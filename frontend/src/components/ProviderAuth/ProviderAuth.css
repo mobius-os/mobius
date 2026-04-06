@@ -28,10 +28,10 @@
 }
 
 .pa__input {
-  background: var(--bg);
-  border: 1px solid var(--border);
+  background: var(--bg, #0c0f14);
+  border: 1px solid var(--border, #252b36);
   border-radius: 6px;
-  color: var(--text);
+  color: var(--text, #d4d4d8);
   padding: 9px 12px;
   outline: none;
   transition: border-color 0.15s;
@@ -40,12 +40,12 @@
 }
 
 .pa__input:focus {
-  border-color: var(--accent);
+  border-color: var(--accent, #a78bfa);
 }
 
 .pa__btn {
   align-self: inherit;
-  background: var(--accent);
+  background: var(--accent, #a78bfa);
   color: #fff;
   border: none;
   border-radius: 6px;
@@ -57,7 +57,7 @@
 }
 
 .pa__btn:hover:not(:disabled) {
-  background: var(--accent-hover);
+  background: var(--accent-hover, #c4b5fd);
 }
 
 .pa__btn:disabled {
@@ -69,27 +69,27 @@
   padding: 5px 12px;
   font-size: 13px;
   background: transparent;
-  color: var(--text);
-  border: 1px solid var(--border);
+  color: var(--text, #d4d4d8);
+  border: 1px solid var(--border, #252b36);
 }
 
 .pa__btn--sm:hover:not(:disabled) {
-  background: var(--surface2);
+  background: var(--surface2, #1a1f28);
 }
 
 .pa__label {
   font-size: 14px;
   font-weight: 600;
-  color: var(--text);
+  color: var(--text, #d4d4d8);
 }
 
 .pa__muted {
   font-size: 13px;
-  color: var(--muted);
+  color: var(--muted, #52525b);
 }
 
 .pa__muted a {
-  color: var(--accent);
+  color: var(--accent, #a78bfa);
   text-decoration: underline;
 }
 

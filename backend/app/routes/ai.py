@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
@@ -42,10 +43,13 @@ async def _stream(messages: list[dict], system: str, tools: bool):
   if system:
     cmd += ["--system-prompt", system]
   try:
+    env = os.environ.copy()
+    env["CLAUDE_CONFIG_DIR"] = "/data/cli-auth/claude"
     proc = await asyncio.create_subprocess_exec(
       *cmd,
       stdout=asyncio.subprocess.PIPE,
       stderr=asyncio.subprocess.PIPE,
+      env=env,
     )
 
     async for raw in proc.stdout:

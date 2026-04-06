@@ -31,11 +31,17 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   const spacerRef = useRef(null)
   const fileInputRef = useRef(null)
   const lastUserMsgRef = useRef(null)
-  const streamingRef = useRef(null)
   const chatIdStaleRef = useRef(false)
   const hadMessagesRef = useRef(false)
   const promotedRef = useRef(false)
   const needsScrollRef = useRef(false)
+  // True while the spacer is actively managing layout (from doSend until
+  // the user scrolls).  Keeps min-height: 0 on the list even after
+  // sending ends, preventing the min-height from inflating scrollHeight
+  // and creating extra scroll space.
+  const [spacerActive, setSpacerActive] = useState(false)
+  // Flag for the useLayoutEffect that positions the spacer after a send.
+  const needsSpacerRef = useRef(false)
 
   const {
     streamItems,
@@ -54,14 +60,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       promoteStreamToMessages()
       setSending(false)
       onStreamEnd?.()
-      // Recalculate spacer after the promoted message renders — the effect
-      // cleanup resets it to 0, which can allow overscroll if the response
-      // is short or empty.
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          recalcSpacer()
-        })
-      })
     },
     onSystemEvent,
   })
@@ -72,20 +70,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     onTranscript: (text) => setInput(text),
     inputRef,
   })
-
-  // Helper to recalculate spacer height based on last user message position.
-  // Used after stream end and after stop to prevent overscroll.
-  function recalcSpacer() {
-    const scrollEl = scrollRef.current
-    const userMsgEl = lastUserMsgRef.current
-    const spacerEl = spacerRef.current
-    if (!scrollEl || !userMsgEl || !spacerEl) return
-    const scrollTarget = Math.max(0, userMsgEl.offsetTop - 4)
-    const targetH = scrollEl.clientHeight + scrollTarget
-    const contentH = scrollEl.scrollHeight - spacerEl.offsetHeight
-    const newH = Math.max(0, targetH - contentH)
-    spacerEl.style.height = `${newH}px`
-  }
 
   // Converts current streamItems to a message and appends to messages state.
   // Uses a flag to ensure idempotency — handleStop and the SSE onStreamEnd
@@ -153,15 +137,14 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
         // Fix stale "running" tool blocks in historical messages.
         // If the agent crashed or the CLI exited before emitting tool_end,
-        // the DB keeps status:"running" forever. Normalize to "done" for
-        // any chat that is no longer active.
-        if (!data.running) {
-          for (const msg of msgs) {
-            if (msg.blocks) {
-              for (const blk of msg.blocks) {
-                if (blk.type === 'tool' && blk.status === 'running') {
-                  blk.status = 'done'
-                }
+        // the DB keeps status:"running" forever.  Always normalize — when
+        // the agent is still running, we strip the partial last message
+        // above and reconnect to SSE, which sets live tools to "running".
+        for (const msg of msgs) {
+          if (msg.blocks) {
+            for (const blk of msg.blocks) {
+              if (blk.type === 'tool' && blk.status === 'running') {
+                blk.status = 'done'
               }
             }
           }
@@ -211,6 +194,68 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     }
   }, [messages])
 
+  // ── Spacer: keeps scrollHeight constant so the message stays put ──
+  //
+  // Formula: spacer = max(0, viewH + scrollTarget − listH)
+  //
+  // This ensures maxScrollTop = scrollTarget at all times.  As content
+  // grows (streaming), the spacer shrinks by exactly the same amount,
+  // keeping scrollHeight = viewH + scrollTarget.  When content shrinks
+  // (stop removes thinking dots), the spacer grows back.  The scroll
+  // position never needs to change.
+  //
+  // Uses direct DOM manipulation (no React state) because the spacer
+  // div has no style prop — React never touches it.  A ResizeObserver
+  // on the list catches ALL content changes (streaming, promote, stop)
+  // in one place.
+  //
+  // IMPORTANT: uses listEl.offsetHeight, NOT scrollEl.scrollHeight.
+  // A scroll container's scrollHeight never goes below clientHeight,
+  // so when content is short it equals the viewport height — useless.
+  useLayoutEffect(() => {
+    if (!needsSpacerRef.current) return
+    needsSpacerRef.current = false
+    const scrollEl = scrollRef.current
+    const userMsgEl = lastUserMsgRef.current
+    const spacerEl = spacerRef.current
+    if (!scrollEl || !userMsgEl || !spacerEl) return
+    const scrollTarget = Math.max(0, userMsgEl.offsetTop - 4)
+    const listEl = scrollEl.querySelector('.chat__list')
+    if (!listEl) return
+    // Track the largest viewport seen (keyboard open vs closed).
+    let maxViewH = scrollEl.clientHeight
+
+    function update() {
+      const viewH = scrollEl.clientHeight
+      if (viewH > maxViewH) maxViewH = viewH
+      const listH = listEl.offsetHeight
+      spacerEl.style.height = `${Math.max(0, maxViewH + scrollTarget - listH)}px`
+      // Auto-scroll: if near the bottom, follow content growth.
+      // Uses scrollHeight (not scrollTarget) so that once content exceeds
+      // the viewport and the spacer hits 0, we follow the new content
+      // instead of yanking back to the message.  When the spacer is still
+      // active, scrollHeight clamps to scrollTarget anyway.
+      const gap = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
+      if (gap < 50) scrollEl.scrollTop = scrollEl.scrollHeight
+    }
+
+    update()
+    scrollEl.scrollTop = scrollTarget
+
+    // ResizeObserver on the list catches everything: streaming content
+    // growth, thinking dots appearing/disappearing, promote, stop.
+    const ro = new ResizeObserver(update)
+    ro.observe(listEl)
+    // Keyboard dismiss / rotation.
+    window.addEventListener('resize', update)
+
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', update)
+    }
+  }, [messages])
+
+
   // Load older messages — called from the scroll handler (near top) and the button.
   const loadingOlder = useRef(false)
   function loadOlderMessages() {
@@ -255,58 +300,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     }
   }
 
-  // Dynamic spacer: shrinks as the streaming response grows,
-  // keeping the viewport stable (no auto-scroll).
-  //
-  // The effect re-runs whenever streamItems changes (not just
-  // isStreaming) because the streaming <li> doesn't exist until
-  // the first stream item arrives.  On the first run streamingRef
-  // is null; re-running after items appear lets us attach the
-  // MutationObserver to the actual element.
-  const hasStreamItems = streamItems.length > 0
-  useEffect(() => {
-    if (!isStreaming || !spacerRef.current || !scrollRef.current) return
-
-    const scrollEl = scrollRef.current
-    const spacerEl = spacerRef.current
-    const responseEl = streamingRef.current
-
-    // streaming <li> not yet mounted — wait for next render.
-    if (!responseEl) return
-
-    function updateSpacer() {
-      const userMsgEl = lastUserMsgRef.current
-      if (!userMsgEl) return
-      // targetH: the scrollHeight where max scrollTop places the message
-      // near the top of the viewport with padding.  doSend scrolls to max,
-      // so this formula determines the final message position.
-      // No scrollTop anywhere — scrolling never affects this formula.
-      // contentH: real content height, excluding the dynamic spacer.
-      // 4px breathing room so the message isn't pixel-flush with the toolbar.
-      // This value + the 8px chat__list padding-top controls the gap above
-      // the sent message. DO NOT increase — keep the message near the top
-      // to maximize viewport space for the agent's response below.
-      const scrollTarget = Math.max(0, userMsgEl.offsetTop - 4)
-      const targetH = scrollEl.clientHeight + scrollTarget
-      const contentH = scrollEl.scrollHeight - spacerEl.offsetHeight
-      const newH = Math.max(0, targetH - contentH)
-      spacerEl.style.height = `${newH}px`
-    }
-
-    const observer = new MutationObserver(updateSpacer)
-    observer.observe(responseEl, {
-      childList: true, subtree: true, characterData: true,
-    })
-
-    updateSpacer()
-    window.addEventListener('resize', updateSpacer)
-
-    return () => {
-      observer.disconnect()
-      window.removeEventListener('resize', updateSpacer)
-      if (spacerEl) spacerEl.style.height = '0px'
-    }
-  }, [isStreaming, hasStreamItems])
 
   function handleFileSelect(e) {
     const fileList = Array.from(e.target.files || [])
@@ -334,39 +327,9 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     clearFiles()
     if (inputRef.current) inputRef.current.style.height = 'auto'
     setSending(true)
-
-    // Scroll the user message to the top of the viewport.
-    //
-    // How it works: set the dynamic spacer to fill the viewport below
-    // the message, then scroll to the message's offsetTop.  As the
-    // response streams in, the spacer shrinks via MutationObserver.
-    //
-    // IMPORTANT: .chat__scroll MUST have position:relative for offsetTop
-    // to be relative to the scroll container.  Without it, offsetTop is
-    // relative to the document body and the scroll position is wrong.
-    //
-    // IMPORTANT: .spacer-dynamic MUST NOT have a CSS transition.
-    // A transition delays the height change, making scrollHeight stale
-    // when read immediately after setting the spacer height.
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        const scrollEl = scrollRef.current
-        const userMsgEl = lastUserMsgRef.current
-        const spacerEl = spacerRef.current
-        if (scrollEl && userMsgEl && spacerEl) {
-          const viewH = scrollEl.clientHeight
-          // 4px breathing room so the message isn't pixel-flush with the toolbar.
-      // This value + the 8px chat__list padding-top controls the gap above
-      // the sent message. DO NOT increase — keep the message near the top
-      // to maximize viewport space for the agent's response below.
-      const scrollTarget = Math.max(0, userMsgEl.offsetTop - 4)
-          const belowMsg = scrollEl.scrollHeight - scrollTarget
-          spacerEl.style.height = `${Math.max(0, viewH - belowMsg)}px`
-          // Scroll to max — accounts for spacer-fixed and any rounding.
-          scrollEl.scrollTop = scrollEl.scrollHeight
-        }
-      })
-    })
+    setSpacerActive(true)
+    if (spacerRef.current) spacerRef.current.style.height = '0px'
+    needsSpacerRef.current = true
 
     try {
       await streamSend(text, attachments.length > 0 ? attachments : undefined)
@@ -416,19 +379,14 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     disconnect()
     setSending(false)
     onStreamEnd?.()
-
-    // Recalculate the spacer after React renders the promoted message.
-    // Without this, stopping the agent (especially before it writes anything)
-    // collapses the spacer to 0, allowing overscroll past the user's message.
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        recalcSpacer()
-      })
-    })
   }
 
   const hasMore = offset > 0
   const showEmpty = messages.length === 0 && !isStreaming && !loading && !sending
+  // Index of the last user message — used to assign lastUserMsgRef to
+  // exactly one element.  Assigning the same ref to multiple elements
+  // is unreliable: React doesn't re-assign refs on existing elements.
+  const lastUserIdx = messages.reduce((acc, m, i) => m.role === 'user' ? i : acc, -1)
 
   return (
     <div className={`chat${showEmpty ? ' chat--empty' : ''}`}>
@@ -446,17 +404,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
       {!showEmpty && (
       <div className="chat__scroll" ref={scrollRef} onScroll={handleScroll}>
-        {loading && (
-          <div className="chat__loading">
-            <div className="chat__thinking"><span /><span /><span /></div>
-          </div>
-        )}
 
-        {/* min-height is disabled during streaming so the dynamic spacer
-            math works — min-height adds invisible space at the bottom of
-            the list that the spacer doesn't account for, letting the user
-            scroll past the content.  Re-enabled when idle for iOS bounce. */}
-        <ul className="chat__list" style={sending ? { minHeight: 0 } : undefined}>
+        {/* min-height is disabled while the spacer is managing layout.
+            min-height: calc(100% + 1px) inflates scrollHeight and creates
+            extra scroll space that conflicts with the spacer.  It's only
+            needed for iOS elastic bounce in the normal scroll flow. */}
+        <ul className="chat__list" style={spacerActive ? { minHeight: 0 } : undefined}>
           {hasMore && (
             <li className="chat__older">
               <button onClick={loadOlderMessages}>Load earlier messages</button>
@@ -467,7 +420,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             <li
               key={msg.id || msg.ts || `${msg.role}-${i}`}
               className={`chat__msg chat__msg--${msg.role}`}
-              ref={msg.role === 'user' && i === messages.length - 1 ? lastUserMsgRef : undefined}
+              ref={i === lastUserIdx ? lastUserMsgRef : undefined}
               onClick={msg.ts && msg.role === 'user'
                 ? (e) => { e.currentTarget.querySelector('.chat__ts')?.classList.toggle('chat__ts--visible') }
                 : undefined}
@@ -486,7 +439,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
           {/* Streaming response — items rendered in arrival order. */}
           {sending && streamItems.length > 0 && (
-            <li className="chat__msg chat__msg--assistant" ref={streamingRef}>
+            <li className="chat__msg chat__msg--assistant">
               {streamItems.map((item, i) => {
                 if (item.type === 'tool') {
                   return (
@@ -518,7 +471,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
         {/* DO NOT add a CSS transition to .spacer-dynamic — it breaks
             the scroll positioning math (see comment in doSend). */}
-        <div className="spacer-dynamic" ref={spacerRef} aria-hidden="true" style={{ height: 0 }} />
+        <div className="spacer-dynamic" ref={spacerRef} aria-hidden="true" />
       </div>
       )}
 

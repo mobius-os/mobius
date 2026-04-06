@@ -9,8 +9,8 @@
 .setup__card {
   width: 100%;
   max-width: 400px;
-  background: var(--surface);
-  border: 1px solid var(--border);
+  background: var(--surface, #14181f);
+  border: 1px solid var(--border, #252b36);
   border-radius: 12px;
   padding: 32px;
 }
@@ -28,10 +28,11 @@
   font-weight: 700;
   margin-bottom: 6px;
   text-align: center;
+  color: var(--text, #d4d4d8);
 }
 
 .setup__subtitle {
-  color: var(--muted);
+  color: var(--muted, #52525b);
   margin-bottom: 24px;
   text-align: center;
 }
@@ -47,36 +48,36 @@
   flex-direction: column;
   gap: 6px;
   font-size: 13px;
-  color: var(--muted);
+  color: var(--muted, #52525b);
 }
 
 .setup__input {
-  background: var(--bg);
-  border: 1px solid var(--border);
+  background: var(--bg, #0c0f14);
+  border: 1px solid var(--border, #252b36);
   border-radius: 6px;
-  color: var(--text);
+  color: var(--text, #d4d4d8);
   padding: 9px 12px;
   outline: none;
   transition: border-color 0.15s;
 }
 
 .setup__input:focus {
-  border-color: var(--accent);
+  border-color: var(--accent, #a78bfa);
 }
 
 .setup__error {
-  color: var(--danger);
+  color: var(--danger, #f87171);
   font-size: 13px;
 }
 
 .setup__hint {
   font-size: 13px;
-  color: var(--muted);
+  color: var(--muted, #52525b);
   margin-top: 6px;
 }
 
 .setup__btn {
-  background: var(--accent);
+  background: var(--accent, #a78bfa);
   color: #fff;
   border: none;
   border-radius: 6px;
@@ -96,7 +97,7 @@
 }
 
 .setup__btn:hover:not(:disabled) {
-  background: var(--accent-hover);
+  background: var(--accent-hover, #c4b5fd);
 }
 
 .setup__btn:disabled {
@@ -111,20 +112,20 @@
 
 .setup__auth-msg {
   font-size: 14px;
-  color: var(--muted);
+  color: var(--muted, #52525b);
   margin-bottom: 8px;
 }
 
 .setup__auth-msg a {
-  color: var(--accent);
+  color: var(--accent, #a78bfa);
   text-decoration: underline;
 }
 
 .setup__spinner {
   width: 24px;
   height: 24px;
-  border: 3px solid var(--border);
-  border-top-color: var(--accent);
+  border: 3px solid var(--border, #252b36);
+  border-top-color: var(--accent, #a78bfa);
   border-radius: 50%;
   margin: 16px auto;
   animation: setup-spin 0.8s linear infinite;
@@ -136,7 +137,7 @@
 
 .setup__auth-waiting {
   font-size: 13px;
-  color: var(--muted);
+  color: var(--muted, #52525b);
 }
 
 .setup__auth-done {
@@ -146,13 +147,13 @@
 
 .setup__auth-success {
   font-size: 14px;
-  color: var(--text);
+  color: var(--text, #d4d4d8);
   margin-bottom: 16px;
 }
 
 .setup__badge {
   display: inline-block;
-  background: var(--accent);
+  background: var(--accent, #a78bfa);
   color: #fff;
   font-size: 11px;
   font-weight: 600;
@@ -165,7 +166,7 @@
 .setup__skip-warn {
   margin-top: 16px;
   font-size: 12px;
-  color: var(--accent);
+  color: var(--accent, #a78bfa);
   text-align: center;
 }
 
@@ -176,23 +177,23 @@
   padding: 8px;
   background: none;
   border: none;
-  color: var(--muted);
+  color: var(--muted, #52525b);
   font-size: 13px;
   cursor: pointer;
   text-align: center;
 }
 
 .setup__skip:hover {
-  color: var(--text);
+  color: var(--text, #d4d4d8);
 }
 
 .setup__auth-help {
-  background: var(--surface);
-  border: 1px solid var(--border);
+  background: var(--surface, #14181f);
+  border: 1px solid var(--border, #252b36);
   border-radius: 6px;
   padding: 12px 14px;
   font-size: 13px;
-  color: var(--muted);
+  color: var(--muted, #52525b);
   margin-top: 10px;
 }
 
@@ -205,8 +206,8 @@
 }
 
 .setup__auth-help-cmd {
-  background: var(--bg);
-  border: 1px solid var(--border);
+  background: var(--bg, #0c0f14);
+  border: 1px solid var(--border, #252b36);
   border-radius: 4px;
   padding: 8px 10px;
   font-size: 12px;

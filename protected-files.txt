@@ -8,5 +8,7 @@
 # here.  The entrypoint enforces chmod 444 + root ownership on these
 # paths (relative to /data/shell/) after every copy or reset.
 src/components/LoginForm/LoginForm.jsx
+src/components/LoginForm/LoginForm.css
 src/components/SetupWizard/SetupWizard.jsx
+src/components/SetupWizard/SetupWizard.css
 src/components/ProviderAuth/ProviderAuth.jsx

@@ -101,3 +101,8 @@ print(f'Icons regenerated with {bg}')
 - Cron scripts that call the `claude` CLI must set
   `CLAUDE_CONFIG_DIR=/data/cli-auth/claude` — cron runs in a clean environment
   and won't find credentials at the default `~/.claude/` path.
+- **Math inside markdown tables:** the chat renders markdown first, then
+  KaTeX. A `|` inside `$...$` in a table cell gets interpreted as a
+  column separator before KaTeX sees it, breaking both the table and the
+  math. Use `\mid` (conditionals) or `\vert` (norms) instead of `|`
+  when writing math inside table cells.

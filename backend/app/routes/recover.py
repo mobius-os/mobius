@@ -2,6 +2,7 @@
 React frontend.  Works even if the agent breaks the shell."""
 
 import io
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -132,8 +133,7 @@ def _action_restore_shell(data_dir: Path, db: Session) -> str:
     return "Error: /app/shell-src not found in image."
   # Restore original source files (agent may have modified or corrupted them).
   src_dest = shell_dir / "src"
-  if src_dest.exists():
-    shutil.rmtree(src_dest)
+  _rm_tree(src_dest)
   shutil.copytree(shell_src / "src", src_dest)
   shutil.copy2(shell_src / "package.json", shell_dir / "package.json")
   shutil.copy2(shell_src / "vite.config.js", shell_dir / "vite.config.js")
@@ -268,10 +268,16 @@ def _create_backup(db: Session, data_dir: Path) -> StreamingResponse:
 
 # -- Helpers -----------------------------------------------------------
 
+def _force_remove(_func, path, _exc_info):
+  """Handles permission errors during rmtree by chmod-ing and retrying."""
+  os.chmod(path, 0o755)
+  _func(path)
+
+
 def _rm_tree(path: Path) -> None:
-  """Recursively removes a directory tree, ignoring errors."""
+  """Recursively removes a directory tree, forcing past read-only files."""
   if not path.exists():
     return
-  shutil.rmtree(path, ignore_errors=True)
+  shutil.rmtree(path, onexc=_force_remove)
 
 

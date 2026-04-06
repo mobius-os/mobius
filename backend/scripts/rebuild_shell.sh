@@ -13,6 +13,10 @@ notify() {
 notify '{"type":"shell_rebuilding"}'
 
 cd /data/shell
+# Clean dist and vite transform cache to ensure a fully fresh build.
+# Without clearing .vite, vite may reuse cached transforms from the
+# previous source and produce a stale bundle.
+rm -rf dist node_modules/.vite 2>/dev/null || true
 if npx vite build 2>&1; then
   echo "Shell rebuilt successfully."
   notify '{"type":"shell_rebuilt"}'

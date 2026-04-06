@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="#what-is-möbius">What is it?</a> &middot;
-  <a href="#the-secret-sauce">The Secret Sauce</a> &middot;
+  <a href="#skill-and-experience">Skill and Experience</a> &middot;
   <a href="#what-can-you-build">What can you build?</a> &middot;
   <a href="#get-started">Get Started</a> &middot;
   <a href="#development">Development</a>
@@ -26,6 +26,8 @@ It works in the browser and installs on your phone like a native app (Android an
 
 The agent can also change the interface itself: the theme, the layout, features in the shell. It edits the source and rebuilds live — some changes appear instantly, others take a few seconds.
 
+Under the hood, the "agent" is the [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) running as a subprocess inside the Docker container. When you send a message, the backend spawns a `claude` process, streams its output back to your browser, and saves the result.
+
 **What you need:** a [Claude](https://claude.ai) subscription (Pro or higher) and somewhere to host it. Other AI providers could be added if there's interest — contributions are welcome.
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.app/template/new?template=https://github.com/hamzamerzic/mobius)
@@ -34,32 +36,14 @@ One click gets you a running instance with HTTPS. Add a persistent volume mounte
 
 ---
 
-## The Secret Sauce
+## Skill and Experience
 
-> **Most AI tools start fresh every time. Möbius learns.**
+The agent's context is split into two layers:
 
-Every session, the agent writes down what it discovered: which apps exist, what approaches worked, what broke and why. This **experience file** lives on your server and is read at the start of every new chat. The agent that helps you today knows what it built last week — and what worked.
+- **Skill** (`skill/agent-skill.md`) — checked into git, ships with every deploy. Defines what the agent can do: how to build mini-apps, how to schedule tasks, how the platform works. Updated by the developer, applies immediately to new chats.
+- **Experience** (`/data/shared/agent-experience.md`) — lives on the volume, written by the agent. Documents what it has built, what worked, what broke and why. The seed file (`backend/scripts/seed-agent-experience.md`) establishes the format and teaches the agent how to maintain the file — what's worth recording, how to structure entries so future sessions can act on them.
 
-This compounds. The more you use Möbius, the better the agent gets at operating within *your specific instance*. It knows your apps, your preferences, your quirks. It has context you can't get any other way — it came from doing the work.
-
-**Why this is different from other AI memory systems:**
-
-| | Claude's built-in memory | Möbius agent experience |
-|---|---|---|
-| What it remembers | You — preferences, habits | The system — what was built, what was learned |
-| Where it lives | Anthropic's servers | Your `/data` volume |
-| Who controls it | Anthropic | You |
-| Transparency | Opaque | A plain text file you can read and edit |
-| Survives deploys | Yes | Yes — updating Möbius doesn't wipe it |
-
-**The two-layer design:**
-
-- **Skill** (`skill/agent-skill.md`) — checked into git, ships with every deploy. What the agent knows how to do on day one: how to build mini-apps, how to schedule tasks, how the platform works. Updated by the developer, applies immediately to new chats.
-- **Experience** (`/data/shared/agent-experience.md`) — accumulated through use, lives on the volume. What *your* instance has learned: the apps that exist here, the quirks discovered, the things that didn't work. Written by the agent. Never overwritten by a deploy.
-
-New instances don't start from zero — a seed file bakes in general wisdom from prior deployments. Your instance-specific knowledge grows on top of that from the first session.
-
-The result: **a platform that gets meaningfully better the longer you use it**, not because the underlying model changed, but because it has real experience building things in your environment.
+The split matters because skill is static knowledge that deploys can update, while experience is instance-specific knowledge that accumulates over time and survives deploys. A well-seeded experience file means the agent knows how to document its own work from the first session.
 
 ---
 
@@ -103,15 +87,14 @@ You start with one small app. A month later you have a little ecosystem of tools
 ```bash
 git clone https://github.com/hamzamerzic/mobius.git
 cd mobius
-cp .env.example .env   # set DOMAIN and SECRET_KEY
+cp .env.example .env
+# Set DOMAIN to your domain name
+# Set SECRET_KEY (at least 32 chars): python3 -c "import secrets; print(secrets.token_hex(32))"
+# Or leave SECRET_KEY blank — one will be auto-generated on first start
 docker compose up -d
 ```
 
-Visit `https://your-domain`. The setup wizard walks you through creating your account and signing in with Claude — no API keys, just your existing login. On a headless server, copy the auth URL to a local browser to complete sign-in.
-
-> **Note:** The Claude CLI requires a Pro or Max subscription. Free-tier accounts will authenticate successfully but may be rate-limited or blocked from using the agent.
-
-> **Auth failing on Hetzner, OVH, or similar providers?** Some hosting providers' IP ranges are blocked by Cloudflare during the token exchange. Workaround: authenticate locally with the Claude CLI (`claude`), then copy `~/.claude/.credentials.json` to your server at `/data/cli-auth/claude/.credentials.json` and restart the container.
+Visit `https://your-domain`. The setup wizard walks you through creating your account and signing in with Claude. On a headless server, copy the auth URL to a local browser to complete sign-in.
 
 Bookmark `/recover` — it's your recovery lifeline if the UI breaks.
 
@@ -195,17 +178,13 @@ frontend/src/
 └── AppCanvas/     sandboxed iframe for mini-apps
 ```
 
-**Prerequisites:** Python 3.12+, Node.js 18+
-
 ```bash
-# Backend
-cd backend && pip install -r requirements.txt
-uvicorn app.main:app --reload   # :8000
-
-# Frontend
-cd frontend && npm install
-npm run dev   # :5173, proxies /api to :8000
+cp .env.example .env   # fill in DOMAIN and SECRET_KEY
+docker compose up -d --build
+docker compose logs -f
 ```
+
+Rebuild after changes with `docker compose up -d --build`. Everything in `/data` persists across rebuilds.
 
 See [CLAUDE.md](CLAUDE.md) for architecture details, streaming gotchas, and notes on things that were hard to get right.
 

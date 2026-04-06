@@ -67,6 +67,7 @@ export default function Shell() {
 
   useEffect(() => { refreshApps() }, [refreshApps])
   useEffect(() => { refreshChats() }, [refreshChats])
+  useEffect(() => { if (drawerOpen) { refreshApps(); refreshChats() } }, [drawerOpen, refreshApps, refreshChats])
 
   // PWA install prompt.
   useEffect(() => {

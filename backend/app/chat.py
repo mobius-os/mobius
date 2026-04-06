@@ -458,7 +458,9 @@ async def run_chat(
   except Exception as exc:
     _active_procs.pop(chat_id, None)
     log.exception("run_chat failed: %s", exc)
+    _finalize_response(db, chat_id, assistant_blocks)
     bc.publish({"type": "error", "message": str(exc)})
+    bc.publish({"type": "done"})
     set_active_broadcast(None)
     bc.mark_completed()
   finally:
