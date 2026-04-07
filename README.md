@@ -10,10 +10,10 @@
 
 <p align="center">
   <a href="#what-is-möbius">What is it?</a> &middot;
-  <a href="#skill-and-experience">Skill and Experience</a> &middot;
   <a href="#what-can-you-build">What can you build?</a> &middot;
+  <a href="#skill-and-experience">Skill &amp; Experience</a> &middot;
   <a href="#get-started">Get Started</a> &middot;
-  <a href="#development">Development</a>
+  <a href="#mini-apps">Mini-Apps</a>
 </p>
 
 ---
@@ -28,22 +28,7 @@ The agent can also change the interface itself: the theme, the layout, features 
 
 Under the hood, the "agent" is the [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) running as a subprocess inside the Docker container. When you send a message, the backend spawns a `claude` process, streams its output back to your browser, and saves the result.
 
-**What you need:** a [Claude](https://claude.ai) subscription (Pro or higher) and somewhere to host it. Other AI providers could be added if there's interest — contributions are welcome.
-
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.app/template/new?template=https://github.com/hamzamerzic/mobius)
-
-One click gets you a running instance with HTTPS. Add a persistent volume mounted at `/data` in Railway's service settings to keep your data across deploys. Or self-host on a $5/month VPS — see [Get Started](#get-started).
-
----
-
-## Skill and Experience
-
-The agent's context is split into two layers:
-
-- **Skill** (`skill/agent-skill.md`) — checked into git, ships with every deploy. Defines what the agent can do: how to build mini-apps, how to schedule tasks, how the platform works. Updated by the developer, applies immediately to new chats.
-- **Experience** (`/data/shared/agent-experience.md`) — lives on the volume, written by the agent. Documents what it has built, what worked, what broke and why. The seed file (`backend/scripts/seed-agent-experience.md`) establishes the format and teaches the agent how to maintain the file — what's worth recording, how to structure entries so future sessions can act on them.
-
-The split matters because skill is static knowledge that deploys can update, while experience is instance-specific knowledge that accumulates over time and survives deploys. A well-seeded experience file means the agent knows how to document its own work from the first session.
+**What you need:** a [Claude](https://claude.ai) subscription (Pro or higher) and somewhere to host it. See [Get Started](#get-started) for one-click deployment.
 
 ---
 
@@ -65,55 +50,38 @@ You start with one small app. A month later you have a little ecosystem of tools
 
 ---
 
+## Skill and Experience
+
+The agent's context is split into two layers:
+
+- **Skill** (`skill/agent-skill.md`) — checked into git, ships with every deploy. Defines what the agent can do: how to build mini-apps, how to schedule tasks, how the platform works.
+- **Experience** (`/data/shared/agent-experience.md`) — lives on the volume, written by the agent. Documents what it has built, what worked, what broke and why.
+
+Skill is static knowledge that deploys can update. Experience is instance-specific knowledge that accumulates over time and survives deploys. A well-seeded experience file means the agent knows how to document its own work from the first session.
+
+---
+
 ## Get Started
 
-**What you need:**
-- A Linux server with Docker (2 GB RAM is enough — a $5 VPS works fine)
-- Docker Engine 20.10+ with Compose V2 (`docker compose`, not `docker-compose`)
-- Ports 80 and 443 open on your server's firewall
-- A domain name (required for HTTPS and mobile PWA install — ~$10/year)
-- A Claude subscription (Pro or higher)
+### Railway (one click)
 
-> **No domain?** You can run without Caddy over HTTP — the app works as a web app but won't install as a PWA on mobile. Set these in `.env`:
-> ```
-> DOMAIN=
-> FRONTEND_ORIGIN=http://YOUR_SERVER_IP:8000
-> ```
-> Then start only the app service (skip Caddy):
-> ```bash
-> docker compose up -d app
-> ```
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/mobius?referralCode=5TQuhr)
+
+Once deployed, open the provided URL. The setup wizard walks you through creating your account and signing in with Claude.
+
+### Self-hosted
+
+**Requirements:** a Linux server with Docker, a domain name pointing to the server (A record), and a Claude subscription.
 
 ```bash
 git clone https://github.com/hamzamerzic/mobius.git
 cd mobius
 cp .env.example .env
-# Set DOMAIN to your domain name
-# Set SECRET_KEY (at least 32 chars): python3 -c "import secrets; print(secrets.token_hex(32))"
-# Or leave SECRET_KEY blank — one will be auto-generated on first start
+sed -i 's/^DOMAIN=.*/DOMAIN=your-domain.com/' .env
 docker compose up -d
 ```
 
-Visit `https://your-domain`. The setup wizard walks you through creating your account and signing in with Claude. On a headless server, copy the auth URL to a local browser to complete sign-in.
-
-Bookmark `/recover` — it's your recovery lifeline if the UI breaks.
-
-### Existing Caddy setup
-
-```bash
-cp docker-compose.override.example.yml docker-compose.override.yml
-# Edit the network name to match yours
-docker compose up -d
-```
-
-Add to your Caddyfile:
-
-```
-mobius.example.com {
-    encode gzip
-    reverse_proxy mobius:8000
-}
-```
+Visit `https://your-domain.com`. The setup wizard walks you through creating your account and signing in with Claude. On a headless server, copy the auth URL to a local browser to complete sign-in.
 
 ### Updates
 
@@ -121,27 +89,7 @@ mobius.example.com {
 git pull && docker compose up -d --build
 ```
 
-Everything in `/data` — your database, built apps, credentials, experience file, theme — survives rebuilds.
-
-> **Update not showing?** If the agent has rebuilt the shell UI, `/data/shell/dist/` takes priority over the freshly deployed code. To pick up the new version:
-> ```bash
-> docker exec mobius rm -rf /data/shell/dist && docker restart mobius
-> ```
-> Or propagate your change through the agent's build — see `CLAUDE.md` for details.
-
-> **Back up your data.** The `mobius_app_data` Docker volume contains everything: chats, mini-apps, credentials, and theme. Running `docker volume rm` on it is **irreversible**. Download a backup from `/recover` → "Download backup" before any destructive operation.
-
-## Security notes
-
-**JWT storage:** Auth tokens are stored in `localStorage` for simplicity. This is an accepted trade-off for a single-owner self-hosted app — the attack surface is your own browser on your own device. If you are security-sensitive, use a dedicated browser profile for Möbius access.
-
-**Session duration:** Tokens expire after 30 days. This is an intentional choice for a single-owner app — you shouldn't need to log in frequently on your own server.
-
-### Recovery
-
-If something breaks, go to `/recover` — a separate password-protected page (same password as your login) that lets you rebuild the shell from the original source, download a backup of all your data, or perform a factory reset. It works even if the React app is broken, since it's a static HTML page served directly by the backend.
-
-**Install on mobile:** On Android, open the site in Chrome and tap "Add to Home Screen" from the browser menu. On iOS, open in Safari and tap the Share button → "Add to Home Screen". HTTPS is required for installation.
+Everything in `/data` survives rebuilds. Bookmark `/recover` — it's your lifeline if the UI breaks.
 
 ---
 
@@ -152,60 +100,18 @@ Each app the agent builds is a React component compiled on the server and render
 - **Persist data** across sessions via a simple storage API
 - **Run on a schedule** — the agent can set up cron jobs that update the app automatically
 - **Fetch external data** server-side, bypassing browser CORS restrictions
+- **Have a built-in AI** — each app can stream Claude responses for chat, analysis, or tool use
 - **Inherit your theme** — change the shell's colors and all apps update instantly
 
 You see it appear live — no reload, no deploy.
 
 ---
 
-## Development
+## Security
 
-Single Docker container: FastAPI serves the API and frontend, the Claude CLI runs as a subprocess per chat message, esbuild compiles JSX on the fly, SQLite stores everything on the `/data` volume.
+Single-owner, self-hosted. Your data stays on your server. Mini-apps run in sandboxed iframes with scoped tokens that can't access auth, settings, or chat history. See [SECURITY.md](SECURITY.md) for the full model.
 
-```
-backend/app/
-├── chat.py        spawns the CLI, streams events, saves to DB
-├── broadcast.py   per-chat in-memory event bus (decouples CLI from SSE)
-├── compiler.py    esbuild wrapper: JSX string → ES module
-├── providers.py   CLI adapters (Claude, extensible)
-└── routes/        auth, apps, chats, ai, storage, recover
-
-frontend/src/
-├── App.jsx        setup → login → shell
-├── Shell/         navigation state, logo bar
-├── Drawer/        chat history, app list
-├── ChatView/      block-memoized markdown, typewriter streaming
-└── AppCanvas/     sandboxed iframe for mini-apps
-```
-
-```bash
-cp .env.example .env   # fill in DOMAIN and SECRET_KEY
-docker compose up -d --build
-docker compose logs -f
-```
-
-Rebuild after changes with `docker compose up -d --build`. Everything in `/data` persists across rebuilds.
-
-See [CLAUDE.md](CLAUDE.md) for architecture details, streaming gotchas, and notes on things that were hard to get right.
-
----
-
-## Troubleshooting
-
-**TLS certificate not issuing**
-Check that ports 80 and 443 are open on your server's firewall, and that your domain's DNS A record points to the server. Run `docker compose logs caddy` to see Let's Encrypt errors.
-
-**Container won't start**
-Run `docker compose logs app` to see the startup error. Common causes: `SECRET_KEY` not set or too short, `DOMAIN` left blank, port 8000 already in use.
-
-**Claude auth not persisting after rebuild**
-CLI credentials are stored at `/data/cli-auth/claude/`. Check that the `/data` volume is mounted correctly with `docker volume ls`. If credentials are missing, go through the setup wizard again or copy `.credentials.json` manually.
-
-**UI broken after the agent made changes**
-Visit `/recover` — a password-protected recovery page (same password as your login). Use "Restore interface" to rebuild the shell from the original source without touching your chats, apps, or data.
-
-**Update not visible after `git pull && docker compose up -d --build`**
-See the update warning above. The agent's shell build at `/data/shell/dist/` takes priority. Clear it with `docker exec mobius rm -rf /data/shell/dist && docker restart mobius`.
+If something breaks, visit `/recover` to rebuild the interface, download a backup, or reset.
 
 ---
 
@@ -215,4 +121,8 @@ Douglas Hofstadter described strange loops as systems that, by moving through le
 
 Möbius does the same thing in code: the agent builds the interface it runs inside, accumulates experience about the system it inhabits, and uses that experience to build better things within it. Like the strip it's named after, there's no clear inside or outside — just one continuous surface.
 
-Whether that's a profound observation or just a fun excuse for the name is left as an exercise for the reader.
+---
+
+## License
+
+[MIT](LICENSE)

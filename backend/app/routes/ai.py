@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.database import get_db
-from app.deps import get_current_owner
+from app.deps import get_current_owner_or_app
 
 router = APIRouter(prefix="/api/ai", tags=["ai"])
 
@@ -84,7 +84,7 @@ async def _stream(messages: list[dict], system: str, tools: bool):
 @router.post("")
 async def ai_chat(
   body: AiRequest,
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_or_app),
   db: Session = Depends(get_db),
 ):
   """Streams a Claude response for use inside mini-apps.

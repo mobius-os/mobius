@@ -35,7 +35,13 @@ export default function SettingsView({ onThemeChange }) {
       const currentCss = themeRes.ok ? await themeRes.text() : ''
       const meta = parseThemeMeta(currentCss)
 
-      const colors = newMode ? LIGHT_COLORS : DARK_COLORS
+      // Swap structural colors for the new mode while preserving agent
+      // customizations (accents, custom vars, etc.).
+      const base = newMode ? LIGHT_COLORS : DARK_COLORS
+      const structuralKeys = ['--bg', '--surface', '--surface2', '--border', '--border-light', '--text', '--muted']
+      const swapped = {}
+      for (const k of structuralKeys) { if (base[k]) swapped[k] = base[k] }
+      const colors = { ...meta.colors, ...swapped }
       const mode = newMode ? 'light' : 'dark'
       const newCss = buildThemeCss(colors, meta, mode)
 
@@ -108,11 +114,11 @@ export default function SettingsView({ onThemeChange }) {
               {configured && <span className="settings__badge">Configured</span>}
             </label>
             <p className="settings__subtext">
-              Get a key at{' '}
-              <a href="https://aistudio.google.com" target="_blank" rel="noopener noreferrer">
+              Used for image generation.
+              Get a free key at{' '}
+              <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">
                 aistudio.google.com
-              </a>.<br />
-              Encrypted at rest, never sent to the browser.
+              </a>.
             </p>
             <input
               className="settings__input"

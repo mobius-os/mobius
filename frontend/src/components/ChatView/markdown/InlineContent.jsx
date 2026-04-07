@@ -1,8 +1,8 @@
-import { useRef, useEffect, useState } from 'react'
+import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import DOMPurify from 'dompurify'
 import { getToken } from '../../../api/client.js'
-import { renderInlineMath, renderBlockMath } from './math.js'
+import { renderInlineMath, renderBlockMath, renderMathToString } from './math.js'
 import ImageLightbox from './ImageLightbox.jsx'
 import '../lightbox.css'
 
@@ -106,17 +106,18 @@ function ExpandableImage({ href, alt }) {
 }
 
 function BlockMathDiv({ tex }) {
-  const ref = useRef(null)
-  useEffect(() => {
-    if (ref.current && tex) renderBlockMath(tex, ref.current)
-  }, [tex])
-  return <div ref={ref} className="md-math-block" />
+  // Synchronous render — no useEffect, no reflow.
+  const html = renderMathToString(tex, true)
+  if (html) {
+    return <div className="md-math-block" dangerouslySetInnerHTML={{ __html: html }} />
+  }
+  return <div className="md-math-block">{tex}</div>
 }
 
 function InlineMathSpan({ tex }) {
-  const ref = useRef(null)
-  useEffect(() => {
-    if (ref.current && tex) renderInlineMath(tex, ref.current)
-  }, [tex])
-  return <span ref={ref} className="md-math-inline" />
+  const html = renderMathToString(tex, false)
+  if (html) {
+    return <span className="md-math-inline" dangerouslySetInnerHTML={{ __html: html }} />
+  }
+  return <span className="md-math-inline">{tex}</span>
 }

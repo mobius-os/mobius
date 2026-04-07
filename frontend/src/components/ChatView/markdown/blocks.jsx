@@ -1,8 +1,8 @@
-import { useRef, useEffect, useState, memo } from 'react'
+import { useEffect, useState, memo } from 'react'
 import DOMPurify from 'dompurify'
 import InlineContent from './InlineContent.jsx'
-import { renderBlockMath } from './math.js'
-import { highlightCode } from './highlight.js'
+import { renderBlockMath, renderMathToString } from './math.js'
+import { highlightSync, highlightCode } from './highlight.js'
 
 /**
  * Block-level markdown components.
@@ -27,26 +27,34 @@ export function Heading({ token }) {
 }
 
 export function CodeBlock({ token }) {
-  const [highlighted, setHighlighted] = useState(null)
   const lang = token.lang || ''
   const code = token.text || ''
 
+  // Try synchronous highlight first (no reflow).
+  // Falls back to async if hljs hasn't loaded yet (rare — only on
+  // very fast page loads before the eager import completes).
+  const syncHtml = highlightSync(code, lang)
+  const [asyncHtml, setAsyncHtml] = useState(null)
+
   useEffect(() => {
+    if (syncHtml) return  // already highlighted synchronously
     let cancelled = false
     highlightCode(code, lang).then(html => {
-      if (!cancelled && html) setHighlighted(html)
+      if (!cancelled && html) setAsyncHtml(html)
     })
     return () => { cancelled = true }
-  }, [code, lang])
+  }, [code, lang, syncHtml])
+
+  const html = syncHtml || asyncHtml
 
   return (
     <pre className="md-code-block">
       {lang && <span className="md-code-lang">{lang}</span>}
-      {highlighted ? (
+      {html ? (
         <code
           className={`md-code language-${lang}`}
           dangerouslySetInnerHTML={{
-            __html: DOMPurify.sanitize(highlighted),
+            __html: DOMPurify.sanitize(html),
           }}
         />
       ) : (
@@ -114,11 +122,11 @@ export function ListBlock({ token }) {
 }
 
 export function MathBlock({ tex }) {
-  const ref = useRef(null)
-  useEffect(() => {
-    if (ref.current && tex) renderBlockMath(tex, ref.current)
-  }, [tex])
-  return <div ref={ref} className="md-math-block" />
+  const html = renderMathToString(tex, true)
+  if (html) {
+    return <div className="md-math-block" dangerouslySetInnerHTML={{ __html: html }} />
+  }
+  return <div className="md-math-block">{tex}</div>
 }
 
 export function HorizontalRule() {

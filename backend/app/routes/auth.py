@@ -25,6 +25,40 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 _limiter = Limiter(key_func=get_remote_address)
 log = logging.getLogger("moebius.auth")
 
+# Global login attempt tracking — single-owner app, so we track
+# consecutive failures across all IPs.
+_login_failures = 0
+_login_cooldown_until = 0.0
+
+
+def _check_login_cooldown():
+  """Raises 429 if in a cooldown period from too many failed logins."""
+  if time.time() < _login_cooldown_until:
+    remaining = int(_login_cooldown_until - time.time())
+    raise HTTPException(
+      status_code=429,
+      detail=f"Too many failed attempts. Try again in {remaining}s.",
+    )
+
+
+def _record_login_failure():
+  """Increments failure count and sets cooldown if threshold reached."""
+  global _login_failures, _login_cooldown_until
+  _login_failures += 1
+  if _login_failures >= 30:
+    _login_cooldown_until = time.time() + 900  # 15 min
+  elif _login_failures >= 20:
+    _login_cooldown_until = time.time() + 300  # 5 min
+  elif _login_failures >= 10:
+    _login_cooldown_until = time.time() + 60   # 1 min
+
+
+def _reset_login_failures():
+  """Resets the failure counter on successful login."""
+  global _login_failures, _login_cooldown_until
+  _login_failures = 0
+  _login_cooldown_until = 0.0
+
 
 @router.get("/setup/status", response_model=schemas.SetupStatus)
 def setup_status(db: Session = Depends(get_db)):
@@ -62,6 +96,7 @@ def login(
   db: Session = Depends(get_db),
 ):
   """Authenticates the owner and returns a JWT access token."""
+  _check_login_cooldown()
   owner = (
     db.query(models.Owner)
     .filter(models.Owner.username == form.username)
@@ -70,13 +105,29 @@ def login(
   if not owner or not auth.verify_password(
     form.password, owner.hashed_password
   ):
+    _record_login_failure()
     raise HTTPException(
       status_code=401,
       detail="Incorrect username or password.",
       headers={"WWW-Authenticate": "Bearer"},
     )
+  _reset_login_failures()
   token = auth.create_access_token({"sub": owner.username})
   return schemas.TokenResponse(access_token=token)
+
+
+@router.post("/app-token")
+def create_app_token_endpoint(
+  body: schemas.AppTokenRequest,
+  owner: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Returns a short-lived JWT scoped to a specific mini-app."""
+  app = db.query(models.App).filter(models.App.id == body.app_id).first()
+  if not app:
+    raise HTTPException(status_code=404, detail="App not found.")
+  token = auth.create_app_token(body.app_id, owner.username)
+  return {"token": token}
 
 
 # -- Provider discovery ---------------------------------------------------

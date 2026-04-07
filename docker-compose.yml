@@ -2,7 +2,7 @@
 # For managed hosting (Railway, PikaPods), just run the app service.
 services:
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2.9-alpine
     restart: unless-stopped
     ports:
       - "80:80"

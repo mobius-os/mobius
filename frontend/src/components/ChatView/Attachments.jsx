@@ -1,4 +1,7 @@
+import { useState } from 'react'
+import { createPortal } from 'react-dom'
 import { getToken } from '../../api/client.js'
+import ImageLightbox from './markdown/ImageLightbox.jsx'
 
 export default function Attachments({ attachments, chatId }) {
   if (!attachments || attachments.length === 0) return null
@@ -11,19 +14,11 @@ export default function Attachments({ attachments, chatId }) {
       {images.length > 0 && (
         <div className="chat__attach-images">
           {images.map((img, i) => (
-            <a
+            <AttachImage
               key={i}
-              href={`/api/chats/${chatId}/uploads/${img.name}?token=${token}`}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <img
-                className="chat__attach-thumb"
-                src={`/api/chats/${chatId}/uploads/${img.name}?token=${token}`}
-                alt={img.name}
-                loading="lazy"
-              />
-            </a>
+              src={`/api/chats/${chatId}/uploads/${img.name}?token=${token}`}
+              alt={img.name}
+            />
           ))}
         </div>
       )}
@@ -44,5 +39,24 @@ export default function Attachments({ attachments, chatId }) {
         </a>
       ))}
     </div>
+  )
+}
+
+function AttachImage({ src, alt }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <img
+        className="chat__attach-thumb"
+        src={src}
+        alt={alt}
+        loading="lazy"
+        onClick={() => setOpen(true)}
+      />
+      {open && createPortal(
+        <ImageLightbox src={src} alt={alt} onClose={() => setOpen(false)} />,
+        document.body,
+      )}
+    </>
   )
 }

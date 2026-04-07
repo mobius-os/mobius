@@ -38,7 +38,13 @@ export function parseThemeMeta(css) {
   const font = (css.match(/--font:\s*([^;]+);/) || [])[1]?.trim() || "'Inter', system-ui, sans-serif"
   const mono = (css.match(/--mono:\s*([^;]+);/) || [])[1]?.trim() || "'JetBrains Mono', ui-monospace, monospace"
   const fontSize = (css.match(/font-size:\s*([^;]+);/) || [])[1]?.trim() || '15px'
-  return { imports, font, mono, fontSize }
+  // Extract all CSS custom properties so agent-set colors survive toggles.
+  const colors = {}
+  css.replace(/--([\w-]+):\s*([^;]+);/g, (_, name, value) => {
+    const key = `--${name}`
+    if (key !== '--font' && key !== '--mono') colors[key] = value.trim()
+  })
+  return { imports, font, mono, fontSize, colors }
 }
 
 export function buildThemeCss(colors, meta, mode) {

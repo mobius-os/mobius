@@ -1,23 +1,21 @@
 /**
- * Lazy-loads highlight.js and provides a highlight function.
- * Only fetches the library when a code block actually appears.
+ * Highlight.js wrapper with eager loading.
+ *
+ * Starts loading immediately on import (not on first code block).
+ * highlightSync() returns highlighted HTML if the library is ready,
+ * null if still loading — the CodeBlock component renders plain text
+ * and upgrades when ready.  This eliminates reflow for most cases
+ * since highlight.js loads during the splash/auth screen.
  */
 
 let hljs = null
-let loading = false
-const waiters = []
 
-async function loadHljs() {
-  if (hljs) return hljs
-  if (loading) {
-    return new Promise(resolve => waiters.push(resolve))
-  }
-  loading = true
+// Start loading immediately.
+const ready = (async () => {
   try {
     const mod = await import('highlight.js/lib/core')
     hljs = mod.default
 
-    // Register common languages.
     const langs = await Promise.all([
       import('highlight.js/lib/languages/javascript'),
       import('highlight.js/lib/languages/python'),
@@ -33,22 +31,34 @@ async function loadHljs() {
       'css', 'xml', 'typescript', 'sql',
     ]
     langs.forEach((lang, i) => hljs.registerLanguage(names[i], lang.default))
-
-    waiters.forEach(fn => fn(hljs))
-    waiters.length = 0
     return hljs
   } catch {
-    loading = false
+    return null
+  }
+})()
+
+/**
+ * Synchronous highlight — returns HTML string or null.
+ * Returns null if hljs hasn't loaded yet (first few hundred ms).
+ */
+export function highlightSync(code, language) {
+  if (!hljs) return null
+  try {
+    if (language && hljs.getLanguage(language)) {
+      return hljs.highlight(code, { language }).value
+    }
+    return hljs.highlightAuto(code).value
+  } catch {
     return null
   }
 }
 
 /**
- * Highlights a code string. Returns HTML string or null.
- * Call from a useEffect — triggers lazy load on first use.
+ * Async highlight — waits for library to load.
+ * Used during streaming where we can afford to wait.
  */
 export async function highlightCode(code, language) {
-  const h = await loadHljs()
+  const h = await ready
   if (!h) return null
   try {
     if (language && h.getLanguage(language)) {

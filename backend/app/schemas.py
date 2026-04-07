@@ -51,6 +51,10 @@ class ProviderCodeRequest(BaseModel):
   code: str
 
 
+class AppTokenRequest(BaseModel):
+  app_id: int
+
+
 class ChatMessage(BaseModel):
   role: str
   content: str
@@ -71,9 +75,14 @@ class SendMessage(BaseModel):
   timezone: str | None = None
 
 
+class PushKeys(BaseModel):
+  p256dh: str
+  auth: str
+
+
 class PushSubscribeRequest(BaseModel):
   endpoint: str
-  keys: dict  # {"p256dh": "...", "auth": "..."}
+  keys: PushKeys
 
 
 class PushUnsubscribeRequest(BaseModel):

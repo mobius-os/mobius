@@ -10,9 +10,13 @@ import MsgContent from './MsgContent.jsx'
 import './ChatView.css'
 
 
-// Module-level map so scroll positions survive component remounts (key={chatId}).
+// Module-level maps so scroll positions and spacer heights survive remounts.
 const _scrollPositions = (() => {
   try { return JSON.parse(sessionStorage.getItem('chat-scroll') || '{}') }
+  catch { return {} }
+})()
+const _spacerHeights = (() => {
+  try { return JSON.parse(sessionStorage.getItem('chat-spacer') || '{}') }
   catch { return {} }
 })()
 
@@ -35,13 +39,14 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   const hadMessagesRef = useRef(false)
   const promotedRef = useRef(false)
   const needsScrollRef = useRef(false)
-  // True while the spacer is actively managing layout (from doSend until
-  // the user scrolls).  Keeps min-height: 0 on the list even after
-  // sending ends, preventing the min-height from inflating scrollHeight
-  // and creating extra scroll space.
+  // Keeps min-height: 0 on the list while the spacer is active, preventing
+  // min-height: calc(100% + 1px) from inflating scrollHeight.
   const [spacerActive, setSpacerActive] = useState(false)
-  // Flag for the useLayoutEffect that positions the spacer after a send.
+  // Set in doSend, consumed by the spacer useLayoutEffect.
   const needsSpacerRef = useRef(false)
+  // Persists scrollTarget across effect runs so the spacer can recalculate
+  // after promote/stop without a full re-init.
+  const scrollTargetRef = useRef(null)
 
   const {
     streamItems,
@@ -54,9 +59,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     disconnect,
   } = useStreamConnection(chatId, {
     onStreamEnd: () => {
-      // Promote streamed items directly to the messages array.
-      // No server fetch — the server saved incrementally during streaming,
-      // and re-fetching causes a visible re-render jitter.
       promoteStreamToMessages()
       setSending(false)
       onStreamEnd?.()
@@ -72,9 +74,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   })
 
   // Converts current streamItems to a message and appends to messages state.
-  // Uses a flag to ensure idempotency — handleStop and the SSE onStreamEnd
-  // callback can both call this concurrently.  The flag is reset in doSend
-  // when a new message starts.
+  // Idempotent via promotedRef — handleStop and onStreamEnd can both call this.
   function promoteStreamToMessages() {
     if (promotedRef.current) return
     const items = latestItemsRef.current
@@ -82,8 +82,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     promotedRef.current = true
     const blocks = items.map(item => {
       if (item.type === 'text') return { type: 'text', content: item.content }
-      // Normalize any still-running tools to done — the backend's final save
-      // does the same, but the "done" SSE event arrives before that save runs.
       const status = item.status === 'running' ? 'done' : item.status
       return { type: 'tool', ...item, status }
     })
@@ -126,9 +124,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         // If the agent is still running, the DB has a partial assistant
         // message saved incrementally during streaming.  The SSE catch-up
         // burst will replay those same events, so drop the partial message
-        // to avoid rendering the initial response twice.  Adjust totalMessages
-        // to match — promoteStreamToMessages will increment it back when the
-        // stream completes.
+        // to avoid rendering the initial response twice.
         const stripped = data.running && msgs.length > 0
           && msgs[msgs.length - 1].role === 'assistant'
         if (stripped) {
@@ -136,10 +132,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         }
 
         // Fix stale "running" tool blocks in historical messages.
-        // If the agent crashed or the CLI exited before emitting tool_end,
-        // the DB keeps status:"running" forever.  Always normalize — when
-        // the agent is still running, we strip the partial last message
-        // above and reconnect to SSE, which sets live tools to "running".
         for (const msg of msgs) {
           if (msg.blocks) {
             for (const blk of msg.blocks) {
@@ -156,10 +148,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         hadMessagesRef.current = msgs.length > 0
         setLoading(false)
 
-        // Flag for useLayoutEffect to restore scroll after React commits the DOM.
         needsScrollRef.current = true
 
-        // If agent is running, connect to the live SSE stream.
         if (data.running) {
           setSending(true)
           connectToStream(false)
@@ -168,85 +158,108 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       .catch(() => setLoading(false))
 
     return () => {
-      // Persist scroll positions to sessionStorage so they survive page reloads.
-      try { sessionStorage.setItem('chat-scroll', JSON.stringify(_scrollPositions)) } catch {}
+      try {
+        sessionStorage.setItem('chat-scroll', JSON.stringify(_scrollPositions))
+        sessionStorage.setItem('chat-spacer', JSON.stringify(_spacerHeights))
+      } catch {}
       cancelled = true
       chatIdStaleRef.current = true
+      scrollTargetRef.current = null
       loadingOlder.current = false
       disconnect()
     }
   }, [chatId])
 
   // Restore scroll position after React commits loaded messages to the DOM.
-  // useLayoutEffect fires synchronously after DOM mutations, before paint —
-  // no flash. The flag ensures this only runs on initial chat load, not
-  // on every messages state change (which would cause repeated flashing).
+  // Applies immediately (before paint) then again after lazy renderers
+  // (KaTeX, highlight.js) reflow content — corrects any height drift
+  // without hiding or flashing.
   useLayoutEffect(() => {
     if (!needsScrollRef.current) return
     needsScrollRef.current = false
     const el = scrollRef.current
     if (!el) return
-    const saved = _scrollPositions[chatId]
-    if (saved != null) {
-      el.scrollTop = el.scrollHeight - saved
-    } else {
-      el.scrollTop = el.scrollHeight
+    // Restore spacer height first — it affects scrollHeight.
+    const savedSpacer = _spacerHeights[chatId]
+    const sp = el.querySelector('.spacer-dynamic')
+    if (savedSpacer && sp) {
+      sp.style.height = savedSpacer
+      setSpacerActive(true)
     }
+    const saved = _scrollPositions[chatId]
+    function applyScroll() {
+      if (saved != null) {
+        el.scrollTop = el.scrollHeight - saved
+      } else {
+        el.scrollTop = el.scrollHeight
+      }
+    }
+    applyScroll()
+    // Re-apply after lazy rendering settles (KaTeX, highlight.js).
+    const tid = setTimeout(applyScroll, 300)
+    return () => clearTimeout(tid)
   }, [messages])
 
-  // ── Spacer: keeps scrollHeight constant so the message stays put ──
+  // ── Spacer: ensures at least a viewport of space below the user's message ──
   //
   // Formula: spacer = max(0, viewH + scrollTarget − listH)
   //
-  // This ensures maxScrollTop = scrollTarget at all times.  As content
-  // grows (streaming), the spacer shrinks by exactly the same amount,
-  // keeping scrollHeight = viewH + scrollTarget.  When content shrinks
-  // (stop removes thinking dots), the spacer grows back.  The scroll
-  // position never needs to change.
+  // On send (needsSpacerRef=true): computes scrollTarget from the last user
+  // message, scrolls to it, and sets up a ResizeObserver to keep the spacer
+  // in sync as content streams in.
   //
-  // Uses direct DOM manipulation (no React state) because the spacer
-  // div has no style prop — React never touches it.  A ResizeObserver
-  // on the list catches ALL content changes (streaming, promote, stop)
-  // in one place.
+  // On promote/stop (needsSpacerRef=false, scrollTargetRef set): recalculates
+  // the spacer once without touching scroll — compensates for content height
+  // changes when thinking dots are removed or stream items are promoted.
   //
-  // IMPORTANT: uses listEl.offsetHeight, NOT scrollEl.scrollHeight.
-  // A scroll container's scrollHeight never goes below clientHeight,
-  // so when content is short it equals the viewport height — useless.
+  // On mount/history (scrollTargetRef=null): does nothing — scroll restoration
+  // handles positioning, spacer height is restored from sessionStorage.
   useLayoutEffect(() => {
-    if (!needsSpacerRef.current) return
+    const isSend = needsSpacerRef.current
     needsSpacerRef.current = false
     const scrollEl = scrollRef.current
     const userMsgEl = lastUserMsgRef.current
     const spacerEl = spacerRef.current
-    if (!scrollEl || !userMsgEl || !spacerEl) return
-    const scrollTarget = Math.max(0, userMsgEl.offsetTop - 4)
-    const listEl = scrollEl.querySelector('.chat__list')
-    if (!listEl) return
-    // Track the largest viewport seen (keyboard open vs closed).
-    let maxViewH = scrollEl.clientHeight
+    if (!scrollEl || !spacerEl) return
 
-    function update() {
-      const viewH = scrollEl.clientHeight
-      if (viewH > maxViewH) maxViewH = viewH
-      const listH = listEl.offsetHeight
-      spacerEl.style.height = `${Math.max(0, maxViewH + scrollTarget - listH)}px`
-      // Auto-scroll: if near the bottom, follow content growth.
-      // Uses scrollHeight (not scrollTarget) so that once content exceeds
-      // the viewport and the spacer hits 0, we follow the new content
-      // instead of yanking back to the message.  When the spacer is still
-      // active, scrollHeight clamps to scrollTarget anyway.
-      const gap = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
-      if (gap < 50) scrollEl.scrollTop = scrollEl.scrollHeight
+    if (isSend) {
+      if (!userMsgEl) return
+      scrollTargetRef.current = Math.max(0, userMsgEl.offsetTop - 4)
+      scrollEl.scrollTop = scrollTargetRef.current
     }
 
-    update()
-    scrollEl.scrollTop = scrollTarget
+    if (scrollTargetRef.current == null) return
 
-    // ResizeObserver on the list catches everything: streaming content
-    // growth, thinking dots appearing/disappearing, promote, stop.
+    // Recalculate spacer height.
+    const scrollTarget = scrollTargetRef.current
+    const listEl = scrollEl.querySelector('.chat__list')
+    if (!listEl) return
+    const viewH = scrollEl.clientHeight
+    const listH = listEl.offsetHeight
+    spacerEl.style.height = `${Math.max(0, viewH + scrollTarget - listH)}px`
+
+    if (!isSend) return
+
+    // Live send — observe content changes for streaming.
+    function update() {
+      const st = scrollTargetRef.current
+      if (st == null) return
+      const vH = scrollEl.clientHeight
+      const lH = listEl.offsetHeight
+      const h = Math.max(0, vH + st - lH)
+      spacerEl.style.height = `${h}px`
+      if (h > 0) {
+        // Content shorter than viewport — hold at user message.
+        scrollEl.scrollTop = st
+      } else {
+        // Content exceeds viewport — follow growth if near bottom.
+        const gap = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
+        if (gap < 50) scrollEl.scrollTop = scrollEl.scrollHeight
+      }
+    }
+
     const ro = new ResizeObserver(update)
     ro.observe(listEl)
-    // Keyboard dismiss / rotation.
     window.addEventListener('resize', update)
 
     return () => {
@@ -268,7 +281,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       .then(data => {
         if (chatIdStaleRef.current) return
         const older = data.messages || []
-        // Older messages are always historical — fix stale running tools.
         for (const msg of older) {
           if (msg.blocks) {
             for (const blk of msg.blocks) {
@@ -292,9 +304,9 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   function handleScroll() {
     const el = scrollRef.current
     if (!el || loadingOlder.current || loading) return
-    // Continuously save scroll as distance-from-bottom.
-    // Can't save in useEffect cleanup — DOM is already detached, scrollTop reads 0.
     _scrollPositions[chatId] = el.scrollHeight - el.scrollTop
+    const sp = el.querySelector('.spacer-dynamic')
+    if (sp) _spacerHeights[chatId] = sp.style.height
     if (el.scrollTop < 5 && offset > 0) {
       loadOlderMessages()
     }
@@ -304,7 +316,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   function handleFileSelect(e) {
     const fileList = Array.from(e.target.files || [])
     if (!fileList.length) return
-    // Reset the input so the same file can be re-selected after removal.
     e.target.value = ''
     addFiles(fileList)
   }
@@ -314,7 +325,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     onMessageStart?.()
     promotedRef.current = false
 
-    // Build attachments from completed pending files.
     const attachments = pendingFiles
       .filter(f => f.status === 'done')
       .map(f => ({ name: f.name, size: f.size, mime_type: f.mime_type }))
@@ -333,8 +343,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
     try {
       await streamSend(text, attachments.length > 0 ? attachments : undefined)
-      // Refresh chat list so this chat appears in the drawer immediately
-      // on the first message, rather than waiting for stream end.
       if (!hadMessagesRef.current) {
         hadMessagesRef.current = true
         onFirstMessage?.()
@@ -373,8 +381,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         body: JSON.stringify({ chat_id: chatId }),
       })
     } catch { /* network error during stop is non-critical */ }
-    // promoteStreamToMessages normalizes running tools to done internally,
-    // so no need to mutate streamItems beforehand.
     promoteStreamToMessages()
     disconnect()
     setSending(false)
@@ -383,15 +389,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
   const hasMore = offset > 0
   const showEmpty = messages.length === 0 && !isStreaming && !loading && !sending
-  // Index of the last user message — used to assign lastUserMsgRef to
-  // exactly one element.  Assigning the same ref to multiple elements
-  // is unreliable: React doesn't re-assign refs on existing elements.
   const lastUserIdx = messages.reduce((acc, m, i) => m.role === 'user' ? i : acc, -1)
 
   return (
     <div className={`chat${showEmpty ? ' chat--empty' : ''}`}>
-      {/* Empty state is rendered outside the scroll area so it can be
-          vertically centered without fighting scroll/spacer/min-height. */}
       {showEmpty && (
         <div className="chat__empty-wrap">
           <div className="chat__empty">
@@ -405,10 +406,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       {!showEmpty && (
       <div className="chat__scroll" ref={scrollRef} onScroll={handleScroll}>
 
-        {/* min-height is disabled while the spacer is managing layout.
-            min-height: calc(100% + 1px) inflates scrollHeight and creates
-            extra scroll space that conflicts with the spacer.  It's only
-            needed for iOS elastic bounce in the normal scroll flow. */}
         <ul className="chat__list" style={spacerActive ? { minHeight: 0 } : undefined}>
           {hasMore && (
             <li className="chat__older">
@@ -437,7 +434,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             </li>
           ))}
 
-          {/* Streaming response — items rendered in arrival order. */}
           {sending && streamItems.length > 0 && (
             <li className="chat__msg chat__msg--assistant">
               {streamItems.map((item, i) => {
@@ -469,8 +465,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           )}
         </ul>
 
-        {/* DO NOT add a CSS transition to .spacer-dynamic — it breaks
-            the scroll positioning math (see comment in doSend). */}
         <div className="spacer-dynamic" ref={spacerRef} aria-hidden="true" />
       </div>
       )}
@@ -538,7 +532,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
               className="chat__input"
               value={input}
               onChange={(e) => {
-                if (listeningRef.current) return  // block Chrome direct-fill during recording
+                if (listeningRef.current) return
                 setInput(e.target.value)
                 e.target.style.height = 'auto'
                 e.target.style.height = Math.min(e.target.scrollHeight, 160) + 'px'

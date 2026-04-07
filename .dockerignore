@@ -1,6 +1,10 @@
 .git
 .env
-*.md
+README.md
+SECURITY.md
+CONTRIBUTING.md
+CLAUDE.md
+docs/
 assets/
 apps/
 node_modules/

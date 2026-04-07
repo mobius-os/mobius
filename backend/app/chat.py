@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from app import auth, models, schemas
 from app.broadcast import ChatBroadcast, create_broadcast, get_broadcast, set_active_broadcast
 from app.config import get_settings
+from app.events import process_event, build_assistant_message, finalize_blocks
 from app.providers import get_provider
 
 
@@ -116,82 +117,6 @@ async def stop_chat_for(chat_id: str, db: Session = None) -> bool:
   return await stop_chat(chat_id, db=db)
 
 
-def _process_event(event: dict, assistant_blocks: list) -> bool:
-  """Accumulates a parsed event into the assistant blocks list.
-
-  Updates assistant_blocks in place with text content, tool starts,
-  tool input/output, and tool completion markers.  Returns True if the
-  blocks changed and a DB save may be warranted.
-  """
-  event_type = event.get("type")
-
-  if event_type == "text":
-    content = event.get("content", "")
-    # Append to last text block or create new one.
-    if (assistant_blocks
-        and assistant_blocks[-1].get("type") == "text"):
-      assistant_blocks[-1]["content"] += content
-    else:
-      assistant_blocks.append(
-        {"type": "text", "content": content}
-      )
-    return True
-
-  if event_type == "tool_start":
-    assistant_blocks.append({
-      "type": "tool",
-      "tool": event.get("tool", ""),
-      "input": event.get("input", ""),
-      "output": "",
-      "status": "running",
-    })
-    return True
-
-  if event_type == "tool_input":
-    # Backfill input summary from the assistant event (arrives after
-    # content_block_start which created the tool block).  Match the
-    # earliest tool block without input — the assistant event lists
-    # tools in order, matching creation order.
-    for blk in assistant_blocks:
-      if blk.get("type") == "tool" and not blk.get("input"):
-        blk["input"] = event.get("input", "")
-        break
-    return True
-
-  if event_type == "tool_output":
-    for blk in reversed(assistant_blocks):
-      if (blk.get("type") == "tool"
-          and blk.get("status") != "done"):
-        blk["output"] = event.get("content", "")
-        break
-    return True
-
-  if event_type == "tool_end":
-    for blk in reversed(assistant_blocks):
-      if (blk.get("type") == "tool"
-          and blk.get("status") != "done"):
-        blk["status"] = "done"
-        break
-    return True
-
-  return False
-
-
-def _build_assistant_message(
-  assistant_blocks: list,
-) -> dict:
-  """Converts accumulated blocks into a message dict for DB storage."""
-  all_text = "".join(
-    b["content"] for b in assistant_blocks
-    if b.get("type") == "text"
-  )
-  return {
-    "role": "assistant",
-    "content": all_text,
-    "blocks": assistant_blocks,
-  }
-
-
 def _finalize_response(
   db: Session,
   chat_id: str,
@@ -200,15 +125,9 @@ def _finalize_response(
   """End-of-response cleanup: force-complete tool blocks and save."""
   if not assistant_blocks:
     return
-  # Any tool block still marked 'running' at this point means its
-  # tool_end event was missed (timing, reconnect, or early exit).
-  # Force them to 'done' so the UI doesn't show a permanent spinner.
-  for blk in assistant_blocks:
-    if (blk.get("type") == "tool"
-        and blk.get("status") == "running"):
-      blk["status"] = "done"
+  finalize_blocks(assistant_blocks)
   _update_last_assistant_message(
-    db, chat_id, _build_assistant_message(assistant_blocks),
+    db, chat_id, build_assistant_message(assistant_blocks),
   )
 
 
@@ -344,11 +263,10 @@ async def run_chat(
     last_save_time = 0.0
     _DB_SAVE_INTERVAL = 1.0  # seconds between incremental DB saves
 
-    # Clamped to [30, 3600] to prevent foot-guns: 0 kills every chat
-    # instantly; multi-million values hang forever.
+    # Default 1 hour, clamped to [30, 7200].
     _MAX_RUNTIME_SECS = max(
       30,
-      min(int(os.environ.get("CHAT_TIMEOUT_SECS", "300")), 3600),
+      min(int(os.environ.get("CHAT_TIMEOUT_SECS", "3600")), 7200),
     )
     try:
       async with asyncio.timeout(_MAX_RUNTIME_SECS):
@@ -406,7 +324,7 @@ async def run_chat(
             bc.publish(event)
 
             # Accumulate blocks and throttle DB saves.
-            save_needed = _process_event(
+            save_needed = process_event(
               event, assistant_blocks,
             )
             if save_needed and chat_id:
@@ -418,7 +336,7 @@ async def run_chat(
                 last_save_time = now
                 _update_last_assistant_message(
                   db, chat_id,
-                  _build_assistant_message(assistant_blocks),
+                  build_assistant_message(assistant_blocks),
                 )
           else:
             continue

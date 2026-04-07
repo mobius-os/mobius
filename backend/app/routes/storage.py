@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.config import get_settings
 from app.database import get_db
-from app.deps import get_current_owner
+from app.deps import get_current_owner_or_app
 
 router = APIRouter(prefix="/api/storage", tags=["storage"])
 
@@ -58,7 +58,7 @@ def read_app_file(
   app_id: int,
   path: str,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_or_app),
 ):
   """Returns a file from an app's data directory."""
   base = Path(get_settings().data_dir) / "apps" / str(app_id)
@@ -74,7 +74,7 @@ def write_app_file(
   path: str,
   body: WriteBody,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_or_app),
 ):
   """Writes text content to a file in an app's data directory."""
   base = Path(get_settings().data_dir) / "apps" / str(app_id)
@@ -87,7 +87,7 @@ def write_app_file(
 @router.get("/shared/{path:path}")
 def read_shared_file(
   path: str,
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_or_app),
 ):
   """Returns a file from the shared data directory."""
   base = Path(get_settings().data_dir) / "shared"
@@ -101,7 +101,7 @@ def read_shared_file(
 def write_shared_file(
   path: str,
   body: WriteBody,
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_or_app),
 ):
   """Writes text content to a file in the shared data directory."""
   base = Path(get_settings().data_dir) / "shared"
@@ -114,7 +114,7 @@ def write_shared_file(
 @router.get("/shared-list/{path:path}")
 def list_shared_dir(
   path: str,
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_or_app),
 ):
   """Lists files in a shared subdirectory. Returns name, size, mime."""
   base = Path(get_settings().data_dir) / "shared"

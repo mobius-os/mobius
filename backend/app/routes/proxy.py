@@ -15,7 +15,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from app import models
-from app.deps import get_current_owner
+from app.deps import get_current_owner_or_app
 
 router = APIRouter(prefix="/api/proxy", tags=["proxy"])
 
@@ -35,7 +35,7 @@ class ProxyPostRequest(BaseModel):
 @router.get("")
 async def proxy_get(
   url: str,
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_or_app),
 ):
   """Fetches a URL via GET and returns the raw response body."""
   _validate_url(url)
@@ -54,7 +54,7 @@ async def proxy_get(
 @router.post("")
 async def proxy_post(
   body: ProxyPostRequest,
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_or_app),
 ):
   """Posts to a URL and returns the raw response body."""
   if body.body and len(body.body.encode()) > _MAX_BODY:

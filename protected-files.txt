@@ -12,3 +12,4 @@ src/components/LoginForm/LoginForm.css
 src/components/SetupWizard/SetupWizard.jsx
 src/components/SetupWizard/SetupWizard.css
 src/components/ProviderAuth/ProviderAuth.jsx
+src/components/ProviderAuth/ProviderAuth.css

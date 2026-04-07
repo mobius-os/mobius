@@ -13,7 +13,7 @@ from app import auth, models, schemas
 from app.compiler import compile_jsx
 from app.config import get_settings
 from app.database import get_db
-from app.deps import get_current_owner
+from app.deps import get_current_owner, get_current_owner_or_app
 
 router = APIRouter(prefix="/api/apps", tags=["apps"])
 
@@ -21,7 +21,7 @@ router = APIRouter(prefix="/api/apps", tags=["apps"])
 @router.get("/", response_model=list[schemas.AppOut])
 def list_apps(
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_or_app),
 ):
   """Returns all registered mini-apps ordered by creation time."""
   return (
@@ -62,7 +62,7 @@ async def create_app(
 def get_app(
   app_id: int,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_or_app),
 ):
   """Returns a single mini-app by ID."""
   app = (

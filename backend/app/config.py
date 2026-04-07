@@ -26,10 +26,13 @@ class Settings(BaseSettings):
     domain = values.get("domain") or values.get("DOMAIN") or "localhost"
     origin = values.get("frontend_origin") or values.get("FRONTEND_ORIGIN") or ""
     railway_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+    port = os.environ.get("PORT", "8000")
     if railway_domain and domain == "localhost":
       values["domain"] = railway_domain
       values["frontend_origin"] = f"https://{railway_domain}"
-      values["api_base_url"] = f"https://{railway_domain}"
+      # Use localhost for agent subprocess calls (same container),
+      # with the correct port that Railway assigned.
+      values["api_base_url"] = f"http://localhost:{port}"
     elif domain != "localhost" and (not origin or origin == "http://localhost:5173"):
       values["frontend_origin"] = f"https://{domain}"
       values["api_base_url"] = f"https://{domain}"

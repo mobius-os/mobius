@@ -19,8 +19,10 @@ should know. Keep it concise — this is injected into every session prompt.
 |------|---------|
 | `Shell/Shell.jsx` | Logo bar, drawer toggle, layout, system events |
 | `Shell/Shell.css` | Logo bar and layout styles |
-| `ChatView/ChatView.jsx` | Chat messages, input, streaming, scroll |
+| `ChatView/ChatView.jsx` | Chat messages, streaming, scroll |
 | `ChatView/ChatView.css` | Chat styles |
+| `ChatView/ChatInput.jsx` | Chat input, voice, file upload, send/stop |
+| `ChatView/ChatInput.css` | Input styles |
 | `Drawer/Drawer.jsx` | Side drawer, chat list, app list |
 | `Drawer/Drawer.css` | Drawer styles |
 | `AppCanvas/AppCanvas.jsx` | Mini-app iframe |
@@ -75,6 +77,22 @@ print(f'Icons regenerated with {bg}')
 - Spatial: generous negative space, consistent padding
 - Backgrounds: gradients and layered transparencies, not flat solids
 
+## Reusable components for mini-apps
+
+The shell includes components that mini-apps can reference as patterns:
+
+| Component | Path | Purpose |
+|-----------|------|---------|
+| `ChatInput` | `ChatView/ChatInput.jsx` | Text input with voice, file attach, send/stop |
+| `BlockRenderer` | `ChatView/markdown/BlockRenderer.jsx` | Streaming markdown renderer |
+| `InlineContent` | `ChatView/markdown/InlineContent.jsx` | Inline markdown (links, images, math) |
+| `ImageLightbox` | `ChatView/markdown/ImageLightbox.jsx` | Pinch-zoom image viewer |
+
+These are in `/data/shell/src/components/`. Mini-apps can't import them
+directly (different bundle), but use them as reference implementations.
+If a mini-app needs a chat interface, copy the patterns from ChatInput
+and BlockRenderer rather than writing from scratch.
+
 ## Apps built
 
 (none yet)
@@ -106,3 +124,6 @@ print(f'Icons regenerated with {bg}')
   column separator before KaTeX sees it, breaking both the table and the
   math. Use `\mid` (conditionals) or `\vert` (norms) instead of `|`
   when writing math inside table cells.
+- Mini-apps receive a scoped token, not the owner's full JWT. The scoped
+  token can access storage, proxy, AI, notifications, and push — but NOT
+  auth, settings, or chat endpoints.

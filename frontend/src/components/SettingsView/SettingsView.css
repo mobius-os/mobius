@@ -59,6 +59,7 @@
 .settings__subtext {
   font-size: 13px;
   color: var(--muted);
+  line-height: 1.5;
 }
 
 .settings__subtext a {
@@ -69,8 +70,8 @@
 .settings__form {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-top: 4px;
+  gap: 12px;
+  margin-top: 8px;
 }
 
 .settings__input {

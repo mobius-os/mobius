@@ -1,5 +1,6 @@
 """Routes for chat CRUD operations."""
 
+import logging
 import shutil
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,6 +14,8 @@ from app.config import get_settings
 from app.chat import is_chat_running, stop_chat_for
 from app.database import get_db
 from app.deps import get_current_owner
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chats", tags=["chats"])
 
@@ -167,7 +170,7 @@ async def delete_chat(
   try:
     await stop_chat_for(chat_id)
   except Exception:
-    pass
+    log.warning("Failed to stop agent for chat %s during delete", chat_id)
   chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
   if chat:
     chat.deleted_at = datetime.now(UTC)

@@ -40,6 +40,14 @@ def create_access_token(
   )
 
 
+def create_app_token(app_id: int, owner_username: str) -> str:
+  """Creates a short-lived JWT scoped to a specific mini-app."""
+  return create_access_token(
+    {"sub": owner_username, "scope": "app", "app_id": app_id},
+    expires_delta=timedelta(hours=8),
+  )
+
+
 def decode_access_token(token: str) -> Optional[dict]:
   """Decodes a JWT and returns the payload, or None if invalid."""
   settings = get_settings()

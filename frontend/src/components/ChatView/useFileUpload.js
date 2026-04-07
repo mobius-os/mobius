@@ -42,8 +42,13 @@ export default function useFileUpload({ chatId }) {
             c.id === chip.id ? { ...c, status: 'error', error: msg } : c
           ))
         } else {
+          // Update name from server response (sanitized filename).
+          const data = await res.json().catch(() => [])
+          const serverName = data?.[0]?.name
           setFiles(prev => prev.map(c =>
-            c.id === chip.id ? { ...c, status: 'done' } : c
+            c.id === chip.id
+              ? { ...c, status: 'done', ...(serverName ? { name: serverName } : {}) }
+              : c
           ))
         }
       } catch (err) {

@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.database import get_db
-from app.deps import get_current_owner
+from app.deps import get_current_owner_or_app
 from app.broadcast import get_broadcast
 from app.push import send_push
 from app.schemas import NotificationOut, NotificationSendRequest
@@ -28,7 +28,7 @@ limiter = Limiter(key_func=get_remote_address)
 def send_notification(
   request: Request,
   body: NotificationSendRequest,
-  owner: models.Owner = Depends(get_current_owner),
+  owner: models.Owner = Depends(get_current_owner_or_app),
   db: Session = Depends(get_db),
 ):
   """Send a push notification to all owner subscriptions."""
@@ -99,7 +99,7 @@ def send_notification(
 
 @router.get("")
 def list_notifications(
-  owner: models.Owner = Depends(get_current_owner),
+  owner: models.Owner = Depends(get_current_owner_or_app),
   db: Session = Depends(get_db),
   limit: int = Query(20, ge=1, le=100),
   before: str | None = Query(None),

@@ -4,7 +4,7 @@
 import os
 import re
 from datetime import UTC, datetime
-from pathlib import Path
+import pathlib
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, UploadFile
@@ -15,7 +15,7 @@ from app import models
 from app.auth import decode_access_token
 from app.config import get_settings
 from app.database import get_db
-from app.deps import get_current_owner
+from app.deps import get_current_owner_or_app
 
 router = APIRouter(prefix="/api/chats", tags=["uploads"])
 
@@ -36,7 +36,7 @@ _INLINE_MIME_TYPES = {
 def _safe_filename(filename: str) -> str:
   """Strips directory components and rejects dangerous filenames."""
   # Strip any path component — only the final name segment is kept.
-  name = Path(filename).name
+  name = pathlib.Path(filename).name
   # Replace anything that isn't alphanumeric, dot, dash, or underscore.
   name = re.sub(r"[^\w.\-]", "_", name)
   # Reject empty names after sanitization.
@@ -47,7 +47,7 @@ def _safe_filename(filename: str) -> str:
 
 def _resolve_upload_dir(data_dir: str, chat_id: str) -> Path:
   """Returns and creates the uploads directory for a chat."""
-  p = Path(data_dir) / "chats" / chat_id / "uploads"
+  p = pathlib.Path(data_dir) / "chats" / chat_id / "uploads"
   p.mkdir(parents=True, exist_ok=True)
   return p
 
@@ -57,8 +57,8 @@ def _unique_name(directory: Path, filename: str) -> str:
   dest = directory / filename
   if not dest.exists():
     return filename
-  stem = Path(filename).stem
-  suffix = Path(filename).suffix
+  stem = pathlib.Path(filename).stem
+  suffix = pathlib.Path(filename).suffix
   i = 1
   while (directory / f"{stem}_{i}{suffix}").exists():
     i += 1
@@ -82,9 +82,9 @@ def _auth_token(
 
 @router.post("/{chat_id}/uploads")
 async def upload_files(
-  files: List[UploadFile],
   chat_id: str,
-  owner: models.Owner = Depends(get_current_owner),
+  files: List[UploadFile],
+  owner: models.Owner = Depends(get_current_owner_or_app),
   db: Session = Depends(get_db),
 ):
   """Saves uploaded files to /data/chats/{id}/uploads/ and records metadata."""
@@ -101,22 +101,16 @@ async def upload_files(
 
   for file in files:
     mime = (file.content_type or "application/octet-stream").split(";")[0].strip().lower()
-    # Read in chunks to enforce size limit without loading the whole file
-    # into memory first.
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in file:
-      total += len(chunk)
-      if total > _MAX_UPLOAD_BYTES:
-        raise HTTPException(
-          status_code=413,
-          detail=(
-            f"{file.filename} exceeds the "
-            f"{_MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit."
-          ),
-        )
-      chunks.append(chunk)
-    content = b"".join(chunks)
+    content = await file.read()
+    if len(content) > _MAX_UPLOAD_BYTES:
+      raise HTTPException(
+        status_code=413,
+        detail=(
+          f"{file.filename} exceeds the "
+          f"{_MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit."
+        ),
+      )
+    total = len(content)
     name = _unique_name(upload_dir, _safe_filename(file.filename or "upload"))
     (upload_dir / name).write_bytes(content)
     saved.append({
@@ -135,7 +129,7 @@ async def upload_files(
 @router.get("/{chat_id}/uploads")
 def list_uploads(
   chat_id: str,
-  owner: models.Owner = Depends(get_current_owner),
+  owner: models.Owner = Depends(get_current_owner_or_app),
   db: Session = Depends(get_db),
 ):
   """Returns the list of uploaded files for a chat."""
@@ -166,7 +160,7 @@ def serve_upload(
     raise HTTPException(status_code=401, detail="Owner not found.")
 
   settings = get_settings()
-  upload_dir = Path(settings.data_dir) / "chats" / chat_id / "uploads"
+  upload_dir = pathlib.Path(settings.data_dir) / "chats" / chat_id / "uploads"
   file_path = (upload_dir / filename).resolve()
 
   if not str(file_path).startswith(str(upload_dir.resolve()) + os.sep):

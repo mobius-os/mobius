@@ -44,22 +44,29 @@ def run_migrations(eng) -> None:
   """
   from sqlalchemy import inspect as sa_inspect, text
   inspector = sa_inspect(eng)
-  if "apps" not in inspector.get_table_names():
+  tables = inspector.get_table_names()
+  if "apps" not in tables:
     return  # fresh install — create_all handles it
   apps_cols = {c["name"] for c in inspector.get_columns("apps")}
   if "chat_id" not in apps_cols:
     with eng.connect() as conn:
       conn.execute(text("ALTER TABLE apps ADD COLUMN chat_id VARCHAR(64) NULL"))
       conn.commit()
-  if "chats" in inspector.get_table_names():
+  if "chats" in tables:
     chats_cols = {c["name"] for c in inspector.get_columns("chats")}
+    _add = []
     if "uploads" not in chats_cols:
-      with eng.connect() as conn:
-        conn.execute(text("ALTER TABLE chats ADD COLUMN uploads JSON NOT NULL DEFAULT '[]'"))
-        conn.commit()
+      _add.append("ALTER TABLE chats ADD COLUMN uploads JSON NOT NULL DEFAULT '[]'")
     if "generated_images" not in chats_cols:
+      _add.append("ALTER TABLE chats ADD COLUMN generated_images JSON NOT NULL DEFAULT '[]'")
+    if "deleted_at" not in chats_cols:
+      _add.append("ALTER TABLE chats ADD COLUMN deleted_at DATETIME")
+    if "session_id" not in chats_cols:
+      _add.append("ALTER TABLE chats ADD COLUMN session_id VARCHAR(128)")
+    if _add:
       with eng.connect() as conn:
-        conn.execute(text("ALTER TABLE chats ADD COLUMN generated_images JSON NOT NULL DEFAULT '[]'"))
+        for stmt in _add:
+          conn.execute(text(stmt))
         conn.commit()
 
 

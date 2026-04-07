@@ -37,9 +37,12 @@ session be faster or avoid mistakes:
 - Things that are obvious from reading the code
 - Temporary state or in-progress work
 
-**Cost discipline:** The experience file is injected into every session as
-part of the prompt — every line costs tokens on every future interaction.
-Keep it focused and concise. Prune entries that are stale or no longer true.
+**The experience file is cached** — it's part of the prompt and cheap to
+serve. The real cost is tool calls: searching through the codebase to
+rediscover something costs far more than having it in cached context.
+Write anything that saves future tool calls: recipes, file locations,
+component patterns, user preferences. The constraint is relevance
+(remove stale entries), not size.
 
 **When you update the experience file, always tell the user:**
 - What you added or changed (one sentence)
@@ -232,6 +235,17 @@ Key CSS vars: `--bg`, `--surface`, `--surface2`, `--text`, `--muted`, `--accent`
 `--accent-hover`, `--accent-dim`, `--border`, `--border-light`, `--danger`, `--green`,
 `--font`, `--mono`.
 
+### Token scoping
+
+Mini-apps receive a scoped token (not the owner's full JWT). The scoped
+token can access storage, proxy, AI, notifications, push, uploads, and
+app endpoints — but NOT auth, settings, or chat endpoints. This means:
+
+- Mini-apps can read/write their own storage and shared storage
+- Mini-apps can use the AI proxy and CORS proxy
+- Mini-apps can send push notifications
+- Mini-apps CANNOT read chat history, change settings, or modify auth
+
 ### Common pitfalls
 
 - **`parseFloat()`** — API data is often strings. Always parse before `.toFixed()` or arithmetic.
@@ -306,8 +320,11 @@ After merging all changes, rebuild: `bash /app/scripts/rebuild_shell.sh`
 ### Protected files (read-only)
 
 - `src/components/LoginForm/LoginForm.jsx`
+- `src/components/LoginForm/LoginForm.css`
 - `src/components/SetupWizard/SetupWizard.jsx`
+- `src/components/SetupWizard/SetupWizard.css`
 - `src/components/ProviderAuth/ProviderAuth.jsx`
+- `src/components/ProviderAuth/ProviderAuth.css`
 
 Backend files (`/app/app/`, `/app/scripts/`) are also root-owned.
 
