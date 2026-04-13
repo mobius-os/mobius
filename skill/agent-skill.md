@@ -133,7 +133,7 @@ not satisfy the gate.
    **Immediately after `Read`ing an informative screenshot, emit
    the embed markdown in the same response segment, before the
    next tool call.** Don't save all screenshots for a final
-   summary — the partner watches the stream live and should see
+   summary — the partner sees your messages in real time and should see
    the image at the moment you see it. Pattern:
 
    1. `Bash`: `agent-browser screenshot <path>`
@@ -174,16 +174,16 @@ not satisfy the gate.
    | Discovered a gotcha or workaround | **`Bash`**: `echo '- Gotcha: <one-line note>' >> /data/shared/agent-experience.md`. |
    | Learned a partner preference | **`Bash`**: `echo '- Partner preference: <one-line note>' >> /data/shared/agent-experience.md`. |
    | Changed shell / CSS / cron | **`Bash`**: `echo '- <what, why>' >> /data/shared/agent-experience.md`. |
-   | **(always last)** Re-read the partner's latest message | Confirm every question, concern, or requested change has been addressed as a tool call in this turn — not "next turn", which may not exist. |
+   | **(second to last)** Scan the session for missed gotchas | Review the tool calls you made this turn. Any wrong assumptions, workarounds, or infrastructure surprises? Each is worth logging — don't let "building mode" make you skip this. |
+   | **(always last)** Re-read the partner's latest message | Confirm every question, concern, or requested change has been addressed. Then ask the partner: does this look right? Anything to change? |
 
    **Use `Bash >>` to append, not `Edit` or `Write`** — see the
    "About this file" section in the experience block for why.
 
-   **Immediately after appending**, emit a one-line summary of what
-   was added before the next tool call — the partner watches the
-   stream live. If newer entries conflict with older ones, the newer
-   entry is correct. If an entry is outdated or irrelevant, delete
-   it — stale entries mislead future sessions.
+   **In the final message**, tell the partner what you logged and
+   why — use partner-facing language, not implementation details.
+   If newer entries conflict with older ones, the newer entry is
+   correct. If an entry is outdated or irrelevant, delete it.
 
 ---
 

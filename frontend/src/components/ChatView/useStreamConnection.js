@@ -28,7 +28,7 @@ const SYSTEM_EVENTS = new Set([
  * requestAnimationFrame for a smooth typewriter effect.  Tool events
  * and non-text events are applied immediately.
  */
-export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent }) {
+export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent, onNeedsRefresh }) {
   const [streamItems, _setStreamItems] = useState([])
   const latestItemsRef = useRef([])
 
@@ -140,6 +140,8 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
   onStreamEndRef.current = onStreamEnd
   const onSystemEventRef = useRef(onSystemEvent)
   onSystemEventRef.current = onSystemEvent
+  const onNeedsRefreshRef = useRef(onNeedsRefresh)
+  onNeedsRefreshRef.current = onNeedsRefresh
 
   const connectToStream = useCallback(async (resetState = false) => {
     disconnect()
@@ -173,6 +175,9 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
         setIsStreaming(false)
         setStreamItems([])
         textBufferRef.current = ''
+        // The chat may have finished while we were offline — re-fetch
+        // messages from the DB so the component shows the final state.
+        onNeedsRefreshRef.current?.()
         return
       }
 
@@ -284,6 +289,12 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
           } else if (event.type === 'done') {
             flushBuffer()
             setIsStreaming(false)
+            // Null the controller so visibility/online handlers know the
+            // connection is closed and can trigger a reconnect if the user
+            // backgrounds and returns.  Without this, abortRef stays
+            // non-null after a normal stream completion and the onVisible
+            // guard (!abortRef.current) prevents reconnection.
+            abortRef.current = null
             // Delay onStreamEnd by one frame so the React render
             // triggered by setIsStreaming(false) above completes before
             // ChatView promotes streamItems to messages.  latestItemsRef

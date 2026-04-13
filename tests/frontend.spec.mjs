@@ -267,15 +267,16 @@ test.describe('Scroll position', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Mobile Enter behavior
+// Enter key behavior across device types
 // ---------------------------------------------------------------------------
 
-test.describe('Mobile Enter key', () => {
-  // Use Playwright's built-in touch emulation so 'ontouchstart' in window
-  // is true — this is what the keydown handler checks.
+test.describe('Enter key — touch-primary device (mobile)', () => {
+  // Emulate a touch-primary device: hasTouch=true makes Chromium report
+  // (hover: none) and (pointer: coarse) via matchMedia, which is what
+  // the keydown handler checks.
   test.use({ hasTouch: true })
 
-  test('10. Enter on touch device inserts newline, does not send', async ({ page }) => {
+  test('10a. Enter inserts newline on touch-primary device', async ({ page }) => {
     await page.setViewportSize({ width: 412, height: 915 })
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
@@ -297,7 +298,6 @@ test.describe('Mobile Enter key', () => {
     await input.fill('Line one')
     await page.keyboard.press('Enter')
 
-    // On a touch device, Enter should NOT send — should insert a newline.
     await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
 
     // Should still be on the empty state (no send happened).
@@ -306,11 +306,57 @@ test.describe('Mobile Enter key', () => {
     )
     expect(hasEmpty).toBe(true)
 
-    // Textarea should contain the original text (possibly with a newline).
+    // Textarea should still have the text.
     const value = await page.evaluate(
       () => document.querySelector('.chat__input')?.value
     )
     expect(value).toContain('Line one')
+  })
+})
+
+test.describe('Enter key — desktop (no touch)', () => {
+  // Default Playwright context: no touch, hover: hover, pointer: fine.
+  // Enter should send the message.
+
+  test('10b. Enter sends on desktop', async ({ page }) => {
+    await setup(page)
+    await newChat(page)
+
+    const input = page.getByRole('textbox', { name: 'Message the agent...' })
+    await input.fill('Desktop send test')
+    await page.keyboard.press('Enter')
+
+    await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
+
+    // Should NOT be on empty state — message was sent.
+    const hasScroll = await page.evaluate(
+      () => !!document.querySelector('.chat__scroll')
+    )
+    expect(hasScroll).toBe(true)
+  })
+
+  test('10c. Shift+Enter inserts newline on desktop', async ({ page }) => {
+    await setup(page)
+    await newChat(page)
+
+    const input = page.getByRole('textbox', { name: 'Message the agent...' })
+    await input.fill('Line one')
+    await page.keyboard.press('Shift+Enter')
+
+    await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
+
+    // Should still be on empty state (no send).
+    const hasEmpty = await page.evaluate(
+      () => !!document.querySelector('.chat__empty-wrap')
+    )
+    expect(hasEmpty).toBe(true)
+
+    // Textarea should have multiline content.
+    const value = await page.evaluate(
+      () => document.querySelector('.chat__input')?.value
+    )
+    expect(value).toContain('Line one')
+    expect(value).toContain('\n')
   })
 })
 
@@ -397,5 +443,201 @@ test.describe('Scroll after stream end', () => {
 
     // Scroll position should not have moved (tolerance for sub-pixel).
     expect(Math.abs(scrollAfter - scrollBefore)).toBeLessThan(5)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Connection recovery — re-fetch messages on 204 reconnect
+// ---------------------------------------------------------------------------
+
+test.describe('Connection recovery', () => {
+  test('12. Messages refresh when SSE reconnect gets 204', async ({ page }) => {
+    // Simulate: send message → stream completes → tab goes away →
+    // tab comes back → SSE returns 204 → messages re-fetched from API.
+    await page.setViewportSize({ width: 412, height: 915 })
+
+    let streamCallCount = 0
+    const initialSseBody = [
+      'data: {"type":"catch_up_done"}\n\n',
+      'data: {"type":"text","content":"Initial response from the agent."}\n\n',
+      'data: {"type":"done"}\n\n',
+    ].join('')
+
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
+      route.fulfill({ status: 202, body: '{}' })
+    )
+    await page.route('**/api/chat/stop', route =>
+      route.fulfill({ status: 200, body: '{}' })
+    )
+
+    // First stream call returns the SSE response; subsequent calls
+    // return 204 (no active broadcast — simulates chat finished while
+    // the user was away).
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route => {
+      streamCallCount++
+      if (streamCallCount === 1) {
+        route.fulfill({
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+          body: initialSseBody,
+        })
+      } else {
+        route.fulfill({ status: 204, body: '' })
+      }
+    })
+
+    await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+    await page.waitForFunction(
+      () => !!(document.querySelector('.chat__empty-wrap')
+            || document.querySelector('.chat__form')),
+      { timeout: 10000 }
+    )
+    await newChat(page)
+
+    // Send message → first stream completes.
+    const input = page.getByRole('textbox', { name: 'Message the agent...' })
+    await input.fill('Recovery test')
+    await page.keyboard.press('Enter')
+    await page.waitForFunction(
+      () => !document.querySelector('.chat__stop'),
+      { timeout: 10000 }
+    )
+    await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
+
+    // Verify initial message rendered.
+    const initialText = await page.evaluate(() =>
+      document.querySelector('.chat__msg--assistant')?.textContent?.trim()
+    )
+    expect(initialText).toContain('Initial response')
+
+    // Now mock the chat API to return an UPDATED message list — as if
+    // the agent sent a new message while the user was away.
+    // Pattern matches /api/chats/<id>?limit=20 (the re-fetch URL).
+    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=/, route => {
+      if (route.request().method() !== 'GET') {
+        route.continue()
+        return
+      }
+      route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [
+            { role: 'user', content: 'Recovery test', ts: Date.now() },
+            { role: 'assistant', content: 'Initial response from the agent.' },
+            { role: 'assistant', content: 'Follow-up message added while you were away.' },
+          ],
+          total: 3,
+          offset: 0,
+        }),
+      })
+    })
+
+    // Simulate visibility change — tab comes back.
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', {
+        value: 'visible', configurable: true,
+      })
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+    await page.evaluate(() => new Promise(r => setTimeout(r, 1000)))
+
+    // The 204 from the stream endpoint should have triggered onNeedsRefresh,
+    // which re-fetches messages. The new "Follow-up" message should appear.
+    const allText = await page.evaluate(() =>
+      document.querySelector('.chat__scroll')?.textContent ?? ''
+    )
+    expect(allText).toContain('Follow-up message added while you were away')
+  })
+
+  test('13. Visibility change after stream completion triggers reconnect gracefully', async ({ page }) => {
+    // After a stream completes (done event), abortRef is nulled.
+    // A subsequent visibility change should trigger a reconnect attempt
+    // (which gets 204 if the chat is finished). This should not cause
+    // errors or duplicate content.
+    await page.setViewportSize({ width: 412, height: 915 })
+
+    let streamCallCount = 0
+
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
+      route.fulfill({ status: 202, body: '{}' })
+    )
+    await page.route('**/api/chat/stop', route =>
+      route.fulfill({ status: 200, body: '{}' })
+    )
+
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route => {
+      streamCallCount++
+      if (streamCallCount === 1) {
+        route.fulfill({
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+          body: [
+            'data: {"type":"catch_up_done"}\n\n',
+            'data: {"type":"text","content":"Agent response."}\n\n',
+            'data: {"type":"done"}\n\n',
+          ].join(''),
+        })
+      } else {
+        // Subsequent reconnect → 204 (chat finished).
+        route.fulfill({ status: 204, body: '' })
+      }
+    })
+
+    await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+    await page.waitForFunction(
+      () => !!(document.querySelector('.chat__empty-wrap')
+            || document.querySelector('.chat__form')),
+      { timeout: 10000 }
+    )
+    await newChat(page)
+
+    const input = page.getByRole('textbox', { name: 'Message the agent...' })
+    await input.fill('Reconnect test')
+    await page.keyboard.press('Enter')
+
+    await page.waitForFunction(
+      () => !document.querySelector('.chat__stop'),
+      { timeout: 10000 }
+    )
+    await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
+    expect(streamCallCount).toBe(1)
+
+    // Mock the re-fetch to return the same messages (the DB would have
+    // persisted them by now in production).
+    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=/, route => {
+      if (route.request().method() !== 'GET') { route.continue(); return }
+      route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [
+            { role: 'user', content: 'Reconnect test', ts: Date.now() },
+            { role: 'assistant', content: 'Agent response.' },
+          ],
+          total: 2,
+          offset: 0,
+        }),
+      })
+    })
+
+    // Simulate visibility change — should trigger a reconnect since
+    // abortRef was nulled on done.
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', {
+        value: 'visible', configurable: true,
+      })
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+    await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
+
+    // Should have reconnected (204) — no errors, no duplicate content.
+    expect(streamCallCount).toBe(2)
+
+    // Content should still be intact (not duplicated or lost).
+    const msgCount = await page.evaluate(() =>
+      document.querySelectorAll('.chat__msg--assistant').length
+    )
+    expect(msgCount).toBe(1)
   })
 })

@@ -10,6 +10,13 @@ import MsgContent from './MsgContent.jsx'
 import './ChatView.css'
 
 
+// Cache touch-primary detection. Updated dynamically if input devices change.
+const _touchMql = typeof matchMedia === 'function'
+  ? matchMedia('(hover: none) and (pointer: coarse)')
+  : null
+let _isTouchPrimary = _touchMql?.matches ?? false
+_touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
+
 // Survive remounts: scroll and spacer state persisted in sessionStorage.
 const _scrollPositions = (() => {
   try { return JSON.parse(sessionStorage.getItem('chat-scroll') || '{}') }
@@ -63,7 +70,37 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // by the passive scroll listener in the spacer effect. Used by
   // promoteStreamToMessages to decide whether to preserve scroll position
   // (user scrolled up to read) or allow re-anchoring (user was following).
-  const nearBottomRef = useRef(true)
+  const nearBottomRef = useRef(false)
+  // Ref mirror of `sending` for use in callbacks without adding it as a
+  // dependency (avoids re-creating fetchMessages on every send).
+  const sendingRef = useRef(false)
+  sendingRef.current = sending
+
+  // Re-fetch messages from the API. Called when the SSE stream reconnects
+  // and gets a 204 (no active broadcast — the chat finished while the
+  // user was offline or on poor connectivity). Replaces stale messages
+  // with the current DB state.
+  const fetchMessages = useCallback(async () => {
+    if (sendingRef.current) return
+    try {
+      const res = await apiFetch(`/chats/${chatId}?limit=20`)
+      const data = await res.json()
+      if (chatIdStaleRef.current) return
+      let msgs = data.messages || []
+      for (const msg of msgs) {
+        if (msg.blocks) {
+          for (const blk of msg.blocks) {
+            if (blk.type === 'tool' && blk.status === 'running') {
+              blk.status = 'done'
+            }
+          }
+        }
+      }
+      setMessages(msgs)
+      setTotalMessages(data.total || 0)
+      setOffset(data.offset || 0)
+    } catch { /* network error — silent, user can retry */ }
+  }, [chatId])
 
   const {
     streamItems,
@@ -81,6 +118,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       onStreamEnd?.()
     },
     onSystemEvent,
+    onNeedsRefresh: fetchMessages,
   })
 
   const { files: pendingFiles, addFiles, removeFile, clearFiles } = useFileUpload({ chatId })
@@ -301,10 +339,19 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     // during streaming.  Updated on EVERY scroll event (including
     // programmatic snaps) so the ResizeObserver always has a fresh
     // reading — no stale-by-one-tick problem.
-    let nearBottom = true
+    // Start with auto-follow OFF. The send path scrolls to show the
+    // user's message at the top of the viewport; the agent's response
+    // appears just below it in the visible area. Auto-follow only
+    // engages when the user actively scrolls to the bottom of content
+    // that OVERFLOWS the viewport. Without the overflow check, the
+    // first message (where content fits on screen → gap≈0) would
+    // falsely engage auto-follow, yanking the user as the response
+    // grows past the fold.
+    let nearBottom = false
     const onScroll = () => {
       const g = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
-      nearBottom = g < 50
+      const overflows = scrollEl.scrollHeight > scrollEl.clientHeight + 50
+      nearBottom = overflows && g < 50
       nearBottomRef.current = nearBottom
     }
     scrollEl.addEventListener('scroll', onScroll, { passive: true })
@@ -599,8 +646,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                 e.target.style.height = Math.min(e.target.scrollHeight, 160) + 'px'
               }}
               onKeyDown={(e) => {
-                const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0
-                if (e.key === 'Enter' && !e.shiftKey && !isTouch) {
+                if (e.key === 'Enter' && !e.shiftKey && !_isTouchPrimary) {
                   e.preventDefault(); handleSubmit(e)
                 }
               }}

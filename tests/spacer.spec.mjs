@@ -519,7 +519,7 @@ test.describe('SSE streaming (real React path)', () => {
     assertSpacerReasonable(m)
   })
 
-  test('17. Long SSE response — spacer reaches 0', async ({ page }) => {
+  test('17. Long SSE response — content overflows, user stays near top', async ({ page }) => {
     const events = [
       { type: 'catch_up_done' },
       { type: 'text', content: 'Very long response. '.repeat(200) },
@@ -536,8 +536,12 @@ test.describe('SSE streaming (real React path)', () => {
     await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
 
     const m = await measure(page)
-    expect(m.spacerH).toBe(0)
+    // Content should overflow the viewport.
     expect(m.listH).toBeGreaterThan(m.clientH)
+    // User should NOT be at the bottom — auto-follow is off by default.
+    // They stay near the top where their message was sent.
+    const gap = m.scrollH - m.scrollTop - m.clientH
+    expect(gap).toBeGreaterThan(100)
   })
 })
 
@@ -602,7 +606,7 @@ test.describe('Autoscroll behavior', () => {
     expect(after.scrollTop).toBeLessThan(after.scrollH - after.clientH - 50)
   })
 
-  test('20. SSE streaming auto-follows to bottom', async ({ page }) => {
+  test('20. SSE streaming does NOT auto-follow — user stays near top', async ({ page }) => {
     // Simulate a long SSE response delivered in chunks.
     const chunks = []
     for (let i = 0; i < 20; i++) {
@@ -626,9 +630,10 @@ test.describe('Autoscroll behavior', () => {
     const m = await measure(page)
     // Content should exceed viewport.
     expect(m.listH).toBeGreaterThan(m.clientH)
-    // Should be scrolled near the bottom (auto-followed through streaming).
+    // Auto-follow is OFF by default — user should NOT be at the bottom.
+    // They stay near the top where their message was sent.
     const gap = m.scrollH - m.scrollTop - m.clientH
-    expect(gap).toBeLessThan(100)
+    expect(gap).toBeGreaterThan(100)
   })
 })
 
@@ -659,5 +664,224 @@ test.describe('Viewport sizes', () => {
     await injectContent(page, 'Mobile content. ', 80)
     const after = await measure(page)
     expect(after.spacerH).toBe(0)
+  })
+})
+
+test.describe('Scroll edge cases', () => {
+  test('21. Scroll preserved after stream end when user scrolled up', async ({ page }) => {
+    // Long SSE response overflowing the viewport.
+    const chunks = []
+    for (let i = 0; i < 30; i++) {
+      chunks.push({ type: 'text', content: `Paragraph ${i}. ${'Text here. '.repeat(12)} ` })
+    }
+    const events = [{ type: 'catch_up_done' }, ...chunks, { type: 'done' }]
+    await setupWithSSE(page, events)
+    await newChat(page)
+    await sendMessage(page, 'Scroll preservation test')
+
+    // Wait for stream to complete.
+    await page.waitForFunction(
+      () => !document.querySelector('.chat__stop'),
+      { timeout: 10000 }
+    )
+    await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
+
+    // Verify content overflows.
+    const before = await measure(page)
+    expect(before.listH).toBeGreaterThan(before.clientH + 100)
+
+    // Scroll up to ~1/3.
+    await page.evaluate(() => {
+      const s = document.querySelector('.chat__scroll')
+      if (s) s.scrollTop = Math.max(0, s.scrollHeight / 3)
+    })
+    await page.evaluate(() => new Promise(r => setTimeout(r, 200)))
+
+    const scrollBefore = await page.evaluate(() =>
+      document.querySelector('.chat__scroll')?.scrollTop ?? 0
+    )
+    expect(scrollBefore).toBeGreaterThan(0)
+
+    // Wait and verify no stale auto-follow snaps back.
+    await page.evaluate(() => new Promise(r => setTimeout(r, 1000)))
+
+    const scrollAfter = await page.evaluate(() =>
+      document.querySelector('.chat__scroll')?.scrollTop ?? 0
+    )
+    expect(Math.abs(scrollAfter - scrollBefore)).toBeLessThan(5)
+  })
+
+  test('22. Auto-follow survives content bursts during streaming', async ({ page }) => {
+    await setup(page)
+    await newChat(page)
+    await sendMessage(page, 'Burst test')
+
+    // Start at the bottom (auto-follow engaged).
+    await page.evaluate(() => {
+      const s = document.querySelector('.chat__scroll')
+      if (s) s.scrollTop = s.scrollHeight
+    })
+    await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
+
+    // Inject a large burst of content (simulates a big code block rendering).
+    await injectContent(page, 'Large code block line. ', 50)
+
+    const m = await measure(page)
+    const gap = m.scrollH - m.scrollTop - m.clientH
+    // Should still be near the bottom — auto-follow survived the burst.
+    expect(gap).toBeLessThan(50)
+  })
+
+  test('23. User scroll-up disengages auto-follow mid-stream', async ({ page }) => {
+    await setup(page)
+    await newChat(page)
+    await sendMessage(page, 'Disengage test')
+
+    // Fill viewport.
+    await injectContent(page, 'Initial content. ', 100)
+
+    // Start at the bottom.
+    await page.evaluate(() => {
+      const s = document.querySelector('.chat__scroll')
+      if (s) s.scrollTop = s.scrollHeight
+    })
+    await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
+
+    // Scroll up past 50px threshold.
+    await page.evaluate(() => {
+      const s = document.querySelector('.chat__scroll')
+      if (s) s.scrollTop = Math.max(0, s.scrollTop - 200)
+    })
+    await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
+
+    const scrollBefore = await page.evaluate(() =>
+      document.querySelector('.chat__scroll')?.scrollTop ?? 0
+    )
+
+    // Inject more content — should NOT auto-follow.
+    await injectContent(page, 'New content arriving. ', 20)
+
+    const scrollAfter = await page.evaluate(() =>
+      document.querySelector('.chat__scroll')?.scrollTop ?? 0
+    )
+
+    // Position should not have jumped to the bottom.
+    const m = await measure(page)
+    const gapFromBottom = m.scrollH - scrollAfter - m.clientH
+    expect(gapFromBottom).toBeGreaterThan(50)
+  })
+
+  test('24. Auto-follow re-engages when user scrolls back to bottom', async ({ page }) => {
+    await setup(page)
+    await newChat(page)
+    await sendMessage(page, 'Re-engage test')
+
+    // Fill viewport and engage auto-follow at the bottom.
+    await injectContent(page, 'Initial content. ', 100)
+    await page.evaluate(() => {
+      const s = document.querySelector('.chat__scroll')
+      if (s) s.scrollTop = s.scrollHeight
+    })
+    await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
+
+    // Scroll up — disengages auto-follow.
+    await page.evaluate(() => {
+      const s = document.querySelector('.chat__scroll')
+      if (s) s.scrollTop = Math.max(0, s.scrollTop - 200)
+    })
+    await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
+
+    // Inject content — should NOT follow (user scrolled up).
+    await injectContent(page, 'While scrolled up. ', 10)
+    const midGap = await page.evaluate(() => {
+      const s = document.querySelector('.chat__scroll')
+      return s ? s.scrollHeight - s.scrollTop - s.clientHeight : 0
+    })
+    expect(midGap).toBeGreaterThan(50)
+
+    // Now scroll back to bottom — should re-engage auto-follow.
+    await page.evaluate(() => {
+      const s = document.querySelector('.chat__scroll')
+      if (s) s.scrollTop = s.scrollHeight
+    })
+    await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
+
+    // Inject more content — should auto-follow again.
+    await injectContent(page, 'After re-engage. ', 10)
+    const afterGap = await page.evaluate(() => {
+      const s = document.querySelector('.chat__scroll')
+      return s ? s.scrollHeight - s.scrollTop - s.clientHeight : 0
+    })
+    expect(afterGap).toBeLessThan(50)
+  })
+
+  test('25. First message does NOT auto-follow as response grows', async ({ page }) => {
+    // On the first message, the user msg + thinking dots fit on screen.
+    // As the response streams and overflows, auto-follow should NOT
+    // engage — the user didn't scroll to the bottom, they're just
+    // viewing a page that hasn't overflowed yet.
+    await setup(page)
+    await newChat(page)
+    await sendMessage(page, 'Short question')
+
+    // Record scroll position right after send.
+    const scrollAfterSend = await page.evaluate(() =>
+      document.querySelector('.chat__scroll')?.scrollTop ?? 0
+    )
+
+    // Now inject a LOT of content — simulates a long streaming response.
+    // This will overflow the viewport.
+    await injectContent(page, 'Long streaming response paragraph. ', 100)
+    await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
+
+    // Verify content overflowed.
+    const m = await measure(page)
+    expect(m.scrollH).toBeGreaterThan(m.clientH + 100)
+
+    // The user should NOT be at the bottom — they should be near their
+    // original scroll position (where the user message was).
+    const gap = m.scrollH - m.scrollTop - m.clientH
+    expect(gap).toBeGreaterThan(100)
+  })
+
+  test('26. Second send after scroll-up on first response', async ({ page }) => {
+    await setup(page)
+    await newChat(page)
+    await sendMessage(page, 'First message')
+
+    // Fill viewport with first response content.
+    await injectContent(page, 'First response content. ', 80)
+
+    // Scroll up to read.
+    await page.evaluate(() => {
+      const s = document.querySelector('.chat__scroll')
+      if (s) s.scrollTop = Math.max(0, s.scrollHeight / 3)
+    })
+    await page.evaluate(() => new Promise(r => setTimeout(r, 200)))
+
+    // Stop the first "streaming" so we can send again.
+    await page.evaluate(() =>
+      document.querySelector('.chat__stop')?.click()
+    )
+    await page.waitForFunction(
+      () => !document.querySelector('.chat__stop'),
+      { timeout: 3000 }
+    )
+    await page.evaluate(() => new Promise(r =>
+      requestAnimationFrame(() => requestAnimationFrame(r))
+    ))
+
+    // Send second message.
+    await sendMessage(page, 'Second message')
+
+    const m = await measure(page)
+    // The second user message should be visible near the top
+    // (the send path scrolls to show the new user message).
+    const userMsgs = await page.evaluate(() => {
+      const msgs = document.querySelectorAll('.chat__text--user')
+      return [...msgs].map(el => el.textContent.trim())
+    })
+    expect(userMsgs).toContain('Second message')
+    expect(m.userVisualTop).toBeLessThan(50)
   })
 })

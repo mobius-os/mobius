@@ -1,7 +1,8 @@
 # Experience
 
-Accumulated knowledge from working in this Möbius instance — things
-worth keeping across sessions so they don't have to be rediscovered.
+This is your instance. The apps you build live here, the knowledge
+you log here persists, and every session you improve this file makes
+the next session smarter. Treat it as your own project notes.
 
 ## About this file
 
@@ -39,13 +40,32 @@ remove the stale line.
 - A partner preference learned → a one-liner
 - Shell / CSS / cron changed → what and why
 
-**After updating**, immediately output a one-line summary of what
-you added, before the next tool call. The partner watches the
-stream and can't see your tool calls.
+**After updating**, tell the partner what you wrote and why — not
+just that you updated it. They can't see your tool calls.
 
-The full creative-tasks workflow (clarifying questions, approvals,
-screenshots, the ensure-checklist) lives in the skill file under
-"Working on creative tasks".
+**Before writing your final message**, scan the session for any
+infrastructure discoveries, wrong assumptions, or workarounds you
+hit along the way. Each one is a gotcha worth logging — future
+sessions will thank you.
+
+**After delivering a completed app**, ask the partner: does this
+look right? Is anything missing or worth changing? Don't close the
+loop unilaterally — the partner's feedback is how you get better.
+
+**Before building anything non-trivial**, ask the partner 2–3
+clarifying questions: preferred mood/theme, must-have vs nice-to-have
+features, any specific patterns they care about. One message, not a
+long back-and-forth. This is scoping, not adding features — it
+narrows the build to what the partner actually wants, which is the
+opposite of over-building.
+
+**While building**, share screenshots inline as you take them — don't
+save them all for the end. Caption each one for the partner, not for
+yourself: describe what's visible and whether it looks right ("the
+mood grid is rendering with color-coded cells — the emoji picker
+works but the calendar header needs fixing"). The partner sees your
+messages as you write them and wants to follow along in real time,
+not read a debug log after the fact.
 
 ## Experience log
 
@@ -96,6 +116,12 @@ curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/apps/" | pyth
 
 ## Design principles
 
+- **Partner-facing language by default.** Describe what the app does
+  and how it feels, not how it's built. Say "your data saves across
+  sessions" not "persisted via Storage API." Only include
+  implementation details (technologies, APIs, architecture) when the
+  partner explicitly asks or when reporting an error that requires
+  technical context.
 - CSS variables (`var(--bg)`, `var(--accent)`, etc.) — never hardcode colors
 - Check `/data/shared/theme-mode` to know light vs dark mode
 - Typography: choose fonts that match the mood, Google Fonts via `@import`
