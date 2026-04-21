@@ -68,8 +68,17 @@ export default function useNavigation() {
   }
 
   function closeDrawer() {
+    const wasPushed = drawerPushedRef.current
     drawerPushedRef.current = false
+    // Update the ref synchronously so the popstate handler fired by
+    // history.back() below sees drawer-closed state and early-returns
+    // without running handleBack.
+    drawerOpenRef.current = false
     setDrawerOpen(false)
+    // Pop the sentinel entry that openDrawer pushed. Without this, every
+    // open/close cycle leaks one history entry — the user has to press
+    // back once per toggle before the app actually navigates back.
+    if (wasPushed) history.back()
   }
 
   function navTo(view, opts = {}) {
@@ -91,6 +100,12 @@ export default function useNavigation() {
     function handleBack() {
       backFiredRef.current = true
       setTimeout(() => { backFiredRef.current = false }, 400)
+      // Clear the drawer-pushed flag — the history entry openDrawer
+      // pushed is now being consumed by this back event. Without this,
+      // a stale true leaks into the next closeDrawer and triggers a
+      // spurious history.back().
+      drawerPushedRef.current = false
+      drawerOpenRef.current = false
       setDrawerOpen(false)
       const entry = navStackRef.current.pop()
       if (entry) {
@@ -98,8 +113,6 @@ export default function useNavigation() {
         setActiveChatId(entry.chatId)
         setActiveAppId(entry.appId)
       }
-      // Empty stack (e.g. orphan drawer-open entry): entry consumed,
-      // no visual change. When all entries are gone, next back exits.
     }
 
     // Navigation API intercept() suppresses Chrome's back-forward slide

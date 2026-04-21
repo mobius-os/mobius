@@ -884,4 +884,41 @@ test.describe('Scroll edge cases', () => {
     expect(userMsgs).toContain('Second message')
     expect(m.userVisualTop).toBeLessThan(50)
   })
+
+  test('27. Viewport resize cycles do not engage auto-follow on streaming chat', async ({ page }) => {
+    // Guards the prevListH gate in the ResizeObserver: the auto-follow
+    // branch must not snap to bottom when the list merely re-measures due
+    // to a viewport resize (content unchanged). This is a partial guard
+    // for the keyboard-cycle drift class of bugs — it does NOT simulate
+    // Chrome Android's first-focus overshoot, which is a browser-level
+    // animation quirk outside our code's control.
+    await setup(page)
+    await newChat(page)
+    await sendMessage(page, 'First')
+
+    // Grow the content so there's room to scroll up.
+    await injectContent(page, 'Padding content line. ', 80)
+    await page.evaluate(() => new Promise(r =>
+      requestAnimationFrame(() => requestAnimationFrame(r))
+    ))
+
+    // Scroll to the top (definitely not near the bottom).
+    await page.evaluate(() => {
+      const s = document.querySelector('.chat__scroll')
+      if (s) s.scrollTop = 0
+    })
+    await page.evaluate(() => new Promise(r => setTimeout(r, 50)))
+
+    const before = await measure(page)
+
+    for (let i = 0; i < 5; i++) {
+      await page.setViewportSize({ width: 412, height: 615 })
+      await page.evaluate(() => new Promise(r => setTimeout(r, 80)))
+      await page.setViewportSize({ width: 412, height: 915 })
+      await page.evaluate(() => new Promise(r => setTimeout(r, 80)))
+    }
+
+    const after = await measure(page)
+    expect(Math.abs(after.scrollTop - before.scrollTop)).toBeLessThan(20)
+  })
 })

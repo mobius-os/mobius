@@ -57,10 +57,11 @@ def test_chat_has_generated_images_column(db, chat):
   assert chat.generated_images == []
 
 
-def test_owner_has_gemini_key_column(db):
+def test_owner_has_gemini_key_column(db, owner_token):
   """Owner.gemini_api_key_enc must default to None."""
   owner = db.query(models.Owner).filter(
     models.Owner.username == "test"
   ).first()
+  assert owner is not None
   assert hasattr(owner, "gemini_api_key_enc")
   assert owner.gemini_api_key_enc is None

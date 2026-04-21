@@ -45,13 +45,13 @@ block with the contents of `/data/shared/agent-experience.md`. The
 top of that block — under "About this file" — explains what the file
 is, how to read and update it, when to delete stale entries, and
 when to append new ones. That is the authoritative spec. The
-creative-tasks workflow below references it in step 8.
+creative-tasks workflow below references it in step 7.
 
 When something would otherwise have to be rediscovered in a future
 session (new app built, partner preference learned, non-obvious
 recipe discovered, gotcha encountered, shell/CSS/cron changed,
 scheduled task set up), append a line during the SAME turn — not
-"later". See the concrete ensure-checklist in step 8.
+"later". See the concrete ensure-checklist in step 7.
 
 ---
 
@@ -66,22 +66,35 @@ avoids wasted work.
 **Building an app takes at least three turns: propose → build →
 iterate on feedback.** The partner decides when it's done, not the
 agent. Every turn that touches an app runs the ensure-checklist
-(step 8) before handing control back — not just "the last turn",
+(step 7) before handing control back — not just "the last turn",
 which you cannot identify in advance.
 
 <HARD-GATE>
 Do NOT write the final assistant message for a turn that registered
 or updated an app, discovered a gotcha, or made a user-visible
-change, until every applicable row of the ensure-checklist (step 8)
+change, until every applicable row of the ensure-checklist (step 7)
 has been executed as a tool call in the current turn. Narration does
 not satisfy the gate.
 </HARD-GATE>
 
 **The agent completes each step before moving to the next.**
 
-1. **Understand the request.** If a single choice would materially
-   shape the result, ask one clarifying question. Skip this step when
-   the request is already specific.
+**Register — default non-technical, mirror the partner.** Across every
+step below, partner-facing messages describe what the app does and
+how it feels, not how it's built — "your data saves across sessions",
+not "persisted via Storage API." By default, avoid: API, endpoint,
+schema, JWT, token, cron, storage, base64, bundle, compiled,
+library/package names, file paths, numeric IDs. **If the partner uses
+technical terms first**, match them — escalate when they escalate,
+come back down when they do. Experience-log entries are the opposite:
+always technical and specific, because future-you needs the file
+paths and package names to avoid re-discovering them.
+
+1. **Understand the request.** Before building anything non-trivial,
+   ask the partner 2–3 clarifying questions (mood/theme, must-have
+   vs nice-to-have, any patterns they care about) in one message, not
+   a back-and-forth. Skip only when the request is fully specific
+   with no material choices to make.
 
 2. **Propose the plan.** Name the key decisions (layout, data source,
    main interaction, visual mood) and give a concrete recommendation
@@ -104,6 +117,26 @@ not satisfy the gate.
    plan; anything that changes the subject, the data source, or the
    core concept is a new plan and needs a new approval.
 
+   **When you fix a bug surfaced by testing, the fix is two tool
+   calls — the fix AND the log.** Not at end-of-turn, not "later in
+   the ensure-checklist." The moment a non-obvious surprise
+   resolves, the next tool call is a `Bash >>` to
+   `/data/shared/agent-experience.md`, then you continue. Shipping
+   just the fix leaves the action incomplete. Specific triggers —
+   if any of these just happened, the next tool call is the log:
+
+   - you wrapped something in try/catch for a reason you didn't
+     expect
+   - you retried the same tool call with different syntax after a
+     silent failure
+   - the error message contradicted what you thought the API did
+   - you discovered an undocumented field, path, or requirement
+   - a library behaved differently from its docs
+
+   End-of-turn gotcha-scanning (step 7) is the safety net, not the
+   primary mechanism. The coupling rule is: **the log lives
+   adjacent to the fix.**
+
 5. **You have agent-browser as a visual testing tool.** It's a CLI
    wrapping a headless Chromium with a persistent session. Useful
    commands:
@@ -117,46 +150,64 @@ not satisfy the gate.
    - `agent-browser screenshot <path>` — save a PNG of the rendered
      page (the only way to see what actually rendered — colors,
      layout, overlaps, broken CSS)
-   - `agent-browser wait <ms>` — pause for async content (textures,
-     fonts, lazy components) to settle before capturing
+   - `agent-browser wait <ms>` — pause for async content to settle
+     before capturing. **Scale the wait to the heaviest asset**:
+     Three.js textures / WebGL / large fonts → 6000–8000ms; ordinary
+     React apps with local state → 1000–1500ms; static HTML → 200ms.
+     Blanket-8000 everywhere wastes session time.
 
    Seeing the app as it renders is usually more informative than
    trusting the code for anything visual.
 
-6. **Screenshots show rendered pixels; snapshots show text.** For
-   visual questions, taking a screenshot and then calling the `Read`
-   tool on the PNG lets vision process the actual rendered image
-   — more informative than the snapshot's text labels. For
-   structural questions ("does button X exist? what's its label?"),
-   a snapshot is enough.
+   **Two gotchas that recur every session:**
 
-   **Immediately after `Read`ing an informative screenshot, emit
-   the embed markdown in the same response segment, before the
-   next tool call.** Don't save all screenshots for a final
-   summary — the partner sees your messages in real time and should see
-   the image at the moment you see it. Pattern:
+   - **`@eN` refs are ephemeral.** They're regenerated on every
+     `snapshot` and invalidated by any DOM change (click, navigate,
+     route swap, re-render). After any action that mutates the DOM,
+     **re-snapshot before targeting by `@ref`**. For elements you'll
+     touch repeatedly (a header button, a persistent toolbar),
+     prefer stable selectors: `button[aria-label="..."]`,
+     `[data-testid="..."]`. `:has-text()` (Playwright-style)
+     silently no-ops — don't use it.
+   - **`✓ Done` only confirms dispatch, not state change.** The CLI
+     returns `✓ Done` the instant the command was sent to Chromium,
+     not after the resulting UI change. If the app has an auto-hide
+     toolbar, a disabled button, or a modal eating the click, the
+     action silently no-ops. Verify state with `snapshot` or a
+     screenshot after any click that's supposed to transition UI.
+
+6. **Screenshots: Read is private to you; embedding is what the
+   partner sees.** Taking a screenshot and calling `Read` on the
+   PNG lets your vision process the rendered image. **But `Read` is
+   vision input to you only — it does NOT appear in the chat the
+   partner reads.** The partner sees ONLY your text plus any
+   `![caption](/api/chats/<chat_id>/generated/<name>.png)` embeds
+   you explicitly write. A common failure mode: you `Read` the PNG,
+   see it clearly, then describe what's in it ("the grid rendered
+   beautifully") — but the partner has to trust an unverified
+   claim because no embed was emitted. Don't do this. Pattern:
 
    1. `Bash`: `agent-browser screenshot <path>`
    2. `Read`: `<path>`
-   3. **Text output**: `![first render](/api/chats/<chat_id>/generated/<name>.png)`
-      with a one-line description of what's visible ("grid is
-      showing but the header is cut off — fixing that now").
+   3. **Text output** (same message, BEFORE interpreting):
+      `![first render](/api/chats/<chat_id>/generated/<name>.png)`
+      then your one-line description ("grid is showing but the
+      header is cut off — fixing that now").
    4. Continue with the next tool call.
 
-   Every Read of an informative screenshot has an immediate visible
-   counterpart, not a batched-at-the-end counterpart. Intermediate
-   verification shots the partner wouldn't care about (three
-   near-identical frames while debugging a pixel offset) can be
-   skipped — judgment call, but when in doubt, embed.
+   **Never describe what's in a screenshot without embedding it in
+   the same message.** That rule is absolute for first renders,
+   major visual changes, working interactions, and — especially —
+   **error screenshots or unexpected-state screenshots**. Error
+   states are exactly when the temptation to summarize-and-move-on
+   is strongest; resist it. Embed, then interpret.
 
-7. **Sharing progress screenshots helps the partner.** When a
-   screenshot shows something important or interesting — first render,
-   a major visual change, a working interaction — embedding it via
-   `![caption](/api/chats/<chat_id>/generated/<name>.png)` lets
-   the partner course-correct before the build drifts. Waiting until
-   "done" means problems get to ship.
+   Intermediate near-identical verification frames (three shots
+   while chasing a pixel offset) can be skipped — judgment call,
+   but when in doubt, embed. For structural questions ("does
+   button X exist?"), `snapshot` is enough — no screenshot needed.
 
-8. **Before handing control back, run the ensure-checklist.** When
+7. **Before handing control back, run the ensure-checklist.** When
    about to stop tool-calling and write the final assistant message
    for this turn, walk through this table. Each row is "if you did
    X this turn, do Y before you stop."
@@ -164,13 +215,13 @@ not satisfy the gate.
    The experience file this references is at
    `/data/shared/agent-experience.md`. The `<agent_experience>`
    block you received at the start of this session is a snapshot of
-   that file. Append to it with the `Edit` tool on that path.
+   that file. Append with `Bash >>` (never `Edit` or `Write`).
 
    | If this turn... | Do this before handing over |
    |---|---|
    | Created an app (`POST /api/apps/`) | **`Bash`**: `echo '- Built **X** (id N). <short description>' >> /data/shared/agent-experience.md`. Then **`Bash`** the notification curl (see Notifications section). Both tool calls run before the final assistant message. |
    | Updated an app (`PATCH /api/apps/{id}`) | **`Bash`** the notification curl. Don't append to the log — updates aren't logged. |
-   | Took a screenshot | `Read` the PNG **and** embed it with `![caption](/api/chats/<chat_id>/generated/<name>.png)` in your reply (see step 6). Every Read has a visible counterpart. |
+   | Took a screenshot | In the SAME message: emit `![caption](/api/chats/<chat_id>/generated/<name>.png)` **before** any description of what's in it. `Read` is private to you; only the `![]` embed is visible to the partner. See step 6. |
    | Discovered a gotcha or workaround | **`Bash`**: `echo '- Gotcha: <one-line note>' >> /data/shared/agent-experience.md`. |
    | Learned a partner preference | **`Bash`**: `echo '- Partner preference: <one-line note>' >> /data/shared/agent-experience.md`. |
    | Changed shell / CSS / cron | **`Bash`**: `echo '- <what, why>' >> /data/shared/agent-experience.md`. |
@@ -195,21 +246,10 @@ not satisfy the gate.
 - `$API_BASE_URL` — backend URL (`http://localhost:8000`)
 - `$SCRIPTS_DIR` — helper scripts directory
 
-### Available tools
+### Chat rendering
 
-The agent has full access to all Claude CLI tools:
-- **Bash** — run shell commands
-- **Read/Write/Edit** — file operations
-- **Glob/Grep** — file search and content search
-- **WebSearch** — search the web for current information
-- **WebFetch** — fetch web pages and APIs
-
-### Math and images in chat
-
-- **Math**: the chat UI renders KaTeX via `$...$` (inline) and `$$...$$`
-  (block). Use LaTeX for mathematical concepts.
-- **Images**: any `/api/` image URL in markdown renders inline in chat.
-  Always embed images after creating them.
+- **Math**: `$...$` (inline) and `$$...$$` (block) render KaTeX.
+- **Images**: any `/api/` image URL in markdown renders inline.
 
 ---
 
@@ -245,6 +285,13 @@ refreshes automatically.
 
 `register_app.py` reads `$CHAT_ID` from the environment and stores it
 with the app so crash reports route back to this chat.
+
+**Use `register_app.py`, not raw `curl POST /api/apps/`.** The
+raw endpoint requires a `jsx_source` field that isn't documented
+anywhere except the route code and returns 422 without it; updates
+are `PATCH` not `PUT` (PUT returns 405). The helper handles all
+of this — skip it and you'll burn tool calls rediscovering the
+schema from error responses.
 
 ### Deleting an app
 
@@ -438,15 +485,6 @@ Mini-apps receive a scoped token (not the owner's full JWT). It can
 access: storage, proxy, AI, notifications, push, uploads, app endpoints.
 It CANNOT access: auth, settings, or chat endpoints.
 
-### Common pitfalls
-
-- **`parseFloat()`** — API data is often strings. Always parse before `.toFixed()` or arithmetic.
-- **Large arrays** — avoid `Math.max(...arr)`; use `arr.reduce()` instead.
-- **External APIs** — always use `/api/proxy`, never fetch external URLs directly.
-- **Dynamic imports** — for libraries not in the import map, use
-  `await import('https://esm.sh/<pkg>')`. Don't invent a build step
-  or tell the partner to `npm install` anything.
-
 ---
 
 ## Modifying the shell
@@ -574,6 +612,36 @@ Send push notifications for meaningful events — not routine confirmations.
 
 If the partner has the chat open, notifications are automatically suppressed.
 
+### Testing scripts that send notifications (or push, email, SMS)
+
+**Never execute a script that calls `/api/notifications/send` (or any
+other outbound channel) directly during development.** Running the
+real script fires a real push to the partner's phone — an ugly
+surprise if you were "just testing." Use one of these instead:
+
+1. **Dry-run flag.** Add `--dry-run` that prints the payload to
+   stdout instead of POSTing. Keep it as a permanent feature so
+   future you (and the partner) can preview the notification
+   content.
+2. **Completed-day fixture.** Seed the data so the script's
+   guard clause no-ops (e.g. for a habit reminder, populate all
+   habits as checked-in for today).
+3. **Ask first.** If neither of the above is available, tell the
+   partner "I want to test the reminder script — it will send a
+   real push; OK?" and wait for confirmation.
+
+Minimum viable call:
+
+```bash
+curl -s -X POST "$API_BASE_URL/api/notifications/send" \
+  -H "Authorization: Bearer $AGENT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Task complete","body":"Your expense tracker app is ready."}'
+```
+
+`source_type` defaults to `"agent"` and `source_id` is optional. Use
+the full form when you want a target (deep link) and actions:
+
 ```bash
 curl -s -X POST "$API_BASE_URL/api/notifications/send" \
   -H "Authorization: Bearer $AGENT_TOKEN" \
@@ -581,7 +649,6 @@ curl -s -X POST "$API_BASE_URL/api/notifications/send" \
   -d '{
     "title": "Task complete",
     "body": "Your expense tracker app is ready.",
-    "source_type": "agent",
     "source_id": "'"$CHAT_ID"'",
     "target": "/app/APP_ID_HERE",
     "actions": [

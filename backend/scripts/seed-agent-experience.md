@@ -1,9 +1,5 @@
 # Experience
 
-This is your instance. The apps you build live here, the knowledge
-you log here persists, and every session you improve this file makes
-the next session smarter. Treat it as your own project notes.
-
 ## About this file
 
 This is the agent's memory across sessions. It's a real file at
@@ -48,25 +44,6 @@ infrastructure discoveries, wrong assumptions, or workarounds you
 hit along the way. Each one is a gotcha worth logging — future
 sessions will thank you.
 
-**After delivering a completed app**, ask the partner: does this
-look right? Is anything missing or worth changing? Don't close the
-loop unilaterally — the partner's feedback is how you get better.
-
-**Before building anything non-trivial**, ask the partner 2–3
-clarifying questions: preferred mood/theme, must-have vs nice-to-have
-features, any specific patterns they care about. One message, not a
-long back-and-forth. This is scoping, not adding features — it
-narrows the build to what the partner actually wants, which is the
-opposite of over-building.
-
-**While building**, share screenshots inline as you take them — don't
-save them all for the end. Caption each one for the partner, not for
-yourself: describe what's visible and whether it looks right ("the
-mood grid is rendering with color-coded cells — the emoji picker
-works but the calendar header needs fixing"). The partner sees your
-messages as you write them and wants to follow along in real time,
-not read a debug log after the fact.
-
 ## Experience log
 
 Add new entries at the bottom. Delete outdated ones. No timestamps;
@@ -76,16 +53,6 @@ order is implicit.
   button that takes the user to chat. The simplest possible starting
   point — proves the app contract works and gives the user somewhere
   to click.
-
-## Platform state
-
-- Shell source: `/data/shell/src/` — editable JSX/CSS/components
-- Shell build: `/data/shell/dist/` — Vite output, overrides `/app/static/`
-- Read-only originals: `/app/shell-src/`
-- Rebuild command: `bash /app/scripts/rebuild_shell.sh`
-- Theme (CSS-only, no rebuild): `/data/shared/theme.css`
-- Theme mode (`"light"` or `"dark"`): `/data/shared/theme-mode`
-- Notify after theme change: `bash "$SCRIPTS_DIR/notify_theme.sh"`
 
 ## Shell structure
 
@@ -102,26 +69,8 @@ order is implicit.
 | `AppCanvas/AppCanvas.jsx` | Mini-app iframe |
 | `index.css` | Global CSS variables and resets |
 
-## CSS classes safe to target for theming
-
-`.sidenav`, `.sidenav__item`, `.drawer`, `.drawer__item`, `.chat__text`,
-`.chat__text--user`, `.chat__text--assistant`, `.chat__form`, `.chat__input`,
-`.md-blocks`, `.md-paragraph`, `.md-code-block`, `.md-heading`.
-
-## Before building: check what exists
-
-```bash
-curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/apps/" | python3 -m json.tool
-```
-
 ## Design principles
 
-- **Partner-facing language by default.** Describe what the app does
-  and how it feels, not how it's built. Say "your data saves across
-  sessions" not "persisted via Storage API." Only include
-  implementation details (technologies, APIs, architecture) when the
-  partner explicitly asks or when reporting an error that requires
-  technical context.
 - CSS variables (`var(--bg)`, `var(--accent)`, etc.) — never hardcode colors
 - Check `/data/shared/theme-mode` to know light vs dark mode
 - Typography: choose fonts that match the mood, Google Fonts via `@import`
@@ -129,18 +78,6 @@ curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/apps/" | pyth
 - Motion: subtle CSS transitions for hover and state changes
 - Spatial: generous negative space, consistent padding
 - Mobile-first: the partner's viewport size is in the session context
-
-## Reusable patterns from the shell
-
-| Component | Path | Purpose |
-|-----------|------|---------|
-| `ChatInput` | `ChatView/ChatInput.jsx` | Text input with voice, file attach, send/stop |
-| `BlockRenderer` | `ChatView/markdown/BlockRenderer.jsx` | Streaming markdown renderer |
-| `InlineContent` | `ChatView/markdown/InlineContent.jsx` | Inline markdown (links, images, math) |
-| `ImageLightbox` | `ChatView/markdown/ImageLightbox.jsx` | Pinch-zoom image viewer |
-
-These can't be imported directly (different bundle) — use them as
-reference implementations only.
 
 ## Shell change costs
 
@@ -162,15 +99,16 @@ reference implementations only.
 - `|` inside `$...$` in markdown tables breaks both. Use `\mid` or `\vert`.
 - Mini-apps get a scoped token, not the owner's full JWT. It can access
   storage, proxy, AI, notifications, push — but NOT auth, settings, or chat.
-- Empty JSX = silent compile failure (0-byte output, "no default export").
-  Always verify: `wc -l apps/<name>/index.jsx`.
 - Storage 404 on first load is normal — handle with default value.
 - Back gesture in apps: use `pushState`/`popstate` for internal navigation.
 - Async assets (Three.js textures, images, lazy components, fonts)
   aren't rendered at the moment `agent-browser open` returns —
   screenshots captured immediately come back empty or half-loaded.
-  Wait for them: `agent-browser open "$URL" && agent-browser wait 8000 && agent-browser screenshot "$OUT"`.
-  Tune the wait to match the heaviest asset.
+  Wait for them: `agent-browser open "$URL" && agent-browser wait <ms> && agent-browser screenshot "$OUT"`.
+  **Scale the wait to the heaviest asset** — Three.js textures /
+  WebGL / large fonts → 6000–8000ms; ordinary React apps with local
+  state → 1000–1500ms; static HTML → 200ms. Blanket-8000 everywhere
+  wastes session time.
 - Proxy endpoint is `/api/proxy?url=<urlencoded>` — the external URL
   MUST be URL-encoded. Building the call inline:
   `curl -s "$API_BASE_URL/api/proxy?url=$(python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=""))' "https://example.com/api")"`.
@@ -187,6 +125,26 @@ reference implementations only.
   scale and the drawing gets progressively distorted. Guard with a
   `useCallback`, a `useRef`-based "already initialized" flag, or an
   explicit `resetTransform()` before each setup.
+- Pointer-driven canvas apps (drawing, particles, gestures) — assume
+  three problems by default, each one-liner:
+  (a) **`setPointerCapture` throws on synthetic pointers.** Always
+  `try { el.setPointerCapture(e.pointerId) } catch {}` — headless
+  testing dispatches synthetic pointers that have no registered
+  pointerId, and the throw kills the whole canvas.
+  (b) **`globalCompositeOperation = 'lighter'` saturates overlapping
+  strokes to pure white**, erasing the palette. Use `source-over`
+  when palette must show; reserve `lighter` for glow/bloom effects
+  on a dark background where saturation is the goal.
+  (c) **`pointermove` fires at sub-pixel rate** → overdraw + perf
+  cliff. Throttle by minimum-pixel-distance (skip points within 2–3
+  px of the previous one) before drawing.
+- Three.js: `import * as THREE from 'three'` and
+  `import { OrbitControls } from 'three/addons/controls/OrbitControls.js'`
+  just work (pinned in the app-frame import map). Visual gotchas:
+  cloud density lives in the PNG's alpha channel, not red — multiply
+  by alpha when sampling for a custom shader. ACES tone mapping
+  crushes dark oceans to flat black; switch to `LinearToneMapping`
+  or lower exposure if sea color matters.
 
 ## Debug endpoints
 

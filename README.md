@@ -9,10 +9,17 @@
 </p>
 
 <p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="https://hub.docker.com"><img src="https://img.shields.io/badge/Docker-single--container-2496ED?logo=docker&logoColor=white" alt="Docker"></a>
+  <a href="#get-started"><img src="https://img.shields.io/badge/PWA-installable-5A0FC8?logo=pwa&logoColor=white" alt="PWA"></a>
+</p>
+
+<p align="center">
   <a href="#what-is-möbius">What is it?</a> &middot;
   <a href="#what-can-you-build">What can you build?</a> &middot;
   <a href="#get-started">Get Started</a> &middot;
-  <a href="#skill-and-experience">Skill &amp; Experience</a>
+  <a href="#skill-and-experience">Skill &amp; Experience</a> &middot;
+  <a href="#license">License</a>
 </p>
 
 ---
@@ -25,17 +32,24 @@ It works in the browser and installs on your phone like a native app (Android an
 
 The agent can also change the interface itself: the theme, the layout, features in the shell. It edits the source and rebuilds live. Some changes appear instantly, others take a few seconds.
 
-**What you need:** a [Claude](https://claude.ai) subscription and somewhere to host it. See [Get Started](#get-started) for one-click deployment.
+Check out [Get Started](#get-started) for one-click setup.
 
 ---
 
 ## What Can You Build?
 
-Every tool you use was designed by someone who doesn't know you. Möbius is different. You talk to it, it builds what you describe, and it learns from every session how to build better things for you. The apps stay. The data stays. The agent stays.
+Software shouldn't be one-size-fits-all. Möbius lets you describe what you want and builds it in front of you. Over time it picks up on your preferences and interests to be more helpful, and your data never leaves a server you control.
 
-We built a news aggregator that runs on a schedule, searches the web, and filters stories based on preferences that evolve over time. A stock market dashboard for a local exchange with no public API. The agent figured out how to scrape it. A finance tool for uploading statements, categorizing spending, and computing taxes from your phone. A period tracker built around how you actually want to use one. A learning companion with spaced repetition that adjusts as you improve. A drum machine that turns voice samples into beats.
+Some things we've built:
 
-Everything runs on your server. Your health data, your finances, your habits, none of it leaves a machine you control.
+- **News aggregator** — runs on a schedule, searches the web, filters stories based on preferences that evolve over time
+- **Stock market dashboard** — for a local exchange with no public API; the agent figured out how to scrape it
+- **Finance tool** — upload statements, categorize spending, compute taxes from your phone
+- **Period tracker** — built around how you actually want to use one
+- **Learning companion** — uses AI to build a curriculum around any topic, with spaced repetition that adjusts as you improve
+- **Drum machine** — turns voice samples into beats
+
+Your health data, your finances, your habits, all private by default.
 
 When you ask for something, the agent builds it as a small app, live, no reload. Each app can store data, run on a schedule, fetch from the web, and use AI on its own. But the agent isn't limited to apps. It can change anything: the interface, the layout, the server, itself. Apps are just the most natural way to grow what it can do.
 
@@ -50,6 +64,8 @@ Click **Deploy Now**, log in to Railway, and deploy. Once it's finished, go to *
 Bookmark `https://xxx.up.railway.app/recover`. If the UI ever breaks, that's where you fix it.
 
 If you're logging in on your phone, save to home screen for the best experience.
+
+To update, go to the same deployment's **Settings → Source → Check for updates**. Railway pulls the latest image and redeploys — chats, apps, credentials, and the agent's experience all survive.
 
 ### Deploy Self-hosted
 
@@ -67,13 +83,7 @@ Caddy handles HTTPS automatically. Visit `https://your-domain.com` and the setup
 
 Bookmark `https://your-domain.com/recover`. If the UI ever breaks, that's where you fix it.
 
-### Updates
-
-```bash
-git pull && docker compose up -d --build
-```
-
-Everything in `/data` survives rebuilds.
+To update: `git pull && docker compose up -d --build`. Everything in `/data` survives rebuilds.
 
 ---
 

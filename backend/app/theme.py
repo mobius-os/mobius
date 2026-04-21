@@ -16,18 +16,18 @@ _IMPORT_RE = re.compile(
 
 DEFAULT_THEME = """\
 :root {
-  --bg: #0c0f14;
-  --surface: #14181f;
-  --surface2: #1a1f28;
-  --border: #252b36;
-  --border-light: #1c2029;
-  --text: #d4d4d8;
-  --muted: #52525b;
-  --accent: #a78bfa;
-  --accent-hover: #c4b5fd;
-  --accent-dim: rgba(167, 139, 250, 0.1);
-  --danger: #f87171;
-  --green: #6ee7b7;
+  --bg: #0d0f14;
+  --surface: #151820;
+  --surface2: #1c2028;
+  --border: #2a2f3a;
+  --border-light: #1e2330;
+  --text: #d8d8dc;
+  --muted: #6b6b76;
+  --accent: #8b6cf7;
+  --accent-hover: #7c5ce6;
+  --accent-dim: rgba(139, 108, 247, 0.12);
+  --danger: #ef4444;
+  --green: #059669;
   --font: 'Inter', system-ui, -apple-system, sans-serif;
   --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
 }

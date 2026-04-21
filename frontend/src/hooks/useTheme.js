@@ -1,13 +1,11 @@
 import { useEffect, useCallback, useRef } from 'react'
-import { LIGHT_COLORS, parseThemeMeta, buildThemeCss } from '../theme.js'
 import { apiFetch } from '../api/client.js'
 
 /**
  * Loads and applies the dynamic theme CSS from storage.
  *
  * Extracts @import url(...) lines and injects them as <link> tags so fonts
- * load reliably. Remaining CSS goes into a <style> element. Also handles
- * auto-light-theme on first boot when the user prefers light color scheme.
+ * load reliably. Remaining CSS goes into a <style> element.
  */
 export default function useTheme() {
   const themeAbortRef = useRef(null)
@@ -59,33 +57,6 @@ export default function useTheme() {
   }, [])
 
   useEffect(() => { loadTheme() }, [loadTheme])
-
-  // Auto light theme on first boot.
-  useEffect(() => {
-    if (!window.matchMedia('(prefers-color-scheme: light)').matches) return
-    apiFetch('/storage/shared/theme-mode')
-      .then(r => {
-        if (r.ok) return
-        return apiFetch('/storage/shared/theme.css')
-          .then(r => r.ok ? r.text() : '')
-          .then(css => {
-            const meta = parseThemeMeta(css)
-            const newCss = buildThemeCss(LIGHT_COLORS, meta, 'light')
-            return Promise.all([
-              apiFetch('/storage/shared/theme.css', {
-                method: 'PUT',
-                body: JSON.stringify({ content: newCss }),
-              }),
-              apiFetch('/storage/shared/theme-mode', {
-                method: 'PUT',
-                body: JSON.stringify({ content: JSON.stringify('light') }),
-              }),
-            ])
-          })
-          .then(() => loadTheme())
-      })
-      .catch(() => {})
-  }, [])
 
   return { loadTheme }
 }

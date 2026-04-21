@@ -134,14 +134,6 @@
   max-width: 100%;
 }
 
-/* ── Loading state ────────────────────────────────── */
-
-.chat__loading {
-  display: flex;
-  justify-content: center;
-  padding: 32px;
-}
-
 /* ── Typing indicator ─────────────────────────────── */
 
 .chat__thinking {
@@ -299,7 +291,7 @@
 
 .chat__foot {
   flex-shrink: 0;
-  padding: 10px 10px max(18px, env(safe-area-inset-bottom));
+  padding: 10px 10px max(10px, env(safe-area-inset-bottom));
   background: var(--bg);
 }
 

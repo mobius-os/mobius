@@ -9,6 +9,7 @@ from pathlib import Path as FilePath
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.responses import Response
 from sqlalchemy.orm import Session
 
 from app import models, schemas
@@ -149,7 +150,7 @@ async def stream_chat(
   """
   bc = get_broadcast(chat_id)
   if bc is None:
-    return JSONResponse(status_code=204, content=None)
+    return Response(status_code=204)
 
   catch_up, queue = bc.subscribe()
 

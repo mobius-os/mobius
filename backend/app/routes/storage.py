@@ -84,6 +84,24 @@ def write_app_file(
   return Response(status_code=204)
 
 
+@router.delete("/apps/{app_id}/{path:path}", status_code=204)
+def delete_app_file(
+  app_id: int,
+  path: str,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner_or_app),
+):
+  """Deletes a file from an app's data directory. 404 if missing."""
+  base = Path(get_settings().data_dir) / "apps" / str(app_id)
+  file_path = _resolve(base, path)
+  if not file_path.exists():
+    raise HTTPException(status_code=404, detail="File not found.")
+  if not file_path.is_file():
+    raise HTTPException(status_code=400, detail="Path is not a file.")
+  file_path.unlink()
+  return Response(status_code=204)
+
+
 @router.get("/shared/{path:path}")
 def read_shared_file(
   path: str,
@@ -108,6 +126,22 @@ def write_shared_file(
   file_path = _resolve(base, path)
   file_path.parent.mkdir(parents=True, exist_ok=True)
   file_path.write_text(body.content, encoding="utf-8")
+  return Response(status_code=204)
+
+
+@router.delete("/shared/{path:path}", status_code=204)
+def delete_shared_file(
+  path: str,
+  _: models.Owner = Depends(get_current_owner_or_app),
+):
+  """Deletes a file from the shared data directory. 404 if missing."""
+  base = Path(get_settings().data_dir) / "shared"
+  file_path = _resolve(base, path)
+  if not file_path.exists():
+    raise HTTPException(status_code=404, detail="File not found.")
+  if not file_path.is_file():
+    raise HTTPException(status_code=400, detail="Path is not a file.")
+  file_path.unlink()
   return Response(status_code=204)
 
 

@@ -3,7 +3,7 @@
 import os
 from functools import lru_cache
 
-from pydantic import field_validator, model_validator
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,44 +19,36 @@ class Settings(BaseSettings):
 
   model_config = SettingsConfigDict(env_file=".env")
 
-  @model_validator(mode="before")
-  @classmethod
-  def auto_detect_platform_domain(cls, values):
-    """On Railway/managed platforms, derive domain and origin automatically.
-
-    api_base_url is NOT set here — the default (http://localhost:$PORT)
-    is correct for all deployment modes since the agent always talks to
-    the server on the same host.
-    """
-    domain = values.get("domain") or values.get("DOMAIN") or "localhost"
-    origin = values.get("frontend_origin") or values.get("FRONTEND_ORIGIN") or ""
-    railway_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
-    if railway_domain and domain == "localhost":
-      values["domain"] = railway_domain
-      values["frontend_origin"] = f"https://{railway_domain}"
-    elif domain != "localhost" and (not origin or origin == "http://localhost:5173"):
-      values["frontend_origin"] = f"https://{domain}"
-    return values
-
-  @field_validator("secret_key")
-  @classmethod
-  def secret_key_must_be_strong(cls, v: str) -> str:
-    """Rejects weak keys at startup before any JWT is signed."""
-    if len(v) < 32:
+  @model_validator(mode="after")
+  def _validate_and_derive(self) -> "Settings":
+    """Validates secret_key strength and derives frontend_origin from
+    DOMAIN on managed platforms (Railway) or when only DOMAIN is set."""
+    if len(self.secret_key) < 32:
       raise ValueError(
         "SECRET_KEY must be at least 32 characters long. "
-        'Generate one with: python3 -c "import secrets; print(secrets.token_hex(32))"'
+        "Generate one with: "
+        'python3 -c "import secrets; print(secrets.token_hex(32))"'
       )
-    return v
 
-  @model_validator(mode="after")
-  def validate_frontend_origin(self) -> "Settings":
-    """Catches the common mistake of leaving DOMAIN blank in .env."""
-    if self.frontend_origin in ("https://", "http://", "https:///", "http:///"):
+    # Railway: auto-derive domain + origin when running on their platform.
+    railway_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+    if railway_domain and self.domain == "localhost":
+      self.domain = railway_domain
+      self.frontend_origin = f"https://{railway_domain}"
+    # Self-hosted: derive origin from domain when not explicitly set.
+    elif self.domain != "localhost" and self.frontend_origin == (
+      "http://localhost:5173"
+    ):
+      self.frontend_origin = f"https://{self.domain}"
+
+    # Catch the common mistake of leaving DOMAIN blank.
+    if self.frontend_origin in (
+      "https://", "http://", "https:///", "http:///",
+    ):
       raise ValueError(
-        "FRONTEND_ORIGIN is invalid (got '%s'). "
-        "Set DOMAIN=your-domain.com in .env, or set FRONTEND_ORIGIN explicitly "
-        "for HTTP-only deployments." % self.frontend_origin
+        f"FRONTEND_ORIGIN is invalid (got {self.frontend_origin!r}). "
+        "Set DOMAIN=your-domain.com in .env, or set FRONTEND_ORIGIN "
+        "explicitly for HTTP-only deployments."
       )
     return self
 

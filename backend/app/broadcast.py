@@ -54,7 +54,10 @@ class ChatBroadcast:
       try:
         q.put_nowait(event)
       except asyncio.QueueFull:
-        log.warning("subscriber queue full, dropping event")
+        log.warning(
+          "subscriber queue full for chat %s, dropping %s event",
+          self.chat_id, event.get("type", "?"),
+        )
 
   def subscribe(self) -> tuple[list[dict], asyncio.Queue]:
     """Returns (catch_up_events, live_queue) for a new subscriber."""
@@ -71,7 +74,13 @@ class ChatBroadcast:
       pass
 
   def mark_completed(self):
-    """Marks the broadcast as done and schedules cleanup."""
+    """Marks the broadcast as done and schedules cleanup.
+
+    Schedules a delayed pop from the global registry so broadcasts
+    don't accumulate for chats whose SSE clients already disconnected
+    (otherwise they'd only be cleaned up on next `get_broadcast` for
+    the same chat_id — which may never come).
+    """
     self.running = False
     self.completed_at = time.time()
     # Push a sentinel so subscribers unblock.
@@ -80,6 +89,22 @@ class ChatBroadcast:
         q.put_nowait(None)
       except asyncio.QueueFull:
         pass
+    log.info(
+      "broadcast done chat_id=%s events=%d subscribers=%d",
+      self.chat_id, len(self.event_log), len(self.subscribers),
+    )
+    # Schedule cleanup after TTL so late reconnectors can still
+    # replay.  Fire-and-forget — the task is tied to the current
+    # event loop and survives until TTL elapses.
+    try:
+      asyncio.get_running_loop().call_later(
+        _COMPLETED_TTL_SECS,
+        lambda: _broadcasts.pop(self.chat_id, None),
+      )
+    except RuntimeError:
+      # No running loop (synchronous context) — the reactive
+      # get_broadcast TTL check will handle cleanup later.
+      pass
 
 
 def get_all_active_broadcasts() -> list["ChatBroadcast"]:
@@ -103,6 +128,7 @@ def create_broadcast(chat_id: str) -> "ChatBroadcast":
   _broadcasts.pop(chat_id, None)
   bc = ChatBroadcast(chat_id)
   _broadcasts[chat_id] = bc
+  log.info("broadcast created chat_id=%s", chat_id)
   return bc
 
 

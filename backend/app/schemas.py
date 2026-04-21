@@ -22,6 +22,10 @@ class TokenResponse(BaseModel):
 class AppCreate(BaseModel):
   name: str
   description: str = ""
+  # Required — the full JSX source of the app's default export.
+  # Prefer `register_app.py`, which handles schema + compile + DB
+  # writes in one call. Hitting this endpoint directly is only
+  # needed for copying apps between instances.
   jsx_source: str
   chat_id: str | None = None
 
@@ -102,7 +106,9 @@ class NotificationSendRequest(BaseModel):
   icon: str | None = None
   target: str | None = None
   actions: list[NotificationAction] | None = None
-  source_type: str  # 'agent' | 'app'
+  # Defaults to 'agent' so the common agent-authored curl works
+  # with just {title, body}. Apps should pass 'app' + their id.
+  source_type: str = "agent"
   source_id: str | None = None
 
 

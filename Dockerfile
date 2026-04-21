@@ -33,9 +33,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
     libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
-    fonts-liberation \
+    fonts-liberation fonts-noto-color-emoji \
     && npm install -g esbuild@0.20.2 \
-    && npm install -g @anthropic-ai/claude-code@2.1.101 \
+    && npm install -g @anthropic-ai/claude-code@2.1.112 \
     && npm install -g agent-browser \
     && agent-browser install \
     && mv /root/.agent-browser /opt/agent-browser \

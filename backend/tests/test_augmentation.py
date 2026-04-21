@@ -21,7 +21,7 @@ def test_no_augmentation_without_uploads(client, db, auth, chat):
     captured.extend(msgs)
     _mark_done(chat_id)
 
-  with patch("app.routes.chats.run_chat", new=fake_run_chat):
+  with patch("app.routes.chats_stream.run_chat", new=fake_run_chat):
     client.post(
       f"/api/chats/{chat.id}/messages",
       json={"content": "hello"},
@@ -45,7 +45,7 @@ def test_attachments_saved_in_message(client, db, auth, chat):
     captured.append({"msgs": msgs, "attachments": kwargs.get("attachments")})
     _mark_done(chat_id)
 
-  with patch("app.routes.chats.run_chat", new=fake_run_chat):
+  with patch("app.routes.chats_stream.run_chat", new=fake_run_chat):
     resp = client.post(
       f"/api/chats/{chat.id}/messages",
       json={"content": "check this", "attachments": attachments},
@@ -71,7 +71,7 @@ def test_augmentation_with_uploads(client, db, auth, chat):
     captured.extend(msgs)
     _mark_done(chat_id)
 
-  with patch("app.routes.chats.run_chat", new=fake_run_chat):
+  with patch("app.routes.chats_stream.run_chat", new=fake_run_chat):
     client.post(
       f"/api/chats/{chat.id}/messages",
       json={"content": "analyze this"},
@@ -98,7 +98,7 @@ def test_message_saved_before_run_chat(client, db, auth, chat):
     s.close()
     _mark_done(chat_id)
 
-  with patch("app.routes.chats.run_chat", new=fake_run_chat):
+  with patch("app.routes.chats_stream.run_chat", new=fake_run_chat):
     client.post(
       f"/api/chats/{chat.id}/messages",
       json={"content": "hello world"},

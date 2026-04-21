@@ -50,6 +50,13 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
   const chatIdRef = useRef(chatId)
   chatIdRef.current = chatId
 
+  // Timestamp of the most recent sendMessage call. A 204 from /stream
+  // shortly after a send means the broadcast hasn't been registered yet
+  // — not that the agent already finished. Distinguishing these
+  // prevents an onNeedsRefresh → fetchMessages race that wipes the
+  // optimistic user message before the DB persists it.
+  const justSentAtRef = useRef(0)
+
   // Character buffer for smooth text reveal.
   const textBufferRef = useRef('')
   const rafRef = useRef(null)
@@ -161,6 +168,19 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
       })
 
       if (res.status === 204) {
+        // A 204 within ~1.5s of sendMessage means the broadcast hasn't
+        // been registered yet (POST→GET race inside the same event
+        // loop), not that the agent already finished. Schedule a
+        // reconnect instead of refreshing from the DB — a DB refresh
+        // here would overwrite the optimistic user message before the
+        // backend has finished persisting it.
+        const sinceSend = Date.now() - justSentAtRef.current
+        if (sinceSend < 1500) {
+          abortRef.current = null
+          setTimeout(() => connectRef.current?.(false), 300)
+          return
+        }
+
         // No active stream — the broadcast is gone, which means either
         // the agent never started on this chat or it already finalized
         // and saved the response to the DB.  In both cases the right
@@ -295,6 +315,11 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
             // non-null after a normal stream completion and the onVisible
             // guard (!abortRef.current) prevents reconnection.
             abortRef.current = null
+            // Close the just-sent race window — the stream completed
+            // normally, so any subsequent 204 genuinely means the chat
+            // is finished (and should trigger a DB refresh) rather than
+            // a POST→GET race needing a retry.
+            justSentAtRef.current = 0
             // Delay onStreamEnd by one frame so the React render
             // triggered by setIsStreaming(false) above completes before
             // ChatView promotes streamItems to messages.  latestItemsRef
@@ -346,6 +371,7 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
   }, [])
 
   const sendMessage = useCallback(async (text, attachments) => {
+    justSentAtRef.current = Date.now()
     setStreamItems([])
     textBufferRef.current = ''
     setIsStreaming(true)

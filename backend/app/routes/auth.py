@@ -8,6 +8,7 @@ import os
 import secrets
 import time
 from base64 import urlsafe_b64encode
+from datetime import timedelta
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -67,6 +68,22 @@ def setup_status(db: Session = Depends(get_db)):
   return schemas.SetupStatus(configured=configured)
 
 
+def _write_service_token(username: str) -> None:
+  """Mints a 90-day service token for cron jobs and writes it to
+  /data/service-token.txt (chmod 600). The entrypoint refresh path
+  only runs when an owner exists at boot, so on first-time setup we
+  have to seed it here — otherwise the file is missing until the
+  next container restart."""
+  settings = get_settings()
+  path = os.path.join(settings.data_dir, "service-token.txt")
+  token = auth.create_access_token(
+    {"sub": username}, expires_delta=timedelta(days=90)
+  )
+  fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+  with os.fdopen(fd, "w") as f:
+    f.write(token)
+
+
 @router.post("/setup", response_model=schemas.TokenResponse)
 @_limiter.limit("3/minute")
 def setup(
@@ -84,6 +101,10 @@ def setup(
   )
   db.add(owner)
   db.commit()
+  try:
+    _write_service_token(body.username)
+  except OSError as exc:
+    log.warning("Could not write service token: %s", exc)
   token = auth.create_access_token({"sub": body.username})
   return schemas.TokenResponse(access_token=token)
 
@@ -307,14 +328,13 @@ async def provider_status(
 ):
   """Checks whether the CLI is authenticated.
 
-  Reads the credential file directly rather than spawning `claude auth
-  status`, which is faster and avoids subprocess overhead.  Falls back
-  to the CLI subprocess if the file can't be read.
+  Reads the credential file directly.  The file format is pinned by
+  the Claude CLI version we ship and is considered stable across the
+  supported range (see CLAUDE.md "Upgrade checklist").
   """
   _, cli_home = _cli_env()
   creds_path = os.path.join(cli_home, ".credentials.json")
 
-  # Fast path: read the credential file directly.
   try:
     with open(creds_path) as f:
       data = json.load(f)
@@ -326,29 +346,7 @@ async def provider_status(
         "email": oauth.get("email", ""),
         "subscription": oauth.get("subscriptionType", ""),
       }
-  except (FileNotFoundError, json.JSONDecodeError, KeyError):
-    pass
+  except (FileNotFoundError, json.JSONDecodeError, KeyError) as exc:
+    log.info("Provider not authenticated: %s", exc)
 
-  # Slow path: ask the CLI (handles cases where credential format
-  # differs from what we expect, e.g. after a CLI update).
-  env, _ = _cli_env()
-  try:
-    proc = await asyncio.create_subprocess_exec(
-      "claude", "auth", "status",
-      stdout=asyncio.subprocess.PIPE,
-      stderr=asyncio.subprocess.STDOUT,
-      env=env,
-    )
-    stdout, _ = await asyncio.wait_for(
-      proc.communicate(), timeout=10.0,
-    )
-    data = json.loads(stdout.decode("utf-8", errors="replace"))
-    return {
-      "authenticated": data.get("loggedIn", False),
-      "provider": "claude",
-      "email": data.get("email", ""),
-      "subscription": data.get("subscriptionType", ""),
-    }
-  except Exception as exc:
-    log.warning("Provider status check failed: %s", exc)
-    return {"authenticated": False, "provider": "claude"}
+  return {"authenticated": False, "provider": "claude"}

@@ -8,11 +8,11 @@ export const DARK_COLORS = {
   '--border-light': '#1e2330',
   '--text': '#d8d8dc',
   '--muted': '#6b6b76',
-  '--accent': '#a78bfa',
-  '--accent-hover': '#c4b5fd',
-  '--accent-dim': 'rgba(167, 139, 250, 0.1)',
-  '--danger': '#f87171',
-  '--green': '#6ee7b7',
+  '--accent': '#8b6cf7',
+  '--accent-hover': '#7c5ce6',
+  '--accent-dim': 'rgba(139, 108, 247, 0.12)',
+  '--danger': '#ef4444',
+  '--green': '#059669',
 }
 
 export const LIGHT_COLORS = {

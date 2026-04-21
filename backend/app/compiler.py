@@ -2,12 +2,18 @@
 
 import asyncio
 import os
+import re
 import tempfile
 from pathlib import Path
 
 from app.config import get_settings
 
 _ESBUILD_TIMEOUT_SECS = 30
+
+# `export default <anything>` with optional async/function/class/paren/identifier.
+# Covers: `export default function`, `export default class`, `export default App`,
+# `export default () =>`, `export default {...}`, etc.
+_EXPORT_DEFAULT_RE = re.compile(r"^\s*export\s+default\b", re.MULTILINE)
 
 
 def _compiled_dir() -> Path:
@@ -30,6 +36,21 @@ async def compile_jsx(app_id: int, jsx_source: str) -> str:
   Raises:
     RuntimeError: If esbuild exits with a non-zero status.
   """
+  # Fail loudly on malformed source before invoking esbuild — the
+  # silent-0-byte case produces a downstream "no default export" at
+  # runtime and wastes a debug round-trip.
+  if not jsx_source or not jsx_source.strip():
+    raise RuntimeError(
+      "JSX source is empty. Write your component to "
+      "apps/<name>/index.jsx before registering."
+    )
+  if not _EXPORT_DEFAULT_RE.search(jsx_source):
+    raise RuntimeError(
+      "JSX source has no `export default` — mini-apps must export a "
+      "default React component. Add `export default function MyApp(...)` "
+      "or `export default ComponentName`."
+    )
+
   out_path = _compiled_dir() / f"app-{app_id}.js"
 
   with tempfile.NamedTemporaryFile(
@@ -52,6 +73,8 @@ async def compile_jsx(app_id: int, jsx_source: str) -> str:
         "--external:react-dom",
         "--external:recharts",
         "--external:date-fns",
+        "--external:three",
+        "--external:three/addons/*",
         f"--outfile={out_path}",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,

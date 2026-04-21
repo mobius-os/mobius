@@ -91,6 +91,15 @@ async function openDrawer(page) {
   await page.evaluate(() => new Promise(r => setTimeout(r, 400)))
 }
 
+/** Close the drawer via the toggle button (without navigating). */
+async function closeDrawerToggle(page) {
+  await page.evaluate(() => {
+    const btn = document.querySelector('[aria-expanded]')
+    if (btn && btn.getAttribute('aria-expanded') === 'true') btn.click()
+  })
+  await page.evaluate(() => new Promise(r => setTimeout(r, 400)))
+}
+
 /** Trigger browser back via history.back().
  *  Uses evaluate to fire within the SPA rather than Playwright's page.goBack
  *  which triggers a real page navigation. */
@@ -195,6 +204,37 @@ test.describe('Back button edge cases', () => {
 
     await goBack(page)
     expect((await getNavState(page)).url).toBe('/')
+  })
+
+  test('8. Drawer open/close cycles do not leak history entries', async ({ page }) => {
+    // Regression guard: each openDrawer() pushes a sentinel history
+    // entry so Chrome's back-forward preview shows a clean state.
+    // closeDrawer() pops that entry (via history.back), otherwise
+    // every toggle adds a zombie and the user has to press back once
+    // per toggle before the app actually navigates anywhere.
+    //
+    // The design tolerates ONE orphan sentinel (handleBack's early-
+    // return consumes it harmlessly). What must not happen: growth per
+    // cycle. So we measure the length after one toggle pair, then
+    // after five — they must match.
+    await setup(page)
+
+    await openDrawer(page)
+    await closeDrawerToggle(page)
+    const afterOne = await page.evaluate(() => history.length)
+
+    for (let i = 0; i < 4; i++) {
+      await openDrawer(page)
+      await closeDrawerToggle(page)
+    }
+    const afterFive = await page.evaluate(() => history.length)
+
+    // No per-cycle leak: five cycles must not add more entries than one.
+    expect(afterFive).toBe(afterOne)
+
+    // Drawer should be closed at the end.
+    const state = await getNavState(page)
+    expect(state.drawerOpen).toBe(false)
   })
 })
 

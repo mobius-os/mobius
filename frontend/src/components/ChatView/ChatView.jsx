@@ -30,7 +30,6 @@ const _spacerHeights = (() => {
 
 export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystemEvent, builtApp, onOpenApp, onMessageStart }) {
   const [messages, setMessages] = useState([])
-  const [totalMessages, setTotalMessages] = useState(0)
   const [offset, setOffset] = useState(0)
   const [loading, setLoading] = useState(true)
   const [sending, setSending] = useState(false)
@@ -97,7 +96,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         }
       }
       setMessages(msgs)
-      setTotalMessages(data.total || 0)
       setOffset(data.offset || 0)
     } catch { /* network error — silent, user can retry */ }
   }, [chatId])
@@ -154,7 +152,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       .map(i => i.content)
       .join('')
     setMessages(prev => [...prev, { role: 'assistant', content, blocks }])
-    setTotalMessages(t => t + 1)
   }
 
   // Persist draft so it survives leaving and re-entering the chat.
@@ -205,7 +202,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         }
 
         setMessages(msgs)
-        setTotalMessages((data.total || 0) - (stripped ? 1 : 0))
         setOffset(data.offset || 0)
         hadMessagesRef.current = msgs.length > 0
         setLoading(false)
@@ -273,9 +269,30 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         ? Math.max(0, lastUserEl.offsetTop - 4)
         : el.scrollTop
     }
-    // Re-apply after lazy renderers settle.
-    const tid = setTimeout(applyScroll, 300)
-    return () => clearTimeout(tid)
+    // Re-apply scroll once the list stops resizing (lazy renderers like
+    // highlight.js / KaTeX expand code blocks asynchronously and shift
+    // scrollHeight). Replaces a blind 300ms timeout with an event-driven
+    // settle detector: re-apply after the list has been idle for 50ms,
+    // then disconnect. Safety timeout caps the observation at 1500ms.
+    const listEl = el.querySelector('.chat__list')
+    let settleTimer = 0
+    let ro
+    if (listEl) {
+      ro = new ResizeObserver(() => {
+        clearTimeout(settleTimer)
+        settleTimer = setTimeout(() => {
+          applyScroll()
+          ro.disconnect()
+        }, 50)
+      })
+      ro.observe(listEl)
+    }
+    const safety = setTimeout(() => ro?.disconnect(), 1500)
+    return () => {
+      clearTimeout(settleTimer)
+      clearTimeout(safety)
+      ro?.disconnect()
+    }
   }, [messages])
 
   // ── Spacer: reserves space below the user's message ──────────────
@@ -335,6 +352,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     // Set up on every path (send, promote, reconnect) — not just send —
     // so the spacer stays correct after switching chats and returning.
     let prevH = spacerH
+    let prevListH = listH
+    let prevClientH = scrollEl.clientHeight
     // Track whether the user is near the bottom so auto-follow works
     // during streaming.  Updated on EVERY scroll event (including
     // programmatic snaps) so the ResizeObserver always has a fresh
@@ -370,15 +389,19 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       }
       prevH = h
 
-      // Auto-follow: if the user is near the bottom (updated in real
-      // time by the scroll listener above), snap to bottom.  The scroll
-      // listener fires on the programmatic snap too, keeping nearBottom
-      // true for the next resize.  When the user scrolls up past 50px,
-      // the listener sets nearBottom=false and auto-follow stops.
-      const gap = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
-      if (nearBottom && gap > 1) {
-        scrollEl.scrollTop = scrollEl.scrollHeight
+      // Auto-follow: only fires when the list actually grew (content
+      // streaming), not when it merely re-measures due to viewport
+      // resize. Without this gate, a keyboard open/close cycle could
+      // briefly flip nearBottom true (as clientHeight changes) and
+      // snap scrollTop to the bottom, drifting the scroll position
+      // across keyboard cycles.
+      if (lH > prevListH) {
+        const gap = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
+        if (nearBottom && gap > 1) {
+          scrollEl.scrollTop = scrollEl.scrollHeight
+        }
       }
+      prevListH = lH
     })
     ro.observe(listEl)
     return () => {
@@ -451,7 +474,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     const userMsg = { role: 'user', content: text, ts: Date.now() }
     if (attachments.length > 0) userMsg.attachments = attachments
     setMessages(prev => [...prev, userMsg])
-    setTotalMessages(t => t + 1)
     setInput('')
     clearFiles()
     if (inputRef.current) inputRef.current.style.height = 'auto'

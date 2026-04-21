@@ -80,3 +80,106 @@ input, textarea {
   font-family: inherit;
   font-size: inherit;
 }
+
+/* ── Visual refinements ──
+   Motion, gradients, selection, and drawer scrollbar rules. Kept in
+   index.css rather than theme.css so the theme toggle (which rewrites
+   theme.css with regenerated colors) doesn't strip them. */
+
+:root {
+  --spring: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+::selection { background: var(--accent-dim); color: var(--text); }
+
+/* Message entry animation */
+@keyframes msg-enter {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.chat__msg { animation: msg-enter 280ms var(--spring); }
+
+/* Tool block entry — opacity only so height stays stable for spacer
+   math (see CLAUDE.md "Chat UX — non-negotiable constraints"). */
+@keyframes tool-enter {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.chat__tool { animation: tool-enter 200ms ease-out; }
+
+/* Tap feedback on interactive elements */
+.chat__send,
+.chat__mic,
+.drawer__item,
+.shell__bar button,
+.chat__stop {
+  transition: transform 100ms ease, background 180ms ease,
+              color 180ms ease, border-color 180ms ease,
+              box-shadow 180ms ease;
+}
+.chat__send:active,
+.chat__mic:active,
+.drawer__item:active,
+.shell__bar button:active {
+  transform: scale(0.96);
+}
+
+/* Drawer spring slide */
+.drawer {
+  transition: transform 320ms var(--spring);
+}
+
+/* Input focus glow */
+.chat__form {
+  transition: border-color 180ms ease,
+              box-shadow 220ms var(--spring);
+}
+.chat__form:focus-within {
+  box-shadow: 0 0 0 3px var(--accent-dim),
+              0 4px 20px -8px var(--accent-dim);
+}
+
+/* Hide drawer scrollbars cleanly */
+.drawer,
+.drawer__body,
+.drawer__group,
+.drawer__section,
+.drawer *[class*="scroll"] {
+  scrollbar-width: none;
+}
+.drawer::-webkit-scrollbar,
+.drawer__body::-webkit-scrollbar,
+.drawer__group::-webkit-scrollbar,
+.drawer__section::-webkit-scrollbar,
+.drawer *[class*="scroll"]::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+/* Gradient wordmark in the shell bar */
+.shell__wordmark {
+  background: linear-gradient(135deg, var(--text) 30%, var(--accent) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Gradient user message bubbles, white text */
+.chat__text--user {
+  background: linear-gradient(135deg, var(--accent), #6d52d9);
+  color: #ffffff;
+  box-shadow: 0 2px 14px -4px rgba(139, 108, 247, 0.35);
+}
+
+/* Gradient empty-state title */
+.chat__empty-title {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  line-height: 1.05;
+  background: linear-gradient(135deg, var(--text) 30%, var(--accent) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}

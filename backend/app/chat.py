@@ -184,6 +184,7 @@ async def _close_browser_session(chat_id: str) -> None:
   """
   if not chat_id:
     return
+  log = _get_logger()
   try:
     proc = await asyncio.create_subprocess_exec(
       "agent-browser", "--session", f"chat-{chat_id}", "close",
@@ -191,6 +192,7 @@ async def _close_browser_session(chat_id: str) -> None:
       stderr=asyncio.subprocess.DEVNULL,
     )
     await asyncio.wait_for(proc.wait(), timeout=5.0)
+    log.info("agent-browser session closed chat_id=%s", chat_id)
   except FileNotFoundError:
     pass  # agent-browser not installed (local dev)
   except asyncio.TimeoutError:
@@ -208,7 +210,31 @@ async def run_chat(
   viewport: dict | None = None,
 ) -> None:
   """Runs the provider CLI as a subprocess and publishes events to the
-  chat's ChatBroadcast.  Caller must create the broadcast before calling."""
+  chat's ChatBroadcast.  Caller must create the broadcast before calling.
+
+  The entire body is wrapped in a top-level try/finally so the
+  `_starting` guard is released even if setup code raises before we
+  reach the subprocess.  Without that, a crash during setup leaves the
+  chat stuck 'starting' until process restart.
+  """
+  try:
+    await _run_chat_impl(
+      messages, chat_id=chat_id, session_id=session_id,
+      attachments=attachments, timezone=timezone, viewport=viewport,
+    )
+  finally:
+    _starting.discard(chat_id)
+
+
+async def _run_chat_impl(
+  messages: list[schemas.ChatMessage],
+  chat_id: str = "",
+  session_id: str | None = None,
+  attachments: list[dict] | None = None,
+  timezone: str | None = None,
+  viewport: dict | None = None,
+) -> None:
+  """Inner implementation of run_chat; see wrapper for lifecycle notes."""
   from app.database import SessionLocal
   db = SessionLocal()
   log = _get_logger()
@@ -227,9 +253,14 @@ async def run_chat(
       ctx = experience_path.read_text(encoding="utf-8").strip()
     except OSError:
       ctx = ""
-    # Dynamic fields go at the end for cache efficiency.
+    # Dynamic fields go at the end for cache efficiency.  Use safe
+    # dict access on viewport so a malformed payload (missing keys,
+    # wrong types) doesn't crash the agent spawn — skip the line
+    # instead.
     tz_line = f"\nTimezone: {timezone}" if timezone else ""
-    vp_line = f"\nViewport: {viewport['width']}x{viewport['height']}" if viewport else ""
+    vp_w = (viewport or {}).get("width")
+    vp_h = (viewport or {}).get("height")
+    vp_line = f"\nViewport: {vp_w}x{vp_h}" if vp_w and vp_h else ""
     if ctx or tz_line or vp_line:
       # One-line pointer so the agent knows the block is a real file.
       # The seed's "About this file" section inside the block owns the
@@ -452,26 +483,18 @@ async def run_chat(
       except asyncio.TimeoutError:
         log.warning("subprocess did not exit cleanly, killing")
         proc.kill()
-      # Tear down this chat's agent-browser session so Chrome doesn't
-      # linger between turns.  Best-effort — log and continue on failure
-      # so we never block a chat from completing on cleanup issues.
-      await _close_browser_session(chat_id)
-      browser_session_closed = True
 
   except Exception as exc:
     _active_procs.pop(chat_id, None)
-    log.exception("run_chat failed: %s", exc)
+    log.exception("run_chat failed chat_id=%s: %s", chat_id, exc)
     _finalize_response(db, chat_id, assistant_blocks)
     bc.publish({"type": "error", "message": str(exc)})
     bc.publish({"type": "done"})
     set_active_broadcast(None)
     bc.mark_completed()
   finally:
-    _starting.discard(chat_id)
-    # If the inner finally ran, the session is already closed and we
-    # don't pay for a second agent-browser subprocess.  Only close from
-    # the outer finally when a crash during setup means the inner
-    # finally never ran.
-    if not locals().get("browser_session_closed"):
-      await _close_browser_session(chat_id)
+    # Close agent-browser session exactly once, regardless of which
+    # code path completed/errored.  _close_browser_session is a no-op
+    # when agent-browser isn't installed (local dev).
+    await _close_browser_session(chat_id)
     db.close()
