@@ -17,7 +17,7 @@ export default function Shell() {
     activeAppId, setActiveAppId,
     activeChatId, setActiveChatId,
     drawerOpen, openDrawer, closeDrawer,
-    navTo, backFiredRef, drawerPushedRef, navStackRef,
+    navTo, backFiredRef, navStackRef,
     activeViewRef, activeChatIdRef, activeAppIdRef,
   } = useNavigation()
 
@@ -182,15 +182,18 @@ export default function Shell() {
       } catch { return }
     }
 
-    // Push nav stack so back returns to the previous view (skip automatic calls).
-    if (draft || forceNew || drawerPushedRef.current) {
-      if (!drawerPushedRef.current) history.pushState(null, '')
-      drawerPushedRef.current = false
+    // Push nav stack so back returns to the previous view, but only
+    // for user-initiated calls (drawer click, draft restore, explicit
+    // forceNew). Skip for bootstrap (no chats exist on app load), where
+    // there's nothing to "go back to."
+    const userInitiated = !!draft || !!forceNew || drawerOpen
+    if (userInitiated) {
       navStackRef.current.push({
         view: activeViewRef.current,
         chatId: activeChatIdRef.current,
         appId: activeAppIdRef.current,
       })
+      try { history.pushState(null, '', '/') } catch { /* ignore */ }
     }
     closeDrawer()
     if (draft) {
@@ -209,9 +212,16 @@ export default function Shell() {
   async function deleteChat(id) {
     await apiFetch(`/chats/${id}`, { method: 'DELETE' }).catch(() => {})
     try { sessionStorage.removeItem(`draft:${id}`) } catch {}
-    // Evict any cached messages for the deleted chat so a future chat
-    // ID collision (e.g. recovery) doesn't surface stale content.
+    // Evict the cached messages so a future chat-ID collision (e.g.
+    // recovery) can't surface stale content.
     queryClient.removeQueries({ queryKey: chatMessagesQueryKey(id) })
+    // Scrub any navStack entries pointing at the deleted chat —
+    // otherwise pressing back would navigate into a chat that returns
+    // 404, leaving the user staring at an empty view. Soft-deleted
+    // chats are recoverable for 7 days via /recover; once recovered
+    // they re-enter the chat list normally and rebuild navStack via
+    // user navigation.
+    navStackRef.current = navStackRef.current.filter(e => e.chatId !== id)
     if (activeChatId === id) {
       await newChat()
     }
