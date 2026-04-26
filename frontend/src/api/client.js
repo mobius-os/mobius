@@ -19,13 +19,27 @@ export function clearToken() {
   localStorage.removeItem('token')
 }
 
-// Wipes the persisted TanStack Query cache. Used on logout / token
-// expiry so the next owner doesn't see the previous owner's data
-// flash before it's overwritten. Returns a promise so callers can
-// `await` it before reloading the page (otherwise the browser would
-// abort the in-flight delete).
+// Wipes persisted client state on logout / token expiry: the
+// TanStack Query cache (IndexedDB) AND the SW Cache Storage
+// entries. The SW caches mini-app module responses under the full
+// request URL — and that URL embeds the per-app scoped token as a
+// query param — so without this wipe the prior owner's app tokens
+// linger in `mobius-apps-*` after their session ends. Returns a
+// promise so callers can `await` it before reloading the page
+// (otherwise the browser would abort the in-flight delete).
 export function clearQueryCache() {
-  return idbDel('mobius-query-cache').catch(() => {})
+  return Promise.all([
+    idbDel('mobius-query-cache').catch(() => {}),
+    wipeSwCaches().catch(() => {}),
+  ])
+}
+
+async function wipeSwCaches() {
+  if (typeof caches === 'undefined') return
+  const keys = await caches.keys()
+  await Promise.all(
+    keys.filter(k => k.startsWith('mobius-')).map(k => caches.delete(k))
+  )
 }
 
 let _setupInProgress = false

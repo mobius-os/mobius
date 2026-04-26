@@ -53,7 +53,10 @@ function applyThemeToDom(css, bg) {
     /@import\s+url\(\s*['"]([^'"]+)['"]\s*\)\s*;[^\S\n]*\n?/g,
     (_, url) => { imports.push(url); return '' }
   )
-  imports.forEach(url => {
+  // Mirror the server-side allowlist (theme.py:_is_safe_import_url)
+  // so a `javascript:` or `data:` URL slipped into theme.css can't
+  // become a stylesheet link element on the client path either.
+  imports.filter(url => /^https?:\/\//i.test(url)).forEach(url => {
     const link = document.createElement('link')
     link.rel = 'stylesheet'
     link.href = url
