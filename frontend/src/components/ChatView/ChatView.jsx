@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { apiFetch, getToken, BASE } from '../../api/client.js'
+import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import { ProgressiveMarkdown } from './markdown/BlockRenderer.jsx'
 import useStreamConnection from './useStreamConnection.js'
 import useVoiceInput from './useVoiceInput.js'
@@ -29,9 +31,23 @@ const _spacerHeights = (() => {
 
 
 export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystemEvent, builtApp, onOpenApp, onMessageStart }) {
-  const [messages, setMessages] = useState([])
-  const [offset, setOffset] = useState(0)
-  const [loading, setLoading] = useState(true)
+  const queryClient = useQueryClient()
+  // Read the query cache synchronously on mount. If we've viewed this
+  // chat before, messages render immediately on remount — no empty
+  // placeholder, no fetch wait, no flash. The query is then refreshed
+  // in the background by the initial useEffect below.
+  // Synchronous cache read on mount. If we've viewed this chat before
+  // and the persister hydrated, useState starts populated → no flash.
+  // The persister itself races with mount on cold load; PersistQuery-
+  // ClientProvider's `onSuccess` flushes mid-flight render trees, so
+  // for already-warm in-memory caches (same session) this is exact;
+  // for IndexedDB-restored caches it's best-effort. The initial fetch
+  // useEffect below always fires regardless and writes the fresh data
+  // back via `commitMessages`, so any miss self-heals on next remount.
+  const cached = queryClient.getQueryData(chatMessagesQueryKey(chatId))
+  const [messages, setMessages] = useState(() => cached?.messages ?? [])
+  const [offset, setOffset] = useState(() => cached?.offset ?? 0)
+  const [loading, setLoading] = useState(!cached)
   const [sending, setSending] = useState(false)
   const [input, setInput] = useState(() => {
     try {
@@ -40,6 +56,23 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       return sessionStorage.getItem(`draft:${chatId}`) || ''
     } catch { return '' }
   })
+
+  // Single setter that updates BOTH local state and the query cache.
+  // Use this instead of bare setMessages/setOffset for any change that
+  // should survive a remount. Caller passes a function (prev) => next
+  // for the messages array, or a literal array.
+  const commitMessages = useCallback((updater, nextOffset) => {
+    setMessages(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater
+      queryClient.setQueryData(chatMessagesQueryKey(chatId), (existing) => ({
+        ...(existing || {}),
+        messages: next,
+        offset: nextOffset !== undefined ? nextOffset : (existing?.offset ?? 0),
+      }))
+      return next
+    })
+    if (nextOffset !== undefined) setOffset(nextOffset)
+  }, [chatId, queryClient])
 
   // DOM refs
   const scrollRef = useRef(null)
@@ -95,10 +128,9 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           }
         }
       }
-      setMessages(msgs)
-      setOffset(data.offset || 0)
+      commitMessages(msgs, data.offset || 0)
     } catch { /* network error — silent, user can retry */ }
-  }, [chatId])
+  }, [chatId, commitMessages])
 
   const {
     streamItems,
@@ -157,7 +189,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       .filter(i => i.type === 'text')
       .map(i => i.content)
       .join('')
-    setMessages(prev => [...prev, { role: 'assistant', content, blocks }])
+    const newMsg = { role: 'assistant', content, blocks }
+    commitMessages(prev => [...prev, newMsg])
   }
 
   // Persist draft so it survives leaving and re-entering the chat.
@@ -207,8 +240,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           }
         }
 
-        setMessages(msgs)
-        setOffset(data.offset || 0)
+        commitMessages(msgs, data.offset || 0)
         hadMessagesRef.current = msgs.length > 0
         setLoading(false)
 
@@ -439,8 +471,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             }
           }
         }
-        setMessages(prev => [...older, ...prev])
-        setOffset(data.offset || 0)
+        commitMessages(prev => [...older, ...prev], data.offset || 0)
         requestAnimationFrame(() => {
           const scrollEl = scrollRef.current
           if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight - prevHeight
@@ -480,7 +511,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
     const userMsg = { role: 'user', content: text, ts: Date.now() }
     if (attachments.length > 0) userMsg.attachments = attachments
-    setMessages(prev => [...prev, userMsg])
+    commitMessages(prev => [...prev, userMsg])
     setInput('')
     clearFiles()
     if (inputRef.current) inputRef.current.style.height = 'auto'
@@ -497,12 +528,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       }
     } catch (err) {
       setSending(false)
-      setMessages(prev => [
+      commitMessages(prev => [
         ...prev,
         { role: 'assistant', content: `Error: ${err.message}`, blocks: [] },
       ])
     }
-  }, [sending, streamSend, pendingFiles])
+  }, [sending, streamSend, pendingFiles, commitMessages])
 
   function handleSubmit(e) {
     e.preventDefault()

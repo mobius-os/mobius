@@ -3,6 +3,7 @@
  * BASE strips the trailing slash from Vite's BASE_URL so paths like
  * /api/chats work regardless of deployment prefix (e.g. /proxy/8001/).
  */
+import { del as idbDel } from 'idb-keyval'
 
 export const BASE = (import.meta.env.BASE_URL || '/').replace(/\/$/, '')
 
@@ -16,6 +17,15 @@ export function setToken(token) {
 
 export function clearToken() {
   localStorage.removeItem('token')
+}
+
+// Wipes the persisted TanStack Query cache. Used on logout / token
+// expiry so the next owner doesn't see the previous owner's data
+// flash before it's overwritten. Returns a promise so callers can
+// `await` it before reloading the page (otherwise the browser would
+// abort the in-flight delete).
+export function clearQueryCache() {
+  return idbDel('mobius-query-cache').catch(() => {})
 }
 
 let _setupInProgress = false
@@ -34,6 +44,10 @@ export async function apiFetch(path, options = {}) {
   if (res.status === 401 && !_setupInProgress) {
     clearToken()
     try { sessionStorage.setItem('auth_expired', '1') } catch {}
+    // Await the cache wipe before reloading. Without this, the page
+    // reload aborts the IndexedDB delete and the next owner could see
+    // stale chats/messages from the cached query data.
+    await clearQueryCache()
     window.location.reload()
     return new Promise(() => {})
   }

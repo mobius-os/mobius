@@ -1,10 +1,27 @@
 import { useState, useEffect } from 'react'
+import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client'
+import { useIsRestoring } from '@tanstack/react-query'
 import SetupWizard from './components/SetupWizard/SetupWizard.jsx'
 import LoginForm from './components/LoginForm/LoginForm.jsx'
 import Shell from './components/Shell/Shell.jsx'
 import { apiFetch, getToken, setSetupInProgress } from './api/client.js'
+import { queryClient, persistOptions } from './queryClient.js'
 
 export default function App() {
+  return (
+    <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
+      <AppRoot />
+    </PersistQueryClientProvider>
+  )
+}
+
+function AppRoot() {
+  // PersistQueryClientProvider hydrates the cache asynchronously from
+  // IndexedDB on cold load. During that window, `useQuery` returns
+  // `isPending: true` even for cached queries. We hold the splash up
+  // until restoration completes so ChatView's useState initializer
+  // sees the hydrated cache (no flash on cold reload).
+  const isRestoring = useIsRestoring()
   // Fast path: if we have a token, show Shell immediately.
   // The splash covers the initial render so there's no flash.
   const hasToken = !!getToken()
@@ -38,7 +55,7 @@ export default function App() {
       .finally(removeSplash)
   }, [])
 
-  if (status === 'loading') return null
+  if (status === 'loading' || isRestoring) return null
   if (status === 'setup') return <SetupWizard onDone={() => { setSetupInProgress(false); setStatus('shell') }} />
   if (status === 'login') return <LoginForm onLogin={() => setStatus('shell')} />
   return <Shell />

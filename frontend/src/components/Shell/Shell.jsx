@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import Drawer from '../Drawer/Drawer.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
 import ChatView from '../ChatView/ChatView.jsx'
@@ -7,6 +8,7 @@ import { apiFetch, BASE } from '../../api/client.js'
 import usePushSubscription from '../../hooks/usePushSubscription.js'
 import useNavigation from '../../hooks/useNavigation.js'
 import useTheme from '../../hooks/useTheme.js'
+import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import './Shell.css'
 
 export default function Shell() {
@@ -20,6 +22,7 @@ export default function Shell() {
   } = useNavigation()
 
   const { loadTheme } = useTheme()
+  const queryClient = useQueryClient()
 
   const [apps, setApps] = useState([])
   const [appVersion, setAppVersion] = useState(0)
@@ -206,6 +209,9 @@ export default function Shell() {
   async function deleteChat(id) {
     await apiFetch(`/chats/${id}`, { method: 'DELETE' }).catch(() => {})
     try { sessionStorage.removeItem(`draft:${id}`) } catch {}
+    // Evict any cached messages for the deleted chat so a future chat
+    // ID collision (e.g. recovery) doesn't surface stale content.
+    queryClient.removeQueries({ queryKey: chatMessagesQueryKey(id) })
     if (activeChatId === id) {
       await newChat()
     }

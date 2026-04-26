@@ -145,6 +145,12 @@ fetch(url, { headers: { Authorization: `Bearer ${token}` } })
 
 ## Gotchas
 
+- **Reverting the theme:** `DELETE /api/storage/shared/theme.css` (no
+  body needed). The platform owns defaults — `/api/theme` returns the
+  user override if present, otherwise the built-in default. Don't try
+  to write a "minimal" theme.css with only a few variables; it gets
+  shadowed by the server-injected initial-render block. Either
+  override completely OR delete entirely.
 - Cron + storage API can get out of sync. Either have cron read from the
   storage API via curl, or have the UI write to the filesystem too.
 - Cron scripts need `CLAUDE_CONFIG_DIR=/data/cli-auth/claude`.
