@@ -54,6 +54,39 @@
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  /* Containing block for absolutely-positioned .shell__view
+     siblings. Each view is full-bleed, stacked, and toggled via
+     visibility — see .shell__view rationale below. */
+  position: relative;
+}
+
+/* `.shell__view` wraps each persisted view (ChatView, AppCanvas).
+   All views are laid out simultaneously (position: absolute, inset
+   0) and toggled via `visibility` + `pointer-events`. Why not
+   display:none?
+     - display:none forces a full layout reflow on each view-flip.
+       ChatView's ResizeObserver fires (size 0 -> real), spacer
+       recalculates, scroll restoration kicks in -> visible jitter.
+     - Iframes inside display:none parents pause some painting; on
+       un-hide, Chrome repaints from scratch -> "elements
+       disappear/reappear" feel reported on app-back-nav.
+   visibility:hidden keeps the layout stable so views are instantly
+   ready when re-shown. The cost is constant layout for all
+   mounted views — acceptable since at most 2-3 are mounted (the
+   active chat, optionally a recently-visited app, optionally
+   settings). */
+.shell__view {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.shell__view--active {
+  visibility: visible;
+  pointer-events: auto;
 }
 
 /* ── PWA install banner ────────────────────────────── */

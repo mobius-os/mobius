@@ -103,10 +103,27 @@ export default function useNavigation() {
   }
 
   function navTo(view, opts = {}) {
-    // Consume the drawer sentinel if present — the user's tap on a
-    // drawer item IS the navigation, so the sentinel becomes the
-    // entry that holds this navTo's "back-to" position.
-    drawerPushedRef.current = false
+    // Ensure exactly one history entry exists above the current
+    // entry to serve as the back-target for this navigation.
+    // Two cases:
+    //   - drawer was open: openDrawer already pushed a sentinel;
+    //     we consume it (clear drawerPushedRef so closeDrawer
+    //     doesn't try to history.back() again).
+    //   - drawer was closed (e.g. nav from a chat's "Open app"
+    //     banner, or from a deep-link entry point with no drawer
+    //     interaction yet): push our own back-target sentinel.
+    //     Without this, navigating from a drawer-less state leaves
+    //     zero entries above base — back-gesture exits the PWA
+    //     instead of returning to the prior view. (Real bug seen
+    //     in deep-link → onOpenApp flow before this fix.)
+    // No BFCache concern in the closed-drawer push path: there's no
+    // drawer animation in flight when we pushState, so Chrome's
+    // snapshot of the entry-being-left captures the clean view.
+    if (drawerPushedRef.current) {
+      drawerPushedRef.current = false
+    } else {
+      try { history.pushState(null, '') } catch { /* ignore */ }
+    }
     navStackRef.current.push({
       view: activeViewRef.current,
       chatId: activeChatIdRef.current,
@@ -114,12 +131,16 @@ export default function useNavigation() {
     })
     drawerOpenRef.current = false
     setDrawerOpen(false)
-    setActiveView(view)
+    // Order matters: set view-payload state (chatId, appId) BEFORE
+    // flipping activeView. If React doesn't batch (or batches
+    // partially), an early render would see view='canvas' but a
+    // stale appId, briefly mounting AppCanvas with the wrong appId
+    // and producing a small visible jitter. Setting view last
+    // guarantees the conditional rendering only flips when the
+    // payload is correct.
     if ('chatId' in opts) setActiveChatId(opts.chatId)
     if ('appId' in opts) setActiveAppId(opts.appId)
-    // No pushState here — see top-of-file rationale. The drawer
-    // sentinel (if there was one) remains in browser history and
-    // serves as the back-target for this navigation.
+    setActiveView(view)
   }
 
   useEffect(() => {
@@ -150,9 +171,21 @@ export default function useNavigation() {
       setDrawerOpen(false)
       const entry = navStackRef.current.pop()
       if (entry) {
-        setActiveView(entry.view)
+        // Order matters: set view-payload state (chatId, appId)
+        // BEFORE flipping activeView. If React doesn't batch (or
+        // batches partially), an early render would see view=
+        // 'canvas' but a stale appId, briefly mounting AppCanvas
+        // with the wrong appId. Setting view last guarantees the
+        // conditional rendering only flips when payload is correct.
+        //
+        // We can faithfully restore entry.appId (even when null) —
+        // the multi-iframe LRU in Shell keeps recently-visited apps
+        // mounted regardless of activeAppId, so a transition to
+        // null doesn't unmount any iframe; the cached AppCanvas
+        // simply becomes hidden until the user re-enters it.
         setActiveChatId(entry.chatId)
         setActiveAppId(entry.appId)
+        setActiveView(entry.view)
       }
     }
 

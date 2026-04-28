@@ -146,6 +146,15 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // spacerActive: keeps min-height: 0 on the list while the spacer is active,
   //   preventing min-height: calc(100% + 1px) from inflating offsetHeight.
   const [spacerActive, setSpacerActive] = useState(false)
+
+  // Reveal-after-scroll-settle gate. The scroll container is rendered
+  // with `visibility: hidden` until scroll restoration has applied the
+  // saved position AND lazy renderers (KaTeX, highlight.js) have
+  // settled — so the user never sees an intermediate position. They
+  // see the chat appear already at the right place, every time.
+  // Reset on every fresh mount because Shell uses key={activeChatId},
+  // so chat-switching is structurally unmount + mount.
+  const [revealed, setRevealed] = useState(false)
   // Set in doSend, consumed by the spacer useLayoutEffect.
   const needsSpacerRef = useRef(false)
   // Persists scrollTarget across renders so promote can recalculate the spacer.
@@ -331,9 +340,16 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     const el = scrollRef.current
     if (el && !fullViewHRef.current) fullViewHRef.current = el.clientHeight
 
-    if (!needsScrollRef.current) return
+    if (!needsScrollRef.current) {
+      // Nothing to restore (e.g. brand-new chat) — reveal immediately.
+      if (!revealed) setRevealed(true)
+      return
+    }
     needsScrollRef.current = false
-    if (!el) return
+    if (!el) {
+      setRevealed(true)
+      return
+    }
     // Spacer height must be restored first — it affects scrollHeight.
     const savedSpacer = _spacerHeights[chatId]
     const sp = el.querySelector('.spacer-dynamic')
@@ -376,11 +392,21 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         settleTimer = setTimeout(() => {
           applyScroll()
           ro.disconnect()
+          setRevealed(true)
         }, 50)
       })
       ro.observe(listEl)
+    } else {
+      // No list to observe — reveal immediately.
+      setRevealed(true)
     }
-    const safety = setTimeout(() => ro?.disconnect(), 1500)
+    // Safety: reveal even if RO never settles (lazy renderers still
+    // working past 1.5s). Capped so the user is never stranded on a
+    // hidden chat.
+    const safety = setTimeout(() => {
+      ro?.disconnect()
+      setRevealed(true)
+    }, 1500)
     return () => {
       clearTimeout(settleTimer)
       clearTimeout(safety)
@@ -628,7 +654,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         </div>
       )}
       {!showEmpty && (
-      <div className="chat__scroll" ref={scrollRef} onScroll={handleScroll}>
+      <div
+        className="chat__scroll"
+        ref={scrollRef}
+        onScroll={handleScroll}
+        style={revealed ? undefined : { visibility: 'hidden' }}
+      >
         <ul className="chat__list" style={spacerActive ? { minHeight: 0 } : undefined}>
           {hasMore && (
             <li className="chat__older">

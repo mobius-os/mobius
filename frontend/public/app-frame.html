@@ -139,35 +139,106 @@
   </script>
 
   <script type="module">
+    // Token-free init protocol (since 2026-04-27).
+    //
+    // The frame HTML is now cacheable across sessions because the
+    // auth token and theme are NOT baked into the body. Instead the
+    // parent shell injects them via postMessage after the iframe
+    // loads. Sequence:
+    //
+    //   1. iframe finishes loading, this script runs.
+    //   2. iframe posts {type:'moebius:frame-ready', appId} to parent.
+    //   3. parent (AppCanvas.jsx) replies with
+    //      {type:'moebius:frame-init', token, themeCss, bg}.
+    //   4. iframe applies theme, imports module with token, mounts.
+    //   5. parent may later post {type:'moebius:frame-theme', ...}
+    //      to update theme without reloading the iframe.
+    //
+    // Origin check: the iframe rejects any message whose origin
+    // isn't `_FRAME_PARENT_ORIGIN` (baked in by the server). An
+    // attacker embedding this frame on their own page can read the
+    // ready event but cannot inject a token — their reply has the
+    // wrong origin.
     import { createRoot } from 'react-dom/client';
     import { createElement } from 'react';
 
     const params = new URLSearchParams(location.search);
-    const appId = params.get('appId');
-    const token = params.get('token') || '';
     const version = params.get('v') || '0';
 
-    if (!appId || !token) {
-      showErr('Configuration error', 'Missing appId or authentication token.');
-    } else {
+    let initialized = false;
+
+    function applyTheme(css, bg) {
+      if (typeof css === 'string' && css.length) {
+        let el = document.getElementById('moebius-theme');
+        if (!el) {
+          el = document.createElement('style');
+          el.id = 'moebius-theme';
+          document.head.appendChild(el);
+        }
+        el.textContent = css;
+      }
+      if (typeof bg === 'string' && bg.length) {
+        document.body.style.background = bg;
+      }
+    }
+
+    async function loadModule(token) {
+      if (!token) {
+        showErr('Configuration error', 'No token received from parent.');
+        return;
+      }
       try {
-        // Include the version in the URL so the browser / SW cache is
-        // busted whenever the agent updates the app. Without this, the
-        // module URL is stable and clients never pick up edits.
-        const url = `/api/apps/${appId}/module?token=${encodeURIComponent(token)}&v=${encodeURIComponent(version)}`;
+        const url = `/api/apps/${_FRAME_APP_ID}/module?token=${encodeURIComponent(token)}&v=${encodeURIComponent(version)}`;
         const mod = await import(url);
         const Component = mod.default;
         if (!Component) {
           showErr('Module error', 'The app module has no default export.');
-        } else {
-          createRoot(document.getElementById('root')).render(
-            createElement(Component, { appId, token })
-          );
+          return;
         }
+        createRoot(document.getElementById('root')).render(
+          createElement(Component, { appId: _FRAME_APP_ID, token })
+        );
+        // Tell the parent we've kicked off the React render so it
+        // can hide the loading overlay. iframe.onLoad alone fires
+        // BEFORE this point (it's the document's load event, not the
+        // app's mount), so on a cold module fetch the parent would
+        // hide the spinner while the iframe is still blank.
+        window.parent.postMessage(
+          { type: 'moebius:frame-mounted', appId: _FRAME_APP_ID },
+          _FRAME_PARENT_ORIGIN
+        );
       } catch (err) {
         showErr('Failed to load app', err.stack || err.message);
       }
     }
+
+    window.addEventListener('message', (e) => {
+      if (e.origin !== _FRAME_PARENT_ORIGIN) return;
+      const msg = e.data;
+      if (!msg || typeof msg !== 'object') return;
+      if (msg.type === 'moebius:frame-theme') {
+        applyTheme(msg.themeCss, msg.bg);
+        return;
+      }
+      if (msg.type === 'moebius:frame-init' && !initialized) {
+        initialized = true;
+        applyTheme(msg.themeCss, msg.bg);
+        loadModule(msg.token);
+      }
+    });
+
+    // No ready/retry handshake. The parent (AppCanvas) drives init
+    // off the iframe's `onLoad` event, which by spec fires AFTER all
+    // module scripts in this document have executed and registered
+    // their message listeners. By then this listener is guaranteed
+    // to be live, so a single postMessage from the parent reaches
+    // it without a race. If we never get init within 10s the iframe
+    // was opened standalone (not inside Möbius) — show an error.
+    setTimeout(() => {
+      if (!initialized) {
+        showErr('Loading timeout', 'No init message from parent shell.');
+      }
+    }, 10000);
   </script>
 </body>
 </html>

@@ -5,7 +5,6 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
@@ -160,21 +159,28 @@ def delete_app(
 @router.get("/{app_id}/frame")
 def get_frame(
   app_id: int,
-  token: str | None = None,
   v: int = 0,
   db: Session = Depends(get_db),
 ):
-  """Serves the mini-app runtime frame with the module inlined.
+  """Serves the mini-app runtime frame HTML.
 
-  The compiled JS is embedded directly in the HTML so the sandboxed
-  iframe (no allow-same-origin) doesn't need to make any cross-origin
-  requests to load the module.  External imports (react, recharts) come
-  from the esm.sh CDN via the importmap and work from any origin.
+  Token-free as of 2026-04-27: the parent shell injects the auth
+  token and the current theme via `postMessage` after the iframe
+  loads, instead of having them server-templated into the body.
+  This makes the frame HTML cacheable across sessions: same
+  (app_id, version) ↔ same response bytes ↔ SW cache hit. With the
+  cache, opening any previously-visited app on a cold PWA start
+  saves the round-trip to the server.
+
+  Frame is intentionally public — it's just the runtime shell
+  (importmap, error UI, postMessage init script). Actual app
+  modules at `/api/apps/{id}/module` still require a token. An
+  attacker embedding this frame in their own page would receive
+  the iframe's `frame-ready` postMessage on their parent window,
+  but the iframe's origin check (against `_FRAME_PARENT_ORIGIN`,
+  baked in below) rejects any reply from a non-Möbius origin, so
+  no token can be coerced into the frame.
   """
-  if not token or not auth.decode_access_token(token):
-    raise HTTPException(
-      status_code=401, detail="Valid token required."
-    )
   app = db.query(models.App).filter(models.App.id == app_id).first()
   if not app or not app.compiled_path:
     raise HTTPException(status_code=404, detail="App not found.")
@@ -183,11 +189,8 @@ def get_frame(
     raise HTTPException(status_code=404, detail="Compiled module missing.")
 
   # Frame priority: agent-editable copy first, then dev-mode path, then
-  # the baked-in fallback.  The agent can edit
-  # /data/shell/public/app-frame.html directly — that file is seeded
-  # once on first boot from /app/shell-src/public/ and is never
-  # overwritten on subsequent boots, so edits persist across
-  # restarts without needing a shell rebuild.
+  # the baked-in fallback. The agent can edit
+  # /data/shell/public/app-frame.html directly.
   frame_candidates = [
     Path(get_settings().data_dir) / "shell" / "public" / "app-frame.html",
     Path(__file__).parent.parent.parent.parent
@@ -200,24 +203,11 @@ def get_frame(
 
   html = frame_path.read_text(encoding="utf-8")
 
-  # Inject theme CSS (default or override) so mini-apps match the shell.
-  from app.theme import inject_theme_into_html
-  html = inject_theme_into_html(html, get_settings().data_dir)
-
-  # Inject appId/token/version into the module script so it can load the
-  # component. The `v` is propagated into the module URL inside the frame
-  # so that bumping the app version (on `app_updated` events) busts the
-  # browser/SW cache; without `v`, the module URL is stable and clients
-  # would never pick up agent edits.
-  html = html.replace(
-    'const params = new URLSearchParams(location.search);',
-    'const params = new URLSearchParams("'
-    + urlencode({"appId": app_id, "token": token, "v": v})
-    + '");',
-  )
-  # Inject appId/chatId into the plain script globals so reportError()
-  # can route errors back to the correct chat.  These placeholders must
-  # match the literals in app-frame.html exactly.
+  # Per-app server-side substitutions. These are stable per-app so
+  # they don't break cacheability of the response. The TOKEN
+  # (per-session) and THEME (per-user-edit) are intentionally NOT
+  # substituted server-side — the parent shell sends them via
+  # postMessage after iframe load. See app-frame.html init script.
   html = html.replace(
     "var _FRAME_APP_ID = 'unknown'",
     f"var _FRAME_APP_ID = {json.dumps(str(app_id))}",
@@ -230,7 +220,16 @@ def get_frame(
     "var _FRAME_PARENT_ORIGIN = 'UNSET'",
     f"var _FRAME_PARENT_ORIGIN = {json.dumps(get_settings().frontend_origin)}",
   )
-  return HTMLResponse(html)
+
+  # When versioned, treat as immutable — the agent bumps `v` on every
+  # update so cache invalidation is automatic. The SW also caches this
+  # cache-first; long-lived since URL changes on app update.
+  cache_header = (
+    "public, max-age=31536000, immutable"
+    if v
+    else "no-cache"
+  )
+  return HTMLResponse(html, headers={"Cache-Control": cache_header})
 
 
 @router.get("/{app_id}/module")

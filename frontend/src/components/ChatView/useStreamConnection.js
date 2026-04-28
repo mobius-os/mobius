@@ -398,8 +398,13 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
       throw err
     }
 
-    // Small delay for the background task to start emitting events.
-    await new Promise(r => setTimeout(r, 50))
+    // No delay needed: chats_stream.py's POST handler calls
+    // create_broadcast(chat_id) synchronously BEFORE returning 202,
+    // so by the time this code resumes after `await apiFetch(...)`
+    // the broadcast is registered. The GET /stream we're about to
+    // make can find it. (The previous 50ms wait was a patch around
+    // a misdiagnosed race; verified deterministic by inspecting
+    // backend/app/routes/chats_stream.py:121-131.)
     connectRef.current?.(true)
   }, [])
 

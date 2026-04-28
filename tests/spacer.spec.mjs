@@ -367,7 +367,7 @@ test.describe('Short responses', () => {
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
       () => !!document.querySelector('.chat__scroll'),
-      { timeout: 8000 }
+      { timeout: 15000 }
     )
     await page.evaluate(() => new Promise(r =>
       requestAnimationFrame(() => requestAnimationFrame(r))

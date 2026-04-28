@@ -25,12 +25,36 @@ export default function Shell() {
   const queryClient = useQueryClient()
 
   const [apps, setApps] = useState([])
-  const [appVersion, setAppVersion] = useState(0)
+  // Per-app version map. Bumped when an `app_updated` SSE event
+  // arrives for that specific app so its iframe `key` cycles. The
+  // multi-iframe LRU cache (below) needs per-app versions because a
+  // single scalar would mis-bust other cached apps' iframes when one
+  // gets edited.
+  const [appVersions, setAppVersions] = useState({})
+  // LRU cache of recently-visited app IDs (most-recent first).
+  // Each entry stays mounted as a hidden iframe so re-opening it via
+  // drawer-tap or back-nav is instant — no module re-fetch, no
+  // WebGL re-init, no app-side data refetch. Bounded by APP_CACHE_MAX
+  // to keep memory predictable on phones (each Three.js / WebGL app
+  // can hold tens of MB).
+  const APP_CACHE_MAX = 4
+  const [appCache, setAppCache] = useState([])
   const [toast, setToast] = useState(null)
   const [chats, setChats] = useState([])
   const chatsLoadedRef = useRef(false)
   const [builtApp, setBuiltApp] = useState(null)
   const [pwaPrompt, setPwaPrompt] = useState(null)
+
+  // Maintain the LRU: when activeAppId changes, move it to the front
+  // of the cache (mounting it if new). Caps at APP_CACHE_MAX; the
+  // tail is evicted (its iframe unmounts, freeing memory).
+  useEffect(() => {
+    if (activeAppId === null || activeAppId === undefined) return
+    setAppCache(prev => {
+      const filtered = prev.filter(id => id !== activeAppId)
+      return [activeAppId, ...filtered].slice(0, APP_CACHE_MAX)
+    })
+  }, [activeAppId])
 
   usePushSubscription()
 
@@ -81,8 +105,13 @@ export default function Shell() {
   // Handle non-content SSE events: theme changes, app updates, shell rebuilds.
   const handleSystemEvent = useCallback((ev) => {
     if (ev.type === 'theme_updated') {
+      // Theme is dynamic in iframes since the token-free frame
+      // refactor: AppCanvas re-broadcasts the theme via
+      // `moebius:frame-theme` postMessage on every theme change,
+      // and the frame applies it without remounting. We do NOT need
+      // to bump appVersions / cycle iframe keys — that would tear
+      // down running apps for a CSS swap and lose their state.
       loadTheme()
-      setAppVersion(v => v + 1)
     } else if (ev.type === 'app_updated') {
       if (ev.appId) {
         refreshApps().then(updatedApps => {
@@ -92,8 +121,14 @@ export default function Shell() {
       } else {
         refreshApps()
       }
-      if (ev.appId && String(ev.appId) === String(activeAppId)) {
-        setAppVersion(v => v + 1)
+      // Bump only the affected app's version so its iframe refreshes
+      // while other cached apps stay intact. Works whether the app
+      // is currently active or just sitting in the LRU cache.
+      if (ev.appId) {
+        setAppVersions(prev => ({
+          ...prev,
+          [ev.appId]: (prev[ev.appId] || 0) + 1,
+        }))
       }
     } else if (ev.type === 'shell_rebuilt') {
       // Deduplicate against the SSE catch-up burst to avoid reload loops.
@@ -271,23 +306,54 @@ export default function Shell() {
       />
 
       <main className="shell__content">
-        {activeView === 'chat' && activeChatId
-          ? <ChatView
-              key={activeChatId}
-              chatId={activeChatId}
-              onStreamEnd={() => { refreshApps(); loadTheme(); refreshChats() }}
-              onFirstMessage={refreshChats}
-              onSystemEvent={handleSystemEvent}
-              builtApp={builtApp}
-              onOpenApp={(id) => { navTo('canvas', { appId: id }); setBuiltApp(null) }}
-              onMessageStart={() => setBuiltApp(null)}
+        {/* Single-mount ChatView, keyed by activeChatId. Switching
+            chats unmounts and remounts; ChatView's hide-then-reveal
+            scroll-restore (visibility:hidden until lazy renderers
+            settle) makes that remount visually seamless. We tried
+            multi-mount LRU caching to avoid remount entirely, but
+            the resulting DOM-reorder on every chat-switch silently
+            reset scrollTop after a few rotations. Single-mount with
+            hide-then-reveal is structurally simpler and locked in
+            by tests. */}
+        {activeView === 'chat' && activeChatId && (
+          <ChatView
+            key={activeChatId}
+            chatId={activeChatId}
+            onStreamEnd={() => { refreshApps(); loadTheme(); refreshChats() }}
+            onFirstMessage={refreshChats}
+            onSystemEvent={handleSystemEvent}
+            builtApp={builtApp}
+            onOpenApp={(appId) => { navTo('canvas', { appId }); setBuiltApp(null) }}
+            onMessageStart={() => setBuiltApp(null)}
+          />
+        )}
+        {/* Multi-iframe LRU cache: render every recently-visited app
+            as its own persisted iframe; only the matching one is
+            visible. Re-opening a cached app via drawer-tap or back-
+            nav is instant (no iframe reload). Cap is APP_CACHE_MAX.
+
+            Render order is sorted by id (stable across LRU rotations)
+            so React never calls insertBefore to reorder the wrappers
+            on app-switch. Reordering keyed children causes Chrome to
+            reload the sandboxed iframes inside, which then never
+            receive a fresh frame-init from the parent and hit the
+            10s "Loading timeout" guard. LRU still controls eviction;
+            only DOM order is stable. */}
+        {[...appCache].sort((a, b) => Number(a) - Number(b)).map(id => (
+          <div
+            key={id}
+            className={`shell__view ${activeView === 'canvas' && activeAppId === id ? 'shell__view--active' : ''}`}
+          >
+            <AppCanvas
+              appId={id}
+              version={appVersions[id] || 0}
+              appName={apps.find(a => String(a.id) === String(id))?.name}
             />
-          : activeView === 'canvas'
-            ? <AppCanvas appId={activeAppId} version={appVersion} />
-            : activeView === 'settings'
-              ? <SettingsView onThemeChange={loadTheme} />
-              : null
-        }
+          </div>
+        ))}
+        {activeView === 'settings' && (
+          <SettingsView onThemeChange={loadTheme} />
+        )}
       </main>
       {pwaPrompt && (
         <div className="shell__pwa-banner">

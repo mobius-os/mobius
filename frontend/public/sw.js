@@ -3,6 +3,11 @@
 // Cache strategy by URL:
 //   /vendor/*                   cache-first    (immutable bundled libs)
 //   /assets/*                   cache-first    (Vite-hashed shell assets)
+//   /api/apps/{id}/frame        cache-first    (URL is version-busted via `?v=`;
+//                                                token + theme are no longer in
+//                                                the body — sent via postMessage
+//                                                so the response is stable per
+//                                                (app, version))
 //   /api/apps/{id}/module       cache-first    (URL is version-busted via `?v=`,
 //                                                so cache is naturally invalidated
 //                                                whenever the agent updates the app)
@@ -11,7 +16,7 @@
 // Everything else (HTML, /api/*) goes straight to the network.
 //
 // Bumping VERSION purges old caches on activate.
-const VERSION = 'v3'
+const VERSION = 'v4'
 const CACHES = {
   vendor: `mobius-vendor-${VERSION}`,
   assets: `mobius-assets-${VERSION}`,
@@ -58,6 +63,15 @@ self.addEventListener('fetch', (event) => {
     }
     if (/^\/api\/apps\/\d+\/module/.test(path)) {
       // Version is in the query string; same URL = same content.
+      event.respondWith(cacheFirst(req, CACHES.apps))
+      return
+    }
+    if (/^\/api\/apps\/\d+\/frame/.test(path)) {
+      // Frame HTML is now token-free and theme-free (parent injects
+      // both via postMessage post-load), so the response is stable
+      // per (app_id, version). The version is in the query string;
+      // same URL = same content. Cache-first matches the module
+      // strategy.
       event.respondWith(cacheFirst(req, CACHES.apps))
       return
     }
