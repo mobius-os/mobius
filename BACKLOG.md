@@ -14,10 +14,10 @@ _(none right now)_
   is the mechanical follow-up to the TanStack work).
 - **Spacer test 9 flake under Playwright chromium.** "Short response
   — spacer preserved after reload" times out in the full chromium
-  suite ~1 in 2 runs but passes alone. Likely resource contention
-  in the parallel test runner. If CI is flaky on this, either bump
-  retries to 1 in `playwright.config.js` or split the suite into
-  smaller projects.
+  suite ~1 in 2 runs but passes alone. Mitigated in 81170a7 by
+  bumping its per-test timeout 8s → 15s; if it still flakes after
+  that, either bump retries to 1 in `playwright.config.js` or split
+  the suite into smaller projects.
 
 ## Next up — agent / iteration loop
 
@@ -47,11 +47,24 @@ _(none right now)_
   backend-only edits).
 - **Owner-status `useQuery`** to replace the imperative fetch in
   `App.jsx`.
-- **`flushSync` / React-18 transition opt-ins** to formalize
-  before-paint scroll restoration in `ChatView`.
 
 ## Closed (recent)
 
+- (81170a7) App iframe LRU + token-free postMessage protocol +
+  chat hide-then-reveal scroll restore + nav back-target sentinel
+  fix. Multi-iframe LRU (cap 4) keeps recently-visited apps mounted
+  with preserved state; render order is sorted by id (NOT LRU
+  recency) so React never reorders keyed wrappers — DOM reparent
+  was reloading sandboxed iframes and tripping the 10s frame-init
+  timeout. Chat scroll restore moved to a hide-then-reveal pattern
+  (`visibility: hidden` until RO-settle + safety cap) — kills the
+  visible jitter without racing the browser to set scrollTop
+  before paint. Multi-mount chat-cache experiment was tried and
+  reverted; structural cost (sessionStorage flush gap, stale
+  closure on applyScroll, native scrollTop reset on reparent) was
+  far higher than user-visible benefit. `navTo` now ensures a
+  back-target sentinel exists so deep-link → "Open app" →
+  swipe-back returns to chat instead of exiting the PWA.
 - (74d3800) Navigation hardening: flushSync(setDrawerOpen(false))
   before pushState in navTo + Shell.newChat. CLAUDE.md "Navigation
   non-negotiable constraints" section locks 6 rules. Test 21

@@ -205,7 +205,7 @@
         // hide the spinner while the iframe is still blank.
         window.parent.postMessage(
           { type: 'moebius:frame-mounted', appId: _FRAME_APP_ID },
-          _FRAME_PARENT_ORIGIN
+          window.location.origin
         );
       } catch (err) {
         showErr('Failed to load app', err.stack || err.message);
@@ -213,7 +213,7 @@
     }
 
     window.addEventListener('message', (e) => {
-      if (e.origin !== _FRAME_PARENT_ORIGIN) return;
+      if (e.origin !== window.location.origin) return;
       const msg = e.data;
       if (!msg || typeof msg !== 'object') return;
       if (msg.type === 'moebius:frame-theme') {

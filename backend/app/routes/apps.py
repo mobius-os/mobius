@@ -216,10 +216,8 @@ def get_frame(
     "var _FRAME_CHAT_ID = ''",
     f"var _FRAME_CHAT_ID = {json.dumps(app.chat_id or '')}",
   )
-  html = html.replace(
-    "var _FRAME_PARENT_ORIGIN = 'UNSET'",
-    f"var _FRAME_PARENT_ORIGIN = {json.dumps(get_settings().frontend_origin)}",
-  )
+  # _FRAME_PARENT_ORIGIN removed — the frame uses
+  # window.location.origin (always same-origin with the shell).
 
   # When versioned, treat as immutable — the agent bumps `v` on every
   # update so cache invalidation is automatic. The SW also caches this
