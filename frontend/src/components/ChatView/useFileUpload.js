@@ -63,6 +63,12 @@ export default function useFileUpload({ chatId }) {
     setFiles(prev => {
       const removing = prev.find(c => c.id === id)
       if (removing?.objectUrl) URL.revokeObjectURL(removing.objectUrl)
+      if (removing?.status === 'done' && removing.name) {
+        fetch(`${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(removing.name)}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${getToken()}` },
+        }).catch(() => {})
+      }
       return prev.filter(c => c.id !== id)
     })
   }

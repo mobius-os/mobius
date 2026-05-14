@@ -583,6 +583,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
   const doSend = useCallback(async (text) => {
     if (!text.trim() || sending) return
+    if (pendingFiles.some(c => c.status === 'uploading')) return
     onMessageStart?.()
     promotedRef.current = false
 

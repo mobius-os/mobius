@@ -7,7 +7,9 @@ Only GET and POST are supported. Requests are authenticated so only the
 owner can use this endpoint.
 """
 
-from urllib.parse import urlparse
+import ipaddress
+import socket
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -38,10 +40,13 @@ async def proxy_get(
   _: models.Owner = Depends(get_current_owner_or_app),
 ):
   """Fetches a URL via GET and returns the raw response body."""
-  _validate_url(url)
+  pinned_url, hostname = _validate_url(url)
   async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
     try:
-      r = await client.get(url)
+      req = client.build_request("GET", pinned_url)
+      req.headers["host"] = hostname
+      req.extensions["sni_hostname"] = hostname.encode("ascii")
+      r = await client.send(req)
     except Exception as exc:
       raise HTTPException(status_code=502, detail=str(exc))
   return Response(
@@ -59,14 +64,17 @@ async def proxy_post(
   """Posts to a URL and returns the raw response body."""
   if body.body and len(body.body.encode()) > _MAX_BODY:
     raise HTTPException(413, "Request body too large (max 512 KB)")
-  _validate_url(body.url)
+  pinned_url, hostname = _validate_url(body.url)
   async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
     try:
-      r = await client.post(
-        body.url,
+      req = client.build_request(
+        "POST", pinned_url,
         content=body.body.encode(),
         headers={"Content-Type": body.content_type},
       )
+      req.headers["host"] = hostname
+      req.extensions["sni_hostname"] = hostname.encode("ascii")
+      r = await client.send(req)
     except Exception as exc:
       raise HTTPException(status_code=502, detail=str(exc))
   return Response(
@@ -76,10 +84,38 @@ async def proxy_post(
   )
 
 
-def _validate_url(url: str) -> None:
-  """Rejects non-HTTP(S) URLs and malformed inputs."""
+def _validate_url(url: str) -> tuple[str, str]:
+  """Validates URL and returns (pinned_url, original_hostname).
+
+  Resolves the hostname, rejects any non-global IPs, and rewrites the URL
+  to connect directly to a validated IP address. This prevents DNS rebinding
+  between validation and connection (TOCTOU).
+  """
   if not url.startswith(("http://", "https://")):
     raise HTTPException(status_code=400, detail="Only http/https URLs allowed.")
   parsed = urlparse(url)
   if not parsed.hostname:
     raise HTTPException(status_code=400, detail="Invalid URL.")
+  try:
+    infos = socket.getaddrinfo(
+      parsed.hostname,
+      parsed.port or (443 if parsed.scheme == "https" else 80),
+    )
+  except socket.gaierror:
+    raise HTTPException(status_code=400, detail="Cannot resolve hostname.")
+  validated_ip = None
+  for _fam, _type, _proto, _canon, sockaddr in infos:
+    ip = ipaddress.ip_address(sockaddr[0])
+    if not ip.is_global:
+      raise HTTPException(
+        status_code=403,
+        detail="Proxying to private/internal addresses is not allowed.",
+      )
+    if validated_ip is None:
+      validated_ip = str(ip)
+  if validated_ip is None:
+    raise HTTPException(status_code=400, detail="Cannot resolve hostname.")
+  ip_host = f"[{validated_ip}]" if ":" in validated_ip else validated_ip
+  new_netloc = f"{ip_host}:{parsed.port}" if parsed.port else ip_host
+  pinned_url = urlunparse(parsed._replace(netloc=new_netloc))
+  return pinned_url, parsed.hostname

@@ -74,3 +74,75 @@ def test_upload_rejects_missing_chat(client, auth):
     headers=auth,
   )
   assert res.status_code == 404
+
+
+def test_delete_upload(client, db, auth, chat):
+  """DELETE /api/chats/{id}/uploads/{filename} removes file and DB entry."""
+  client.post(
+    f"/api/chats/{chat.id}/uploads",
+    files=[("files", ("remove-me.txt", io.BytesIO(b"bye"), "text/plain"))],
+    headers=auth,
+  )
+  db.refresh(chat)
+  assert len(chat.uploads) == 1
+
+  res = client.delete(
+    f"/api/chats/{chat.id}/uploads/remove-me.txt",
+    headers=auth,
+  )
+  assert res.status_code == 204
+
+  db.refresh(chat)
+  assert len(chat.uploads) == 0
+
+
+def test_delete_upload_missing_chat(client, auth):
+  """DELETE to a nonexistent chat returns 404."""
+  res = client.delete("/api/chats/nope/uploads/any.txt", headers=auth)
+  assert res.status_code == 404
+
+
+def test_delete_upload_leaves_others_intact(client, db, auth, chat):
+  """Deleting one upload does not affect other uploads on the same chat."""
+  r1 = client.post(
+    f"/api/chats/{chat.id}/uploads",
+    files=[("files", ("keep-one.txt", io.BytesIO(b"aaa"), "text/plain"))],
+    headers=auth,
+  )
+  r2 = client.post(
+    f"/api/chats/{chat.id}/uploads",
+    files=[("files", ("keep-two.txt", io.BytesIO(b"bbb"), "text/plain"))],
+    headers=auth,
+  )
+  name1 = r1.json()[0]["name"]
+  name2 = r2.json()[0]["name"]
+  db.refresh(chat)
+  assert len(chat.uploads) == 2
+
+  client.delete(f"/api/chats/{chat.id}/uploads/{name1}", headers=auth)
+  db.refresh(chat)
+  assert len(chat.uploads) == 1
+  assert chat.uploads[0]["name"] == name2
+
+
+def test_delete_upload_missing_file_still_cleans_db(client, db, auth, chat):
+  """DELETE succeeds even if the file was already removed from disk."""
+  client.post(
+    f"/api/chats/{chat.id}/uploads",
+    files=[("files", ("ghost.txt", io.BytesIO(b"x"), "text/plain"))],
+    headers=auth,
+  )
+  db.refresh(chat)
+  import pathlib, os
+  from app.config import get_settings
+  fpath = pathlib.Path(get_settings().data_dir) / "chats" / chat.id / "uploads" / "ghost.txt"
+  if fpath.exists():
+    fpath.unlink()
+
+  res = client.delete(
+    f"/api/chats/{chat.id}/uploads/ghost.txt",
+    headers=auth,
+  )
+  assert res.status_code == 204
+  db.refresh(chat)
+  assert len(chat.uploads) == 0

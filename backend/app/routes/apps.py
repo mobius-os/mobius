@@ -177,9 +177,9 @@ def get_frame(
   modules at `/api/apps/{id}/module` still require a token. An
   attacker embedding this frame in their own page would receive
   the iframe's `frame-ready` postMessage on their parent window,
-  but the iframe's origin check (against `_FRAME_PARENT_ORIGIN`,
-  baked in below) rejects any reply from a non-Möbius origin, so
-  no token can be coerced into the frame.
+  but the iframe's origin check (against `window.location.origin`)
+  rejects any reply from a non-Möbius origin, so no token can be
+  coerced into the frame.
   """
   app = db.query(models.App).filter(models.App.id == app_id).first()
   if not app or not app.compiled_path:

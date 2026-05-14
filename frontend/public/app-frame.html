@@ -105,7 +105,6 @@
     // Populated by server-side injection in get_frame() — do not rename.
     var _FRAME_APP_ID = 'unknown'
     var _FRAME_CHAT_ID = ''
-    var _FRAME_PARENT_ORIGIN = 'UNSET'
 
     var capturedError = ''
     var capturedErrorOnce = false  // only the first error is reported (root cause)
@@ -124,7 +123,7 @@
         appId: _FRAME_APP_ID,
         chatId: _FRAME_CHAT_ID,
         error: capturedError
-      }, _FRAME_PARENT_ORIGIN)
+      }, window.location.origin)
       var btn = document.getElementById('report-btn')
       btn.textContent = 'Reported'
       btn.className = 'error-btn error-btn--reported'
@@ -155,10 +154,10 @@
     //      to update theme without reloading the iframe.
     //
     // Origin check: the iframe rejects any message whose origin
-    // isn't `_FRAME_PARENT_ORIGIN` (baked in by the server). An
-    // attacker embedding this frame on their own page can read the
-    // ready event but cannot inject a token — their reply has the
-    // wrong origin.
+    // isn't window.location.origin (same-origin with the shell).
+    // An attacker embedding this frame on their own page can read
+    // the ready event but cannot inject a token — their reply has
+    // the wrong origin.
     import { createRoot } from 'react-dom/client';
     import { createElement } from 'react';
 

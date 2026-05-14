@@ -8,14 +8,14 @@ import pathlib
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
 
 from app import models
 from app.auth import decode_access_token
 from app.config import get_settings
 from app.database import get_db
-from app.deps import get_current_owner_or_app
+from app.deps import get_current_owner, get_current_owner_or_app
 
 router = APIRouter(prefix="/api/chats", tags=["uploads"])
 
@@ -84,7 +84,7 @@ def _auth_token(
 async def upload_files(
   chat_id: str,
   files: List[UploadFile],
-  owner: models.Owner = Depends(get_current_owner_or_app),
+  owner: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
   """Saves uploaded files to /data/chats/{id}/uploads/ and records metadata."""
@@ -140,6 +140,37 @@ def list_uploads(
   if not chat:
     raise HTTPException(status_code=404, detail="Chat not found.")
   return chat.uploads or []
+
+
+@router.delete("/{chat_id}/uploads/{filename}", status_code=204)
+def delete_upload(
+  chat_id: str,
+  filename: str = Path(...),
+  owner: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Removes an uploaded file from disk and from the chat's upload list."""
+  chat = db.query(models.Chat).filter(
+    models.Chat.id == chat_id,
+    models.Chat.deleted_at.is_(None),
+  ).first()
+  if not chat:
+    raise HTTPException(status_code=404, detail="Chat not found.")
+
+  settings = get_settings()
+  upload_dir = pathlib.Path(settings.data_dir) / "chats" / chat_id / "uploads"
+  file_path = (upload_dir / filename).resolve()
+  if not str(file_path).startswith(str(upload_dir.resolve()) + os.sep):
+    raise HTTPException(status_code=400, detail="Invalid path.")
+
+  if file_path.exists() and file_path.is_file():
+    file_path.unlink()
+
+  if chat.uploads:
+    chat.uploads = [u for u in chat.uploads if u.get("name") != filename]
+    db.commit()
+
+  return Response(status_code=204)
 
 
 @router.get("/{chat_id}/uploads/{filename}")

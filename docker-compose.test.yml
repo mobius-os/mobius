@@ -22,5 +22,20 @@ services:
       retries: 3
       start_period: 30s
 
+  pytest:
+    image: mobius-test:ci
+    profiles: ["test"]
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/tests:/app/tests
+      - ./frontend/public/app-frame.html:/app/app-frame.html
+    environment:
+      - SECRET_KEY=test-secret-key-at-least-32-characters-long
+      - DATABASE_URL=sqlite:////tmp/test.db
+      - DATA_DIR=/tmp/testdata
+      - FRONTEND_ORIGIN=http://localhost:5173
+    working_dir: /app
+    entrypoint: ["python", "-m", "pytest", "tests/", "-v"]
+
 volumes:
   test_data:

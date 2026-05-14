@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.config import get_settings
 from app.database import get_db
-from app.deps import get_current_owner_or_app
+from app.deps import get_current_owner, get_current_owner_or_app
 
 router = APIRouter(prefix="/api/storage", tags=["storage"])
 
@@ -119,7 +119,7 @@ def read_shared_file(
 def write_shared_file(
   path: str,
   body: WriteBody,
-  _: models.Owner = Depends(get_current_owner_or_app),
+  _: models.Owner = Depends(get_current_owner),
 ):
   """Writes text content to a file in the shared data directory."""
   base = Path(get_settings().data_dir) / "shared"
@@ -132,7 +132,7 @@ def write_shared_file(
 @router.delete("/shared/{path:path}", status_code=204)
 def delete_shared_file(
   path: str,
-  _: models.Owner = Depends(get_current_owner_or_app),
+  _: models.Owner = Depends(get_current_owner),
 ):
   """Deletes a file from the shared data directory. 404 if missing."""
   base = Path(get_settings().data_dir) / "shared"
