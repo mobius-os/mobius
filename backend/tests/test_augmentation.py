@@ -110,10 +110,11 @@ def test_message_saved_before_run_chat(client, db, auth, chat):
   assert "hello world" in captured_messages[0]["content"]
 
 
-def test_double_send_stops_and_restarts(client, db, auth, chat):
-  """Sending a message while agent is running stops old, starts new."""
+def test_double_send_queues_message(client, db, auth, chat):
+  """Sending a message while agent is running queues it without killing."""
   from app.chat import _active_procs
-  from unittest.mock import MagicMock, AsyncMock, patch
+  from app import models
+  from unittest.mock import MagicMock, AsyncMock
 
   mock_proc = MagicMock()
   mock_proc.returncode = None
@@ -122,16 +123,18 @@ def test_double_send_stops_and_restarts(client, db, auth, chat):
   _active_procs[chat.id] = mock_proc
 
   try:
-    async def fake_run_chat(*a, **kw):
-      pass
-    with patch("app.routes.chats_stream.run_chat", side_effect=fake_run_chat):
-      resp = client.post(
-        f"/api/chats/{chat.id}/messages",
-        json={"content": "second message"},
-        headers=auth,
-      )
+    resp = client.post(
+      f"/api/chats/{chat.id}/messages",
+      json={"content": "second message"},
+      headers=auth,
+    )
     assert resp.status_code == 202
-    mock_proc.kill.assert_called_once()
+    assert resp.json()["status"] == "queued"
+    # Agent must NOT be killed — current turn finishes naturally.
+    mock_proc.kill.assert_not_called()
+    # Message must be saved to DB for the next turn.
+    db.refresh(chat)
+    assert any(m["content"] == "second message" for m in chat.messages)
   finally:
     _active_procs.pop(chat.id, None)
 

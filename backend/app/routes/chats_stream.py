@@ -67,18 +67,25 @@ async def send_message(
     raise HTTPException(status_code=404, detail="Chat not found.")
 
   if not mark_starting(chat_id):
-    from app.chat import stop_chat_for
-    stopped = await stop_chat_for(chat_id)
-    if not stopped:
-      raise HTTPException(
-        status_code=503,
-        detail="Agent did not stop in time. Try again.",
-      )
-    if not mark_starting(chat_id):
-      raise HTTPException(
-        status_code=503,
-        detail="Could not start agent after stop.",
-      )
+    # Agent is already running for this chat.  Save the user message
+    # to the DB so it's part of the conversation history, but don't
+    # kill the agent or start a new run.  The message is queued — the
+    # user can send the next turn after the current response finishes.
+    user_msg = {
+      "role": "user",
+      "content": body.content,
+      "ts": int(time.time() * 1000),
+    }
+    if body.hidden:
+      user_msg["hidden"] = True
+    if body.attachments:
+      user_msg["attachments"] = body.attachments
+    existing = list(chat.messages or [])
+    existing.append(user_msg)
+    chat.messages = existing
+    chat.updated_at = datetime.now(UTC)
+    db.commit()
+    return JSONResponse(status_code=202, content={"status": "queued"})
 
   # From here until create_task, any exception must discard the
   # starting guard — otherwise the chat_id stays in the set forever and

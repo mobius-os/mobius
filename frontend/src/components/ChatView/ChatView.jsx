@@ -698,21 +698,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     onStreamEnd?.()
   }
 
-  async function handleInterruptSend(e) {
-    e.preventDefault()
-    const text = input.trim()
-    if (!text) return
-    // Stop current stream, promote partial response.
-    promoteStreamToMessages()
-    disconnect({ clearStreaming: true })
-    setSending(false)
-    onStreamEnd?.()
-    // Small delay to let React commit the state reset before
-    // doSend checks the sending guard.
-    await new Promise(r => requestAnimationFrame(r))
-    doSend(text)
-  }
-
   const hasMore = offset > 0
   const showEmpty = messages.length === 0 && !isStreaming && !loading && !sending
   const lastUserIdx = messages.reduce((acc, m, i) => (m.role === 'user' && !m.hidden) ? i : acc, -1)
@@ -910,21 +895,14 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                   <rect width="12" height="12" rx="2" />
                 </svg>
               </button>
-            ) : (input.trim() || sending) && !listening ? (
+            ) : input.trim() && !listening ? (
               <button
                 className="chat__send"
                 type="button"
-                onTouchEnd={(e) => {
-                  e.preventDefault()
-                  if (sending) handleInterruptSend(e)
-                  else handleSubmit(e)
-                }}
-                onClick={(e) => {
-                  if (sending) handleInterruptSend(e)
-                  else handleSubmit(e)
-                }}
+                onTouchEnd={(e) => { e.preventDefault(); handleSubmit(e) }}
+                onClick={handleSubmit}
                 aria-label="Send"
-                disabled={!sending && pendingFiles.some(c => c.status === 'uploading')}
+                disabled={sending || pendingFiles.some(c => c.status === 'uploading')}
               >
                 <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
                   <path d="M6.5 11V2M2 6.5l4.5-4.5 4.5 4.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
