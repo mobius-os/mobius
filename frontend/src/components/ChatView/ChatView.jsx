@@ -225,6 +225,13 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       promoteStreamToMessages()
       setSending(false)
       onStreamEnd?.()
+      // Flush any message queued while the agent was streaming.
+      // Must fire after setSending(false) so doSend's guard passes.
+      const pending = pendingMessageRef.current
+      if (pending) {
+        pendingMessageRef.current = null
+        requestAnimationFrame(() => doSend(pending))
+      }
     },
     onSystemEvent,
     onNeedsRefresh: fetchMessages,
@@ -594,9 +601,24 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     addFiles(fileList)
   }
 
+  // Holds a message typed while the agent is streaming. Flushed
+  // by onStreamEnd after the current turn completes — preserves
+  // conversation ordering (assistant response before queued message).
+  const pendingMessageRef = useRef(null)
+
   const doSend = useCallback(async (text) => {
-    if (!text.trim() || sending) return
+    if (!text.trim()) return
     if (pendingFiles.some(c => c.status === 'uploading')) return
+    // If the agent is streaming, queue the message for after
+    // the current turn finishes. Show it optimistically now.
+    if (sending) {
+      pendingMessageRef.current = text
+      const userMsg = { role: 'user', content: text, ts: Date.now() }
+      commitMessages(prev => [...prev, userMsg])
+      setInput('')
+      if (inputRef.current) inputRef.current.style.height = 'auto'
+      return
+    }
     onMessageStart?.()
     promotedRef.current = false
 
@@ -885,7 +907,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
               placeholder="Message the agent..."
               rows={1}
             />
-            {sending ? (
+            {(sending && !input.trim()) ? (
               <button className="chat__stop" type="button" onClick={handleStop} aria-label="Stop">
                 <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
                   <rect width="12" height="12" rx="2" />
@@ -898,7 +920,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                 onTouchEnd={(e) => { e.preventDefault(); handleSubmit(e) }}
                 onClick={handleSubmit}
                 aria-label="Send"
-                disabled={sending || pendingFiles.some(c => c.status === 'uploading')}
+                disabled={pendingFiles.some(c => c.status === 'uploading')}
               >
                 <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
                   <path d="M6.5 11V2M2 6.5l4.5-4.5 4.5 4.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
