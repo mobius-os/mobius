@@ -634,6 +634,33 @@ test.describe('Autoscroll behavior', () => {
     // They stay near the top where their message was sent.
     const gap = m.scrollH - m.scrollTop - m.clientH
     expect(gap).toBeGreaterThan(100)
+    assertUserMsgAtTop(m, 'after long SSE promote')
+  })
+
+  test('20b. User message stays pinned near top through real SSE stream', async ({ page }) => {
+    // Replaces removed test 25. Uses real SSE/React path (not DOM
+    // injection) to verify the user message remains near the top
+    // after a long streaming response completes and is promoted.
+    const chunks = []
+    for (let i = 0; i < 15; i++) {
+      chunks.push({ type: 'text', content: `Line ${i + 1}. ${'Filling. '.repeat(8)} ` })
+    }
+    await setupWithSSE(page, [
+      { type: 'catch_up_done' },
+      ...chunks,
+      { type: 'done' },
+    ])
+    await newChat(page)
+    await sendMessage(page, 'Pin test')
+
+    await page.waitForFunction(
+      () => !document.querySelector('.chat__stop'),
+      { timeout: 10000 }
+    )
+    await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
+
+    const m = await measure(page)
+    assertUserMsgAtTop(m, 'after stream completion')
   })
 })
 
@@ -813,35 +840,6 @@ test.describe('Scroll edge cases', () => {
       return s ? s.scrollHeight - s.scrollTop - s.clientHeight : 0
     })
     expect(afterGap).toBeLessThan(50)
-  })
-
-  test('25. First message does NOT auto-follow as response grows', async ({ page }) => {
-    // On the first message, the user msg + thinking dots fit on screen.
-    // As the response streams and overflows, auto-follow should NOT
-    // engage — the user didn't scroll to the bottom, they're just
-    // viewing a page that hasn't overflowed yet.
-    await setup(page)
-    await newChat(page)
-    await sendMessage(page, 'Short question')
-
-    // Record scroll position right after send.
-    const scrollAfterSend = await page.evaluate(() =>
-      document.querySelector('.chat__scroll')?.scrollTop ?? 0
-    )
-
-    // Now inject a LOT of content — simulates a long streaming response.
-    // This will overflow the viewport.
-    await injectContent(page, 'Long streaming response paragraph. ', 100)
-    await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
-
-    // Verify content overflowed.
-    const m = await measure(page)
-    expect(m.scrollH).toBeGreaterThan(m.clientH + 100)
-
-    // The user should NOT be at the bottom — they should be near their
-    // original scroll position (where the user message was).
-    const gap = m.scrollH - m.scrollTop - m.clientH
-    expect(gap).toBeGreaterThan(100)
   })
 
   test('26. Second send after scroll-up on first response', async ({ page }) => {

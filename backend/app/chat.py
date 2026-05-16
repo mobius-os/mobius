@@ -97,6 +97,16 @@ _active_procs: dict[str, asyncio.subprocess.Process] = {}
 # This closes the TOCTOU gap between is_chat_running and proc registration.
 _starting: set[str] = set()
 
+# Per-run generation counter. Incremented by stop_chat_for so
+# in-flight run_chat tasks for an older generation abort before
+# spawning a subprocess.
+_run_generation: dict[str, int] = {}
+
+
+def current_run_generation(chat_id: str) -> int:
+  """Returns the current generation for a chat (0 if none)."""
+  return _run_generation.get(chat_id, 0)
+
 
 def get_active_procs() -> dict[str, asyncio.subprocess.Process]:
   """Accessor for the active-procs dict.  Prefer this over importing
@@ -156,8 +166,46 @@ async def stop_chat(chat_id: str | None = None, db: Session = None) -> bool:
 
 
 async def stop_chat_for(chat_id: str, db: Session = None) -> bool:
-  """Kills the agent subprocess for a specific chat."""
-  return await stop_chat(chat_id, db=db)
+  """Kills the agent subprocess for a specific chat.
+
+  Bumps the generation counter so any in-flight run_chat task for
+  the old generation aborts before spawning. Waits for the process
+  to die with a bounded timeout.
+  """
+  gen = _run_generation.get(chat_id, 0) + 1
+  _run_generation[chat_id] = gen
+
+  proc = _active_procs.get(chat_id)
+  if proc and proc.returncode is None:
+    proc.kill()
+    try:
+      await asyncio.wait_for(proc.wait(), timeout=2.0)
+    except asyncio.TimeoutError:
+      # Proc didn't die — keep it tracked so it's not orphaned.
+      return False
+    # Wait succeeded — now safe to remove.
+    _active_procs.pop(chat_id, None)
+
+  bc = get_broadcast(chat_id)
+  if bc and bc.running:
+    bc.mark_completed()
+
+  _starting.discard(chat_id)
+  return True
+
+
+def filter_post_question(event_type: str, suppress_text: bool) -> tuple[bool, bool]:
+  """Decides whether a parsed event should be broadcast to SSE clients.
+
+  Returns (publish, new_suppress_text). After a question event,
+  suppresses text, tool_output, and tool_end (Claude's auto-answer
+  fallback). TODO: unnecessary with SDK canUseTool approach.
+  """
+  if event_type == "question":
+    return True, True
+  if suppress_text and event_type in ("text", "tool_output", "tool_end"):
+    return False, True
+  return True, suppress_text
 
 
 def _finalize_response(
@@ -205,6 +253,8 @@ async def run_chat(
   messages: list[schemas.ChatMessage],
   chat_id: str = "",
   session_id: str | None = None,
+  provider_id: str | None = None,
+  run_gen: int | None = None,
   attachments: list[dict] | None = None,
   timezone: str | None = None,
   viewport: dict | None = None,
@@ -220,21 +270,35 @@ async def run_chat(
   try:
     await _run_chat_impl(
       messages, chat_id=chat_id, session_id=session_id,
+      provider_id=provider_id, run_gen=run_gen,
       attachments=attachments, timezone=timezone, viewport=viewport,
     )
   finally:
-    _starting.discard(chat_id)
+    # Only clear _starting if we still own this generation.
+    # A newer stop_chat_for may have bumped the generation and
+    # taken ownership of _starting.
+    if run_gen is None or _run_generation.get(chat_id, 0) == run_gen:
+      _starting.discard(chat_id)
 
 
 async def _run_chat_impl(
   messages: list[schemas.ChatMessage],
   chat_id: str = "",
   session_id: str | None = None,
+  provider_id: str | None = None,
+  run_gen: int | None = None,
   attachments: list[dict] | None = None,
   timezone: str | None = None,
   viewport: dict | None = None,
 ) -> None:
   """Inner implementation of run_chat; see wrapper for lifecycle notes."""
+  # Check if a newer send superseded this one while we were queued.
+  # Do NOT discard _starting here — the newer run owns it.
+  if run_gen is not None and _run_generation.get(chat_id, 0) != run_gen:
+    log = _get_logger()
+    log.info("run_chat aborted: generation mismatch chat_id=%s", chat_id)
+    return
+
   from app.database import SessionLocal
   db = SessionLocal()
   log = _get_logger()
@@ -316,28 +380,19 @@ async def _run_chat_impl(
     "CHAT_ID": chat_id,
   })
 
+  # Get the provider first — needed for auth check.
+  provider = get_provider(provider_id)
+
   # Pre-flight: check that provider credentials exist before spawning
   # the CLI. Without this, the CLI fails with a cryptic error.
-  creds_path = (
-    Path(settings.data_dir)
-    / "cli-auth" / "claude" / ".credentials.json"
-  )
-  if not creds_path.exists():
-    bc.publish({
-      "type": "error",
-      "message": (
-        "Not signed in. Open Settings and connect "
-        "under AI provider."
-      ),
-    })
+  auth_error = provider.check_auth(settings.data_dir)
+  if auth_error:
+    bc.publish({"type": "error", "message": auth_error})
     bc.publish({"type": "done"})
     set_active_broadcast(None)
     bc.mark_completed()
     db.close()
     return
-
-  # Get the active provider and build its command.
-  provider = get_provider()
   result = provider.build(
     user_message=user_message,
     session_id=session_id,
@@ -353,6 +408,7 @@ async def _run_chat_impl(
     "chat start chat_id=%s provider=%s session=%s msg_len=%d",
     chat_id, provider.name, session_id or "new", len(user_message),
   )
+  proc = None
   try:
     proc = await asyncio.create_subprocess_exec(
       *result.cmd,
@@ -387,13 +443,21 @@ async def _run_chat_impl(
           if not line:
             continue
 
-          # Capture session_id from the CLI init event.
+          parsed = provider.parse_line(line)
+          if parsed is None:
+            log.debug("skipped: %.200s", line)
+            continue
+
+          # parse_line may return a single dict or a list.
+          events = (
+            parsed if isinstance(parsed, list) else [parsed]
+          )
+
+          # Capture session_id from provider-normalized event.
           if not session_captured:
-            try:
-              raw_event = json.loads(line)
-              if (raw_event.get("type") == "system"
-                  and raw_event.get("subtype") == "init"):
-                sid = raw_event.get("session_id")
+            for evt in events:
+              if evt.get("type") == "session_init":
+                sid = evt.get("session_id")
                 if sid and chat_id:
                   from app.models import Chat
                   chat_obj = (
@@ -405,19 +469,11 @@ async def _run_chat_impl(
                     chat_obj.session_id = sid
                     db.commit()
                 session_captured = True
-            except json.JSONDecodeError:
-              pass
+                break
 
-          parsed = provider.parse_line(line)
-          if parsed is None:
-            log.debug("skipped: %.200s", line)
-            continue
-
-          # parse_line may return a single dict or a list.
-          events = (
-            parsed if isinstance(parsed, list) else [parsed]
-          )
           for event in events:
+            if event.get("type") == "session_init":
+              continue  # internal event, don't broadcast
             event_type = event.get("type")
             log.debug("event type=%s", event_type)
 
@@ -437,11 +493,10 @@ async def _run_chat_impl(
             # Suppress Claude's fallback text and the synthetic tool
             # result. TODO: with the Agent SDK's canUseTool callback
             # the auto-answer never fires and this is unnecessary.
-            if event_type == "question":
-              suppress_text = True
-            if suppress_text and event_type in (
-              "text", "tool_output", "tool_end",
-            ):
+            publish, suppress_text = filter_post_question(
+              event_type, suppress_text,
+            )
+            if not publish:
               continue
 
             bc.publish(event)
@@ -487,7 +542,8 @@ async def _run_chat_impl(
 
     finally:
       _finalize_response(db, chat_id, assistant_blocks)
-      _active_procs.pop(chat_id, None)
+      if _active_procs.get(chat_id) is proc:
+        _active_procs.pop(chat_id, None)
       set_active_broadcast(None)
       bc.mark_completed()
       stderr_task.cancel()
@@ -498,7 +554,8 @@ async def _run_chat_impl(
         proc.kill()
 
   except Exception as exc:
-    _active_procs.pop(chat_id, None)
+    if proc is not None and _active_procs.get(chat_id) is proc:
+      _active_procs.pop(chat_id, None)
     log.exception("run_chat failed chat_id=%s: %s", chat_id, exc)
     _finalize_response(db, chat_id, assistant_blocks)
     bc.publish({"type": "error", "message": str(exc)})

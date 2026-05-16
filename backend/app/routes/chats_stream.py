@@ -67,13 +67,29 @@ async def send_message(
     raise HTTPException(status_code=404, detail="Chat not found.")
 
   if not mark_starting(chat_id):
-    raise HTTPException(status_code=409, detail="Agent is already running.")
+    from app.chat import stop_chat_for
+    stopped = await stop_chat_for(chat_id)
+    if not stopped:
+      raise HTTPException(
+        status_code=503,
+        detail="Agent did not stop in time. Try again.",
+      )
+    if not mark_starting(chat_id):
+      raise HTTPException(
+        status_code=503,
+        detail="Could not start agent after stop.",
+      )
 
   # From here until create_task, any exception must discard the
   # starting guard — otherwise the chat_id stays in the set forever and
   # the chat is stuck "starting" until process restart.  run_chat's
   # outer finally only fires after the task is scheduled.
   try:
+    # Set provider on first message (new chat).
+    if not chat.messages:
+      owner = db.query(models.Owner).first()
+      chat.provider = (owner.provider if owner else "claude") or "claude"
+
     # Build the full message history for the agent.
     msgs = [schemas.ChatMessage(role=m["role"], content=m.get("content", ""))
             for m in (chat.messages or [])]
@@ -124,9 +140,12 @@ async def send_message(
     # endpoint can subscribe immediately without a race.
     bc = create_broadcast(chat_id)  # noqa: F841 — registered in global registry
 
+    from app.chat import current_run_generation
+    gen = current_run_generation(chat_id)
     asyncio.create_task(
       run_chat(
         msgs, chat_id=chat_id, session_id=chat.session_id,
+        provider_id=chat.provider, run_gen=gen,
         attachments=body.attachments, timezone=body.timezone,
         viewport=body.viewport,
       )

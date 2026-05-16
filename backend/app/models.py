@@ -16,6 +16,7 @@ class Owner(Base):
   username = Column(String(64), nullable=False, unique=True)
   hashed_password = Column(String(255), nullable=False)
   gemini_api_key_enc = Column(Text, nullable=True, default=None)
+  provider = Column(String(32), nullable=False, default="claude")
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
 
@@ -31,6 +32,7 @@ class Chat(Base):
   generated_images = Column(JSON, nullable=False, default=list)
   deleted_at = Column(DateTime, nullable=True, default=None)
   session_id = Column(String(128), nullable=True, default=None)
+  provider = Column(String(32), nullable=False, default="claude")
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)

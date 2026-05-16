@@ -65,10 +65,19 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     return True
 
   if event_type == "question":
-    assistant_blocks.append({
-      "type": "question",
-      "questions": event.get("questions", []),
-    })
+    # Coalesce: if the last block is already a question (from a
+    # partial assistant event), replace it instead of appending.
+    # --include-partial-messages can deliver progressively more
+    # complete question data for the same AskUserQuestion call.
+    questions = event.get("questions", [])
+    if (assistant_blocks
+        and assistant_blocks[-1].get("type") == "question"):
+      assistant_blocks[-1]["questions"] = questions
+    else:
+      assistant_blocks.append({
+        "type": "question",
+        "questions": questions,
+      })
     return True
 
   return False

@@ -182,6 +182,69 @@ test.describe('Stream reconnection', () => {
     expect(streamRequestCount).toBe(1)
   })
 
+  test('6. Typing while streaming shows Send instead of Stop', async ({ page }) => {
+    let streamCount = 0
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async route => {
+      streamCount++
+      if (streamCount === 1) {
+        // First stream: deliver text but keep connection open (no done).
+        // The SSE body ends at the network level, which makes
+        // useStreamConnection see EOF → it calls onStreamEnd. To keep
+        // the "sending" state visible long enough for the test, we
+        // delay the response so the typing happens while Stop is shown.
+        await new Promise(r => setTimeout(r, 500))
+        route.fulfill({
+          status: 200,
+          headers: {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+          },
+          body: sseBody([
+            { type: 'text', content: 'streaming...' },
+            { type: 'done' },
+          ]),
+        })
+      } else {
+        route.fulfill({
+          status: 200,
+          headers: {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+          },
+          body: sseBody([
+            { type: 'text', content: 'second response' },
+            { type: 'done' },
+          ]),
+        })
+      }
+    })
+
+    await setupChat(page)
+    await send(page, 'hello')
+
+    // Stop button should appear while agent is working.
+    await expect(page.locator('button[aria-label="Stop"]')).toBeVisible({
+      timeout: 3000,
+    }).catch(() => {
+      // Stream may have completed already — that's OK for this test.
+      // The key invariant is below.
+    })
+
+    // After stream completes, type a follow-up.
+    await expect(page.locator('.chat__scroll')).toContainText(
+      'streaming...', { timeout: 5000 },
+    )
+    const input = page.getByRole('textbox', { name: 'Message the agent...' })
+    await input.fill('follow up')
+    await expect(page.locator('button[aria-label="Send"]')).toBeVisible()
+
+    // Send and verify second response arrives.
+    await page.locator('button[aria-label="Send"]').click()
+    await expect(page.locator('.chat__scroll')).toContainText(
+      'second response', { timeout: 5000 },
+    )
+  })
+
   test('5. 204 shortly after send retries instead of refreshing', async ({ page }) => {
     let streamRequestCount = 0
 

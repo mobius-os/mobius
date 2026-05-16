@@ -41,6 +41,15 @@ const _spacerHeights = (() => {
  *  different) would cause stale rendering, so this comparison stays on
  *  the safe side: any structural difference in the last entry returns
  *  false. */
+function sameBlock(a, b) {
+  if (a === b) return true
+  if (!a || !b) return false
+  return a.type === b.type && a.status === b.status
+      && a.content === b.content && a.tool === b.tool
+      && a.input === b.input && a.output === b.output
+      && a.questions === b.questions && a.answers === b.answers
+}
+
 function sameMessageList(a, b) {
   if (a === b) return true
   if (!a || !b) return false
@@ -56,8 +65,7 @@ function sameMessageList(a, b) {
   if ((bla?.length || 0) !== (blb?.length || 0)) return false
   if (bla && blb) {
     for (let i = 0; i < bla.length; i++) {
-      if (bla[i] !== blb[i]
-          && JSON.stringify(bla[i]) !== JSON.stringify(blb[i])) return false
+      if (!sameBlock(bla[i], blb[i])) return false
     }
   }
   return true
@@ -242,15 +250,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     const items = latestItemsRef.current
     if (items.length === 0) return
     promotedRef.current = true
-    // If the user scrolled up during streaming (not near the bottom),
-    // null the scroll target so the spacer effect skips re-anchoring.
-    // Without this, the content restructure triggers the ResizeObserver
-    // which snaps them back to the bottom.  If the user IS near the
-    // bottom (following the stream), preserve the scroll target so
-    // auto-follow continues through the promote.
-    if (!nearBottomRef.current) {
-      scrollTargetRef.current = null
-    }
+    // Preserve scrollTargetRef so the spacer layout effect re-anchors
+    // the user message at the same position after promote. Previously
+    // this nulled scrollTargetRef when nearBottomRef was false, but
+    // nearBottomRef is always false in the normal pinned state (user
+    // message at top, response growing below). Nulling caused the
+    // layout effect to skip re-anchoring, shifting scroll position.
     const blocks = items.map(item => {
       if (item.type === 'text') return { type: 'text', content: item.content }
       if (item.type === 'question') return { type: 'question', questions: item.questions }
@@ -693,9 +698,24 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     onStreamEnd?.()
   }
 
+  async function handleInterruptSend(e) {
+    e.preventDefault()
+    const text = input.trim()
+    if (!text) return
+    // Stop current stream, promote partial response.
+    promoteStreamToMessages()
+    disconnect({ clearStreaming: true })
+    setSending(false)
+    onStreamEnd?.()
+    // Small delay to let React commit the state reset before
+    // doSend checks the sending guard.
+    await new Promise(r => requestAnimationFrame(r))
+    doSend(text)
+  }
+
   const hasMore = offset > 0
   const showEmpty = messages.length === 0 && !isStreaming && !loading && !sending
-  const lastUserIdx = messages.reduce((acc, m, i) => m.role === 'user' ? i : acc, -1)
+  const lastUserIdx = messages.reduce((acc, m, i) => (m.role === 'user' && !m.hidden) ? i : acc, -1)
 
   return (
     <div className={`chat${showEmpty ? ' chat--empty' : ''}`}>
@@ -880,19 +900,31 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
               placeholder="Message the agent..."
               rows={1}
             />
-            {sending ? (
+            {/* Send/Stop/Mic button. The Send button is a STABLE element
+                that never unmounts — only its onClick changes. This prevents
+                mobile keyboard dismissal when React re-renders the button
+                between touch-start and touch-end. */}
+            {(sending && !input.trim()) ? (
               <button className="chat__stop" type="button" onClick={handleStop} aria-label="Stop">
                 <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
                   <rect width="12" height="12" rx="2" />
                 </svg>
               </button>
-            ) : (input.trim() && !listening) ? (
+            ) : (input.trim() || sending) && !listening ? (
               <button
                 className="chat__send"
                 type="button"
-                onClick={handleSubmit}
+                onTouchEnd={(e) => {
+                  e.preventDefault()
+                  if (sending) handleInterruptSend(e)
+                  else handleSubmit(e)
+                }}
+                onClick={(e) => {
+                  if (sending) handleInterruptSend(e)
+                  else handleSubmit(e)
+                }}
                 aria-label="Send"
-                disabled={pendingFiles.some(c => c.status === 'uploading')}
+                disabled={!sending && pendingFiles.some(c => c.status === 'uploading')}
               >
                 <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
                   <path d="M6.5 11V2M2 6.5l4.5-4.5 4.5 4.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>

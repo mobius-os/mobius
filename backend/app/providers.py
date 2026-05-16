@@ -66,6 +66,10 @@ class BaseProvider:
   # Subdirectory under /data/cli-auth/ where credentials are stored.
   auth_dir: str = ""
 
+  def check_auth(self, data_dir: str) -> str | None:
+    """Returns an error message if not authenticated, None if ok."""
+    return None
+
   def build(
     self,
     user_message: str,
@@ -88,12 +92,30 @@ class ClaudeProvider(BaseProvider):
   cli_cmd = "claude"
   auth_dir = "claude"
 
+  def check_auth(self, data_dir):
+    creds = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
+    if not creds.exists():
+      return (
+        "Not signed in. Open Settings and connect "
+        "under AI provider."
+      )
+    return None
+
   def build(self, user_message, session_id, base_env, data_dir, chat_id=None):
     cmd = [
       "claude",
       "-p",
       "--output-format", "stream-json",
       "--verbose",
+      # DO NOT REMOVE --include-partial-messages. Without it the CLI
+      # closes stdout without emitting a result event — the stream
+      # ends silently and no assistant response appears. stream-json
+      # is used (instead of plain text) because it gives us structured
+      # events: tool_start/tool_end for collapsible tool blocks,
+      # session_id for multi-turn resume, and cost/usage in the result
+      # event. Side effect: intermediate assistant events arrive with
+      # incomplete tool input (e.g. empty questions array for
+      # AskUserQuestion). Those are filtered in _parse_tool_event.
       "--include-partial-messages",
       "--dangerously-skip-permissions",
     ]
@@ -168,9 +190,17 @@ class ClaudeProvider(BaseProvider):
         name = block.get("name", "")
         inp = block.get("input", {})
         if name == "AskUserQuestion":
+          # --include-partial-messages causes the CLI to emit
+          # intermediate assistant events as tool input is assembled.
+          # The first partial has empty/incomplete input (questions: []
+          # or missing question text).  Skip those to avoid rendering
+          # an empty QuestionCard before the real one arrives.
+          questions = inp.get("questions", [])
+          if not questions or not all(q.get("question") for q in questions):
+            continue
           results.append({
             "type": "question",
-            "questions": inp.get("questions", []),
+            "questions": questions,
           })
           continue
         summary = _summarize_input(name, inp)
@@ -247,6 +277,11 @@ class ClaudeProvider(BaseProvider):
 
     event_type = event.get("type")
 
+    if event_type == "system":
+      if event.get("subtype") == "init" and event.get("session_id"):
+        return {"type": "session_init", "session_id": event["session_id"]}
+      return None
+
     if event_type == "stream_event":
       return self._parse_stream_event(event)
     elif event_type == "assistant":
@@ -259,9 +294,163 @@ class ClaudeProvider(BaseProvider):
     return None
 
 
+class CodexProvider(BaseProvider):
+  """OpenAI Codex CLI (codex exec --json)."""
+
+  name = "Codex"
+  cli_cmd = "codex"
+  auth_dir = "codex"
+
+  def check_auth(self, data_dir):
+    creds = Path(data_dir) / "cli-auth" / "codex" / "auth.json"
+    if not creds.exists():
+      return (
+        "Not signed in to Codex. Open Settings and connect "
+        "under AI provider."
+      )
+    return None
+
+  def build(self, user_message, session_id, base_env, data_dir, chat_id=None):
+    agent_settings = _load_agent_settings(data_dir)
+    model = agent_settings.get("codex_model")
+
+    if session_id:
+      # Resume: codex exec resume [OPTIONS] SESSION_ID PROMPT
+      cmd = [
+        "codex", "exec", "resume",
+        "--json",
+        "--dangerously-bypass-approvals-and-sandbox",
+      ]
+      if model:
+        cmd += ["--model", model]
+      cmd += [session_id, user_message]
+    else:
+      # New session: codex exec [OPTIONS] -- PROMPT
+      cmd = [
+        "codex", "exec",
+        "--json",
+        "--dangerously-bypass-approvals-and-sandbox",
+      ]
+      if model:
+        cmd += ["--model", model]
+      cmd += ["--", user_message]
+
+    env = dict(base_env)
+
+    # Point Codex to credential directory (device-auth tokens).
+    codex_home = str(Path(data_dir) / "cli-auth" / "codex")
+    env["CODEX_HOME"] = codex_home
+
+    # Write AGENTS.md for system prompt on first message.
+    if not session_id:
+      skill = _skill_path()
+      if skill:
+        agents_md = Path(data_dir) / "AGENTS.md"
+        try:
+          agents_md.write_text(
+            skill.read_text(encoding="utf-8"), encoding="utf-8",
+          )
+        except OSError:
+          pass
+
+    return ProviderResult(cmd=cmd, env=env)
+
+  def _extract_command(self, raw_cmd: str) -> str:
+    """Extracts the user command from Codex's bash -lc wrapper."""
+    prefix = "/bin/bash -lc '"
+    if raw_cmd.startswith(prefix) and raw_cmd.endswith("'"):
+      return raw_cmd[len(prefix):-1]
+    return raw_cmd
+
+  def parse_line(self, line: str) -> list[dict] | dict | None:
+    try:
+      event = json.loads(line)
+    except json.JSONDecodeError:
+      return None
+
+    etype = event.get("type")
+
+    if etype == "thread.started":
+      tid = event.get("thread_id")
+      if tid:
+        return {"type": "session_init", "session_id": tid}
+      return None
+
+    if etype == "turn.started":
+      return None
+
+    if etype == "item.started":
+      item = event.get("item", {})
+      itype = item.get("type")
+      if itype == "command_execution":
+        return {
+          "type": "tool_start",
+          "tool": "Bash",
+          "input": self._extract_command(item.get("command", "")),
+        }
+      if itype == "file_change":
+        changes = item.get("changes", [])
+        path = changes[0].get("path", "") if changes else ""
+        return {"type": "tool_start", "tool": "Edit", "input": path}
+      if itype == "mcp_tool_call":
+        server = item.get("server", "")
+        tool = item.get("tool", "")
+        return {
+          "type": "tool_start",
+          "tool": f"{server}:{tool}" if server else tool,
+          "input": "",
+        }
+      if itype == "web_search":
+        return {
+          "type": "tool_start",
+          "tool": "WebSearch",
+          "input": item.get("query", ""),
+        }
+      return None
+
+    if etype == "item.completed":
+      item = event.get("item", {})
+      itype = item.get("type")
+      if itype == "agent_message":
+        text = item.get("text", "")
+        if text:
+          return {"type": "text", "content": text}
+        return None
+      if itype == "command_execution":
+        output = item.get("aggregated_output", "").strip()
+        results = []
+        if output:
+          results.append({"type": "tool_output", "content": output})
+        results.append({"type": "tool_end"})
+        return results
+      if itype == "file_change":
+        changes = item.get("changes", [])
+        diff = "\n".join(c.get("diff", "") for c in changes).strip()
+        results = []
+        if diff:
+          results.append({"type": "tool_output", "content": diff})
+        results.append({"type": "tool_end"})
+        return results
+      if itype in ("mcp_tool_call", "web_search"):
+        return {"type": "tool_end"}
+      return None
+
+    if etype == "turn.completed":
+      return {"type": "done", "cost_usd": 0}
+
+    if etype == "error":
+      return {
+        "type": "error",
+        "message": event.get("message", "Codex error"),
+      }
+
+    return None
+
+
 # Registry of available providers, keyed by ID.
 PROVIDERS: dict[str, BaseProvider] = {
   "claude": ClaudeProvider(),
+  "codex": CodexProvider(),
 }
 
 # The default provider when none is configured.

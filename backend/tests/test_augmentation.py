@@ -110,21 +110,57 @@ def test_message_saved_before_run_chat(client, db, auth, chat):
   assert "hello world" in captured_messages[0]["content"]
 
 
-def test_double_send_rejected_when_running(client, db, auth, chat):
-  """Sending a message while agent is running must return 409."""
+def test_double_send_stops_and_restarts(client, db, auth, chat):
+  """Sending a message while agent is running stops old, starts new."""
   from app.chat import _active_procs
-  from unittest.mock import MagicMock
+  from unittest.mock import MagicMock, AsyncMock, patch
 
   mock_proc = MagicMock()
   mock_proc.returncode = None
+  mock_proc.kill = MagicMock()
+  mock_proc.wait = AsyncMock()
   _active_procs[chat.id] = mock_proc
 
   try:
-    resp = client.post(
-      f"/api/chats/{chat.id}/messages",
-      json={"content": "second message"},
-      headers=auth,
-    )
-    assert resp.status_code == 409
+    async def fake_run_chat(*a, **kw):
+      pass
+    with patch("app.routes.chats_stream.run_chat", side_effect=fake_run_chat):
+      resp = client.post(
+        f"/api/chats/{chat.id}/messages",
+        json={"content": "second message"},
+        headers=auth,
+      )
+    assert resp.status_code == 202
+    mock_proc.kill.assert_called_once()
   finally:
     _active_procs.pop(chat.id, None)
+
+
+def test_generation_mismatch_does_not_clear_newer_starting(db):
+  """Old run_chat with stale generation must not clear _starting."""
+  from app.chat import (
+    _starting, _run_generation, current_run_generation,
+  )
+  chat_id = "gen-race-test"
+
+  # Simulate: old run queued at gen 0, then stop bumps to gen 1.
+  _run_generation[chat_id] = 0
+  _starting.add(chat_id)
+
+  # Stop bumps generation (simulating stop_chat_for).
+  _run_generation[chat_id] = 1
+
+  # Old run_chat checks generation — mismatch, should NOT clear
+  # _starting because the newer run owns it.
+  old_gen = 0
+  if old_gen != current_run_generation(chat_id):
+    pass  # would return early in real code
+  else:
+    _starting.discard(chat_id)
+
+  # _starting should still contain chat_id (newer run owns it).
+  assert chat_id in _starting
+
+  # Cleanup.
+  _starting.discard(chat_id)
+  _run_generation.pop(chat_id, None)

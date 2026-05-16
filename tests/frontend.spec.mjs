@@ -309,13 +309,98 @@ test.describe('Message rendering', () => {
       'you picked Blue', { timeout: 5000 },
     )
 
-    // Verify the answered question card shows the selected answer.
-    await expect(page.locator('.qcard__answer')).toContainText('Blue', {
-      timeout: 5000,
-    })
+    // Verify the question card is in answered state (no submit button).
+    await expect(page.locator('.qcard__submit')).toHaveCount(0)
 
     // Verify the persistence endpoint was called with the right answers.
     expect(persistedAnswers).toEqual({ 'What color?': 'Blue' })
+  })
+
+  test('6c. Question card answer sends hidden message', async ({ page }) => {
+    // Regression: hidden flag must be passed through sendMessage
+    // to the backend so question answers don't show as user bubbles.
+    const sentBodies = []
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
+      sentBodies.push(route.request().postDataJSON())
+      route.fulfill({ status: 202, body: '{}' })
+    })
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/question-answers$/, route =>
+      route.fulfill({ status: 200, body: '{"ok":true}' })
+    )
+    await page.route('**/api/chat/stop', route =>
+      route.fulfill({ status: 200, body: '{}' })
+    )
+    let streamCount = 0
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route => {
+      streamCount++
+      route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+        body: streamCount === 1
+          ? [
+              `data: ${JSON.stringify({ type: 'question', questions: [{ question: 'Pick one', header: 'Test', multiSelect: false, options: [{ label: 'A', description: '' }, { label: 'B', description: '' }] }] })}\n\n`,
+              'data: {"type":"done"}\n\n',
+            ].join('')
+          : [
+              'data: {"type":"text","content":"Got it"}\n\n',
+              'data: {"type":"done"}\n\n',
+            ].join(''),
+      })
+    })
+
+    await page.setViewportSize({ width: 412, height: 915 })
+    await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+    await page.waitForFunction(
+      () => !!(document.querySelector('.chat__empty-wrap') || document.querySelector('.chat__form')),
+      { timeout: 10000 }
+    )
+    await newChat(page)
+    await sendMessage(page, 'Ask me')
+    await expect(page.locator('.qcard')).toBeVisible({ timeout: 5000 })
+    await page.locator('.qcard__opt', { hasText: 'A' }).click()
+    await page.locator('.qcard__submit').click()
+
+    await expect.poll(() => sentBodies.length).toBe(2)
+    // The answer message MUST have hidden: true
+    expect(sentBodies[1].hidden).toBe(true)
+    expect(sentBodies[1].content).toContain('A')
+  })
+
+  test('6d. Empty question events do not render a card', async ({ page }) => {
+    // Regression: partial assistant events with empty questions array
+    // must not create an empty QuestionCard.
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
+      route.fulfill({ status: 202, body: '{}' })
+    )
+    await page.route('**/api/chat/stop', route =>
+      route.fulfill({ status: 200, body: '{}' })
+    )
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route =>
+      route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+        body: [
+          // Empty question (partial event) — should be filtered
+          'data: {"type":"question","questions":[]}\n\n',
+          // Real question
+          `data: ${JSON.stringify({ type: 'question', questions: [{ question: 'Real question', header: 'Q', multiSelect: false, options: [{ label: 'X', description: '' }, { label: 'Y', description: '' }] }] })}\n\n`,
+          'data: {"type":"done"}\n\n',
+        ].join(''),
+      })
+    )
+
+    await page.setViewportSize({ width: 412, height: 915 })
+    await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+    await page.waitForFunction(
+      () => !!(document.querySelector('.chat__empty-wrap') || document.querySelector('.chat__form')),
+      { timeout: 10000 }
+    )
+    await newChat(page)
+    await sendMessage(page, 'Ask me')
+
+    // Only ONE question card should render (the real one).
+    await expect(page.locator('.qcard')).toHaveCount(1, { timeout: 5000 })
+    await expect(page.locator('.qcard')).toContainText('Real question')
   })
 })
 

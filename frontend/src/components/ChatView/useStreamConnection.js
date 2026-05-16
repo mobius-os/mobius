@@ -313,11 +313,24 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
               return updated
             })
           } else if (event.type === 'question') {
-            flushBuffer()
-            setStreamItems(prev => [...prev, {
-              type: 'question',
-              questions: event.questions || [],
-            }])
+            const questions = event.questions || []
+            if (questions.length > 0 && questions[0]?.question) {
+              flushBuffer()
+              // Coalesce: if the last stream item is already a question
+              // (from a partial assistant event), replace it instead of
+              // appending. This prevents duplicate/incomplete cards when
+              // --include-partial-messages delivers progressively more
+              // complete question data.
+              setStreamItems(prev => {
+                const last = prev[prev.length - 1]
+                if (last?.type === 'question') {
+                  const updated = [...prev]
+                  updated[updated.length - 1] = { type: 'question', questions }
+                  return updated
+                }
+                return [...prev, { type: 'question', questions }]
+              })
+            }
           } else if (event.type === 'error') {
             flushBuffer()
             setStreamItems(prev => {

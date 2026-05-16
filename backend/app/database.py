@@ -63,9 +63,28 @@ def run_migrations(eng) -> None:
       _add.append("ALTER TABLE chats ADD COLUMN deleted_at DATETIME")
     if "session_id" not in chats_cols:
       _add.append("ALTER TABLE chats ADD COLUMN session_id VARCHAR(128)")
+    if "provider" not in chats_cols:
+      _add.append(
+        "ALTER TABLE chats ADD COLUMN provider VARCHAR(32) "
+        "NOT NULL DEFAULT 'claude'"
+      )
     if _add:
       with eng.connect() as conn:
         for stmt in _add:
+          conn.execute(text(stmt))
+        conn.commit()
+
+  if "owner" in tables:
+    owner_cols = {c["name"] for c in inspector.get_columns("owner")}
+    _add_owner = []
+    if "provider" not in owner_cols:
+      _add_owner.append(
+        "ALTER TABLE owner ADD COLUMN provider VARCHAR(32) "
+        "NOT NULL DEFAULT 'claude'"
+      )
+    if _add_owner:
+      with eng.connect() as conn:
+        for stmt in _add_owner:
           conn.execute(text(stmt))
         conn.commit()
 

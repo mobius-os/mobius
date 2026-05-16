@@ -60,3 +60,21 @@ def test_clear_gemini_key(client, db, auth):
   from app import models
   owner = db.query(models.Owner).first()
   assert owner.gemini_api_key_enc is None
+
+
+def test_set_provider(client, auth):
+  """POST /api/settings with provider switches the active provider."""
+  client.post("/api/settings", json={"provider": "codex"}, headers=auth)
+  r = client.get("/api/settings", headers=auth)
+  assert r.json()["provider"] == "codex"
+
+  client.post("/api/settings", json={"provider": "claude"}, headers=auth)
+  r = client.get("/api/settings", headers=auth)
+  assert r.json()["provider"] == "claude"
+
+
+def test_set_invalid_provider_ignored(client, auth):
+  """POST /api/settings with invalid provider is silently ignored."""
+  client.post("/api/settings", json={"provider": "invalid"}, headers=auth)
+  r = client.get("/api/settings", headers=auth)
+  assert r.json()["provider"] == "claude"

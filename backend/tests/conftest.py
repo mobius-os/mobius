@@ -38,6 +38,7 @@ def fresh_db():
   from app import broadcast as bc_mod
   chat_mod._starting.clear()
   chat_mod._active_procs.clear()
+  chat_mod._run_generation.clear()
   bc_mod._broadcasts.clear() if hasattr(bc_mod, "_broadcasts") else None
 
   yield

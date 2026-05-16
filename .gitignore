@@ -49,3 +49,4 @@ docs/
 
 # Internal dev artifacts — not for public release
 demo-logs/
+.claude/

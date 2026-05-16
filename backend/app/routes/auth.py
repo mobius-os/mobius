@@ -324,29 +324,138 @@ async def provider_code(
 
 @router.get("/provider/status")
 async def provider_status(
+  owner: models.Owner = Depends(get_current_owner),
+):
+  """Checks whether the active provider is authenticated.
+
+  Uses the provider's own check_auth method so this endpoint works
+  for any registered provider, not just Claude.
+  """
+  from app.providers import get_provider
+  provider = get_provider(owner.provider)
+  error = provider.check_auth(get_settings().data_dir)
+  return {
+    "provider": owner.provider or "claude",
+    "provider_name": provider.name,
+    "authenticated": error is None,
+    "error": error,
+  }
+
+
+# -- Codex device-auth flow -------------------------------------------------
+#
+# Uses `codex login --device-auth` subprocess. The backend starts the
+# process, parses the URL and one-time code from stdout, returns them
+# to the frontend, then a background watcher awaits completion.
+
+import re
+from pathlib import Path
+
+_codex_login_procs: dict[str, asyncio.subprocess.Process] = {}
+_codex_login_status: dict[str, str] = {}  # "complete" | "failed"
+
+
+async def _watch_codex_login(proc):
+  """Background task that awaits proc.wait() and stores the result."""
+  await proc.wait()
+  # Only update if this proc is still the active one -- a newer
+  # login may have replaced it.
+  if _codex_login_procs.get("active") is proc:
+    _codex_login_status["result"] = (
+      "complete" if proc.returncode == 0 else "failed"
+    )
+    _codex_login_procs.pop("active", None)
+
+
+@router.post("/provider/codex/login")
+async def codex_login_start(
   _: models.Owner = Depends(get_current_owner),
 ):
-  """Checks whether the CLI is authenticated.
+  """Starts codex login --device-auth and returns the URL + code."""
+  # Kill any existing login process before starting a new one.
+  old_proc = _codex_login_procs.pop("active", None)
+  if old_proc and old_proc.returncode is None:
+    old_proc.kill()
+    try:
+      await asyncio.wait_for(old_proc.wait(), timeout=2.0)
+    except asyncio.TimeoutError:
+      pass
 
-  Reads the credential file directly.  The file format is pinned by
-  the Claude CLI version we ship and is considered stable across the
-  supported range (see CLAUDE.md "Upgrade checklist").
-  """
-  _, cli_home = _cli_env()
-  creds_path = os.path.join(cli_home, ".credentials.json")
+  settings = get_settings()
+  codex_home = str(Path(settings.data_dir) / "cli-auth" / "codex")
+  Path(codex_home).mkdir(parents=True, exist_ok=True)
 
+  env = dict(os.environ)
+  env["CODEX_HOME"] = codex_home
+
+  proc = await asyncio.create_subprocess_exec(
+    "codex", "login", "--device-auth",
+    stdin=asyncio.subprocess.DEVNULL,
+    stdout=asyncio.subprocess.PIPE,
+    stderr=asyncio.subprocess.STDOUT,  # merge stderr into stdout
+    env=env,
+  )
+
+  # Read until we see the device code or EOF.
+  output = ""
   try:
-    with open(creds_path) as f:
-      data = json.load(f)
-    oauth = data.get("claudeAiOauth", {})
-    if oauth.get("accessToken"):
-      return {
-        "authenticated": True,
-        "provider": "claude",
-        "email": oauth.get("email", ""),
-        "subscription": oauth.get("subscriptionType", ""),
-      }
-  except (FileNotFoundError, json.JSONDecodeError, KeyError) as exc:
-    log.info("Provider not authenticated: %s", exc)
+    async with asyncio.timeout(15):
+      while True:
+        line = await proc.stdout.readline()
+        if not line:
+          break
+        output += line.decode("utf-8", errors="replace")
+        if "code" in output.lower() and re.search(
+          r'[A-Z0-9]{4,}-[A-Z0-9]{4,}', output
+        ):
+          break
+  except asyncio.TimeoutError:
+    proc.kill()
+    try:
+      await asyncio.wait_for(proc.wait(), timeout=2.0)
+    except asyncio.TimeoutError:
+      pass
+    log.warning("codex login timed out, output: %s", output[:500])
+    raise HTTPException(500, "Codex login timed out")
 
-  return {"authenticated": False, "provider": "claude"}
+  # Strip ANSI escape sequences before parsing — CLI output often
+  # wraps URLs in color codes (e.g. \x1b[4mhttps://...\x1b[0m)
+  # which end up as garbage in the captured URL.
+  clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', output)
+
+  # Parse URL and code from the cleaned output.
+  url_match = re.search(r'(https://[^\s<>"\']+)', clean)
+  code_match = re.search(r'([A-Z0-9]{4,}-[A-Z0-9]{4,})', clean)
+  if not url_match or not code_match:
+    proc.kill()
+    try:
+      await asyncio.wait_for(proc.wait(), timeout=2.0)
+    except asyncio.TimeoutError:
+      pass
+    log.warning(
+      "Could not parse device code from codex output: %s",
+      output[:500],
+    )
+    raise HTTPException(500, "Could not parse device code")
+
+  _codex_login_procs["active"] = proc
+  _codex_login_status.pop("result", None)
+  asyncio.create_task(_watch_codex_login(proc))
+
+  # Trim trailing punctuation that may have been captured from the
+  # CLI's sentence formatting (e.g. "Visit https://example.com.").
+  parsed_url = url_match.group(1).rstrip('.,;:!?')
+  return {"url": parsed_url, "code": code_match.group(1)}
+
+
+@router.get("/provider/codex/status")
+async def codex_login_status_view(
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Returns the device-auth login status (for frontend polling)."""
+  if "active" not in _codex_login_procs:
+    result = _codex_login_status.pop("result", None)
+    if result:
+      return {"status": result}
+    return {"status": "none"}
+  return {"status": "pending"}

@@ -209,6 +209,8 @@ async def save_question_answers(
   db: Session = Depends(get_db),
 ):
   """Saves the user's answers into the last question block."""
+  from sqlalchemy.orm.attributes import flag_modified
+
   chat = db.query(models.Chat).filter(
     models.Chat.id == chat_id,
     models.Chat.deleted_at.is_(None),
@@ -219,10 +221,11 @@ async def save_question_answers(
   for msg in reversed(msgs):
     if msg.get("role") != "assistant":
       continue
-    for block in msg.get("blocks", []):
+    for block in reversed(msg.get("blocks", [])):
       if block.get("type") == "question":
         block["answers"] = body.answers
         chat.messages = msgs
+        flag_modified(chat, "messages")
         db.commit()
         return {"ok": True}
   raise HTTPException(status_code=404, detail="No question block found.")

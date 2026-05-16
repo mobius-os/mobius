@@ -36,6 +36,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-liberation fonts-noto-color-emoji \
     && npm install -g esbuild@0.20.2 \
     && npm install -g @anthropic-ai/claude-code@2.1.141 \
+    && npm install -g @openai/codex@0.130.0 \
     && npm install -g agent-browser \
     && agent-browser install \
     && mv /root/.agent-browser /opt/agent-browser \

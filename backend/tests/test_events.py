@@ -83,6 +83,33 @@ def test_question_event_creates_block():
   assert blocks == [{"type": "question", "questions": questions}]
 
 
+def test_question_coalesces_partial_then_full():
+  """Partial question followed by full question replaces, not appends."""
+  blocks = []
+  partial = [{"question": "First?", "options": []}]
+  full = [
+    {"question": "First?", "options": [{"label": "A"}, {"label": "B"}]},
+    {"question": "Second?", "options": [{"label": "X"}, {"label": "Y"}]},
+  ]
+  process_event({"type": "question", "questions": partial}, blocks)
+  assert len(blocks) == 1
+  assert len(blocks[0]["questions"]) == 1
+
+  process_event({"type": "question", "questions": full}, blocks)
+  assert len(blocks) == 1  # still one block, not two
+  assert len(blocks[0]["questions"]) == 2
+  assert blocks[0]["questions"][1]["question"] == "Second?"
+
+
+def test_question_after_text_appends():
+  """Question after a text block appends (not coalesces)."""
+  blocks = [{"type": "text", "content": "hello"}]
+  process_event({"type": "question", "questions": [{"question": "Q?"}]}, blocks)
+  assert len(blocks) == 2
+  assert blocks[0]["type"] == "text"
+  assert blocks[1]["type"] == "question"
+
+
 def test_question_block_in_built_message():
   blocks = [
     {"type": "text", "content": "Let me ask:"},
