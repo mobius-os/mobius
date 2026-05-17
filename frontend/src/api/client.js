@@ -17,6 +17,10 @@ export function setToken(token) {
 
 export function clearToken() {
   localStorage.removeItem('token')
+  // Setup-wizard resume state assumes an active token. If the token
+  // is gone (logout / expiry), clear the resume key so the user
+  // doesn't get bounced back into the wizard after they re-login.
+  try { localStorage.removeItem('setup-step') } catch {}
 }
 
 // Wipes persisted client state on logout / token expiry: the

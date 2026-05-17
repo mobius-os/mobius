@@ -15,6 +15,22 @@ export default function App() {
   )
 }
 
+// localStorage key written by SetupWizard while the user is mid-flow
+// (after account creation, before final onDone). Kept in App.jsx so the
+// resume check happens BEFORE the token fast path commits us to Shell.
+const SETUP_STEP_KEY = 'setup-step'
+
+function readSetupStep() {
+  try {
+    const v = localStorage.getItem(SETUP_STEP_KEY)
+    return (v === 'provider' || v === 'gemini') ? v : null
+  } catch { return null }
+}
+
+function clearSetupStep() {
+  try { localStorage.removeItem(SETUP_STEP_KEY) } catch {}
+}
+
 function AppRoot() {
   // PersistQueryClientProvider hydrates the cache asynchronously from
   // IndexedDB on cold load. During that window, `useQuery` returns
@@ -22,10 +38,16 @@ function AppRoot() {
   // until restoration completes so ChatView's useState initializer
   // sees the hydrated cache (no flash on cold reload).
   const isRestoring = useIsRestoring()
-  // Fast path: if we have a token, show Shell immediately.
-  // The splash covers the initial render so there's no flash.
+  // If a previous tab created an account but the user closed before
+  // finishing provider/Gemini steps, resume the wizard at that step
+  // instead of dropping them into a Shell with no AI configured.
+  // Read BEFORE the token fast path so we don't briefly mount Shell.
   const hasToken = !!getToken()
-  const [status, setStatus] = useState(hasToken ? 'shell' : 'loading')
+  const resumeStep = hasToken ? readSetupStep() : null
+  const initialStatus = resumeStep ? 'setup' : (hasToken ? 'shell' : 'loading')
+  const [status, setStatus] = useState(initialStatus)
+  // Stable across renders — we only need the value captured on mount.
+  const [initialSetupStep] = useState(resumeStep || 'account')
 
   useEffect(() => {
     // shell-reload: skip splash entirely, go straight to shell
@@ -37,8 +59,9 @@ function AppRoot() {
       return
     }
 
-    // Only check setup status if we don't have a token.
     if (hasToken) {
+      // Either resuming setup or going to shell — both already set
+      // synchronously above. Just hide the splash.
       removeSplash()
       return
     }
@@ -56,7 +79,16 @@ function AppRoot() {
   }, [])
 
   if (status === 'loading' || isRestoring) return null
-  if (status === 'setup') return <SetupWizard onDone={() => { setSetupInProgress(false); setStatus('shell') }} />
+  if (status === 'setup') return (
+    <SetupWizard
+      initialStep={initialSetupStep}
+      onDone={() => {
+        clearSetupStep()
+        setSetupInProgress(false)
+        setStatus('shell')
+      }}
+    />
+  )
   if (status === 'login') return <LoginForm onLogin={() => setStatus('shell')} />
   return <Shell />
 }

@@ -74,11 +74,35 @@ button {
   cursor: pointer;
   font-family: inherit;
   font-size: inherit;
+  /* Mobile: kill the default translucent tap-highlight that flashes
+     a selection-colored overlay around every button on press. We use
+     :active for press feedback (see "Tap feedback" below) which is
+     deliberate and theme-aware. */
+  -webkit-tap-highlight-color: transparent;
+  /* Prevent a button press from accidentally selecting the button's
+     text content (long-press on mobile, drag on desktop). Doesn't
+     block keyboard focus or click handlers. */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 
 input, textarea {
   font-family: inherit;
   font-size: inherit;
+}
+
+/* Accessibility: keyboard-only focus ring on text inputs. Forms across
+   the app (Setup, Login, Settings, Gemini key) remove the native
+   outline and only swap border-color — fine for mouse/touch focus,
+   but invisible to keyboard users on themes where the border color
+   is close to the background. :focus-visible only fires for keyboard
+   navigation (or screen-reader / programmatic focus), so the click
+   path stays unchanged. */
+input:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--accent, #a78bfa);
+  outline-offset: 1px;
 }
 
 /* ── Visual refinements ──

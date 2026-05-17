@@ -61,6 +61,14 @@ function CodexAuth({ onConnected }) {
     }
   }
 
+  function cancelPending() {
+    stopPolling()
+    setStatus('idle')
+    setUrl('')
+    setCode('')
+    setError('')
+  }
+
   if (status === 'pending') {
     return (
       <div className="codex-auth">
@@ -77,7 +85,18 @@ function CodexAuth({ onConnected }) {
             <span>Enter code: <strong className="codex-auth__code">{code}</strong></span>
           </div>
         </div>
-        <p className="settings__subtext">Waiting for sign-in to complete...</p>
+        <div className="codex-auth__pending-actions">
+          <p className="settings__subtext codex-auth__waiting">
+            Waiting for sign-in to complete…
+          </p>
+          <button
+            type="button"
+            className="pa__btn pa__btn--sm"
+            onClick={cancelPending}
+          >
+            Cancel
+          </button>
+        </div>
       </div>
     )
   }
@@ -176,6 +195,13 @@ export default function SettingsView({ onThemeChange }) {
   // Tracks whether the initial /settings fetch finished, so the
   // provider row UI is rendered only after we know the default.
   const [providerLoaded, setProviderLoaded] = useState(false)
+  // Surface failures from POST /settings (provider switch) so the
+  // optimistic radio revert isn't silent — otherwise the user sees the
+  // dot flip and flip back with no explanation.
+  const [providerError, setProviderError] = useState('')
+  // Same idea for the dark-mode toggle: a failed theme persist would
+  // bounce the knob without telling the user why.
+  const [themeError, setThemeError] = useState('')
 
   useEffect(() => {
     apiFetch('/settings')
@@ -239,14 +265,23 @@ export default function SettingsView({ onThemeChange }) {
     const oldProvider = provider
     setProvider(newProvider)
     setProviderSaving(true)
+    setProviderError('')
     try {
       const res = await apiFetch('/settings', {
         method: 'POST',
         body: JSON.stringify({ provider: newProvider }),
       })
-      if (!res.ok) setProvider(oldProvider)
+      if (!res.ok) {
+        setProvider(oldProvider)
+        setProviderError(
+          'Could not switch provider. Please try again.',
+        )
+      }
     } catch {
       setProvider(oldProvider)
+      setProviderError(
+        'Network error. Could not switch provider.',
+      )
     } finally {
       setProviderSaving(false)
     }
@@ -256,6 +291,7 @@ export default function SettingsView({ onThemeChange }) {
     const newMode = !lightMode
     setLightMode(newMode)
     setThemeSwitching(true)
+    setThemeError('')
 
     try {
       const themeRes = await apiFetch('/storage/shared/theme.css')
@@ -311,6 +347,9 @@ export default function SettingsView({ onThemeChange }) {
       onThemeChange?.()
     } catch {
       setLightMode(!newMode)
+      setThemeError(
+        'Could not save theme. Check your connection and try again.',
+      )
       onThemeChange?.()  // reload original theme on error
     } finally {
       setThemeSwitching(false)
@@ -383,6 +422,9 @@ export default function SettingsView({ onThemeChange }) {
               >
                 <CodexAuth onConnected={onCodexAuthDone} />
               </ProviderRow>
+              {providerError && (
+                <p className="settings__error">{providerError}</p>
+              )}
             </div>
           )}
         </section>
@@ -439,6 +481,9 @@ export default function SettingsView({ onThemeChange }) {
               <span className="settings__toggle-knob" />
             </button>
           </div>
+          {themeError && (
+            <p className="settings__error">{themeError}</p>
+          )}
         </section>
 
         <section className="settings__section settings__section--compact">

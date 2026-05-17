@@ -1,10 +1,25 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { apiFetch, setToken, setSetupInProgress, BASE } from '../../api/client.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import './SetupWizard.css'
 
-export default function SetupWizard({ onDone }) {
-  const [step, setStep] = useState('account') // 'account' | 'provider' | 'gemini'
+// localStorage key for resuming setup mid-wizard. If the user creates
+// an account but closes the tab before finishing the provider /
+// Gemini steps, the next visit would otherwise land them in Shell
+// with no AI configured — silently broken. AppRoot reads this key
+// and routes back into the wizard at the right step.
+const SETUP_STEP_KEY = 'setup-step'
+
+export default function SetupWizard({ onDone, initialStep = 'account' }) {
+  const [step, setStep] = useState(initialStep)
+
+  // Persist + restore step. Only persist past 'account' — the account
+  // step has no token yet, so there's nothing to resume to. Clear on
+  // unmount via onDone (handled by the consumer in App.jsx).
+  useEffect(() => {
+    if (step === 'account') return
+    try { localStorage.setItem(SETUP_STEP_KEY, step) } catch {}
+  }, [step])
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')

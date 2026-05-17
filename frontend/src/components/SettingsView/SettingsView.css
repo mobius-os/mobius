@@ -237,6 +237,18 @@
   color: var(--accent);
 }
 
+.codex-auth__pending-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.codex-auth__waiting {
+  margin: 0;
+}
+
 /* ── Unified provider rows ─────────────────────────── */
 
 .settings__providers {
