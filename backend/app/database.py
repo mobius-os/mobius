@@ -57,6 +57,10 @@ def run_migrations(eng) -> None:
     _add = []
     if "uploads" not in chats_cols:
       _add.append("ALTER TABLE chats ADD COLUMN uploads JSON NOT NULL DEFAULT '[]'")
+    if "pending_messages" not in chats_cols:
+      _add.append(
+        "ALTER TABLE chats ADD COLUMN pending_messages JSON NOT NULL DEFAULT '[]'"
+      )
     if "generated_images" not in chats_cols:
       _add.append("ALTER TABLE chats ADD COLUMN generated_images JSON NOT NULL DEFAULT '[]'")
     if "deleted_at" not in chats_cols:

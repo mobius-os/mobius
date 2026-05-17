@@ -10,7 +10,8 @@ import json
 import logging
 import os
 import time
-from datetime import timedelta
+import weakref
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -102,6 +103,30 @@ _starting: set[str] = set()
 # spawning a subprocess.
 _run_generation: dict[str, int] = {}
 
+# Per-chat asyncio locks serialize read-modify-write on
+# chat.pending_messages. The lock guards three operations that all
+# touch the queue: append (POST /messages), cancel (DELETE /pending),
+# and promote (turn-end drain). Without serialization, two of those
+# fired concurrently can read the same snapshot and one commit
+# overwrites the other — silently dropping queue entries.
+#
+# WeakValueDictionary lets entries collect when no caller is holding
+# the lock, so the dict can't grow unbounded. Lookups are atomic from
+# the asyncio scheduler's POV (no await between get + check + insert),
+# so concurrent callers for the same chat get the same lock instance.
+_queue_locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (
+  weakref.WeakValueDictionary()
+)
+
+
+def get_queue_lock(chat_id: str) -> asyncio.Lock:
+  """Returns the per-chat queue lock, creating it if needed."""
+  lock = _queue_locks.get(chat_id)
+  if lock is None:
+    lock = asyncio.Lock()
+    _queue_locks[chat_id] = lock
+  return lock
+
 
 def current_run_generation(chat_id: str) -> int:
   """Returns the current generation for a chat (0 if none)."""
@@ -147,21 +172,44 @@ def discard_starting(chat_id: str) -> None:
 
 
 async def stop_chat(chat_id: str | None = None, db: Session = None) -> bool:
-  """Kills the active subprocess for a chat and clears its session_id
-  so the next message starts a fresh session with full history."""
+  """Kills the active subprocess for a chat, bumps its generation, and
+  clears its pending queue so a queued continuation cannot auto-start
+  after Stop. Session_id is preserved so the next message resumes."""
   killed = False
-  targets = [chat_id] if chat_id else list(_active_procs.keys())
+  if chat_id:
+    targets = [chat_id]
+  else:
+    # Global stop must reach chats with NO proc yet (in _starting) or
+    # only a live broadcast (queued continuation between turns). Union
+    # all three lifecycle sources.
+    from app.broadcast import _broadcasts
+    targets = list({
+      *_active_procs.keys(),
+      *_starting,
+      *(cid for cid, bc in _broadcasts.items() if bc.running),
+    })
   for cid in targets:
+    # Bump generation BEFORE killing so the dying run_chat's finally
+    # detects ownership change and skips _promote_pending_messages /
+    # continuation scheduling. Without this, Stop would still drain
+    # the queue and start the next turn.
+    _run_generation[cid] = _run_generation.get(cid, 0) + 1
+    if db is not None:
+      try:
+        chat = db.query(models.Chat).filter(models.Chat.id == cid).first()
+        if chat and chat.pending_messages:
+          chat.pending_messages = []
+          db.commit()
+      except Exception:
+        db.rollback()
     proc = _active_procs.pop(cid, None)
     if proc and proc.returncode is None:
       proc.kill()
       killed = True
-      # Keep session_id so the next message resumes with context.
-      # The CLI's --resume flag will pick up where we left off.
-      # Mark the broadcast completed so subscribers unblock.
       bc = get_broadcast(cid)
       if bc and bc.running:
         bc.mark_completed()
+    _starting.discard(cid)
   return killed
 
 
@@ -169,11 +217,21 @@ async def stop_chat_for(chat_id: str, db: Session = None) -> bool:
   """Kills the agent subprocess for a specific chat.
 
   Bumps the generation counter so any in-flight run_chat task for
-  the old generation aborts before spawning. Waits for the process
-  to die with a bounded timeout.
+  the old generation aborts before spawning. Clears the pending
+  queue so a queued continuation cannot auto-start after Stop.
+  Waits for the process to die with a bounded timeout.
   """
   gen = _run_generation.get(chat_id, 0) + 1
   _run_generation[chat_id] = gen
+
+  if db is not None:
+    try:
+      chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+      if chat and chat.pending_messages:
+        chat.pending_messages = []
+        db.commit()
+    except Exception:
+      db.rollback()
 
   proc = _active_procs.get(chat_id)
   if proc and proc.returncode is None:
@@ -222,6 +280,164 @@ def _finalize_response(
   )
 
 
+def _promote_pending_messages_locked(
+  db: Session,
+  chat_id: str,
+) -> tuple[list[schemas.ChatMessage], dict | None, str | None]:
+  """Inner promote logic. PRECONDITION: caller holds the per-chat queue
+  lock. This sync variant exists so the finally block in _run_chat_impl
+  can do its 'late-drain + release _starting' critical section atomically
+  under a single lock acquisition without needing re-entrant locks.
+
+  Returns (next_messages, first_pending, session_id) on success.
+  Returns ([], None, session_id) when the pending queue is empty or
+  when next_messages construction fails (malformed transcript entry).
+  """
+  if not chat_id:
+    return [], None, None
+  chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+  if not chat:
+    return [], None, None
+  # Refresh inside the lock so we see commits from any append or
+  # cancel that completed while we waited.
+  db.refresh(chat)
+  pending = list(chat.pending_messages or [])
+  if not pending:
+    return [], None, chat.session_id
+
+  existing = list(chat.messages or [])
+  first_pending = pending[0]
+  # Build next_messages BEFORE committing so a malformed transcript
+  # entry can't silently consume a pending turn. If construction
+  # raises, log and leave the queue intact for retry.
+  try:
+    next_messages = [
+      schemas.ChatMessage(
+        role=m.get("role", "user"),
+        content=m.get("content", "") or "",
+      )
+      for m in existing
+    ]
+    next_messages.append(
+      schemas.ChatMessage(
+        role=first_pending.get("role", "user"),
+        content=first_pending.get("content", "") or "",
+      )
+    )
+  except Exception:
+    _get_logger().exception(
+      "promote: next_messages construction failed chat_id=%s — "
+      "leaving pending queue intact", chat_id,
+    )
+    return [], None, chat.session_id
+
+  chat.messages = existing + [first_pending]
+  chat.pending_messages = pending[1:]
+  chat.updated_at = datetime.now(UTC)
+  db.commit()
+
+  return next_messages, first_pending, chat.session_id
+
+
+async def _promote_pending_messages(
+  db: Session,
+  chat_id: str,
+) -> tuple[list[schemas.ChatMessage], dict | None, str | None]:
+  """Atomically promotes the head of the pending queue into the transcript.
+
+  Held under the per-chat queue lock so the read-modify-write on
+  pending_messages doesn't race with append (POST /messages) or
+  cancel (DELETE /pending/{ts}).
+
+  This function does NOT claim _starting — the caller is responsible
+  for ensuring exclusive promotion (e.g., via mark_starting before
+  call in stale-pending path, or by virtue of being the only finally
+  block for a given run in the turn-end path). Adding mark_starting
+  here was a round-7 over-engineering that broke the finally path:
+  _starting still contains the original send's claim when the finally
+  fires, so the in-promote mark_starting always returned False and
+  no queued turn ever got promoted in production.
+  """
+  if not chat_id:
+    return [], None, None
+  async with get_queue_lock(chat_id):
+    return _promote_pending_messages_locked(db, chat_id)
+
+
+def _clear_pending_queue(db: Session, chat_id: str) -> None:
+  """Empties the pending_messages queue for a chat. Used on terminal
+  setup errors (no owner, missing auth) so queued messages don't pile
+  up repeating the same error."""
+  if not chat_id:
+    return
+  try:
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    if chat and chat.pending_messages:
+      chat.pending_messages = []
+      db.commit()
+  except Exception:
+    db.rollback()
+
+
+def _schedule_continuation(
+  chat_id: str,
+  messages: list,
+  session_id: str | None,
+  provider_id: str | None,
+  next_user: dict,
+) -> None:
+  """Bumps generation and spawns the next-turn run_chat.
+
+  Precondition: the caller already holds the 'starting' claim for
+  this chat. Two paths satisfy that:
+    - Turn-end continuation (finally in _run_chat_impl): the original
+      send's mark_starting from chats_stream.py is still in _starting
+      and gets handed off to the new run via the generation bump.
+    - Stale-pending drain (chats_stream.py send_message): the route
+      explicitly calls mark_starting before _promote_pending_messages.
+  If scheduling fails, this function releases the claim so the chat
+  isn't stuck 'starting' until process restart.
+  """
+  log = _get_logger()
+  bc = None
+  coro = None
+  try:
+    # Inside the try so any exception (even from these lines) releases
+    # the _starting claim the caller held. Without this, a failure
+    # here would leak _starting until process restart.
+    next_gen = current_run_generation(chat_id) + 1
+    _run_generation[chat_id] = next_gen
+    bc = create_broadcast(chat_id)  # registered in global registry
+    # Build the coroutine BEFORE create_task so the except block can
+    # .close() it if scheduling raises — otherwise Python warns
+    # "coroutine was never awaited" and leaks the un-driven coroutine.
+    coro = run_chat(
+      messages,
+      chat_id=chat_id,
+      session_id=session_id,
+      provider_id=provider_id,
+      run_gen=next_gen,
+      attachments=next_user.get("attachments"),
+      timezone=next_user.get("timezone"),
+      viewport=next_user.get("viewport"),
+    )
+    asyncio.create_task(coro)
+    # Task owns the coroutine now — don't close it in the except.
+    coro = None
+  except Exception as exc:
+    log.exception(
+      "continuation scheduling failed chat_id=%s: %s", chat_id, exc,
+    )
+    # Clean up the broadcast we just registered so is_chat_running
+    # doesn't report this chat as permanently active.
+    if bc is not None:
+      bc.mark_completed()
+    # Close the orphan coroutine to silence the unawaited-coro warning.
+    if coro is not None:
+      coro.close()
+    _starting.discard(chat_id)
+
+
 async def _close_browser_session(chat_id: str) -> None:
   """Close this chat's agent-browser session so Chrome doesn't linger.
 
@@ -247,6 +463,40 @@ async def _close_browser_session(chat_id: str) -> None:
     log.warning("agent-browser close timed out for chat %s", chat_id)
   except Exception as exc:
     log.warning("agent-browser close failed for chat %s: %s", chat_id, exc)
+
+
+async def _drain_and_release(
+  db: Session,
+  chat_id: str,
+  we_own_gen: bool,
+) -> tuple[dict | None, list, str | None]:
+  """End-of-turn queue drain. Returns (next_user, next_messages,
+  next_session_id) for the caller to publish + schedule.
+
+  Under the per-chat queue lock:
+    - Promotes the head of pending_messages (if any).
+    - If nothing to promote AND we_own_gen, releases _starting so any
+      subsequent POST sees is_chat_running=False and starts a fresh run.
+
+  Doing this in a single locked critical section closes the race
+  between the run_chat finally and a POST that arrives in the window
+  after the subprocess exits but before _starting is released. Both
+  ends serialize on the same lock; whichever side wins ordering, the
+  message is either promoted here or POST takes the start path.
+
+  When we_own_gen is False (Stop bumped the gen), we must not promote
+  or release _starting — the newer owner (Stop, or the continuation
+  it scheduled) is responsible for those.
+  """
+  if not we_own_gen:
+    return None, [], None
+  async with get_queue_lock(chat_id):
+    next_messages, first_pending, next_session_id = (
+      _promote_pending_messages_locked(db, chat_id)
+    )
+    if first_pending is None:
+      _starting.discard(chat_id)
+    return first_pending, next_messages, next_session_id
 
 
 async def run_chat(
@@ -358,6 +608,8 @@ async def _run_chat_impl(
   owner = db.query(models.Owner).first()
   if not owner:
     bc.publish({"type": "error", "message": "No owner configured."})
+    _clear_pending_queue(db, chat_id)
+    bc.publish({"type": "done"})
     set_active_broadcast(None)
     bc.mark_completed()
     return
@@ -391,6 +643,7 @@ async def _run_chat_impl(
   auth_error = provider.check_auth(settings.data_dir)
   if auth_error:
     bc.publish({"type": "error", "message": auth_error})
+    _clear_pending_queue(db, chat_id)
     bc.publish({"type": "done"})
     set_active_broadcast(None)
     bc.mark_completed()
@@ -485,7 +738,6 @@ async def _run_chat_impl(
                 "chat done chat_id=%s cost_usd=%.4f",
                 chat_id, event.get("cost_usd", 0),
               )
-              bc.publish({"type": "done"})
               break
             elif event_type == "error":
               log.error(
@@ -526,7 +778,6 @@ async def _run_chat_impl(
         else:
           # stdout exhausted without "done" — CLI exited early.
           log.warning("CLI exited without done event")
-          bc.publish({"type": "done"})
     except asyncio.TimeoutError:
       log.warning(
         "chat timeout after %ds, killing subprocess",
@@ -541,14 +792,36 @@ async def _run_chat_impl(
           " Use the stop button and try again."
         ),
       })
-      bc.publish({"type": "done"})
 
     finally:
       _finalize_response(db, chat_id, assistant_blocks)
       if _active_procs.get(chat_id) is proc:
         _active_procs.pop(chat_id, None)
       set_active_broadcast(None)
+      # Only drain the queue if we still own this generation. A Stop
+      # bumps the generation and clears pending_messages — we must not
+      # promote/continue after Stop.
+      we_own_gen = (
+        run_gen is None or _run_generation.get(chat_id, 0) == run_gen
+      )
+      next_user, next_messages, next_session_id = await _drain_and_release(
+        db, chat_id, we_own_gen,
+      )
+      if next_user:
+        bc.publish({
+          "type": "queued_turn_starting",
+          "ts": next_user.get("ts"),
+        })
+      bc.publish({"type": "done"})
       bc.mark_completed()
+      if next_user:
+        _schedule_continuation(
+          chat_id=chat_id,
+          messages=next_messages,
+          session_id=next_session_id,
+          provider_id=provider_id,
+          next_user=next_user,
+        )
       stderr_task.cancel()
       try:
         await asyncio.wait_for(proc.wait(), timeout=5.0)
@@ -562,9 +835,31 @@ async def _run_chat_impl(
     log.exception("run_chat failed chat_id=%s: %s", chat_id, exc)
     _finalize_response(db, chat_id, assistant_blocks)
     bc.publish({"type": "error", "message": str(exc)})
-    bc.publish({"type": "done"})
     set_active_broadcast(None)
+    # Even on error, drain the queue so queued messages aren't stranded.
+    # The user's next turn shouldn't be silently dropped because the
+    # previous turn crashed (e.g. transient network/CLI issue).
+    we_own_gen = (
+      run_gen is None or _run_generation.get(chat_id, 0) == run_gen
+    )
+    next_user, next_messages, next_session_id = await _drain_and_release(
+      db, chat_id, we_own_gen,
+    )
+    if next_user:
+      bc.publish({
+        "type": "queued_turn_starting",
+        "ts": next_user.get("ts"),
+      })
+    bc.publish({"type": "done"})
     bc.mark_completed()
+    if next_user:
+      _schedule_continuation(
+        chat_id=chat_id,
+        messages=next_messages,
+        session_id=next_session_id,
+        provider_id=provider_id,
+        next_user=next_user,
+      )
   finally:
     # Close agent-browser session exactly once, regardless of which
     # code path completed/errored.  _close_browser_session is a no-op

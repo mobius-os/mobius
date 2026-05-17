@@ -314,26 +314,50 @@ class CodexProvider(BaseProvider):
     agent_settings = _load_agent_settings(data_dir)
     model = agent_settings.get("codex_model")
 
+    # Use the app-server runner. `codex exec --json` only emits one
+    # final agent_message event (no per-token deltas), so it can't
+    # produce the typewriter effect. The app-server JSON-RPC protocol
+    # emits `item/agentMessage/delta` notifications for streaming.
+    # The runner script handles the protocol handshake and translates
+    # notifications into clean Möbius event lines (session_init, text,
+    # tool_*, done) — so parse_line just JSON-decodes and returns.
+    #
+    # Prompt + base-instructions are passed via files (not argv) so
+    # large prompts (experience block injection, ~20KB) don't risk
+    # hitting argv limits on any OS.
+    scripts_dir = Path(__file__).parent.parent / "scripts"
+    runner = scripts_dir / "codex_appserver_runner.py"
+
+    # Sanitize chat_id for filesystem use. The route layer accepts
+    # chat ids over the wire and they end up in path components — a
+    # malicious id like "../../" or one with NUL could escape the
+    # data dir. Keep only alphanumerics, dash, underscore (matches
+    # the format we generate; longer/legitimate ids unaffected).
+    import re
+    import uuid
+    safe_chat_id = re.sub(r"[^A-Za-z0-9_-]", "_", chat_id or "default")
+    chat_dir = Path(data_dir) / "chats" / safe_chat_id
+    chat_dir.mkdir(parents=True, exist_ok=True)
+
+    # Per-run UUID-suffixed prompt file. Same-chat continuations
+    # (queued-turn drain) can launch multiple runs in quick succession;
+    # a shared `codex-prompt.txt` would race. The runner unlinks both
+    # the prompt and the per-run instructions file immediately after
+    # reading them (see codex_appserver_runner.py) so they don't
+    # accumulate on disk or retain transcript content outside the DB.
+    run_id = uuid.uuid4().hex[:12]
+    prompt_file = chat_dir / f"codex-prompt-{run_id}.txt"
+    prompt_file.write_text(user_message, encoding="utf-8")
+
+    cmd = [
+      "python3", str(runner),
+      "--prompt", str(prompt_file),
+      "--cwd", data_dir,
+    ]
     if session_id:
-      # Resume: codex exec resume [OPTIONS] SESSION_ID PROMPT
-      cmd = [
-        "codex", "exec", "resume",
-        "--json",
-        "--dangerously-bypass-approvals-and-sandbox",
-      ]
-      if model:
-        cmd += ["--model", model]
-      cmd += [session_id, user_message]
-    else:
-      # New session: codex exec [OPTIONS] -- PROMPT
-      cmd = [
-        "codex", "exec",
-        "--json",
-        "--dangerously-bypass-approvals-and-sandbox",
-      ]
-      if model:
-        cmd += ["--model", model]
-      cmd += ["--", user_message]
+      cmd += ["--session-id", session_id]
+    if model:
+      cmd += ["--model", model]
 
     env = dict(base_env)
 
@@ -341,15 +365,18 @@ class CodexProvider(BaseProvider):
     codex_home = str(Path(data_dir) / "cli-auth" / "codex")
     env["CODEX_HOME"] = codex_home
 
-    # Write AGENTS.md for system prompt on first message.
+    # System prompt on first message: write the skill to a per-run
+    # file (same race rationale as the prompt) and pass it as
+    # --base-instructions so codex uses it for the thread.
     if not session_id:
       skill = _skill_path()
       if skill:
-        agents_md = Path(data_dir) / "AGENTS.md"
+        instructions_file = chat_dir / f"codex-instructions-{run_id}.txt"
         try:
-          agents_md.write_text(
+          instructions_file.write_text(
             skill.read_text(encoding="utf-8"), encoding="utf-8",
           )
+          cmd += ["--base-instructions", str(instructions_file)]
         except OSError:
           pass
 
@@ -368,12 +395,44 @@ class CodexProvider(BaseProvider):
     except json.JSONDecodeError:
       return None
 
-    etype = event.get("type")
+    # The runner script (scripts/codex_appserver_runner.py) translates
+    # codex app-server JSON-RPC into clean Möbius events: session_init,
+    # text, tool_start, tool_input, tool_output, tool_end, done, error.
+    # When we see a top-level Möbius-shaped event, return it directly —
+    # this is the fast path that handles everything from the runner.
+    direct_type = event.get("type")
+    if direct_type in (
+      "session_init", "text", "tool_start", "tool_input",
+      "tool_output", "tool_end", "done", "error",
+    ):
+      return event
 
-    if etype == "thread.started":
+    # Legacy fallback below: if for any reason raw `codex exec --json`
+    # output (or raw JSON-RPC notifications) leaks through to us, the
+    # branches below still translate them. Keeps the provider working
+    # even if the runner script regresses or is bypassed.
+    method = event.get("method")
+    if method:
+      etype = method.replace("/", ".")
+      event = {**(event.get("params") or {}), "type": etype}
+    else:
+      etype = direct_type
+
+    if etype in ("thread.started", "thread/started"):
+      # Exec mode uses thread_id; app-server uses thread.id.
       tid = event.get("thread_id")
+      if not tid:
+        thread = event.get("thread") or {}
+        tid = thread.get("id")
       if tid:
         return {"type": "session_init", "session_id": tid}
+      return None
+
+    # App-server streaming delta — the headline feature.
+    if etype == "item.agentMessage.delta":
+      delta = event.get("delta", "")
+      if delta:
+        return {"type": "text", "content": delta}
       return None
 
     if etype == "turn.started":
@@ -411,10 +470,19 @@ class CodexProvider(BaseProvider):
     if etype == "item.completed":
       item = event.get("item", {})
       itype = item.get("type")
-      if itype == "agent_message":
+      # In app-server, deltas already streamed all the text — the
+      # completion event's text is redundant, ignore it. In exec mode,
+      # this is the ONLY source of agent text.
+      if itype == "agent_message":  # exec mode
         text = item.get("text", "")
         if text:
           return {"type": "text", "content": text}
+        return None
+      if itype == "agentMessage":  # app-server: deltas already sent
+        return None
+      # App-server uses userMessage for the echo of the user's input —
+      # we don't display that (chat.py already saved it).
+      if itype == "userMessage":
         return None
       if itype == "command_execution":
         output = item.get("aggregated_output", "").strip()
@@ -424,15 +492,53 @@ class CodexProvider(BaseProvider):
         results.append({"type": "tool_end"})
         return results
       if itype == "file_change":
+        # Upstream FileUpdateChange struct is {path, kind} — there is
+        # no diff field. Render the per-change list as the tool output
+        # so the user sees what was added/updated/deleted.
         changes = item.get("changes", [])
-        diff = "\n".join(c.get("diff", "") for c in changes).strip()
+        lines = [
+          f"{c.get('kind', '?')} {c.get('path', '')}".strip()
+          for c in changes
+        ]
+        summary = "\n".join(l for l in lines if l)
         results = []
-        if diff:
-          results.append({"type": "tool_output", "content": diff})
+        if summary:
+          results.append({"type": "tool_output", "content": summary})
         results.append({"type": "tool_end"})
         return results
-      if itype in ("mcp_tool_call", "web_search"):
-        return {"type": "tool_end"}
+      if itype == "web_search":
+        # The actual query is only available at item.completed; the
+        # item.started event has query="". Backfill via tool_input
+        # (events.py applies it to the most recent input-less tool)
+        # so the user sees what was searched.
+        query = item.get("query", "")
+        if not query:
+          # Codex sometimes lists multiple queries under action.queries.
+          action = item.get("action") or {}
+          queries = action.get("queries") or []
+          if queries:
+            query = "\n".join(str(q) for q in queries)
+        results = []
+        if query:
+          results.append({"type": "tool_input", "input": query})
+        results.append({"type": "tool_end"})
+        return results
+      if itype == "mcp_tool_call":
+        # MCP tool args / result may be carried in the completion item.
+        # Best-effort surfacing — show args as input, result as output.
+        args = item.get("arguments") or item.get("input") or ""
+        if isinstance(args, (dict, list)):
+          args = json.dumps(args, indent=2)
+        result = item.get("result") or item.get("output") or ""
+        if isinstance(result, (dict, list)):
+          result = json.dumps(result, indent=2)
+        results = []
+        if args:
+          results.append({"type": "tool_input", "input": str(args)})
+        if result:
+          results.append({"type": "tool_output", "content": str(result)})
+        results.append({"type": "tool_end"})
+        return results
       return None
 
     if etype == "turn.completed":

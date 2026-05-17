@@ -28,7 +28,12 @@ const SYSTEM_EVENTS = new Set([
  * requestAnimationFrame for a smooth typewriter effect.  Tool events
  * and non-text events are applied immediately.
  */
-export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent, onNeedsRefresh }) {
+export default function useStreamConnection(chatId, {
+  onStreamEnd,
+  onSystemEvent,
+  onNeedsRefresh,
+  onQueuedTurnStarting,
+}) {
   const [streamItems, _setStreamItems] = useState([])
   const latestItemsRef = useRef([])
 
@@ -53,6 +58,24 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
   const retryCount = useRef(0)
   const chatIdRef = useRef(chatId)
   chatIdRef.current = chatId
+
+  // Tracks setTimeout handles for reconnect attempts so unmount can
+  // cancel them. Without this, a timer scheduled by the SSE loop can
+  // fire after unmount and call connectRef.current — which then
+  // setState on a dead component (React warning + potential leak).
+  const reconnectTimersRef = useRef(new Set())
+  function scheduleReconnect(fn, delay) {
+    const handle = setTimeout(() => {
+      reconnectTimersRef.current.delete(handle)
+      fn()
+    }, delay)
+    reconnectTimersRef.current.add(handle)
+    return handle
+  }
+  function cancelReconnectTimers() {
+    for (const h of reconnectTimersRef.current) clearTimeout(h)
+    reconnectTimersRef.current.clear()
+  }
 
   // Timestamp of the most recent sendMessage call. A 204 from /stream
   // shortly after a send means the broadcast hasn't been registered yet
@@ -140,6 +163,7 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
       rafRef.current = null
     }
     drainingRef.current = false
+    cancelReconnectTimers()
     if (clearStreaming) {
       setIsStreaming(false)
       setConnectionError(null)
@@ -159,6 +183,13 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
   onSystemEventRef.current = onSystemEvent
   const onNeedsRefreshRef = useRef(onNeedsRefresh)
   onNeedsRefreshRef.current = onNeedsRefresh
+  const onQueuedTurnStartingRef = useRef(onQueuedTurnStarting)
+  onQueuedTurnStartingRef.current = onQueuedTurnStarting
+  const queuedContinuationRef = useRef(false)
+  // Carries the ts of the message the backend just promoted so the
+  // frontend can remove the matching pending entry, even if the user
+  // canceled or reordered items locally in the meantime.
+  const queuedContinuationTsRef = useRef(null)
 
   const connectToStream = useCallback(async (resetState = false) => {
     disconnect()
@@ -187,7 +218,7 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
         const sinceSend = Date.now() - justSentAtRef.current
         if (sinceSend < 1500) {
           abortRef.current = null
-          setTimeout(() => connectRef.current?.(false), 300)
+          scheduleReconnect(() => connectRef.current?.(false), 300)
           return
         }
 
@@ -341,6 +372,10 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
               updated.push({ type: 'text', content: `\n\nError: ${event.message}` })
               return updated
             })
+          } else if (event.type === 'queued_turn_starting') {
+            queuedContinuationRef.current = true
+            queuedContinuationTsRef.current = event.ts ?? null
+            onQueuedTurnStartingRef.current?.(event.ts)
           } else if (event.type === 'done') {
             flushBuffer()
             setIsStreaming(false)
@@ -355,12 +390,21 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
             // is finished (and should trigger a DB refresh) rather than
             // a POST→GET race needing a retry.
             justSentAtRef.current = 0
+            const continues = queuedContinuationRef.current
+            const promotedTs = queuedContinuationTsRef.current
+            queuedContinuationRef.current = false
+            queuedContinuationTsRef.current = null
             // Delay onStreamEnd by one frame so the React render
             // triggered by setIsStreaming(false) above completes before
             // ChatView promotes streamItems to messages.  latestItemsRef
             // is already up-to-date (synchronous), so this is purely for
             // render consistency (e.g. streaming UI teardown).
-            requestAnimationFrame(() => onStreamEndRef.current?.())
+            requestAnimationFrame(() => {
+              onStreamEndRef.current?.({ continues, promotedTs })
+              if (continues) {
+                scheduleReconnect(() => connectRef.current?.(true), 150)
+              }
+            })
             return
           }
         }
@@ -389,7 +433,7 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
         setConnectionError('retrying')
         const delay = Math.pow(2, retryCount.current) * 1000
         retryCount.current++
-        setTimeout(() => connectRef.current?.(true), delay)
+        scheduleReconnect(() => connectRef.current?.(true), delay)
       }
     }
   }, [disconnect, startDraining, flushBuffer])
@@ -405,12 +449,18 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
     connectRef.current?.(true)
   }, [])
 
-  const sendMessage = useCallback(async (text, attachments, { hidden = false } = {}) => {
-    justSentAtRef.current = Date.now()
-    setStreamItems([])
-    textBufferRef.current = ''
-    setIsStreaming(true)
-    setConnectionError(null)
+  const sendMessage = useCallback(async (
+    text,
+    attachments,
+    { hidden = false, queueOnly = false } = {},
+  ) => {
+    if (!queueOnly) {
+      justSentAtRef.current = Date.now()
+      setStreamItems([])
+      textBufferRef.current = ''
+      setIsStreaming(true)
+      setConnectionError(null)
+    }
 
     try {
       const body = { content: text }
@@ -429,8 +479,24 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
         body: JSON.stringify(body),
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      // Trust the backend's actual status, not the frontend's queueOnly
+      // hint. The frontend's `sending` flag can be stale (turn finished
+      // between the doSend check and the POST landing), so a request
+      // sent with queueOnly:true can come back as "started". Always
+      // connect to the stream when the backend says it started.
+      if (data.status === 'queued') return data
+      // Started: ensure streaming state is set even if the caller
+      // passed queueOnly:true expecting it would be queued.
+      if (queueOnly) {
+        justSentAtRef.current = Date.now()
+        setStreamItems([])
+        textBufferRef.current = ''
+        setIsStreaming(true)
+        setConnectionError(null)
+      }
     } catch (err) {
-      setIsStreaming(false)
+      if (!queueOnly) setIsStreaming(false)
       throw err
     }
 
@@ -442,6 +508,7 @@ export default function useStreamConnection(chatId, { onStreamEnd, onSystemEvent
     // a misdiagnosed race; verified deterministic by inspecting
     // backend/app/routes/chats_stream.py:121-131.)
     connectRef.current?.(true)
+    return { status: 'started' }
   }, [])
 
   // Reconnect on visibility change or network recovery, but ONLY

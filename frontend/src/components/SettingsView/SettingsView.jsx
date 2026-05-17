@@ -104,6 +104,55 @@ function CodexAuth({ onConnected }) {
   )
 }
 
+/**
+ * Single unified row per provider. Replaces the old layout that
+ * duplicated each provider across a card selector + a separate auth
+ * section. Per Codex's UX consultation: one row, one status badge,
+ * default-radio disabled when not connected, auth panel inline.
+ */
+function ProviderRow({
+  id, name, isDefault, connected, onSelect, disabled,
+  expanded, onToggleExpand, children,
+}) {
+  return (
+    <div className={`provider-row${isDefault ? ' provider-row--default' : ''}`}>
+      <button
+        type="button"
+        className="provider-row__main"
+        onClick={() => onSelect(id)}
+        disabled={disabled}
+        title={connected
+          ? (isDefault ? 'Default for new chats' : 'Set as default')
+          : 'Tap to set up authentication'}
+      >
+        <span className={`provider-row__radio${isDefault ? ' provider-row__radio--on' : ''}`}>
+          {isDefault && <span className="provider-row__radio-dot" />}
+        </span>
+        <span className="provider-row__name">{name}</span>
+        <span className={`provider-row__status provider-row__status--${connected ? 'connected' : 'disconnected'}`}>
+          {connected ? 'Connected' : 'Not connected'}
+        </span>
+      </button>
+      <button
+        type="button"
+        className="provider-row__action"
+        onClick={onToggleExpand}
+        aria-expanded={expanded}
+      >
+        {connected
+          ? (expanded ? 'Close' : 'Reconnect')
+          : (expanded ? 'Close' : 'Connect')}
+      </button>
+      {expanded && (
+        <div className="provider-row__auth">
+          {children}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
 export default function SettingsView({ onThemeChange }) {
   const [geminiKey, setGeminiKey] = useState('')
   const [configured, setConfigured] = useState(false)
@@ -113,21 +162,29 @@ export default function SettingsView({ onThemeChange }) {
   const [lightMode, setLightMode] = useState(false)
   const [themeSwitching, setThemeSwitching] = useState(false)
 
-  // Provider state.
-  const [provider, setProvider] = useState('claude')
+  // Provider state. `provider` starts as null until /settings resolves
+  // so the UI doesn't briefly highlight "Claude" before the real default
+  // arrives (was causing a purple flash on Settings open).
+  const [provider, setProvider] = useState(null)
   const [claudeAuthenticated, setClaudeAuthenticated] = useState(false)
   const [codexAuthenticated, setCodexAuthenticated] = useState(false)
   const [providerSaving, setProviderSaving] = useState(false)
+  // Which provider has its inline auth panel expanded. null = none.
+  const [expandedAuth, setExpandedAuth] = useState(null)
+  // Tracks whether the initial /settings fetch finished, so the
+  // provider row UI is rendered only after we know the default.
+  const [providerLoaded, setProviderLoaded] = useState(false)
 
   useEffect(() => {
     apiFetch('/settings')
       .then(r => r.json())
       .then(data => {
         if (data.gemini_configured) setConfigured(true)
-        if (data.provider) setProvider(data.provider)
+        setProvider(data.provider || 'claude')
         if (data.codex_authenticated) setCodexAuthenticated(true)
       })
-      .catch(() => {})
+      .catch(() => { setProvider('claude') })
+      .finally(() => setProviderLoaded(true))
 
     apiFetch('/auth/provider/status')
       .then(r => r.json())
@@ -141,7 +198,21 @@ export default function SettingsView({ onThemeChange }) {
   }, [])
 
   async function selectProvider(newProvider) {
-    if (newProvider === provider || providerSaving) return
+    if (providerSaving) return
+    // If user clicks a disconnected provider (whether or not it's the
+    // current default), open its auth panel. The "default but
+    // disconnected" case is real: backend has provider=codex but codex
+    // isn't authenticated yet — the user MUST be able to reach the
+    // auth flow via the row.
+    const isConnected = newProvider === 'claude'
+      ? claudeAuthenticated
+      : codexAuthenticated
+    if (!isConnected) {
+      setExpandedAuth(newProvider)
+      return
+    }
+    // Connected. If it's already the default, no-op.
+    if (newProvider === provider) return
     const oldProvider = provider
     setProvider(newProvider)
     setProviderSaving(true)
@@ -258,63 +329,49 @@ export default function SettingsView({ onThemeChange }) {
 
         <section className="settings__section">
           <h2 className="settings__section-title">AI provider</h2>
-          <p className="settings__subtext" style={{ marginBottom: 12 }}>Start new chats with:</p>
+          <p className="settings__subtext" style={{ marginBottom: 12 }}>
+            Pick the default for new chats. Only connected providers can be selected.
+          </p>
 
-          <div className="settings__provider-cards">
-            <button
-              className={`settings__provider-card${provider === 'claude' ? ' settings__provider-card--selected' : ''}`}
-              onClick={() => selectProvider('claude')}
-              disabled={providerSaving}
-            >
-              <span className="settings__provider-radio">
-                {provider === 'claude' && <span className="settings__provider-radio-dot" />}
-              </span>
-              <span className="settings__provider-card-info">
-                <span className="settings__provider-card-name">Claude Code</span>
-                <span className={`settings__provider-card-status${claudeAuthenticated ? ' settings__provider-card-status--ok' : ''}`}>
-                  {claudeAuthenticated ? 'Connected' : 'Not connected'}
-                </span>
-              </span>
-            </button>
+          {providerLoaded && (
+            <div className="settings__providers">
+              <ProviderRow
+                id="claude"
+                name="Claude Code"
+                isDefault={provider === 'claude'}
+                connected={claudeAuthenticated}
+                onSelect={selectProvider}
+                disabled={providerSaving}
+                expanded={expandedAuth === 'claude'}
+                onToggleExpand={() => setExpandedAuth(
+                  expandedAuth === 'claude' ? null : 'claude',
+                )}
+              >
+                <ProviderAuth compact onDone={() => {
+                  setClaudeAuthenticated(true)
+                  setExpandedAuth(null)
+                }} />
+              </ProviderRow>
 
-            <button
-              className={`settings__provider-card${provider === 'codex' ? ' settings__provider-card--selected' : ''}`}
-              onClick={() => selectProvider('codex')}
-              disabled={providerSaving}
-            >
-              <span className="settings__provider-radio">
-                {provider === 'codex' && <span className="settings__provider-radio-dot" />}
-              </span>
-              <span className="settings__provider-card-info">
-                <span className="settings__provider-card-name">Codex (OpenAI)</span>
-                <span className={`settings__provider-card-status${codexAuthenticated ? ' settings__provider-card-status--ok' : ''}`}>
-                  {codexAuthenticated ? 'Connected' : 'Not connected'}
-                </span>
-              </span>
-            </button>
-          </div>
-
-          <div className="settings__provider-block" style={{ marginTop: 16 }}>
-            <div className="settings__provider-header">
-              <span className="settings__provider-name">Claude Code</span>
+              <ProviderRow
+                id="codex"
+                name="Codex (OpenAI)"
+                isDefault={provider === 'codex'}
+                connected={codexAuthenticated}
+                onSelect={selectProvider}
+                disabled={providerSaving}
+                expanded={expandedAuth === 'codex'}
+                onToggleExpand={() => setExpandedAuth(
+                  expandedAuth === 'codex' ? null : 'codex',
+                )}
+              >
+                <CodexAuth onConnected={() => {
+                  setCodexAuthenticated(true)
+                  setExpandedAuth(null)
+                }} />
+              </ProviderRow>
             </div>
-            <ProviderAuth compact onDone={() => setClaudeAuthenticated(true)} />
-          </div>
-
-          <div className="settings__provider-block" style={{ marginTop: 12 }}>
-            <div className="settings__provider-header">
-              <span className="settings__provider-name">Codex (OpenAI)</span>
-            </div>
-            {codexAuthenticated ? (
-              <div className="pa__row">
-                <span className="pa__label">
-                  <span className="pa__success">Connected</span>
-                </span>
-              </div>
-            ) : (
-              <CodexAuth onConnected={() => setCodexAuthenticated(true)} />
-            )}
-          </div>
+          )}
         </section>
 
         <section className="settings__section">

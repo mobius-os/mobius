@@ -183,3 +183,16 @@ input, textarea {
   -webkit-text-fill-color: transparent;
   background-clip: text;
 }
+
+/* High-contrast text selection so the highlight is visible on every
+   theme (including custom dark themes). Without this, themes with
+   subtle accent colors leave selections nearly invisible against the
+   message background. */
+::selection {
+  background: var(--accent, #4f8cff);
+  color: var(--bg, #fff);
+}
+::-moz-selection {
+  background: var(--accent, #4f8cff);
+  color: var(--bg, #fff);
+}

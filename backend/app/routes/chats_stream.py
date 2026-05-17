@@ -50,6 +50,97 @@ def _sse(data: dict) -> str:
   return f"data: {json.dumps(data)}\n\n"
 
 
+def _content_with_uploads(chat: models.Chat, body: schemas.SendMessage) -> str:
+  """Returns message content with the session upload notice appended."""
+  settings = get_settings()
+  content = body.content
+  if chat.uploads:
+    safe_entries = []
+    for f in chat.uploads:
+      safe = _safe_upload_path(f['path'], settings.data_dir)
+      if safe is not None:
+        safe_entries.append(
+          f"- {f['name']} → {safe}"
+          f" ({f.get('mime_type', 'unknown')}, {round(f['size'] / 1024)} KB)"
+        )
+    if safe_entries:
+      lines = "\n".join(safe_entries)
+      content += f"\n\n[Files in this session:\n{lines}]"
+  return content
+
+
+def _ensure_unique_ts(new_msg: dict, pending: list[dict]) -> None:
+  """Bumps new_msg['ts'] so it's strictly greater than every ts in pending.
+
+  Two sends inside the same millisecond would otherwise collide,
+  producing duplicate React keys client-side and making DELETE-by-ts
+  ambiguous (it would remove all matching entries). The id only needs
+  to be unique within the queue, not globally — keeping it as an int
+  millisecond timestamp preserves human-readable ordering.
+  """
+  if not pending:
+    return
+  max_ts = max((m.get("ts", 0) for m in pending), default=0)
+  if new_msg.get("ts", 0) <= max_ts:
+    new_msg["ts"] = max_ts + 1
+
+
+async def _append_to_pending(
+  chat: models.Chat, body: schemas.SendMessage, db: Session,
+) -> dict:
+  """Appends a queued message and commits. Returns the stored dict.
+
+  Serialized per chat via the queue lock from app.chat — concurrent
+  POSTs (and concurrent DELETE/promote) are made safe by refreshing
+  the chat row from the DB inside the lock so each caller sees the
+  committed state of the previous one.
+  """
+  from app.chat import get_queue_lock
+  async with get_queue_lock(chat.id):
+    db.refresh(chat)
+    pending = list(chat.pending_messages or [])
+    new_msg = _user_message_from_body(chat, body)
+    _ensure_unique_ts(new_msg, pending)
+    pending.append(new_msg)
+    chat.pending_messages = pending
+    chat.updated_at = datetime.now(UTC)
+    db.commit()
+  return new_msg
+
+
+def _queued_response(new_msg: dict, position: int) -> JSONResponse:
+  """Standard 202 response for a queued message."""
+  return JSONResponse(
+    status_code=202,
+    content={
+      "status": "queued",
+      "position": position,
+      "ts": new_msg["ts"],
+    },
+  )
+
+
+def _user_message_from_body(
+  chat: models.Chat,
+  body: schemas.SendMessage,
+) -> dict:
+  """Builds the durable user message payload for a send request."""
+  user_msg = {
+    "role": "user",
+    "content": _content_with_uploads(chat, body),
+    "ts": int(time.time() * 1000),
+  }
+  if body.hidden:
+    user_msg["hidden"] = True
+  if body.attachments:
+    user_msg["attachments"] = body.attachments
+  if body.timezone:
+    user_msg["timezone"] = body.timezone
+  if body.viewport:
+    user_msg["viewport"] = body.viewport
+  return user_msg
+
+
 @router.post("/{chat_id}/messages", status_code=202)
 async def send_message(
   body: schemas.SendMessage,
@@ -66,8 +157,58 @@ async def send_message(
   if not chat:
     raise HTTPException(status_code=404, detail="Chat not found.")
 
+  # Queue path: agent is running OR stale pending exists from a
+  # previous crash. Appending the new send at the END of pending
+  # preserves chronological order. When pending was stale (server
+  # crashed mid-turn), we additionally spawn a run that drains the
+  # queue from the head, so the queued messages actually get answered
+  # rather than sitting forever.
+  if is_chat_running(chat_id) or chat.pending_messages:
+    new_msg = await _append_to_pending(chat, body, db)
+
+    if not is_chat_running(chat_id):
+      # Stale pending — try to claim and drain. mark_starting prevents
+      # a duplicate spawn if a concurrent request already started one
+      # (e.g., two stale-pending POSTs racing).
+      if mark_starting(chat_id):
+        try:
+          from app.chat import (
+            _promote_pending_messages, _schedule_continuation,
+          )
+          next_messages, next_user, next_session_id = (
+            await _promote_pending_messages(db, chat_id)
+          )
+          if next_user:
+            _schedule_continuation(
+              chat_id=chat_id,
+              messages=next_messages,
+              session_id=next_session_id,
+              provider_id=chat.provider,
+              next_user=next_user,
+            )
+          else:
+            # Nothing to promote (queue race, malformed) — release.
+            discard_starting(chat_id)
+        except Exception:
+          discard_starting(chat_id)
+          raise
+
+    # Re-read pending after the potential promote so the reported
+    # position reflects the user-visible queue (excludes the message
+    # that just became the active turn).
+    db.refresh(chat)
+    remaining = list(chat.pending_messages or [])
+    try:
+      position = [m.get("ts") for m in remaining].index(new_msg["ts"]) + 1
+    except ValueError:
+      # Edge case: the new message was somehow consumed (shouldn't
+      # happen because promote takes the head, but defensive).
+      position = 0
+    return _queued_response(new_msg, position)
+
   if not mark_starting(chat_id):
-    raise HTTPException(status_code=409, detail="Agent is already running.")
+    new_msg = await _append_to_pending(chat, body, db)
+    return _queued_response(new_msg, len(chat.pending_messages))
 
   # From here until create_task, any exception must discard the
   # starting guard — otherwise the chat_id stays in the set forever and
@@ -83,40 +224,14 @@ async def send_message(
     msgs = [schemas.ChatMessage(role=m["role"], content=m.get("content", ""))
             for m in (chat.messages or [])]
 
-    # Append a file notification when the chat has uploads so the
-    # agent knows what files are available in this session.  Validate
-    # each stored path against data_dir before injecting it — a
-    # tampered DB record could otherwise point the agent at
-    # credentials or other sensitive files.
-    settings = get_settings()
-    content = body.content
-    if chat.uploads:
-      safe_entries = []
-      for f in chat.uploads:
-        safe = _safe_upload_path(f['path'], settings.data_dir)
-        if safe is not None:
-          safe_entries.append(
-            f"- {f['name']} → {safe}"
-            f" ({f.get('mime_type', 'unknown')}, {round(f['size'] / 1024)} KB)"
-          )
-      if safe_entries:
-        lines = "\n".join(safe_entries)
-        content += f"\n\n[Files in this session:\n{lines}]"
+    content = _content_with_uploads(chat, body)
 
     msgs.append(schemas.ChatMessage(role="user", content=content))
 
     # Save the user message to the DB immediately so the chat list
     # reflects it before the background task starts.  This also sets
     # the title from the first message.
-    user_msg = {
-      "role": "user",
-      "content": content,
-      "ts": int(time.time() * 1000),
-    }
-    if body.hidden:
-      user_msg["hidden"] = True
-    if body.attachments:
-      user_msg["attachments"] = body.attachments
+    user_msg = _user_message_from_body(chat, body)
     existing = list(chat.messages or [])
     existing.append(user_msg)
     chat.messages = existing
@@ -144,6 +259,44 @@ async def send_message(
     raise
 
   return JSONResponse(status_code=202, content={"status": "started"})
+
+
+@router.delete("/{chat_id}/pending/{ts}", status_code=200)
+async def cancel_pending_message(
+  chat_id: str,
+  ts: int,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Removes a queued (not-yet-started) user message from the pending
+  queue. Identifies the message by its client-assigned timestamp.
+
+  Returns the updated pending queue so the client can reconcile any
+  drift (e.g. the backend promoted a message into the active turn
+  between the user clicking X and the DELETE landing).
+  """
+  chat = db.query(models.Chat).filter(
+    models.Chat.id == chat_id,
+    models.Chat.deleted_at.is_(None),
+  ).first()
+  if not chat:
+    raise HTTPException(status_code=404, detail="Chat not found.")
+
+  # Same per-chat lock as POST queue append + promote. Without it, a
+  # DELETE that races a concurrent POST/promote can read a stale
+  # snapshot and commit, undoing the other operation. Serializing
+  # here makes all three queue mutations pairwise atomic.
+  from app.chat import get_queue_lock
+  async with get_queue_lock(chat_id):
+    db.refresh(chat)
+    pending = list(chat.pending_messages or [])
+    remaining = [m for m in pending if m.get("ts") != ts]
+    if len(remaining) != len(pending):
+      chat.pending_messages = remaining
+      chat.updated_at = datetime.now(UTC)
+      db.commit()
+
+  return {"pending_messages": remaining}
 
 
 @router.get("/{chat_id}/stream")

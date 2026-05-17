@@ -28,6 +28,7 @@ class Chat(Base):
   id = Column(String(64), primary_key=True)
   title = Column(String(256), nullable=False, default="New chat")
   messages = Column(JSON, nullable=False, default=list)
+  pending_messages = Column(JSON, nullable=False, default=list)
   uploads = Column(JSON, nullable=False, default=list)
   generated_images = Column(JSON, nullable=False, default=list)
   deleted_at = Column(DateTime, nullable=True, default=None)

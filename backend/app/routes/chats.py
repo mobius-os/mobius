@@ -151,6 +151,7 @@ def get_chat(
     "id": chat.id,
     "title": chat.title,
     "messages": page,
+    "pending_messages": list(chat.pending_messages or []),
     "total": total,
     "offset": start,
     "running": is_chat_running(chat_id),
@@ -168,7 +169,7 @@ async def delete_chat(
   # Stop the agent first so it can't write to the chat after we mark it deleted.
   # Use try/finally so a stop error never prevents the soft-delete.
   try:
-    await stop_chat_for(chat_id)
+    await stop_chat_for(chat_id, db=db)
   except Exception:
     log.warning("Failed to stop agent for chat %s during delete", chat_id)
   chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()

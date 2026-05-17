@@ -585,3 +585,124 @@
   background: var(--accent);
   color: var(--bg);
 }
+
+/* ── Queued messages tray ──────────────────────────── */
+
+.queued {
+  max-width: 768px;
+  margin: 0 auto 8px;
+  background: var(--surface);
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.queued__hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px 6px;
+  border-bottom: 1px solid var(--border-light);
+  margin-bottom: 4px;
+  gap: 8px;
+}
+
+.queued__count {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.queued__hint {
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.75;
+  flex: 1;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queued__row {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  border-radius: 8px;
+  transition: background 0.15s;
+}
+
+.queued__row:hover {
+  background: var(--bg);
+}
+
+.queued__toggle {
+  flex: 1;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 8px 6px 8px 10px;
+  background: none;
+  border: none;
+  text-align: left;
+  font: inherit;
+  color: var(--text);
+  cursor: pointer;
+  min-width: 0;
+}
+
+.queued__toggle:disabled {
+  cursor: default;
+}
+
+.queued__chevron {
+  flex-shrink: 0;
+  margin-top: 5px;
+  color: var(--muted);
+  transition: transform 0.15s;
+}
+
+.queued__chevron--open {
+  transform: rotate(180deg);
+}
+
+.queued__text {
+  font-size: 14px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-width: 0;
+  flex: 1;
+}
+
+.queued__row:not(.queued__row--expanded) .queued__text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.queued__cancel {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  margin: 4px 4px 0 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.queued__cancel:hover {
+  background: var(--bg);
+  color: var(--text);
+}

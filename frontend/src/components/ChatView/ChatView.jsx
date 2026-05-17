@@ -9,8 +9,22 @@ import useFileUpload from './useFileUpload.js'
 import ConnectionStatus from './ConnectionStatus.jsx'
 import ToolBlock from './ToolBlock.jsx'
 import QuestionCard from './QuestionCard.jsx'
+import QueuedMessages from './QueuedMessages.jsx'
 import MsgContent from './MsgContent.jsx'
 import './ChatView.css'
+
+
+/** Returns the element's margin-box height (offsetHeight + vertical
+ *  margins). Needed for the queued tray: it sits in a flex column above
+ *  .chat__form, so its bottom margin shrinks .chat__scroll just as
+ *  much as its border-box does. offsetHeight alone misses that. */
+function _trayMarginBox(el) {
+  if (!el) return 0
+  const cs = getComputedStyle(el)
+  return el.offsetHeight
+    + (parseFloat(cs.marginTop) || 0)
+    + (parseFloat(cs.marginBottom) || 0)
+}
 
 
 // Cache touch-primary detection. Updated dynamically if input devices change.
@@ -88,6 +102,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // back via `commitMessages`, so any miss self-heals on next remount.
   const cached = queryClient.getQueryData(chatMessagesQueryKey(chatId))
   const [messages, setMessages] = useState(() => cached?.messages ?? [])
+  const [pendingMessages, setPendingMessages] = useState([])
   const [offset, setOffset] = useState(() => cached?.offset ?? 0)
   const [loading, setLoading] = useState(!cached)
   const [sending, setSending] = useState(false)
@@ -106,6 +121,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // ref + calling setQueryData once outside the updater is correct.
   const messagesRef = useRef(messages)
   messagesRef.current = messages
+  const pendingMessagesRef = useRef(pendingMessages)
+  pendingMessagesRef.current = pendingMessages
 
   // Single setter that updates local state AND the query cache.
   //
@@ -187,16 +204,23 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   const sendingRef = useRef(false)
   sendingRef.current = sending
 
+  // Bumped by handleStop (and any future hard-clear of local state)
+  // so any in-flight fetchMessages can't resurrect cleared data.
+  const fetchGenRef = useRef(0)
+
   // Re-fetch messages from the API. Called when the SSE stream reconnects
   // and gets a 204 (no active broadcast — the chat finished while the
   // user was offline or on poor connectivity). Replaces stale messages
   // with the current DB state.
   const fetchMessages = useCallback(async ({ force = false } = {}) => {
     if (sendingRef.current && !force) return
+    const gen = fetchGenRef.current
     try {
       const res = await apiFetch(`/chats/${chatId}?limit=20`)
       const data = await res.json()
       if (chatIdStaleRef.current) return
+      // Discard if a Stop (or other clear) bumped gen while we waited.
+      if (fetchGenRef.current !== gen) return
       let msgs = data.messages || []
       for (const msg of msgs) {
         if (msg.blocks) {
@@ -208,6 +232,20 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         }
       }
       commitMessages(msgs, data.offset || 0)
+      // Sync pending queue from server. Preserve any local cid if we
+      // already had this entry (matched by server ts); otherwise derive
+      // a stable cid from the server ts so QueuedMessages's expanded
+      // state survives re-renders.
+      const localByTs = new Map(
+        (pendingMessagesRef.current || []).map(m => [m.ts, m.cid])
+      )
+      const serverPending = (data.pending_messages || []).map(m => ({
+        ...m,
+        cid: localByTs.get(m.ts) || `s-${m.ts}`,
+        queued: true,
+      }))
+      pendingMessagesRef.current = serverPending
+      setPendingMessages(serverPending)
     } catch { /* network error — silent, user can retry */ }
   }, [chatId, commitMessages])
 
@@ -221,20 +259,51 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     retry,
     disconnect,
   } = useStreamConnection(chatId, {
-    onStreamEnd: () => {
+    onStreamEnd: ({ continues, promotedTs } = {}) => {
       promoteStreamToMessages()
-      setSending(false)
-      onStreamEnd?.()
-      // Flush any message queued while the agent was streaming.
-      // Must fire after setSending(false) so doSend's guard passes.
-      const pending = pendingMessageRef.current
-      if (pending) {
-        pendingMessageRef.current = null
-        requestAnimationFrame(() => doSend(pending))
+      if (continues) {
+        // Backend auto-promoted the head of the pending queue into a
+        // new turn. Mirror that locally: find the entry by ts (the
+        // backend-authoritative id; the runner sends queued_turn_starting
+        // with the promoted ts), append it to messages, and remove from
+        // pendingMessages. Re-arm the spacer so the new user message
+        // anchors at the top of the viewport.
+        const queued = pendingMessagesRef.current
+        const idx = promotedTs != null
+          ? queued.findIndex(m => m.ts === promotedTs)
+          : 0
+        if (idx >= 0 && queued.length > 0) {
+          const first = queued[idx]
+          const rest = queued.filter((_, i) => i !== idx)
+          const { queued: _q, cid: _c, position: _p, ...msg } = first
+          commitMessages(prev => [...prev, msg])
+          pendingMessagesRef.current = rest
+          setPendingMessages(rest)
+          promotedRef.current = false
+          setSpacerActive(true)
+          if (spacerRef.current) spacerRef.current.style.height = '0px'
+          needsSpacerRef.current = true
+        } else {
+          // Server's promoted ts isn't in our local queue (cancel raced
+          // with promote). Refetch authoritative state.
+          promotedRef.current = false
+          fetchMessages({ force: true })
+        }
+        setSending(true)
+      } else {
+        setSending(false)
+        // Stream ended without continuation. If we have local pending
+        // entries, server may have cleared them (auth fail, error) —
+        // refetch to reconcile. Skip when pending empty.
+        if (pendingMessagesRef.current.length > 0) {
+          fetchMessages({ force: true })
+        }
       }
+      onStreamEnd?.()
     },
     onSystemEvent,
     onNeedsRefresh: fetchMessages,
+    onQueuedTurnStarting: () => {},
   })
 
   // Mirror isStreaming as a ref so the ResizeObserver callback (which
@@ -245,7 +314,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
   const { files: pendingFiles, addFiles, removeFile, clearFiles } = useFileUpload({ chatId })
 
-  const { listening, listeningRef, toggleVoice } = useVoiceInput({
+  const { listening, listeningRef, stopVoice, toggleVoice } = useVoiceInput({
     onTranscript: (text) => setInput(text),
     inputRef,
   })
@@ -330,6 +399,16 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
         needsScrollRef.current = true
 
+        // Hydrate pending queue from backend so a reload mid-queue
+        // doesn't drop the visible "queued" tray. Derive a stable
+        // cid from the server ts so QueuedMessages's expanded state
+        // survives future re-renders.
+        const serverPending = (data.pending_messages || []).map(m => ({
+          ...m, cid: `s-${m.ts}`, queued: true,
+        }))
+        pendingMessagesRef.current = serverPending
+        setPendingMessages(serverPending)
+
         if (data.running) {
           setSending(true)
           connectToStream(false)
@@ -339,6 +418,19 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
     return () => {
       try {
+        // Capture current scroll + spacer from DOM at unmount, so chats
+        // where the user never scrolled (no handleScroll firing) still
+        // get their state persisted. Without this, a short response
+        // chat that the user revisits has no saved spacer to restore
+        // and the user message drops out of the top-of-viewport pin.
+        const el = scrollRef.current
+        if (el) {
+          _scrollPositions[chatId] = el.scrollHeight - el.scrollTop
+          const sp = el.querySelector('.spacer-dynamic')
+          if (sp && sp.style.height) {
+            _spacerHeights[chatId] = sp.style.height
+          }
+        }
         sessionStorage.setItem('chat-scroll', JSON.stringify(_scrollPositions))
         sessionStorage.setItem('chat-spacer', JSON.stringify(_spacerHeights))
       } catch {}
@@ -357,8 +449,18 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     // Must happen outside the needsScrollRef guard — the scroll element may
     // not exist on the initial render (empty state), so the first render
     // where it appears may not have needsScrollRef set.
+    // Track the MAX clientHeight ever observed. On empty chats, the
+    // .chat__scroll element doesn't exist until the first send — at
+    // which point the user has been typing (keyboard open), so the
+    // initial clientHeight is reduced by the keyboard. Subsequent
+    // spacer math would use this too-small viewH and over-shrink the
+    // spacer for every later message. By keeping the max, the value
+    // snaps to the correct keyboard-closed height as soon as the
+    // keyboard ever closes (e.g. after send via the blur on touch).
     const el = scrollRef.current
-    if (el && !fullViewHRef.current) fullViewHRef.current = el.clientHeight
+    if (el && el.clientHeight > fullViewHRef.current) {
+      fullViewHRef.current = el.clientHeight
+    }
 
     if (!needsScrollRef.current) {
       // Nothing to restore (e.g. brand-new chat) — reveal immediately.
@@ -476,10 +578,18 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     // Recalculate spacer height (both send and promote paths).
     // Must happen before setting scrollTop — otherwise the browser clamps
     // scrollTop to a value that's too low.
+    //
+    // Subtract the queued tray's margin-box from viewH. The tray sits
+    // in chat__foot (sibling of chat__scroll); when it appears, the
+    // scroll area shrinks by tray.offsetHeight + vertical margins. Not
+    // accounting for it leaves a dead-space below the response equal to
+    // the tray height.
     const st = scrollTargetRef.current
     const listEl = scrollEl.querySelector('.chat__list')
     if (!listEl) return
-    const viewH = fullViewHRef.current || scrollEl.clientHeight
+    const queuedTrayEl = scrollEl.parentElement?.querySelector('.queued')
+    const trayH = _trayMarginBox(queuedTrayEl)
+    const viewH = (fullViewHRef.current || scrollEl.clientHeight) - trayH
     const listH = listEl.offsetHeight
     const spacerH = Math.max(0, viewH + st - listH)
     spacerEl.style.height = `${spacerH}px`
@@ -515,10 +625,20 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     scrollEl.addEventListener('scroll', onScroll, { passive: true })
 
     const ro = new ResizeObserver(() => {
+      // Snap fullViewHRef to keyboard-closed height when we observe a
+      // larger clientHeight (e.g., keyboard dismissed after blur).
+      if (scrollEl.clientHeight > fullViewHRef.current) {
+        fullViewHRef.current = scrollEl.clientHeight
+      }
       if (scrollTargetRef.current == null) return
       const target = scrollTargetRef.current
       const lH = listEl.offsetHeight
-      const h = Math.max(0, viewH + target - lH)
+      // Re-read tray height every tick (expand/collapse, add/cancel).
+      const trayHNow = _trayMarginBox(
+        scrollEl.parentElement?.querySelector('.queued'),
+      )
+      const viewHNow = (fullViewHRef.current || scrollEl.clientHeight) - trayHNow
+      const h = Math.max(0, viewHNow + target - lH)
       spacerEl.style.height = `${h}px`
 
       // Content shrank (spacer grew) — browser may have clamped scrollTop
@@ -544,11 +664,15 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       prevListH = lH
     })
     ro.observe(listEl)
+    // Also observe the queued tray so expand/collapse of a row triggers
+    // a spacer recalc (the tray's own height changes without listEl
+    // changing).
+    if (queuedTrayEl) ro.observe(queuedTrayEl)
     return () => {
       ro.disconnect()
       scrollEl.removeEventListener('scroll', onScroll)
     }
-  }, [messages])
+  }, [messages, pendingMessages.length])
 
 
   // Paginate older messages when scrolled to top or button clicked.
@@ -601,30 +725,95 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     addFiles(fileList)
   }
 
-  // Holds a message typed while the agent is streaming. Flushed
-  // by onStreamEnd after the current turn completes — preserves
-  // conversation ordering (assistant response before queued message).
-  const pendingMessageRef = useRef(null)
-
   const doSend = useCallback(async (text) => {
     if (!text.trim()) return
     if (pendingFiles.some(c => c.status === 'uploading')) return
-    // If the agent is streaming, queue the message for after
-    // the current turn finishes. Show it optimistically now.
-    if (sending) {
-      pendingMessageRef.current = text
-      const userMsg = { role: 'user', content: text, ts: Date.now() }
-      commitMessages(prev => [...prev, userMsg])
-      setInput('')
-      if (inputRef.current) inputRef.current.style.height = 'auto'
-      return
-    }
-    onMessageStart?.()
-    promotedRef.current = false
+
+    // Stop voice recognition so a late onresult doesn't refill input
+    // after we clear it.
+    if (listeningRef.current) stopVoice?.()
+
+    // On touch devices, blur to dismiss the soft keyboard. Desktop keeps
+    // focus so the cursor stays ready for the next message.
+    if (_isTouchPrimary) inputRef.current?.blur()
 
     const attachments = pendingFiles
       .filter(f => f.status === 'done')
       .map(f => ({ name: f.name, size: f.size, mime_type: f.mime_type }))
+
+    // QUEUE PATH: agent is streaming or queue isn't empty. Optimistic
+    // entry with a stable client-side `cid` (UUID) that survives the
+    // optimistic-ts → server-ts swap. Backend writes to chat.pending_messages
+    // via POST /messages returning {status: "queued", ts, position}.
+    if (sending || isStreaming) {
+      const cid = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `cid-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+      const queuedMsg = { role: 'user', content: text, ts: Date.now(), cid, queued: true }
+      if (attachments.length > 0) queuedMsg.attachments = attachments
+      setPendingMessages(prev => {
+        const next = [...prev, { ...queuedMsg, position: prev.length + 1 }]
+        pendingMessagesRef.current = next
+        return next
+      })
+      setInput('')
+      clearFiles()
+      if (inputRef.current) inputRef.current.style.height = 'auto'
+      try {
+        const result = await streamSend(
+          text,
+          attachments.length > 0 ? attachments : undefined,
+          { queueOnly: true },
+        )
+        if (result?.status === 'queued') {
+          // Replace optimistic ts with server's (cid is stable).
+          setPendingMessages(prev => {
+            const next = prev.map(m =>
+              m.cid === queuedMsg.cid
+                ? { ...m, ts: result.ts ?? m.ts, position: result.position }
+                : m
+            )
+            pendingMessagesRef.current = next
+            return next
+          })
+        }
+        // Race: server said "started" though we expected queued.
+        if (result?.status === 'started') {
+          setPendingMessages(prev => {
+            const next = prev.filter(m => m.cid !== queuedMsg.cid)
+            pendingMessagesRef.current = next
+            return next
+          })
+          onMessageStart?.()
+          promotedRef.current = false
+          commitMessages(prev => {
+            const { queued: _q, cid: _c, position: _p, ...msg } = queuedMsg
+            return [...prev, msg]
+          })
+          setSending(true)
+          setSpacerActive(true)
+          if (spacerRef.current) spacerRef.current.style.height = '0px'
+          needsSpacerRef.current = true
+        }
+      } catch (err) {
+        // Roll back optimistic + restore input.
+        setPendingMessages(prev => {
+          const next = prev.filter(m => m.cid !== queuedMsg.cid)
+          pendingMessagesRef.current = next
+          return next
+        })
+        setInput(text)
+        commitMessages(prev => [
+          ...prev,
+          { role: 'assistant', content: `Error: ${err.message}`, blocks: [] },
+        ])
+      }
+      return
+    }
+
+    // FRESH SEND PATH: no active turn, no queue.
+    onMessageStart?.()
+    promotedRef.current = false
 
     const userMsg = { role: 'user', content: text, ts: Date.now() }
     if (attachments.length > 0) userMsg.attachments = attachments
@@ -650,7 +839,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         { role: 'assistant', content: `Error: ${err.message}`, blocks: [] },
       ])
     }
-  }, [sending, streamSend, pendingFiles, commitMessages])
+  }, [sending, isStreaming, streamSend, pendingFiles, commitMessages, clearFiles])
 
   // Sends the answer without a visible user message bubble.
   // TODO: when migrating to Claude Agent SDK, replace this with the
@@ -703,6 +892,36 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     doSend(input.trim())
   }
 
+  // Cancel a queued message via DELETE. Optimistic remove; reconcile
+  // by re-fetching authoritative state on success or on error.
+  const handleCancelPending = useCallback(async (ts) => {
+    const optimistic = pendingMessagesRef.current.filter(m => m.ts !== ts)
+    pendingMessagesRef.current = optimistic
+    setPendingMessages(optimistic)
+    try {
+      const res = await apiFetch(`/chats/${chatId}/pending/${ts}`, {
+        method: 'DELETE',
+      })
+      const data = await res.json()
+      const server = (data.pending_messages || []).map(m => ({
+        ...m, cid: `s-${m.ts}`, queued: true,
+      }))
+      pendingMessagesRef.current = server
+      setPendingMessages(server)
+    } catch {
+      // Refetch authoritative state.
+      try {
+        const res = await apiFetch(`/chats/${chatId}?limit=1`)
+        const data = await res.json()
+        const server = (data.pending_messages || []).map(m => ({
+          ...m, cid: `s-${m.ts}`, queued: true,
+        }))
+        pendingMessagesRef.current = server
+        setPendingMessages(server)
+      } catch { /* offline; leave optimistic, user can retry */ }
+    }
+  }, [chatId])
+
   async function handleStop() {
     try {
       await fetch(`${BASE}/api/chat/stop`, {
@@ -717,6 +936,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     promoteStreamToMessages()
     disconnect({ clearStreaming: true })
     setSending(false)
+    // Backend clears pending on stop; mirror locally and bump fetch gen
+    // so any in-flight refetch can't repopulate the tray.
+    fetchGenRef.current += 1
+    pendingMessagesRef.current = []
+    setPendingMessages([])
     onStreamEnd?.()
   }
 
@@ -845,6 +1069,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       <ConnectionStatus error={connectionError} onRetry={retry} />
 
       <div className="chat__foot">
+        <QueuedMessages items={pendingMessages} onCancel={handleCancelPending} />
         <form className="chat__form" onSubmit={handleSubmit}>
           {pendingFiles.length > 0 && (
             <div className="chat__chips">

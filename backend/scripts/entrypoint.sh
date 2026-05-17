@@ -13,6 +13,15 @@ trap cleanup TERM INT
 mkdir -p /data/db /data/apps /data/compiled /data/shared /data/shell /data/logs /data/cron-logs /data/cli-auth
 chown -R mobius:mobius /data 2>/dev/null || chmod -R 777 /data 2>/dev/null || true
 
+# Defensive: any baked-in Python source/script that ended up with a
+# group-restrictive mode (e.g. 640 from a host umask 027) would be
+# unreadable by the mobius user at runtime. Make app + scripts world-
+# readable so subprocesses spawned by uvicorn (running as mobius) can
+# always import / exec them. Without this, a single Write tool on the
+# host with a tight umask silently broke Codex streaming until we
+# tracked down the perm denial. See providers.py::CodexProvider.build.
+chmod -R a+rX /app/app /app/scripts 2>/dev/null || true
+
 # Auto-generate SECRET_KEY if not set (one-click deploy support).
 # Persisted to /data so it survives container restarts.
 if [ -z "$SECRET_KEY" ]; then
@@ -199,4 +208,13 @@ fi
 
 
 # Drop to non-root user and start the server.
-exec su -s /bin/sh mobius -c "cd /app && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"
+# umask 022: newly created files default to 644 (rw-r--r--) so the
+# mobius server can read script/source files copied into the image at
+# build time (whose default chmod inherits from the host umask of the
+# user who created them — sometimes 027/077). Without this, runner
+# scripts created via Write that ship with mode 640 are unreadable by
+# the mobius user at runtime, causing subprocess "permission denied"
+# failures that look like generic CLI crashes.
+umask 022
+
+exec su -s /bin/sh mobius -c "umask 022 && cd /app && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"
