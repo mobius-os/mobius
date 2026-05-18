@@ -111,14 +111,19 @@ _CLEAR_STORAGE_SCRIPT = """
        browser still holds the old JWT in localStorage, the
        TanStack Query IndexedDB cache, and the SetupWizard resume key.
        Clear them here so the next visit to / doesn't try to use stale
-       credentials or render stale chat data. */
+       credentials or render stale chat data.
+
+       IndexedDB: the React app persists the query cache via idb-keyval
+       under key 'mobius-query-cache' inside idb-keyval's default
+       database 'keyval-store'. Deleting the DB drops the only key the
+       app keeps there; idb-keyval recreates it lazily on next use. */
     try {
       localStorage.removeItem('token');
       localStorage.removeItem('setup-step');
       localStorage.removeItem('auth_expired');
       sessionStorage.clear();
       if (window.indexedDB) {
-        indexedDB.deleteDatabase('moebius-query-cache');
+        indexedDB.deleteDatabase('keyval-store');
       }
     } catch (e) { /* private mode / quota — best effort */ }
   </script>
