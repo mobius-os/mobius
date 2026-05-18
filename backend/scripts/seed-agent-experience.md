@@ -234,9 +234,10 @@ that's a safety net, not a license to leave them out.)
 
 **Verify legibility on the authenticated view, not the login page.**
 The login screen renders without `.shell`, so it doesn't preview the
-actual chat. Take a screenshot AFTER logging in / from a chat with
-a few messages to see what the partner will see. If text is hard to
-read, redesign.
+actual chat. Use `bash "$SCRIPTS_DIR/preview_shell.sh"` to screenshot
+the real chat view — it sets your scoped token in localStorage,
+navigates into the shell, dismisses the install banner, and writes
+the PNG path to stdout. If text is hard to read, redesign.
 
 Pseudo-element ornaments are a tool, not a budget — you don't owe
 them to anyone. One quiet `body::before { opacity: 0.15 }` often
