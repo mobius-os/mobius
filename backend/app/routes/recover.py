@@ -65,6 +65,23 @@ def recover_page(request: Request, db: Session = Depends(get_db)):
   return HTMLResponse(_themed(login_html()))
 
 
+def _request_is_https(request: Request) -> bool:
+  """Detects whether the inbound request was served over TLS.
+
+  Prefer the actual request scheme over a configured DOMAIN value:
+  Möbius commonly runs behind a TLS-terminating reverse proxy (Caddy)
+  on a public hostname, but in containers DOMAIN may be set to
+  'localhost' or be unset entirely. We want Secure=True whenever the
+  browser used HTTPS, regardless of internal routing.
+  """
+  forwarded = request.headers.get("x-forwarded-proto", "").lower().split(",")[0].strip()
+  if forwarded == "https":
+    return True
+  if forwarded == "http":
+    return False
+  return request.url.scheme == "https"
+
+
 @router.post("/recover/auth")
 @_limiter.limit("5/minute")
 def recover_auth(
@@ -83,13 +100,19 @@ def recover_auth(
     return HTMLResponse(_themed(login_html(error="Incorrect username or password.")))
   token = auth.create_access_token({"sub": owner.username})
   resp = HTMLResponse(_themed(dashboard_html()))
-  # Only set the secure flag when not running on localhost — local dev uses HTTP.
-  is_secure = get_settings().domain not in ("localhost", "127.0.0.1", "")
   resp.set_cookie(
     _COOKIE, token,
     httponly=True, samesite="strict", max_age=3600,
-    secure=is_secure,
+    secure=_request_is_https(request),
   )
+  return resp
+
+
+@router.post("/recover/logout")
+def recover_logout(request: Request):
+  """Clears the recovery session cookie and returns the login page."""
+  resp = HTMLResponse(_themed(login_html()))
+  resp.delete_cookie(_COOKIE)
   return resp
 
 
@@ -126,6 +149,14 @@ def _action_restore_shell(data_dir: Path, db: Session) -> str:
 
   Restores /data/shell/src from /app/shell-src/src, then runs npm build.
   Does not touch the database, compiled mini-apps, or CLI auth.
+
+  Atomicity: Vite's build cleans the outDir before populating it. If
+  the build times out or fails partway, `dist` would be left empty
+  or partial — the React app would 404 on assets until /app/static
+  fallback is consulted. We preserve the current dist as `dist.bak`
+  before the build, restore from it on any failure, and only remove
+  the backup on success. Worst case, the user sees the same shell
+  they had before the action.
   """
   shell_dir = data_dir / "shell"
   shell_src = Path("/app/shell-src")
@@ -140,16 +171,44 @@ def _action_restore_shell(data_dir: Path, db: Session) -> str:
   # Ensure node_modules are present (image has them in shell-src).
   if not (shell_dir / "node_modules").exists():
     shutil.copytree(shell_src / "node_modules", shell_dir / "node_modules")
-  # Run the build.
-  result = subprocess.run(
-    ["npm", "run", "build"],
-    cwd=str(shell_dir),
-    capture_output=True,
-    text=True,
-    timeout=120,
-  )
+
+  dist_dir = shell_dir / "dist"
+  dist_bak = shell_dir / "dist.bak"
+  had_dist = dist_dir.exists()
+  if had_dist:
+    _rm_tree(dist_bak)
+    os.rename(dist_dir, dist_bak)
+
+  def _restore_backup() -> None:
+    """Restores the previous dist from dist.bak on failure paths."""
+    _rm_tree(dist_dir)
+    if dist_bak.exists():
+      os.rename(dist_bak, dist_dir)
+
+  try:
+    result = subprocess.run(
+      ["npm", "run", "build"],
+      cwd=str(shell_dir),
+      capture_output=True,
+      text=True,
+      timeout=120,
+    )
+  except subprocess.TimeoutExpired:
+    _restore_backup()
+    return (
+      "Build timed out after 120s — previous shell restored."
+      " Try again, or use Factory reset if it keeps failing."
+    )
+  except OSError as exc:
+    _restore_backup()
+    return f"Build could not start: {exc}"
+
   if result.returncode != 0:
-    return f"Build failed: {result.stderr[-600:]}"
+    _restore_backup()
+    return f"Build failed (previous shell restored): {result.stderr[-600:]}"
+
+  # Success — drop the backup.
+  _rm_tree(dist_bak)
   return "Shell restored and rebuilt from original source. Reload the app."
 
 
@@ -194,8 +253,13 @@ def recover_action(
 
   if action == "factory_reset":
     _action_factory_reset(data_dir, db)
+    # clear_storage=True injects a small inline script that wipes the
+    # React app's localStorage (token, setup-step) and the TanStack
+    # Query IndexedDB cache. Without this, the next / load picks up
+    # the stale token and renders cached chats from the prior owner.
     resp = HTMLResponse(_themed(login_html(
-      error="Factory reset complete.  Set up your account again."
+      error="Factory reset complete.  Set up your account again.",
+      clear_storage=True,
     )))
     resp.delete_cookie(_COOKIE)
     return resp

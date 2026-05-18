@@ -5,6 +5,20 @@ maintain independently.
 """
 
 import html
+import json
+
+
+def _confirm_attr(text: str) -> str:
+  """Returns a properly escaped HTML attribute value that runs
+  `return confirm(<text>)` on submit. json.dumps gives a valid JS
+  string literal (handles quotes, backslashes, control chars); the
+  surrounding html.escape makes the value safe inside an HTML
+  double-quoted attribute. Without this, editing any _CONFIRM_*
+  constant to contain an apostrophe or </script> would break or
+  poison the page.
+  """
+  js = f"return confirm({json.dumps(text)});"
+  return html.escape(js, quote=True)
 
 _STYLE = """
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -29,11 +43,25 @@ _STYLE = """
     outline: none;
   }
   input:focus { border-color: var(--accent, #a78bfa); }
+  /* Keyboard-only focus ring — matches the React app's index.css rule
+     so the recovery page doesn't lose the accessibility outline that
+     the rest of the app just gained. */
+  input:focus-visible {
+    outline: 2px solid var(--accent, #a78bfa); outline-offset: 1px;
+  }
   .btn {
     display: inline-block; padding: 10px 20px; font-size: 14px;
     border: none; border-radius: 6px; cursor: pointer;
     color: #fff; text-decoration: none; text-align: center;
     width: 100%;
+    /* Consistency with the React app: kill the mobile tap-highlight
+       overlay and the accidental text-selection on press. */
+    -webkit-tap-highlight-color: transparent;
+    user-select: none; -webkit-user-select: none;
+    -webkit-touch-callout: none;
+  }
+  .btn:focus-visible {
+    outline: 2px solid var(--accent, #a78bfa); outline-offset: 2px;
   }
   .btn-primary { background: var(--accent, #a78bfa); }
   .btn-primary:hover { background: var(--accent-hover, #c4b5fd); }
@@ -77,18 +105,45 @@ _STYLE = """
 """
 
 
-def login_html(error: str = "") -> str:
-  """Returns the recovery login page HTML."""
+_CLEAR_STORAGE_SCRIPT = """
+  <script>
+    /* After factory reset, the server-side state is wiped but the
+       browser still holds the old JWT in localStorage, the
+       TanStack Query IndexedDB cache, and the SetupWizard resume key.
+       Clear them here so the next visit to / doesn't try to use stale
+       credentials or render stale chat data. */
+    try {
+      localStorage.removeItem('token');
+      localStorage.removeItem('setup-step');
+      localStorage.removeItem('auth_expired');
+      sessionStorage.clear();
+      if (window.indexedDB) {
+        indexedDB.deleteDatabase('moebius-query-cache');
+      }
+    } catch (e) { /* private mode / quota — best effort */ }
+  </script>
+"""
+
+
+def login_html(error: str = "", clear_storage: bool = False) -> str:
+  """Returns the recovery login page HTML.
+
+  When clear_storage=True, includes an inline script that wipes the
+  React app's localStorage / sessionStorage / IndexedDB cache. Used
+  after factory reset so the next visit to the React app doesn't
+  pick up a stale token or render cached chat data.
+  """
   error_html = (
     f'<p class="error">{html.escape(error)}</p>' if error else ""
   )
+  clear_html = _CLEAR_STORAGE_SCRIPT if clear_storage else ""
   return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Möbius Recovery</title>
-  <style>{_STYLE}</style>
+  <style>{_STYLE}</style>{clear_html}
 </head>
 <body>
   <div class="card">
@@ -122,6 +177,10 @@ _CONFIRM_FACTORY = (
   " CLI credentials, and theme — but preserves chat history."
   " Are you sure?"
 )
+_CONFIRM_BACKUP = (
+  "Backup includes OAuth credentials for Claude and Codex."
+  " Store the file securely. Continue?"
+)
 
 
 def dashboard_html(msg: str = "") -> str:
@@ -147,7 +206,7 @@ def dashboard_html(msg: str = "") -> str:
       <p class="label">&#10003; Recommended</p>
       <p class="desc">Resets the interface to its original state. Chats, mini-apps, and settings are untouched.</p>
       <form method="POST" action="/recover/action"
-            onsubmit="return confirm('{_CONFIRM_RESTORE}')">
+            onsubmit="{_confirm_attr(_CONFIRM_RESTORE)}">
         <input type="hidden" name="action" value="restore_shell">
         <button class="btn btn-primary" type="submit">
           Restore interface
@@ -158,7 +217,8 @@ def dashboard_html(msg: str = "") -> str:
     <div class="section">
       <p class="section-title">Other safe actions</p>
       <div class="actions">
-        <form method="POST" action="/recover/action">
+        <form method="POST" action="/recover/action"
+              onsubmit="{_confirm_attr(_CONFIRM_BACKUP)}">
           <input type="hidden" name="action" value="download_backup">
           <button class="btn btn-outline" type="submit">
             Download backup (.zip)
@@ -180,21 +240,21 @@ def dashboard_html(msg: str = "") -> str:
       <p class="section-title">Destructive actions</p>
       <div class="actions">
         <form method="POST" action="/recover/action"
-              onsubmit="return confirm('{_CONFIRM_APPS}')">
+              onsubmit="{_confirm_attr(_CONFIRM_APPS)}">
           <input type="hidden" name="action" value="reset_apps">
           <button class="btn btn-warn" type="submit">
             Reset all mini-apps
           </button>
         </form>
         <form method="POST" action="/recover/action"
-              onsubmit="return confirm('{_CONFIRM_AUTH}')">
+              onsubmit="{_confirm_attr(_CONFIRM_AUTH)}">
           <input type="hidden" name="action" value="reset_settings">
           <button class="btn btn-warn" type="submit">
             Reset CLI auth
           </button>
         </form>
         <form method="POST" action="/recover/action"
-              onsubmit="return confirm('{_CONFIRM_FACTORY}')">
+              onsubmit="{_confirm_attr(_CONFIRM_FACTORY)}">
           <input type="hidden" name="action" value="factory_reset">
           <button class="btn btn-warn" type="submit">
             Factory reset
@@ -204,9 +264,16 @@ def dashboard_html(msg: str = "") -> str:
     </div>
 
     <hr>
-    <a href="/" class="btn btn-outline" style="margin-top: 4px;">
-      &larr; Back to app
-    </a>
+    <div class="actions">
+      <a href="/" class="btn btn-outline">
+        &larr; Back to app
+      </a>
+      <form method="POST" action="/recover/logout">
+        <button class="btn btn-outline" type="submit">
+          Log out of recovery
+        </button>
+      </form>
+    </div>
   </div>
 </body>
 </html>"""
