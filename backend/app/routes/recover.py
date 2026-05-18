@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +30,15 @@ _limiter = Limiter(key_func=get_remote_address)
 # Session tokens are short-lived, stored in a cookie.  They are separate
 # from JWT tokens so recovery works even if JWT logic is broken.
 _COOKIE = "moebius_recover"
+
+# Serializes the restore-shell action. FastAPI runs sync route handlers
+# in a threadpool, so two concurrent /recover/action POSTs can run
+# _action_restore_shell in parallel — and the dist-swap (rename to
+# dist.bak, run build, rename back on failure) is not safe under
+# concurrency: thread A's rename clobbers thread B's backup, both end
+# up with no dist on a failure path. Lock at the action boundary so
+# only one shell restore runs at a time.
+_RESTORE_SHELL_LOCK = threading.Lock()
 
 
 def _themed(html_str: str) -> str:
@@ -157,7 +167,21 @@ def _action_restore_shell(data_dir: Path, db: Session) -> str:
   before the build, restore from it on any failure, and only remove
   the backup on success. Worst case, the user sees the same shell
   they had before the action.
+
+  Concurrency: serialized by `_RESTORE_SHELL_LOCK`. Two simultaneous
+  POSTs from the recovery page would otherwise race the dist.bak
+  swap and end up with no dist on a failure path.
   """
+  if not _RESTORE_SHELL_LOCK.acquire(blocking=False):
+    return "Another shell restore is already running. Wait for it to finish."
+  try:
+    return _do_restore_shell(data_dir)
+  finally:
+    _RESTORE_SHELL_LOCK.release()
+
+
+def _do_restore_shell(data_dir: Path) -> str:
+  """Inner restore-shell implementation. Caller holds _RESTORE_SHELL_LOCK."""
   shell_dir = data_dir / "shell"
   shell_src = Path("/app/shell-src")
   if not shell_src.exists():
