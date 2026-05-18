@@ -1,3 +1,12 @@
+/* CONTRACT: .shell is the authenticated viewport. It paints
+   `var(--bg)` solidly across the entire screen (position: fixed;
+   inset: 0). Any ornament on html / body pseudo-elements is hidden
+   behind this layer once logged in — paint ornaments on
+   `.shell::before` / `.shell::after` instead.
+
+   `--bg` is therefore an OPAQUE FILL variable. Themes that set it
+   to rgba(..., <1) will leak whatever sits behind through every
+   surface that paints it. */
 .shell {
   position: fixed;
   inset: 0;

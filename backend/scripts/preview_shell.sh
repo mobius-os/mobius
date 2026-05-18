@@ -32,6 +32,16 @@ if ! command -v agent-browser >/dev/null 2>&1; then
   exit 1
 fi
 
+# Match the partner's actual viewport so the screenshot frames what
+# they see, not a fixed default. chat.py exports these from the
+# `Viewport: WxH` payload the React shell sends with every turn.
+# If they're missing (older shell, malformed payload), agent-browser
+# falls back to its default — the screenshot is still useful, just
+# not pixel-accurate to the partner's device.
+if [ -n "${VIEWPORT_WIDTH:-}" ] && [ -n "${VIEWPORT_HEIGHT:-}" ]; then
+  agent-browser set viewport "${VIEWPORT_WIDTH}" "${VIEWPORT_HEIGHT}" >/dev/null
+fi
+
 # Origin must be loaded before localStorage.setItem (localStorage is
 # per-origin and only writable once a same-origin document exists).
 agent-browser open "${API_BASE_URL}/" >/dev/null

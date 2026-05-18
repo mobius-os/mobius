@@ -1,3 +1,8 @@
+/* CONTRACT: .chat paints `var(--bg)` as its own solid background.
+   Message bubbles below paint `var(--surface)` / `var(--surface2)`
+   on top of this — so both `--bg` and `--surface*` must read as
+   OPAQUE FILL variables. Translucent values let the page background
+   bleed through bubbles. */
 .chat {
   display: flex;
   flex-direction: column;

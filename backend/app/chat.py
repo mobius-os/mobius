@@ -634,6 +634,15 @@ async def _run_chat_impl(
     "SCRIPTS_DIR": str(scripts_dir),
     "CHAT_ID": chat_id,
   })
+  # Partner viewport (sent by the React shell on each turn). The agent
+  # uses these when taking screenshots so the framing matches what the
+  # partner actually sees — preview_shell.sh reads them, mini-app
+  # screenshots in the seed/skill recipes use them.
+  vp_w = (viewport or {}).get("width")
+  vp_h = (viewport or {}).get("height")
+  if vp_w and vp_h:
+    base_env["VIEWPORT_WIDTH"] = str(vp_w)
+    base_env["VIEWPORT_HEIGHT"] = str(vp_h)
 
   # Get the provider first — needed for auth check.
   provider = get_provider(provider_id)
