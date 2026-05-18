@@ -32,6 +32,31 @@ intentional design.
 
 _(none right now)_
 
+## Next up — agent contract / discoverability
+
+(Both items align with the "code empowers the agent" philosophy:
+the current contracts surprise agents in non-obvious ways and the
+fix is to make the design itself less surprising.)
+
+- **Symmetric storage API.** `PUT /api/storage/apps/{id}/file.json`
+  accepts `{content: JSON.stringify(myData)}` while `GET` returns
+  the parsed inner object — the asymmetry has cost agents at least
+  two compile cycles per build (per the chat-2 introspection). Fix:
+  let `PUT` accept the inner object directly; the server stringifies.
+  Keep `{content: "..."}` as a legacy shim for existing mini-apps,
+  with a deprecation log line. Read shape stays as-is (already the
+  good shape).
+- **CSS contract comments in Shell.css + ChatView.css.** The
+  Andalusian-theme failure traced to: agent knew variable names
+  from `theme.py:DEFAULT_THEME` but didn't know which selector
+  paints which variable. Fix: add `/* CONTRACT: ... */` comments
+  beside each `background: var(--bg)` / `var(--surface)` / etc. in
+  Shell.css and ChatView.css, explaining what relies on this being
+  opaque/solid. Comments are greppable, live next to the rule, and
+  hard to miss in normal editing. (A generated `theme-selectors.json`
+  catalog was considered and rejected — comments first; add the JSON
+  only if multiple agents still trip after the comments land.)
+
 ## Next up — agent UX
 
 - **Notify on pending input.** When the agent leaves a turn open

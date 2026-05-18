@@ -66,6 +66,13 @@ infrastructure discoveries, wrong assumptions, or workarounds you
 hit along the way. Each one is a gotcha worth logging — future
 sessions will thank you.
 
+If during the build you discovered a non-obvious platform contract
+(e.g. "the shell paints `--bg` solidly across the viewport, so html
+pseudo-element ornaments get hidden") — append one terse line to
+the running experience log under a "Platform contracts" heading.
+Engineering memory for the next agent, not partner-facing
+narration. One line, not a recap.
+
 ## Before building: triage the prompt
 
 Three tiers — pick the matching one and act:
