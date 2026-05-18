@@ -3,6 +3,31 @@
 Running list of user-reported items and ideas, ordered roughly by
 priority within each section. Update as items ship or get re-scoped.
 
+## Design philosophy (read first)
+
+**Code empowers the agent; it does not police the agent.** When
+working on subsystems the agent touches (themes, mini-apps,
+experience log, anything in `/data/shared/` or `/data/apps/`):
+
+- Prefer well-designed defaults and clear in-code documentation
+  over server-side rewriting of the agent's output.
+- Make the contract discoverable from the code itself (comments on
+  why a variable exists, what consumes it, what the safe range is)
+  rather than spelling it out in the seed.
+- Mistakes should be hard to make because the design is hackable
+  with low cognitive load, not because validators block them.
+
+Infrastructure the agent doesn't see — provider plumbing, queue
+state machine, recovery atomicity, streaming protocol, shell
+internals — is fair game for whatever level of complexity makes
+it correct. The split is intentional: invisible robustness for
+the platform, maximal expressive surface for the agent.
+
+When in doubt: would documenting this in code/seed cost less than
+maintaining a sanitizer? Usually yes. Reach for the sanitizer only
+when a mistake is silent + catastrophic + indistinguishable from
+intentional design.
+
 ## In progress
 
 _(none right now)_
