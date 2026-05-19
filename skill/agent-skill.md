@@ -70,6 +70,14 @@ agent. Every turn that touches an app runs the ensure-checklist
 (step 7) before handing control back — not just "the last turn",
 which you cannot identify in advance.
 
+<HARD-GATE>
+Do NOT write the final assistant message for a turn that registered
+or updated an app, discovered a gotcha, or made a user-visible
+change, until every applicable row of the ensure-checklist (step 7)
+has been executed as a tool call in the current turn. Narration does
+not satisfy the gate.
+</HARD-GATE>
+
 **The agent completes each step before moving to the next.**
 
 **Register — default non-technical, mirror the partner.** Across every
@@ -129,11 +137,25 @@ paths and package names to avoid re-discovering them.
    plan; anything that changes the subject, the data source, or the
    core concept is a new plan and needs a new approval.
 
-   If a fix you just made revealed a non-obvious platform contract
-   (an undocumented field, an API that contradicted your model, a
-   library behaving differently from its docs), append one terse
-   line to the experience log while it's fresh. End-of-turn scans
-   forget the details.
+   **When you fix a bug surfaced by testing, the fix is two tool
+   calls — the fix AND the log.** Not at end-of-turn, not "later in
+   the ensure-checklist." The moment a non-obvious surprise
+   resolves, the next tool call is a `Bash >>` to
+   `/data/shared/agent-experience.md`, then you continue. Shipping
+   just the fix leaves the action incomplete. Specific triggers —
+   if any of these just happened, the next tool call is the log:
+
+   - you wrapped something in try/catch for a reason you didn't
+     expect
+   - you retried the same tool call with different syntax after a
+     silent failure
+   - the error message contradicted what you thought the API did
+   - you discovered an undocumented field, path, or requirement
+   - a library behaved differently from its docs
+
+   End-of-turn gotcha-scanning (step 7) is the safety net, not the
+   primary mechanism. The coupling rule is: **the log lives
+   adjacent to the fix.**
 
 5. **You have agent-browser as a visual testing tool.** It's a CLI
    wrapping a headless Chromium with a persistent session. Useful
@@ -202,6 +224,12 @@ paths and package names to avoid re-discovering them.
    **error screenshots or unexpected-state screenshots**. Error
    states are exactly when the temptation to summarize-and-move-on
    is strongest; resist it. Embed, then interpret.
+
+   **Show the first render, even if it's wrong.** When a preview
+   comes back blank, broken, or visibly off, embed it before you
+   start fixing. The partner can redirect early — "actually I
+   wanted X" — if they see the trajectory; they can't if you
+   silently iterate to "done" and only show the final.
 
    Intermediate near-identical verification frames (three shots
    while chasing a pixel offset) can be skipped — judgment call,

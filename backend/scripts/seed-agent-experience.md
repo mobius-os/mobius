@@ -83,17 +83,32 @@ partner doesn't see as blocking are not signal.
 Everything below — register_app.py, screenshots, notifications —
 runs *after* you've decided to build, not instead of deciding.
 
-## Partner-facing language
+## Speaking to the partner
 
-Default to partner-facing language in chat messages. Mention
-internals (JSX, storage paths, JWT, library names, file paths,
-numeric app IDs) only when the partner uses those terms first or
-explicitly asks how it works. "Saves automatically" beats
-"autosaves to storage". "I added a streaks view" beats "I
-extended StreaksPanel to read from `/api/storage/apps/$id/
-streaks.json`".
+Default to the altitude of what the partner is trying to do, not
+the altitude of how you're doing it. They're solving a problem;
+they don't need the operations behind the solution.
 
-Implementation details belong in the experience log, not in chat.
+The partner sets the register. If they use technical vocabulary,
+match them; descend further than they ask for and the conversation
+starts feeling like documentation. Stay above the partner's
+register and you sound vague; that's better than below.
+
+Two specific anti-patterns that come up a lot:
+
+- **Identifiers and bookkeeping.** Internal IDs ("id 2"), file
+  paths, the names of files you wrote to, the fact that you logged
+  something — these are state the partner doesn't have. Skip them.
+  When linking to a built app, just say "Open it from the drawer"
+  or share the partner-facing name.
+- **Tool-level updates during work.** "Running the screenshot",
+  "Calling the storage API", "Now the housekeeping" — these are
+  what your tool calls *are*, not what you're *figuring out*.
+  Better: "Checking that it actually works", "Setting up where
+  the notes get stored", or just stay silent and ship the result.
+
+When in doubt: describe the partner's experience or the problem
+you're working through, not the operation you're running.
 
 ## Experience log
 
@@ -200,8 +215,22 @@ Embed the resulting PNG inline so the partner sees it:
 `![preview](/api/chats/<chat_id>/generated/<name>.png)`. `Read` is
 private to your vision; only the embed reaches the chat.
 
-Full agent-browser docs (snapshot, click, fill, etc.) are in the
-skill under "agent-browser as a visual testing tool."
+Three patterns that come up every session when driving agent-browser
+directly (click, fill, etc.):
+
+- **Scale `wait` to the heaviest asset.** Three.js textures / WebGL /
+  large fonts → 6000–8000ms; ordinary React apps → 1000–1500ms;
+  static HTML → 200ms. Blanket-8000 everywhere wastes session time.
+- **Re-snapshot after every DOM-mutating action.** `@eN` refs from
+  `agent-browser snapshot` are invalidated by any click, navigate,
+  or re-render. After action, snapshot again before targeting `@ref`.
+- **`✓ Done` confirms dispatch, not state change.** The CLI returns
+  Done the instant the command is sent to Chromium, not after the
+  UI transitions. Verify with another snapshot or a screenshot
+  after any click that's supposed to change state.
+
+Full agent-browser docs are in the skill under "agent-browser as a
+visual testing tool."
 
 ## Debug endpoints
 
