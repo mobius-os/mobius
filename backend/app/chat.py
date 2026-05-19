@@ -813,9 +813,24 @@ async def _run_chat_impl(
       we_own_gen = (
         run_gen is None or _run_generation.get(chat_id, 0) == run_gen
       )
-      next_user, next_messages, next_session_id = await _drain_and_release(
-        db, chat_id, we_own_gen,
-      )
+      # `_drain_and_release` takes the per-chat queue lock with no
+      # internal timeout — if another coroutine holds it (e.g. a
+      # concurrent POST appending a queued message), the finally
+      # block hangs HERE, before bc.publish(done) + mark_completed.
+      # Result: `_active_procs` is empty (proc already popped above)
+      # but broadcast stays `running=True` forever. Zombie chat.
+      # Cap the wait so any contention surfaces as a logged event
+      # and we still publish `done` + complete the broadcast.
+      try:
+        next_user, next_messages, next_session_id = await asyncio.wait_for(
+          _drain_and_release(db, chat_id, we_own_gen), timeout=5.0,
+        )
+      except asyncio.TimeoutError:
+        log.error(
+          "queue drain timed out chat_id=%s; completing broadcast", chat_id,
+        )
+        _starting.discard(chat_id)
+        next_user, next_messages, next_session_id = None, [], None
       if next_user:
         bc.publish({
           "type": "queued_turn_starting",
@@ -851,9 +866,18 @@ async def _run_chat_impl(
     we_own_gen = (
       run_gen is None or _run_generation.get(chat_id, 0) == run_gen
     )
-    next_user, next_messages, next_session_id = await _drain_and_release(
-      db, chat_id, we_own_gen,
-    )
+    # Same drain-timeout guard as the success path — see comment above.
+    try:
+      next_user, next_messages, next_session_id = await asyncio.wait_for(
+        _drain_and_release(db, chat_id, we_own_gen), timeout=5.0,
+      )
+    except asyncio.TimeoutError:
+      log.error(
+        "queue drain timed out (error path) chat_id=%s; completing broadcast",
+        chat_id,
+      )
+      _starting.discard(chat_id)
+      next_user, next_messages, next_session_id = None, [], None
     if next_user:
       bc.publish({
         "type": "queued_turn_starting",
