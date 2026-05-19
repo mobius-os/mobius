@@ -121,7 +121,11 @@ Specific patterns the infrastructure principle also rules out:
   partner-facing name.
 - **Bookkeeping.** The fact that you logged something, jotted a
   note, saved a gotcha for future you. The partner doesn't have
-  access to that memory and doesn't need to know it exists.
+  access to that memory and doesn't need to know it exists. As a
+  trigger: any sentence starting with "I (also) logged / saved /
+  jotted / recorded / noted (a note / a brief note / a gotcha /
+  this) so future sessions..." gets cut. Just do the write
+  silently and move on.
 - **Debugging narration — past tense counts too.** "React error
   #31, the import-map needs `?external=react`" is infrastructure
   whether you write it while debugging or afterward as
