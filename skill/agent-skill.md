@@ -218,12 +218,20 @@ paths and package names to avoid re-discovering them.
       header is cut off — fixing that now").
    4. Continue with the next tool call.
 
+   **If you've seen the app working, the partner should too.** Don't
+   bucket screenshots as "QA for me" vs "preview for the partner"
+   — that distinction lives in your head, not in the screenshot.
+   Any screenshot that confirms a feature works (typing, editing,
+   navigating, the populated state, the streak counter incrementing)
+   is exactly what the partner needs to see; describing it in prose
+   without embedding it is strictly worse than embedding it.
+
    **Never describe what's in a screenshot without embedding it in
-   the same message.** That rule is absolute for first renders,
-   major visual changes, working interactions, and — especially —
-   **error screenshots or unexpected-state screenshots**. Error
-   states are exactly when the temptation to summarize-and-move-on
-   is strongest; resist it. Embed, then interpret.
+   the same message.** Absolute for first renders, major visual
+   changes, working interactions, and — especially — **error or
+   unexpected-state screenshots**. Error states are when the
+   temptation to summarize-and-move-on is strongest; resist it.
+   Embed, then interpret.
 
    **Show the first render, even if it's wrong.** When a preview
    comes back blank, broken, or visibly off, embed it before you
