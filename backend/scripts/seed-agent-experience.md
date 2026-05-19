@@ -182,23 +182,22 @@ which doesn't mount `.shell` and gives a misleading preview).
 
 ## Screenshots — quick start
 
-For previewing a mini-app, the direct app-frame URL works once
-you sign the token in the query:
+For previewing a mini-app:
 
 ```bash
-APP_URL="$API_BASE_URL/api/apps/$APP_ID/frame?token=$AGENT_TOKEN&v=$(date +%s)"
-agent-browser set viewport "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT"
-agent-browser open "$APP_URL"
-agent-browser wait 1500   # scale up for Three.js / fonts / lazy loads
-agent-browser screenshot /data/chats/$CHAT_ID/generated/preview.png
+bash "$SCRIPTS_DIR/preview_app.sh" "$APP_ID"
 ```
 
-For previewing the authenticated shell with your theme applied, use
-`bash "$SCRIPTS_DIR/preview_shell.sh"` — it handles the localStorage
-token dance.
+It opens the app inside the authenticated shell (which handles the
+parent-init handshake the iframe expects), sets the viewport to
+match the partner's device, and writes the PNG to
+`/data/chats/$CHAT_ID/generated/`. Prints the path on stdout.
+
+For previewing the shell itself (e.g. after a theme change), use
+`bash "$SCRIPTS_DIR/preview_shell.sh"`.
 
 Embed the resulting PNG inline so the partner sees it:
-`![preview](/api/chats/<chat_id>/generated/preview.png)`. `Read` is
+`![preview](/api/chats/<chat_id>/generated/<name>.png)`. `Read` is
 private to your vision; only the embed reaches the chat.
 
 Full agent-browser docs (snapshot, click, fill, etc.) are in the
