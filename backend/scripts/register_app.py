@@ -64,6 +64,11 @@ def main() -> None:
     print(f"Cannot read JSX file: {exc}", file=sys.stderr)
     sys.exit(1)
 
+  # Absolute directory of the JSX file — sent to the API so the file
+  # watcher can resolve `<app_dir>/index.jsx` change events back to
+  # this app's DB row exactly, without slugify-guessing the name.
+  source_dir = os.path.dirname(os.path.abspath(jsx_path))
+
   token = os.environ.get("AGENT_TOKEN")
   if not token:
     print("AGENT_TOKEN environment variable is not set.", file=sys.stderr)
@@ -83,14 +88,25 @@ def main() -> None:
       f"{base}/api/apps/{existing['id']}",
       token,
       "PATCH",
-      {"description": description, "jsx_source": jsx_source, "chat_id": chat_id},
+      {
+        "description": description,
+        "jsx_source": jsx_source,
+        "chat_id": chat_id,
+        "source_dir": source_dir,
+      },
     )
   else:
     app = _call(
       f"{base}/api/apps/",
       token,
       "POST",
-      {"name": name, "description": description, "jsx_source": jsx_source, "chat_id": chat_id},
+      {
+        "name": name,
+        "description": description,
+        "jsx_source": jsx_source,
+        "chat_id": chat_id,
+        "source_dir": source_dir,
+      },
     )
 
   print(json.dumps(app))

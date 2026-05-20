@@ -28,6 +28,10 @@ class AppCreate(BaseModel):
   # needed for copying apps between instances.
   jsx_source: str
   chat_id: str | None = None
+  # Absolute directory under /data/apps/ where this app's index.jsx
+  # lives. Passed by register_app.py so the file watcher can resolve
+  # file events to apps without slugify-guessing the name.
+  source_dir: str | None = None
 
 
 class AppUpdate(BaseModel):
@@ -37,6 +41,7 @@ class AppUpdate(BaseModel):
   # None means "omit from update" (the field is not changed).
   # To explicitly clear chat_id, pass an empty string ("").
   chat_id: str | None = None
+  source_dir: str | None = None
 
 
 class AppOut(BaseModel):
@@ -45,6 +50,7 @@ class AppOut(BaseModel):
   description: str
   compiled_path: str
   chat_id: str | None = None
+  source_dir: str | None = None
   created_at: datetime
   updated_at: datetime
 

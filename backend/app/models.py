@@ -50,6 +50,12 @@ class App(Base):
   description = Column(Text, nullable=False, default="")
   jsx_source = Column(Text, nullable=False, default="")
   compiled_path = Column(String(512), nullable=False, default="")
+  # Absolute directory under /data/apps/ holding this app's source
+  # files (typically `/data/apps/<dirname>`).  Stored explicitly so
+  # the file watcher can map a modified `index.jsx` back to its DB
+  # row without slugify-guessing the name.  Null for apps created
+  # before this column existed.
+  source_dir = Column(String(512), nullable=True, default=None)
   # Chat that last created or modified this app.  Null for apps created
   # before this column was added.  Used to route app errors back to the
   # correct chat so the agent can fix them.

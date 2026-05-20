@@ -42,6 +42,7 @@ async def create_app(
     description=body.description,
     jsx_source=body.jsx_source,
     chat_id=body.chat_id,
+    source_dir=body.source_dir,
   )
   db.add(app)
   db.flush()  # assigns app.id without committing
@@ -101,6 +102,8 @@ async def update_app(
     app.compiled_path = compiled
   if body.chat_id is not None:
     app.chat_id = body.chat_id
+  if body.source_dir is not None:
+    app.source_dir = body.source_dir
   db.commit()
   db.refresh(app)
   return app
