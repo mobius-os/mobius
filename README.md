@@ -59,23 +59,12 @@ When you ask for something, the agent builds it as a small app, live, no reload.
 
 ## What Can You Change?
 
-Apps are the most obvious thing the agent builds — but they aren't the only adaptive surface. The platform itself is yours to reshape. The split that matters:
+Apps are the most obvious thing the agent builds — but they aren't the only adaptive surface. The platform itself is yours to reshape.
 
-### Capabilities — the part the platform grows into
-
-The shell ships small on purpose. Missing a feature? Describe it and the agent builds it. File upload, notifications, scheduled jobs, a richer settings panel, a web-search button. The harness keeps a candidate list of *generally useful* additions; the ones that survive scrutiny get upstreamed into the shipped image, so the next clean install of Möbius starts with them already in place. You add things by using them; the starting point grows.
-
-By default the agent has read-write on `/data` (your shell, your apps, your storage) and read-only on `/app` (the image's server code). That's the security boundary I want my own agent to respect. Backend changes that survive a redeploy are on the roadmap behind a staging-overlay + diff-review gate.
-
-### Presentation — the part that stays yours
-
-Capabilities are general; *taste* is the opposite.
-
-- **Visual identity.** "Make it feel warmer." "Restyle the whole shell as a 1970s synthesizer panel." "Wood-paneled reading room, soft serifs, no rounded corners." "Drifting aurora gradient with hand-drawn doodles parallaxing across." The agent edits the CSS, rebuilds, and the new look is live within seconds — and stays only on your volume.
-- **Layout.** Want the drawer gone and a persistent Chat / Apps / Settings bottom-nav instead? Prompt for it. The navigation model of the whole instance changes in one chat.
-- **Providers.** Switch between Claude Code and Codex from Settings. Plug in your own API keys. Gemini handles image generation.
-
-For a fuller walk-through with screenshots, see the [companion blog post](https://hamzamerzic.info/blog/2026/mobius-an-app-that-builds-itself/).
+- **Visual identity.** "Make it feel warmer." "Restyle the whole shell as a 1970s synthesizer panel." "Tighten the mobile spacing and bump the contrast." The agent edits the CSS, rebuilds, and the new look is live within seconds.
+- **Shell features.** Missing an attachment button? File preview pane? Chat search? Describe what you want; the agent adds it.
+- **Providers.** Switch between Claude Code and Codex from Settings. Plug in your own API keys.
+- **Data flows.** Add a webhook, a scheduled job, a new storage shape. The platform exposes these as ordinary primitives the agent can compose.
 
 If the UI ever ends up in a state you don't want, every instance ships with `/recover` — a built-in escape hatch that resets the shell while preserving your chats, apps, and data.
 
@@ -90,7 +79,7 @@ The agent's context is split into two layers:
 
 Skill is static knowledge that deploys can update. Experience is instance-specific knowledge that accumulates over time and survives deploys. A well-seeded experience file means the agent knows how to document its own work from the first session.
 
-A second loop, off to the side, watches the inner agent build and rewrites the skill to make it more helpful next time. That's the subject of the [self-improvement harness post](https://hamzamerzic.info/blog/2026/the-self-improvement-harness/).
+A second loop, off to the side, watches the inner agent build and rewrites the skill to make it more helpful next time.
 
 ---
 
@@ -114,7 +103,7 @@ The next steps:
 - **Dreaming.** A scheduled background process that reorganizes the knowledge graph while you're away — consolidating, deduplicating, and surfacing patterns the agent couldn't see live. Inspired by recent work on offline memory consolidation for long-running agents.
 - **Proactive behavior under user control.** The agent should be able to notice stale apps, suggest things worth learning, and ask before interrupting. Discretion over chattiness.
 
-None of these ship yet. The roadmap is open in the [project page](https://hamzamerzic.info/mobius/).
+None of these ship yet.
 
 ---
 

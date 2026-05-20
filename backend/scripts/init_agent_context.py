@@ -42,23 +42,20 @@ def init():
   EXPERIENCE_PATH.parent.mkdir(parents=True, exist_ok=True)
   _ensure_mobius_writable(EXPERIENCE_PATH.parent)
 
-  # Migrate from old agent-context.md if it exists and experience doesn't.
-  # Keep the old file around in case it has useful content the agent wrote.
-  if not EXPERIENCE_PATH.exists():
-    if SEED_PATH.exists():
-      shutil.copy2(SEED_PATH, EXPERIENCE_PATH)
-      print(f"Seeded {EXPERIENCE_PATH} from {SEED_PATH}")
-    else:
-      EXPERIENCE_PATH.write_text(
-        "# Agent experience\n\n(No seed file found — start fresh.)\n",
-        encoding="utf-8",
-      )
-      print(f"Created empty {EXPERIENCE_PATH}")
-  else:
-    print(f"Already exists: {EXPERIENCE_PATH}")
+  # Always copy seed → live on every boot. Rebuild = current state.
+  # Instance memory the agent appended is intentionally not preserved —
+  # mobius is in active development and we want prod to track the seed.
+  # When this changes, add a sentinel-based preservation scheme here.
+  if SEED_PATH.exists():
+    shutil.copy2(SEED_PATH, EXPERIENCE_PATH)
+    print(f"Seeded {EXPERIENCE_PATH} from {SEED_PATH}")
+  elif not EXPERIENCE_PATH.exists():
+    EXPERIENCE_PATH.write_text(
+      "# Agent experience\n\n(No seed file found — start fresh.)\n",
+      encoding="utf-8",
+    )
+    print(f"Created empty {EXPERIENCE_PATH}")
 
-  # Always re-chown: catches upgrades where the file existed from a
-  # prior (buggy) boot and was left root-owned.
   _ensure_mobius_writable(EXPERIENCE_PATH)
 
 

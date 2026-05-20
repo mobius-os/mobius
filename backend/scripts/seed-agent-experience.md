@@ -248,9 +248,18 @@ match the partner's device, and writes the PNG to
 For previewing the shell itself (e.g. after a theme change), use
 `bash "$SCRIPTS_DIR/preview_shell.sh"`.
 
-Embed the resulting PNG inline so the partner sees it:
-`![preview](/api/chats/<chat_id>/generated/<name>.png)`. `Read` is
-private to your vision; only the embed reaches the chat.
+**Embed-before-describe is a syntactic rule, not a vibe.** When you
+`Read` a PNG, the next text block you write must contain
+`![caption](/api/chats/<chat_id>/generated/<name>.png)` before any
+prose that mentions what the screenshot shows. Embed and description
+live in the same text block, embed first. This is a check you can
+run on yourself: before sending a text block that mentions a
+screenshot, confirm the string `![` and the file path are present in
+that block. "Share inline" without this check reads as "share
+eventually" and you end up collating the embeds into a final summary
+— that defeats the point, because the partner was following along
+through your running narrative. `Read` is private to your vision;
+only the `![]` embed reaches the chat.
 
 Three patterns that come up every session when driving agent-browser
 directly (click, fill, etc.):
