@@ -40,6 +40,23 @@ _DEBOUNCE_SECS = 1.0
 _INDEX_JSX = "index.jsx"
 
 
+def _slugify(name: str) -> str:
+  """Mirrors the agent's directory-naming convention for app names:
+  lowercase, runs of whitespace → single hyphen, drop anything that
+  isn't alphanumeric or hyphen.
+
+  Examples:
+    "Click Counter"      → "click-counter"
+    "Markdown Previewer" → "markdown-previewer"
+    "Stopwatch"          → "stopwatch"
+  """
+  import re
+  slug = name.strip().lower()
+  slug = re.sub(r"\s+", "-", slug)
+  slug = re.sub(r"[^a-z0-9-]", "", slug)
+  return slug
+
+
 class _JsxHandler(FileSystemEventHandler):
   """Watchdog event handler that schedules debounced recompiles."""
 
@@ -113,10 +130,16 @@ class _JsxHandler(FileSystemEventHandler):
 
     db = SessionLocal()
     try:
-      app = (
-        db.query(models.App)
-        .filter(models.App.name == app_dir_name)
-        .first()
+      # Agents use slug-style directory names (e.g. "click-counter")
+      # while the DB stores partner-facing names (e.g. "Click Counter").
+      # Match by comparing slugified app names against the dir name.
+      candidates = db.query(models.App).all()
+      app = next(
+        (
+          a for a in candidates
+          if _slugify(a.name) == app_dir_name or a.name == app_dir_name
+        ),
+        None,
       )
       if app is None:
         return
