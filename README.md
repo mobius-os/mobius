@@ -18,8 +18,9 @@
   <a href="#what-is-möbius">What is it?</a> &middot;
   <a href="#what-can-you-build">What can you build?</a> &middot;
   <a href="#what-can-you-change">What can you change?</a> &middot;
-  <a href="#get-started">Get started</a> &middot;
-  <a href="#where-its-going">Where it's going</a>
+  <a href="#built-by-the-agent">Built by the agent</a> &middot;
+  <a href="#how-it-improves-itself">How it improves itself</a> &middot;
+  <a href="#get-started">Get started</a>
 </p>
 
 ---
@@ -59,7 +60,22 @@ When you ask for something, the agent builds it as a small app right inside the 
 
 ## What can you change?
 
-Apps are the most obvious thing the agent builds — but they aren't the only adaptive surface. The platform itself is yours to reshape.
+Apps are the most obvious thing the agent builds, but the platform itself is also yours to reshape. Two layers, treated differently: **capabilities** (general features like file upload or notifications — candidates for upstreaming so the next Möbius install inherits them) and **presentation** (your theme, layout, and fonts, which live only on your volume and stay yours).
+
+<p align="center">
+  <img src="assets/screenshots/theme-00-baseline.png" width="180" alt="Möbius baseline shell — purple accent on dark, sans-serif" />
+  <img src="assets/screenshots/theme-01-cozy.png" width="180" alt="Möbius after 'cozy reading nook' — walnut and amber, soft serif" />
+  <img src="assets/screenshots/theme-02-brutalist.png" width="180" alt="Möbius after 'brutalist green-on-black terminal' — phosphor green on near-black, JetBrains Mono" />
+  <img src="assets/screenshots/theme-04-ambient.png" width="180" alt="Möbius after 'slow drifting ambient' — teal-to-violet gradient mesh, glassy bubbles" />
+</p>
+
+<sub>Same instance, four prompts: baseline; cozy reading nook; brutalist green-on-black terminal; slow drifting ambient. The colors, fonts, and layout are CSS the agent wrote in response to a single sentence.</sub>
+
+<p align="center">
+  <img src="assets/screenshots/theme-07-dynamic.gif" width="280" alt="Möbius with a 'playful room' theme: drifting bubbles, parallax silhouettes, warm-cool gradient cycling" />
+</p>
+
+<sub>Or you can ask for motion. Five seconds of the gradient cycling and a particle layer doing its thing.</sub>
 
 - **Visual identity.** "Make it feel warmer." "Restyle the whole shell as a 1970s synthesizer panel." "Tighten the mobile spacing and bump the contrast." The agent edits the CSS, rebuilds, and the new look is live within seconds.
 - **Shell features.** Missing an attachment button? File preview pane? Chat search? Describe what you want; the agent adds it.
@@ -67,6 +83,21 @@ Apps are the most obvious thing the agent builds — but they aren't the only ad
 - **Data flows.** Add a webhook, a scheduled job, a new storage shape. The platform exposes these as ordinary primitives the agent can compose.
 
 If the UI ever ends up in a state you don't want, every instance ships with `/recover` — a built-in escape hatch that resets the shell while preserving your chats, apps, and data.
+
+---
+
+## Built by the agent
+
+Möbius ships with a deliberately minimal chat — no file upload, no scheduled jobs panel, no notifications button. To check the demo wasn't stage-managed, I tore the file-upload pipeline out (the FastAPI route, the React component, the works) and asked the agent for it back in one ordinary message: *"I'd like to send files and images along with my messages. Can you add file upload to the chat?"*
+
+<p align="center">
+  <img src="assets/screenshots/upload-01-bare.png" width="260" alt="Composer with just a text field and a disabled send arrow. No paperclip, no mic." />
+  <img src="assets/screenshots/upload-04-in-use.png" width="260" alt="Composer with the paperclip restored, a file attached inline in the sent message, and the agent's reply describing what it sees." />
+</p>
+
+<sub>Before and after, one chat. The endpoint, the schema, the drag-and-drop overlay, the paste handler, the chip row, the image thumbnails — all written by the agent in the same session. The frontend was serving the new components by the end of the conversation.</sub>
+
+The same loop handles every general capability: notifications, scheduled jobs, web-search buttons, voice mode, richer settings. You describe what you want; the agent builds it. [Full story →](https://hamzamerzic.info/blog/2026/mobius-an-app-that-builds-itself/)
 
 ---
 
@@ -93,6 +124,22 @@ The strange loop is the shape. The lever is shorter than that: closing the itera
 
 ---
 
+## How it improves itself
+
+The agent that builds your apps is the inner loop. There is also an outer loop, off the host, watching the inner one work and rewriting its instructions to make it more helpful next time. The pairing is unusual but the moves are simple: the outer agent reads the inner one's transcripts, asks it questions, and edits its skill and experience files between sessions.
+
+Three findings worth flagging from running this loop on ourselves:
+
+1. The natural debugging move is to read the inner agent's transcripts and patch the prompt. That stalls quickly — every rule you add seems to surface a regression somewhere else. Asking the inner agent *why* it did what it did, with the transcript still in its context, produced more durable revisions in fewer iterations than third-party theory-of-mind ever did.
+
+2. The naive worry about asking the model directly is that you will get sycophancy back. The actual finding is more nuanced. Confrontational prompts produce binary compliance-or-defiance; warm, curious framings get the model to push back on bad premises and cooperate on good ones — the productive middle.
+
+3. Once the loop is working, what limits the inner agent's improvement stops being the model itself. It is whatever you decide is worth measuring and optimizing for, and that set of meta-goals is upstream of the harness — it comes from real users hitting real friction on real apps.
+
+[Full notes from the harness experiments →](https://hamzamerzic.info/blog/2026/the-self-improvement-harness/)
+
+---
+
 ## Where it's going
 
 Today, Möbius remembers through the experience file and the apps + data on your server. That's already enough to make instances diverge — yours will look and feel nothing like mine after a few months.
@@ -101,7 +148,7 @@ The next steps:
 
 - **Knowledge graph.** A structured memory layer that grows from every interaction, separate from the chat transcript. Lets the agent reason about your taste, your tools, and your recurring patterns without re-reading every conversation.
 - **Dreaming.** A scheduled background process that reorganizes the knowledge graph while you're away — consolidating, deduplicating, and surfacing patterns the agent couldn't see live. Inspired by recent work on offline memory consolidation for long-running agents.
-- **Proactive behavior under user control.** The agent should be able to notice stale apps, suggest things worth learning, and ask before interrupting. Discretion over chattiness.
+- **Proactive behavior under user control.** The agent should be able to notice stale apps, suggest things worth learning, and ask before interrupting — discretion rather than chattiness.
 
 None of these ship yet.
 
