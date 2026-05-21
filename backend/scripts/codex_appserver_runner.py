@@ -306,16 +306,23 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
   # 2. thread/start or thread/resume
+  #
+  # Both methods accept the same config overrides. We MUST re-send
+  # `sandbox` + `approvalPolicy` on resume — otherwise codex falls back
+  # to its built-in defaults (workspace-write + on-request) which wrap
+  # every exec in bwrap. Inside this container bwrap can't create user
+  # namespaces, so every tool call would die with "bwrap: No permissions
+  # to create a new namespace" and the agent would give up.
+  thread_params: dict = {
+    "cwd": args.cwd,
+    "sandbox": "danger-full-access",
+    "approvalPolicy": "never",
+  }
   if args.session_id:
     thread_method = "thread/resume"
-    thread_params: dict = {"threadId": args.session_id}
+    thread_params["threadId"] = args.session_id
   else:
     thread_method = "thread/start"
-    thread_params = {
-      "cwd": args.cwd,
-      "sandbox": "danger-full-access",
-      "approvalPolicy": "never",
-    }
     if base_instructions:
       thread_params["baseInstructions"] = base_instructions
     if args.model:

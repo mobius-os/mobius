@@ -18,7 +18,7 @@
   <a href="#what-is-möbius">What is it?</a> &middot;
   <a href="#what-can-you-build">What can you build?</a> &middot;
   <a href="#what-can-you-change">What can you change?</a> &middot;
-  <a href="#get-started">Get Started</a> &middot;
+  <a href="#get-started">Get started</a> &middot;
   <a href="#where-its-going">Where it's going</a>
 </p>
 
@@ -38,9 +38,9 @@ Check out [Get Started](#get-started) for one-click setup.
 
 ---
 
-## What Can You Build?
+## What can you build?
 
-Software shouldn't be one-size-fits-all. Möbius lets you describe what you want and builds it in front of you. Over time it picks up on your preferences and interests to be more helpful, and your data never leaves a server you control.
+Most software is built once, for everyone. Möbius lets you describe what you want and builds it in front of you. Over time it picks up on your preferences and interests to be more helpful, and your data never leaves a server you control.
 
 Some things we've built:
 
@@ -53,11 +53,11 @@ Some things we've built:
 
 Your health data, your finances, your habits, all private by default.
 
-When you ask for something, the agent builds it as a small app, live, no reload. Each app can store data, run on a schedule, fetch from the web, and use AI on its own.
+When you ask for something, the agent builds it as a small app right inside the chat, without reloading the page. Each app can store data, run on a schedule, fetch from the web, and use AI on its own.
 
 ---
 
-## What Can You Change?
+## What can you change?
 
 Apps are the most obvious thing the agent builds — but they aren't the only adaptive surface. The platform itself is yours to reshape.
 
@@ -70,7 +70,7 @@ If the UI ever ends up in a state you don't want, every instance ships with `/re
 
 ---
 
-## Skill and Experience
+## Skill and experience
 
 The agent's context is split into two layers:
 
@@ -83,7 +83,7 @@ A second loop, off to the side, watches the inner agent build and rewrites the s
 
 ---
 
-## The Loop
+## The loop
 
 Douglas Hofstadter described strange loops as systems that, by moving through levels, unexpectedly arrive back where they started. Gödel found one in arithmetic. Escher drew one in hands that draw each other. Bach wove them into canons that modulate through every key and come home.
 
@@ -93,7 +93,7 @@ The strange loop is the shape. The lever is shorter than that: closing the itera
 
 ---
 
-## Where It's Going
+## Where it's going
 
 Today, Möbius remembers through the experience file and the apps + data on your server. That's already enough to make instances diverge — yours will look and feel nothing like mine after a few months.
 
@@ -107,7 +107,7 @@ None of these ship yet.
 
 ---
 
-## Get Started
+## Get started
 
 ### <a href="https://railway.com/deploy/mobius?referralCode=5TQuhr"><img src="https://railway.com/button.svg" alt="Deploy on Railway" height="28"></a>
 
@@ -119,7 +119,7 @@ If you're logging in on your phone, save to home screen for the best experience.
 
 To update, go to the same deployment's **Settings → Source → Check for updates**. Railway pulls the latest image and redeploys — chats, apps, credentials, and the agent's experience all survive.
 
-### Deploy Self-hosted
+### Deploy self-hosted
 
 **Requirements:** a Linux server with Docker, a domain name pointing to it, and a Claude or Codex subscription.
 

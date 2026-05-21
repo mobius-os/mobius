@@ -50,5 +50,6 @@ docs/
 # Internal dev artifacts — not for public release
 demo-logs/
 .claude/
+.pm/
 AGENTS.md
 CLAUDE.md
