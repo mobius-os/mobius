@@ -304,6 +304,11 @@ test.describe('Message rendering', () => {
     expect(sentBodies[1].content).toContain('Blue')
     expect(sentBodies[1].hidden).toBe(true)
 
+    // Atomic answer persistence: answers now ride along in the
+    // /messages POST itself (the redesign eliminated the separate
+    // POST /question-answers race). Verify the answers field is set.
+    expect(sentBodies[1].answers).toEqual({ 'What color?': 'Blue' })
+
     // Wait for the agent's follow-up response to arrive (second stream).
     await expect(page.locator('.chat__scroll')).toContainText(
       'you picked Blue', { timeout: 5000 },
@@ -311,9 +316,6 @@ test.describe('Message rendering', () => {
 
     // Verify the question card is in answered state (no submit button).
     await expect(page.locator('.qcard__submit')).toHaveCount(0)
-
-    // Verify the persistence endpoint was called with the right answers.
-    expect(persistedAnswers).toEqual({ 'What color?': 'Blue' })
   })
 
   test('6c. Question card answer sends hidden message', async ({ page }) => {

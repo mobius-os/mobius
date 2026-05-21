@@ -803,6 +803,30 @@ async def _run_chat_impl(
                   db, chat_id,
                   build_assistant_message(assistant_blocks),
                 )
+
+            # AskUserQuestion: end the turn. CLI 2.1.145 auto-resolves
+            # AskUserQuestion with `is_error="Answer questions?"` and
+            # the agent continues with assumed defaults (tool_start +
+            # tool_input bypass `filter_post_question`'s suppression
+            # set). Killing the proc here freezes the conversation at
+            # the question; the user's answer arrives via the existing
+            # hidden-message + --resume path. Confirmed coherent end-
+            # to-end in `tools/sdk_emulation` smoke tests.
+            if event_type == "question":
+              log.info(
+                "AskUserQuestion: ending turn early chat_id=%s",
+                chat_id,
+              )
+              save_message_to_db = (
+                build_assistant_message(assistant_blocks)
+              )
+              _update_last_assistant_message(
+                db, chat_id, save_message_to_db,
+              )
+              if proc and proc.returncode is None:
+                proc.kill()
+              bc.publish({"type": "done", "cost_usd": 0})
+              break
           else:
             continue
           break  # break outer loop when inner breaks on "done"

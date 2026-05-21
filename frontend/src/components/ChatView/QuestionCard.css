@@ -43,6 +43,14 @@
   font-size: 13px;
   cursor: pointer;
   transition: background .15s, border-color .15s;
+  /* Don't let the browser's default mouse-focus ring linger on the
+     last clicked option — visually inconsistent with un-clicked
+     options. Keyboard-focus uses :focus-visible below for a11y. */
+  outline: none;
+}
+.qcard__opt:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .qcard__opt:hover:not(:disabled) {
   background: var(--surface2, rgba(128,128,128,.1));

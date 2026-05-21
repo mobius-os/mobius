@@ -563,10 +563,26 @@ test.describe('Autoscroll behavior', () => {
     const before = await measure(page)
     expect(before.listH).toBeGreaterThan(before.clientH)
 
-    // Scroll to the bottom so we're in "follow" mode.
+    // Two-step gesture simulation for the new state-machine design:
+    //   1. Programmatic scroll positions content at the bottom (no
+    //      mode transition — outside gesture window).
+    //   2. Wait for the IntersectionObserver to settle
+    //      bottomVisibleRef to true (50ms debounce inside the hook).
+    //   3. Dispatch a pointerdown + a tiny scroll within the gesture
+    //      window. The scroll handler now sees bottomVisibleRef=true
+    //      AND userDriven=true → transitions mode to FOLLOW_BOTTOM.
     await page.evaluate(() => {
       const s = document.querySelector('.chat__scroll')
       if (s) s.scrollTop = s.scrollHeight
+    })
+    await page.evaluate(() => new Promise(r => setTimeout(r, 150)))
+    await page.evaluate(() => {
+      const s = document.querySelector('.chat__scroll')
+      if (!s) return
+      s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+      // Tiny in-window scroll forces onScroll to re-evaluate mode.
+      s.scrollTop = Math.max(0, s.scrollTop - 1)
+      s.scrollTop = s.scrollHeight
     })
     await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
 
@@ -810,20 +826,27 @@ test.describe('Scroll edge cases', () => {
     await newChat(page)
     await sendMessage(page, 'Re-engage test')
 
-    // Fill viewport and engage auto-follow at the bottom.
+    // Helper: simulate a user-driven scroll. pointerdown opens the
+    // gesture window; the scrollTop write within it is treated as
+    // user intent and may transition the ScrollMode.
+    const userScrollTo = async (top) => {
+      await page.evaluate((t) => {
+        const s = document.querySelector('.chat__scroll')
+        if (!s) return
+        s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+        s.scrollTop = t === 'bottom' ? s.scrollHeight
+          : t === 'up' ? Math.max(0, s.scrollTop - 200)
+          : t
+      }, top)
+      await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
+    }
+
+    // Fill viewport and engage auto-follow at the bottom (user gesture).
     await injectContent(page, 'Initial content. ', 100)
-    await page.evaluate(() => {
-      const s = document.querySelector('.chat__scroll')
-      if (s) s.scrollTop = s.scrollHeight
-    })
-    await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
+    await userScrollTo('bottom')
 
     // Scroll up — disengages auto-follow.
-    await page.evaluate(() => {
-      const s = document.querySelector('.chat__scroll')
-      if (s) s.scrollTop = Math.max(0, s.scrollTop - 200)
-    })
-    await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
+    await userScrollTo('up')
 
     // Inject content — should NOT follow (user scrolled up).
     await injectContent(page, 'While scrolled up. ', 10)
@@ -834,11 +857,7 @@ test.describe('Scroll edge cases', () => {
     expect(midGap).toBeGreaterThan(50)
 
     // Now scroll back to bottom — should re-engage auto-follow.
-    await page.evaluate(() => {
-      const s = document.querySelector('.chat__scroll')
-      if (s) s.scrollTop = s.scrollHeight
-    })
-    await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
+    await userScrollTo('bottom')
 
     // Inject more content — should auto-follow again.
     await injectContent(page, 'After re-engage. ', 10)

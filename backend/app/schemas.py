@@ -85,6 +85,13 @@ class SendMessage(BaseModel):
   timezone: str | None = None
   viewport: dict | None = None
   hidden: bool = False
+  # When `hidden=True` and the user is answering an AskUserQuestion,
+  # frontend includes the resolved answers here. Backend writes them
+  # into the LAST assistant message's question block in the same
+  # transaction that appends the hidden user message — eliminating the
+  # POST /question-answers + POST /messages race that left answers
+  # missing on mid-stream remounts.
+  answers: dict | None = None
 
 
 class PushKeys(BaseModel):

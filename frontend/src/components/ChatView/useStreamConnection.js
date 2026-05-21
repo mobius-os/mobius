@@ -154,13 +154,21 @@ export default function useStreamConnection(chatId, {
   }, [])
 
   const disconnect = useCallback(({ clearStreaming = false } = {}) => {
+    // Salvage any text that's in the typewriter buffer but hasn't
+    // been drained into streamItems yet. Without this, Stop loses
+    // the most recent text chunks (up to ~1 frame of buffered
+    // characters) because the drain rAF is cancelled below before it
+    // gets to push them. promoteStreamToMessages reads latestItemsRef
+    // — if the buffer didn't land, those chars are gone forever.
+    //
+    // flushBuffer is also called by the `done` event handler before
+    // teardown, so this is redundant on the happy path but
+    // load-bearing on abort/Stop. Idempotent — does nothing if the
+    // buffer is empty.
+    flushBuffer()
     if (abortRef.current) {
       abortRef.current.abort()
       abortRef.current = null
-    }
-    if (rafRef.current) {
-      cancelAnimationFrame(rafRef.current)
-      rafRef.current = null
     }
     drainingRef.current = false
     cancelReconnectTimers()
@@ -170,7 +178,7 @@ export default function useStreamConnection(chatId, {
       retryCount.current = 0
       justSentAtRef.current = 0
     }
-  }, [])
+  }, [flushBuffer])
 
   useEffect(() => () => disconnect(), [chatId, disconnect])
 
@@ -452,7 +460,7 @@ export default function useStreamConnection(chatId, {
   const sendMessage = useCallback(async (
     text,
     attachments,
-    { hidden = false, queueOnly = false } = {},
+    { hidden = false, queueOnly = false, answers = undefined } = {},
   ) => {
     if (!queueOnly) {
       justSentAtRef.current = Date.now()
@@ -465,6 +473,10 @@ export default function useStreamConnection(chatId, {
     try {
       const body = { content: text }
       if (hidden) body.hidden = true
+      // AskUserQuestion answers persist atomically with the hidden
+      // user message — backend writes them into the question block
+      // in the same transaction (see chats_stream.py).
+      if (answers) body.answers = answers
       if (attachments && attachments.length > 0) {
         body.attachments = attachments
       }

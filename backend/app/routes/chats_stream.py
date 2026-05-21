@@ -94,10 +94,20 @@ async def _append_to_pending(
   POSTs (and concurrent DELETE/promote) are made safe by refreshing
   the chat row from the DB inside the lock so each caller sees the
   committed state of the previous one.
+
+  AskUserQuestion answers: when the body carries `answers` (user is
+  submitting a hidden answer to a question), the answers are written
+  into the LAST assistant message's question block inside this same
+  lock + commit. Applying answers BEFORE the refresh would be
+  overwritten by the refresh; applying them OUTSIDE the lock could
+  race with a concurrent send. So they ride along with the queue
+  append, atomic.
   """
   from app.chat import get_queue_lock
   async with get_queue_lock(chat.id):
     db.refresh(chat)
+    # Apply answers AFTER refresh so we don't lose the write.
+    _apply_answers_to_last_question(chat, body.answers)
     pending = list(chat.pending_messages or [])
     new_msg = _user_message_from_body(chat, body)
     _ensure_unique_ts(new_msg, pending)
@@ -141,6 +151,34 @@ def _user_message_from_body(
   return user_msg
 
 
+def _apply_answers_to_last_question(
+  chat: models.Chat, answers: dict | None,
+) -> bool:
+  """Writes `answers` into the LAST assistant message's question block.
+
+  Atomic with the rest of the POST /messages transaction — when the
+  user submits a question-card answer, the answers + the hidden user
+  message + the new turn start happen in one DB commit, eliminating
+  the race that used to leave answers missing on mid-stream remounts.
+
+  Returns True if a question block was found and updated.
+  """
+  if not answers:
+    return False
+  msgs = list(chat.messages or [])
+  for msg in reversed(msgs):
+    if msg.get("role") != "assistant":
+      continue
+    for block in reversed(msg.get("blocks") or []):
+      if block.get("type") == "question":
+        block["answers"] = answers
+        chat.messages = msgs  # rebind so SQLAlchemy detects JSON mutation
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(chat, "messages")
+        return True
+  return False
+
+
 @router.post("/{chat_id}/messages", status_code=202)
 async def send_message(
   body: schemas.SendMessage,
@@ -156,6 +194,16 @@ async def send_message(
   ).first()
   if not chat:
     raise HTTPException(status_code=404, detail="Chat not found.")
+
+  # Atomic answer persistence: when the user is submitting a hidden
+  # answer to an AskUserQuestion (body.hidden=true with body.answers),
+  # write those answers into the existing question block BEFORE any
+  # branching. This eliminates the dual-request race (old flow: a
+  # separate POST /question-answers wrote them, racing with the GET on
+  # remount). The actual commit happens in whichever branch below runs
+  # (queue path, stale-pending path, or fresh-start path) — they each
+  # call db.commit() on the chat row.
+  _apply_answers_to_last_question(chat, body.answers)
 
   # Queue path: agent is running OR stale pending exists from a
   # previous crash. Appending the new send at the END of pending

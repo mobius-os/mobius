@@ -1,11 +1,13 @@
-import { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { apiFetch, getToken, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import { ProgressiveMarkdown } from './markdown/BlockRenderer.jsx'
 import useStreamConnection from './useStreamConnection.js'
+import useScrollMode from './useScrollMode.js'
 import useVoiceInput from './useVoiceInput.js'
 import useFileUpload from './useFileUpload.js'
+import ChatInputBar from './ChatInputBar.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
 import ToolBlock from './ToolBlock.jsx'
 import QuestionCard from './QuestionCard.jsx'
@@ -14,35 +16,12 @@ import MsgContent from './MsgContent.jsx'
 import './ChatView.css'
 
 
-/** Returns the element's margin-box height (offsetHeight + vertical
- *  margins). Needed for the queued tray: it sits in a flex column above
- *  .chat__form, so its bottom margin shrinks .chat__scroll just as
- *  much as its border-box does. offsetHeight alone misses that. */
-function _trayMarginBox(el) {
-  if (!el) return 0
-  const cs = getComputedStyle(el)
-  return el.offsetHeight
-    + (parseFloat(cs.marginTop) || 0)
-    + (parseFloat(cs.marginBottom) || 0)
-}
-
-
 // Cache touch-primary detection. Updated dynamically if input devices change.
 const _touchMql = typeof matchMedia === 'function'
   ? matchMedia('(hover: none) and (pointer: coarse)')
   : null
 let _isTouchPrimary = _touchMql?.matches ?? false
 _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
-
-// Survive remounts: scroll and spacer state persisted in sessionStorage.
-const _scrollPositions = (() => {
-  try { return JSON.parse(sessionStorage.getItem('chat-scroll') || '{}') }
-  catch { return {} }
-})()
-const _spacerHeights = (() => {
-  try { return JSON.parse(sessionStorage.getItem('chat-spacer') || '{}') }
-  catch { return {} }
-})()
 
 /** Cheap structural equality for chat-message arrays. Returns true when
  *  the lists have the same length AND the last message has the same
@@ -127,20 +106,38 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // Single setter that updates local state AND the query cache.
   //
   // ALWAYS writes the query cache (so even empty chats have an entry,
-  // ensuring a cache hit on the next visit). Skips the React state
-  // update when messages are structurally identical — that's the
-  // path that was causing back-navigation jitter, because the
-  // background fetch would re-set the same array reference and
-  // trigger a redundant re-render of the spacer effect.
-  const commitMessages = useCallback((updater, nextOffset) => {
+  // ensuring a cache hit on the next visit). By default, skips the
+  // React state update when messages are structurally identical
+  // (sameMessageList) — that's the path that was causing back-
+  // navigation jitter, because the background fetch would re-set the
+  // same array reference and trigger a redundant re-render of the
+  // spacer effect.
+  //
+  // The `force` option overrides that skip. Callers that originate
+  // state-machine transitions (e.g., promoteStreamToMessages doing a
+  // BRIDGE merge where catch-up content may match the DB partial
+  // byte-for-byte) MUST pass force=true. Without it, sameMessageList
+  // returns true on the structural match and setMessages is skipped
+  // — local state lags behind the cache, the UI keeps rendering the
+  // old version, and the only way to see the new one is to remount
+  // (which re-reads from the cache via useState initializer).
+  // Background-fetch callers leave force=false to keep the perf win.
+  const commitMessages = useCallback((updater, nextOffset, opts) => {
+    const force = opts?.force === true
     const prev = messagesRef.current
     const next = typeof updater === 'function' ? updater(prev) : updater
+    // Advance messagesRef synchronously so back-to-back commitMessages
+    // calls within the same React batch (e.g. handleStop's promote +
+    // doSend's user-msg append) compose correctly. Without this, the
+    // second call's updater reads the pre-batch prev and overwrites
+    // the first call's result on setMessages.
+    messagesRef.current = next
     queryClient.setQueryData(chatMessagesQueryKey(chatId), (existing) => ({
       ...(existing || {}),
       messages: next,
       offset: nextOffset !== undefined ? nextOffset : (existing?.offset ?? 0),
     }))
-    if (sameMessageList(prev, next)) {
+    if (!force && sameMessageList(prev, next)) {
       // Offset may still have changed (older-messages pagination).
       if (nextOffset !== undefined) {
         setOffset(o => o === nextOffset ? o : nextOffset)
@@ -157,56 +154,81 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   const scrollRef = useRef(null)
   const inputRef = useRef(null)
   const spacerRef = useRef(null)
-  const fileInputRef = useRef(null)
   const lastUserMsgRef = useRef(null)
 
-  // Lifecycle guards. With a cache hit, messages are populated on the
-  // very first render, so:
-  //   - `needsScrollRef` starts true so the *first* useLayoutEffect
-  //     applies the saved scroll position synchronously, before paint.
-  //     Without this, the user sees scrollTop=0 briefly, then the
-  //     fetch resolves and the restoration teleports us to the saved
-  //     position. That's the visible jitter on chat-back-nav.
-  //   - `hadMessagesRef` reflects the cached length so `doSend`'s
-  //     "first message" branch doesn't fire spuriously.
+  // Lifecycle guards. `hadMessagesRef` reflects the cached length so
+  // doSend's "first message" branch doesn't fire spuriously.
   const chatIdStaleRef = useRef(false)
   const hadMessagesRef = useRef((cached?.messages?.length ?? 0) > 0)
   const promotedRef = useRef(false)
-  const needsScrollRef = useRef(!!cached)
+  // True when the CURRENT in-flight turn is bridging a DB partial we
+  // kept on mount (running=true on fetch, last message was assistant).
+  // promoteStreamToMessages reads this to decide REPLACE-vs-APPEND:
+  //   bridge=true  → replace the kept partial (single assistant msg
+  //                  in the transcript; preserves id/ts/answers).
+  //   bridge=false → append a fresh assistant msg (new turn).
+  // Reset on every doSend / onStreamEnd so the next turn starts fresh.
+  const bridgePartialRef = useRef(false)
 
-  // Spacer state — see CLAUDE.md "Chat UX — non-negotiable constraints".
-  // spacerActive: keeps min-height: 0 on the list while the spacer is active,
-  //   preventing min-height: calc(100% + 1px) from inflating offsetHeight.
+  // Spacer "active" CSS state — keeps min-height: 0 on the list while
+  // the spacer is in play, preventing the elastic-overscroll
+  // min-height: calc(100% + 1px) from inflating offsetHeight and
+  // breaking the spacer formula.
   const [spacerActive, setSpacerActive] = useState(false)
-
-  // Reveal-after-scroll-settle gate. The scroll container is rendered
-  // with `visibility: hidden` until scroll restoration has applied the
-  // saved position AND lazy renderers (KaTeX, highlight.js) have
-  // settled — so the user never sees an intermediate position. They
-  // see the chat appear already at the right place, every time.
-  // Reset on every fresh mount because Shell uses key={activeChatId},
-  // so chat-switching is structurally unmount + mount.
-  const [revealed, setRevealed] = useState(false)
-  // Set in doSend, consumed by the spacer useLayoutEffect.
-  const needsSpacerRef = useRef(false)
-  // Persists scrollTarget across renders so promote can recalculate the spacer.
-  const scrollTargetRef = useRef(null)
-  // Full viewport height (keyboard closed). Set once on mount, used for spacer
-  // sizing so keyboard open/close doesn't change scrollHeight.
-  const fullViewHRef = useRef(0)
-  // Tracks whether the user is near the bottom of the scroll area. Updated
-  // by the passive scroll listener in the spacer effect. Used by
-  // promoteStreamToMessages to decide whether to preserve scroll position
-  // (user scrolled up to read) or allow re-anchoring (user was following).
-  const nearBottomRef = useRef(false)
-  // Ref mirror of `sending` for use in callbacks without adding it as a
-  // dependency (avoids re-creating fetchMessages on every send).
+  // Ref mirrors of `sending` and `isStreaming`. The refs are read by
+  // doSend's queue-vs-fresh-send guard (and by fetchMessages). Reading
+  // the state directly would capture a render-time value in doSend's
+  // closure — stale if doSend is invoked from a callback that crosses
+  // a render boundary (e.g., handleStop calling doSend(combined) after
+  // setSending(false)). The refs are updated every render so they
+  // always reflect the latest commit.
   const sendingRef = useRef(false)
   sendingRef.current = sending
+  const isStreamingRef = useRef(false)
+  isStreamingRef.current = false  // set below after useStreamConnection
+
+  // Re-entry guard for handleStop. Two rapid Stop clicks (e.g. during
+  // the await on /chat/stop) would otherwise both snapshot the same
+  // pending queue and both call doSend(combined) → duplicate sends.
+  const handlingStopRef = useRef(false)
 
   // Bumped by handleStop (and any future hard-clear of local state)
   // so any in-flight fetchMessages can't resurrect cleared data.
   const fetchGenRef = useRef(0)
+
+  // Pagination flag — gates loadOlderMessages from re-entering AND
+  // gates the scroll-handler in useScrollMode from misclassifying
+  // post-prepend scroll-clamps as user gestures.
+  const loadingOlder = useRef(false)
+
+  // ── Scroll subsystem ─────────────────────────────────────────────
+  //
+  // useScrollMode owns the entire scroll state machine: mode ref,
+  // applyMode funnel, IntersectionObserver bottom sentinel,
+  // ResizeObserver for layout updates, user-gesture detection,
+  // mobile keyboard handling via visualViewport, and the
+  // hide-then-reveal restore on mount.
+  //
+  // The hook returns:
+  //   • modeRef               — mutate to set PIN_USER_MSG{ts} on send,
+  //                             FOLLOW_BOTTOM on user scroll-to-bottom,
+  //                             ANCHOR_AT{...} on pagination, etc.
+  //   • gestureWindowUntilRef — read by handleScroll to gate pagination
+  //                             on user-driven scrolls only.
+  //   • revealed              — apply to .chat__scroll style for the
+  //                             hide-then-reveal scroll restore.
+  //
+  // See useScrollMode.js + docs/chat-redesign.md for full design.
+  const { modeRef, gestureWindowUntilRef, revealed } = useScrollMode({
+    chatId,
+    scrollRef,
+    spacerRef,
+    lastUserMsgRef,
+    messages,
+    messagesRef,
+    pendingMessagesLength: pendingMessages.length,
+    loadingOlderRef: loadingOlder,
+  })
 
   // Re-fetch messages from the API. Called when the SSE stream reconnects
   // and gets a 204 (no active broadcast — the chat finished while the
@@ -282,7 +304,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           promotedRef.current = false
           setSpacerActive(true)
           if (spacerRef.current) spacerRef.current.style.height = '0px'
-          needsSpacerRef.current = true
+          // Queued continuation is backend-initiated — the user may
+          // be reading something else in the chat. Don't yank them
+          // by re-pinning. Keep whatever mode they were in
+          // (FOLLOW_BOTTOM, ANCHOR_AT, or a previous PIN).
         } else {
           // Server's promoted ts isn't in our local queue (cancel raced
           // with promote). Refetch authoritative state.
@@ -305,11 +330,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     onNeedsRefresh: fetchMessages,
     onQueuedTurnStarting: () => {},
   })
-
-  // Mirror isStreaming as a ref so the ResizeObserver callback (which
-  // never re-binds) can gate auto-follow on it. Tool-block toggles in
-  // finished messages grow the list and were tripping auto-follow.
-  const isStreamingRef = useRef(false)
+  // Keep the ref mirror of isStreaming up to date for doSend's
+  // closure-safe guard. (sendingRef is set inline above where
+  // `sending` is declared; isStreaming comes from useStreamConnection
+  // so we mirror it here.)
   isStreamingRef.current = isStreaming
 
   const { files: pendingFiles, addFiles, removeFile, clearFiles } = useFileUpload({ chatId })
@@ -319,19 +343,20 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     inputRef,
   })
 
-  // Snapshot stream into a permanent message. Idempotent — both handleStop
-  // and onStreamEnd may call this.
+  // Snapshot stream into a permanent message. Idempotent — both
+  // handleStop and onStreamEnd may call this.
+  //
+  // REPLACE if the last message in `prev` is already an assistant
+  // message — that's the DB partial we kept on mount when returning
+  // mid-stream (see fetch effect). Promoting alongside the partial
+  // would duplicate the in-flight content in the final transcript.
+  // APPEND otherwise (the normal first-time send path: `prev` ends in
+  // a user message, the assistant message hasn't been committed yet).
   function promoteStreamToMessages() {
     if (promotedRef.current) return
     const items = latestItemsRef.current
     if (items.length === 0) return
     promotedRef.current = true
-    // Preserve scrollTargetRef so the spacer layout effect re-anchors
-    // the user message at the same position after promote. Previously
-    // this nulled scrollTargetRef when nearBottomRef was false, but
-    // nearBottomRef is always false in the normal pinned state (user
-    // message at top, response growing below). Nulling caused the
-    // layout effect to skip re-anchoring, shifting scroll position.
     const blocks = items.map(item => {
       if (item.type === 'text') return { type: 'text', content: item.content }
       if (item.type === 'question') return { type: 'question', questions: item.questions }
@@ -342,8 +367,51 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       .filter(i => i.type === 'text')
       .map(i => i.content)
       .join('')
-    const newMsg = { role: 'assistant', content, blocks }
-    commitMessages(prev => [...prev, newMsg])
+    const isBridge = bridgePartialRef.current
+    bridgePartialRef.current = false  // one-shot — next turn will append
+    commitMessages(prev => {
+      const last = prev[prev.length - 1]
+      if (isBridge && last?.role === 'assistant') {
+        // BRIDGE case: we mounted with a DB partial that we KEPT, and
+        // this is the same in-flight turn finishing. Replace the
+        // partial with the freshly-promoted version, preserving id/ts
+        // so the <li>'s data-key stays stable.
+        //
+        // ANSWER PRESERVATION: question-block answers live INSIDE the
+        // block (block.answers), not at the message level. The catch-
+        // up streamItems re-emits the question event WITHOUT answers
+        // (the backend doesn't include them in the SSE replay — they
+        // live in chat.messages, not in the per-turn event stream).
+        // If we blindly replace blocks, any answers the user submitted
+        // before navigating away (which ARE persisted in the DB and
+        // came back in our fetch) would be wiped on this promote.
+        // So: for each promoted block, if it's a question and the
+        // corresponding existing block has answers, copy them over.
+        const mergedBlocks = blocks.map((nb, i) => {
+          const ob = last.blocks?.[i]
+          if (nb.type === 'question'
+              && ob?.type === 'question'
+              && ob.answers
+              && !nb.answers) {
+            return { ...nb, answers: ob.answers }
+          }
+          return nb
+        })
+        const merged = { ...last, content, blocks: mergedBlocks }
+        return [...prev.slice(0, -1), merged]
+      }
+      // Normal multi-turn flow: append a fresh assistant message.
+      // No ts on this one — it'll get one from the DB on next fetch.
+      return [...prev, { role: 'assistant', content, blocks }]
+    }, undefined, { force: true })
+    // force=true bypasses sameMessageList. In the BRIDGE merge path
+    // the new (catch-up) blocks may be structurally identical to the
+    // kept DB-partial blocks (backend's throttled save was recent +
+    // catch-up replayed the same events). Without force, setMessages
+    // is skipped, local state lags the cache, and the UI keeps
+    // rendering the stale version — the partial only "appears" on
+    // remount via the cache. Force is correct here because promote
+    // is a state-machine commit, not a redundant background refetch.
   }
 
   // Persist draft so it survives leaving and re-entering the chat.
@@ -372,15 +440,16 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       .then(r => r.json())
       .then(data => {
         if (cancelled) return
-        let msgs = data.messages || []
+        const msgs = data.messages || []
 
-        // Drop partial assistant message when the agent is still running —
-        // the SSE catch-up burst will replay those events.
-        const stripped = data.running && msgs.length > 0
-          && msgs[msgs.length - 1].role === 'assistant'
-        if (stripped) {
-          msgs = msgs.slice(0, -1)
-        }
+        // Keep the DB partial when the agent is still running. The
+        // user sees the most recent persisted state immediately; SSE
+        // catch-up populates streamItems and the streaming <li> takes
+        // over visually (see messages.map render — last assistant is
+        // suppressed when sending && streamItems.length > 0). On done,
+        // promoteStreamToMessages replaces this partial with the
+        // final version. Previously we stripped this and waited for
+        // SSE — caused the "message disappears on choppy return" bug.
 
         // Normalize stale "running" tool blocks from interrupted sessions.
         for (const msg of msgs) {
@@ -395,9 +464,17 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
         commitMessages(msgs, data.offset || 0)
         hadMessagesRef.current = msgs.length > 0
+        // Mark that this mount's in-flight turn is bridging a DB
+        // partial. promoteStreamToMessages reads this to decide
+        // whether to REPLACE the kept partial (true) or APPEND a
+        // fresh assistant message (false). Only the very first turn
+        // after mount is a "bridge"; once that turn promotes,
+        // subsequent turns are normal appends.
+        bridgePartialRef.current = !!(
+          data.running && msgs.length > 0
+          && msgs[msgs.length - 1].role === 'assistant'
+        )
         setLoading(false)
-
-        needsScrollRef.current = true
 
         // Hydrate pending queue from backend so a reload mid-queue
         // doesn't drop the visible "queued" tray. Derive a stable
@@ -418,270 +495,46 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
     return () => {
       try {
-        // Capture current scroll + spacer from DOM at unmount, so chats
-        // where the user never scrolled (no handleScroll firing) still
-        // get their state persisted. Without this, a short response
-        // chat that the user revisits has no saved spacer to restore
-        // and the user message drops out of the top-of-viewport pin.
-        const el = scrollRef.current
-        if (el) {
-          _scrollPositions[chatId] = el.scrollHeight - el.scrollTop
-          const sp = el.querySelector('.spacer-dynamic')
-          if (sp && sp.style.height) {
-            _spacerHeights[chatId] = sp.style.height
-          }
-        }
-        sessionStorage.setItem('chat-scroll', JSON.stringify(_scrollPositions))
-        sessionStorage.setItem('chat-spacer', JSON.stringify(_spacerHeights))
+        // (Scroll mode persistence has moved to useScrollMode's own
+        // cleanup — runs on chatId change, before this effect's
+        // cleanup, so modeRef is captured for the chat we're leaving.)
       } catch {}
       cancelled = true
       chatIdStaleRef.current = true
-      scrollTargetRef.current = null
       loadingOlder.current = false
       disconnect()
     }
   }, [chatId])
 
-  // Restore scroll position before paint, then re-apply after 300ms to
-  // correct drift from lazy renderers (KaTeX, highlight.js).
-  useLayoutEffect(() => {
-    // Capture full viewport height as soon as the scroll element mounts.
-    // Must happen outside the needsScrollRef guard — the scroll element may
-    // not exist on the initial render (empty state), so the first render
-    // where it appears may not have needsScrollRef set.
-    // Track the MAX clientHeight ever observed. On empty chats, the
-    // .chat__scroll element doesn't exist until the first send — at
-    // which point the user has been typing (keyboard open), so the
-    // initial clientHeight is reduced by the keyboard. Subsequent
-    // spacer math would use this too-small viewH and over-shrink the
-    // spacer for every later message. By keeping the max, the value
-    // snaps to the correct keyboard-closed height as soon as the
-    // keyboard ever closes (e.g. after send via the blur on touch).
-    const el = scrollRef.current
-    if (el && el.clientHeight > fullViewHRef.current) {
-      fullViewHRef.current = el.clientHeight
-    }
 
-    if (!needsScrollRef.current) {
-      // Nothing to restore (e.g. brand-new chat) — reveal immediately.
-      if (!revealed) setRevealed(true)
-      return
-    }
-    needsScrollRef.current = false
-    if (!el) {
-      setRevealed(true)
-      return
-    }
-    // Spacer height must be restored first — it affects scrollHeight.
-    const savedSpacer = _spacerHeights[chatId]
-    const sp = el.querySelector('.spacer-dynamic')
-    if (savedSpacer && sp) {
-      sp.style.height = savedSpacer
-      setSpacerActive(true)
-    }
-    const saved = _scrollPositions[chatId]
-    function applyScroll() {
-      if (saved != null) {
-        el.scrollTop = el.scrollHeight - saved
-      } else {
-        el.scrollTop = el.scrollHeight
-      }
-    }
-    applyScroll()
-    // Restore scrollTarget so the spacer effect sets up a ResizeObserver.
-    // Without this, returning to a streaming chat leaves the spacer frozen
-    // because scrollTargetRef was nulled on cleanup.  Use the last user
-    // message's offsetTop (same as the send path) so the spacer formula
-    // produces the correct height for keeping that message at the top.
-    if (savedSpacer && parseInt(savedSpacer) > 0) {
-      const userMsgs = el.querySelectorAll('.chat__msg--user')
-      const lastUserEl = userMsgs[userMsgs.length - 1]
-      scrollTargetRef.current = lastUserEl
-        ? Math.max(0, lastUserEl.offsetTop - 4)
-        : el.scrollTop
-    }
-    // Re-apply scroll once the list stops resizing (lazy renderers like
-    // highlight.js / KaTeX expand code blocks asynchronously and shift
-    // scrollHeight). Replaces a blind 300ms timeout with an event-driven
-    // settle detector: re-apply after the list has been idle for 50ms,
-    // then disconnect. Safety timeout caps the observation at 1500ms.
-    const listEl = el.querySelector('.chat__list')
-    let settleTimer = 0
-    let ro
-    if (listEl) {
-      ro = new ResizeObserver(() => {
-        clearTimeout(settleTimer)
-        settleTimer = setTimeout(() => {
-          applyScroll()
-          ro.disconnect()
-          setRevealed(true)
-        }, 50)
-      })
-      ro.observe(listEl)
-    } else {
-      // No list to observe — reveal immediately.
-      setRevealed(true)
-    }
-    // Safety: reveal even if RO never settles (lazy renderers still
-    // working past 1.5s). Capped so the user is never stranded on a
-    // hidden chat.
-    const safety = setTimeout(() => {
-      ro?.disconnect()
-      setRevealed(true)
-    }, 1500)
-    return () => {
-      clearTimeout(settleTimer)
-      clearTimeout(safety)
-      ro?.disconnect()
-    }
-  }, [messages])
-
-  // ── Spacer: reserves space below the user's message ──────────────
-  //
-  // Formula: spacer = max(0, fullViewH + scrollTarget − listH)
-  //
-  // Three triggers (all via [messages] dependency):
-  //   send    — set spacer, scroll to user message, start ResizeObserver
-  //   promote — recalculate spacer only (don't touch scroll)
-  //   mount   — skip (scroll-restore handles it)
-  //
-  // The spacer uses fullViewH (keyboard-closed viewport, captured on mount)
-  // so that keyboard open/close doesn't change scrollHeight. Without this,
-  // the browser resets scrollTop when the viewport resizes.
-  //
-  // The ResizeObserver only sets scrollTop in two cases:
-  //   1. Content shrank (thinking dots removed) → browser clamped scrollTop
-  //      in the async gap before the observer fired → correct it
-  //   2. Content filled the viewport (spacer hit 0) → auto-follow if near bottom
-  //
-  // overflow-anchor: none is set on .chat__scroll in CSS to prevent Chrome's
-  // scroll anchoring from fighting the spacer.
-  //
-  useLayoutEffect(() => {
-    const isSend = needsSpacerRef.current
-    needsSpacerRef.current = false
-
-    // Mount/history — scroll-restore handles positioning.
-    if (!isSend && scrollTargetRef.current == null) return
-
-    const scrollEl = scrollRef.current
-    const spacerEl = spacerRef.current
-    if (!scrollEl || !spacerEl) return
-
-    // Send — compute scroll target from the user message's position.
-    if (isSend) {
-      const userMsgEl = lastUserMsgRef.current
-      if (!userMsgEl) return
-      scrollTargetRef.current = Math.max(0, userMsgEl.offsetTop - 4)
-    }
-
-    // Recalculate spacer height (both send and promote paths).
-    // Must happen before setting scrollTop — otherwise the browser clamps
-    // scrollTop to a value that's too low.
-    //
-    // Subtract the queued tray's margin-box from viewH. The tray sits
-    // in chat__foot (sibling of chat__scroll); when it appears, the
-    // scroll area shrinks by tray.offsetHeight + vertical margins. Not
-    // accounting for it leaves a dead-space below the response equal to
-    // the tray height.
-    const st = scrollTargetRef.current
-    const listEl = scrollEl.querySelector('.chat__list')
-    if (!listEl) return
-    const queuedTrayEl = scrollEl.parentElement?.querySelector('.queued')
-    const trayH = _trayMarginBox(queuedTrayEl)
-    const viewH = (fullViewHRef.current || scrollEl.clientHeight) - trayH
-    const listH = listEl.offsetHeight
-    const spacerH = Math.max(0, viewH + st - listH)
-    spacerEl.style.height = `${spacerH}px`
-
-    if (isSend) scrollEl.scrollTop = st
-
-    // ResizeObserver: keep the spacer in sync as content streams in,
-    // tool blocks expand, or lazy renderers (highlight.js, KaTeX) resize.
-    // Set up on every path (send, promote, reconnect) — not just send —
-    // so the spacer stays correct after switching chats and returning.
-    let prevH = spacerH
-    let prevListH = listH
-    let prevClientH = scrollEl.clientHeight
-    // Track whether the user is near the bottom so auto-follow works
-    // during streaming.  Updated on EVERY scroll event (including
-    // programmatic snaps) so the ResizeObserver always has a fresh
-    // reading — no stale-by-one-tick problem.
-    // Start with auto-follow OFF. The send path scrolls to show the
-    // user's message at the top of the viewport; the agent's response
-    // appears just below it in the visible area. Auto-follow only
-    // engages when the user actively scrolls to the bottom of content
-    // that OVERFLOWS the viewport. Without the overflow check, the
-    // first message (where content fits on screen → gap≈0) would
-    // falsely engage auto-follow, yanking the user as the response
-    // grows past the fold.
-    let nearBottom = false
-    const onScroll = () => {
-      const g = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
-      const overflows = scrollEl.scrollHeight > scrollEl.clientHeight + 50
-      nearBottom = overflows && g < 50
-      nearBottomRef.current = nearBottom
-    }
-    scrollEl.addEventListener('scroll', onScroll, { passive: true })
-
-    const ro = new ResizeObserver(() => {
-      // Snap fullViewHRef to keyboard-closed height when we observe a
-      // larger clientHeight (e.g., keyboard dismissed after blur).
-      if (scrollEl.clientHeight > fullViewHRef.current) {
-        fullViewHRef.current = scrollEl.clientHeight
-      }
-      if (scrollTargetRef.current == null) return
-      const target = scrollTargetRef.current
-      const lH = listEl.offsetHeight
-      // Re-read tray height every tick (expand/collapse, add/cancel).
-      const trayHNow = _trayMarginBox(
-        scrollEl.parentElement?.querySelector('.queued'),
-      )
-      const viewHNow = (fullViewHRef.current || scrollEl.clientHeight) - trayHNow
-      const h = Math.max(0, viewHNow + target - lH)
-      spacerEl.style.height = `${h}px`
-
-      // Content shrank (spacer grew) — browser may have clamped scrollTop
-      // in the gap before this callback. Correct it.
-      if (h > prevH && scrollEl.scrollTop < target) {
-        scrollEl.scrollTop = target
-      }
-      prevH = h
-
-      // Auto-follow: only fires while a stream is actively writing
-      // and the list actually grew. Two gates:
-      //   isStreamingRef — user-initiated growth (tool-block expand,
-      //     image lightbox close) on a finished message must not
-      //     snap the scroll.
-      //   lH > prevListH — re-measures from viewport resize (keyboard
-      //     open/close) must not snap either.
-      if (isStreamingRef.current && lH > prevListH) {
-        const gap = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
-        if (nearBottom && gap > 1) {
-          scrollEl.scrollTop = scrollEl.scrollHeight
-        }
-      }
-      prevListH = lH
-    })
-    ro.observe(listEl)
-    // Also observe the queued tray so expand/collapse of a row triggers
-    // a spacer recalc (the tray's own height changes without listEl
-    // changing).
-    if (queuedTrayEl) ro.observe(queuedTrayEl)
-    return () => {
-      ro.disconnect()
-      scrollEl.removeEventListener('scroll', onScroll)
-    }
-  }, [messages, pendingMessages.length])
-
-
-  // Paginate older messages when scrolled to top or button clicked.
-  const loadingOlder = useRef(false)
+  // Paginate older messages. Captures a pre-prepend anchor so we can
+  // restore the user's reading position via applyMode after the
+  // prepend grows scrollHeight upward. The anchor is the topmost
+  // currently-rendered message; after prepend, it has the same
+  // data-key but a new (larger) offsetTop. ANCHOR_AT{key, offset}
+  // lands the user at the same visual position.
+  // (loadingOlder ref is declared earlier alongside the useScrollMode
+  // hook call — it's passed to the hook to gate the scroll handler.)
   function loadOlderMessages() {
     const el = scrollRef.current
     if (!el || loadingOlder.current || loading || offset <= 0) return
     loadingOlder.current = true
-    const prevHeight = el.scrollHeight
+    // Snapshot the topmost rendered msg + its current offset for
+    // post-prepend restore. The anchor key/offset is stable: after
+    // the prepend, the SAME message has a larger offsetTop (older
+    // messages are inserted above it), and ANCHOR_AT{key, offset}
+    // resolves to the new offsetTop minus the original gap → no
+    // visible jump.
+    const topMsg = el.querySelector('.chat__msg[data-key]')
+    const anchorKey = topMsg?.dataset?.key || null
+    const anchorOffset = topMsg ? topMsg.offsetTop - el.scrollTop : 0
+    // We deliberately do NOT save the previous mode to restore later.
+    // The user paginated — their intent is now to read older content.
+    // If the previous mode was FOLLOW_BOTTOM and we restored it,
+    // the next layout event (e.g., a streaming token) would yank
+    // them to the bottom, undoing the pagination. Pagination leaves
+    // them at the new anchor; the next gesture (or send) writes a
+    // fresh mode.
     apiFetch(`/chats/${chatId}?limit=20&before=${offset}`)
       .then(r => r.json())
       .then(data => {
@@ -696,10 +549,26 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             }
           }
         }
+        // Set the temporary anchor mode BEFORE commitMessages so the
+        // ensuing layout effect (triggered by [messages] change)
+        // applies the anchor instead of intentMode. Otherwise the
+        // layout effect runs first with intentMode (e.g., PIN at the
+        // user msg's NEW offsetTop) → visible jump → then our rAF
+        // would set the anchor → second jump.
+        if (anchorKey) {
+          modeRef.current = {
+            kind: 'ANCHOR_AT', key: anchorKey, offset: anchorOffset,
+          }
+        }
         commitMessages(prev => [...older, ...prev], data.offset || 0)
         requestAnimationFrame(() => {
-          const scrollEl = scrollRef.current
-          if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight - prevHeight
+          // The layout effect has run with ANCHOR_AT — applyMode
+          // landed the topmost-pre-prepend msg at the same visual
+          // position. We deliberately DON'T restore the previous
+          // mode: user paginated → their intent is to read older
+          // content. The ANCHOR_AT mode keeps them there across
+          // subsequent layout events (incoming tokens, etc). Their
+          // next gesture (or send) writes a fresh mode.
           loadingOlder.current = false
         })
       })
@@ -709,23 +578,32 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   function handleScroll() {
     const el = scrollRef.current
     if (!el || loadingOlder.current || loading) return
-    _scrollPositions[chatId] = el.scrollHeight - el.scrollTop
-    const sp = el.querySelector('.spacer-dynamic')
-    if (sp) _spacerHeights[chatId] = sp.style.height
+    // Gesture guard: applyMode's programmatic scrolls (e.g., PIN_USER_MSG
+    // landing near scrollTop=0 when the user msg is high in the list,
+    // or FOLLOW_BOTTOM after a pagination prepend) can satisfy
+    // `scrollTop < 5 && offset > 0` and trigger an unwanted pagination
+    // load. Only paginate when the scroll was user-driven (recent
+    // pointer/wheel/touch/key in the 250ms window).
+    const userDriven = performance.now() < gestureWindowUntilRef.current
+    if (!userDriven) return
     if (el.scrollTop < 5 && offset > 0) {
       loadOlderMessages()
     }
   }
 
 
-  function handleFileSelect(e) {
-    const fileList = Array.from(e.target.files || [])
-    if (!fileList.length) return
-    e.target.value = ''
-    addFiles(fileList)
-  }
-
-  const doSend = useCallback(async (text) => {
+  // `opts.pin` controls whether the new user message pins to the top
+  // of the viewport (the standard ChatGPT/Claude.ai send UX). Defaults
+  // to true for normal user-initiated sends. Pass `pin: false` from
+  // synthetic-send paths where pinning would be surprising:
+  //   - handleStop's queue-collapse: the user clicked Stop, not Send;
+  //     pinning the auto-generated combined message would yank the
+  //     viewport away from whatever the user was reading (the partial
+  //     they just stopped) → original turn 1 user msg + partial get
+  //     pushed above the viewport. Keep their current scroll mode
+  //     instead — the new turn streams into view from where they were.
+  const doSend = useCallback(async (text, opts = {}) => {
+    const pin = opts.pin !== false  // default true
     if (!text.trim()) return
     if (pendingFiles.some(c => c.status === 'uploading')) return
 
@@ -745,7 +623,14 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     // entry with a stable client-side `cid` (UUID) that survives the
     // optimistic-ts → server-ts swap. Backend writes to chat.pending_messages
     // via POST /messages returning {status: "queued", ts, position}.
-    if (sending || isStreaming) {
+    //
+    // Read from refs (not React state) so doSend stays closure-safe.
+    // Callers like handleStop invoke doSend AFTER calling
+    // setSending(false) — the captured `sending` state would still
+    // be `true` in this render's closure, sending the message to the
+    // queue path instead of the fresh-send path. Refs reflect the
+    // latest commit and dodge that.
+    if (sendingRef.current || isStreamingRef.current) {
       const cid = (typeof crypto !== 'undefined' && crypto.randomUUID)
         ? crypto.randomUUID()
         : `cid-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
@@ -793,7 +678,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           setSending(true)
           setSpacerActive(true)
           if (spacerRef.current) spacerRef.current.style.height = '0px'
-          needsSpacerRef.current = true
+          // New visible user msg → pin it to the top of the viewport.
+          modeRef.current = { kind: 'PIN_USER_MSG', ts: queuedMsg.ts }
+          // This is a NEW turn (not the bridge turn from mount).
+          // Reset so the upcoming promote appends a fresh assistant
+          // instead of replacing whichever message is currently last.
+          bridgePartialRef.current = false
         }
       } catch (err) {
         // Roll back optimistic + restore input.
@@ -824,7 +714,15 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     setSending(true)
     setSpacerActive(true)
     if (spacerRef.current) spacerRef.current.style.height = '0px'
-    needsSpacerRef.current = true
+    // User just sent — pin the new user message to viewport top.
+    // Skip when caller asked us not to pin (e.g. handleStop's
+    // queue-collapse, where the user was reading the partial and
+    // shouldn't be yanked to a synthetic combined message).
+    if (pin) {
+      modeRef.current = { kind: 'PIN_USER_MSG', ts: userMsg.ts }
+    }
+    // Fresh turn — not a bridge from a mounted DB partial.
+    bridgePartialRef.current = false
 
     try {
       await streamSend(text, attachments.length > 0 ? attachments : undefined)
@@ -839,19 +737,29 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         { role: 'assistant', content: `Error: ${err.message}`, blocks: [] },
       ])
     }
-  }, [sending, isStreaming, streamSend, pendingFiles, commitMessages, clearFiles])
+    // doSend doesn't need `sending` / `isStreaming` in deps anymore —
+    // the guard reads sendingRef/isStreamingRef, and refs are stable.
+    // Dropping them avoids needlessly re-creating doSend on every
+    // stream tick (and avoids the stale-closure trap for callers
+    // like handleStop).
+  }, [streamSend, pendingFiles, commitMessages, clearFiles])
 
   // Sends the answer without a visible user message bubble.
-  // TODO: when migrating to Claude Agent SDK, replace this with the
-  // canUseTool callback which returns answers as updatedInput — the
-  // hidden message, answer persistence endpoint, and this function
-  // all become unnecessary.
+  // Sends the answer to an AskUserQuestion as a hidden user message.
+  // Answers ride along in the SAME POST as the hidden message —
+  // backend writes them atomically into the existing question block
+  // (see chats_stream.py:_apply_answers_to_last_question). One
+  // transaction, no race. The previous flow had a separate
+  // POST /question-answers that could race with the GET on a mid-
+  // stream remount, causing answers to disappear on first return
+  // and reappear on the second.
   const doSendSilent = useCallback(async (text, resolvedAnswers) => {
     if (!text.trim() || sending) return
     onMessageStart?.()
     promotedRef.current = false
 
-    // Update the question block with answers so the completed state persists.
+    // Local optimistic update of the question block so the UI shows
+    // the answered state immediately (before backend round-trip).
     if (resolvedAnswers) {
       commitMessages(prev => {
         const updated = [...prev]
@@ -865,19 +773,26 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         }
         return updated
       })
-      // Persist answers to DB so the completed state survives reload.
-      // TODO: replace with SDK canUseTool approach — answers would flow
-      // back as updatedInput and this endpoint becomes unnecessary.
-      apiFetch(`/chats/${chatId}/question-answers`, {
-        method: 'POST',
-        body: JSON.stringify({ answers: resolvedAnswers }),
-      }).catch(() => {})
     }
 
     setSending(true)
-    needsSpacerRef.current = true
+    // doSendSilent starts a NEW hidden turn (the answer-followup).
+    // bridgePartialRef may still be true if mount kept a DB partial
+    // and the user submitted an answer before that partial's done
+    // event arrived. The new turn is NOT a bridge — its promote
+    // should append a fresh assistant message, not replace the
+    // question-block message (which already has answers).
+    bridgePartialRef.current = false
+    // Hidden answer is a continuation, NOT a new visible send. The
+    // user may be reading somewhere else; don't yank them with a
+    // PIN. The agent's response builds into the existing assistant
+    // message; if the user was at FOLLOW_BOTTOM they'll see it
+    // forming, if ANCHOR_AT they stay where they are.
     try {
-      await streamSend(text, undefined, { hidden: true })
+      await streamSend(text, undefined, {
+        hidden: true,
+        answers: resolvedAnswers,
+      })
     } catch (err) {
       setSending(false)
       commitMessages(prev => [
@@ -923,30 +838,112 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   }, [chatId])
 
   async function handleStop() {
+    // Re-entry guard. Without this, two rapid Stop clicks would both
+    // snapshot the same pending queue (the snapshot happens BEFORE
+    // the await on /chat/stop) and both call doSend(combined) →
+    // duplicate combined send. Set the guard synchronously at entry
+    // and clear it in a finally so transient errors don't strand it.
+    if (handlingStopRef.current) return
+    handlingStopRef.current = true
     try {
-      await fetch(`${BASE}/api/chat/stop`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${getToken()}`,
-        },
-        body: JSON.stringify({ chat_id: chatId }),
-      })
-    } catch { /* network error during stop is non-critical */ }
-    promoteStreamToMessages()
-    disconnect({ clearStreaming: true })
-    setSending(false)
-    // Backend clears pending on stop; mirror locally and bump fetch gen
-    // so any in-flight refetch can't repopulate the tray.
-    fetchGenRef.current += 1
-    pendingMessagesRef.current = []
-    setPendingMessages([])
-    onStreamEnd?.()
+      // Snapshot the queue BEFORE stopping (the backend's stop
+      // clears chat.pending_messages). If queued messages exist,
+      // the first Stop press collapses them into a single combined
+      // message and submits it as the next turn — matches Claude.ai /
+      // Codex UX where Stop is "cancel current, send what I queued"
+      // rather than "discard everything". A second Stop with no
+      // queue actually halts. Users can still remove individual
+      // queued messages via the X button while they're queued.
+      //
+      // Trade-off: any attachments on queued messages are dropped
+      // when we collapse (we join only `.content` text). Typical
+      // queued messages are text follow-ups; if attachment-
+      // preservation becomes important we'd merge `.attachments`
+      // arrays and route through streamSend directly instead of
+      // doSend.
+      const queuedTexts = pendingMessagesRef.current
+        .map(m => (m.content || '').trim())
+        .filter(Boolean)
+      const combined = queuedTexts.join('\n\n')
+
+      // Invalidate any in-flight refetch + clear pending BEFORE the
+      // /chat/stop await. During that await, the SSE stream closes
+      // (server kills proc + closes broadcast), which fires the
+      // natural onStreamEnd path in useStreamConnection → ChatView's
+      // onStreamEnd handler → if pendingMessagesRef has items it
+      // calls fetchMessages({force:true}) → that fetch can land
+      // BEFORE handleStop continues post-await, overwriting the
+      // just-promoted partial + the soon-to-be-sent combined turn
+      // with stale DB state. Bumping fetchGen NOW makes any such
+      // in-flight fetch get discarded by its gen guard; clearing
+      // pendingMessagesRef NOW also prevents the natural handler
+      // from triggering the fetch at all.
+      fetchGenRef.current += 1
+      pendingMessagesRef.current = []
+      setPendingMessages([])
+
+      try {
+        await fetch(`${BASE}/api/chat/stop`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${getToken()}`,
+          },
+          body: JSON.stringify({ chat_id: chatId }),
+        })
+      } catch { /* network error during stop is non-critical */ }
+      disconnect({ clearStreaming: true })
+      promoteStreamToMessages()
+      setSending(false)
+      // Sync the refs to the just-committed state so any synchronous
+      // caller below (doSend(combined)) reads the post-stop values.
+      // setSending(false) queues a render — the next render will write
+      // sendingRef via the top-of-component mirror, but until then the
+      // ref still holds the pre-stop `true`. We need the value RIGHT
+      // NOW for doSend's guard.
+      sendingRef.current = false
+      isStreamingRef.current = false
+      // pending + fetchGen were cleared/bumped BEFORE the await above.
+      onStreamEnd?.()
+
+      if (combined) {
+        // doSend's guard reads sendingRef/isStreamingRef (just synced
+        // to false above) → fresh-send path. pin:false so the
+        // synthetic combined-from-queue message doesn't yank the
+        // viewport to top, pushing the partial the user just stopped
+        // (and the original turn-1 user msg) above the viewport.
+        // Mode stays whatever the user had — they were reading the
+        // partial, the new turn streams in continuing from there.
+        doSend(combined, { pin: false })
+      }
+    } finally {
+      handlingStopRef.current = false
+    }
   }
 
   const hasMore = offset > 0
   const showEmpty = messages.length === 0 && !isStreaming && !loading && !sending
   const lastUserIdx = messages.reduce((acc, m, i) => (m.role === 'user' && !m.hidden) ? i : acc, -1)
+
+  // The streaming <li> only carries a data-key in the BRIDGE case
+  // (we kept a DB partial on mount and the streaming <li> is the
+  // visual replacement for that suppressed message). Using the
+  // partial's data-key keeps an ANCHOR_AT pointing at the partial
+  // resolving correctly through the catch-up window.
+  //
+  // For multi-turn flow (no bridge), the previous turn's assistant
+  // is rendered alongside the streaming <li> (different turns). If
+  // we shared a data-key, applyMode's querySelector lookup would be
+  // ambiguous (two elements with the same data-key). Better to leave
+  // the streaming <li> with NO data-key — ANCHOR_AT during streaming
+  // falls back to the topmost visible message (e.g., the user msg
+  // above), which is the user's natural reading anchor anyway.
+  const streamingDataKey = (() => {
+    if (!bridgePartialRef.current) return undefined
+    const last = messages[messages.length - 1]
+    if (!last || last.role !== 'assistant' || last.hidden) return undefined
+    return last.id || `${last.role}-${last.ts ?? messages.length - 1}`
+  })()
 
   return (
     <div className={`chat${showEmpty ? ' chat--empty' : ''}`}>
@@ -975,19 +972,39 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
           {messages.map((msg, i) => {
             if (msg.hidden) return null
-            const hasQuestion = msg.role === 'assistant'
-              && msg.blocks?.some(b => b.type === 'question')
             const isLastMsg = i === messages.length - 1
               || messages.slice(i + 1).every(m => m.hidden)
+            // Suppress the last assistant message ONLY when this is
+            // the BRIDGE case (we kept a DB partial on mount and the
+            // streaming <li> is about to render the same in-flight
+            // turn). For normal multi-turn flow, the existing
+            // assistant message and the streaming <li> represent
+            // DIFFERENT turns and must BOTH render — otherwise a
+            // user's answered-question card would hide whenever the
+            // next turn streams.
+            if (bridgePartialRef.current
+                && msg.role === 'assistant' && isLastMsg
+                && sending && streamItems.length > 0) {
+              return null
+            }
+            const hasQuestion = msg.role === 'assistant'
+              && msg.blocks?.some(b => b.type === 'question')
             const questionBlock = hasQuestion
               ? msg.blocks.find(b => b.type === 'question') : null
             const questionAnswerable = hasQuestion && isLastMsg && !sending
               && !questionBlock?.answers
+            // Stable per-message DOM key for the scroll state machine.
+            // data-key is queried by applyMode when restoring an
+            // ANCHOR_AT mode. msg.id (server-assigned UUID) is ideal;
+            // fall back to role+ts which is also stable across renders.
+            const dataKey = msg.id || `${msg.role}-${msg.ts ?? i}`
             return (
             <li
               key={msg.id || msg.ts || `${msg.role}-${i}`}
               className={`chat__msg chat__msg--${msg.role}`}
               ref={i === lastUserIdx ? lastUserMsgRef : undefined}
+              data-key={dataKey}
+              data-ts={msg.role === 'user' && msg.ts ? String(msg.ts) : undefined}
               onClick={msg.ts && msg.role === 'user'
                 ? (e) => { e.currentTarget.querySelector('.chat__ts')?.classList.toggle('chat__ts--visible') }
                 : undefined}
@@ -1010,7 +1027,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           )})}
 
           {sending && streamItems.length > 0 && (
-            <li className="chat__msg chat__msg--assistant">
+            <li
+              className="chat__msg chat__msg--assistant"
+              data-key={streamingDataKey}
+            >
               {streamItems.map((item, i) => {
                 if (item.type === 'tool') {
                   return (
@@ -1052,6 +1072,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         </ul>
 
         <div className="spacer-dynamic" ref={spacerRef} aria-hidden="true" />
+        {/* Bottom sentinel — watched by IntersectionObserver. When
+            it's in the viewport, the user is at the bottom of
+            content (FOLLOW_BOTTOM intent). Zero size + aria-hidden
+            so it's invisible to users and screen readers. */}
+        <div className="chat__bottom-sentinel" aria-hidden="true" />
       </div>
       )}
 
@@ -1070,104 +1095,24 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
       <div className="chat__foot">
         <QueuedMessages items={pendingMessages} onCancel={handleCancelPending} />
-        <form className="chat__form" onSubmit={handleSubmit}>
-          {pendingFiles.length > 0 && (
-            <div className="chat__chips">
-              {pendingFiles.map(chip => (
-                <div
-                  key={chip.id}
-                  className={`chat__chip${chip.status === 'error' ? ' chat__chip--error' : ''}${chip.objectUrl ? ' chat__chip--image' : ''}`}
-                  title={chip.status === 'error' ? chip.error : chip.name}
-                >
-                  {chip.objectUrl && (
-                    <img className="chat__chip-thumb" src={chip.objectUrl} alt="" />
-                  )}
-                  <span className="chat__chip-name">{chip.name}</span>
-                  <span className="chat__chip-status">
-                    {chip.status === 'uploading' ? 'uploading…' : chip.status === 'error' ? 'error' : `${Math.round(chip.size / 1024)}KB`}
-                  </span>
-                  <button
-                    type="button"
-                    className="chat__chip-remove"
-                    onClick={() => removeFile(chip.id)}
-                    aria-label={`Remove ${chip.name}`}
-                  >×</button>
-                </div>
-              ))}
-            </div>
-          )}
-          <div className="chat__input-row">
-            <input
-              type="file"
-              multiple
-              ref={fileInputRef}
-              onChange={handleFileSelect}
-              style={{ display: 'none' }}
-            />
-            <button
-              type="button"
-              className="chat__attach"
-              onClick={() => fileInputRef.current?.click()}
-              aria-label="Attach files"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
-              </svg>
-            </button>
-            <textarea
-              ref={inputRef}
-              className="chat__input"
-              value={input}
-              onChange={(e) => {
-                if (listeningRef.current) return
-                setInput(e.target.value)
-                e.target.style.height = 'auto'
-                e.target.style.height = Math.min(e.target.scrollHeight, 160) + 'px'
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey && !_isTouchPrimary) {
-                  e.preventDefault(); handleSubmit(e)
-                }
-              }}
-              placeholder="Message the agent..."
-              rows={1}
-            />
-            {(sending && !input.trim()) ? (
-              <button className="chat__stop" type="button" onClick={handleStop} aria-label="Stop">
-                <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
-                  <rect width="12" height="12" rx="2" />
-                </svg>
-              </button>
-            ) : (input.trim() && !listening) ? (
-              <button
-                className="chat__send"
-                type="button"
-                onTouchEnd={(e) => { e.preventDefault(); handleSubmit(e) }}
-                onClick={handleSubmit}
-                aria-label="Send"
-                disabled={pendingFiles.some(c => c.status === 'uploading')}
-              >
-                <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-                  <path d="M6.5 11V2M2 6.5l4.5-4.5 4.5 4.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                </svg>
-              </button>
-            ) : (
-              <button
-                className={`chat__mic ${listening ? 'chat__mic--active' : ''}`}
-                type="button"
-                onTouchEnd={(e) => { e.preventDefault(); toggleVoice() }}
-                onClick={toggleVoice}
-                aria-label={listening ? 'Stop recording' : 'Voice input'}
-              >
-                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                  <rect x="4.5" y="1" width="5" height="8" rx="2.5" stroke="currentColor" strokeWidth="1.3"/>
-                  <path d="M3 7a4 4 0 008 0" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
-                  <path d="M7 11v2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
-                </svg>
-              </button>
-            )}
-          </div>
-        </form>
+        <ChatInputBar
+          input={input}
+          onInputChange={setInput}
+          onSubmit={handleSubmit}
+          inputRef={inputRef}
+          sending={sending}
+          listening={listening}
+          listeningRef={listeningRef}
+          onToggleVoice={toggleVoice}
+          onStop={handleStop}
+          pendingFiles={pendingFiles}
+          onAddFiles={addFiles}
+          onRemoveFile={removeFile}
+          // leftButtons: reserved for future "/" picker (model /
+          // skill / thinking-level selector). The slot is here so
+          // adding it later won't require touching ChatView again.
+          // leftButtons={<SlashPicker onPick={...} />}
+        />
       </div>
     </div>
   )

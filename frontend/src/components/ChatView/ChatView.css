@@ -184,6 +184,19 @@
 
 .spacer-dynamic { /* no transition — must be instant for scroll math to work */ }
 
+/* ── Bottom sentinel ─────────────────────────────── */
+
+/* Zero-size element at the absolute bottom of .chat__scroll, watched
+   by an IntersectionObserver to detect "user is at the bottom".
+   1px height (not 0) so the observer actually has a target to track;
+   browsers can be quirky with zero-size IO targets. aria-hidden in
+   JSX keeps it invisible to assistive tech. */
+.chat__bottom-sentinel {
+  height: 1px;
+  width: 100%;
+  pointer-events: none;
+}
+
 /* ── Connection status ───────────────────────────── */
 
 .connection-status {
