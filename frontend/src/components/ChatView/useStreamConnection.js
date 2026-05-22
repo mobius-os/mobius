@@ -84,6 +84,17 @@ export default function useStreamConnection(chatId, {
   // optimistic user message before the DB persists it.
   const justSentAtRef = useRef(0)
 
+  // Max innerHeight ever observed for this session. Used as the viewport
+  // height sent to the backend (which forwards it to the agent so its
+  // screenshots match the partner's framing). interactive-widget=
+  // resizes-content shrinks innerHeight when the keyboard opens — and
+  // POST /messages typically fires WITH the keyboard open — so the raw
+  // value is keyboard-poisoned. Max-tracking mirrors the same defensive
+  // trick useScrollMode applies to the spacer (fullViewHRef).
+  const maxInnerHeightRef = useRef(
+    typeof window !== 'undefined' ? window.innerHeight : 0
+  )
+
   // Character buffer for smooth text reveal.
   const textBufferRef = useRef('')
   const rafRef = useRef(null)
@@ -181,6 +192,17 @@ export default function useStreamConnection(chatId, {
   }, [flushBuffer])
 
   useEffect(() => () => disconnect(), [chatId, disconnect])
+
+  useEffect(() => {
+    function trackMaxHeight() {
+      if (window.innerHeight > maxInnerHeightRef.current) {
+        maxInnerHeightRef.current = window.innerHeight
+      }
+    }
+    trackMaxHeight()
+    window.addEventListener('resize', trackMaxHeight)
+    return () => window.removeEventListener('resize', trackMaxHeight)
+  }, [])
 
   // Use a ref for connectToStream so handleReconnect always
   // calls the latest version (avoids stale closure).
@@ -481,7 +503,10 @@ export default function useStreamConnection(chatId, {
         body.attachments = attachments
       }
       try { body.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone } catch {}
-      body.viewport = { width: window.innerWidth, height: window.innerHeight }
+      body.viewport = {
+        width: window.innerWidth,
+        height: maxInnerHeightRef.current || window.innerHeight,
+      }
       const res = await fetch(`${BASE}/api/chats/${chatIdRef.current}/messages`, {
         method: 'POST',
         headers: {
