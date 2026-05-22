@@ -414,19 +414,6 @@ export default function SettingsView({ onThemeChange }) {
           {providerLoaded && (
             <div className="settings__providers">
               <ProviderRow
-                id="claude"
-                name="Claude Code"
-                isDefault={provider === 'claude'}
-                connected={claudeAuthenticated}
-                onSelect={selectProvider}
-                disabled={providerSaving}
-                expanded={expandedAuth === 'claude'}
-                onToggleExpand={toggleClaudeAuth}
-              >
-                <ProviderAuth compact onDone={onClaudeAuthDone} />
-              </ProviderRow>
-
-              <ProviderRow
                 id="codex"
                 name="OpenAI Codex"
                 isDefault={provider === 'codex'}
@@ -437,6 +424,19 @@ export default function SettingsView({ onThemeChange }) {
                 onToggleExpand={toggleCodexAuth}
               >
                 <CodexAuth onConnected={onCodexAuthDone} />
+              </ProviderRow>
+
+              <ProviderRow
+                id="claude"
+                name="Claude Code"
+                isDefault={provider === 'claude'}
+                connected={claudeAuthenticated}
+                onSelect={selectProvider}
+                disabled={providerSaving}
+                expanded={expandedAuth === 'claude'}
+                onToggleExpand={toggleClaudeAuth}
+              >
+                <ProviderAuth compact onDone={onClaudeAuthDone} />
               </ProviderRow>
               {providerError && (
                 <p className="settings__error">{providerError}</p>

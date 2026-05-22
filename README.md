@@ -5,7 +5,7 @@
 <h1 align="center">Möbius</h1>
 
 <p align="center">
-  A self-hosted personalized assistant that gets better the more you use it, instead of worse.
+  A personalized AI agent you can self-host. It adapts to you in both what it does and how it looks, and gets sharper the more you use it.
 </p>
 
 <p align="center">
@@ -29,7 +29,7 @@
 
 Most software asks you to adapt to it. AI assistants tend to make this worse with time — context drifts, preferences leak between tasks, memory accumulates in the wrong places, sessions feel less coherent the more you use them. Möbius is built around the opposite idea: it improves the more you interact with it.
 
-It's a self-hosted PWA with a chat on one side and a canvas on the other. You describe what you want, and the agent inside builds it — a small piece of software that lands next to the chat, runs in your browser, and is yours to keep.
+Möbius is a personalized AI agent you self-host. A chat on one side, a canvas on the other. You describe what you want, and the coding agent inside builds it — a small piece of software that lands next to the chat, runs in your browser, and is yours to keep.
 
 The agent isn't limited to apps. It can change the interface itself: the theme, the layout, the features in the shell. It edits the source and rebuilds live. Some changes appear instantly, others take a few seconds. The agent supports Claude Code or Codex as the coding provider, with Gemini for image generation.
 
@@ -56,28 +56,23 @@ Your health data, your finances, your habits, all private by default.
 
 When you ask for something, the agent builds it as a small app right inside the chat, without reloading the page. Each app can store data, run on a schedule, fetch from the web, and use AI on its own.
 
+<p align="center">
+  <img src="assets/screenshots/apps-cycle.gif" width="280" alt="A few of the apps Möbius has built — ISS tracker, habit log, HN dashboard, earthquake map, flashcards deck" />
+</p>
+
+<sub>A few of the apps Möbius has built me in chat — an ISS tracker, a Brazil trip planner, a daily news digest, a Hacker News dashboard, a live earthquake monitor, a habit tracker, and a drum machine. Each was a single prompt; the agent wrote the JSX, compiled it, mounted it, and the app lives in the same shell the chat does.</sub>
+
 ---
 
 ## What can you change?
 
 Apps are the most obvious thing the agent builds, but the platform itself is also yours to reshape. Two layers, treated differently: **capabilities** (general features like file upload or notifications — candidates for upstreaming so the next Möbius install inherits them) and **presentation** (your theme, layout, and fonts, which live only on your volume and stay yours).
 
-<table align="center">
-  <tr>
-    <td align="center" width="25%"><img src="assets/screenshots/theme-00-baseline.png" alt="Möbius baseline shell — purple accent on dark, sans-serif" /></td>
-    <td align="center" width="25%"><img src="assets/screenshots/theme-01-cozy.png" alt="Möbius after 'cozy reading nook' — walnut and amber, soft serif" /></td>
-    <td align="center" width="25%"><img src="assets/screenshots/theme-04-ambient.png" alt="Möbius after 'slow drifting ambient' — teal-to-violet gradient mesh, glassy bubbles" /></td>
-    <td align="center" width="25%"><img src="assets/screenshots/theme-06-medieval.png" alt="Möbius after 'medieval manuscript' — parchment cream background, blackletter wordmark, calligraphic prompt" /></td>
-  </tr>
-  <tr>
-    <td align="center"><sub>baseline</sub></td>
-    <td align="center"><sub>cozy reading nook</sub></td>
-    <td align="center"><sub>drifting ambient</sub></td>
-    <td align="center"><sub>medieval manuscript</sub></td>
-  </tr>
-</table>
+<p align="center">
+  <img src="assets/screenshots/theme-cycle.gif" width="280" alt="Möbius theme cycle — baseline, cozy reading nook, drifting ambient, medieval manuscript" />
+</p>
 
-<sub>Same instance, four prompts. The colors, fonts, and layout are CSS the agent wrote in response to a single sentence.</sub>
+<sub>Same instance, four prompts: baseline, cozy reading nook, drifting ambient, medieval manuscript. The colors, fonts, and layout are CSS the agent wrote in response to a single sentence.</sub>
 
 <p align="center">
   <img src="assets/screenshots/theme-07-dynamic.gif" width="280" alt="Möbius with a 'playful room' theme: drifting bubbles, parallax silhouettes, warm-cool gradient cycling" />
@@ -100,12 +95,12 @@ Möbius ships with a deliberately minimal chat — no file upload, no scheduled 
 
 <table align="center">
   <tr>
-    <td align="center" width="50%"><img src="assets/screenshots/upload-01-bare.png" alt="Composer with just a text field and a disabled send arrow. No paperclip, no mic." /></td>
+    <td align="center" width="50%"><img src="assets/screenshots/upload-02a-pristine.png" alt="Top of the chat: the typed prompt asking for file upload, the agent's initial check, and a composer at the bottom with no paperclip." /></td>
     <td align="center" width="50%"><img src="assets/screenshots/upload-04-in-use.png" alt="Composer with the paperclip restored, a file attached inline in the sent message, and the agent's reply describing what it sees." /></td>
   </tr>
   <tr>
-    <td align="center"><sub>before</sub></td>
-    <td align="center"><sub>after</sub></td>
+    <td align="center"><sub>before — no file upload</sub></td>
+    <td align="center"><sub>after — file upload added by the agent</sub></td>
   </tr>
 </table>
 
