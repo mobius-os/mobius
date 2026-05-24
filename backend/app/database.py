@@ -88,6 +88,13 @@ def run_migrations(eng) -> None:
         "ALTER TABLE chats ADD COLUMN provider VARCHAR(32) "
         "NOT NULL DEFAULT 'claude'"
       )
+    if "agent_settings_json" not in chats_cols:
+      # Nullable JSON blob holding per-chat overrides for the agent
+      # runtime (model, effort, ...). Null means "fall back to the
+      # global default in /data/shared/agent-settings.json".
+      _add.append(
+        "ALTER TABLE chats ADD COLUMN agent_settings_json JSON"
+      )
     if _add:
       with eng.connect() as conn:
         for stmt in _add:

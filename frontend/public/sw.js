@@ -113,27 +113,6 @@ async function staleWhileRevalidate(req, cacheName) {
   return cached || network
 }
 
-// Network-first with a 3-second timeout. If the network is slow, fall
-// back to cache so the app stays responsive on shaky connections —
-// per the offline-first PWA pattern (slicker.me/webdev/pwas-offline-first).
-const NETWORK_FIRST_TIMEOUT_MS = 3000
-
-async function networkFirst(req, cacheName) {
-  const cache = await caches.open(cacheName)
-  const cachedPromise = cache.match(req)
-  try {
-    const ctrl = new AbortController()
-    const timer = setTimeout(() => ctrl.abort(), NETWORK_FIRST_TIMEOUT_MS)
-    const res = await fetch(req, { signal: ctrl.signal })
-    clearTimeout(timer)
-    if (res.ok) cache.put(req, res.clone()).catch(() => {})
-    return res
-  } catch {
-    const cached = await cachedPromise
-    return cached || Response.error()
-  }
-}
-
 // Web Push: show notification when a push arrives.
 self.addEventListener('push', (e) => {
   if (!e.data) return
@@ -151,7 +130,34 @@ self.addEventListener('push', (e) => {
   e.waitUntil(self.registration.showNotification(data.title, options))
 })
 
-// Notification tap: deep-link into the PWA.
+// Notification tap: deep-link into the PWA. Earlier versions of this
+// file were truncated mid-handler — the whole sw.js failed `node
+// --check` with a SyntaxError, so the browser couldn't register the
+// service worker on installed PWAs. Net effect was: no offline cache,
+// no push click handling, no app-frame caching, no logout cache-purge.
+// Keep the handler complete; run `node --check frontend/public/sw.js`
+// after any edit here.
+// Whitelists notification targets to same-origin chat/app paths to
+// prevent a malicious notification payload (server compromise, MITM
+// of an unencrypted push) from steering us to an arbitrary URL via
+// openWindow() or driving Shell.jsx's navTo with a bogus target.
+function _safeTarget(raw) {
+  if (typeof raw !== 'string' || !raw) return '/'
+  let path = raw
+  try {
+    if (/^https?:\/\//.test(raw)) {
+      const u = new URL(raw)
+      if (u.origin !== self.location.origin) return '/'
+      path = u.pathname
+    }
+  } catch { return '/' }
+  if (path === '/' || /^\/chat\/[^/]+$/.test(path)
+      || /^\/app\/[^/]+$/.test(path)) {
+    return path
+  }
+  return '/'
+}
+
 self.addEventListener('notificationclick', (e) => {
   e.notification.close()
   const data = e.notification.data || {}
@@ -161,8 +167,28 @@ self.addEventListener('notificationclick', (e) => {
     const match = data.actions.find(a => a.action === e.action)
     if (match && match.target) target = match.target
   }
+  target = _safeTarget(target)
 
-  e.waitUntil(
-    clients.matchAll({ type: 'window', includeUncontrolled: true })
-      .then(windowClients => {
-        for (const clien
+  e.waitUntil((async () => {
+    const windowClients = await clients.matchAll({
+      type: 'window',
+      includeUncontrolled: true,
+    })
+    const focusable = windowClients.filter(c => 'focus' in c)
+    // Prefer a client the user is currently looking at — focusing a
+    // hidden/background tab would steer the message away from the
+    // window they're actually using. Fall back to the first match if
+    // nothing is visible.
+    const visible = focusable.find(c => c.visibilityState === 'visible')
+    const target_client = visible || focusable[0]
+    if (target_client) {
+      // Focus BEFORE postMessage so the message lands on the window
+      // the user will end up on. If focus moves the active document
+      // mid-handler, postMessage on the un-focused one can race.
+      await target_client.focus()
+      target_client.postMessage({ type: 'notification-click', target })
+      return
+    }
+    if (clients.openWindow) return clients.openWindow(target)
+  })())
+})

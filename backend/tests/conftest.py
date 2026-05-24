@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+import weakref
 
 import pytest
 from fastapi.testclient import TestClient
@@ -33,12 +34,26 @@ def fresh_db():
   auth_module._login_failures = 0
   auth_module._login_cooldown_until = 0.0
 
-  # Clear chat runtime state across tests.
+  # Clear chat runtime state across tests. Includes the SDK
+  # registries even though no current test populates them — once SDK
+  # unit tests are added (see _003-tech-debt-and-test-gaps.md TG-2),
+  # leaving these uncleared would cross-contaminate.
   from app import chat as chat_mod
   from app import broadcast as bc_mod
   chat_mod._starting.clear()
   chat_mod._active_procs.clear()
+  chat_mod._active_clients.clear()
+  chat_mod._active_sessions.clear()
+  chat_mod._pending_questions.clear()
   chat_mod._run_generation.clear()
+  # Reset the per-chat queue-lock registry by reassigning to a fresh
+  # WeakValueDictionary so a lock held by a leaked task from a prior
+  # test can't be returned to the next test's caller.
+  chat_mod._queue_locks = weakref.WeakValueDictionary()
+  # Drop any cached skill text loaded by a prior test; the next caller
+  # will re-read from disk. Using setattr in case the attribute is
+  # declared lazily below the read-site.
+  setattr(chat_mod, "_SKILL_TEXT_CACHE", None)
   bc_mod._broadcasts.clear() if hasattr(bc_mod, "_broadcasts") else None
 
   yield

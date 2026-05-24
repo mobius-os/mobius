@@ -19,6 +19,24 @@ from app.deps import get_current_owner, get_current_owner_or_app
 router = APIRouter(prefix="/api/apps", tags=["apps"])
 
 
+def _slugify_for_source_dir(name: str) -> str:
+  """Same slug shape register_app.py / the storage layout uses.
+  Lowercase, alphanum + hyphen, collapsed runs, stripped."""
+  slug = "".join(
+    ch if ch.isalnum() else "-" for ch in (name or "").lower()
+  ).strip("-")
+  while "--" in slug:
+    slug = slug.replace("--", "-")
+  return slug or "app"
+
+
+def _derive_source_dir(data_dir: str, name: str) -> str:
+  """Default source_dir when a caller doesn't provide one.
+  Mirrors register_app.py's `/data/apps/<slug>/` convention so the
+  watcher's exact-match lookup always finds the app."""
+  return str(Path(data_dir) / "apps" / _slugify_for_source_dir(name))
+
+
 @router.get("/", response_model=list[schemas.AppOut])
 def list_apps(
   db: Session = Depends(get_db),
@@ -37,12 +55,20 @@ async def create_app(
   _: models.Owner = Depends(get_current_owner),
 ):
   """Creates and compiles a new mini-app from JSX source."""
+  # Always set source_dir. The file watcher resolves edits via exact
+  # source_dir match — apps with NULL source_dir are invisible to
+  # auto-recompile and the partner gets the silent "save doesn't
+  # land" failure mode. Derive from the name slug (same convention
+  # register_app.py uses) when the caller didn't provide one.
+  source_dir = body.source_dir or _derive_source_dir(
+    get_settings().data_dir, body.name
+  )
   app = models.App(
     name=body.name,
     description=body.description,
     jsx_source=body.jsx_source,
     chat_id=body.chat_id,
-    source_dir=body.source_dir,
+    source_dir=source_dir,
   )
   db.add(app)
   db.flush()  # assigns app.id without committing
@@ -132,6 +158,7 @@ def delete_app(
   # a live 404.
   compiled_path = app.compiled_path
   app_name = app.name
+  app_source_dir = app.source_dir
 
   db.delete(app)
   db.commit()
@@ -143,15 +170,23 @@ def delete_app(
     except OSError:
       pass  # best effort — a stale compiled file is harmless
 
-  # Source tree under /data/apps/<slug>/.  Only delete directories whose
-  # name is a URL-safe slug, to avoid path-traversal via a tampered name
-  # field.  If the agent used a non-slug name, the source tree is left.
-  if app_name and re.fullmatch(r"[a-zA-Z0-9_-]+", app_name):
-    settings = get_settings()
+  # Source tree under /data/apps/.  Newer apps store the exact source
+  # directory; legacy apps fall back to name-based cleanup.
+  settings = get_settings()
+  apps_root = (Path(settings.data_dir) / "apps").resolve()
+  if app_source_dir:
+    source_dir = Path(app_source_dir)
+    try:
+      resolved = source_dir.resolve()
+      if (resolved.is_dir()
+          and str(resolved).startswith(str(apps_root) + "/")):
+        shutil.rmtree(resolved, ignore_errors=True)
+    except OSError:
+      pass
+  elif app_name and re.fullmatch(r"[a-zA-Z0-9_-]+", app_name):
     source_dir = Path(settings.data_dir) / "apps" / app_name
     try:
       resolved = source_dir.resolve()
-      apps_root = (Path(settings.data_dir) / "apps").resolve()
       if (resolved.is_dir()
           and str(resolved).startswith(str(apps_root) + "/")):
         shutil.rmtree(resolved, ignore_errors=True)
@@ -252,6 +287,12 @@ def get_module(
   naturally. Without `v`, fall back to no-cache so legacy clients
   never get stuck on stale modules.
   """
+  # Apps share modules same as they share storage — every mini-app
+  # is authored by the owner's own agent, and a multi-app workflow
+  # may legitimately want to import or interop across them. Any
+  # valid token (owner or app-scoped) is allowed to fetch any
+  # module by id. See CLAUDE.md "Mini-app sandbox — accepted
+  # same-origin decision" for the broader trust model.
   if not token or not auth.decode_access_token(token):
     raise HTTPException(
       status_code=401, detail="Valid token required."

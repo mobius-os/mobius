@@ -8,7 +8,8 @@ import os
 import secrets
 import time
 from base64 import urlsafe_b64encode
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -26,39 +27,78 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 _limiter = Limiter(key_func=get_remote_address)
 log = logging.getLogger("moebius.auth")
 
-# Global login attempt tracking — single-owner app, so we track
-# consecutive failures across all IPs.
-_login_failures = 0
-_login_cooldown_until = 0.0
+# Global login attempt tracking keyed by username. IP-level defense
+# remains handled separately by slowapi rate limits.
+_login_failures: dict[str, int] = {}
+_login_cooldown_until: dict[str, datetime] = {}
 
 
-def _check_login_cooldown():
+def _ensure_login_tracking_maps() -> None:
+  """Normalizes test-reset globals back to the keyed tracking maps."""
+  global _login_failures, _login_cooldown_until
+  if not isinstance(_login_failures, dict):
+    _login_failures = {}
+  if not isinstance(_login_cooldown_until, dict):
+    _login_cooldown_until = {}
+
+
+def _check_login_cooldown(username: str):
   """Raises 429 if in a cooldown period from too many failed logins."""
-  if time.time() < _login_cooldown_until:
-    remaining = int(_login_cooldown_until - time.time())
+  _ensure_login_tracking_maps()
+  until = _login_cooldown_until.get(username)
+  if until and datetime.now(UTC) < until:
+    remaining = int((until - datetime.now(UTC)).total_seconds())
     raise HTTPException(
       status_code=429,
       detail=f"Too many failed attempts. Try again in {remaining}s.",
     )
+  if until:
+    _login_cooldown_until.pop(username, None)
 
 
-def _record_login_failure():
+def _record_login_failure(username: str):
   """Increments failure count and sets cooldown if threshold reached."""
-  global _login_failures, _login_cooldown_until
-  _login_failures += 1
-  if _login_failures >= 30:
-    _login_cooldown_until = time.time() + 900  # 15 min
-  elif _login_failures >= 20:
-    _login_cooldown_until = time.time() + 300  # 5 min
-  elif _login_failures >= 10:
-    _login_cooldown_until = time.time() + 60   # 1 min
+  _ensure_login_tracking_maps()
+  failures = _login_failures.get(username, 0) + 1
+  _login_failures[username] = failures
+  if failures >= 30:
+    _login_cooldown_until[username] = datetime.now(UTC) + timedelta(minutes=15)
+  elif failures >= 20:
+    _login_cooldown_until[username] = datetime.now(UTC) + timedelta(minutes=5)
+  elif failures >= 10:
+    _login_cooldown_until[username] = datetime.now(UTC) + timedelta(minutes=1)
 
 
-def _reset_login_failures():
+def _reset_login_failures(username: str):
   """Resets the failure counter on successful login."""
-  global _login_failures, _login_cooldown_until
-  _login_failures = 0
-  _login_cooldown_until = 0.0
+  _ensure_login_tracking_maps()
+  _login_failures.pop(username, None)
+  _login_cooldown_until.pop(username, None)
+
+
+def _extract_provider_code_and_state(raw_code: str) -> tuple[str, str | None]:
+  """Extract the provider code and echoed state from pasted input."""
+  raw = raw_code.strip()
+  parsed = urlparse(raw)
+  values = {}
+  if parsed.scheme and (parsed.query or parsed.fragment):
+    query = parse_qs(parsed.query)
+    fragment = parse_qs(parsed.fragment)
+    values = {**query, **fragment}
+  elif "=" in raw and ("&" in raw or raw.startswith("code=")):
+    values = parse_qs(raw)
+
+  if values:
+    code = (values.get("code") or [raw])[0]
+    state = (values.get("state") or [None])[0]
+    return code, state
+
+  code, _, fragment = raw.partition("#")
+  state = None
+  if fragment:
+    fragment_values = parse_qs(fragment)
+    state = (fragment_values.get("state") or [None])[0]
+  return code, state
 
 
 @router.get("/setup/status", response_model=schemas.SetupStatus)
@@ -117,7 +157,7 @@ def login(
   db: Session = Depends(get_db),
 ):
   """Authenticates the owner and returns a JWT access token."""
-  _check_login_cooldown()
+  _check_login_cooldown(form.username)
   owner = (
     db.query(models.Owner)
     .filter(models.Owner.username == form.username)
@@ -126,13 +166,13 @@ def login(
   if not owner or not auth.verify_password(
     form.password, owner.hashed_password
   ):
-    _record_login_failure()
+    _record_login_failure(form.username)
     raise HTTPException(
       status_code=401,
       detail="Incorrect username or password.",
       headers={"WWW-Authenticate": "Bearer"},
     )
-  _reset_login_failures()
+  _reset_login_failures(form.username)
   token = auth.create_access_token({"sub": owner.username})
   return schemas.TokenResponse(access_token=token)
 
@@ -284,9 +324,19 @@ async def provider_code(
   pkce = _active_pkce
   _active_pkce = None
 
-  # The code may include a #fragment with the state echo — strip it.
-  raw = body.code.strip()
-  code = raw.split("#")[0]
+  code, returned_state = _extract_provider_code_and_state(body.code)
+  # State is verified only when the user pasted the full callback
+  # URL (which contains `#state=...`). Bare-code pastes are still
+  # accepted — the original flow worked that way and breaking it
+  # would lock out anyone whose provider redirect doesn't surface
+  # the state fragment in a copy-pasteable shape. PKCE's
+  # code-verifier check below is the load-bearing CSRF defense; the
+  # state check is belt-and-suspenders only when state is present.
+  if returned_state is not None and returned_state != pkce["state"]:
+    raise HTTPException(
+      status_code=403,
+      detail="OAuth state mismatch. Start the auth flow again.",
+    )
 
   try:
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -340,6 +390,30 @@ async def provider_status(
     "authenticated": error is None,
     "error": error,
   }
+
+
+@router.get("/providers/status")
+async def providers_status(
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Returns connection status for ALL registered providers.
+
+  The `/provider/status` route above only reports the currently-
+  active provider — sufficient for SettingsView's "is the current one
+  connected" check, but the `/` slash picker needs to know which
+  providers' models are usable so it can hide disconnected ones.
+  """
+  from app.providers import PROVIDERS
+  data_dir = get_settings().data_dir
+  out = {}
+  for pid, provider in PROVIDERS.items():
+    error = provider.check_auth(data_dir)
+    out[pid] = {
+      "name": provider.name,
+      "authenticated": error is None,
+      "error": error,
+    }
+  return out
 
 
 # -- Codex device-auth flow -------------------------------------------------

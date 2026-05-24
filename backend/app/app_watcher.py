@@ -115,6 +115,13 @@ class _JsxHandler(FileSystemEventHandler):
     try:
       # Resolve dir → app via the source_dir column set by
       # register_app.py.  Exact path match; no string normalization.
+      # Apps with source_dir=NULL (legacy or created without going
+      # through register_app.py) silently won't auto-recompile —
+      # that's documented in the seed under "If your edit didn't
+      # recompile" so the agent knows to re-register. We deliberately
+      # don't slug-match the dir name to a candidate app here;
+      # guessing is exactly the kind of code-policing the design
+      # philosophy says belongs in the seed, not the server.
       app = (
         db.query(models.App)
         .filter(models.App.source_dir == str(p.parent))

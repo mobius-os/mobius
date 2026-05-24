@@ -1,5 +1,6 @@
 """Routes for chat CRUD operations."""
 
+import json
 import logging
 import shutil
 from datetime import UTC, datetime, timedelta
@@ -11,7 +12,12 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.config import get_settings
-from app.chat import is_chat_running, stop_chat_for
+from app.chat import (
+  bump_run_generation,
+  forget_chat,
+  is_chat_running,
+  stop_chat_for,
+)
 from app.database import get_db
 from app.deps import get_current_owner
 
@@ -33,6 +39,49 @@ def _purge_chat_dir(chat_id: str) -> None:
 class ChatUpdate(BaseModel):
   title: str | None = None
   messages: list[dict] | None = None
+
+
+def _coerce_agent_settings(raw) -> dict:
+  """Returns a fresh dict from a possibly-string JSON value.
+
+  SQLAlchemy's JSON column type usually returns dict on read, but
+  on some SQLite + driver combos (especially with text-backed JSON
+  columns) the value comes back as a raw string. Calling
+  `dict(some_str)` raises TypeError. Normalize once at every
+  read site to defend against that — and against legacy rows
+  written before the column was typed as JSON.
+
+  Returns `{}` for None, invalid JSON, or non-dict values.
+  """
+  if raw is None:
+    return {}
+  if isinstance(raw, dict):
+    return dict(raw)
+  if isinstance(raw, str):
+    try:
+      parsed = json.loads(raw)
+      return dict(parsed) if isinstance(parsed, dict) else {}
+    except (ValueError, TypeError):
+      return {}
+  return {}
+
+
+class ChatPatch(BaseModel):
+  # Partial-update payload from the `/` slash picker. Sending `None`
+  # for `agent_settings_json` clears the override (reverts the chat to
+  # the global default); sending a dict merges into the existing one.
+  # Keys: `model`, `effort`, ... see providers.effective_agent_settings
+  # for the full list. Values are merged as-is — if the SDK rejects a
+  # bogus value, the SDK's error message is the right UX, not a
+  # server-side guardrail that prevents agent experimentation.
+  agent_settings_json: dict | None = None
+  # When True, treat agent_settings_json=None as an explicit clear.
+  clear_agent_settings: bool = False
+  # When set, switches the chat's provider (claude/codex). The handler
+  # ALSO mirrors the new value onto `owner.provider` so future new
+  # chats inherit it — this is what makes "default = last selected"
+  # work without a settings-page toggle.
+  provider: str | None = None
 
 
 @router.get("")
@@ -77,12 +126,28 @@ def create_chat(
   _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
-  """Creates a new chat."""
+  """Creates a new chat.
+
+  Snapshots the current global agent-settings defaults (model +
+  effort) into chat.agent_settings_json so the picker always renders
+  with something selected AND so subsequent changes to the global
+  default don't bleed into this chat. The chat's provider is
+  inherited from owner.provider (the implicit "default = last
+  picked").
+  """
   import uuid
+  from app.providers import initial_chat_defaults
+
+  owner = db.query(models.Owner).first()
+  provider = (owner.provider if owner else None) or "claude"
+  defaults = initial_chat_defaults(get_settings().data_dir, provider)
+
   chat = models.Chat(
     id=str(uuid.uuid4()),
     title=body.title or "New chat",
     messages=body.messages or [],
+    provider=provider,
+    agent_settings_json=defaults,
   )
   db.add(chat)
   db.commit()
@@ -112,6 +177,123 @@ def update_chat(
   chat.updated_at = datetime.now(UTC)
   db.commit()
   return {"ok": True}
+
+
+@router.patch("/{chat_id}")
+async def patch_chat(
+  body: ChatPatch,
+  chat_id: str,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Partial-update endpoint used by the `/` slash picker.
+
+  The picker writes per-chat overrides for the agent runtime (model,
+  effort, ...) here. The new dict is MERGED into the existing
+  `agent_settings_json` (last-write-wins per key) so changing just
+  `effort` doesn't blow away a previously-picked `model`.
+
+  Pass `clear_agent_settings=true` to revert this chat to the global
+  default. The `effective` field in the response is what the next
+  turn will actually use (override merged onto global default).
+
+  Serialized per-chat via the same lock that guards pending_messages
+  RMW — two PATCHes racing on the same chat would otherwise both
+  read the same snapshot and the later commit would clobber keys
+  from the earlier one.
+  """
+  from sqlalchemy.orm.attributes import flag_modified
+  from app.config import get_settings as get_app_settings
+  from app.providers import effective_agent_settings
+  from app.chat import get_queue_lock
+
+  async with get_queue_lock(chat_id):
+    chat = db.query(models.Chat).filter(
+      models.Chat.id == chat_id,
+      models.Chat.deleted_at.is_(None),
+    ).first()
+    if not chat:
+      raise HTTPException(status_code=404, detail="Chat not found.")
+
+    if body.clear_agent_settings:
+      chat.agent_settings_json = None
+    elif body.agent_settings_json is not None:
+      existing = _coerce_agent_settings(chat.agent_settings_json)
+      for k, v in body.agent_settings_json.items():
+        if v is None:
+          existing.pop(k, None)
+        else:
+          existing[k] = v
+      chat.agent_settings_json = existing or None
+      # SQLAlchemy doesn't always notice in-place JSON mutations even
+      # after a fresh dict assignment in older versions; flag_modified
+      # is the belt-and-suspenders fix.
+      flag_modified(chat, "agent_settings_json")
+
+    if body.provider is not None and body.provider in ("claude", "codex"):
+      # Reject a switch to a disconnected provider — the picker may
+      # have raced ahead of /auth/providers/status, or the user may
+      # be on stale state. Without this check the PATCH would succeed
+      # silently and then every subsequent message turn would fail
+      # auth, leaving the user confused. 409 surfaces the real
+      # problem at pick-time.
+      from app.providers import get_provider
+      candidate = get_provider(body.provider)
+      auth_error = candidate.check_auth(get_app_settings().data_dir)
+      if auth_error is not None:
+        raise HTTPException(
+          status_code=409,
+          detail=(
+            f"{candidate.name} is not connected. "
+            "Open Settings to connect, then try again."
+          ),
+        )
+      if chat.provider != body.provider:
+        # Sessions aren't cross-provider portable: a Claude session id
+        # is not a valid Codex thread id and vice versa. Wipe the
+        # session id when the provider actually changes so the next
+        # turn starts a fresh session for the new provider. The
+        # frontend lock (has_assistant_turns → only same-provider
+        # picks visible) prevents this from happening mid-thread in
+        # the UI, but a direct API caller or a recovery scenario can
+        # still hit it.
+        chat.session_id = None
+      chat.provider = body.provider
+      # Mirror to owner.provider so the NEXT new chat inherits the
+      # provider the user just picked here — this is the "default =
+      # last selected" contract that replaced the Settings radio. The
+      # mirror is best-effort: if the owner row is missing for some
+      # reason, the per-chat write is still authoritative.
+      # NOTE: owner.provider is intentionally NOT mirrored here. The
+      # global default updates only when the user SENDS a message
+      # using the new settings — see mark_settings_dirty + the send
+      # path in chats_stream.py. Mirror-on-PATCH would propagate
+      # "just clicked around in the picker" into the global default.
+
+    db.commit()
+    db.refresh(chat)
+    data_dir = get_app_settings().data_dir
+
+    # Mark the chat as having pending unsent settings changes. The
+    # next POST /messages on this chat will mirror its settings to
+    # the global default (so new chats inherit) + owner.provider,
+    # then clear the dirty bit. If the user picks here but never
+    # sends, the global default stays untouched — which matches the
+    # user's stated contract: only manual *sent* changes shift the
+    # default.
+    from app.chat import mark_settings_dirty
+    mark_settings_dirty(chat_id)
+
+    return {
+      "ok": True,
+      "agent_settings_json": _coerce_agent_settings(chat.agent_settings_json) or None,
+      "provider": chat.provider or "claude",
+      "effective": effective_agent_settings(
+        data_dir,
+        _coerce_agent_settings(chat.agent_settings_json) or None,
+        provider=chat.provider or "claude",
+      ),
+    }
 
 
 @router.get("/{chat_id}")
@@ -147,6 +329,16 @@ def get_chat(
   else:
     start = max(0, total - limit)
     page = all_msgs[start:]
+  # Compute the effective per-turn agent settings — provider-aware
+  # so the picker always has a real model + effort to show, even for
+  # legacy chats that never got a create_chat snapshot.
+  from app.config import get_settings as get_app_settings
+  from app.providers import effective_agent_settings
+  data_dir = get_app_settings().data_dir
+  has_assistant_turns = any(
+    m.get("role") == "assistant" for m in all_msgs
+  )
+  provider = chat.provider or "claude"
   return {
     "id": chat.id,
     "title": chat.title,
@@ -156,6 +348,14 @@ def get_chat(
     "offset": start,
     "running": is_chat_running(chat_id),
     "session_id": chat.session_id,
+    "provider": provider,
+    "agent_settings_json": _coerce_agent_settings(chat.agent_settings_json) or None,
+    "effective_agent_settings": effective_agent_settings(
+      data_dir,
+      _coerce_agent_settings(chat.agent_settings_json) or None,
+      provider=provider,
+    ),
+    "has_assistant_turns": has_assistant_turns,
   }
 
 
@@ -166,16 +366,37 @@ async def delete_chat(
   db: Session = Depends(get_db),
 ):
   """Soft-deletes a chat and stops any running agent for it."""
-  # Stop the agent first so it can't write to the chat after we mark it deleted.
-  # Use try/finally so a stop error never prevents the soft-delete.
-  try:
-    await stop_chat_for(chat_id, db=db)
-  except Exception:
-    log.warning("Failed to stop agent for chat %s during delete", chat_id)
+  # Only attempt to stop if the chat is actually running. An idle chat
+  # has no proc/SDK client/session to interrupt, so calling
+  # stop_chat_for would be a no-op — but a transient error during the
+  # no-op (DB hiccup, lookup glitch) would falsely 409 and make the
+  # chat un-deleteable. The 409 only fires when the chat WAS running
+  # and we couldn't stop it cleanly — that's the case we actually need
+  # to protect against (orphan runner writing to a soft-deleted row).
+  if is_chat_running(chat_id):
+    try:
+      stopped = await stop_chat_for(chat_id, db=db)
+    except Exception:
+      log.warning("Failed to stop agent for chat %s during delete", chat_id)
+      stopped = False
+    if not stopped:
+      raise HTTPException(
+        status_code=409,
+        detail="Could not stop active agent; retry",
+      )
+  # Bump generation BEFORE the soft-delete commit so that any run
+  # that started in the TOCTOU window between the is_chat_running
+  # check above and now sees `we_own_gen == False` on its next gen
+  # check and skips auto-promote / continuation. Otherwise a runner
+  # racing the delete could write to the just-deleted row.
+  bump_run_generation(chat_id)
   chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
   if chat:
     chat.deleted_at = datetime.now(UTC)
     db.commit()
+  # Drop in-memory per-chat state so a deleted chat doesn't leave a
+  # stale `_run_generation` entry on long-running containers.
+  forget_chat(chat_id)
 
 
 @router.post("/{chat_id}/recover")

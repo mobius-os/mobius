@@ -93,6 +93,13 @@ class ChatBroadcast:
       "broadcast done chat_id=%s events=%d subscribers=%d",
       self.chat_id, len(self.event_log), len(self.subscribers),
     )
+    # Drop subscriber references so a completed broadcast doesn't look
+    # "watched" to push.notify_owner's suppression check. An SSE client
+    # whose generator never ran its `finally: unsubscribe(queue)` (server
+    # SIGKILL, mid-flight disconnect that bypassed the finally) would
+    # otherwise leave a stale queue in this list and silently suppress
+    # push delivery for the next notification on this chat.
+    self.subscribers = []
     # Schedule cleanup after TTL so late reconnectors can still
     # replay.  Fire-and-forget — the task is tied to the current
     # event loop and survives until TTL elapses.

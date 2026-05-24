@@ -12,7 +12,12 @@ from fastapi import APIRouter, Depends, Query
 
 from app import models
 from app.broadcast import get_broadcast, get_all_active_broadcasts
-from app.chat import get_active_procs, get_starting
+from app.chat import (
+  get_active_clients,
+  get_active_procs,
+  get_active_sessions,
+  get_starting,
+)
 from app.config import get_settings
 from app.deps import get_current_owner
 
@@ -23,7 +28,14 @@ router = APIRouter(prefix="/api/debug", tags=["debug"])
 def debug_status(
   _owner: models.Owner = Depends(get_current_owner),
 ):
-  """Returns active agent processes, broadcasts, and starting state."""
+  """Returns active agent runtimes, broadcasts, and starting state.
+
+  `active_procs` lists subprocess-backed runtimes (Codex today, Claude
+  when `MOBIUS_USE_SDK=0`). `active_sdk_clients` and `active_sdk_sessions`
+  list SDK-backed runtimes (Claude via claude-agent-sdk, future Codex
+  via openai-codex). Completion monitors should treat a chat as
+  "running" if it appears in ANY of the three lists.
+  """
   active = []
   for chat_id, proc in get_active_procs().items():
     active.append({
@@ -32,6 +44,9 @@ def debug_status(
       "running": proc.returncode is None,
       "returncode": proc.returncode,
     })
+
+  sdk_clients = [{"chat_id": cid} for cid in get_active_clients()]
+  sdk_sessions = [{"chat_id": cid} for cid in get_active_sessions()]
 
   broadcasts = []
   for bc in get_all_active_broadcasts():
@@ -44,6 +59,8 @@ def debug_status(
 
   return {
     "active_procs": active,
+    "active_sdk_clients": sdk_clients,
+    "active_sdk_sessions": sdk_sessions,
     "starting": list(get_starting()),
     "broadcasts": broadcasts,
   }

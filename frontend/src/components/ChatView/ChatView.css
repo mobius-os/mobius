@@ -7,7 +7,7 @@
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: var(--bg);
+  background: var(--bg); /* CONTRACT: opaque app-wide fill — must hide content beneath */
 }
 
 /* Empty state: sits outside .chat__scroll as a direct flex child so it
@@ -60,9 +60,9 @@
 
 .chat__older button {
   background: none;
-  border: 1px solid var(--border-light);
+  border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
   border-radius: 20px;
-  color: var(--muted);
+  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
   font-size: 12px;
   padding: 5px 16px;
   cursor: pointer;
@@ -70,8 +70,8 @@
 }
 
 .chat__older button:hover {
-  color: var(--text);
-  border-color: var(--border);
+  color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
+  border-color: var(--border); /* CONTRACT: 1px line on top of the inherited opaque fill */
 }
 
 /* ── Empty state ───────────────────────────────────── */
@@ -88,8 +88,8 @@
 }
 
 .chat__empty-glyph { opacity: 0.85; margin-bottom: 12px; }
-.chat__empty-title { font-size: 22px; font-weight: 600; color: var(--text); letter-spacing: -0.02em; }
-.chat__empty-sub { font-size: 14px; color: var(--muted); line-height: 1.7; }
+.chat__empty-title { font-size: 22px; font-weight: 600; color: var(--text); /* CONTRACT: high-contrast text on opaque fill */ letter-spacing: -0.02em; }
+.chat__empty-sub { font-size: 14px; color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */ line-height: 1.7; }
 
 /* ── Messages ──────────────────────────────────────── */
 
@@ -106,7 +106,7 @@
    Absolutely positioned so it doesn't shift content below. */
 .chat__ts {
   font-size: 11px;
-  color: var(--muted);
+  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
   margin-top: 4px;
   opacity: 0;
   pointer-events: none;
@@ -125,17 +125,17 @@
 }
 
 .chat__text--user {
-  background: var(--accent);
+  background: var(--accent); /* CONTRACT: vivid opaque accent fill */
   color: #fff;
   padding: 11px 16px;
   border-radius: 18px 18px 5px 18px;
   max-width: min(85%, 75ch);
   white-space: pre-wrap;
-  box-shadow: 0 2px 12px var(--accent-dim);
+  box-shadow: 0 2px 12px var(--accent-dim); /* CONTRACT: translucent accent halo — relies on opaque surface beneath */
 }
 
 .chat__text--assistant {
-  color: var(--text);
+  color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
   max-width: 100%;
 }
 
@@ -153,7 +153,7 @@
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--border);
+  background: var(--border); /* CONTRACT: used as a 1px separator stripe — border color repurposed as fill */
   animation: thinking 1.2s ease-in-out infinite;
 }
 .chat__thinking span:nth-child(2) { animation-delay: 0.2s; }
@@ -168,7 +168,7 @@
   display: inline-block;
   width: 6px;
   height: 6px;
-  background: var(--accent);
+  background: var(--accent); /* CONTRACT: vivid opaque accent fill */
   border-radius: 50%;
   margin-left: 4px;
   vertical-align: middle;
@@ -206,25 +206,25 @@
   gap: 8px;
   padding: 6px 16px;
   font-size: 12px;
-  color: var(--muted);
-  background: var(--surface);
-  border-top: 1px solid var(--border-light);
+  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
+  background: var(--surface); /* CONTRACT: opaque card/panel fill, sits on --bg */
+  border-top: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
 }
 
 .connection-status__text { opacity: 0.8; }
 
 .connection-status__retry {
   background: none;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border); /* CONTRACT: 1px line on opaque fill */
   border-radius: 6px;
-  color: var(--text);
+  color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
   font-size: 11px;
   padding: 2px 10px;
   cursor: pointer;
 }
 
 .connection-status__retry:hover {
-  background: var(--surface2);
+  background: var(--surface2); /* CONTRACT: opaque hover/raised fill, slightly above --surface */
 }
 
 /* ── Tool activity blocks ──────────────────────────── */
@@ -245,18 +245,18 @@
 .chat__tool {
   border-radius: 10px;
   font-size: 11px;
-  font-family: var(--mono);
+  font-family: var(--mono); /* CONTRACT: monospace font stack for tool-call output */
   overflow: hidden;
 }
 
 .chat__tool--running {
-  background: var(--surface);
-  border: 1px solid var(--accent, var(--border-light));
+  background: var(--surface); /* CONTRACT: opaque card/panel fill, sits on --bg */
+  border: 1px solid var(--accent, var(--border-light)); /* CONTRACT: vivid accent line; falls back to hairline if accent unset */
 }
 
 .chat__tool--done {
-  background: color-mix(in srgb, var(--accent) 5%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border-light));
+  background: color-mix(in srgb, var(--accent) 5%, transparent); /* CONTRACT: 5% accent tint — must sit on the opaque message-list fill beneath, NOT used as a standalone surface */
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border-light)); /* CONTRACT: 1px line mixing accent with hairline */
 }
 
 .chat__tool-header {
@@ -269,20 +269,20 @@
 }
 
 .chat__tool-name {
-  color: var(--muted);
+  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   flex: 1;
 }
 
-.chat__tool--done .chat__tool-name { color: var(--muted); }
-.chat__tool-toggle { color: var(--muted); font-size: 10px; flex-shrink: 0; }
+.chat__tool--done .chat__tool-name { color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */ }
+.chat__tool-toggle { color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */ font-size: 10px; flex-shrink: 0; }
 
 .chat__tool-detail {
   padding: 0 10px 8px;
   font-size: 10.5px;
-  color: var(--muted);
+  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
   white-space: pre-wrap;
   word-break: break-all;
   max-height: 200px;
@@ -290,14 +290,14 @@
   line-height: 1.5;
 }
 
-.chat__tool-output { color: var(--text); }
+.chat__tool-output { color: var(--text); /* CONTRACT: high-contrast text on opaque fill */ }
 
 .chat__tool-spin {
   display: inline-block;
   width: 9px;
   height: 9px;
-  border: 1.5px solid var(--border);
-  border-top-color: var(--accent);
+  border: 1.5px solid var(--border); /* CONTRACT: 1.5px ring on opaque fill (used for spinner track) */
+  border-top-color: var(--accent); /* CONTRACT: vivid accent — spinning arc on top of the track */
   border-radius: 50%;
   animation: spin 0.75s linear infinite;
   flex-shrink: 0;
@@ -310,7 +310,7 @@
 .chat__foot {
   flex-shrink: 0;
   padding: 10px 10px max(10px, env(safe-area-inset-bottom));
-  background: var(--bg);
+  background: var(--bg); /* CONTRACT: opaque app-wide fill — must hide content beneath */
 }
 
 .chat__form {
@@ -319,23 +319,23 @@
   display: flex;
   flex-direction: column;
   gap: 0;
-  background: var(--surface);
-  border: 1px solid var(--border-light);
+  background: var(--surface); /* CONTRACT: opaque card/panel fill, sits on --bg */
+  border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
   border-radius: 14px;
   padding: 10px 10px 10px 18px;
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 
 .chat__form:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-dim);
+  border-color: var(--accent); /* CONTRACT: vivid accent line */
+  box-shadow: 0 0 0 3px var(--accent-dim); /* CONTRACT: translucent accent glow — focus ring; relies on the opaque .chat__form background */
 }
 
 .chat__input {
   flex: 1;
   background: none;
   border: none;
-  color: var(--text);
+  color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
   font-size: 16px;
   line-height: 1.5;
   resize: none;
@@ -346,7 +346,7 @@
   overflow-y: auto;
 }
 
-.chat__input::placeholder { color: var(--muted); }
+.chat__input::placeholder { color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */ }
 .chat__input:disabled { opacity: 0.5; }
 
 /* Suppress the global textarea:focus-visible outline (index.css) on
@@ -364,7 +364,7 @@
   height: 36px;
   border-radius: 10px;
   border: none;
-  background: var(--accent);
+  background: var(--accent); /* CONTRACT: vivid opaque accent fill */
   color: #fff;
   display: flex;
   align-items: center;
@@ -374,12 +374,12 @@
 }
 
 .chat__send:hover:not(:disabled) {
-  background: var(--accent-hover);
+  background: var(--accent-hover); /* CONTRACT: vivid opaque accent on hover */
   transform: scale(1.06);
 }
 
 .chat__send:disabled {
-  background: var(--border);
+  background: var(--border); /* CONTRACT: used as a 1px separator stripe — border color repurposed as fill */
   cursor: not-allowed;
 }
 
@@ -388,9 +388,9 @@
   width: 36px;
   height: 36px;
   border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--muted);
+  border: 1px solid var(--border); /* CONTRACT: 1px line on opaque fill */
+  background: var(--surface); /* CONTRACT: opaque card/panel fill, sits on --bg */
+  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
   display: flex;
   align-items: center;
   justify-content: center;
@@ -400,8 +400,8 @@
 }
 
 .chat__stop:hover {
-  background: var(--surface2);
-  color: var(--text);
+  background: var(--surface2); /* CONTRACT: opaque hover/raised fill, slightly above --surface */
+  color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
 }
 
 /* ── Voice input ──────────────────────────────────── */
@@ -411,9 +411,9 @@
   width: 36px;
   height: 36px;
   border-radius: 10px;
-  border: 1px solid var(--border-light);
+  border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
   background: none;
-  color: var(--muted);
+  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
   display: flex;
   align-items: center;
   justify-content: center;
@@ -422,10 +422,10 @@
   align-self: flex-end;
 }
 
-.chat__mic:hover { color: var(--text); }
+.chat__mic:hover { color: var(--text); /* CONTRACT: high-contrast text on opaque fill */ }
 
 .chat__mic--active {
-  color: var(--danger);
+  color: var(--danger); /* CONTRACT: destructive accent on opaque fill */
   border-color: rgba(248, 113, 113, 0.3);
   animation: mic-pulse 1.5s ease-in-out infinite;
 }
@@ -441,9 +441,9 @@
   width: 36px;
   height: 36px;
   border-radius: 10px;
-  border: 1px solid var(--border-light);
+  border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
   background: none;
-  color: var(--muted);
+  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
   display: flex;
   align-items: center;
   justify-content: center;
@@ -451,7 +451,7 @@
   transition: color 0.15s, background 0.15s;
   align-self: flex-end;
 }
-.chat__attach:hover { color: var(--text); }
+.chat__attach:hover { color: var(--text); /* CONTRACT: high-contrast text on opaque fill */ }
 
 /* ── Input row (inner flex row in form) ──────────────── */
 .chat__input-row {
@@ -472,18 +472,18 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  background: var(--surface2);
-  border: 1px solid var(--border-light);
+  background: var(--surface2); /* CONTRACT: opaque hover/raised fill, slightly above --surface */
+  border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
   border-radius: 8px;
   padding: 4px 8px;
   font-size: 12px;
-  color: var(--text);
+  color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
   max-width: 200px;
 }
 
 .chat__chip--error {
   border-color: rgba(248, 113, 113, 0.5);
-  color: var(--danger);
+  color: var(--danger); /* CONTRACT: destructive accent on opaque fill */
 }
 
 .chat__chip-name {
@@ -496,7 +496,7 @@
 
 .chat__chip-status {
   font-size: 11px;
-  color: var(--muted);
+  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
   white-space: nowrap;
 }
 
@@ -504,7 +504,7 @@
   flex-shrink: 0;
   background: none;
   border: none;
-  color: var(--muted);
+  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
   cursor: pointer;
   padding: 0;
   font-size: 14px;
@@ -512,7 +512,7 @@
   display: flex;
   align-items: center;
 }
-.chat__chip-remove:hover { color: var(--text); }
+.chat__chip-remove:hover { color: var(--text); /* CONTRACT: high-contrast text on opaque fill */ }
 
 .chat__chip--image {
   padding: 3px;
@@ -546,7 +546,7 @@
   max-width: 160px;
   object-fit: cover;
   border-radius: 8px;
-  border: 1px solid var(--border-light);
+  border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
   cursor: pointer;
   transition: opacity 0.15s;
 }
@@ -559,19 +559,19 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  background: var(--surface);
-  border: 1px solid var(--border-light);
+  background: var(--surface); /* CONTRACT: opaque card/panel fill, sits on --bg */
+  border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
   border-radius: 8px;
   padding: 6px 10px;
   font-size: 12px;
-  color: var(--text);
+  color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
   text-decoration: none;
   max-width: 200px;
   transition: background 0.15s;
 }
 
 .chat__attach-file:hover {
-  background: var(--surface2);
+  background: var(--surface2); /* CONTRACT: opaque hover/raised fill, slightly above --surface */
 }
 
 .chat__attach-file-name {
@@ -583,7 +583,7 @@
 }
 
 .chat__attach-file-size {
-  color: var(--muted);
+  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
   font-size: 11px;
   white-space: nowrap;
 }
@@ -597,9 +597,9 @@
 }
 
 .chat__open-app-btn {
-  background: var(--accent-dim);
-  border: 1px solid var(--accent);
-  color: var(--accent);
+  background: var(--accent-dim); /* CONTRACT: translucent accent glow — NOT a fill, relies on the surface beneath */
+  border: 1px solid var(--accent); /* CONTRACT: vivid accent line */
+  color: var(--accent); /* CONTRACT: vivid accent text */
   border-radius: 8px;
   padding: 8px 16px;
   font-size: 13px;
@@ -609,8 +609,8 @@
 }
 
 .chat__open-app-btn:hover {
-  background: var(--accent);
-  color: var(--bg);
+  background: var(--accent); /* CONTRACT: vivid opaque accent fill */
+  color: var(--bg); /* CONTRACT: paint app-bg color on the accent fill — needs --bg solid to stay readable */
 }
 
 /* ── Queued messages tray ──────────────────────────── */
@@ -618,8 +618,8 @@
 .queued {
   max-width: 768px;
   margin: 0 auto 8px;
-  background: var(--surface);
-  border: 1px solid var(--border-light);
+  background: var(--surface); /* CONTRACT: opaque card/panel fill, sits on --bg */
+  border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
   border-radius: 12px;
   padding: 6px;
   display: flex;
@@ -632,7 +632,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 4px 8px 6px;
-  border-bottom: 1px solid var(--border-light);
+  border-bottom: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
   margin-bottom: 4px;
   gap: 8px;
 }
@@ -640,14 +640,14 @@
 .queued__count {
   font-size: 11px;
   font-weight: 600;
-  color: var(--muted);
+  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
 
 .queued__hint {
   font-size: 11px;
-  color: var(--muted);
+  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
   opacity: 0.75;
   flex: 1;
   text-align: right;
@@ -665,7 +665,7 @@
 }
 
 .queued__row:hover {
-  background: var(--bg);
+  background: var(--bg); /* CONTRACT: opaque app-wide fill — must hide content beneath */
 }
 
 .queued__toggle {
@@ -678,7 +678,7 @@
   border: none;
   text-align: left;
   font: inherit;
-  color: var(--text);
+  color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
   cursor: pointer;
   min-width: 0;
 }
@@ -690,7 +690,7 @@
 .queued__chevron {
   flex-shrink: 0;
   margin-top: 5px;
-  color: var(--muted);
+  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
   transition: transform 0.15s;
 }
 
@@ -724,12 +724,12 @@
   background: none;
   border: none;
   border-radius: 6px;
-  color: var(--muted);
+  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
 
 .queued__cancel:hover {
-  background: var(--bg);
-  color: var(--text);
+  background: var(--bg); /* CONTRACT: opaque app-wide fill — must hide content beneath */
+  color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
 }

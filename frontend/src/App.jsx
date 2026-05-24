@@ -4,7 +4,8 @@ import { useIsRestoring } from '@tanstack/react-query'
 import SetupWizard from './components/SetupWizard/SetupWizard.jsx'
 import LoginForm from './components/LoginForm/LoginForm.jsx'
 import Shell from './components/Shell/Shell.jsx'
-import { apiFetch, getToken, setSetupInProgress } from './api/client.js'
+import { getToken, setSetupInProgress } from './api/client.js'
+import { setupQueries } from './hooks/queries.js'
 import { queryClient, persistOptions } from './queryClient.js'
 
 export default function App() {
@@ -46,6 +47,7 @@ function AppRoot() {
   const resumeStep = hasToken ? readSetupStep() : null
   const initialStatus = resumeStep ? 'setup' : (hasToken ? 'shell' : 'loading')
   const [status, setStatus] = useState(initialStatus)
+  const setupStatusQuery = setupQueries.status.useQuery({ enabled: !hasToken })
   // Stable across renders — we only need the value captured on mount.
   const [initialSetupStep] = useState(resumeStep || 'account')
 
@@ -65,18 +67,14 @@ function AppRoot() {
       removeSplash()
       return
     }
-    apiFetch('/auth/setup/status')
-      .then((r) => r.json())
-      .then((data) => {
-        if (!data.configured) {
-          setStatus('setup')
-        } else {
-          setStatus('login')
-        }
-      })
-      .catch(() => setStatus('login'))
-      .finally(removeSplash)
-  }, [])
+    if (setupStatusQuery.isSuccess) {
+      setStatus(setupStatusQuery.data.configured ? 'login' : 'setup')
+      removeSplash()
+    } else if (setupStatusQuery.isError) {
+      setStatus('login')
+      removeSplash()
+    }
+  }, [hasToken, setupStatusQuery.isError, setupStatusQuery.isSuccess, setupStatusQuery.data])
 
   if (status === 'loading' || isRestoring) return null
   if (status === 'setup') return (

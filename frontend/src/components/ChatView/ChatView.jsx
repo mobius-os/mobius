@@ -8,6 +8,7 @@ import useScrollMode from './useScrollMode.js'
 import useVoiceInput from './useVoiceInput.js'
 import useFileUpload from './useFileUpload.js'
 import ChatInputBar from './ChatInputBar.jsx'
+import SlashPicker from '../SlashPicker/SlashPicker.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
 import ToolBlock from './ToolBlock.jsx'
 import QuestionCard from './QuestionCard.jsx'
@@ -84,6 +85,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   const [pendingMessages, setPendingMessages] = useState([])
   const [offset, setOffset] = useState(() => cached?.offset ?? 0)
   const [loading, setLoading] = useState(!cached)
+  // When the initial /chats/{id} fetch fails we used to silently
+  // setLoading(false) — the empty-state UI ("What's on your mind?")
+  // would then render as if the chat had no history, hiding the
+  // real problem. loadError flips on the catch so we can render a
+  // retry message instead of pretending the chat is empty.
+  const [loadError, setLoadError] = useState(false)
   const [sending, setSending] = useState(false)
   const [input, setInput] = useState(() => {
     try {
@@ -92,6 +99,13 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       return sessionStorage.getItem(`draft:${chatId}`) || ''
     } catch { return '' }
   })
+
+  // Per-chat agent runtime config (provider, agent_settings_json,
+  // effective_agent_settings, has_assistant_turns). Resolved by the
+  // initial /chats/{id} fetch and used to drive the SlashPicker in
+  // the composer. Stays null until the fetch lands; SlashPicker
+  // simply hides until then.
+  const [chatInfo, setChatInfo] = useState(null)
 
   // Mirror `messages` in a ref so commitMessages can compute the next
   // value without putting a side-effect (setQueryData) inside a
@@ -280,6 +294,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     connectToStream,
     retry,
     disconnect,
+    clearStreamItems,
   } = useStreamConnection(chatId, {
     onStreamEnd: ({ continues, promotedTs } = {}) => {
       promoteStreamToMessages()
@@ -302,12 +317,19 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           pendingMessagesRef.current = rest
           setPendingMessages(rest)
           promotedRef.current = false
-          setSpacerActive(true)
-          if (spacerRef.current) spacerRef.current.style.height = '0px'
           // Queued continuation is backend-initiated — the user may
           // be reading something else in the chat. Don't yank them
-          // by re-pinning. Keep whatever mode they were in
-          // (FOLLOW_BOTTOM, ANCHOR_AT, or a previous PIN).
+          // by re-pinning OR resizing the spacer to 0 (which causes
+          // a visible jump when the spacer was previously sized for
+          // the just-finished turn and then has to regrow as the
+          // continuation streams). Keep whatever mode they were in
+          // (FOLLOW_BOTTOM, ANCHOR_AT, or a previous PIN); the
+          // existing spacer stays put until the user's next explicit
+          // send re-arms it. Stop with queued messages does NOT hit
+          // this path on the live UI — `handleStop` collapses the
+          // queue client-side via doSend(combined, {pin: false}) and
+          // clears pendingMessagesRef before /chat/stop fires, so no
+          // queued_turn_starting event reaches us here.
         } else {
           // Server's promoted ts isn't in our local queue (cancel raced
           // with promote). Refetch authoritative state.
@@ -412,6 +434,15 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     // rendering the stale version — the partial only "appears" on
     // remount via the cache. Force is correct here because promote
     // is a state-machine commit, not a redundant background refetch.
+
+    // Wipe the live streamItems now that they live in `messages`. The
+    // conditional live `<li>` (rendered at the bottom of the list
+    // when `sending && streamItems.length > 0`) would otherwise
+    // double-render the just-promoted assistant message during the
+    // ~150ms gap between this promote and the next reconnect that
+    // would otherwise clear streamItems — the user sees a duplicate
+    // flash on every queued-continuation turn.
+    clearStreamItems?.()
   }
 
   // Persist draft so it survives leaving and re-entering the chat.
@@ -435,6 +466,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   useEffect(() => {
     let cancelled = false
     chatIdStaleRef.current = false
+    setLoadError(false)
 
     apiFetch(`/chats/${chatId}?limit=20`)
       .then(r => r.json())
@@ -464,6 +496,16 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
         commitMessages(msgs, data.offset || 0)
         hadMessagesRef.current = msgs.length > 0
+        // Snapshot the per-chat runtime config so the SlashPicker
+        // can render with the current effective model/effort. The
+        // initial fetch is the only canonical source; the picker
+        // updates this dict in place on each PATCH.
+        setChatInfo({
+          provider: data.provider || 'claude',
+          agent_settings_json: data.agent_settings_json || null,
+          effective: data.effective_agent_settings || {},
+          has_assistant_turns: !!data.has_assistant_turns,
+        })
         // Mark that this mount's in-flight turn is bridging a DB
         // partial. promoteStreamToMessages reads this to decide
         // whether to REPLACE the kept partial (true) or APPEND a
@@ -491,7 +533,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           connectToStream(false)
         }
       })
-      .catch(() => setLoading(false))
+      .catch(() => {
+        if (cancelled) return
+        setLoadError(true)
+        setLoading(false)
+      })
 
     return () => {
       try {
@@ -615,9 +661,14 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     // focus so the cursor stays ready for the next message.
     if (_isTouchPrimary) inputRef.current?.blur()
 
-    const attachments = pendingFiles
-      .filter(f => f.status === 'done')
-      .map(f => ({ name: f.name, size: f.size, mime_type: f.mime_type }))
+    // Callers can pre-supply attachments (e.g. handleStop collapsing
+    // a queue that had files attached to queued items). When provided,
+    // they replace the pendingFiles-derived list so data isn't lost.
+    const attachments = Array.isArray(opts.attachments)
+      ? opts.attachments
+      : pendingFiles
+          .filter(f => f.status === 'done')
+          .map(f => ({ name: f.name, size: f.size, mime_type: f.mime_type }))
 
     // QUEUE PATH: agent is streaming or queue isn't empty. Optimistic
     // entry with a stable client-side `cid` (UUID) that survives the
@@ -754,7 +805,25 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // stream remount, causing answers to disappear on first return
   // and reappear on the second.
   const doSendSilent = useCallback(async (text, resolvedAnswers) => {
-    if (!text.trim() || sending) return
+    // Guard on refs, not render-time `sending`. A fast double-click
+    // fires two handlers in the same tick before React commits the
+    // setSending(true) below — both closures see `sending === false`
+    // and both submit the same answer. Flip sendingRef synchronously
+    // right after the guard so the second click bails immediately.
+    if (!text.trim()) return
+    // Answer submissions (resolvedAnswers truthy) are allowed mid-turn:
+    // the runner is paused on the AskUserQuestion future and is waiting
+    // for exactly this POST. BOTH gates must relax — `sending` is set
+    // by the originating user prompt and stays true through the whole
+    // turn, `isStreaming` is true while the SSE stream is open. Without
+    // both relaxations, Submit on a question card silently no-ops and
+    // the Codex bridge times out after 10 minutes (the user sees "card
+    // came back with no answer"). QuestionCard's own `submitted` state
+    // guards against double-clicks on the same card.
+    if ((sendingRef.current || isStreamingRef.current) && !resolvedAnswers) {
+      return
+    }
+    sendingRef.current = true
     onMessageStart?.()
     promotedRef.current = false
 
@@ -800,7 +869,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         { role: 'assistant', content: `Error: ${err.message}`, blocks: [] },
       ])
     }
-  }, [sending, streamSend, commitMessages])
+  }, [streamSend, commitMessages])
 
   function handleSubmit(e) {
     e.preventDefault()
@@ -855,16 +924,25 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       // queue actually halts. Users can still remove individual
       // queued messages via the X button while they're queued.
       //
-      // Trade-off: any attachments on queued messages are dropped
-      // when we collapse (we join only `.content` text). Typical
-      // queued messages are text follow-ups; if attachment-
-      // preservation becomes important we'd merge `.attachments`
-      // arrays and route through streamSend directly instead of
-      // doSend.
+      // Collapse queued messages into one combined turn. Attachments
+      // are preserved by merging each queued item's `.attachments`
+      // (de-duped by name) and passing them through doSend's opts —
+      // data loss on Stop was a real bug (user adds files, agent's
+      // mid-turn, user hits Stop, files vanish).
       const queuedTexts = pendingMessagesRef.current
         .map(m => (m.content || '').trim())
         .filter(Boolean)
-      const combined = queuedTexts.join('\n\n')
+      const combined = queuedTexts.join('\n')
+      const seenNames = new Set()
+      const combinedAttachments = []
+      for (const m of pendingMessagesRef.current) {
+        for (const a of (m.attachments || [])) {
+          if (a && a.name && !seenNames.has(a.name)) {
+            seenNames.add(a.name)
+            combinedAttachments.push(a)
+          }
+        }
+      }
 
       // Invalidate any in-flight refetch + clear pending BEFORE the
       // /chat/stop await. During that await, the SSE stream closes
@@ -882,8 +960,9 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       pendingMessagesRef.current = []
       setPendingMessages([])
 
+      let stoppedCleanly = true
       try {
-        await fetch(`${BASE}/api/chat/stop`, {
+        const stopRes = await fetch(`${BASE}/api/chat/stop`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -891,7 +970,44 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           },
           body: JSON.stringify({ chat_id: chatId }),
         })
+        if (stopRes.ok) {
+          // stop_chat returns {stopped: false} when the SDK interrupt
+          // timed out — the runner is still alive. We must NOT tear
+          // down local state or re-send the collapsed queue, because
+          // that would mean two concurrent runs of the same chat.
+          // Leave the stream attached and surface the failure so the
+          // user can retry. Network errors are treated as success-ish
+          // (we have to assume the proc died on our end too).
+          try {
+            const data = await stopRes.json()
+            if (data && data.stopped === false) stoppedCleanly = false
+          } catch { /* non-JSON body — assume legacy success */ }
+        }
       } catch { /* network error during stop is non-critical */ }
+      if (!stoppedCleanly) {
+        // Restore the queued messages we optimistically cleared, so
+        // the user can hit Stop again or wait + retry without losing
+        // their drafts. Don't disconnect — the runner may still be
+        // streaming.
+        if (combined) {
+          // Re-hydrate from the snapshot we took at the top.
+          pendingMessagesRef.current = pendingMessagesRef.current
+          // No-op assignment above is intentional documentation. The
+          // real restore: we have `queuedTexts` + `combinedAttachments`
+          // but their original `ts` ids; safest is just a refetch so
+          // the user sees authoritative server state.
+          try {
+            const res = await apiFetch(`/chats/${chatId}?limit=1`)
+            const data = await res.json()
+            const server = (data.pending_messages || []).map(m => ({
+              ...m, cid: `s-${m.ts}`, queued: true,
+            }))
+            pendingMessagesRef.current = server
+            setPendingMessages(server)
+          } catch { /* leave empty; user can resend */ }
+        }
+        return
+      }
       disconnect({ clearStreaming: true })
       promoteStreamToMessages()
       setSending(false)
@@ -914,7 +1030,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         // (and the original turn-1 user msg) above the viewport.
         // Mode stays whatever the user had — they were reading the
         // partial, the new turn streams in continuing from there.
-        doSend(combined, { pin: false })
+        doSend(combined, {
+          pin: false,
+          attachments: combinedAttachments.length > 0
+            ? combinedAttachments
+            : undefined,
+        })
       }
     } finally {
       handlingStopRef.current = false
@@ -922,7 +1043,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   }
 
   const hasMore = offset > 0
-  const showEmpty = messages.length === 0 && !isStreaming && !loading && !sending
+  // Empty-state is the "I have nothing to show because nothing happened
+  // yet" view. If the initial chat fetch errored, we have no idea
+  // whether the chat is empty — surfacing that branch separately keeps
+  // us from lying with "What's on your mind?" over a network failure.
+  const showEmpty = !loadError && messages.length === 0 && !isStreaming && !loading && !sending
+  const showLoadError = loadError && messages.length === 0 && !loading && !sending
   const lastUserIdx = messages.reduce((acc, m, i) => (m.role === 'user' && !m.hidden) ? i : acc, -1)
 
   // The streaming <li> only carries a data-key in the BRIDGE case
@@ -946,7 +1072,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   })()
 
   return (
-    <div className={`chat${showEmpty ? ' chat--empty' : ''}`}>
+    <div className={`chat${showEmpty || showLoadError ? ' chat--empty' : ''}`}>
       {showEmpty && (
         <div className="chat__empty-wrap">
           <div className="chat__empty">
@@ -956,7 +1082,27 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           </div>
         </div>
       )}
-      {!showEmpty && (
+      {showLoadError && (
+        <div className="chat__empty-wrap">
+          <div className="chat__empty">
+            <p className="chat__empty-title">Couldn't load this chat.</p>
+            <p className="chat__empty-sub">Check your connection and try again.</p>
+            <button
+              type="button"
+              onClick={() => {
+                setLoadError(false)
+                setLoading(true)
+                // Re-run the load-effect by toggling chatId-derived
+                // state. Cheapest path is a soft reload of the route.
+                window.location.reload()
+              }}
+            >
+              Retry
+            </button>
+          </div>
+        </div>
+      )}
+      {!showEmpty && !showLoadError && (
       <div
         className="chat__scroll"
         ref={scrollRef}
@@ -1040,12 +1186,17 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                   )
                 }
                 if (item.type === 'question') {
+                  // QuestionCard tracks its own `submitted` state and
+                  // disables itself after the user answers. The agent
+                  // is paused on the AskUserQuestion future, so the
+                  // user MUST be able to click these chips even while
+                  // the turn is otherwise "streaming". No external
+                  // disabled gate.
                   return (
                     <div key={`s-${i}`}>
                       <QuestionCard
                         questions={item.questions}
                         onAnswer={doSendSilent}
-                        disabled={isStreaming}
                       />
                     </div>
                   )
@@ -1108,10 +1259,28 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           pendingFiles={pendingFiles}
           onAddFiles={addFiles}
           onRemoveFile={removeFile}
-          // leftButtons: reserved for future "/" picker (model /
-          // skill / thinking-level selector). The slot is here so
-          // adding it later won't require touching ChatView again.
-          // leftButtons={<SlashPicker onPick={...} />}
+          leftButtons={chatInfo ? (
+            <SlashPicker
+              chatId={chatId}
+              provider={chatInfo.provider}
+              effective={chatInfo.effective}
+              hasAssistantTurns={chatInfo.has_assistant_turns}
+              onChange={({ agent_settings_json, provider, effective }) => {
+                // Merge into chatInfo so the next render reflects the
+                // PATCH without a roundtrip. effective is authoritative
+                // (backend re-merged on top of the current global file).
+                // `provider` only changes when the user flipped the
+                // provider radio — preserve the existing value
+                // otherwise so a model-only PATCH doesn't wipe it.
+                setChatInfo(prev => prev ? ({
+                  ...prev,
+                  agent_settings_json: agent_settings_json,
+                  provider: provider || prev.provider,
+                  effective: effective || prev.effective,
+                }) : prev)
+              }}
+            />
+          ) : null}
         />
       </div>
     </div>

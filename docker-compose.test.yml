@@ -6,7 +6,10 @@ services:
     init: true
     restart: "no"
     environment:
-      - SECRET_KEY=${SECRET_KEY:-}
+      # Pin a fixed test SECRET_KEY so the test container never inherits a
+      # prod-shaped value from the host shell. Do NOT use this value anywhere
+      # other than mobius-test.
+      - SECRET_KEY=test-secret-not-for-prod-do-not-use-anywhere-else
       - DOMAIN=localhost
       - FRONTEND_ORIGIN=http://localhost:8001
       - DATABASE_URL=sqlite:////data/db/ultimate.db

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { setToken, BASE } from '../../api/client.js'
+import { api, setToken, BASE } from '../../api/client.js'
 import './LoginForm.css'
 
 export default function LoginForm({ onLogin }) {
@@ -23,12 +23,7 @@ export default function LoginForm({ onLogin }) {
     setError('')
     setLoading(true)
     try {
-      const body = new URLSearchParams({ username, password })
-      const res = await fetch(`${BASE}/api/auth/token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body,
-      })
+      const res = await api.auth.login({ username, password })
       if (!res.ok) {
         setError('Incorrect username or password.')
         return

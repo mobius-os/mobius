@@ -436,6 +436,13 @@ export default function useStreamConnection(chatId, {
               }
             })
             return
+          } else if (import.meta.env.DEV) {
+            // Surface event types the dispatch chain doesn't handle
+            // so a new SDK-runner event doesn't get silently dropped
+            // during development. Prod stays silent.
+            console.debug(
+              'useStreamConnection: unknown event type', event.type, event,
+            )
           }
         }
       }
@@ -484,7 +491,14 @@ export default function useStreamConnection(chatId, {
     attachments,
     { hidden = false, queueOnly = false, answers = undefined } = {},
   ) => {
-    if (!queueOnly) {
+    // Answer submissions (hidden+answers) ride the EXISTING turn —
+    // the runner is paused on the AskUserQuestion future and resumes
+    // in place. Wiping streamItems here would erase the question card
+    // the user just answered, and the post-answer agent output would
+    // render as if a fresh turn started (no context for what the user
+    // is replying to). Keep streamItems intact for the answer path.
+    const isAnswerSubmission = !!answers
+    if (!queueOnly && !isAnswerSubmission) {
       justSentAtRef.current = Date.now()
       setStreamItems([])
       textBufferRef.current = ''
@@ -523,6 +537,13 @@ export default function useStreamConnection(chatId, {
       // sent with queueOnly:true can come back as "started". Always
       // connect to the stream when the backend says it started.
       if (data.status === 'queued') return data
+      // AskUserQuestion answer was delivered in-process to the parked
+      // future — the runner resumes the EXISTING turn with the answer.
+      // No new stream connection needed; the existing SSE keeps
+      // streaming whatever the runner emits next. Returning here
+      // prevents a redundant reconnect that would close the live
+      // stream and replay the full catch-up burst.
+      if (data.status === 'answer_delivered') return data
       // Started: ensure streaming state is set even if the caller
       // passed queueOnly:true expecting it would be queued.
       if (queueOnly) {
@@ -592,6 +613,18 @@ export default function useStreamConnection(chatId, {
     }
   }, [])
 
+  // Exposed so ChatView's promoteStreamToMessages can wipe the live
+  // streamItems right after copying them into `messages`. Without this,
+  // the conditional `<li>` rendering `streamItems` (gated on `sending`,
+  // which stays true through a queued continuation) double-renders the
+  // just-promoted content for ~150ms until reconnect calls
+  // setStreamItems([]) — the user sees a duplicate of the assistant
+  // message that flashes and disappears.
+  function clearStreamItems() {
+    setStreamItems([])
+    textBufferRef.current = ''
+  }
+
   return {
     streamItems,
     latestItemsRef,
@@ -601,5 +634,6 @@ export default function useStreamConnection(chatId, {
     connectToStream,
     retry,
     disconnect,
+    clearStreamItems,
   }
 }

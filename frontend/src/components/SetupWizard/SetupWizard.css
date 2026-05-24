@@ -167,6 +167,13 @@
   text-transform: capitalize;
 }
 
+/* Provider list in the connect-AI step uses the shared
+   .settings__providers + .provider-row styles from ProviderAuth.css.
+   Leave a little breathing room above the skip warning. */
+.setup__card .settings__providers {
+  margin-bottom: 16px;
+}
+
 .setup__skip-warn {
   margin-top: 16px;
   font-size: 12px;

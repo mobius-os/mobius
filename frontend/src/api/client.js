@@ -70,9 +70,214 @@ export async function apiFetch(path, options = {}) {
     // reload aborts the IndexedDB delete and the next owner could see
     // stale chats/messages from the cached query data.
     await clearQueryCache()
-    window.location.reload()
-    return new Promise(() => {})
+    // Defer reload one tick and throw a typed error so callers'
+    // try/catch/finally blocks run (stopping spinners) before the
+    // page goes away. Previously we returned a never-resolving
+    // promise, which left finally{} clauses dangling for the entire
+    // reload window — visible as stuck loading state.
+    setTimeout(() => window.location.reload(), 100)
+    throw new Error('AUTH_EXPIRED')
   }
 
   return res
+}
+
+export const api = {
+  auth: {
+    /**
+     * Login runs before any JWT exists, so the auth interceptor adds no
+     * Authorization header. It still goes through apiFetch so the path
+     * and base-prefix logic stay centralized.
+     */
+    login: ({ username, password }) => apiFetch('/auth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ username, password }),
+    }),
+    setup: {
+      status: () => apiFetch('/auth/setup/status'),
+      create: (payload) => apiFetch('/auth/setup', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    },
+    provider: {
+      statuses: () => apiFetch('/auth/providers/status'),
+      appToken: (appId) => apiFetch('/auth/app-token', {
+        method: 'POST',
+        body: JSON.stringify({ app_id: appId }),
+      }),
+      claude: {
+        status: () => apiFetch('/auth/provider/status'),
+        startLogin: () => apiFetch('/auth/provider/login', { method: 'POST' }),
+        submitCode: (code) => apiFetch('/auth/provider/code', {
+          method: 'POST',
+          body: JSON.stringify({ code }),
+        }),
+      },
+      codex: {
+        startLogin: () => apiFetch('/auth/provider/codex/login', { method: 'POST' }),
+        status: () => apiFetch('/auth/provider/codex/status'),
+      },
+    },
+  },
+  chats: {
+    list: () => apiFetch('/chats'),
+    create: (payload) => apiFetch('/chats', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+    detail: (chatId, { limit } = {}) => {
+      const params = new URLSearchParams()
+      if (limit !== undefined) params.set('limit', String(limit))
+      const query = params.toString()
+      return apiFetch(`/chats/${chatId}${query ? `?${query}` : ''}`)
+    },
+    update: (chatId, payload) => apiFetch(`/chats/${chatId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+    remove: (chatId) => apiFetch(`/chats/${chatId}`, { method: 'DELETE' }),
+  },
+  apps: {
+    list: () => apiFetch('/apps/'),
+    frameUrl: (appId, version = 0) => `${BASE}/api/apps/${appId}/frame?v=${version}`,
+  },
+  settings: {
+    get: () => apiFetch('/settings'),
+    save: (payload) => apiFetch('/settings', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  },
+  theme: {
+    get: () => apiFetch('/theme'),
+  },
+  storage: {
+    shared: {
+      getThemeCss: () => apiFetch('/storage/shared/theme.css'),
+      putThemeCss: (content) => apiFetch('/storage/shared/theme.css', {
+        method: 'PUT',
+        body: JSON.stringify({ content }),
+      }),
+      getThemeMode: () => apiFetch('/storage/shared/theme-mode'),
+      putThemeMode: (mode) => apiFetch('/storage/shared/theme-mode', {
+        method: 'PUT',
+        body: JSON.stringify({ content: JSON.stringify(mode) }),
+      }),
+    },
+  },
+  notify: {
+    send: (payload) => apiFetch('/notify', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  },
+  push: {
+    vapidKey: () => apiFetch('/push/vapid-key'),
+    subscribe: (payload) => apiFetch('/push/subscribe', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  },
+}
+
+export const api = {
+  auth: {
+    /**
+     * Login runs before any JWT exists, so the auth interceptor adds no
+     * Authorization header. It still goes through apiFetch so the path
+     * and base-prefix logic stay centralized.
+     */
+    login: ({ username, password }) => apiFetch('/auth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ username, password }),
+    }),
+    setup: {
+      status: () => apiFetch('/auth/setup/status'),
+      create: (payload) => apiFetch('/auth/setup', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    },
+    provider: {
+      statuses: () => apiFetch('/auth/providers/status'),
+      appToken: (appId) => apiFetch('/auth/app-token', {
+        method: 'POST',
+        body: JSON.stringify({ app_id: appId }),
+      }),
+      claude: {
+        status: () => apiFetch('/auth/provider/status'),
+        startLogin: () => apiFetch('/auth/provider/login', { method: 'POST' }),
+        submitCode: (code) => apiFetch('/auth/provider/code', {
+          method: 'POST',
+          body: JSON.stringify({ code }),
+        }),
+      },
+      codex: {
+        startLogin: () => apiFetch('/auth/provider/codex/login', { method: 'POST' }),
+        status: () => apiFetch('/auth/provider/codex/status'),
+      },
+    },
+  },
+  chats: {
+    list: () => apiFetch('/chats'),
+    create: (payload) => apiFetch('/chats', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+    detail: (chatId, { limit } = {}) => {
+      const params = new URLSearchParams()
+      if (limit !== undefined) params.set('limit', String(limit))
+      const query = params.toString()
+      return apiFetch(`/chats/${chatId}${query ? `?${query}` : ''}`)
+    },
+    update: (chatId, payload) => apiFetch(`/chats/${chatId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+    remove: (chatId) => apiFetch(`/chats/${chatId}`, { method: 'DELETE' }),
+  },
+  apps: {
+    list: () => apiFetch('/apps/'),
+    frameUrl: (appId, version = 0) => `${BASE}/api/apps/${appId}/frame?v=${version}`,
+  },
+  settings: {
+    get: () => apiFetch('/settings'),
+    save: (payload) => apiFetch('/settings', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  },
+  theme: {
+    get: () => apiFetch('/theme'),
+  },
+  storage: {
+    shared: {
+      getThemeCss: () => apiFetch('/storage/shared/theme.css'),
+      putThemeCss: (content) => apiFetch('/storage/shared/theme.css', {
+        method: 'PUT',
+        body: JSON.stringify({ content }),
+      }),
+      getThemeMode: () => apiFetch('/storage/shared/theme-mode'),
+      putThemeMode: (mode) => apiFetch('/storage/shared/theme-mode', {
+        method: 'PUT',
+        body: JSON.stringify({ content: JSON.stringify(mode) }),
+      }),
+    },
+  },
+  notify: {
+    send: (payload) => apiFetch('/notify', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  },
+  push: {
+    vapidKey: () => apiFetch('/push/vapid-key'),
+    subscribe: (payload) => apiFetch('/push/subscribe', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  },
 }

@@ -247,14 +247,36 @@ export default function useScrollMode({
       bottomVisibleRef.current = sRect.top < cRect.bottom && sRect.bottom > cRect.top
     }
 
-    // Single layout pass: size spacer THEN apply mode. Order matters
-    // — without the spacer sized, PIN_USER_MSG can't scroll to top
-    // (browser clamps scrollTop).
-    function syncLayout() {
+    // Identity check: apply the mode ONLY when modeRef.current
+    // changed since the last apply. Callers always assign a fresh
+    // object (`modeRef.current = { kind: ..., ts: ... }`) when they
+    // intend a transition, so === identity is the right signal.
+    // Steady-state streaming (mode unchanged) won't re-pin even as
+    // the layout settles around tool-block status flips, KaTeX,
+    // highlight.js, and markdown re-wrap — that's the bug from
+    // May 2026 where scrollTop drifted with userMsg.offsetTop.
+    let lastAppliedMode = null
+
+    function sizeSpacer() {
       const lastUserEl = lastUserMsgRef.current
       const h = _computeSpacerH(scrollEl, listEl, lastUserEl, fullViewHRef.current)
       spacerEl.style.height = `${h}px`
-      applyMode(scrollEl, modeRef.current)
+    }
+
+    function maybeApplyMode() {
+      if (modeRef.current !== lastAppliedMode) {
+        applyMode(scrollEl, modeRef.current)
+        lastAppliedMode = modeRef.current
+      }
+    }
+
+    // Full sync — size spacer and apply-if-changed. Used at mount,
+    // RO, vv, reveal. Each call sizes the spacer (always needed —
+    // the spacer math depends on changing content) but only
+    // touches scrollTop on a real mode transition.
+    function syncLayout() {
+      sizeSpacer()
+      maybeApplyMode()
     }
     syncLayout()
 
@@ -286,12 +308,18 @@ export default function useScrollMode({
       }, 50)
     }
 
-    // ResizeObserver — re-runs syncLayout on content size changes.
+    // ResizeObserver — re-runs spacer sizing on content size
+    // changes. Does NOT re-apply the scroll mode: that would re-pin
+    // scrollTop on every tool-block height change / lazy-renderer
+    // settle and cause visible mid-stream scroll jitter (the bug
+    // the user reported in May 2026). The mode's scroll position
+    // is established on explicit transitions; the spacer keeps it
+    // achievable as content evolves.
     const ro = new ResizeObserver(() => {
       if (scrollEl.clientHeight > fullViewHRef.current) {
         fullViewHRef.current = scrollEl.clientHeight
       }
-      syncLayout()
+      sizeSpacer()
       requestRevealOnQuiet()  // each RO firing pushes the reveal back
     })
     ro.observe(listEl)

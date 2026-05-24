@@ -1,12 +1,43 @@
-"""Routes for per-app and shared file storage."""
+"""Routes for per-app and shared file storage.
 
+PUT body shapes:
+
+  1. JSON inner object for `.json` files (`Content-Type:
+     application/json`). Body IS the data:
+       PUT /api/storage/apps/7/notes.json
+       {"title": "hi", "items": [1, 2, 3]}
+     Server stringifies and writes `{"title":"hi","items":[1,2,3]}`.
+
+  2. JSON envelope for non-JSON files (`Content-Type:
+     application/json`):
+       PUT /api/storage/apps/7/notes.txt
+       {"content": "plain text body"}
+     Server writes the inner string as-is.
+
+  3. Raw text for non-JSON files (`Content-Type: text/*`):
+       PUT /api/storage/apps/7/notes.txt
+       plain text body
+     Server decodes the request body as UTF-8 and writes it directly.
+
+  4. Raw bytes for any path (`Content-Type: application/octet-stream`,
+     or any other non-JSON, non-text MIME type):
+       PUT /api/storage/apps/7/blob.bin
+       <bytes>
+     Server writes the bytes directly.
+
+For JSON requests, a body that is exactly `{"content": "<str>"}` is
+treated as the envelope; anything else is the inner object and is only
+accepted for `.json` paths.
+"""
+
+import json
+import logging
 import mimetypes
 import re
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse
-from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import models
@@ -16,6 +47,7 @@ from app.deps import get_current_owner, get_current_owner_or_app
 
 router = APIRouter(prefix="/api/storage", tags=["storage"])
 
+_log = logging.getLogger(__name__)
 _SAFE_RE = re.compile(r"^[\w.\-\/]+$")
 
 
@@ -42,6 +74,14 @@ def _serve_file(file_path: Path):
   mime, _ = mimetypes.guess_type(file_path.name)
   if mime and not mime.startswith(tuple(_TEXT_PREFIXES)):
     return FileResponse(file_path, media_type=mime)
+  if mime == "application/json":
+    try:
+      return PlainTextResponse(
+        file_path.read_text(encoding="utf-8"),
+        media_type="application/json",
+      )
+    except UnicodeDecodeError:
+      return FileResponse(file_path)
   # Fall back to text for unknown or text types.
   try:
     return PlainTextResponse(file_path.read_text(encoding="utf-8"))
@@ -49,8 +89,68 @@ def _serve_file(file_path: Path):
     return FileResponse(file_path)
 
 
-class WriteBody(BaseModel):
-  content: str
+def _is_envelope(body) -> bool:
+  """True iff body is the legacy `{"content": "<string>"}` shape."""
+  return (
+    isinstance(body, dict)
+    and set(body.keys()) == {"content"}
+    and isinstance(body["content"], str)
+  )
+
+
+async def _decode_write_body(request: Request, file_path: Path) -> str | bytes:
+  """Decodes a PUT body into text or bytes to write to disk.
+
+  Accepts JSON inner objects for `.json` files, the legacy JSON
+  envelope for text files, raw text for non-JSON files, and raw bytes
+  for any path.
+  """
+  raw = await request.body()
+  content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+  is_json_path = file_path.suffix.lower() == ".json"
+
+  if content_type != "application/json":
+    if content_type.startswith("text/"):
+      if is_json_path:
+        raise HTTPException(
+          status_code=415,
+          detail="Raw text writes are only accepted for non-JSON paths.",
+        )
+      try:
+        return raw.decode("utf-8")
+      except UnicodeDecodeError:
+        raise HTTPException(
+          status_code=400,
+          detail="Text storage writes must be valid UTF-8.",
+        )
+    return raw
+
+  try:
+    body = json.loads(raw)
+  except json.JSONDecodeError:
+    raise HTTPException(status_code=400, detail="Invalid JSON body.")
+
+  # For .json paths the body IS the document — never sniff for the
+  # legacy envelope. Otherwise a mini-app that legitimately stores
+  # `{"content": "..."}` (single-field forms, markdown notes, etc.)
+  # gets silently unwrapped: the file ends up containing the raw
+  # string instead of the JSON object, and the next read returns a
+  # string where the app expected a dict. The envelope shape is only
+  # meaningful when the path is non-JSON (the envelope was added so
+  # text files could be PUT via a JSON body, not the other way).
+  if is_json_path:
+    return json.dumps(body, ensure_ascii=False)
+
+  if _is_envelope(body):
+    return body["content"]
+
+  raise HTTPException(
+    status_code=400,
+    detail=(
+      "Non-JSON paths require an envelope body: "
+      "{\"content\": \"<text>\"}."
+    ),
+  )
 
 
 @router.get("/apps/{app_id}/{path:path}")
@@ -69,18 +169,22 @@ def read_app_file(
 
 
 @router.put("/apps/{app_id}/{path:path}", status_code=204)
-def write_app_file(
+async def write_app_file(
   app_id: int,
   path: str,
-  body: WriteBody,
+  request: Request,
   db: Session = Depends(get_db),
   _: models.Owner = Depends(get_current_owner_or_app),
 ):
-  """Writes text content to a file in an app's data directory."""
+  """Writes content to a file in an app's data directory."""
   base = Path(get_settings().data_dir) / "apps" / str(app_id)
   file_path = _resolve(base, path)
+  content = await _decode_write_body(request, file_path)
   file_path.parent.mkdir(parents=True, exist_ok=True)
-  file_path.write_text(body.content, encoding="utf-8")
+  if isinstance(content, bytes):
+    file_path.write_bytes(content)
+  else:
+    file_path.write_text(content, encoding="utf-8")
   return Response(status_code=204)
 
 
@@ -116,16 +220,20 @@ def read_shared_file(
 
 
 @router.put("/shared/{path:path}", status_code=204)
-def write_shared_file(
+async def write_shared_file(
   path: str,
-  body: WriteBody,
+  request: Request,
   _: models.Owner = Depends(get_current_owner),
 ):
-  """Writes text content to a file in the shared data directory."""
+  """Writes content to a file in the shared data directory."""
   base = Path(get_settings().data_dir) / "shared"
   file_path = _resolve(base, path)
+  content = await _decode_write_body(request, file_path)
   file_path.parent.mkdir(parents=True, exist_ok=True)
-  file_path.write_text(body.content, encoding="utf-8")
+  if isinstance(content, bytes):
+    file_path.write_bytes(content)
+  else:
+    file_path.write_text(content, encoding="utf-8")
   return Response(status_code=204)
 
 

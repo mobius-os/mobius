@@ -21,7 +21,8 @@ from app import auth, models, schemas
 from app.broadcast import ChatBroadcast, create_broadcast, get_broadcast, set_active_broadcast
 from app.config import get_settings
 from app.events import process_event, build_assistant_message, finalize_blocks
-from app.providers import get_provider
+from app.providers import effective_agent_settings, get_provider
+from app.push import notify_owner
 
 
 def _get_logger() -> logging.Logger:
@@ -49,7 +50,6 @@ def _get_logger() -> logging.Logger:
     logging.DEBUG if os.getenv("MOEBIUS_CHAT_DEBUG") else logging.INFO
   )
   return logger
-
 
 
 def _safe_commit(db: Session) -> bool:
@@ -87,6 +87,38 @@ def _save_message(db: Session, chat_id: str, message: dict):
   _safe_commit(db)
 
 
+def _notify_pending_question(db: Session, chat_id: str, event: dict):
+  """Fires a push notification when AskUserQuestion ends a turn.
+
+  Suppressed automatically by `notify_owner` when the owner is
+  currently subscribed to this chat's SSE stream. Failures are
+  swallowed — a missed notification must not crash the turn.
+  """
+  if not chat_id:
+    return
+  try:
+    questions = event.get("questions") or []
+    first = questions[0].get("question", "") if questions else ""
+    body = first[:120] if first else "Möbius is waiting for your answer."
+    owner = db.query(models.Owner).order_by(models.Owner.id).first()
+    if owner is None:
+      return
+    notify_owner(
+      db,
+      owner.id,
+      title="Möbius needs your answer",
+      body=body,
+      source_type="chat",
+      source_id=chat_id,
+      target=f"/chat/{chat_id}",
+    )
+  except Exception:
+    log = _get_logger()
+    log.exception(
+      "notify_pending_question failed chat_id=%s", chat_id,
+    )
+
+
 def _update_last_assistant_message(db: Session, chat_id: str, message: dict):
   """Updates the last assistant message in the chat (for streaming updates)."""
   if not chat_id:
@@ -97,6 +129,37 @@ def _update_last_assistant_message(db: Session, chat_id: str, message: dict):
     return
   msgs = list(chat.messages)
   if msgs and msgs[-1].get("role") == "assistant":
+    # Preserve question.answers from the existing message: when the
+    # user submits an AskUserQuestion answer via POST /messages, the
+    # answers are written atomically into the existing question block
+    # (chats_stream.py:_apply_answers_to_last_question). The runner's
+    # subsequent writeback rebuilds the message from `assistant_blocks`
+    # (which has no answers field), so without this merge the answers
+    # get wiped — user sees an "unanswered" question card after reload.
+    #
+    # Multi-question per turn IS observed in practice (an agent can
+    # call AskUserQuestion twice sequentially within one turn after
+    # the first answer resolves). Match by the question id (or, if
+    # the SDK ever omits one, fall back to the joined question text)
+    # rather than block position — position-match would silently
+    # mis-merge if a future runner ever inserted a tool/text block
+    # between two questions on a partial replay.
+    def _q_key(block):
+      qs = block.get("questions") or []
+      if qs and qs[0].get("id"):
+        return ("id", qs[0]["id"])
+      texts = tuple(q.get("question") or q.get("text") or "" for q in qs)
+      return ("text", texts)
+
+    existing_answers_by_key = {}
+    for ob in msgs[-1].get("blocks") or []:
+      if ob.get("type") == "question" and ob.get("answers"):
+        existing_answers_by_key[_q_key(ob)] = ob["answers"]
+    for nb in message.get("blocks") or []:
+      if nb.get("type") == "question" and not nb.get("answers"):
+        carried = existing_answers_by_key.get(_q_key(nb))
+        if carried:
+          nb["answers"] = carried
     msgs[-1] = message
   else:
     msgs.append(message)
@@ -141,6 +204,157 @@ _queue_locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (
 )
 
 
+# Pending AskUserQuestion state, keyed by chat_id. Populated by the
+# Claude SDK `can_use_tool` callback when AskUserQuestion fires;
+# resolved by the POST /messages answer-delivery short-circuit. Stays
+# empty for subprocess-backed providers (their AskUserQuestion
+# intercept still kills the proc and queues the answer as a new turn).
+from app.pending_questions import PendingQuestion
+
+_pending_questions: dict[str, PendingQuestion] = {}
+
+
+def deliver_answer(chat_id: str, answers: dict) -> bool:
+  """Resolves a pending AskUserQuestion with the partner's answers.
+
+  Returns True if a pending question was waiting and was resolved,
+  False if no pending question exists (caller should fall through to
+  the normal queue path). Idempotent — if the future is already done
+  (race with stop), returns True without re-resolving.
+  """
+  pending = _pending_questions.get(chat_id)
+  if pending is None:
+    return False
+  if not pending.future.done():
+    pending.future.set_result(answers)
+  return True
+
+
+def get_pending_question(chat_id: str) -> "PendingQuestion | None":
+  """Accessor for the pending-question registry. Tests + debug routes
+  use this; the run loop owns set/clear directly."""
+  return _pending_questions.get(chat_id)
+
+
+def claim_pending_question(chat_id: str) -> "PendingQuestion | None":
+  """Atomically removes and returns the pending question for a chat."""
+  return _pending_questions.pop(chat_id, None)
+
+
+# Live SDK runtime registries, keyed by chat_id. SDK-backed providers
+# hold their long-lived objects here so stop_chat* and the queue
+# drainer can reach them. Subprocess-backed providers continue to use
+# `_active_procs` (below) — the two coexist during the SDK rollout.
+_active_clients: dict[str, object] = {}     # Claude SDK stop handles (ActiveClaudeClient)
+_active_sessions: dict[str, object] = {}    # Codex SDK stop+steer handles (ActiveCodexTurn)
+
+
+def get_active_clients() -> dict[str, object]:
+  return _active_clients
+
+
+def get_active_sessions() -> dict[str, object]:
+  return _active_sessions
+
+
+class _ChatEventSink:
+  """Bridges SDK-runner events to broadcast + DB state.
+
+  SDK runners publish Möbius events via `sink.publish(event)`. The
+  sink forwards each event to the real broadcast, accumulates
+  assistant content blocks for the message-in-progress, throttles
+  DB writes, and captures `session_id` + `cost_usd` from terminal
+  events. This keeps SDK runners pure (one-way SDK → events) while
+  the chat-side state stays here.
+
+  Lifetime: one sink per `_run_chat_impl` call. After the runner
+  returns, the chat-impl wrapper calls `finalize()` which writes the
+  final assistant message + persists session_id/cost on the chat row.
+  """
+
+  _SAVE_INTERVAL_SECS = 1.0
+  _IMMEDIATE_SAVE_TYPES = frozenset(
+    {"tool_start", "tool_end", "error", "question"}
+  )
+
+  def __init__(self, bc, chat_id: str, db: Session):
+    self.bc = bc
+    self.chat_id = chat_id
+    self.db = db
+    self.assistant_blocks: list = []
+    self.session_id: str | None = None
+    self.cost_usd: float | None = None
+    self._last_save = 0.0
+
+  def publish(self, event: dict) -> None:
+    event_type = event.get("type")
+
+    # Broadcast every other event.
+    self.bc.publish(event)
+
+    # done: capture cost.
+    if event_type == "done":
+      self.cost_usd = event.get("cost_usd")
+
+    # Accumulate + maybe save.
+    if process_event(event, self.assistant_blocks) and self.chat_id:
+      now = time.monotonic()
+      if (event_type in self._IMMEDIATE_SAVE_TYPES
+          or now - self._last_save >= self._SAVE_INTERVAL_SECS):
+        self._last_save = now
+        _update_last_assistant_message(
+          self.db, self.chat_id,
+          build_assistant_message(self.assistant_blocks),
+        )
+
+  def finalize(self) -> None:
+    """Write the final assistant message snapshot to the DB."""
+    if self.chat_id and self.assistant_blocks:
+      _finalize_response(self.db, self.chat_id, self.assistant_blocks)
+
+
+_SKILL_TEXT_CACHE: str | None = None
+
+
+def _read_skill_text() -> str:
+  """Returns the agent skill (system-prompt) text, cached after first
+  read. Used by SDK runners as the `system_prompt` option.
+
+  Process-lifetime cache: an in-place edit to the skill file inside
+  a running container won't be picked up until the container restarts.
+  This is intentional given the deploy model (image rebuild → restart
+  → fresh cache load), but worth knowing if you're testing skill edits
+  on a live container — `docker restart mobius-test` (or prod) is
+  required to refresh.
+  """
+  global _SKILL_TEXT_CACHE
+  if _SKILL_TEXT_CACHE is not None:
+    return _SKILL_TEXT_CACHE
+  candidates = [
+    Path("/app/skill/agent-skill.md"),
+    Path(__file__).resolve().parents[2] / "skill" / "agent-skill.md",
+  ]
+  for p in candidates:
+    try:
+      text = p.read_text(encoding="utf-8")
+      _SKILL_TEXT_CACHE = text
+      return text
+    except (OSError, FileNotFoundError):
+      continue
+  # No skill file found — cache the empty fallback so subsequent calls
+  # don't re-stat the filesystem. The empty case is genuinely degraded
+  # (SDK runs without a system prompt) and the test suite relies on
+  # this path working; warn loudly so the silent-failure variant
+  # ("volume mount race", "CI without /app/skill mounted") is visible
+  # in chat.log instead of disappearing into the cache.
+  _get_logger().warning(
+    "skill file not found at expected paths; SDK turns will run "
+    "without a system prompt"
+  )
+  _SKILL_TEXT_CACHE = ""
+  return ""
+
+
 def get_queue_lock(chat_id: str) -> asyncio.Lock:
   """Returns the per-chat queue lock, creating it if needed."""
   lock = _queue_locks.get(chat_id)
@@ -153,6 +367,58 @@ def get_queue_lock(chat_id: str) -> asyncio.Lock:
 def current_run_generation(chat_id: str) -> int:
   """Returns the current generation for a chat (0 if none)."""
   return _run_generation.get(chat_id, 0)
+
+
+# Chats whose agent_settings_json was changed via PATCH since the
+# last message send. The next send mirrors the chat's effective
+# settings to the global default file (and owner.provider) so future
+# new chats inherit, then clears the flag. In-memory: a restart loses
+# pending dirty bits, which means the user's most recent unsent pick
+# won't propagate to the global default after a server restart —
+# minor edge case, no DB migration needed.
+_settings_dirty: set[str] = set()
+
+
+def mark_settings_dirty(chat_id: str) -> None:
+  """Flag a chat as having unsent picker changes."""
+  _settings_dirty.add(chat_id)
+
+
+def take_settings_dirty(chat_id: str) -> bool:
+  """Returns True if the chat was dirty, AND clears the flag in one
+  atomic discard. Used by the send path to decide whether to mirror
+  the chat's settings as the new global default."""
+  if chat_id in _settings_dirty:
+    _settings_dirty.discard(chat_id)
+    return True
+  return False
+
+
+def bump_run_generation(chat_id: str) -> int:
+  """Bumps the per-chat generation counter and returns the new value.
+
+  Used by callers that need to invalidate any in-flight or about-to-
+  start run for a chat without going through `stop_chat_for`. Delete
+  uses this to close the idle→starting race: a concurrent POST that
+  hits `mark_starting` between the delete's `is_chat_running` check
+  and the soft-delete commit would otherwise leave a runner writing
+  to the just-deleted row. Bumping the generation makes any future
+  `we_own_gen` check fail, so the runner's auto-promote/continuation
+  skips writing.
+  """
+  next_gen = _run_generation.get(chat_id, 0) + 1
+  _run_generation[chat_id] = next_gen
+  return next_gen
+
+
+def forget_chat(chat_id: str) -> None:
+  """Drops any per-chat bookkeeping so a deleted chat doesn't leak.
+
+  Safe to call when the chat is already idle; mid-run callers should
+  rely on stop_chat_for first. Currently scrubs the run-generation
+  entry — extend here if future per-chat state shows up.
+  """
+  _run_generation.pop(chat_id, None)
 
 
 def get_active_procs() -> dict[str, asyncio.subprocess.Process]:
@@ -173,6 +439,12 @@ def is_chat_running(chat_id: str) -> bool:
     return True
   proc = _active_procs.get(chat_id)
   if proc is not None and proc.returncode is None:
+    return True
+  # SDK-backed turns don't go through `_active_procs` — they register
+  # in `_active_clients` (Claude) / `_active_sessions` (Codex). Check
+  # both explicitly instead of relying on the broadcast-lifecycle
+  # coincidence that today's SDK runners maintain.
+  if chat_id in _active_clients or chat_id in _active_sessions:
     return True
   bc = get_broadcast(chat_id)
   return bc is not None and bc.running
@@ -201,21 +473,35 @@ async def stop_chat(chat_id: str | None = None, db: Session = None) -> bool:
   if chat_id:
     targets = [chat_id]
   else:
-    # Global stop must reach chats with NO proc yet (in _starting) or
-    # only a live broadcast (queued continuation between turns). Union
-    # all three lifecycle sources.
+    # Global stop must reach chats with NO proc yet (in _starting), or
+    # only a live broadcast (queued continuation between turns), AND
+    # any SDK-backed runs registered in _active_clients (Claude) or
+    # _active_sessions (Codex). Without the SDK registries, an SDK
+    # turn between broadcast lifecycle events would silently escape
+    # a global stop. Mirror is_chat_running()'s coverage exactly.
     from app.broadcast import _broadcasts
     targets = list({
       *_active_procs.keys(),
       *_starting,
+      *_active_clients.keys(),
+      *_active_sessions.keys(),
       *(cid for cid, bc in _broadcasts.items() if bc.running),
     })
   for cid in targets:
     # Bump generation BEFORE killing so the dying run_chat's finally
     # detects ownership change and skips _promote_pending_messages /
     # continuation scheduling. Without this, Stop would still drain
-    # the queue and start the next turn.
+    # the queue and start the next turn — but the frontend already
+    # owns the "collapse queue into one combined follow-up" behavior
+    # (see ChatView.jsx:handleStop), so a backend continuation would
+    # double-fire the queued work. Backend Stop is purely interrupt.
     _run_generation[cid] = _run_generation.get(cid, 0) + 1
+    # Clear chat.pending_messages here too — the frontend already
+    # snapshots + clears its local mirror before POSTing /chat/stop,
+    # but a fresh client (or a Stop initiated from outside the chat
+    # UI) wouldn't have done that. Authoritative truth on the server
+    # must match: queue is empty post-Stop so the frontend's combined
+    # re-send is the only path back to streaming.
     if db is not None:
       try:
         chat = db.query(models.Chat).filter(models.Chat.id == cid).first()
@@ -224,13 +510,68 @@ async def stop_chat(chat_id: str | None = None, db: Session = None) -> bool:
           db.commit()
       except Exception:
         db.rollback()
+    pending = _pending_questions.get(cid)
+    if pending is not None:
+      if not pending.future.done():
+        pending.future.cancel()
+      # Pop the registry entry too — otherwise a stale answer POST
+      # hits claim_pending_question() after Stop, returns 202
+      # "answer_delivered", but no turn resumes and the user's reply
+      # silently vanishes.
+      _pending_questions.pop(cid, None)
     proc = _active_procs.pop(cid, None)
     if proc and proc.returncode is None:
       proc.kill()
       killed = True
       bc = get_broadcast(cid)
       if bc and bc.running:
+        # Emit a terminal `done` so live SSE subscribers see a clean
+        # close instead of `useStreamConnection.js`'s "stream closed
+        # unexpectedly" path. Matches the normal-finish contract.
+        bc.publish({"type": "done", "cost_usd": 0})
         bc.mark_completed()
+    client = _active_clients.get(cid)
+    if client is not None:
+      try:
+        # Bound the SDK interrupt the same way subprocess.kill is
+        # bounded (2s). A wedged SDK client must not prevent the
+        # rest of the stop sweep from running.
+        await asyncio.wait_for(client.interrupt(), timeout=2.0)
+        killed = True
+      except asyncio.TimeoutError:
+        _get_logger().warning(
+          "stop_chat: Claude SDK interrupt timed out chat_id=%s", cid,
+        )
+      except Exception:
+        _get_logger().exception(
+          "stop_chat: Claude SDK interrupt failed chat_id=%s", cid,
+        )
+      finally:
+        _active_clients.pop(cid, None)
+    session = _active_sessions.get(cid)
+    if session is not None:
+      try:
+        await asyncio.wait_for(session.interrupt(), timeout=2.0)
+        killed = True
+      except asyncio.TimeoutError:
+        _get_logger().warning(
+          "stop_chat: Codex SDK interrupt timed out chat_id=%s", cid,
+        )
+      except Exception:
+        _get_logger().exception(
+          "stop_chat: Codex SDK interrupt failed chat_id=%s", cid,
+        )
+      finally:
+        _active_sessions.pop(cid, None)
+    # Mirror stop_chat_for's broadcast-completion path so SDK-backed
+    # subscribers see a terminal `done` and don't hang in "stream
+    # closed unexpectedly". The subprocess branch above already
+    # emits this inline; we cover the SDK case here (idempotent
+    # against subprocess that already completed bc).
+    bc = get_broadcast(cid)
+    if bc and bc.running:
+      bc.publish({"type": "done", "cost_usd": 0})
+      bc.mark_completed()
     _starting.discard(cid)
   return killed
 
@@ -238,9 +579,15 @@ async def stop_chat(chat_id: str | None = None, db: Session = None) -> bool:
 async def stop_chat_for(chat_id: str, db: Session = None) -> bool:
   """Kills the agent subprocess for a specific chat.
 
-  Bumps the generation counter so any in-flight run_chat task for
-  the old generation aborts before spawning. Clears the pending
-  queue so a queued continuation cannot auto-start after Stop.
+  Bumps the generation counter so the dying run_chat's finally
+  skips _promote_pending_messages / _schedule_continuation. Clears
+  chat.pending_messages so any queued items don't auto-drain from
+  the backend side. The frontend (ChatView.jsx:handleStop) snapshots
+  the queue BEFORE POSTing /chat/stop, then re-submits the combined
+  text as ONE follow-up turn via doSend — that's where queued work
+  gets sent. Backend Stop is purely the interrupt; the frontend owns
+  the "collapse + resend" UX. See CLAUDE.md "Stop-chat contract".
+
   Waits for the process to die with a bounded timeout.
   """
   gen = _run_generation.get(chat_id, 0) + 1
@@ -255,6 +602,16 @@ async def stop_chat_for(chat_id: str, db: Session = None) -> bool:
     except Exception:
       db.rollback()
 
+  pending = _pending_questions.get(chat_id)
+  if pending is not None:
+    if not pending.future.done():
+      pending.future.cancel()
+    # Pop the registry entry too (mirrors stop_chat). Without this,
+    # a stale answer POST after Stop hits claim_pending_question(),
+    # returns 202 "answer_delivered", but no turn resumes and the
+    # user's answer silently vanishes.
+    _pending_questions.pop(chat_id, None)
+
   proc = _active_procs.get(chat_id)
   if proc and proc.returncode is None:
     proc.kill()
@@ -266,12 +623,68 @@ async def stop_chat_for(chat_id: str, db: Session = None) -> bool:
     # Wait succeeded — now safe to remove.
     _active_procs.pop(chat_id, None)
 
+  # Stop the SDK client if one exists. Any failure here MUST NOT
+  # skip the broadcast-completion + _starting cleanup below — an SSE
+  # client subscribed to bc would otherwise hang forever waiting for
+  # a terminal event. So we log + swallow exceptions and continue,
+  # but track `stopped_cleanly` so the caller (delete_chat) can 409
+  # instead of soft-deleting a chat whose runner is still wedged.
+  stopped_cleanly = True
+  client = _active_clients.get(chat_id)
+  if client is not None:
+    try:
+      # Mirror the subprocess proc.kill+wait_for(2.0) pattern: bound
+      # the SDK interrupt so a wedged client can't hang Stop. We
+      # already pop the registry entry in `finally` regardless, so
+      # the dead handle doesn't linger.
+      await asyncio.wait_for(client.interrupt(), timeout=2.0)
+    except asyncio.TimeoutError:
+      stopped_cleanly = False
+      _get_logger().warning(
+        "stop_chat_for: Claude SDK interrupt timed out chat_id=%s",
+        chat_id,
+      )
+    except Exception:
+      stopped_cleanly = False
+      _get_logger().exception(
+        "stop_chat_for: Claude SDK interrupt failed chat_id=%s", chat_id,
+      )
+    finally:
+      _active_clients.pop(chat_id, None)
+
+  session = _active_sessions.get(chat_id)
+  if session is not None:
+    interrupt_ok = False
+    try:
+      await asyncio.wait_for(session.interrupt(), timeout=2.0)
+      interrupt_ok = True
+    except asyncio.TimeoutError:
+      stopped_cleanly = False
+      _get_logger().warning(
+        "stop_chat_for: Codex SDK interrupt timed out chat_id=%s",
+        chat_id,
+      )
+    except Exception:
+      _get_logger().exception(
+        "stop_chat_for: Codex SDK interrupt failed chat_id=%s", chat_id,
+      )
+      # Interrupt raised — treat as "done trying" and pop the handle
+      # so it doesn't leak. Only the timeout path keeps the entry, so
+      # the runner's own cleanup can pop it when the session truly dies.
+      interrupt_ok = True
+    if interrupt_ok:
+      _active_sessions.pop(chat_id, None)
+
   bc = get_broadcast(chat_id)
   if bc and bc.running:
+    # Emit a terminal `done` so live SSE subscribers see a clean close
+    # instead of `useStreamConnection.js`'s "stream closed unexpectedly"
+    # path. Matches the normal-finish contract.
+    bc.publish({"type": "done", "cost_usd": 0})
     bc.mark_completed()
 
   _starting.discard(chat_id)
-  return True
+  return stopped_cleanly
 
 
 def filter_post_question(event_type: str, suppress_text: bool) -> tuple[bool, bool]:
@@ -279,7 +692,9 @@ def filter_post_question(event_type: str, suppress_text: bool) -> tuple[bool, bo
 
   Returns (publish, new_suppress_text). After a question event,
   suppresses text, tool_output, and tool_end (Claude's auto-answer
-  fallback). TODO: unnecessary with SDK canUseTool approach.
+  fallback). Only used on the subprocess fallback path; SDK paths
+  intercept AskUserQuestion via can_use_tool before any auto-answer
+  events would fire.
   """
   if event_type == "question":
     return True, True
@@ -518,6 +933,12 @@ async def _drain_and_release(
     )
     if first_pending is None:
       _starting.discard(chat_id)
+      # Chat is fully idle — nothing in flight, nothing queued. Drop
+      # the per-chat generation counter so long-running containers
+      # don't accumulate one entry per chat-ever-touched. A future
+      # send re-creates the entry from 0; Stop semantics still rely
+      # on monotonic bumps within a single live run.
+      _run_generation.pop(chat_id, None)
     return first_pending, next_messages, next_session_id
 
 
@@ -669,6 +1090,39 @@ async def _run_chat_impl(
   # Get the provider first — needed for auth check.
   provider = get_provider(provider_id)
 
+  # Resolve effective agent settings (model, effort, ...) for this turn.
+  # Per-chat overrides from `Chat.agent_settings_json` win over the
+  # global default in /data/shared/agent-settings.json. The slash
+  # picker (see frontend/.../SlashPicker.jsx) writes overrides via
+  # PATCH /api/chats/{id}; the file remains the fallback every chat
+  # starts from. Computed once here and threaded into every dispatch
+  # branch below so the SDK runners and the subprocess fallback all
+  # agree on the same merged dict.
+  chat_overrides: dict | None = None
+  if chat_id:
+    try:
+      _chat_row = (
+        db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+      )
+      if _chat_row and _chat_row.agent_settings_json:
+        if isinstance(_chat_row.agent_settings_json, dict):
+          chat_overrides = _chat_row.agent_settings_json
+        elif isinstance(_chat_row.agent_settings_json, str):
+          # SQLite JSON columns occasionally surface as raw strings
+          # depending on driver version. Decode defensively so a
+          # str value doesn't silently disable overrides.
+          try:
+            chat_overrides = json.loads(_chat_row.agent_settings_json)
+          except (json.JSONDecodeError, TypeError):
+            chat_overrides = None
+    except Exception:
+      log.exception(
+        "failed to load per-chat agent_settings chat_id=%s", chat_id,
+      )
+  agent_settings = effective_agent_settings(
+    settings.data_dir, chat_overrides,
+  )
+
   # Pre-flight: check that provider credentials exist before spawning
   # the CLI. Without this, the CLI fails with a cryptic error.
   auth_error = provider.check_auth(settings.data_dir)
@@ -680,16 +1134,290 @@ async def _run_chat_impl(
     bc.mark_completed()
     db.close()
     return
+  data_dir = Path(settings.data_dir)
+  cwd = str(data_dir) if data_dir.exists() else str(Path.cwd())
+
+  # SDK dispatch: route both Claude and Codex through their official
+  # Agent SDK runners when the feature flag is on (default 1). The
+  # subprocess path below is the fallback for `MOBIUS_USE_SDK=0`.
+  use_sdk = os.environ.get("MOBIUS_USE_SDK", "1") == "1"
+  is_claude = provider.name == "Claude Code"
+  is_codex = provider.name == "Codex"
+  if use_sdk and is_codex:
+    log.info(
+      "chat start chat_id=%s provider=%s session=%s msg_len=%d sdk=codex",
+      chat_id, provider.name, session_id or "new", len(user_message),
+    )
+    sdk_env = provider.build_env(
+      base_env=base_env,
+      data_dir=settings.data_dir,
+      chat_id=chat_id,
+    )
+    sink = _ChatEventSink(bc, chat_id, db)
+    runner_result: dict = {}
+    try:
+      from app.codex_sdk_runner import run_codex_sdk_turn
+      runner_result = await run_codex_sdk_turn(
+        user_message=user_message,
+        session_id=session_id,
+        base_env=sdk_env,
+        cwd=cwd,
+        chat_id=chat_id,
+        bc=sink,
+        pending_questions=_pending_questions,
+        notify_pending_question_cb=_notify_pending_question,
+        db=db,
+        active_sessions=_active_sessions,
+        agent_settings=agent_settings,
+      )
+      new_session_id = runner_result.get("session_id")
+      err = runner_result.get("error")
+      if not err and new_session_id and chat_id:
+        chat_obj = db.query(models.Chat).filter(
+          models.Chat.id == chat_id
+        ).first()
+        if chat_obj:
+          chat_obj.session_id = new_session_id
+          _safe_commit(db)
+      if err:
+        log.error("codex SDK error chat_id=%s: %s", chat_id, err)
+      else:
+        log.info(
+          "chat done chat_id=%s cost_usd=%.4f sdk=codex",
+          chat_id, runner_result.get("cost_usd") or 0.0,
+        )
+    except Exception as exc:
+      log.exception("codex SDK turn failed chat_id=%s: %s", chat_id, exc)
+      # Publish through the sink BEFORE finalize so the error lands
+      # in the persisted assistant transcript, not just the live wire.
+      sink.publish({"type": "error", "message": str(exc)})
+      sink.finalize()
+      _active_sessions.pop(chat_id, None)
+      set_active_broadcast(None)
+      # Mirror the success-path drain. Crucially, still check gen
+      # ownership: if a concurrent Stop bumped gen, we must NOT
+      # promote queued messages — the frontend's stop-handler will
+      # resend them as one combined turn (see AGENTS.md Stop-chat
+      # contract). Otherwise we'd double-fire the queue.
+      we_own_gen = (
+        run_gen is None or _run_generation.get(chat_id, 0) == run_gen
+      )
+      try:
+        next_user, next_messages, next_session_id = await asyncio.wait_for(
+          _drain_and_release(db, chat_id, we_own_gen), timeout=5.0,
+        )
+      except asyncio.TimeoutError:
+        log.error(
+          "queue drain timed out chat_id=%s (codex sdk except)", chat_id,
+        )
+        _starting.discard(chat_id)
+        next_user, next_messages, next_session_id = None, [], None
+      if next_user:
+        bc.publish({
+          "type": "queued_turn_starting",
+          "ts": next_user.get("ts"),
+        })
+      bc.publish({"type": "done"})
+      bc.mark_completed()
+      if next_user:
+        _schedule_continuation(
+          chat_id=chat_id,
+          messages=next_messages,
+          session_id=next_session_id,
+          provider_id=provider_id,
+          next_user=next_user,
+        )
+      db.close()
+      return
+    err = runner_result.get("error")
+    if err:
+      # Same R2-5 rationale: publish through sink before finalize so
+      # the error is persisted alongside any partial response that
+      # streamed before the failure.
+      sink.publish({"type": "error", "message": err})
+    sink.finalize()
+    _active_sessions.pop(chat_id, None)
+    set_active_broadcast(None)
+    we_own_gen = (
+      run_gen is None or _run_generation.get(chat_id, 0) == run_gen
+    )
+    try:
+      next_user, next_messages, next_session_id = await asyncio.wait_for(
+        _drain_and_release(db, chat_id, we_own_gen), timeout=5.0,
+      )
+    except asyncio.TimeoutError:
+      log.error(
+        "queue drain timed out chat_id=%s (codex sdk path)", chat_id,
+      )
+      _starting.discard(chat_id)
+      next_user, next_messages, next_session_id = None, [], None
+    if next_user:
+      bc.publish({
+        "type": "queued_turn_starting",
+        "ts": next_user.get("ts"),
+      })
+    # Error event already broadcast via sink.publish before finalize
+    # (R2-5). Don't re-emit here — it would double-deliver to live
+    # subscribers.
+    bc.publish({
+      "type": "done",
+      "cost_usd": runner_result.get("cost_usd") or 0,
+    })
+    bc.mark_completed()
+    if next_user:
+      _schedule_continuation(
+        chat_id=chat_id,
+        messages=next_messages,
+        session_id=next_session_id,
+        provider_id=provider_id,
+        next_user=next_user,
+
+      )
+    await _close_browser_session(chat_id)
+    db.close()
+    return
+
+  if use_sdk and is_claude:
+    log.info(
+      "chat start chat_id=%s provider=%s session=%s msg_len=%d sdk=claude",
+      chat_id, provider.name, session_id or "new", len(user_message),
+    )
+    sdk_env = provider.build_env(
+      base_env=base_env,
+      data_dir=settings.data_dir,
+      chat_id=chat_id,
+    )
+    sink = _ChatEventSink(bc, chat_id, db)
+    try:
+      from app.claude_sdk_runner import run_claude_sdk_turn
+      runner_result = await run_claude_sdk_turn(
+        user_message=user_message,
+        session_id=session_id,
+        base_env=sdk_env,
+        cwd=cwd,
+        chat_id=chat_id,
+        skill_text=_read_skill_text(),
+        bc=sink,
+        pending_questions=_pending_questions,
+        notify_pending_question_cb=_notify_pending_question,
+        db=db,
+        active_clients=_active_clients,
+        agent_settings=agent_settings,
+      )
+      new_session_id = runner_result.get("session_id")
+      err = runner_result.get("error")
+      if not err and new_session_id and chat_id:
+        chat_obj = db.query(models.Chat).filter(
+          models.Chat.id == chat_id
+        ).first()
+        if chat_obj:
+          chat_obj.session_id = new_session_id
+          _safe_commit(db)
+      if err:
+        log.error("claude SDK error chat_id=%s: %s", chat_id, err)
+      else:
+        log.info(
+          "chat done chat_id=%s cost_usd=%.4f sdk=claude",
+          chat_id, runner_result.get("cost_usd") or 0.0,
+        )
+    except Exception as exc:
+      log.exception("claude SDK turn failed chat_id=%s: %s", chat_id, exc)
+      # Publish through the sink BEFORE finalize so the error lands
+      # in the persisted assistant transcript, not just the live wire.
+      sink.publish({"type": "error", "message": str(exc)})
+      sink.finalize()
+      _active_clients.pop(chat_id, None)
+      set_active_broadcast(None)
+      # Mirror the success-path drain. Crucially, still check gen
+      # ownership: if a concurrent Stop bumped gen, we must NOT
+      # promote queued messages — the frontend's stop-handler will
+      # resend them as one combined turn (see AGENTS.md Stop-chat
+      # contract). Otherwise we'd double-fire the queue.
+      we_own_gen = (
+        run_gen is None or _run_generation.get(chat_id, 0) == run_gen
+      )
+      try:
+        next_user, next_messages, next_session_id = await asyncio.wait_for(
+          _drain_and_release(db, chat_id, we_own_gen), timeout=5.0,
+        )
+      except asyncio.TimeoutError:
+        log.error(
+          "queue drain timed out chat_id=%s (claude sdk except)", chat_id,
+        )
+        _starting.discard(chat_id)
+        next_user, next_messages, next_session_id = None, [], None
+      if next_user:
+        bc.publish({
+          "type": "queued_turn_starting",
+          "ts": next_user.get("ts"),
+        })
+      bc.publish({"type": "done"})
+      bc.mark_completed()
+      if next_user:
+        _schedule_continuation(
+          chat_id=chat_id,
+          messages=next_messages,
+          session_id=next_session_id,
+          provider_id=provider_id,
+          next_user=next_user,
+        )
+      db.close()
+      return
+    if err:
+      # Same R2-5 rationale: persist the error alongside any partial
+      # response that streamed before the failure.
+      sink.publish({"type": "error", "message": err})
+    sink.finalize()
+    _active_clients.pop(chat_id, None)
+    set_active_broadcast(None)
+    we_own_gen = (
+      run_gen is None or _run_generation.get(chat_id, 0) == run_gen
+    )
+    try:
+      next_user, next_messages, next_session_id = await asyncio.wait_for(
+        _drain_and_release(db, chat_id, we_own_gen), timeout=5.0,
+      )
+    except asyncio.TimeoutError:
+      log.error(
+        "queue drain timed out chat_id=%s (sdk path)", chat_id,
+      )
+      _starting.discard(chat_id)
+      next_user, next_messages, next_session_id = None, [], None
+    if next_user:
+      bc.publish({
+        "type": "queued_turn_starting",
+        "ts": next_user.get("ts"),
+      })
+    # Error event already broadcast via sink.publish before finalize
+    # (R2-5). Don't re-emit here — it would double-deliver to live
+    # subscribers.
+    bc.publish({
+      "type": "done",
+      "cost_usd": runner_result.get("cost_usd") or 0,
+    })
+    bc.mark_completed()
+    if next_user:
+      _schedule_continuation(
+        chat_id=chat_id,
+        messages=next_messages,
+        session_id=next_session_id,
+        provider_id=provider_id,
+        next_user=next_user,
+
+      )
+    await _close_browser_session(chat_id)
+    db.close()
+    return
+
+  # Subprocess path (codex today; claude fallback when MOBIUS_USE_SDK=0).
   result = provider.build(
     user_message=user_message,
     session_id=session_id,
     base_env=base_env,
     data_dir=settings.data_dir,
     chat_id=chat_id,
+    agent_settings=agent_settings,
   )
-
-  data_dir = Path(settings.data_dir)
-  cwd = str(data_dir) if data_dir.exists() else str(Path.cwd())
 
   log.info(
     "chat start chat_id=%s provider=%s session=%s msg_len=%d",
@@ -823,6 +1551,7 @@ async def _run_chat_impl(
               _update_last_assistant_message(
                 db, chat_id, save_message_to_db,
               )
+              _notify_pending_question(db, chat_id, event)
               if proc and proc.returncode is None:
                 proc.kill()
               bc.publish({"type": "done", "cost_usd": 0})
@@ -891,6 +1620,7 @@ async def _run_chat_impl(
           session_id=next_session_id,
           provider_id=provider_id,
           next_user=next_user,
+  
         )
       stderr_task.cancel()
       try:
@@ -938,6 +1668,7 @@ async def _run_chat_impl(
         session_id=next_session_id,
         provider_id=provider_id,
         next_user=next_user,
+
       )
   finally:
     # Close agent-browser session exactly once, regardless of which

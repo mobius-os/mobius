@@ -14,12 +14,20 @@ from sqlalchemy.orm import Session
 
 from app import models, schemas
 from app.broadcast import create_broadcast, get_broadcast
-from app.chat import discard_starting, is_chat_running, mark_starting, run_chat
+from app.chat import (
+  claim_pending_question,
+  discard_starting,
+  is_chat_running,
+  mark_starting,
+  run_chat,
+)
 from app.config import get_settings
 from app.database import get_db
 from app.deps import get_current_owner
 
 router = APIRouter(prefix="/api/chats", tags=["chats"])
+
+log = logging.getLogger(__name__)
 
 # Keepalive interval for the SSE stream to prevent proxy timeouts.
 _KEEPALIVE_INTERVAL = 30  # seconds
@@ -118,6 +126,16 @@ async def _append_to_pending(
   return new_msg
 
 
+def _answer_delivered_response(chat_id: str) -> JSONResponse:
+  """202 for an AskUserQuestion answer that was delivered in-process
+  to a blocked SDK PreToolUse hook. The SDK resumes the active turn
+  with the answer; no new turn is queued."""
+  return JSONResponse(
+    status_code=202,
+    content={"status": "answer_delivered", "chat_id": chat_id},
+  )
+
+
 def _queued_response(new_msg: dict, position: int) -> JSONResponse:
   """Standard 202 response for a queued message."""
   return JSONResponse(
@@ -203,7 +221,88 @@ async def send_message(
   # remount). The actual commit happens in whichever branch below runs
   # (queue path, stale-pending path, or fresh-start path) — they each
   # call db.commit() on the chat row.
+  #
+  # Load-bearing for the SDK answer-delivery path below (committed at
+  # the claim_pending_question short-circuit). Redundant for the queue
+  # path, where _append_to_pending re-applies after db.refresh. Don't
+  # remove without re-tracing both paths.
   _apply_answers_to_last_question(chat, body.answers)
+
+  # SDK in-process answer delivery: if the Claude Agent SDK is blocked
+  # in a PreToolUse hook waiting for an AskUserQuestion answer (held
+  # in `_pending_questions[chat_id]`), resolve the future in-place and
+  # return — the SDK then continues the active turn with the answer.
+  # The subprocess providers leave `_pending_questions` empty (their
+  # AskUserQuestion intercept kills the proc and the answer becomes a
+  # new queued turn), so this short-circuit no-ops for them and the
+  # existing queue path takes over.
+  if body.answers:
+    from app.chat import get_queue_lock
+    async with get_queue_lock(chat_id):
+      pending = claim_pending_question(chat_id)
+      if pending is not None:
+        db.commit()  # persist the answers we just wrote
+        if not pending.future.done():
+          pending.future.set_result(body.answers)
+        return _answer_delivered_response(chat_id)
+      # No pending question (Stop cancelled it, or stale UI). If we
+      # fell through, the answer text would land as a new turn prompt
+      # (e.g. "- Which color?: Red") which is nonsense to the agent.
+      # 410 Gone tells the client "the question you're answering is
+      # no longer accepting answers" so the UI can hide the card and
+      # surface the right error.
+      db.rollback()  # don't keep the answer-write we just did
+      raise HTTPException(
+        status_code=410,
+        detail="The question is no longer accepting answers.",
+      )
+
+  # Local helper used by both code paths below: coerces the chat's
+  # JSON-column settings to a plain dict (defends against the
+  # SQLite-driver string-mode quirk that _coerce_agent_settings in
+  # routes/chats.py exists for).
+  def _coerce_chat_settings(c):
+    raw = c.agent_settings_json
+    if raw is None:
+      return {}
+    if isinstance(raw, dict):
+      return dict(raw)
+    if isinstance(raw, str):
+      import json as _json
+      try:
+        parsed = _json.loads(raw)
+        return dict(parsed) if isinstance(parsed, dict) else {}
+      except (ValueError, TypeError):
+        return {}
+    return {}
+
+  # Send-gated default mirror. Runs for BOTH the start-turn branch
+  # below AND the queue-append branch — a user who PATCHes settings
+  # then sends (whether that send starts a fresh turn or queues
+  # behind an in-flight one) has performed a "manual sent change"
+  # and the mirror should fire. If write fails, re-mark dirty so the
+  # next send retries — never silently drop the user's pick.
+  def _commit_send_gated_mirror():
+    from app.chat import take_settings_dirty, mark_settings_dirty
+    if not take_settings_dirty(chat_id):
+      return
+    from app.providers import write_agent_settings
+    from app.config import get_settings as _get_settings
+    cs = _coerce_chat_settings(chat)
+    mirror = {}
+    if cs.get("model") is not None:
+      mirror["model"] = cs["model"]
+    if cs.get("effort") is not None:
+      mirror["effort"] = cs["effort"]
+    ok = True
+    if mirror:
+      ok = write_agent_settings(_get_settings().data_dir, mirror)
+    if not ok:
+      mark_settings_dirty(chat_id)
+      return
+    owner = db.query(models.Owner).first()
+    if owner is not None and chat.provider:
+      owner.provider = chat.provider
 
   # Queue path: agent is running OR stale pending exists from a
   # previous crash. Appending the new send at the END of pending
@@ -213,6 +312,7 @@ async def send_message(
   # rather than sitting forever.
   if is_chat_running(chat_id) or chat.pending_messages:
     new_msg = await _append_to_pending(chat, body, db)
+    _commit_send_gated_mirror()
 
     if not is_chat_running(chat_id):
       # Stale pending — try to claim and drain. mark_starting prevents
@@ -267,6 +367,8 @@ async def send_message(
     if not chat.messages:
       owner = db.query(models.Owner).first()
       chat.provider = (owner.provider if owner else "claude") or "claude"
+
+    _commit_send_gated_mirror()
 
     # Build the full message history for the agent.
     msgs = [schemas.ChatMessage(role=m["role"], content=m.get("content", ""))
@@ -361,6 +463,15 @@ async def stream_chat(
   """
   bc = get_broadcast(chat_id)
   if bc is None:
+    # No broadcast either because none was ever created or because the
+    # completed-broadcast TTL (30s) elapsed. The third case is a real
+    # race: a continuation is being scheduled and the client reconnect
+    # lands in the gap. Hard to fix without restructuring the
+    # broadcast lifecycle; logging makes it visible if it gets noisy.
+    log.debug(
+      "stream subscribe: no broadcast for chat_id=%s "
+      "(likely between turns or TTL)", chat_id,
+    )
     return Response(status_code=204)
 
   catch_up, queue = bc.subscribe()

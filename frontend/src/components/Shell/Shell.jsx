@@ -4,11 +4,11 @@ import Drawer from '../Drawer/Drawer.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
 import ChatView from '../ChatView/ChatView.jsx'
 import SettingsView from '../SettingsView/SettingsView.jsx'
-import { apiFetch, BASE } from '../../api/client.js'
+import { api, BASE } from '../../api/client.js'
 import usePushSubscription from '../../hooks/usePushSubscription.js'
 import useNavigation from '../../hooks/useNavigation.js'
 import useTheme from '../../hooks/useTheme.js'
-import { chatMessagesQueryKey } from '../../hooks/queries.js'
+import { appQueries, chatQueries } from '../../hooks/queries.js'
 import './Shell.css'
 
 export default function Shell() {
@@ -23,8 +23,11 @@ export default function Shell() {
 
   const { loadTheme } = useTheme()
   const queryClient = useQueryClient()
+  const appsQuery = appQueries.list.useQuery()
+  const chatsQuery = chatQueries.list.useQuery()
+  const apps = appsQuery.data ?? []
+  const chats = chatsQuery.data ?? []
 
-  const [apps, setApps] = useState([])
   // Per-app version map. Bumped when an `app_updated` SSE event
   // arrives for that specific app so its iframe `key` cycles. The
   // multi-iframe LRU cache (below) needs per-app versions because a
@@ -40,7 +43,6 @@ export default function Shell() {
   const APP_CACHE_MAX = 4
   const [appCache, setAppCache] = useState([])
   const [toast, setToast] = useState(null)
-  const [chats, setChats] = useState([])
   const chatsLoadedRef = useRef(false)
   const [builtApp, setBuiltApp] = useState(null)
   const [pwaPrompt, setPwaPrompt] = useState(null)
@@ -59,36 +61,27 @@ export default function Shell() {
   usePushSubscription()
 
   const refreshApps = useCallback(() => {
-    return apiFetch('/apps/')
-      .then((r) => r.json())
-      .then((data) => {
-        if (Array.isArray(data)) {
-          setApps(data)
-          return data
-        }
-        return []
-      })
+    return appsQuery.refetch()
+      .then((result) => result.data || [])
       .catch(() => [])
-  }, [])
+  }, [appsQuery])
 
   // Load chats; restore activeChatId if still present, else pick the first.
   const refreshChats = useCallback(() => {
-    apiFetch('/chats')
-      .then(r => r.json())
-      .then(data => {
-        if (!Array.isArray(data)) return
-        setChats(data)
-        setActiveChatId(prev => {
-          if (prev && data.some(c => c.id === prev)) return prev
-          return data[0]?.id || null
-        })
-        chatsLoadedRef.current = true
-      })
-      .catch(() => {})
-  }, [])
+    return chatsQuery.refetch()
+      .then((result) => result.data || [])
+      .catch(() => [])
+  }, [chatsQuery])
 
-  useEffect(() => { refreshApps() }, [refreshApps])
-  useEffect(() => { refreshChats() }, [refreshChats])
+  useEffect(() => {
+    if (!chatsQuery.isFetched) return
+    setActiveChatId(prev => {
+      if (prev && chats.some(c => c.id === prev)) return prev
+      return chats[0]?.id || null
+    })
+    chatsLoadedRef.current = true
+  }, [chats, chatsQuery.isFetched, setActiveChatId])
+
   useEffect(() => { if (drawerOpen) { refreshApps(); refreshChats() } }, [drawerOpen, refreshApps, refreshChats])
 
   // Capture PWA install prompt if the user hasn't dismissed it.
@@ -180,6 +173,11 @@ export default function Shell() {
     }
 
     function onMessage(e) {
+      // window 'message' events are for cross-frame postMessage —
+      // mini-app iframes (origin 'null' from sandboxed iframes) or
+      // same-origin sibling frames. NOT service-worker messages —
+      // those arrive on navigator.serviceWorker, handled separately
+      // below.
       if (e.origin !== 'null' && e.origin !== window.location.origin) return
       if (e.data?.type === 'moebius:app-error') {
         handleAppError(e)
@@ -187,9 +185,40 @@ export default function Shell() {
         newChat({ draft: e.data.draft, forceNew: true })
       }
     }
+
+    function onSwMessage(e) {
+      // Service-worker client.postMessage delivers here via
+      // navigator.serviceWorker — NOT via window.message. (Subtle
+      // browser API split: the SW spec routes them through the SW
+      // container, not the global.) sw.js fires this on
+      // notificationclick when an existing client is focused.
+      if (e.data?.type !== 'notification-click') return
+      const target = e.data.target
+      if (typeof target !== 'string' || !target) return
+      let path = target
+      try {
+        if (/^https?:\/\//.test(target)) path = new URL(target).pathname
+      } catch { /* keep target as-is */ }
+      const appMatch = path.match(/^\/app\/([^/]+)$/)
+      const chatMatch = path.match(/^\/chat\/([^/]+)$/)
+      if (appMatch) {
+        navTo('canvas', { appId: parseInt(appMatch[1], 10) })
+      } else if (chatMatch) {
+        navTo('chat', { chatId: chatMatch[1] })
+      }
+    }
+
     window.addEventListener('message', onMessage)
-    return () => window.removeEventListener('message', onMessage)
-  }, [apps, chats])
+    if (navigator.serviceWorker) {
+      navigator.serviceWorker.addEventListener('message', onSwMessage)
+    }
+    return () => {
+      window.removeEventListener('message', onMessage)
+      if (navigator.serviceWorker) {
+        navigator.serviceWorker.removeEventListener('message', onSwMessage)
+      }
+    }
+  }, [apps, chats, navTo])
 
   async function newChat({ draft, forceNew } = {}) {
     // Resolve chatId BEFORE switching views — setting activeView='chat'
@@ -207,13 +236,10 @@ export default function Shell() {
       chatId = empty.id
     } else {
       try {
-        const res = await apiFetch('/chats', {
-          method: 'POST',
-          body: JSON.stringify({ title: 'New chat' }),
-        })
+        const res = await api.chats.create({ title: 'New chat' })
         const chat = await res.json()
         chatId = chat.id
-        refreshChats()
+        await refreshChats()
       } catch { return }
     }
 
@@ -247,11 +273,31 @@ export default function Shell() {
   }
 
   async function deleteChat(id) {
-    await apiFetch(`/chats/${id}`, { method: 'DELETE' }).catch(() => {})
+    // 409 means the agent is still running and stop_chat_for couldn't
+    // interrupt it within the timeout. We MUST NOT clear local state
+    // in that case — doing so would leave a phantom chat that's gone
+    // from the UI but still has a runner writing to the DB. Surface
+    // the error and bail; the user can retry once the runner settles.
+    let res
+    try {
+      res = await api.chats.remove(id)
+    } catch {
+      // Network error — treat as inconclusive, don't touch local state.
+      return
+    }
+    if (!res.ok) {
+      if (res.status === 409) {
+        // TODO: surface a toast once we have that primitive. For now
+        // the chat row stays in the list and the user can retry.
+        return
+      }
+      // Other non-2xx (404 = already gone, etc.) — fall through to
+      // local cleanup so a 404 doesn't leave a phantom in the UI.
+    }
     try { sessionStorage.removeItem(`draft:${id}`) } catch {}
     // Evict the cached messages so a future chat-ID collision (e.g.
     // recovery) can't surface stale content.
-    queryClient.removeQueries({ queryKey: chatMessagesQueryKey(id) })
+    chatQueries.messages.remove(queryClient, id)
     // Scrub any navStack entries pointing at the deleted chat —
     // otherwise pressing back would navigate into a chat that returns
     // 404, leaving the user staring at an empty view. Soft-deleted
@@ -262,7 +308,7 @@ export default function Shell() {
     if (activeChatId === id) {
       await newChat()
     }
-    setChats(prev => prev.filter(c => c.id !== id))
+    await refreshChats()
   }
 
   // Bootstrap: create an initial chat once the server confirms zero chats exist.

@@ -1,0 +1,73 @@
+/* SlashPicker — `/` composer button + drop-up popover. Drops up
+   (popover above the trigger) because the composer sits at the
+   bottom of the viewport and a drop-down would render off-screen
+   on mobile. */
+
+.slash {
+  position: relative;
+  display: inline-flex;
+  /* Sit at the bottom of the composer row so the icon stays anchored
+     when the textarea grows multiline (mirrors AttachButton + Send). */
+  align-self: flex-end;
+}
+
+.slash__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+
+.slash__btn:hover,
+.slash__btn--open {
+  background: var(--surface2);
+  border-color: var(--accent, #6f78d6);
+}
+
+.slash__popover {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 30;
+  width: min(320px, calc(100vw - 32px));
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.slash__foot {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.slash__note {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text);
+  line-height: 1.35;
+}
+
+.slash__note--muted {
+  color: var(--muted);
+}
+
+.slash__error {
+  margin: 0;
+  font-size: 11px;
+  color: #c14a3d;
+}

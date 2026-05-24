@@ -1,8 +1,6 @@
 """Notification send and history endpoints."""
 
 import logging
-import uuid
-from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Query, Request
 from slowapi import Limiter
@@ -12,8 +10,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.database import get_db
 from app.deps import get_current_owner_or_app
-from app.broadcast import get_broadcast
-from app.push import send_push
+from app.push import notify_owner
 from app.schemas import NotificationOut, NotificationSendRequest
 
 logger = logging.getLogger(__name__)
@@ -32,68 +29,20 @@ def send_notification(
   db: Session = Depends(get_db),
 ):
   """Send a push notification to all owner subscriptions."""
-  notification_id = str(uuid.uuid4())
   actions_list = (
     [a.model_dump() for a in body.actions] if body.actions else None
   )
-
-  # Save to DB.
-  notif = models.Notification(
-    id=notification_id,
-    owner_id=owner.id,
-    source_type=body.source_type,
-    source_id=body.source_id,
+  notification_id = notify_owner(
+    db,
+    owner.id,
     title=body.title,
     body=body.body,
+    source_type=body.source_type,
+    source_id=body.source_id,
     icon=body.icon,
     target=body.target,
     actions=actions_list,
-    sent_at=datetime.now(UTC),
   )
-  db.add(notif)
-  db.commit()
-
-  # Build the push payload.
-  payload = {
-    "id": notification_id,
-    "title": body.title,
-    "body": body.body,
-    "icon": body.icon,
-    "target": body.target,
-    "actions": actions_list,
-  }
-
-  # Skip push if the user is watching this chat right now — the SSE
-  # stream already delivers the agent's output in real time.
-  bc = get_broadcast(body.source_id) if body.source_id else None
-  if bc and bc.subscribers:
-    return {"id": notification_id}
-
-  # Deliver to all subscriptions. Remove stale ones.
-  subs = (
-    db.query(models.PushSubscription)
-    .filter(models.PushSubscription.owner_id == owner.id)
-    .all()
-  )
-  stale_ids = []
-  for sub in subs:
-    sub_info = {
-      "endpoint": sub.endpoint,
-      "keys": {"p256dh": sub.p256dh, "auth": sub.auth},
-    }
-    try:
-      alive = send_push(sub_info, payload)
-      if not alive:
-        stale_ids.append(sub.id)
-    except Exception:
-      logger.exception("push delivery failed for sub %s", sub.id[:8])
-
-  if stale_ids:
-    db.query(models.PushSubscription).filter(
-      models.PushSubscription.id.in_(stale_ids)
-    ).delete(synchronize_session=False)
-    db.commit()
-
   return {"id": notification_id}
 
 

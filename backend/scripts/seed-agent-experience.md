@@ -77,11 +77,15 @@ category constraints. They don't tell you what to build. Treating
 them as enough specificity leads to building an app the partner
 never asked for.
 
-**If the AskUserQuestion tool / question card returns without an
-answer** (dismissed, errored, partner skipped) — do NOT retry.
-Pick the recommended defaults, build, and let the partner redirect
-after. Hesitating wastes turns; ambiguous responses to a tool the
-partner doesn't see as blocking are not signal.
+**If you call AskUserQuestion the runner pauses until the partner
+answers.** chat.py freezes the turn at the question event — there
+is no auto-build on dismissal. Don't fire a question if you'd
+rather just build; pick defaults and ship. Only ask when you
+genuinely cannot pick a sensible default.
+
+<!-- TODO(future): if dismissal should count as "use defaults" for
+tier-2 prompts, the runner needs an auto-approve path; the prose
+used to claim this behavior but chat.py never implemented it. -->
 
 Everything below — register_app.py, screenshots, notifications —
 runs *after* you've decided to build, not instead of deciding.
@@ -99,46 +103,6 @@ data, stop and ask in chat — unless the data was created by you
 in this same turn as a disposable test fixture. Do not infer
 consent from usefulness, reversibility, or confidence. When
 unsure who owns it, ask.
-
-## Speaking to the partner
-
-The partner's mental model should contain only entities that
-affect their experience. Agent infrastructure — your tool calls,
-your file paths, your internal IDs, your verification mechanisms —
-exists so you can do the work; it doesn't belong in the partner's
-model. (A high-level plan for what you're about to do is
-different — that's direction the partner can follow and redirect.
-The mechanism beneath it isn't. The *content* of what you note in
-your memory is also fair game when it's partner-relevant — what
-isn't is the mechanism of the noting.)
-
-The partner sets the register. If they use technical vocabulary,
-match them; descend further than they ask for and the
-conversation feels like documentation. Stay above the partner's
-register and you sound vague; that's better than below.
-
-**Group-level plans, not per-tool announcements.** Before a batch
-of related tool calls, give the partner a one-sentence high-level
-description of what the next chunk of work accomplishes — at their
-altitude, not the tool's. Inside the batch, individual tools run
-silently; they're covered by the phase you announced. New phase
-gets a new sentence. The failure mode is announcing each tool when
-it's already inside a phase you already framed.
-
-Specific patterns the infrastructure principle also rules out:
-
-- **Identifiers and paths.** Internal IDs ("id 2", `/app/4`), file
-  paths, the names of files you wrote to. When pointing at a
-  built app, say "Open it from the drawer" or use the
-  partner-facing name.
-- **Debugging narration — past tense counts too.** "React error
-  #31, the import-map needs `?external=react`" is infrastructure
-  whether you write it while debugging or afterward as
-  "fixed and noted that the markdown library was shipping its
-  own React copy." If the partner asks how a failure was fixed,
-  match their register; otherwise the mechanism stays out of the
-  chat. The partner's problem is "the previewer crashed"; the
-  rest is your problem to solve.
 
 ## Experience log
 
@@ -187,6 +151,33 @@ To verify, use `bash "$SCRIPTS_DIR/preview_shell.sh"` — it
 screenshots the real authenticated chat view (not the login screen,
 which doesn't mount `.shell` and gives a misleading preview).
 
+Snapshot before overwriting — recipe and rationale live in the
+skill's "Theme snapshots before overwriting" section.
+
+## Shell layout contracts
+
+These are the load-bearing conventions across `Shell.css` and
+`ChatView.css`. Match them when adding new selectors — generic
+class names break the existing CSS by sibling-selector or
+contract-comment mismatch.
+
+- **BEM naming.** Use `.chat__*`, `.shell__*`, `.drawer__*`,
+  `.queued__*`. Never invent `.chat-queued` or `.shell-bar` —
+  the underscore variant is what every existing rule expects.
+- **Drawer scroll model.** Sections use `flex: 2 1 0` (chats),
+  `flex: 1 1 0; min-height: 120px` (apps), `flex-shrink: 0`
+  (settings). Never put `overflow-y` on `.drawer__body` — when
+  apps grow, chats get pushed off-screen.
+- **Composer is a flex pill, not an overlap.** The pill (the
+  composer wrapper) is `display: flex; gap: 6px` with the
+  textarea and send button as siblings. Avoid negative
+  margins to "overlap" the send button onto the textarea —
+  that's how text-slides-under-send-button bugs happen.
+- **Pill geometry.** For a true stadium curve, `border-radius`
+  equals half the height (40px tall → 20px radius), not
+  `9999px`. The 9999px shortcut renders correctly for short
+  pills but wrong as the pill grows.
+
 ## Shell change costs
 
 - **theme.css only (no rebuild):** color variables, gradients, background
@@ -198,6 +189,9 @@ which doesn't mount `.shell` and gives a misleading preview).
 - **JSX/CSS edit + rebuild:** new DOM elements, React-managed animations,
   canvas, particle systems, structural layout changes.
   Each rebuild triggers a visible page transition — batch all edits before rebuilding.
+- App source lives at the top of `apps/<slug>/` (`index.jsx` plus any
+  companion files); runtime partner data the app reads/writes goes under
+  `apps/<slug>/data/`, which is gitignored.
 
 ## Gotchas
 
@@ -208,12 +202,39 @@ which doesn't mount `.shell` and gives a misleading preview).
   app gets an id + DB row). If your edit doesn't seem to land,
   refresh the iframe; if it still doesn't, check that
   `/data/compiled/app-<id>.js` mtime advanced.
-- **Reverting the theme:** `DELETE /api/storage/shared/theme.css` (no
-  body needed). The platform owns defaults — `/api/theme` returns the
-  user override if present, otherwise the built-in default. Don't try
-  to write a "minimal" theme.css with only a few variables; it gets
-  shadowed by the server-injected initial-render block. Either
-  override completely OR delete entirely.
+- **`register_app.py` is for the INITIAL create only — never
+  re-run it.** Edits land via the file watcher; re-registering
+  creates a duplicate app whenever the `<name>` you pass differs
+  by even one character from the stored display name (slug vs.
+  title is the common slip — `tunnel-runner-3d` vs. `Tunnel Run
+  3D`). If a duplicate appears, `DELETE /api/apps/<dup-id>`.
+
+- **"The partner still sees the old app" — checklist, in order.**
+  If you edited `/data/apps/<slug>/index.jsx` and the partner says
+  it didn't change, **do not reach for `register_app.py`** — work
+  these instead:
+  1. **Compile mtime advanced?**
+     `stat -c '%Y %n' /data/compiled/app-<id>.js` should be newer
+     than your edit. If not, auto-recompile didn't fire — the
+     most common cause is a JSX syntax error. Check
+     `/data/logs/chat.log` for `compile failed for`.
+  2. **Iframe still showing the cached bundle?** A successful
+     recompile broadcasts `app_updated` which busts the iframe
+     cache, but a cached iframe in the partner's drawer LRU may
+     need to be reopened. Take a screenshot via
+     `bash "$SCRIPTS_DIR/preview_app.sh" <id>` and Read it — if
+     it shows the old UI but the file is new, the iframe is the
+     stale layer.
+  3. **Module-load error?** App stuck on a loading spinner means
+     it's not a code-edit issue at all; check the served bundle
+     and its imports — `curl -s "$API_BASE_URL/api/apps/<id>/module?token=$AGENT_TOKEN"`
+     and any vendor URL it references (`/vendor/three/three.module.js`,
+     `esm.sh/*`).
+- **Theme revert:** `DELETE /api/storage/shared/theme.css` (no body)
+  restores the platform default. Never write a partial theme.css —
+  the server-injected initial-render block shadows it; either override
+  completely or delete entirely. (Snapshot-before-overwrite lives in
+  the skill's "Theme snapshots before overwriting" section.)
 - Cron + storage API can get out of sync. Either have cron read from the
   storage API via curl, or have the UI write to the filesystem too.
 - Cron scripts need `CLAUDE_CONFIG_DIR=/data/cli-auth/claude`.
@@ -221,18 +242,37 @@ which doesn't mount `.shell` and gives a misleading preview).
 - Mini-apps get a scoped token, not the owner's full JWT. It can access
   storage, proxy, AI, notifications, push — but NOT auth, settings, or chat.
 - Storage 404 on first load is normal — handle with default value.
-- **Storage API read shape is asymmetric**: `PUT` takes
-  `{content: JSON.stringify(myData)}`; `GET` returns the parsed
-  inner object directly, NOT an envelope. Past agents have lost
-  rebuild cycles assuming GET mirrors PUT. (See the skill for the
-  full API examples.)
+- **Storage API asymmetry:** `PUT /api/storage/apps/{id}/notes.json`
+  with body
+  `{title: "hi", items: [1,2,3]}` writes
+  `{"title":"hi","items":[1,2,3]}` to disk. No envelope, no double
+  stringify. The legacy `{content: JSON.stringify(myData)}` envelope
+  still works (for non-JSON paths it's required), so older mini-apps
+  keep running. **For new code on `.json` files: just
+  `body: JSON.stringify(data)` — one stringify, not two.** GET
+  returns the raw file (parses cleanly with `await res.json()` for
+  JSON files); GET does not mirror PUT shape, and past agents lost
+  rebuild cycles assuming it did. (See the skill for the full API
+  examples.)
+- **Floating composer:** `.chat__foot` is `position:absolute` with
+  transparent background. Do NOT add background to `.chat__foot` or
+  wrap its controls in a shared opaque container — that breaks the
+  scroll-underneath illusion.
+- **Codex auth fallback:** if `/codex:rescue` returns auth errors or
+  exits non-zero, say so in chat — do not pretend the run succeeded.
+  Credentials at `/data/cli-auth/codex/` need refreshing.
 - Back gesture in apps: use `pushState`/`popstate` for internal navigation.
 - Three.js: `import * as THREE from 'three'` and
   `import { OrbitControls } from 'three/addons/controls/OrbitControls.js'`
   just work (self-hosted at `/vendor/three/` via the app-frame
   import map — no esm.sh waterfall).
 
-## Screenshots — quick start
+## Screenshot helpers (instance-specific scripts)
+
+These two helper scripts are pre-installed on this instance.
+General screenshot rules (embed-before-describe, agent-browser
+gotchas) live in the skill — this section only covers the
+shortcuts.
 
 For previewing a mini-app:
 
@@ -247,39 +287,3 @@ match the partner's device, and writes the PNG to
 
 For previewing the shell itself (e.g. after a theme change), use
 `bash "$SCRIPTS_DIR/preview_shell.sh"`.
-
-**Embed-before-describe is a syntactic rule, not a vibe.** When you
-`Read` a PNG, the next text block you write must contain
-`![caption](/api/chats/<chat_id>/generated/<name>.png)` before any
-prose that mentions what the screenshot shows. Embed and description
-live in the same text block, embed first. This is a check you can
-run on yourself: before sending a text block that mentions a
-screenshot, confirm the string `![` and the file path are present in
-that block. "Share inline" without this check reads as "share
-eventually" and you end up collating the embeds into a final summary
-— that defeats the point, because the partner was following along
-through your running narrative. `Read` is private to your vision;
-only the `![]` embed reaches the chat.
-
-Three patterns that come up every session when driving agent-browser
-directly (click, fill, etc.):
-
-- **Scale `wait` to the heaviest asset.** Three.js textures / WebGL /
-  large fonts → 6000–8000ms; ordinary React apps → 1000–1500ms;
-  static HTML → 200ms. Blanket-8000 everywhere wastes session time.
-- **Re-snapshot after every DOM-mutating action.** `@eN` refs from
-  `agent-browser snapshot` are invalidated by any click, navigate,
-  or re-render. After action, snapshot again before targeting `@ref`.
-- **`✓ Done` confirms dispatch, not state change.** The CLI returns
-  Done the instant the command is sent to Chromium, not after the
-  UI transitions. Verify with another snapshot or a screenshot
-  after any click that's supposed to change state.
-
-Full agent-browser docs are in the skill under "agent-browser as a
-visual testing tool."
-
-## Debug endpoints
-
-- Active agents: `curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/debug/status"`
-- Chat logs: `curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/debug/logs?lines=50"`
-- Filter by chat: add `&chat_id=<id>` to the logs endpoint.

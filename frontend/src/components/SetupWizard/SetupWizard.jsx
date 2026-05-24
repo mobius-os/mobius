@@ -1,6 +1,9 @@
 import { useState } from 'react'
-import { apiFetch, setToken, setSetupInProgress, BASE } from '../../api/client.js'
+import { api, setToken, setSetupInProgress, BASE } from '../../api/client.js'
+import { authQueries, settingsQueries } from '../../hooks/queries.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
+import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
+import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
 import './SetupWizard.css'
 
 // localStorage key for resuming setup mid-wizard. If the user creates
@@ -43,10 +46,7 @@ export default function SetupWizard({ onDone, initialStep = 'account' }) {
     }
     setLoading(true)
     try {
-      const res = await apiFetch('/auth/setup', {
-        method: 'POST',
-        body: JSON.stringify({ username, password }),
-      })
+      const res = await api.auth.setup.create({ username, password })
       if (!res.ok) {
         const data = await res.json()
         setError(data.detail || 'Setup failed.')
@@ -71,10 +71,7 @@ export default function SetupWizard({ onDone, initialStep = 'account' }) {
     }
     setGeminiSaving(true)
     try {
-      const res = await apiFetch('/settings', {
-        method: 'POST',
-        body: JSON.stringify({ gemini_api_key: geminiKey.trim() }),
-      })
+      const res = await api.settings.save({ gemini_api_key: geminiKey.trim() })
       if (!res.ok) {
         const data = await res.json()
         setGeminiError(data.detail || 'Failed to save key.')
@@ -89,30 +86,7 @@ export default function SetupWizard({ onDone, initialStep = 'account' }) {
   }
 
   if (step === 'provider') {
-    return (
-      <div className="setup">
-        <div className="setup__card">
-          <img src={`${BASE}/moebius.png`} alt="Möbius" className="setup__logo" />
-          <h1 className="setup__title">Connect your AI</h1>
-          <p className="setup__subtitle">
-            Sign in with your Claude account. Requires a Pro or Max subscription.
-            No API key needed.
-          </p>
-
-          <ProviderAuth onDone={() => goToStep('gemini')} />
-
-          <p className="setup__skip-warn">
-            Skipping means the AI agent won't work — all chat messages will fail until you sign in with Claude.
-          </p>
-          <button
-            className="setup__skip"
-            onClick={() => goToStep('gemini')}
-          >
-            Skip for now
-          </button>
-        </div>
-      </div>
-    )
+    return <ProviderStep onSkip={() => goToStep('gemini')} onConnected={() => goToStep('gemini')} />
   }
 
   if (step === 'gemini') {
@@ -143,7 +117,7 @@ export default function SetupWizard({ onDone, initialStep = 'account' }) {
           </p>
           {geminiError && <p className="setup__error">{geminiError}</p>}
           <button className="setup__btn" onClick={handleGeminiSave} disabled={geminiSaving}>
-            {geminiSaving ? 'Saving\u2026' : 'Save & continue'}
+            {geminiSaving ? 'Saving…' : 'Save & continue'}
           </button>
           <button className="setup__skip" onClick={onDone}>
             Skip for now
@@ -204,6 +178,72 @@ export default function SetupWizard({ onDone, initialStep = 'account' }) {
             {loading ? 'Setting up…' : 'Continue'}
           </button>
         </form>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Connect-AI step: mirrors the Settings page's provider list but
+ * with no default-selection radio. Each provider is a row that
+ * expands to its auth panel on tap. Codex is listed first because
+ * it works on a free ChatGPT account; an inline hint about the
+ * ChatGPT-account device-auth toggle lives inside CodexAuth. Either
+ * provider connecting advances the wizard.
+ */
+function ProviderStep({ onSkip, onConnected }) {
+  const [expanded, setExpanded] = useState('codex')
+  const claudeStatusQuery = authQueries.provider.claudeStatus.useQuery()
+  const settingsQuery = settingsQueries.owner.useQuery()
+  const codexConnected = !!settingsQuery.data?.codex_authenticated
+  const claudeConnected = !!claudeStatusQuery.data?.authenticated
+
+  function toggle(id) {
+    setExpanded(prev => prev === id ? null : id)
+  }
+
+  return (
+    <div className="setup">
+      <div className="setup__card">
+        <img src={`${BASE}/moebius.png`} alt="Möbius" className="setup__logo" />
+        <h1 className="setup__title">Connect your AI</h1>
+        <p className="setup__subtitle">
+          Pick a provider to connect. You can switch or connect the
+          other one later in Settings.
+        </p>
+
+        <div className="settings__providers">
+          <ProviderRow
+            id="codex"
+            name="OpenAI Codex"
+            badge="Free account, limited usage"
+            connected={codexConnected}
+            showRadio={false}
+            expanded={expanded === 'codex'}
+            onToggleExpand={() => toggle('codex')}
+          >
+            <CodexAuth onConnected={onConnected} />
+          </ProviderRow>
+
+          <ProviderRow
+            id="claude"
+            name="Claude Code"
+            connected={claudeConnected}
+            showRadio={false}
+            expanded={expanded === 'claude'}
+            onToggleExpand={() => toggle('claude')}
+          >
+            <ProviderAuth compact onDone={onConnected} />
+          </ProviderRow>
+        </div>
+
+        <p className="setup__skip-warn">
+          Skipping means the AI agent won't work — all chat messages
+          will fail until you connect a provider.
+        </p>
+        <button className="setup__skip" onClick={onSkip}>
+          Skip for now
+        </button>
       </div>
     </div>
   )

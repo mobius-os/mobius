@@ -143,3 +143,33 @@ def test_unknown_event_returns_false():
   changed = process_event({"type": "unknown"}, blocks)
   assert not changed
   assert blocks == []
+
+
+# --- error events (round-3 hardening) -------------------------------
+# Error events must persist into the assistant transcript (so users
+# see what went wrong on scroll-back), and consecutive errors must
+# coalesce into one block (so a flaky run doesn't stack a wall of
+# duplicate errors). The signature here is `process_event(event,
+# blocks)` — not `(state, event)` — matching the rest of this file.
+
+
+def test_process_error_event_appends_block():
+  blocks = []
+  changed = process_event({"type": "error", "message": "boom"}, blocks)
+  assert changed
+  assert any(
+    b.get("type") == "error" and b.get("message") == "boom"
+    for b in blocks
+  )
+
+
+def test_process_error_event_coalesces_duplicates():
+  """Repeated error events collapse to one (no stacked blocks)."""
+  blocks = [{"type": "text", "content": "partial"}]
+  process_event({"type": "error", "message": "first"}, blocks)
+  process_event({"type": "error", "message": "second"}, blocks)
+  error_blocks = [b for b in blocks if b.get("type") == "error"]
+  assert len(error_blocks) == 1
+  assert error_blocks[0]["message"] == "second"
+  # Text block preserved.
+  assert any(b.get("type") == "text" for b in blocks)

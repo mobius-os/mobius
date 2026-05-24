@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react'
-import { apiFetch } from '../../api/client.js'
+import { useQueryClient } from '@tanstack/react-query'
+import { api } from '../../api/client.js'
+import { authQueries } from '../../hooks/queries.js'
 import './ProviderAuth.css'
 
 /**
@@ -11,29 +13,23 @@ import './ProviderAuth.css'
  *   className — additional class on the wrapper (optional)
  */
 export default function ProviderAuth({ onDone, compact = false, className = '' }) {
-  const [authenticated, setAuthenticated] = useState(false)
-  const [loading, setLoading] = useState(true)
+  const queryClient = useQueryClient()
+  const statusQuery = authQueries.provider.claudeStatus.useQuery()
   const [authUrl, setAuthUrl] = useState('')
   const [authCode, setAuthCode] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [starting, setStarting] = useState(false)
   const [justConnected, setJustConnected] = useState(false)
-
-  useEffect(() => {
-    apiFetch('/auth/provider/status')
-      .then(r => r.json())
-      .then(data => setAuthenticated(!!data.authenticated))
-      .catch(() => {})
-      .finally(() => setLoading(false))
-  }, [])
+  const authenticated = !!statusQuery.data?.authenticated
+  const loading = statusQuery.isLoading
 
   async function startAuth() {
     setError('')
     setAuthUrl('')
     setStarting(true)
     try {
-      const res = await apiFetch('/auth/provider/login', { method: 'POST' })
+      const res = await api.auth.provider.claude.startLogin()
       if (!res.ok) {
         const data = await res.json()
         setError(data.detail || 'Could not start auth.')
@@ -55,21 +51,17 @@ export default function ProviderAuth({ onDone, compact = false, className = '' }
     setError('')
     setSubmitting(true)
     try {
-      const res = await apiFetch('/auth/provider/code', {
-        method: 'POST',
-        body: JSON.stringify({ code: authCode.trim() }),
-      })
+      const res = await api.auth.provider.claude.submitCode(authCode.trim())
       if (!res.ok) {
         const data = await res.json()
         setError(data.detail || 'Failed to submit code.')
         return
       }
-      const sr = await apiFetch('/auth/provider/status')
-      const s = await sr.json()
-      if (!s.authenticated) {
+      authQueries.provider.claudeStatus.invalidate(queryClient)
+      const next = await statusQuery.refetch()
+      if (!next.data?.authenticated) {
         setError('Authentication failed. Try again.')
       } else {
-        setAuthenticated(true)
         setAuthUrl('')
         setAuthCode('')
         setJustConnected(true)

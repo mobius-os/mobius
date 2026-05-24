@@ -54,6 +54,25 @@ async def lifespan(app):
   # Seed a Hello World app on first boot (no-op if apps already exist).
   from scripts.seed_hello import seed as seed_hello
   await seed_hello()
+  # Backfill source_dir for legacy app rows. The file watcher resolves
+  # /data/apps/<slug>/index.jsx → app.id via exact source_dir match;
+  # rows with NULL (older builds, or apps imported without going
+  # through register_app.py) would silently never auto-recompile.
+  # Derive the same slug shape register_app.py uses and persist it.
+  from app.routes.apps import _derive_source_dir
+  from app.database import SessionLocal
+  from app import models as _models
+  _db = SessionLocal()
+  try:
+    legacy = _db.query(_models.App).filter(
+      _models.App.source_dir.is_(None)
+    ).all()
+    for _a in legacy:
+      _a.source_dir = _derive_source_dir(settings.data_dir, _a.name)
+    if legacy:
+      _db.commit()
+  finally:
+    _db.close()
   # Start the JSX file watcher so direct edits to /data/apps/*/index.jsx
   # auto-recompile and refresh the served bundle — agents don't need to
   # re-run register_app.py just to push a code change.
@@ -182,6 +201,19 @@ if _static_dir.is_dir():
     file = _static_dir / path
     if file.is_file() and path != "index.html":
       return FileResponse(str(file))
+    # _static_dir resolution is all-or-nothing at startup — when the
+    # agent's live build (/data/shell/dist) is selected, any file
+    # that lives ONLY in the baked build (/app/static) would
+    # otherwise fall through to the HTML response. /vendor/three/*
+    # is the canonical example: the npm-install vendor copy lands in
+    # /app/static at image build time, but Vite doesn't include
+    # vendor in /data/shell/dist. Falling back to the baked dir for
+    # files-not-in-live keeps mini-app imports working without
+    # forcing the rebuild script to mirror the entire vendor tree.
+    if _static_dir != _baked_dir and path != "index.html":
+      baked = _baked_dir / path
+      if baked.is_file():
+        return FileResponse(str(baked))
     # Always inject theme CSS (default or override) so colors are
     # consistent from the first paint.
     from fastapi.responses import HTMLResponse

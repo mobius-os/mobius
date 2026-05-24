@@ -15,6 +15,52 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from app.tool_summaries import summarize_tool_input
+
+
+# Known models per provider, with the top entry treated as the
+# default. Mirrors the order in the frontend's CLAUDE_MODELS /
+# CODEX_MODELS lists — keep in sync when a model lands at the top
+# of either list. Listing all known values lets the snapshot logic
+# detect cross-provider model mismatches (e.g. the global file
+# remembers a Codex model but a new chat starts on Claude) and
+# fall back cleanly to the provider's own top entry.
+KNOWN_MODELS = {
+  "claude": [
+    "claude-opus-4-7-20251215",
+    "claude-opus-4-6-20251015",
+    "claude-opus-4-5-20251001",
+    "claude-sonnet-4-7-20251215",
+    "claude-sonnet-4-5-20251001",
+    "claude-haiku-4-5-20251001",
+  ],
+  "codex": [
+    "gpt-5.4",
+  ],
+}
+
+DEFAULT_MODELS = {
+  provider: models[0] for provider, models in KNOWN_MODELS.items()
+}
+
+# Initial effort when no global default exists. Aligns with the
+# picker's middle option so new chats always render the picker with
+# something selected — no error handling needed for "user sent without
+# picking anything".
+DEFAULT_EFFORT = "medium"
+
+
+def _model_belongs_to_other_provider(model: str, provider: str) -> bool:
+  """True when `model` is a KNOWN model for some OTHER provider.
+  Use this to reject cross-provider mismatches without blocking
+  unknown / future model names — the SDK is the authority on what
+  it accepts; we only intercept the specific failure mode of
+  sending a Codex model to Claude or vice versa."""
+  for p, models in KNOWN_MODELS.items():
+    if p != provider and model in models:
+      return True
+  return False
+
 
 def _load_agent_settings(data_dir: str) -> dict:
   """Loads agent settings from /data/shared/agent-settings.json."""
@@ -25,6 +71,98 @@ def _load_agent_settings(data_dir: str) -> dict:
     except (json.JSONDecodeError, OSError):
       pass
   return {}
+
+
+def write_agent_settings(data_dir: str, settings: dict) -> bool:
+  """Persists `settings` to /data/shared/agent-settings.json.
+
+  Returns True on success, False on disk/permission failure. The
+  caller is responsible for retry / re-marking the source as dirty
+  so the mirror isn't silently lost.
+  """
+  path = Path(data_dir) / "shared" / "agent-settings.json"
+  try:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings, indent=2))
+    return True
+  except OSError:
+    return False
+
+
+def initial_chat_defaults(data_dir: str, provider: str) -> dict:
+  """Returns the {model, effort} snapshot a brand-new chat should
+  start with — current global defaults merged with hard-coded
+  per-provider fallbacks so the picker always renders something
+  selected AND the model actually belongs to the chat's provider.
+
+  The global file holds ONE model (the user's last pick across
+  providers); when a new chat starts on a DIFFERENT provider, that
+  remembered model is the wrong one to seed — e.g. file has
+  `gpt-5.4` but owner.provider is still `claude`. In that case
+  ignore the file's model and use the provider's own top model.
+  Effort is provider-agnostic so the file's value carries cleanly.
+
+  This snapshot is written into chat.agent_settings_json so each
+  chat is fully self-contained: subsequent global-default changes
+  don't bleed into existing chats.
+  """
+  defaults = _load_agent_settings(data_dir)
+  file_model = defaults.get("model")
+  if file_model and not _model_belongs_to_other_provider(file_model, provider):
+    model = file_model
+  else:
+    model = DEFAULT_MODELS.get(provider, DEFAULT_MODELS["claude"])
+  return {
+    "model": model,
+    "effort": defaults.get("effort") or DEFAULT_EFFORT,
+  }
+
+
+def effective_agent_settings(
+  data_dir: str,
+  chat_overrides: dict | None = None,
+  provider: str | None = None,
+) -> dict:
+  """Merges per-chat overrides on top of the global defaults, with
+  provider-aware fallback so model+effort are ALWAYS populated.
+
+  Layer order (later wins per key):
+    1. Hard-coded provider defaults (top model + medium effort).
+    2. Global file at /data/shared/agent-settings.json.
+    3. Per-chat overrides from Chat.agent_settings_json.
+
+  Provider-aware fallback fires when neither the file nor the
+  override supplies a key — that guarantees the picker always shows
+  a real selection and the runner always uses a real model. Existing
+  chats created before the snapshot-on-create change have no
+  override; the fallback bridges them without a migration.
+
+  Known keys today: `model`, `effort`, `codex_model`. Future picker
+  fields (thinking budget, sandbox mode) follow the same path — add
+  the key here without a migration.
+  """
+  prov = provider or "claude"
+  merged = {
+    "model": DEFAULT_MODELS.get(prov, DEFAULT_MODELS["claude"]),
+    "effort": DEFAULT_EFFORT,
+  }
+  # File layer: only carry the model if it belongs to this provider.
+  # Effort is provider-agnostic so it always carries.
+  file_layer = _load_agent_settings(data_dir)
+  if file_layer.get("effort") is not None:
+    merged["effort"] = file_layer["effort"]
+  fm = file_layer.get("model")
+  if fm and not _model_belongs_to_other_provider(fm, prov):
+    merged["model"] = fm
+  # Per-chat overrides are authoritative — the user explicitly
+  # picked them for THIS chat, so they trump the cross-provider
+  # check.
+  if chat_overrides:
+    for k, v in chat_overrides.items():
+      if v is None:
+        continue
+      merged[k] = v
+  return merged
 
 
 def _skill_path() -> Path | None:
@@ -41,19 +179,6 @@ class ProviderResult:
   """Everything the chat module needs to spawn a provider subprocess."""
   cmd: list[str]
   env: dict[str, str]
-
-
-def _summarize_input(tool: str, inp: dict) -> str:
-  """Returns a short human-readable summary of a tool's input."""
-  if tool == "Bash":
-    return inp.get("command", "")
-  elif tool in ("Read", "Glob"):
-    return inp.get("file_path", "") or inp.get("pattern", "")
-  elif tool in ("Write", "Edit"):
-    return inp.get("file_path", "")
-  elif tool == "Grep":
-    return inp.get("pattern", "")
-  return str(inp)[:200] if inp else ""
 
 
 class BaseProvider:
@@ -80,6 +205,21 @@ class BaseProvider:
     """Returns the command and env for the subprocess."""
     raise NotImplementedError
 
+  def build_env(
+    self,
+    base_env: dict[str, str],
+    data_dir: str,
+    chat_id: str | None = None,
+  ) -> dict[str, str]:
+    """Returns just the env dict that build() would produce.
+
+    The SDK path uses only the env (credentials path, per-chat
+    agent-browser session) and does not need the cmd list. Splitting
+    the env construction here keeps the SDK path from building and
+    discarding a full CLI argv.
+    """
+    raise NotImplementedError
+
   def parse_line(self, line: str) -> Optional[dict]:
     """Parses one stdout line into an SSE event dict, or None."""
     raise NotImplementedError
@@ -101,7 +241,10 @@ class ClaudeProvider(BaseProvider):
       )
     return None
 
-  def build(self, user_message, session_id, base_env, data_dir, chat_id=None):
+  def build(
+    self, user_message, session_id, base_env, data_dir,
+    chat_id=None, agent_settings=None,
+  ):
     cmd = [
       "claude",
       "-p",
@@ -129,22 +272,37 @@ class ClaudeProvider(BaseProvider):
     # The agent uses agent-browser (installed in the image) via Bash for
     # screenshots and interactive testing — no MCP browser tools needed.
 
-    # Load user-configurable settings (model, effort).
-    agent_settings = _load_agent_settings(data_dir)
-    if agent_settings.get("model"):
-      cmd += ["--model", agent_settings["model"]]
-    if agent_settings.get("effort"):
-      cmd += ["--effort", agent_settings["effort"]]
+    # Load user-configurable settings (model, effort). When the caller
+    # passes pre-merged effective settings (chat.py merges per-chat
+    # overrides on top of the file defaults), prefer those — keeps
+    # the merge logic in a single place.
+    merged = (
+      dict(agent_settings)
+      if agent_settings is not None
+      else _load_agent_settings(data_dir)
+    )
+    if merged.get("model"):
+      cmd += ["--model", merged["model"]]
+    if merged.get("effort"):
+      cmd += ["--effort", merged["effort"]]
 
     # Message is a positional argument — always last.  The "--" terminates
     # option parsing so the agent doesn't confuse it with a flag value.
     cmd += ["--", user_message]
 
+    env = self.build_env(base_env, data_dir, chat_id=chat_id)
+    return ProviderResult(cmd=cmd, env=env)
+
+  def build_env(
+    self,
+    base_env: dict[str, str],
+    data_dir: str,
+    chat_id: str | None = None,
+  ) -> dict[str, str]:
     env = dict(base_env)
     creds = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
     if creds.exists():
       env["CLAUDE_CONFIG_DIR"] = str(creds.parent)
-
     # Per-chat agent-browser session.  Every agent-browser invocation
     # in this subprocess picks up AGENT_BROWSER_SESSION via env, so
     # each chat gets its own isolated Chrome instance and they don't
@@ -152,8 +310,7 @@ class ClaudeProvider(BaseProvider):
     # The session is torn down by chat.py in the finally block.
     if chat_id:
       env["AGENT_BROWSER_SESSION"] = f"chat-{chat_id}"
-
-    return ProviderResult(cmd=cmd, env=env)
+    return env
 
   def _parse_stream_event(self, event: dict):
     """Handles stream_event — text deltas and tool block starts."""
@@ -203,7 +360,7 @@ class ClaudeProvider(BaseProvider):
             "questions": questions,
           })
           continue
-        summary = _summarize_input(name, inp)
+        summary = summarize_tool_input(name, inp)
         if summary:
           results.append({
             "type": "tool_input",
@@ -310,9 +467,19 @@ class CodexProvider(BaseProvider):
       )
     return None
 
-  def build(self, user_message, session_id, base_env, data_dir, chat_id=None):
-    agent_settings = _load_agent_settings(data_dir)
-    model = agent_settings.get("codex_model")
+  def build(
+    self, user_message, session_id, base_env, data_dir,
+    chat_id=None, agent_settings=None,
+  ):
+    merged = (
+      dict(agent_settings)
+      if agent_settings is not None
+      else _load_agent_settings(data_dir)
+    )
+    # Codex accepts the picker's `model` key OR a Codex-specific
+    # `codex_model` for backwards compatibility. The per-chat picker
+    # writes `model`; the legacy file uses `codex_model`.
+    model = merged.get("model") or merged.get("codex_model")
 
     # Use the app-server runner. `codex exec --json` only emits one
     # final agent_message event (no per-token deltas), so it can't
@@ -359,11 +526,7 @@ class CodexProvider(BaseProvider):
     if model:
       cmd += ["--model", model]
 
-    env = dict(base_env)
-
-    # Point Codex to credential directory (device-auth tokens).
-    codex_home = str(Path(data_dir) / "cli-auth" / "codex")
-    env["CODEX_HOME"] = codex_home
+    env = self.build_env(base_env, data_dir, chat_id=chat_id)
 
     # System prompt on first message: write the skill to a per-run
     # file (same race rationale as the prompt) and pass it as
@@ -381,6 +544,17 @@ class CodexProvider(BaseProvider):
           pass
 
     return ProviderResult(cmd=cmd, env=env)
+
+  def build_env(
+    self,
+    base_env: dict[str, str],
+    data_dir: str,
+    chat_id: str | None = None,
+  ) -> dict[str, str]:
+    del chat_id  # codex doesn't use AGENT_BROWSER_SESSION
+    env = dict(base_env)
+    env["CODEX_HOME"] = str(Path(data_dir) / "cli-auth" / "codex")
+    return env
 
   def _extract_command(self, raw_cmd: str) -> str:
     """Extracts the user command from Codex's bash -lc wrapper."""

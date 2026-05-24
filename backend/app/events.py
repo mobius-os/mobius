@@ -64,6 +64,23 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
         break
     return True
 
+  if event_type == "error":
+    # Persist the error into the assistant transcript so users see
+    # what went wrong when scrolling back. The same event is also
+    # broadcast live for active SSE subscribers (the sink handles
+    # both). Coalesce: a single error is enough — additional error
+    # events on the same turn replace rather than stack.
+    message = event.get("message", "") or ""
+    if (assistant_blocks
+        and assistant_blocks[-1].get("type") == "error"):
+      assistant_blocks[-1]["message"] = message
+    else:
+      assistant_blocks.append({
+        "type": "error",
+        "message": message,
+      })
+    return True
+
   if event_type == "question":
     # Coalesce: if the last block is already a question (from a
     # partial assistant event), replace it instead of appending.

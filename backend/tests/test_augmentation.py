@@ -625,7 +625,15 @@ def test_promote_and_append_dont_lose_messages(db):
 
 
 def test_stop_clears_pending_queue(db):
-  """stop_chat must clear pending_messages and bump generation."""
+  """stop_chat must clear chat.pending_messages and bump
+  _run_generation. The dying run_chat's finally checks ownership
+  via the gen counter and skips _promote_pending_messages /
+  _schedule_continuation when bumped — that prevents the backend
+  from double-firing the queue (the frontend's handleStop already
+  collapses the queue into a combined doSend; if backend also
+  drained, queued work would land twice). See CLAUDE.md
+  `Stop-chat contract`.
+  """
   import asyncio
   from app import models
   from app.chat import (
@@ -658,7 +666,10 @@ def test_stop_clears_pending_queue(db):
 
 
 def test_stop_chat_for_clears_pending_queue(db):
-  """stop_chat_for must clear pending_messages too."""
+  """stop_chat_for must clear pending_messages too (mirror of the
+  global path test). Backend Stop is purely interrupt; frontend
+  owns the collapse-and-resend.
+  """
   import asyncio
   from app import models
   from app.chat import _run_generation, stop_chat_for

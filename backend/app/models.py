@@ -34,6 +34,14 @@ class Chat(Base):
   deleted_at = Column(DateTime, nullable=True, default=None)
   session_id = Column(String(128), nullable=True, default=None)
   provider = Column(String(32), nullable=False, default="claude")
+  # Per-chat overrides for the agent runtime (model, effort, future
+  # fields like thinking budget). When null, the chat uses the global
+  # default from /data/shared/agent-settings.json. Stored as JSON
+  # rather than dedicated columns so new fields can land without a
+  # migration. Read in `chat.py:_run_chat_impl` and merged over the
+  # file-loaded defaults; written by `PATCH /api/chats/{id}` from the
+  # `/` slash picker (see `frontend/.../SlashPicker.jsx`).
+  agent_settings_json = Column(JSON, nullable=True, default=None)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)

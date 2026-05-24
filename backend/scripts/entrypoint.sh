@@ -11,7 +11,19 @@ trap cleanup TERM INT
 # Railway (and similar platforms) mount a fresh volume at /data owned by
 # root — the dirs from the Dockerfile are replaced by the empty mount.
 mkdir -p /data/db /data/apps /data/compiled /data/shared /data/shell /data/logs /data/cron-logs /data/cli-auth
-chown -R mobius:mobius /data 2>/dev/null || chmod -R 777 /data 2>/dev/null || true
+if ! chown -R mobius:mobius /data 2>/dev/null; then
+  echo "WARNING: chown -R mobius:mobius /data failed (likely a managed-volume platform like Railway)." >&2
+  echo "WARNING: Falling back to chmod 1777 /data + 777 on subdirs so the mobius user can traverse" >&2
+  echo "WARNING: AND create files at the /data top level. Per-file chmods later in this script set" >&2
+  echo "WARNING: explicit 600 on sensitive paths (.secret-key, service-token.txt, cli-auth/) so the" >&2
+  echo "WARNING: wide perms don't expose secrets. chmod 700 here would lock the mobius user out of" >&2
+  echo "WARNING: /data entirely (root-owned dir, mode 700, no read/exec for non-owner) and break" >&2
+  echo "WARNING: boot. chmod 755 was the previous fallback but broke runtime writes to top-level" >&2
+  echo "WARNING: /data/service-token.txt — POST /api/auth/setup writes it as the mobius user, and" >&2
+  echo "WARNING: it needs to be able to create files in /data, not just traverse." >&2
+  chmod 1777 /data 2>/dev/null || true
+  chmod -R 777 /data/db /data/apps /data/compiled /data/shared /data/shell /data/logs /data/cron-logs /data/cli-auth 2>/dev/null || true
+fi
 
 # Defensive: any baked-in Python source/script that ended up with a
 # group-restrictive mode (e.g. 640 from a host umask 027) would be
@@ -89,17 +101,27 @@ token = create_access_token({'sub': owner.username}, expires_delta=timedelta(day
 print(token, end='')
 ")
 if [ -n "$_token" ]; then
-  echo "$_token" > /data/service-token.txt
-  chown mobius:mobius /data/service-token.txt
-  chmod 600 /data/service-token.txt
+  # Atomic write: tmp + rename. A crash mid-write would otherwise leave
+  # an empty service-token.txt that cron jobs read as an empty token.
+  echo "$_token" > /data/service-token.txt.tmp
+  chown mobius:mobius /data/service-token.txt.tmp 2>/dev/null || true
+  chmod 600 /data/service-token.txt.tmp
+  mv /data/service-token.txt.tmp /data/service-token.txt
   echo "Service token written/refreshed at /data/service-token.txt"
 fi
 
 # The python block above imports app.database, which opens the SQLite
-# engine as root and creates an empty /data/db/ultimate.db file owned by
-# root. That then breaks uvicorn running as mobius. Re-chown /data/db
+# engine as root and creates an empty /data/db/ultimate.db file owned
+# by root. That then breaks uvicorn running as mobius. Re-chown /data/db
 # here so the mobius user can always write.
-chown -R mobius:mobius /data/db 2>/dev/null || true
+#
+# /data/logs is included as defense in depth: any root-run step that
+# accidentally touches /data/logs/chat.log (initial logging
+# configuration, a future entrypoint script, a startup probe) would
+# leave it root-owned and uvicorn (mobius) could not subsequently
+# write. Source of any specific occurrence is hard to pin down after
+# the fact — this chown costs nothing and closes the class.
+chown -R mobius:mobius /data/db /data/logs 2>/dev/null || true
 
 # Copy frontend source to /data/shell/ on first boot (or recovery).
 if [ ! -d /data/shell/src ]; then
@@ -155,7 +177,15 @@ if [ -f /data/shell/.origin-hash ]; then
   fi
 fi
 
-# Run per-app init scripts to restore cron entries lost on container restart.
+# Run per-app init scripts to restore cron entries lost on container
+# restart. Don't pre-clear the crontab — agents (and the operator) may
+# have installed cron entries directly via `crontab -u`, and a blanket
+# `crontab -r` on every boot would silently wipe them. Init scripts
+# that use idempotent patterns (e.g. write a full crontab, or check
+# for existing entries before appending) survive replay. The cost of
+# the previous policing was real: agent-installed crons disappeared
+# on the next deploy with no signal. Per Möbius's design philosophy
+# (CLAUDE.md), "code empowers the agent; it does not police it."
 for init_script in /data/apps/*/init-cron.sh; do
   [ -f "$init_script" ] && su -s /bin/sh mobius -c "bash $init_script" 2>/dev/null || true
 done
@@ -179,31 +209,82 @@ fi
 # Initialize agent experience file (seeds from template on first boot).
 python3 /app/scripts/init_agent_context.py
 
-# Create default theme.css if it doesn't exist.
-if [ ! -f /data/shared/theme.css ]; then
-  cat > /data/shared/theme.css << 'EOF'
-:root {
-  /* Colors */
-  --bg: #0c0f14;
-  --surface: #14181f;
-  --surface2: #1a1f28;
-  --border: #252b36;
-  --border-light: #1c2029;
-  --text: #d4d4d8;
-  --muted: #52525b;
-  --accent: #a78bfa;
-  --accent-hover: #c4b5fd;
-  --accent-dim: rgba(167, 139, 250, 0.1);
-  --danger: #f87171;
-  --green: #6ee7b7;
+# Theme: no starter file written here. /api/theme reads
+# /data/shared/theme.css when present, otherwise falls through to
+# theme.py:DEFAULT_THEME — the single source of truth for the
+# platform default. Deleting /data/shared/theme.css cleanly reverts
+# to that default; writing the file creates an override.
 
-  /* Typography */
-  --font: 'Inter', system-ui, sans-serif;
-  --mono: 'JetBrains Mono', ui-monospace, monospace;
-  font-size: 15px;
-}
+# Always write the gitignore so prior boots (which lacked .secret-key in
+# the ignore list) get the updated rules before the next add/commit cycle.
+cat > /data/.gitignore <<'EOF'
+cli-auth/
+push/*.pem
+service-token.txt
+.secret-key
+compiled/
+shell/dist/
+shell/node_modules/
+db/
+chats/
+backups/
+*.bak-*
+apps/*/data/
 EOF
-  chown mobius:mobius /data/shared/theme.css
+chown mobius:mobius /data/.gitignore 2>/dev/null || true
+
+# Drop nested git repos under /data so the outer /data/.git is the
+# ONE repo that covers everything sensible. If we leave inner .git
+# directories in place (the shell came in as a clone; the agent may
+# have run `git init` in /data/apps/<slug>/...), `git add` from
+# /data root treats them as submodules and warns with "adding
+# embedded git repository". An agent in chat 380581a8 surfaced
+# this gotcha. Removing the inner .git makes shell + apps just
+# tracked files in the outer repo — agent has one git history that
+# captures every edit it makes.
+find /data -mindepth 2 -maxdepth 4 -type d -name '.git' -prune \
+  -exec rm -rf {} + 2>/dev/null || true
+
+if [ ! -d /data/.git ]; then
+  git init /data
+  git -C /data config user.name 'Mobius Agent'
+  git -C /data config user.email 'agent@mobius'
+  git -C /data add -A
+  git -C /data commit -m 'init' --allow-empty
+  chown -R mobius:mobius /data/.git 2>/dev/null || true
+else
+  # Defensive: a prior boot may have committed .secret-key before it was
+  # in the gitignore. Untrack it so the JWT signing key never re-enters
+  # any subsequent commit.
+  git -C /data rm --cached .secret-key 2>/dev/null || true
+fi
+
+# Idempotent re-chown of /data/.git on every boot. A `docker pull` plus
+# a recreated volume can leave a previously-mobius-owned /data/.git
+# root-owned again (e.g. some recovery installs bake /data/.git into the
+# image layer). Without this the agent's commits fail with "fatal:
+# detected dubious ownership" or refuse to write index updates.
+chown -R mobius:mobius /data/.git 2>/dev/null || true
+
+# Ensure the mobius user has a GLOBAL git identity available. The
+# local-repo config above only covers /data/.git; when the agent later
+# runs `git commit` inside /data/apps/<slug>/ (which may have its own
+# .git with no config, or no .git and no fallback because it's not
+# nested under /data/.git's worktree), commits fail with "Please tell
+# me who you are." Set the global config as mobius so any future
+# repository — per-app, shell, or scratch — picks up an identity.
+su -s /bin/sh mobius -c "
+  git config --global user.name 'Möbius Agent'
+  git config --global user.email 'agent@mobius.local'
+" 2>/dev/null || true
+
+# Only copy the pm-commit helper if missing or if the image version
+# differs from the on-disk copy. Blindly overwriting on every boot wipes
+# any instance-local edits the agent or operator may have made.
+if [ ! -f /data/.pm-commit ] || ! cmp -s /app/scripts/pm-commit /data/.pm-commit; then
+  cp /app/scripts/pm-commit /data/.pm-commit
+  chmod +x /data/.pm-commit
+  chown mobius:mobius /data/.pm-commit 2>/dev/null || true
 fi
 
 

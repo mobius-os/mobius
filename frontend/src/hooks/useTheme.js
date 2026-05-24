@@ -1,7 +1,6 @@
 import { useEffect } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { apiFetch } from '../api/client.js'
-import { themeQueryKey } from './queries.js'
+import { useQueryClient } from '@tanstack/react-query'
+import { themeQueries } from './queries.js'
 
 // `bg` from /api/theme is constrained server-side to a hex color via
 // the regex in theme.py:get_bg_color. We re-validate client-side so a
@@ -25,15 +24,7 @@ const HEX_RE = /^#[0-9a-fA-F]{3,8}$/
  */
 export default function useTheme() {
   const queryClient = useQueryClient()
-  const { data } = useQuery({
-    queryKey: themeQueryKey,
-    queryFn: async () => {
-      const res = await apiFetch('/theme')
-      if (!res.ok) throw new Error(`theme fetch failed: ${res.status}`)
-      return res.json()
-    },
-    staleTime: 60_000,
-  })
+  const { data } = themeQueries.useQuery()
 
   useEffect(() => {
     if (!data || !data.css) return
@@ -41,7 +32,7 @@ export default function useTheme() {
   }, [data])
 
   return {
-    loadTheme: () => queryClient.invalidateQueries({ queryKey: themeQueryKey }),
+    loadTheme: () => themeQueries.invalidate(queryClient),
   }
 }
 

@@ -8,7 +8,7 @@ FROM node:20-slim AS frontend
 
 WORKDIR /build
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm ci
+RUN npm ci --ignore-scripts
 COPY frontend/ .
 RUN npm run build
 
@@ -55,6 +55,17 @@ WORKDIR /app
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# openai-codex Python SDK: installed in a separate step because its
+# upstream pyproject pins openai-codex-cli-bin==0.131.0a4 (a version
+# not published on PyPI). Install --no-deps to skip that broken pin,
+# then pin the cli-bin to a version that actually exists.
+# Pinned to commit SHA (not tag) for full reproducibility — tags are
+# mutable on GitHub. SHA corresponds to refs/tags/rust-v0.133.0 as of
+# 2026-05-24.
+RUN pip install --no-cache-dir --no-deps \
+      'openai-codex @ git+https://github.com/openai/codex.git@71a2103606e57ee3508db968c26b2fcee54b5c6e#subdirectory=sdk/python' \
+    && pip install --no-cache-dir 'openai-codex-cli-bin==0.133.0'
+
 COPY backend/app ./app/
 COPY backend/scripts ./scripts/
 COPY skill/ ./skill/
@@ -64,21 +75,11 @@ COPY protected-files.txt ./protected-files.txt
 COPY --from=frontend /build/dist ./static/
 COPY frontend/public/app-frame.html ./app-frame.html
 
-# Self-host three.js. The app-frame import map points at /vendor/three/...
-# so mini-apps with `import * as THREE from 'three'` resolve to a same-
-# origin fetch instead of the esm.sh waterfall (cold-load saves 1-3s on
-# any 3D app). Pinned to match the version we previously served via CDN.
-RUN mkdir -p /tmp/vendor && cd /tmp/vendor \
-    && npm init -y >/dev/null \
-    && npm install --silent three@0.162.0 \
-    && mkdir -p /app/static/vendor/three/addons \
-    && cp node_modules/three/build/three.module.js /app/static/vendor/three/three.module.js \
-    && cp -r node_modules/three/examples/jsm/. /app/static/vendor/three/addons/ \
-    && rm -rf /tmp/vendor
-
 # Self-hosted vendor libs for mini-app import maps. Pinned via npm
 # install at image build time, served same-origin under /vendor/ with
-# a long cache. Eliminates the cold-load esm.sh waterfall for three.js.
+# a long cache. Eliminates the cold-load esm.sh waterfall for three.js
+# (cold-load saves 1-3s on any 3D app). Pinned to match the version
+# we previously served via CDN.
 RUN mkdir -p /tmp/vendor-install && cd /tmp/vendor-install \
     && npm init -y >/dev/null \
     && npm install --no-audit --no-fund --silent three@0.162.0 \
