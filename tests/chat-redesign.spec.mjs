@@ -68,7 +68,14 @@ async function sendMessage(page, text) {
   const input = page.getByRole('textbox', { name: 'Message the agent...' })
   await input.fill(text)
   await page.keyboard.press('Enter')
-  await page.waitForSelector('.chat__scroll', { timeout: 3000 })
+  // Wait for the optimistic user-message LI to render — the
+  // deterministic signal that the send landed. The previous
+  // strategy (waiting on `.chat__scroll` to be visible) raced the
+  // hide-then-reveal safety cap when prior tests left state in the
+  // shared storageState; downstream assertions already do their
+  // own visibility waits, so blocking on container visibility up
+  // front bought nothing.
+  await page.waitForSelector('.chat__msg--user', { timeout: 8000 })
   await page.evaluate(() => new Promise(r =>
     requestAnimationFrame(() => requestAnimationFrame(r))
   ))
@@ -108,6 +115,91 @@ test.describe('Bug 1: AskUserQuestion', () => {
     // disabled={isStreaming} stayed grayed out).
     const optionButtons = page.locator('.qcard__opt')
     await expect(optionButtons.first()).toBeEnabled({ timeout: 5000 })
+  })
+
+
+  test('partial question + text token + full question for same id renders ONE card', async ({ page }) => {
+    // The user-visible duplicate-card bug from the klix chat: the
+    // SDK's --include-partial-messages can deliver two `question`
+    // events for the same AskUserQuestion call with other events
+    // (text token, tool boundary) landing between them. Old dedup
+    // ("last block is question?") missed the second match and
+    // appended a phantom card. New dedup matches by question id
+    // and replaces in place no matter where the existing block
+    // sits.
+    const streamBody = [
+      `data: ${JSON.stringify({
+        type: 'question',
+        questions: [{
+          id: 'klix_scope',
+          question: 'What change?',
+          header: 'Scope',
+          multiSelect: false,
+          options: [],
+        }],
+      })}\n\n`,
+      'data: {"type":"text","content":"thinking..."}\n\n',
+      `data: ${JSON.stringify({
+        type: 'question',
+        questions: [{
+          id: 'klix_scope',
+          question: 'What change?',
+          header: 'Scope',
+          multiSelect: false,
+          options: [{ label: 'Fix' }, { label: 'Skip' }],
+        }],
+      })}\n\n`,
+      'data: {"type":"done"}\n\n',
+    ].join('')
+    await setupWithStreamMock(page, streamBody)
+    await newChat(page)
+    await sendMessage(page, 'Try the partial-then-full sequence')
+
+    await expect(page.locator('.qcard')).toHaveCount(1, { timeout: 5000 })
+    // The single card has the FINAL options (replace happened), not
+    // the empty partial options.
+    await expect(page.locator('.qcard__opt')).toHaveCount(
+      3, // 2 real options + "Other"
+      { timeout: 2000 }
+    )
+    await expect(page.getByRole('button', { name: 'Fix' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Skip' })).toBeVisible()
+  })
+
+
+  test('two distinct AskUserQuestion calls (different ids) render TWO cards', async ({ page }) => {
+    // Companion to the previous test: identity-based dedup must NOT
+    // collapse genuinely different question calls just because they
+    // share a question text or a common position.
+    const streamBody = [
+      `data: ${JSON.stringify({
+        type: 'question',
+        questions: [{
+          id: 'q-scope',
+          question: 'What change?',
+          header: 'Scope',
+          multiSelect: false,
+          options: [{ label: 'Fix' }],
+        }],
+      })}\n\n`,
+      'data: {"type":"text","content":"got it"}\n\n',
+      `data: ${JSON.stringify({
+        type: 'question',
+        questions: [{
+          id: 'q-mode',
+          question: 'Which mode?',
+          header: 'Mode',
+          multiSelect: false,
+          options: [{ label: 'Direct' }],
+        }],
+      })}\n\n`,
+      'data: {"type":"done"}\n\n',
+    ].join('')
+    await setupWithStreamMock(page, streamBody)
+    await newChat(page)
+    await sendMessage(page, 'Ask two questions')
+
+    await expect(page.locator('.qcard')).toHaveCount(2, { timeout: 5000 })
   })
 
 

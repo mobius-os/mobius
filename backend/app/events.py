@@ -111,22 +111,46 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     return True
 
   if event_type == "question":
-    # Coalesce: if the last block is already a question (from a
-    # partial assistant event), replace it instead of appending.
-    # --include-partial-messages can deliver progressively more
-    # complete question data for the same AskUserQuestion call.
+    # Two partial deliveries for the same AskUserQuestion call may
+    # straddle other events (a text token or tool boundary often
+    # lands between them). Coalesce by stable identity — the SDK-
+    # provided question id, falling back to the first question's
+    # text — instead of "is the last block a question?". Adjacency-
+    # based dedup left duplicate cards when anything interleaved.
     questions = event.get("questions", [])
-    if (assistant_blocks
-        and assistant_blocks[-1].get("type") == "question"):
-      assistant_blocks[-1]["questions"] = questions
-    else:
-      assistant_blocks.append({
-        "type": "question",
-        "questions": questions,
-      })
+    new_block = {"type": "question", "questions": questions}
+    key = question_block_key(new_block)
+    for i, existing in enumerate(assistant_blocks):
+      if (existing.get("type") == "question"
+          and question_block_key(existing) == key):
+        existing["questions"] = questions
+        return True
+    assistant_blocks.append(new_block)
     return True
 
   return False
+
+
+def question_block_key(block: dict) -> tuple:
+  """Stable identity for an AskUserQuestion call across partial events.
+
+  Two question blocks compare equal iff they represent the same
+  AskUserQuestion invocation. Prefer the SDK-assigned id (Claude
+  and Codex both supply one); fall back to the first question's
+  text so a defensive runner that omits ids still dedups correctly.
+
+  The first question is enough — a single AskUserQuestion call can
+  carry multiple sub-questions, but their order and first member
+  are stable across the partial-message stream while the trailing
+  list grows progressively.
+  """
+  questions = block.get("questions") or []
+  if not questions:
+    return ("empty",)
+  first = questions[0] or {}
+  if first.get("id"):
+    return ("id", first["id"])
+  return ("text", first.get("question") or first.get("text") or "")
 
 
 def build_assistant_message(

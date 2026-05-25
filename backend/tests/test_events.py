@@ -110,12 +110,73 @@ def test_question_coalesces_partial_then_full():
 
 
 def test_question_after_text_appends():
-  """Question after a text block appends (not coalesces)."""
+  """A brand-new question (no prior question block to match) appends."""
   blocks = [{"type": "text", "content": "hello"}]
   process_event({"type": "question", "questions": [{"question": "Q?"}]}, blocks)
   assert len(blocks) == 2
   assert blocks[0]["type"] == "text"
   assert blocks[1]["type"] == "question"
+
+
+def test_question_partial_then_full_with_text_between_does_not_duplicate():
+  """The user-visible duplicate-card bug: --include-partial-messages
+  can deliver two partial events for the same AskUserQuestion call
+  with a text token landing between them.  Dedup must match by
+  identity (question id), not by 'is the last block a question'.
+  """
+  blocks = []
+  partial = [{"id": "klix_scope", "question": "What change?", "options": []}]
+  process_event({"type": "question", "questions": partial}, blocks)
+  process_event({"type": "text", "content": "thinking..."}, blocks)
+  full = [{
+    "id": "klix_scope",
+    "question": "What change?",
+    "options": [{"label": "Fix"}, {"label": "Skip"}],
+  }]
+  process_event({"type": "question", "questions": full}, blocks)
+
+  question_blocks = [b for b in blocks if b.get("type") == "question"]
+  assert len(question_blocks) == 1, (
+    f"expected one question block, got {len(question_blocks)}"
+  )
+  assert question_blocks[0]["questions"][0]["options"] == [
+    {"label": "Fix"}, {"label": "Skip"},
+  ]
+  # Text block survives the coalesce, in its original position.
+  assert any(b.get("type") == "text" for b in blocks)
+
+
+def test_question_partial_then_full_matches_by_text_when_id_missing():
+  """Fallback path: defensive runner that omits the SDK id still
+  dedups by the first question's text.
+  """
+  blocks = []
+  partial = [{"question": "Color?", "options": []}]
+  process_event({"type": "question", "questions": partial}, blocks)
+  process_event({"type": "tool_start", "tool": "Bash", "input": "ls"}, blocks)
+  full = [{"question": "Color?", "options": [{"label": "Red"}]}]
+  process_event({"type": "question", "questions": full}, blocks)
+
+  question_blocks = [b for b in blocks if b.get("type") == "question"]
+  assert len(question_blocks) == 1
+  assert question_blocks[0]["questions"][0]["options"] == [{"label": "Red"}]
+
+
+def test_question_different_ids_append_as_separate_blocks():
+  """Two distinct AskUserQuestion calls (different ids) must remain
+  separate blocks, even if a text block sits between them.
+  """
+  blocks = []
+  q1 = [{"id": "scope", "question": "What change?", "options": []}]
+  process_event({"type": "question", "questions": q1}, blocks)
+  process_event({"type": "text", "content": "I see — next: "}, blocks)
+  q2 = [{"id": "mode", "question": "Which mode?", "options": []}]
+  process_event({"type": "question", "questions": q2}, blocks)
+
+  question_blocks = [b for b in blocks if b.get("type") == "question"]
+  assert len(question_blocks) == 2
+  assert question_blocks[0]["questions"][0]["id"] == "scope"
+  assert question_blocks[1]["questions"][0]["id"] == "mode"
 
 
 def test_question_block_in_built_message():

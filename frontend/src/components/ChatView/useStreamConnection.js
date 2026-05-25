@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { getToken, BASE } from '../../api/client.js'
+import { questionKey } from './questionKey.js'
 
 // Characters revealed per frame at 60fps.
 // 3 chars/frame × 60fps = ~180 chars/sec — fast but smooth.
@@ -461,19 +462,25 @@ export default function useStreamConnection(chatId, {
             const questions = event.questions || []
             if (questions.length > 0 && questions[0]?.question) {
               flushBuffer()
-              // Coalesce: if the last stream item is already a question
-              // (from a partial assistant event), replace it instead of
-              // appending. This prevents duplicate/incomplete cards when
-              // --include-partial-messages delivers progressively more
-              // complete question data.
+              // Coalesce by stable identity (question id, falling back
+              // to text). Adjacency-based dedup ("last item is
+              // question?") left phantom cards behind whenever a text
+              // token or tool boundary landed between two partial
+              // deliveries for the same AskUserQuestion call. Mirrors
+              // backend/app/events.py:process_event so the SSE stream
+              // and the persisted message agree on identity.
+              const incoming = { type: 'question', questions }
+              const key = questionKey(incoming)
               setStreamItems(prev => {
-                const last = prev[prev.length - 1]
-                if (last?.type === 'question') {
+                const idx = prev.findIndex(
+                  it => it.type === 'question' && questionKey(it) === key
+                )
+                if (idx !== -1) {
                   const updated = [...prev]
-                  updated[updated.length - 1] = { type: 'question', questions }
+                  updated[idx] = incoming
                   return updated
                 }
-                return [...prev, { type: 'question', questions }]
+                return [...prev, incoming]
               })
             }
           } else if (event.type === 'error') {

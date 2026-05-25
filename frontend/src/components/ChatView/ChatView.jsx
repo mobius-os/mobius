@@ -16,6 +16,7 @@ import ToolBlock from './ToolBlock.jsx'
 import QuestionCard from './QuestionCard.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
 import MsgContent from './MsgContent.jsx'
+import { questionKey } from './questionKey.js'
 import './ChatView.css'
 
 
@@ -403,17 +404,24 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         // If we blindly replace blocks, any answers the user submitted
         // before navigating away (which ARE persisted in the DB and
         // came back in our fetch) would be wiped on this promote.
-        // So: for each promoted block, if it's a question and the
-        // corresponding existing block has answers, copy them over.
-        const mergedBlocks = blocks.map((nb, i) => {
-          const ob = last.blocks?.[i]
-          if (nb.type === 'question'
-              && ob?.type === 'question'
-              && ob.answers
-              && !nb.answers) {
-            return { ...nb, answers: ob.answers }
+        //
+        // Match by question identity (shared questionKey helper —
+        // mirrors backend/app/events.py:question_block_key), NOT by
+        // block index. A duplicate-card hiccup mid-stream can shift
+        // positions between live streamItems and the persisted
+        // message; position-match would either drop answers or paste
+        // them onto the wrong card. Identity-match survives any
+        // intervening block reshuffles.
+        const existingAnswersByKey = new Map()
+        for (const ob of last.blocks || []) {
+          if (ob?.type === 'question' && ob.answers) {
+            existingAnswersByKey.set(questionKey(ob), ob.answers)
           }
-          return nb
+        }
+        const mergedBlocks = blocks.map(nb => {
+          if (nb.type !== 'question' || nb.answers) return nb
+          const carried = existingAnswersByKey.get(questionKey(nb))
+          return carried ? { ...nb, answers: carried } : nb
         })
         const merged = { ...last, content, blocks: mergedBlocks }
         return [...prev.slice(0, -1), merged]

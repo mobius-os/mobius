@@ -21,7 +21,12 @@ from sqlalchemy.orm import Session
 from app import auth, chat_queue, models, questions, schemas
 from app.broadcast import ChatBroadcast, create_broadcast, get_broadcast, set_active_broadcast
 from app.config import get_settings
-from app.events import process_event, build_assistant_message, finalize_blocks
+from app.events import (
+  build_assistant_message,
+  finalize_blocks,
+  process_event,
+  question_block_key,
+)
 from app.providers import effective_agent_settings, get_provider, get_skill_path
 from app.runner_registry import RunnerKind, registry
 from app.runtime_types import ChatEvent
@@ -138,25 +143,17 @@ def _update_last_assistant_message(db: Session, chat_id: str, message: dict) -> 
     #
     # Multi-question per turn IS observed in practice (an agent can
     # call AskUserQuestion twice sequentially within one turn after
-    # the first answer resolves). Match by the question id (or, if
-    # the SDK ever omits one, fall back to the joined question text)
-    # rather than block position — position-match would silently
-    # mis-merge if a future runner ever inserted a tool/text block
-    # between two questions on a partial replay.
-    def _q_key(block):
-      qs = block.get("questions") or []
-      if qs and qs[0].get("id"):
-        return ("id", qs[0]["id"])
-      texts = tuple(q.get("question") or q.get("text") or "" for q in qs)
-      return ("text", texts)
-
+    # the first answer resolves). Match by the shared
+    # question_block_key — the same identity used by
+    # events.process_event for cross-event coalescing — so the two
+    # paths agree on which existing block a new one extends.
     existing_answers_by_key = {}
     for ob in msgs[-1].get("blocks") or []:
       if ob.get("type") == "question" and ob.get("answers"):
-        existing_answers_by_key[_q_key(ob)] = ob["answers"]
+        existing_answers_by_key[question_block_key(ob)] = ob["answers"]
     for nb in message.get("blocks") or []:
       if nb.get("type") == "question" and not nb.get("answers"):
-        carried = existing_answers_by_key.get(_q_key(nb))
+        carried = existing_answers_by_key.get(question_block_key(nb))
         if carried:
           nb["answers"] = carried
     msgs[-1] = message
