@@ -369,7 +369,18 @@ def forget_chat(chat_id: str) -> None:
 
 
 def _clear_pending_messages(db: Session | None, chat_id: str) -> None:
-  """Clears persisted queued messages for the chat, best-effort."""
+  """Clears persisted queued messages for the chat, best-effort.
+
+  Caller MUST hold ``chat_queue.get_lock(chat_id)`` — this mutation
+  shares the queue's serialization invariant with every other RMW
+  on ``chat.pending_messages`` (append in routes/chats_stream.py:POST
+  /messages, cancel in DELETE /pending, promote in
+  chat_queue.drain_and_release). Without the lock, a concurrent
+  append can read the queue, this clear can overwrite it with [],
+  and the appender then writes back its stale snapshot — the user's
+  freshly-queued message vanishes. See CLAUDE.md "Message queue +
+  send-while-generating".
+  """
   if db is None:
     return
   try:
@@ -446,7 +457,13 @@ async def stop_chat_for(chat_id: str, db: Session = None) -> bool:
   Waits for the process to die with a bounded timeout.
   """
   bump_run_generation(chat_id)
-  _clear_pending_messages(db, chat_id)
+  # The queue-lock window guards the pending_messages clear from
+  # racing concurrent append/cancel/promote paths. Generation bump
+  # happens BEFORE the lock so the dying runner sees the new gen as
+  # soon as it next checks (no need for the lock — generation is its
+  # own state).
+  async with chat_queue.get_lock(chat_id):
+    _clear_pending_messages(db, chat_id)
   questions.cancel(chat_id)
   all_stopped = True
   for handle in registry.get_handles(chat_id):
@@ -493,7 +510,11 @@ def _finalize_response(
 def _clear_pending_queue(db: Session, chat_id: str) -> None:
   """Empties the pending_messages queue for a chat. Used on terminal
   setup errors (no owner, missing auth) so queued messages don't pile
-  up repeating the same error."""
+  up repeating the same error.
+
+  Caller MUST hold ``chat_queue.get_lock(chat_id)`` — same invariant
+  as ``_clear_pending_messages``; see that docstring.
+  """
   if not chat_id:
     return
   try:
@@ -720,7 +741,8 @@ async def _run_chat_impl(
   owner = db.query(models.Owner).first()
   if not owner:
     bc.publish({"type": "error", "message": "No owner configured."})
-    _clear_pending_queue(db, chat_id)
+    async with chat_queue.get_lock(chat_id):
+      _clear_pending_queue(db, chat_id)
     bc.publish({"type": "done"})
     set_active_broadcast(None)
     bc.mark_completed()
@@ -814,7 +836,8 @@ async def _run_chat_impl(
   auth_error = provider.check_auth(settings.data_dir)
   if auth_error:
     bc.publish({"type": "error", "message": auth_error})
-    _clear_pending_queue(db, chat_id)
+    async with chat_queue.get_lock(chat_id):
+      _clear_pending_queue(db, chat_id)
     bc.publish({"type": "done"})
     set_active_broadcast(None)
     bc.mark_completed()
