@@ -18,12 +18,11 @@ from pathlib import Path
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from app import auth, models, schemas
+from app import auth, models, questions, schemas
 from app.broadcast import ChatBroadcast, create_broadcast, get_broadcast, set_active_broadcast
 from app.config import get_settings
 from app.events import process_event, build_assistant_message, finalize_blocks
 from app.providers import effective_agent_settings, get_provider
-from app.push import notify_owner
 from app.runner_registry import RunnerKind, registry
 from app.runtime_types import ChatEvent
 
@@ -91,35 +90,14 @@ def _save_message(db: Session, chat_id: str, message: dict):
 
 
 def _notify_pending_question(db: Session, chat_id: str, event: dict):
-  """Fires a push notification when AskUserQuestion ends a turn.
+  """Thin shim — delegates to questions.notify (ticket 033).
 
-  Suppressed automatically by `notify_owner` when the owner is
-  currently subscribed to this chat's SSE stream. Failures are
-  swallowed — a missed notification must not crash the turn.
+  Kept so the existing `notify_pending_question_cb` kwarg threaded
+  into the SDK runners doesn't need a runner-side change in this
+  commit. Dropped in commit 2 when runners pick up the alias-free
+  call site.
   """
-  if not chat_id:
-    return
-  try:
-    questions = event.get("questions") or []
-    first = questions[0].get("question", "") if questions else ""
-    body = first[:120] if first else "Möbius is waiting for your answer."
-    owner = db.query(models.Owner).order_by(models.Owner.id).first()
-    if owner is None:
-      return
-    notify_owner(
-      db,
-      owner.id,
-      title="Möbius needs your answer",
-      body=body,
-      source_type="chat",
-      source_id=chat_id,
-      target=f"/chat/{chat_id}",
-    )
-  except Exception:
-    log = _get_logger()
-    log.exception(
-      "notify_pending_question failed chat_id=%s", chat_id,
-    )
+  questions.notify(db, chat_id, event)
 
 
 @dataclass
@@ -223,41 +201,30 @@ _queue_locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (
 )
 
 
-# Pending AskUserQuestion state, keyed by chat_id. Populated by the
-# Claude SDK `can_use_tool` callback when AskUserQuestion fires;
-# resolved by the POST /messages answer-delivery short-circuit. Stays
-# empty for subprocess-backed providers (their AskUserQuestion
-# intercept still kills the proc and queues the answer as a new turn).
+# Pending AskUserQuestion state lives in `app.questions._pending`
+# (ticket 033). The alias below keeps existing references in this
+# module — including the runners' `pending_questions=` DI kwarg —
+# pointing at the SAME dict, so both names mutate the same registry
+# during commit 1. Commit 2 drops the alias and routes pass
+# `questions._pending` explicitly at the SDK call sites.
 from app.pending_questions import PendingQuestion
 
-_pending_questions: dict[str, PendingQuestion] = {}
+_pending_questions = questions._pending
 
 
 def deliver_answer(chat_id: str, answers: dict) -> bool:
-  """Resolves a pending AskUserQuestion with the partner's answers.
-
-  Returns True if a pending question was waiting and was resolved,
-  False if no pending question exists (caller should fall through to
-  the normal queue path). Idempotent — if the future is already done
-  (race with stop), returns True without re-resolving.
-  """
-  pending = _pending_questions.get(chat_id)
-  if pending is None:
-    return False
-  if not pending.future.done():
-    pending.future.set_result(answers)
-  return True
+  """Thin shim — delegates to questions.deliver_answer (ticket 033)."""
+  return questions.deliver_answer(chat_id, answers)
 
 
 def get_pending_question(chat_id: str) -> "PendingQuestion | None":
-  """Accessor for the pending-question registry. Tests + debug routes
-  use this; the run loop owns set/clear directly."""
-  return _pending_questions.get(chat_id)
+  """Thin shim — delegates to questions.get (ticket 033)."""
+  return questions.get(chat_id)
 
 
 def claim_pending_question(chat_id: str) -> "PendingQuestion | None":
-  """Atomically removes and returns the pending question for a chat."""
-  return _pending_questions.pop(chat_id, None)
+  """Thin shim — delegates to questions.claim (ticket 033)."""
+  return questions.claim(chat_id)
 
 class _ChatEventSink:
   """Bridges SDK-runner events to broadcast + DB state.
@@ -504,12 +471,8 @@ def _clear_pending_messages(db: Session | None, chat_id: str) -> None:
 
 
 def _cancel_pending_question(chat_id: str) -> None:
-  """Cancels and drops any live AskUserQuestion for the chat."""
-  pending = _pending_questions.get(chat_id)
-  if pending is not None and not pending.future.done():
-    pending.future.cancel()
-  if pending is not None:
-    _pending_questions.pop(chat_id, None)
+  """Thin shim — delegates to questions.cancel (ticket 033)."""
+  questions.cancel(chat_id)
 
 
 def _finalize_broadcast_if_running(chat_id: str) -> None:

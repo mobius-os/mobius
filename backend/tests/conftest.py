@@ -40,8 +40,13 @@ def fresh_db():
   # leaving these uncleared would cross-contaminate.
   from app import chat as chat_mod
   from app import broadcast as bc_mod
+  from app import questions as questions_mod
   from app.runner_registry import registry
-  chat_mod._pending_questions.clear()
+  # ticket 033: pending-question registry now lives in app.questions.
+  # chat_mod._pending_questions is an alias for questions_mod._pending
+  # during commit 1; clearing through the canonical name keeps the
+  # fixture future-proof when the alias is dropped in commit 2.
+  questions_mod._pending.clear()
   registry._starting.clear()
   registry._handles.clear()
   registry._generation.clear()
