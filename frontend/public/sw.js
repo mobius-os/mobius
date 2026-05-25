@@ -16,7 +16,15 @@
 // Everything else (HTML, /api/*) goes straight to the network.
 //
 // Bumping VERSION purges old caches on activate.
-const VERSION = 'v4'
+// v5: the `/api/apps/{id}/{frame,module}?v=N` cache key changed shape
+// — Shell.jsx now derives N from `app.updated_at` (epoch-seconds)
+// instead of an in-memory counter that reset on every reload. Old
+// entries cached under `?v=0` etc. for previously-updated apps are
+// now strictly unreachable URLs that hold stale (broken) modules,
+// so the cleanest path is to purge them on this activate. New
+// requests come from the updated_at-based URLs and get fresh
+// fetches that match server state.
+const VERSION = 'v5'
 const CACHES = {
   vendor: `mobius-vendor-${VERSION}`,
   assets: `mobius-assets-${VERSION}`,
