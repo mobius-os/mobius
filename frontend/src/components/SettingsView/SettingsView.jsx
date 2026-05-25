@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import { authQueries, settingsQueries, themeQueries } from '../../hooks/queries.js'
 import { DARK_COLORS, LIGHT_COLORS, parseThemeMeta, buildThemeCss } from '../../theme.js'
+import { applyThemeToDom, persistTheme } from '../../lib/themeService.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
@@ -78,28 +79,18 @@ export default function SettingsView({ onThemeChange }) {
       const mode = newMode ? 'light' : 'dark'
       const newCss = buildThemeCss(colors, meta, mode)
 
-      // Apply immediately to the DOM — no round-trip delay.
-      const el = document.getElementById('mobius-theme') || (() => {
-        const s = document.createElement('style')
-        s.id = 'mobius-theme'
-        document.head.appendChild(s)
-        return s
-      })()
+      // Extract bg from the NEW css (not from old meta) — toggling
+      // mode swaps --bg so meta.bg is stale.
       const bgMatch = newCss.match(/--bg:\s*(#[0-9a-fA-F]{3,8})/)
-      if (bgMatch) {
-        document.body.style.background = bgMatch[1]
-        const themeMeta = document.querySelector('meta[name="theme-color"]')
-        if (themeMeta) themeMeta.setAttribute('content', bgMatch[1])
-      }
-      el.textContent = newCss.replace(/@import\s+url\([^)]+\)\s*;[^\S\n]*\n?/g, '')
+      const newBg = bgMatch ? bgMatch[1] : meta.colors['--bg']
 
-      // Persist in background — don't await sequentially.
-      await Promise.all([
-        api.storage.shared.putThemeCss(newCss),
-        api.storage.shared.putThemeMode(mode),
-      ])
+      // Apply immediately to the DOM — no round-trip delay. Single
+      // entry point in themeService keeps SettingsView free of
+      // direct getElementById / body.style / meta-tag mutations.
+      applyThemeToDom(newCss, newBg)
 
-      api.notify.send({ type: 'theme_updated' }).catch(() => {})
+      // Persist in background.
+      await persistTheme(newCss, mode, api)
 
       // Invalidate the theme query so AppCanvas picks up the change
       // and sends moebius:frame-theme to iframes. The /notify POST
