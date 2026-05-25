@@ -161,8 +161,13 @@ export default function AppCanvas({ appId, version = 0, appName }) {
   if (!token) return null
 
   // Token NOT in URL anymore — sent via postMessage above. Frame URL
-  // is stable per (appId, version), enabling the SW frame cache.
-  const src = api.apps.frameUrl(appId, version)
+  // is stable per appId (no `?v=` query). Cache freshness is handled
+  // by the server's ETag + the browser's HTTP cache: every iframe
+  // mount sends If-None-Match and the server returns 304 (use cache)
+  // or 200 (fresh). The `version` prop still drives the iframe `key`
+  // below so an `app_updated` event triggers a real React remount,
+  // which forces the browser to re-validate the fresh-fetched URL.
+  const src = api.apps.frameUrl(appId)
 
   // The iframe key intentionally OMITS `token` — the token may
   // refresh (after staleTime) but the iframe should keep its in-app

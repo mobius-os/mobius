@@ -29,12 +29,21 @@ export function clearToken() {
 
 // Wipes persisted client state on logout / token expiry: the
 // TanStack Query cache (IndexedDB) AND the SW Cache Storage
-// entries. The SW caches mini-app module responses under the full
-// request URL — and that URL embeds the per-app scoped token as a
-// query param — so without this wipe the prior owner's app tokens
-// linger in `mobius-apps-*` after their session ends. Returns a
-// promise so callers can `await` it before reloading the page
-// (otherwise the browser would abort the in-flight delete).
+// entries. The SW currently caches `mobius-vendor-*`,
+// `mobius-assets-*`, `mobius-proxy-*`, and `mobius-esm-*` —
+// nothing per-owner anymore (app frame/module moved to HTTP
+// ETag revalidation, no SW cache entry, see sw.js), but the wipe
+// still matters because:
+//   - the TanStack Query cache (IDB) holds owner-scoped chat/app
+//     lists that a subsequent owner on a shared device must not see;
+//   - cached `mobius-proxy-*` responses may include owner-fetched
+//     remote assets that look benign but expose visited URLs;
+//   - bumping past a stale SW that still has the retired
+//     `mobius-apps-*` cache (pre-v6 instances) needs the activate
+//     purge to land, and an explicit wipe forces it on logout
+//     rather than waiting for the next navigation.
+// Returns a promise so callers can `await` it before reloading the
+// page (otherwise the browser would abort the in-flight delete).
 export function clearQueryCache() {
   return Promise.all([
     idbDel('mobius-query-cache').catch(() => {}),
@@ -141,7 +150,13 @@ export const api = {
   },
   apps: {
     list: () => apiFetch('/apps/'),
-    frameUrl: (appId, version = 0) => `${BASE}/api/apps/${appId}/frame?v=${version}`,
+    // Stable per-app URL — cache freshness is handled by the server's
+    // ETag + the browser's HTTP cache, not by a manual `?v=` param.
+    // See backend/app/routes/apps.py for the ETag derivation. The
+    // iframe REMOUNTS on app_updated (via the React `key` prop in
+    // AppCanvas) which forces the browser to re-fetch and revalidate
+    // via If-None-Match.
+    frameUrl: (appId) => `${BASE}/api/apps/${appId}/frame`,
   },
   settings: {
     get: () => apiFetch('/settings'),

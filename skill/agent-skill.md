@@ -942,14 +942,20 @@ Use these when debugging issues instead of adding temporary endpoints.
 
 ### Viewing apps directly
 
-To check an app's rendered output without the shell iframe, open the
-frame URL directly in a browser or tool:
+To check an app's rendered output, use the preview scripts (they
+load the app inside the authenticated Möbius shell, which is the
+realistic path the user takes):
 
 ```
-$API_BASE_URL/api/apps/<id>/frame?token=$AGENT_TOKEN&v=$(date +%s)
+bash "$SCRIPTS_DIR/preview_app.sh" <id>
 ```
 
-This renders the app full-page with its own scoped token.
+The frame URL itself is stable per-app (`$API_BASE_URL/api/apps/<id>/frame`)
+— freshness is handled by the server's ETag + browser cache, no
+`?v=` cache-buster needed. The frame waits for a parent shell
+`moebius:frame-init` postMessage, so opening the URL standalone
+just shows the "Loading timeout" error panel — always go through
+the preview helper or the live shell.
 
 ---
 

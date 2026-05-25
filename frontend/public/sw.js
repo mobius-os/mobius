@@ -3,32 +3,27 @@
 // Cache strategy by URL:
 //   /vendor/*                   cache-first    (immutable bundled libs)
 //   /assets/*                   cache-first    (Vite-hashed shell assets)
-//   /api/apps/{id}/frame        cache-first    (URL is version-busted via `?v=`;
-//                                                token + theme are no longer in
-//                                                the body — sent via postMessage
-//                                                so the response is stable per
-//                                                (app, version))
-//   /api/apps/{id}/module       cache-first    (URL is version-busted via `?v=`,
-//                                                so cache is naturally invalidated
-//                                                whenever the agent updates the app)
 //   /api/proxy?url=*.{img/font} SWR            (cacheable static assets only)
 //   esm.sh/*                    cache-first    (versioned URLs are immutable)
 // Everything else (HTML, /api/*) goes straight to the network.
 //
-// Bumping VERSION purges old caches on activate.
-// v5: the `/api/apps/{id}/{frame,module}?v=N` cache key changed shape
-// — Shell.jsx now derives N from `app.updated_at` (epoch-seconds)
-// instead of an in-memory counter that reset on every reload. Old
-// entries cached under `?v=0` etc. for previously-updated apps are
-// now strictly unreachable URLs that hold stale (broken) modules,
-// so the cleanest path is to purge them on this activate. New
-// requests come from the updated_at-based URLs and get fresh
-// fetches that match server state.
-const VERSION = 'v5'
+// `/api/apps/{id}/{frame,module}` are INTENTIONALLY NOT intercepted by
+// the SW. The server returns an ETag derived from `app.updated_at` and
+// `Cache-Control: no-cache`, so the browser's own HTTP cache handles
+// revalidation via `If-None-Match` automatically. SW interception
+// would shortcut that with cache-first, which is exactly the
+// "spinner-forever" failure mode we previously hit — the SW kept
+// returning a stale broken module across reloads because the
+// `?v=` cache key reset to 0 on every Shell mount.
+//
+// Bumping VERSION purges all old `mobius-*` caches on activate.
+// v6: retire the `mobius-apps-vN` cache (the routes that used it are
+// no longer intercepted). The activate-purge will reclaim the disk
+// space from any pre-v6 instances.
+const VERSION = 'v6'
 const CACHES = {
   vendor: `mobius-vendor-${VERSION}`,
   assets: `mobius-assets-${VERSION}`,
-  apps: `mobius-apps-${VERSION}`,
   proxy: `mobius-proxy-${VERSION}`,
   esm: `mobius-esm-${VERSION}`,
 }
@@ -69,20 +64,10 @@ self.addEventListener('fetch', (event) => {
       event.respondWith(cacheFirst(req, CACHES.assets))
       return
     }
-    if (/^\/api\/apps\/\d+\/module/.test(path)) {
-      // Version is in the query string; same URL = same content.
-      event.respondWith(cacheFirst(req, CACHES.apps))
-      return
-    }
-    if (/^\/api\/apps\/\d+\/frame/.test(path)) {
-      // Frame HTML is now token-free and theme-free (parent injects
-      // both via postMessage post-load), so the response is stable
-      // per (app_id, version). The version is in the query string;
-      // same URL = same content. Cache-first matches the module
-      // strategy.
-      event.respondWith(cacheFirst(req, CACHES.apps))
-      return
-    }
+    // /api/apps/{id}/frame and /api/apps/{id}/module deliberately
+    // fall through to the network — the browser handles freshness
+    // via the ETag the server returns. SW interception used to
+    // cache-first these and held stale modules across reloads.
     if (path === '/api/proxy') {
       const upstream = url.searchParams.get('url') || ''
       if (CACHEABLE_PROXY_EXT.test(upstream)) {

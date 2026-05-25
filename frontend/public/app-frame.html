@@ -169,9 +169,6 @@
     import { createRoot } from 'react-dom/client';
     import { createElement } from 'react';
 
-    const params = new URLSearchParams(location.search);
-    const version = params.get('v') || '0';
-
     let initialized = false;
 
     function applyTheme(css, bg) {
@@ -195,7 +192,7 @@
         return;
       }
       try {
-        const url = `/api/apps/${_FRAME_APP_ID}/module?token=${encodeURIComponent(token)}&v=${encodeURIComponent(version)}`;
+        const url = `/api/apps/${_FRAME_APP_ID}/module?token=${encodeURIComponent(token)}`;
         const mod = await import(url);
         const Component = mod.default;
         if (!Component) {

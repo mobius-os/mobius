@@ -6,7 +6,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy.orm import Session
 
@@ -194,10 +194,31 @@ def delete_app(
       pass
 
 
+def _etag_for_app(app: models.App) -> str | None:
+  """Weak ETag derived from `app.updated_at`. Microsecond precision
+  so two updates within the same wall-clock second produce different
+  validators — second-precision risks the agent shipping a fix and
+  the user's cached browser refusing to revalidate."""
+  if not app.updated_at:
+    return None
+  ts_us = int(app.updated_at.timestamp() * 1_000_000)
+  return f'W/"{ts_us}"'
+
+
+def _not_modified_if_match(request: Request, etag: str) -> Response | None:
+  """Returns a 304 Response if the request's If-None-Match matches
+  `etag`, else None. The 304 must keep the ETag header so a browser
+  re-validating an existing cache entry can keep its validator."""
+  match = request.headers.get("if-none-match")
+  if match and etag in [v.strip() for v in match.split(",")]:
+    return Response(status_code=304, headers={"ETag": etag})
+  return None
+
+
 @router.get("/{app_id}/frame")
 def get_frame(
   app_id: int,
-  v: int = 0,
+  request: Request,
   db: Session = Depends(get_db),
 ):
   """Serves the mini-app runtime frame HTML.
@@ -205,10 +226,19 @@ def get_frame(
   Token-free as of 2026-04-27: the parent shell injects the auth
   token and the current theme via `postMessage` after the iframe
   loads, instead of having them server-templated into the body.
-  This makes the frame HTML cacheable across sessions: same
-  (app_id, version) ↔ same response bytes ↔ SW cache hit. With the
-  cache, opening any previously-visited app on a cold PWA start
-  saves the round-trip to the server.
+
+  Cache freshness model (2026-05-25 refactor): URL is stable per
+  app_id (no `?v=` query). Response carries an ETag derived from
+  `app.updated_at` and `Cache-Control: no-cache`. Browsers send
+  `If-None-Match` on every navigation; we return 304 with empty
+  body when the app hasn't been updated, or 200 with the fresh
+  frame when it has. This removed the SW cache-first interception
+  for this route — the browser HTTP cache + ETag validation handle
+  it natively, which means the agent's fresh-Chromium tests and
+  the user's persistent-PWA cache converge on identical behavior
+  (the previous `?v=` counter was an in-memory value that reset on
+  reload, leaving the user pinned to whatever broken module they
+  first cached).
 
   Frame is intentionally public — it's just the runtime shell
   (importmap, error UI, postMessage init script). Actual app
@@ -226,6 +256,12 @@ def get_frame(
   if not compiled.exists():
     raise HTTPException(status_code=404, detail="Compiled module missing.")
 
+  etag = _etag_for_app(app)
+  if etag:
+    not_modified = _not_modified_if_match(request, etag)
+    if not_modified is not None:
+      return not_modified
+
   # Frame priority: agent-editable copy first, then dev-mode path, then
   # the baked-in fallback. The agent can edit
   # /data/shell/public/app-frame.html directly.
@@ -241,11 +277,10 @@ def get_frame(
 
   html = frame_path.read_text(encoding="utf-8")
 
-  # Per-app server-side substitutions. These are stable per-app so
-  # they don't break cacheability of the response. The TOKEN
-  # (per-session) and THEME (per-user-edit) are intentionally NOT
-  # substituted server-side — the parent shell sends them via
-  # postMessage after iframe load. See app-frame.html init script.
+  # Per-app server-side substitutions. The TOKEN (per-session) and
+  # THEME (per-user-edit) are intentionally NOT substituted
+  # server-side — the parent shell sends them via postMessage after
+  # iframe load.
   html = html.replace(
     "var _FRAME_APP_ID = 'unknown'",
     f"var _FRAME_APP_ID = {json.dumps(str(app_id))}",
@@ -254,38 +289,31 @@ def get_frame(
     "var _FRAME_CHAT_ID = ''",
     f"var _FRAME_CHAT_ID = {json.dumps(app.chat_id or '')}",
   )
-  # _FRAME_PARENT_ORIGIN removed — the frame uses
-  # window.location.origin (always same-origin with the shell).
 
-  # When versioned, treat as immutable — the agent bumps `v` on every
-  # update so cache invalidation is automatic. The SW also caches this
-  # cache-first; long-lived since URL changes on app update.
-  cache_header = (
-    "public, max-age=31536000, immutable"
-    if v
-    else "no-cache"
-  )
-  return HTMLResponse(html, headers={"Cache-Control": cache_header})
+  headers = {"Cache-Control": "no-cache"}
+  if etag:
+    headers["ETag"] = etag
+  return HTMLResponse(html, headers=headers)
 
 
 @router.get("/{app_id}/module")
 def get_module(
   app_id: int,
+  request: Request,
   token: str | None = None,
-  v: int | None = None,
   db: Session = Depends(get_db),
 ):
   """Serves the compiled JS module for a mini-app.
 
-  Accepts a token query parameter so that the app-frame iframe
-  can load the module without custom request headers.
+  Accepts a `token` query parameter so the iframe can load the
+  module without custom request headers (dynamic `import()` doesn't
+  set an Authorization header).
 
-  Caching: when a version (`v`) is supplied, the URL is treated as
-  immutable — the client may cache the response indefinitely. The
-  agent bumps the app version on every update via the `app_updated`
-  event flow, which changes the URL and invalidates the cache
-  naturally. Without `v`, fall back to no-cache so legacy clients
-  never get stuck on stale modules.
+  Cache freshness: ETag derived from `app.updated_at` (microsecond
+  precision) + `Cache-Control: no-cache`. Browser sends
+  `If-None-Match` on every fetch; we return 304 when the app hasn't
+  changed. Matches the `/frame` route's strategy — see comment
+  there for the broader rationale.
   """
   # Apps share modules same as they share storage — every mini-app
   # is authored by the owner's own agent, and a multi-app workflow
@@ -307,15 +335,20 @@ def get_module(
     raise HTTPException(
       status_code=404, detail="Compiled module not found on disk."
     )
-  cache_header = (
-    "public, max-age=31536000, immutable"
-    if v is not None
-    else "no-cache"
-  )
+
+  etag = _etag_for_app(app)
+  if etag:
+    not_modified = _not_modified_if_match(request, etag)
+    if not_modified is not None:
+      return not_modified
+
+  headers = {"Cache-Control": "no-cache"}
+  if etag:
+    headers["ETag"] = etag
   return FileResponse(
     path,
     media_type="application/javascript",
-    headers={"Cache-Control": cache_header},
+    headers=headers,
   )
 
 
