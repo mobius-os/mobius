@@ -232,6 +232,17 @@ chown mobius:mobius /data/.gitignore 2>/dev/null || true
 find /data -mindepth 2 -maxdepth 4 -type d -name '.git' -prune \
   -exec rm -rf {} + 2>/dev/null || true
 
+# Idempotent re-chown of /data/.git BEFORE the if/else below — git
+# refuses cross-owner operations with "dubious ownership", so any git
+# command we run as mobius (the else branch's untrack loop) needs the
+# repo mobius-owned first. A `docker pull` plus a recreated volume can
+# leave a previously-mobius-owned /data/.git root-owned again (e.g.
+# some recovery installs bake /data/.git into the image layer); without
+# this the agent's commits also fail. No-op via `|| true` if /data/.git
+# doesn't exist yet — the fresh-init branch below creates it and
+# re-chowns in that case.
+chown -R mobius:mobius /data/.git 2>/dev/null || true
+
 if [ ! -d /data/.git ]; then
   git init /data
   git -C /data config user.name 'Mobius Agent'
@@ -245,23 +256,14 @@ else
   # it had already been committed; same story for the loose root-level
   # .db files). `git rm --cached` is idempotent — silently no-ops if
   # the path isn't in the index — so this is safe to re-run every boot.
-  # Must run as mobius: /data/.git is mobius-owned (re-chowned below
-  # on every boot), and git refuses cross-owner operations with
-  # "dubious ownership". Running as root here would silently no-op via
-  # the trailing `|| true`.
+  # Runs as mobius (the .git owner); the pre-chown above guarantees
+  # ownership is correct.
   su -s /bin/sh mobius -c '
     for path in .secret-key db.sqlite3 mobius.db; do
       git -C /data rm --cached "$path" 2>/dev/null || true
     done
   '
 fi
-
-# Idempotent re-chown of /data/.git on every boot. A `docker pull` plus
-# a recreated volume can leave a previously-mobius-owned /data/.git
-# root-owned again (e.g. some recovery installs bake /data/.git into the
-# image layer). Without this the agent's commits fail with "fatal:
-# detected dubious ownership" or refuse to write index updates.
-chown -R mobius:mobius /data/.git 2>/dev/null || true
 
 # Ensure the mobius user has a GLOBAL git identity available. The
 # local-repo config above only covers /data/.git; when the agent later
@@ -271,8 +273,8 @@ chown -R mobius:mobius /data/.git 2>/dev/null || true
 # me who you are." Set the global config as mobius so any future
 # repository — per-app, shell, or scratch — picks up an identity.
 su -s /bin/sh mobius -c "
-  git config --global user.name 'Möbius Agent'
-  git config --global user.email 'agent@mobius.local'
+  git config --global user.name 'Mobius Agent'
+  git config --global user.email 'agent@mobius'
 " 2>/dev/null || true
 
 # Only copy the pm-commit helper if missing or if the image version

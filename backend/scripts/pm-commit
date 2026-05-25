@@ -2,4 +2,4 @@
 set -e
 git -C /data add -A
 git -C /data diff --cached --quiet && exit 0
-git -C /data commit -m "$1" --author='Mobius Agent <agent@mobius>'
+git -C /data commit -m "$1"

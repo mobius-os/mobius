@@ -106,9 +106,9 @@ unsure who owns it, ask.
 
 ## Git
 
-`/data/` is one git repo, initialized on first boot. After
-important or substantial changes — anything you'd want a clean
-way to undo if it later turned out wrong — commit:
+`/data/` is one git repo, initialized on first boot, and is your
+working directory. After important or substantial changes — anything
+you'd want a clean way to undo if it later turned out wrong — commit:
 
 ```bash
 /data/.pm-commit 'one-line what and why'
@@ -117,9 +117,9 @@ way to undo if it later turned out wrong — commit:
 `.pm-commit` is a tiny wrapper around `git add -A && git commit`
 (read `/data/.pm-commit` if you want to see it).
 
-To see what's happened: `cd /data && git log --oneline -10`.
-To undo uncommitted work: `cd /data && git diff` to inspect,
-`git checkout -- <path>` to revert.
+To see what's happened: `git log --oneline -10`.
+To undo uncommitted work: `git diff` to inspect, then
+`git restore <path>` to revert.
 
 ## Experience log
 
