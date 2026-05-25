@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
-import { appQueries, themeQueryKey } from '../../hooks/queries.js'
+import { appQueries, themeQueries } from '../../hooks/queries.js'
 import './AppCanvas.css'
 
 // =================================================================
@@ -57,13 +57,14 @@ import './AppCanvas.css'
 export default function AppCanvas({ appId, version = 0, appName }) {
   const { data: token } = appQueries.token.useQuery(appId)
 
-  // Read the cached theme so we can hand it to the iframe via
-  // postMessage on its ready signal. useTheme in Shell handles the
-  // fetch and SSE-driven updates; here we just subscribe to cache.
+  // AppCanvas was passive (enabled: false) — relied on Shell's
+  // useTheme to write the cache. After ticket 047, AppCanvas owns
+  // its own fetch on cache miss so deep-link arrival (or query
+  // eviction) does not wedge sendInit forever waiting for a
+  // populate that never comes.
   const { data: theme } = useQuery({
-    queryKey: themeQueryKey,
-    enabled: false,
-    staleTime: Infinity,
+    queryKey: themeQueries.keys.all,
+    queryFn: themeQueries.fetch,
   })
 
   const [loaded, setLoaded] = useState(false)
