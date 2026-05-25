@@ -91,26 +91,34 @@ export default function AppCanvas({ appId, version = 0, appName }) {
   function sendInit() {
     if (!loadedRef.current) return
     if (!token) return
+    // Gate on theme being resolved too. Sending init with
+    // `themeCss: undefined` lets the iframe render its first paint
+    // with the fallback theme, then `frame-theme` arrives later and
+    // re-paints — a visible flash on cold cache. The iframe's own
+    // "Loading…" state is already shown until init arrives, so
+    // deferring init by a few ms costs nothing.
+    if (!theme) return
     const iframe = iframeRef.current
     if (!iframe || !iframe.contentWindow) return
     iframe.contentWindow.postMessage(
       {
         type: 'moebius:frame-init',
         token,
-        themeCss: theme?.css,
-        bg: theme?.bg,
+        themeCss: theme.css,
+        bg: theme.bg,
       },
       window.location.origin,
     )
   }
 
-  // Re-attempt init when token becomes available. Covers the case
-  // where the iframe finished loading before the token query
-  // resolved — `onLoad` already fired with no init sent; this effect
-  // catches up once the token arrives.
+  // Re-attempt init when token or theme becomes available. Covers
+  // (a) iframe finished loading before token resolved, (b) iframe
+  // finished loading + token resolved before theme cache populated.
+  // The iframe's own `initialized` flag dedups any extras, so it's
+  // safe to depend on identity-churn-prone theme fields here.
   useEffect(() => {
     sendInit()
-  }, [token, appId, version])
+  }, [token, appId, version, theme?.css, theme?.bg])
 
   // Listen for the frame's `frame-mounted` signal, which fires AFTER
   // the React component is rendered inside the iframe. This is the
