@@ -451,8 +451,11 @@ async def stop_chat(chat_id: str | None = None, db: Session = None) -> bool:
   if chat_id is not None:
     return await stop_chat_for(chat_id, db=db)
   from app.broadcast import _broadcasts
+  # Snapshot `_broadcasts` via `list()` first — iterating the live
+  # mapping can raise RuntimeError if a concurrent task creates a
+  # new broadcast (e.g. a chat starts during a global Stop sweep).
   targets = registry.all_alive_chat_ids() | {
-    cid for cid, bc in _broadcasts.items() if bc.running
+    cid for cid, bc in list(_broadcasts.items()) if bc.running
   }
   stopped_any = False
   for cid in targets:

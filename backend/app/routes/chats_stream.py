@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app import models, questions, schemas
 from app.broadcast import create_broadcast, get_broadcast
 from app.chat import (
+  _schedule_continuation,
   discard_starting,
   is_chat_running,
   mark_starting,
@@ -314,7 +315,6 @@ async def send_message(
       # (e.g., two stale-pending POSTs racing).
       if mark_starting(chat_id):
         try:
-          from app.chat import _schedule_continuation
           next_messages, next_user, next_session_id = (
             await chat_queue.promote_pending_messages(db, chat_id)
           )
