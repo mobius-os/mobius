@@ -29,12 +29,22 @@ export default function Shell() {
   const apps = appsQuery.data ?? []
   const chats = chatsQuery.data ?? []
 
-  // Per-app version map. Bumped when an `app_updated` SSE event
-  // arrives for that specific app so its iframe `key` cycles. The
-  // multi-iframe LRU cache (below) needs per-app versions because a
-  // single scalar would mis-bust other cached apps' iframes when one
-  // gets edited.
-  const [appVersions, setAppVersions] = useState({})
+  // Per-app cache buster derived from `app.updated_at` on the server.
+  // Using a server-supplied value (vs an in-memory counter) means the
+  // iframe URL stays valid across reloads — without this, every page
+  // reload reset the in-memory counter to 0, the SW cache-first hit
+  // on `/api/apps/{id}/frame?v=0` served whatever broken module the
+  // user FIRST cached, and subsequent agent fixes were invisible
+  // until a fresh `app_updated` happened mid-session (which itself
+  // didn't survive the next reload). updated_at is the only field
+  // that monotonically reflects server state, so it's the right
+  // cache key.
+  const versionForApp = useCallback((id) => {
+    const app = apps.find(a => String(a.id) === String(id))
+    if (!app?.updated_at) return 0
+    const t = Date.parse(app.updated_at)
+    return Number.isFinite(t) ? Math.floor(t / 1000) : 0
+  }, [apps])
   // LRU cache of recently-visited app IDs (most-recent first).
   // Each entry stays mounted as a hidden iframe so re-opening it via
   // drawer-tap or back-nav is instant — no module re-fetch, no
@@ -107,6 +117,11 @@ export default function Shell() {
       // down running apps for a CSS swap and lose their state.
       loadTheme()
     } else if (ev.type === 'app_updated') {
+      // Refetch the apps list so the affected app's `updated_at`
+      // reflects the server's new state. versionForApp reads from
+      // that field, so the iframe URL automatically picks up the
+      // new cache-buster on the next render — no separate version
+      // counter to keep in sync.
       if (ev.appId) {
         refreshApps().then(updatedApps => {
           const name = updatedApps.find(a => String(a.id) === String(ev.appId))?.name || null
@@ -114,15 +129,6 @@ export default function Shell() {
         })
       } else {
         refreshApps()
-      }
-      // Bump only the affected app's version so its iframe refreshes
-      // while other cached apps stay intact. Works whether the app
-      // is currently active or just sitting in the LRU cache.
-      if (ev.appId) {
-        setAppVersions(prev => ({
-          ...prev,
-          [ev.appId]: (prev[ev.appId] || 0) + 1,
-        }))
       }
     } else if (ev.type === 'shell_rebuilt') {
       // Deduplicate against the SSE catch-up burst to avoid reload loops.
@@ -401,7 +407,7 @@ export default function Shell() {
           >
             <AppCanvas
               appId={id}
-              version={appVersions[id] || 0}
+              version={versionForApp(id)}
               appName={apps.find(a => String(a.id) === String(id))?.name}
             />
           </div>
