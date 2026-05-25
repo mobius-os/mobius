@@ -28,7 +28,13 @@ export default function SettingsView({ onThemeChange }) {
   const [themeError, setThemeError] = useState('')
 
   useEffect(() => {
-    if (themeModeQuery.data === 'light') setLightMode(true)
+    // Mirror the full query value so a cache invalidation that
+    // resolves to 'dark' actually flips the knob back. The earlier
+    // light-only branch left the toggle stuck on whenever data went
+    // light → dark via refetch (e.g. another tab toggled, or a
+    // failed persist's rollback landed via invalidation).
+    if (themeModeQuery.data === undefined) return
+    setLightMode(themeModeQuery.data === 'light')
   }, [themeModeQuery.data])
 
   const configured = !!settingsQuery.data?.gemini_configured
