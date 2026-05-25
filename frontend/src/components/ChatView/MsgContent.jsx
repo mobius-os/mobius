@@ -57,10 +57,19 @@ export default function MsgContent({ msg, chatId, onQuestionAnswer, questionAnsw
             // a glance the agent didn't author it. Without this
             // branch the block rendered to null and the error
             // vanished on chat return; that was the bug.
+            //
+            // Run the message through StandardMarkdown so URLs in
+            // provider error responses (quota links, billing
+            // pages) become clickable — agents' error payloads
+            // typically include "Upgrade to Pro (https://...)" and
+            // "purchase more credits at https://..." that the user
+            // wants to tap straight from the chat.
             return (
               <div key={i} className="chat__text--error" role="alert">
                 <span className="chat__error-label">Error</span>
-                {block.message || 'The agent ran into an issue.'}
+                <StandardMarkdown
+                  text={block.message || 'The agent ran into an issue.'}
+                />
               </div>
             )
           }

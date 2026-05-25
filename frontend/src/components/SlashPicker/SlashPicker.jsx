@@ -231,12 +231,18 @@ export default function SlashPicker({
     && effective?.model && draftModel
     && draftModel !== effective?.model
   )
-  // Once a chat has assistant turns the provider is pinned (sessions
-  // aren't cross-provider portable). The per-row disable in the
-  // picker is the visible feedback; no extra hint text — that just
-  // takes space without telling the partner anything they can't see
-  // from the disabled rows themselves.
-  const lockedToProvider = hasAssistantTurns ? provider : null
+  // Used to be: `hasAssistantTurns ? provider : null` (hard-disable
+  // the other provider's rows once the chat had an assistant turn,
+  // on the theory that SDK sessions aren't cross-portable). But
+  // backend `patch_chat` already wipes `session_id` on provider
+  // change, and the new SDK session reads the prior chat messages
+  // as context — the user keeps their transcript, only the
+  // provider's internal session caches reset. Hard-disabling led
+  // to silent failures where the user tapped the other provider,
+  // the radio's `onChange` didn't fire, and the chat stayed on the
+  // original provider. Allow the switch; let the user own the
+  // decision.
+  const lockedToProvider = null
 
   return (
     <div className="slash" ref={wrapRef}>

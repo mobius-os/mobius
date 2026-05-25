@@ -359,4 +359,51 @@ test.describe('Error block: persists across chat return', () => {
       page.locator('.chat__text--error', { hasText: 'Quota exceeded' }),
     ).toBeVisible({ timeout: 3000 })
   })
+
+  test('URLs in error messages render as clickable links', async ({ page }) => {
+    // Provider error payloads typically include billing / upgrade
+    // links ("Upgrade to Pro (https://chatgpt.com/explore/pro)").
+    // Routing error.message through StandardMarkdown auto-links
+    // them so the user can tap straight from the chat instead of
+    // copy-pasting. Before this fix the URL rendered as plain
+    // text.
+    const errorMsg = 'Quota exceeded. Upgrade at https://example.test/billing'
+    const streamBody = [
+      `data: ${JSON.stringify({ type: 'error', message: errorMsg })}\n\n`,
+      'data: {"type":"done"}\n\n',
+    ].join('')
+
+    await page.setViewportSize({ width: 412, height: 915 })
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
+      route.fulfill({ status: 202, body: '{}' })
+    )
+    await page.route('**/api/chat/stop', route =>
+      route.fulfill({ status: 200, body: '{}' })
+    )
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route =>
+      route.fulfill({
+        status: 200,
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+        },
+        body: streamBody,
+      })
+    )
+
+    await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+    await page.waitForFunction(
+      () => !!(document.querySelector('.chat__empty-wrap')
+            || document.querySelector('.chat__form')),
+      { timeout: 10000 }
+    )
+    await newChat(page)
+    await sendMessage(page, 'Trigger error')
+
+    // The error renders as a system notice. The URL inside it
+    // must be an actual <a href> — assert the anchor exists with
+    // the URL the message contained.
+    const link = page.locator('.chat__text--error a[href*="example.test/billing"]')
+    await expect(link).toBeVisible({ timeout: 5000 })
+  })
 })
