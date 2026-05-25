@@ -211,6 +211,24 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   const sendingRef = useRef(false)
   sendingRef.current = sending
 
+  // Ref mirrors of prop callbacks. doSend / doSendSilent are
+  // memoized via useCallback; if these props were listed in the
+  // deps array, every parent re-render that passed a fresh function
+  // identity would re-create both callbacks (and any consumers'
+  // useEffect-on-doSend would re-fire). Keeping them out of deps
+  // was an explicit choice (see the comment at doSend's deps
+  // array below) — but reading the props directly from the closure
+  // captured stale references the moment the parent dropped its
+  // useCallback. Refs mirror the latest commit each render, so
+  // doSend invokes whatever the parent passed THIS frame even when
+  // the callback identity itself is frozen. stopVoice (from
+  // useVoiceInput, not a prop) is mirrored below — its hook is
+  // declared further down.
+  const onMessageStartRef = useRef(onMessageStart)
+  onMessageStartRef.current = onMessageStart
+  const onFirstMessageRef = useRef(onFirstMessage)
+  onFirstMessageRef.current = onFirstMessage
+
   // Re-entry guard for handleStop. Two rapid Stop clicks (e.g. during
   // the await on /chat/stop) would otherwise both snapshot the same
   // pending queue and both call doSend(combined) → duplicate sends.
@@ -355,6 +373,15 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     onTranscript: (text) => setInput(text),
     inputRef,
   })
+
+  // Ref mirror of stopVoice (peer of onMessageStartRef /
+  // onFirstMessageRef above). useVoiceInput may not memoize its
+  // return, so doSend's closure would capture a stale function
+  // ref if we read stopVoice directly without including it in
+  // deps. Mirror via ref to stay closure-safe without churning
+  // doSend's identity.
+  const stopVoiceRef = useRef(stopVoice)
+  stopVoiceRef.current = stopVoice
 
   // Snapshot stream into a permanent message. Idempotent — both
   // handleStop and onStreamEnd may call this.
@@ -655,7 +682,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
     // Stop voice recognition so a late onresult doesn't refill input
     // after we clear it.
-    if (listeningRef.current) stopVoice?.()
+    if (listeningRef.current) stopVoiceRef.current?.()
 
     // On touch devices, blur to dismiss the soft keyboard. Desktop keeps
     // focus so the cursor stays ready for the next message.
@@ -706,7 +733,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         // Race: server said "started" though we expected queued.
         if (result?.status === 'started') {
           pendingQueue.cancelByCid(queuedMsg.cid)
-          onMessageStart?.()
+          onMessageStartRef.current?.()
           promotedRef.current = false
           commitMessages(prev => {
             const { queued: _q, cid: _c, position: _p, ...msg } = queuedMsg
@@ -736,7 +763,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     }
 
     // FRESH SEND PATH: no active turn, no queue.
-    onMessageStart?.()
+    onMessageStartRef.current?.()
     promotedRef.current = false
 
     const userMsg = { role: 'user', content: text, ts: Date.now() }
@@ -762,7 +789,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       await streamSend(text, attachments.length > 0 ? attachments : undefined)
       if (!hadMessagesRef.current) {
         hadMessagesRef.current = true
-        onFirstMessage?.()
+        onFirstMessageRef.current?.()
       }
     } catch (err) {
       setSending(false)
@@ -773,9 +800,13 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     }
     // doSend doesn't need `sending` / `isStreaming` in deps anymore —
     // the guard reads sendingRef/isStreamingRef, and refs are stable.
-    // Dropping them avoids needlessly re-creating doSend on every
-    // stream tick (and avoids the stale-closure trap for callers
-    // like handleStop).
+    // Same for the prop callbacks (onMessageStart, onFirstMessage,
+    // stopVoice): doSend reads them via the ref mirrors declared near
+    // the top of the component, so they don't need to be in deps and
+    // doSend doesn't re-allocate when the parent passes fresh
+    // identities. Dropping all of these from deps avoids needlessly
+    // re-creating doSend on every stream tick (and avoids the
+    // stale-closure trap for callers like handleStop).
   }, [streamSend, pendingFiles, commitMessages, clearFiles])
 
   // Sends the answer without a visible user message bubble.
@@ -807,7 +838,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       return
     }
     sendingRef.current = true
-    onMessageStart?.()
+    onMessageStartRef.current?.()
     promotedRef.current = false
 
     // Local optimistic update of the question block so the UI shows
