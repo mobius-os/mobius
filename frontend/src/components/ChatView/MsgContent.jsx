@@ -49,6 +49,21 @@ export default function MsgContent({ msg, chatId, onQuestionAnswer, questionAnsw
               </div>
             )
           }
+          if (block.type === 'error') {
+            // Errors persist as their own block (backend's
+            // process_event for 'error' events). Read as a system
+            // notice rather than an agent reply — distinct
+            // styling, no agent bubble — so the user can tell at
+            // a glance the agent didn't author it. Without this
+            // branch the block rendered to null and the error
+            // vanished on chat return; that was the bug.
+            return (
+              <div key={i} className="chat__text--error" role="alert">
+                <span className="chat__error-label">Error</span>
+                {block.message || 'The agent ran into an issue.'}
+              </div>
+            )
+          }
           return null
         })}
       </>

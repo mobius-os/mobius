@@ -461,7 +461,16 @@ export default function useStreamConnection(chatId, {
                 b.type === 'tool' && b.status === 'running'
                   ? { ...b, status: 'done' } : b
               )
-              updated.push({ type: 'text', content: `\n\nError: ${event.message}` })
+              // Use the same `error` block shape the backend
+              // persists, so MsgContent renders it identically
+              // before and after promote — without this the
+              // streaming "Error: ..." text was a plain text block
+              // and the post-promote DB block was `{type:'error'}`,
+              // and the latter rendered as null because MsgContent
+              // had no branch for it (which is the bug we're
+              // fixing — the error visibly disappeared on chat
+              // return).
+              updated.push({ type: 'error', message: event.message })
               return updated
             })
           } else if (event.type === 'queued_turn_starting') {

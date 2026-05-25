@@ -382,6 +382,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     const blocks = items.map(item => {
       if (item.type === 'text') return { type: 'text', content: item.content }
       if (item.type === 'question') return { type: 'question', questions: item.questions }
+      if (item.type === 'error') return { type: 'error', message: item.message }
       const status = item.status === 'running' ? 'done' : item.status
       return { type: 'tool', ...item, status }
     })
@@ -1207,6 +1208,14 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                     <div key={`s-${i}`} className="chat__text chat__text--assistant">
                       <ProgressiveMarkdown text={item.content} />
                       {isLast && <span className="chat__cursor" />}
+                    </div>
+                  )
+                }
+                if (item.type === 'error') {
+                  return (
+                    <div key={`s-${i}`} className="chat__text--error" role="alert">
+                      <span className="chat__error-label">Error</span>
+                      {item.message || 'The agent ran into an issue.'}
                     </div>
                   )
                 }
