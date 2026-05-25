@@ -44,6 +44,7 @@ from app import models
 from app.config import get_settings
 from app.database import get_db
 from app.deps import get_current_owner, get_current_owner_or_app
+from app.path_utils import validate_path_within_base
 
 router = APIRouter(prefix="/api/storage", tags=["storage"])
 
@@ -52,17 +53,20 @@ _SAFE_RE = re.compile(r"^[\w.\-\/]+$")
 
 
 def _resolve(base: Path, rel: str) -> Path:
-  """Returns a path within base, raising 400 on traversal attempts."""
+  """Returns a path within base, raising 400 on traversal attempts.
+
+  Layers a strict character-set whitelist over the shared
+  validate_path_within_base check. The whitelist rejects spaces,
+  quotes, control bytes, and other shell-metacharacters before the
+  resolution step ever sees them, which keeps mini-app storage paths
+  to the same shape (`[\\w.\\-/]+`) the file watcher and slug logic
+  elsewhere already assume.
+  """
   if not _SAFE_RE.match(rel):
     raise HTTPException(status_code=400, detail="Invalid path.")
   if ".." in Path(rel).parts:
     raise HTTPException(status_code=400, detail="Path traversal not allowed.")
-  resolved = (base / rel).resolve()
-  if not str(resolved).startswith(str(base.resolve()) + "/"):
-    raise HTTPException(
-      status_code=400, detail="Path traversal denied."
-    )
-  return resolved
+  return validate_path_within_base(rel, base)
 
 
 # Text MIME types that are safe to read as UTF-8.

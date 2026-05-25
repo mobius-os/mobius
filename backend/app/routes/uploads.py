@@ -5,17 +5,19 @@ import os
 import re
 from datetime import UTC, datetime
 import pathlib
-from typing import List, Optional
+from typing import List
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Path, UploadFile
 from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
 
 from app import models
 from app.auth import decode_access_token
+from app.auth_helpers import get_auth_token
 from app.config import get_settings
 from app.database import get_db
 from app.deps import get_current_owner, get_current_owner_or_app
+from app.path_utils import validate_path_within_base
 
 router = APIRouter(prefix="/api/chats", tags=["uploads"])
 
@@ -65,19 +67,9 @@ def _unique_name(directory: Path, filename: str) -> str:
   return f"{stem}_{i}{suffix}"
 
 
-# The serve endpoint uses this instead of get_current_owner because
+# The serve endpoint uses get_auth_token from app.auth_helpers because
 # <img> tags and iframes cannot set Authorization headers; ?token= is
 # the only way to authenticate browser-initiated resource fetches.
-def _auth_token(
-  authorization: Optional[str] = Header(default=None),
-  token: Optional[str] = Query(default=None),
-) -> str:
-  """Accepts a JWT from Authorization header or ?token= query param."""
-  if authorization and authorization.startswith("Bearer "):
-    return authorization[7:]
-  if token:
-    return token
-  raise HTTPException(status_code=401, detail="Not authenticated.")
 
 
 @router.post("/{chat_id}/uploads")
@@ -159,9 +151,7 @@ def delete_upload(
 
   settings = get_settings()
   upload_dir = pathlib.Path(settings.data_dir) / "chats" / chat_id / "uploads"
-  file_path = (upload_dir / filename).resolve()
-  if not str(file_path).startswith(str(upload_dir.resolve()) + os.sep):
-    raise HTTPException(status_code=400, detail="Invalid path.")
+  file_path = validate_path_within_base(filename, upload_dir)
 
   if file_path.exists() and file_path.is_file():
     file_path.unlink()
@@ -177,7 +167,7 @@ def delete_upload(
 def serve_upload(
   chat_id: str,
   filename: str = Path(...),
-  raw_token: str = Depends(_auth_token),
+  raw_token: str = Depends(get_auth_token),
   db: Session = Depends(get_db),
 ):
   """Serves an uploaded file. Accepts JWT from header or ?token= param."""
@@ -192,10 +182,8 @@ def serve_upload(
 
   settings = get_settings()
   upload_dir = pathlib.Path(settings.data_dir) / "chats" / chat_id / "uploads"
-  file_path = (upload_dir / filename).resolve()
+  file_path = validate_path_within_base(filename, upload_dir)
 
-  if not str(file_path).startswith(str(upload_dir.resolve()) + os.sep):
-    raise HTTPException(status_code=400, detail="Invalid path.")
   if not file_path.exists():
     raise HTTPException(status_code=404, detail="File not found.")
 

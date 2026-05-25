@@ -6,21 +6,21 @@ import logging
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi import Path as FastPath
-from fastapi import Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from app import models
 from app.auth import decode_access_token, decrypt_api_key
+from app.auth_helpers import get_auth_token
 from app.config import get_settings
 from app.database import get_db
 from app.deps import get_current_owner
+from app.path_utils import validate_path_within_base
 
 log = logging.getLogger(__name__)
 
@@ -55,19 +55,9 @@ class GenerateRequest(BaseModel):
     return v
 
 
-# The generate endpoint uses this instead of get_current_owner because
-# the image serve endpoint must accept ?token= for <img> tags that
-# cannot set Authorization headers.
-def _auth_token(
-  authorization: Optional[str] = Header(default=None),
-  token: Optional[str] = Query(default=None),
-) -> str:
-  """Accepts a JWT from Authorization header or ?token= query param."""
-  if authorization and authorization.startswith("Bearer "):
-    return authorization[7:]
-  if token:
-    return token
-  raise HTTPException(status_code=401, detail="Not authenticated.")
+# The generate endpoint uses get_auth_token from app.auth_helpers
+# because the image serve endpoint must accept ?token= for <img> tags
+# that cannot set Authorization headers.
 
 
 async def _call_gemini(
@@ -181,7 +171,7 @@ async def generate_image(
 def serve_generated_image(
   chat_id: str,
   filename: str = FastPath(...),
-  raw_token: str = Depends(_auth_token),
+  raw_token: str = Depends(get_auth_token),
   db: Session = Depends(get_db),
 ):
   """Serves a generated image. Accepts JWT from header or ?token= param."""
@@ -196,10 +186,8 @@ def serve_generated_image(
 
   settings = get_settings()
   gen_dir = Path(settings.data_dir) / "chats" / chat_id / "generated"
-  file_path = (gen_dir / filename).resolve()
+  file_path = validate_path_within_base(filename, gen_dir)
 
-  if not file_path.is_relative_to(gen_dir.resolve()):
-    raise HTTPException(status_code=400, detail="Invalid path.")
   if not file_path.exists():
     raise HTTPException(status_code=404, detail="Image not found.")
 
