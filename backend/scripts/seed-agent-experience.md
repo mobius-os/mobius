@@ -104,6 +104,23 @@ in this same turn as a disposable test fixture. Do not infer
 consent from usefulness, reversibility, or confidence. When
 unsure who owns it, ask.
 
+## Git
+
+`/data/` is one git repo, initialized on first boot. After
+important or substantial changes — anything you'd want a clean
+way to undo if it later turned out wrong — commit:
+
+```bash
+/data/.pm-commit 'one-line what and why'
+```
+
+`.pm-commit` is a tiny wrapper around `git add -A && git commit`
+(read `/data/.pm-commit` if you want to see it).
+
+To see what's happened: `cd /data && git log --oneline -10`.
+To undo uncommitted work: `cd /data && git diff` to inspect,
+`git checkout -- <path>` to revert.
+
 ## Experience log
 
 Add new entries at the bottom. Delete outdated ones. No timestamps;

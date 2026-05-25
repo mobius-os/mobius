@@ -132,21 +132,6 @@ if [ ! -d /data/shell/src ]; then
   find /app/shell-src/src -type f | sort | xargs md5sum | md5sum | cut -d' ' -f1 > /data/shell/.origin-hash
 fi
 
-# Initialize local git in /data/shell/ so the agent can track changes.
-# This is purely local — no remote, no pushing.
-if [ ! -d /data/shell/.git ]; then
-  cd /data/shell
-  su -s /bin/sh mobius -c "
-    git init
-    git config user.name 'Möbius Agent'
-    git config user.email 'agent@mobius.local'
-    git add -A
-    git commit -m 'initial: shell source from build'
-    git checkout -b agent
-  " 2>/dev/null
-  cd /app
-fi
-
 # --- enforce protected file permissions ---
 # These files handle credential input and must not be agent-writable.
 # Runs on every boot, not just first boot, to re-enforce if needed.
@@ -226,6 +211,8 @@ compiled/
 shell/dist/
 shell/node_modules/
 db/
+db.sqlite3
+mobius.db
 chats/
 backups/
 *.bak-*
@@ -253,10 +240,14 @@ if [ ! -d /data/.git ]; then
   git -C /data commit -m 'init' --allow-empty
   chown -R mobius:mobius /data/.git 2>/dev/null || true
 else
-  # Defensive: a prior boot may have committed .secret-key before it was
-  # in the gitignore. Untrack it so the JWT signing key never re-enters
-  # any subsequent commit.
-  git -C /data rm --cached .secret-key 2>/dev/null || true
+  # Defensive: prior boots may have committed paths that the current
+  # gitignore now covers (.secret-key landed in the gitignore after
+  # it had already been committed; same story for the loose root-level
+  # .db files). `git rm --cached` is idempotent — silently no-ops if
+  # the path isn't in the index — so this is safe to re-run every boot.
+  for path in .secret-key db.sqlite3 mobius.db; do
+    git -C /data rm --cached "$path" 2>/dev/null || true
+  done
 fi
 
 # Idempotent re-chown of /data/.git on every boot. A `docker pull` plus

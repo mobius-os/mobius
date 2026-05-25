@@ -669,32 +669,6 @@ curl -s -H "Authorization: Bearer $AGENT_TOKEN" \
 If the next iteration goes wrong, PUT the backup back. Without
 the snapshot, a 900-line theme can be lost to a single typo.
 
-### Git tracking
-
-**Prefer committing after structural shell edits** so changes are auditable
-and reversible:
-
-```bash
-cd /data/shell && git add -A && git commit -m "what: concise description of what and why"
-```
-
-Good commit messages: `"add weather widget to sidebar"`,
-`"fix drawer overflow on small screens"`.
-
-Check the git log before making changes to understand the current
-state:
-
-```bash
-cd /data/shell && git log --oneline -10
-```
-
-If something goes wrong, revert:
-
-```bash
-cd /data/shell && git diff           # see what changed
-cd /data/shell && git checkout -- .  # revert uncommitted changes
-```
-
 ### What the server serves
 
 Evaluated once at startup:
@@ -737,7 +711,7 @@ input area.
 
 **Before rebuilding**, review changes:
 ```bash
-cd /data/shell && git diff
+cd /data && git diff -- shell/
 ```
 
 If the shell breaks, direct the partner to `/recover` → "Restore interface".
