@@ -142,7 +142,11 @@ export default function SettingsView({ onThemeChange }) {
                 expanded={expandedAuth === 'claude'}
                 onToggleExpand={toggleClaudeAuth}
               >
-                <ProviderAuth compact onDone={onClaudeAuthDone} />
+                <ProviderAuth
+                  authenticated={claudeAuthenticated}
+                  compact
+                  onDone={onClaudeAuthDone}
+                />
               </ProviderRow>
             </div>
           )}
