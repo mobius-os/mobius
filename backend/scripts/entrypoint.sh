@@ -245,9 +245,15 @@ else
   # it had already been committed; same story for the loose root-level
   # .db files). `git rm --cached` is idempotent — silently no-ops if
   # the path isn't in the index — so this is safe to re-run every boot.
-  for path in .secret-key db.sqlite3 mobius.db; do
-    git -C /data rm --cached "$path" 2>/dev/null || true
-  done
+  # Must run as mobius: /data/.git is mobius-owned (re-chowned below
+  # on every boot), and git refuses cross-owner operations with
+  # "dubious ownership". Running as root here would silently no-op via
+  # the trailing `|| true`.
+  su -s /bin/sh mobius -c '
+    for path in .secret-key db.sqlite3 mobius.db; do
+      git -C /data rm --cached "$path" 2>/dev/null || true
+    done
+  '
 fi
 
 # Idempotent re-chown of /data/.git on every boot. A `docker pull` plus
