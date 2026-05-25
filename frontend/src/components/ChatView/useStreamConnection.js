@@ -7,6 +7,19 @@ import { getToken, BASE } from '../../api/client.js'
 // DO NOT decrease below 2 — it makes streaming feel sluggish.
 const CHARS_PER_FRAME = 3
 
+// Window during which a 204 from /stream after a send is a race
+// (the SSE GET landed before chats_stream.py:POST /messages finished
+// registering the broadcast) rather than "agent finished." The POST
+// handler returns 202 only AFTER create_broadcast(chat_id) completes,
+// so any 204 outside this window genuinely means there's no active
+// turn left and the right move is a DB refresh. Inside the window,
+// schedule a quick reconnect instead — refreshing here would wipe
+// the optimistic user message before persistence catches up.
+//
+// 1.5s is the empirical headroom: round-trip + create_broadcast +
+// scheduler hop are well under that on local + remote prod traffic.
+const BROADCAST_REGISTRATION_WINDOW_MS = 1500
+
 // Events that come through the chat SSE stream but are not chat content.
 // These are published by agent scripts (notify_theme.sh, register_app.py,
 // rebuild_shell.sh) via POST /api/notify, which pushes them into the
@@ -80,6 +93,7 @@ const SYSTEM_EVENTS = new Set([
  *   >,
  *   latestItemsRef: React.MutableRefObject<Array<object>>,
  *   isStreaming: boolean,
+ *   isStreamingRef: React.MutableRefObject<boolean>,
  *   connectionError: string | null,
  *   sendMessage: (text: string, attachments?: Array<object>,
  *                 opts?: {hidden?: boolean, queueOnly?: boolean,
@@ -89,6 +103,14 @@ const SYSTEM_EVENTS = new Set([
  *   disconnect: (opts?: {clearStreaming?: boolean}) => void,
  *   clearStreamItems: () => void,
  * }}
+ *
+ * `isStreamingRef` is the synchronous mirror of `isStreaming`. It
+ * exists because ChatView's `handleStop` reads it from a closure
+ * that crosses a render boundary (after the `/chat/stop` await),
+ * and the queue-vs-fresh-send guard in `doSend` reads it from a
+ * callback fired during `setSending`'s commit window. Both paths
+ * need the latest value RIGHT NOW, not the value captured at last
+ * render — so the ref is load-bearing, not a convenience.
  */
 export default function useStreamConnection(chatId, {
   onStreamEnd,
@@ -308,7 +330,7 @@ export default function useStreamConnection(chatId, {
         // here would overwrite the optimistic user message before the
         // backend has finished persisting it.
         const sinceSend = Date.now() - justSentAtRef.current
-        if (sinceSend < 1500) {
+        if (sinceSend < BROADCAST_REGISTRATION_WINDOW_MS) {
           abortRef.current = null
           scheduleReconnect(() => connectRef.current?.(false), 300)
           return
@@ -700,6 +722,7 @@ export default function useStreamConnection(chatId, {
     streamItems,
     latestItemsRef,
     isStreaming,
+    isStreamingRef,
     connectionError,
     sendMessage,
     connectToStream,

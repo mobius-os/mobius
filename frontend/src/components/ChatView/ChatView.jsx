@@ -199,17 +199,16 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // min-height: calc(100% + 1px) from inflating offsetHeight and
   // breaking the spacer formula.
   const [spacerActive, setSpacerActive] = useState(false)
-  // Ref mirrors of `sending` and `isStreaming`. The refs are read by
-  // doSend's queue-vs-fresh-send guard (and by fetchMessages). Reading
-  // the state directly would capture a render-time value in doSend's
-  // closure — stale if doSend is invoked from a callback that crosses
-  // a render boundary (e.g., handleStop calling doSend(combined) after
-  // setSending(false)). The refs are updated every render so they
-  // always reflect the latest commit.
+  // Ref mirror of `sending`. Read by doSend's queue-vs-fresh-send
+  // guard (and by fetchMessages). Reading state directly would
+  // capture a render-time value in doSend's closure — stale when
+  // doSend is invoked from a callback that crosses a render boundary
+  // (e.g. handleStop calling doSend(combined) after setSending(false)).
+  // The ref is updated every render so it always reflects the latest
+  // commit. The peer ref for streaming state lives inside
+  // useStreamConnection and is exposed below as `isStreamingRef`.
   const sendingRef = useRef(false)
   sendingRef.current = sending
-  const isStreamingRef = useRef(false)
-  isStreamingRef.current = false  // set below after useStreamConnection
 
   // Re-entry guard for handleStop. Two rapid Stop clicks (e.g. during
   // the await on /chat/stop) would otherwise both snapshot the same
@@ -291,6 +290,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     streamItems,
     latestItemsRef,
     isStreaming,
+    isStreamingRef,
     connectionError,
     sendMessage: streamSend,
     connectToStream,
@@ -347,11 +347,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     onNeedsRefresh: fetchMessages,
     onQueuedTurnStarting: () => {},
   })
-  // Keep the ref mirror of isStreaming up to date for doSend's
-  // closure-safe guard. (sendingRef is set inline above where
-  // `sending` is declared; isStreaming comes from useStreamConnection
-  // so we mirror it here.)
-  isStreamingRef.current = isStreaming
 
   const { files: pendingFiles, addFiles, removeFile, clearFiles } = useFileUpload({ chatId })
 
@@ -976,14 +971,15 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       disconnect({ clearStreaming: true })
       promoteStreamToMessages()
       setSending(false)
-      // Sync the refs to the just-committed state so any synchronous
-      // caller below (doSend(combined)) reads the post-stop values.
+      // Sync sendingRef to the just-committed state so the synchronous
+      // doSend(combined) call below reads the post-stop value.
       // setSending(false) queues a render — the next render will write
       // sendingRef via the top-of-component mirror, but until then the
       // ref still holds the pre-stop `true`. We need the value RIGHT
-      // NOW for doSend's guard.
+      // NOW for doSend's guard. (The peer isStreamingRef is the hook's
+      // own ref; disconnect({clearStreaming: true}) above flipped it
+      // synchronously already.)
       sendingRef.current = false
-      isStreamingRef.current = false
       // pending + fetchGen were cleared/bumped BEFORE the await above.
       onStreamEnd?.()
 
