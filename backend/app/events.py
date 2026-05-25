@@ -3,6 +3,10 @@
 Pure data transforms that accumulate streaming events into the
 assistant message structure.  No I/O — extracted from chat.py for
 testability and clarity.
+
+Tool events for a single tool MUST arrive in the order tool_start,
+optional tool_input, tool_output, tool_end, with no events for other
+tools interleaved between them.
 """
 
 from typing import Literal

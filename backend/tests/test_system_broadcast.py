@@ -141,6 +141,21 @@ def test_text_event_keeps_legacy_publish_then_save_order(db, chat):
   )
 
 
+def test_sink_publish_returns_false_on_safe_commit_failure(db, chat, monkeypatch):
+  """publish() exposes DB write failure via its boolean return."""
+  chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
+  db.commit()
+  db.refresh(chat)
+  bc = _OrderedBroadcast(chat.id)
+  sink = chat_mod._ChatEventSink(bc, chat.id, db)
+
+  monkeypatch.setattr(chat_mod, "_safe_commit", lambda _db: False)
+
+  ok = sink.publish({"type": "tool_start", "tool": "Bash", "input": "ls"})
+
+  assert ok is False
+
+
 # --- Bug 4: SystemBroadcast end-to-end --------------------------------
 
 

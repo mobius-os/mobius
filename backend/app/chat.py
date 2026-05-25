@@ -23,6 +23,7 @@ from app.config import get_settings
 from app.events import process_event, build_assistant_message, finalize_blocks
 from app.providers import effective_agent_settings, get_provider
 from app.push import notify_owner
+from app.runtime_types import ChatEvent
 
 
 def _get_logger() -> logging.Logger:
@@ -119,14 +120,14 @@ def _notify_pending_question(db: Session, chat_id: str, event: dict):
     )
 
 
-def _update_last_assistant_message(db: Session, chat_id: str, message: dict):
+def _update_last_assistant_message(db: Session, chat_id: str, message: dict) -> bool:
   """Updates the last assistant message in the chat (for streaming updates)."""
   if not chat_id:
-    return
+    return True
   from app.models import Chat
   chat = db.query(Chat).filter(Chat.id == chat_id).first()
   if not chat or not chat.messages:
-    return
+    return True
   msgs = list(chat.messages)
   if msgs and msgs[-1].get("role") == "assistant":
     # Preserve question.answers from the existing message: when the
@@ -164,7 +165,7 @@ def _update_last_assistant_message(db: Session, chat_id: str, message: dict):
   else:
     msgs.append(message)
   chat.messages = msgs
-  _safe_commit(db)
+  return _safe_commit(db)
 
 
 async def _drain(stream: asyncio.StreamReader) -> None:
@@ -270,6 +271,11 @@ class _ChatEventSink:
   Lifetime: one sink per `_run_chat_impl` call. After the runner
   returns, the chat-impl wrapper calls `finalize()` which writes the
   final assistant message + persists session_id/cost on the chat row.
+
+  DB-lock-drop behavior: broadcasts still happen even when the DB
+  write path hits `_safe_commit()` returning False (for example a
+  transient SQLite lock). `publish()` returns that commit outcome so
+  callers can observe a broadcast-without-persist gap if they care.
   """
 
   _SAVE_INTERVAL_SECS = 1.0
@@ -288,8 +294,16 @@ class _ChatEventSink:
     self.cost_usd: float | None = None
     self._last_save = 0.0
 
-  def publish(self, event: dict) -> None:
+  def publish(self, event: ChatEvent) -> bool:
+    """Publishes an event and returns whether persistence succeeded.
+
+    Live broadcast is best-effort independent from persistence. When
+    `_safe_commit()` returns False because the database is locked, the
+    event is still published to SSE subscribers and the boolean return
+    exposes that observability gap to the caller.
+    """
     event_type = event.get("type")
+    commit_ok = True
 
     # Accumulate the event into assistant_blocks and decide whether a
     # save is due (immediate for save-triggering types, throttled
@@ -311,7 +325,7 @@ class _ChatEventSink:
     # next runner writeback (which has no block.answers to carry over).
     if needs_save and event_type == "question":
       self._last_save = time.monotonic()
-      _update_last_assistant_message(
+      commit_ok = _update_last_assistant_message(
         self.db, self.chat_id,
         build_assistant_message(self.assistant_blocks),
       )
@@ -327,10 +341,11 @@ class _ChatEventSink:
     # the 1s throttle).
     if needs_save and event_type != "question":
       self._last_save = time.monotonic()
-      _update_last_assistant_message(
+      commit_ok = _update_last_assistant_message(
         self.db, self.chat_id,
         build_assistant_message(self.assistant_blocks),
       )
+    return commit_ok
 
   def finalize(self) -> None:
     """Write the final assistant message snapshot to the DB."""
