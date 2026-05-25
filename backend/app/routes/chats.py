@@ -83,6 +83,8 @@ def list_chats(
     models.Chat.deleted_at < cutoff,
   ).all()
   for c in stale:
+    questions.cancel(c.id)
+    forget_chat(c.id)
     _purge_chat_dir(c.id)
     db.delete(c)
   db.commit()
