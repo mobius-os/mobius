@@ -71,6 +71,18 @@ COPY backend/scripts ./scripts/
 COPY skill/ ./skill/
 COPY protected-files.txt ./protected-files.txt
 
+# Recovery sources — immutable baked copies of the backend code and
+# scripts. The entrypoint chowns the LIVE /app/app/ and /app/scripts/
+# to mobius so the agent can edit them; if the agent breaks something,
+# recovery_restore.sh restores from these baked copies. Stay root-owned
+# and chmod a-w so even root running the recovery script can't
+# accidentally modify them in-place. They are the floor of the
+# recovery story: if the agent corrupts the live copy, this is what
+# we copy back from.
+COPY backend/app ./app-baked/
+COPY backend/scripts ./scripts-baked/
+RUN chmod -R a-w /app/app-baked /app/scripts-baked
+
 # Frontend static files + app-frame served by FastAPI.
 COPY --from=frontend /build/dist ./static/
 COPY frontend/public/app-frame.html ./app-frame.html

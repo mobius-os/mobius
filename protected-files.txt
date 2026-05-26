@@ -1,15 +1,52 @@
 # Protected files — read-only for the agent.
 #
-# These files handle credential input (passwords, tokens).  The agent
-# can read them to understand the auth flow but cannot modify them.
-# Tampering could allow exfiltration of user credentials.
+# Entries are ABSOLUTE paths. The entrypoint enforces chmod 444 +
+# root ownership on each path after the chown sweep that hands the
+# rest of /app/app/, /app/scripts/, and /data/shell/ to the mobius
+# user.
 #
-# When adding new files that handle secrets or auth tokens, add them
-# here.  The entrypoint enforces chmod 444 + root ownership on these
-# paths (relative to /data/shell/) after every copy or reset.
-src/components/LoginForm/LoginForm.jsx
-src/components/LoginForm/LoginForm.css
-src/components/SetupWizard/SetupWizard.jsx
-src/components/SetupWizard/SetupWizard.css
-src/components/ProviderAuth/ProviderAuth.jsx
-src/components/ProviderAuth/ProviderAuth.css
+# Two categories live here:
+#
+# 1. **Credential surfaces** — files that handle password / token
+#    input. Agent could exfiltrate by tampering. Keep root-owned.
+#
+# 2. **Frozen recovery island** — the minimum set of files that
+#    MUST keep working when the agent has broken everything else.
+#    Recovery chat is the always-reachable escape hatch; its code
+#    paths cannot be agent-editable or the safety net is illusory.
+#    If a frozen file is somehow corrupted, recovery_restore.sh
+#    re-copies it from /app/app-baked/ or /app/scripts-baked/.
+
+# --- Credential surfaces (shell) ---
+/data/shell/src/components/LoginForm/LoginForm.jsx
+/data/shell/src/components/LoginForm/LoginForm.css
+/data/shell/src/components/SetupWizard/SetupWizard.jsx
+/data/shell/src/components/SetupWizard/SetupWizard.css
+/data/shell/src/components/ProviderAuth/ProviderAuth.jsx
+/data/shell/src/components/ProviderAuth/ProviderAuth.css
+
+# --- Frozen recovery island (backend) ---
+/app/app/routes/recover.py
+/app/app/routes/recover_html.py
+/app/app/recover_chat.py
+/app/app/recover_chat_runner.py
+/app/app/recover_auth.py
+
+# --- Frozen recovery wiring ---
+# Without these, the recovery files above exist on disk but are not
+# reachable via HTTP. The agent CAN edit `main.py` to drop
+# `include_router(recover_chat_router)` and `routes/__init__.py` to
+# stop exporting the recover routers — both are mobius-writable
+# without this entry, and would silently disable recovery on the
+# next restart. Same for `auth.py`: agent could hardcode a password
+# or mint tokens. `database.py` is on the boot import chain — a
+# corrupted database.py prevents uvicorn from starting at all, so
+# recovery becomes unreachable. Freeze the load-bearing imports.
+/app/app/main.py
+/app/app/routes/__init__.py
+/app/app/auth.py
+/app/app/database.py
+
+# --- Frozen recovery island (scripts) ---
+/app/scripts/entrypoint.sh
+/app/scripts/recovery_restore.sh

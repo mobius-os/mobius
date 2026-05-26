@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from 'react'
 
 const ACTIVE_CHAT_KEY = 'moebius_active_chat'
 
+const MAX_APP_SENTINELS = 20
+
 // Parse shell-reload state (shell rebuild preserves view across reload).
 const shellReload = (() => {
   const raw = sessionStorage.getItem('shell-reload')
@@ -79,6 +81,17 @@ export default function useNavigation() {
   // True when openDrawer pushed an entry that hasn't been consumed by
   // a navigation or a back-gesture yet.
   const drawerPushedRef = useRef(false)
+  // Per-app pending nav-sentinels installed via the moebius:nav-push
+  // postMessage protocol. Keyed by appId. AppCanvas validates incoming
+  // messages and increments via appNavPush; handleBack consumes via
+  // moebius:nav-back postMessage to the iframe. See "Mini-app back-
+  // nav protocol" in skill/agent-skill.md.
+  const appSentinelCountsRef = useRef(new Map())
+  // True while we are programmatically consuming stale app-sentinels
+  // via history.go(-N) during an app switch. The popstate handler
+  // checks this flag and bails so the auto-pop doesn't fire
+  // handleBack and over-pop navStackRef.
+  const suppressPopstateRef = useRef(0)
 
   function openDrawer() {
     history.pushState(null, '')
@@ -102,7 +115,63 @@ export default function useNavigation() {
     }
   }
 
+  /**
+   * Mini-app nav-bridge: install a back-sentinel on behalf of the
+   * active mini-app. The iframe's window.postMessage sends
+   * moebius:nav-push when entering a nested view (article open,
+   * detail modal, etc.). Pushing a real top-level history entry
+   * here makes Android's swipe-back gesture snapshot the current
+   * view as the preview — which iframe-internal history can't do.
+   * On back-gesture, handleBack consumes one of these sentinels by
+   * forwarding moebius:nav-back to the iframe instead of changing
+   * the shell view.
+   */
+  function appNavPush(appId) {
+    if (appId == null) return
+    const m = appSentinelCountsRef.current
+    const current = m.get(appId) || 0
+    if (current >= MAX_APP_SENTINELS) {
+      // Defense against a misbehaving or compromised mini-app spamming
+      // nav-push. Cap is generous (20) so legitimate deeply-nested apps
+      // are unaffected.
+      return
+    }
+    try { history.pushState(null, '') } catch { return }
+    m.set(appId, current + 1)
+  }
+
+  /** Consume one app-sentinel (e.g. user tapped the in-app back
+   *  button inside the mini-app). Funnels through history.back so
+   *  the popstate handler's app-sentinel-first branch sees the same
+   *  state as a user gesture. */
+  function appNavPop(appId) {
+    if (appId == null) return
+    const m = appSentinelCountsRef.current
+    const n = m.get(appId) || 0
+    if (n <= 0) return
+    history.back()
+  }
+
   function navTo(view, opts = {}) {
+    // Switching apps clears the previous app's pending sentinels —
+    // they belong to a view we're leaving. We DO collapse them via
+    // history.go(-stale) and suppress the popstate handler for the
+    // window in which the synthetic events fire. Without this, the
+    // sentinels would sit as orphan history entries: the user would
+    // back-gesture into them, handleBack's app-sentinel branch
+    // wouldn't trigger (count is 0), the navStack-pop branch would
+    // run with an empty navStack, and the UI would feel frozen for
+    // `stale` back-presses.
+    const newAppId = ('appId' in opts) ? opts.appId : activeAppIdRef.current
+    if (activeAppIdRef.current && activeAppIdRef.current !== newAppId) {
+      const m = appSentinelCountsRef.current
+      const stale = m.get(activeAppIdRef.current) || 0
+      if (stale > 0) {
+        m.set(activeAppIdRef.current, 0)
+        suppressPopstateRef.current += stale
+        try { history.go(-stale) } catch { /* ignore */ }
+      }
+    }
     // Ensure exactly one history entry exists above the current
     // entry to serve as the back-target for this navigation.
     // Two cases:
@@ -164,6 +233,29 @@ export default function useNavigation() {
         setDrawerOpen(false)
         return
       }
+      // App-sentinel-first: if the active mini-app has pending
+      // sentinels installed via moebius:nav-push, the current entry
+      // being consumed belongs to the app's nested-view state — not
+      // the shell's navStack. Forward moebius:nav-back to the iframe
+      // and decrement the count. The shell view does NOT change.
+      const appId = activeAppIdRef.current
+      if (appId != null) {
+        const m = appSentinelCountsRef.current
+        const n = m.get(appId) || 0
+        if (n > 0) {
+          m.set(appId, n - 1)
+          const iframe = document.querySelector(
+            `iframe[data-app-id="${appId}"]`
+          )
+          if (iframe?.contentWindow) {
+            iframe.contentWindow.postMessage(
+              { type: 'moebius:nav-back' },
+              window.location.origin,
+            )
+          }
+          return
+        }
+      }
       // No drawer (or drawer open without a sentinel — defensive):
       // treat as real navigation back. Pop navStack and restore.
       drawerPushedRef.current = false
@@ -196,8 +288,17 @@ export default function useNavigation() {
       function onNavigate(e) {
         if (e.navigationType !== 'traverse') return
         if (!e.canIntercept) return
+        // Synthetic back fired by navTo's stale-sentinel cleanup —
+        // decrement and bail. Without this guard the cleanup would
+        // pop navStackRef once per stale entry.
+        if (suppressPopstateRef.current > 0) {
+          suppressPopstateRef.current -= 1
+          return
+        }
         // Nothing to go back to — let the browser handle it (exits PWA).
-        if (navStackRef.current.length === 0 && !drawerOpenRef.current) return
+        if (navStackRef.current.length === 0
+            && !drawerOpenRef.current
+            && !(appSentinelCountsRef.current.get(activeAppIdRef.current) > 0)) return
         e.intercept({ handler() { handleBack() } })
       }
       navigation.addEventListener('navigate', onNavigate)
@@ -206,7 +307,13 @@ export default function useNavigation() {
 
     // popstate fallback (Safari, older Chrome).
     function onPopState() {
-      if (navStackRef.current.length === 0 && !drawerOpenRef.current) return
+      if (suppressPopstateRef.current > 0) {
+        suppressPopstateRef.current -= 1
+        return
+      }
+      if (navStackRef.current.length === 0
+            && !drawerOpenRef.current
+            && !(appSentinelCountsRef.current.get(activeAppIdRef.current) > 0)) return
       handleBack()
     }
     window.addEventListener('popstate', onPopState)
@@ -243,5 +350,8 @@ export default function useNavigation() {
     activeViewRef,
     activeChatIdRef,
     activeAppIdRef,
+    appNavPush,
+    appNavPop,
+    appSentinelCountsRef,
   }
 }

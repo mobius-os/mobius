@@ -4,6 +4,7 @@ React frontend.  Works even if the agent breaks the shell."""
 import io
 import os
 import shutil
+import signal
 import sqlite3
 import subprocess
 import tempfile
@@ -18,7 +19,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
-from app import auth, models
+from app import models, recover_auth
 from app.config import get_settings
 from app.database import get_db
 from app.routes.recover_html import dashboard_html, login_html
@@ -27,9 +28,15 @@ from app.theme import inject_theme_into_html
 router = APIRouter(tags=["recover"])
 _limiter = Limiter(key_func=get_remote_address)
 
-# Session tokens are short-lived, stored in a cookie.  They are separate
-# from JWT tokens so recovery works even if JWT logic is broken.
-_COOKIE = "moebius_recover"
+# Session tokens come from `recover_auth` (HMAC-signed, no JWT
+# library) so recovery works even if `app/auth.py` is broken or
+# corrupted by the agent. The cookie name + TTL match what the
+# previous JWT-based implementation used. NOTE: the cookie FORMAT
+# changed (was JWT, now HMAC) so existing /recover sessions from
+# pre-upgrade do NOT carry over — users get bounced to the login
+# form on their next /recover visit after deploy. One-time minor
+# friction; documented in the deploy runbook.
+_COOKIE = recover_auth.COOKIE_NAME
 
 # Serializes the restore-shell action. FastAPI runs sync route handlers
 # in a threadpool, so two concurrent /recover/action POSTs can run
@@ -49,14 +56,12 @@ def _themed(html_str: str) -> str:
 def _verify_session(request: Request, db: Session) -> models.Owner:
   """Returns the owner if the recovery session cookie is valid."""
   token = request.cookies.get(_COOKIE)
-  if not token:
-    raise HTTPException(status_code=401)
-  payload = auth.decode_access_token(token)
-  if not payload:
+  username = recover_auth.decode_session_token(token)
+  if not username:
     raise HTTPException(status_code=401)
   owner = (
     db.query(models.Owner)
-    .filter(models.Owner.username == payload.get("sub"))
+    .filter(models.Owner.username == username)
     .first()
   )
   if not owner:
@@ -70,7 +75,7 @@ def _verify_session(request: Request, db: Session) -> models.Owner:
 def recover_page(request: Request, db: Session = Depends(get_db)):
   """Serves the recovery login form or the recovery dashboard."""
   token = request.cookies.get(_COOKIE)
-  if token and auth.decode_access_token(token):
+  if token and recover_auth.decode_session_token(token):
     return HTMLResponse(_themed(dashboard_html()))
   return HTMLResponse(_themed(login_html()))
 
@@ -94,7 +99,7 @@ def _request_is_https(request: Request) -> bool:
 
 @router.post("/recover/auth")
 @_limiter.limit("5/minute")
-def recover_auth(
+def recover_login(
   request: Request,
   username: str = Form(...),
   password: str = Form(...),
@@ -106,9 +111,9 @@ def recover_auth(
     .filter(models.Owner.username == username)
     .first()
   )
-  if not owner or not auth.verify_password(password, owner.hashed_password):
+  if not owner or not recover_auth.verify_password(password, owner.hashed_password):
     return HTMLResponse(_themed(login_html(error="Incorrect username or password.")))
-  token = auth.create_access_token({"sub": owner.username})
+  token = recover_auth.create_session_token(owner.username)
   resp = HTMLResponse(_themed(dashboard_html()))
   resp.set_cookie(
     _COOKIE, token,
@@ -250,6 +255,40 @@ def _action_factory_reset(data_dir: Path, db: Session) -> None:
     (data_dir / subdir).mkdir(parents=True, exist_ok=True)
 
 
+_RECOVER_PENDING_FILE = Path("/data/.recover-pending")
+
+
+def _defer_restore(mode: str) -> None:
+  """Writes a flag file then SIGTERMs uvicorn. The container restart
+  policy brings uvicorn back; entrypoint.sh reads the flag and runs
+  recovery_restore.sh AS ROOT before starting uvicorn.
+
+  Running the restore from entrypoint (not from this route handler)
+  is load-bearing: the route runs as `mobius` (uvicorn dropped
+  privilege), but `cp -a` from /app/<X>-baked/ to /app/<X>/ must
+  preserve root ownership on protected files for the frozen-island
+  invariant to hold. Mobius cannot `chown root:root`. Entrypoint
+  CAN — it runs as root before the `su -s mobius` exec at the end."""
+  _RECOVER_PENDING_FILE.write_text(mode)
+  import threading
+  threading.Timer(0.2, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()
+
+
+def _action_restore_backend(data_dir: Path, db: Session) -> str:
+  """Schedules restore of /app/app/ from /app/app-baked/ at next
+  boot, then SIGTERMs uvicorn. Docker restart policy (unless-stopped
+  on prod) recreates uvicorn; entrypoint.sh sees /data/.recover-pending
+  and runs recovery_restore.sh AS ROOT before starting uvicorn."""
+  _defer_restore("backend")
+  return "Backend restore scheduled. Server is restarting..."
+
+
+def _action_restore_scripts(data_dir: Path, db: Session) -> str:
+  """Schedules restore of /app/scripts/ from /app/scripts-baked/."""
+  _defer_restore("scripts")
+  return "Scripts restore scheduled. Server is restarting..."
+
+
 # Maps action names to handler functions.  download_backup is handled
 # separately because it returns a StreamingResponse, not a plain message.
 _ACTION_HANDLERS = {
@@ -257,6 +296,8 @@ _ACTION_HANDLERS = {
   "reset_chat": _action_reset_chat,
   "reset_settings": _action_reset_settings,
   "restore_shell": _action_restore_shell,
+  "restore_backend": _action_restore_backend,
+  "restore_scripts": _action_restore_scripts,
 }
 
 

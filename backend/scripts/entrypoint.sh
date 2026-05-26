@@ -33,14 +33,21 @@ if ! chown -R mobius:mobius /data 2>/dev/null; then
   chmod -R 777 /data/db /data/apps /data/compiled /data/shared /data/shell /data/logs /data/cron-logs /data/cli-auth 2>/dev/null || true
 fi
 
-# Defensive: any baked-in Python source/script that ended up with a
-# group-restrictive mode (e.g. 640 from a host umask 027) would be
-# unreadable by the mobius user at runtime. Make app + scripts world-
-# readable so subprocesses spawned by uvicorn (running as mobius) can
-# always import / exec them. Without this, a single Write tool on the
-# host with a tight umask silently broke Codex streaming until we
-# tracked down the perm denial. See providers.py::CodexProvider.build.
+# Hand the live backend + scripts to mobius so the agent can edit
+# them at runtime. The /app/app-baked/ and /app/scripts-baked/ copies
+# stay root-owned + chmod a-w as the recovery floor (recovery_restore.sh
+# copies from there if the agent breaks the live copy).
+#
+# Why chown here every boot: docker layer caching gives us back the
+# baked image perms (root-owned) on container restart. The chown is
+# idempotent. Frozen files are re-chmod-444'd a few lines down.
+#
+# Why a+rX too: any baked-in Python source/script with a group-
+# restrictive mode (host umask 027 leaves files at 640) would be
+# unreadable by mobius. World-readable is the safe default for code
+# that doesn't hold secrets.
 chmod -R a+rX /app/app /app/scripts 2>/dev/null || true
+chown -R mobius:mobius /app/app /app/scripts 2>/dev/null || true
 
 # Auto-generate SECRET_KEY if not set (one-click deploy support).
 # Persisted to /data so it survives container restarts.
@@ -141,16 +148,35 @@ if [ ! -d /data/shell/src ]; then
 fi
 
 # --- enforce protected file permissions ---
-# These files handle credential input and must not be agent-writable.
-# Runs on every boot, not just first boot, to re-enforce if needed.
+# Two categories of protected files (see protected-files.txt header):
+#   1. Credential surfaces — chmod 444 root prevents agent tampering.
+#   2. Frozen recovery island — chmod 444 root keeps the recovery
+#      chat reachable + working when the rest of the platform is
+#      broken.
+# Entries are absolute paths so both /data/shell/ and /app/app/
+# targets fit the same enforcement loop. Runs on every boot, not
+# just first boot, to re-enforce after the chown sweep above.
 if [ -f /app/protected-files.txt ]; then
   while IFS= read -r line; do
     # skip comments and empty lines
     case "$line" in \#*|"") continue ;; esac
-    target="/data/shell/$line"
+    # Absolute paths only (new format). Legacy relative paths are
+    # treated as /data/shell/-relative for backward compat with any
+    # external protected-files.txt overrides.
+    case "$line" in
+      /*) target="$line" ;;
+      *)  target="/data/shell/$line" ;;
+    esac
     if [ -f "$target" ]; then
       chown root:root "$target"
-      chmod 444 "$target"
+      # Shell scripts in the frozen list need to stay EXECUTABLE
+      # (recovery_restore.sh, entrypoint.sh) so root can run them.
+      # 555 = read + execute for everyone, no write. Non-executable
+      # files (Python sources, CSS, HTML) stay 444.
+      case "$target" in
+        *.sh) chmod 555 "$target" ;;
+        *)    chmod 444 "$target" ;;
+      esac
     fi
   done < /app/protected-files.txt
 fi
@@ -225,6 +251,8 @@ chats/
 backups/
 *.bak-*
 apps/*/data/
+recovery_chat.jsonl
+.recover-pending
 EOF
 chown mobius:mobius /data/.gitignore 2>/dev/null || true
 
@@ -294,6 +322,67 @@ if [ ! -f /data/.pm-commit ] || ! cmp -s /app/scripts/pm-commit /data/.pm-commit
   chown mobius:mobius /data/.pm-commit 2>/dev/null || true
 fi
 
+
+# Deferred restore: a previous boot's recovery chat may have written
+# /data/.recover-pending=<mode>. Process it AS ROOT (we're still root
+# at this point) so recovery_restore.sh can chown protected files
+# back to root:root. Then clear the flag and continue boot.
+#
+# Running the restore here (not from the route handler that wrote
+# the flag) is load-bearing: cp -a from /app/<X>-baked/ over the
+# live /app/<X>/ must preserve root ownership on protected files
+# for the frozen-island invariant to hold. The route handler runs
+# as mobius (uvicorn drops privilege) and cannot `chown root:root`.
+# Root can. The flag file is the handoff between the two contexts.
+if [ -f /data/.recover-pending ]; then
+  mode=$(cat /data/.recover-pending 2>/dev/null | tr -d '[:space:]')
+  rm -f /data/.recover-pending
+  restore_status=""
+  case "$mode" in
+    backend|scripts|shell-dist|shell-src)
+      echo "Recovery flag detected: $mode — running recovery_restore.sh as root..."
+      if /app/scripts/recovery_restore.sh "$mode"; then
+        restore_status="ok"
+      else
+        restore_status="failed"
+        echo "WARNING: recovery_restore.sh $mode failed" >&2
+      fi
+      ;;
+    "") : ;;
+    *)
+      restore_status="unknown-mode"
+      echo "WARNING: unknown recovery flag mode: $mode" >&2
+      ;;
+  esac
+  # Tell the user what happened by appending to the recovery chat
+  # log. They'll see this when they reload /recover/chat after the
+  # container restart. Without this signal a silent failure leaves
+  # them refreshing nervously with no feedback.
+  if [ -n "$restore_status" ]; then
+    ts=$(date -u +%s)
+    payload="{\"role\":\"system\",\"content\":\"Recovery action '$mode' completed: $restore_status. Server restarted.\",\"ts\":$ts}"
+    echo "$payload" >> /data/recovery_chat.jsonl
+    chown mobius:mobius /data/recovery_chat.jsonl 2>/dev/null || true
+  fi
+  # Re-enforce protected files now that the restore may have
+  # touched perms.
+  if [ -f /app/protected-files.txt ]; then
+    while IFS= read -r line; do
+      case "$line" in \#*|"") continue ;; esac
+      case "$line" in
+        /*) target="$line" ;;
+        *)  target="/data/shell/$line" ;;
+      esac
+      if [ -f "$target" ]; then
+        chown root:root "$target" 2>/dev/null || true
+        case "$target" in
+          *.sh) chmod 555 "$target" 2>/dev/null || true ;;
+          *)    chmod 444 "$target" 2>/dev/null || true ;;
+        esac
+      fi
+    done < /app/protected-files.txt
+  fi
+fi
 
 # Drop to non-root user and start the server.
 # umask 022: newly created files default to 644 (rw-r--r--) so the
