@@ -522,10 +522,17 @@ async function saveText(appId, token, path, text) {
 ```
 
 The path's extension picks the form: `.json` paths accept your data
-directly; non-JSON paths require the `{content: "..."}` envelope. The
-legacy `{content: JSON.stringify(data)}` envelope still works on
-`.json` paths too — handy if you're updating an existing mini-app
-without rewriting its save calls.
+directly; non-JSON paths require the `{content: "..."}` envelope.
+
+**Do NOT double-wrap a `.json` save with
+`{content: JSON.stringify(data)}`.** The server stores that exact
+envelope to disk for `.json` paths; subsequent loads return the
+envelope shape, not the data, and the app's load logic silently
+falls back to empty state. The next save then overwrites the real
+data with empty state on disk. This is the most common storage
+regression — when in doubt, write `body: JSON.stringify(data)` and
+read with `await res.json()`. The envelope form is only for text
+files (markdown, CSS, etc.) on non-`.json` paths.
 
 Use `/api/storage/shared/{path}` for files shared across apps.
 
