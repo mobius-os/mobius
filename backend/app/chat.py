@@ -13,6 +13,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from sqlalchemy.exc import OperationalError
@@ -48,7 +49,12 @@ def _get_logger() -> logging.Logger:
   settings = get_settings()
   log_dir = Path(settings.data_dir) / "logs"
   log_dir.mkdir(parents=True, exist_ok=True)
-  handler = logging.FileHandler(log_dir / "chat.log", encoding="utf-8")
+  handler = RotatingFileHandler(
+    log_dir / "chat.log",
+    maxBytes=50 * 1024 * 1024,
+    backupCount=3,
+    encoding="utf-8",
+  )
   handler.setFormatter(
     logging.Formatter("%(asctime)s %(levelname)s %(message)s")
   )
@@ -463,12 +469,17 @@ async def stop_chat_for(chat_id: str, db: Session = None) -> bool:
     _clear_pending_messages(db, chat_id)
   questions.cancel(chat_id)
   all_stopped = True
+  log = _get_logger()
   for handle in registry.get_handles(chat_id):
-    ok = await handle.stop(timeout=2.0)
-    if ok:
-      registry.unregister(chat_id, handle.kind)
-    else:
+    stopped = await handle.stop(timeout=2.0)
+    if not stopped:
+      log.warning(
+        "stop_chat_for: handle.stop() timed out for chat %s "
+        "(%s) — unregistering anyway to converge state",
+        chat_id, handle.kind,
+      )
       all_stopped = False
+    registry.unregister(chat_id, handle.kind)
   _finalize_broadcast_if_running(chat_id)
   registry.discard_starting(chat_id)
   return all_stopped
