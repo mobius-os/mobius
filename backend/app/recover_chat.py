@@ -185,6 +185,11 @@ async def recover_chat_stream(
   sends the id, and only id-tagged streams participate in dedup."""
   _require_session(moebius_recover)
   turn_id = (payload or {}).get("turn_id") if payload else None
+  # Provider picker — client passes "claude" or "codex"; anything else
+  # falls back to the default (first configured, claude-preferred).
+  provider = (payload or {}).get("provider") if payload else None
+  if provider not in recover_chat_runner.SUPPORTED_PROVIDERS:
+    provider = None  # runner picks the default
   if isinstance(turn_id, int):
     if turn_id in _streamed_turn_ids:
       raise HTTPException(
@@ -204,7 +209,7 @@ async def recover_chat_stream(
     _mark_turn_id_streamed(turn_id)
 
   async def gen():
-    async for chunk in recover_chat_runner.stream_turn(message):
+    async for chunk in recover_chat_runner.stream_turn(message, provider):
       yield chunk
 
   return StreamingResponse(
@@ -288,6 +293,33 @@ def _render_page(history: list[dict]) -> str:
     )
   history_html = "\n".join(history_html_parts)
 
+  # Provider picker. One radio per supported provider; the default
+  # checked radio is the runner's preferred-default. Status badge
+  # tells the user which providers have credentials configured.
+  prov_status = recover_chat_runner.provider_status()
+  prov_default = recover_chat_runner.default_provider()
+  prov_radio_html_parts = []
+  for name in recover_chat_runner.SUPPORTED_PROVIDERS:
+    configured = bool(prov_status.get(name))
+    checked = "checked" if name == prov_default else ""
+    badge = (
+      '<span class="rc-prov-ok" title="configured">●</span>'
+      if configured
+      else '<span class="rc-prov-missing" title="not connected">○</span>'
+    )
+    label_title = "" if configured else (
+      ' title="No credentials in /data/cli-auth/' + name + '. '
+      'Connect from Settings in the main app, '
+      'or use the Reconnect link (coming soon)."'
+    )
+    prov_radio_html_parts.append(
+      f'<label class="rc-prov"{label_title}>'
+      f'<input type="radio" name="rc-prov" value="{name}" {checked}>'
+      f'{badge} {name}'
+      f'</label>'
+    )
+  provider_picker_html = "\n".join(prov_radio_html_parts)
+
   return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -330,6 +362,27 @@ def _render_page(history: list[dict]) -> str:
     font-size: 13px;
   }}
   .rc-actions button:hover {{ background: #444; }}
+  .rc-prov-row {{
+    padding: 6px 12px;
+    border-bottom: 1px solid #333;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 13px;
+    color: #aaa;
+    flex-wrap: wrap;
+  }}
+  .rc-prov-label {{ color: #888; }}
+  .rc-prov {{
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    user-select: none;
+  }}
+  .rc-prov input[type="radio"] {{ margin: 0 4px 0 0; }}
+  .rc-prov-ok {{ color: #2a5; }}
+  .rc-prov-missing {{ color: #c66; }}
   .rc-log {{
     flex: 1;
     overflow-y: auto;
@@ -410,6 +463,10 @@ def _render_page(history: list[dict]) -> str:
   <button id="rc-restart-btn">Restart server</button>
   <button id="rc-reset-btn">Reset recovery chat</button>
 </div>
+<div class="rc-prov-row">
+  <span class="rc-prov-label">Rescue agent:</span>
+  {provider_picker_html}
+</div>
 <div id="rc-log" class="rc-log">{history_html}</div>
 <form class="rc-form" id="rc-form">
   <textarea id="rc-input" placeholder="Tell the agent what is broken..." required></textarea>
@@ -485,10 +542,12 @@ async function handleSend(e) {{
   // still SSE (data: <json>\\n\\n) so we parse it line-by-line.
   let streamOk = true;
   try {{
+    const selectedProv = document.querySelector('input[name="rc-prov"]:checked');
+    const provName = selectedProv ? selectedProv.value : undefined;
     const resp = await fetch('/recover/chat/stream', {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{turn_id: turnId}}),
+      body: JSON.stringify({{turn_id: turnId, provider: provName}}),
     }});
     if (!resp.ok || !resp.body) {{
       throw new Error('stream failed: ' + resp.status);

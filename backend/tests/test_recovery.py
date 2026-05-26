@@ -471,7 +471,7 @@ def test_turn_id_replay_returns_409(
   # 409 behavior on the second POST.
   from app import recover_chat_runner as rcr
 
-  async def _empty_stream(_message):
+  async def _empty_stream(_message, _provider=None):
     if False:
       yield ""  # generator that yields nothing
 
@@ -938,7 +938,7 @@ def test_reset_clears_streamed_turn_ids(
   # at turn_id=0 — proves the integration is actually unblocked.
   from app import recover_chat_runner as rcr
 
-  async def _empty_stream(_message):
+  async def _empty_stream(_message, _provider=None):
     if False:
       yield ""
 
@@ -1072,3 +1072,119 @@ async def test_stream_turn_releases_claim_even_when_terminate_raises(
         break
   await _asyncio.wait_for(_consume(), timeout=2.0)
   assert got_event, "second stream blocked — slot release was incomplete"
+
+
+# ---------------------------------------------------------------------
+# Step 3: provider picker flows through send/stream into stream_turn.
+#
+# When the client picks `codex` (or `claude`), the runner must receive
+# that exact value as its second argument. Lock this in so a future
+# refactor that drops the provider param from /stream → stream_turn
+# fails loudly.
+# ---------------------------------------------------------------------
+
+def test_provider_picker_flows_to_runner(
+  client, auth_cookie, monkeypatch, tmp_path,
+):
+  log_path = tmp_path / "picker.jsonl"
+  monkeypatch.setattr(
+    "app.recover_chat_runner.RECOVERY_LOG_PATH", log_path,
+  )
+  from app import recover_chat as rc
+  from app import recover_chat_runner as rcr
+  rc._streamed_turn_ids.clear()
+
+  seen_provider: list = []
+
+  async def _capturing_stream(_message, provider=None):
+    seen_provider.append(provider)
+    if False:
+      yield ""
+
+  monkeypatch.setattr(rcr, "stream_turn", _capturing_stream)
+
+  send = client.post(
+    "/recover/chat/send",
+    json={"message": "rescue this"},
+    cookies=auth_cookie,
+  )
+  assert send.status_code == 200
+  turn_id = send.json()["turn_id"]
+
+  # Client picks codex explicitly.
+  r = client.post(
+    "/recover/chat/stream",
+    json={"turn_id": turn_id, "provider": "codex"},
+    cookies=auth_cookie,
+  )
+  assert r.status_code == 200, r.text
+  assert seen_provider == ["codex"], (
+    f"runner did not receive provider=codex, saw {seen_provider}"
+  )
+
+
+def test_provider_picker_unknown_falls_back_to_default(
+  client, auth_cookie, monkeypatch, tmp_path,
+):
+  log_path = tmp_path / "picker_unknown.jsonl"
+  monkeypatch.setattr(
+    "app.recover_chat_runner.RECOVERY_LOG_PATH", log_path,
+  )
+  from app import recover_chat as rc
+  from app import recover_chat_runner as rcr
+  rc._streamed_turn_ids.clear()
+
+  seen_provider: list = []
+
+  async def _capturing_stream(_message, provider=None):
+    seen_provider.append(provider)
+    if False:
+      yield ""
+
+  monkeypatch.setattr(rcr, "stream_turn", _capturing_stream)
+
+  send = client.post(
+    "/recover/chat/send",
+    json={"message": "rescue"},
+    cookies=auth_cookie,
+  )
+  turn_id = send.json()["turn_id"]
+
+  # Client passes a bogus provider; route layer should normalize to
+  # None so the runner picks its default.
+  r = client.post(
+    "/recover/chat/stream",
+    json={"turn_id": turn_id, "provider": "not-a-real-provider"},
+    cookies=auth_cookie,
+  )
+  assert r.status_code == 200, r.text
+  assert seen_provider == [None], (
+    f"unknown provider should normalize to None, saw {seen_provider}"
+  )
+
+
+def test_provider_status_helpers(monkeypatch, tmp_path):
+  """`provider_status` reflects which credential files exist;
+  `default_provider` prefers claude when both are configured."""
+  from app import recover_chat_runner as rcr
+
+  fake_claude = tmp_path / "claude"
+  fake_codex = tmp_path / "codex"
+  fake_claude.mkdir()
+  fake_codex.mkdir()
+
+  monkeypatch.setattr(rcr, "CLAUDE_CONFIG_PATH", fake_claude)
+  monkeypatch.setattr(rcr, "CODEX_CONFIG_PATH", fake_codex)
+
+  # Nothing configured yet.
+  assert rcr.provider_status() == {"claude": False, "codex": False}
+
+  # Only codex configured.
+  (fake_codex / "auth.json").write_text("{}")
+  assert rcr.provider_status() == {"claude": False, "codex": True}
+  assert rcr.default_provider() == "codex"
+
+  # Both configured → claude wins by preference order.
+  (fake_claude / ".credentials.json").write_text("{}")
+  assert rcr.provider_status() == {"claude": True, "codex": True}
+  assert rcr.default_provider() == "claude"
