@@ -321,6 +321,48 @@ if [ ! -f /data/.pm-commit ] || ! cmp -s /app/scripts/pm-commit /data/.pm-commit
 fi
 
 
+# Deferred restore: a previous boot's recovery chat may have written
+# /data/.recover-pending=<mode>. Process it AS ROOT (we're still root
+# at this point) so recovery_restore.sh can chown protected files
+# back to root:root. Then clear the flag and continue boot.
+#
+# Running the restore here (not from the route handler that wrote
+# the flag) is load-bearing: cp -a from /app/<X>-baked/ over the
+# live /app/<X>/ must preserve root ownership on protected files
+# for the frozen-island invariant to hold. The route handler runs
+# as mobius (uvicorn drops privilege) and cannot `chown root:root`.
+# Root can. The flag file is the handoff between the two contexts.
+if [ -f /data/.recover-pending ]; then
+  mode=$(cat /data/.recover-pending 2>/dev/null | tr -d '[:space:]')
+  rm -f /data/.recover-pending
+  case "$mode" in
+    backend|scripts|shell-dist|shell-src)
+      echo "Recovery flag detected: $mode — running recovery_restore.sh as root..."
+      /app/scripts/recovery_restore.sh "$mode" || echo "WARNING: recovery_restore.sh $mode failed"
+      ;;
+    "") : ;;
+    *) echo "WARNING: unknown recovery flag mode: $mode" >&2 ;;
+  esac
+  # Re-enforce protected files now that the restore may have
+  # touched perms.
+  if [ -f /app/protected-files.txt ]; then
+    while IFS= read -r line; do
+      case "$line" in \#*|"") continue ;; esac
+      case "$line" in
+        /*) target="$line" ;;
+        *)  target="/data/shell/$line" ;;
+      esac
+      if [ -f "$target" ]; then
+        chown root:root "$target" 2>/dev/null || true
+        case "$target" in
+          *.sh) chmod 555 "$target" 2>/dev/null || true ;;
+          *)    chmod 444 "$target" 2>/dev/null || true ;;
+        esac
+      fi
+    done < /app/protected-files.txt
+  fi
+fi
+
 # Drop to non-root user and start the server.
 # umask 022: newly created files default to 644 (rw-r--r--) so the
 # mobius server can read script/source files copied into the image at

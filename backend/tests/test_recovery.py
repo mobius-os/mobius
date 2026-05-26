@@ -194,13 +194,38 @@ def test_recover_chat_reset_requires_cookie(client):
 
 
 def test_recover_chat_stream_requires_cookie(client):
-  r = client.get("/recover/chat/stream?message=hi")
+  # POST (not GET) so message never lands in access logs / browser
+  # history. Body is empty — runner reads the latest user line from
+  # /data/recovery_chat.jsonl.
+  r = client.post("/recover/chat/stream")
   assert r.status_code == 401
 
 
-def test_recover_chat_stream_rejects_empty_message(client, auth_cookie):
-  r = client.get("/recover/chat/stream?message=", cookies=auth_cookie)
+def test_recover_chat_stream_rejects_when_no_message_in_log(
+  client, auth_cookie, monkeypatch, tmp_path,
+):
+  # No log file yet, so latest_user_message() returns None.
+  monkeypatch.setattr(
+    "app.recover_chat_runner.RECOVERY_LOG_PATH",
+    tmp_path / "empty.jsonl",
+  )
+  r = client.post("/recover/chat/stream", cookies=auth_cookie)
   assert r.status_code == 400
+
+
+def test_recover_chat_latest_user_message(monkeypatch, tmp_path):
+  """The stream endpoint reads the most-recent user line; runner
+  must return it correctly across mixed roles."""
+  log_path = tmp_path / "mixed.jsonl"
+  monkeypatch.setattr(
+    "app.recover_chat_runner.RECOVERY_LOG_PATH", log_path,
+  )
+  from app import recover_chat_runner as rcr
+  rcr.append_log("user", "first")
+  rcr.append_log("assistant", "reply1")
+  rcr.append_log("user", "second")
+  rcr.append_log("assistant", "reply2")
+  assert rcr.latest_user_message() == "second"
 
 
 def test_recover_chat_runner_log_helpers(monkeypatch, tmp_path):

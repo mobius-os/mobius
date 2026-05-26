@@ -252,38 +252,38 @@ def _action_factory_reset(data_dir: Path, db: Session) -> None:
     (data_dir / subdir).mkdir(parents=True, exist_ok=True)
 
 
+_RECOVER_PENDING_FILE = Path("/data/.recover-pending")
+
+
+def _defer_restore(mode: str) -> None:
+  """Writes a flag file then SIGTERMs uvicorn. The container restart
+  policy brings uvicorn back; entrypoint.sh reads the flag and runs
+  recovery_restore.sh AS ROOT before starting uvicorn.
+
+  Running the restore from entrypoint (not from this route handler)
+  is load-bearing: the route runs as `mobius` (uvicorn dropped
+  privilege), but `cp -a` from /app/<X>-baked/ to /app/<X>/ must
+  preserve root ownership on protected files for the frozen-island
+  invariant to hold. Mobius cannot `chown root:root`. Entrypoint
+  CAN — it runs as root before the `su -s mobius` exec at the end."""
+  _RECOVER_PENDING_FILE.write_text(mode)
+  import threading
+  threading.Timer(0.2, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()
+
+
 def _action_restore_backend(data_dir: Path, db: Session) -> str:
-  """Restores /app/app/ from /app/app-baked/ via recovery_restore.sh
-  then SIGTERMs the parent process so the container supervisor
-  restarts uvicorn with the baked code."""
-  script = Path("/app/scripts/recovery_restore.sh")
-  if not script.is_file():
-    return "recovery_restore.sh not found (broken image?)"
-  result = subprocess.run(
-    [str(script), "backend"],
-    capture_output=True, text=True, timeout=60,
-  )
-  if result.returncode != 0:
-    return f"restore_backend failed: {result.stderr[:200]}"
-  # Schedule a SIGTERM so uvicorn restarts with the baked code. The
-  # HTTP response goes out first; the worker exits after that.
-  os.kill(os.getppid(), signal.SIGTERM)
-  return "Backend restored from /app/app-baked/. Server is restarting..."
+  """Schedules restore of /app/app/ from /app/app-baked/ at next
+  boot, then SIGTERMs uvicorn. Docker restart policy (unless-stopped
+  on prod) recreates uvicorn; entrypoint.sh sees /data/.recover-pending
+  and runs recovery_restore.sh AS ROOT before starting uvicorn."""
+  _defer_restore("backend")
+  return "Backend restore scheduled. Server is restarting..."
 
 
 def _action_restore_scripts(data_dir: Path, db: Session) -> str:
-  """Restores /app/scripts/ from /app/scripts-baked/. No restart
-  needed -- scripts are loaded at invocation time, not at boot."""
-  script = Path("/app/scripts/recovery_restore.sh")
-  if not script.is_file():
-    return "recovery_restore.sh not found (broken image?)"
-  result = subprocess.run(
-    [str(script), "scripts"],
-    capture_output=True, text=True, timeout=60,
-  )
-  if result.returncode != 0:
-    return f"restore_scripts failed: {result.stderr[:200]}"
-  return "Scripts restored from /app/scripts-baked/."
+  """Schedules restore of /app/scripts/ from /app/scripts-baked/."""
+  _defer_restore("scripts")
+  return "Scripts restore scheduled. Server is restarting..."
 
 
 # Maps action names to handler functions.  download_backup is handled

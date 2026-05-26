@@ -72,15 +72,24 @@ async def recover_chat_send(
   return JSONResponse({"status": "queued", "message": text})
 
 
-@router.get("/recover/chat/stream")
+@router.post("/recover/chat/stream")
 async def recover_chat_stream(
-  message: str,
   moebius_recover: str | None = Cookie(default=None),
 ):
-  """SSE stream of the agent's response to `message`."""
+  """SSE stream of the agent's response to the latest user message
+  in the log. POST (not GET) so the message body never appears in
+  uvicorn access logs, Caddy access logs, or browser history — the
+  recovery chat handles sensitive repair conversations.
+
+  Send + stream are split: the client POSTs /recover/chat/send first
+  (which persists the message to /data/recovery_chat.jsonl), then
+  POSTs to this endpoint to consume the response. The runner reads
+  the latest user-role line from the log, so there is nothing to
+  pass in the URL or body."""
   _require_session(moebius_recover)
-  if not message.strip():
-    raise HTTPException(status_code=400, detail="message required")
+  message = recover_chat_runner.latest_user_message()
+  if not message:
+    raise HTTPException(status_code=400, detail="no message in log")
 
   async def gen():
     async for chunk in recover_chat_runner.stream_turn(message):
@@ -107,11 +116,24 @@ def recover_chat_reset(
 def recover_restart(
   moebius_recover: str | None = Cookie(default=None),
 ):
-  """Soft restart: SIGTERM the parent so the container supervisor
-  restarts uvicorn. After the agent edits backend code, the user
-  clicks Restart in the recovery chat to load new code."""
+  """Soft restart: SIGTERM the uvicorn process so the container
+  supervisor (docker restart policy: unless-stopped on prod, "no"
+  on test) restarts it. After the agent edits backend code, the
+  user clicks Restart in the recovery chat to load new code.
+
+  We SIGTERM os.getpid() (uvicorn itself), NOT os.getppid().
+  Reason: entrypoint.sh ends with `exec su -s /bin/sh mobius -c
+  "exec uvicorn ..."`. Under this chain `getppid()` is the `su`
+  process which is effectively the container init — killing it
+  kills the whole container including any deferred state. Killing
+  uvicorn directly lets docker restart it cleanly. Verified on
+  mobius-test."""
   _require_session(moebius_recover)
-  os.kill(os.getppid(), signal.SIGTERM)
+  # Schedule the SIGTERM after the HTTP response has been flushed
+  # so the client actually sees the {"status": "restarting"} body.
+  # Without the threading.Timer, uvicorn dies before flushing.
+  import threading
+  threading.Timer(0.2, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()
   return JSONResponse({"status": "restarting"})
 
 
@@ -325,30 +347,50 @@ async function handleSend(e) {{
     return false;
   }}
 
-  const url = '/recover/chat/stream?message=' + encodeURIComponent(text);
-  const es = new EventSource(url);
-  es.onmessage = (ev) => {{
-    try {{
-      const data = JSON.parse(ev.data);
-      if (data.type === 'text') {{
-        asstMsg.text.textContent += data.content;
-        scrollToBottom();
-      }} else if (data.type === 'tool') {{
-        appendInline(asstMsg.wrap, 'rc-tool', '▸ Tool: ' + data.name);
-      }} else if (data.type === 'error') {{
-        appendInline(asstMsg.wrap, 'rc-err', data.message);
-      }} else if (data.type === 'done') {{
-        es.close();
-        sendBtn.disabled = false;
-        inputEl.focus();
+  // Use fetch+ReadableStream rather than EventSource so the stream
+  // endpoint can be POST (no message in the URL). The wire format is
+  // still SSE (data: <json>\\n\\n) so we parse it line-by-line.
+  let streamOk = true;
+  try {{
+    const resp = await fetch('/recover/chat/stream', {{ method: 'POST' }});
+    if (!resp.ok || !resp.body) {{
+      throw new Error('stream failed: ' + resp.status);
+    }}
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {{
+      const {{ value, done }} = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, {{ stream: true }});
+      // SSE frames are separated by a blank line. Process whole
+      // frames; leave partial frame in `buf`.
+      let idx;
+      while ((idx = buf.indexOf('\\n\\n')) !== -1) {{
+        const frame = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        if (!frame.startsWith('data:')) continue;
+        try {{
+          const data = JSON.parse(frame.slice(5).trim());
+          if (data.type === 'text') {{
+            asstMsg.text.textContent += data.content;
+            scrollToBottom();
+          }} else if (data.type === 'tool') {{
+            appendInline(asstMsg.wrap, 'rc-tool', '▸ Tool: ' + data.name);
+          }} else if (data.type === 'error') {{
+            appendInline(asstMsg.wrap, 'rc-err', data.message);
+          }} else if (data.type === 'done') {{
+            // Drain the rest of the response then exit the loop.
+          }}
+        }} catch (e) {{ /* malformed frame - ignore */ }}
       }}
-    }} catch (e) {{ /* malformed event - ignore */ }}
-  }};
-  es.onerror = () => {{
-    es.close();
-    appendInline(asstMsg.wrap, 'rc-err', 'Stream interrupted.');
-    sendBtn.disabled = false;
-  }};
+    }}
+  }} catch (err) {{
+    streamOk = false;
+    appendInline(asstMsg.wrap, 'rc-err', 'Stream interrupted: ' + err);
+  }}
+  sendBtn.disabled = false;
+  inputEl.focus();
   return false;
 }}
 

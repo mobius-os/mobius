@@ -85,6 +85,11 @@ export default function useNavigation() {
   // moebius:nav-back postMessage to the iframe. See "Mini-app back-
   // nav protocol" in skill/agent-skill.md.
   const appSentinelCountsRef = useRef(new Map())
+  // True while we are programmatically consuming stale app-sentinels
+  // via history.go(-N) during an app switch. The popstate handler
+  // checks this flag and bails so the auto-pop doesn't fire
+  // handleBack and over-pop navStackRef.
+  const suppressPopstateRef = useRef(0)
 
   function openDrawer() {
     history.pushState(null, '')
@@ -140,19 +145,22 @@ export default function useNavigation() {
 
   function navTo(view, opts = {}) {
     // Switching apps clears the previous app's pending sentinels —
-    // they belong to a view we're leaving. history.go(-N) collapses
-    // them so the back-stack stays in sync with what the user sees.
+    // they belong to a view we're leaving. We DO collapse them via
+    // history.go(-stale) and suppress the popstate handler for the
+    // window in which the synthetic events fire. Without this, the
+    // sentinels would sit as orphan history entries: the user would
+    // back-gesture into them, handleBack's app-sentinel branch
+    // wouldn't trigger (count is 0), the navStack-pop branch would
+    // run with an empty navStack, and the UI would feel frozen for
+    // `stale` back-presses.
     const newAppId = ('appId' in opts) ? opts.appId : activeAppIdRef.current
     if (activeAppIdRef.current && activeAppIdRef.current !== newAppId) {
       const m = appSentinelCountsRef.current
       const stale = m.get(activeAppIdRef.current) || 0
       if (stale > 0) {
         m.set(activeAppIdRef.current, 0)
-        // Don't actually history.go(-stale) — that would fire popstate
-        // handlers and over-pop the navStack. Just forget the
-        // sentinels; the entries remain in the browser history but
-        // become harmless drawer-style entries that handleBack's
-        // navStack-pop branch consumes naturally.
+        suppressPopstateRef.current += stale
+        try { history.go(-stale) } catch { /* ignore */ }
       }
     }
     // Ensure exactly one history entry exists above the current
@@ -271,6 +279,13 @@ export default function useNavigation() {
       function onNavigate(e) {
         if (e.navigationType !== 'traverse') return
         if (!e.canIntercept) return
+        // Synthetic back fired by navTo's stale-sentinel cleanup —
+        // decrement and bail. Without this guard the cleanup would
+        // pop navStackRef once per stale entry.
+        if (suppressPopstateRef.current > 0) {
+          suppressPopstateRef.current -= 1
+          return
+        }
         // Nothing to go back to — let the browser handle it (exits PWA).
         if (navStackRef.current.length === 0
             && !drawerOpenRef.current
@@ -283,6 +298,10 @@ export default function useNavigation() {
 
     // popstate fallback (Safari, older Chrome).
     function onPopState() {
+      if (suppressPopstateRef.current > 0) {
+        suppressPopstateRef.current -= 1
+        return
+      }
       if (navStackRef.current.length === 0
             && !drawerOpenRef.current
             && !(appSentinelCountsRef.current.get(activeAppIdRef.current) > 0)) return

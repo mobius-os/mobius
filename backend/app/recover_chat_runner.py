@@ -101,6 +101,25 @@ def reset_log() -> None:
     RECOVERY_LOG_PATH.unlink()
 
 
+def latest_user_message() -> str | None:
+  """Returns the most recent user-role message in the log, or None."""
+  if not RECOVERY_LOG_PATH.is_file():
+    return None
+  last = None
+  with RECOVERY_LOG_PATH.open("r", encoding="utf-8") as f:
+    for line in f:
+      line = line.strip()
+      if not line:
+        continue
+      try:
+        entry = json.loads(line)
+        if entry.get("role") == "user":
+          last = entry.get("content")
+      except json.JSONDecodeError:
+        continue
+  return last
+
+
 async def stream_turn(user_message: str) -> AsyncIterator[str]:
   """Spawns the Claude CLI for one turn and yields SSE events."""
   claude_bin = shutil.which("claude")
