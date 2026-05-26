@@ -32,6 +32,21 @@
 /app/app/recover_chat_runner.py
 /app/app/recover_auth.py
 
+# --- Frozen recovery wiring ---
+# Without these, the recovery files above exist on disk but are not
+# reachable via HTTP. The agent CAN edit `main.py` to drop
+# `include_router(recover_chat_router)` and `routes/__init__.py` to
+# stop exporting the recover routers — both are mobius-writable
+# without this entry, and would silently disable recovery on the
+# next restart. Same for `auth.py`: agent could hardcode a password
+# or mint tokens. `database.py` is on the boot import chain — a
+# corrupted database.py prevents uvicorn from starting at all, so
+# recovery becomes unreachable. Freeze the load-bearing imports.
+/app/app/main.py
+/app/app/routes/__init__.py
+/app/app/auth.py
+/app/app/database.py
+
 # --- Frozen recovery island (scripts) ---
 /app/scripts/entrypoint.sh
 /app/scripts/recovery_restore.sh

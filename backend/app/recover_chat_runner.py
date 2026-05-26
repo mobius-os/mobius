@@ -35,6 +35,28 @@ from typing import AsyncIterator
 
 RECOVERY_LOG_PATH = Path("/data/recovery_chat.jsonl")
 CLAUDE_CONFIG_PATH = Path("/data/cli-auth/claude")
+SUBPROCESS_CWD = "/data"
+
+# Module-level lock serializes stream_turn so a double-click on Send
+# (or a network-retry-driven reconnect) doesn't spawn two CLI
+# processes that race to write the assistant entry. The lock is
+# instantiated lazily because asyncio.Lock requires a running event
+# loop at construction time on older Python versions.
+_STREAM_LOCK: asyncio.Lock | None = None
+
+
+def _get_stream_lock() -> asyncio.Lock:
+  global _STREAM_LOCK
+  if _STREAM_LOCK is None:
+    _STREAM_LOCK = asyncio.Lock()
+  return _STREAM_LOCK
+
+
+# Hard cap on the rendered + in-memory recovery log so a long repair
+# session can't degrade the very page you need most. The on-disk
+# file keeps growing; only the page render + latest_user_message are
+# bounded. Operator can manually truncate the file if needed.
+MAX_RENDERED_MESSAGES = 200
 
 
 def _sse(event: dict) -> str:
@@ -43,29 +65,67 @@ def _sse(event: dict) -> str:
 
 
 def _system_prompt() -> str:
-  """Recovery agent instructions. Minimal — agent is here to fix."""
+  """Recovery agent instructions. Minimal — agent is here to fix.
+
+  Updated 2026-05-26 per multi-reviewer findings:
+    - `diff -ru` not `git diff`: /app/app-baked/ has no .git
+    - cwd is /data/, set in stream_turn's subprocess call
+    - read prior turns from the log file before answering
+    - no AskUserQuestion (recovery UI has only a textarea)
+    - no API calls (no AGENT_TOKEN, no API_BASE_URL set here —
+      this is intentionally filesystem-only)
+  """
   return (
     "You are running inside the Mobius recovery chat. The user has "
     "reached you here because something in the platform is broken "
-    "and they need help fixing it. You have elevated write access "
-    "to /app/app/ (backend), /app/scripts/ (utility scripts), and "
-    "/data/shell/ (frontend source). Recovery routes themselves "
-    "(/app/app/routes/recover*.py, /app/app/recover_chat*.py, "
-    "/app/app/recover_auth.py, /app/scripts/entrypoint.sh, "
-    "/app/scripts/recovery_restore.sh) are frozen (chmod 444) and "
-    "cannot be edited.\n\n"
+    "and they need help fixing it.\n\n"
+    "BEFORE answering, run `Read /data/recovery_chat.jsonl` to see "
+    "prior turns in this session (each line is a JSON object with "
+    "role + content). The CLI is invoked fresh per turn so there is "
+    "no in-process memory of earlier exchanges.\n\n"
+    "You have filesystem-only access. There is NO $AGENT_TOKEN, NO "
+    "$API_BASE_URL, NO $CHAT_ID env var here — the production chat "
+    "API plumbing may be broken. Do not try to POST to /api/...\n\n"
+    "Do NOT call AskUserQuestion. The recovery UI is a plain "
+    "textarea; questions you ask via that tool will hang silently. "
+    "Ask in plain prose and wait for the user's next turn.\n\n"
+    "Write surface:\n"
+    "  /app/app/        backend Python (mobius-writable, EXCEPT the "
+    "frozen-island files below). Your cwd is /data/; backend lives "
+    "at /app/app/.\n"
+    "  /app/scripts/    utility scripts (mobius-writable, EXCEPT "
+    "the two .sh files below).\n"
+    "  /data/shell/     frontend source + built bundle.\n\n"
+    "Frozen island (chmod 444/555 root-owned, edits are blocked at "
+    "the OS level — do not waste tool calls trying):\n"
+    "  /app/app/main.py                  router wiring\n"
+    "  /app/app/routes/__init__.py        router exports\n"
+    "  /app/app/auth.py                   production auth\n"
+    "  /app/app/database.py               DB engine init\n"
+    "  /app/app/routes/recover.py         recovery page\n"
+    "  /app/app/routes/recover_html.py    recovery HTML\n"
+    "  /app/app/recover_chat.py           this chat's endpoints\n"
+    "  /app/app/recover_chat_runner.py    this runner\n"
+    "  /app/app/recover_auth.py           recovery auth\n"
+    "  /app/scripts/entrypoint.sh         boot\n"
+    "  /app/scripts/recovery_restore.sh   restore from baked\n\n"
     "Workflow:\n"
-    "1. Read /data/logs/chat.log and use git diff against "
-    "/app/app-baked/ or /app/shell-src/ to understand what changed.\n"
-    "2. Make the fix.\n"
-    "3. Ask the user to click Restart in the recovery chat UI "
-    "(triggers POST /recover/restart) so uvicorn reloads the code.\n"
-    "4. After verifying the fix, append a Lesson to "
+    "1. Read /data/logs/chat.log for the latest error trail.\n"
+    "2. To see what changed vs the baked copy, use `diff -ru "
+    "/app/app-baked/ /app/app/` (NOT git diff — /app/app-baked/ "
+    "has no .git). Same for `/app/shell-src/` vs `/data/shell/`.\n"
+    "3. Make the fix in /app/app/ or /app/scripts/ or /data/shell/.\n"
+    "4. Tell the user: \"Click the **Restart server** button at the "
+    "top of this page.\" That POSTs /recover/restart, which SIGTERMs "
+    "uvicorn; the container's restart policy brings it back with "
+    "your edits loaded. No need to leave this chat.\n"
+    "5. After the partner confirms the fix, append a Lesson to "
     "/data/shared/agent-experience.md describing what went wrong "
     "and how to avoid it.\n\n"
-    "If you cannot fix it, tell the user to use the Restore "
-    "buttons in the main recovery page (/recover) -- that is the "
-    "last-resort reset using /app/app-baked/ or /app/shell-src/."
+    "If you cannot fix it from here, tell the user: \"Open "
+    "/recover in a new tab; click 'Restore backend' (or 'Restore "
+    "shell' / 'Restore scripts') — this copies the baked sources "
+    "back over the live ones and restarts the server.\""
   )
 
 
@@ -78,8 +138,14 @@ def append_log(role: str, content: str) -> None:
     f.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
 
-def load_log() -> list[dict]:
-  """Returns all logged messages in order, or [] if no log yet."""
+def load_log(limit: int | None = MAX_RENDERED_MESSAGES) -> list[dict]:
+  """Returns the most recent `limit` logged messages in order (or
+  all if limit is None). Default cap is MAX_RENDERED_MESSAGES so a
+  long repair session can't degrade the recovery page render.
+
+  The on-disk file is unbounded; only what we LOAD is capped.
+  Operator can manually truncate /data/recovery_chat.jsonl.
+  """
   if not RECOVERY_LOG_PATH.is_file():
     return []
   out = []
@@ -92,6 +158,8 @@ def load_log() -> list[dict]:
         out.append(json.loads(line))
       except json.JSONDecodeError:
         continue
+  if limit is not None and len(out) > limit:
+    out = out[-limit:]
   return out
 
 
@@ -121,7 +189,19 @@ def latest_user_message() -> str | None:
 
 
 async def stream_turn(user_message: str) -> AsyncIterator[str]:
-  """Spawns the Claude CLI for one turn and yields SSE events."""
+  """Spawns the Claude CLI for one turn and yields SSE events.
+
+  Serialized via _STREAM_LOCK so a double-click on Send (or a
+  network reconnect that fires a duplicate POST) cannot spawn two
+  concurrent CLI processes that interleave output and race to
+  append assistant entries to the log.
+  """
+  async with _get_stream_lock():
+    async for chunk in _stream_turn_locked(user_message):
+      yield chunk
+
+
+async def _stream_turn_locked(user_message: str) -> AsyncIterator[str]:
   claude_bin = shutil.which("claude")
   if not claude_bin:
     yield _sse({"type": "error", "message": "claude CLI not found in PATH"})
@@ -143,11 +223,16 @@ async def stream_turn(user_message: str) -> AsyncIterator[str]:
     "--", user_message,
   ]
 
+  # cwd=/data so the agent's relative-path commands in the system
+  # prompt resolve consistently. Without this, cwd inherits from
+  # uvicorn's launch dir (/app) which contradicts the prompt's
+  # `Read /data/recovery_chat.jsonl` references.
   proc = await asyncio.create_subprocess_exec(
     *cmd,
     stdout=asyncio.subprocess.PIPE,
     stderr=asyncio.subprocess.PIPE,
     env=env,
+    cwd=SUBPROCESS_CWD,
   )
 
   full_assistant_text = []

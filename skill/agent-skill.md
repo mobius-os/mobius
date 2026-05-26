@@ -52,6 +52,14 @@ for a small "frozen island" that keeps recovery reachable.
 | `/app/app/routes/recover*.py`, `/app/app/recover_chat*.py`, `/app/app/recover_auth.py`, `/app/scripts/entrypoint.sh`, `/app/scripts/recovery_restore.sh` | NO | Frozen recovery island. Listed in `/app/protected-files.txt`. Chmod 444/555 root-owned. Tampering by you is blocked at the OS level. |
 | `/data/cli-auth/`, `/data/.secret-key` | NO | Credentials, signing key. |
 
+**Important: edits live in the container's writable layer.** Your
+backend edits to `/app/app/` and `/app/scripts/` survive container
+restarts BUT are wiped on `docker compose up --build` (a rebuild
+restores the image's baked content). To make a backend change
+permanent, the partner must also patch the source repo on the host
+and commit. If unsure, ask the partner whether the fix is meant to
+be a one-off (container-only) or permanent (host-repo too).
+
 **If you break the live copy of something, the partner can recover
 via the `/recover` page or by talking to a fresh you in the recovery
 chat at `/recover/chat`.** That chat runs its own minimal stack
@@ -63,9 +71,25 @@ source back over the live copy.
 
 When working on a backend bug fix:
 1. Edit `/app/app/...py` in place
-2. Ask the partner to click "Restart server" in the recovery chat
-   (POSTs `/recover/restart`, SIGTERMs uvicorn, container restarts)
-3. Verify the fix
+2. Ask the partner to **open `/recover/chat` in a new browser tab**
+   (they stay in your current chat — your session survives the
+   restart). The recovery chat may prompt for login: it uses the
+   **same owner password as the main shell**, just behind a
+   separate login form, not a different credential.
+3. In that recovery-chat tab, the partner clicks "Restart server"
+   (POSTs `/recover/restart`, SIGTERMs uvicorn, container restarts).
+   The restart takes **~5-15 seconds**; the recovery-chat page
+   auto-reloads when the backend is healthy again.
+4. Verify the fix in the original chat (which is still open and
+   still has your full conversation history).
+
+**Which recovery URL?**
+
+| Situation | URL | Action |
+|---|---|---|
+| Backend edit, ready to load | `/recover/chat` | Click "Restart server" |
+| Agent stuck or unable to fix | `/recover` | Click "Restore backend" / "Restore shell" / "Restore scripts" |
+| Lost ability to log in to main shell | `/recover` | Log in (owner password), then options above |
 
 ---
 
@@ -584,6 +608,29 @@ useEffect(() => {
 }, [])
 ```
 
+**Vanilla JS variant** (for non-React mini-apps):
+
+```js
+// On entering a nested view:
+window.parent.postMessage(
+  { type: 'moebius:nav-push', label: 'detail' },
+  window.location.origin,
+)
+
+// Listen for the host telling you the user back-gestured:
+window.addEventListener('message', (e) => {
+  if (e.origin !== window.location.origin) return
+  if (e.data?.type !== 'moebius:nav-back') return
+  closeDetailView()  // your app's own state mutation
+})
+
+// On the app's own in-app back tap (X button etc.):
+window.parent.postMessage(
+  { type: 'moebius:nav-pop' },
+  window.location.origin,
+)
+```
+
 The shell installs a back-sentinel in its own history on
 `nav-push`, so the OS snapshots the article-list page underneath
 for the preview. On back-gesture the shell consumes the sentinel
@@ -592,6 +639,14 @@ own view. Single back-press, real preview.
 
 Don't combine `iframe.history.pushState` with this protocol —
 pick one model per nested-view level.
+
+**Important:** every code path that exits a nested view must call
+`nav-pop`. If your in-app X-button closes the modal but skips the
+`nav-pop`, the next back-gesture will be silently consumed by the
+host (and forwarded to your iframe via `moebius:nav-back` — which
+your handler may not be ready to receive in the new context). The
+user perceives back as broken. Treat `nav-pop` and `nav-push` as a
+strict pair, like push/pop on a stack.
 
 ### Fetching external URLs
 

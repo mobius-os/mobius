@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from 'react'
 
 const ACTIVE_CHAT_KEY = 'moebius_active_chat'
 
+const MAX_APP_SENTINELS = 20
+
 // Parse shell-reload state (shell rebuild preserves view across reload).
 const shellReload = (() => {
   const raw = sessionStorage.getItem('shell-reload')
@@ -126,9 +128,16 @@ export default function useNavigation() {
    */
   function appNavPush(appId) {
     if (appId == null) return
-    try { history.pushState(null, '') } catch { return }
     const m = appSentinelCountsRef.current
-    m.set(appId, (m.get(appId) || 0) + 1)
+    const current = m.get(appId) || 0
+    if (current >= MAX_APP_SENTINELS) {
+      // Defense against a misbehaving or compromised mini-app spamming
+      // nav-push. Cap is generous (20) so legitimate deeply-nested apps
+      // are unaffected.
+      return
+    }
+    try { history.pushState(null, '') } catch { return }
+    m.set(appId, current + 1)
   }
 
   /** Consume one app-sentinel (e.g. user tapped the in-app back
