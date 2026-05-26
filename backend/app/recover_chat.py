@@ -69,38 +69,49 @@ async def recover_chat_send(
   payload: dict = Body(...),
   moebius_recover: str | None = Cookie(default=None),
 ):
-  """Accepts a user message, persists it, returns 202.
+  """Accepts a user message, persists it, returns a turn_id the
+  client uses to pair with the subsequent /stream POST.
 
-  Streaming happens via GET /recover/chat/stream where the client
-  picks up the response. Split send + stream so the EventSource
-  setup is idempotent on reconnect.
+  The turn_id is the message's index in the log (counted from 0).
+  Pairing via id rather than 'latest user message' closes a race
+  where two browser tabs (or two rapid sends) cause one stream to
+  respond to the wrong message.
   """
   _require_session(moebius_recover)
   text = (payload.get("message") or "").strip()
   if not text:
     raise HTTPException(status_code=400, detail="message required")
-  recover_chat_runner.append_log("user", text)
-  return JSONResponse({"status": "queued", "message": text})
+  turn_id = recover_chat_runner.append_log("user", text)
+  return JSONResponse(
+    {"status": "queued", "message": text, "turn_id": turn_id}
+  )
 
 
 @router.post("/recover/chat/stream")
 @_limiter.limit("30/minute")
 async def recover_chat_stream(
   request: Request,
+  payload: dict | None = Body(default=None),
   moebius_recover: str | None = Cookie(default=None),
 ):
-  """SSE stream of the agent's response to the latest user message
-  in the log. POST (not GET) so the message body never appears in
-  uvicorn access logs, Caddy access logs, or browser history — the
-  recovery chat handles sensitive repair conversations.
+  """SSE stream of the agent's response to a specific persisted
+  message. POST (not GET) so the message body never appears in
+  uvicorn access logs, Caddy access logs, or browser history.
 
-  Send + stream are split: the client POSTs /recover/chat/send first
-  (which persists the message to /data/recovery_chat.jsonl), then
-  POSTs to this endpoint to consume the response. The runner reads
-  the latest user-role line from the log, so there is nothing to
-  pass in the URL or body."""
+  Pairing: the client passes the `turn_id` returned by /send. The
+  runner reads THAT specific message (by index in the jsonl log)
+  rather than 'latest user message' — closes the multi-tab race
+  where two sends + two streams could mis-pair.
+
+  For backward compatibility, if turn_id is omitted the runner
+  still falls back to latest_user_message — but the client always
+  sends the id."""
   _require_session(moebius_recover)
-  message = recover_chat_runner.latest_user_message()
+  turn_id = (payload or {}).get("turn_id") if payload else None
+  if isinstance(turn_id, int):
+    message = recover_chat_runner.user_message_by_id(turn_id)
+  else:
+    message = recover_chat_runner.latest_user_message()
   if not message:
     raise HTTPException(status_code=400, detail="no message in log")
 
@@ -357,6 +368,10 @@ async function handleSend(e) {{
   userMsg.text.textContent = text;
   const asstMsg = makeMsg('assistant');
 
+  // turn_id from /send pairs the subsequent /stream with this
+  // specific message, so a second send from another tab can't make
+  // /stream answer the wrong message.
+  let turnId = null;
   try {{
     const r = await fetch('/recover/chat/send', {{
       method: 'POST',
@@ -364,6 +379,8 @@ async function handleSend(e) {{
       body: JSON.stringify({{message: text}}),
     }});
     if (!r.ok) throw new Error('send failed: ' + r.status);
+    const sendBody = await r.json();
+    turnId = sendBody.turn_id;
   }} catch (err) {{
     asstMsg.role.textContent = 'error';
     asstMsg.text.textContent = String(err);
@@ -376,7 +393,11 @@ async function handleSend(e) {{
   // still SSE (data: <json>\\n\\n) so we parse it line-by-line.
   let streamOk = true;
   try {{
-    const resp = await fetch('/recover/chat/stream', {{ method: 'POST' }});
+    const resp = await fetch('/recover/chat/stream', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{turn_id: turnId}}),
+    }});
     if (!resp.ok || !resp.body) {{
       throw new Error('stream failed: ' + resp.status);
     }}
@@ -447,7 +468,14 @@ async function handleRestart() {{
 async function handleReset() {{
   if (!confirm('Wipe the recovery chat log? This cannot be undone.')) return;
   try {{
-    await fetch('/recover/chat/reset', {{method: 'POST'}});
+    const resp = await fetch('/recover/chat/reset', {{method: 'POST'}});
+    if (!resp.ok) {{
+      // Server-side delete failed (disk error, perm issue). Do NOT
+      // wipe the DOM — a successful-looking UI would mask the real
+      // state: page reload would re-render the un-deleted log and
+      // the user would be confused about whether the reset worked.
+      throw new Error('reset returned ' + resp.status);
+    }}
     while (logEl.firstChild) logEl.removeChild(logEl.firstChild);
   }} catch (err) {{
     const sys = makeMsg('system');

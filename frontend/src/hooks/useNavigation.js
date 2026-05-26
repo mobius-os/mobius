@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 
 const ACTIVE_CHAT_KEY = 'moebius_active_chat'
 
@@ -126,31 +126,44 @@ export default function useNavigation() {
    * forwarding moebius:nav-back to the iframe instead of changing
    * the shell view.
    */
-  function appNavPush(appId) {
-    if (appId == null) return
+  // Returns true on success, false on rejection (cap hit). Callers
+  // (AppCanvas) post `moebius:nav-push-rejected` back to the iframe
+  // on false so the app can correct its own bookkeeping — silent
+  // rejection would let the app's count drift permanently above the
+  // shell's, and its next `nav-pop` would consume someone else's
+  // legit sentinel (which back-fires hard).
+  //
+  // Wrapped in useCallback with [] deps because Shell passes this
+  // function down to AppCanvas, and AppCanvas's message-listener
+  // useEffect depends on it. Without the stable identity, the
+  // listener tears down + re-registers on every Shell render
+  // (every SSE event, every queue update, every toast). The
+  // teardown→register window can drop a frame-mounted message →
+  // stuck loading spinner. All state we read is via refs, so the
+  // empty dep array is correct.
+  const appNavPush = useCallback((appId) => {
+    if (appId == null) return false
     const m = appSentinelCountsRef.current
     const current = m.get(appId) || 0
     if (current >= MAX_APP_SENTINELS) {
-      // Defense against a misbehaving or compromised mini-app spamming
-      // nav-push. Cap is generous (20) so legitimate deeply-nested apps
-      // are unaffected.
-      return
+      return false
     }
-    try { history.pushState(null, '') } catch { return }
+    try { history.pushState(null, '') } catch { return false }
     m.set(appId, current + 1)
-  }
+    return true
+  }, [])
 
   /** Consume one app-sentinel (e.g. user tapped the in-app back
    *  button inside the mini-app). Funnels through history.back so
    *  the popstate handler's app-sentinel-first branch sees the same
    *  state as a user gesture. */
-  function appNavPop(appId) {
+  const appNavPop = useCallback((appId) => {
     if (appId == null) return
     const m = appSentinelCountsRef.current
     const n = m.get(appId) || 0
     if (n <= 0) return
     history.back()
-  }
+  }, [])
 
   function navTo(view, opts = {}) {
     // Switching apps clears the previous app's pending sentinels —

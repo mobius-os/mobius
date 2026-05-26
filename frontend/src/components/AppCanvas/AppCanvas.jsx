@@ -149,7 +149,17 @@ export default function AppCanvas({
       // the iframe via moebius:nav-back instead of changing the
       // shell view.
       if (msg.type === 'moebius:nav-push') {
-        onNavPush?.(appId)
+        const ok = onNavPush?.(appId)
+        if (ok === false) {
+          // Cap hit (MAX_APP_SENTINELS) or pushState threw. Tell the
+          // app so it can correct its own bookkeeping — otherwise its
+          // count drifts above the shell's and the next nav-pop pops
+          // a sentinel it never owned, breaking back-nav permanently.
+          iframe.contentWindow?.postMessage(
+            { type: 'moebius:nav-push-rejected' },
+            window.location.origin,
+          )
+        }
       } else if (msg.type === 'moebius:nav-pop') {
         onNavPop?.(appId)
       }

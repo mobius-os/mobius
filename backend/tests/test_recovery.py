@@ -286,3 +286,90 @@ def test_recover_auth_empty_secret_key():
       os.environ.pop("SECRET_KEY", None)
     else:
       os.environ["SECRET_KEY"] = saved
+
+
+# ---------------------------------------------------------------------
+# Send/stream pairing — closes the multi-tab race where /stream would
+# read "latest user message" instead of the specific one paired with
+# the /send that returned the turn_id.
+# ---------------------------------------------------------------------
+
+def test_send_returns_turn_id(client, auth_cookie, monkeypatch, tmp_path):
+  """/recover/chat/send returns a turn_id the client passes back to
+  /stream so the response pairs with this specific message, not
+  'latest' (which races under multi-tab use)."""
+  log_path = tmp_path / "pair.jsonl"
+  monkeypatch.setattr(
+    "app.recover_chat_runner.RECOVERY_LOG_PATH", log_path,
+  )
+  r = client.post(
+    "/recover/chat/send",
+    json={"message": "first"},
+    cookies=auth_cookie,
+  )
+  assert r.status_code == 200
+  body = r.json()
+  assert "turn_id" in body
+  assert body["turn_id"] == 0
+
+  r2 = client.post(
+    "/recover/chat/send",
+    json={"message": "second"},
+    cookies=auth_cookie,
+  )
+  assert r2.json()["turn_id"] == 1
+
+
+def test_user_message_by_id_pairs_correctly(monkeypatch, tmp_path):
+  """The runner helper returns the EXACT message at a turn_id, not
+  the latest. This is what closes the send/stream pairing race."""
+  log_path = tmp_path / "byid.jsonl"
+  monkeypatch.setattr(
+    "app.recover_chat_runner.RECOVERY_LOG_PATH", log_path,
+  )
+  from app import recover_chat_runner as rcr
+  id1 = rcr.append_log("user", "first")
+  id2 = rcr.append_log("assistant", "reply1")
+  id3 = rcr.append_log("user", "second")
+
+  assert rcr.user_message_by_id(id1) == "first"
+  assert rcr.user_message_by_id(id2) is None  # assistant, not user
+  assert rcr.user_message_by_id(id3) == "second"
+  # Out-of-range ids return None cleanly.
+  assert rcr.user_message_by_id(999) is None
+  assert rcr.user_message_by_id(-1) is None
+
+
+def test_stream_uses_provided_turn_id_not_latest(
+  client, auth_cookie, monkeypatch, tmp_path,
+):
+  """If the client passes turn_id=N, the stream endpoint should
+  resolve to message N — even if a NEWER user message has landed
+  in the log since. This is the multi-tab race fix."""
+  log_path = tmp_path / "race.jsonl"
+  monkeypatch.setattr(
+    "app.recover_chat_runner.RECOVERY_LOG_PATH", log_path,
+  )
+  # Two sends in quick succession (simulating two tabs racing).
+  r1 = client.post(
+    "/recover/chat/send",
+    json={"message": "tab1 message"},
+    cookies=auth_cookie,
+  )
+  tab1_turn = r1.json()["turn_id"]
+  r2 = client.post(
+    "/recover/chat/send",
+    json={"message": "tab2 message"},
+    cookies=auth_cookie,
+  )
+  tab2_turn = r2.json()["turn_id"]
+  assert tab1_turn != tab2_turn
+
+  # Verify the runner's user_message_by_id (what the stream endpoint
+  # uses internally) returns the right message for each turn_id.
+  from app import recover_chat_runner as rcr
+  assert rcr.user_message_by_id(tab1_turn) == "tab1 message"
+  assert rcr.user_message_by_id(tab2_turn) == "tab2 message"
+  # latest_user_message would return tab2 (this is the race scenario
+  # we are explicitly NOT relying on anymore).
+  assert rcr.latest_user_message() == "tab2 message"

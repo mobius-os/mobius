@@ -129,13 +129,56 @@ def _system_prompt() -> str:
   )
 
 
-def append_log(role: str, content: str) -> None:
-  """Appends one message to the recovery log. JSON-per-line so a
-  partial write doesn't corrupt earlier entries."""
+def append_log(role: str, content: str) -> int:
+  """Appends one message to the recovery log and returns its
+  zero-based index. The index is the turn_id used by /send +
+  /stream to pair a stream response to its specific message,
+  closing the multi-tab race where 'latest user message' would
+  cross wires.
+
+  JSON-per-line so a partial write doesn't corrupt earlier
+  entries. Index counts ALL lines (any role); the runner filters
+  by role when reading. Using line count as id is durable: log
+  truncation invalidates ids, which is the correct behaviour
+  (after reset, prior turn_ids are stale and the next /stream
+  will simply 400)."""
   RECOVERY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
   entry = {"role": role, "content": content, "ts": time.time()}
   with RECOVERY_LOG_PATH.open("a", encoding="utf-8") as f:
     f.write(json.dumps(entry, separators=(",", ":")) + "\n")
+  # Count lines AFTER the append so the returned index is the
+  # one this entry just landed at. Cheap because the file is tiny.
+  try:
+    with RECOVERY_LOG_PATH.open("r", encoding="utf-8") as f:
+      return sum(1 for _ in f) - 1
+  except Exception:
+    return -1
+
+
+def user_message_by_id(turn_id: int) -> str | None:
+  """Returns the content of the message at `turn_id` if it exists
+  AND is a user message. None otherwise — the /stream handler 400s
+  on None so a stale/garbage id surfaces as a clean error rather
+  than racing onto the wrong message."""
+  if turn_id < 0:
+    return None
+  if not RECOVERY_LOG_PATH.is_file():
+    return None
+  with RECOVERY_LOG_PATH.open("r", encoding="utf-8") as f:
+    for i, line in enumerate(f):
+      if i != turn_id:
+        continue
+      line = line.strip()
+      if not line:
+        return None
+      try:
+        entry = json.loads(line)
+        if entry.get("role") != "user":
+          return None
+        return entry.get("content") or None
+      except json.JSONDecodeError:
+        return None
+  return None
 
 
 def load_log(limit: int | None = MAX_RENDERED_MESSAGES) -> list[dict]:

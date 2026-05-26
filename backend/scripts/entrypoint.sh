@@ -359,9 +359,22 @@ if [ -f /data/.recover-pending ]; then
   # container restart. Without this signal a silent failure leaves
   # them refreshing nervously with no feedback.
   if [ -n "$restore_status" ]; then
-    ts=$(date -u +%s)
-    payload="{\"role\":\"system\",\"content\":\"Recovery action '$mode' completed: $restore_status. Server restarted.\",\"ts\":$ts}"
-    echo "$payload" >> /data/recovery_chat.jsonl
+    # Build the JSON via python's json.dumps so any future addition
+    # of free-form strings (error output, file paths, etc.) gets
+    # correctly escaped. Shell-interpolated JSON via echo was the
+    # original pattern but a single unescaped " or backslash in
+    # restore_status would corrupt the JSONL line and the runner
+    # would silently skip it (json.JSONDecodeError catch). The
+    # extra subprocess is cheap and runs at most once per boot.
+    python3 -c "
+import json, sys, time
+entry = {
+  'role': 'system',
+  'content': f\"Recovery action '{sys.argv[1]}' completed: {sys.argv[2]}. Server restarted.\",
+  'ts': int(time.time()),
+}
+print(json.dumps(entry, separators=(',', ':')))
+" "$mode" "$restore_status" >> /data/recovery_chat.jsonl
     chown mobius:mobius /data/recovery_chat.jsonl 2>/dev/null || true
   fi
   # Re-enforce protected files now that the restore may have
