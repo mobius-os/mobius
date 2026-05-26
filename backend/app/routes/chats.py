@@ -31,10 +31,27 @@ SOFT_DELETE_TTL = timedelta(days=7)
 
 
 def _purge_chat_dir(chat_id: str) -> None:
-  """Removes /data/chats/{chat_id}/ if it exists."""
-  chat_dir = Path(get_settings().data_dir) / "chats" / chat_id
-  if chat_dir.exists():
-    shutil.rmtree(chat_dir)
+  """Removes per-chat scratch dirs left on disk after a chat is gone.
+
+  Two locations get cleaned: the chat's data dir
+  (`/data/chats/{chat_id}/` — uploads, generated images, scratch)
+  and its agent-browser Chromium profile
+  (`/data/agent-browser-profiles/chat-{chat_id}/` — IndexedDB,
+  cache, cookies; typically 50-200 MB per profile that's seen any
+  use). Without the second rmtree, profiles accumulated across
+  every chat that ever invoked agent-browser and were never
+  reclaimed by chat-delete or the 7-day soft-delete purge — a slow
+  disk leak proportional to chat count, not time.
+
+  Both rmtrees use `ignore_errors=True` so chats that never wrote
+  to a given location don't raise.
+  """
+  data_dir = Path(get_settings().data_dir)
+  shutil.rmtree(data_dir / "chats" / chat_id, ignore_errors=True)
+  shutil.rmtree(
+    data_dir / "agent-browser-profiles" / f"chat-{chat_id}",
+    ignore_errors=True,
+  )
 
 
 
@@ -87,6 +104,19 @@ def list_chats(
     forget_chat(c.id)
     _purge_chat_dir(c.id)
     db.delete(c)
+  # Notification TTL: rows are written by every AskUserQuestion ack
+  # and every agent-driven push, and nothing else deletes them. Keep
+  # the table from growing unbounded by dropping anything older than
+  # 90 days alongside the chat purge above — same cadence, same
+  # transaction. Naive UTC matches `Notification.sent_at`'s storage
+  # format (see the chat cutoff above for the same TypeError-avoidance
+  # rationale).
+  notification_cutoff = (
+    datetime.now(UTC).replace(tzinfo=None) - timedelta(days=90)
+  )
+  db.query(models.Notification).filter(
+    models.Notification.sent_at < notification_cutoff,
+  ).delete(synchronize_session=False)
   db.commit()
 
   chats = (

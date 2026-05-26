@@ -47,6 +47,73 @@ def test_purge_removes_data_dir(client, db, auth, chat):
   assert not chat_dir.exists(), "Chat directory must be deleted with chat"
 
 
+def test_purge_removes_agent_browser_profile(client, db, auth, chat):
+  """Hard delete must also remove the agent-browser Chromium profile.
+
+  Profiles accumulate at /data/agent-browser-profiles/chat-{id}/
+  whenever a chat invokes agent-browser. Previously this path was
+  untouched by both delete and 7-day purge, leaking 50-200 MB per
+  profile to disk indefinitely (ticket 051).
+  """
+  import os
+  chat.deleted_at = datetime.utcnow() - timedelta(days=8)
+  db.commit()
+
+  data_dir = os.environ["DATA_DIR"]
+  profile_dir = Path(data_dir) / "agent-browser-profiles" / "chat-testchat"
+  profile_dir.mkdir(parents=True, exist_ok=True)
+  (profile_dir / "Cache").mkdir()
+  (profile_dir / "Cache" / "blob.bin").write_text("fake-cache")
+
+  client.get("/api/chats", headers=auth)
+
+  assert not profile_dir.exists(), (
+    "agent-browser profile dir must be deleted with chat"
+  )
+
+
+def test_notifications_older_than_90_days_purged(client, db, auth):
+  """Notifications older than 90 days must be deleted by list_chats.
+
+  The notification table had no TTL — rows accumulated indefinitely
+  from every AskUserQuestion ack and agent-driven push notification.
+  Ticket 052 caps growth by deleting >90-day rows alongside the
+  existing soft-deleted-chat purge.
+  """
+  owner = db.query(models.Owner).first()
+  old = models.Notification(
+    id="old-notif",
+    owner_id=owner.id,
+    source_type="chat",
+    source_id="testchat",
+    title="Old",
+    body="should be purged",
+    sent_at=datetime.utcnow() - timedelta(days=91),
+  )
+  recent = models.Notification(
+    id="recent-notif",
+    owner_id=owner.id,
+    source_type="chat",
+    source_id="testchat",
+    title="Recent",
+    body="should survive",
+    sent_at=datetime.utcnow() - timedelta(days=30),
+  )
+  db.add(old)
+  db.add(recent)
+  db.commit()
+
+  client.get("/api/chats", headers=auth)
+  db.expire_all()
+
+  assert db.query(models.Notification).filter(
+    models.Notification.id == "old-notif"
+  ).first() is None, "Notification older than 90 days must be purged"
+  assert db.query(models.Notification).filter(
+    models.Notification.id == "recent-notif"
+  ).first() is not None, "Notification newer than 90 days must survive"
+
+
 def test_chat_has_uploads_column(db, chat):
   """Chat.uploads must default to an empty list."""
   assert chat.uploads == []
