@@ -35,6 +35,7 @@ import logging
 import os
 import re
 import secrets
+import sqlite3
 import time
 from base64 import urlsafe_b64encode
 from pathlib import Path
@@ -90,15 +91,53 @@ _codex_login_procs: dict = {}
 _codex_login_status: dict = {}  # "complete" | "failed"
 
 
+# Recovery DB path resolution — same env-var the rest of the recovery
+# surface reads, inlined so we don't import from app.config or
+# recover_chat.py. Used by `_owner_exists` below.
+_DB_URL = os.environ.get("DATABASE_URL", "sqlite:////data/db/ultimate.db")
+_RECOVERY_DB_PATH = (
+  _DB_URL.removeprefix("sqlite:///") if _DB_URL.startswith("sqlite:")
+  else _DB_URL
+)
+
+
+def _owner_exists(username: str) -> bool:
+  """Returns True iff an Owner row with `username` exists in the DB.
+
+  Duplicated from recover_chat.py on purpose — recover_oauth.py is
+  its own frozen island and shouldn't import from another frozen
+  file just to share this 10-line helper. Uses raw sqlite3 so a
+  broken app.database / app.models doesn't take this surface down.
+  """
+  if not username:
+    return False
+  try:
+    with sqlite3.connect(_RECOVERY_DB_PATH) as con:
+      row = con.execute(
+        "SELECT 1 FROM owner WHERE username = ? LIMIT 1",
+        (username,),
+      ).fetchone()
+      return row is not None
+  except sqlite3.Error:
+    return False
+
+
 def _require_recovery_session(token: Optional[str]) -> None:
-  """Raises 401 unless the recovery cookie is valid.
+  """Raises 401 unless the recovery cookie is valid AND the owner
+  still exists.
 
   Recovery OAuth is gated on the recovery cookie, NOT the main-app
   owner JWT. The cookie is issued by /recover login (owner password)
   so reaching this surface still requires the owner password.
+
+  Owner-existence is re-checked on every call to defeat the
+  factory-reset-stale-cookie attack: factory reset deletes the
+  owner row, but the cookie's HMAC stays valid for up to 1h. Without
+  the re-check, a second tab / stolen cookie could keep writing to
+  /data/cli-auth/ post-reset. Codex review caught this.
   """
   username = recover_auth.decode_session_token(token)
-  if not username:
+  if not username or not _owner_exists(username):
     raise HTTPException(status_code=401)
 
 

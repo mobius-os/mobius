@@ -830,7 +830,7 @@ async def _spawn_claude(
 
 
 async def _spawn_codex(
-  user_message: str, claim: dict,
+  user_message: str, claim: dict, chat_id: str | None,
 ) -> AsyncIterator[str]:
   """Spawns the Codex CLI for one turn and yields SSE events.
 
