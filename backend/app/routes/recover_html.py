@@ -208,15 +208,39 @@ def dashboard_html(msg: str = "") -> str:
     {msg_html}
 
     <div class="recommended">
-      <p class="label">&#10003; Recommended</p>
-      <p class="desc">Resets the interface to its original state. Chats, mini-apps, and settings are untouched.</p>
-      <form method="POST" action="/recover/action"
-            onsubmit="{_confirm_attr(_CONFIRM_RESTORE)}">
-        <input type="hidden" name="action" value="restore_shell">
-        <button class="btn btn-primary" type="submit">
-          Restore interface
-        </button>
-      </form>
+      <p class="label">&#10003; Talk to the agent</p>
+      <p class="desc">Opens a minimal chat with the agent so it can diagnose and fix what's broken. The agent has elevated write access to backend code, scripts, and shell from here.</p>
+      <a class="btn btn-primary" href="/recover/chat" style="display:inline-block;text-decoration:none;">
+        Open recovery chat
+      </a>
+    </div>
+
+    <div class="section">
+      <p class="section-title">Restore from baked sources</p>
+      <p class="desc" style="margin-bottom:8px;">If the agent made things worse, copy the original baked source back over the live copy. Chats, mini-apps, and settings are untouched.</p>
+      <div class="actions">
+        <form method="POST" action="/recover/action"
+              onsubmit="{_confirm_attr(_CONFIRM_RESTORE)}">
+          <input type="hidden" name="action" value="restore_shell">
+          <button class="btn btn-outline" type="submit">
+            Restore shell
+          </button>
+        </form>
+        <form method="POST" action="/recover/action"
+              onsubmit="return confirm('Restore /app/app/ from the baked backend copy and restart the server. Continue?');">
+          <input type="hidden" name="action" value="restore_backend">
+          <button class="btn btn-outline" type="submit">
+            Restore backend
+          </button>
+        </form>
+        <form method="POST" action="/recover/action"
+              onsubmit="return confirm('Restore /app/scripts/ from the baked scripts copy. Continue?');">
+          <input type="hidden" name="action" value="restore_scripts">
+          <button class="btn btn-outline" type="submit">
+            Restore scripts
+          </button>
+        </form>
+      </div>
     </div>
 
     <div class="section">

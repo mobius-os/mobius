@@ -79,6 +79,12 @@ export default function useNavigation() {
   // True when openDrawer pushed an entry that hasn't been consumed by
   // a navigation or a back-gesture yet.
   const drawerPushedRef = useRef(false)
+  // Per-app pending nav-sentinels installed via the moebius:nav-push
+  // postMessage protocol. Keyed by appId. AppCanvas validates incoming
+  // messages and increments via appNavPush; handleBack consumes via
+  // moebius:nav-back postMessage to the iframe. See "Mini-app back-
+  // nav protocol" in skill/agent-skill.md.
+  const appSentinelCountsRef = useRef(new Map())
 
   function openDrawer() {
     history.pushState(null, '')
@@ -102,7 +108,53 @@ export default function useNavigation() {
     }
   }
 
+  /**
+   * Mini-app nav-bridge: install a back-sentinel on behalf of the
+   * active mini-app. The iframe's window.postMessage sends
+   * moebius:nav-push when entering a nested view (article open,
+   * detail modal, etc.). Pushing a real top-level history entry
+   * here makes Android's swipe-back gesture snapshot the current
+   * view as the preview — which iframe-internal history can't do.
+   * On back-gesture, handleBack consumes one of these sentinels by
+   * forwarding moebius:nav-back to the iframe instead of changing
+   * the shell view.
+   */
+  function appNavPush(appId) {
+    if (appId == null) return
+    try { history.pushState(null, '') } catch { return }
+    const m = appSentinelCountsRef.current
+    m.set(appId, (m.get(appId) || 0) + 1)
+  }
+
+  /** Consume one app-sentinel (e.g. user tapped the in-app back
+   *  button inside the mini-app). Funnels through history.back so
+   *  the popstate handler's app-sentinel-first branch sees the same
+   *  state as a user gesture. */
+  function appNavPop(appId) {
+    if (appId == null) return
+    const m = appSentinelCountsRef.current
+    const n = m.get(appId) || 0
+    if (n <= 0) return
+    history.back()
+  }
+
   function navTo(view, opts = {}) {
+    // Switching apps clears the previous app's pending sentinels —
+    // they belong to a view we're leaving. history.go(-N) collapses
+    // them so the back-stack stays in sync with what the user sees.
+    const newAppId = ('appId' in opts) ? opts.appId : activeAppIdRef.current
+    if (activeAppIdRef.current && activeAppIdRef.current !== newAppId) {
+      const m = appSentinelCountsRef.current
+      const stale = m.get(activeAppIdRef.current) || 0
+      if (stale > 0) {
+        m.set(activeAppIdRef.current, 0)
+        // Don't actually history.go(-stale) — that would fire popstate
+        // handlers and over-pop the navStack. Just forget the
+        // sentinels; the entries remain in the browser history but
+        // become harmless drawer-style entries that handleBack's
+        // navStack-pop branch consumes naturally.
+      }
+    }
     // Ensure exactly one history entry exists above the current
     // entry to serve as the back-target for this navigation.
     // Two cases:
@@ -164,6 +216,29 @@ export default function useNavigation() {
         setDrawerOpen(false)
         return
       }
+      // App-sentinel-first: if the active mini-app has pending
+      // sentinels installed via moebius:nav-push, the current entry
+      // being consumed belongs to the app's nested-view state — not
+      // the shell's navStack. Forward moebius:nav-back to the iframe
+      // and decrement the count. The shell view does NOT change.
+      const appId = activeAppIdRef.current
+      if (appId != null) {
+        const m = appSentinelCountsRef.current
+        const n = m.get(appId) || 0
+        if (n > 0) {
+          m.set(appId, n - 1)
+          const iframe = document.querySelector(
+            `iframe[data-app-id="${appId}"]`
+          )
+          if (iframe?.contentWindow) {
+            iframe.contentWindow.postMessage(
+              { type: 'moebius:nav-back' },
+              window.location.origin,
+            )
+          }
+          return
+        }
+      }
       // No drawer (or drawer open without a sentinel — defensive):
       // treat as real navigation back. Pop navStack and restore.
       drawerPushedRef.current = false
@@ -197,7 +272,9 @@ export default function useNavigation() {
         if (e.navigationType !== 'traverse') return
         if (!e.canIntercept) return
         // Nothing to go back to — let the browser handle it (exits PWA).
-        if (navStackRef.current.length === 0 && !drawerOpenRef.current) return
+        if (navStackRef.current.length === 0
+            && !drawerOpenRef.current
+            && !(appSentinelCountsRef.current.get(activeAppIdRef.current) > 0)) return
         e.intercept({ handler() { handleBack() } })
       }
       navigation.addEventListener('navigate', onNavigate)
@@ -206,7 +283,9 @@ export default function useNavigation() {
 
     // popstate fallback (Safari, older Chrome).
     function onPopState() {
-      if (navStackRef.current.length === 0 && !drawerOpenRef.current) return
+      if (navStackRef.current.length === 0
+            && !drawerOpenRef.current
+            && !(appSentinelCountsRef.current.get(activeAppIdRef.current) > 0)) return
       handleBack()
     }
     window.addEventListener('popstate', onPopState)
@@ -243,5 +322,8 @@ export default function useNavigation() {
     activeViewRef,
     activeChatIdRef,
     activeAppIdRef,
+    appNavPush,
+    appNavPop,
+    appSentinelCountsRef,
   }
 }

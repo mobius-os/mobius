@@ -150,6 +150,12 @@ app.include_router(ai_router)
 app.include_router(notify_router)
 app.include_router(proxy_router)
 app.include_router(recover_router)
+
+# Recovery chat — frozen, isolated from production chat code so it
+# stays reachable when the agent breaks chat.py / providers.py /
+# auth.py. See app/recover_chat.py for the design.
+from app.recover_chat import router as recover_chat_router  # noqa: E402
+app.include_router(recover_chat_router)
 app.include_router(settings_router)
 app.include_router(uploads_router)
 app.include_router(generate_router)

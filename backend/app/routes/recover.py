@@ -4,6 +4,7 @@ React frontend.  Works even if the agent breaks the shell."""
 import io
 import os
 import shutil
+import signal
 import sqlite3
 import subprocess
 import tempfile
@@ -18,7 +19,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
-from app import auth, models
+from app import models, recover_auth
 from app.config import get_settings
 from app.database import get_db
 from app.routes.recover_html import dashboard_html, login_html
@@ -27,9 +28,12 @@ from app.theme import inject_theme_into_html
 router = APIRouter(tags=["recover"])
 _limiter = Limiter(key_func=get_remote_address)
 
-# Session tokens are short-lived, stored in a cookie.  They are separate
-# from JWT tokens so recovery works even if JWT logic is broken.
-_COOKIE = "moebius_recover"
+# Session tokens come from `recover_auth` (HMAC-signed, no JWT
+# library) so recovery works even if `app/auth.py` is broken or
+# corrupted by the agent. The cookie name + TTL match what the
+# previous JWT-based implementation used; existing recover sessions
+# carry over after deploy.
+_COOKIE = recover_auth.COOKIE_NAME
 
 # Serializes the restore-shell action. FastAPI runs sync route handlers
 # in a threadpool, so two concurrent /recover/action POSTs can run
@@ -49,14 +53,12 @@ def _themed(html_str: str) -> str:
 def _verify_session(request: Request, db: Session) -> models.Owner:
   """Returns the owner if the recovery session cookie is valid."""
   token = request.cookies.get(_COOKIE)
-  if not token:
-    raise HTTPException(status_code=401)
-  payload = auth.decode_access_token(token)
-  if not payload:
+  username = recover_auth.decode_session_token(token)
+  if not username:
     raise HTTPException(status_code=401)
   owner = (
     db.query(models.Owner)
-    .filter(models.Owner.username == payload.get("sub"))
+    .filter(models.Owner.username == username)
     .first()
   )
   if not owner:
@@ -70,7 +72,7 @@ def _verify_session(request: Request, db: Session) -> models.Owner:
 def recover_page(request: Request, db: Session = Depends(get_db)):
   """Serves the recovery login form or the recovery dashboard."""
   token = request.cookies.get(_COOKIE)
-  if token and auth.decode_access_token(token):
+  if token and recover_auth.decode_session_token(token):
     return HTMLResponse(_themed(dashboard_html()))
   return HTMLResponse(_themed(login_html()))
 
@@ -94,7 +96,7 @@ def _request_is_https(request: Request) -> bool:
 
 @router.post("/recover/auth")
 @_limiter.limit("5/minute")
-def recover_auth(
+def recover_login(
   request: Request,
   username: str = Form(...),
   password: str = Form(...),
@@ -106,9 +108,9 @@ def recover_auth(
     .filter(models.Owner.username == username)
     .first()
   )
-  if not owner or not auth.verify_password(password, owner.hashed_password):
+  if not owner or not recover_auth.verify_password(password, owner.hashed_password):
     return HTMLResponse(_themed(login_html(error="Incorrect username or password.")))
-  token = auth.create_access_token({"sub": owner.username})
+  token = recover_auth.create_session_token(owner.username)
   resp = HTMLResponse(_themed(dashboard_html()))
   resp.set_cookie(
     _COOKIE, token,
@@ -250,6 +252,40 @@ def _action_factory_reset(data_dir: Path, db: Session) -> None:
     (data_dir / subdir).mkdir(parents=True, exist_ok=True)
 
 
+def _action_restore_backend(data_dir: Path, db: Session) -> str:
+  """Restores /app/app/ from /app/app-baked/ via recovery_restore.sh
+  then SIGTERMs the parent process so the container supervisor
+  restarts uvicorn with the baked code."""
+  script = Path("/app/scripts/recovery_restore.sh")
+  if not script.is_file():
+    return "recovery_restore.sh not found (broken image?)"
+  result = subprocess.run(
+    [str(script), "backend"],
+    capture_output=True, text=True, timeout=60,
+  )
+  if result.returncode != 0:
+    return f"restore_backend failed: {result.stderr[:200]}"
+  # Schedule a SIGTERM so uvicorn restarts with the baked code. The
+  # HTTP response goes out first; the worker exits after that.
+  os.kill(os.getppid(), signal.SIGTERM)
+  return "Backend restored from /app/app-baked/. Server is restarting..."
+
+
+def _action_restore_scripts(data_dir: Path, db: Session) -> str:
+  """Restores /app/scripts/ from /app/scripts-baked/. No restart
+  needed -- scripts are loaded at invocation time, not at boot."""
+  script = Path("/app/scripts/recovery_restore.sh")
+  if not script.is_file():
+    return "recovery_restore.sh not found (broken image?)"
+  result = subprocess.run(
+    [str(script), "scripts"],
+    capture_output=True, text=True, timeout=60,
+  )
+  if result.returncode != 0:
+    return f"restore_scripts failed: {result.stderr[:200]}"
+  return "Scripts restored from /app/scripts-baked/."
+
+
 # Maps action names to handler functions.  download_backup is handled
 # separately because it returns a StreamingResponse, not a plain message.
 _ACTION_HANDLERS = {
@@ -257,6 +293,8 @@ _ACTION_HANDLERS = {
   "reset_chat": _action_reset_chat,
   "reset_settings": _action_reset_settings,
   "restore_shell": _action_restore_shell,
+  "restore_backend": _action_restore_backend,
+  "restore_scripts": _action_restore_scripts,
 }
 
 

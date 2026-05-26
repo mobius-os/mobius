@@ -1,15 +1,37 @@
 # Protected files — read-only for the agent.
 #
-# These files handle credential input (passwords, tokens).  The agent
-# can read them to understand the auth flow but cannot modify them.
-# Tampering could allow exfiltration of user credentials.
+# Entries are ABSOLUTE paths. The entrypoint enforces chmod 444 +
+# root ownership on each path after the chown sweep that hands the
+# rest of /app/app/, /app/scripts/, and /data/shell/ to the mobius
+# user.
 #
-# When adding new files that handle secrets or auth tokens, add them
-# here.  The entrypoint enforces chmod 444 + root ownership on these
-# paths (relative to /data/shell/) after every copy or reset.
-src/components/LoginForm/LoginForm.jsx
-src/components/LoginForm/LoginForm.css
-src/components/SetupWizard/SetupWizard.jsx
-src/components/SetupWizard/SetupWizard.css
-src/components/ProviderAuth/ProviderAuth.jsx
-src/components/ProviderAuth/ProviderAuth.css
+# Two categories live here:
+#
+# 1. **Credential surfaces** — files that handle password / token
+#    input. Agent could exfiltrate by tampering. Keep root-owned.
+#
+# 2. **Frozen recovery island** — the minimum set of files that
+#    MUST keep working when the agent has broken everything else.
+#    Recovery chat is the always-reachable escape hatch; its code
+#    paths cannot be agent-editable or the safety net is illusory.
+#    If a frozen file is somehow corrupted, recovery_restore.sh
+#    re-copies it from /app/app-baked/ or /app/scripts-baked/.
+
+# --- Credential surfaces (shell) ---
+/data/shell/src/components/LoginForm/LoginForm.jsx
+/data/shell/src/components/LoginForm/LoginForm.css
+/data/shell/src/components/SetupWizard/SetupWizard.jsx
+/data/shell/src/components/SetupWizard/SetupWizard.css
+/data/shell/src/components/ProviderAuth/ProviderAuth.jsx
+/data/shell/src/components/ProviderAuth/ProviderAuth.css
+
+# --- Frozen recovery island (backend) ---
+/app/app/routes/recover.py
+/app/app/routes/recover_html.py
+/app/app/recover_chat.py
+/app/app/recover_chat_runner.py
+/app/app/recover_auth.py
+
+# --- Frozen recovery island (scripts) ---
+/app/scripts/entrypoint.sh
+/app/scripts/recovery_restore.sh

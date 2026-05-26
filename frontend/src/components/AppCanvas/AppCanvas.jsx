@@ -54,7 +54,10 @@ import './AppCanvas.css'
 // reload (~1–3s of visible jank). Tokens are short-lived but stable
 // across React remounts — a 5-minute staleTime is well within the
 // server-side validity window.
-export default function AppCanvas({ appId, version = 0, appName }) {
+export default function AppCanvas({
+  appId, version = 0, appName,
+  onNavPush, onNavPop,
+}) {
   const { data: token } = appQueries.token.useQuery(appId)
 
   // AppCanvas was passive (enabled: false) — relied on Shell's
@@ -138,10 +141,22 @@ export default function AppCanvas({ appId, version = 0, appName }) {
       if (msg.type === 'moebius:frame-mounted' && String(msg.appId) === String(appId)) {
         setLoaded(true)
       }
+      // Mini-app back-nav protocol (see useNavigation.appNavPush /
+      // appNavPop). The app announces nested-view enter/exit via
+      // postMessage; the shell installs a real top-level history
+      // sentinel so Android's swipe-back gesture has something to
+      // snapshot for the preview, and routes back-gestures back to
+      // the iframe via moebius:nav-back instead of changing the
+      // shell view.
+      if (msg.type === 'moebius:nav-push') {
+        onNavPush?.(appId)
+      } else if (msg.type === 'moebius:nav-pop') {
+        onNavPop?.(appId)
+      }
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
-  }, [appId])
+  }, [appId, onNavPush, onNavPop])
 
   // Broadcast theme updates to an already-loaded iframe so it can
   // refresh its theme without remounting (and losing app state).
@@ -189,6 +204,7 @@ export default function AppCanvas({ appId, version = 0, appName }) {
         className="canvas"
         src={src}
         title={appName || 'Mini-app'}
+        data-app-id={appId}
         sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-top-navigation-by-user-activation"
         allow="microphone"
         onLoad={() => {

@@ -36,6 +36,39 @@ When asked, the agent tells the human partner about these capabilities:
 
 ---
 
+## Write surface (widened 2026-05-26)
+
+You have direct write access to almost the entire platform. The
+short version: anything tracked in git is yours to edit, except
+for a small "frozen island" that keeps recovery reachable.
+
+| Path | Editable? | Notes |
+|---|---|---|
+| `/data/shell/src/`, `/data/shell/dist/` | yes | Frontend source + built bundle. Rebuild with `bash /app/scripts/rebuild_shell.sh` after editing src/. |
+| `/app/app/` | yes | Backend Python. Edits take effect on next uvicorn restart — ask the partner to click Restart in the recovery chat. |
+| `/app/scripts/` | yes | Utility scripts (rebuild_shell.sh, init scripts). |
+| `/data/apps/<slug>/`, `/data/shared/` | yes | Mini-app source + shared data. |
+| `/app/app-baked/`, `/app/scripts-baked/`, `/app/static/`, `/app/shell-src/` | NO | Immutable recovery sources (chmod a-w). `recovery_restore.sh` copies from these back to live if you break something. |
+| `/app/app/routes/recover*.py`, `/app/app/recover_chat*.py`, `/app/app/recover_auth.py`, `/app/scripts/entrypoint.sh`, `/app/scripts/recovery_restore.sh` | NO | Frozen recovery island. Listed in `/app/protected-files.txt`. Chmod 444/555 root-owned. Tampering by you is blocked at the OS level. |
+| `/data/cli-auth/`, `/data/.secret-key` | NO | Credentials, signing key. |
+
+**If you break the live copy of something, the partner can recover
+via the `/recover` page or by talking to a fresh you in the recovery
+chat at `/recover/chat`.** That chat runs its own minimal stack
+(separate auth, separate runner, separate storage in
+`/data/recovery_chat.jsonl`) so it stays reachable when production
+chat code is broken. From there, the partner can click "Restore
+backend" / "Restore shell" / "Restore scripts" to copy the baked
+source back over the live copy.
+
+When working on a backend bug fix:
+1. Edit `/app/app/...py` in place
+2. Ask the partner to click "Restart server" in the recovery chat
+   (POSTs `/recover/restart`, SIGTERMs uvicorn, container restarts)
+3. Verify the fix
+
+---
+
 ## Sessions and memory
 
 **The agent is ephemeral.** Each chat starts fresh with no memory of
@@ -518,6 +551,47 @@ useEffect(() => {
   return () => window.removeEventListener('popstate', onPop)
 }, [])
 ```
+
+**Android back-preview** — the swipe-back gesture renders a preview
+of the previous screen from a top-level history snapshot. Iframe
+`history.pushState` is invisible to that mechanism, so apps that
+only use iframe history get a blank preview. To get a real preview
+AND single-step back, opt into the **shell-mediated back protocol**
+via postMessage:
+
+```jsx
+// On entering a nested view (article, detail, modal):
+window.parent.postMessage(
+  { type: 'moebius:nav-push', label: 'klix-article' },
+  window.location.origin,
+)
+
+// On the app's own in-app back tap (X button, swipe handler):
+window.parent.postMessage(
+  { type: 'moebius:nav-pop' },
+  window.location.origin,
+)
+
+// Listen for the shell to tell you the user back-gestured:
+useEffect(() => {
+  function onMessage(e) {
+    if (e.origin !== window.location.origin) return
+    if (e.data?.type !== 'moebius:nav-back') return
+    closeNestedView()  // your app's own state mutation
+  }
+  window.addEventListener('message', onMessage)
+  return () => window.removeEventListener('message', onMessage)
+}, [])
+```
+
+The shell installs a back-sentinel in its own history on
+`nav-push`, so the OS snapshots the article-list page underneath
+for the preview. On back-gesture the shell consumes the sentinel
+and forwards `moebius:nav-back` to you instead of changing its
+own view. Single back-press, real preview.
+
+Don't combine `iframe.history.pushState` with this protocol —
+pick one model per nested-view level.
 
 ### Fetching external URLs
 
