@@ -39,7 +39,7 @@ def test_stop_chat_for_wedged_sdk_client_times_out(client, auth, chat):
   elapsed = time.monotonic() - start
   assert elapsed < 3.0, f"stop_chat_for hung for {elapsed}s"
   assert stopped is False
-  assert registry.get_handle(chat.id, RunnerKind.CLAUDE_SDK) is hanging
+  assert registry.get_handle(chat.id, RunnerKind.CLAUDE_SDK) is None
 
 
 def test_global_stop_targets_sdk_only_chats(client, auth, chat):
