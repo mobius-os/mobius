@@ -666,30 +666,30 @@ window.addEventListener('message', (e) => {
 })
 ```
 
-### Known limitations of the back-nav protocol
+### Back-nav across app switches
 
-These are accepted trade-offs documented so you can recognize the
-failure modes rather than chase them:
+App-sentinels are preserved across drawer-driven app switches. If
+you nest 2 levels in Klix then drawer-tap to Notes, the user gets
+browser-style back: first back returns to Klix (still showing the
+nested view it had when they left), next two backs unwind Klix's
+nesting, last back exits to the previous main view. Your iframe
+stays mounted in the LRU cache while invisible, so its internal
+state is preserved.
 
-1. **App-switch desync.** If you have nested-view sentinels pending
-   and the user navigates to a different mini-app, the host
-   collapses your sentinels (via `history.go(-N)`). Your iframe is
-   kept in the LRU cache (still mounted, just hidden) — your
-   in-app nested state stays as-is. When the user returns, the
-   visible nested view has no shell-side back-target; back-gesture
-   exits the app rather than unwinding the nested state. Mitigation:
-   listen for `visibilitychange` / iframe-hidden signals and pop
-   your own nested state when becoming invisible.
-2. **Suppression race during app-switch.** During the synthetic
-   `history.go(-N)` that collapses sentinels, the host briefly
-   suppresses popstate processing. A real user back-gesture
-   interleaved within that ~10ms window will be silently consumed
-   (lost). Edge case; document but don't engineer around.
-3. **No tree restoration.** The protocol stores a count, not a
-   stack of view labels. If you push 3 sentinels (list → detail →
-   edit) and the host sends 3 `nav-back` events, your app must
-   know how to unwind those in order. Keep your own breadcrumb if
-   the view hierarchy is non-trivial.
+The only thing your app needs to do for this to work: respond to
+`moebius:nav-back` correctly even when your iframe is currently
+invisible. The shell will route the back-gesture to whichever app
+the user is returning to — by the time `nav-back` arrives, your
+iframe is visible again. No special-casing needed for "hidden"
+states.
+
+### Limitation: no tree restoration
+
+The protocol stores a count, not a stack of view labels. If you
+push 3 sentinels (list → detail → edit) and the host sends 3
+`nav-back` events, your app must know how to unwind those in
+order. Keep your own breadcrumb if the view hierarchy is
+non-trivial.
 
 ### Fetching external URLs
 
