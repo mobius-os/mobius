@@ -289,9 +289,24 @@ def _do_restore_shell(data_dir: Path) -> str:
 def _action_factory_reset(data_dir: Path) -> None:
   """Deletes everything: apps, owner, storage, compiled files.
 
-  Returns None to signal that the caller should redirect to the login page
-  rather than the dashboard.
+  Also terminates any in-flight recovery rescue agent — a running
+  subprocess would otherwise retain elevated write access until it
+  naturally exits, even though /recover endpoints will start
+  rejecting its session cookie immediately. Codex review caught
+  this gap.
+
+  Returns None to signal that the caller should redirect to the
+  login page rather than the dashboard.
   """
+  # Kill the in-flight rescue agent BEFORE deleting state so the
+  # subprocess can't write to files we're about to wipe (race-
+  # tolerant, not race-free — best-effort, the proc.kill() is fast).
+  try:
+    from app import recover_chat_runner
+    recover_chat_runner.terminate_active_run()
+  except Exception:
+    # Don't let the kill fail block the reset itself.
+    pass
   _db_delete_all_apps()
   _db_delete_all_owners()
   for subdir in ["compiled", "apps", "shared", "logs", "cli-auth"]:

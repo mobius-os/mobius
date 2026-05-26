@@ -1354,3 +1354,115 @@ def test_recover_oauth_rejects_stale_cookie_post_factory_reset(
   assert r.status_code == 401
   r = client.get("/recover/provider/codex/status", cookies=auth_cookie)
   assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------
+# Post-review MEDIUM fixes (codex 186ff8a review)
+# ---------------------------------------------------------------------
+
+def test_send_surfaces_disk_failure_as_500(
+  client, auth_cookie, chat_id, monkeypatch,
+):
+  """If append_log returns -1 (its 'disk error' sentinel), the route
+  must 500 — not return `{"status":"queued","turn_id":-1}` and let
+  the client think the message was persisted.
+
+  Codex caught this: a swallowed -1 would propagate to /stream
+  where user_message_by_id(-1) returns None, and the user just
+  sees a generic "no message in log" without ever knowing the
+  earlier write failed.
+  """
+  from app import recover_chat_runner as rcr
+  monkeypatch.setattr(rcr, "append_log", lambda *a, **kw: -1)
+  r = client.post(
+    "/recover/chat/send",
+    json={"chat_id": chat_id, "message": "disk full"},
+    cookies=auth_cookie,
+  )
+  assert r.status_code == 500
+  assert "persist" in r.text.lower() or "failed" in r.text.lower()
+
+
+def test_legacy_migration_atomic_under_partial_copy(monkeypatch, tmp_path):
+  """If the legacy → multi-chat copy is interrupted mid-write,
+  the next list_chats() call must re-attempt rather than treating
+  the partial file as the migrated artifact.
+
+  Codex caught this: the old code wrote directly to legacy.jsonl,
+  so a copy that died halfway left a half-good file that future
+  calls assumed was complete. The atomic-rename fix writes to
+  .partial first; on failure the partial is cleaned up so the
+  next list_chats() retries.
+  """
+  from app import recover_chat_runner as rcr
+  monkeypatch.setattr(rcr, "RECOVERY_CHATS_DIR", tmp_path / "chats")
+  legacy = tmp_path / "legacy_log.jsonl"
+  legacy.write_text(
+    '{"role":"user","content":"first","ts":1.0}\n'
+    '{"role":"assistant","content":"reply","ts":2.0}\n'
+    '{"role":"user","content":"second","ts":3.0}\n'
+  )
+  monkeypatch.setattr(rcr, "RECOVERY_LOG_PATH", legacy)
+
+  # Make shutil.copyfileobj fail mid-write to simulate disk full.
+  original_copy = rcr.shutil.copyfileobj
+
+  def boom(*_a, **_kw):
+    raise OSError("simulated disk full")
+
+  monkeypatch.setattr(rcr.shutil, "copyfileobj", boom)
+  # First attempt — should silently fail (best-effort migration)
+  # but NOT leave a partial legacy.jsonl behind.
+  rcr.list_chats()
+  partial = tmp_path / "chats" / "legacy.jsonl.partial"
+  target = tmp_path / "chats" / "legacy.jsonl"
+  assert not partial.exists(), "partial copy must be cleaned up on failure"
+  assert not target.exists(), "failed copy must not produce a target file"
+  assert legacy.is_file(), "legacy source must be preserved when copy fails"
+
+  # Restore copyfileobj and retry: should succeed cleanly.
+  monkeypatch.setattr(rcr.shutil, "copyfileobj", original_copy)
+  chats = rcr.list_chats()
+  assert any(c["chat_id"] == "legacy" for c in chats)
+  # Source removed only after the atomic rename succeeded.
+  assert not legacy.exists()
+  # And the migrated file has all 3 original lines + the _meta line.
+  migrated_lines = target.read_text().strip().splitlines()
+  assert len(migrated_lines) == 4  # _meta + 3 entries
+
+
+def test_factory_reset_terminates_active_recovery_run(monkeypatch):
+  """Factory reset must kill an in-flight recovery rescue agent so
+  it can't keep writing to /data/* after the reset wipes credentials.
+
+  Codex review flagged: _require_session re-checks the owner row
+  before each HTTP request, but a stream that's already running
+  keeps its subprocess alive. terminate_active_run() bridges the gap.
+  """
+  from app import recover_chat_runner as rcr
+  from app.routes import recover as rec_routes
+
+  # Pre-populate the runner's claim slot with a fake "active" proc
+  # so terminate_active_run has something to kill.
+  killed = {"flag": False}
+
+  class _FakeProc:
+    def kill(self):
+      killed["flag"] = True
+
+  rcr._current_run = {"proc": _FakeProc()}
+  try:
+    # Stub out the destructive side-effects of factory_reset so the
+    # test doesn't touch real files — we only care about the
+    # terminate-active-run call.
+    monkeypatch.setattr(rec_routes, "_db_delete_all_apps", lambda: None)
+    monkeypatch.setattr(rec_routes, "_db_delete_all_owners", lambda: None)
+    monkeypatch.setattr(rec_routes, "_rm_tree", lambda _p: None)
+
+    from pathlib import Path as _Path
+    rec_routes._action_factory_reset(_Path("/tmp/nonexistent-test-data"))
+
+    assert killed["flag"], "factory_reset must kill the active rescue proc"
+    assert rcr._current_run is None, "claim slot must be cleared post-reset"
+  finally:
+    rcr._current_run = None

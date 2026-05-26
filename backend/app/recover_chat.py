@@ -234,6 +234,12 @@ async def recover_chat_send(
     turn_id = recover_chat_runner.append_log(chat_id, "user", text)
   except ValueError as exc:
     raise HTTPException(status_code=404, detail=str(exc))
+  # append_log returns -1 on disk error (full disk, perm denied, etc.).
+  # Surface as 500 so the client sees a real failure rather than a
+  # "queued" status whose turn_id can't be streamed later. Codex
+  # caught this swallowed-error path in review.
+  if turn_id < 0:
+    raise HTTPException(status_code=500, detail="failed to persist message")
   return JSONResponse(
     {"status": "queued", "message": text, "turn_id": turn_id}
   )

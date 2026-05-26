@@ -148,6 +148,45 @@ def _release_run(claim: dict) -> None:
       _current_run = None
 
 
+def terminate_active_run() -> bool:
+  """Kills the active recovery subprocess (if any) and frees the slot.
+
+  Called from destructive admin actions (factory reset, restart)
+  where we want the running rescue agent to STOP — not just be
+  walled out of future endpoints — because it may still be in the
+  middle of a tool call that writes to disk.
+
+  Codex review caught the gap: `_require_session` re-checks the
+  owner row before each HTTP request, but a stream that's ALREADY
+  running keeps its subprocess alive. After a factory reset that
+  blows away credentials and data, the in-flight rescue agent
+  retains elevated write access until it naturally exits.
+
+  Returns True if a run was active and got terminated, False if
+  there was nothing to kill. Pure sync — the subprocess kill is
+  fire-and-forget (the OS reaps it); the stream generator's own
+  finally will release the slot when its next await wakes up.
+  """
+  global _current_run
+  with _run_lock:
+    claim = _current_run
+  if claim is None:
+    return False
+  proc = claim.get("proc")
+  if proc is not None:
+    try:
+      proc.kill()
+    except (ProcessLookupError, OSError):
+      pass
+  # Force-clear the slot so a new request can start immediately, even
+  # if the stream generator's own cleanup hasn't run yet. Belt-and-
+  # braces — the generator's finally also clears it.
+  with _run_lock:
+    if _current_run is claim:
+      _current_run = None
+  return True
+
+
 # Module-level threading lock wraps "append one line + derive its
 # index" in `append_log`. Without this, two concurrent /send requests
 # can both append their line, both count the file (both see N lines),
@@ -324,6 +363,12 @@ def _migrate_legacy_log() -> None:
   target = RECOVERY_CHATS_DIR / "legacy.jsonl"
   if target.exists():
     return
+  # Atomic write: copy to <target>.partial first, then rename onto
+  # target only if the copy succeeded. Without this, a mid-copy OSError
+  # (disk full, etc.) would leave a partial legacy.jsonl that future
+  # `list_chats()` calls treat as "already migrated" — silently skipping
+  # the rest of the legacy history forever. Codex caught this in review.
+  tmp = RECOVERY_CHATS_DIR / "legacy.jsonl.partial"
   try:
     mtime = RECOVERY_LOG_PATH.stat().st_mtime
     meta = {
@@ -334,17 +379,20 @@ def _migrate_legacy_log() -> None:
       }
     }
     with RECOVERY_LOG_PATH.open("r", encoding="utf-8") as src, \
-        target.open("w", encoding="utf-8") as dst:
+        tmp.open("w", encoding="utf-8") as dst:
       dst.write(json.dumps(meta, separators=(",", ":")) + "\n")
       shutil.copyfileobj(src, dst)
-    # Only unlink after successful copy. If the rename failed (disk
-    # full, permission, etc.), keep the legacy file so a retry can
-    # re-attempt and the user doesn't lose data.
+    # Atomic rename within the same directory — either the new
+    # legacy.jsonl exists complete or it doesn't.
+    tmp.replace(target)
     RECOVERY_LOG_PATH.unlink()
   except OSError:
-    # Best-effort migration. If it failed, the user still sees their
-    # legacy data via the standalone file; the UI just won't list it.
-    pass
+    # Best-effort migration. Clean up the partial so the next call
+    # can re-attempt with a fresh copy rather than thinking it's done.
+    try:
+      tmp.unlink()
+    except OSError:
+      pass
 
 
 def list_chats() -> list[dict]:
