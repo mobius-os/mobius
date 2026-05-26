@@ -22,16 +22,50 @@ from __future__ import annotations
 
 import os
 import signal
+import sqlite3
 from collections import OrderedDict
 
-from fastapi import APIRouter, Body, Cookie, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Cookie, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from sqlalchemy.orm import Session
 
-from app import models, recover_auth, recover_chat_runner
-from app.database import get_db
+from app import recover_auth, recover_chat_runner
+
+# Recovery is INDEPENDENT of the agent's import chain. We do not
+# import app.database / app.models / app.config / app.theme — those
+# are on the agent's write surface and can be broken without
+# bringing recovery down. The recovery surface uses raw sqlite3
+# (stdlib) for the one query it needs (owner-row lookup) and reads
+# the DB location straight from the DATABASE_URL env var (no
+# app.config dependency). Same env var the rest of the app uses,
+# so prod, test, and any future override stay in sync.
+_DB_URL = os.environ.get("DATABASE_URL", "sqlite:////data/db/ultimate.db")
+# DATABASE_URL is `sqlite:///<path>` (relative) or `sqlite:////<path>`
+# (absolute). Strip the `sqlite:///` prefix; the remaining string is
+# already the on-disk path in either case.
+RECOVERY_DB_PATH = _DB_URL.removeprefix("sqlite:///") if _DB_URL.startswith("sqlite:") else _DB_URL
+
+
+def _owner_exists(username: str) -> bool:
+  """Returns True iff an Owner row with `username` exists.
+
+  Uses raw sqlite3 so a broken app.database / app.models doesn't
+  take recovery down. Failures (DB missing, schema mismatch, etc.)
+  return False — caller treats that as "no valid session," which
+  routes the user back to /recover for re-setup.
+  """
+  if not username:
+    return False
+  try:
+    with sqlite3.connect(RECOVERY_DB_PATH) as con:
+      row = con.execute(
+        "SELECT 1 FROM owner WHERE username = ? LIMIT 1",
+        (username,),
+      ).fetchone()
+      return row is not None
+  except sqlite3.Error:
+    return False
 
 router = APIRouter(tags=["recover"])
 
@@ -62,48 +96,33 @@ def _mark_turn_id_streamed(turn_id: int) -> None:
     _streamed_turn_ids.popitem(last=False)
 
 
-def _require_session(
-  token: str | None, db: Session,
-) -> models.Owner:
+def _require_session(token: str | None) -> str:
   """Validates the recovery cookie AND re-confirms the owner row
-  still exists. Returns the Owner on success; raises 401 otherwise.
+  still exists. Returns the username on success; raises 401
+  otherwise.
 
   The owner-existence check is what makes a factory-reset cookie
   invalid even though its HMAC + expiry are still good: factory
   reset deletes the Owner row, so the next request with the stale
   cookie finds no owner and is rejected. Without this lookup, a
   second tab or stolen cookie would retain elevated access on a
-  wiped instance for up to the remaining TTL (1h)."""
+  wiped instance for up to the remaining TTL (1h).
+  """
   username = recover_auth.decode_session_token(token)
-  if not username:
+  if not username or not _owner_exists(username):
     raise HTTPException(status_code=401)
-  owner = (
-    db.query(models.Owner)
-    .filter(models.Owner.username == username)
-    .first()
-  )
-  if not owner:
-    raise HTTPException(status_code=401)
-  return owner
+  return username
 
 
 @router.get("/recover/chat", response_class=HTMLResponse)
 def recover_chat_page(
   moebius_recover: str | None = Cookie(default=None),
-  db: Session = Depends(get_db),
 ):
   """Serves the recovery chat HTML. Requires the recovery cookie
   AND a live owner row — a factory-reset instance redirects stale
   cookies back to /recover for re-setup, same as no cookie at all."""
   username = recover_auth.decode_session_token(moebius_recover)
-  owner = None
-  if username:
-    owner = (
-      db.query(models.Owner)
-      .filter(models.Owner.username == username)
-      .first()
-    )
-  if not owner:
+  if not username or not _owner_exists(username):
     return HTMLResponse(
       '<meta http-equiv="refresh" content="0; url=/recover">',
       status_code=302,
@@ -118,7 +137,6 @@ async def recover_chat_send(
   request: Request,
   payload: dict = Body(...),
   moebius_recover: str | None = Cookie(default=None),
-  db: Session = Depends(get_db),
 ):
   """Accepts a user message, persists it, returns a turn_id the
   client uses to pair with the subsequent /stream POST.
@@ -128,7 +146,7 @@ async def recover_chat_send(
   where two browser tabs (or two rapid sends) cause one stream to
   respond to the wrong message.
   """
-  _require_session(moebius_recover, db)
+  _require_session(moebius_recover)
   text = (payload.get("message") or "").strip()
   if not text:
     raise HTTPException(status_code=400, detail="message required")
@@ -144,7 +162,6 @@ async def recover_chat_stream(
   request: Request,
   payload: dict | None = Body(default=None),
   moebius_recover: str | None = Cookie(default=None),
-  db: Session = Depends(get_db),
 ):
   """SSE stream of the agent's response to a specific persisted
   message. POST (not GET) so the message body never appears in
@@ -166,7 +183,7 @@ async def recover_chat_stream(
   For backward compatibility, if turn_id is omitted the runner
   still falls back to latest_user_message — but the client always
   sends the id, and only id-tagged streams participate in dedup."""
-  _require_session(moebius_recover, db)
+  _require_session(moebius_recover)
   turn_id = (payload or {}).get("turn_id") if payload else None
   if isinstance(turn_id, int):
     if turn_id in _streamed_turn_ids:
@@ -202,10 +219,9 @@ async def recover_chat_stream(
 def recover_chat_reset(
   request: Request,
   moebius_recover: str | None = Cookie(default=None),
-  db: Session = Depends(get_db),
 ):
   """Wipes /data/recovery_chat.jsonl."""
-  _require_session(moebius_recover, db)
+  _require_session(moebius_recover)
   recover_chat_runner.reset_log()
   # Reset re-numbers turn_ids from 0. Clear the replay-dedup set so
   # the next /stream POST doesn't 409 against ids from the previous
@@ -219,7 +235,6 @@ def recover_chat_reset(
 def recover_restart(
   request: Request,
   moebius_recover: str | None = Cookie(default=None),
-  db: Session = Depends(get_db),
 ):
   """Soft restart: SIGTERM the uvicorn process so the container
   supervisor (docker restart policy: unless-stopped on prod, "no"
@@ -233,7 +248,7 @@ def recover_restart(
   kills the whole container including any deferred state. Killing
   uvicorn directly lets docker restart it cleanly. Verified on
   mobius-test."""
-  _require_session(moebius_recover, db)
+  _require_session(moebius_recover)
   # Schedule the SIGTERM after the HTTP response has been flushed
   # so the client actually sees the {"status": "restarting"} body.
   # Without the threading.Timer, uvicorn dies before flushing.
