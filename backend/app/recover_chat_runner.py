@@ -4,11 +4,12 @@ Deliberately does NOT share code with app.chat, app.providers, or
 the SDK runners. Those are the production chat path; if the agent
 broke them, recovery still needs to work. This module is small,
 frozen (chmod 444 via protected-files.txt), and imports only
-stdlib + bcrypt.
+stdlib.
 
 What it does:
-- Spawns the Claude CLI with --print --output-format stream-json
-  via asyncio.create_subprocess_exec (args as list, no shell)
+- Spawns either the Claude CLI (`claude --print --output-format
+  stream-json`) or the Codex CLI (`codex exec --json`) via
+  asyncio.create_subprocess_exec (args as list, no shell)
 - Parses each stdout JSON line into a small set of events
 - Yields them as SSE-formatted strings for the recovery chat page
 - Appends each user + assistant turn to /data/recovery_chat.jsonl
@@ -18,8 +19,8 @@ What it does NOT do:
 - AskUserQuestion (user can just type)
 - Multi-turn resume (the agent reads the log file itself for context)
 - Stop / cancel mid-stream (refresh to abandon)
-- Per-token typewriter
-- Provider switching (Claude only; Codex SDK is in production path)
+- Per-token typewriter (Claude path streams text deltas; Codex
+  emits the assistant message in one chunk at turn end)
 """
 
 from __future__ import annotations
@@ -36,7 +37,43 @@ from typing import AsyncIterator
 
 RECOVERY_LOG_PATH = Path("/data/recovery_chat.jsonl")
 CLAUDE_CONFIG_PATH = Path("/data/cli-auth/claude")
+CODEX_CONFIG_PATH = Path("/data/cli-auth/codex")
 SUBPROCESS_CWD = "/data"
+
+# Supported providers for the recovery chat. Keep ordered: the default
+# resolution prefers the first available entry.
+SUPPORTED_PROVIDERS: tuple[str, ...] = ("claude", "codex")
+
+
+def provider_status() -> dict[str, bool]:
+  """Returns {provider_name: is_configured} for each supported provider.
+
+  A provider is "configured" if its credential directory has the
+  expected auth file. `.credentials.json` for Claude, `auth.json`
+  for Codex — these are what the respective CLIs read at spawn time,
+  so their presence is a reasonable proxy for "the CLI will start
+  without an interactive login prompt." False negative is possible
+  if the file exists but is corrupted; the spawn will then error
+  and the user sees a meaningful message.
+  """
+  return {
+    "claude": (CLAUDE_CONFIG_PATH / ".credentials.json").is_file(),
+    "codex": (CODEX_CONFIG_PATH / "auth.json").is_file(),
+  }
+
+
+def default_provider() -> str:
+  """Returns the first configured provider, preferring claude.
+
+  Falls back to the first SUPPORTED_PROVIDERS entry when nothing is
+  configured (the spawn will then fail with 'claude CLI not found'
+  or 'auth missing' — a meaningful error for the user).
+  """
+  status = provider_status()
+  for name in SUPPORTED_PROVIDERS:
+    if status.get(name):
+      return name
+  return SUPPORTED_PROVIDERS[0]
 
 # `_current_run` tracks the in-flight stream_turn so a second
 # concurrent request can detect the conflict and return a
@@ -340,8 +377,12 @@ async def _terminate_proc(proc: asyncio.subprocess.Process) -> None:
     pass
 
 
-async def stream_turn(user_message: str) -> AsyncIterator[str]:
-  """Spawns the Claude CLI for one turn and yields SSE events.
+async def stream_turn(
+  user_message: str, provider: str | None = None,
+) -> AsyncIterator[str]:
+  """Spawns the rescue CLI for one turn and yields SSE events.
+
+  `provider` is 'claude' or 'codex' (or None → default_provider()).
 
   Concurrency contract: at most one subprocess runs at a time. A
   second /stream request that arrives while one is in flight gets a
@@ -371,7 +412,8 @@ async def stream_turn(user_message: str) -> AsyncIterator[str]:
     return
 
   try:
-    async for chunk in _stream_turn_impl(user_message, claim):
+    chosen = provider or default_provider()
+    async for chunk in _stream_turn_impl(user_message, claim, chosen):
       yield chunk
   finally:
     # Release the run slot FIRST, before any await. The release is
@@ -400,9 +442,23 @@ async def stream_turn(user_message: str) -> AsyncIterator[str]:
 
 
 async def _stream_turn_impl(
-  user_message: str, claim: dict
+  user_message: str, claim: dict, provider: str,
 ) -> AsyncIterator[str]:
-  """Spawns the CLI, writes the message to stdin, streams stdout.
+  """Dispatches to the per-provider spawn function and forwards events."""
+  if provider == "codex":
+    async for ev in _spawn_codex(user_message, claim):
+      yield ev
+    return
+  # Default: Claude. Unknown provider names also fall through to Claude
+  # so a typo doesn't silently produce zero output.
+  async for ev in _spawn_claude(user_message, claim):
+    yield ev
+
+
+async def _spawn_claude(
+  user_message: str, claim: dict,
+) -> AsyncIterator[str]:
+  """Spawns the Claude CLI, writes the message to stdin, streams stdout.
 
   Message goes via stdin (not argv) so long pastes — crash logs,
   full diffs, > 200KB dumps — don't hit Linux's ~128KB argv cap.
@@ -506,6 +562,118 @@ async def _stream_turn_impl(
       err = stderr_b.decode("utf-8", errors="replace").strip()[:500]
       if err:
         yield _sse({"type": "error", "message": f"CLI exit {rc}: {err}"})
+
+  except Exception as exc:
+    yield _sse({
+      "type": "error",
+      "message": f"Recovery runner crashed: {exc!r}",
+    })
+
+  try:
+    assistant_text = "".join(full_assistant_text)
+    if assistant_text:
+      append_log("assistant", assistant_text)
+  except Exception:
+    pass
+
+  yield _sse({"type": "done"})
+
+
+async def _spawn_codex(
+  user_message: str, claim: dict,
+) -> AsyncIterator[str]:
+  """Spawns the Codex CLI for one turn and yields SSE events.
+
+  Unlike Claude's stream-json output, `codex exec --json` does not
+  emit per-token deltas — it ends a turn with a single
+  `item.completed` event whose `item.text` is the full assistant
+  message. So this path yields ONE big `text` event at turn end
+  rather than streaming chunks. Acceptable for recovery — the user
+  is rescuing a broken instance, they don't need typewriter UX.
+
+  Message goes via stdin (the trailing `-` argv) so long pastes
+  don't hit Linux's argv cap, mirroring the Claude path.
+  """
+  codex_bin = shutil.which("codex")
+  if not codex_bin:
+    yield _sse(
+      {"type": "error", "message": "codex CLI not found in PATH"}
+    )
+    yield _sse({"type": "done"})
+    return
+
+  env = dict(os.environ)
+  env["CODEX_HOME"] = str(CODEX_CONFIG_PATH)
+
+  cmd = [
+    codex_bin, "exec", "--json",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--skip-git-repo-check",
+    "-",  # explicit stdin marker
+  ]
+
+  proc = await asyncio.create_subprocess_exec(
+    *cmd,
+    stdin=asyncio.subprocess.PIPE,
+    stdout=asyncio.subprocess.PIPE,
+    stderr=asyncio.subprocess.PIPE,
+    env=env,
+    cwd=SUBPROCESS_CWD,
+  )
+  claim["proc"] = proc
+
+  assert proc.stdin is not None
+  try:
+    proc.stdin.write(user_message.encode("utf-8"))
+    await proc.stdin.drain()
+  except (BrokenPipeError, ConnectionResetError):
+    pass
+  finally:
+    try:
+      proc.stdin.close()
+    except Exception:
+      pass
+
+  full_assistant_text: list[str] = []
+  try:
+    assert proc.stdout is not None
+    while True:
+      line = await proc.stdout.readline()
+      if not line:
+        break
+      try:
+        event = json.loads(line.decode("utf-8"))
+      except (json.JSONDecodeError, UnicodeDecodeError):
+        continue
+
+      ev_type = event.get("type")
+      if ev_type == "item.completed":
+        item = event.get("item", {}) or {}
+        item_type = item.get("type")
+        if item_type == "agent_message":
+          text = item.get("text", "")
+          if text:
+            full_assistant_text.append(text)
+            yield _sse({"type": "text", "content": text})
+        elif item_type in ("tool_use", "command_execution", "commandExecution"):
+          # Codex tool events: emit a minimal "tool" event so the UI
+          # can show a "▸ Tool: <name>" hint. Best-effort name
+          # extraction across the few shapes the CLI emits.
+          name = (
+            item.get("name")
+            or item.get("command")
+            or item_type
+          )
+          yield _sse({"type": "tool", "name": str(name)[:80]})
+
+    rc = await proc.wait()
+    if rc != 0:
+      stderr_b = await proc.stderr.read() if proc.stderr else b""
+      err = stderr_b.decode("utf-8", errors="replace").strip()[:500]
+      if err:
+        yield _sse(
+          {"type": "error", "message": f"CLI exit {rc}: {err}"}
+        )
 
   except Exception as exc:
     yield _sse({
