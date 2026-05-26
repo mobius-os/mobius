@@ -4,6 +4,19 @@ const ACTIVE_CHAT_KEY = 'moebius_active_chat'
 
 const MAX_APP_SENTINELS = 20
 
+// Returns true if ANY app in the per-app sentinel map has pending
+// back-targets. Used by the popstate / onNavigate early-return guards:
+// even when the currently-active app has zero sentinels (e.g. you
+// just switched to Notes), an INACTIVE app's sentinels (Klix at
+// comment depth) are still real back-targets — the OS back-gesture
+// should be intercepted so handleBack can route them properly.
+function _anyAppHasSentinels(map) {
+  for (const n of map.values()) {
+    if (n > 0) return true
+  }
+  return false
+}
+
 // Parse shell-reload state (shell rebuild preserves view across reload).
 const shellReload = (() => {
   const raw = sessionStorage.getItem('shell-reload')
@@ -87,11 +100,6 @@ export default function useNavigation() {
   // moebius:nav-back postMessage to the iframe. See "Mini-app back-
   // nav protocol" in skill/agent-skill.md.
   const appSentinelCountsRef = useRef(new Map())
-  // True while we are programmatically consuming stale app-sentinels
-  // via history.go(-N) during an app switch. The popstate handler
-  // checks this flag and bails so the auto-pop doesn't fire
-  // handleBack and over-pop navStackRef.
-  const suppressPopstateRef = useRef(0)
 
   function openDrawer() {
     history.pushState(null, '')
@@ -165,26 +173,41 @@ export default function useNavigation() {
     history.back()
   }, [])
 
+  /** Drop all pending sentinels for an app. AppCanvas calls this in
+   *  its useEffect cleanup so an LRU eviction (or any iframe unmount)
+   *  clears the ghost count. Without this, the count would outlive
+   *  the iframe; later back-gestures while that app is active again
+   *  would fire `nav-back` postMessages into a null iframe (silently
+   *  consumed, no UI response).
+   *
+   *  The browser history entries from earlier appNavPush calls are
+   *  left in place — once the count is 0, _anyAppHasSentinels in
+   *  the popstate guard returns false for that app, so back-gestures
+   *  through those orphan entries fall through to the browser's
+   *  native handling (no-op, eventually exits the PWA). */
+  const appNavReset = useCallback((appId) => {
+    if (appId == null) return
+    appSentinelCountsRef.current.set(appId, 0)
+  }, [])
+
   function navTo(view, opts = {}) {
-    // Switching apps clears the previous app's pending sentinels —
-    // they belong to a view we're leaving. We DO collapse them via
-    // history.go(-stale) and suppress the popstate handler for the
-    // window in which the synthetic events fire. Without this, the
-    // sentinels would sit as orphan history entries: the user would
-    // back-gesture into them, handleBack's app-sentinel branch
-    // wouldn't trigger (count is 0), the navStack-pop branch would
-    // run with an empty navStack, and the UI would feel frozen for
-    // `stale` back-presses.
-    const newAppId = ('appId' in opts) ? opts.appId : activeAppIdRef.current
-    if (activeAppIdRef.current && activeAppIdRef.current !== newAppId) {
-      const m = appSentinelCountsRef.current
-      const stale = m.get(activeAppIdRef.current) || 0
-      if (stale > 0) {
-        m.set(activeAppIdRef.current, 0)
-        suppressPopstateRef.current += stale
-        try { history.go(-stale) } catch { /* ignore */ }
-      }
-    }
+    // App-sentinels from the previous app stay in browser history.
+    // Each one is still a valid back-target for that app — the
+    // app's iframe is preserved in the LRU cache, and handleBack
+    // routes nav-back to whichever app is active at the moment the
+    // sentinel is consumed (which navStack-pop will have restored
+    // by the time we get to the app-sentinel branch). This gives
+    // browser-style back: backing out of Notes returns to Klix at
+    // the depth the user left it.
+    //
+    // An earlier revision cleared sentinels here via
+    // history.go(-stale) + a suppressPopstateRef counter. That
+    // caused two bugs: (1) the iframe's nested state went out of
+    // sync with the shell's count (back-gesture exited the app
+    // instead of unwinding); (2) a real user back-gesture inside
+    // the ~10ms synthetic-pop window was silently consumed. Both
+    // disappear with the no-clearing model.
+    //
     // Ensure exactly one history entry exists above the current
     // entry to serve as the back-target for this navigation.
     // Two cases:
@@ -301,17 +324,15 @@ export default function useNavigation() {
       function onNavigate(e) {
         if (e.navigationType !== 'traverse') return
         if (!e.canIntercept) return
-        // Synthetic back fired by navTo's stale-sentinel cleanup —
-        // decrement and bail. Without this guard the cleanup would
-        // pop navStackRef once per stale entry.
-        if (suppressPopstateRef.current > 0) {
-          suppressPopstateRef.current -= 1
-          return
-        }
         // Nothing to go back to — let the browser handle it (exits PWA).
+        // Check every back-target source: navStack (shell-level), open
+        // drawer, OR any app's pending sentinels (sentinels for an
+        // INACTIVE app are still real back-targets — handleBack will
+        // restore the owning app via navStack-pop, then subsequent
+        // backs unwind that app's nesting).
         if (navStackRef.current.length === 0
             && !drawerOpenRef.current
-            && !(appSentinelCountsRef.current.get(activeAppIdRef.current) > 0)) return
+            && !_anyAppHasSentinels(appSentinelCountsRef.current)) return
         e.intercept({ handler() { handleBack() } })
       }
       navigation.addEventListener('navigate', onNavigate)
@@ -320,13 +341,9 @@ export default function useNavigation() {
 
     // popstate fallback (Safari, older Chrome).
     function onPopState() {
-      if (suppressPopstateRef.current > 0) {
-        suppressPopstateRef.current -= 1
-        return
-      }
       if (navStackRef.current.length === 0
             && !drawerOpenRef.current
-            && !(appSentinelCountsRef.current.get(activeAppIdRef.current) > 0)) return
+            && !_anyAppHasSentinels(appSentinelCountsRef.current)) return
       handleBack()
     }
     window.addEventListener('popstate', onPopState)
@@ -365,6 +382,7 @@ export default function useNavigation() {
     activeAppIdRef,
     appNavPush,
     appNavPop,
+    appNavReset,
     appSentinelCountsRef,
   }
 }

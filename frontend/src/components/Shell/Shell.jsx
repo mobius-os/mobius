@@ -20,7 +20,7 @@ export default function Shell() {
     drawerOpen, openDrawer, closeDrawer,
     navTo, backFiredRef, drawerPushedRef, navStackRef,
     activeViewRef, activeChatIdRef, activeAppIdRef,
-    appNavPush, appNavPop,
+    appNavPush, appNavPop, appNavReset,
   } = useNavigation()
 
   const { loadTheme } = useTheme()
@@ -412,6 +412,7 @@ export default function Shell() {
               appName={apps.find(a => String(a.id) === String(id))?.name}
               onNavPush={appNavPush}
               onNavPop={appNavPop}
+              onNavReset={appNavReset}
             />
           </div>
         ))}
