@@ -1,4 +1,15 @@
-"""Database engine and session configuration."""
+"""Database engine and session configuration.
+
+FROZEN at runtime (chmod 444 root-owned per protected-files.txt).
+main.py imports this at module load to set up the engine + run
+migrations; if I'm broken the server can't boot and /recover/chat
+is unreachable. (The recovery surface itself uses raw sqlite3
+and doesn't depend on me, but main.py still does.)
+
+To edit me, change the source on the host repo and rebuild the
+container image. For ad-hoc DB queries the agent should use raw
+`sqlite3` from stdlib — that path doesn't touch this file at all.
+"""
 
 from pathlib import Path
 

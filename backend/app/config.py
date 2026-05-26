@@ -1,4 +1,15 @@
-"""Application settings loaded from environment variables."""
+"""Application settings loaded from environment variables.
+
+FROZEN at runtime (chmod 444 root-owned per protected-files.txt).
+main.py imports this at module load; if I'm broken the server
+can't boot and /recover/chat is unreachable.
+
+To edit me, change the source on the host repo and rebuild the
+container image. The agent should not try to edit me in-place at
+runtime — the chmod will block it and the error looks like a bug.
+Use /data/shared/agent-settings.json for per-instance settings that
+don't need code changes.
+"""
 
 import os
 from functools import lru_cache

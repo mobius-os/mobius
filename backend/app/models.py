@@ -1,4 +1,16 @@
-"""SQLAlchemy ORM models."""
+"""SQLAlchemy ORM models.
+
+FROZEN at runtime (chmod 444 root-owned per protected-files.txt).
+main.py and many route modules import these at module load; if I'm
+broken the server can't boot and /recover/chat is unreachable.
+
+To add a column to an existing table: edit me on the host repo and
+rebuild. For per-chat fields you can usually skip a migration by
+adding to `Chat.agent_settings_json` (a JSON column intentionally
+included as the no-migration escape hatch). For app-scoped data
+you'd otherwise add a column for, use per-app storage at
+`/data/apps/<app_id>/...` via the storage API.
+"""
 
 from datetime import UTC, datetime
 

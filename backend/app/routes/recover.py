@@ -1,5 +1,12 @@
-"""Recovery page: static HTML, password-authenticated, independent of the
-React frontend.  Works even if the agent breaks the shell."""
+"""Recovery page: static HTML, password-authenticated, independent of
+the React frontend AND of the agent's import chain.
+
+Self-contained on purpose: uses raw sqlite3 (stdlib) for owner-row
+queries, reads DATA_DIR from the environment, and serves un-themed
+HTML. We do NOT import app.database / app.models / app.config /
+app.theme — those are on the agent's write surface, and the
+recovery page exists to be reachable when they're broken.
+"""
 
 import io
 import os
@@ -13,20 +20,70 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from sqlalchemy.orm import Session
 
-from app import models, recover_auth
-from app.config import get_settings
-from app.database import get_db
+from app import recover_auth
 from app.routes.recover_html import dashboard_html, login_html
-from app.theme import inject_theme_into_html
 
 router = APIRouter(tags=["recover"])
 _limiter = Limiter(key_func=get_remote_address)
+
+# Recovery's view of the world — read straight from env vars so we
+# don't depend on app.config. Same vars the rest of the app uses,
+# so prod/test/overrides stay in sync without an import.
+_DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
+_DB_URL = os.environ.get("DATABASE_URL", "sqlite:////data/db/ultimate.db")
+RECOVERY_DB_PATH = (
+  _DB_URL.removeprefix("sqlite:///") if _DB_URL.startswith("sqlite:") else _DB_URL
+)
+
+
+def _owner_password_hash(username: str) -> str | None:
+  """Returns the owner's hashed_password if `username` exists, else None.
+
+  Used by /recover/auth (login) to verify the password without
+  importing the SQLAlchemy ORM. Raw sqlite3 keeps recovery alive
+  even when app.database / app.models is broken.
+  """
+  if not username:
+    return None
+  try:
+    with sqlite3.connect(RECOVERY_DB_PATH) as con:
+      row = con.execute(
+        "SELECT hashed_password FROM owner WHERE username = ? LIMIT 1",
+        (username,),
+      ).fetchone()
+      return row[0] if row else None
+  except sqlite3.Error:
+    return None
+
+
+def _owner_exists(username: str) -> bool:
+  """Returns True iff an Owner row with `username` exists."""
+  return _owner_password_hash(username) is not None
+
+
+def _db_delete_all_apps() -> None:
+  """Deletes every row in the `apps` table. Raw sqlite3 — no ORM."""
+  try:
+    with sqlite3.connect(RECOVERY_DB_PATH) as con:
+      con.execute("DELETE FROM apps")
+      con.commit()
+  except sqlite3.Error:
+    pass  # best-effort; factory_reset also wipes /data/apps/ on disk
+
+
+def _db_delete_all_owners() -> None:
+  """Deletes every row in the `owner` table. Raw sqlite3 — no ORM."""
+  try:
+    with sqlite3.connect(RECOVERY_DB_PATH) as con:
+      con.execute("DELETE FROM owner")
+      con.commit()
+  except sqlite3.Error:
+    pass
 
 # Session tokens come from `recover_auth` (HMAC-signed, no JWT
 # library) so recovery works even if `app/auth.py` is broken or
@@ -48,45 +105,30 @@ _COOKIE = recover_auth.COOKIE_NAME
 _RESTORE_SHELL_LOCK = threading.Lock()
 
 
-def _themed(html_str: str) -> str:
-  """Injects the active theme CSS into a recover page HTML string.
+def _verify_session(request: Request) -> str:
+  """Returns the owner username if the recovery session cookie is valid.
 
-  Degrades gracefully if theme.py is broken (it's on the agent's
-  write surface, not frozen). Without this fallback a broken theme
-  would render the recovery page unreachable — the exact failure
-  mode the page exists to recover from.
+  Validates the HMAC + expiry AND re-confirms the owner row still
+  exists (factory reset deletes the row; the stale cookie's HMAC
+  is still valid but the session has to be invalidated). Raises
+  401 otherwise.
   """
-  try:
-    return inject_theme_into_html(html_str, get_settings().data_dir)
-  except Exception:
-    return html_str
-
-
-def _verify_session(request: Request, db: Session) -> models.Owner:
-  """Returns the owner if the recovery session cookie is valid."""
   token = request.cookies.get(_COOKIE)
   username = recover_auth.decode_session_token(token)
-  if not username:
+  if not username or not _owner_exists(username):
     raise HTTPException(status_code=401)
-  owner = (
-    db.query(models.Owner)
-    .filter(models.Owner.username == username)
-    .first()
-  )
-  if not owner:
-    raise HTTPException(status_code=401)
-  return owner
+  return username
 
 
 # -- Pages ------------------------------------------------------------
 
 @router.get("/recover", response_class=HTMLResponse)
-def recover_page(request: Request, db: Session = Depends(get_db)):
+def recover_page(request: Request):
   """Serves the recovery login form or the recovery dashboard."""
   token = request.cookies.get(_COOKIE)
   if token and recover_auth.decode_session_token(token):
-    return HTMLResponse(_themed(dashboard_html()))
-  return HTMLResponse(_themed(login_html()))
+    return HTMLResponse(dashboard_html())
+  return HTMLResponse(login_html())
 
 
 def _request_is_https(request: Request) -> bool:
@@ -112,18 +154,13 @@ def recover_login(
   request: Request,
   username: str = Form(...),
   password: str = Form(...),
-  db: Session = Depends(get_db),
 ):
   """Authenticates and sets a recovery session cookie."""
-  owner = (
-    db.query(models.Owner)
-    .filter(models.Owner.username == username)
-    .first()
-  )
-  if not owner or not recover_auth.verify_password(password, owner.hashed_password):
-    return HTMLResponse(_themed(login_html(error="Incorrect username or password.")))
-  token = recover_auth.create_session_token(owner.username)
-  resp = HTMLResponse(_themed(dashboard_html()))
+  pw_hash = _owner_password_hash(username)
+  if not pw_hash or not recover_auth.verify_password(password, pw_hash):
+    return HTMLResponse(login_html(error="Incorrect username or password."))
+  token = recover_auth.create_session_token(username)
+  resp = HTMLResponse(dashboard_html())
   resp.set_cookie(
     _COOKIE, token,
     httponly=True, samesite="strict", max_age=3600,
@@ -135,21 +172,20 @@ def recover_login(
 @router.post("/recover/logout")
 def recover_logout(request: Request):
   """Clears the recovery session cookie and returns the login page."""
-  resp = HTMLResponse(_themed(login_html()))
+  resp = HTMLResponse(login_html())
   resp.delete_cookie(_COOKIE)
   return resp
 
 
-def _action_reset_apps(data_dir: Path, db: Session) -> str:
+def _action_reset_apps(data_dir: Path) -> str:
   """Deletes all apps from the database and clears compiled output."""
-  db.query(models.App).delete()
-  db.commit()
+  _db_delete_all_apps()
   _rm_tree(data_dir / "compiled")
   (data_dir / "compiled").mkdir(parents=True, exist_ok=True)
   return "All apps have been reset."
 
 
-def _action_reset_chat(data_dir: Path, db: Session) -> str:
+def _action_reset_chat(data_dir: Path) -> str:
   """Clears the debug log file at /data/logs/chat.log.
 
   This does not affect chat history — conversations are stored server-side
@@ -161,14 +197,14 @@ def _action_reset_chat(data_dir: Path, db: Session) -> str:
   return "Debug chat log cleared."
 
 
-def _action_reset_settings(data_dir: Path, db: Session) -> str:
+def _action_reset_settings(data_dir: Path) -> str:
   """Clears CLI auth credentials so the user can re-authenticate."""
   _rm_tree(data_dir / "cli-auth")
   (data_dir / "cli-auth").mkdir(parents=True, exist_ok=True)
   return "CLI auth cleared.  Sign in again via the setup wizard."
 
 
-def _action_restore_shell(data_dir: Path, db: Session) -> str:
+def _action_restore_shell(data_dir: Path) -> str:
   """Rebuilds the frontend from the original source baked into the image.
 
   Restores /data/shell/src from /app/shell-src/src, then runs npm build.
@@ -250,15 +286,14 @@ def _do_restore_shell(data_dir: Path) -> str:
   return "Shell restored and rebuilt from original source. Reload the app."
 
 
-def _action_factory_reset(data_dir: Path, db: Session) -> None:
+def _action_factory_reset(data_dir: Path) -> None:
   """Deletes everything: apps, owner, storage, compiled files.
 
   Returns None to signal that the caller should redirect to the login page
   rather than the dashboard.
   """
-  db.query(models.App).delete()
-  db.query(models.Owner).delete()
-  db.commit()
+  _db_delete_all_apps()
+  _db_delete_all_owners()
   for subdir in ["compiled", "apps", "shared", "logs", "cli-auth"]:
     _rm_tree(data_dir / subdir)
     (data_dir / subdir).mkdir(parents=True, exist_ok=True)
@@ -301,7 +336,7 @@ def _defer_restore(mode: str) -> None:
   threading.Timer(0.2, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()
 
 
-def _action_restore_backend(data_dir: Path, db: Session) -> str:
+def _action_restore_backend(data_dir: Path) -> str:
   """Schedules restore of /app/app/ from /app/app-baked/ at next
   boot, then SIGTERMs uvicorn. Docker restart policy (unless-stopped
   on prod) recreates uvicorn; entrypoint.sh sees /data/.recover-pending
@@ -310,7 +345,7 @@ def _action_restore_backend(data_dir: Path, db: Session) -> str:
   return "Backend restore scheduled. Server is restarting..."
 
 
-def _action_restore_scripts(data_dir: Path, db: Session) -> str:
+def _action_restore_scripts(data_dir: Path) -> str:
   """Schedules restore of /app/scripts/ from /app/scripts-baked/."""
   _defer_restore("scripts")
   return "Scripts restore scheduled. Server is restarting..."
@@ -333,35 +368,33 @@ _ACTION_HANDLERS = {
 def recover_action(
   request: Request,
   action: str = Form(...),
-  db: Session = Depends(get_db),
 ):
   """Executes a recovery action."""
-  owner = _verify_session(request, db)
-  settings = get_settings()
-  data_dir = Path(settings.data_dir)
+  _verify_session(request)
+  data_dir = _DATA_DIR
 
   if action == "download_backup":
-    return _create_backup(db, data_dir)
+    return _create_backup(data_dir)
 
   if action == "factory_reset":
-    _action_factory_reset(data_dir, db)
+    _action_factory_reset(data_dir)
     # clear_storage=True injects a small inline script that wipes the
     # React app's localStorage (token, setup-step) and the TanStack
     # Query IndexedDB cache. Without this, the next / load picks up
     # the stale token and renders cached chats from the prior owner.
-    resp = HTMLResponse(_themed(login_html(
+    resp = HTMLResponse(login_html(
       error="Factory reset complete.  Set up your account again.",
       clear_storage=True,
-    )))
+    ))
     resp.delete_cookie(_COOKIE)
     return resp
 
   handler = _ACTION_HANDLERS.get(action)
   if handler is None:
-    return HTMLResponse(_themed(dashboard_html(msg="Unknown action.")))
+    return HTMLResponse(dashboard_html(msg="Unknown action."))
 
-  msg = handler(data_dir, db)
-  return HTMLResponse(_themed(dashboard_html(msg=msg)))
+  msg = handler(data_dir)
+  return HTMLResponse(dashboard_html(msg=msg))
 
 
 # -- Backup ------------------------------------------------------------
@@ -380,7 +413,7 @@ def _backup_db(src_path: Path, dest_path: Path) -> None:
   src.close()
 
 
-def _create_backup(db: Session, data_dir: Path) -> StreamingResponse:
+def _create_backup(data_dir: Path) -> StreamingResponse:
   """Creates a ZIP archive of the database and app data.
 
   Backup includes CLI auth credentials. Store the backup file securely.
