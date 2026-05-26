@@ -49,7 +49,7 @@ for a small "frozen island" that keeps recovery reachable.
 | `/app/scripts/` | yes | Utility scripts (rebuild_shell.sh, init scripts). |
 | `/data/apps/<slug>/`, `/data/shared/` | yes | Mini-app source + shared data. |
 | `/app/app-baked/`, `/app/scripts-baked/`, `/app/static/`, `/app/shell-src/` | NO | Immutable recovery sources (chmod a-w). `recovery_restore.sh` copies from these back to live if you break something. |
-| `/app/app/routes/recover*.py`, `/app/app/recover_chat*.py`, `/app/app/recover_auth.py`, `/app/scripts/entrypoint.sh`, `/app/scripts/recovery_restore.sh` | NO | Frozen recovery island. Listed in `/app/protected-files.txt`. Chmod 444/555 root-owned. Tampering by you is blocked at the OS level. |
+| `/app/app/routes/recover*.py`, `/app/app/recover_chat*.py`, `/app/app/recover_auth.py`, `/app/app/main.py`, `/app/app/routes/__init__.py`, `/app/app/auth.py`, `/app/app/database.py`, `/app/app/config.py`, `/app/app/models.py`, `/app/scripts/entrypoint.sh`, `/app/scripts/recovery_restore.sh` | NO | Frozen recovery island + boot-chain wiring. Listed in `/app/protected-files.txt`. Chmod 444/555 root-owned. The non-recover_* files are frozen because main.py imports them at module load; a broken auth/database/config/models would kill uvicorn boot and take /recover with it. Tampering by you is blocked at the OS level — don't try to chmod or rewrite these. |
 | `/data/cli-auth/`, `/data/.secret-key` | NO | Credentials, signing key. |
 
 **Important: edits live in the container's writable layer.** Your
@@ -189,10 +189,6 @@ their register; otherwise the mechanism stays out of the chat.
    AskUserQuestion card with no answer does NOT auto-approve —
    chat.py freezes the turn at the question event, so the runner
    stays paused until the partner answers or stops the turn.
-
-   <!-- TODO(future): if we want dismissal to count as tier-2
-   approval, chat.py needs an auto-approve path on dismissal; the
-   prose used to claim this but the runtime never implemented it. -->
 
    **How to ask: `AskUserQuestion` (the tool, not prose) is the
    default for clarifying questions.** The tool renders a tappable
@@ -362,13 +358,6 @@ their register; otherwise the mechanism stays out of the chat.
    `Write`; delete stale lines; newer entries win) live in the
    experience-file "About this file" section — that's the
    source of truth, don't restate it here.
-
-   <!-- The `/data/.pm-commit` row was removed: chat.py has no
-   way to observe whether a commit happened, so the prose was a
-   paper contract. TODO(future): if source-versioning becomes a
-   hard requirement, wire a runtime audit (e.g. a post-turn hook
-   that diffs `/data/apps/` and refuses to publish `done` until
-   the diff is committed) rather than re-adding the prose. -->
 
    **In the final message**, tell the partner what you logged and
    why — use partner-facing language, not implementation details.
@@ -879,7 +868,7 @@ input area.
 cd /data && git diff -- shell/
 ```
 
-If the shell breaks, direct the partner to `/recover` → "Restore interface".
+If the shell breaks, direct the partner to `/recover` → "Restore shell".
 
 ---
 
@@ -1048,10 +1037,19 @@ before deleting.
 
 - Uploaded files: `/data/chats/{chat_id}/uploads/`
 - Generated images: `/data/chats/{chat_id}/generated/`
-- Persistent app storage: `/data/shared/{app-name}/`
+- Per-app storage (numeric id): `/data/apps/{app_id}/<path>` — what
+  `PUT /api/storage/apps/{app_id}/...` writes to, keyed by the
+  numeric app id from the DB
+- Per-app source (slug): `/data/apps/{slug}/index.jsx` — where the
+  app's JSX source lives, keyed by slug (NOT the same dir as
+  storage; the slug tree and the numeric-id tree are separate)
+- Shared storage (cross-app): `/data/shared/<path>` — what
+  `PUT /api/storage/shared/...` writes to; used for theme.css,
+  agent-settings.json, agent-experience.md, etc.
+- Compiled bundles: `/data/compiled/app-{app_id}.js`
 
 Chat files are purged when the chat is permanently deleted (after 7 days).
-For data that should outlive a chat, use shared storage.
+For data that should outlive a chat, use per-app or shared storage.
 
 ---
 
@@ -1144,7 +1142,13 @@ the preview helper or the live shell.
 echo '{"model": "sonnet", "effort": "high"}' > /data/shared/agent-settings.json
 ```
 
-Models: `opus`, `sonnet`, `haiku`. Effort: `low`, `medium`, `high`, `max`.
+Models: `opus`, `sonnet`, `haiku`.
+Effort enum varies by provider: Claude accepts `low`, `medium`,
+`high`, `xhigh`, `max`; Codex accepts `none`, `minimal`, `low`,
+`medium`, `high`, `xhigh`. Pick a value valid for whichever provider
+this chat is using (check the slash picker), and prefer leaving it
+unset unless you have a specific reason — the per-provider default
+is sensible.
 
 ---
 

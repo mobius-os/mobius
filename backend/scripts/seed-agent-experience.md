@@ -83,10 +83,6 @@ is no auto-build on dismissal. Don't fire a question if you'd
 rather just build; pick defaults and ship. Only ask when you
 genuinely cannot pick a sensible default.
 
-<!-- TODO(future): if dismissal should count as "use defaults" for
-tier-2 prompts, the runner needs an auto-approve path; the prose
-used to claim this behavior but chat.py never implemented it. -->
-
 Everything below — register_app.py, screenshots, notifications —
 runs *after* you've decided to build, not instead of deciding.
 
@@ -139,8 +135,7 @@ order is implicit.
 | `Shell/Shell.css` | Logo bar and layout styles |
 | `ChatView/ChatView.jsx` | Chat messages, streaming, scroll |
 | `ChatView/ChatView.css` | Chat styles |
-| `ChatView/ChatInput.jsx` | Chat input, voice, file upload, send/stop |
-| `ChatView/ChatInput.css` | Input styles |
+| `ChatView/ChatInputBar.jsx` | Chat input, voice, file upload, send/stop |
 | `Drawer/Drawer.jsx` | Side drawer, chat list, app list |
 | `Drawer/Drawer.css` | Drawer styles |
 | `AppCanvas/AppCanvas.jsx` | Mini-app iframe |
@@ -206,9 +201,15 @@ contract-comment mismatch.
 - **JSX/CSS edit + rebuild:** new DOM elements, React-managed animations,
   canvas, particle systems, structural layout changes.
   Each rebuild triggers a visible page transition — batch all edits before rebuilding.
-- App source lives at the top of `apps/<slug>/` (`index.jsx` plus any
-  companion files); runtime partner data the app reads/writes goes under
-  `apps/<slug>/data/`, which is gitignored.
+- App **source** lives at `/data/apps/<slug>/index.jsx` (+ any
+  companion files), keyed by slug. App **runtime data** written
+  through the storage API lives at `/data/apps/<app_id>/<path>`,
+  keyed by the numeric app id. These are SEPARATE trees — slugs and
+  numeric ids don't coincide. If a mini-app PUTs to
+  `/api/storage/apps/{appId}/data/foo.json`, the file lands at
+  `/data/apps/<app_id>/data/foo.json` (numeric-id tree), not under
+  the slug tree. Paths beginning with `data/` are gitignored if you
+  want runtime files kept out of the source repo.
 
 ## Gotchas
 
@@ -279,9 +280,12 @@ contract-comment mismatch.
   transparent background. Do NOT add background to `.chat__foot` or
   wrap its controls in a shared opaque container — that breaks the
   scroll-underneath illusion.
-- **Codex auth fallback:** if `/codex:rescue` returns auth errors or
-  exits non-zero, say so in chat — do not pretend the run succeeded.
-  Credentials at `/data/cli-auth/codex/` need refreshing.
+- **Codex auth failure mode:** when Codex turns fail with auth
+  errors, surface that to the partner — don't pretend the run
+  succeeded. Credentials at `/data/cli-auth/codex/` need refreshing
+  via Settings → AI provider → Reconnect. (There is no
+  `/codex:rescue` slash-command available inside the Möbius
+  container; that exists only in the user's host Claude Code.)
 - Back gesture in apps: use `pushState`/`popstate` for internal navigation.
 - Three.js: `import * as THREE from 'three'` and
   `import { OrbitControls } from 'three/addons/controls/OrbitControls.js'`
