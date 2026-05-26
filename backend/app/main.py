@@ -82,20 +82,30 @@ async def lifespan(app):
   # rows with NULL (older builds, or apps imported without going
   # through register_app.py) would silently never auto-recompile.
   # Derive the same slug shape register_app.py uses and persist it.
-  from app.routes.apps import _derive_source_dir
-  from app.database import SessionLocal
-  from app import models as _models
-  _db = SessionLocal()
+  #
+  # Wrapped: app/routes/apps.py is on the agent's write surface. The
+  # routes/__init__.py _load() scaffold stubs apps_router on import
+  # failure, but this direct import bypasses that — without the
+  # try/except a SyntaxError in apps.py would crash lifespan and take
+  # /recover/chat down with it (the exact failure mode the scaffold
+  # was built to prevent).
   try:
-    legacy = _db.query(_models.App).filter(
-      _models.App.source_dir.is_(None)
-    ).all()
-    for _a in legacy:
-      _a.source_dir = _derive_source_dir(settings.data_dir, _a.name)
-    if legacy:
-      _db.commit()
-  finally:
-    _db.close()
+    from app.routes.apps import _derive_source_dir
+    from app.database import SessionLocal
+    from app import models as _models
+    _db = SessionLocal()
+    try:
+      legacy = _db.query(_models.App).filter(
+        _models.App.source_dir.is_(None)
+      ).all()
+      for _a in legacy:
+        _a.source_dir = _derive_source_dir(settings.data_dir, _a.name)
+      if legacy:
+        _db.commit()
+    finally:
+      _db.close()
+  except Exception as exc:
+    _log.error("source_dir backfill failed: %s", exc, exc_info=True)
   # Start the JSX file watcher so direct edits to /data/apps/*/index.jsx
   # auto-recompile and refresh the served bundle — agents don't need to
   # re-run register_app.py just to push a code change.
@@ -119,11 +129,19 @@ async def lifespan(app):
       except Exception as exc:
         _log.error("watcher handler.close failed: %s", exc, exc_info=True)
     if _observer is not None:
+      # Split stop/join into independent try blocks so a stop()
+      # failure doesn't skip join() — otherwise the watchdog thread
+      # would never be reaped on shutdown. In practice both are very
+      # unlikely to raise, but structurally a shared try would let
+      # one fault swallow the other.
       try:
         _observer.stop()
-        _observer.join(timeout=2)
       except Exception as exc:
         _log.error("watcher observer.stop failed: %s", exc, exc_info=True)
+      try:
+        _observer.join(timeout=2)
+      except Exception as exc:
+        _log.error("watcher observer.join failed: %s", exc, exc_info=True)
 
 settings = get_settings()
 

@@ -207,6 +207,10 @@ def recover_chat_reset(
   """Wipes /data/recovery_chat.jsonl."""
   _require_session(moebius_recover, db)
   recover_chat_runner.reset_log()
+  # Reset re-numbers turn_ids from 0. Clear the replay-dedup set so
+  # the next /stream POST doesn't 409 against ids from the previous
+  # log generation (which the reset just invalidated).
+  _streamed_turn_ids.clear()
   return JSONResponse({"status": "ok"})
 
 

@@ -42,23 +42,55 @@ SUBPROCESS_CWD = "/data"
 # concurrent request can detect the conflict and return a
 # 409-equivalent SSE error rather than queueing. It carries the live
 # asyncio subprocess Process so the generator's finally can
-# deterministically kill it. The claim is protected by `_run_lock`,
-# an asyncio mutex held only around claim/release — never across the
-# subprocess lifetime. This replaces the old `_STREAM_LOCK` that
-# wrapped the entire SSE generator: when a client disconnected,
-# FastAPI stopped consuming and the `async with` exit only ran when
-# the generator was GC'd or aclose()'d, leaving the lock orphaned
-# and blocking every subsequent /stream request.
+# deterministically kill it.
+#
+# `_run_lock` is a *threading* lock (not asyncio.Lock) because the
+# claim/release operations are pure in-memory dict reads/writes — no
+# I/O, no awaits. Using a sync lock makes the release path
+# uncancellable: real ASGI client-disconnect raises CancelledError
+# at the next await point inside `stream_turn`'s finally, and if the
+# release used `async with` that CancelledError could abort the
+# release before `_current_run = None` runs, wedging the recovery
+# chat until server restart. A sync lock has no await, so
+# cancellation cannot interleave.
+#
+# This replaces the old `_STREAM_LOCK` that wrapped the entire SSE
+# generator: when a client disconnected, FastAPI stopped consuming
+# and the `async with` exit only ran when the generator was GC'd or
+# aclose()'d, leaving the lock orphaned and blocking every
+# subsequent /stream request.
 _current_run: dict | None = None
-_run_lock: asyncio.Lock | None = None
+_run_lock = threading.Lock()
 
 
-def _get_run_lock() -> asyncio.Lock:
-  """Lazily create the run-claim mutex on the running event loop."""
-  global _run_lock
-  if _run_lock is None:
-    _run_lock = asyncio.Lock()
-  return _run_lock
+def _claim_run() -> dict | None:
+  """Atomically claim the run slot.
+
+  Returns a fresh claim dict on success, or None if a turn is
+  already in flight. The claim has `proc: None` initially; the
+  caller fills it after spawning the subprocess so the cleanup path
+  can find the process to terminate.
+  """
+  global _current_run
+  with _run_lock:
+    if _current_run is not None:
+      return None
+    _current_run = {"proc": None}
+    return _current_run
+
+
+def _release_run(claim: dict) -> None:
+  """Release the run slot if `claim` still owns it.
+
+  Pure sync — safe to call from a cancelled task's finally. The
+  identity check guards against a misuse that reassigned
+  `_current_run` from outside; we'd rather leave a stale slot than
+  clobber a different caller's claim.
+  """
+  global _current_run
+  with _run_lock:
+    if _current_run is claim:
+      _current_run = None
 
 
 # Module-level threading lock wraps "append one line + derive its
@@ -284,20 +316,27 @@ async def _terminate_proc(proc: asyncio.subprocess.Process) -> None:
     return
   try:
     proc.terminate()
-  except ProcessLookupError:
+  except (ProcessLookupError, OSError):
+    # Process already gone, or signal delivery failed (denied by
+    # namespace, etc.). Either way, nothing to wait on — return so
+    # the caller's cleanup can proceed.
     return
   try:
     await asyncio.wait_for(proc.wait(), timeout=_KILL_GRACE_SECONDS)
     return
   except asyncio.TimeoutError:
     pass
+  except BaseException:
+    # Don't let wait() failure (including CancelledError from the
+    # surrounding task being cancelled) block the SIGKILL fallback.
+    pass
   try:
     proc.kill()
-  except ProcessLookupError:
+  except (ProcessLookupError, OSError):
     return
   try:
     await proc.wait()
-  except Exception:
+  except BaseException:
     pass
 
 
@@ -320,41 +359,44 @@ async def stream_turn(user_message: str) -> AsyncIterator[str]:
   ran the `__aexit__` — blocking every subsequent /stream call in
   the meantime.
   """
-  global _current_run
-
   # Claim the run slot atomically. If it's already taken, return a
   # structured SSE error rather than queueing.
-  async with _get_run_lock():
-    if _current_run is not None:
-      yield _sse({
-        "type": "error",
-        "message": "Another recovery turn is in progress.",
-      })
-      yield _sse({"type": "done"})
-      return
-    # Reserve the slot now (proc is filled in after spawn) so a
-    # concurrent caller can see the claim without waiting on
-    # subprocess startup.
-    _current_run = {"proc": None}
-    claim = _current_run
+  claim = _claim_run()
+  if claim is None:
+    yield _sse({
+      "type": "error",
+      "message": "Another recovery turn is in progress.",
+    })
+    yield _sse({"type": "done"})
+    return
 
   try:
     async for chunk in _stream_turn_impl(user_message, claim):
       yield chunk
   finally:
-    # Always release the run slot and tear down the subprocess. This
-    # finally fires on GeneratorExit too (FastAPI stops pulling on
-    # client disconnect), so the next /stream request is never
-    # blocked by a phantom previous run.
+    # Release the run slot FIRST, before any await. The release is
+    # pure sync (threading.Lock + dict assignment), so it can't be
+    # interrupted by CancelledError. If we awaited _terminate_proc
+    # first and the task got cancelled mid-await, the slot would
+    # leak and wedge the recovery chat until restart — the exact
+    # failure the round-4 fix was meant to prevent.
+    #
+    # Once released, a concurrent /stream POST can start a fresh
+    # turn. That turn's CLI subprocess is independent of ours; even
+    # though our subprocess teardown is still in progress, the OS
+    # owns reaping it. Briefly two CLI processes may coexist (ours
+    # being killed, theirs starting); the spec is "one turn at a
+    # time" and our turn is logically over once cleanup begins.
+    _release_run(claim)
     proc = claim.get("proc")
     if proc is not None:
-      await _terminate_proc(proc)
-    async with _get_run_lock():
-      # Only clear if we still own the slot (defensive — a misuse
-      # that reassigned _current_run from outside would surface as a
-      # stale claim rather than silently corrupting state).
-      if _current_run is claim:
-        _current_run = None
+      try:
+        await _terminate_proc(proc)
+      except BaseException:
+        # Don't let subprocess teardown failure propagate. Slot is
+        # already released; the kernel will reap the child even if
+        # our polite shutdown sequence failed.
+        pass
 
 
 async def _stream_turn_impl(

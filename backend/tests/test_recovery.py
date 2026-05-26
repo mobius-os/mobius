@@ -896,3 +896,179 @@ async def test_stream_turn_passes_long_message_via_stdin(
   assert spawn_args["kwargs"].get("stdin") is not None
   combined_stdin = b"".join(spawn_args["stdin_writes"])
   assert combined_stdin == big_message.encode("utf-8")
+
+
+# ---------------------------------------------------------------------
+# Round-5: reset must clear the turn_id replay-dedup set
+#
+# The reset endpoint wipes recovery_chat.jsonl, after which the next
+# user send starts at turn_id=0 again. Without also clearing the
+# in-memory _streamed_turn_ids set, the next /stream POST 409s
+# immediately because the old generation's ids are still remembered
+# — the reset button silently breaks the very next turn.
+# ---------------------------------------------------------------------
+
+def test_reset_clears_streamed_turn_ids(
+  client, auth_cookie, monkeypatch, tmp_path,
+):
+  """POST /recover/chat/reset must clear the turn_id replay set, or
+  the next send (which restarts at turn_id=0) will 409 against the
+  prior generation's already-streamed ids."""
+  log_path = tmp_path / "reset.jsonl"
+  monkeypatch.setattr(
+    "app.recover_chat_runner.RECOVERY_LOG_PATH", log_path,
+  )
+  from app import recover_chat as rc
+  rc._streamed_turn_ids.clear()
+
+  # Pre-populate the dedup set as if we'd streamed several turns.
+  for i in range(5):
+    rc._mark_turn_id_streamed(i)
+  assert len(rc._streamed_turn_ids) == 5
+
+  # Reset clears the log AND the dedup set.
+  r = client.post("/recover/chat/reset", cookies=auth_cookie)
+  assert r.status_code == 200, r.text
+  assert len(rc._streamed_turn_ids) == 0, (
+    "reset must clear the in-memory dedup set so the next turn"
+    " (which restarts at turn_id=0) is not blocked as a replay"
+  )
+
+  # End-to-end: after reset, a fresh send + stream cycle must work
+  # at turn_id=0 — proves the integration is actually unblocked.
+  from app import recover_chat_runner as rcr
+
+  async def _empty_stream(_message):
+    if False:
+      yield ""
+
+  monkeypatch.setattr(rcr, "stream_turn", _empty_stream)
+
+  send = client.post(
+    "/recover/chat/send",
+    json={"message": "hi"},
+    cookies=auth_cookie,
+  )
+  assert send.status_code == 200, send.text
+  fresh_turn_id = send.json()["turn_id"]
+  assert fresh_turn_id == 0, (
+    f"after reset the log starts empty so turn_id must be 0,"
+    f" got {fresh_turn_id}"
+  )
+
+  stream = client.post(
+    "/recover/chat/stream",
+    json={"turn_id": fresh_turn_id},
+    cookies=auth_cookie,
+  )
+  assert stream.status_code == 200, (
+    f"post-reset turn_id=0 was 409d as a replay: {stream.text}"
+  )
+
+
+# ---------------------------------------------------------------------
+# Round-5: stream_turn cleanup must release the claim slot even if
+# _terminate_proc raises an exception.
+#
+# Regression target: codex review flagged that an OSError other than
+# ProcessLookupError, or a CancelledError during real ASGI client
+# disconnect, would propagate out of _terminate_proc and abort the
+# claim-release that follows. The slot would stay set, and every
+# subsequent /stream would 409 with "Another recovery turn is in
+# progress." until server restart. The structural fix released the
+# slot synchronously BEFORE the await on _terminate_proc, and
+# wrapped the await in try/except BaseException. This test exercises
+# the contract: even if terminate raises, the next claim succeeds.
+# ---------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_stream_turn_releases_claim_even_when_terminate_raises(
+  monkeypatch, tmp_path,
+):
+  """Make _terminate_proc raise unexpectedly. The next stream_turn
+  must still be able to claim the slot."""
+  import asyncio as _asyncio
+  from app import recover_chat_runner as rcr
+  monkeypatch.setattr(
+    "app.recover_chat_runner.RECOVERY_LOG_PATH",
+    tmp_path / "terminate_raises.jsonl",
+  )
+
+  class _StubStream:
+    def __init__(self, lines):
+      self._lines = list(lines)
+    async def readline(self):
+      if not self._lines:
+        return b""
+      await _asyncio.sleep(0.005)
+      return self._lines.pop(0)
+    async def read(self):
+      return b""
+
+  class _StubProc:
+    def __init__(self, *_a, **_kw):
+      self.stdout = _StubStream([
+        b'{"type":"stream_event","event":{"type":'
+        b'"content_block_delta","delta":{"type":'
+        b'"text_delta","text":"x"}}}\n',
+      ])
+      self.stderr = _StubStream([])
+      self.stdin = _StubStdin()
+      self.returncode = None
+    def terminate(self):
+      self.returncode = -15
+    def kill(self):
+      self.returncode = -9
+    async def wait(self):
+      if self.returncode is None:
+        self.returncode = 0
+      return self.returncode
+
+  class _StubStdin:
+    def write(self, _): pass
+    async def drain(self): pass
+    def close(self): pass
+
+  async def fake_spawn(*_a, **_kw):
+    return _StubProc()
+
+  # Inject a _terminate_proc that always raises. The structural fix
+  # absorbs this and still clears the claim.
+  async def exploding_terminate(_proc):
+    raise OSError("simulated signal-delivery failure")
+
+  monkeypatch.setattr(
+    "app.recover_chat_runner.asyncio.create_subprocess_exec",
+    fake_spawn,
+  )
+  monkeypatch.setattr(
+    "app.recover_chat_runner.shutil.which", lambda _: "/fake/claude",
+  )
+  monkeypatch.setattr(rcr, "_terminate_proc", exploding_terminate)
+
+  # Sanity: slot starts empty.
+  assert rcr._current_run is None
+
+  # Run a stream to completion (or near it), abandoning it via
+  # aclose to fire the finally with our exploding _terminate_proc.
+  gen1 = rcr.stream_turn("first")
+  await gen1.__anext__()
+  await gen1.aclose()
+
+  # Despite _terminate_proc raising, the slot MUST be released.
+  assert rcr._current_run is None, (
+    "claim slot was not released after _terminate_proc raised"
+    " — recovery chat is wedged"
+  )
+
+  # End-to-end: a second stream can claim the slot promptly.
+  gen2 = rcr.stream_turn("second")
+  got_event = False
+  async def _consume():
+    nonlocal got_event
+    async for chunk in gen2:
+      got_event = True
+      if "done" in chunk:
+        break
+  await _asyncio.wait_for(_consume(), timeout=2.0)
+  assert got_event, "second stream blocked — slot release was incomplete"
