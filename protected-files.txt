@@ -31,6 +31,7 @@
 /app/app/recover_chat.py
 /app/app/recover_chat_runner.py
 /app/app/recover_auth.py
+/app/app/recover_oauth.py
 
 # --- Frozen recovery wiring ---
 # Without these, the recovery files above exist on disk but are not

@@ -88,13 +88,36 @@ def test_recover_auth_password_verify():
 
 @pytest.fixture
 def client(monkeypatch, tmp_path):
-  """A fresh TestClient with isolated /data/recovery_chat.jsonl."""
+  """A fresh TestClient with an isolated recovery layout.
+
+  Patches BOTH the legacy single-file path (RECOVERY_LOG_PATH) and
+  the multi-chat directory (RECOVERY_CHATS_DIR) into tmp_path so a
+  test can't pollute the developer's /data. Also clears the
+  in-process dedup set so test order doesn't matter.
+  """
   monkeypatch.setattr(
     "app.recover_chat_runner.RECOVERY_LOG_PATH",
     tmp_path / "recovery_chat.jsonl",
   )
+  monkeypatch.setattr(
+    "app.recover_chat_runner.RECOVERY_CHATS_DIR",
+    tmp_path / "chats",
+  )
+  from app import recover_chat as rc
+  rc._streamed_turn_ids.clear()
   from app.main import app
   return TestClient(app)
+
+
+@pytest.fixture
+def chat_id(client):
+  """Creates a fresh Claude chat and yields its chat_id.
+
+  Most HTTP tests need a chat to act on. The client fixture isolates
+  the chats dir to tmp_path, so this is safe per-test.
+  """
+  from app import recover_chat_runner as rcr
+  return rcr.create_chat("claude")
 
 
 @pytest.fixture
@@ -136,60 +159,83 @@ def test_recover_chat_page_renders_with_cookie(client, auth_cookie):
   assert "Recovery mode" in r.text
 
 
-def test_recover_chat_send_persists_to_jsonl(client, auth_cookie, monkeypatch, tmp_path):
-  log_path = tmp_path / "recovery_chat.jsonl"
-  monkeypatch.setattr(
-    "app.recover_chat_runner.RECOVERY_LOG_PATH", log_path,
-  )
+def test_recover_chat_send_persists_to_jsonl(client, auth_cookie, chat_id):
+  """A successful /send appends a user entry to the chat's log file.
+
+  Verifies the on-disk shape (jsonl with the user message) so a
+  later /stream can replay against the file even if the in-process
+  state is lost.
+  """
+  from app import recover_chat_runner as rcr
+  log_path = rcr.chat_log_path(chat_id)
+  # New chat: log file has only the _meta line at this point.
+  assert log_path.is_file()
+  initial_lines = log_path.read_text().strip().splitlines()
+  assert len(initial_lines) == 1  # _meta only
+
   r = client.post(
     "/recover/chat/send",
-    json={"message": "fix the broken thing"},
+    json={"chat_id": chat_id, "message": "fix the broken thing"},
     cookies=auth_cookie,
   )
   assert r.status_code == 200
   assert r.json()["status"] == "queued"
-  assert log_path.is_file()
   lines = log_path.read_text().strip().splitlines()
-  assert len(lines) == 1
-  entry = json.loads(lines[0])
-  assert entry["role"] == "user"
-  assert entry["content"] == "fix the broken thing"
+  assert len(lines) == 2  # _meta + the new user entry
+  user_entry = json.loads(lines[1])
+  assert user_entry["role"] == "user"
+  assert user_entry["content"] == "fix the broken thing"
 
 
-def test_recover_chat_send_rejects_empty(client, auth_cookie):
+def test_recover_chat_send_rejects_empty(client, auth_cookie, chat_id):
   r = client.post(
     "/recover/chat/send",
-    json={"message": "   "},
+    json={"chat_id": chat_id, "message": "   "},
     cookies=auth_cookie,
   )
   assert r.status_code == 400
 
 
-def test_recover_chat_send_requires_cookie(client):
+def test_recover_chat_send_requires_cookie(client, chat_id):
   r = client.post(
     "/recover/chat/send",
-    json={"message": "hi"},
+    json={"chat_id": chat_id, "message": "hi"},
   )
   assert r.status_code == 401
 
 
-def test_recover_chat_reset_wipes_log(client, auth_cookie, monkeypatch, tmp_path):
-  log_path = tmp_path / "recovery_chat.jsonl"
-  monkeypatch.setattr(
-    "app.recover_chat_runner.RECOVERY_LOG_PATH", log_path,
+def test_recover_chat_reset_wipes_log(client, auth_cookie, chat_id):
+  """/recover/chat/reset truncates the chat to just its _meta line.
+
+  Reset KEEPS the chat slot (so the chat_id stays valid; user can
+  keep chatting). For permanent deletion the user calls
+  /recover/chat/delete instead.
+  """
+  from app import recover_chat_runner as rcr
+  # Populate the chat with a couple of entries via the runner so
+  # we have something to reset.
+  rcr.append_log(chat_id, "user", "x")
+  rcr.append_log(chat_id, "assistant", "y")
+  log_path = rcr.chat_log_path(chat_id)
+  pre = log_path.read_text().strip().splitlines()
+  assert len(pre) == 3  # _meta + user + assistant
+
+  r = client.post(
+    "/recover/chat/reset",
+    json={"chat_id": chat_id},
+    cookies=auth_cookie,
   )
-  log_path.write_text(
-    '{"role":"user","content":"x","ts":1.0}\n'
-    '{"role":"assistant","content":"y","ts":2.0}\n'
-  )
-  assert log_path.is_file()
-  r = client.post("/recover/chat/reset", cookies=auth_cookie)
   assert r.status_code == 200
-  assert not log_path.is_file()
+  post = log_path.read_text().strip().splitlines()
+  assert len(post) == 1  # only _meta survives
+  # Chat slot still valid.
+  assert rcr.get_chat_provider(chat_id) == "claude"
 
 
-def test_recover_chat_reset_requires_cookie(client):
-  r = client.post("/recover/chat/reset")
+def test_recover_chat_reset_requires_cookie(client, chat_id):
+  # The 401 fires before body parsing, so the missing chat_id in
+  # the body doesn't matter — but pass it anyway for clarity.
+  r = client.post("/recover/chat/reset", json={"chat_id": chat_id})
   assert r.status_code == 401
 
 
@@ -217,54 +263,70 @@ def test_recover_chat_latest_user_message(monkeypatch, tmp_path):
   """The stream endpoint reads the most-recent user line; runner
   must return it correctly across mixed roles."""
   log_path = tmp_path / "mixed.jsonl"
-  monkeypatch.setattr(
-    "app.recover_chat_runner.RECOVERY_LOG_PATH", log_path,
-  )
   from app import recover_chat_runner as rcr
-  rcr.append_log("user", "first")
-  rcr.append_log("assistant", "reply1")
-  rcr.append_log("user", "second")
-  rcr.append_log("assistant", "reply2")
-  assert rcr.latest_user_message() == "second"
+  monkeypatch.setattr(
+    "app.recover_chat_runner.RECOVERY_CHATS_DIR",
+    tmp_path / "chats",
+  )
+  chat_id = rcr.create_chat("claude")
+  rcr.append_log(chat_id, "user", "first")
+  rcr.append_log(chat_id, "assistant", "reply1")
+  rcr.append_log(chat_id, "user", "second")
+  rcr.append_log(chat_id, "assistant", "reply2")
+  assert rcr.latest_user_message(chat_id) == "second"
 
 
 def test_recover_chat_runner_log_helpers(monkeypatch, tmp_path):
-  """append_log + load_log + reset_log work as documented."""
+  """append_log + load_log + reset_log work as documented for a chat."""
   monkeypatch.setattr(
-    "app.recover_chat_runner.RECOVERY_LOG_PATH",
-    tmp_path / "recovery.jsonl",
+    "app.recover_chat_runner.RECOVERY_CHATS_DIR",
+    tmp_path / "chats",
   )
   from app import recover_chat_runner as rcr
+  chat_id = rcr.create_chat("claude")
 
-  assert rcr.load_log() == []
-  rcr.append_log("user", "hello")
-  rcr.append_log("assistant", "world")
-  logged = rcr.load_log()
+  # load_log skips the _meta line; freshly-created chat has zero
+  # user/assistant messages.
+  assert rcr.load_log(chat_id) == []
+  rcr.append_log(chat_id, "user", "hello")
+  rcr.append_log(chat_id, "assistant", "world")
+  logged = rcr.load_log(chat_id)
   assert len(logged) == 2
   assert logged[0]["content"] == "hello"
   assert logged[1]["content"] == "world"
 
-  rcr.reset_log()
-  assert rcr.load_log() == []
+  # reset_log truncates the chat to its _meta line (keeps the slot).
+  rcr.reset_log(chat_id)
+  assert rcr.load_log(chat_id) == []
+  # Chat still exists (provider preserved).
+  assert rcr.get_chat_provider(chat_id) == "claude"
 
 
-def test_recover_chat_page_escapes_role_field(client, auth_cookie, monkeypatch, tmp_path):
+def test_recover_chat_page_escapes_role_field(
+  client, auth_cookie, monkeypatch, tmp_path,
+):
   """Poisoned role values (e.g. from a compromised agent writing to
-  /data/recovery_chat.jsonl) must be HTML-escaped when rendered,
-  otherwise the recovery page becomes XSS-vulnerable on the only
-  trusted surface left when production chat is broken."""
-  log_path = tmp_path / "poisoned.jsonl"
-  monkeypatch.setattr(
-    "app.recover_chat_runner.RECOVERY_LOG_PATH", log_path,
-  )
-  log_path.write_text(
-    '{"role":"<script>alert(1)</script>","content":"hi","ts":1.0}\n'
-  )
-  r = client.get("/recover/chat", cookies=auth_cookie)
+  the chat log file) must be HTML-escaped when rendered, otherwise
+  the recovery page becomes XSS-vulnerable on the only trusted
+  surface left when production chat is broken.
+
+  Under multi-chat, the page renders /recover/chat?id=<chat_id>, so
+  we plant the malformed entry into a per-chat log and request that
+  chat specifically.
+  """
+  from app import recover_chat_runner as rcr
+  chat_id = rcr.create_chat("claude")
+  # Manually append a poisoned entry to the chat's log file —
+  # bypasses the runner's validation so we test the page's escape
+  # behavior, not the writer's.
+  log_path = rcr.chat_log_path(chat_id)
+  with log_path.open("a") as f:
+    f.write(
+      '{"role":"<script>alert(1)</script>","content":"hi","ts":1.0}\n'
+    )
+  r = client.get(f"/recover/chat?id={chat_id}", cookies=auth_cookie)
   assert r.status_code == 200
-  # The raw payload must not appear as live HTML.
   assert "<script>alert(1)</script>" not in r.text
-  # The escaped form should appear.
   assert "&lt;script&gt;alert(1)&lt;/script&gt;" in r.text
 
 
@@ -294,85 +356,84 @@ def test_recover_auth_empty_secret_key():
 # the /send that returned the turn_id.
 # ---------------------------------------------------------------------
 
-def test_send_returns_turn_id(client, auth_cookie, monkeypatch, tmp_path):
+def test_send_returns_turn_id(client, auth_cookie, chat_id):
   """/recover/chat/send returns a turn_id the client passes back to
   /stream so the response pairs with this specific message, not
-  'latest' (which races under multi-tab use)."""
-  log_path = tmp_path / "pair.jsonl"
-  monkeypatch.setattr(
-    "app.recover_chat_runner.RECOVERY_LOG_PATH", log_path,
-  )
+  'latest' (which races under multi-tab use).
+
+  Under multi-chat, turn_id=0 is the _meta line. The first user
+  send gets turn_id=1, the second gets turn_id=2, etc.
+  """
   r = client.post(
     "/recover/chat/send",
-    json={"message": "first"},
+    json={"chat_id": chat_id, "message": "first"},
     cookies=auth_cookie,
   )
   assert r.status_code == 200
   body = r.json()
   assert "turn_id" in body
-  assert body["turn_id"] == 0
+  assert body["turn_id"] == 1  # 0 is the _meta line
 
   r2 = client.post(
     "/recover/chat/send",
-    json={"message": "second"},
+    json={"chat_id": chat_id, "message": "second"},
     cookies=auth_cookie,
   )
-  assert r2.json()["turn_id"] == 1
+  assert r2.json()["turn_id"] == 2
 
 
 def test_user_message_by_id_pairs_correctly(monkeypatch, tmp_path):
   """The runner helper returns the EXACT message at a turn_id, not
   the latest. This is what closes the send/stream pairing race."""
-  log_path = tmp_path / "byid.jsonl"
   monkeypatch.setattr(
-    "app.recover_chat_runner.RECOVERY_LOG_PATH", log_path,
+    "app.recover_chat_runner.RECOVERY_CHATS_DIR",
+    tmp_path / "chats",
   )
   from app import recover_chat_runner as rcr
-  id1 = rcr.append_log("user", "first")
-  id2 = rcr.append_log("assistant", "reply1")
-  id3 = rcr.append_log("user", "second")
+  chat_id = rcr.create_chat("claude")
+  id1 = rcr.append_log(chat_id, "user", "first")
+  id2 = rcr.append_log(chat_id, "assistant", "reply1")
+  id3 = rcr.append_log(chat_id, "user", "second")
 
-  assert rcr.user_message_by_id(id1) == "first"
-  assert rcr.user_message_by_id(id2) is None  # assistant, not user
-  assert rcr.user_message_by_id(id3) == "second"
+  assert rcr.user_message_by_id(chat_id, id1) == "first"
+  assert rcr.user_message_by_id(chat_id, id2) is None  # assistant
+  assert rcr.user_message_by_id(chat_id, id3) == "second"
   # Out-of-range ids return None cleanly.
-  assert rcr.user_message_by_id(999) is None
-  assert rcr.user_message_by_id(-1) is None
+  assert rcr.user_message_by_id(chat_id, 999) is None
+  assert rcr.user_message_by_id(chat_id, -1) is None
+  # The _meta line at index 0 is not a user message.
+  assert rcr.user_message_by_id(chat_id, 0) is None
 
 
 def test_stream_uses_provided_turn_id_not_latest(
-  client, auth_cookie, monkeypatch, tmp_path,
+  client, auth_cookie, chat_id,
 ):
   """If the client passes turn_id=N, the stream endpoint should
   resolve to message N — even if a NEWER user message has landed
   in the log since. This is the multi-tab race fix."""
-  log_path = tmp_path / "race.jsonl"
-  monkeypatch.setattr(
-    "app.recover_chat_runner.RECOVERY_LOG_PATH", log_path,
-  )
   # Two sends in quick succession (simulating two tabs racing).
   r1 = client.post(
     "/recover/chat/send",
-    json={"message": "tab1 message"},
+    json={"chat_id": chat_id, "message": "tab1 message"},
     cookies=auth_cookie,
   )
   tab1_turn = r1.json()["turn_id"]
   r2 = client.post(
     "/recover/chat/send",
-    json={"message": "tab2 message"},
+    json={"chat_id": chat_id, "message": "tab2 message"},
     cookies=auth_cookie,
   )
   tab2_turn = r2.json()["turn_id"]
   assert tab1_turn != tab2_turn
 
-  # Verify the runner's user_message_by_id (what the stream endpoint
-  # uses internally) returns the right message for each turn_id.
+  # The runner's user_message_by_id (what the stream endpoint uses
+  # internally) returns the right message for each turn_id.
   from app import recover_chat_runner as rcr
-  assert rcr.user_message_by_id(tab1_turn) == "tab1 message"
-  assert rcr.user_message_by_id(tab2_turn) == "tab2 message"
-  # latest_user_message would return tab2 (this is the race scenario
-  # we are explicitly NOT relying on anymore).
-  assert rcr.latest_user_message() == "tab2 message"
+  assert rcr.user_message_by_id(chat_id, tab1_turn) == "tab1 message"
+  assert rcr.user_message_by_id(chat_id, tab2_turn) == "tab2 message"
+  # latest_user_message would return tab2 (the race scenario we
+  # are explicitly NOT relying on anymore).
+  assert rcr.latest_user_message(chat_id) == "tab2 message"
 
 
 # ---------------------------------------------------------------------
@@ -380,24 +441,20 @@ def test_stream_uses_provided_turn_id_not_latest(
 # ---------------------------------------------------------------------
 
 def test_stale_cookie_after_owner_deletion_rejected(
-  client, auth_cookie, monkeypatch, tmp_path,
+  client, auth_cookie, chat_id,
 ):
   """A valid HMAC cookie issued before a factory reset must NOT
   retain elevated access after the Owner row is gone. Without the
   per-request owner-existence check, the cookie would stay valid
   for the remainder of its 1h TTL — a second tab, stolen cookie, or
   another browser profile would keep elevated write access on a
-  wiped instance."""
-  monkeypatch.setattr(
-    "app.recover_chat_runner.RECOVERY_LOG_PATH",
-    tmp_path / "recovery_chat.jsonl",
-  )
-
+  wiped instance.
+  """
   # Sanity: send works while the owner exists (the auth_cookie
   # fixture created the `tester` row).
   r = client.post(
     "/recover/chat/send",
-    json={"message": "before reset"},
+    json={"chat_id": chat_id, "message": "before reset"},
     cookies=auth_cookie,
   )
   assert r.status_code == 200
@@ -416,19 +473,23 @@ def test_stale_cookie_after_owner_deletion_rejected(
   # reject the now-stale cookie.
   r = client.post(
     "/recover/chat/send",
-    json={"message": "after reset"},
+    json={"chat_id": chat_id, "message": "after reset"},
     cookies=auth_cookie,
   )
   assert r.status_code == 401, "stale cookie must not be accepted on /send"
 
   r = client.post(
     "/recover/chat/stream",
-    json={"turn_id": 0},
+    json={"chat_id": chat_id, "turn_id": 1},
     cookies=auth_cookie,
   )
   assert r.status_code == 401, "stale cookie must not be accepted on /stream"
 
-  r = client.post("/recover/chat/reset", cookies=auth_cookie)
+  r = client.post(
+    "/recover/chat/reset",
+    json={"chat_id": chat_id},
+    cookies=auth_cookie,
+  )
   assert r.status_code == 401, "stale cookie must not be accepted on /reset"
 
   # The HTML page must redirect (its no-cookie behavior), not render.
@@ -440,63 +501,47 @@ def test_stale_cookie_after_owner_deletion_rejected(
 # turn_id replay/reuse guard
 # ---------------------------------------------------------------------
 
-def test_turn_id_replay_returns_409(
-  client, auth_cookie, monkeypatch, tmp_path,
-):
-  """The same turn_id POSTed to /stream twice must return 409 on
-  the second attempt. Without this guard, a double-click or a
-  network retry would spawn a second Claude CLI subprocess against
-  the same historical message — doubled token cost + a duplicate
-  assistant entry in the recovery log."""
-  log_path = tmp_path / "replay.jsonl"
-  monkeypatch.setattr(
-    "app.recover_chat_runner.RECOVERY_LOG_PATH", log_path,
-  )
-  # Reset the module-level dedup set so the test is order-independent.
+def test_turn_id_replay_returns_409(client, auth_cookie, chat_id, monkeypatch):
+  """The same (chat_id, turn_id) POSTed to /stream twice must return
+  409 on the second attempt. Under multi-chat, the dedup key is the
+  tuple — two different chats can each have turn_id=1 without conflict.
+  """
   from app import recover_chat as rc
   rc._streamed_turn_ids.clear()
 
-  # Step 1: a user send creates turn_id=0.
   r = client.post(
     "/recover/chat/send",
-    json={"message": "fix the thing"},
+    json={"chat_id": chat_id, "message": "fix the thing"},
     cookies=auth_cookie,
   )
   assert r.status_code == 200
   turn_id = r.json()["turn_id"]
 
-  # Step 2: stub stream_turn so the test doesn't actually spawn
-  # the Claude CLI subprocess. The dedup check happens BEFORE the
-  # stream begins, so even a no-op streamer suffices to verify the
-  # 409 behavior on the second POST.
+  # Stub stream_turn so the test doesn't actually spawn a CLI.
   from app import recover_chat_runner as rcr
 
-  async def _empty_stream(_message, _provider=None):
+  async def _empty_stream(_message, _provider=None, chat_id=None):
     if False:
-      yield ""  # generator that yields nothing
+      yield ""
 
   monkeypatch.setattr(rcr, "stream_turn", _empty_stream)
 
   r1 = client.post(
     "/recover/chat/stream",
-    json={"turn_id": turn_id},
+    json={"chat_id": chat_id, "turn_id": turn_id},
     cookies=auth_cookie,
   )
   assert r1.status_code == 200, (
     f"first stream should succeed, got {r1.status_code}: {r1.text}"
   )
 
-  # Step 3: replay the same turn_id — must 409.
+  # Replay: same (chat_id, turn_id) → 409.
   r2 = client.post(
     "/recover/chat/stream",
-    json={"turn_id": turn_id},
+    json={"chat_id": chat_id, "turn_id": turn_id},
     cookies=auth_cookie,
   )
-  assert r2.status_code == 409, (
-    f"replayed turn_id must return 409, got {r2.status_code}: {r2.text}"
-  )
-  # The body should explain why so a client UI can show something
-  # actionable instead of a generic conflict.
+  assert r2.status_code == 409
   assert "turn_id" in r2.text.lower() or "already" in r2.text.lower()
 
 
@@ -510,11 +555,12 @@ def test_turn_id_streamed_set_is_bounded(monkeypatch):
   # Push 2x the cap; only the most-recent N entries should survive.
   cap = rc._STREAMED_TURN_IDS_MAX
   for i in range(cap * 2):
-    rc._mark_turn_id_streamed(i)
+    rc._mark_turn_id_streamed("test-chat", i)
   assert len(rc._streamed_turn_ids) == cap
   # FIFO eviction: the oldest ids were dropped, the newest are kept.
-  assert 0 not in rc._streamed_turn_ids
-  assert (cap * 2 - 1) in rc._streamed_turn_ids
+  # Old assertion (int-keyed) replaced with tuple-keyed check below.
+  assert all(k[1] != 0 for k in rc._streamed_turn_ids)
+  assert any(k[1] == cap * 2 - 1 for k in rc._streamed_turn_ids)
 
 
 # ---------------------------------------------------------------------
@@ -783,34 +829,37 @@ async def test_stream_turn_rejects_concurrent_second_request(
 async def test_append_log_concurrent_callers_get_distinct_ids(
   monkeypatch, tmp_path,
 ):
-  """Fire N=10 concurrent append_log calls; each must return a
-  distinct id and the file must end with exactly 10 lines.
+  """Fire N=10 concurrent append_log calls into the same chat; each
+  must return a distinct id and the file must end with exactly N+1
+  lines (N appends + the _meta line).
 
   Without the lock, two callers could both read the post-append
   line count and both return the same id (the TOCTOU race that
-  re-opens the multi-tab pairing bug)."""
+  re-opens the multi-tab pairing bug).
+  """
   import asyncio as _asyncio
   from app import recover_chat_runner as rcr
   monkeypatch.setattr(
-    "app.recover_chat_runner.RECOVERY_LOG_PATH",
-    tmp_path / "concurrent_append.jsonl",
+    "app.recover_chat_runner.RECOVERY_CHATS_DIR",
+    tmp_path / "chats",
   )
+  chat_id = rcr.create_chat("claude")
 
   N = 10
   results = await _asyncio.gather(
-    *[_asyncio.to_thread(rcr.append_log, "user", f"msg-{i}")
+    *[_asyncio.to_thread(rcr.append_log, chat_id, "user", f"msg-{i}")
       for i in range(N)]
   )
-  # All ids distinct, covering 0..N-1 exactly.
-  assert sorted(results) == list(range(N))
-  # File has exactly N non-empty lines.
-  log_path = tmp_path / "concurrent_append.jsonl"
+  # All ids distinct, covering 1..N (turn_id=0 is the _meta line).
+  assert sorted(results) == list(range(1, N + 1))
+  # File has exactly N+1 non-empty lines (_meta + N appends).
+  log_path = rcr.chat_log_path(chat_id)
   lines = [
     line for line in log_path.read_text().splitlines() if line.strip()
   ]
-  assert len(lines) == N
-  # Every line is a valid JSON object — no torn writes.
-  for line in lines:
+  assert len(lines) == N + 1
+  # Every appended line is a valid JSON object — no torn writes.
+  for line in lines[1:]:
     entry = json.loads(line)
     assert entry["role"] == "user"
     assert entry["content"].startswith("msg-")
@@ -909,36 +958,43 @@ async def test_stream_turn_passes_long_message_via_stdin(
 # ---------------------------------------------------------------------
 
 def test_reset_clears_streamed_turn_ids(
-  client, auth_cookie, monkeypatch, tmp_path,
+  client, auth_cookie, chat_id, monkeypatch,
 ):
-  """POST /recover/chat/reset must clear the turn_id replay set, or
-  the next send (which restarts at turn_id=0) will 409 against the
-  prior generation's already-streamed ids."""
-  log_path = tmp_path / "reset.jsonl"
-  monkeypatch.setattr(
-    "app.recover_chat_runner.RECOVERY_LOG_PATH", log_path,
-  )
+  """POST /recover/chat/reset must clear the (chat_id, turn_id)
+  entries from the replay dedup set for that chat, or the next
+  send (which restarts at turn_id=1 — the line just after _meta)
+  will 409 against the prior generation's already-streamed ids.
+  """
   from app import recover_chat as rc
   rc._streamed_turn_ids.clear()
 
-  # Pre-populate the dedup set as if we'd streamed several turns.
-  for i in range(5):
-    rc._mark_turn_id_streamed(i)
+  # Pre-populate the dedup set as if we'd streamed several turns
+  # in THIS chat.
+  for i in range(1, 6):
+    rc._mark_turn_id_streamed(chat_id, i)
   assert len(rc._streamed_turn_ids) == 5
 
-  # Reset clears the log AND the dedup set.
-  r = client.post("/recover/chat/reset", cookies=auth_cookie)
+  # Also seed an entry for a DIFFERENT chat — reset shouldn't clear
+  # other chats' ids.
+  rc._mark_turn_id_streamed("other-chat", 1)
+  assert len(rc._streamed_turn_ids) == 6
+
+  # Reset this chat: clears just THIS chat's entries.
+  r = client.post(
+    "/recover/chat/reset",
+    json={"chat_id": chat_id},
+    cookies=auth_cookie,
+  )
   assert r.status_code == 200, r.text
-  assert len(rc._streamed_turn_ids) == 0, (
-    "reset must clear the in-memory dedup set so the next turn"
-    " (which restarts at turn_id=0) is not blocked as a replay"
+  remaining = list(rc._streamed_turn_ids.keys())
+  assert remaining == [("other-chat", 1)], (
+    f"reset must clear only this chat's ids; got {remaining}"
   )
 
-  # End-to-end: after reset, a fresh send + stream cycle must work
-  # at turn_id=0 — proves the integration is actually unblocked.
+  # End-to-end: after reset, a fresh send + stream cycle must work.
   from app import recover_chat_runner as rcr
 
-  async def _empty_stream(_message, _provider=None):
+  async def _empty_stream(_message, _provider=None, chat_id=None):
     if False:
       yield ""
 
@@ -946,23 +1002,24 @@ def test_reset_clears_streamed_turn_ids(
 
   send = client.post(
     "/recover/chat/send",
-    json={"message": "hi"},
+    json={"chat_id": chat_id, "message": "hi"},
     cookies=auth_cookie,
   )
   assert send.status_code == 200, send.text
   fresh_turn_id = send.json()["turn_id"]
-  assert fresh_turn_id == 0, (
-    f"after reset the log starts empty so turn_id must be 0,"
-    f" got {fresh_turn_id}"
+  # After reset, the chat has just the _meta line (turn_id=0); the
+  # first user append goes to turn_id=1.
+  assert fresh_turn_id == 1, (
+    f"after reset the first user send must get turn_id=1, got {fresh_turn_id}"
   )
 
   stream = client.post(
     "/recover/chat/stream",
-    json={"turn_id": fresh_turn_id},
+    json={"chat_id": chat_id, "turn_id": fresh_turn_id},
     cookies=auth_cookie,
   )
   assert stream.status_code == 200, (
-    f"post-reset turn_id=0 was 409d as a replay: {stream.text}"
+    f"post-reset turn_id=1 was 409d as a replay: {stream.text}"
   )
 
 
@@ -1084,19 +1141,23 @@ async def test_stream_turn_releases_claim_even_when_terminate_raises(
 # ---------------------------------------------------------------------
 
 def test_provider_picker_flows_to_runner(
-  client, auth_cookie, monkeypatch, tmp_path,
+  client, auth_cookie, chat_id, monkeypatch,
 ):
-  log_path = tmp_path / "picker.jsonl"
-  monkeypatch.setattr(
-    "app.recover_chat_runner.RECOVERY_LOG_PATH", log_path,
-  )
+  """Client explicitly picks `codex`; runner must receive that
+  value as its `provider` argument.
+
+  The chat was created with `claude` (see `chat_id` fixture), so
+  this verifies the per-turn override path — the client can
+  override even when the chat itself defaults to a different
+  provider.
+  """
   from app import recover_chat as rc
   from app import recover_chat_runner as rcr
   rc._streamed_turn_ids.clear()
 
   seen_provider: list = []
 
-  async def _capturing_stream(_message, provider=None):
+  async def _capturing_stream(_message, provider=None, chat_id=None):
     seen_provider.append(provider)
     if False:
       yield ""
@@ -1105,16 +1166,15 @@ def test_provider_picker_flows_to_runner(
 
   send = client.post(
     "/recover/chat/send",
-    json={"message": "rescue this"},
+    json={"chat_id": chat_id, "message": "rescue this"},
     cookies=auth_cookie,
   )
   assert send.status_code == 200
   turn_id = send.json()["turn_id"]
 
-  # Client picks codex explicitly.
   r = client.post(
     "/recover/chat/stream",
-    json={"turn_id": turn_id, "provider": "codex"},
+    json={"chat_id": chat_id, "turn_id": turn_id, "provider": "codex"},
     cookies=auth_cookie,
   )
   assert r.status_code == 200, r.text
@@ -1124,19 +1184,19 @@ def test_provider_picker_flows_to_runner(
 
 
 def test_provider_picker_unknown_falls_back_to_default(
-  client, auth_cookie, monkeypatch, tmp_path,
+  client, auth_cookie, chat_id, monkeypatch,
 ):
-  log_path = tmp_path / "picker_unknown.jsonl"
-  monkeypatch.setattr(
-    "app.recover_chat_runner.RECOVERY_LOG_PATH", log_path,
-  )
+  """Client passes a bogus provider; the route normalizes the
+  override to None so the runner falls back to the chat's stored
+  provider (claude, per the fixture).
+  """
   from app import recover_chat as rc
   from app import recover_chat_runner as rcr
   rc._streamed_turn_ids.clear()
 
   seen_provider: list = []
 
-  async def _capturing_stream(_message, provider=None):
+  async def _capturing_stream(_message, provider=None, chat_id=None):
     seen_provider.append(provider)
     if False:
       yield ""
@@ -1145,21 +1205,21 @@ def test_provider_picker_unknown_falls_back_to_default(
 
   send = client.post(
     "/recover/chat/send",
-    json={"message": "rescue"},
+    json={"chat_id": chat_id, "message": "rescue"},
     cookies=auth_cookie,
   )
   turn_id = send.json()["turn_id"]
 
-  # Client passes a bogus provider; route layer should normalize to
-  # None so the runner picks its default.
   r = client.post(
     "/recover/chat/stream",
-    json={"turn_id": turn_id, "provider": "not-a-real-provider"},
+    json={"chat_id": chat_id, "turn_id": turn_id, "provider": "not-a-real-provider"},
     cookies=auth_cookie,
   )
   assert r.status_code == 200, r.text
-  assert seen_provider == [None], (
-    f"unknown provider should normalize to None, saw {seen_provider}"
+  # When the override is invalid, the route uses the chat's stored
+  # provider — claude in this fixture.
+  assert seen_provider == ["claude"], (
+    f"unknown provider should fall back to chat's stored provider, saw {seen_provider}"
   )
 
 
