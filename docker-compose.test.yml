@@ -4,7 +4,11 @@ services:
     build: .
     container_name: mobius-test
     init: true
-    restart: "no"
+    # `unless-stopped` so the recovery chat's Restart button works in
+    # test: SIGTERMing uvicorn relies on Docker bringing the container
+    # back up. With `restart: "no"` the recovery flow bricks the test
+    # container exactly where we exercise it.
+    restart: unless-stopped
     environment:
       # Pin a fixed test SECRET_KEY so the test container never inherits a
       # prod-shaped value from the host shell. Do NOT use this value anywhere

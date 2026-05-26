@@ -168,24 +168,26 @@ export default function AppCanvas({
     return () => window.removeEventListener('message', onMessage)
   }, [appId, onNavPush, onNavPop])
 
-  // Clear this app's pending nav-sentinels when AppCanvas unmounts
-  // (LRU eviction, or when the user logs out and the shell tears
-  // down). Without this, the shell's count outlives the iframe;
-  // later back-gestures while this app becomes active again would
-  // fire moebius:nav-back postMessages into a null iframe — silently
-  // consumed, no UI response. Codex caught this in review.
+  // Clear this app's pending nav-sentinels when the iframe stops
+  // representing the same browsing context. That happens on:
+  //   - AppCanvas unmount (LRU eviction, logout)
+  //   - appId change (different app in the same AppCanvas slot)
+  //   - version bump (app_updated → iframe key changes → DOM
+  //     remount with a fresh internal nav stack starting at 0)
   //
-  // The history entries from earlier appNavPush calls stay in
-  // browser history. Once the count is 0, the popstate guard skips
-  // interception, so back-gestures through those orphan entries
-  // fall through to the browser's native handling. User-visible
-  // effect: a few no-op back-presses if the user navigates back
-  // into the area after an LRU eviction. Better than the silent
-  // gesture-eating bug.
+  // Without resetting, the shell's per-app sentinel count outlives
+  // the iframe's internal state, and later back-gestures fire
+  // moebius:nav-back postMessages into an iframe whose own nav
+  // stack is empty — silently consumed or mishandled by the app.
+  //
+  // Browser history entries from earlier appNavPush calls remain in
+  // history. Once the shell count is 0, _anyAppHasSentinels returns
+  // false so popstate skips interception and back-gestures through
+  // those orphan entries fall through to native handling.
   useEffect(() => {
     if (!appId) return
     return () => { onNavReset?.(appId) }
-  }, [appId, onNavReset])
+  }, [appId, version, onNavReset])
 
   // Broadcast theme updates to an already-loaded iframe so it can
   // refresh its theme without remounting (and losing app state).

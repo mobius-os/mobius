@@ -373,3 +373,526 @@ def test_stream_uses_provided_turn_id_not_latest(
   # latest_user_message would return tab2 (this is the race scenario
   # we are explicitly NOT relying on anymore).
   assert rcr.latest_user_message() == "tab2 message"
+
+
+# ---------------------------------------------------------------------
+# Owner-existence check on every cookie consumption
+# ---------------------------------------------------------------------
+
+def test_stale_cookie_after_owner_deletion_rejected(
+  client, auth_cookie, monkeypatch, tmp_path,
+):
+  """A valid HMAC cookie issued before a factory reset must NOT
+  retain elevated access after the Owner row is gone. Without the
+  per-request owner-existence check, the cookie would stay valid
+  for the remainder of its 1h TTL — a second tab, stolen cookie, or
+  another browser profile would keep elevated write access on a
+  wiped instance."""
+  monkeypatch.setattr(
+    "app.recover_chat_runner.RECOVERY_LOG_PATH",
+    tmp_path / "recovery_chat.jsonl",
+  )
+
+  # Sanity: send works while the owner exists (the auth_cookie
+  # fixture created the `tester` row).
+  r = client.post(
+    "/recover/chat/send",
+    json={"message": "before reset"},
+    cookies=auth_cookie,
+  )
+  assert r.status_code == 200
+
+  # Simulate factory reset: delete the Owner row. Cookie HMAC stays
+  # valid; the structural check is whether the backend re-verifies
+  # the owner on each call.
+  from app.database import SessionLocal
+  from app import models
+  db = SessionLocal()
+  db.query(models.Owner).filter(models.Owner.username == "tester").delete()
+  db.commit()
+  db.close()
+
+  # Every endpoint that mutates state or returns elevated data must
+  # reject the now-stale cookie.
+  r = client.post(
+    "/recover/chat/send",
+    json={"message": "after reset"},
+    cookies=auth_cookie,
+  )
+  assert r.status_code == 401, "stale cookie must not be accepted on /send"
+
+  r = client.post(
+    "/recover/chat/stream",
+    json={"turn_id": 0},
+    cookies=auth_cookie,
+  )
+  assert r.status_code == 401, "stale cookie must not be accepted on /stream"
+
+  r = client.post("/recover/chat/reset", cookies=auth_cookie)
+  assert r.status_code == 401, "stale cookie must not be accepted on /reset"
+
+  # The HTML page must redirect (its no-cookie behavior), not render.
+  r = client.get("/recover/chat", cookies=auth_cookie, follow_redirects=False)
+  assert r.status_code == 302
+
+
+# ---------------------------------------------------------------------
+# turn_id replay/reuse guard
+# ---------------------------------------------------------------------
+
+def test_turn_id_replay_returns_409(
+  client, auth_cookie, monkeypatch, tmp_path,
+):
+  """The same turn_id POSTed to /stream twice must return 409 on
+  the second attempt. Without this guard, a double-click or a
+  network retry would spawn a second Claude CLI subprocess against
+  the same historical message — doubled token cost + a duplicate
+  assistant entry in the recovery log."""
+  log_path = tmp_path / "replay.jsonl"
+  monkeypatch.setattr(
+    "app.recover_chat_runner.RECOVERY_LOG_PATH", log_path,
+  )
+  # Reset the module-level dedup set so the test is order-independent.
+  from app import recover_chat as rc
+  rc._streamed_turn_ids.clear()
+
+  # Step 1: a user send creates turn_id=0.
+  r = client.post(
+    "/recover/chat/send",
+    json={"message": "fix the thing"},
+    cookies=auth_cookie,
+  )
+  assert r.status_code == 200
+  turn_id = r.json()["turn_id"]
+
+  # Step 2: stub stream_turn so the test doesn't actually spawn
+  # the Claude CLI subprocess. The dedup check happens BEFORE the
+  # stream begins, so even a no-op streamer suffices to verify the
+  # 409 behavior on the second POST.
+  from app import recover_chat_runner as rcr
+
+  async def _empty_stream(_message):
+    if False:
+      yield ""  # generator that yields nothing
+
+  monkeypatch.setattr(rcr, "stream_turn", _empty_stream)
+
+  r1 = client.post(
+    "/recover/chat/stream",
+    json={"turn_id": turn_id},
+    cookies=auth_cookie,
+  )
+  assert r1.status_code == 200, (
+    f"first stream should succeed, got {r1.status_code}: {r1.text}"
+  )
+
+  # Step 3: replay the same turn_id — must 409.
+  r2 = client.post(
+    "/recover/chat/stream",
+    json={"turn_id": turn_id},
+    cookies=auth_cookie,
+  )
+  assert r2.status_code == 409, (
+    f"replayed turn_id must return 409, got {r2.status_code}: {r2.text}"
+  )
+  # The body should explain why so a client UI can show something
+  # actionable instead of a generic conflict.
+  assert "turn_id" in r2.text.lower() or "already" in r2.text.lower()
+
+
+def test_turn_id_streamed_set_is_bounded(monkeypatch):
+  """The dedup set must not grow unbounded — at most N most-recent
+  turn_ids are remembered. This guards against memory exhaustion
+  via a long-running recovery session or adversarial id flooding."""
+  from app import recover_chat as rc
+  rc._streamed_turn_ids.clear()
+
+  # Push 2x the cap; only the most-recent N entries should survive.
+  cap = rc._STREAMED_TURN_IDS_MAX
+  for i in range(cap * 2):
+    rc._mark_turn_id_streamed(i)
+  assert len(rc._streamed_turn_ids) == cap
+  # FIFO eviction: the oldest ids were dropped, the newest are kept.
+  assert 0 not in rc._streamed_turn_ids
+  assert (cap * 2 - 1) in rc._streamed_turn_ids
+
+
+# ---------------------------------------------------------------------
+# _defer_restore mode validation
+# ---------------------------------------------------------------------
+
+def test_defer_restore_rejects_invalid_mode():
+  """Calling _defer_restore with an unknown mode must raise rather
+  than write a typo to /data/.recover-pending. Otherwise the
+  entrypoint silently falls through to restore_status='unknown-mode'
+  and the container reboots into the same broken state."""
+  from app.routes import recover as recover_routes
+
+  import pytest as _pytest
+  with _pytest.raises(ValueError):
+    recover_routes._defer_restore("shell")  # missing -dist or -src
+  with _pytest.raises(ValueError):
+    recover_routes._defer_restore("")  # empty
+  with _pytest.raises(ValueError):
+    recover_routes._defer_restore("backend ")  # trailing whitespace
+
+
+def test_defer_restore_valid_modes_listed():
+  """All four expected modes are in the allow-list. If this fails,
+  either a mode was renamed in entrypoint without updating the
+  Python guardrail, or vice versa — both cases are bugs."""
+  from app.routes import recover as recover_routes
+  assert recover_routes._VALID_MODES == frozenset({
+    "backend", "scripts", "shell-dist", "shell-src",
+  })
+
+
+# ---------------------------------------------------------------------
+# Structural fix #1: stream_turn must release its run-claim on client
+# disconnect so the next /stream call isn't blocked. The old design
+# held an asyncio.Lock across the whole generator; FastAPI stopping
+# consumption (client disconnect) didn't run the lock's __aexit__
+# until generator GC, orphaning the lock and blocking every later
+# /stream.
+# ---------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_stream_turn_releases_claim_on_client_disconnect(
+  monkeypatch, tmp_path,
+):
+  """Abandon a stream mid-flight (aclose the generator before
+  consuming "done"); a fresh stream_turn must run without blocking.
+
+  Regression target: prior code held _STREAM_LOCK across the entire
+  generator. A client disconnect left the lock held until generator
+  GC ran __aexit__, which on a busy server was often "never until
+  process restart" — blocking the only escape hatch the user has.
+
+  We fake the subprocess so the test runs without a real claude
+  binary: any spawn from _stream_turn_impl returns a stub Process
+  whose stdout slowly yields a few lines and then EOFs. We start
+  the first stream, pull one chunk, then aclose() it — simulating
+  FastAPI stopping consumption on disconnect. Then we start a
+  second stream and assert it produces events promptly (i.e. the
+  claim was released).
+  """
+  import asyncio as _asyncio
+  from app import recover_chat_runner as rcr
+  monkeypatch.setattr(
+    "app.recover_chat_runner.RECOVERY_LOG_PATH",
+    tmp_path / "disconnect.jsonl",
+  )
+
+  class _StubStream:
+    def __init__(self, lines):
+      self._lines = list(lines)
+      self._closed = False
+
+    async def readline(self):
+      if self._closed or not self._lines:
+        return b""
+      # Yield a small delay so the test can interleave aclose()
+      # between reads — simulates a real streaming subprocess.
+      await _asyncio.sleep(0.01)
+      return self._lines.pop(0)
+
+    async def read(self):
+      return b""
+
+  class _StubProc:
+    instances: list = []
+
+    def __init__(self, *lines):
+      # Two text-delta events then EOF; enough to let the consumer
+      # pull one chunk before aclose.
+      payload = [
+        (
+          b'{"type":"stream_event","event":{"type":'
+          b'"content_block_delta","delta":{"type":'
+          b'"text_delta","text":"hi"}}}\n'
+        ),
+        (
+          b'{"type":"stream_event","event":{"type":'
+          b'"content_block_delta","delta":{"type":'
+          b'"text_delta","text":" there"}}}\n'
+        ),
+      ]
+      self.stdout = _StubStream(payload)
+      self.stderr = _StubStream([])
+      self.stdin = _StubStdin()
+      self.returncode = None
+      self._terminated = False
+      self._waited = False
+      _StubProc.instances.append(self)
+
+    def terminate(self):
+      self._terminated = True
+      self.returncode = -15
+
+    def kill(self):
+      self.returncode = -9
+
+    async def wait(self):
+      self._waited = True
+      if self.returncode is None:
+        self.returncode = 0
+      return self.returncode
+
+  class _StubStdin:
+    def __init__(self):
+      self._closed = False
+
+    def write(self, data):
+      pass
+
+    async def drain(self):
+      pass
+
+    def close(self):
+      self._closed = True
+
+  async def fake_spawn(*cmd, **kwargs):
+    return _StubProc()
+
+  monkeypatch.setattr(
+    "app.recover_chat_runner.asyncio.create_subprocess_exec",
+    fake_spawn,
+  )
+  monkeypatch.setattr(
+    "app.recover_chat_runner.shutil.which",
+    lambda _: "/fake/claude",
+  )
+
+  # First stream — pull one chunk then abandon it.
+  gen1 = rcr.stream_turn("first")
+  first_chunk = await gen1.__anext__()
+  assert "hi" in first_chunk or "data:" in first_chunk
+  await gen1.aclose()
+
+  # The run-claim must be released after aclose so the next stream
+  # can proceed without blocking. Without the fix this hangs.
+  gen2 = rcr.stream_turn("second")
+  got_event = False
+  async def _consume():
+    nonlocal got_event
+    async for chunk in gen2:
+      got_event = True
+      if "done" in chunk:
+        break
+
+  await _asyncio.wait_for(_consume(), timeout=2.0)
+  assert got_event, "second stream never produced events"
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_rejects_concurrent_second_request(
+  monkeypatch, tmp_path,
+):
+  """A second stream_turn invoked while the first is in flight must
+  receive an SSE error frame ('Another recovery turn is in
+  progress.') and complete promptly — not queue, not block."""
+  import asyncio as _asyncio
+  from app import recover_chat_runner as rcr
+  monkeypatch.setattr(
+    "app.recover_chat_runner.RECOVERY_LOG_PATH",
+    tmp_path / "concurrent.jsonl",
+  )
+
+  # Hold the first stream open: stub a subprocess whose stdout never
+  # EOFs until we set a release event.
+  release = _asyncio.Event()
+
+  class _BlockingStream:
+    async def readline(self):
+      await release.wait()
+      return b""
+    async def read(self):
+      return b""
+
+  class _BlockingStdin:
+    def write(self, data):
+      pass
+    async def drain(self):
+      pass
+    def close(self):
+      pass
+
+  class _BlockingProc:
+    def __init__(self):
+      self.stdout = _BlockingStream()
+      self.stderr = _BlockingStream()
+      self.stdin = _BlockingStdin()
+      self.returncode = None
+
+    def terminate(self):
+      self.returncode = -15
+
+    def kill(self):
+      self.returncode = -9
+
+    async def wait(self):
+      if self.returncode is None:
+        self.returncode = 0
+      return self.returncode
+
+  async def fake_spawn(*cmd, **kwargs):
+    return _BlockingProc()
+
+  monkeypatch.setattr(
+    "app.recover_chat_runner.asyncio.create_subprocess_exec",
+    fake_spawn,
+  )
+  monkeypatch.setattr(
+    "app.recover_chat_runner.shutil.which",
+    lambda _: "/fake/claude",
+  )
+
+  gen1 = rcr.stream_turn("first")
+  # Kick off gen1 so it claims the slot — pull one chunk via a task
+  # but DON'T block waiting forever.
+  task1 = _asyncio.create_task(gen1.__anext__())
+  await _asyncio.sleep(0.05)  # yield so gen1 can claim
+
+  # Second stream while first is live: should immediately yield an
+  # error event mentioning the conflict, then done.
+  gen2 = rcr.stream_turn("second")
+  events = []
+  async for chunk in gen2:
+    events.append(chunk)
+  joined = "".join(events)
+  assert "Another recovery turn is in progress" in joined
+  assert '"type":"done"' in joined
+
+  # Release gen1 cleanly.
+  release.set()
+  task1.cancel()
+  try:
+    await task1
+  except (_asyncio.CancelledError, StopAsyncIteration):
+    pass
+  await gen1.aclose()
+
+
+# ---------------------------------------------------------------------
+# Structural fix #2: append_log must be atomic across concurrent
+# callers so each returns a distinct turn_id and the file ends with
+# exactly N lines for N appends.
+# ---------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_append_log_concurrent_callers_get_distinct_ids(
+  monkeypatch, tmp_path,
+):
+  """Fire N=10 concurrent append_log calls; each must return a
+  distinct id and the file must end with exactly 10 lines.
+
+  Without the lock, two callers could both read the post-append
+  line count and both return the same id (the TOCTOU race that
+  re-opens the multi-tab pairing bug)."""
+  import asyncio as _asyncio
+  from app import recover_chat_runner as rcr
+  monkeypatch.setattr(
+    "app.recover_chat_runner.RECOVERY_LOG_PATH",
+    tmp_path / "concurrent_append.jsonl",
+  )
+
+  N = 10
+  results = await _asyncio.gather(
+    *[_asyncio.to_thread(rcr.append_log, "user", f"msg-{i}")
+      for i in range(N)]
+  )
+  # All ids distinct, covering 0..N-1 exactly.
+  assert sorted(results) == list(range(N))
+  # File has exactly N non-empty lines.
+  log_path = tmp_path / "concurrent_append.jsonl"
+  lines = [
+    line for line in log_path.read_text().splitlines() if line.strip()
+  ]
+  assert len(lines) == N
+  # Every line is a valid JSON object — no torn writes.
+  for line in lines:
+    entry = json.loads(line)
+    assert entry["role"] == "user"
+    assert entry["content"].startswith("msg-")
+
+
+# ---------------------------------------------------------------------
+# Structural fix #3: long messages go via stdin, not argv, so they
+# don't crash subprocess spawn at Linux's ~128KB argv cap.
+# ---------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_stream_turn_passes_long_message_via_stdin(
+  monkeypatch, tmp_path,
+):
+  """A >200KB user message must spawn cleanly. We mock the subprocess
+  to record the argv and the stdin write so we can assert (a) the
+  message is NOT on argv (which would crash for real on Linux) and
+  (b) the message IS written to stdin in full.
+
+  Regression target: prior code passed `user_message` as a trailing
+  positional argv item. Recovery is exactly the context where users
+  paste big diffs and crash logs, so the argv cap was a real risk."""
+  import asyncio as _asyncio
+  from app import recover_chat_runner as rcr
+  monkeypatch.setattr(
+    "app.recover_chat_runner.RECOVERY_LOG_PATH",
+    tmp_path / "long.jsonl",
+  )
+
+  spawn_args = {"argv": None, "stdin_writes": []}
+
+  class _StubStream:
+    async def readline(self):
+      return b""  # immediate EOF — runner emits done and exits
+    async def read(self):
+      return b""
+
+  class _StubStdin:
+    def write(self, data):
+      spawn_args["stdin_writes"].append(data)
+    async def drain(self):
+      pass
+    def close(self):
+      pass
+
+  class _StubProc:
+    def __init__(self):
+      self.stdout = _StubStream()
+      self.stderr = _StubStream()
+      self.stdin = _StubStdin()
+      self.returncode = 0
+    def terminate(self): pass
+    def kill(self): pass
+    async def wait(self):
+      return 0
+
+  async def fake_spawn(*cmd, **kwargs):
+    spawn_args["argv"] = list(cmd)
+    spawn_args["kwargs"] = kwargs
+    return _StubProc()
+
+  monkeypatch.setattr(
+    "app.recover_chat_runner.asyncio.create_subprocess_exec",
+    fake_spawn,
+  )
+  monkeypatch.setattr(
+    "app.recover_chat_runner.shutil.which",
+    lambda _: "/fake/claude",
+  )
+
+  big_message = "X" * 250_000  # 250 KB — well past the ~128KB argv cap
+  gen = rcr.stream_turn(big_message)
+  async for _ in gen:
+    pass
+
+  # The message must NOT appear anywhere on the argv list.
+  assert spawn_args["argv"] is not None
+  for arg in spawn_args["argv"]:
+    assert big_message not in arg, (
+      "user message leaked into argv — would crash for real on Linux"
+    )
+  # stdin must be wired up and the message must be written to it.
+  assert spawn_args["kwargs"].get("stdin") is not None
+  combined_stdin = b"".join(spawn_args["stdin_writes"])
+  assert combined_stdin == big_message.encode("utf-8")

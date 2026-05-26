@@ -22,13 +22,16 @@ from __future__ import annotations
 
 import os
 import signal
+from collections import OrderedDict
 
-from fastapi import APIRouter, Body, Cookie, HTTPException, Request
+from fastapi import APIRouter, Body, Cookie, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+from sqlalchemy.orm import Session
 
-from app import recover_auth, recover_chat_runner
+from app import models, recover_auth, recover_chat_runner
+from app.database import get_db
 
 router = APIRouter(tags=["recover"])
 
@@ -40,20 +43,67 @@ router = APIRouter(tags=["recover"])
 _limiter = Limiter(key_func=get_remote_address)
 
 
-def _require_session(token: str | None) -> str:
-  """Returns username if cookie is valid; raises 401 otherwise."""
+# Bounded set of turn_ids that have already been streamed. A second
+# /recover/chat/stream POST for the same id returns 409 instead of
+# spawning a duplicate CLI subprocess. The cap keeps memory bounded
+# under any attack pattern; the eviction order is FIFO so the most
+# recent N ids are always remembered. OrderedDict gives O(1) insert,
+# membership check, and popitem(last=False) for FIFO eviction —
+# simpler than a separate deque + set pair.
+_STREAMED_TURN_IDS_MAX = 256
+_streamed_turn_ids: "OrderedDict[int, None]" = OrderedDict()
+
+
+def _mark_turn_id_streamed(turn_id: int) -> None:
+  """Records that `turn_id` has been streamed. Evicts the oldest id
+  if the cap is exceeded so the set stays bounded under load."""
+  _streamed_turn_ids[turn_id] = None
+  while len(_streamed_turn_ids) > _STREAMED_TURN_IDS_MAX:
+    _streamed_turn_ids.popitem(last=False)
+
+
+def _require_session(
+  token: str | None, db: Session,
+) -> models.Owner:
+  """Validates the recovery cookie AND re-confirms the owner row
+  still exists. Returns the Owner on success; raises 401 otherwise.
+
+  The owner-existence check is what makes a factory-reset cookie
+  invalid even though its HMAC + expiry are still good: factory
+  reset deletes the Owner row, so the next request with the stale
+  cookie finds no owner and is rejected. Without this lookup, a
+  second tab or stolen cookie would retain elevated access on a
+  wiped instance for up to the remaining TTL (1h)."""
   username = recover_auth.decode_session_token(token)
   if not username:
     raise HTTPException(status_code=401)
-  return username
+  owner = (
+    db.query(models.Owner)
+    .filter(models.Owner.username == username)
+    .first()
+  )
+  if not owner:
+    raise HTTPException(status_code=401)
+  return owner
 
 
 @router.get("/recover/chat", response_class=HTMLResponse)
 def recover_chat_page(
   moebius_recover: str | None = Cookie(default=None),
+  db: Session = Depends(get_db),
 ):
-  """Serves the recovery chat HTML. Requires the recovery cookie."""
-  if not recover_auth.decode_session_token(moebius_recover):
+  """Serves the recovery chat HTML. Requires the recovery cookie
+  AND a live owner row — a factory-reset instance redirects stale
+  cookies back to /recover for re-setup, same as no cookie at all."""
+  username = recover_auth.decode_session_token(moebius_recover)
+  owner = None
+  if username:
+    owner = (
+      db.query(models.Owner)
+      .filter(models.Owner.username == username)
+      .first()
+    )
+  if not owner:
     return HTMLResponse(
       '<meta http-equiv="refresh" content="0; url=/recover">',
       status_code=302,
@@ -68,6 +118,7 @@ async def recover_chat_send(
   request: Request,
   payload: dict = Body(...),
   moebius_recover: str | None = Cookie(default=None),
+  db: Session = Depends(get_db),
 ):
   """Accepts a user message, persists it, returns a turn_id the
   client uses to pair with the subsequent /stream POST.
@@ -77,7 +128,7 @@ async def recover_chat_send(
   where two browser tabs (or two rapid sends) cause one stream to
   respond to the wrong message.
   """
-  _require_session(moebius_recover)
+  _require_session(moebius_recover, db)
   text = (payload.get("message") or "").strip()
   if not text:
     raise HTTPException(status_code=400, detail="message required")
@@ -93,6 +144,7 @@ async def recover_chat_stream(
   request: Request,
   payload: dict | None = Body(default=None),
   moebius_recover: str | None = Cookie(default=None),
+  db: Session = Depends(get_db),
 ):
   """SSE stream of the agent's response to a specific persisted
   message. POST (not GET) so the message body never appears in
@@ -103,17 +155,36 @@ async def recover_chat_stream(
   rather than 'latest user message' — closes the multi-tab race
   where two sends + two streams could mis-pair.
 
+  Replay guard: a given `turn_id` can only be streamed once. A
+  duplicate POST (double-click, network retry, second tab, malicious
+  replay) returns 409 instead of spawning a second CLI subprocess
+  that would re-bill the user and append a duplicate assistant
+  entry to the log. The dedup happens at the route boundary so the
+  underlying runner's stream lock isn't relied upon for this
+  semantic.
+
   For backward compatibility, if turn_id is omitted the runner
   still falls back to latest_user_message — but the client always
-  sends the id."""
-  _require_session(moebius_recover)
+  sends the id, and only id-tagged streams participate in dedup."""
+  _require_session(moebius_recover, db)
   turn_id = (payload or {}).get("turn_id") if payload else None
   if isinstance(turn_id, int):
+    if turn_id in _streamed_turn_ids:
+      raise HTTPException(
+        status_code=409,
+        detail="turn_id already streamed",
+      )
     message = recover_chat_runner.user_message_by_id(turn_id)
   else:
     message = recover_chat_runner.latest_user_message()
   if not message:
     raise HTTPException(status_code=400, detail="no message in log")
+
+  # Mark BEFORE starting the stream so a duplicate POST that arrives
+  # while the first is still streaming also gets the 409 — not just
+  # duplicates that arrive after completion.
+  if isinstance(turn_id, int):
+    _mark_turn_id_streamed(turn_id)
 
   async def gen():
     async for chunk in recover_chat_runner.stream_turn(message):
@@ -131,9 +202,10 @@ async def recover_chat_stream(
 def recover_chat_reset(
   request: Request,
   moebius_recover: str | None = Cookie(default=None),
+  db: Session = Depends(get_db),
 ):
   """Wipes /data/recovery_chat.jsonl."""
-  _require_session(moebius_recover)
+  _require_session(moebius_recover, db)
   recover_chat_runner.reset_log()
   return JSONResponse({"status": "ok"})
 
@@ -143,6 +215,7 @@ def recover_chat_reset(
 def recover_restart(
   request: Request,
   moebius_recover: str | None = Cookie(default=None),
+  db: Session = Depends(get_db),
 ):
   """Soft restart: SIGTERM the uvicorn process so the container
   supervisor (docker restart policy: unless-stopped on prod, "no"
@@ -156,7 +229,7 @@ def recover_restart(
   kills the whole container including any deferred state. Killing
   uvicorn directly lets docker restart it cleanly. Verified on
   mobius-test."""
-  _require_session(moebius_recover)
+  _require_session(moebius_recover, db)
   # Schedule the SIGTERM after the HTTP response has been flushed
   # so the client actually sees the {"status": "restarting"} body.
   # Without the threading.Timer, uvicorn dies before flushing.

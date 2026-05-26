@@ -63,12 +63,20 @@ def _assert_provider_defaults() -> None:
 @asynccontextmanager
 async def lifespan(app):
   import asyncio as _asyncio
+  import logging as _logging
+  _log = _logging.getLogger(__name__)
   _assert_provider_defaults()
   _init_db()
   init_vapid()
   # Seed a Hello World app on first boot (no-op if apps already exist).
-  from scripts.seed_hello import seed as seed_hello
-  await seed_hello()
+  # Wrapped: scripts/seed_hello.py is on the agent's write surface, and
+  # a SyntaxError or runtime failure here would kill lifespan startup
+  # and take /recover/chat down with it.
+  try:
+    from scripts.seed_hello import seed as seed_hello
+    await seed_hello()
+  except Exception as exc:
+    _log.error("seed_hello failed: %s", exc, exc_info=True)
   # Backfill source_dir for legacy app rows. The file watcher resolves
   # /data/apps/<slug>/index.jsx → app.id via exact source_dir match;
   # rows with NULL (older builds, or apps imported without going
@@ -91,16 +99,31 @@ async def lifespan(app):
   # Start the JSX file watcher so direct edits to /data/apps/*/index.jsx
   # auto-recompile and refresh the served bundle — agents don't need to
   # re-run register_app.py just to push a code change.
-  from app.app_watcher import start_watcher
-  _observer, _handler = start_watcher(_asyncio.get_running_loop())
+  # Wrapped: app/app_watcher.py is on the agent's write surface; a
+  # failure must not crash lifespan.
+  _observer = None
+  _handler = None
+  try:
+    from app.app_watcher import start_watcher
+    _observer, _handler = start_watcher(_asyncio.get_running_loop())
+  except Exception as exc:
+    _log.error("start_watcher failed: %s", exc, exc_info=True)
   try:
     yield
   finally:
     # Drain pending debounce timers first so they can't post coroutines
     # to a loop that's about to close, then stop+join the observer.
-    _handler.close()
-    _observer.stop()
-    _observer.join(timeout=2)
+    if _handler is not None:
+      try:
+        _handler.close()
+      except Exception as exc:
+        _log.error("watcher handler.close failed: %s", exc, exc_info=True)
+    if _observer is not None:
+      try:
+        _observer.stop()
+        _observer.join(timeout=2)
+      except Exception as exc:
+        _log.error("watcher observer.stop failed: %s", exc, exc_info=True)
 
 settings = get_settings()
 

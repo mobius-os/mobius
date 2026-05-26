@@ -28,6 +28,7 @@ import asyncio
 import json
 import os
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import AsyncIterator
@@ -37,19 +38,44 @@ RECOVERY_LOG_PATH = Path("/data/recovery_chat.jsonl")
 CLAUDE_CONFIG_PATH = Path("/data/cli-auth/claude")
 SUBPROCESS_CWD = "/data"
 
-# Module-level lock serializes stream_turn so a double-click on Send
-# (or a network-retry-driven reconnect) doesn't spawn two CLI
-# processes that race to write the assistant entry. The lock is
-# instantiated lazily because asyncio.Lock requires a running event
-# loop at construction time on older Python versions.
-_STREAM_LOCK: asyncio.Lock | None = None
+# `_current_run` tracks the in-flight stream_turn so a second
+# concurrent request can detect the conflict and return a
+# 409-equivalent SSE error rather than queueing. It carries the live
+# asyncio subprocess Process so the generator's finally can
+# deterministically kill it. The claim is protected by `_run_lock`,
+# an asyncio mutex held only around claim/release — never across the
+# subprocess lifetime. This replaces the old `_STREAM_LOCK` that
+# wrapped the entire SSE generator: when a client disconnected,
+# FastAPI stopped consuming and the `async with` exit only ran when
+# the generator was GC'd or aclose()'d, leaving the lock orphaned
+# and blocking every subsequent /stream request.
+_current_run: dict | None = None
+_run_lock: asyncio.Lock | None = None
 
 
-def _get_stream_lock() -> asyncio.Lock:
-  global _STREAM_LOCK
-  if _STREAM_LOCK is None:
-    _STREAM_LOCK = asyncio.Lock()
-  return _STREAM_LOCK
+def _get_run_lock() -> asyncio.Lock:
+  """Lazily create the run-claim mutex on the running event loop."""
+  global _run_lock
+  if _run_lock is None:
+    _run_lock = asyncio.Lock()
+  return _run_lock
+
+
+# Module-level threading lock wraps "append one line + derive its
+# index" in `append_log`. Without this, two concurrent /send requests
+# can both append their line, both count the file (both see N lines),
+# and both return the same turn_id — re-opening the multi-tab pairing
+# race the turn_id was meant to close. threading.Lock (not
+# asyncio.Lock) because the file I/O is synchronous and must work
+# across any mix of sync + async callers.
+_append_lock = threading.Lock()
+
+
+# Grace period (seconds) between SIGTERM and SIGKILL during cleanup.
+# Short enough that an abandoned stream releases the run-claim quickly
+# (next /stream POST is unblocked), long enough for a polite shutdown
+# to flush a final stdout line.
+_KILL_GRACE_SECONDS = 0.5
 
 
 # Hard cap on the rendered + in-memory recovery log so a long repair
@@ -141,18 +167,32 @@ def append_log(role: str, content: str) -> int:
   by role when reading. Using line count as id is durable: log
   truncation invalidates ids, which is the correct behaviour
   (after reset, prior turn_ids are stale and the next /stream
-  will simply 400)."""
+  will simply 400).
+
+  Append + index-derivation runs under `_append_lock` so two
+  concurrent callers cannot both observe the same final line
+  count. Without the lock, both would return the same turn_id,
+  both /stream POSTs would resolve to the same log row, and the
+  multi-tab pairing race the turn_id was meant to close would
+  re-open.
+  """
   RECOVERY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
   entry = {"role": role, "content": content, "ts": time.time()}
-  with RECOVERY_LOG_PATH.open("a", encoding="utf-8") as f:
-    f.write(json.dumps(entry, separators=(",", ":")) + "\n")
-  # Count lines AFTER the append so the returned index is the
-  # one this entry just landed at. Cheap because the file is tiny.
-  try:
-    with RECOVERY_LOG_PATH.open("r", encoding="utf-8") as f:
-      return sum(1 for _ in f) - 1
-  except Exception:
-    return -1
+  payload = json.dumps(entry, separators=(",", ":")) + "\n"
+  with _append_lock:
+    # One open in "a+" mode: append the line and count from the same
+    # handle. Seeking to 0 and counting under the lock guarantees no
+    # other writer can interleave between the write and the count, so
+    # the returned index is always this line's zero-based position.
+    try:
+      with RECOVERY_LOG_PATH.open("a+", encoding="utf-8") as f:
+        f.write(payload)
+        f.flush()
+        f.seek(0)
+        total = sum(1 for _ in f)
+      return total - 1
+    except Exception:
+      return -1
 
 
 def user_message_by_id(turn_id: int) -> str | None:
@@ -231,23 +271,107 @@ def latest_user_message() -> str | None:
   return last
 
 
+async def _terminate_proc(proc: asyncio.subprocess.Process) -> None:
+  """Polite SIGTERM, brief grace, SIGKILL fallback. Always awaits
+  the child so the kernel reaps it and proc.returncode is set.
+
+  Called from stream_turn's finally so cleanup is deterministic
+  regardless of how the generator exited: normal completion, client
+  disconnect (GeneratorExit at the current await point), or an
+  unexpected exception in the streaming loop.
+  """
+  if proc.returncode is not None:
+    return
+  try:
+    proc.terminate()
+  except ProcessLookupError:
+    return
+  try:
+    await asyncio.wait_for(proc.wait(), timeout=_KILL_GRACE_SECONDS)
+    return
+  except asyncio.TimeoutError:
+    pass
+  try:
+    proc.kill()
+  except ProcessLookupError:
+    return
+  try:
+    await proc.wait()
+  except Exception:
+    pass
+
+
 async def stream_turn(user_message: str) -> AsyncIterator[str]:
   """Spawns the Claude CLI for one turn and yields SSE events.
 
-  Serialized via _STREAM_LOCK so a double-click on Send (or a
-  network reconnect that fires a duplicate POST) cannot spawn two
-  concurrent CLI processes that interleave output and race to
-  append assistant entries to the log.
+  Concurrency contract: at most one subprocess runs at a time. A
+  second /stream request that arrives while one is in flight gets a
+  409-equivalent SSE error event and exits. We deliberately do NOT
+  queue across an SSE boundary — that produces a UI where the client
+  thinks its turn is live but nothing is streaming.
+
+  The run-claim is held under `_run_lock` only at the boundary (claim
+  on entry, release on exit). The subprocess itself runs outside the
+  asyncio lock; its lifetime is bound to the generator via the
+  try/finally, which fires on normal completion AND on GeneratorExit
+  (FastAPI stops consuming when the client disconnects). The old
+  design wrapped the whole generator in `async with _STREAM_LOCK`,
+  which orphaned the lock on client disconnect until generator GC
+  ran the `__aexit__` — blocking every subsequent /stream call in
+  the meantime.
   """
-  async with _get_stream_lock():
-    async for chunk in _stream_turn_locked(user_message):
+  global _current_run
+
+  # Claim the run slot atomically. If it's already taken, return a
+  # structured SSE error rather than queueing.
+  async with _get_run_lock():
+    if _current_run is not None:
+      yield _sse({
+        "type": "error",
+        "message": "Another recovery turn is in progress.",
+      })
+      yield _sse({"type": "done"})
+      return
+    # Reserve the slot now (proc is filled in after spawn) so a
+    # concurrent caller can see the claim without waiting on
+    # subprocess startup.
+    _current_run = {"proc": None}
+    claim = _current_run
+
+  try:
+    async for chunk in _stream_turn_impl(user_message, claim):
       yield chunk
+  finally:
+    # Always release the run slot and tear down the subprocess. This
+    # finally fires on GeneratorExit too (FastAPI stops pulling on
+    # client disconnect), so the next /stream request is never
+    # blocked by a phantom previous run.
+    proc = claim.get("proc")
+    if proc is not None:
+      await _terminate_proc(proc)
+    async with _get_run_lock():
+      # Only clear if we still own the slot (defensive — a misuse
+      # that reassigned _current_run from outside would surface as a
+      # stale claim rather than silently corrupting state).
+      if _current_run is claim:
+        _current_run = None
 
 
-async def _stream_turn_locked(user_message: str) -> AsyncIterator[str]:
+async def _stream_turn_impl(
+  user_message: str, claim: dict
+) -> AsyncIterator[str]:
+  """Spawns the CLI, writes the message to stdin, streams stdout.
+
+  Message goes via stdin (not argv) so long pastes — crash logs,
+  full diffs, > 200KB dumps — don't hit Linux's ~128KB argv cap.
+  `claude --print --input-format text` with no positional `prompt`
+  reads from stdin (input-format text is the CLI default).
+  """
   claude_bin = shutil.which("claude")
   if not claude_bin:
-    yield _sse({"type": "error", "message": "claude CLI not found in PATH"})
+    yield _sse(
+      {"type": "error", "message": "claude CLI not found in PATH"}
+    )
     yield _sse({"type": "done"})
     return
 
@@ -255,15 +379,16 @@ async def _stream_turn_locked(user_message: str) -> AsyncIterator[str]:
   if CLAUDE_CONFIG_PATH.is_dir():
     env["CLAUDE_CONFIG_DIR"] = str(CLAUDE_CONFIG_PATH)
 
+  # No positional user_message — it goes via stdin below.
   cmd = [
     claude_bin,
     "--print",
+    "--input-format", "text",
     "--output-format", "stream-json",
     "--verbose",
     "--include-partial-messages",
     "--dangerously-skip-permissions",
     "--system-prompt", _system_prompt(),
-    "--", user_message,
   ]
 
   # cwd=/data so the agent's relative-path commands in the system
@@ -272,11 +397,32 @@ async def _stream_turn_locked(user_message: str) -> AsyncIterator[str]:
   # `Read /data/recovery_chat.jsonl` references.
   proc = await asyncio.create_subprocess_exec(
     *cmd,
+    stdin=asyncio.subprocess.PIPE,
     stdout=asyncio.subprocess.PIPE,
     stderr=asyncio.subprocess.PIPE,
     env=env,
     cwd=SUBPROCESS_CWD,
   )
+  # Publish the live process onto the claim immediately so a
+  # GeneratorExit between spawn and stdin-write still tears down.
+  claim["proc"] = proc
+
+  # Write the message to stdin and close so the CLI sees EOF and
+  # starts processing. drain() handles backpressure for large
+  # payloads automatically.
+  assert proc.stdin is not None
+  try:
+    proc.stdin.write(user_message.encode("utf-8"))
+    await proc.stdin.drain()
+  except (BrokenPipeError, ConnectionResetError):
+    # Subprocess died before reading stdin — fall through to read
+    # whatever stderr has and surface as an error event.
+    pass
+  finally:
+    try:
+      proc.stdin.close()
+    except Exception:
+      pass
 
   full_assistant_text = []
   try:
@@ -324,10 +470,6 @@ async def _stream_turn_locked(user_message: str) -> AsyncIterator[str]:
       "type": "error",
       "message": f"Recovery runner crashed: {exc!r}",
     })
-  finally:
-    if proc.returncode is None:
-      proc.kill()
-      await proc.wait()
 
   try:
     assistant_text = "".join(full_assistant_text)

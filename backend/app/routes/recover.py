@@ -257,6 +257,14 @@ def _action_factory_reset(data_dir: Path, db: Session) -> None:
 
 _RECOVER_PENDING_FILE = Path("/data/.recover-pending")
 
+# Modes the entrypoint's recovery_restore.sh knows how to handle.
+# Keep in sync with the case-statement in scripts/recovery_restore.sh
+# (`backend`, `scripts`, `shell-dist`, `shell-src`). A typo'd mode
+# would silently boot-loop into restore_status="unknown-mode", so
+# the validation here is the guardrail that turns a silent
+# misconfiguration into a loud caller-visible error.
+_VALID_MODES = frozenset({"backend", "scripts", "shell-dist", "shell-src"})
+
 
 def _defer_restore(mode: str) -> None:
   """Writes a flag file then SIGTERMs uvicorn. The container restart
@@ -268,7 +276,17 @@ def _defer_restore(mode: str) -> None:
   privilege), but `cp -a` from /app/<X>-baked/ to /app/<X>/ must
   preserve root ownership on protected files for the frozen-island
   invariant to hold. Mobius cannot `chown root:root`. Entrypoint
-  CAN — it runs as root before the `su -s mobius` exec at the end."""
+  CAN — it runs as root before the `su -s mobius` exec at the end.
+
+  Raises ValueError on an unknown mode — entrypoint.sh would silently
+  fall through to restore_status="unknown-mode" and the container
+  would reboot into the same broken state. Better to reject the
+  typo at the call site than to ship a boot loop.
+  """
+  if mode not in _VALID_MODES:
+    raise ValueError(
+      f"invalid restore mode {mode!r}; expected one of {sorted(_VALID_MODES)}"
+    )
   _RECOVER_PENDING_FILE.write_text(mode)
   import threading
   threading.Timer(0.2, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()

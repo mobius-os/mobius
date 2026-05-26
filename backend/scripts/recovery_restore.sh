@@ -123,7 +123,16 @@ if [ -f /app/protected-files.txt ]; then
       "$DST"/*|"$DST")
         if [ -f "$target" ]; then
           chown root:root "$target" 2>/dev/null || true
-          chmod 444 "$target" 2>/dev/null || true
+          # .sh files need 555 (executable) so the next entrypoint
+          # boot can run them. Other files (Python, configs) → 444.
+          # Without the case-split, a direct `docker exec
+          # recovery_restore.sh scripts` strips +x from entrypoint.sh
+          # and recovery_restore.sh themselves, and the next
+          # container restart fails with `permission denied`.
+          case "$target" in
+            *.sh) chmod 555 "$target" 2>/dev/null || true ;;
+            *)    chmod 444 "$target" 2>/dev/null || true ;;
+          esac
         fi
         ;;
     esac
