@@ -79,6 +79,10 @@ def run_migrations(eng) -> None:
     with eng.connect() as conn:
       conn.execute(text("ALTER TABLE apps ADD COLUMN source_dir VARCHAR(512) NULL"))
       conn.commit()
+  if "pinned_at" not in apps_cols:
+    with eng.connect() as conn:
+      conn.execute(text("ALTER TABLE apps ADD COLUMN pinned_at DATETIME NULL"))
+      conn.commit()
   if "chats" in tables:
     chats_cols = {c["name"] for c in inspector.get_columns("chats")}
     _add = []
@@ -106,6 +110,9 @@ def run_migrations(eng) -> None:
       _add.append(
         "ALTER TABLE chats ADD COLUMN agent_settings_json JSON"
       )
+    if "pinned_at" not in chats_cols:
+      # NOT NULL = pinned. Drawer sort key (see routes/chats.py).
+      _add.append("ALTER TABLE chats ADD COLUMN pinned_at DATETIME NULL")
     if _add:
       with eng.connect() as conn:
         for stmt in _add:

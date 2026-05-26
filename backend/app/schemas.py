@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.providers import PROVIDER_NAMES
 
@@ -38,13 +38,17 @@ class AppCreate(BaseModel):
 
 
 class AppUpdate(BaseModel):
-  name: str | None = None
+  # Drawer rename uses `name`; 500-char cap matches ChatPatch.title
+  # so a runaway agent can't bloat the apps list response.
+  name: str | None = Field(default=None, max_length=500)
   description: str | None = None
   jsx_source: str | None = None
   # None means "omit from update" (the field is not changed).
   # To explicitly clear chat_id, pass an empty string ("").
   chat_id: str | None = None
   source_dir: str | None = None
+  # Drawer pin toggle. True sets pinned_at = now, False clears it.
+  pinned: bool | None = None
 
 
 class AppOut(BaseModel):
@@ -54,6 +58,7 @@ class AppOut(BaseModel):
   compiled_path: str
   chat_id: str | None = None
   source_dir: str | None = None
+  pinned_at: datetime | None = None
   created_at: datetime
   updated_at: datetime
 
@@ -88,7 +93,27 @@ class AgentSettingsOverride(BaseModel):
   model_config = ConfigDict(extra="allow")
 
   model: str | None = None
-  effort: Literal["low", "medium", "high", "xhigh"] | None = None
+  # Union of both SDKs' effort enums:
+  #   Codex `ReasoningEffort` (openai-codex 0.131+): none, minimal,
+  #     low, medium, high, xhigh.
+  #   Claude `EffortLevel` (claude-agent-sdk): low, medium, high,
+  #     xhigh, max (xhigh + max are Opus-tier only).
+  # The picker enforces per-provider scoping. Runners forward the
+  # value as-is to the SDK; a model/effort mismatch (e.g. `max` on a
+  # non-Opus Claude) surfaces as a 400 at turn time, not at PATCH.
+  # Acceptable per the platform's "reversibility over prevention"
+  # philosophy.
+  effort: Literal[
+    "none", "minimal", "low", "medium", "high", "xhigh", "max"
+  ] | None = None
+  # Per-provider memory of the last-picked effort. The enums are
+  # NOT comparable across providers — Codex `medium` is roughly
+  # Claude `low`, not Claude `medium` — so the picker has to
+  # remember each provider's last value separately and swap
+  # `effort` to that value when the user switches providers.
+  # Frontend writes the full dict each PATCH; backend stores it
+  # verbatim under this key.
+  effort_by_provider: dict[str, str] | None = None
 
 
 class ChatPatch(BaseModel):
@@ -97,6 +122,13 @@ class ChatPatch(BaseModel):
   agent_settings_json: AgentSettingsOverride | None = None
   clear_agent_settings: bool = False
   provider: str | None = None
+  # Drawer rename uses this. Empty string is rejected so a misfired
+  # blur on an empty input can't blank the title in the sidebar.
+  # 500-char cap defends against runaway-agent megabyte payloads
+  # bloating the chats list response on every refresh.
+  title: str | None = Field(default=None, max_length=500)
+  # Drawer pin toggle. True sets pinned_at = now, False clears it.
+  pinned: bool | None = None
 
   @field_validator("provider")
   @classmethod

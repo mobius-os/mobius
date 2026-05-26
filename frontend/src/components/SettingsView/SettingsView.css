@@ -1,7 +1,7 @@
 .settings {
   height: 100%;
   overflow-y: auto;
-  padding: 32px 24px;
+  padding: 32px 24px 24px;
 }
 
 .settings__content {
@@ -12,7 +12,7 @@
 .settings__title {
   font-size: 22px;
   font-weight: 700;
-  margin-bottom: 28px;
+  margin-bottom: 32px;
 }
 
 .settings__section {

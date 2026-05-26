@@ -214,10 +214,6 @@ async def run_claude_sdk_turn(
   """
   current_session_id = session_id
   cost_usd: float | None = None
-  # Track tool_use_ids of AskUserQuestion calls so we can suppress
-  # their tool_output events on the SSE stream — the question card UI
-  # already shows the answers, so a separate tool_output is redundant.
-  ask_question_tool_use_ids: set[str] = set()
 
   # Canonical AskUserQuestion handling via can_use_tool, per
   # https://code.claude.com/docs/en/agent-sdk/user-input
@@ -395,9 +391,6 @@ async def run_claude_sdk_turn(
           for block in sdk_msg.content:
             if not isinstance(block, ToolUseBlock):
               continue
-            if block.name == "AskUserQuestion":
-              ask_question_tool_use_ids.add(block.id)
-              continue
             bc.publish({
               "type": "tool_start",
               "tool": block.name,
@@ -416,9 +409,6 @@ async def run_claude_sdk_turn(
         if isinstance(sdk_msg, UserMessage):
           for block in sdk_msg.content if isinstance(sdk_msg.content, list) else []:
             if not isinstance(block, ToolResultBlock):
-              continue
-            if block.tool_use_id in ask_question_tool_use_ids:
-              ask_question_tool_use_ids.discard(block.tool_use_id)
               continue
             bc.publish({
               "type": "tool_output",
@@ -476,6 +466,5 @@ async def run_claude_sdk_turn(
       _model,
       chat_id,
     )
-    ask_question_tool_use_ids.clear()
     return await _run_once(None)
   return result

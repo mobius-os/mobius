@@ -119,10 +119,19 @@ def list_chats(
   ).delete(synchronize_session=False)
   db.commit()
 
+  # Pinned chats sort first (newest pin at top of the pinned group),
+  # then unpinned by recency. `pinned_at IS NOT NULL` is the primary
+  # key on SQLite's order_by — a `desc()` on a nullable column would
+  # put NULL last under our SQLite collation, but making the boolean
+  # explicit is clearer and portable.
   chats = (
     db.query(models.Chat)
     .filter(models.Chat.deleted_at.is_(None))
-    .order_by(models.Chat.updated_at.desc())
+    .order_by(
+      models.Chat.pinned_at.is_(None),
+      models.Chat.pinned_at.desc(),
+      models.Chat.updated_at.desc(),
+    )
     .all()
   )
   return [
@@ -130,6 +139,7 @@ def list_chats(
       "id": c.id,
       "title": c.title,
       "updated_at": c.updated_at.isoformat(),
+      "pinned_at": c.pinned_at.isoformat() if c.pinned_at else None,
       "has_messages": bool(c.messages and len(c.messages) > 0),
     }
     for c in chats
@@ -220,6 +230,20 @@ async def patch_chat(
 
   async with get_queue_lock(chat_id):
     chat = get_active_chat_or_404(db, chat_id)
+
+    # Drawer rename. Trim + reject empty so a stray blur on an empty
+    # input can't silently blank a chat's title.
+    if body.title is not None:
+      new_title = body.title.strip()
+      if new_title:
+        chat.title = new_title
+
+    # Drawer pin toggle. We stamp the time on pin so the pinned group
+    # sorts newest-pinned-first within itself.
+    if body.pinned is not None:
+      chat.pinned_at = (
+        datetime.now(UTC).replace(tzinfo=None) if body.pinned else None
+      )
 
     if body.clear_agent_settings:
       chat.agent_settings_json = None

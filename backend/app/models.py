@@ -56,6 +56,11 @@ class Chat(Base):
   # file-loaded defaults; written by `PATCH /api/chats/{id}` from the
   # `/` slash picker (see `frontend/.../SlashPicker.jsx`).
   agent_settings_json = Column(JSON, nullable=True, default=None)
+  # Drawer pinning: NOT NULL = pinned, NULL = unpinned. Sort key for
+  # the chats list — pinned rows render first, ordered by this
+  # column DESC (newest pin at top of pinned group). PATCH
+  # /api/chats/{id} accepts `pinned: bool` to toggle.
+  pinned_at = Column(DateTime, nullable=True, default=None)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
@@ -82,6 +87,8 @@ class App(Base):
   # before this column was added.  Used to route app errors back to the
   # correct chat so the agent can fix them.
   chat_id = Column(String(64), nullable=True, default=None)
+  # See `Chat.pinned_at` — same contract.
+  pinned_at = Column(DateTime, nullable=True, default=None)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)

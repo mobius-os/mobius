@@ -20,7 +20,7 @@
 
 .shell__bar {
   flex-shrink: 0;
-  height: calc(52px + env(safe-area-inset-top));
+  height: calc(58px + env(safe-area-inset-top));
   padding-top: env(safe-area-inset-top);
   display: flex;
   align-items: center;
@@ -45,13 +45,13 @@
 }
 
 .shell__logo {
-  width: 30px;
-  height: 30px;
-  border-radius: 5px;
+  width: 34px;
+  height: 34px;
+  border-radius: 6px;
 }
 
 .shell__wordmark {
-  font-size: 18px;
+  font-size: 20px;
   font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--text); /* CONTRACT: high-contrast text on the opaque --bg of .shell__bar */

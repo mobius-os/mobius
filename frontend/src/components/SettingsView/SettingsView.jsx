@@ -127,10 +127,6 @@ export default function SettingsView({ onThemeChange }) {
 
         <section className="settings__section">
           <h2 className="settings__section-title">AI providers</h2>
-          <p className="settings__subtext" style={{ marginBottom: 12 }}>
-            Connect the providers you want to use. Pick the agent in
-            each chat using the "/" button.
-          </p>
 
           {providerLoaded && (
             <div className="settings__providers">

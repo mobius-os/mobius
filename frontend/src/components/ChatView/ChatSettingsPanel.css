@@ -1,0 +1,220 @@
+/* Per-chat model + effort picker rendered inside the composer's `+`
+   popover. Typography (sizes + weights) mirrors the OpenAI Apps SDK
+   tokens (variables-semantic.css from github.com/openai/apps-sdk-ui):
+   row title = 14px/400 (--font-text-sm), subtitle = 12px/400
+   (--font-text-xs), effort label badge = 12px/600 (semibold) —
+   buttons are 14px/500 elsewhere but the effort label here is a
+   badge, not a button label. Letter-spacing is intentionally 0. */
+
+.csp {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.csp__label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 4px 10px 6px;
+}
+
+.csp-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  background: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+  color: var(--text);
+  text-align: left;
+  transition: background 0.12s ease;
+}
+
+.csp-row:hover { background: var(--surface); }
+
+.csp-row--selected {
+  background: var(--accent-dim);
+}
+.csp-row--selected:hover { background: var(--accent-dim); }
+
+.csp-row--locked {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.csp-row--locked:hover { background: none; }
+
+.csp-row__icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  display: grid;
+  place-items: center;
+  color: var(--text);
+  flex-shrink: 0;
+}
+body.theme-light .csp-row__icon { border-color: rgba(15, 18, 25, 0.10); }
+
+.csp-row--selected .csp-row__icon {
+  background: var(--surface2);
+}
+
+.csp-row__main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.csp-row__title {
+  font-size: 14px;     /* --font-text-sm */
+  font-weight: 500;    /* OpenAI Apps SDK menu rows are 400; bump to 500 to read as the primary line above the 12px subtitle */
+  line-height: 1.4;
+  color: var(--text);
+}
+
+.csp-row__sub {
+  font-size: 12px;     /* --font-text-xs */
+  font-weight: 400;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.csp-row__dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border);
+  flex-shrink: 0;
+  position: relative;
+  transition: border-color 0.12s ease;
+}
+
+.csp-row--selected .csp-row__dot {
+  border-color: var(--accent);
+}
+
+.csp-row--selected .csp-row__dot::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  transform: translate(-50%, -50%);
+}
+
+/* ── Effort stepper-slider ───────────────────────────────
+   A horizontal track with N stops + a label on the side
+   showing the long-form name of the selected stop. Single
+   line regardless of N (Codex=6, Claude=5) so the popover
+   width is independent of which provider is selected. The
+   layout is: [track grows to fill] [12px gap] [label].
+   Indent matches the row title (icon 30 + gap 12 + row pad 10 = 52). */
+.csp-effort {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 4px 12px 8px 52px;
+}
+
+.csp-effort__track {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: relative;
+}
+
+/* The track's connecting line — drawn behind the stops via ::before.
+   Inset so the line starts under the first stop and ends under the
+   last; pseudo-element doesn't take pointer events so stops stay
+   clickable. */
+.csp-effort__track::before {
+  content: '';
+  position: absolute;
+  left: 7px;
+  right: 7px;
+  top: 50%;
+  height: 2px;
+  background: var(--border);
+  border-radius: 2px;
+  transform: translateY(-50%);
+}
+
+.csp-effort__stop {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background 0.15s, border-color 0.15s, transform 0.15s;
+}
+
+.csp-effort__stop:hover {
+  border-color: var(--accent);
+}
+
+/* Stops at or below the selected one read as "filled" — fill in
+   accent, no inner cutout. Use --filled (≤ selected) rather than
+   only --on (=== selected) so the user gets the slider feel. */
+.csp-effort__stop--filled {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* The selected stop sits proud of its neighbors — larger, with a
+   white-ish ring around the accent fill to read as the slider
+   thumb. */
+.csp-effort__stop--on {
+  background: var(--accent);
+  border-color: var(--accent);
+  transform: scale(1.35);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.csp-effort__label {
+  font-size: 12px;      /* --font-text-xs */
+  font-weight: 600;     /* OpenAI badge weight */
+  color: var(--text);
+  white-space: nowrap;
+  min-width: 70px;
+  text-align: right;
+}
+
+.csp__foot {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px 0;
+}
+
+.csp__note {
+  margin: 0;
+  font-size: 12px;     /* --font-text-xs */
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.csp__error {
+  margin: 0;
+  font-size: 12px;     /* --font-text-xs */
+  color: var(--danger);
+}

@@ -10,7 +10,7 @@ import useFileUpload from './useFileUpload.js'
 import usePendingQueue from './hooks/usePendingQueue.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
 import ChatInputBar from './ChatInputBar.jsx'
-import SlashPicker from '../SlashPicker/SlashPicker.jsx'
+import ComposerPopover from './ComposerPopover.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
 import ToolBlock from './ToolBlock.jsx'
 import QuestionCard from './QuestionCard.jsx'
@@ -177,6 +177,19 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   const inputRef = useRef(null)
   const spacerRef = useRef(null)
   const lastUserMsgRef = useRef(null)
+  // ChatInputBar owns the hidden <input type="file"> but no longer
+  // ships a paperclip button. ComposerPopover renders the "+" trigger
+  // that opens the Attach-files row; on click it calls this ref's
+  // current() to fire the bar's hidden picker. ChatInputBar's layout
+  // effect installs the function.
+  const attachTriggerRef = useRef(null)
+  // Refs for the absolutely-positioned foot. A ResizeObserver
+  // measures `.chat__foot` and publishes its height as `--composer-h`
+  // on `.chat`, which `.chat__list` reads for its bottom padding so
+  // chips/queue/multi-line growth keep the last message visible
+  // above the pill.
+  const chatRef = useRef(null)
+  const footRef = useRef(null)
 
   // Lifecycle guards. `hadMessagesRef` reflects the cached length so
   // doSend's "first message" branch doesn't fire spuriously.
@@ -484,14 +497,42 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     } catch { /* quota exceeded or private browsing */ }
   }, [input, chatId])
 
-  // Auto-size textarea when a draft is restored.
+  // Auto-size textarea when a draft is restored. Cap matches the
+  // 280px max-height enforced by `handleTextareaChange` in
+  // ChatInputBar; without keeping these in sync a tall draft would
+  // restore visually truncated until the user types one more
+  // character to trigger the live-grow path. Also mirror the
+  // .chat__pill--tall class toggle so a restored multi-line draft
+  // anchors the send/mic buttons to the bottom of the pill — the
+  // toggle otherwise only fires on input keystrokes.
   useEffect(() => {
     const el = inputRef.current
     if (el && input) {
       el.style.height = 'auto'
-      el.style.height = Math.min(el.scrollHeight, 160) + 'px'
+      const h = Math.min(el.scrollHeight, 280)
+      el.style.height = h + 'px'
+      const pill = el.closest('.chat__pill')
+      if (pill) pill.classList.toggle('chat__pill--tall', h > 45)
     }
   }, [chatId])
+
+  // Publish `.chat__foot`'s rendered height as `--composer-h` on
+  // `.chat`. `.chat__list` reads this var for its bottom padding so
+  // the last message always clears the absolutely-positioned pill
+  // — chips, queue tray, multi-line growth all push the clearance
+  // in lockstep.
+  useEffect(() => {
+    const chatEl = chatRef.current
+    const footEl = footRef.current
+    if (!chatEl || !footEl || typeof ResizeObserver === 'undefined') return
+    const apply = () => {
+      chatEl.style.setProperty('--composer-h', `${footEl.offsetHeight}px`)
+    }
+    apply()
+    const ro = new ResizeObserver(apply)
+    ro.observe(footEl)
+    return () => ro.disconnect()
+  }, [])
 
   // Fetch messages and connect to an in-progress stream if the agent is running.
   useEffect(() => {
@@ -1072,7 +1113,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   })()
 
   return (
-    <div className={`chat${showEmpty || showLoadError ? ' chat--empty' : ''}`}>
+    <div
+      ref={chatRef}
+      className={`chat${showEmpty || showLoadError ? ' chat--empty' : ''}`}
+    >
       {showEmpty && (
         <div className="chat__empty-wrap">
           <div className="chat__empty">
@@ -1261,7 +1305,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
       <ConnectionStatus error={connectionError} onRetry={retry} />
 
-      <div className="chat__foot">
+      <div ref={footRef} className="chat__foot">
         <QueuedMessages items={pendingQueue.pendingMessages} onCancel={handleCancelPending} />
         <ChatInputBar
           input={input}
@@ -1276,13 +1320,24 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           pendingFiles={pendingFiles}
           onAddFiles={addFiles}
           onRemoveFile={removeFile}
-          leftButtons={chatInfo ? (
-            <SlashPicker
+          attachTriggerRef={attachTriggerRef}
+          leftButtons={
+            <ComposerPopover
+              chatInfo={chatInfo}
               chatId={chatId}
-              provider={chatInfo.provider}
-              effective={chatInfo.effective}
-              hasAssistantTurns={chatInfo.has_assistant_turns}
-              onChange={({ agent_settings_json, provider, effective }) => {
+              onAttachClick={() => attachTriggerRef.current?.()}
+              /* Derive live — `chatInfo.has_assistant_turns` is set
+                 once on mount via the API and never refreshed when
+                 the running turn finishes. Without this OR, sending
+                 a message and getting a reply in the same session
+                 leaves the cross-provider lock disengaged: the user
+                 can flip Claude ↔ Codex mid-chat and lose the
+                 session, which neither SDK can recover from. */
+              hasAssistantTurns={
+                (chatInfo?.has_assistant_turns ?? false)
+                || messages.some(m => m.role === 'assistant')
+              }
+              onChangeChatInfo={({ agent_settings_json, provider, effective }) => {
                 // Merge into chatInfo so the next render reflects the
                 // PATCH without a roundtrip. effective is authoritative
                 // (backend re-merged on top of the current global file).
@@ -1297,7 +1352,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                 }) : prev)
               }}
             />
-          ) : null}
+          }
         />
       </div>
     </div>

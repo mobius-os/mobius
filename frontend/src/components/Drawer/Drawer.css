@@ -21,11 +21,11 @@
 
 .drawer {
   position: fixed;
-  top: calc(52px + env(safe-area-inset-top));
+  top: calc(58px + env(safe-area-inset-top));
   left: 0;
   bottom: 0;
   z-index: 95;
-  width: 280px;
+  width: min(360px, 90vw);
   background: var(--bg);
   border-right: 1px solid var(--border-light);
   display: flex;
@@ -39,10 +39,18 @@
   box-shadow: 8px 0 48px rgba(0, 0, 0, 0.5);
 }
 
+/* Disable the transition while the user is mid-drag so the panel
+   follows the finger 1:1; restored on touchend regardless of close. */
+.drawer--dragging { transition: none; }
+
 .drawer__body {
   flex: 1;
   overflow: hidden;
-  padding: 10px 8px 24px;
+  /* Bottom padding kept lean so the Settings row sits close to the
+     drawer's bottom edge — earlier 20px floor left an awkward gap
+     on devices with no home-bar safe-area. The safe-area fallback
+     still pushes things up on devices that have one. */
+  padding: 10px 8px max(8px, env(safe-area-inset-bottom));
   display: flex;
   flex-direction: column;
 }
@@ -74,13 +82,29 @@
 
 
 .drawer__label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--muted);
-  padding: 12px 10px 6px;
+  padding: 16px 12px 6px;
+  margin: 0;
 }
+.drawer__label svg { flex-shrink: 0; opacity: 1; }
+.drawer__label span { line-height: 1; }
+
+/* Section-header accents — both pulled from the platform accent.
+ * The icon distinguishes the sections; the color stays unified to
+ * avoid fighting the rest of the brand palette. */
+.drawer__label--chats,
+.drawer__label--apps { color: var(--accent); }
+
+/* Light theme — darker shade for WCAG AA contrast. */
+body.theme-light .drawer__label--chats,
+body.theme-light .drawer__label--apps { color: #6b3fcf; }
 
 .drawer__scroll {
   flex: 1;
@@ -95,12 +119,12 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 10px;
+  padding: 9px 12px;
   background: none;
   border: none;
   border-radius: 8px;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 15px;
   font-family: var(--font);
   font-weight: 400;
   text-align: left;
@@ -119,41 +143,210 @@
   background: var(--accent-dim);
 }
 
+.drawer__item-icon {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  color: inherit;
+  opacity: 0.85;
+}
+
 .drawer__item-text {
   flex: 1;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-/* ── Delete ────────────────────────────────────────── */
-
-.drawer__delete {
+/* Trailing pin badge on pinned rows — small, muted, sits flush to
+   the row's right edge. Doesn't compete with the chat title; just
+   signals the row is in the pinned group. */
+.drawer__item-pin {
   flex-shrink: 0;
-  width: 20px;
-  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  color: var(--muted);
+  opacity: 0.85;
+}
+.drawer__item--active .drawer__item-pin { color: inherit; opacity: 1; }
+
+/* ── Row + three-dots menu ─────────────────────────── */
+
+/* The row stacks two siblings (button + menu trigger) horizontally so
+ * the trigger isn't nested inside the row button (nested <button>
+ * elements are invalid HTML and Chrome silently hoists the inner one
+ * out, breaking layout). The menu floats below the row absolutely. */
+.drawer__row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.drawer__row .drawer__item {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The ⋮ button matches the row height so its hit area aligns
+   with the row's vertical bounds. align-self: stretch makes it
+   grow to the row's full height set by the .drawer__item padding. */
+.drawer__more {
+  flex-shrink: 0;
+  align-self: stretch;
+  width: 32px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: none;
   border: none;
-  border-radius: 5px;
+  border-radius: 6px;
   color: var(--muted);
   cursor: pointer;
   opacity: 0;
-  transition: opacity 0.12s, color 0.12s;
+  transition: opacity 0.12s, color 0.12s, background 0.12s;
   -webkit-tap-highlight-color: transparent;
 }
 
-.drawer__item:hover .drawer__delete { opacity: 1; }
+.drawer__row:hover .drawer__more,
+.drawer__row:focus-within .drawer__more { opacity: 1; }
 
-/* Always show on touch devices. */
+/* Always show on touch devices — :hover never fires there, and the
+ * menu trigger has to be reachable without a hover state. */
 @media (hover: none) {
-  .drawer__delete { opacity: 0.5; }
+  .drawer__more { opacity: 0.5; }
 }
 
-.drawer__delete:hover {
+.drawer__more:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+
+/* Menu roundness — outer 12px so the floating popover reads as a
+   softer surface than the underlying 8px rows; inner items match
+   row radius (8px) so a hovered menu item visually rhymes with
+   the row's selected/active background. */
+.drawer__menu {
+  position: absolute;
+  right: 4px;
+  top: calc(100% - 4px);
+  z-index: 2;
+  min-width: 200px;
+  padding: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+/* Flip the menu upward when the parent .drawer__row has the
+   --flip-up modifier (set by DrawerRow when there's not enough
+   space below — last row in the scroll area). */
+.drawer__row--flip-up .drawer__menu {
+  top: auto;
+  bottom: calc(100% - 4px);
+}
+
+.drawer__menu-item {
+  width: 100%;
+  display: block;
+  padding: 8px 10px;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 13px;
+  font-family: var(--font);
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Icon-bearing menu items (Pin to top / Unpin) get a flex row so
+   the leading icon stays aligned with the row's text baseline. */
+.drawer__menu-item--icon {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.drawer__menu-item--icon svg { flex-shrink: 0; opacity: 0.85; }
+
+.drawer__menu-item:hover {
+  background: var(--surface);
+}
+
+.drawer__menu-item--danger {
   color: var(--danger);
+}
+
+.drawer__menu-confirm {
+  padding: 6px 10px 8px;
+}
+
+.drawer__menu-confirm-label {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.drawer__menu-confirm-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.drawer__menu-confirm-btn {
+  flex: 1;
+  padding: 6px 8px;
+  background: var(--surface);
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  font-family: var(--font);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.drawer__menu-confirm-btn--yes {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+.drawer__menu-note {
+  margin: 6px 4px 0;
+  padding: 4px 6px;
+  border-top: 1px solid var(--border-light);
+  padding-top: 8px;
+  font-size: 11px;
+  font-style: italic;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+/* ── Inline rename ─────────────────────────────────── */
+
+.drawer__item--editing {
+  padding: 4px 6px;
+}
+
+.drawer__rename-input {
+  flex: 1;
+  width: 100%;
+  padding: 5px 8px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  font-family: var(--font);
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 /* ── Empty state ──────────────────────────────────── */

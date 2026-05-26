@@ -42,9 +42,21 @@ def list_apps(
   db: Session = Depends(get_db),
   _: models.Owner = Depends(get_current_owner_or_app),
 ):
-  """Returns all registered mini-apps ordered by creation time."""
+  """Returns all registered mini-apps.
+
+  Pinned apps sort first (newest pin at top of the pinned group),
+  then unpinned apps by creation time (oldest first — the drawer's
+  apps list has historically been stable-ordered). See `Chat.pinned_at`
+  for the same contract on chats.
+  """
   return (
-    db.query(models.App).order_by(models.App.created_at).all()
+    db.query(models.App)
+    .order_by(
+      models.App.pinned_at.is_(None),
+      models.App.pinned_at.desc(),
+      models.App.created_at,
+    )
+    .all()
   )
 
 
@@ -130,6 +142,11 @@ async def update_app(
     app.chat_id = body.chat_id
   if body.source_dir is not None:
     app.source_dir = body.source_dir
+  if body.pinned is not None:
+    from datetime import UTC, datetime
+    app.pinned_at = (
+      datetime.now(UTC).replace(tzinfo=None) if body.pinned else None
+    )
   db.commit()
   db.refresh(app)
   return app

@@ -1,18 +1,118 @@
+/* ╔════════════════════════════════════════════════════════════╗
+   ║                                                            ║
+   ║   COMPOSER ARCHITECTURE — LOAD-BEARING INVARIANTS          ║
+   ║                                                            ║
+   ║   Every rule below has a real-bug history. If a future     ║
+   ║   pass quietly violates one, regression-hunt these first.  ║
+   ║                                                            ║
+   ║   1. `.chat__foot` is `position: absolute; bottom: 0`      ║
+   ║      with `pointer-events: none` — chat content scrolls    ║
+   ║      *behind* the composer. Only the pill + + + queue +    ║
+   ║      attach-tray re-enable pointer-events. The gutter is   ║
+   ║      transparent.                                          ║
+   ║                                                            ║
+   ║   2. `--composer-h` is published by a ResizeObserver in    ║
+   ║      ChatView.jsx that watches `.chat__foot`. `.chat__list`║
+   ║      reserves `padding-bottom: calc(var(--composer-h) +    ║
+   ║      16px)` so the last message clears the pill as it      ║
+   ║      grows (chips, queue tray, multi-line input).          ║
+   ║                                                            ║
+   ║   3. Empty-state wrap centers in the chat area with a      ║
+   ║      FIXED 140px bottom reservation (NOT --composer-h).    ║
+   ║      Logo moves up with the keyboard (viewport shrinks     ║
+   ║      via interactive-widget=resizes-content → chat         ║
+   ║      shrinks → centerpoint moves up) but stays put when    ║
+   ║      the composer grows multi-line. --composer-h-based     ║
+   ║      padding would drift the logo every keystroke.         ║
+   ║                                                            ║
+   ║   4. Pill + + button are a UNIFIED PAIR:                   ║
+   ║        - Same background: color-mix(srgb, --surface 60%,   ║
+   ║          transparent).                                     ║
+   ║        - Same backdrop-filter: blur(16px) saturate(140%).  ║
+   ║        - Pill min-height 48px === + button 48×48.          ║
+   ║        - Same hairline border-color.                       ║
+   ║      Touching one without the other breaks the visual      ║
+   ║      pairing — they read as one composer surface.          ║
+   ║                                                            ║
+   ║   5. Active `+` (popover open) is PURPLE FROSTED GLASS:    ║
+   ║      `color-mix(srgb, --accent 75%, transparent)` — not    ║
+   ║      a flat solid. The 75% lets the backdrop-blur still    ║
+   ║      show through, so the active state is the same         ║
+   ║      material as the resting state, just tinted. The       ║
+   ║      `!important` on background-color is belt-and-         ║
+   ║      suspenders against `:hover` lingering on touch tap.   ║
+   ║                                                            ║
+   ║   6. ONE focus halo, on `.chat__pill:focus-within` only:   ║
+   ║      `box-shadow: 0 0 0 3px var(--accent-dim)`. The +      ║
+   ║      button gets NO halo. Two halos read as a broken       ║
+   ║      double outline. (Restored exactly from commit         ║
+   ║      be32e58 after two iterations adding overcomplicated   ║
+   ║      multi-layer glows.)                                   ║
+   ║                                                            ║
+   ║   7. `.chat__pill--tall` toggles when textarea height > 45 ║
+   ║      (not 30, not 50). 31 ≈ single line, 55 ≈ two lines,   ║
+   ║      45 sits safely between. Earlier 30-threshold fired    ║
+   ║      on every keystroke and yanked send/mic to the bottom. ║
+   ║      Tall state anchors send/stop/mic to flex-end so the   ║
+   ║      action stays near the cursor.                         ║
+   ║                                                            ║
+   ║   8. `.chat__pill--with-attach .chat__input-line` always   ║
+   ║      uses align-items: flex-end. When chips are present    ║
+   ║      and the user types multi-line, the cursor must stay   ║
+   ║      pinned at the visible bottom of the pill — pure       ║
+   ║      `--tall` alignment alone missed the chips case.       ║
+   ║                                                            ║
+   ║   9. Attach cards are UNIFORM 96×96 squares (image and     ║
+   ║      file alike). Tray uses `align-items: center` so a     ║
+   ║      mixed image+file row doesn't stretch shorter cards.   ║
+   ║      File card name wraps to 2 lines (line-clamp) since    ║
+   ║      96px is too tight for 1-line ellipsis. The badge      ║
+   ║      already communicates the file type, so the display    ║
+   ║      strips the extension; the agent receives the full     ║
+   ║      original name regardless.                             ║
+   ║                                                            ║
+   ║  10. Soft-keyboard contract (CSS half — JSX half lives     ║
+   ║      in ComposerPopover.jsx, ChatInputBar.jsx,             ║
+   ║      ChatSettingsPanel.jsx):                               ║
+   ║        - Pill is `font-size: 16px` minimum — iOS Safari    ║
+   ║          zooms inputs below 16px on focus.                 ║
+   ║        - `.chat__input` overrides `outline: none` on       ║
+   ║          :focus-visible because the pill's :focus-within   ║
+   ║          box-shadow already provides the focus ring;       ║
+   ║          the inner outline drew a sharp square inside      ║
+   ║          the rounded pill.                                 ║
+   ║                                                            ║
+   ╚════════════════════════════════════════════════════════════╝ */
+
 /* CONTRACT: .chat paints `var(--bg)` as its own solid background.
    Message bubbles below paint `var(--surface)` / `var(--surface2)`
    on top of this — so both `--bg` and `--surface*` must read as
    OPAQUE FILL variables. Translucent values let the page background
-   bleed through bubbles. */
+   bleed through bubbles.
+
+   `position: relative` anchors `.chat__foot` (absolutely positioned)
+   so chat content can scroll *behind* the composer. The gutter
+   around the pill is transparent — only the pill + `+` button are
+   opaque. List bottom padding tracks the foot's measured height
+   via the `--composer-h` CSS var. */
 .chat {
   display: flex;
   flex-direction: column;
   height: 100%;
   background: var(--bg); /* CONTRACT: opaque app-wide fill — must hide content beneath */
+  position: relative;
 }
 
-/* Empty state: sits outside .chat__scroll as a direct flex child so it
-   doesn't fight the scroll container's min-height, spacers, or overflow
-   rules.  flex:1 + centering groups it naturally with the input bar. */
+/* Empty state: centered in the available chat area, with a FIXED
+   bottom reservation so the composer doesn't overlap the logo.
+   Centering means the cluster moves up when the visible viewport
+   shrinks (keyboard open via `interactive-widget=resizes-content`)
+   — the chat container itself gets shorter, so the centerpoint
+   moves up. The bottom padding is a CONSTANT (not --composer-h)
+   so multi-line input growth doesn't push the cluster up; only
+   the keyboard does. 140px clears a typical multi-line composer;
+   if the user composes a wall of text on the empty state, slight
+   overlap is acceptable. */
 .chat--empty .chat__empty-wrap {
   flex: 1;
   min-height: 0;
@@ -20,6 +120,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  padding-bottom: 140px;
 }
 
 /* ── Scroll area ───────────────────────────────────── */
@@ -45,7 +146,13 @@
   width: 100%;
   max-width: 768px;
   margin: 0 auto;
-  padding: 8px 6px 16px;
+  /* Bottom padding clears the absolutely-positioned `.chat__foot`.
+     Tracks the foot's measured height via the `--composer-h` CSS
+     var (written by ChatView's ResizeObserver), plus a small
+     breathing-room margin so chips/queue tray growing the foot
+     keeps the last message clear of the pill. Fallback 80px is
+     for the first paint before the RO fires. */
+  padding: 8px 6px calc(var(--composer-h, 80px) + 16px);
   display: flex;
   flex-direction: column;
   gap: 24px;
@@ -85,6 +192,10 @@
   gap: 10px;
   max-width: 768px;
   margin: 0 auto;
+  /* Lift the empty-state cluster (logo + title + sub) ~5% above
+     the visual centerline so it doesn't feel buried by the
+     composer at the bottom. */
+  transform: translateY(-5%);
 }
 
 .chat__empty-glyph { opacity: 0.85; margin-bottom: 12px; }
@@ -339,28 +450,73 @@
 
 /* ── Input footer ──────────────────────────────────── */
 
+/* Absolutely positioned at the bottom of `.chat` so the scroll
+   area extends behind it. Background is TRANSPARENT — only the
+   inner pill and `+` button are opaque, so chat content visibly
+   scrolls under the composer gutter. Pointer events are disabled
+   on the foot itself and re-enabled selectively on its interactive
+   children, so taps on the gutter pass through to the chat. */
 .chat__foot {
-  flex-shrink: 0;
-  padding: 10px 10px max(10px, env(safe-area-inset-bottom));
-  background: var(--bg); /* CONTRACT: opaque app-wide fill — must hide content beneath */
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 8px 12px max(8px, env(safe-area-inset-bottom));
+  background: transparent;
+  pointer-events: none;
+  z-index: 5;
 }
 
+.chat__foot .queued,
+.chat__foot .chat__attach-tray,
+.chat__foot .chat__pill,
+.chat__foot .composer-plus { pointer-events: auto; }
+
+/* The form is a transparent shell. File chips render above the
+   input row when present; the `+` button and pill share the row. */
 .chat__form {
-  max-width: 768px;
+  max-width: 720px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
   gap: 0;
-  background: var(--surface); /* CONTRACT: opaque card/panel fill, sits on --bg */
+}
+
+/* The pill: TRANSLUCENT surface with backdrop-blur — chat content
+   visibly softens through the pill background. Hairline border and
+   slight surface tint keep it readable as a card. ~48px tall to
+   match a WhatsApp-style composer; send/mic buttons live INSIDE
+   at 32×32. */
+.chat__pill {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
   border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
-  border-radius: 14px;
-  padding: 10px 10px 10px 18px;
+  border-radius: 24px;
+  padding: 4px;
+  min-height: 48px;
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 
-.chat__form:focus-within {
+/* Multi-line: pill grows downward and the send/mic anchor to the
+   bottom-right so the action stays near the cursor. */
+.chat__pill--tall { align-items: flex-end; }
+.chat__pill--tall .chat__send,
+.chat__pill--tall .chat__stop,
+.chat__pill--tall .chat__mic { align-self: flex-end; }
+
+/* Focus halo — exact restore of the be32e58 rule that was on the
+   old `.chat__form`: a single 3px translucent-accent ring around
+   the focused composer. Same shape, just now on `.chat__pill`
+   since the form is transparent in this redesign. */
+.chat__pill:focus-within {
   border-color: var(--accent); /* CONTRACT: vivid accent line */
-  box-shadow: 0 0 0 3px var(--accent-dim); /* CONTRACT: translucent accent glow — focus ring; relies on the opaque .chat__form background */
+  box-shadow: 0 0 0 3px var(--accent-dim); /* CONTRACT: translucent accent glow — focus ring */
 }
 
 .chat__input {
@@ -368,92 +524,91 @@
   background: none;
   border: none;
   color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
-  font-size: 16px;
-  line-height: 1.5;
+  font-size: 16px;    /* iOS Safari no-zoom threshold — keep at 16px */
+  font-weight: 400;
+  line-height: 1.45;
   resize: none;
   outline: none;
   min-height: 24px;
-  max-height: 160px;
-  padding: 2px 0;
+  max-height: 280px;
+  padding: 4px 8px 4px 12px;
   overflow-y: auto;
+  display: block;
 }
 
 .chat__input::placeholder { color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */ }
 .chat__input:disabled { opacity: 0.5; }
 
 /* Suppress the global textarea:focus-visible outline (index.css) on
-   the chat input specifically. The .chat__form:focus-within box-shadow
+   the chat input specifically. The .chat__pill:focus-within box-shadow
    already provides a fully-visible, theme-aware keyboard focus ring
-   around the whole composer; the inner 2px outline draws a sharp
-   rectangle inside the rounded form glow and looks like a purple
-   square. Keep the global rule for Setup/Login/Settings inputs that
-   don't have their own focus-within container. */
+   around the pill; the inner 2px outline draws a sharp rectangle
+   inside the rounded pill glow and looks like a purple square. Keep
+   the global rule for Setup/Login/Settings inputs that don't have
+   their own focus-within container. */
 .chat__input:focus-visible { outline: none; }
 
+/* Send / Stop / Mic buttons all live INSIDE `.chat__pill` at 36×36.
+   Only `.chat__send` keeps the accent fill (primary action); stop +
+   mic are borderless icons on the pill's own surface. */
 .chat__send {
   flex-shrink: 0;
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
   border: none;
   background: var(--accent); /* CONTRACT: vivid opaque accent fill */
   color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: background 0.15s, transform 0.1s;
-  align-self: flex-end;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.08s;
 }
 
 .chat__send:hover:not(:disabled) {
   background: var(--accent-hover); /* CONTRACT: vivid opaque accent on hover */
-  transform: scale(1.06);
 }
+.chat__send:active:not(:disabled) { transform: scale(0.94); }
 
 .chat__send:disabled {
   background: var(--border); /* CONTRACT: used as a 1px separator stripe — border color repurposed as fill */
   cursor: not-allowed;
 }
 
+/* Stop button — red so the "interrupt running agent" affordance
+   is unmissable. Solid red on hover, slightly desaturated at rest. */
 .chat__stop {
   flex-shrink: 0;
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
-  border: 1px solid var(--border); /* CONTRACT: 1px line on opaque fill */
-  background: var(--surface); /* CONTRACT: opaque card/panel fill, sits on --bg */
-  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: var(--danger); /* CONTRACT: destructive accent on opaque fill */
+  display: grid;
+  place-items: center;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-  align-self: flex-end;
+  transition: color 0.15s, background 0.15s;
 }
-
 .chat__stop:hover {
-  background: var(--surface2); /* CONTRACT: opaque hover/raised fill, slightly above --surface */
-  color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
+  color: #fff;
+  background: var(--danger); /* CONTRACT: destructive accent fill */
 }
 
 /* ── Voice input ──────────────────────────────────── */
-
 .chat__mic {
   flex-shrink: 0;
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
-  border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
-  background: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
   color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  display: grid;
+  place-items: center;
   cursor: pointer;
-  transition: color 0.15s, background 0.15s;
-  align-self: flex-end;
+  transition: color 0.15s;
 }
-
 .chat__mic:hover { color: var(--text); /* CONTRACT: high-contrast text on opaque fill */ }
 
 .chat__mic--active {
@@ -467,95 +622,360 @@
   50% { box-shadow: 0 0 0 6px rgba(248, 113, 113, 0); }
 }
 
-/* ── File attach button ──────────────────────────────── */
-.chat__attach {
-  flex-shrink: 0;
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
-  border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
-  background: none;
-  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: color 0.15s, background 0.15s;
-  align-self: flex-end;
-}
-.chat__attach:hover { color: var(--text); /* CONTRACT: high-contrast text on opaque fill */ }
 
-/* ── Input row (inner flex row in form) ──────────────── */
+/* Row aligns children to the BOTTOM so the `+` button stays 38×38
+   pinned at the bottom-left when the pill grows multi-line. Without
+   this the row would `stretch` the `+` button to the pill's grown
+   height (top edge follows the pill upward). */
 .chat__input-row {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  align-items: flex-end;
+  gap: 8px;
 }
 
-/* ── File chips ──────────────────────────────────────── */
-.chat__chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding-bottom: 8px;
+/* ── + button (composer popover trigger) ──────────────── */
+.composer-plus {
+  position: relative;
+  flex-shrink: 0;
+  align-self: flex-end;
 }
 
-.chat__chip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--surface2); /* CONTRACT: opaque hover/raised fill, slightly above --surface */
+/* + button: 48×48, matched 1:1 to the pill's min-height — same
+   frosted-glass surface tint (60%) and same hairline border so
+   the two read as a unified pair. When the popover opens the
+   trigger switches to a solid accent fill to signal active
+   state. */
+.chat__plus {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
   border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
-  border-radius: 8px;
-  padding: 4px 8px;
-  font-size: 12px;
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
   color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
-  max-width: 200px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  flex-shrink: 0;
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
 }
 
-.chat__chip--error {
-  border-color: rgba(248, 113, 113, 0.5);
-  color: var(--danger); /* CONTRACT: destructive accent on opaque fill */
+.chat__plus:hover {
+  background: color-mix(in srgb, var(--surface2) 70%, transparent);
+  color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
 }
 
-.chat__chip-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* No focus outline of any kind on the + button. The color change
+   (active state below) is the only visual feedback — a second
+   concentric ring on top of the active fill reads as a "broken"
+   double outline. */
+.chat__plus:focus,
+.chat__plus:focus-visible { outline: none; }
+
+/* Active state: PURPLE FROSTED GLASS — translucent accent fill so
+   the same backdrop-blur the pill uses shows through, but tinted
+   the platform accent. The double `.chat__plus.chat__plus--active`
+   selector bumps specificity so this wins over any :hover state
+   lingering from a touch tap; `!important` on background-color is
+   belt-and-suspenders against any cascade additions. */
+.chat__plus.chat__plus--active {
+  background-color: color-mix(in srgb, var(--accent) 75%, transparent) !important;
+  background-image: none;
+  border-color: var(--accent);
+  color: #fff;
+  /* Keep the .chat__plus backdrop-filter blur — purple frosted
+     glass instead of a flat opaque purple disc. */
+  box-shadow: none;
+}
+
+/* ── Composer popover (Attach + Model picker) ────────── */
+
+/* Drops UP from the trigger — composer sits at the bottom of the
+   screen so a downward popover would clip. `bottom: calc(100% + 8px)`
+   anchors the panel's bottom edge 8px above the trigger. Aligned to
+   the LEFT edge of the trigger so the panel doesn't drift off-screen
+   on narrow viewports; the panel is 296px wide which fits even at
+   the 360px mobile baseline. */
+.composer-popover {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  width: 296px;
+  /* `dvh` (dynamic viewport height) shrinks when the soft keyboard
+     opens, so the popover never extends past the visible area. Cap
+     at ~50% of the visible viewport so the user can always see
+     some chat above; absolute 420px cap on tall screens. */
+  max-height: min(50dvh, 420px);
+  overflow-y: auto;
+  background: var(--surface); /* CONTRACT: opaque card/panel fill, sits on --bg */
+  border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
+  border-radius: 14px;
+  box-shadow: 0 12px 32px -8px rgba(0, 0, 0, 0.35);
+  padding: 6px;
+  z-index: 50;
+  /* Touch-scroll inside the popover should not bubble up and close
+     the keyboard or scroll the chat behind it. */
+  overscroll-behavior: contain;
+}
+
+body.theme-light .composer-popover {
+  box-shadow: 0 12px 32px -8px rgba(15, 18, 25, 0.18);
+}
+
+.composer-popover__section {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+/* Hairline divider between the Attach section and the picker
+   section so the popover reads as two distinct groups. */
+.composer-popover__section--picker {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
+}
+
+/* Generic popover row — used by the Attach files entry. Same
+   geometry as `.csp-row` in ChatSettingsPanel so the two sections
+   align visually. */
+.composer-popover__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  background: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+  color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
+  text-align: left;
+  transition: background 0.12s ease;
+}
+
+.composer-popover__row:hover { background: var(--surface2); /* CONTRACT: opaque hover/raised fill, slightly above --surface */ }
+
+.composer-popover__row-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: var(--surface2); /* CONTRACT: opaque hover/raised fill, slightly above --surface */
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  display: grid;
+  place-items: center;
+  color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
+  flex-shrink: 0;
+}
+body.theme-light .composer-popover__row-icon { border-color: rgba(15, 18, 25, 0.10); }
+
+.composer-popover__row-main {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
 }
 
-.chat__chip-status {
-  font-size: 11px;
-  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
-  white-space: nowrap;
+.composer-popover__row-title {
+  font-size: 14px;     /* --font-text-sm */
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
 }
 
-.chat__chip-remove {
-  flex-shrink: 0;
-  background: none;
-  border: none;
+.composer-popover__row-sub {
+  font-size: 12px;     /* --font-text-xs */
+  font-weight: 400;
   color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
-  cursor: pointer;
-  padding: 0;
-  font-size: 14px;
-  line-height: 1;
+  line-height: 1.4;
+}
+
+/* ── File chips: attach cards inside the pill ────────────────
+   When the user attaches files the pill flips to a column layout
+   (.chat__pill--with-attach) with the cards on top and the input
+   row below. Cards are fixed-box: images render as 72×72 thumbs,
+   other files as 168px rectangles with a colored type badge. */
+
+/* Inner row inside the pill containing the textarea + send/mic.
+   Default: center-aligned so a single line of text + the mic icon
+   read as vertically centered in the pill. When the textarea grows
+   multi-line, `.chat__pill--tall` flips to flex-end so the buttons
+   stay anchored at the bottom-right while the textarea expands up. */
+.chat__input-line {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
+  gap: 2px;
 }
-.chat__chip-remove:hover { color: var(--text); /* CONTRACT: high-contrast text on opaque fill */ }
-
-.chat__chip--image {
-  padding: 3px;
+.chat__pill--tall .chat__input-line {
+  align-items: flex-end;
 }
 
-.chat__chip-thumb {
-  width: 40px;
-  height: 40px;
-  object-fit: cover;
-  border-radius: 5px;
+/* When file chips are attached the pill flips to a column with the
+   chip tray on top and the input-line below. */
+.chat__pill--with-attach {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 22px;
+}
+/* When chips are attached the pill is in column layout and the
+   input-line sits BELOW the chip tray. Anchor send/mic to the
+   bottom of input-line regardless of textarea height so they don't
+   drift upward as the user types multiple lines. */
+.chat__pill--with-attach .chat__input-line {
+  min-height: 38px;
+  align-items: flex-end;
+}
+
+/* `align-items: center` keeps the row from stretching a shorter
+   card (the 80×80 image) to match a taller one — every card stays
+   at its declared height. The tray's parent (.chat__pill) sets the
+   overall vertical rhythm; the cards inside MUST be uniformly
+   sized so the row doesn't grow or shrink as the user adds files. */
+.chat__attach-tray {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 2px 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  min-width: 0;
+}
+.chat__attach-tray::-webkit-scrollbar { display: none; }
+
+.chat__attach-card {
+  position: relative;
   flex-shrink: 0;
+}
+
+/* File card: 96×96 square, matching the image card 1:1 so a mixed
+   row of files and images reads as a uniform grid. Badge top-left,
+   filename below as a 2-line caption (clamped). Width is the same
+   as the image, so long names truncate — the badge already
+   communicates the file's type and the agent receives the full
+   name regardless of what we display. */
+.chat__attach-card--file {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 6px;
+  padding: 10px;
+  background: var(--surface2); /* CONTRACT: opaque hover/raised fill, slightly above --surface */
+  border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
+  border-radius: 14px;
+  width: 96px;
+  height: 96px;
+}
+
+.chat__attach-card--image {
+  width: 96px;
+  height: 96px;
+  padding: 0;
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--surface2); /* CONTRACT: opaque hover/raised fill, slightly above --surface */
+  border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
+}
+
+.chat__attach-card--error {
+  border-color: rgba(248, 113, 113, 0.55);
+}
+
+.chat__attach-card-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.chat__attach-card-icon {
+  width: 30px;
+  height: 36px;
+  border-radius: 4px;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: 0.06em;
+  position: relative;
+}
+/* Folded-corner detail for the doc-icon — gives a paper feel
+   without an SVG. */
+.chat__attach-card-icon::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 8px;
+  height: 8px;
+  background: linear-gradient(135deg, transparent 50%, rgba(0,0,0,0.25) 50%);
+}
+.chat__attach-card-icon--pdf  { background: #e0382c; }
+.chat__attach-card-icon--doc  { background: #2b7fff; }
+.chat__attach-card-icon--code { background: var(--muted); }
+
+/* Filename wraps to 2 lines (clamped) since the file card is a
+   tight 96×96 square — a 1-line ellipsis at this width chops too
+   aggressively. `break-all` keeps long unbroken sequences (hashes,
+   tokens) from overflowing the card. */
+.chat__attach-card-name {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  line-height: 1.25;
+  word-break: break-all;
+}
+
+/* The remove × sits INSIDE the card corner — the pill's rounded
+   boundary (and backdrop-filter clip region) would crop an outside-
+   positioned × on small cards near the pill edge. Top/right at 4px
+   keeps the button fully visible and within the card's bounds. */
+.chat__attach-card-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  border: none;
+  color: #fff;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+  z-index: 1;
+}
+.chat__attach-card-remove:hover { background: rgba(0, 0, 0, 0.8); }
+body.theme-light .chat__attach-card-remove {
+  background: rgba(255, 255, 255, 0.85);
+  color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
+}
+body.theme-light .chat__attach-card-remove:hover { background: rgba(255, 255, 255, 1); }
+
+.chat__attach-card-spin {
+  position: absolute;
+  bottom: 6px;
+  left: 6px;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid var(--border); /* CONTRACT: 1.5px ring on opaque fill (used for spinner track) */
+  border-top-color: var(--accent); /* CONTRACT: vivid accent — spinning arc on top of the track */
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
 }
 
 /* ── Message attachments ─────────────────────────────── */
@@ -667,6 +1087,44 @@
   border-bottom: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
   margin-bottom: 4px;
   gap: 8px;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: background 0.15s;
+  user-select: none;
+}
+
+.queued__hdr:hover {
+  background: var(--surface2); /* CONTRACT: secondary opaque fill */
+}
+
+.queued__hdr:focus-visible {
+  outline: 2px solid var(--accent, currentColor);
+  outline-offset: -2px;
+}
+
+.queued--collapsed .queued__hdr {
+  border-bottom: 0;
+  margin-bottom: 0;
+}
+
+.queued--collapsed {
+  gap: 0;
+}
+
+.queued__hdr-chevron {
+  flex-shrink: 0;
+  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
+  transition: transform 0.15s;
+}
+
+.queued__hdr-chevron--collapsed {
+  transform: rotate(-90deg);
+}
+
+.queued__items {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .queued__count {
