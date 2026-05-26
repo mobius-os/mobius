@@ -251,6 +251,8 @@ chats/
 backups/
 *.bak-*
 apps/*/data/
+recovery_chat.jsonl
+.recover-pending
 EOF
 chown mobius:mobius /data/.gitignore 2>/dev/null || true
 
@@ -335,14 +337,33 @@ fi
 if [ -f /data/.recover-pending ]; then
   mode=$(cat /data/.recover-pending 2>/dev/null | tr -d '[:space:]')
   rm -f /data/.recover-pending
+  restore_status=""
   case "$mode" in
     backend|scripts|shell-dist|shell-src)
       echo "Recovery flag detected: $mode — running recovery_restore.sh as root..."
-      /app/scripts/recovery_restore.sh "$mode" || echo "WARNING: recovery_restore.sh $mode failed"
+      if /app/scripts/recovery_restore.sh "$mode"; then
+        restore_status="ok"
+      else
+        restore_status="failed"
+        echo "WARNING: recovery_restore.sh $mode failed" >&2
+      fi
       ;;
     "") : ;;
-    *) echo "WARNING: unknown recovery flag mode: $mode" >&2 ;;
+    *)
+      restore_status="unknown-mode"
+      echo "WARNING: unknown recovery flag mode: $mode" >&2
+      ;;
   esac
+  # Tell the user what happened by appending to the recovery chat
+  # log. They'll see this when they reload /recover/chat after the
+  # container restart. Without this signal a silent failure leaves
+  # them refreshing nervously with no feedback.
+  if [ -n "$restore_status" ]; then
+    ts=$(date -u +%s)
+    payload="{\"role\":\"system\",\"content\":\"Recovery action '$mode' completed: $restore_status. Server restarted.\",\"ts\":$ts}"
+    echo "$payload" >> /data/recovery_chat.jsonl
+    chown mobius:mobius /data/recovery_chat.jsonl 2>/dev/null || true
+  fi
   # Re-enforce protected files now that the restore may have
   # touched perms.
   if [ -f /app/protected-files.txt ]; then

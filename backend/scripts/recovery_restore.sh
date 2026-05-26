@@ -77,14 +77,27 @@ echo "Restoring $DST from $SRC..."
 mkdir -p "$DST"
 
 # cp -a preserves perms + ownership of the SOURCE (root:root for the
-# baked copies). The chown sweep below re-hands the writable layers
-# back to mobius. Protected files in the destination that are chmod
-# 444 root will block cp -a's overwrite with "Permission denied" —
-# that's expected (the frozen island is already the right content)
-# and we suppress those errors with --no-clobber + a fallback rsync
-# pattern if cp fails on those.
-if ! cp -a "$SRC/." "$DST/" 2>&1; then
-  echo "cp -a failed; some protected files probably blocked overwrite (expected)" >&2
+# baked copies). When this script runs from entrypoint AS ROOT (the
+# normal post-flag-file path), root bypasses the dest chmod-444 so
+# all files restore cleanly. When run AS MOBIUS (e.g. manual debug),
+# cp -a's open-for-write on chmod-444 dest files fails with EACCES
+# on protected files — which is fine because those files are already
+# the right content (frozen + root-owned). We distinguish the two
+# cases by checking euid: if we're root, ANY cp failure is real and
+# fails the script.
+cp_output=$(cp -a "$SRC/." "$DST/" 2>&1)
+cp_status=$?
+if [ $cp_status -ne 0 ]; then
+  if [ "$(id -u)" -eq 0 ]; then
+    echo "FATAL: cp -a failed while running as root:" >&2
+    echo "$cp_output" >&2
+    exit 3
+  else
+    # Mobius run: protected-file EACCES is expected. Surface other
+    # errors but don't fail (operator can re-run as root if needed).
+    echo "cp -a partial: protected files blocked overwrite (expected when run as mobius)" >&2
+    echo "$cp_output" | grep -v "Permission denied" >&2 || true
+  fi
 fi
 
 # Re-hand the writable layer to mobius (except for protected files

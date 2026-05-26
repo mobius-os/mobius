@@ -23,12 +23,21 @@ from __future__ import annotations
 import os
 import signal
 
-from fastapi import APIRouter, Body, Cookie, HTTPException
+from fastapi import APIRouter, Body, Cookie, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from app import recover_auth, recover_chat_runner
 
 router = APIRouter(tags=["recover"])
+
+# Rate limits defend against a stolen-cookie attacker burning subprocess
+# spawns or hammering /recover/restart for DoS amplification. Per-IP
+# rather than per-cookie because the cookie itself is the credential
+# we're protecting. Limits chosen to be invisible to a single human
+# operator but block automation.
+_limiter = Limiter(key_func=get_remote_address)
 
 
 def _require_session(token: str | None) -> str:
@@ -54,7 +63,9 @@ def recover_chat_page(
 
 
 @router.post("/recover/chat/send")
+@_limiter.limit("30/minute")
 async def recover_chat_send(
+  request: Request,
   payload: dict = Body(...),
   moebius_recover: str | None = Cookie(default=None),
 ):
@@ -73,7 +84,9 @@ async def recover_chat_send(
 
 
 @router.post("/recover/chat/stream")
+@_limiter.limit("30/minute")
 async def recover_chat_stream(
+  request: Request,
   moebius_recover: str | None = Cookie(default=None),
 ):
   """SSE stream of the agent's response to the latest user message
@@ -103,7 +116,9 @@ async def recover_chat_stream(
 
 
 @router.post("/recover/chat/reset")
+@_limiter.limit("10/minute")
 def recover_chat_reset(
+  request: Request,
   moebius_recover: str | None = Cookie(default=None),
 ):
   """Wipes /data/recovery_chat.jsonl."""
@@ -113,7 +128,9 @@ def recover_chat_reset(
 
 
 @router.post("/recover/restart")
+@_limiter.limit("5/minute")
 def recover_restart(
+  request: Request,
   moebius_recover: str | None = Cookie(default=None),
 ):
   """Soft restart: SIGTERM the uvicorn process so the container
@@ -152,9 +169,16 @@ def _render_page(history: list[dict]) -> str:
   """Returns the recovery chat HTML with prior log baked in."""
   history_html_parts = []
   for msg in history:
-    role = msg.get("role", "?")
+    # role MUST be escaped — an attacker (or compromised agent in a
+    # normal chat) with /data/ write access could plant a poisoned
+    # jsonl entry like {"role":"<script>...</script>"}. _escape on
+    # `content` alone was incomplete.
+    role = _escape(msg.get("role", "?"))
     content = _escape(msg.get("content") or "")
-    cls = "rc-user" if role == "user" else "rc-asst"
+    # cls is derived from the RAW role, not the escaped form, so
+    # the comparison still works even if an attacker plants junk in
+    # role (which becomes a visible-but-inert string).
+    cls = "rc-user" if msg.get("role") == "user" else "rc-asst"
     history_html_parts.append(
       f'<div class="rc-msg {cls}"><div class="rc-role">{role}</div>'
       f'<div class="rc-text">{content}</div></div>'
@@ -399,7 +423,21 @@ async function handleRestart() {{
   try {{
     await fetch('/recover/restart', {{method: 'POST'}});
     const sys = makeMsg('system');
-    sys.text.textContent = 'Restart signal sent. Wait a few seconds and reload.';
+    sys.text.textContent = 'Restart signal sent. Reconnecting in ~10 seconds...';
+    // Poll health every 1.5s; reload the page once the backend is
+    // back up (or hard-reload after 30s if health never comes back).
+    // Without this auto-reload the user would refresh nervously,
+    // which several reviews flagged as poor UX.
+    const start = Date.now();
+    const tick = async () => {{
+      if (Date.now() - start > 30000) {{ location.reload(); return; }}
+      try {{
+        const r = await fetch('/api/health', {{cache: 'no-store'}});
+        if (r.ok) {{ location.reload(); return; }}
+      }} catch (_) {{ /* ignore until backend is up */ }}
+      setTimeout(tick, 1500);
+    }};
+    setTimeout(tick, 3000);
   }} catch (err) {{
     const sys = makeMsg('system');
     sys.text.textContent = 'Restart request failed: ' + err;

@@ -31,8 +31,11 @@ _limiter = Limiter(key_func=get_remote_address)
 # Session tokens come from `recover_auth` (HMAC-signed, no JWT
 # library) so recovery works even if `app/auth.py` is broken or
 # corrupted by the agent. The cookie name + TTL match what the
-# previous JWT-based implementation used; existing recover sessions
-# carry over after deploy.
+# previous JWT-based implementation used. NOTE: the cookie FORMAT
+# changed (was JWT, now HMAC) so existing /recover sessions from
+# pre-upgrade do NOT carry over — users get bounced to the login
+# form on their next /recover visit after deploy. One-time minor
+# friction; documented in the deploy runbook.
 _COOKIE = recover_auth.COOKIE_NAME
 
 # Serializes the restore-shell action. FastAPI runs sync route handlers

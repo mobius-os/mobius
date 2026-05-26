@@ -246,3 +246,43 @@ def test_recover_chat_runner_log_helpers(monkeypatch, tmp_path):
 
   rcr.reset_log()
   assert rcr.load_log() == []
+
+
+def test_recover_chat_page_escapes_role_field(client, auth_cookie, monkeypatch, tmp_path):
+  """Poisoned role values (e.g. from a compromised agent writing to
+  /data/recovery_chat.jsonl) must be HTML-escaped when rendered,
+  otherwise the recovery page becomes XSS-vulnerable on the only
+  trusted surface left when production chat is broken."""
+  log_path = tmp_path / "poisoned.jsonl"
+  monkeypatch.setattr(
+    "app.recover_chat_runner.RECOVERY_LOG_PATH", log_path,
+  )
+  log_path.write_text(
+    '{"role":"<script>alert(1)</script>","content":"hi","ts":1.0}\n'
+  )
+  r = client.get("/recover/chat", cookies=auth_cookie)
+  assert r.status_code == 200
+  # The raw payload must not appear as live HTML.
+  assert "<script>alert(1)</script>" not in r.text
+  # The escaped form should appear.
+  assert "&lt;script&gt;alert(1)&lt;/script&gt;" in r.text
+
+
+def test_recover_auth_empty_secret_key():
+  """SECRET_KEY missing or empty: create_session_token raises (the
+  caller / route is responsible for surfacing this), decode returns
+  None (graceful degradation for inbound requests)."""
+  import os
+  saved = os.environ.get("SECRET_KEY")
+  os.environ["SECRET_KEY"] = ""
+  try:
+    import pytest
+    with pytest.raises(RuntimeError):
+      recover_auth.create_session_token("alice")
+    # decode is the inbound path — must NOT raise; returns None.
+    assert recover_auth.decode_session_token("any.token") is None
+  finally:
+    if saved is None:
+      os.environ.pop("SECRET_KEY", None)
+    else:
+      os.environ["SECRET_KEY"] = saved
