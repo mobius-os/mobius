@@ -997,9 +997,19 @@ function makeLine(text) {{
 function makeLink(url) {{
   const p = document.createElement('p');
   const a = document.createElement('a');
-  a.href = url;
-  a.target = '_blank';
-  a.rel = 'noopener';
+  // Defense in depth: only allow http(s) schemes on the href.
+  // The OAuth URLs returned by the server are always https://, but
+  // a compromised/MITM'd response could plant a `javascript:` URL
+  // that would execute on click. Showing the URL as text is fine
+  // either way; the difference is whether clicking does anything.
+  if (/^https?:\\/\\//i.test(url)) {{
+    a.href = url;
+    a.target = '_blank';
+    a.rel = 'noopener';
+  }} else {{
+    a.href = '#';
+    a.title = 'URL blocked: unexpected scheme';
+  }}
   a.textContent = url;
   p.appendChild(a);
   return p;

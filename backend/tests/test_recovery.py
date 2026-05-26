@@ -1431,6 +1431,128 @@ def test_legacy_migration_atomic_under_partial_copy(monkeypatch, tmp_path):
   assert len(migrated_lines) == 4  # _meta + 3 entries
 
 
+# ---------------------------------------------------------------------
+# Post-review #3 (Claude reviewer): security contract locks
+# ---------------------------------------------------------------------
+
+@pytest.mark.parametrize("endpoint,payload_extra", [
+  ("/recover/chat/send", {"message": "x"}),
+  ("/recover/chat/delete", {}),
+  ("/recover/chat/reset", {}),
+])
+def test_path_traversal_chat_id_rejected(
+  client, auth_cookie, endpoint, payload_extra,
+):
+  """A chat_id like '../etc/passwd' must be rejected at every endpoint
+  that takes one. The defense lives in _validate_chat_id (regex
+  allowlist) inside chat_log_path; this test pins the contract so
+  a future refactor that bypasses chat_log_path opens a real
+  traversal that the test catches.
+
+  Claude reviewer flagged: the chat_log_path validator is the
+  load-bearing security check; without a regression test, a refactor
+  could plug in raw path joins and the security failure would be
+  invisible.
+  """
+  body = {"chat_id": "../etc/passwd", **payload_extra}
+  r = client.post(endpoint, json=body, cookies=auth_cookie)
+  # Any non-2xx is acceptable — current paths return 400 (delete,
+  # reset) or 404 (send). The contract is "not 2xx", not the exact
+  # status, since the helper that raises ValueError happens to be
+  # caught with different statuses per endpoint.
+  assert r.status_code >= 400, (
+    f"{endpoint}: traversal chat_id must be rejected, got {r.status_code}"
+  )
+  assert r.status_code < 500, (
+    f"{endpoint}: traversal must be a CLIENT error, not 5xx (server error)"
+  )
+
+
+def test_claude_oauth_rejects_state_mismatch(client, auth_cookie):
+  """OAuth's state parameter is the CSRF guard for the Claude PKCE
+  flow. A code payload that carries `state=WRONG` (i.e. forged by an
+  attacker who somehow tricked the user into pasting a crafted
+  callback URL) must be rejected.
+
+  Claude reviewer flagged: the state-mismatch branch in
+  recover_oauth.py was untested.
+  """
+  # Establish a PKCE flow so _active_pkce is set with a known state.
+  start = client.post("/recover/provider/claude/start", cookies=auth_cookie)
+  assert start.status_code == 200
+
+  # Submit a code with an explicitly wrong state in the URL fragment.
+  # _extract_provider_code_and_state will parse `state=WRONG` and the
+  # downstream comparison must reject.
+  r = client.post(
+    "/recover/provider/claude/code",
+    json={"code": "https://platform.claude.com/oauth/code/callback?code=abc&state=DEFINITELY-WRONG"},
+    cookies=auth_cookie,
+  )
+  assert r.status_code == 403, (
+    f"state mismatch must return 403, got {r.status_code}: {r.text}"
+  )
+
+
+@pytest.mark.asyncio
+async def test_codex_login_times_out_if_device_code_never_appears(
+  client, auth_cookie, monkeypatch,
+):
+  """If the codex subprocess hangs (never emits a device code), the
+  /codex/start endpoint must return 500 within the configured 15s
+  budget — not hang the request indefinitely.
+
+  Claude reviewer flagged: the timeout branch in recover_oauth.py
+  (lines ~361-368) was the only protection against a hung CLI and
+  had zero test coverage.
+  """
+  # Stub create_subprocess_exec to return a proc whose stdout never
+  # yields a line matching the device-code pattern.
+  import asyncio as _asyncio
+
+  class _HangingStdout:
+    async def readline(self):
+      # Sleep beyond the timeout deadline so the asyncio.timeout(15)
+      # fires. We monkey-patch the timeout below to keep the test fast.
+      await _asyncio.sleep(60)
+      return b""
+
+  class _HangingProc:
+    def __init__(self):
+      self.stdout = _HangingStdout()
+      self.returncode = None
+    def kill(self):
+      self.returncode = -9
+    async def wait(self):
+      if self.returncode is None:
+        self.returncode = 0
+      return self.returncode
+
+  async def fake_spawn(*_a, **_kw):
+    return _HangingProc()
+
+  from app import recover_oauth as roa
+  monkeypatch.setattr(
+    "app.recover_oauth.asyncio.create_subprocess_exec",
+    fake_spawn,
+  )
+  # Shrink the timeout from 15s to 0.5s so the test runs fast.
+  # The route uses `async with asyncio.timeout(15)` so we swap the
+  # asyncio.timeout factory for one with a shorter deadline.
+  original_timeout = _asyncio.timeout
+
+  def fast_timeout(seconds):
+    return original_timeout(0.5)
+
+  monkeypatch.setattr("app.recover_oauth.asyncio.timeout", fast_timeout)
+
+  # Call the endpoint. With the hanging proc + 0.5s timeout, the
+  # route should kill the proc and 500.
+  r = client.post("/recover/provider/codex/start", cookies=auth_cookie)
+  assert r.status_code == 500
+  assert "timed out" in r.text.lower() or "timeout" in r.text.lower()
+
+
 def test_factory_reset_terminates_active_recovery_run(monkeypatch):
   """Factory reset must kill an in-flight recovery rescue agent so
   it can't keep writing to /data/* after the reset wipes credentials.
