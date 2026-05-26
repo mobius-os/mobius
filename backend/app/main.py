@@ -216,6 +216,13 @@ app.include_router(recover_router)
 # auth.py. See app/recover_chat.py for the design.
 from app.recover_chat import router as recover_chat_router  # noqa: E402
 app.include_router(recover_chat_router)
+
+# Recovery OAuth — frozen, isolated from routes/auth.py so the
+# recovery surface can connect/reconnect a provider even when the
+# main-app auth routes are broken by an agent edit. See
+# app/recover_oauth.py for the design.
+from app.recover_oauth import router as recover_oauth_router  # noqa: E402
+app.include_router(recover_oauth_router)
 app.include_router(settings_router)
 app.include_router(uploads_router)
 app.include_router(generate_router)

@@ -28,6 +28,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import secrets
 import shutil
 import threading
 import time
@@ -35,9 +37,25 @@ from pathlib import Path
 from typing import AsyncIterator
 
 
+# Multi-chat layout: one jsonl file per chat under RECOVERY_CHATS_DIR.
+# First line of each file is a metadata record: `{"_meta": {...}}`.
+# Subsequent lines are role/content entries appended at runtime.
+# chat_id is a short hex id (12 chars) generated when the chat is
+# created; the file is `<chat_id>.jsonl`.
+#
+# RECOVERY_LOG_PATH is the LEGACY single-file path. If present at
+# list_chats() time it gets migrated into the chats dir as
+# `legacy.jsonl` so prior recovery history isn't orphaned.
 RECOVERY_LOG_PATH = Path("/data/recovery_chat.jsonl")
+RECOVERY_CHATS_DIR = Path("/data/recovery/chats")
 CLAUDE_CONFIG_PATH = Path("/data/cli-auth/claude")
 CODEX_CONFIG_PATH = Path("/data/cli-auth/codex")
+
+# chat_id must be alphanumeric (plus dash/underscore) to prevent path
+# traversal in chat_log_path. 64-char cap matches what the create_chat
+# generator produces (12 chars); we allow longer for backward
+# compatibility with manually-named files like "legacy".
+_CHAT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 SUBPROCESS_CWD = "/data"
 
 # Supported providers for the recovery chat. Keep ordered: the default
@@ -224,37 +242,234 @@ def _system_prompt() -> str:
   )
 
 
-def append_log(role: str, content: str) -> int:
-  """Appends one message to the recovery log and returns its
-  zero-based index. The index is the turn_id used by /send +
-  /stream to pair a stream response to its specific message,
-  closing the multi-tab race where 'latest user message' would
-  cross wires.
+# ---------------------------------------------------------------------
+# Multi-chat layout
+# ---------------------------------------------------------------------
+# Each recovery chat is a single jsonl file under RECOVERY_CHATS_DIR.
+# The first line is a metadata record: `{"_meta": {provider, created_at, ...}}`.
+# Subsequent lines are message entries: `{"role": "user|assistant",
+# "content": "...", "ts": ...}`.
+#
+# Why a file-per-chat:
+#  - Atomic appends per chat (no cross-chat lock contention)
+#  - Simple list = ls the directory
+#  - Reset a single chat without affecting others
+#  - Backup / inspect with cat or `jq`
+#
+# Why the metadata first line (not a separate meta.json):
+#  - One file per chat keeps the on-disk layout obvious
+#  - The first line is read-only after creation; no append-time
+#    coordination needed
+#  - turn_id is the line's zero-based position (so the meta line is
+#    turn_id=0; the first user message is turn_id=1). The runner
+#    skips _meta on reads.
 
-  JSON-per-line so a partial write doesn't corrupt earlier
-  entries. Index counts ALL lines (any role); the runner filters
-  by role when reading. Using line count as id is durable: log
-  truncation invalidates ids, which is the correct behaviour
-  (after reset, prior turn_ids are stale and the next /stream
-  will simply 400).
 
-  Append + index-derivation runs under `_append_lock` so two
-  concurrent callers cannot both observe the same final line
-  count. Without the lock, both would return the same turn_id,
-  both /stream POSTs would resolve to the same log row, and the
-  multi-tab pairing race the turn_id was meant to close would
-  re-open.
+def _validate_chat_id(chat_id: str) -> None:
+  """Raises ValueError on a chat_id that doesn't match the allowed
+  shape. The shape is restrictive enough to prevent path traversal
+  (no '..', no '/'). Allowed: alphanumeric, dash, underscore.
   """
-  RECOVERY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+  if not isinstance(chat_id, str) or not _CHAT_ID_RE.match(chat_id):
+    raise ValueError(f"invalid chat_id: {chat_id!r}")
+
+
+def chat_log_path(chat_id: str) -> Path:
+  """Returns the on-disk path for `chat_id`'s log file.
+
+  Validates chat_id to prevent path traversal. Caller is responsible
+  for checking the file exists if that's required — this function
+  just computes the path.
+  """
+  _validate_chat_id(chat_id)
+  return RECOVERY_CHATS_DIR / f"{chat_id}.jsonl"
+
+
+def _read_meta(path: Path) -> dict | None:
+  """Reads the first line of a chat file and returns its `_meta` dict.
+
+  Returns None if the file is missing, empty, the first line isn't
+  valid JSON, or the JSON doesn't carry a `_meta` key. Used by both
+  list_chats (to render metadata) and get_chat_provider.
+  """
+  if not path.is_file():
+    return None
+  try:
+    with path.open("r", encoding="utf-8") as f:
+      first = f.readline().strip()
+    if not first:
+      return None
+    data = json.loads(first)
+  except (json.JSONDecodeError, OSError):
+    return None
+  if isinstance(data, dict) and isinstance(data.get("_meta"), dict):
+    return data["_meta"]
+  return None
+
+
+def _migrate_legacy_log() -> None:
+  """Moves the pre-multi-chat single-log file into the chats dir.
+
+  Called by list_chats() so the migration is lazy — no startup hook,
+  no entrypoint change. Idempotent: if `legacy.jsonl` already exists
+  in the chats dir, the legacy file is left alone (the user's
+  decision to delete or keep it). The migrated file gets a synthetic
+  `_meta` prepended with provider="claude" (the only option the
+  legacy runner supported) and migrated_from_legacy=True so the UI
+  can label it distinctively if it wants to.
+  """
+  if not RECOVERY_LOG_PATH.is_file():
+    return
+  RECOVERY_CHATS_DIR.mkdir(parents=True, exist_ok=True)
+  target = RECOVERY_CHATS_DIR / "legacy.jsonl"
+  if target.exists():
+    return
+  try:
+    mtime = RECOVERY_LOG_PATH.stat().st_mtime
+    meta = {
+      "_meta": {
+        "provider": "claude",
+        "created_at": mtime,
+        "migrated_from_legacy": True,
+      }
+    }
+    with RECOVERY_LOG_PATH.open("r", encoding="utf-8") as src, \
+        target.open("w", encoding="utf-8") as dst:
+      dst.write(json.dumps(meta, separators=(",", ":")) + "\n")
+      shutil.copyfileobj(src, dst)
+    # Only unlink after successful copy. If the rename failed (disk
+    # full, permission, etc.), keep the legacy file so a retry can
+    # re-attempt and the user doesn't lose data.
+    RECOVERY_LOG_PATH.unlink()
+  except OSError:
+    # Best-effort migration. If it failed, the user still sees their
+    # legacy data via the standalone file; the UI just won't list it.
+    pass
+
+
+def list_chats() -> list[dict]:
+  """Returns a list of chat metadata dicts, most-recently-touched first.
+
+  Each entry: {chat_id, provider, created_at, mtime, migrated_from_legacy?}.
+  Lazily migrates the legacy single-log if it exists, so callers
+  always see the unified view.
+  """
+  _migrate_legacy_log()
+  if not RECOVERY_CHATS_DIR.is_dir():
+    return []
+  out: list[dict] = []
+  for p in RECOVERY_CHATS_DIR.glob("*.jsonl"):
+    meta = _read_meta(p)
+    if not meta:
+      # File missing _meta — skip rather than crash. A malformed file
+      # could be the result of an aborted create_chat or manual edit.
+      continue
+    out.append({
+      "chat_id": p.stem,
+      "provider": meta.get("provider"),
+      "created_at": meta.get("created_at"),
+      "migrated_from_legacy": meta.get("migrated_from_legacy", False),
+      "mtime": p.stat().st_mtime,
+    })
+  out.sort(key=lambda m: m.get("mtime") or 0, reverse=True)
+  return out
+
+
+def create_chat(provider: str) -> str:
+  """Creates a new chat with the given provider, returns its chat_id.
+
+  chat_id is a 12-char hex string (48 bits of entropy — unguessable
+  for any practical attack; 1 in 2.8e14 collision per chat). The
+  created file has a single line: the `_meta` record. Subsequent
+  append_log calls add user/assistant messages.
+  """
+  if provider not in SUPPORTED_PROVIDERS:
+    raise ValueError(
+      f"unsupported provider: {provider}; expected one of {SUPPORTED_PROVIDERS}"
+    )
+  RECOVERY_CHATS_DIR.mkdir(parents=True, exist_ok=True)
+  # Retry on the astronomically-unlikely collision so we never
+  # silently overwrite an existing chat.
+  for _ in range(5):
+    chat_id = secrets.token_hex(6)
+    path = RECOVERY_CHATS_DIR / f"{chat_id}.jsonl"
+    if path.exists():
+      continue
+    meta = {
+      "_meta": {"provider": provider, "created_at": time.time()}
+    }
+    # Open with O_CREAT|O_EXCL via Python's "x" mode so a parallel
+    # collision raises FileExistsError rather than silently clobber.
+    try:
+      with path.open("x", encoding="utf-8") as f:
+        f.write(json.dumps(meta, separators=(",", ":")) + "\n")
+      return chat_id
+    except FileExistsError:
+      continue
+  raise RuntimeError("could not allocate unique chat_id after retries")
+
+
+def delete_chat(chat_id: str) -> bool:
+  """Deletes a chat's log file. Returns True if the file existed.
+
+  Used by the recovery UI's "delete chat" affordance. Validates
+  chat_id (path traversal defense). Failures other than 'missing'
+  raise — the UI surfaces those as errors so the user knows the
+  chat wasn't actually deleted.
+  """
+  path = chat_log_path(chat_id)
+  if not path.is_file():
+    return False
+  path.unlink()
+  return True
+
+
+def get_chat_provider(chat_id: str) -> str | None:
+  """Returns the provider name a chat was created with, or None.
+
+  None means the chat doesn't exist or its _meta line is missing.
+  The HTTP layer uses this to decide whether to default the picker
+  to a specific provider when opening an existing chat.
+  """
+  meta = _read_meta(chat_log_path(chat_id))
+  if not meta:
+    return None
+  return meta.get("provider")
+
+
+# ---------------------------------------------------------------------
+# Per-chat log operations — all take chat_id as the first argument.
+# turn_id is the message's zero-based line index, which means turn_id=0
+# is always the _meta line (skipped on user-message lookups) and the
+# first real user message has turn_id=1.
+# ---------------------------------------------------------------------
+
+
+def append_log(chat_id: str, role: str, content: str) -> int:
+  """Appends a message to `chat_id`'s log; returns its turn_id (line index).
+
+  turn_id is the line's zero-based position in the file, used to pair
+  /send and /stream requests so a multi-tab user can't mis-route a
+  response.
+
+  The append + index-derivation runs under `_append_lock` so two
+  concurrent callers cannot both observe the same final line count.
+  Without the lock, both would return the same turn_id and both
+  /stream POSTs would resolve to the same log row.
+
+  Note: the lock is GLOBAL, not per-chat. Concurrent appends across
+  different chats serialize, which is fine — recovery is single-
+  owner and traffic is low. Per-chat locks would add complexity
+  for no real benefit.
+  """
+  path = chat_log_path(chat_id)
+  if not path.is_file():
+    raise ValueError(f"chat {chat_id} not found")
   entry = {"role": role, "content": content, "ts": time.time()}
   payload = json.dumps(entry, separators=(",", ":")) + "\n"
   with _append_lock:
-    # One open in "a+" mode: append the line and count from the same
-    # handle. Seeking to 0 and counting under the lock guarantees no
-    # other writer can interleave between the write and the count, so
-    # the returned index is always this line's zero-based position.
     try:
-      with RECOVERY_LOG_PATH.open("a+", encoding="utf-8") as f:
+      with path.open("a+", encoding="utf-8") as f:
         f.write(payload)
         f.flush()
         f.seek(0)
@@ -264,16 +479,18 @@ def append_log(role: str, content: str) -> int:
       return -1
 
 
-def user_message_by_id(turn_id: int) -> str | None:
-  """Returns the content of the message at `turn_id` if it exists
-  AND is a user message. None otherwise — the /stream handler 400s
-  on None so a stale/garbage id surfaces as a clean error rather
-  than racing onto the wrong message."""
+def user_message_by_id(chat_id: str, turn_id: int) -> str | None:
+  """Returns the content of the message at `turn_id` if it's a user
+  message in this chat. None for any other case (missing, wrong role,
+  _meta line, malformed). The /stream handler 400s on None so the
+  client sees a clean error rather than streaming the wrong message.
+  """
   if turn_id < 0:
     return None
-  if not RECOVERY_LOG_PATH.is_file():
+  path = chat_log_path(chat_id)
+  if not path.is_file():
     return None
-  with RECOVERY_LOG_PATH.open("r", encoding="utf-8") as f:
+  with path.open("r", encoding="utf-8") as f:
     for i, line in enumerate(f):
       if i != turn_id:
         continue
@@ -282,61 +499,87 @@ def user_message_by_id(turn_id: int) -> str | None:
         return None
       try:
         entry = json.loads(line)
-        if entry.get("role") != "user":
-          return None
-        return entry.get("content") or None
       except json.JSONDecodeError:
         return None
+      if entry.get("role") != "user":
+        # _meta lines and assistant lines both hit this branch.
+        return None
+      return entry.get("content") or None
   return None
 
 
-def load_log(limit: int | None = MAX_RENDERED_MESSAGES) -> list[dict]:
-  """Returns the most recent `limit` logged messages in order (or
-  all if limit is None). Default cap is MAX_RENDERED_MESSAGES so a
-  long repair session can't degrade the recovery page render.
+def load_log(
+  chat_id: str, limit: int | None = MAX_RENDERED_MESSAGES,
+) -> list[dict]:
+  """Returns the chat's messages in order, capped at `limit`.
 
-  The on-disk file is unbounded; only what we LOAD is capped.
-  Operator can manually truncate /data/recovery_chat.jsonl.
+  Skips the _meta first line (it's not a user/assistant message).
+  Default cap is MAX_RENDERED_MESSAGES so a long repair session
+  can't degrade the recovery page render.
   """
-  if not RECOVERY_LOG_PATH.is_file():
+  path = chat_log_path(chat_id)
+  if not path.is_file():
     return []
-  out = []
-  with RECOVERY_LOG_PATH.open("r", encoding="utf-8") as f:
-    for line in f:
-      line = line.strip()
-      if not line:
-        continue
-      try:
-        out.append(json.loads(line))
-      except json.JSONDecodeError:
-        continue
-  if limit is not None and len(out) > limit:
-    out = out[-limit:]
-  return out
-
-
-def reset_log() -> None:
-  """Wipes the recovery log. The Reset button calls this."""
-  if RECOVERY_LOG_PATH.is_file():
-    RECOVERY_LOG_PATH.unlink()
-
-
-def latest_user_message() -> str | None:
-  """Returns the most recent user-role message in the log, or None."""
-  if not RECOVERY_LOG_PATH.is_file():
-    return None
-  last = None
-  with RECOVERY_LOG_PATH.open("r", encoding="utf-8") as f:
+  out: list[dict] = []
+  with path.open("r", encoding="utf-8") as f:
     for line in f:
       line = line.strip()
       if not line:
         continue
       try:
         entry = json.loads(line)
-        if entry.get("role") == "user":
-          last = entry.get("content")
       except json.JSONDecodeError:
         continue
+      # Skip the metadata line; it isn't a chat message.
+      if isinstance(entry, dict) and "_meta" in entry and "role" not in entry:
+        continue
+      out.append(entry)
+  if limit is not None and len(out) > limit:
+    out = out[-limit:]
+  return out
+
+
+def reset_log(chat_id: str) -> None:
+  """Truncates the chat to just its _meta line (keeps provider association).
+
+  Used by the per-chat "Reset" button so the user can clear the
+  conversation while keeping the same chat slot. To delete the chat
+  entirely, call delete_chat instead.
+  """
+  path = chat_log_path(chat_id)
+  if not path.is_file():
+    return
+  meta = _read_meta(path)
+  if meta is None:
+    # No recoverable metadata — fall back to a default so the file
+    # remains a valid chat after reset.
+    meta = {"provider": "claude", "created_at": time.time()}
+  with path.open("w", encoding="utf-8") as f:
+    f.write(json.dumps({"_meta": meta}, separators=(",", ":")) + "\n")
+
+
+def latest_user_message(chat_id: str) -> str | None:
+  """Returns the most recent user message in the chat, or None.
+
+  Used as a fallback when /stream is invoked without a turn_id
+  (legacy clients). The current client always sends turn_id, so
+  this is rarely hit in practice.
+  """
+  path = chat_log_path(chat_id)
+  if not path.is_file():
+    return None
+  last = None
+  with path.open("r", encoding="utf-8") as f:
+    for line in f:
+      line = line.strip()
+      if not line:
+        continue
+      try:
+        entry = json.loads(line)
+      except json.JSONDecodeError:
+        continue
+      if entry.get("role") == "user":
+        last = entry.get("content")
   return last
 
 
@@ -378,11 +621,17 @@ async def _terminate_proc(proc: asyncio.subprocess.Process) -> None:
 
 
 async def stream_turn(
-  user_message: str, provider: str | None = None,
+  user_message: str,
+  provider: str | None = None,
+  chat_id: str | None = None,
 ) -> AsyncIterator[str]:
   """Spawns the rescue CLI for one turn and yields SSE events.
 
   `provider` is 'claude' or 'codex' (or None → default_provider()).
+  `chat_id` identifies which chat's log gets the assistant entry;
+  None means don't persist (used by ad-hoc / test paths). When
+  provided, the spawn function appends the final assistant text via
+  `append_log(chat_id, "assistant", ...)`.
 
   Concurrency contract: at most one subprocess runs at a time. A
   second /stream request that arrives while one is in flight gets a
@@ -413,7 +662,7 @@ async def stream_turn(
 
   try:
     chosen = provider or default_provider()
-    async for chunk in _stream_turn_impl(user_message, claim, chosen):
+    async for chunk in _stream_turn_impl(user_message, claim, chosen, chat_id):
       yield chunk
   finally:
     # Release the run slot FIRST, before any await. The release is
@@ -442,21 +691,21 @@ async def stream_turn(
 
 
 async def _stream_turn_impl(
-  user_message: str, claim: dict, provider: str,
+  user_message: str, claim: dict, provider: str, chat_id: str | None,
 ) -> AsyncIterator[str]:
   """Dispatches to the per-provider spawn function and forwards events."""
   if provider == "codex":
-    async for ev in _spawn_codex(user_message, claim):
+    async for ev in _spawn_codex(user_message, claim, chat_id):
       yield ev
     return
   # Default: Claude. Unknown provider names also fall through to Claude
   # so a typo doesn't silently produce zero output.
-  async for ev in _spawn_claude(user_message, claim):
+  async for ev in _spawn_claude(user_message, claim, chat_id):
     yield ev
 
 
 async def _spawn_claude(
-  user_message: str, claim: dict,
+  user_message: str, claim: dict, chat_id: str | None,
 ) -> AsyncIterator[str]:
   """Spawns the Claude CLI, writes the message to stdin, streams stdout.
 
@@ -572,7 +821,8 @@ async def _spawn_claude(
   try:
     assistant_text = "".join(full_assistant_text)
     if assistant_text:
-      append_log("assistant", assistant_text)
+      if chat_id:
+        append_log(chat_id, "assistant", assistant_text)
   except Exception:
     pass
 
@@ -684,7 +934,8 @@ async def _spawn_codex(
   try:
     assistant_text = "".join(full_assistant_text)
     if assistant_text:
-      append_log("assistant", assistant_text)
+      if chat_id:
+        append_log(chat_id, "assistant", assistant_text)
   except Exception:
     pass
 
