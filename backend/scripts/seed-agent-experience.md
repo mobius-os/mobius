@@ -259,18 +259,22 @@ contract-comment mismatch.
 - Mini-apps get a scoped token, not the owner's full JWT. It can access
   storage, proxy, AI, notifications, push — but NOT auth, settings, or chat.
 - Storage 404 on first load is normal — handle with default value.
-- **Storage API asymmetry:** `PUT /api/storage/apps/{id}/notes.json`
-  with body
+- **Storage API asymmetry — and the envelope trap:**
+  `PUT /api/storage/apps/{id}/notes.json` with body
   `{title: "hi", items: [1,2,3]}` writes
-  `{"title":"hi","items":[1,2,3]}` to disk. No envelope, no double
-  stringify. The legacy `{content: JSON.stringify(myData)}` envelope
-  still works (for non-JSON paths it's required), so older mini-apps
-  keep running. **For new code on `.json` files: just
-  `body: JSON.stringify(data)` — one stringify, not two.** GET
-  returns the raw file (parses cleanly with `await res.json()` for
-  JSON files); GET does not mirror PUT shape, and past agents lost
-  rebuild cycles assuming it did. (See the skill for the full API
-  examples.)
+  `{"title":"hi","items":[1,2,3]}` to disk. **For `.json` paths the
+  body IS the document — no envelope, no double stringify.** The
+  envelope form `{content: JSON.stringify(data)}` does NOT get
+  unwrapped on `.json` paths anymore; the server stores the envelope
+  shape literally. The app then loads back `{content: "..."}` instead
+  of its data, falls through to empty state, and the next save
+  overwrites real data with empty state. Multiple apps were silently
+  destroying user data this way until 2026-05-26 when the source bug
+  was fixed across 18 mini-apps. **Rule of thumb: `.json` → `body:
+  JSON.stringify(data)`; everything else → `body:
+  JSON.stringify({content: text})`.** GET returns the raw file
+  (parses cleanly with `await res.json()`); GET does not mirror PUT
+  shape.
 - **Floating composer:** `.chat__foot` is `position:absolute` with
   transparent background. Do NOT add background to `.chat__foot` or
   wrap its controls in a shared opaque container — that breaks the
