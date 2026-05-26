@@ -127,19 +127,31 @@ order is implicit.
   point — proves the app contract works and gives the user somewhere
   to click.
 
-## Shell structure
+## Querying the file structure
 
-| File | Controls |
-|------|---------|
-| `Shell/Shell.jsx` | Logo bar, drawer toggle, layout, system events |
-| `Shell/Shell.css` | Logo bar and layout styles |
-| `ChatView/ChatView.jsx` | Chat messages, streaming, scroll |
-| `ChatView/ChatView.css` | Chat styles |
-| `ChatView/ChatInputBar.jsx` | Chat input, voice, file upload, send/stop |
-| `Drawer/Drawer.jsx` | Side drawer, chat list, app list |
-| `Drawer/Drawer.css` | Drawer styles |
-| `AppCanvas/AppCanvas.jsx` | Mini-app iframe |
-| `index.css` | Global CSS variables and resets |
+Hand-written directory tables go stale the moment a file is renamed.
+Past versions of this seed claimed files like `ChatInput.jsx` that
+no longer existed, which sent the agent on dead-end searches and
+caused a real envelope-format bug downstream. The replacement:
+
+**`describe-tree.py`** walks a directory and prints
+`filename — first-sentence-of-docstring` for each file. Use it
+instead of trusting any hardcoded list, including this one:
+
+```bash
+python3 /app/scripts/describe-tree.py /data/shell/src/components/ --depth 1 --quiet
+python3 /app/scripts/describe-tree.py /app/app/ --depth 1 --quiet
+python3 /app/scripts/describe-tree.py /data/apps/ --depth 1 --quiet
+```
+
+Convention (load-bearing — the seed expects you to follow it):
+**every new file you write starts with a brief docstring or
+top-comment** describing what it does in one sentence. Python →
+module docstring. JSX/TS → `/* ... */` block. Shell → leading `#`
+comments. CSS → leading `/* ... */`. Without this, the next agent
+reading describe-tree.py output sees `(no description)` for your
+file and has to open it to figure out what it does — exactly the
+friction this convention exists to remove.
 
 ## Design principles
 

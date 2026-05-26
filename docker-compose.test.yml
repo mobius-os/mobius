@@ -36,6 +36,10 @@ services:
     volumes:
       - ./backend/app:/app/app
       - ./backend/tests:/app/tests
+      # describe-tree.py + entrypoint + register_app are imported by
+      # tests; mount the live scripts dir so renames/new scripts are
+      # picked up without rebuilding the image.
+      - ./backend/scripts:/app/scripts
       - ./frontend/public/app-frame.html:/app/app-frame.html
     environment:
       - SECRET_KEY=test-secret-key-at-least-32-characters-long

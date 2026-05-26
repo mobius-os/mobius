@@ -49,7 +49,7 @@ for a small "frozen island" that keeps recovery reachable.
 | `/app/scripts/` | yes | Utility scripts (rebuild_shell.sh, init scripts). |
 | `/data/apps/<slug>/`, `/data/shared/` | yes | Mini-app source + shared data. |
 | `/app/app-baked/`, `/app/scripts-baked/`, `/app/static/`, `/app/shell-src/` | NO | Immutable recovery sources (chmod a-w). `recovery_restore.sh` copies from these back to live if you break something. |
-| `/app/app/routes/recover*.py`, `/app/app/recover_chat*.py`, `/app/app/recover_auth.py`, `/app/app/main.py`, `/app/app/routes/__init__.py`, `/app/app/auth.py`, `/app/app/database.py`, `/app/app/config.py`, `/app/app/models.py`, `/app/scripts/entrypoint.sh`, `/app/scripts/recovery_restore.sh` | NO | Frozen recovery island + boot-chain wiring. Listed in `/app/protected-files.txt`. Chmod 444/555 root-owned. The non-recover_* files are frozen because main.py imports them at module load; a broken auth/database/config/models would kill uvicorn boot and take /recover with it. Tampering by you is blocked at the OS level — don't try to chmod or rewrite these. |
+| `/app/app/routes/recover*.py`, `/app/app/recover_chat*.py`, `/app/app/recover_auth.py`, `/app/app/recover_oauth.py`, `/app/app/main.py`, `/app/app/routes/__init__.py`, `/app/app/auth.py`, `/app/app/database.py`, `/app/app/config.py`, `/app/app/models.py`, `/app/scripts/entrypoint.sh`, `/app/scripts/recovery_restore.sh` | NO | Frozen recovery island + boot-chain wiring. Listed in `/app/protected-files.txt`. Chmod 444/555 root-owned. The non-recover_* files are frozen because main.py imports them at module load; a broken auth/database/config/models would kill uvicorn boot and take /recover with it. Tampering by you is blocked at the OS level — don't try to chmod or rewrite these. |
 | `/data/cli-auth/`, `/data/.secret-key` | NO | Credentials, signing key. |
 
 **Important: edits live in the container's writable layer.** Your
@@ -746,6 +746,21 @@ It CANNOT access: auth, settings, or chat endpoints.
 ## Modifying the shell
 
 The shell UI is fully editable. Source lives at `/data/shell/src/`.
+
+**Don't trust hardcoded file lists** — they go stale. To see what
+lives in the shell (or any directory on the platform), run:
+
+```bash
+python3 /app/scripts/describe-tree.py /data/shell/src/components/ --depth 1 --quiet
+```
+
+The script prints `filename — first-sentence-of-docstring` for
+each file, so the listing always matches reality. Works on any
+directory (`/app/app/`, `/data/apps/`, mini-app folders). When
+you write a NEW file, start it with a one-sentence docstring or
+top-comment — that's what describe-tree extracts. Python →
+`"""..."""`, JSX → `/* ... */`, shell → leading `#` lines, CSS
+→ `/* ... */`.
 
 ### CSS-only changes (no rebuild needed)
 
