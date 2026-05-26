@@ -201,9 +201,23 @@ def recover_chat_delete(
   payload: dict = Body(...),
   moebius_recover: str | None = Cookie(default=None),
 ):
-  """Deletes a chat permanently. 404 if it didn't exist."""
+  """Deletes a chat permanently. 404 if it didn't exist.
+
+  Also terminates the rescue subprocess IF one is currently
+  running for this chat — without that, an in-flight agent would
+  keep running with elevated write access, and its final
+  append_log call would fail into a swallowed exception (codex
+  reviewer flagged). Other chats' rescue agents are unaffected.
+  """
   _require_session(moebius_recover)
   chat_id = _extract_chat_id(payload)
+  # Kill any in-flight rescue for THIS chat before deleting its
+  # log file. terminate_active_run_for is a no-op if the active run
+  # (if any) belongs to a different chat.
+  try:
+    recover_chat_runner.terminate_active_run_for(chat_id)
+  except Exception:
+    pass
   try:
     existed = recover_chat_runner.delete_chat(chat_id)
   except ValueError as exc:

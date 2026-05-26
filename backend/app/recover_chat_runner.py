@@ -118,19 +118,23 @@ _current_run: dict | None = None
 _run_lock = threading.Lock()
 
 
-def _claim_run() -> dict | None:
+def _claim_run(chat_id: str | None = None) -> dict | None:
   """Atomically claim the run slot.
 
   Returns a fresh claim dict on success, or None if a turn is
   already in flight. The claim has `proc: None` initially; the
   caller fills it after spawning the subprocess so the cleanup path
   can find the process to terminate.
+
+  `chat_id` is recorded on the claim so `terminate_active_run_for`
+  can decide whether the active subprocess belongs to a specific
+  chat (e.g. when that chat is deleted mid-stream).
   """
   global _current_run
   with _run_lock:
     if _current_run is not None:
       return None
-    _current_run = {"proc": None}
+    _current_run = {"proc": None, "chat_id": chat_id}
     return _current_run
 
 
@@ -146,6 +150,34 @@ def _release_run(claim: dict) -> None:
   with _run_lock:
     if _current_run is claim:
       _current_run = None
+
+
+def terminate_active_run_for(chat_id: str) -> bool:
+  """Kills the active recovery subprocess IF it's for `chat_id`.
+
+  Called from delete_chat — if the user deletes a chat that
+  currently has a rescue agent running on it, the agent's output
+  has nowhere to land (the log file is being unlinked), so kill
+  it. Other chats' rescue agents are left alone.
+
+  Returns True if a matching run was killed, False if there was
+  nothing to terminate or the active run is for a different chat.
+  """
+  global _current_run
+  with _run_lock:
+    claim = _current_run
+    if claim is None or claim.get("chat_id") != chat_id:
+      return False
+  proc = claim.get("proc")
+  if proc is not None:
+    try:
+      proc.kill()
+    except (ProcessLookupError, OSError):
+      pass
+  with _run_lock:
+    if _current_run is claim:
+      _current_run = None
+  return True
 
 
 def terminate_active_run() -> bool:
@@ -216,8 +248,15 @@ def _sse(event: dict) -> str:
   return f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
 
 
-def _system_prompt() -> str:
+def _system_prompt(chat_id: str | None = None) -> str:
   """Recovery agent instructions. Minimal — agent is here to fix.
+
+  `chat_id` is interpolated into the "read prior turns" instruction
+  so the agent knows which per-chat log to read. Multi-chat moved
+  the log from a single /data/recovery_chat.jsonl to per-chat files
+  at /data/recovery/chats/<chat_id>.jsonl; older versions of this
+  prompt hardcoded the legacy path and silently broke multi-turn
+  context after the migration (Claude review caught it).
 
   Updated 2026-05-26 per multi-reviewer findings:
     - `diff -ru` not `git diff`: /app/app-baked/ has no .git
@@ -226,15 +265,26 @@ def _system_prompt() -> str:
     - no AskUserQuestion (recovery UI has only a textarea)
     - no API calls (no AGENT_TOKEN, no API_BASE_URL set here —
       this is intentionally filesystem-only)
+  Updated 2026-05-26 (later): take chat_id, interpolate the per-
+  chat log path so the agent reads the right file.
   """
+  if chat_id:
+    log_path = f"/data/recovery/chats/{chat_id}.jsonl"
+  else:
+    # Defensive fallback for ad-hoc invocations without a chat_id.
+    # The first line of the per-chat file is a `_meta` record; the
+    # legacy file has no such header. The agent should skip lines
+    # starting with `{"_meta"` when iterating.
+    log_path = "/data/recovery/chats/*.jsonl  (multi-chat layout — list-chats first)"
   return (
     "You are running inside the Mobius recovery chat. The user has "
     "reached you here because something in the platform is broken "
     "and they need help fixing it.\n\n"
-    "BEFORE answering, run `Read /data/recovery_chat.jsonl` to see "
-    "prior turns in this session (each line is a JSON object with "
-    "role + content). The CLI is invoked fresh per turn so there is "
-    "no in-process memory of earlier exchanges.\n\n"
+    f"BEFORE answering, run `Read {log_path}` to see prior turns "
+    "in this session. Each line is a JSON object with role + "
+    "content; the FIRST line is a `_meta` record (provider + "
+    "created_at) — skip it. The CLI is invoked fresh per turn so "
+    "there is no in-process memory of earlier exchanges.\n\n"
     "You have filesystem-only access. There is NO $AGENT_TOKEN, NO "
     "$API_BASE_URL, NO $CHAT_ID env var here — the production chat "
     "API plumbing may be broken. Do not try to POST to /api/...\n\n"
@@ -254,11 +304,14 @@ def _system_prompt() -> str:
     "  /app/app/routes/__init__.py        router exports\n"
     "  /app/app/auth.py                   production auth\n"
     "  /app/app/database.py               DB engine init\n"
+    "  /app/app/config.py                 env settings\n"
+    "  /app/app/models.py                 SQLAlchemy table defs\n"
     "  /app/app/routes/recover.py         recovery page\n"
     "  /app/app/routes/recover_html.py    recovery HTML\n"
     "  /app/app/recover_chat.py           this chat's endpoints\n"
     "  /app/app/recover_chat_runner.py    this runner\n"
     "  /app/app/recover_auth.py           recovery auth\n"
+    "  /app/app/recover_oauth.py          recovery OAuth\n"
     "  /app/scripts/entrypoint.sh         boot\n"
     "  /app/scripts/recovery_restore.sh   restore from baked\n\n"
     "Workflow:\n"
@@ -699,7 +752,7 @@ async def stream_turn(
   """
   # Claim the run slot atomically. If it's already taken, return a
   # structured SSE error rather than queueing.
-  claim = _claim_run()
+  claim = _claim_run(chat_id=chat_id)
   if claim is None:
     yield _sse({
       "type": "error",
@@ -783,13 +836,13 @@ async def _spawn_claude(
     "--verbose",
     "--include-partial-messages",
     "--dangerously-skip-permissions",
-    "--system-prompt", _system_prompt(),
+    "--system-prompt", _system_prompt(chat_id),
   ]
 
   # cwd=/data so the agent's relative-path commands in the system
   # prompt resolve consistently. Without this, cwd inherits from
   # uvicorn's launch dir (/app) which contradicts the prompt's
-  # `Read /data/recovery_chat.jsonl` references.
+  # `Read /data/recovery/chats/<chat_id>.jsonl` references.
   proc = await asyncio.create_subprocess_exec(
     *cmd,
     stdin=asyncio.subprocess.PIPE,
@@ -920,9 +973,21 @@ async def _spawn_codex(
   )
   claim["proc"] = proc
 
+  # Codex `exec --json` has no separate --system-prompt flag — the
+  # stdin payload IS the prompt. So prepend the recovery system
+  # prompt to the user message, separated by a clear marker so the
+  # model treats them as distinct intents. Without this, the Codex
+  # rescue agent has no context about the recovery surface (write
+  # surface, frozen island, per-chat log path) and behaves like a
+  # bare codex session — Claude reviewer flagged this gap.
   assert proc.stdin is not None
+  combined = (
+    _system_prompt(chat_id)
+    + "\n\n---\n\nUser message follows:\n\n"
+    + user_message
+  )
   try:
-    proc.stdin.write(user_message.encode("utf-8"))
+    proc.stdin.write(combined.encode("utf-8"))
     await proc.stdin.drain()
   except (BrokenPipeError, ConnectionResetError):
     pass

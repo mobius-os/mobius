@@ -95,6 +95,12 @@ def _extract_python(head: str) -> str:
   Skips a shebang line and any leading comments. Returns empty if
   the file doesn't start with a docstring (which is the convention
   this script encourages — files SHOULD start with one).
+
+  Anchors the closing delimiter to the SAME triple-quote type the
+  docstring opened with: a `\"\"\"`-opened docstring containing a
+  `'''` substring (e.g. SQL examples) must not be cut at the
+  embedded `'''`. Two-branch alternation rather than one mixed
+  regex achieves this without needing a regex backreference.
   """
   # Skip shebang + leading comments + blank lines.
   lines = head.split("\n")
@@ -103,11 +109,15 @@ def _extract_python(head: str) -> str:
     lines[i].startswith("#") or not lines[i].strip()
   ):
     i += 1
-  remainder = "\n".join(lines[i:])
-  m = re.match(r'\s*(?:"""|\'\'\')(.*?)(?:"""|\'\'\')', remainder, re.DOTALL)
-  if not m:
-    return ""
-  return _first_sentence(m.group(1))
+  remainder = "\n".join(lines[i:]).lstrip()
+  # Try each delimiter type explicitly; pick whichever opens first.
+  for opener, closer in (('"""', '"""'), ("'''", "'''")):
+    if remainder.startswith(opener):
+      end = remainder.find(closer, len(opener))
+      if end == -1:
+        return ""
+      return _first_sentence(remainder[len(opener):end])
+  return ""
 
 
 def _extract_js_ts(head: str) -> str:
@@ -170,12 +180,28 @@ def _extract_md(head: str) -> str:
 
   Skips a YAML frontmatter block (`---\n...\n---`) at the top, which
   many of our .pm/ tickets use.
+
+  The frontmatter end marker is `\\n---\\n` (newline-dash-dash-dash-
+  newline) anchored as a WHOLE line, not just any substring `---`.
+  Without that anchor, a frontmatter containing a YAML block scalar
+  with `---` on its own line (e.g. `description: |\\n  ---\\n`)
+  would be cut short and the script would extract YAML mid-block
+  as the description. Claude reviewer caught this edge case.
   """
   text = head.lstrip()
   if text.startswith("---\n") or text.startswith("---\r\n"):
-    end = text.find("\n---", 4)
-    if end != -1:
-      text = text[end + 4 :].lstrip()
+    # Search for the closing `---` AS A WHOLE LINE. Anchor with both
+    # leading and trailing newline so a `---` inside a YAML block
+    # scalar (indented or with trailing content) doesn't match.
+    for marker in ("\n---\n", "\n---\r\n"):
+      end = text.find(marker, 4)
+      if end != -1:
+        text = text[end + len(marker):].lstrip()
+        break
+    else:
+      # File starts with `---\n` but has no proper closing line —
+      # treat as malformed and skip the frontmatter heuristic.
+      pass
   # Prefer the first heading.
   for line in text.split("\n"):
     line = line.strip()

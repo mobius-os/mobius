@@ -1553,6 +1553,221 @@ async def test_codex_login_times_out_if_device_code_never_appears(
   assert "timed out" in r.text.lower() or "timeout" in r.text.lower()
 
 
+def test_system_prompt_lists_all_frozen_island_files():
+  """The recovery agent's system prompt enumerates the frozen-island
+  paths so the agent doesn't waste turns trying to edit them. Codex
+  reviewer flagged: the list was missing recover_oauth.py, config.py,
+  and models.py even though all three are in protected-files.txt
+  and chmod 444 root-owned.
+  """
+  from app import recover_chat_runner as rcr
+  prompt = rcr._system_prompt("abc")
+  expected = [
+    "main.py",
+    "routes/__init__.py",
+    "auth.py",
+    "database.py",
+    "config.py",
+    "models.py",
+    "recover_chat.py",
+    "recover_chat_runner.py",
+    "recover_auth.py",
+    "recover_oauth.py",
+    "entrypoint.sh",
+    "recovery_restore.sh",
+  ]
+  for path in expected:
+    assert path in prompt, f"frozen-island list must include {path}"
+
+
+def test_terminate_active_run_for_only_kills_matching_chat(monkeypatch):
+  """delete_chat must kill the rescue subprocess if (and only if) the
+  active run is for the chat being deleted. A run for a different
+  chat must be left alone. Codex reviewer flagged: an in-flight
+  rescue survived chat deletion and its final append_log silently
+  failed."""
+  from app import recover_chat_runner as rcr
+
+  killed = {"flag": False}
+
+  class _FakeProc:
+    returncode = None
+    def kill(self):
+      killed["flag"] = True
+
+  # Active run for chat "A". Deleting chat "B" should NOT kill it.
+  rcr._current_run = {"proc": _FakeProc(), "chat_id": "A"}
+  try:
+    assert rcr.terminate_active_run_for("B") is False
+    assert killed["flag"] is False, "deleting chat B must not kill chat A's run"
+    assert rcr._current_run is not None, "claim for chat A must survive"
+
+    # Now delete chat "A" — should kill.
+    assert rcr.terminate_active_run_for("A") is True
+    assert killed["flag"] is True
+    assert rcr._current_run is None
+  finally:
+    rcr._current_run = None
+
+
+def test_terminate_active_codex_login_kills_and_clears_state():
+  """Factory reset must kill an in-flight `codex login --device-auth`
+  subprocess. Otherwise a delayed auth completion can recreate
+  /data/cli-auth/codex/auth.json on an instance that was just
+  factory-reset. Codex reviewer caught this as HIGH severity."""
+  from app import recover_oauth
+
+  killed = {"flag": False}
+
+  class _FakeProc:
+    returncode = None
+    def kill(self):
+      killed["flag"] = True
+
+  recover_oauth._codex_login_procs["active"] = _FakeProc()
+  recover_oauth._codex_login_status.pop("result", None)
+  try:
+    result = recover_oauth.terminate_active_codex_login()
+    assert result is True
+    assert killed["flag"] is True
+    assert "active" not in recover_oauth._codex_login_procs
+    assert recover_oauth._codex_login_status.get("result") == "failed"
+
+    # No-op when there's nothing active.
+    assert recover_oauth.terminate_active_codex_login() is False
+  finally:
+    recover_oauth._codex_login_procs.pop("active", None)
+    recover_oauth._codex_login_status.pop("result", None)
+
+
+def test_recover_page_redirects_to_login_on_stale_cookie(
+  client, auth_cookie,
+):
+  """GET /recover with a valid HMAC cookie but a deleted owner row
+  must render the login form, not the dashboard. Codex reviewer
+  caught the asymmetry: POST endpoints re-check owner-existence,
+  GET /recover was only checking the HMAC.
+  """
+  # Sanity: dashboard renders while the owner exists.
+  r = client.get("/recover", cookies=auth_cookie)
+  assert r.status_code == 200
+  assert "Restore" in r.text or "Backup" in r.text or "Recovery" in r.text
+
+  # Delete the owner.
+  from app.database import SessionLocal
+  from app import models
+  db = SessionLocal()
+  db.query(models.Owner).filter(models.Owner.username == "tester").delete()
+  db.commit()
+  db.close()
+
+  # Same cookie, no owner — must NOT render the dashboard.
+  r = client.get("/recover", cookies=auth_cookie)
+  assert r.status_code == 200
+  # The login form has a password field; the dashboard does not.
+  assert 'type="password"' in r.text.lower() or 'name="password"' in r.text.lower()
+
+
+def test_system_prompt_references_per_chat_log_path():
+  """Multi-chat moved the recovery log from /data/recovery_chat.jsonl
+  (legacy single file) to /data/recovery/chats/<chat_id>.jsonl.
+  The system prompt must point the agent at the CURRENT per-chat
+  path so it can read prior turns; pointing at the legacy path
+  silently breaks multi-turn context (Claude review caught this).
+  """
+  from app import recover_chat_runner as rcr
+  prompt = rcr._system_prompt("abc123")
+  assert "/data/recovery/chats/abc123.jsonl" in prompt, (
+    "system prompt must include the per-chat log path so the agent "
+    "knows which file to read for prior turns"
+  )
+  assert "/data/recovery_chat.jsonl" not in prompt, (
+    "system prompt must not reference the LEGACY single-file path; "
+    "that file is unlinked after migration"
+  )
+
+  # Defensive: no chat_id → fall back, but DON'T point at the legacy
+  # singleton (we want the agent to discover the multi-chat layout
+  # rather than read a deleted file).
+  fallback = rcr._system_prompt(None)
+  assert "/data/recovery/chats/" in fallback
+
+
+def test_codex_spawn_prepends_system_prompt_to_user_message(
+  monkeypatch, tmp_path,
+):
+  """Codex `exec --json` has no --system-prompt flag — the recovery
+  agent needs its context prepended to the stdin payload. Without
+  this, the Codex rescue agent has no knowledge of the recovery
+  surface, write-surface layout, or per-chat log path.
+
+  Claude review flagged: _spawn_codex was passing only the user
+  message via stdin, dropping the system prompt entirely.
+  """
+  import asyncio as _asyncio
+  from app import recover_chat_runner as rcr
+  monkeypatch.setattr(
+    "app.recover_chat_runner.RECOVERY_CHATS_DIR",
+    tmp_path / "chats",
+  )
+
+  written: list[bytes] = []
+
+  class _RecordingStdin:
+    def write(self, data):
+      written.append(data)
+    async def drain(self): pass
+    def close(self): pass
+
+  class _StubStdout:
+    async def readline(self):
+      return b""
+
+  class _StubProc:
+    def __init__(self):
+      self.stdin = _RecordingStdin()
+      self.stdout = _StubStdout()
+      self.stderr = _StubStdout()
+      self.returncode = None
+    def kill(self): self.returncode = -9
+    def terminate(self): self.returncode = -15
+    async def wait(self):
+      if self.returncode is None:
+        self.returncode = 0
+      return self.returncode
+
+  async def fake_spawn(*_a, **_kw):
+    return _StubProc()
+
+  monkeypatch.setattr(
+    "app.recover_chat_runner.asyncio.create_subprocess_exec",
+    fake_spawn,
+  )
+  monkeypatch.setattr(
+    "app.recover_chat_runner.shutil.which", lambda _: "/fake/codex",
+  )
+
+  chat_id = rcr.create_chat("codex")
+  events = []
+  async def _drive():
+    async for chunk in rcr.stream_turn(
+      "diagnose the broken backend", provider="codex", chat_id=chat_id,
+    ):
+      events.append(chunk)
+  _asyncio.run(_drive())
+
+  combined = b"".join(written).decode()
+  assert "diagnose the broken backend" in combined, (
+    "user message must reach stdin"
+  )
+  assert "running inside the Mobius recovery chat" in combined, (
+    "system prompt must be prepended so Codex has recovery context"
+  )
+  assert f"/data/recovery/chats/{chat_id}.jsonl" in combined, (
+    "system prompt must include the per-chat log path"
+  )
+
+
 def test_factory_reset_terminates_active_recovery_run(monkeypatch):
   """Factory reset must kill an in-flight recovery rescue agent so
   it can't keep writing to /data/* after the reset wipes credentials.

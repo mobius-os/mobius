@@ -70,6 +70,35 @@ def test_extract_python_no_docstring_returns_empty():
   assert describe_tree._extract_python(src) == ""
 
 
+def test_extract_python_double_quoted_with_embedded_single_triple():
+  """A `\"\"\"`-opened docstring containing `'''` must NOT terminate
+  early at the embedded `'''`. Claude review caught the original
+  regex (alternation on both ends) mis-terminating in this case.
+  """
+  src = (
+    '"""This module handles \'time-series\' data.\n'
+    "\n"
+    "Uses '''raw''' SQL examples like this.\n"
+    '"""\n'
+  )
+  result = describe_tree._extract_python(src)
+  assert result == "This module handles 'time-series' data."
+
+
+def test_extract_python_single_quoted_with_embedded_double_triple():
+  """Symmetric case: `'''`-opened docstring containing `\"\"\"`
+  must terminate only at the matching `'''`.
+  """
+  src = (
+    "'''Module description.\n"
+    "\n"
+    'Has \"\"\"some literal\"\"\" inside.\n'
+    "'''\n"
+  )
+  result = describe_tree._extract_python(src)
+  assert result == "Module description."
+
+
 # ---------------------------------------------------------------------
 # _extract_js_ts — leading /* */ or // comments
 # ---------------------------------------------------------------------
@@ -144,6 +173,42 @@ def test_extract_md_skips_frontmatter():
     "Description.\n"
   )
   assert describe_tree._extract_md(src) == "Real heading"
+
+
+def test_extract_md_frontmatter_with_embedded_dashes_in_block_scalar():
+  """YAML supports `---` inside block scalars. The frontmatter end-
+  marker detector must match `\\n---\\n` as a WHOLE LINE so an
+  embedded dash-dash-dash doesn't truncate the frontmatter early.
+
+  Claude review flagged: `text.find("\\n---", 4)` matched ANY
+  substring starting with `\\n---`, including the dashes inside a
+  literal block. The whole-line anchor (`\\n---\\n`) avoids this.
+  """
+  src = (
+    "---\n"
+    "title: My Feature\n"
+    "description: |\n"
+    "  Some context\n"
+    "  ---\n"
+    "  More context\n"
+    "tags: [foo]\n"
+    "---\n"
+    "\n"
+    "# Real heading\n"
+  )
+  assert describe_tree._extract_md(src) == "Real heading"
+
+
+def test_extract_md_malformed_frontmatter_falls_back():
+  """A file that opens with `---\\n` but never closes the
+  frontmatter shouldn't crash — fall back to extracting from
+  whatever text follows."""
+  src = "---\nno closing marker\nstill in frontmatter\n"
+  # The fallback: no real text to extract; behavior is "best effort,
+  # don't crash." We just verify it returns *something* (could be
+  # empty or the first line) without raising.
+  result = describe_tree._extract_md(src)
+  assert isinstance(result, str)
 
 
 # ---------------------------------------------------------------------

@@ -306,14 +306,66 @@ async def claude_code(
 
 # --- Codex device-auth flow -----------------------------------------
 
+# Absolute cap on how long a codex device-auth subprocess is allowed
+# to live waiting for the user to complete authentication. The 15s
+# `asyncio.timeout` in codex_start only bounds the INITIAL readline
+# loop (until the device code is parsed); after that, _watch_codex_login
+# does a bare `proc.wait()` with no deadline. A user who walks away
+# would leave the subprocess running indefinitely. Codex review caught
+# this.
+_CODEX_LOGIN_MAX_LIFETIME = 600  # 10 minutes — generous for slow auth
+
+
 async def _watch_codex_login(proc) -> None:
-  """Awaits proc.wait() and records the outcome."""
-  await proc.wait()
+  """Awaits proc.wait() (with a lifetime cap) and records the outcome.
+
+  If the user never completes authentication within
+  _CODEX_LOGIN_MAX_LIFETIME, the subprocess is killed and the status
+  reads as 'failed'. Without this cap, an abandoned login would
+  outlive every other recovery action and could in principle complete
+  (and recreate /data/cli-auth/codex/auth.json) long after the user
+  has moved on — the same class of leak factory_reset has to guard
+  against.
+  """
+  try:
+    await asyncio.wait_for(proc.wait(), timeout=_CODEX_LOGIN_MAX_LIFETIME)
+  except asyncio.TimeoutError:
+    try:
+      proc.kill()
+    except (ProcessLookupError, OSError):
+      pass
+    try:
+      await asyncio.wait_for(proc.wait(), timeout=2.0)
+    except (asyncio.TimeoutError, BaseException):
+      pass
   if _codex_login_procs.get("active") is proc:
     _codex_login_status["result"] = (
       "complete" if proc.returncode == 0 else "failed"
     )
     _codex_login_procs.pop("active", None)
+
+
+def terminate_active_codex_login() -> bool:
+  """Kills any in-flight codex device-auth subprocess.
+
+  Called from destructive admin actions (factory reset) so a login
+  that completes AFTER the reset can't recreate the credentials the
+  reset just wiped. Returns True if a proc was active and got
+  killed, False if there was nothing to terminate. Codex review
+  caught the gap: factory_reset was killing the recovery rescue
+  agent but not the device-auth login proc, so /data/cli-auth/codex/
+  could be repopulated post-reset.
+  """
+  proc = _codex_login_procs.pop("active", None)
+  if proc is None:
+    return False
+  if proc.returncode is None:
+    try:
+      proc.kill()
+    except (ProcessLookupError, OSError):
+      pass
+  _codex_login_status["result"] = "failed"
+  return True
 
 
 @router.post("/recover/provider/codex/start")
