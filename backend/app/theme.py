@@ -22,27 +22,35 @@ DEFAULT_THEME = """\
      bubbles + drawer + banners paint --surface / --surface2,
      borders are 1px lines on top of those surfaces). Keep these
      SOLID — making them rgba(..., <1) lets whatever sits behind
-     bleed through and makes text unreadable. */
-  --bg: #0d0f14;
-  --surface: #151820;
-  --surface2: #1c2028;
-  --border: #2a2f3a;
-  --border-light: #1e2330;
+     bleed through and makes text unreadable.
 
-  /* Text colors — paint on top of the opaque fills above. */
-  --text: #d8d8dc;
-  --muted: #6b6b76;
+     Palette neutralized in 2026-05: dropped the slight blue tint
+     (--bg #0d0f14 → #0d0d0d, surfaces same step) so the dark
+     mode reads as a true charcoal stack rather than blue-grey. */
+  --bg: #0d0d0d;
+  --surface: #171717;
+  --surface2: #212121;
+  --border: #2a2a2a;
+  --border-light: #1f1f1f;
+
+  /* Text colors — paint on top of the opaque fills above. --muted
+     was #6b6b76 which ran ~3.8:1 vs --bg and failed WCAG AA on
+     helper copy. Bumped to #9b9b9b (~6.4:1) so subtitles, section
+     labels, and provider-status strings actually read. */
+  --text: #ececec;
+  --muted: #9b9b9b;
 
   /* Accent palette — small accents (buttons, links, focus rings,
      glow). Free to be vivid; --accent-dim is allowed to be
-     translucent because it's used as a glow, not as a fill. */
+     translucent because it's used as a glow, not as a fill.
+     KEEP the purple — it's the platform's brand mark. */
   --accent: #8b6cf7;
   --accent-hover: #7c5ce6;
-  --accent-dim: rgba(139, 108, 247, 0.12);
+  --accent-dim: rgba(139, 108, 247, 0.14);
 
   /* Status colors. */
-  --danger: #ef4444;
-  --green: #059669;
+  --danger: #f87171;
+  --green: #10b981;
 
   /* Typography. */
   --font: 'Inter', system-ui, -apple-system, sans-serif;

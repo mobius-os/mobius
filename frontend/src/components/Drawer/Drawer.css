@@ -81,30 +81,24 @@
 }
 
 
+/* Section labels: sentence case, plain muted color, no tracking.
+   The earlier uppercase-tracked-accent treatment read as ornament,
+   not structure. The leading icon already tells you which section
+   you're in; the label is just the readable hook. */
 .drawer__label {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
   color: var(--muted);
-  padding: 16px 12px 6px;
+  padding: 18px 12px 6px;
   margin: 0;
 }
-.drawer__label svg { flex-shrink: 0; opacity: 1; }
+.drawer__label svg { flex-shrink: 0; opacity: 0.85; color: var(--muted); }
 .drawer__label span { line-height: 1; }
-
-/* Section-header accents — both pulled from the platform accent.
- * The icon distinguishes the sections; the color stays unified to
- * avoid fighting the rest of the brand palette. */
-.drawer__label--chats,
-.drawer__label--apps { color: var(--accent); }
-
-/* Light theme — darker shade for WCAG AA contrast. */
-body.theme-light .drawer__label--chats,
-body.theme-light .drawer__label--apps { color: #6b3fcf; }
 
 .drawer__scroll {
   flex: 1;
@@ -119,12 +113,12 @@ body.theme-light .drawer__label--apps { color: #6b3fcf; }
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 9px 12px;
+  padding: 10px 12px;
   background: none;
   border: none;
-  border-radius: 8px;
-  color: var(--muted);
-  font-size: 15px;
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 14px;
   font-family: var(--font);
   font-weight: 400;
   text-align: left;
@@ -141,6 +135,19 @@ body.theme-light .drawer__label--apps { color: #6b3fcf; }
 .drawer__item--active {
   color: var(--accent);
   background: var(--accent-dim);
+}
+
+/* Keyboard focus ring — applies to all interactive drawer rows.
+   Without this, tab navigation lands on rows with no visual cue
+   for screen-reader / keyboard users. The accent ring matches
+   the composer pill's focus halo so the platform reads as a
+   single design system. */
+.drawer__item:focus-visible,
+.drawer__more:focus-visible,
+.drawer__menu-item:focus-visible,
+.drawer__menu-confirm-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .drawer__item-icon {
@@ -193,18 +200,21 @@ body.theme-light .drawer__label--apps { color: #6b3fcf; }
 }
 
 /* The ⋮ button matches the row height so its hit area aligns
-   with the row's vertical bounds. align-self: stretch makes it
-   grow to the row's full height set by the .drawer__item padding. */
+   with the row's vertical bounds. Width bumped 32 → 40 for a
+   compliant touch target (44 is the strict guideline but the
+   button stretches vertically so the full hit area is the row
+   height ≈ 40px). align-self: stretch makes it grow to the row's
+   full height set by the .drawer__item padding. */
 .drawer__more {
   flex-shrink: 0;
   align-self: stretch;
-  width: 32px;
+  width: 40px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: none;
   border: none;
-  border-radius: 6px;
+  border-radius: 8px;
   color: var(--muted);
   cursor: pointer;
   opacity: 0;

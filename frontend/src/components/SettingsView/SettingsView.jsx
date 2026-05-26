@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { api } from '../../api/client.js'
 import { authQueries, settingsQueries, themeQueries } from '../../hooks/queries.js'
 import * as themeService from '../../lib/themeService.js'
@@ -200,16 +201,12 @@ export default function SettingsView({ onThemeChange }) {
         <section className="settings__section settings__section--compact">
           <div className="settings__row">
             <span className="settings__label">Dark mode</span>
-            <button
-              className={`settings__toggle ${!lightMode ? 'settings__toggle--on' : ''}`}
-              onClick={toggleTheme}
+            <Switch
+              checked={!lightMode}
+              onCheckedChange={toggleTheme}
               disabled={themeSwitching}
-              role="switch"
-              aria-checked={!lightMode}
               aria-label="Toggle dark mode"
-            >
-              <span className="settings__toggle-knob" />
-            </button>
+            />
           </div>
           {themeError && (
             <p className="settings__error">{themeError}</p>
