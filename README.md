@@ -99,8 +99,8 @@ Möbius ships with a deliberately minimal chat — no file upload, no scheduled 
     <td align="center" width="50%"><img src="assets/screenshots/upload-04-in-use.png" alt="Composer with the paperclip restored, a file attached inline in the sent message, and the agent's reply describing what it sees." /></td>
   </tr>
   <tr>
-    <td align="center"><sub>before — no file upload</sub></td>
-    <td align="center"><sub>after — file upload added by the agent</sub></td>
+    <td align="center"><sub>Instructing the agent to add file upload to chat</sub></td>
+    <td align="center"><sub>Chat upload added</sub></td>
   </tr>
 </table>
 
