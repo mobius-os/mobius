@@ -63,9 +63,12 @@ be a one-off (container-only) or permanent (host-repo too).
 **If you break the live copy of something, the partner can recover
 via the `/recover` page or by talking to a fresh you in the recovery
 chat at `/recover/chat`.** That chat runs its own minimal stack
-(separate auth, separate runner, separate storage in
-`/data/recovery_chat.jsonl`) so it stays reachable when production
-chat code is broken. From there, the partner can click "Restore
+(separate auth, separate runner, separate per-chat storage at
+`/data/recovery/chats/<chat_id>.jsonl`) so it stays reachable when
+production chat code is broken. The partner can start multiple
+recovery chats with different providers (Claude or Codex) and
+connect/reconnect either provider from inside the recovery
+surface. From the `/recover` dashboard they can click "Restore
 backend" / "Restore shell" / "Restore scripts" to copy the baked
 source back over the live copy.
 

@@ -124,9 +124,18 @@ def _verify_session(request: Request) -> str:
 
 @router.get("/recover", response_class=HTMLResponse)
 def recover_page(request: Request):
-  """Serves the recovery login form or the recovery dashboard."""
+  """Serves the recovery login form or the recovery dashboard.
+
+  The dashboard requires BOTH a valid HMAC cookie AND a live owner
+  row. POST endpoints (/recover/action, /recover/auth/logout, etc.)
+  re-check owner-existence via _verify_session; the GET should
+  match so a factory-reset user with a stale cookie sees the login
+  page (consistent), not the dashboard (which would then 401 on
+  the next click). Codex reviewer caught this asymmetry.
+  """
   token = request.cookies.get(_COOKIE)
-  if token and recover_auth.decode_session_token(token):
+  username = recover_auth.decode_session_token(token) if token else None
+  if username and _owner_exists(username):
     return HTMLResponse(dashboard_html())
   return HTMLResponse(login_html())
 
@@ -306,6 +315,16 @@ def _action_factory_reset(data_dir: Path) -> None:
     recover_chat_runner.terminate_active_run()
   except Exception:
     # Don't let the kill fail block the reset itself.
+    pass
+  # Also kill any in-flight codex device-auth subprocess. Without
+  # this, a user who started "Connect Codex" but never finished
+  # could have device-auth complete AFTER the reset, recreating
+  # /data/cli-auth/codex/auth.json that we're about to wipe. Codex
+  # reviewer caught this gap.
+  try:
+    from app import recover_oauth
+    recover_oauth.terminate_active_codex_login()
+  except Exception:
     pass
   _db_delete_all_apps()
   _db_delete_all_owners()
