@@ -41,11 +41,21 @@
 # next restart. Same for `auth.py`: agent could hardcode a password
 # or mint tokens. `database.py` is on the boot import chain — a
 # corrupted database.py prevents uvicorn from starting at all, so
-# recovery becomes unreachable. Freeze the load-bearing imports.
+# recovery becomes unreachable. `config.py` is imported by main.py
+# AND auth.py AND database.py — it's the deepest shared dependency;
+# break it and the entire boot chain dies before any router is
+# evaluated. `models.py` is imported by recover_chat.py (for the
+# Owner row lookup) and by database.py — a broken models.py kills
+# both the recovery owner check and any other route that touches
+# the DB. Both are small, stable files (~60 and ~110 lines, last
+# 6 months saw <5 commits each) so freezing them costs the agent
+# little but seals the boot chain.
 /app/app/main.py
 /app/app/routes/__init__.py
 /app/app/auth.py
 /app/app/database.py
+/app/app/config.py
+/app/app/models.py
 
 # --- Frozen recovery island (scripts) ---
 /app/scripts/entrypoint.sh

@@ -49,8 +49,17 @@ _RESTORE_SHELL_LOCK = threading.Lock()
 
 
 def _themed(html_str: str) -> str:
-  """Injects the active theme CSS into a recover page HTML string."""
-  return inject_theme_into_html(html_str, get_settings().data_dir)
+  """Injects the active theme CSS into a recover page HTML string.
+
+  Degrades gracefully if theme.py is broken (it's on the agent's
+  write surface, not frozen). Without this fallback a broken theme
+  would render the recovery page unreachable — the exact failure
+  mode the page exists to recover from.
+  """
+  try:
+    return inject_theme_into_html(html_str, get_settings().data_dir)
+  except Exception:
+    return html_str
 
 
 def _verify_session(request: Request, db: Session) -> models.Owner:

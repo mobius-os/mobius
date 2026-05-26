@@ -20,8 +20,10 @@ from sqlalchemy.exc import OperationalError
 from app.config import get_settings
 from app.database import Base, engine, run_migrations
 from app import models
-from app.providers import PROVIDER_NAMES
-from app.push import init_vapid
+# providers and push are on the agent's write surface; deferred into
+# lifespan with try/except so a SyntaxError in either doesn't prevent
+# uvicorn boot (and thereby kill the recovery surface). See the
+# wrapped imports in lifespan() below.
 from app.routes import (
   ai_router, apps_router, auth_router,
   chat_router, chats_router, chats_stream_router,
@@ -48,14 +50,18 @@ def _init_db():
         raise
 
 
-def _assert_provider_defaults() -> None:
-  """Validate SQLAlchemy provider defaults against the registry."""
+def _assert_provider_defaults(provider_names) -> None:
+  """Validate SQLAlchemy provider defaults against the registry.
+
+  `provider_names` is passed in instead of imported at module scope
+  so a broken providers.py doesn't crash main.py at import time.
+  """
   owner_default = models.Owner.provider.default.arg
   chat_default = models.Chat.provider.default.arg
-  assert owner_default in PROVIDER_NAMES, (
+  assert owner_default in provider_names, (
     "models.Owner.provider default must be in providers.PROVIDER_NAMES"
   )
-  assert chat_default in PROVIDER_NAMES, (
+  assert chat_default in provider_names, (
     "models.Chat.provider default must be in providers.PROVIDER_NAMES"
   )
 
@@ -65,9 +71,22 @@ async def lifespan(app):
   import asyncio as _asyncio
   import logging as _logging
   _log = _logging.getLogger(__name__)
-  _assert_provider_defaults()
+  # Wrapped: providers.py is on the agent's write surface. A broken
+  # providers.py shouldn't take down the server — log and skip the
+  # defaults check so the recovery surface stays reachable.
+  try:
+    from app.providers import PROVIDER_NAMES
+    _assert_provider_defaults(PROVIDER_NAMES)
+  except Exception as exc:
+    _log.error("provider defaults check skipped: %s", exc, exc_info=True)
   _init_db()
-  init_vapid()
+  # Wrapped: push.py is on the agent's write surface. VAPID init is
+  # nice-to-have (no push notifications without it) but not boot-critical.
+  try:
+    from app.push import init_vapid
+    init_vapid()
+  except Exception as exc:
+    _log.error("init_vapid failed: %s", exc, exc_info=True)
   # Seed a Hello World app on first boot (no-op if apps already exist).
   # Wrapped: scripts/seed_hello.py is on the agent's write surface, and
   # a SyntaxError or runtime failure here would kill lifespan startup
