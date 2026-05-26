@@ -1248,3 +1248,109 @@ def test_provider_status_helpers(monkeypatch, tmp_path):
   (fake_claude / ".credentials.json").write_text("{}")
   assert rcr.provider_status() == {"claude": True, "codex": True}
   assert rcr.default_provider() == "claude"
+
+
+# ---------------------------------------------------------------------
+# Post-review regression locks (codex caught these in the 186ff8a review)
+# ---------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_spawn_codex_signature_accepts_chat_id(monkeypatch, tmp_path):
+  """The dispatcher calls _spawn_codex(user_message, claim, chat_id),
+  but an earlier draft only declared (user_message, claim). Codex
+  caught the arity mismatch in review — every Codex recovery turn
+  would have crashed silently with TypeError.
+
+  This test exercises just the signature, not the full subprocess
+  spawn — we stub `asyncio.create_subprocess_exec` so the test
+  doesn't need a real codex binary."""
+  import asyncio as _asyncio
+  from app import recover_chat_runner as rcr
+  monkeypatch.setattr(
+    "app.recover_chat_runner.RECOVERY_CHATS_DIR",
+    tmp_path / "chats",
+  )
+
+  class _StubStdout:
+    async def readline(self):
+      return b""  # immediate EOF
+
+  class _StubStdin:
+    def write(self, _): pass
+    async def drain(self): pass
+    def close(self): pass
+
+  class _StubProc:
+    def __init__(self):
+      self.stdout = _StubStdout()
+      self.stderr = _StubStdout()
+      self.stdin = _StubStdin()
+      self.returncode = None
+    def terminate(self): self.returncode = -15
+    def kill(self): self.returncode = -9
+    async def wait(self):
+      if self.returncode is None:
+        self.returncode = 0
+      return self.returncode
+
+  async def fake_spawn(*_a, **_kw):
+    return _StubProc()
+
+  monkeypatch.setattr(
+    "app.recover_chat_runner.asyncio.create_subprocess_exec",
+    fake_spawn,
+  )
+  monkeypatch.setattr(
+    "app.recover_chat_runner.shutil.which",
+    lambda _: "/fake/codex",
+  )
+
+  chat_id = rcr.create_chat("codex")
+  events = []
+  async for chunk in rcr.stream_turn("hi", provider="codex", chat_id=chat_id):
+    events.append(chunk)
+  # The 3-arg call into _spawn_codex must have succeeded — we expect
+  # at least a `done` event back.
+  assert any('"done"' in e for e in events), (
+    f"_spawn_codex(user_message, claim, chat_id) signature broken; events={events!r}"
+  )
+
+
+def test_recover_oauth_rejects_stale_cookie_post_factory_reset(
+  client, auth_cookie,
+):
+  """Factory reset deletes the owner row but the recovery cookie's
+  HMAC stays valid for ~1h. The OAuth endpoints must re-check the
+  owner row, not just the HMAC, or a stolen cookie / second tab can
+  keep rewriting /data/cli-auth/ post-reset.
+
+  Codex review flagged: recover_oauth.py's _require_recovery_session
+  was only checking the HMAC. Now it also checks _owner_exists.
+  """
+  # Sanity: with the owner present, OAuth start endpoint works.
+  r = client.post("/recover/provider/claude/start", cookies=auth_cookie)
+  assert r.status_code == 200
+
+  # Simulate factory reset: delete the owner row.
+  from app.database import SessionLocal
+  from app import models
+  db = SessionLocal()
+  db.query(models.Owner).filter(models.Owner.username == "tester").delete()
+  db.commit()
+  db.close()
+
+  # Same cookie, owner gone — must 401 on every OAuth surface.
+  r = client.post("/recover/provider/claude/start", cookies=auth_cookie)
+  assert r.status_code == 401, (
+    f"stale cookie must not start Claude OAuth post-reset, got {r.status_code}"
+  )
+  r = client.post(
+    "/recover/provider/claude/code",
+    json={"code": "x"},
+    cookies=auth_cookie,
+  )
+  assert r.status_code == 401
+  r = client.post("/recover/provider/codex/start", cookies=auth_cookie)
+  assert r.status_code == 401
+  r = client.get("/recover/provider/codex/status", cookies=auth_cookie)
+  assert r.status_code == 401
