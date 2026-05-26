@@ -18,7 +18,7 @@ class _FailingHandle:
     return False
 
 
-def test_stop_chat_for_false_keeps_handle_registered():
+def test_stop_chat_for_false_unregisters_handle():
   handle = _FailingHandle("chat-delete-safety")
   registry.register(handle)
 
@@ -28,5 +28,18 @@ def test_stop_chat_for_false_keeps_handle_registered():
   assert handle.stop_calls == 1
   assert (
     registry.get_handle("chat-delete-safety", RunnerKind.CLAUDE_SDK)
-    is handle
+    is None
   )
+
+
+def test_stop_chat_for_unregisters_on_timeout():
+  chat_id = "chat-delete-safety-timeout"
+  handle = _FailingHandle(chat_id)
+  registry.register(handle)
+
+  stopped = asyncio.run(chat_mod.stop_chat_for(chat_id))
+
+  assert stopped is False
+  assert handle.stop_calls == 1
+  assert registry.is_alive(chat_id) is False
+  assert chat_mod.is_chat_running(chat_id) is False
