@@ -304,8 +304,7 @@ def test_run_chat_passes_merged_settings_into_claude_sdk(
       run_gen=chat_mod.current_run_generation(chat.id),
     )
 
-  with patch.dict(os.environ, {"MOBIUS_USE_SDK": "1"}), \
-       patch(
+  with patch(
          "app.claude_sdk_runner.run_claude_sdk_turn",
          side_effect=fake_runner,
        ), \
