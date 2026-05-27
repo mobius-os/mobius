@@ -4,7 +4,7 @@
 # everything from one FastAPI process.  Works on VPS, Railway, PikaPods.
 
 # -- Stage 1: build the frontend --------------------------------------
-FROM node:20-slim AS frontend
+FROM node:22-slim AS frontend
 
 WORKDIR /build
 COPY frontend/package.json frontend/package-lock.json* ./
@@ -34,10 +34,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
     fonts-liberation fonts-noto-color-emoji \
-    && npm install -g esbuild@0.20.2 \
+    && npm install -g esbuild@0.25.12 \
     && npm install -g @anthropic-ai/claude-code@2.1.152 \
     && npm install -g @openai/codex@0.134.0 \
-    && npm install -g agent-browser \
+    && npm install -g agent-browser@0.27.0 \
     && agent-browser install \
     && mv /root/.agent-browser /opt/agent-browser \
     && apt-get autoremove -y \
