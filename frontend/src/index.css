@@ -9,6 +9,16 @@
    pipeline and SDK design tokens silently resolved to empty. */
 @import "@openai/apps-sdk-ui/css";
 
+/* Tailwind v4 custom variant: lets us write `light:` utility
+   prefixes that compile to `[data-theme="light"]` scoped rules.
+   Parallels Tailwind's built-in `dark:` variant. The `&:where(...)`
+   wrap keeps specificity at 0 so utilities still lose to component
+   CSS by ordinary cascade rules — only intentional `light:` usage
+   layers on top. Matches both the themed element itself and any
+   descendant, mirroring how the hand-written
+   `[data-theme="light"] .foo` selectors work today. */
+@custom-variant light (&:where([data-theme="light"], [data-theme="light"] *));
+
 /* Universal reset, scoped to box-sizing + tap-highlight only.
    We previously zeroed margin + padding on every element — that
    overrode the apps-sdk-ui's component-layer rules like
