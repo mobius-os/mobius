@@ -104,9 +104,9 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
   // Per-chat agent runtime config (provider, agent_settings_json,
   // effective_agent_settings, has_assistant_turns). Resolved by the
-  // initial /chats/{id} fetch and used to drive the SlashPicker in
-  // the composer. Stays null until the fetch lands; SlashPicker
-  // simply hides until then.
+  // initial /chats/{id} fetch and used to drive ChatSettingsPanel
+  // (the model + effort picker inside the `+` popover). Stays null
+  // until the fetch lands; the picker simply hides until then.
   const [chatInfo, setChatInfo] = useState(null)
 
   // Mirror `messages` in a ref so commitMessages can compute the next
@@ -568,10 +568,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
         commitMessages(msgs, data.offset || 0)
         hadMessagesRef.current = msgs.length > 0
-        // Snapshot the per-chat runtime config so the SlashPicker
-        // can render with the current effective model/effort. The
-        // initial fetch is the only canonical source; the picker
-        // updates this dict in place on each PATCH.
+        // Snapshot the per-chat runtime config so ChatSettingsPanel
+        // (the model + effort picker in the `+` popover) renders
+        // with the current effective model/effort. The initial
+        // fetch is the only canonical source; the picker updates
+        // this dict in place on each PATCH.
         setChatInfo({
           provider: data.provider || 'claude',
           agent_settings_json: data.agent_settings_json || null,
