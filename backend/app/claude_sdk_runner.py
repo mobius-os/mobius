@@ -39,6 +39,17 @@ Design choices:
   skill load-bearing across resumes and matches our "skill is always-
   on" contract — passing the same text on resume is a no-op; passing
   updated text after a deploy correctly updates the resumed session.
+- We deliberately pass `skill_text` as a custom string (not
+  `SystemPromptPreset{append=skill_text, exclude_dynamic_sections=True}`).
+  The preset+append form would layer Claude Code's default
+  engineer-facing preset on top of our Möbius skill — adding
+  generic tool-use / communication guidance that our skill already
+  defines in Möbius-specific terms (and sometimes contradicts).
+  `exclude_dynamic_sections` only applies with the default preset
+  (the CLI ignores it with `--system-prompt`, per the CLI's own
+  `--help`), so for our custom-string path it would be a no-op
+  even if we set it. Möbius owns its system prompt end-to-end;
+  the skill is the contract, not a layer on top of someone else's.
 """
 
 from __future__ import annotations
