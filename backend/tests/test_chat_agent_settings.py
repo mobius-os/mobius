@@ -299,3 +299,126 @@ def test_run_chat_passes_merged_settings_into_claude_sdk(
   settings = captured["agent_settings"]
   assert settings["model"] == "claude-opus-4-5"
   assert settings["effort"] == "medium"
+
+
+def test_patch_model_only_with_cross_provider_model_switches_provider(
+  client, auth, chat, db, monkeypatch,
+):
+  """A model-only PATCH whose model belongs to a different provider
+  than the chat is currently on must infer the target provider and
+  switch atomically — never leave `chat.provider=codex` paired with
+  `chat.agent_settings_json.model=claude-sonnet-X`.
+
+  Observed in prod: the picker's same-provider branch sends only
+  `{agent_settings_json: {model}}` when it thinks the chat is
+  already on that provider. When local picker state diverges from
+  the server (TanStack Query refetch landing mid-pick, stale prop,
+  etc.) the model field gets persisted but the provider stays
+  whatever the DB had. The runner's silent cross-provider fallback
+  (codex_sdk_runner / claude_sdk_runner) then re-normalizes at turn
+  time, masking the bug AND running the wrong model.
+
+  Backend-level defense: infer the target provider from the model
+  when the body didn't state one. Subject to the existing 409-on-
+  disconnected-provider guard.
+  """
+  from app import providers, models
+  monkeypatch.setattr(providers.CodexProvider, "check_auth", lambda self, d: None)
+
+  # Chat starts on claude with a claude model.
+  assert chat.provider == "claude"
+  r = client.patch(
+    f"/api/chats/{chat.id}",
+    headers=auth,
+    json={"agent_settings_json": {"model": "claude-sonnet-4-5-20251001"}},
+  )
+  assert r.status_code == 200
+
+  # Now PATCH model-only with a Codex model — provider must auto-flip.
+  r = client.patch(
+    f"/api/chats/{chat.id}",
+    headers=auth,
+    json={"agent_settings_json": {"model": "gpt-5.4"}},
+  )
+  assert r.status_code == 200, r.json()
+  body = r.json()
+  assert body["provider"] == "codex", (
+    "provider must auto-switch to codex because gpt-5.4 is a Codex "
+    "model and the body didn't explicitly state a provider"
+  )
+  assert body["agent_settings_json"]["model"] == "gpt-5.4"
+
+  # And the session_id must be cleared so the next turn starts a
+  # fresh codex session (the prior session_id was for claude).
+  db.expire_all()
+  refreshed = db.query(models.Chat).filter(models.Chat.id == chat.id).first()
+  assert refreshed.session_id is None
+  assert refreshed.provider == "codex"
+
+
+def test_patch_model_only_cross_provider_409s_if_target_disconnected(
+  client, auth, chat, db, monkeypatch,
+):
+  """Same auto-inference, but if the inferred target provider isn't
+  connected, the PATCH must 409 instead of partially committing.
+  Without this, a model-only PATCH could leave the chat in a state
+  where the next send fails auth — the exact UX the explicit-
+  provider 409 was added to prevent.
+  """
+  from app import providers, models
+  # Codex is NOT mocked as connected → check_auth returns an error.
+  monkeypatch.setattr(
+    providers.CodexProvider,
+    "check_auth",
+    lambda self, d: "Codex not authenticated",
+  )
+
+  r = client.patch(
+    f"/api/chats/{chat.id}",
+    headers=auth,
+    json={"agent_settings_json": {"model": "gpt-5.4"}},
+  )
+  assert r.status_code == 409
+  assert "not connected" in r.json()["detail"].lower()
+
+  # Atomic: chat row unchanged.
+  db.expire_all()
+  refreshed = db.query(models.Chat).filter(models.Chat.id == chat.id).first()
+  assert refreshed.provider == "claude"
+  # The model write must also have been rolled back — partial commit
+  # would leave model=gpt-5.4 on a claude chat (the original bug).
+  assert (refreshed.agent_settings_json or {}).get("model") != "gpt-5.4"
+
+
+def test_patch_model_only_same_provider_does_not_change_provider(
+  client, auth, chat, db, monkeypatch,
+):
+  """Sanity guard for the auto-inference logic: a model-only PATCH
+  whose model belongs to the SAME provider as the chat must NOT
+  trigger any provider-switch side-effects (session wipe, auth
+  check). This is the happy path the picker's same-provider branch
+  uses every time the user changes Sonnet → Opus etc.
+  """
+  from app import models, providers
+
+  # Hold session_id so we can prove it wasn't wiped.
+  chat.session_id = "session-must-survive"
+  db.commit()
+
+  # Don't mock codex auth at all — if the handler erroneously triggers
+  # a switch, the check_auth on real CodexProvider would 409 (codex not
+  # connected in test env). The test passes only if we DON'T hit it.
+
+  r = client.patch(
+    f"/api/chats/{chat.id}",
+    headers=auth,
+    json={"agent_settings_json": {"model": "claude-opus-4-7-20251215"}},
+  )
+  assert r.status_code == 200, r.json()
+  assert r.json()["provider"] == "claude"
+
+  db.expire_all()
+  refreshed = db.query(models.Chat).filter(models.Chat.id == chat.id).first()
+  assert refreshed.session_id == "session-must-survive", (
+    "same-provider model swap must preserve session_id"
+  )
