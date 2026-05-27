@@ -36,6 +36,7 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
 from base64 import urlsafe_b64encode
 from pathlib import Path
@@ -82,8 +83,12 @@ _CODEX_CONFIG_PATH = Path(
 
 # In-flight PKCE state for the Claude flow. Single-owner app, so one
 # flow at a time is fine. A second call to /start replaces the prior
-# state; a stale /complete after the timeout fails cleanly.
+# state; a stale /complete after the timeout fails cleanly. The lock
+# serializes read-modify-write so two rapid /start clicks can't
+# interleave between generate+assign and leave the second /code
+# stranded with a verifier from the FIRST start.
 _active_pkce: dict | None = None
+_pkce_lock = threading.Lock()
 
 # Codex login subprocess + result tracking. Mirrors the structure
 # routes/auth.py uses for the main-app Codex login.
@@ -216,7 +221,8 @@ def claude_start(
   global _active_pkce
   verifier, challenge = _generate_pkce()
   state = secrets.token_urlsafe(32)
-  _active_pkce = {"verifier": verifier, "state": state, "ts": time.time()}
+  with _pkce_lock:
+    _active_pkce = {"verifier": verifier, "state": state, "ts": time.time()}
 
   auth_url = (
     f"{_AUTHORIZE_URL}?code=true"
@@ -241,24 +247,27 @@ async def claude_code(
   """Exchanges the authorization code for tokens and writes them to disk."""
   _require_recovery_session(moebius_recover)
   global _active_pkce
-  if not _active_pkce:
-    raise HTTPException(
-      status_code=400,
-      detail="No auth flow in progress. Start one first.",
-    )
-  if time.time() - _active_pkce["ts"] > _PKCE_TIMEOUT:
-    _active_pkce = None
-    raise HTTPException(
-      status_code=400,
-      detail="Auth flow expired. Please start again.",
-    )
-
   raw_code = (payload.get("code") or "").strip()
   if not raw_code:
     raise HTTPException(status_code=400, detail="code required")
 
-  pkce = _active_pkce
-  _active_pkce = None
+  # Atomically claim the in-flight PKCE entry: check presence + expiry
+  # + clear in one lock-held block so a concurrent /start can't replace
+  # it between our check and our read.
+  with _pkce_lock:
+    if not _active_pkce:
+      raise HTTPException(
+        status_code=400,
+        detail="No auth flow in progress. Start one first.",
+      )
+    if time.time() - _active_pkce["ts"] > _PKCE_TIMEOUT:
+      _active_pkce = None
+      raise HTTPException(
+        status_code=400,
+        detail="Auth flow expired. Please start again.",
+      )
+    pkce = _active_pkce
+    _active_pkce = None
 
   code, returned_state = _extract_provider_code_and_state(raw_code)
   if returned_state is not None and returned_state != pkce["state"]:

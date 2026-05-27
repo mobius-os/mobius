@@ -22,6 +22,11 @@ class TokenResponse(BaseModel):
   token_type: str = "bearer"
 
 
+# Declared cross-app share level for /api/storage/apps/{id}/. Default
+# is 'none' — apps are private until the partner says otherwise.
+ShareLevel = Literal["none", "read", "write"]
+
+
 class AppCreate(BaseModel):
   name: str
   description: str = ""
@@ -35,6 +40,7 @@ class AppCreate(BaseModel):
   # lives. Passed by register_app.py so the file watcher can resolve
   # file events to apps without slugify-guessing the name.
   source_dir: str | None = None
+  share_with_apps: ShareLevel = "none"
 
 
 class AppUpdate(BaseModel):
@@ -49,6 +55,7 @@ class AppUpdate(BaseModel):
   source_dir: str | None = None
   # Drawer pin toggle. True sets pinned_at = now, False clears it.
   pinned: bool | None = None
+  share_with_apps: ShareLevel | None = None
 
 
 class AppOut(BaseModel):
@@ -59,6 +66,7 @@ class AppOut(BaseModel):
   chat_id: str | None = None
   source_dir: str | None = None
   pinned_at: datetime | None = None
+  share_with_apps: ShareLevel = "none"
   created_at: datetime
   updated_at: datetime
 

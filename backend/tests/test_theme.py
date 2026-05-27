@@ -141,8 +141,8 @@ def test_api_theme_returns_default_when_no_override(client, auth):
   assert res.status_code == 200
   body = res.json()
   assert body["css"] == DEFAULT_THEME
-  # DEFAULT_THEME has --bg: #0d0f14
-  assert body["bg"] == "#0d0f14"
+  # DEFAULT_THEME has --bg: #0d0d0d (neutralized 2026-05).
+  assert body["bg"] == "#0d0d0d"
 
 
 def test_api_theme_returns_user_override_when_present(client, auth):

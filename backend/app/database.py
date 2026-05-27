@@ -83,6 +83,13 @@ def run_migrations(eng) -> None:
     with eng.connect() as conn:
       conn.execute(text("ALTER TABLE apps ADD COLUMN pinned_at DATETIME NULL"))
       conn.commit()
+  if "share_with_apps" not in apps_cols:
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN share_with_apps VARCHAR(16) "
+        "NOT NULL DEFAULT 'none'"
+      ))
+      conn.commit()
   if "chats" in tables:
     chats_cols = {c["name"] for c in inspector.get_columns("chats")}
     _add = []

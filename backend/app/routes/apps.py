@@ -81,6 +81,7 @@ async def create_app(
     jsx_source=body.jsx_source,
     chat_id=body.chat_id,
     source_dir=source_dir,
+    share_with_apps=body.share_with_apps,
   )
   db.add(app)
   db.flush()  # assigns app.id without committing
@@ -147,6 +148,8 @@ async def update_app(
     app.pinned_at = (
       datetime.now(UTC).replace(tzinfo=None) if body.pinned else None
     )
+  if body.share_with_apps is not None:
+    app.share_with_apps = body.share_with_apps
   db.commit()
   db.refresh(app)
   return app
