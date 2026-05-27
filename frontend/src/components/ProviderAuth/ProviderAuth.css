@@ -154,7 +154,7 @@
 }
 
 .codex-auth__code {
-  font-family: monospace;
+  font-family: var(--mono);
   font-size: 15px;
   letter-spacing: 0.05em;
   color: var(--accent);
