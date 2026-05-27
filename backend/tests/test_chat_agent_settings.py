@@ -228,13 +228,19 @@ def test_chat_patch_provider_validator_rejects_unknown():
     raise AssertionError("Expected ValidationError for bogus provider")
 
 
-def test_agent_settings_override_allows_unknown_keys():
-  override = AgentSettingsOverride(
-    model="claude-opus-4-7-20251215",
-    sandbox_mode="workspace-write",
-  )
-  assert override.model == "claude-opus-4-7-20251215"
-  assert override.model_dump()["sandbox_mode"] == "workspace-write"
+def test_agent_settings_override_rejects_unknown_keys():
+  """Unknown fields are rejected (extra='forbid'). Round-2 security
+  finding H2 — the previous 'allow' policy silently persisted any
+  key into chat.agent_settings_json + every GET response."""
+  from pydantic import ValidationError
+  try:
+    AgentSettingsOverride(
+      model="claude-opus-4-7-20251215",
+      sandbox_mode="workspace-write",
+    )
+  except ValidationError:
+    return
+  raise AssertionError("Expected ValidationError for unknown key")
 
 
 def test_patch_chat_provider_and_model_in_same_request(

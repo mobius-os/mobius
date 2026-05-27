@@ -102,9 +102,12 @@ class ChatStopRequest(BaseModel):
 
 
 class AgentSettingsOverride(BaseModel):
-  """Per-chat agent settings override with pass-through extras."""
+  """Per-chat agent settings override. Unknown fields are rejected
+  (422) so a typo'd or experimental key can't silently land in the
+  persisted chat row + every GET response. To add a new field,
+  declare it explicitly below."""
 
-  model_config = ConfigDict(extra="allow")
+  model_config = ConfigDict(extra="forbid")
 
   model: str | None = None
   # Union of both SDKs' effort enums:
