@@ -71,7 +71,7 @@
   gap: 6px;
   background: none;
   border: none;
-  color: var(--color-connected, #10b981);
+  color: var(--green);
   font-size: 12px;
   font-weight: 500;
   padding: 0;

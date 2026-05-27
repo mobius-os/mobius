@@ -311,9 +311,10 @@
 }
 
 .provider-row__status--connected {
-  /* Falls back to a sensible emerald if the active theme doesn't
-     define --color-connected. Custom themes can override. */
-  color: var(--color-connected, #10b981);
+  /* Uses the platform's existing --green token — agent-built
+     themes that customise --green pick up the new value
+     automatically. No separate alias needed. */
+  color: var(--green);
 }
 
 .provider-row__status--disconnected {

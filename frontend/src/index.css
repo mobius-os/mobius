@@ -224,15 +224,13 @@ textarea:focus-visible {
   transition: transform 320ms var(--spring);
 }
 
-/* Input focus glow */
-.chat__form {
-  transition: border-color 180ms ease,
-              box-shadow 220ms var(--spring);
-}
-.chat__form:focus-within {
-  box-shadow: 0 0 0 3px var(--accent-dim),
-              0 4px 20px -8px var(--accent-dim);
-}
+/* NOTE: the `.chat__form:focus-within` box-shadow that lived here
+   was REMOVED. It drew an outer rectangle around the pill + +
+   button when the textarea was focused — visible as a "bounding
+   box" larger than the pill itself. The composer contract
+   (ChatView.css invariant #6) says ONE focus halo, on
+   `.chat__pill:focus-within` only. Do not reintroduce a form-
+   level focus ring without re-reading that contract. */
 
 /* Hide drawer scrollbars cleanly */
 .drawer,
