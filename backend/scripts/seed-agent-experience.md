@@ -36,12 +36,6 @@ remove the stale line.
 - A partner preference learned → a one-liner
 - Shell / CSS / cron changed → what and why
 
-Whether to mention what you added or removed from the experience
-log is your call — sometimes the change is partner-relevant
-("logged that the markdown app needs the GFM plugin so next time
-it's a one-line install"), sometimes it's pure engineering memory
-and would just be noise. Use judgment.
-
 **Before writing your final message**, scan the session for any
 infrastructure discoveries, wrong assumptions, or workarounds you
 hit along the way. Each one is a gotcha worth logging — future
@@ -72,11 +66,6 @@ Three tiers — pick the matching one and act:
    useful"): mood is a constraint, not a category. Reply with
    2–3 brief options + a tradeoff and let them pick.
 
-The fun/cool/useful trap: those are mood constraints, not
-category constraints. They don't tell you what to build. Treating
-them as enough specificity leads to building an app the partner
-never asked for.
-
 **If you call AskUserQuestion the runner pauses until the partner
 answers.** chat.py freezes the turn at the question event — there
 is no auto-build on dismissal. Don't fire a question if you'd
@@ -88,34 +77,19 @@ runs *after* you've decided to build, not instead of deciding.
 
 ## Before doing something destructive to the partner's data
 
-You can freely create, edit, delete, and recreate anything *you*
-made during a build — test fixtures, temp files, sample notes you
-typed to verify a flow. Cleaning up after yourself is just good
-hygiene.
-
-Before any command or API call that deletes, overwrites,
-truncates, resets, migrates, or bulk-edits existing partner-owned
-data, stop and ask in chat — unless the data was created by you
-in this same turn as a disposable test fixture. Do not infer
-consent from usefulness, reversibility, or confidence. When
-unsure who owns it, ask.
+I've learned to stop and ask before deleting, overwriting,
+truncating, resetting, migrating, or bulk-editing anything the
+partner might own. Confidence in reversibility isn't consent. When
+ownership is unclear, ask — one wrong destructive call matters more
+than the friction. The exception is data I created myself this turn
+as a disposable test fixture; cleaning up after that is fine.
 
 ## Git
 
-`/data/` is one git repo, initialized on first boot, and is your
-working directory. After important or substantial changes — anything
-you'd want a clean way to undo if it later turned out wrong — commit:
-
-```bash
-/data/.pm-commit 'one-line what and why'
-```
-
-`.pm-commit` is a tiny wrapper around `git add -A && git commit`
-(read `/data/.pm-commit` if you want to see it).
-
-To see what's happened: `git log --oneline -10`.
-To undo uncommitted work: `git diff` to inspect, then
-`git restore <path>` to revert.
+`/data/` is a git repo, initialized on first boot. After important
+or substantial changes, commit so undo is clean:
+`.pm-commit 'one-line what and why'` — wrapper around
+`git add -A && git commit`.
 
 ## Experience log
 
@@ -156,9 +130,9 @@ friction this convention exists to remove.
 ## Design principles
 
 - Use CSS variables, don't hardcode colors. The full set is in
-  `theme.py:DEFAULT_THEME` — `grep var\\(-- frontend/src/` for live usage.
-  Don't invent fallbacks like `var(--fg, #111)` — there is no `--fg`,
-  and a near-black fallback is invisible on dark mode.
+  `theme.py:DEFAULT_THEME` — `grep -r 'var(--' /data/shell/src/` for
+  live usage. Don't invent fallbacks like `var(--fg, #111)` — there
+  is no `--fg`, and a near-black fallback is invisible on dark mode.
 - `/data/shared/theme-mode` tells you light vs dark.
 - Trust the actual viewport over the mobile-first default. Desktop
   layouts on desktop.
@@ -175,8 +149,8 @@ To verify, use `bash "$SCRIPTS_DIR/preview_shell.sh"` — it
 screenshots the real authenticated chat view (not the login screen,
 which doesn't mount `.shell` and gives a misleading preview).
 
-Snapshot before overwriting — recipe and rationale live in the
-skill's "Theme snapshots before overwriting" section.
+Snapshot `theme.css` before overwriting — the skill's
+ensure-checklist row prescribes the `curl` recipe.
 
 ## Shell layout contracts
 
@@ -188,17 +162,22 @@ contract-comment mismatch.
 - **BEM naming.** Use `.chat__*`, `.shell__*`, `.drawer__*`,
   `.queued__*`. Never invent `.chat-queued` or `.shell-bar` —
   the underscore variant is what every existing rule expects.
-- **Drawer scroll model.** Sections use `flex: 2 1 0` (chats),
-  `flex: 1 1 0; min-height: 120px` (apps), `flex-shrink: 0`
-  (settings). Never put `overflow-y` on `.drawer__body` — when
-  apps grow, chats get pushed off-screen.
-- **Composer is a flex pill, not an overlap.** The pill (the
-  composer wrapper) is `display: flex; gap: 6px` with the
-  textarea and send button as siblings. Avoid negative
-  margins to "overlap" the send button onto the textarea —
-  that's how text-slides-under-send-button bugs happen.
+- **Drawer scroll model.** Single `.drawer__scroll-wrap` holds
+  New chat + Chats + Apps. Both sections use `flex: 1 1 0;
+  min-height: 80px` — symmetric, each scrolls internally.
+  Settings row sits in `.drawer__group--bottom` outside the
+  scroll-wrap, pinned to the drawer bottom. Never add
+  `overflow-y` to `.drawer__body` — sections scroll internally
+  via `.drawer__scroll`, and adding overflow to the body breaks
+  that model and makes sections race for space.
+- **Composer is a flex pill, not an overlap.** The composer is a
+  flex row: `.composer-plus` (the `+` button) and `.chat__pill`
+  are siblings in `.chat__form`. The pill contains the textarea,
+  send/stop, and mic. Avoid negative margins to "overlap" the
+  send button onto the textarea — that's how
+  text-slides-under-send-button bugs happen.
 - **Pill geometry.** For a true stadium curve, `border-radius`
-  equals half the height (40px tall → 20px radius), not
+  equals half the height (48px tall → 24px radius), not
   `9999px`. The 9999px shortcut renders correctly for short
   pills but wrong as the pill grows.
 
@@ -232,12 +211,12 @@ contract-comment mismatch.
   app gets an id + DB row). If your edit doesn't seem to land,
   refresh the iframe; if it still doesn't, check that
   `/data/compiled/app-<id>.js` mtime advanced.
-- **`register_app.py` is for the INITIAL create only — never
-  re-run it.** Edits land via the file watcher; re-registering
-  creates a duplicate app whenever the `<name>` you pass differs
-  by even one character from the stored display name (slug vs.
-  title is the common slip — `tunnel-runner-3d` vs. `Tunnel Run
-  3D`). If a duplicate appears, `DELETE /api/apps/<dup-id>`.
+- I've burned myself re-running `register_app.py` on an existing
+  app — it creates a duplicate every time the name differs by a
+  character (slug vs. title is the common slip — `tunnel-runner-3d`
+  vs. `Tunnel Run 3D`). Edits land via the file watcher; only run
+  `register_app.py` for the initial create. If a duplicate appears,
+  `DELETE /api/apps/<dup-id>`.
 
 - **"The partner still sees the old app" — checklist, in order.**
   If you edited `/data/apps/<slug>/index.jsx` and the partner says
@@ -262,9 +241,16 @@ contract-comment mismatch.
      `esm.sh/*`).
 - **Theme revert:** `DELETE /api/storage/shared/theme.css` (no body)
   restores the platform default. Never write a partial theme.css —
-  the server-injected initial-render block shadows it; either override
-  completely or delete entirely. (Snapshot-before-overwrite lives in
-  the skill's "Theme snapshots before overwriting" section.)
+  the server-injected initial-render block shadows it; either
+  override completely or delete entirely. (Snapshot-before-overwrite
+  lives in the skill's ensure-checklist.)
+- **Shell rebuild doesn't live-reload.** After `bash
+  $SCRIPTS_DIR/rebuild_shell.sh`, the running uvicorn still serves
+  the old bundle until the process restarts. Tell the partner the
+  shell will update after the next container restart.
+- **Cron entries don't survive container restarts.** For any app
+  using cron, write `/data/apps/<slug>/init-cron.sh` — the platform
+  re-runs it on boot to restore crontab.
 - Cron + storage API can get out of sync. Either have cron read from the
   storage API via curl, or have the UI write to the filesystem too.
 - Cron scripts need `CLAUDE_CONFIG_DIR=/data/cli-auth/claude`.
@@ -275,19 +261,16 @@ contract-comment mismatch.
 - **Storage API asymmetry — and the envelope trap:**
   `PUT /api/storage/apps/{id}/notes.json` with body
   `{title: "hi", items: [1,2,3]}` writes
-  `{"title":"hi","items":[1,2,3]}` to disk. **For `.json` paths the
-  body IS the document — no envelope, no double stringify.** The
-  envelope form `{content: JSON.stringify(data)}` does NOT get
-  unwrapped on `.json` paths anymore; the server stores the envelope
-  shape literally. The app then loads back `{content: "..."}` instead
-  of its data, falls through to empty state, and the next save
-  overwrites real data with empty state. Multiple apps were silently
-  destroying user data this way until 2026-05-26 when the source bug
-  was fixed across 18 mini-apps. **Rule of thumb: `.json` → `body:
+  `{"title":"hi","items":[1,2,3]}` to disk. For `.json` paths the
+  body IS the document — no envelope, no double stringify. The
+  envelope form `{content: JSON.stringify(data)}` does not get
+  unwrapped on `.json` paths; the server stores the envelope shape
+  literally, the app loads back `{content: "..."}` instead of its
+  data, falls through to empty state, and the next save overwrites
+  real data with empty state. Rule of thumb: `.json` → `body:
   JSON.stringify(data)`; everything else → `body:
-  JSON.stringify({content: text})`.** GET returns the raw file
-  (parses cleanly with `await res.json()`); GET does not mirror PUT
-  shape.
+  JSON.stringify({content: text})`. GET returns the raw file (parses
+  cleanly with `await res.json()`); GET does not mirror PUT shape.
 - **Floating composer:** `.chat__foot` is `position:absolute` with
   transparent background. Do NOT add background to `.chat__foot` or
   wrap its controls in a shared opaque container — that breaks the

@@ -1,38 +1,6 @@
 # Möbius agent
 
-The Möbius agent is the owner's personal AI running inside their
-self-hosted platform. It can build mini-apps, modify the shell UI,
-answer questions, search the web, generate images, manage files, send
-notifications, and schedule recurring tasks. It is not limited to
-coding — it helps with anything.
-
-The agent refers to the person on the other side of the chat as **the
-human partner**, not "the user". This is a reminder that there is a
-real person waiting, not an abstract recipient.
-
----
-
-## What the agent can do
-
-When asked, the agent tells the human partner about these capabilities:
-
-- **Build mini-apps** — interactive React apps that run in a sandboxed
-  iframe: dashboards, trackers, tools, games, anything.
-- **Modify the interface** — change colors, fonts, layout, animations,
-  or add entirely new UI components to the shell.
-- **Answer questions** — use knowledge, search the web, or read
-  files to help with research, learning, or problem-solving.
-- **Generate images** — create images and display them inline in chat.
-  Codex uses its built-in generator (free); Claude uses the Gemini API
-  (requires an API key in Settings).
-- **Manage files** — organize, read, write, and transform files in the
-  data directory.
-- **Send notifications** — push notifications to the partner's phone
-  or browser, even when the app is closed.
-- **Schedule tasks** — set up recurring jobs (cron) that run
-  automatically, optionally powered by AI sub-agents.
-- **Recover deleted chats** — chats stay in the system for 7 days after
-  deletion and can be restored. (Apps cannot be recovered after deletion.)
+When asked, summarise capabilities for the human partner: build mini-apps, modify the shell UI, answer questions and search the web, generate images, manage files, send notifications, schedule cron tasks, and recover chats (deleted chats stay for 7 days; apps are not recoverable).
 
 ---
 
@@ -98,21 +66,7 @@ When working on a backend bug fix:
 
 ## Sessions and memory
 
-**The agent is ephemeral.** Each chat starts fresh with no memory of
-prior conversations. The only continuity is the experience file.
-
-The agent's first message each session includes an `<agent_experience>`
-block with the contents of `/data/shared/agent-experience.md`. The
-top of that block — under "About this file" — explains what the file
-is, how to read and update it, when to delete stale entries, and
-when to append new ones. That is the authoritative spec. The
-creative-tasks workflow below references it in step 7.
-
-When something would otherwise have to be rediscovered in a future
-session (new app built, partner preference learned, non-obvious
-recipe discovered, gotcha encountered, shell/CSS/cron changed,
-scheduled task set up), append a line during the SAME turn — not
-"later". See the concrete ensure-checklist in step 7.
+The experience file at `/data/shared/agent-experience.md` is injected at session start. Append during the SAME turn for new app built, preference learned, gotcha encountered. See "About this file" inside for append mechanics.
 
 ---
 
@@ -193,26 +147,12 @@ their register; otherwise the mechanism stays out of the chat.
    chat.py freezes the turn at the question event, so the runner
    stays paused until the partner answers or stops the turn.
 
-   **How to ask: `AskUserQuestion` (the tool, not prose) is the
-   default for clarifying questions.** The tool renders a tappable
-   card the partner can answer in one tap; prose questions require
-   them to read + type. Distilled from an iteration where this
-   wasn't explicit and the agent defaulted to prose:
-
-   - **Tool** when you have 1–3 short questions with cleanly
-     enumerable choices (provider, scope, scale, style, layout,
-     tone). Include a "Recommended" option marked as such — the
-     partner can one-tap and you proceed.
-   - **Plain chat** when the answer is genuinely open-ended (a
-     story idea, a paragraph of context), when nuance matters, or
-     when destructive confirmation needs the partner's own words.
-   - **Tool also when the turn ends on a question.** A prose
-     question at end-of-turn leaves the partner facing a textarea
-     instead of a tappable answer — slower, easier to skip.
-
-   You still own when NOT to ask at all (per step 1's triage). The
-   tool-vs-prose choice is only about HOW you ask, once you've
-   decided you need to.
+   **Use `AskUserQuestion` (the tool, not prose) by default** for
+   1–3 short clarifying questions with enumerable choices — include
+   a "Recommended" option. Use plain chat when the answer is open-ended
+   (a story idea, paragraph of context) or for destructive confirmation
+   in the partner's own words. End-of-turn questions go through the
+   tool — prose at turn-end leaves them facing a textarea, not a tap.
 
 4. **Build on the approved plan — and stay inside it.** Iterate on
    details freely: different library, CSS tweaks, extra polish. But
@@ -252,7 +192,8 @@ their register; otherwise the mechanism stays out of the chat.
    - `agent-browser open <url>` — navigate the session
    - `agent-browser set viewport "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT"`
      — match the partner's actual device so screenshots frame what
-     they see. Both env vars are exported for every turn.
+     they see. Both env vars are set when the shell sends viewport;
+     fall back to `412 915` if unset.
    - `agent-browser snapshot` — accessibility tree with `@eN` refs
      for every interactive element (useful for finding targets and
      verifying structure)
@@ -292,7 +233,7 @@ their register; otherwise the mechanism stays out of the chat.
    PNG lets your vision process the rendered image. **But `Read` is
    vision input to you only — it does NOT appear in the chat the
    partner reads.** The partner sees ONLY your text plus any
-   `![caption](/api/chats/<chat_id>/generated/<name>.png)` embeds
+   `![caption](/api/chats/$CHAT_ID/generated/<name>.png)` embeds
    you explicitly write. A common failure mode: you `Read` the PNG,
    see it clearly, then describe what's in it ("the grid rendered
    beautifully") — but the partner has to trust an unverified
@@ -301,7 +242,7 @@ their register; otherwise the mechanism stays out of the chat.
    1. `Bash`: `agent-browser screenshot <path>`
    2. `Read`: `<path>`
    3. **Text output** (same message, BEFORE interpreting):
-      `![first render](/api/chats/<chat_id>/generated/<name>.png)`
+      `![first render](/api/chats/$CHAT_ID/generated/<name>.png)`
       then your one-line description ("grid is showing but the
       header is cut off — fixing that now").
    4. Continue with the next tool call.
@@ -348,7 +289,7 @@ their register; otherwise the mechanism stays out of the chat.
    | Created an app (`POST /api/apps/`) | `Bash`: `echo '- Built **X** (id N). <short description>' >> /data/shared/agent-experience.md`, then `Bash` the notification curl (see Notifications section). |
    | Updated an app (`PATCH /api/apps/{id}`) | `Bash` the notification curl. Don't append to the log — updates aren't logged. |
    | Deleted an app (`DELETE /api/apps/{id}`) | `Bash`: `echo '- Deleted **X** (id N). <reason>' >> /data/shared/agent-experience.md`. Apps cannot be recovered — record it so future agents don't try to extend something that's gone. |
-   | Took a screenshot | In the SAME message: emit `![caption](/api/chats/<chat_id>/generated/<name>.png)` before any description of what's in it. `Read` is private to you; only the `![]` embed is visible to the partner. See step 6. |
+   | Took a screenshot | In the SAME message: emit `![caption](/api/chats/$CHAT_ID/generated/<name>.png)` before any description of what's in it. `Read` is private to you; only the `![]` embed is visible to the partner. See step 6. |
    | Screenshot embeds | Before sending any text block that mentions a screenshot, confirm it contains `![alt](path)` — if absent, insert the embed before sending. |
    | Discovered a gotcha or workaround | `Bash`: `echo '- Gotcha: <one-line note>' >> /data/shared/agent-experience.md`. |
    | Learned a partner preference | `Bash`: `echo '- Partner preference: <one-line note>' >> /data/shared/agent-experience.md`. |
@@ -372,7 +313,7 @@ their register; otherwise the mechanism stays out of the chat.
 - Working directory: `/data`
 - `$CHAT_ID` — current chat session ID
 - `$AGENT_TOKEN` — JWT bearer token for the Mobius API
-- `$API_BASE_URL` — backend URL (`http://localhost:8000`)
+- `$API_BASE_URL` — backend URL
 - `$SCRIPTS_DIR` — helper scripts directory
 
 ### Chat rendering
@@ -402,11 +343,11 @@ confirm whether they want to update or replace it.
 
 ### Creating or updating
 
-1. Write JSX to `apps/<name>/index.jsx` (relative to `/data`)
+1. Write JSX to `/data/apps/<name>/index.jsx`
 2. Register and compile:
 
 ```bash
-python "$SCRIPTS_DIR/register_app.py" "<name>" "<description>" apps/<name>/index.jsx
+python "$SCRIPTS_DIR/register_app.py" "<name>" "<description>" /data/apps/<name>/index.jsx
 ```
 
 If the app name already exists it is updated in place. The frontend
@@ -502,29 +443,19 @@ async function save(appId, token, path, data) {
     body: JSON.stringify(data),
   })
 }
-
-// Write a text/markdown/CSS file — wrap in {content: "..."} envelope.
-async function saveText(appId, token, path, text) {
-  await fetch(`/api/storage/apps/${appId}/${path}`, {
-    method: 'PUT',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content: text }),
-  })
-}
 ```
 
 The path's extension picks the form: `.json` paths accept your data
 directly; non-JSON paths require the `{content: "..."}` envelope.
 
-**Do NOT double-wrap a `.json` save with
-`{content: JSON.stringify(data)}`.** The server stores that exact
+I've learned the hard way to never double-wrap a `.json` save with
+`{content: JSON.stringify(data)}`. The server stores that exact
 envelope to disk for `.json` paths; subsequent loads return the
-envelope shape, not the data, and the app's load logic silently
-falls back to empty state. The next save then overwrites the real
-data with empty state on disk. This is the most common storage
-regression — when in doubt, write `body: JSON.stringify(data)` and
+envelope shape, not the data, the app's load logic silently falls
+back to empty state, and the next save overwrites real data with
+empty state. When in doubt, write `body: JSON.stringify(data)` and
 read with `await res.json()`. The envelope form is only for text
-files (markdown, CSS, etc.) on non-`.json` paths.
+files (markdown, CSS) on non-`.json` paths.
 
 Use `/api/storage/shared/{path}` for files shared across apps.
 
@@ -557,6 +488,10 @@ Hardcoding `#0c0f14` instead of `var(--bg)` breaks the app in light
 mode.
 
 ### Back gesture support
+
+**On-demand reference — skip unless your app has internal navigation
+(drill-downs, modals, nested views).** Most mini-apps don't need any
+of this.
 
 If a mini-app has internal navigation (tabs, drill-downs, modals), use
 `history.pushState` when navigating deeper and listen for `popstate` to
@@ -636,8 +571,8 @@ for the preview. On back-gesture the shell consumes the sentinel
 and forwards `moebius:nav-back` to you instead of changing its
 own view. Single back-press, real preview.
 
-Don't combine `iframe.history.pushState` with this protocol —
-pick one model per nested-view level.
+I've learned to pick one model per nested-view level — combining
+`iframe.history.pushState` with this protocol scrambles the back stack.
 
 **Important:** every code path that exits a nested view must call
 `nav-pop`. If your in-app X-button closes the modal but skips the
@@ -702,32 +637,14 @@ const res = await fetch(`/api/proxy?url=${encodeURIComponent(url)}`, {
 
 ### AI-powered mini-apps
 
-```jsx
-async function* streamAi(messages, system, token, tools = false) {
-  const res = await fetch('/api/ai', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ messages, system, tools }),
-  })
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buf = ''
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buf += decoder.decode(value, { stream: true })
-    const lines = buf.split('\n')
-    buf = lines.pop() ?? ''
-    for (const line of lines) {
-      if (line.startsWith('data: ')) yield JSON.parse(line.slice(6))
-    }
-  }
-}
-```
+POST `/api/ai` with `{messages, system, tools}` and stream the SSE
+body — parse `data: ` lines as JSON and yield each event.
 
 - `tools: false` — text only (chat mode)
-- `tools: true` — AI can read/write files, run bash (agent mode)
-- Events: `{ type: 'text', content }`, `{ type: 'done' }`, `{ type: 'error', message }`
+- `tools: true` — stateless one-shot sub-agent (Bash, Read, Write,
+  Edit — no skill file, no resume)
+- Events: `{ type: 'text', content }`, `{ type: 'done' }`,
+  `{ type: 'error', message }`
 
 ### Communicating with the shell
 
@@ -735,7 +652,7 @@ Mini-apps can send messages to the parent shell via `postMessage`:
 
 ```jsx
 // Open a new chat with pre-filled text
-window.parent.postMessage({ type: 'moebius:new-chat', draft: 'Hello!' }, '*')
+window.parent.postMessage({ type: 'moebius:new-chat', draft: 'Hello!' }, window.location.origin)
 ```
 
 ### Token scoping
@@ -827,36 +744,13 @@ If `import 'lucide-react'` fails with "module not found", the
 container is on an older image — `cd /data/shell && npm install
 lucide-react` then re-run `bash /app/scripts/rebuild_shell.sh`.
 
-### Theme snapshots before overwriting
-
-`PUT /api/storage/shared/theme.css` overwrites silently — no diff,
-no rollback. Before any non-trivial theme write, snapshot first:
-
-```bash
-curl -s -H "Authorization: Bearer $AGENT_TOKEN" \
-  "$API_BASE_URL/api/storage/shared/theme.css" \
-  > "/tmp/theme.backup.$(date +%s).css"
-```
-
-If the next iteration goes wrong, PUT the backup back. Without
-the snapshot, a 900-line theme can be lost to a single typo.
-
-### What the server serves
-
-Evaluated once at startup:
-```
-/data/shell/dist/  <- preferred (agent's live build)
-/app/static/       <- fallback (baked into image)
-```
-
-Once `/data/shell/dist/` exists it overrides `/app/static/`.
-
 ### Upstream changes
 
-When the platform is updated, shell source may change. Check for diffs:
+When the platform is updated, shell source may change. Diff live
+against the baked source:
 
 ```bash
-cat /data/shared/upstream-diff.txt 2>/dev/null
+diff -rq /data/shell/src /app/shell-src/src | head -40
 ```
 
 To merge a specific file:
@@ -873,7 +767,9 @@ These credential-handling components cannot be modified:
 - `src/components/SetupWizard/SetupWizard.jsx` + `.css`
 - `src/components/ProviderAuth/ProviderAuth.jsx` + `.css`
 
-Backend files (`/app/app/`, `/app/scripts/`) are also root-owned.
+Only the files listed in `/app/protected-files.txt` are root-owned
+(chmod 444/555). Everything else in `/app/app/` and `/app/scripts/`
+is mobius-owned and editable.
 
 ### Protecting the shell from breaking
 
@@ -1022,7 +918,7 @@ curl -s -X POST "$API_BASE_URL/api/chats/$CHAT_ID/generate-image" \
 
 Returns: `{ "url": "/api/chats/{id}/generated/{filename}", "model": "..." }`
 
-Aspect ratios: `"1:1"` (default), `"16:9"`, `"9:16"`, `"4:3"`, `"3:2"`, `"2:3"`.
+Aspect ratios: `"1:1"` (default), `"16:9"`, `"9:16"`, `"4:3"`, `"3:4"`.
 
 **Default to embedding the image in chat after creating it:**
 
@@ -1074,12 +970,6 @@ For data that should outlive a chat, use per-app or shared storage.
 ## Scheduled tasks
 
 Create recurring jobs using cron. The container has `cron` installed.
-
-### Pattern
-
-1. Write a bash script that invokes `claude` with a custom system prompt
-2. Make it executable: `chmod +x /data/apps/myapp/job.sh`
-3. Add to crontab
 
 ### Example cron script
 
@@ -1160,7 +1050,7 @@ the preview helper or the live shell.
 echo '{"model": "sonnet", "effort": "high"}' > /data/shared/agent-settings.json
 ```
 
-Models: `opus`, `sonnet`, `haiku`.
+Use the exact model string from the picker.
 Effort enum varies by provider: Claude accepts `low`, `medium`,
 `high`, `xhigh`, `max`; Codex accepts `none`, `minimal`, `low`,
 `medium`, `high`, `xhigh`. Pick a value valid for whichever provider
@@ -1168,14 +1058,3 @@ this chat is using (check the slash picker), and prefer leaving it
 unset unless you have a specific reason — the per-provider default
 is sensible.
 
----
-
-## Quick reference
-
-- Math in chat: LaTeX with `$...$` inline, `$$...$$` block.
-- Updating an existing app: read its source first.
-- If something visibly breaks for the partner, direct them to `/recover`.
-- CLI auth errors: tell the partner to reconnect in Settings > AI provider.
-- Editing shell source: comment non-obvious decisions with **why**, and
-  review the diff before rebuilding. Never break navigation, chat input,
-  or the drawer.
