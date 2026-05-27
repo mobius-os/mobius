@@ -25,11 +25,12 @@ def debug_status(
 ):
   """Returns active agent runtimes, broadcasts, and starting state.
 
-  `active_procs` lists subprocess-backed runtimes (Codex today, Claude
-  when `MOBIUS_USE_SDK=0`). `active_sdk_clients` and `active_sdk_sessions`
-  list SDK-backed runtimes (Claude via claude-agent-sdk, future Codex
-  via openai-codex). Completion monitors should treat a chat as
-  "running" if it appears in ANY of the three lists.
+  `active_procs` is retained for golden-fixture stability but is empty
+  in production now that the subprocess fallback is gone.
+  `active_sdk_clients` and `active_sdk_sessions` list the SDK-backed
+  runtimes (Claude via claude-agent-sdk, Codex via openai-codex).
+  Completion monitors should treat a chat as "running" if it appears
+  in either of those two lists.
   """
   active = []
   for handle in registry.handles_by_kind(RunnerKind.SUBPROCESS):

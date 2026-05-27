@@ -299,7 +299,6 @@ def test_run_codex_sdk_turn_resume_mismatch_returns_error(monkeypatch):
     "_sdk_imports",
     lambda: _fake_sdk(FakeAsyncCodex),
   )
-  monkeypatch.setattr(codex_sdk_runner, "_load_agent_settings", lambda _env: {})
 
   bc = _FakeBroadcast()
   result = asyncio.run(
@@ -355,7 +354,6 @@ def test_run_codex_sdk_turn_resume_skips_skill_lookup(monkeypatch):
     "_sdk_imports",
     lambda: _fake_sdk(FakeAsyncCodex),
   )
-  monkeypatch.setattr(codex_sdk_runner, "_load_agent_settings", lambda _env: {})
   monkeypatch.setattr(
     codex_sdk_runner,
     "get_skill_path",
@@ -379,7 +377,6 @@ def test_run_codex_sdk_turn_resume_skips_skill_lookup(monkeypatch):
   assert result == {
     "session_id": "requested-thread",
     "cost_usd": None,
-    "usage": None,
     "error": None,
   }
   assert bc.events == [{
@@ -423,7 +420,6 @@ def test_run_codex_sdk_turn_cleans_up_active_session_on_stream_exception(
   sdk = _fake_sdk(FakeAsyncCodex)
   sdk["AgentMessageDeltaNotification"] = AgentMessageDeltaNotification
   monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
-  monkeypatch.setattr(codex_sdk_runner, "_load_agent_settings", lambda _env: {})
   mark_finished_calls: list[bool] = []
   original_mark_finished = codex_sdk_runner.ActiveCodexTurn.mark_finished
 
@@ -501,7 +497,6 @@ def test_run_codex_sdk_turn_error_notification_will_retry_continues(monkeypatch)
   sdk["AsyncCodex"] = FakeAsyncCodex
   sdk["AgentMessageDeltaNotification"] = AgentMessageDeltaNotification
   monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
-  monkeypatch.setattr(codex_sdk_runner, "_load_agent_settings", lambda _env: {})
 
   bc = _FakeBroadcast()
   result = asyncio.run(
@@ -520,7 +515,6 @@ def test_run_codex_sdk_turn_error_notification_will_retry_continues(monkeypatch)
   assert result == {
     "session_id": "thread-1",
     "cost_usd": None,
-    "usage": None,
     "error": None,
   }
   assert bc.events == [
@@ -561,7 +555,6 @@ def test_run_codex_sdk_turn_error_notification_fatal_raises(monkeypatch):
 
   sdk["AsyncCodex"] = FakeAsyncCodex
   monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
-  monkeypatch.setattr(codex_sdk_runner, "_load_agent_settings", lambda _env: {})
 
   result = asyncio.run(
     codex_sdk_runner.run_codex_sdk_turn(
@@ -604,7 +597,6 @@ def test_run_codex_sdk_turn_stream_exhaustion_relies_on_sdk_terminal_contract(
     "_sdk_imports",
     lambda: _fake_sdk(FakeAsyncCodex),
   )
-  monkeypatch.setattr(codex_sdk_runner, "_load_agent_settings", lambda _env: {})
 
   result = asyncio.run(
     codex_sdk_runner.run_codex_sdk_turn(

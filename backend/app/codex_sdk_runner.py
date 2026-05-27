@@ -44,9 +44,9 @@ import concurrent.futures as _cf
 import json
 import logging
 import shutil
-from pathlib import Path
 from typing import Any
 
+from app.codex_appserver import _extract_bash_command
 from app.providers import get_skill_path
 from app.runtime_types import RunnerResult
 from app.runner_registry import RunnerKind, registry
@@ -111,26 +111,6 @@ class ActiveCodexTurn:
     """Resolves the stop waiter once the runner is fully drained."""
     if not self._finished.done():
       self._finished.set_result(None)
-
-
-def _data_dir_from_env(base_env: dict[str, str]) -> Path:
-  """Best-effort `/data` resolution from the passed Codex environment."""
-  codex_home = base_env.get("CODEX_HOME")
-  if codex_home:
-    try:
-      return Path(codex_home).resolve().parent.parent
-    except OSError:
-      return Path(codex_home).parent.parent
-  return Path("/data")
-
-
-def _load_agent_settings(base_env: dict[str, str]) -> dict[str, Any]:
-  """Loads `/data/shared/agent-settings.json` when it exists."""
-  path = _data_dir_from_env(base_env) / "shared" / "agent-settings.json"
-  try:
-    return json.loads(path.read_text(encoding="utf-8"))
-  except (OSError, json.JSONDecodeError):
-    return {}
 
 
 def _sdk_imports() -> dict[str, Any]:
@@ -225,38 +205,6 @@ def _format_json(value: Any) -> str:
     return json.dumps(dumped, ensure_ascii=True, indent=2)
   except (TypeError, ValueError):
     return str(dumped)
-
-
-def _extract_bash_command(raw: str) -> str:
-  """Strips Codex's `/bin/bash -lc` wrapper when present."""
-  prefix = "/bin/bash -lc '"
-  if raw.startswith(prefix) and raw.endswith("'"):
-    return raw[len(prefix):-1]
-  return raw
-
-
-def _usage_breakdown_dict(value: Any) -> dict[str, Any] | None:
-  """Converts one token-usage breakdown into a plain dict."""
-  dumped = _model_dump(value)
-  if isinstance(dumped, dict):
-    return dumped
-  return None
-
-
-def _usage_dict(usage: Any) -> dict[str, Any] | None:
-  """Converts `ThreadTokenUsage` into a Möbius-friendly dict."""
-  if usage is None:
-    return None
-  dumped = _model_dump(usage)
-  if not isinstance(dumped, dict):
-    return None
-  result: dict[str, Any] = {
-    "last": _usage_breakdown_dict(dumped.get("last")),
-    "total": _usage_breakdown_dict(dumped.get("total")),
-  }
-  if dumped.get("modelContextWindow") is not None:
-    result["model_context_window"] = dumped["modelContextWindow"]
-  return result
 
 
 def _tool_start_event(item: Any, sdk: dict[str, Any]) -> dict[str, Any] | None:
@@ -669,15 +617,14 @@ async def run_codex_sdk_turn(
     db: SQLAlchemy session for runner-side persistence paths.
 
   Returns:
-    Dict with `session_id`, `cost_usd`, `usage`, and `error`.
+    Dict with `session_id`, `cost_usd`, and `error`.
   """
   sdk = _sdk_imports()
-  # `agent_settings` is the chat.py-computed merge of the global file
-  # defaults and per-chat overrides. When the caller didn't pass it
-  # (older call sites, unit tests), fall back to loading the file
-  # directly so the runner still works standalone.
+  # chat.py always pre-merges the per-chat overrides on top of the
+  # global file defaults; treat a missing dict as empty rather than
+  # re-reading the file here. Standalone callers (tests) pass `{}`.
   if agent_settings is None:
-    agent_settings = _load_agent_settings(base_env)
+    agent_settings = {}
   # Per-chat picker writes the `model` key; the legacy file format
   # uses `codex_model`. Honor both so existing setups don't regress.
   model = agent_settings.get("model") or agent_settings.get("codex_model")
@@ -751,7 +698,6 @@ async def run_codex_sdk_turn(
   thread = None
   turn = None
   current_session_id = session_id
-  usage: dict[str, Any] | None = None
   completed_turn: Any | None = None
 
   try:
@@ -841,7 +787,6 @@ async def run_codex_sdk_turn(
         return {
           "session_id": current_session_id,
           "cost_usd": None,
-          "usage": usage,
           "error": error_text,
         }
       bc.publish({
@@ -894,7 +839,9 @@ async def run_codex_sdk_turn(
           continue
 
         if isinstance(payload, sdk["ThreadTokenUsageUpdatedNotification"]):
-          usage = _usage_dict(payload.token_usage)
+          # Token usage is reported but currently not surfaced; the
+          # SDK already exposes it via the thread handle for any
+          # consumer that needs it.
           continue
 
         if isinstance(
@@ -914,9 +861,6 @@ async def run_codex_sdk_turn(
           continue
 
         if isinstance(payload, sdk["TurnCompletedNotification"]):
-          usage = usage or _usage_dict(
-            getattr(payload.turn, "usage", None)
-          )
           completed_turn = payload.turn
           break
 
@@ -943,14 +887,12 @@ async def run_codex_sdk_turn(
       return {
         "session_id": current_session_id,
         "cost_usd": None,
-        "usage": usage,
         "error": error_text,
       }
   except Exception as exc:
     return {
       "session_id": current_session_id,
       "cost_usd": None,
-      "usage": usage,
       "error": str(exc),
     }
   finally:
