@@ -29,6 +29,15 @@ router = APIRouter(prefix="/api/chats", tags=["chats"])
 
 SOFT_DELETE_TTL = timedelta(days=7)
 
+# How long an untouched empty chat (no session, no messages, no pending
+# queue) survives before the list_chats sweeper hard-deletes it. Long
+# enough that a user who opened a chat, started a draft in the browser,
+# and walked away for the afternoon doesn't lose it; short enough that
+# abandoned empties don't pile up across weeks. Hard-delete (not soft)
+# because there's nothing to recover — content lived only in the
+# browser's sessionStorage, which is the user's problem to preserve.
+EMPTY_CHAT_GRACE = timedelta(hours=24)
+
 
 def _purge_chat_dir(chat_id: str) -> None:
   """Removes per-chat scratch dirs left on disk after a chat is gone.
@@ -100,6 +109,33 @@ def list_chats(
     models.Chat.deleted_at < cutoff,
   ).all()
   for c in stale:
+    questions.cancel(c.id)
+    forget_chat(c.id)
+    _purge_chat_dir(c.id)
+    db.delete(c)
+  # Hard-delete abandoned empties — chats that were created, never had
+  # a message sent (no session_id, no messages, no pending queue), and
+  # have been sitting that way for over EMPTY_GRACE. The soft-delete
+  # TTL above is for chats the user EXPLICITLY deleted — those have
+  # content worth a 7-day recovery window. An untouched empty has
+  # nothing to recover; the soft-delete dance just defers reclaim.
+  # The grace protects a chat opened minutes ago with a draft in the
+  # browser's sessionStorage from being nuked out from under the user
+  # between draft autosaves. JSON-column emptiness is checked in Python
+  # rather than SQL because cross-dialect `JSON = '[]'` is fragile;
+  # the SQL prefilter (NULL session, NULL deleted_at, older than the
+  # grace) keeps the candidate set small.
+  empty_cutoff = (
+    datetime.now(UTC).replace(tzinfo=None) - EMPTY_CHAT_GRACE
+  )
+  candidates = db.query(models.Chat).filter(
+    models.Chat.deleted_at.is_(None),
+    models.Chat.session_id.is_(None),
+    models.Chat.created_at < empty_cutoff,
+  ).all()
+  for c in candidates:
+    if c.messages or c.pending_messages:
+      continue
     questions.cancel(c.id)
     forget_chat(c.id)
     _purge_chat_dir(c.id)
