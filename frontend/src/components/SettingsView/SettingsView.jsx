@@ -9,6 +9,8 @@ import * as themeService from '../../lib/themeService.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
+import StatusDot from '../ui/StatusDot.jsx'
+import '../ui/StatusDot.css'
 import './SettingsView.css'
 
 
@@ -167,7 +169,7 @@ export default function SettingsView({ onThemeChange }) {
           <form className="settings__form" onSubmit={handleSave}>
             <label className="settings__label">
               Gemini API key
-              {configured && <span className="settings__badge">Configured</span>}
+              {configured && <StatusDot color="--green">Configured</StatusDot>}
             </label>
             <p className="settings__subtext">
               Get a key at{' '}

@@ -60,31 +60,11 @@
   gap: 8px;
 }
 
-/* "Configured" indicator — leading green dot + plain label,
-   matching the provider-row status pattern. Earlier full-accent
-   fill outranked the field label; an outlined chip still felt
-   like an unrelated visual language vs the provider-status dot.
-   Same dot, same label weight = same semantic of "this is set up". */
-.settings__badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: none;
-  border: none;
-  color: var(--green);
-  font-size: 12px;
-  font-weight: 500;
-  padding: 0;
-  text-transform: none;
-}
-
-.settings__badge::before {
-  content: '';
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-}
+/* "Configured" indicator now uses the shared <StatusDot> component
+   (frontend/src/components/ui/StatusDot.jsx) — both this badge
+   AND the provider-row "Connected" / "Not connected" status pull
+   from the same source so the dot size + gap + typography never
+   drift across surfaces. */
 
 .settings__subtext {
   font-size: 13px;

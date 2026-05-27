@@ -286,40 +286,11 @@
   border-radius: 6px;
 }
 
-/* Status indicator — leading colored dot + plain label. Replaces
-   the earlier uppercase-tracked pill that visually outranked the
-   provider name. The leading-dot pattern is also reused on the
-   "Configured" indicator next to the Gemini API key, so provider
-   auth status and API-key status read as the same kind of cue. */
-.provider-row__status {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 500;
-  text-transform: none;
-  letter-spacing: 0;
-  padding: 0;
-}
-
-.provider-row__status::before {
-  content: '';
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-}
-
-.provider-row__status--connected {
-  /* Uses the platform's existing --green token — agent-built
-     themes that customise --green pick up the new value
-     automatically. No separate alias needed. */
-  color: var(--green);
-}
-
-.provider-row__status--disconnected {
-  color: var(--muted);
-}
+/* Provider connected / disconnected indicator now renders via
+   the shared <StatusDot> component
+   (frontend/src/components/ui/StatusDot.jsx) — the bespoke
+   .provider-row__status* rules used to live here. Single source
+   of truth for the dot-plus-label pattern. */
 
 /* Action button — solid surface fill so it reads as a tappable
    pill against the surface-colored provider row. Earlier outline
