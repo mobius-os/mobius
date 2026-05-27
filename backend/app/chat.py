@@ -767,20 +767,21 @@ async def _run_chat_impl(
   # branch below so the SDK runners and the subprocess fallback all
   # agree on the same merged dict.
   chat_overrides: dict | None = None
+  chat_row = None
   if chat_id:
     try:
-      _chat_row = (
+      chat_row = (
         db.query(models.Chat).filter(models.Chat.id == chat_id).first()
       )
-      if _chat_row and _chat_row.agent_settings_json:
-        if isinstance(_chat_row.agent_settings_json, dict):
-          chat_overrides = _chat_row.agent_settings_json
-        elif isinstance(_chat_row.agent_settings_json, str):
+      if chat_row and chat_row.agent_settings_json:
+        if isinstance(chat_row.agent_settings_json, dict):
+          chat_overrides = chat_row.agent_settings_json
+        elif isinstance(chat_row.agent_settings_json, str):
           # SQLite JSON columns occasionally surface as raw strings
           # depending on driver version. Decode defensively so a
           # str value doesn't silently disable overrides.
           try:
-            chat_overrides = json.loads(_chat_row.agent_settings_json)
+            chat_overrides = json.loads(chat_row.agent_settings_json)
           except (json.JSONDecodeError, TypeError):
             chat_overrides = None
     except Exception:
@@ -788,8 +789,33 @@ async def _run_chat_impl(
         "failed to load per-chat agent_settings chat_id=%s", chat_id,
       )
   agent_settings = effective_agent_settings(
-    settings.data_dir, chat_overrides,
+    settings.data_dir, chat_overrides, provider=provider_id,
   )
+
+  # Snapshot-on-first-send: if the chat has no overrides yet (created
+  # empty, never had the picker touched), freeze the current effective
+  # settings onto the row so subsequent turns in THIS chat don't drift
+  # when the global default changes in another chat. Without this, a
+  # user who starts a Codex/high conversation and later picks Codex/low
+  # in a sibling chat would silently get the new effort on their next
+  # turn in the original — a real "why did my model change?" surprise.
+  # The picker's PATCH path is the other commit point; this one covers
+  # the "just typed and sent without opening the picker" path.
+  if chat_row is not None and chat_overrides is None:
+    snapshot = {
+      k: agent_settings[k]
+      for k in ("model", "effort", "effort_by_provider")
+      if agent_settings.get(k) is not None
+    }
+    if snapshot:
+      chat_row.agent_settings_json = snapshot
+      try:
+        db.commit()
+      except Exception:
+        log.exception(
+          "failed to snapshot initial agent_settings chat_id=%s", chat_id,
+        )
+        db.rollback()
 
   # Pre-flight: check that provider credentials exist before spawning
   # the CLI. Without this, the CLI fails with a cryptic error.

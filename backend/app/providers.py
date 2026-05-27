@@ -157,10 +157,16 @@ def effective_agent_settings(
     "effort": DEFAULT_EFFORT,
   }
   # File layer: only carry the model if it belongs to this provider.
-  # Effort is provider-agnostic so it always carries.
+  # Effort is provider-agnostic so it always carries. Also carry the
+  # per-provider effort memory so the picker can restore it on
+  # provider switch — without this, a brand-new empty chat would lose
+  # the user's previously-picked Claude effort the moment they
+  # switched to Codex in the panel (and vice versa).
   file_layer = _load_agent_settings(data_dir)
   if file_layer.get("effort") is not None:
     merged["effort"] = file_layer["effort"]
+  if file_layer.get("effort_by_provider") is not None:
+    merged["effort_by_provider"] = file_layer["effort_by_provider"]
   fm = file_layer.get("model")
   if fm and not _model_belongs_to_other_provider(fm, prov):
     merged["model"] = fm

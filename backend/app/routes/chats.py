@@ -190,26 +190,33 @@ def create_chat(
 ):
   """Creates a new chat.
 
-  Snapshots the current global agent-settings defaults (model +
-  effort) into chat.agent_settings_json so the picker always renders
-  with something selected AND so subsequent changes to the global
-  default don't bleed into this chat. The chat's provider is
-  inherited from owner.provider (the implicit "default = last
-  picked").
+  Leaves `agent_settings_json` NULL so the chat reads the live global
+  defaults from `/data/shared/agent-settings.json` until the user
+  picks something specific. Snapshotting at creation time used to
+  freeze whatever the defaults were when the empty chat was first
+  created, and the frontend's empty-chat reuse path then surfaced
+  that stale snapshot — silently ignoring whichever model/effort the
+  user had since picked. The snapshot now happens lazily, at the
+  first commit point: a PATCH from the picker (see `patch_chat`
+  below) or the first message send (see `chat.py:_snapshot_initial_settings`).
+  Either path freezes the chat's settings so subsequent global
+  changes from OTHER chats don't bleed in. Provider is still
+  inherited from owner.provider — the implicit "default = last
+  picked" — because the provider lock kicks in after the first
+  assistant turn and we want the new chat to start on the user's
+  current provider.
   """
   import uuid
-  from app.providers import initial_chat_defaults
 
   owner = db.query(models.Owner).first()
   provider = (owner.provider if owner else None) or "claude"
-  defaults = initial_chat_defaults(get_settings().data_dir, provider)
 
   chat = models.Chat(
     id=str(uuid.uuid4()),
     title=body.title or "New chat",
     messages=body.messages or [],
     provider=provider,
-    agent_settings_json=defaults,
+    agent_settings_json=None,
   )
   db.add(chat)
   db.commit()
