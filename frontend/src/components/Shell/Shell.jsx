@@ -47,6 +47,11 @@ export default function Shell() {
   const [appCache, setAppCache] = useState([])
   const [toast, setToast] = useState(null)
   const chatsLoadedRef = useRef(false)
+  // In-flight guard for newChat. The function POSTs unconditionally now
+  // (the old empty-chat-reuse path was the implicit deduper); without
+  // this guard a rapid double-tap on "+ New chat" before the API
+  // returns races two creates and leaves an extra empty chat behind.
+  const creatingChatRef = useRef(false)
   const [builtApp, setBuiltApp] = useState(null)
   const [pwaPrompt, setPwaPrompt] = useState(null)
 
@@ -251,13 +256,19 @@ export default function Shell() {
     //
     // Resolve chatId BEFORE switching views — setting activeView='chat'
     // with the old chatId causes a visible flash of the previous chat.
+    if (creatingChatRef.current) return
+    creatingChatRef.current = true
     let chatId
     try {
       const res = await api.chats.create({ title: 'New chat' })
       const chat = await res.json()
       chatId = chat.id
       await refreshChats()
-    } catch { return }
+    } catch {
+      return
+    } finally {
+      creatingChatRef.current = false
+    }
 
     // Push nav stack so back returns to the previous view (skip
     // automatic calls — bootstrap or chat-deletion-induced re-create).
