@@ -13,8 +13,12 @@
  * Run: npx playwright test tests/chat-redesign.spec.mjs
  */
 import { test, expect } from '@playwright/test'
+import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
+
+// Per-worker cleanup: see tests/_chatTracker.mjs.
+attachCleanup()
 
 
 /** Helper: log in via the storageState set by auth.setup.mjs and
@@ -55,6 +59,10 @@ async function setupWithStreamMock(page, streamBody) {
 
 /** Navigate to a new empty chat. */
 async function newChat(page) {
+  // Create the chat via API first (so it's tagged with the worker
+  // prefix and can be reaped after the spec finishes), then click
+  // through the UI to actually land on it.
+  await createTaggedChat(page)
   await page.evaluate(() => document.querySelector('.drawer__item--new')?.click())
   const hasEmpty = await page.evaluate(
     () => !!document.querySelector('.chat__empty-wrap')

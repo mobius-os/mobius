@@ -9,8 +9,14 @@
  * Debug: npx playwright test tests/spacer.spec.mjs --headed --debug
  */
 import { test, expect } from '@playwright/test'
+import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
+
+// Per-worker cleanup: every chat this worker created during this spec
+// file is bulk-deleted after the last test. Keeps the chat list from
+// piling up across workers + runs. See tests/_chatTracker.mjs.
+attachCleanup()
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -43,15 +49,9 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
 
 /** Navigate to a new empty chat. */
 async function newChat(page) {
-  // Create a new chat via API, then reload to land on it.
-  await page.evaluate(async () => {
-    const token = localStorage.getItem('token')
-    await fetch('/api/chats', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({})
-    })
-  })
+  // Create a worker-tagged chat via the API so cleanupWorkerChats
+  // can find and delete it after the spec finishes.
+  await createTaggedChat(page)
   // Click new-chat button via DOM (works even if drawer is hidden).
   await page.evaluate(() => {
     document.querySelector('.drawer__item--new')?.click()
