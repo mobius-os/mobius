@@ -201,14 +201,32 @@ def test_extract_md_frontmatter_with_embedded_dashes_in_block_scalar():
 
 def test_extract_md_malformed_frontmatter_falls_back():
   """A file that opens with `---\\n` but never closes the
-  frontmatter shouldn't crash — fall back to extracting from
-  whatever text follows."""
+  frontmatter shouldn't crash — and must NOT return `---` as the
+  description. The earlier fallback (`pass`) left the opening
+  marker in `text`, and the content-scan loop returned that first
+  non-empty line, yielding `"---"`. Codex review round #5 caught
+  this. We now skip past the opening marker so we extract the
+  actual first content line.
+  """
   src = "---\nno closing marker\nstill in frontmatter\n"
-  # The fallback: no real text to extract; behavior is "best effort,
-  # don't crash." We just verify it returns *something* (could be
-  # empty or the first line) without raising.
   result = describe_tree._extract_md(src)
   assert isinstance(result, str)
+  assert result != "---", (
+    "malformed frontmatter must not surface the opening marker as "
+    "the description"
+  )
+  # Best-effort extraction picks up the first content line.
+  assert result == "no closing marker"
+
+
+def test_extract_md_malformed_frontmatter_empty_after_marker():
+  """Edge case: file is JUST the opening marker line and nothing
+  else. Must return an empty string rather than `---`.
+  """
+  result = describe_tree._extract_md("---\n")
+  assert result == "", (
+    "single-line `---` file must yield empty description, not the marker"
+  )
 
 
 # ---------------------------------------------------------------------

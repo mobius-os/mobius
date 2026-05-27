@@ -162,21 +162,33 @@ def terminate_active_run_for(chat_id: str) -> bool:
 
   Returns True if a matching run was killed, False if there was
   nothing to terminate or the active run is for a different chat.
+
+  Atomicity: we set `claim["cancelled"]`, read `claim["proc"]`, and
+  clear `_current_run` all under the same lock acquisition. This
+  matters during the spawn-startup window where `_claim_run` has
+  installed the claim but the subprocess hasn't been attached yet.
+  In that window the spawn task does its OWN `claim["cancelled"]`
+  check under the same lock before publishing `proc`; whichever
+  path acquires the lock first wins, and the other path either
+  kills the just-published proc (delete-after-publish) or skips
+  publishing entirely (delete-before-publish). Codex review caught
+  the original race where claim["proc"] was None at delete time and
+  the not-yet-attached subprocess still started and ran against a
+  deleted chat.
   """
   global _current_run
   with _run_lock:
     claim = _current_run
     if claim is None or claim.get("chat_id") != chat_id:
       return False
-  proc = claim.get("proc")
+    claim["cancelled"] = True
+    proc = claim.get("proc")
+    _current_run = None
   if proc is not None:
     try:
       proc.kill()
     except (ProcessLookupError, OSError):
       pass
-  with _run_lock:
-    if _current_run is claim:
-      _current_run = None
   return True
 
 
@@ -269,22 +281,33 @@ def _system_prompt(chat_id: str | None = None) -> str:
   chat log path so the agent reads the right file.
   """
   if chat_id:
-    log_path = f"/data/recovery/chats/{chat_id}.jsonl"
+    prior_turns = (
+      f"BEFORE answering, run `Read /data/recovery/chats/{chat_id}.jsonl` "
+      "to see prior turns in this session. Each line is a JSON object "
+      "with role + content; the FIRST line is a `_meta` record (provider "
+      "+ created_at) — skip it. The CLI is invoked fresh per turn so "
+      "there is no in-process memory of earlier exchanges."
+    )
   else:
-    # Defensive fallback for ad-hoc invocations without a chat_id.
-    # The first line of the per-chat file is a `_meta` record; the
-    # legacy file has no such header. The agent should skip lines
-    # starting with `{"_meta"` when iterating.
-    log_path = "/data/recovery/chats/*.jsonl  (multi-chat layout — list-chats first)"
+    # Defensive fallback for ad-hoc invocations without a chat_id
+    # (tests, internal tooling). The HTTP layer always supplies
+    # one. Don't emit a `Read <glob>` instruction here — the Read
+    # tool would treat the glob as a literal filename and waste a
+    # tool call on a guaranteed file-not-found. Tell the agent to
+    # list the directory instead. Codex review noted this fallback
+    # is unreachable from production but the prior wording could
+    # mislead any non-HTTP caller.
+    prior_turns = (
+      "Prior turns in this session live under /data/recovery/chats/ "
+      "as one .jsonl per chat. List that directory to find the right "
+      "file. Each line in a chat file is a JSON object with role + "
+      "content; the FIRST line is a `_meta` record — skip it."
+    )
   return (
     "You are running inside the Mobius recovery chat. The user has "
     "reached you here because something in the platform is broken "
     "and they need help fixing it.\n\n"
-    f"BEFORE answering, run `Read {log_path}` to see prior turns "
-    "in this session. Each line is a JSON object with role + "
-    "content; the FIRST line is a `_meta` record (provider + "
-    "created_at) — skip it. The CLI is invoked fresh per turn so "
-    "there is no in-process memory of earlier exchanges.\n\n"
+    + prior_turns + "\n\n"
     "You have filesystem-only access. There is NO $AGENT_TOKEN, NO "
     "$API_BASE_URL, NO $CHAT_ID env var here — the production chat "
     "API plumbing may be broken. Do not try to POST to /api/...\n\n"
@@ -853,7 +876,22 @@ async def _spawn_claude(
   )
   # Publish the live process onto the claim immediately so a
   # GeneratorExit between spawn and stdin-write still tears down.
-  claim["proc"] = proc
+  # Atomic with the cancellation check so a delete_chat that landed
+  # during the await above doesn't slip past — see the matching
+  # comment in terminate_active_run_for.
+  with _run_lock:
+    if claim.get("cancelled"):
+      cancelled_during_spawn = True
+    else:
+      claim["proc"] = proc
+      cancelled_during_spawn = False
+  if cancelled_during_spawn:
+    try:
+      proc.kill()
+    except (ProcessLookupError, OSError):
+      pass
+    yield _sse({"type": "done"})
+    return
 
   # Write the message to stdin and close so the CLI sees EOF and
   # starts processing. drain() handles backpressure for large
@@ -971,7 +1009,23 @@ async def _spawn_codex(
     env=env,
     cwd=SUBPROCESS_CWD,
   )
-  claim["proc"] = proc
+  # Atomic publish + cancellation check under the run lock; mirrors
+  # _spawn_claude. Without this guard a delete_chat that landed
+  # during the spawn await would clear _current_run but the not-yet-
+  # attached proc would keep running against the deleted chat.
+  with _run_lock:
+    if claim.get("cancelled"):
+      cancelled_during_spawn = True
+    else:
+      claim["proc"] = proc
+      cancelled_during_spawn = False
+  if cancelled_during_spawn:
+    try:
+      proc.kill()
+    except (ProcessLookupError, OSError):
+      pass
+    yield _sse({"type": "done"})
+    return
 
   # Codex `exec --json` has no separate --system-prompt flag — the
   # stdin payload IS the prompt. So prepend the recovery system

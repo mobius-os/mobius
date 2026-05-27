@@ -1803,3 +1803,256 @@ def test_factory_reset_terminates_active_recovery_run(monkeypatch):
     assert rcr._current_run is None, "claim slot must be cleared post-reset"
   finally:
     rcr._current_run = None
+
+
+# ---------------------------------------------------------------------
+# Review round #5 regressions
+# ---------------------------------------------------------------------
+
+def test_codex_status_is_idempotent_across_concurrent_polls(monkeypatch):
+  """codex_status used to `pop("result")`, so the first poller after
+  completion consumed the terminal state and every subsequent
+  poller (or concurrent tab / EventSource reconnect) read `idle`
+  instead of `complete`. The second tab would then hang on
+  "Waiting…" forever. Codex review round #5 caught this.
+  """
+  from app import recover_oauth
+
+  recover_oauth._codex_login_procs.pop("active", None)
+  recover_oauth._codex_login_status["result"] = "complete"
+  # Stub the auth wrapper — we're testing read semantics, not auth.
+  monkeypatch.setattr(
+    "app.recover_oauth._require_recovery_session", lambda _t: None,
+  )
+
+  try:
+    from unittest.mock import Mock
+    req = Mock()
+    s1 = recover_oauth.codex_status(req, moebius_recover="x")
+    s2 = recover_oauth.codex_status(req, moebius_recover="x")
+    s3 = recover_oauth.codex_status(req, moebius_recover="x")
+    assert s1 == {"state": "complete"}, "first poll must see complete"
+    assert s2 == {"state": "complete"}, (
+      "second concurrent poll must STILL see complete — pop would race"
+    )
+    assert s3 == {"state": "complete"}, "third poll likewise"
+    # And the underlying state must STILL be there (non-destructive read).
+    assert recover_oauth._codex_login_status.get("result") == "complete"
+  finally:
+    recover_oauth._codex_login_status.pop("result", None)
+
+
+def test_codex_status_cleared_only_by_next_start():
+  """After codex_status is non-destructive, the `result` key must
+  be cleared when /provider/codex/start kicks off a new flow —
+  otherwise a stale `complete` from a prior run would leak into
+  the next attempt's first poll. The clearing already lives in
+  codex_start (line `_codex_login_status.pop("result", None)`);
+  this test pins that behavior so it can't regress.
+  """
+  from app import recover_oauth
+  # Inspect codex_start's source for the clearing call. We use
+  # textual assertion rather than re-running the full subprocess
+  # spawn (which would need codex on PATH + working network).
+  import inspect
+  src = inspect.getsource(recover_oauth.codex_start)
+  assert '_codex_login_status.pop("result"' in src, (
+    "codex_start must clear stale result so the next status poll "
+    "doesn't see the previous run's terminal state"
+  )
+
+
+def test_codex_start_registers_proc_before_readline_loop():
+  """The original codex_start spawned the subprocess at line 393
+  but didn't publish it to _codex_login_procs until line 438,
+  AFTER the 15s readline loop + parsing. A factory reset hitting
+  that window called terminate_active_codex_login on an empty
+  registry, killed nothing, and let the login complete + rewrite
+  /data/cli-auth/codex/auth.json after the reset wiped it. Codex
+  review round #5 caught this as the security gap the prior round
+  was supposed to close.
+
+  Source-level assertion: `_codex_login_procs["active"] = proc`
+  must appear BEFORE the first `await proc.stdout.readline()` in
+  the function body. Source inspection is the right tool here
+  because the runtime path goes through slowapi's request-typed
+  decorator and the cleanup branches we want to verify are timeout
+  / parse-failure paths that are awkward to drive end-to-end.
+  """
+  import inspect
+  from app import recover_oauth
+
+  src = inspect.getsource(recover_oauth.codex_start)
+  register_pos = src.find('_codex_login_procs["active"] = proc')
+  readline_pos = src.find("proc.stdout.readline()")
+
+  assert register_pos != -1, (
+    "codex_start must publish the proc to _codex_login_procs so a "
+    "concurrent factory reset can kill it"
+  )
+  assert readline_pos != -1, "expected a readline call in codex_start"
+  assert register_pos < readline_pos, (
+    "registration must happen BEFORE the readline loop — otherwise "
+    "terminate_active_codex_login can't find the proc during the "
+    "startup window and a delayed login completion can rewrite "
+    "/data/cli-auth/codex/auth.json post-reset"
+  )
+
+  # And both timeout + parse-failure branches must clean up the
+  # registry entry (since the watcher hasn't started yet).
+  cleanup = '_codex_login_procs.pop("active", None)'
+  # The clearing-on-start call counts as 1. The timeout-branch and
+  # parse-failure-branch cleanups add 2 more, for a minimum of 3.
+  assert src.count(cleanup) >= 3, (
+    "both timeout and parse-failure branches must pop the registry "
+    "entry so a failed startup doesn't leak a stale active proc"
+  )
+
+
+def test_terminate_active_run_for_cancels_during_spawn_startup(monkeypatch):
+  """The original terminate_active_run_for only killed when
+  claim["proc"] was already attached. _claim_run installs the
+  claim with proc=None and the subprocess is attached LATER, after
+  create_subprocess_exec returns. A delete_chat landing in that
+  window cleared _current_run and reported success, but the not-
+  yet-attached subprocess kept starting and ran against the now-
+  deleted chat. Codex review round #5 caught this race.
+
+  We simulate the window: install a claim with proc=None for chat
+  "A", call terminate_active_run_for("A"), then verify the
+  cancellation flag is set so the eventual proc-attach can no-op.
+  """
+  from app import recover_chat_runner as rcr
+
+  claim = {"proc": None, "chat_id": "A"}
+  rcr._current_run = claim
+  try:
+    result = rcr.terminate_active_run_for("A")
+    assert result is True, (
+      "terminate must succeed even when proc isn't attached yet"
+    )
+    assert claim.get("cancelled") is True, (
+      "the spawn-task sentinel must be set so the in-flight spawn "
+      "kills itself when it tries to publish the proc"
+    )
+    assert rcr._current_run is None, "claim slot must be released"
+  finally:
+    rcr._current_run = None
+
+
+def test_spawn_kills_proc_when_cancelled_during_spawn(monkeypatch, tmp_path):
+  """End-to-end: if a claim is cancelled while _spawn_claude is
+  awaiting create_subprocess_exec, the spawn task must kill the
+  just-spawned proc instead of publishing it and continuing to
+  stream against a deleted chat. Codex review round #5 follow-up.
+  """
+  import asyncio as _asyncio
+  from app import recover_chat_runner as rcr
+
+  monkeypatch.setattr(
+    "app.recover_chat_runner.RECOVERY_CHATS_DIR",
+    tmp_path / "chats",
+  )
+
+  killed = {"flag": False}
+
+  class _RecordingStdin:
+    def write(self, _): pass
+    async def drain(self): pass
+    def close(self): pass
+
+  class _StubStdout:
+    async def readline(self):
+      return b""
+    async def read(self):
+      return b""
+
+  class _StubProc:
+    def __init__(self):
+      self.stdin = _RecordingStdin()
+      self.stdout = _StubStdout()
+      self.stderr = _StubStdout()
+      self.returncode = None
+    def kill(self):
+      killed["flag"] = True
+      self.returncode = -9
+    async def wait(self):
+      if self.returncode is None:
+        self.returncode = 0
+      return self.returncode
+
+  async def _fake_spawn(*_a, **_kw):
+    # Simulate the race: the claim was just cancelled (e.g. by a
+    # delete_chat that landed during the await) BEFORE the spawn
+    # returns. By the time create_subprocess_exec resolves, the
+    # cancellation flag is already set.
+    claim["cancelled"] = True
+    return _StubProc()
+
+  monkeypatch.setattr(
+    "app.recover_chat_runner.asyncio.create_subprocess_exec",
+    _fake_spawn,
+  )
+  monkeypatch.setattr(
+    "app.recover_chat_runner.shutil.which", lambda _: "/fake/claude",
+  )
+
+  chat_id = rcr.create_chat("claude")
+  claim = rcr._claim_run(chat_id=chat_id)
+  assert claim is not None
+
+  try:
+    events = []
+    async def _drive():
+      async for chunk in rcr._spawn_claude("hi", claim, chat_id):
+        events.append(chunk)
+    _asyncio.run(_drive())
+
+    assert killed["flag"], (
+      "spawn task must kill the just-spawned proc when it observes "
+      "the cancellation flag — otherwise the not-yet-attached proc "
+      "would run against the deleted chat"
+    )
+    # Only a `done` SSE should escape; no text events.
+    assert any('"done"' in e for e in events), (
+      "cancelled spawn must still emit done so the SSE client closes"
+    )
+  finally:
+    rcr._current_run = None
+
+
+def test_system_prompt_fallback_does_not_emit_read_glob():
+  """The chat_id=None fallback path used to emit `Read /data/recovery/
+  chats/*.jsonl  (multi-chat layout — list-chats first)` as a
+  literal Read instruction. The Claude CLI's Read tool does not
+  expand globs and would waste a tool call on a guaranteed file-
+  not-found. The fallback must instead tell the agent to LIST the
+  directory rather than READ a glob. Both Claude (round #5) and
+  Codex flagged this; Codex confirmed it's unreachable from
+  production HTTP but it remains a defensive nit for non-HTTP
+  callers.
+  """
+  from app import recover_chat_runner as rcr
+  fallback = rcr._system_prompt(None)
+
+  # The defensive fallback must NOT direct the agent to Read a
+  # glob path (which the Read tool would treat literally).
+  assert "Read /data/recovery/chats/*.jsonl" not in fallback, (
+    "fallback must not ask the agent to Read a glob path"
+  )
+  # And must mention the directory so the agent can find its way.
+  assert "/data/recovery/chats/" in fallback
+
+
+def test_system_prompt_with_chat_id_still_emits_read_instruction():
+  """Conversely, the normal path (chat_id supplied) MUST still
+  include the `Read <per-chat-path>` instruction — that's how the
+  recovery agent picks up prior turns. Regression guard for the
+  defensive-fallback edit so it doesn't accidentally drop the
+  instruction from the happy path.
+  """
+  from app import recover_chat_runner as rcr
+  prompt = rcr._system_prompt("xyz789")
+  assert "Read /data/recovery/chats/xyz789.jsonl" in prompt, (
+    "the chat_id path must still tell the agent to read its log"
+  )

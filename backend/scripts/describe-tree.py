@@ -199,9 +199,11 @@ def _extract_md(head: str) -> str:
         text = text[end + len(marker):].lstrip()
         break
     else:
-      # File starts with `---\n` but has no proper closing line —
-      # treat as malformed and skip the frontmatter heuristic.
-      pass
+      # File starts with `---\n` but has no proper closing line.
+      # Skip past the opening marker line so we extract a real
+      # content line below instead of returning `---` itself.
+      # Codex review caught this.
+      text = text.split("\n", 1)[1] if "\n" in text else ""
   # Prefer the first heading.
   for line in text.split("\n"):
     line = line.strip()

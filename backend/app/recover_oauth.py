@@ -397,6 +397,14 @@ async def codex_start(
     stderr=asyncio.subprocess.STDOUT,
     env=env,
   )
+  # Register the proc BEFORE the readline loop so a concurrent
+  # factory reset (or another destructive call) can find and kill
+  # it during the startup window. Without this, terminate_active_
+  # codex_login() would see an empty registry, kill nothing, and
+  # let the login complete after the reset — recreating the
+  # credentials the reset just wiped. Codex review caught this.
+  _codex_login_procs["active"] = proc
+  _codex_login_status.pop("result", None)
 
   output = ""
   try:
@@ -411,6 +419,8 @@ async def codex_start(
         ):
           break
   except asyncio.TimeoutError:
+    # Cleanup the registry entry — no watcher to do it for us yet.
+    _codex_login_procs.pop("active", None)
     proc.kill()
     try:
       await asyncio.wait_for(proc.wait(), timeout=2.0)
@@ -424,6 +434,8 @@ async def codex_start(
   url_match = re.search(r'(https://[^\s<>"\']+)', clean)
   code_match = re.search(r'([A-Z0-9]{4,}-[A-Z0-9]{4,})', clean)
   if not url_match or not code_match:
+    # Same cleanup as the timeout branch — no watcher yet.
+    _codex_login_procs.pop("active", None)
     proc.kill()
     try:
       await asyncio.wait_for(proc.wait(), timeout=2.0)
@@ -435,8 +447,8 @@ async def codex_start(
     )
     raise HTTPException(500, "Could not parse device code")
 
-  _codex_login_procs["active"] = proc
-  _codex_login_status.pop("result", None)
+  # Proc is already registered above; just start the watcher now
+  # that we know parsing succeeded.
   asyncio.create_task(_watch_codex_login(proc))
 
   parsed_url = url_match.group(1).rstrip('.,;:!?')
@@ -451,11 +463,18 @@ def codex_status(
   """Polls the codex login state.
 
   Returns one of: in_progress, complete, failed, idle.
+
+  Reads `_codex_login_status["result"]` non-destructively so two
+  concurrent pollers (e.g. EventSource reconnect, two browser tabs,
+  or a poll that races with the watcher's status set) both observe
+  the terminal state. The result is cleared on the next
+  /provider/codex/start, not on first read. Codex review caught the
+  pop-destroys-state bug.
   """
   _require_recovery_session(moebius_recover)
   if "active" in _codex_login_procs:
     return {"state": "in_progress"}
-  result = _codex_login_status.pop("result", None)
+  result = _codex_login_status.get("result")
   if result == "complete":
     return {"state": "complete"}
   if result == "failed":
