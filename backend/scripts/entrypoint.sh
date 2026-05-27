@@ -397,6 +397,24 @@ print(json.dumps(entry, separators=(',', ':')))
   fi
 fi
 
+# Install the codex-plugin-cc into the agent's CLAUDE_CONFIG_DIR if
+# not yet present. Source is baked into the image at /opt/codex-plugin-cc
+# (pinned in the Dockerfile via `git clone --branch v1.0.4`). The install
+# writes settings.json + plugins/ under /data/cli-auth/claude/, which
+# is volume-backed — so we re-install automatically if the volume is
+# wiped. Runs as mobius so all resulting files are mobius-owned and
+# the agent's CLI can update them if it ever runs `plugin update`.
+# A failure here is non-fatal: the agent still works without the
+# plugin, the user just doesn't get the /codex:* slash commands or
+# codex:codex-rescue subagent.
+if [ ! -f /data/cli-auth/claude/plugins/installed_plugins.json ]; then
+  mkdir -p /data/cli-auth/claude
+  chown mobius:mobius /data/cli-auth /data/cli-auth/claude 2>/dev/null || true
+  su -s /bin/sh mobius -c "CLAUDE_CONFIG_DIR=/data/cli-auth/claude claude plugin marketplace add /opt/codex-plugin-cc" \
+    && su -s /bin/sh mobius -c "CLAUDE_CONFIG_DIR=/data/cli-auth/claude claude plugin install codex@openai-codex" \
+    || echo "WARNING: codex-plugin-cc install failed (non-fatal)" >&2
+fi
+
 # Drop to non-root user and start the server.
 # umask 022: newly created files default to 644 (rw-r--r--) so the
 # mobius server can read script/source files copied into the image at

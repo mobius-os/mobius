@@ -50,6 +50,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # (root still has access because root always does.)
 RUN ln -s /opt/agent-browser /root/.agent-browser
 
+# openai/codex-plugin-cc — Claude Code plugin that exposes Codex as a
+# delegation/review subagent inside the agent's session. Cloned at
+# image-build time so the source is reproducible and pinned to a
+# release tag; the actual `claude plugin install` happens at first
+# boot in entrypoint.sh (it has to write into the agent's runtime
+# CLAUDE_CONFIG_DIR=/data/cli-auth/claude/, which is a volume and
+# can't be baked into the image). Stays root-owned + world-readable
+# (git clone's default 755/644) — install only reads from here.
+RUN git clone --depth 1 --branch v1.0.4 \
+      https://github.com/openai/codex-plugin-cc.git /opt/codex-plugin-cc
+
 WORKDIR /app
 
 COPY backend/requirements.txt .
