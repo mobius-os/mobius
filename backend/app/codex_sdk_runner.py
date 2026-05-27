@@ -13,17 +13,17 @@ in `active_sessions[chat_id]` so Stop and queued-message steering can
 reach it.
 
 **AskUserQuestion parity is shipped via the `request_user_input`
-tool.** Earlier revisions of this docstring (and the A-12 ledger
-note) declared AskUserQuestion unsupported on the Codex path. That
-was based on a partial audit — the high-level `request_user_input`
-/ `collaboration_modes` Python API doesn't exist in 0.131.0a4, but
-the underlying wire surface does: the app-server emits
-`item/tool/requestUserInput` JSON-RPC requests when the model
-calls the tool, and `AppServerClient.approval_handler` is the
-callback that receives them. The Codex high-level class doesn't
-forward `approval_handler`, so we monkey-patch
-`codex._client._sync._approval_handler` after construction (see
-`_install_request_user_input_handler` below).
+tool.** The underlying wire surface is `item/tool/requestUserInput`
+JSON-RPC requests emitted by the app-server when the model calls
+the tool. `AppServerClient.approval_handler` is the documented
+constructor argument that receives them (public as of
+openai-codex 0.134.0; was a private attribute on a less-stable
+path before). The high-level `AsyncCodex` / `AsyncAppServerClient`
+wrappers do not forward `approval_handler` to the underlying sync
+client, so we set the attribute on `codex._client._sync` directly
+after construction. See `_install_request_user_input_handler`
+below — the attribute itself is part of the public API surface, we
+just have to reach through the async wrappers to get at it.
 
 The tool is gated by the `default_mode_request_user_input`
 feature flag (stage `UnderDevelopment`, default off), enabled via
@@ -348,9 +348,14 @@ def _install_request_user_input_handler(
   pending_questions: dict,
   db: Any,
 ) -> None:
-  """Monkey-patches `codex._client._sync._approval_handler` to bridge
-  Codex's `request_user_input` tool into Möbius's shared
-  `_pending_questions` machinery.
+  """Wires Möbius's question-bridge into `codex._client._sync._approval_handler`.
+
+  As of openai-codex 0.134.0, `AppServerClient.approval_handler` is a
+  documented constructor argument. The high-level `AsyncCodex` /
+  `AsyncAppServerClient` wrappers don't forward it, so we still set
+  the attribute on the underlying sync client after construction —
+  but the attribute itself is now part of the public surface, not a
+  private internal we're sneaking past.
 
   The handler runs on the SDK's sync worker thread, so anything that
   touches asyncio state (the future, the broadcast, the DB session)
@@ -562,13 +567,14 @@ def _install_request_user_input_handler(
       }
     return {"answers": answers_by_qid}
 
-  # Reach the sync client through the documented internal path. The
-  # async client delegates all approvals to the underlying sync one.
-  # Test fakes legitimately lack the `_client` chain entirely; only
-  # real openai-codex installs reach the strict check.
-  sync_module = None
+  # Reach the sync client. AsyncCodex._client is AsyncAppServerClient;
+  # AsyncAppServerClient._sync is AppServerClient — the level that
+  # owns the public `approval_handler` constructor argument. Test
+  # fakes legitimately lack the chain entirely; only real
+  # openai-codex installs reach the strict check.
+  sync_client = None
   try:
-    sync_module = codex._client._sync
+    sync_client = codex._client._sync
   except AttributeError:
     log.warning(
       "Codex SDK has no _client._sync chain — request_user_input "
@@ -576,16 +582,17 @@ def _install_request_user_input_handler(
       chat_id,
     )
     return
-  if not hasattr(sync_module, "_approval_handler"):
-    # Real openai-codex client without the expected hook means the
-    # SDK was refactored — silently no-opping would make the model's
-    # AskUserQuestion calls vanish. Fail loudly so the operator pins
-    # a known-good version instead of debugging silent question loss.
+  if not hasattr(sync_client, "_approval_handler"):
+    # Real openai-codex client without the expected attribute means
+    # the SDK was refactored — silently no-opping would make the
+    # model's AskUserQuestion calls vanish. Fail loudly so the
+    # operator pins a known-good version instead of debugging silent
+    # question loss.
     raise RuntimeError(
-      "openai-codex API broken: _client._sync._approval_handler "
+      "openai-codex API broken: AppServerClient._approval_handler "
       "missing — pin a known-good version"
     )
-  sync_module._approval_handler = handler
+  sync_client._approval_handler = handler
   log.debug(
     "Codex request_user_input bridge installed chat_id=%s", chat_id,
   )
@@ -702,10 +709,11 @@ async def run_codex_sdk_turn(
 
   try:
     async with sdk["AsyncCodex"](config=config) as codex:
-      # Install AskUserQuestion bridge by monkey-patching the sync
-      # AppServerClient's approval_handler. The hook is documented as
-      # private (`_client._sync._approval_handler`) and only exposed via
-      # the AppServerClient constructor — AsyncCodex doesn't forward it.
+      # Install AskUserQuestion bridge on the sync AppServerClient's
+      # approval_handler attribute. `approval_handler` is a public
+      # constructor argument as of openai-codex 0.134.0, but the
+      # higher-level AsyncCodex / AsyncAppServerClient don't forward
+      # it, so we set it on `codex._client._sync` after construction.
       # When the model calls the `request_user_input` tool (enabled by
       # the features.default_mode_request_user_input config_override
       # above), the app-server sends an `item/tool/requestUserInput`

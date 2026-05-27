@@ -35,8 +35,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
     fonts-liberation fonts-noto-color-emoji \
     && npm install -g esbuild@0.20.2 \
-    && npm install -g @anthropic-ai/claude-code@2.1.145 \
-    && npm install -g @openai/codex@0.132.0 \
+    && npm install -g @anthropic-ai/claude-code@2.1.152 \
+    && npm install -g @openai/codex@0.134.0 \
     && npm install -g agent-browser \
     && agent-browser install \
     && mv /root/.agent-browser /opt/agent-browser \
@@ -60,11 +60,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 # not published on PyPI). Install --no-deps to skip that broken pin,
 # then pin the cli-bin to a version that actually exists.
 # Pinned to commit SHA (not tag) for full reproducibility — tags are
-# mutable on GitHub. SHA corresponds to refs/tags/rust-v0.133.0 as of
-# 2026-05-24.
+# mutable on GitHub. SHA corresponds to refs/tags/rust-v0.134.0 as of
+# 2026-05-27. 0.134 replaced the private `_client._sync._approval_handler`
+# monkey-patch with a public `approval_handler` constructor argument
+# on `openai_codex.client.AppServerClient` — codex_sdk_runner.py now
+# uses that public API instead of monkey-patching.
 RUN pip install --no-cache-dir --no-deps \
-      'openai-codex @ git+https://github.com/openai/codex.git@71a2103606e57ee3508db968c26b2fcee54b5c6e#subdirectory=sdk/python' \
-    && pip install --no-cache-dir 'openai-codex-cli-bin==0.133.0'
+      'openai-codex @ git+https://github.com/openai/codex.git@a75c443fdb64db48c3cf4bdb247c7ee52c0144c9#subdirectory=sdk/python' \
+    && pip install --no-cache-dir 'openai-codex-cli-bin==0.134.0'
 
 COPY backend/app ./app/
 COPY backend/scripts ./scripts/
