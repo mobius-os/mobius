@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -16,17 +16,46 @@ from app.deps import get_current_owner_or_app
 router = APIRouter(prefix="/api/ai", tags=["ai"])
 
 
+# Tools the mini-app surface is allowed to request. `true` expands to
+# this full set; a list-form `tools` is intersected with it. Keeping
+# the allowlist here (not in the JWT or DB) so an app can ask for a
+# subset on a per-call basis without re-registering itself.
+_ALLOWED_TOOLS = {"Bash", "Write", "Read", "Edit", "Glob", "Grep"}
+
+
 class AiRequest(BaseModel):
   messages: list[dict]
   system: str = ""
-  tools: bool = False
+  # false = no tools (the default); true = full allowlist; list =
+  # exact subset the app wants for this call. List form lets an app
+  # declare "I only need Read + Glob" and have the spawned subprocess
+  # match. Unknown tool names are rejected (400).
+  tools: bool | list[str] = False
 
 
 def _sse(data: dict) -> str:
   return f"data: {json.dumps(data)}\n\n"
 
 
-async def _stream(messages: list[dict], system: str, tools: bool):
+def _resolve_tools(tools: bool | list[str]) -> str:
+  """Returns the value passed to `--allowedTools` for the Claude CLI."""
+  if tools is False:
+    return "none"
+  if tools is True:
+    return ",".join(sorted(_ALLOWED_TOOLS))
+  unknown = [t for t in tools if t not in _ALLOWED_TOOLS]
+  if unknown:
+    raise HTTPException(
+      status_code=400,
+      detail=(
+        f"Unknown tool(s): {', '.join(unknown)}. "
+        f"Allowed: {', '.join(sorted(_ALLOWED_TOOLS))}."
+      ),
+    )
+  return ",".join(tools) if tools else "none"
+
+
+async def _stream(messages: list[dict], system: str, allowed_tools: str):
   """Streams a Claude response for a mini-app conversation."""
   last = messages[-1].get("content", "") if messages else ""
 
@@ -35,11 +64,8 @@ async def _stream(messages: list[dict], system: str, tools: bool):
     "-p", last,
     "--output-format", "stream-json",
     "--verbose",
+    "--allowedTools", allowed_tools,
   ]
-  if tools:
-    cmd += ["--allowedTools", "Bash,Write,Read,Edit,Glob,Grep"]
-  else:
-    cmd += ["--allowedTools", "none"]
   if system:
     cmd += ["--system-prompt", system]
   try:
@@ -92,8 +118,11 @@ async def ai_chat(
   Mini-apps pass their full conversation history in the system prompt
   and send the latest user message as the last item in messages.
   """
+  # Validate tools BEFORE opening the stream so a bad tool name
+  # returns 400 instead of an SSE error mid-stream.
+  allowed_tools = _resolve_tools(body.tools)
   return StreamingResponse(
-    _stream(body.messages, body.system, body.tools),
+    _stream(body.messages, body.system, allowed_tools),
     media_type="text/event-stream",
     headers={
       "Cache-Control": "no-cache",

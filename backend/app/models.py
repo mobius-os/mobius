@@ -89,6 +89,19 @@ class App(Base):
   chat_id = Column(String(64), nullable=True, default=None)
   # See `Chat.pinned_at` — same contract.
   pinned_at = Column(DateTime, nullable=True, default=None)
+  # Cross-app storage access this app grants to OTHER apps. The owner
+  # token always has full access; an app token for THIS app always has
+  # full access to this app's data. Affects /api/storage/apps/{id}/...
+  # when the caller is a DIFFERENT app token:
+  #   'none'  (default) — other apps get 403
+  #   'read'  — other apps can GET; PUT/DELETE 403
+  #   'write' — other apps can GET/PUT/DELETE
+  # The agent sets this when building an app, based on partner intent.
+  # The owner can always override via chat — this is the declared
+  # default, not an enforced ceiling.
+  share_with_apps = Column(
+    String(16), nullable=False, default="none"
+  )
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)

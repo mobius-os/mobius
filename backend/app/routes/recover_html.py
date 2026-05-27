@@ -288,6 +288,13 @@ _CONFIRM_BACKUP = (
   "Backup includes OAuth credentials for Claude and Codex."
   " Store the file securely. Continue?"
 )
+_CONFIRM_RESTORE_BACKEND = (
+  "Restore /app/app/ from the baked backend copy and restart the"
+  " server. Continue?"
+)
+_CONFIRM_RESTORE_SCRIPTS = (
+  "Restore /app/scripts/ from the baked scripts copy. Continue?"
+)
 
 
 def dashboard_html(msg: str = "") -> str:
@@ -330,14 +337,14 @@ def dashboard_html(msg: str = "") -> str:
           </button>
         </form>
         <form method="POST" action="/recover/action"
-              onsubmit="return confirm('Restore /app/app/ from the baked backend copy and restart the server. Continue?');">
+              onsubmit="{_confirm_attr(_CONFIRM_RESTORE_BACKEND)}">
           <input type="hidden" name="action" value="restore_backend">
           <button class="btn btn-outline" type="submit">
             Restore backend
           </button>
         </form>
         <form method="POST" action="/recover/action"
-              onsubmit="return confirm('Restore /app/scripts/ from the baked scripts copy. Continue?');">
+              onsubmit="{_confirm_attr(_CONFIRM_RESTORE_SCRIPTS)}">
           <input type="hidden" name="action" value="restore_scripts">
           <button class="btn btn-outline" type="submit">
             Restore scripts

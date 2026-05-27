@@ -43,13 +43,52 @@ from sqlalchemy.orm import Session
 from app import models
 from app.config import get_settings
 from app.database import get_db
-from app.deps import get_current_owner, get_current_owner_or_app
+from app.deps import (
+  Principal,
+  get_current_owner,
+  get_current_owner_or_app,
+  get_principal,
+)
 from app.path_utils import validate_path_within_base
 
 router = APIRouter(prefix="/api/storage", tags=["storage"])
 
 _log = logging.getLogger(__name__)
 _SAFE_RE = re.compile(r"^[\w.\-\/]+$")
+
+
+def _check_cross_app(
+  db: Session, principal: Principal, target_app_id: int, mode: str
+) -> None:
+  """Enforces declared cross-app access on /api/storage/apps/{id}/...
+
+  Owner tokens always pass. App tokens accessing their OWN app always
+  pass. App tokens accessing a DIFFERENT app check that app's
+  `share_with_apps` field — 'none' rejects everything, 'read' allows
+  GET only, 'write' allows GET/PUT/DELETE.
+
+  mode: 'read' or 'write'.
+  """
+  if principal.app_id is None:
+    return  # owner token
+  if principal.app_id == target_app_id:
+    return  # app accessing its own data
+  target = (
+    db.query(models.App).filter(models.App.id == target_app_id).first()
+  )
+  if not target:
+    raise HTTPException(status_code=404, detail="App not found.")
+  share = (target.share_with_apps or "none").lower()
+  if share == "none":
+    raise HTTPException(
+      status_code=403,
+      detail=f"App {target_app_id} does not share data with other apps.",
+    )
+  if share == "read" and mode != "read":
+    raise HTTPException(
+      status_code=403,
+      detail=f"App {target_app_id} shares read-only data.",
+    )
 
 
 def _resolve(base: Path, rel: str) -> Path:
@@ -162,9 +201,10 @@ def read_app_file(
   app_id: int,
   path: str,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner_or_app),
+  principal: Principal = Depends(get_principal),
 ):
   """Returns a file from an app's data directory."""
+  _check_cross_app(db, principal, app_id, mode="read")
   base = Path(get_settings().data_dir) / "apps" / str(app_id)
   file_path = _resolve(base, path)
   if not file_path.exists():
@@ -178,9 +218,10 @@ async def write_app_file(
   path: str,
   request: Request,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner_or_app),
+  principal: Principal = Depends(get_principal),
 ):
   """Writes content to a file in an app's data directory."""
+  _check_cross_app(db, principal, app_id, mode="write")
   base = Path(get_settings().data_dir) / "apps" / str(app_id)
   file_path = _resolve(base, path)
   content = await _decode_write_body(request, file_path)
@@ -197,9 +238,10 @@ def delete_app_file(
   app_id: int,
   path: str,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner_or_app),
+  principal: Principal = Depends(get_principal),
 ):
   """Deletes a file from an app's data directory. 404 if missing."""
+  _check_cross_app(db, principal, app_id, mode="write")
   base = Path(get_settings().data_dir) / "apps" / str(app_id)
   file_path = _resolve(base, path)
   if not file_path.exists():
