@@ -12,8 +12,12 @@
  * Run:  npx playwright test tests/cache.spec.mjs
  */
 import { test, expect } from '@playwright/test'
+import { workerChatTitle, workerPrefix, attachCleanup } from './_chatTracker.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
+
+// Per-worker cleanup: see tests/_chatTracker.mjs.
+attachCleanup()
 
 async function setup(page, viewport = { width: 412, height: 915 }) {
   await page.setViewportSize(viewport)
@@ -35,17 +39,26 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
   )
 }
 
-/** Create N empty chats via the API so navigation tests have content. */
+/** Create N empty chats via the API so navigation tests have content.
+ *  Each chat is tagged with the worker prefix so cleanupWorkerChats
+ *  can reap it after the spec. */
 async function ensureChats(page, count = 2) {
-  return page.evaluate(async (n) => {
+  const { workerIndex, title: testTitle } = test.info()
+  // Pre-generate the titles on the Node side so we don't have to
+  // import the helper into the page context.
+  const titles = Array.from(
+    { length: count },
+    () => workerChatTitle(workerIndex, testTitle)
+  )
+  return page.evaluate(async ({ titles: ts }) => {
     const tok = localStorage.getItem('token')
     if (!tok) return []
     const ids = []
-    for (let i = 0; i < n; i++) {
+    for (const title of ts) {
       const res = await fetch('/api/chats', {
         method: 'POST',
         headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
-        body: '{}',
+        body: JSON.stringify({ title }),
       })
       if (res.ok) {
         const c = await res.json()
@@ -53,7 +66,7 @@ async function ensureChats(page, count = 2) {
       }
     }
     return ids
-  }, count)
+  }, { titles })
 }
 
 async function openDrawer(page) {
@@ -121,14 +134,20 @@ test.describe('Chat messages cache (TanStack Query)', () => {
 
     // Use the chat IDs returned by ensureChats directly. Driving via
     // localStorage + reload is reliable across drawer rendering quirks.
-    const ids = await page.evaluate(async () => {
+    // Filter to this worker's chats so concurrent workers' fixtures
+    // don't bleed into the list and shift ids[0]/ids[1].
+    const myPrefix = workerPrefix(test.info().workerIndex)
+    const ids = await page.evaluate(async (prefix) => {
       const tok = localStorage.getItem('token')
       const res = await fetch('/api/chats', {
         headers: { 'Authorization': 'Bearer ' + tok },
       })
       const list = await res.json()
-      return Array.isArray(list) ? list.map(c => c.id) : []
-    })
+      if (!Array.isArray(list)) return []
+      return list
+        .filter(c => (c.title || '').startsWith(prefix))
+        .map(c => c.id)
+    }, myPrefix)
     expect(ids.length).toBeGreaterThanOrEqual(2)
     const chatA = ids[0]
     const chatB = ids[1]

@@ -7,8 +7,12 @@
  * Run: npx playwright test tests/frontend.spec.mjs
  */
 import { test, expect } from '@playwright/test'
+import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
+
+// Per-worker cleanup: see tests/_chatTracker.mjs.
+attachCleanup()
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -37,14 +41,9 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
 }
 
 async function newChat(page) {
-  await page.evaluate(async () => {
-    const token = localStorage.getItem('token')
-    await fetch('./api/chats', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({})
-    })
-  })
+  // Worker-tagged title so cleanupWorkerChats can find + delete this
+  // chat at the end of the spec. See tests/_chatTracker.mjs.
+  await createTaggedChat(page)
   await page.evaluate(() => {
     document.querySelector('.drawer__item--new')?.click()
   })
