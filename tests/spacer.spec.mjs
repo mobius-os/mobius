@@ -63,7 +63,7 @@ async function newChat(page) {
   if (!hasEmpty) {
     await page.goto(BASE)
   }
-  await page.waitForSelector('.chat__empty-wrap', { timeout: 8000 })
+  await expect(page.locator('.chat__empty-wrap')).toBeVisible({ timeout: 8000 })
 }
 
 /** Type a message and press Enter.  Returns after React has rendered. */
@@ -72,7 +72,7 @@ async function sendMessage(page, text) {
   await input.fill(text)
   await page.keyboard.press('Enter')
   // Wait for the scroll container to appear (empty state -> chat state).
-  await page.waitForSelector('.chat__scroll', { timeout: 3000 })
+  await expect(page.locator('.chat__scroll')).toBeVisible({ timeout: 3000 })
   // Two rAFs for React to flush layout effects.
   await page.evaluate(() => new Promise(r =>
     requestAnimationFrame(() => requestAnimationFrame(r))
@@ -432,7 +432,7 @@ test.describe('Chat switching (the bug)', () => {
 
     // Reload to simulate returning.
     await page.goto(BASE)
-    await page.waitForSelector('.chat__scroll, .chat__empty-wrap', { timeout: 8000 })
+    await expect(page.locator('.chat__scroll, .chat__empty-wrap').first()).toBeVisible({ timeout: 8000 })
     await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
 
     const hasScroll = await page.evaluate(() => !!document.querySelector('.chat__scroll'))

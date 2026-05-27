@@ -138,7 +138,7 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
     // stays open per the route mock above).
     await sendMessage(page, 'first message')
     // Wait until sending=true (Stop button rendered).
-    await page.waitForSelector('.chat__stop', { timeout: 5000 })
+    await expect(page.locator('.chat__stop')).toBeVisible({ timeout: 5000 })
     // Queue a second message while the first is still streaming.
     await sendMessage(page, 'queued message')
     // Verify the queued tray rendered with the second message.

@@ -68,7 +68,7 @@ async function newChat(page) {
     () => !!document.querySelector('.chat__empty-wrap')
   )
   if (!hasEmpty) await page.goto(BASE)
-  await page.waitForSelector('.chat__empty-wrap', { timeout: 8000 })
+  await expect(page.locator('.chat__empty-wrap')).toBeVisible({ timeout: 8000 })
 }
 
 
@@ -83,7 +83,7 @@ async function sendMessage(page, text) {
   // shared storageState; downstream assertions already do their
   // own visibility waits, so blocking on container visibility up
   // front bought nothing.
-  await page.waitForSelector('.chat__msg--user', { timeout: 8000 })
+  await expect(page.locator('.chat__msg--user').first()).toBeVisible({ timeout: 8000 })
   await page.evaluate(() => new Promise(r =>
     requestAnimationFrame(() => requestAnimationFrame(r))
   ))
