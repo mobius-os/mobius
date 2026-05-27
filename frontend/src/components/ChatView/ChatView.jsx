@@ -177,6 +177,18 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   const inputRef = useRef(null)
   const spacerRef = useRef(null)
   const lastUserMsgRef = useRef(null)
+  // Stable callback ref attached to the last user message <div>. An
+  // inline callback (or even an inline ternary returning `lastUserMsgRef`
+  // vs `undefined`) creates fresh ref identities every render, which
+  // React 19 treats as detach + reattach. During the detach window
+  // `lastUserMsgRef.current = null` and any concurrent ResizeObserver
+  // tick in useScrollMode (streaming tokens fire a lot of these) computes
+  // pinTarget = 0, collapses the spacer, and the browser clamps scrollTop
+  // — the chat visibly jumps. Capturing the callback once keeps the
+  // attachment stable across re-renders.
+  const setLastUserMsgRef = useCallback((node) => {
+    lastUserMsgRef.current = node
+  }, [])
   // ChatInputBar owns the hidden <input type="file"> but no longer
   // ships a paperclip button. ComposerPopover renders the "+" trigger
   // that opens the Attach-files row; on click it calls this ref's
@@ -1211,7 +1223,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             <li
               key={msg.id || msg.ts || `${msg.role}-${i}`}
               className={`chat__msg chat__msg--${msg.role}`}
-              ref={i === lastUserIdx ? lastUserMsgRef : undefined}
+              ref={i === lastUserIdx ? setLastUserMsgRef : null}
               data-key={dataKey}
               data-ts={msg.role === 'user' && msg.ts ? String(msg.ts) : undefined}
               onClick={msg.ts && msg.role === 'user'

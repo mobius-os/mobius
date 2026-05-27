@@ -240,6 +240,12 @@ export default function useScrollMode({
   const bottomVisibleRef = useRef(false)
   const gestureWindowUntilRef = useRef(0)
   const fullViewHRef = useRef(0)
+  // Lives outside the layout effect so it survives StrictMode's
+  // double-invoke in dev (and any future effect re-run). If this were
+  // a local `let` inside the effect, the second invoke would reset it
+  // to null and `maybeApplyMode()` would re-write scrollTop with the
+  // same mode it already applied, visibly snapping the viewport.
+  const lastAppliedModeRef = useRef(null)
 
   // Persist mode on every chatId change so the next mount restores.
   // (Layout effect can't easily handle persistence because it runs
@@ -304,8 +310,10 @@ export default function useScrollMode({
     // Steady-state streaming (mode unchanged) won't re-pin even as
     // the layout settles around tool-block status flips, KaTeX,
     // highlight.js, and markdown re-wrap — that's the bug from
-    // May 2026 where scrollTop drifted with userMsg.offsetTop.
-    let lastAppliedMode = null
+    // May 2026 where scrollTop drifted with userMsg.offsetTop. The
+    // last-applied identity lives on `lastAppliedModeRef` (declared
+    // above) so it survives the layout effect re-running, including
+    // React 19 StrictMode's dev-time double-invoke.
 
     function sizeSpacer() {
       const lastUserEl = lastUserMsgRef.current
@@ -314,9 +322,9 @@ export default function useScrollMode({
     }
 
     function maybeApplyMode() {
-      if (modeRef.current !== lastAppliedMode) {
+      if (modeRef.current !== lastAppliedModeRef.current) {
         applyMode(scrollEl, modeRef.current)
-        lastAppliedMode = modeRef.current
+        lastAppliedModeRef.current = modeRef.current
       }
     }
 
