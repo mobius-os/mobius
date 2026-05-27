@@ -192,6 +192,14 @@
    base can't reset. */
 .settings__row button[role="switch"] {
   background: var(--switch-track-color);
+  /* Tailwind v4 Preflight ALSO zeros border-radius on ALL
+     buttons in an UNLAYERED rule that beats the SDK Switch's
+     layered `.Track { border-radius: var(--radius-full) }`.
+     The thumb (a <span>) is unaffected so it renders circular,
+     but the track stayed a sharp rectangle — the toggle looked
+     like a square on prod even though the thumb was round.
+     Same fix pattern as the background override above. */
+  border-radius: var(--radius-full, 9999px);
 }
 .settings__row button[role="switch"][data-state="checked"] {
   background: var(--switch-track-color-checked);
