@@ -248,9 +248,13 @@ contract-comment mismatch.
   $SCRIPTS_DIR/rebuild_shell.sh`, the running uvicorn still serves
   the old bundle until the process restarts. Tell the partner the
   shell will update after the next container restart.
-- **Cron entries don't survive container restarts.** `/var/spool/cron/`
-  lives inside the container, not on `/data`, so Railway redeploys
-  wipe every entry. Use the scaffold:
+- **Cron entries don't survive container rebuilds.** `/var/spool/cron/`
+  lives in the image layer, not on `/data`, so any rebuild
+  (`docker compose build && up`, Railway/Fly/Render redeploy, image
+  pull) starts with an empty crontab. The entrypoint replays
+  `/data/apps/*/init-cron.sh` on boot to put entries back, so every
+  cron task needs a matching `init-cron.sh` — without it, the
+  schedule silently vanishes on the next rebuild. Use the scaffold:
   `bash /app/scripts/init-cron-scaffold.sh <slug> "<schedule>"`. It
   writes `job.sh` + `init-cron.sh` + installs the live entry,
   idempotent. Never call `crontab -u mobius` directly without
