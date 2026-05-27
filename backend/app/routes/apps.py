@@ -1,5 +1,6 @@
 """Routes for managing the mini-app registry."""
 
+import asyncio
 import json
 import re
 import shutil
@@ -376,7 +377,7 @@ def get_module(
 
 
 @router.get("/{app_id}/validate")
-def validate_app(
+async def validate_app(
   app_id: int,
   db: Session = Depends(get_db),
   _: models.Owner = Depends(get_current_owner),
@@ -414,20 +415,38 @@ def validate_app(
           "Compiled JS has no default export — "
           "the component won't mount."
         )
-      # Quick syntax check via node --check if available.
+      # Quick syntax check via node --check if available. Uses
+      # asyncio.create_subprocess_exec so the FastAPI event loop
+      # stays free while node runs (a blocking subprocess.run here
+      # would stall every other request for up to the 5s timeout).
+      proc = None
       try:
-        result = subprocess.run(
-          ["node", "--check", str(path)],
-          capture_output=True, text=True, timeout=5,
+        proc = await asyncio.create_subprocess_exec(
+          "node", "--check", str(path),
+          stdout=asyncio.subprocess.PIPE,
+          stderr=asyncio.subprocess.PIPE,
         )
-        if result.returncode != 0:
-          issues.append(
-            f"JS syntax error: {result.stderr.strip()}"
+        try:
+          stdout_b, stderr_b = await asyncio.wait_for(
+            proc.communicate(), timeout=5,
           )
+        except asyncio.TimeoutError:
+          # Kill the orphan node process; otherwise it lingers
+          # holding the pipe open until the OS reaps it.
+          try:
+            proc.kill()
+            await proc.wait()
+          except ProcessLookupError:
+            pass
+          issues.append("Syntax check timed out.")
+        else:
+          if proc.returncode != 0:
+            stderr = stderr_b.decode("utf-8", errors="replace")
+            issues.append(
+              f"JS syntax error: {stderr.strip()}"
+            )
       except FileNotFoundError:
         pass  # node not available — skip this check
-      except subprocess.TimeoutExpired:
-        issues.append("Syntax check timed out.")
 
   return {
     "app_id": app.id,
