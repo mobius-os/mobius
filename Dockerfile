@@ -97,10 +97,10 @@ COPY frontend/public/app-frame.html ./app-frame.html
 # we previously served via CDN.
 RUN mkdir -p /tmp/vendor-install && cd /tmp/vendor-install \
     && npm init -y >/dev/null \
-    && npm install --no-audit --no-fund --silent three@0.162.0 \
-    && mkdir -p /app/static/vendor/three/addons \
-    && cp node_modules/three/build/three.module.js /app/static/vendor/three/three.module.js \
-    && cp -r node_modules/three/examples/jsm/. /app/static/vendor/three/addons/ \
+    && npm install --no-audit --no-fund --silent three@0.184.0 \
+    && mkdir -p /app/static/vendor/three@0.184.0/addons \
+    && cp node_modules/three/build/three.module.js /app/static/vendor/three@0.184.0/three.module.js \
+    && cp -r node_modules/three/examples/jsm/. /app/static/vendor/three@0.184.0/addons/ \
     && cd / && rm -rf /tmp/vendor-install
 
 # Full frontend source so the agent can edit and rebuild the shell.
