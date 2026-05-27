@@ -64,7 +64,7 @@ async function sendMessage(page, text) {
   const input = page.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
   await page.keyboard.press('Enter')
-  await page.waitForSelector('.chat__scroll', { timeout: 3000 })
+  await expect(page.locator('.chat__scroll')).toBeVisible({ timeout: 3000 })
   await page.evaluate(() => new Promise(r =>
     requestAnimationFrame(() => requestAnimationFrame(r))
   ))
