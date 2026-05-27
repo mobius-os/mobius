@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Plus, Chats, Grid, DotsVerticalMoreMenu, SettingsCog, Pin, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
 import { Menu } from '@openai/apps-sdk-ui/components/Menu'
-import { Tooltip } from '@openai/apps-sdk-ui/components/Tooltip'
 import { EmptyMessage } from '@openai/apps-sdk-ui/components/EmptyMessage'
 import { apiFetch } from '../../api/client.js'
 import { appQueries, chatQueries } from '../../hooks/queries.js'
@@ -164,9 +163,32 @@ export default function Drawer({
     const dy = t.clientY - dragStart.current.y
     const shouldClose = dx < -70 && Math.abs(dx) > Math.abs(dy) * 1.35
     const el = drawerRef.current
+    // Smooth release: set the resting transform EXPLICITLY here so
+    // the eased transition runs from the user's finger position to
+    // the target. The previous version cleared the inline transform
+    // before calling onClose — between that clear (which let the
+    // open-class transform: 0 take over) and the parent state
+    // update, the drawer snapped back to 0 for a frame before
+    // animating to -100%. That snap was the visible jitter.
     if (el) {
       el.classList.remove('drawer--dragging')
-      el.style.transform = ''
+      if (shouldClose) {
+        // Animate from drag position to closed target. Clear the
+        // inline transform after the transition completes so the
+        // next open doesn't start from translateX(-100%) inline
+        // (which would conflict with the .drawer--open class).
+        el.style.transform = 'translateX(-100%)'
+        const cleanup = () => {
+          if (el) el.style.transform = ''
+          el.removeEventListener('transitionend', cleanup)
+        }
+        el.addEventListener('transitionend', cleanup, { once: true })
+      } else {
+        // Snap-back to open: clearing the inline transform lets
+        // the .drawer--open class's translateX(0) take over with
+        // the transition running from the drag position.
+        el.style.transform = ''
+      }
     }
     dragStart.current = null
     if (shouldClose) onClose?.()
@@ -444,20 +466,21 @@ function DrawerRow({
         onClose={() => onMenuToggle(false)}
       >
         <Menu.Trigger>
-          {/* Tooltip shows on hover (desktop) / long-press (touch).
-              The aria-label is the source of truth for assistive
-              tech; the tooltip is the visible cue for sighted
-              keyboard / cursor users — discovery beats reading
-              the aria. */}
-          <Tooltip content="More actions" compact openDelay={500}>
-            <button
-              type="button"
-              className="drawer__more"
-              aria-label={`More actions for ${label}`}
-            >
-              <DotsVerticalMoreMenu width={16} height={16} aria-hidden="true" />
-            </button>
-          </Tooltip>
+          {/* No Tooltip wrap here. Both Menu.Trigger and Tooltip
+              are Radix asChild wrappers that merge their props
+              onto the first child element. Nesting them breaks
+              the click-prop chain — Menu's onClick lands on the
+              Tooltip wrapper instead of the button, so tapping
+              ⋮ did nothing. The aria-label below covers screen
+              readers; visible tooltip discovery is a nice-to-have
+              we can revisit later with a different composition. */}
+          <button
+            type="button"
+            className="drawer__more"
+            aria-label={`More actions for ${label}`}
+          >
+            <DotsVerticalMoreMenu width={16} height={16} aria-hidden="true" />
+          </button>
         </Menu.Trigger>
         <Menu.Content side="bottom" align="end" sideOffset={4} minWidth={200}>
           {!confirmingDelete ? (
@@ -519,7 +542,7 @@ function DrawerRow({
           )}
           {kind === 'chat' && (
             <p className="drawer__menu-note">
-              Deleted chats stay recoverable by the agent for 7 days.
+              The agent can recover deleted chats for 7 days.
             </p>
           )}
         </Menu.Content>
