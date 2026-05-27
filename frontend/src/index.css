@@ -68,6 +68,9 @@ html, body, * { scrollbar-width: none; -ms-overflow-style: none; }
 :root {
   --font: 'Inter', system-ui, -apple-system, sans-serif;
   --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+  /* Default to dark. Light-mode override below keeps native UA
+     widgets (scrollbars, date picker, autofill background) in
+     sync with the active theme. */
   color-scheme: dark;
   /* The SDK uses `--color-ring` as its keyboard focus-ring color.
      Map it to the Mobius accent so SDK controls + bespoke widgets
@@ -75,6 +78,10 @@ html, body, * { scrollbar-width: none; -ms-overflow-style: none; }
      define everything else we consume — radius, motion, switch
      defaults — so we only set what we want to OVERRIDE.) */
   --color-ring: var(--accent);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
 }
 
 html, body, #root {
