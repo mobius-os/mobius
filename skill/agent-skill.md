@@ -515,14 +515,44 @@ of the previous screen from a top-level history snapshot. Iframe
 `history.pushState` is invisible to that mechanism, so apps that
 only use iframe history get a blank preview. To get a real preview
 AND single-step back, opt into the **shell-mediated back protocol**
-via postMessage:
+via postMessage. The push is a handshake: send `nav-push` with a
+fresh `requestId`, wait for `moebius:nav-push-ack` with the same
+id, THEN render the nested view. Opening optimistically lets the OS
+snapshot the nested view as the back-preview background — the back
+gesture works but the preview shows the screen you're leaving instead
+of the one you're returning to.
 
 ```jsx
-// On entering a nested view (article, detail, modal):
-window.parent.postMessage(
-  { type: 'moebius:nav-push', label: 'klix-article' },
-  window.location.origin,
-)
+function navPushAndAwaitAck(label) {
+  const requestId = `np-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  return new Promise((resolve, reject) => {
+    function onMsg(e) {
+      if (e.origin !== window.location.origin) return
+      if (e.data?.requestId !== requestId) return
+      if (e.data.type === 'moebius:nav-push-ack') {
+        window.removeEventListener('message', onMsg)
+        resolve()
+      } else if (e.data.type === 'moebius:nav-push-rejected') {
+        window.removeEventListener('message', onMsg)
+        reject(new Error('nav-push rejected (cap hit)'))
+      }
+    }
+    window.addEventListener('message', onMsg)
+    window.parent.postMessage(
+      { type: 'moebius:nav-push', label, requestId },
+      window.location.origin,
+    )
+  })
+}
+
+async function openArticle(article) {
+  try {
+    await navPushAndAwaitAck('klix-article')
+  } catch {
+    return  // shell rejected the push; stay on the list
+  }
+  setSelectedArticle(article)  // safe to render the nested view now
+}
 
 // On the app's own in-app back tap (X button, swipe handler):
 window.parent.postMessage(
@@ -545,20 +575,32 @@ useEffect(() => {
 **Vanilla JS variant** (for non-React mini-apps):
 
 ```js
-// On entering a nested view:
-window.parent.postMessage(
-  { type: 'moebius:nav-push', label: 'detail' },
-  window.location.origin,
-)
+async function navPushAndAwaitAck(label) {
+  const requestId = `np-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  await new Promise((resolve, reject) => {
+    function onMsg(e) {
+      if (e.origin !== window.location.origin) return
+      if (e.data?.requestId !== requestId) return
+      if (e.data.type === 'moebius:nav-push-ack') {
+        window.removeEventListener('message', onMsg); resolve()
+      } else if (e.data.type === 'moebius:nav-push-rejected') {
+        window.removeEventListener('message', onMsg); reject()
+      }
+    }
+    window.addEventListener('message', onMsg)
+    window.parent.postMessage(
+      { type: 'moebius:nav-push', label, requestId },
+      window.location.origin,
+    )
+  })
+}
 
-// Listen for the host telling you the user back-gestured:
 window.addEventListener('message', (e) => {
   if (e.origin !== window.location.origin) return
   if (e.data?.type !== 'moebius:nav-back') return
-  closeDetailView()  // your app's own state mutation
+  closeDetailView()
 })
 
-// On the app's own in-app back tap (X button etc.):
 window.parent.postMessage(
   { type: 'moebius:nav-pop' },
   window.location.origin,
@@ -570,6 +612,11 @@ The shell installs a back-sentinel in its own history on
 for the preview. On back-gesture the shell consumes the sentinel
 and forwards `moebius:nav-back` to you instead of changing its
 own view. Single back-press, real preview.
+
+The `requestId` is optional on the wire (the shell echoes whatever
+you send, including `undefined`), but use a fresh id per push when
+multiple pushes can be in flight — otherwise a stale ack from an
+earlier push can resolve a later promise.
 
 I've learned to pick one model per nested-view level — combining
 `iframe.history.pushState` with this protocol scrambles the back stack.
@@ -584,21 +631,14 @@ strict pair, like push/pop on a stack.
 
 **Rejection handling:** the host caps pending sentinels at 20 per
 app to defend against runaway state. If you exceed the cap, the
-host responds with `{type: 'moebius:nav-push-rejected'}`. Treat
-this as a hard "stay where you are" — do NOT increment your local
-nested-state counter. Without this, your app's count drifts above
-the host's permanently and the next `nav-pop` consumes the wrong
-sentinel.
-
-```js
-window.addEventListener('message', (e) => {
-  if (e.origin !== window.location.origin) return
-  if (e.data?.type === 'moebius:nav-push-rejected') {
-    // Roll back the optimistic state change that prompted nav-push.
-    closeJustOpenedNestedView()
-  }
-})
-```
+host responds with `{type: 'moebius:nav-push-rejected', requestId}`.
+The `navPushAndAwaitAck` helper above rejects its promise in that
+case, so you simply don't render the nested view. If you bypass the
+helper and post `nav-push` directly without awaiting an ack, treat
+a rejection as a hard "stay where you are" — do NOT increment your
+local nested-state counter. Without this, your app's count drifts
+above the host's permanently and the next `nav-pop` consumes the
+wrong sentinel.
 
 ### Back-nav across app switches
 

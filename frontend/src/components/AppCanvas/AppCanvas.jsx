@@ -150,13 +150,31 @@ export default function AppCanvas({
       // shell view.
       if (msg.type === 'moebius:nav-push') {
         const ok = onNavPush?.(appId)
+        // Echo the iframe's optional requestId on both ack and reject
+        // so the app can correlate when multiple nav-pushes are in
+        // flight. Apps that don't pass a requestId get undefined back
+        // and treat the next ack/reject as theirs (backwards compatible
+        // with the pre-ack protocol).
+        const requestId = msg.requestId
         if (ok === false) {
           // Cap hit (MAX_APP_SENTINELS) or pushState threw. Tell the
           // app so it can correct its own bookkeeping — otherwise its
           // count drifts above the shell's and the next nav-pop pops
           // a sentinel it never owned, breaking back-nav permanently.
           iframe.contentWindow?.postMessage(
-            { type: 'moebius:nav-push-rejected' },
+            { type: 'moebius:nav-push-rejected', requestId },
+            window.location.origin,
+          )
+        } else {
+          // Confirm the sentinel is installed so the app can defer
+          // opening its nested view until the OS back-gesture preview
+          // would snapshot the previous screen. Without this ack the
+          // app has to open optimistically and may render the nested
+          // view before the shell's pushState lands — the BFCache then
+          // snapshots the nested view and uses it as the back preview
+          // (wrong background).
+          iframe.contentWindow?.postMessage(
+            { type: 'moebius:nav-push-ack', requestId },
             window.location.origin,
           )
         }
