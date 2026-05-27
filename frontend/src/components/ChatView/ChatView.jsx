@@ -758,7 +758,19 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       pendingQueue.add(queuedMsg)
       setInput('')
       clearFiles()
-      if (inputRef.current) inputRef.current.style.height = 'auto'
+      if (inputRef.current) {
+        inputRef.current.style.height = 'auto'
+        // Drop the multi-line `.chat__pill--tall` class so send/mic
+        // re-center vertically. Without this, the pill stays in
+        // flex-end alignment after a send-from-tall and the freshly
+        // empty textarea renders pinned to the bottom — text appears
+        // off-center (lower than its resting position) until the
+        // user types again. `handleTextareaChange` re-evaluates this
+        // class on every keystroke, but send doesn't go through that
+        // path. Tap-to-focus doesn't trigger a change event either,
+        // so the visual stayed broken until the next keystroke.
+        inputRef.current.closest('.chat__pill')?.classList.remove('chat__pill--tall')
+      }
       try {
         const result = await streamSend(
           text,
@@ -812,7 +824,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     commitMessages(prev => [...prev, userMsg])
     setInput('')
     clearFiles()
-    if (inputRef.current) inputRef.current.style.height = 'auto'
+    if (inputRef.current) {
+      inputRef.current.style.height = 'auto'
+      // Drop the multi-line `.chat__pill--tall` class — see queue-path
+      // comment above for the full rationale.
+      inputRef.current.closest('.chat__pill')?.classList.remove('chat__pill--tall')
+    }
     setSending(true)
     setSpacerActive(true)
     if (spacerRef.current) spacerRef.current.style.height = '0px'

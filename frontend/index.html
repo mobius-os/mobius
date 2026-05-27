@@ -49,7 +49,17 @@
       }, 8000)
     </script>
     <script>
-      if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js')
+      // `updateViaCache: 'none'` tells the browser to bypass its HTTP
+      // cache when fetching sw.js itself during update checks. Without
+      // this, the browser caches sw.js (we set Cache-Control: no-cache
+      // server-side but a previously-cached SW response still applies
+      // until the browser revalidates) and the OLD sw.js keeps being
+      // served on reload — users get stuck on a stale precached bundle
+      // and need to manually clear cache. With this set, every reload
+      // triggers a fresh sw.js fetch from network so deploys take
+      // effect immediately. Belt-and-suspenders with the server-side
+      // header in main.py.
+      if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
       // Request persistent storage so cached app modules and offline
       // state aren't evicted under storage pressure. Best-effort —
       // browser may deny without prompting.

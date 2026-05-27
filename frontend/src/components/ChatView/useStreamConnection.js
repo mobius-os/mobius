@@ -617,9 +617,25 @@ export default function useStreamConnection(chatId, {
         body.attachments = attachments
       }
       try { body.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone } catch {}
+      // Viewport height: prefer the CURRENT visual viewport so the
+      // agent's screenshots match the partner's framing right now.
+      // Fall back to the max-ever-observed only when current looks
+      // keyboard-poisoned (significantly smaller than max — a soft
+      // keyboard subtracts ~250-300px on phones, so a >100px gap is
+      // the heuristic). Pure max-tracking was wrong: if the user
+      // opens the chat with the URL bar collapsed (taller viewport)
+      // then re-shows it, the stale max yielded a too-tall screenshot.
+      // Pure current was also wrong: POSTs that land before the
+      // keyboard fully dismisses get the shrunken height. The blend
+      // gets the right value in both cases.
+      const cur = (typeof window.visualViewport !== 'undefined' && window.visualViewport)
+        ? window.visualViewport.height
+        : window.innerHeight
+      const maxH = maxInnerHeightRef.current || 0
+      const keyboardLikely = maxH > 0 && cur < maxH - 100
       body.viewport = {
         width: window.innerWidth,
-        height: maxInnerHeightRef.current || window.innerHeight,
+        height: keyboardLikely ? maxH : cur,
       }
       const res = await fetch(`${BASE}/api/chats/${chatIdRef.current}/messages`, {
         method: 'POST',

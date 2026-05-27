@@ -232,9 +232,29 @@ async def send_message(
   # AskUserQuestion intercept kills the proc and the answer becomes a
   # new queued turn), so this short-circuit no-ops for them and the
   # existing queue path takes over.
+  #
+  # Registration race: the frontend renders the question card the
+  # instant the `question` SSE event lands, but the bridge handler
+  # that inserts into `questions._pending` runs in a separate task
+  # (Codex marshals it via `run_coroutine_threadsafe` from the SDK's
+  # sync worker thread; Claude's `can_use_tool` is an SDK callback).
+  # A user who taps an answer chip in the ~tens-of-ms window between
+  # "event published" and "registry populated" used to hit 410. We
+  # poll with a short grace period — `await asyncio.sleep(0.05)`
+  # yields to the loop so the bridge's pending coroutine can advance
+  # and write the entry. 500ms total is long enough to cover the
+  # registration race in practice but short enough that a genuinely
+  # stale UI still gets the 410 fast.
   if body.answers:
     async with chat_queue.get_lock(chat_id):
+      _GRACE_ATTEMPTS = 10
+      _GRACE_INTERVAL = 0.05  # seconds — total ~500ms
       pending = questions.claim(chat_id)
+      for _ in range(_GRACE_ATTEMPTS):
+        if pending is not None:
+          break
+        await asyncio.sleep(_GRACE_INTERVAL)
+        pending = questions.claim(chat_id)
       if pending is not None:
         db.commit()  # persist the answers we just wrote
         if not pending.future.done():
