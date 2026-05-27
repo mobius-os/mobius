@@ -291,34 +291,6 @@ async def send_message(
         return {}
     return {}
 
-  # Send-gated default mirror. Runs for BOTH the start-turn branch
-  # below AND the queue-append branch — a user who PATCHes settings
-  # then sends (whether that send starts a fresh turn or queues
-  # behind an in-flight one) has performed a "manual sent change"
-  # and the mirror should fire. If write fails, re-mark dirty so the
-  # next send retries — never silently drop the user's pick.
-  def _commit_send_gated_mirror():
-    from app.chat import take_settings_dirty, mark_settings_dirty
-    if not take_settings_dirty(chat_id):
-      return
-    from app.providers import write_agent_settings
-    from app.config import get_settings as _get_settings
-    cs = _coerce_chat_settings(chat)
-    mirror = {}
-    if cs.get("model") is not None:
-      mirror["model"] = cs["model"]
-    if cs.get("effort") is not None:
-      mirror["effort"] = cs["effort"]
-    ok = True
-    if mirror:
-      ok = write_agent_settings(_get_settings().data_dir, mirror)
-    if not ok:
-      mark_settings_dirty(chat_id)
-      return
-    owner = db.query(models.Owner).first()
-    if owner is not None and chat.provider:
-      owner.provider = chat.provider
-
   # Queue path: agent is running OR stale pending exists from a
   # previous crash. Appending the new send at the END of pending
   # preserves chronological order. When pending was stale (server
@@ -327,7 +299,6 @@ async def send_message(
   # rather than sitting forever.
   if is_chat_running(chat_id) or chat.pending_messages:
     new_msg = await _append_to_pending(chat, body, db)
-    _commit_send_gated_mirror()
 
     if not is_chat_running(chat_id):
       # Stale pending — try to claim and drain. mark_starting prevents
@@ -379,8 +350,6 @@ async def send_message(
     if not chat.messages:
       owner = db.query(models.Owner).first()
       chat.provider = (owner.provider if owner else "claude") or "claude"
-
-    _commit_send_gated_mirror()
 
     # Build the full message history for the agent.
     msgs = [schemas.ChatMessage(role=m["role"], content=m.get("content", ""))

@@ -105,13 +105,24 @@ def test_patch_chat_merges_partial_updates(client, auth, chat):
 
 
 def test_patch_chat_clear_reverts_to_default(client, auth, chat):
-  """clear_agent_settings=true drops the override entirely."""
+  """clear_agent_settings=true drops the per-chat override entirely.
+
+  Under PATCH-immediate mirror semantics: picking "override-model" in
+  the picker writes it to the global default. Clearing this chat's
+  override falls back to whatever's now in global — which IS
+  "override-model" (the last picked value). To test "clear" against
+  a different fallback, reset the global between the PATCH and the
+  clear so the global isn't the same value.
+  """
   _write_global_settings({"model": "fallback-model"})
   client.patch(
     f"/api/chats/{chat.id}",
     headers=auth,
     json={"agent_settings_json": {"model": "override-model"}},
   )
+  # PATCH-immediate mirror just wrote override-model to global.
+  # Reset global so we can verify clear falls back to it.
+  _write_global_settings({"model": "fallback-model"})
   r = client.patch(
     f"/api/chats/{chat.id}",
     headers=auth,
@@ -124,7 +135,12 @@ def test_patch_chat_clear_reverts_to_default(client, auth, chat):
 
 
 def test_get_chat_includes_effective_settings(client, auth, chat):
-  """GET /chats/{id} surfaces both raw override and merged effective."""
+  """GET /chats/{id} surfaces both raw override and merged effective.
+
+  Under PATCH-immediate mirror: the per-chat PATCH also writes model
+  to global. The global's existing `effort: low` is preserved because
+  the mirror is ADDITIVE (it only overwrites keys actually set).
+  """
   _write_global_settings({"model": "global", "effort": "low"})
   client.patch(
     f"/api/chats/{chat.id}",
@@ -135,6 +151,8 @@ def test_get_chat_includes_effective_settings(client, auth, chat):
   body = r.json()
   assert body["agent_settings_json"] == {"model": "per-chat"}
   assert body["effective_agent_settings"]["model"] == "per-chat"
+  # effort still comes from global, which kept its "low" because the
+  # mirror only writes keys present in the chat's settings.
   assert body["effective_agent_settings"]["effort"] == "low"
   assert body["has_assistant_turns"] is False
 
@@ -152,19 +170,17 @@ def test_get_chat_has_assistant_turns_reflects_history(
   assert r.json()["has_assistant_turns"] is True
 
 
-def test_patch_chat_switches_provider_but_does_not_mirror_yet(
+def test_patch_chat_provider_mirrors_to_owner_immediately(
   client, auth, chat, db, monkeypatch,
 ):
-  """PATCH /chats/{id} with `provider` switches the chat but does NOT
-  mirror to owner.provider — the global default only shifts when the
-  user actually SENDS a message with the new provider (see
-  `_settings_dirty` + the send path in chats_stream.py). This
-  matches the "only manual sent changes update the default" contract
-  the user asked for: picking-and-closing the picker without sending
-  shouldn't change what new chats inherit.
+  """PATCH /chats/{id} with `provider` mirrors to owner.provider
+  immediately so the NEXT new chat inherits the picked provider.
 
-  Pair with `test_send_after_patch_mirrors_to_owner` for the
-  on-send mirror behavior."""
+  Earlier revisions of this contract gated the mirror on send, but
+  the picker UX broke for the common case: pick a model, open a new
+  chat, find it still on the old provider. PATCH-immediate matches
+  the "default = last selected" mental model.
+  """
   from app import models, providers
 
   monkeypatch.setattr(providers.CodexProvider, "check_auth", lambda self, d: None)
@@ -181,10 +197,10 @@ def test_patch_chat_switches_provider_but_does_not_mirror_yet(
   body = r.json()
   assert body["provider"] == "codex"
 
-  # Owner.provider stays "claude" — no mirror until send.
+  # Owner.provider mirrors immediately under PATCH-immediate.
   db.expire_all()
   owner_after = db.query(models.Owner).first()
-  assert owner_after.provider == "claude"
+  assert owner_after.provider == "codex"
 
 
 def test_patch_chat_provider_rejects_unknown_value(client, auth, chat, db):

@@ -108,9 +108,20 @@
   color: var(--muted);
 }
 
-.md-list {
+/* Tailwind v4 Preflight zeroes `list-style` on every ul/ol — without
+   restoring it here, our markdown lists render bullet- and number-less.
+   Scoped to the .md-list class so we don't leak list-style into other
+   shell ul/ol uses (drawer chat list, settings, etc.). */
+ul.md-list {
   margin: 0;
   padding-left: 28px;
+  list-style: disc;
+}
+
+ol.md-list {
+  margin: 0;
+  padding-left: 28px;
+  list-style: decimal;
 }
 
 .md-list-item {
@@ -118,6 +129,15 @@
   line-height: 1.7;
   padding-left: 8px;
 }
+
+/* Nested lists inherit the right marker style without an explicit
+   class change. ul > ul becomes a `circle`; ol > ol becomes a
+   lower-alpha. */
+.md-list .md-list { margin-top: 4px; }
+ul.md-list ul.md-list { list-style: circle; }
+ul.md-list ul.md-list ul.md-list { list-style: square; }
+ol.md-list ol.md-list { list-style: lower-alpha; }
+ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
 
 .md-math-block {
   overflow-x: auto;

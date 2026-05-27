@@ -315,30 +315,32 @@ async def patch_chat(
         # still hit it.
         chat.session_id = None
       chat.provider = target_provider
-      # Mirror to owner.provider so the NEXT new chat inherits the
-      # provider the user just picked here — this is the "default =
-      # last selected" contract that replaced the Settings radio. The
-      # mirror is best-effort: if the owner row is missing for some
-      # reason, the per-chat write is still authoritative.
-      # NOTE: owner.provider is intentionally NOT mirrored here. The
-      # global default updates only when the user SENDS a message
-      # using the new settings — see mark_settings_dirty + the send
-      # path in chats_stream.py. Mirror-on-PATCH would propagate
-      # "just clicked around in the picker" into the global default.
 
     db.commit()
     db.refresh(chat)
     data_dir = get_app_settings().data_dir
 
-    # Mark the chat as having pending unsent settings changes. The
-    # next POST /messages on this chat will mirror its settings to
-    # the global default (so new chats inherit) + owner.provider,
-    # then clear the dirty bit. If the user picks here but never
-    # sends, the global default stays untouched — which matches the
-    # user's stated contract: only manual *sent* changes shift the
-    # default.
-    from app.chat import mark_settings_dirty
-    mark_settings_dirty(chat_id)
+    # Mirror the new pick to the global default immediately. New
+    # chats read /data/shared/agent-settings.json on creation, so
+    # the user's latest model/effort/provider becomes the seed for
+    # the next new chat. Mirror is best-effort + ADDITIVE: only
+    # keys actually set on the chat are written, preserving any
+    # other keys already in the global file.
+    settings_obj = _coerce_agent_settings(chat.agent_settings_json) or {}
+    if settings_obj:
+      from app.providers import _load_agent_settings, write_agent_settings
+      mirror = _load_agent_settings(data_dir) or {}
+      for key in ("model", "effort", "effort_by_provider"):
+        value = settings_obj.get(key)
+        if value is not None:
+          mirror[key] = value
+      if mirror:
+        write_agent_settings(data_dir, mirror)
+    if chat.provider:
+      owner = db.query(models.Owner).first()
+      if owner is not None:
+        owner.provider = chat.provider
+        db.commit()
 
     return {
       "ok": True,

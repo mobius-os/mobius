@@ -305,31 +305,6 @@ def current_run_generation(chat_id: str) -> int:
   return registry.current_generation(chat_id)
 
 
-# Chats whose agent_settings_json was changed via PATCH since the
-# last message send. The next send mirrors the chat's effective
-# settings to the global default file (and owner.provider) so future
-# new chats inherit, then clears the flag. In-memory: a restart loses
-# pending dirty bits, which means the user's most recent unsent pick
-# won't propagate to the global default after a server restart —
-# minor edge case, no DB migration needed.
-_settings_dirty: set[str] = set()
-
-
-def mark_settings_dirty(chat_id: str) -> None:
-  """Flag a chat as having unsent picker changes."""
-  _settings_dirty.add(chat_id)
-
-
-def take_settings_dirty(chat_id: str) -> bool:
-  """Returns True if the chat was dirty, AND clears the flag in one
-  atomic discard. Used by the send path to decide whether to mirror
-  the chat's settings as the new global default."""
-  if chat_id in _settings_dirty:
-    _settings_dirty.discard(chat_id)
-    return True
-  return False
-
-
 def bump_run_generation(chat_id: str) -> int:
   """Bumps the per-chat generation counter and returns the new value.
 
