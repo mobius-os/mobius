@@ -6,6 +6,36 @@ maintain independently.
 
 import html
 import json
+import os
+from pathlib import Path
+
+
+def _theme_mode() -> str:
+  """Reads the active theme mode ("dark" or "light") from disk.
+
+  Mirrors `app.theme.get_theme_mode` but reads directly with stdlib
+  to preserve recovery's "no import of app.theme" contract — the
+  recovery page must render even when the rest of the app's import
+  chain is broken. Used to drive the `data-theme` attribute on
+  `<html>` so the light-mode card-shadow rule actually fires (the
+  earlier `body.theme-light` selector was set nowhere). Falls back
+  to "dark" — the historical default — on any read failure.
+  """
+  data_dir = Path(os.environ.get("DATA_DIR", "/data"))
+  path = data_dir / "shared" / "theme-mode"
+  try:
+    raw = path.read_text(encoding="utf-8").strip()
+    if not raw:
+      return "dark"
+    try:
+      mode = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+      mode = raw
+    if mode in ("dark", "light"):
+      return mode
+  except (OSError, ValueError):
+    pass
+  return "dark"
 
 
 def _confirm_attr(text: str) -> str:
@@ -38,7 +68,7 @@ _STYLE = """
     max-width: 480px; width: 100%;
     margin: 0 auto;
   }
-  body.theme-light .card {
+  [data-theme="light"] .card {
     box-shadow:
       0 1px 2px rgba(0, 0, 0, 0.04),
       0 1px 3px rgba(0, 0, 0, 0.04);
@@ -95,10 +125,16 @@ _STYLE = """
     color: var(--danger, #f87171);
     border: 1px solid var(--danger, #f87171);
   }
+  /* :active alone was leaving the button stuck on the filled
+     state on slow networks — touch ends, mouse moves elsewhere,
+     but the active style persists until the next paint. Pairing
+     `:active` with `:hover` scopes the fill to genuine cursor
+     interactions on desktop. On touch the `:hover` media query
+     below uses transitions so the tap-flash reverts smoothly. */
   @media (hover: hover) and (pointer: fine) {
     .btn-warn:hover { background: var(--danger, #f87171); color: #fff; }
+    .btn-warn:hover:active { background: var(--danger, #f87171); color: #fff; }
   }
-  .btn-warn:active { background: var(--danger, #f87171); color: #fff; }
   .btn-outline {
     background: var(--surface2, #212121);
     border: 1px solid var(--border-light, #1f1f1f);
@@ -207,8 +243,9 @@ def login_html(error: str = "", clear_storage: bool = False) -> str:
     f'<p class="error">{html.escape(error)}</p>' if error else ""
   )
   clear_html = _CLEAR_STORAGE_SCRIPT if clear_storage else ""
+  mode = _theme_mode()
   return f"""<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="{mode}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -258,8 +295,9 @@ def dashboard_html(msg: str = "") -> str:
   msg_html = (
     f'<p class="msg">{html.escape(msg)}</p>' if msg else ""
   )
+  mode = _theme_mode()
   return f"""<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="{mode}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
