@@ -20,6 +20,7 @@ edit it at runtime.
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import sqlite3
@@ -482,7 +483,12 @@ def _render_page(
   # When in chat view, render the chat surface; otherwise the
   # picker view is the primary content. JS hides/shows the
   # appropriate sections.
-  active_chat_id_js = _escape(active_chat_id) if active_chat_id else ""
+  # chat_id flows into a JS string literal below. HTML-escape isn't
+  # the right escape there (a backslash in chat_id would escape the
+  # closing quote). json.dumps yields a valid JS string literal
+  # including its surrounding quotes, so substitute it without
+  # adding our own.
+  active_chat_id_js = json.dumps(active_chat_id) if active_chat_id else '""'
   show_chat_view = "block" if active_chat_id else "none"
   show_picker_view = "none" if active_chat_id else "block"
 
@@ -757,7 +763,7 @@ def _render_page(
 <script>
 // chat_id for this view, baked in by the server. Empty string in
 // picker view (no chat selected).
-const CHAT_ID = "{active_chat_id_js}";
+const CHAT_ID = {active_chat_id_js};
 
 const logEl = document.getElementById('rc-log');
 const inputEl = document.getElementById('rc-input');

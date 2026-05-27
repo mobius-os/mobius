@@ -69,6 +69,7 @@ export default function SettingsView({ onThemeChange }) {
   }, [queryClient])
 
   async function toggleTheme() {
+    if (themeSwitching) return
     const newMode = !lightMode
     setLightMode(newMode)
     setThemeSwitching(true)
