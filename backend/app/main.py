@@ -288,7 +288,23 @@ if _static_dir.is_dir():
 
     file = _static_dir / path
     if file.is_file() and path != "index.html":
-      return FileResponse(str(file))
+      # The service worker MUST be served with `Cache-Control:
+      # no-cache` so the browser revalidates it on every page load.
+      # Without this header the browser caches sw.js by HTTP
+      # heuristic (10% of last-modified age), which for a daily-
+      # updated SW can be hours — old SW keeps serving the old
+      # precached bundle even after deploys. Users reported the
+      # PWA "not updating despite multiple refreshes" because of
+      # this. `no-cache` (not `no-store`) still lets the browser
+      # cache the response body but forces revalidation via
+      # If-None-Match on every request, so a 304 keeps the
+      # download cheap when nothing changed.
+      headers = (
+        {"Cache-Control": "no-cache, must-revalidate"}
+        if path == "sw.js"
+        else None
+      )
+      return FileResponse(str(file), headers=headers)
     # _static_dir resolution is all-or-nothing at startup — when the
     # agent's live build (/data/shell/dist) is selected, any file
     # that lives ONLY in the baked build (/app/static) would

@@ -220,7 +220,7 @@ export default function Drawer({
               <span className="drawer__item-text">New chat</span>
             </button>
 
-          <div className="drawer__group">
+          <div className="drawer__group drawer__group--chats">
             <p className="drawer__label drawer__label--chats">
               <Chats width={16} height={16} aria-hidden="true" />
               <span>Chats</span>
@@ -262,7 +262,7 @@ export default function Drawer({
           </div>
 
           {apps.length > 0 && (
-            <div className="drawer__group">
+            <div className="drawer__group drawer__group--apps">
               <p className="drawer__label drawer__label--apps">
                 <Grid width={16} height={16} aria-hidden="true" />
                 <span>Apps</span>

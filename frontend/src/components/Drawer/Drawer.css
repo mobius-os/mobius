@@ -76,11 +76,13 @@
    so a tap-friendly "start fresh" affordance reads as a primary
    action, not just another list item. The hairline border + slight
    indent (margin) give it breathing room without competing with
-   the section headers. */
+   the section headers. Margin-bottom tightened 12 → 4 so the
+   "Chats" header sits close to the pill (the header's own padding
+   provides the visual gap). */
 .drawer__item--new {
   color: var(--text);
   font-weight: 500;
-  margin: 0 4px 12px;
+  margin: 0 4px 4px;
   padding: 11px 12px;
   border: 1px solid var(--border);
 }
@@ -93,23 +95,35 @@
 
 /* ── Groups (History, Apps) ───────────────────────── */
 
-/* Each group sizes to content but may shrink when total content
-   exceeds the wrapper. `flex: 0 1 auto` means:
-     - Don't grow beyond content (no empty padding).
-     - Can shrink (yields space when needed).
-     - Basis = content height.
-   When chats has 2 rows + apps has 30 rows + drawer height 600px:
-     chats wants ~80px, apps wants ~1200px. Chats fits without
-     shrinking; apps shrinks to fill the rest and scrolls inside.
-   When both have many items, both shrink proportionally and each
-   scrolls internally — so Apps is always reachable without
-   scrolling past every chat. */
+/* Default group: size-to-content, can shrink. The two sections
+   that share space (chats + apps) get more specific rules below
+   so the chats-heavy / apps-heavy lopsidedness self-corrects. */
 .drawer__group {
   flex: 0 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  margin-top: 8px;
+  margin-top: 4px;
+}
+
+/* Chats + Apps: contract that keeps BOTH sections visible even
+   when one has many more rows than the other.
+   - Chats fills available space (`flex: 1 1 0`) with internal
+     scroll for overflow.
+   - Apps prefers its content size BUT is capped at 50% of the
+     wrapper height so a 50-app instance still leaves room for
+     chats above. When apps has few items it sits at content size
+     and chats grows to fill the rest.
+   - Both have `overflow-y: auto` inside their `.drawer__scroll`
+     to scroll independently. */
+.drawer__group--chats {
+  flex: 1 1 0;
+  min-height: 80px;
+}
+.drawer__group--apps {
+  flex: 0 1 auto;
+  max-height: 50%;
+  min-height: 0;
 }
 
 
@@ -126,7 +140,11 @@
   letter-spacing: 0;
   text-transform: none;
   color: var(--muted);
-  padding: 18px 12px 6px;
+  /* Top padding tightened from 18 → 8 so the gap between
+     "New chat" and the "Chats" section header reads as a
+     subtle separation, not a vertical chasm. The 6px bottom
+     keeps the label visually attached to the rows below. */
+  padding: 8px 12px 6px;
   margin: 0;
 }
 .drawer__label svg { flex-shrink: 0; opacity: 0.85; color: var(--muted); }
