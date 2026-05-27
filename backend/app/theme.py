@@ -33,12 +33,15 @@ DEFAULT_THEME = """\
   --border: #2a2a2a;
   --border-light: #1f1f1f;
 
-  /* Text colors — paint on top of the opaque fills above. --muted
-     was #6b6b76 which ran ~3.8:1 vs --bg and failed WCAG AA on
-     helper copy. Bumped to #9b9b9b (~6.4:1) so subtitles, section
-     labels, and provider-status strings actually read. */
+  /* Text colors — paint on top of the opaque fills above.
+       2026-05-26: --muted #6b6b76 (~3.8:1 vs --bg, failed AA)
+         → #9b9b9b (~6.4:1)
+       2026-05-27: --muted #9b9b9b → #a8a8a8 (~6.1:1 on --surface2
+         #212121, was ~5.2:1 — comfortable AA on raised surfaces
+         for the small text used in section labels and provider
+         status indicators). */
   --text: #ececec;
-  --muted: #9b9b9b;
+  --muted: #a8a8a8;
 
   /* Accent palette — small accents (buttons, links, focus rings,
      glow). Free to be vivid; --accent-dim is allowed to be

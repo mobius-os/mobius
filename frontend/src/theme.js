@@ -1,9 +1,12 @@
 // Shared theme constants and helpers used by Shell (auto-detect) and SettingsView (toggle).
 
 // Palette neutralized 2026-05: dropped the slight blue tint so the
-// dark stack reads as true charcoal; --muted bumped from #6b6b76
-// (~3.8:1 — fails WCAG AA) to #9b9b9b (~6.4:1). Must stay in sync
-// with backend/app/theme.py DEFAULT_THEME.
+// dark stack reads as true charcoal. --muted bumped twice:
+//   2026-05-26: #6b6b76 (~3.8:1, failed WCAG AA) → #9b9b9b (~6.4:1)
+//   2026-05-27: #9b9b9b → #a8a8a8 (~6.1:1 on --surface2 #212121, was
+//     ~5.2:1 — comfortable AA on raised surfaces for the small text
+//     used in section labels and provider status indicators).
+// Must stay in sync with backend/app/theme.py DEFAULT_THEME.
 export const DARK_COLORS = {
   '--bg': '#0d0d0d',
   '--surface': '#171717',
@@ -11,7 +14,7 @@ export const DARK_COLORS = {
   '--border': '#2a2a2a',
   '--border-light': '#1f1f1f',
   '--text': '#ececec',
-  '--muted': '#9b9b9b',
+  '--muted': '#a8a8a8',
   '--accent': '#8b6cf7',
   '--accent-hover': '#7c5ce6',
   '--accent-dim': 'rgba(139, 108, 247, 0.14)',
@@ -19,14 +22,20 @@ export const DARK_COLORS = {
   '--green': '#10b981',
 }
 
+// Light palette tightened 2026-05-27: --muted #7a7772 was 4.6:1 on
+// --bg #f0eeeb (knife-edge AA fail for small text); bumped to
+// #6b6864 (~5.4:1). --surface widened from #f8f7f5 to #ffffff so
+// cards read by contrast rather than relying on box-shadow alone
+// — the earlier 3-LCh-step ramp made cards almost invisible
+// without elevation. Must stay in sync with backend/app/theme.py.
 export const LIGHT_COLORS = {
   '--bg': '#f0eeeb',
-  '--surface': '#f8f7f5',
+  '--surface': '#ffffff',
   '--surface2': '#e8e6e2',
   '--border': '#d4d1cc',
   '--border-light': '#e2dfdb',
   '--text': '#1c1b1a',
-  '--muted': '#7a7772',
+  '--muted': '#6b6864',
   '--accent': '#8b6cf7',
   '--accent-hover': '#7c5ce6',
   '--accent-dim': 'rgba(139, 108, 247, 0.08)',
