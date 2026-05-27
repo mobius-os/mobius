@@ -323,4 +323,17 @@ if _static_dir.is_dir():
     from fastapi.responses import HTMLResponse
     html = (_static_dir / "index.html").read_text(encoding="utf-8")
     html = inject_theme_into_html(html, settings.data_dir)
-    return HTMLResponse(html)
+    # index.html MUST be served with `Cache-Control: no-cache` so the
+    # browser revalidates on every page load. Without it, the browser
+    # heuristically caches HTML for hours and the user's PWA keeps
+    # loading the OLD <script src="/assets/index-{old-hash}.js">
+    # references — they reload, see old code, blame the deploy. The
+    # asset bundles themselves are content-hashed and immutable, so
+    # the cost of revalidating index.html is one round-trip; with the
+    # ETag the body usually comes back as 304. Paired with the
+    # equivalent header on /sw.js (above) so neither side of the
+    # shell-entry can pin the user to a stale build.
+    return HTMLResponse(
+      html,
+      headers={"Cache-Control": "no-cache, must-revalidate"},
+    )
