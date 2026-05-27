@@ -87,6 +87,38 @@ def get_bg_color(data_dir: str) -> str:
   return m.group(1) if m else "#0c0f14"
 
 
+def get_theme_mode(data_dir: str) -> str:
+  """Returns the active theme mode ("dark" or "light").
+
+  Sourced from `/data/shared/theme-mode` (a JSON-encoded string),
+  written by `themeService.toggleTheme` on every mode swap. Falls
+  back to "dark" — the historical default — when the file is
+  missing, unreadable, or contains an unrecognized value. Used by
+  the recovery page and any other server-rendered surface that
+  needs to mirror the SPA's theme without re-parsing the CSS.
+  """
+  import json
+  path = Path(data_dir) / "shared" / "theme-mode"
+  if not path.exists():
+    return "dark"
+  try:
+    raw = path.read_text(encoding="utf-8").strip()
+    if not raw:
+      return "dark"
+    # Storage layer stores values as JSON strings, so an extra
+    # decode peels the quotes. Direct strings (legacy writes) work
+    # too via the fallback.
+    try:
+      mode = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+      mode = raw
+    if mode in ("dark", "light"):
+      return mode
+  except OSError:
+    pass
+  return "dark"
+
+
 def _escape_for_style_tag(css: str) -> str:
   """Escapes any closing </style> sequence inside CSS so it can't break
   out of a <style> block. The HTML parser ends a <style> at the first
