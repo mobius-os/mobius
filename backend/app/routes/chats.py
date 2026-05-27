@@ -260,7 +260,33 @@ async def patch_chat(
       # is the belt-and-suspenders fix.
       flag_modified(chat, "agent_settings_json")
 
-    if body.provider is not None and body.provider in ("claude", "codex"):
+    # Determine the effective target provider. The body may set it
+    # explicitly, OR it may be implied by a model-only PATCH whose
+    # `model` belongs to a different provider than the chat is
+    # currently on. The latter case used to leak through silently,
+    # leaving `chat.provider=codex` + `chat.agent_settings_json.model
+    # = claude-sonnet-X`; the runner's own cross-provider fallback
+    # (claude_sdk_runner / codex_sdk_runner) then re-normalized at
+    # turn time, masking the picker bug and running the wrong model.
+    # Infer the provider from the model whenever the user didn't
+    # state one explicitly so the chat row stays self-consistent.
+    target_provider = body.provider
+    if (
+      target_provider is None
+      and body.agent_settings_json is not None
+    ):
+      new_model = body.agent_settings_json.model_dump(exclude_unset=True).get(
+        "model"
+      )
+      if new_model:
+        from app.providers import _model_belongs_to_other_provider
+        current_provider = chat.provider or "claude"
+        if _model_belongs_to_other_provider(new_model, current_provider):
+          target_provider = (
+            "codex" if current_provider == "claude" else "claude"
+          )
+
+    if target_provider is not None and target_provider in ("claude", "codex"):
       # Reject a switch to a disconnected provider — the picker may
       # have raced ahead of /auth/providers/status, or the user may
       # be on stale state. Without this check the PATCH would succeed
@@ -268,7 +294,7 @@ async def patch_chat(
       # auth, leaving the user confused. 409 surfaces the real
       # problem at pick-time.
       from app.providers import get_provider
-      candidate = get_provider(body.provider)
+      candidate = get_provider(target_provider)
       auth_error = candidate.check_auth(get_app_settings().data_dir)
       if auth_error is not None:
         raise HTTPException(
@@ -278,7 +304,7 @@ async def patch_chat(
             "Open Settings to connect, then try again."
           ),
         )
-      if chat.provider != body.provider:
+      if chat.provider != target_provider:
         # Sessions aren't cross-provider portable: a Claude session id
         # is not a valid Codex thread id and vice versa. Wipe the
         # session id when the provider actually changes so the next
@@ -288,7 +314,7 @@ async def patch_chat(
         # the UI, but a direct API caller or a recovery scenario can
         # still hit it.
         chat.session_id = None
-      chat.provider = body.provider
+      chat.provider = target_provider
       # Mirror to owner.provider so the NEXT new chat inherits the
       # provider the user just picked here — this is the "default =
       # last selected" contract that replaced the Settings radio. The

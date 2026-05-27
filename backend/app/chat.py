@@ -722,10 +722,19 @@ async def _run_chat_impl(
       # One-line pointer so the agent knows the block is a real file.
       # The seed's "About this file" section inside the block owns the
       # full spec (how to read, append, delete).
+      # Codex models occasionally echo the entire <agent_experience>
+      # block back to the user as their reply preamble — particularly
+      # on long, prose-heavy first prompts. Claude doesn't do this.
+      # The explicit "do not echo / quote / summarize" sentence is
+      # what stops it. Keep the "See 'About this file'" pointer so
+      # the agent still knows it can edit the underlying file when
+      # appropriate.
       meta = (
-        "The <agent_experience> block below is a snapshot of "
-        "/data/shared/agent-experience.md — see 'About this file' "
-        "inside for how to read and update it."
+        "The <agent_experience> block below is PRIVATE CONTEXT — a "
+        "snapshot of /data/shared/agent-experience.md. Read it "
+        "silently; do NOT echo, quote, or summarize it back to the "
+        "user. See 'About this file' inside for how to read and "
+        "update it."
       )
       user_message = (
         f"{meta}\n\n"
