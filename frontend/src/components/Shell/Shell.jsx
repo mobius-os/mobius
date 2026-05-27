@@ -237,37 +237,48 @@ export default function Shell() {
   }, [apps, chats, navTo])
 
   async function newChat({ draft, forceNew } = {}) {
-    // Always POST a fresh chat. An earlier version reused the most-
-    // recently-updated empty chat to avoid DB-row churn, but every chat
-    // snapshots model/effort/provider into agent_settings_json at creation
-    // time (so subsequent global-default changes don't bleed into existing
-    // chats — see backend/app/routes/chats.py:create_chat). Reusing an
-    // empty chat reused its FROZEN snapshot, so "New chat" silently
-    // surfaced whichever defaults were current weeks ago, ignoring the
-    // user's most recent model/effort pick. Always-create is the
-    // structural fix; the reuse optimization also wasn't preventing
-    // accumulation (hundreds of empties piled up anyway).
+    // Reuse the most-recently-updated empty chat if one exists; only
+    // POST a fresh row when no empty is available. Safe to reuse now
+    // that create_chat leaves agent_settings_json NULL — an untouched
+    // empty reads the live global default from agent-settings.json on
+    // render, so the user always sees their most recent model/effort
+    // pick. (Before, create_chat snapshotted defaults at creation time
+    // and reuse surfaced that stale snapshot, which is what made the
+    // empty-chat reuse path buggy in the first place.)
     //
-    // `forceNew` is kept as a parameter — it no longer affects chat
-    // creation (every call creates), but the nav-stack push logic below
-    // still uses it to distinguish user-initiated calls (which want a
-    // back-target installed) from automatic ones (bootstrap, deletion-
-    // induced re-create).
+    // `forceNew` bypasses reuse for callers that NEED a fresh row —
+    // moebius:new-chat events (the ChatView wouldn't remount on the
+    // same chatId, so the pending-draft useState initializer wouldn't
+    // run) and the app-crash routing (the report draft is keyed to a
+    // fresh chat). Also used below to distinguish user-initiated calls
+    // from automatic ones (bootstrap, deletion-induced re-create) for
+    // the nav-stack push.
     //
     // Resolve chatId BEFORE switching views — setting activeView='chat'
     // with the old chatId causes a visible flash of the previous chat.
-    if (creatingChatRef.current) return
-    creatingChatRef.current = true
     let chatId
-    try {
-      const res = await api.chats.create({ title: 'New chat' })
-      const chat = await res.json()
-      chatId = chat.id
-      await refreshChats()
-    } catch {
-      return
-    } finally {
-      creatingChatRef.current = false
+    const empty = !forceNew && [...chats]
+      .filter(c => !c.has_messages)
+      .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''))
+      [0]
+    if (empty) {
+      chatId = empty.id
+    } else {
+      // Spam-click guard: when no empty exists, two rapid taps would
+      // race two POSTs and leave an extra empty behind. The in-flight
+      // ref short-circuits the second call until the first resolves.
+      if (creatingChatRef.current) return
+      creatingChatRef.current = true
+      try {
+        const res = await api.chats.create({ title: 'New chat' })
+        const chat = await res.json()
+        chatId = chat.id
+        await refreshChats()
+      } catch {
+        return
+      } finally {
+        creatingChatRef.current = false
+      }
     }
 
     // Push nav stack so back returns to the previous view (skip
