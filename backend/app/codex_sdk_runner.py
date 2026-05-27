@@ -18,12 +18,32 @@ JSON-RPC requests emitted by the app-server when the model calls
 the tool. `AppServerClient.approval_handler` is the documented
 constructor argument that receives them (public as of
 openai-codex 0.134.0; was a private attribute on a less-stable
-path before). The high-level `AsyncCodex` / `AsyncAppServerClient`
-wrappers do not forward `approval_handler` to the underlying sync
-client, so we set the attribute on `codex._client._sync` directly
-after construction. See `_install_request_user_input_handler`
-below — the attribute itself is part of the public API surface, we
-just have to reach through the async wrappers to get at it.
+path before). Only the sync `AppServerClient` accepts
+`approval_handler` in its constructor. The async wrappers
+(`AsyncCodex`, `AsyncAppServerClient`) don't, so we set the
+attribute on `codex._client._sync` after construction. The
+attribute itself is public API; we just reach through two async
+wrappers to get at it. See `_install_request_user_input_handler`
+below.
+
+Why we don't drop `AsyncCodex` and construct `AppServerClient`
+directly to pass `approval_handler` as a kwarg: doing so would
+mean rebuilding everything `AsyncCodex` / `AsyncThread` /
+`AsyncTurnHandle` give us for free. That list includes lazy
+`start()` + `initialize()` + metadata validation, the
+`ApprovalMode` enum translation to `(approval_policy,
+approvals_reviewer)` via private `_approval_mode_settings`
+helpers, `ThreadStartParams` / `TurnStartParams` Pydantic
+construction, `_normalize_run_input` + `_to_wire_input`
+translation, `register_turn_notifications` +
+`next_turn_notification` polling that terminates on
+`turn/completed`, and the `AsyncThread` / `AsyncTurnHandle`
+context. That's ~100 lines of plumbing built on four private SDK
+helpers, replacing one public-attribute set on a wrapper-internal
+chain. The current pattern has the smaller fragility surface.
+Revisit if `AsyncCodex` ever grows `approval_handler` in its
+constructor (forwarded down to `_sync`), at which point
+`_install_request_user_input_handler` collapses to a kwarg.
 
 The tool is gated by the `default_mode_request_user_input`
 feature flag (stage `UnderDevelopment`, default off), enabled via
@@ -351,11 +371,13 @@ def _install_request_user_input_handler(
   """Wires Möbius's question-bridge into `codex._client._sync._approval_handler`.
 
   As of openai-codex 0.134.0, `AppServerClient.approval_handler` is a
-  documented constructor argument. The high-level `AsyncCodex` /
-  `AsyncAppServerClient` wrappers don't forward it, so we still set
-  the attribute on the underlying sync client after construction —
-  but the attribute itself is now part of the public surface, not a
-  private internal we're sneaking past.
+  documented constructor argument on the sync client. Neither
+  `AsyncCodex` nor `AsyncAppServerClient` accept it in their
+  constructors, so we still set the attribute on the underlying sync
+  client after construction. The attribute itself is public API; we
+  just reach through two async wrappers to get at it. See the module
+  docstring for the full reasoning on why we don't drop `AsyncCodex`
+  and construct `AppServerClient` directly.
 
   The handler runs on the SDK's sync worker thread, so anything that
   touches asyncio state (the future, the broadcast, the DB session)
@@ -711,9 +733,12 @@ async def run_codex_sdk_turn(
     async with sdk["AsyncCodex"](config=config) as codex:
       # Install AskUserQuestion bridge on the sync AppServerClient's
       # approval_handler attribute. `approval_handler` is a public
-      # constructor argument as of openai-codex 0.134.0, but the
-      # higher-level AsyncCodex / AsyncAppServerClient don't forward
-      # it, so we set it on `codex._client._sync` after construction.
+      # sync-client constructor argument as of openai-codex 0.134.0;
+      # neither AsyncCodex nor AsyncAppServerClient accept it, so we
+      # set it on `codex._client._sync` after construction. Staying
+      # on AsyncCodex (instead of dropping to AppServerClient to pass
+      # the kwarg natively) keeps ~100 lines of SDK glue out of this
+      # module. See the module docstring for the full reasoning.
       # When the model calls the `request_user_input` tool (enabled by
       # the features.default_mode_request_user_input config_override
       # above), the app-server sends an `item/tool/requestUserInput`
