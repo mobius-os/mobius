@@ -670,7 +670,11 @@ export default function useStreamConnection(chatId, {
         setConnectionError(null)
       }
     } catch (err) {
-      if (!queueOnly) setIsStreaming(false)
+      // Always reset streaming state on POST failure. The earlier
+      // `if (!queueOnly)` guard left the UI stuck on "thinking" dots
+      // when a queueOnly send raced the server's `status: 'started'`
+      // branch and then the POST itself failed mid-flight.
+      setIsStreaming(false)
       throw err
     }
 

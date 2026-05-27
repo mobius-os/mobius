@@ -247,6 +247,7 @@ def inject_theme_into_html(html: str, data_dir: str) -> str:
   """
   css = get_theme_css(data_dir)
   bg = get_bg_color(data_dir)
+  mode = get_theme_mode(data_dir)
   imports, css = extract_imports(css)
   safe_imports = [u for u in imports if _is_safe_import_url(u)]
   link_tags = "".join(
@@ -260,4 +261,12 @@ def inject_theme_into_html(html: str, data_dir: str) -> str:
   )
   html = html.replace("background:#0c0f14", f"background:{bg}")
   html = html.replace('content="#0c0f14"', f'content="{bg}"')
+  # `data-theme` on <html> activates the right `color-scheme` from
+  # the very first paint. Without it, light-mode users see a flash of
+  # dark-themed native widgets (scrollbars, autofill, date pickers)
+  # before `applyThemeToDom` runs from the React effect.
+  html = html.replace(
+    '<html lang="en">',
+    f'<html lang="en" data-theme="{mode}">',
+  )
   return html
