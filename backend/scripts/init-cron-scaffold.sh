@@ -20,7 +20,7 @@
 # init-cron.sh is checked-in scaffolding — re-running this scaffold for
 # the same slug + schedule is a no-op (idempotent on every layer).
 
-set -e
+set -euo pipefail
 
 if [ $# -lt 2 ]; then
   echo "Usage: $0 <slug> \"<cron-schedule>\"" >&2
@@ -30,9 +30,18 @@ fi
 
 SLUG="$1"
 SCHEDULE="$2"
-APP_DIR="/data/apps/$SLUG"
-JOB_PATH="$APP_DIR/job.sh"
-INIT_PATH="$APP_DIR/init-cron.sh"
+
+# Slug guard: anything outside `[A-Za-z0-9_-]+` silently breaks the
+# init-cron.sh heredoc + the matching grep in the replay path. Hard
+# fail early instead of writing a non-functional script.
+if ! printf '%s' "$SLUG" | grep -qE '^[A-Za-z0-9_-]+$'; then
+  echo "ERROR: slug must match [A-Za-z0-9_-]+, got: $SLUG" >&2
+  exit 2
+fi
+
+APP_DIR="/data/apps/${SLUG}"
+JOB_PATH="${APP_DIR}/job.sh"
+INIT_PATH="${APP_DIR}/init-cron.sh"
 
 if [ ! -d "$APP_DIR" ]; then
   echo "ERROR: $APP_DIR does not exist. Create the mini-app first." >&2

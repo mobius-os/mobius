@@ -28,6 +28,7 @@ from collections import OrderedDict
 
 from fastapi import APIRouter, Body, Cookie, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from starlette.background import BackgroundTask
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -378,13 +379,23 @@ def recover_restart(
   kills the whole container including any deferred state. Killing
   uvicorn directly lets docker restart it cleanly. Verified on
   mobius-test."""
-  _require_session(moebius_recover)
-  # Schedule the SIGTERM after the HTTP response has been flushed
-  # so the client actually sees the {"status": "restarting"} body.
-  # Without the threading.Timer, uvicorn dies before flushing.
-  import threading
-  threading.Timer(0.2, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()
-  return JSONResponse({"status": "restarting"})
+  username = _require_session(moebius_recover)
+
+  def _sigterm_self():
+    # Re-validate the session NOW (post-flush) rather than trusting
+    # the 200ms-old check. Eliminates the race where a factory reset
+    # completes between request entry and the SIGTERM firing.
+    if not _owner_exists(username):
+      return
+    os.kill(os.getpid(), signal.SIGTERM)
+
+  # Starlette's BackgroundTask runs after the response is flushed —
+  # no fixed sleep needed and no race window between the session
+  # check and the kill.
+  return JSONResponse(
+    {"status": "restarting"},
+    background=BackgroundTask(_sigterm_self),
+  )
 
 
 def _escape(s: str) -> str:

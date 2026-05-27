@@ -465,6 +465,7 @@ async def codex_start(
 
 
 @router.get("/recover/provider/codex/status")
+@_limiter.limit("120/minute")
 def codex_status(
   request: Request,
   moebius_recover: str | None = Cookie(default=None),

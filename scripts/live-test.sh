@@ -248,7 +248,7 @@ flow_1_message_order() {
   for i in 0 1 2; do
     local m="${msgs[$i]}"
     # Use fill (not type, which would Enter-submit) on the textarea.
-    ab find placeholder "Message the agent..." fill "${m}" >/dev/null
+    ab find placeholder "Message Möbius…" fill "${m}" >/dev/null
     ab wait 200 >/dev/null
     ab find role button click --name Send >/dev/null
     ab wait 1500 >/dev/null
@@ -302,13 +302,13 @@ flow_2_keyboard_blur() {
   navigate_to_chat "${cid}"
 
   # Focus textarea so document.activeElement points at it.
-  ab find placeholder "Message the agent..." click >/dev/null
+  ab find placeholder "Message Möbius…" click >/dev/null
   ab wait 300 >/dev/null
   local pre
   pre=$(ab eval "document.activeElement && document.activeElement.tagName" 2>/dev/null | tr -d '\r\n "')
   log "  before send: activeElement=${pre}"
 
-  ab find placeholder "Message the agent..." fill "kbd-test" >/dev/null
+  ab find placeholder "Message Möbius…" fill "kbd-test" >/dev/null
   shot "before-send"
   ab find role button click --name Send >/dev/null
   ab wait 600 >/dev/null
@@ -354,15 +354,15 @@ flow_3_queue() {
   local cid; cid=$(new_chat "live-test-flow3")
   navigate_to_chat "${cid}"
 
-  ab find placeholder "Message the agent..." fill "Use the bash tool to run: sleep 12 && echo done. Then in 5 words, say what you did." >/dev/null
+  ab find placeholder "Message Möbius…" fill "Use the bash tool to run: sleep 12 && echo done. Then in 5 words, say what you did." >/dev/null
   ab find role button click --name Send >/dev/null
   ab wait 3000 >/dev/null
 
   # While the first turn is streaming, queue two more.
-  ab find placeholder "Message the agent..." fill "queued-msg-A-${RANDOM}" >/dev/null
+  ab find placeholder "Message Möbius…" fill "queued-msg-A-${RANDOM}" >/dev/null
   ab find role button click --name Send >/dev/null
   ab wait 200 >/dev/null
-  ab find placeholder "Message the agent..." fill "queued-msg-B-${RANDOM}" >/dev/null
+  ab find placeholder "Message Möbius…" fill "queued-msg-B-${RANDOM}" >/dev/null
   ab find role button click --name Send >/dev/null
   ab wait 200 >/dev/null
   shot "after-queueing"
@@ -409,7 +409,7 @@ flow_4_provider_switch() {
   api POST /api/settings -d '{"provider":"claude"}' >/dev/null
   local cid_claude; cid_claude=$(new_chat "live-test-claude")
   navigate_to_chat "${cid_claude}"
-  ab find placeholder "Message the agent..." fill "probe-claude" >/dev/null
+  ab find placeholder "Message Möbius…" fill "probe-claude" >/dev/null
   ab find role button click --name Send >/dev/null
   ab wait 4000 >/dev/null
   shot "claude-probe"
@@ -426,7 +426,7 @@ flow_4_provider_switch() {
 
   local cid_codex; cid_codex=$(new_chat "live-test-codex")
   navigate_to_chat "${cid_codex}"
-  ab find placeholder "Message the agent..." fill "probe-codex" >/dev/null
+  ab find placeholder "Message Möbius…" fill "probe-codex" >/dev/null
   ab find role button click --name Send >/dev/null
   ab wait 4000 >/dev/null
   shot "codex-probe"
@@ -464,14 +464,14 @@ flow_5_cancel_queue() {
   local cid; cid=$(new_chat "live-test-flow5")
   navigate_to_chat "${cid}"
 
-  ab find placeholder "Message the agent..." fill "Use the bash tool to run: sleep 12 && echo done. Then in 5 words, say what you did." >/dev/null
+  ab find placeholder "Message Möbius…" fill "Use the bash tool to run: sleep 12 && echo done. Then in 5 words, say what you did." >/dev/null
   ab find role button click --name Send >/dev/null
   ab wait 3000 >/dev/null
 
-  ab find placeholder "Message the agent..." fill "to-cancel-${RANDOM}" >/dev/null
+  ab find placeholder "Message Möbius…" fill "to-cancel-${RANDOM}" >/dev/null
   ab find role button click --name Send >/dev/null
   ab wait 200 >/dev/null
-  ab find placeholder "Message the agent..." fill "to-keep-${RANDOM}" >/dev/null
+  ab find placeholder "Message Möbius…" fill "to-keep-${RANDOM}" >/dev/null
   ab find role button click --name Send >/dev/null
   ab wait 200 >/dev/null
   shot "queue-before-cancel"

@@ -1812,6 +1812,11 @@ def test_codex_status_is_idempotent_across_concurrent_polls(monkeypatch):
   monkeypatch.setattr(
     "app.recover_oauth._require_recovery_session", lambda _t: None,
   )
+  # Disable slowapi rate-limiting: the test calls the route function
+  # directly with a Mock, so the limiter's request inspection raises.
+  # The rate limit is added per security review round 2; this test
+  # is unit-level and bypasses it intentionally.
+  monkeypatch.setattr(recover_oauth._limiter, "enabled", False)
 
   try:
     from unittest.mock import Mock
