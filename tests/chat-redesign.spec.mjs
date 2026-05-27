@@ -65,7 +65,7 @@ async function newChat(page) {
 
 
 async function sendMessage(page, text) {
-  const input = page.getByRole('textbox', { name: 'Message the agent...' })
+  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
   await page.keyboard.press('Enter')
   // Wait for the optimistic user-message LI to render — the

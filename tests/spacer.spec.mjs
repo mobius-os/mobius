@@ -68,7 +68,7 @@ async function newChat(page) {
 
 /** Type a message and press Enter.  Returns after React has rendered. */
 async function sendMessage(page, text) {
-  const input = page.getByRole('textbox', { name: 'Message the agent...' })
+  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
   await page.keyboard.press('Enter')
   // Wait for the scroll container to appear (empty state -> chat state).

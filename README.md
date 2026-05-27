@@ -5,7 +5,7 @@
 <h1 align="center">Möbius</h1>
 
 <p align="center">
-  A personalized AI agent you can self-host. It adapts to you in both what it does and how it looks, and gets sharper the more you use it.
+  A personalized AI agent you self-host. It adapts to what you do and how you want it to look, and gets sharper the more you use it.
 </p>
 
 <p align="center">
@@ -31,7 +31,7 @@ Most software asks you to adapt to it. AI assistants tend to make this worse wit
 
 Möbius is a personalized AI agent you self-host. A chat on one side, a canvas on the other. You describe what you want, and the coding agent inside builds it — a small piece of software that lands next to the chat, runs in your browser, and is yours to keep.
 
-The agent isn't limited to apps. It can change the interface itself: the theme, the layout, the features in the shell. It edits the source and rebuilds live. Some changes appear instantly, others take a few seconds. The agent runs on Codex (free ChatGPT tier or a ChatGPT Pro/Max plan) or Claude Code (any paid plan), with Gemini for image generation.
+The agent isn't limited to apps. It can change the interface itself: the theme, the layout, the features in the shell. It edits the source and rebuilds live. Some changes appear instantly, others take a few seconds. The agent runs on Codex (free or paid ChatGPT plan) or Claude Code (any paid plan) — both via OAuth, no API key needed. Codex includes image generation out of the box; on Claude Code you can plug in a Gemini API key for image generation if you want it, but it's optional.
 
 It installs on your phone like a native app (Android and iOS). Because it runs on *your* server, your data stays yours.
 
@@ -41,7 +41,7 @@ Check out [Get Started](#get-started) for one-click setup.
 
 ## What can you build?
 
-Most software is built once, for everyone. Möbius lets you describe what you want and builds it in front of you. Over time it picks up on your preferences and interests to be more helpful, and your data never leaves a server you control.
+Most software is built once, for everyone. Möbius builds what you describe, in front of you. Over time it picks up on your preferences and interests to be more helpful, and your data never leaves a server you control.
 
 Some things we've built:
 
@@ -82,10 +82,10 @@ Apps are the most obvious thing the agent builds, but the platform itself is als
 
 - **Visual identity.** "Make it feel warmer." "Restyle the whole shell as a 1970s synthesizer panel." "Tighten the mobile spacing and bump the contrast." The agent edits the CSS, rebuilds, and the new look is live within seconds.
 - **Shell features.** Missing an attachment button? File preview pane? Chat search? Describe what you want; the agent adds it.
-- **Providers.** Switch between Claude Code and Codex from Settings. Plug in your own API keys.
+- **Providers.** Switch between Claude Code and Codex from Settings — both log in via OAuth. Codex generates images natively; on Claude Code, an optional Gemini API key unlocks the same.
 - **Data flows.** Add a webhook, a scheduled job, a new storage shape. The platform exposes these as ordinary primitives the agent can compose.
 
-If the UI ever ends up in a state you don't want, every instance ships with `/recover` — a built-in escape hatch that resets the shell while preserving your chats, apps, and data.
+If the UI ever breaks, every instance ships with `/recover` — it resets the shell and leaves your chats, apps, and data untouched.
 
 ---
 
@@ -177,7 +177,7 @@ To update, go to the same deployment's **Settings → Source → Check for updat
 
 ### Deploy self-hosted
 
-**Requirements:** a Linux server with Docker, a domain name pointing to it, and a coding provider — Codex (free ChatGPT tier or a Pro/Max plan) or Claude Code.
+**Requirements:** a Linux server with Docker, a domain name pointing to it, and a coding provider — Codex (free or paid plan) or Claude Code (paid plan).
 
 ```bash
 git clone https://github.com/hamzamerzic/mobius.git

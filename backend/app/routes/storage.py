@@ -57,15 +57,22 @@ _log = logging.getLogger(__name__)
 _SAFE_RE = re.compile(r"^[\w.\-\/]+$")
 
 
+_LEVELS = {"none": 0, "read": 1, "write": 2}
+
+
 def _check_cross_app(
   db: Session, principal: Principal, target_app_id: int, mode: str
 ) -> None:
   """Enforces declared cross-app access on /api/storage/apps/{id}/...
 
   Owner tokens always pass. App tokens accessing their OWN app always
-  pass. App tokens accessing a DIFFERENT app check that app's
-  `share_with_apps` field — 'none' rejects everything, 'read' allows
-  GET only, 'write' allows GET/PUT/DELETE.
+  pass. App tokens accessing a DIFFERENT app pass only when BOTH:
+    - the caller's `cross_app_access` permits the mode, AND
+    - the target's `share_with_apps` permits the mode.
+
+  Subject-side is the primary check (threat model: "one app is
+  compromised; what stops it from ransacking the others"); object-
+  side is defense-in-depth.
 
   mode: 'read' or 'write'.
   """
@@ -73,21 +80,37 @@ def _check_cross_app(
     return  # owner token
   if principal.app_id == target_app_id:
     return  # app accessing its own data
+  need = _LEVELS[mode]
+  caller = (
+    db.query(models.App).filter(models.App.id == principal.app_id).first()
+  )
+  caller_level = _LEVELS.get(
+    (caller.cross_app_access or "none").lower() if caller else "none", 0
+  )
+  if caller_level < need:
+    raise HTTPException(
+      status_code=403,
+      detail=(
+        f"This app's cross_app_access is "
+        f"'{(caller.cross_app_access if caller else 'none')}' — "
+        f"insufficient for {mode}."
+      ),
+    )
   target = (
     db.query(models.App).filter(models.App.id == target_app_id).first()
   )
   if not target:
     raise HTTPException(status_code=404, detail="App not found.")
-  share = (target.share_with_apps or "none").lower()
-  if share == "none":
+  target_level = _LEVELS.get(
+    (target.share_with_apps or "none").lower(), 0
+  )
+  if target_level < need:
     raise HTTPException(
       status_code=403,
-      detail=f"App {target_app_id} does not share data with other apps.",
-    )
-  if share == "read" and mode != "read":
-    raise HTTPException(
-      status_code=403,
-      detail=f"App {target_app_id} shares read-only data.",
+      detail=(
+        f"App {target_app_id} share_with_apps is "
+        f"'{target.share_with_apps}' — insufficient for {mode}."
+      ),
     )
 
 

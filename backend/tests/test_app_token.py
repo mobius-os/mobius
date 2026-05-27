@@ -154,12 +154,14 @@ def test_app_token_can_read_shared_storage(client, owner_token):
   assert "hello" in r.text
 
 
-def _create_app(client, owner_token, name, share=None):
+def _create_app(client, owner_token, name, cross=None, share=None):
   body = {
     "name": name,
     "description": "test",
     "jsx_source": "export default function App() { return <div>x</div> }",
   }
+  if cross is not None:
+    body["cross_app_access"] = cross
   if share is not None:
     body["share_with_apps"] = share
   r = client.post(
@@ -170,57 +172,89 @@ def _create_app(client, owner_token, name, share=None):
   return r.json()["id"]
 
 
-def test_cross_app_storage_default_is_none(client, owner_token):
-  """Default share_with_apps='none' → other apps get 403."""
-  _, app_token_1 = _make_app_and_token(client, owner_token)
-  app_id_2 = _create_app(client, owner_token, "other-app")
+def _make_app_token(client, owner_token, app_id):
+  r = client.post(
+    "/api/auth/app-token", json={"app_id": app_id},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  return r.json()["token"]
+
+
+def test_cross_app_storage_blocked_when_caller_cross_app_access_is_none(
+  client, owner_token,
+):
+  """Subject-side: caller defaults to 'none' → blocked even if target shares."""
+  caller_id = _create_app(client, owner_token, "caller")  # cross='none'
+  caller_token = _make_app_token(client, owner_token, caller_id)
+  target_id = _create_app(client, owner_token, "target", share="write")
   client.put(
-    f"/api/storage/apps/{app_id_2}/data.json",
-    json={"content": '{"shared": true}'},
+    f"/api/storage/apps/{target_id}/data.json",
+    json={"content": '{"k": 1}'},
     headers={"Authorization": f"Bearer {owner_token}"},
   )
   r = client.get(
-    f"/api/storage/apps/{app_id_2}/data.json",
-    headers={"Authorization": f"Bearer {app_token_1}"},
+    f"/api/storage/apps/{target_id}/data.json",
+    headers={"Authorization": f"Bearer {caller_token}"},
   )
   assert r.status_code == 403
 
 
-def test_cross_app_storage_read_allows_get_blocks_write(client, owner_token):
-  """share_with_apps='read' → other apps GET succeeds, PUT/DELETE 403."""
-  _, app_token_1 = _make_app_and_token(client, owner_token)
-  app_id_2 = _create_app(client, owner_token, "readable-app", share="read")
+def test_cross_app_storage_blocked_when_target_share_is_none(
+  client, owner_token,
+):
+  """Object-side: target defaults to 'none' → blocked even if caller is open."""
+  caller_id = _create_app(client, owner_token, "caller", cross="write")
+  caller_token = _make_app_token(client, owner_token, caller_id)
+  target_id = _create_app(client, owner_token, "target")  # share='none'
   client.put(
-    f"/api/storage/apps/{app_id_2}/data.json",
-    json={"content": '{"shared": true}'},
+    f"/api/storage/apps/{target_id}/data.json",
+    json={"content": '{"k": 1}'},
     headers={"Authorization": f"Bearer {owner_token}"},
   )
   r = client.get(
-    f"/api/storage/apps/{app_id_2}/data.json",
-    headers={"Authorization": f"Bearer {app_token_1}"},
+    f"/api/storage/apps/{target_id}/data.json",
+    headers={"Authorization": f"Bearer {caller_token}"},
+  )
+  assert r.status_code == 403
+
+
+def test_cross_app_storage_read_when_both_sides_permit(client, owner_token):
+  """Both sides 'read' (or higher) → GET succeeds, PUT blocked."""
+  caller_id = _create_app(client, owner_token, "caller", cross="read")
+  caller_token = _make_app_token(client, owner_token, caller_id)
+  target_id = _create_app(client, owner_token, "target", share="read")
+  client.put(
+    f"/api/storage/apps/{target_id}/data.json",
+    json={"content": '{"k": 1}'},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  r = client.get(
+    f"/api/storage/apps/{target_id}/data.json",
+    headers={"Authorization": f"Bearer {caller_token}"},
   )
   assert r.status_code == 200
   r = client.put(
-    f"/api/storage/apps/{app_id_2}/data.json",
+    f"/api/storage/apps/{target_id}/data.json",
     json={"content": '{"tampered": true}'},
-    headers={"Authorization": f"Bearer {app_token_1}"},
+    headers={"Authorization": f"Bearer {caller_token}"},
   )
   assert r.status_code == 403
 
 
-def test_cross_app_storage_write_allows_everything(client, owner_token):
-  """share_with_apps='write' → other apps can GET / PUT / DELETE."""
-  _, app_token_1 = _make_app_and_token(client, owner_token)
-  app_id_2 = _create_app(client, owner_token, "writable-app", share="write")
+def test_cross_app_storage_write_when_both_sides_permit(client, owner_token):
+  """Both sides 'write' → GET / PUT / DELETE all succeed."""
+  caller_id = _create_app(client, owner_token, "caller", cross="write")
+  caller_token = _make_app_token(client, owner_token, caller_id)
+  target_id = _create_app(client, owner_token, "target", share="write")
   r = client.put(
-    f"/api/storage/apps/{app_id_2}/data.json",
-    json={"content": '{"from_other": true}'},
-    headers={"Authorization": f"Bearer {app_token_1}"},
+    f"/api/storage/apps/{target_id}/data.json",
+    json={"content": '{"k": 1}'},
+    headers={"Authorization": f"Bearer {caller_token}"},
   )
   assert r.status_code == 204
   r = client.get(
-    f"/api/storage/apps/{app_id_2}/data.json",
-    headers={"Authorization": f"Bearer {app_token_1}"},
+    f"/api/storage/apps/{target_id}/data.json",
+    headers={"Authorization": f"Bearer {caller_token}"},
   )
   assert r.status_code == 200
 
@@ -230,7 +264,7 @@ def test_app_token_can_access_own_storage_regardless_of_share(
 ):
   """Own-app storage is always full-access for that app's token."""
   app_id, app_token = _make_app_and_token(client, owner_token)
-  # share_with_apps stays 'none' by default — still works for own data.
+  # Both fields stay 'none' by default — still works for own data.
   r = client.put(
     f"/api/storage/apps/{app_id}/mine.json",
     json={"content": '{"k": 1}'},

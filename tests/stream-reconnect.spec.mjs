@@ -38,7 +38,7 @@ async function setupChat(page) {
 }
 
 async function send(page, text) {
-  const input = page.getByRole('textbox', { name: 'Message the agent...' })
+  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
   await page.keyboard.press('Enter')
 }
@@ -234,7 +234,7 @@ test.describe('Stream reconnection', () => {
     await expect(page.locator('.chat__scroll')).toContainText(
       'streaming...', { timeout: 5000 },
     )
-    const input = page.getByRole('textbox', { name: 'Message the agent...' })
+    const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('follow up')
     await expect(page.locator('button[aria-label="Send"]')).toBeVisible()
 

@@ -185,7 +185,7 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
         onClick={startLogin}
         disabled={status === 'connecting'}
       >
-        {status === 'connecting' ? 'Starting...' : 'Connect to Codex'}
+        {status === 'connecting' ? 'Starting…' : 'Connect to Codex'}
       </button>
       {error && <p className="pa__error">{error}</p>}
     </div>

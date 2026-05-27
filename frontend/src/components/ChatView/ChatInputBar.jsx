@@ -361,7 +361,7 @@ export default function ChatInputBar({
               value={input}
               onChange={handleTextareaChange}
               onKeyDown={handleKeyDown}
-              placeholder="Message the agent..."
+              placeholder="Message Möbius…"
               rows={1}
             />
             {rightButtons}
