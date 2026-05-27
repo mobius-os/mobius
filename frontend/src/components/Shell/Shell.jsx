@@ -164,8 +164,6 @@ export default function Shell() {
   //     the building chat was deleted. Error is set as a draft (not auto-sent)
   //     so the user can review before sending.
   //   moebius:new-chat — open a new chat with optional pre-filled draft text.
-  //     Always forceNew to avoid reusing the current empty chat (which would
-  //     skip the useState initializer that reads pending-draft).
   useEffect(() => {
     async function handleAppError(e) {
       const appEntry = apps.find(a => String(a.id) === String(e.data.appId))
@@ -234,27 +232,32 @@ export default function Shell() {
   }, [apps, chats, navTo])
 
   async function newChat({ draft, forceNew } = {}) {
+    // Always POST a fresh chat. An earlier version reused the most-
+    // recently-updated empty chat to avoid DB-row churn, but every chat
+    // snapshots model/effort/provider into agent_settings_json at creation
+    // time (so subsequent global-default changes don't bleed into existing
+    // chats — see backend/app/routes/chats.py:create_chat). Reusing an
+    // empty chat reused its FROZEN snapshot, so "New chat" silently
+    // surfaced whichever defaults were current weeks ago, ignoring the
+    // user's most recent model/effort pick. Always-create is the
+    // structural fix; the reuse optimization also wasn't preventing
+    // accumulation (hundreds of empties piled up anyway).
+    //
+    // `forceNew` is kept as a parameter — it no longer affects chat
+    // creation (every call creates), but the nav-stack push logic below
+    // still uses it to distinguish user-initiated calls (which want a
+    // back-target installed) from automatic ones (bootstrap, deletion-
+    // induced re-create).
+    //
     // Resolve chatId BEFORE switching views — setting activeView='chat'
     // with the old chatId causes a visible flash of the previous chat.
-    // forceNew: always create a new chat (don't reuse empty). Required for
-    // moebius:new-chat because reusing the same chatId wouldn't remount
-    // ChatView, so the useState initializer wouldn't read pending-draft.
     let chatId
-    const empty = !forceNew && [...chats]
-      .filter(c => !c.has_messages)
-      .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''))
-      [0]
-
-    if (empty) {
-      chatId = empty.id
-    } else {
-      try {
-        const res = await api.chats.create({ title: 'New chat' })
-        const chat = await res.json()
-        chatId = chat.id
-        await refreshChats()
-      } catch { return }
-    }
+    try {
+      const res = await api.chats.create({ title: 'New chat' })
+      const chat = await res.json()
+      chatId = chat.id
+      await refreshChats()
+    } catch { return }
 
     // Push nav stack so back returns to the previous view (skip
     // automatic calls — bootstrap or chat-deletion-induced re-create).
