@@ -203,6 +203,26 @@ body.theme-light .settings__section {
   --color-ring: var(--accent);
 }
 
+/* Tailwind v4's Preflight resets button backgrounds in the base
+   layer, which fights the SDK Switch's component-layer
+   `background: var(--switch-track-color-*)` rules and leaves the
+   track transparent. Targeting the Switch button directly from
+   our settings scope gives a higher-specificity wins-over-base
+   override. Mirrors what the SDK does, just at a layer Tailwind's
+   base can't reset. */
+.settings__row button[role="switch"] {
+  background: var(--switch-track-color);
+}
+.settings__row button[role="switch"][data-state="checked"] {
+  background: var(--switch-track-color-checked);
+}
+.settings__row button[role="switch"][data-disabled] {
+  background: var(--switch-track-color-disabled);
+}
+.settings__row button[role="switch"][data-disabled][data-state="checked"] {
+  background: var(--switch-track-color-checked-disabled);
+}
+
 /* Toggle switch */
 .settings__toggle {
   position: relative;

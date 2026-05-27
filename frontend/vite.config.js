@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
 
 // Service-worker integration uses `injectManifest` rather than the
@@ -13,6 +14,14 @@ import { VitePWA } from 'vite-plugin-pwa'
 // on activate by `cleanupOutdatedCaches`, no manual bumps.
 export default defineConfig({
   plugins: [
+    // Tailwind v4 — required by @openai/apps-sdk-ui so its
+    // `@theme static {}` token blocks resolve. Without this plugin
+    // SDK design tokens (--radius-full, --color-ring, etc.) parse
+    // as unknown at-rules and silently produce empty values. Order
+    // matters: tailwindcss before React so token transforms are
+    // available to the @import "tailwindcss" + SDK CSS chain in
+    // index.css.
+    tailwindcss(),
     react(),
     VitePWA({
       srcDir: 'src',

@@ -24,36 +24,54 @@ _STYLE = """
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     font-family: var(--font, system-ui, -apple-system, sans-serif);
-    background: var(--bg, #0c0f14); color: var(--text, #d4d4d8);
-    min-height: 100vh; display: flex;
-    align-items: center; justify-content: center;
-    padding: 16px;
+    /* Fallback colors are kept in sync with backend/app/theme.py
+       DEFAULT_THEME so the recovery page reads as the same shell
+       even when the React app's theme injection hasn't run (the
+       recovery page is meant to load when things are broken). */
+    background: var(--bg, #0d0d0d); color: var(--text, #ececec);
+    min-height: 100vh;
+    padding: 32px 16px;
   }
   .card {
-    background: var(--surface, #14181f); border: 1px solid var(--border, #252b36);
-    border-radius: 12px; padding: 32px; max-width: 440px; width: 100%;
+    background: var(--surface, #171717); border: 1px solid var(--border, #2a2a2a);
+    border-radius: 14px; padding: 24px;
+    max-width: 480px; width: 100%;
+    margin: 0 auto;
   }
-  h1 { font-size: 20px; margin-bottom: 4px; }
-  .sub { color: var(--muted, #52525b); font-size: 14px; margin-bottom: 24px; }
-  label { display: block; font-size: 13px; color: var(--muted, #52525b); margin-bottom: 4px; }
+  body.theme-light .card {
+    box-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.04),
+      0 1px 3px rgba(0, 0, 0, 0.04);
+  }
+  h1 {
+    font-size: 22px; font-weight: 600;
+    letter-spacing: -0.01em; margin-bottom: 4px;
+  }
+  .sub { color: var(--muted, #9b9b9b); font-size: 14px; margin-bottom: 24px; }
+  label {
+    display: block; font-size: 13px; font-weight: 500;
+    color: var(--muted, #9b9b9b); margin-bottom: 6px;
+  }
   input {
-    width: 100%; padding: 10px 12px; font-size: 14px;
-    background: var(--bg, #0c0f14); border: 1px solid var(--border, #252b36);
-    border-radius: 6px; color: var(--text, #d4d4d8); margin-bottom: 12px;
+    width: 100%; padding: 11px 14px; font-size: 14px;
+    background: var(--bg, #0d0d0d); border: 1px solid var(--border, #2a2a2a);
+    border-radius: 10px; color: var(--text, #ececec); margin-bottom: 14px;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  input:focus {
+    border-color: var(--accent, #8b6cf7);
+    box-shadow: 0 0 0 3px var(--accent-dim, rgba(139, 108, 247, 0.14));
+  }
+  input:focus-visible {
     outline: none;
   }
-  input:focus { border-color: var(--accent, #a78bfa); }
-  /* Keyboard-only focus ring — matches the React app's index.css rule
-     so the recovery page doesn't lose the accessibility outline that
-     the rest of the app just gained. */
-  input:focus-visible {
-    outline: 2px solid var(--accent, #a78bfa); outline-offset: 1px;
-  }
   .btn {
-    display: inline-block; padding: 10px 20px; font-size: 14px;
-    border: none; border-radius: 6px; cursor: pointer;
+    display: inline-block; padding: 11px 18px; font-size: 14px; font-weight: 500;
+    border: none; border-radius: 10px; cursor: pointer;
     color: #fff; text-decoration: none; text-align: center;
     width: 100%;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
     /* Consistency with the React app: kill the mobile tap-highlight
        overlay and the accidental text-selection on press. */
     -webkit-tap-highlight-color: transparent;
@@ -61,24 +79,44 @@ _STYLE = """
     -webkit-touch-callout: none;
   }
   .btn:focus-visible {
-    outline: 2px solid var(--accent, #a78bfa); outline-offset: 2px;
+    outline: 2px solid var(--accent, #8b6cf7); outline-offset: 2px;
   }
-  .btn-primary { background: var(--accent, #a78bfa); }
-  .btn-primary:hover { background: var(--accent-hover, #c4b5fd); }
-  .btn-warn { background: #dc2626; }
-  .btn-warn:hover { background: #b91c1c; }
+  .btn-primary { background: var(--accent, #8b6cf7); }
+  @media (hover: hover) and (pointer: fine) {
+    .btn-primary:hover { background: var(--accent-hover, #7c5ce6); }
+  }
+  /* Danger actions read as OUTLINE by default; the fill only
+     appears on hover/focus. Three solid-red CTAs in a column
+     read alarmist for a recovery surface where the safe actions
+     are next to them. The destructive intent is still clear from
+     the red text/border + the per-action confirm() dialog. */
+  .btn-warn {
+    background: transparent;
+    color: var(--danger, #f87171);
+    border: 1px solid var(--danger, #f87171);
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .btn-warn:hover { background: var(--danger, #f87171); color: #fff; }
+  }
+  .btn-warn:active { background: var(--danger, #f87171); color: #fff; }
   .btn-outline {
-    background: transparent; border: 1px solid var(--border, #252b36);
-    color: var(--text, #d4d4d8);
+    background: var(--surface2, #212121);
+    border: 1px solid var(--border-light, #1f1f1f);
+    color: var(--text, #ececec);
   }
-  .btn-outline:hover { background: var(--surface2, #1a1f28); }
+  @media (hover: hover) and (pointer: fine) {
+    .btn-outline:hover {
+      background: color-mix(in srgb, var(--accent, #8b6cf7) 14%, var(--surface2, #212121));
+      border-color: color-mix(in srgb, var(--accent, #8b6cf7) 60%, var(--border-light, #1f1f1f));
+    }
+  }
   .error { color: var(--danger, #f87171); font-size: 13px; margin-bottom: 12px; }
   .msg {
-    background: rgba(110, 231, 183, 0.08);
-    border: 1px solid var(--green, #6ee7b7);
-    color: var(--green, #6ee7b7);
+    background: color-mix(in srgb, var(--green, #10b981) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--green, #10b981) 45%, transparent);
+    color: var(--green, #10b981);
     font-size: 14px; font-weight: 500;
-    border-radius: 8px;
+    border-radius: 10px;
     padding: 12px 14px;
     margin-bottom: 18px;
     display: flex; align-items: flex-start; gap: 10px;
@@ -87,20 +125,47 @@ _STYLE = """
     content: "\\2713"; font-size: 16px; font-weight: 700; flex: 0 0 auto;
   }
   .actions { display: flex; flex-direction: column; gap: 10px; }
-  .section { margin-bottom: 20px; }
-  .section-title { font-size: 13px; color: var(--muted, #52525b); margin-bottom: 8px; }
-  hr { border: none; border-top: 1px solid var(--border, #252b36); margin: 20px 0; }
+  .section { margin-bottom: 24px; }
+  .section-title {
+    font-size: 13px; font-weight: 500;
+    color: var(--muted, #9b9b9b);
+    margin-bottom: 10px;
+  }
+  hr { border: none; border-top: 1px solid var(--border, #2a2a2a); margin: 24px 0; }
   .recommended {
-    background: var(--accent-dim, rgba(167,139,250,0.08));
-    border: 1px solid var(--accent, #a78bfa);
-    border-radius: 10px; padding: 16px; margin-bottom: 20px;
+    background: color-mix(in srgb, var(--accent, #8b6cf7) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent, #8b6cf7) 55%, transparent);
+    border-radius: 12px; padding: 18px; margin-bottom: 24px;
   }
   .recommended .label {
-    font-size: 11px; font-weight: 700; letter-spacing: 0.06em;
-    text-transform: uppercase; color: var(--accent, #a78bfa); margin-bottom: 8px;
+    font-size: 13px; font-weight: 500;
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--accent, #8b6cf7);
+    margin-bottom: 6px;
+    display: flex; align-items: center; gap: 6px;
   }
   .recommended .desc {
-    font-size: 13px; color: var(--muted, #52525b); margin-bottom: 12px;
+    font-size: 13px; color: var(--muted, #9b9b9b);
+    line-height: 1.5; margin-bottom: 14px;
+  }
+  /* The "primary" CTA inside the recommended panel becomes a
+     plain accent-text outline button — solid purple-on-purple
+     was hard to read. */
+  .recommended .btn-primary {
+    background: var(--surface, #171717);
+    color: var(--accent, #8b6cf7);
+    border: 1px solid color-mix(in srgb, var(--accent, #8b6cf7) 60%, transparent);
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .recommended .btn-primary:hover {
+      background: var(--accent, #8b6cf7); color: #fff;
+      border-color: var(--accent, #8b6cf7);
+    }
+  }
+  .desc {
+    font-size: 13px; color: var(--muted, #9b9b9b);
+    line-height: 1.5;
   }
 """
 

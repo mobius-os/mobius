@@ -1,3 +1,14 @@
+/* Tailwind v4 — modern utility classes + processes the SDK's
+   `@theme static {}` token blocks so design tokens like
+   --radius-full, --color-ring, --switch-* resolve natively
+   (the SDK is built for Tailwind v4). */
+@import "tailwindcss";
+/* SDK CSS imported here (not from main.jsx) so Tailwind v4
+   processes its @theme blocks as part of the same input chain.
+   Importing as a JS module kept the SDK CSS outside Tailwind's
+   pipeline and SDK design tokens silently resolved to empty. */
+@import "@openai/apps-sdk-ui/css";
+
 *, *::before, *::after {
   box-sizing: border-box;
   margin: 0;
@@ -20,6 +31,12 @@ html, body, * { scrollbar-width: none; -ms-overflow-style: none; }
   --font: 'Inter', system-ui, -apple-system, sans-serif;
   --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
   color-scheme: dark;
+  /* The SDK uses `--color-ring` as its keyboard focus-ring color.
+     Map it to the Mobius accent so SDK controls + bespoke widgets
+     share one focus language. (Tailwind v4 + the SDK's @theme
+     define everything else we consume — radius, motion, switch
+     defaults — so we only set what we want to OVERRIDE.) */
+  --color-ring: var(--accent);
 }
 
 html, body, #root {

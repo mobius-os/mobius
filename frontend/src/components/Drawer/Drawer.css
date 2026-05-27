@@ -55,33 +55,19 @@
   min-height: 0;
 }
 
-/* Single scroll wrapper: ONE scrollable region that holds New chat +
-   Chats + Apps as one continuous column. Earlier each group had
-   `flex: 1` and split the drawer height in half, so 2 chats + 1 app
-   left a huge empty band between sections and the apps list cut off
-   mid-row. With one scroll area the sections size to their content
-   naturally; if total content overflows, the whole column scrolls,
-   and a gradient mask fades the bottom edge so any partial row
-   doesn't read as abruptly cut off. */
+/* Wrapper around New chat + Chats + Apps. Holds the layout for
+   the per-section scroll model: New chat stays at the top, Chats
+   and Apps share the remaining space proportionally to their
+   content, and each scrolls INTERNALLY when its share is smaller
+   than its content. This means both sections are always visible
+   with roughly equal spacing — if you have 100 chats, you don't
+   have to scroll past all of them to reach Apps. A single
+   parent-scroll would force that. */
 .drawer__scroll-wrap {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
-  scrollbar-width: thin;
-  /* Fade the bottom edge so a partially-visible row at the scroll
-     boundary doesn't read as a cut. The mask is 24px tall — enough
-     to dissolve text but not enough to noticeably eat content from
-     full rows. */
-  mask-image: linear-gradient(
-    to bottom,
-    black calc(100% - 24px),
-    transparent
-  );
-  -webkit-mask-image: linear-gradient(
-    to bottom,
-    black calc(100% - 24px),
-    transparent
-  );
+  display: flex;
+  flex-direction: column;
 }
 
 /* ── New chat ──────────────────────────────────────── */
@@ -107,18 +93,23 @@
 
 /* ── Groups (History, Apps) ───────────────────────── */
 
+/* Each group sizes to content but may shrink when total content
+   exceeds the wrapper. `flex: 0 1 auto` means:
+     - Don't grow beyond content (no empty padding).
+     - Can shrink (yields space when needed).
+     - Basis = content height.
+   When chats has 2 rows + apps has 30 rows + drawer height 600px:
+     chats wants ~80px, apps wants ~1200px. Chats fits without
+     shrinking; apps shrinks to fill the rest and scrolls inside.
+   When both have many items, both shrink proportionally and each
+   scrolls internally — so Apps is always reachable without
+   scrolling past every chat. */
 .drawer__group {
-  margin-top: 8px;
+  flex: 0 1 auto;
   min-height: 0;
-}
-
-/* The old --flex variant gave each group flex:1 and split the
-   drawer height. With the new single-scroll-wrap layout it's a
-   no-op (kept for backward compat in case external code still
-   references it). The scroll lives on .drawer__scroll-wrap now. */
-.drawer__group--flex {
   display: flex;
   flex-direction: column;
+  margin-top: 8px;
 }
 
 
@@ -141,11 +132,26 @@
 .drawer__label svg { flex-shrink: 0; opacity: 0.85; color: var(--muted); }
 .drawer__label span { line-height: 1; }
 
-/* Per-section row container — no longer scrolls (the outer
-   drawer__scroll-wrap owns the scrollbar). Just stacks rows. */
+/* Per-section row container — scrolls internally when its group
+   has been shrunk below its content size. Fade-mask at the bottom
+   so a partial row at the scroll boundary doesn't read as cut. */
 .drawer__scroll {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  mask-image: linear-gradient(
+    to bottom,
+    black calc(100% - 16px),
+    transparent
+  );
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    black calc(100% - 16px),
+    transparent
+  );
 }
 
 /* ── Items ─────────────────────────────────────────── */
