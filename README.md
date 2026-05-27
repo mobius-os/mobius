@@ -31,7 +31,7 @@ Most software asks you to adapt to it. AI assistants tend to make this worse wit
 
 Möbius is a personalized AI agent you self-host. A chat on one side, a canvas on the other. You describe what you want, and the coding agent inside builds it — a small piece of software that lands next to the chat, runs in your browser, and is yours to keep.
 
-The agent isn't limited to apps. It can change the interface itself: the theme, the layout, the features in the shell. It edits the source and rebuilds live. Some changes appear instantly, others take a few seconds. The agent supports Codex (works on a free ChatGPT account, limited usage) or Claude Code as the coding provider, with Gemini for image generation.
+The agent isn't limited to apps. It can change the interface itself: the theme, the layout, the features in the shell. It edits the source and rebuilds live. Some changes appear instantly, others take a few seconds. The agent runs on Codex (free ChatGPT tier or a ChatGPT Pro/Max plan) or Claude Code (any paid plan), with Gemini for image generation.
 
 It installs on your phone like a native app (Android and iOS). Because it runs on *your* server, your data stays yours.
 
@@ -167,7 +167,7 @@ None of these ship yet.
 
 ### <a href="https://railway.com/deploy/mobius?referralCode=5TQuhr"><img src="https://railway.com/button.svg" alt="Deploy on Railway" height="28"></a>
 
-Click **Deploy Now**, log in to Railway, and deploy. New accounts get a free month, then around $5/month for hosting. Once the deploy finishes, go to **Settings → Networking → Generate Domain**. You'll get a URL like `xxx.up.railway.app`. Open it, and the setup wizard walks you through creating your account and connecting Codex (free ChatGPT account, limited usage) or Claude.
+Click **Deploy Now**, log in to Railway, and deploy. New accounts get a free month, then around $5/month for hosting. Once the deploy finishes, go to **Settings → Networking → Generate Domain**. You'll get a URL like `xxx.up.railway.app`. Open it, and the setup wizard walks you through creating your account and connecting Codex or Claude.
 
 Bookmark `https://xxx.up.railway.app/recover`. If the UI ever breaks, that's where you fix it.
 
@@ -177,7 +177,7 @@ To update, go to the same deployment's **Settings → Source → Check for updat
 
 ### Deploy self-hosted
 
-**Requirements:** a Linux server with Docker, a domain name pointing to it, and either a free ChatGPT account (Codex on the free tier has limited usage) or a Claude Code subscription.
+**Requirements:** a Linux server with Docker, a domain name pointing to it, and a coding provider — Codex (free ChatGPT tier or a Pro/Max plan) or Claude Code.
 
 ```bash
 git clone https://github.com/hamzamerzic/mobius.git
@@ -192,23 +192,6 @@ Caddy handles HTTPS automatically. Visit `https://your-domain.com` and the setup
 Bookmark `https://your-domain.com/recover`. If the UI ever breaks, that's where you fix it.
 
 To update: `git pull && docker compose up -d --build`. Everything in `/data` survives rebuilds.
-
-### Using Codex on the free tier
-
-Codex is OpenAI's coding agent. It works on a free ChatGPT account (with limited usage), which makes it the lowest-friction way to try Möbius — no paid subscription needed. The setup wizard lists it first for that reason.
-
-One step you need to do once, before signing in:
-
-1. Open [chatgpt.com](https://chatgpt.com) and sign in to your account.
-2. Click your profile (top-right) → **Settings**.
-3. Open the **Security** tab.
-4. Turn on **Enable device code authorization for Codex**.
-
-Without this toggle, the Möbius setup wizard's "Connect to Codex" button will fail with a "contact your workspace admin" message — even on a personal account. The toggle exists because Codex's CLI uses a device-auth flow, which is off by default.
-
-After that, hit Connect to Codex in Möbius and follow the device-code prompt in your browser.
-
-If you're on a managed ChatGPT workspace (Business / Enterprise / Edu), an admin needs to enable the equivalent toggle under **Workspace Settings → Settings and Permissions → Codex local**. End users can't self-serve there.
 
 ---
 
