@@ -13,6 +13,13 @@
   box-sizing: border-box;
   margin: 0;
   padding: 0;
+  /* Suppress the Android Chrome / iOS Safari tap-highlight on
+     every interactive element. Tailwind v4 Preflight zeros
+     border-radius on textareas/inputs, which makes the default
+     tap-highlight render as a sharp rectangle — visible inside
+     our rounded composer pill. The shell uses its own focus
+     rings (`:focus-visible`) so we don't need this default. */
+  -webkit-tap-highlight-color: transparent;
 }
 
 /* Hide scrollbars globally. Shell-wide (not just .chat__scroll) so

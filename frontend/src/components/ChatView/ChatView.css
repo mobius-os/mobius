@@ -534,6 +534,14 @@
   padding: 4px 8px 4px 12px;
   overflow-y: auto;
   display: block;
+  /* Suppress the Android Chrome / iOS Safari tap-highlight that
+     paints a translucent dark rectangle on the focused textarea.
+     Tailwind v4's Preflight resets textarea border-radius to 0,
+     which makes the highlight render as a sharp square INSIDE
+     the rounded pill — looks like a "faint square background"
+     against the pill surface. The pill itself already provides
+     the focus ring via :focus-within. */
+  -webkit-tap-highlight-color: transparent;
 }
 
 .chat__input::placeholder { color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */ }
