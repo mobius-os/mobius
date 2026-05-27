@@ -1,18 +1,22 @@
 // Shared theme constants and helpers used by Shell (auto-detect) and SettingsView (toggle).
 
+// Palette neutralized 2026-05: dropped the slight blue tint so the
+// dark stack reads as true charcoal; --muted bumped from #6b6b76
+// (~3.8:1 — fails WCAG AA) to #9b9b9b (~6.4:1). Must stay in sync
+// with backend/app/theme.py DEFAULT_THEME.
 export const DARK_COLORS = {
-  '--bg': '#0d0f14',
-  '--surface': '#151820',
-  '--surface2': '#1c2028',
-  '--border': '#2a2f3a',
-  '--border-light': '#1e2330',
-  '--text': '#d8d8dc',
-  '--muted': '#6b6b76',
+  '--bg': '#0d0d0d',
+  '--surface': '#171717',
+  '--surface2': '#212121',
+  '--border': '#2a2a2a',
+  '--border-light': '#1f1f1f',
+  '--text': '#ececec',
+  '--muted': '#9b9b9b',
   '--accent': '#8b6cf7',
   '--accent-hover': '#7c5ce6',
-  '--accent-dim': 'rgba(139, 108, 247, 0.12)',
-  '--danger': '#ef4444',
-  '--green': '#059669',
+  '--accent-dim': 'rgba(139, 108, 247, 0.14)',
+  '--danger': '#f87171',
+  '--green': '#10b981',
 }
 
 export const LIGHT_COLORS = {

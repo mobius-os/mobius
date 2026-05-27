@@ -199,14 +199,25 @@ export default function Drawer({
       >
         <div className="drawer__body">
 
-          <button className="drawer__item drawer__item--new" onClick={onNewChat}>
-            <span className="drawer__item-icon" aria-hidden="true">
-              <Plus width={18} height={18} />
-            </span>
-            <span className="drawer__item-text">New chat</span>
-          </button>
+          {/* Single scroll wrapper around New chat + Chats + Apps.
+              Earlier each group held its own scrolling region with
+              flex:1, which split the drawer height evenly even when
+              one section had a few rows and the other had many. With
+              one outer scroll, sections size to content; if total
+              content overflows, the whole column scrolls and the
+              bottom edge fades via mask-image so a half-row at the
+              boundary doesn't read as abruptly cut off. Settings
+              sits outside this wrapper at the drawer bottom. */}
+          <div className="drawer__scroll-wrap">
 
-          <div className="drawer__group drawer__group--flex">
+            <button className="drawer__item drawer__item--new" onClick={onNewChat}>
+              <span className="drawer__item-icon" aria-hidden="true">
+                <Plus width={18} height={18} />
+              </span>
+              <span className="drawer__item-text">New chat</span>
+            </button>
+
+          <div className="drawer__group">
             <p className="drawer__label drawer__label--chats">
               <Chats width={16} height={16} aria-hidden="true" />
               <span>Chats</span>
@@ -244,7 +255,7 @@ export default function Drawer({
           </div>
 
           {apps.length > 0 && (
-            <div className="drawer__group drawer__group--flex">
+            <div className="drawer__group">
               <p className="drawer__label drawer__label--apps">
                 <Grid width={16} height={16} aria-hidden="true" />
                 <span>Apps</span>
@@ -279,6 +290,8 @@ export default function Drawer({
               </div>
             </div>
           )}
+
+          </div>{/* /.drawer__scroll-wrap */}
 
           <div className="drawer__group drawer__group--bottom">
             <button

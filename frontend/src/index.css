@@ -30,6 +30,22 @@ html, body, #root {
   width: 100%;
 }
 
+/* Accessibility: respect prefers-reduced-motion. Collapses all
+   transitions and animations to near-instant — the user has asked
+   the OS to suppress non-essential motion. The shell + drawer +
+   composer popovers all rely on transitions, so this rule has to
+   live at the global level rather than per-component. Keeps a
+   1ms duration (not 0) so transitionend events still fire and any
+   logic gated on them continues to work. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 
 /*
  * Shell fade-in animation.

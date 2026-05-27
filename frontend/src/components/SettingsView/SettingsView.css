@@ -28,6 +28,18 @@
   padding: 14px 20px;
 }
 
+/* Light mode: cards in light mode lose almost all visible
+   separation from the bg because the surface↔bg contrast is
+   subtle (#f8f7f5 on #f0eeeb). A soft elevation shadow restores
+   the layered card feel from earlier iterations without making
+   the surface itself darker. Dark mode leaves cards flat — dark
+   surfaces don't need elevation. */
+body.theme-light .settings__section {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.04),
+    0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
 /* Section titles: sentence-case, no tracking, no uppercase. The
    previous uppercase-tracked treatment read as ornament. */
 .settings__section-title {
@@ -48,19 +60,30 @@
   gap: 8px;
 }
 
-/* Demoted from full-accent fill: the "Configured" pill was
-   outranking the field label it described. Now an outlined chip
-   that signals state without competing. */
+/* "Configured" indicator — leading green dot + plain label,
+   matching the provider-row status pattern. Earlier full-accent
+   fill outranked the field label; an outlined chip still felt
+   like an unrelated visual language vs the provider-status dot.
+   Same dot, same label weight = same semantic of "this is set up". */
 .settings__badge {
-  display: inline-block;
-  background: var(--accent-dim);
-  color: var(--accent);
-  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
-  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  color: var(--color-connected, #10b981);
+  font-size: 12px;
   font-weight: 500;
-  padding: 2px 8px;
-  border-radius: 10px;
-  text-transform: capitalize;
+  padding: 0;
+  text-transform: none;
+}
+
+.settings__badge::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
 }
 
 .settings__subtext {
@@ -162,6 +185,22 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  /* Override the apps-sdk-ui Switch tokens so the dark-mode toggle
+     reads at the same scale as our earlier bespoke 48x28 switch.
+     The SDK ships smaller defaults tuned for the OpenAI design
+     system; these locals scope the bump so it doesn't bleed into
+     other future Switch usages. Accent palette wired in so the
+     ON state uses the Möbius purple. */
+  --switch-track-width: 48px;
+  --switch-track-height: 28px;
+  --switch-thumb-size: 22px;
+  --switch-thumb-offset: 3px;
+  --switch-track-color: var(--border);
+  --switch-track-color-hover: var(--surface2);
+  --switch-track-color-checked: var(--accent);
+  --switch-track-color-disabled: var(--surface);
+  --switch-track-color-checked-disabled: var(--accent-dim);
+  --color-ring: var(--accent);
 }
 
 /* Toggle switch */

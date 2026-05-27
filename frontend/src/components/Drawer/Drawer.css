@@ -9,7 +9,7 @@
   -webkit-backdrop-filter: blur(4px);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.22s ease;
+  transition: opacity var(--transition-duration-basic, 220ms) var(--cubic-exit, ease);
 }
 
 .drawer-overlay--visible {
@@ -31,7 +31,10 @@
   display: flex;
   flex-direction: column;
   transform: translateX(-100%);
-  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  /* Use the apps-sdk-ui motion tokens so all platform transitions
+     read as part of the same design system. --cubic-move is the
+     ease curve the SDK uses for sliding panels. */
+  transition: transform var(--transition-duration-basic, 250ms) var(--cubic-move, cubic-bezier(0.4, 0, 0.2, 1));
 }
 
 .drawer--open {
@@ -46,36 +49,74 @@
 .drawer__body {
   flex: 1;
   overflow: hidden;
-  /* Bottom padding kept lean so the Settings row sits close to the
-     drawer's bottom edge — earlier 20px floor left an awkward gap
-     on devices with no home-bar safe-area. The safe-area fallback
-     still pushes things up on devices that have one. */
   padding: 10px 8px max(8px, env(safe-area-inset-bottom));
   display: flex;
   flex-direction: column;
+  min-height: 0;
+}
+
+/* Single scroll wrapper: ONE scrollable region that holds New chat +
+   Chats + Apps as one continuous column. Earlier each group had
+   `flex: 1` and split the drawer height in half, so 2 chats + 1 app
+   left a huge empty band between sections and the apps list cut off
+   mid-row. With one scroll area the sections size to their content
+   naturally; if total content overflows, the whole column scrolls,
+   and a gradient mask fades the bottom edge so any partial row
+   doesn't read as abruptly cut off. */
+.drawer__scroll-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  /* Fade the bottom edge so a partially-visible row at the scroll
+     boundary doesn't read as a cut. The mask is 24px tall — enough
+     to dissolve text but not enough to noticeably eat content from
+     full rows. */
+  mask-image: linear-gradient(
+    to bottom,
+    black calc(100% - 24px),
+    transparent
+  );
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    black calc(100% - 24px),
+    transparent
+  );
 }
 
 /* ── New chat ──────────────────────────────────────── */
 
+/* Outlined pill — visually distinct from the chat/app rows below
+   so a tap-friendly "start fresh" affordance reads as a primary
+   action, not just another list item. The hairline border + slight
+   indent (margin) give it breathing room without competing with
+   the section headers. */
 .drawer__item--new {
-  color: var(--muted);
-  margin-bottom: 4px;
+  color: var(--text);
+  font-weight: 500;
+  margin: 0 4px 12px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
 }
 
 .drawer__item--new:hover {
-  color: var(--accent);
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--border-light);
 }
 
 /* ── Groups (History, Apps) ───────────────────────── */
 
 .drawer__group {
   margin-top: 8px;
-  min-height: 0;  /* allow flex children to shrink below content size */
+  min-height: 0;
 }
 
+/* The old --flex variant gave each group flex:1 and split the
+   drawer height. With the new single-scroll-wrap layout it's a
+   no-op (kept for backward compat in case external code still
+   references it). The scroll lives on .drawer__scroll-wrap now. */
 .drawer__group--flex {
-  flex: 1;
-  min-height: 0;
   display: flex;
   flex-direction: column;
 }
@@ -100,10 +141,11 @@
 .drawer__label svg { flex-shrink: 0; opacity: 0.85; color: var(--muted); }
 .drawer__label span { line-height: 1; }
 
+/* Per-section row container — no longer scrolls (the outer
+   drawer__scroll-wrap owns the scrollbar). Just stacks rows. */
 .drawer__scroll {
-  flex: 1;
-  overflow-y: auto;
-  scrollbar-width: thin;
+  display: flex;
+  flex-direction: column;
 }
 
 /* ── Items ─────────────────────────────────────────── */
@@ -127,9 +169,16 @@
   -webkit-tap-highlight-color: transparent;
 }
 
-.drawer__item:hover {
-  color: var(--text);
-  background: var(--surface);
+/* Hover gated to real pointers (mouse / trackpad). On touch
+   devices :hover lingers on the last-tapped row until the user
+   taps elsewhere — sticking a highlight on rows the user just
+   navigated AWAY from. Matches the @openai/apps-sdk-ui convention
+   used across their components. */
+@media (hover: hover) and (pointer: fine) {
+  .drawer__item:hover {
+    color: var(--text);
+    background: var(--surface);
+  }
 }
 
 .drawer__item--active {
@@ -222,18 +271,22 @@
   -webkit-tap-highlight-color: transparent;
 }
 
-.drawer__row:hover .drawer__more,
 .drawer__row:focus-within .drawer__more { opacity: 1; }
+
+/* Hover-only desktop reveal — keeps the trigger hidden until the
+   user actually hovers a row with a mouse. */
+@media (hover: hover) and (pointer: fine) {
+  .drawer__row:hover .drawer__more { opacity: 1; }
+  .drawer__more:hover {
+    color: var(--text);
+    background: var(--surface);
+  }
+}
 
 /* Always show on touch devices — :hover never fires there, and the
  * menu trigger has to be reachable without a hover state. */
 @media (hover: none) {
   .drawer__more { opacity: 0.5; }
-}
-
-.drawer__more:hover {
-  color: var(--text);
-  background: var(--surface);
 }
 
 /* Menu roundness — outer 12px so the floating popover reads as a
@@ -285,8 +338,10 @@
 }
 .drawer__menu-item--icon svg { flex-shrink: 0; opacity: 0.85; }
 
-.drawer__menu-item:hover {
-  background: var(--surface);
+@media (hover: hover) and (pointer: fine) {
+  .drawer__menu-item:hover {
+    background: var(--surface);
+  }
 }
 
 .drawer__menu-item--danger {

@@ -168,8 +168,7 @@ export default function SettingsView({ onThemeChange }) {
               {configured && <span className="settings__badge">Configured</span>}
             </label>
             <p className="settings__subtext">
-              Used for image generation.
-              Get a free key at{' '}
+              Get a key at{' '}
               <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">
                 aistudio.google.com
               </a>.
