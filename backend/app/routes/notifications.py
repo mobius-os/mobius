@@ -60,7 +60,7 @@ def list_notifications(
     .order_by(models.Notification.sent_at.desc())
   )
   if before:
-    ref = db.query(models.Notification).get(before)
+    ref = db.get(models.Notification, before)
     if ref:
       q = q.filter(models.Notification.sent_at < ref.sent_at)
   return [
