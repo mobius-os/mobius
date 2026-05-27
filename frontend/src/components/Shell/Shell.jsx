@@ -30,16 +30,7 @@ export default function Shell() {
   const apps = appsQuery.data ?? []
   const chats = chatsQuery.data ?? []
 
-  // Per-app cache buster derived from `app.updated_at` on the server.
-  // Using a server-supplied value (vs an in-memory counter) means the
-  // iframe URL stays valid across reloads — without this, every page
-  // reload reset the in-memory counter to 0, the SW cache-first hit
-  // on `/api/apps/{id}/frame?v=0` served whatever broken module the
-  // user FIRST cached, and subsequent agent fixes were invisible
-  // until a fresh `app_updated` happened mid-session (which itself
-  // didn't survive the next reload). updated_at is the only field
-  // that monotonically reflects server state, so it's the right
-  // cache key.
+  // Cache key from app.updated_at (server-side). Stable across reloads.
   const versionForApp = useCallback((id) => {
     const app = apps.find(a => String(a.id) === String(id))
     if (!app?.updated_at) return 0
@@ -154,7 +145,7 @@ export default function Shell() {
       document.body.style.opacity = '0'
       setTimeout(() => window.location.reload(), 220)
     } else if (ev.type === 'shell_rebuild_failed') {
-      setToast('Shell rebuild failed — the agent is fixing it.')
+      setToast('Shell rebuild failed.')
       setTimeout(() => setToast(null), 8000)
     }
   }, [activeAppId, activeView, drawerOpen, activeChatId, loadTheme, refreshApps])

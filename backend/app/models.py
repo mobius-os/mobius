@@ -89,16 +89,23 @@ class App(Base):
   chat_id = Column(String(64), nullable=True, default=None)
   # See `Chat.pinned_at` — same contract.
   pinned_at = Column(DateTime, nullable=True, default=None)
-  # Cross-app storage access this app grants to OTHER apps. The owner
-  # token always has full access; an app token for THIS app always has
-  # full access to this app's data. Affects /api/storage/apps/{id}/...
-  # when the caller is a DIFFERENT app token:
-  #   'none'  (default) — other apps get 403
-  #   'read'  — other apps can GET; PUT/DELETE 403
-  #   'write' — other apps can GET/PUT/DELETE
-  # The agent sets this when building an app, based on partner intent.
-  # The owner can always override via chat — this is the declared
-  # default, not an enforced ceiling.
+  # Subject-side: what THIS app's token can do against OTHER apps'
+  # storage. The primary direction — designed for the threat model
+  # "one mini-app is compromised, what stops it from reading every
+  # other app's data". An app's outbound reach defaults to 'none';
+  # the agent opts an app in to interop when the partner asks for it.
+  #   'none'  (default) — cannot touch other apps
+  #   'read'  — can GET from other apps; PUT/DELETE 403
+  #   'write' — can GET/PUT/DELETE on other apps
+  cross_app_access = Column(
+    String(16), nullable=False, default="none"
+  )
+  # Object-side: what other apps can do against THIS app's storage.
+  # Defense-in-depth on top of cross_app_access. The effective right
+  # to (read|write) app B from app A's token is
+  #     min(A.cross_app_access, B.share_with_apps)
+  # — both sides must permit. If either is 'none', access is denied.
+  # Owner tokens skip both checks; own-app tokens skip both.
   share_with_apps = Column(
     String(16), nullable=False, default="none"
   )

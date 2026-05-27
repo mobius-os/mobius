@@ -90,6 +90,13 @@ def run_migrations(eng) -> None:
         "NOT NULL DEFAULT 'none'"
       ))
       conn.commit()
+  if "cross_app_access" not in apps_cols:
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN cross_app_access VARCHAR(16) "
+        "NOT NULL DEFAULT 'none'"
+      ))
+      conn.commit()
   if "chats" in tables:
     chats_cols = {c["name"] for c in inspector.get_columns("chats")}
     _add = []

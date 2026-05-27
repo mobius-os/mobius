@@ -167,7 +167,7 @@ export default function ComposerPopover({
             })
           }
         }}
-        aria-label="Add attachment or change model"
+        aria-label="Attach or change model"
         aria-haspopup="dialog"
         aria-expanded={open}
       >

@@ -139,20 +139,10 @@ def _update_last_assistant_message(db: Session, chat_id: str, message: dict) -> 
     return True
   msgs = list(chat.messages)
   if msgs and msgs[-1].get("role") == "assistant":
-    # Preserve question.answers from the existing message: when the
-    # user submits an AskUserQuestion answer via POST /messages, the
-    # answers are written atomically into the existing question block
-    # (chats_stream.py:_apply_answers_to_last_question). The runner's
-    # subsequent writeback rebuilds the message from `assistant_blocks`
-    # (which has no answers field), so without this merge the answers
-    # get wiped — user sees an "unanswered" question card after reload.
-    #
-    # Multi-question per turn IS observed in practice (an agent can
-    # call AskUserQuestion twice sequentially within one turn after
-    # the first answer resolves). Match by the shared
-    # question_block_key — the same identity used by
-    # events.process_event for cross-event coalescing — so the two
-    # paths agree on which existing block a new one extends.
+    # Carry answers forward: _apply_answers_to_last_question writes
+    # them here; the runner rebuilds from assistant_blocks (no
+    # answers), so merge keyed by question_block_key to avoid wiping
+    # them on writeback. Multi-question turns are supported.
     existing_answers_by_key = {}
     for ob in msgs[-1].get("blocks") or []:
       if ob.get("type") == "question" and ob.get("answers"):

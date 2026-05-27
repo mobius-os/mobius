@@ -56,7 +56,7 @@ async function newChat(page) {
 }
 
 async function sendMessage(page, text) {
-  const input = page.getByRole('textbox', { name: 'Message the agent...' })
+  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
   await page.keyboard.press('Enter')
   await page.waitForSelector('.chat__scroll', { timeout: 3000 })
@@ -107,7 +107,7 @@ test.describe('Input behavior', () => {
     expect(hasSend).toBe(false)
 
     // Type something — send button should appear
-    await page.getByRole('textbox', { name: 'Message the agent...' }).fill('hello')
+    await page.getByRole('textbox', { name: 'Message Möbius…' }).fill('hello')
     await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
 
     const hasSendAfter = await page.evaluate(
@@ -534,7 +534,7 @@ test.describe('Enter key — touch-primary device (mobile)', () => {
     )
     await newChat(page)
 
-    const input = page.getByRole('textbox', { name: 'Message the agent...' })
+    const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('Line one')
     await page.keyboard.press('Enter')
 
@@ -562,7 +562,7 @@ test.describe('Enter key — desktop (no touch)', () => {
     await setup(page)
     await newChat(page)
 
-    const input = page.getByRole('textbox', { name: 'Message the agent...' })
+    const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('Desktop send test')
     await page.keyboard.press('Enter')
 
@@ -579,7 +579,7 @@ test.describe('Enter key — desktop (no touch)', () => {
     await setup(page)
     await newChat(page)
 
-    const input = page.getByRole('textbox', { name: 'Message the agent...' })
+    const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('Line one')
     await page.keyboard.press('Shift+Enter')
 
@@ -642,7 +642,7 @@ test.describe('Scroll after stream end', () => {
     await newChat(page)
 
     // Send message → stream completes.
-    const input = page.getByRole('textbox', { name: 'Message the agent...' })
+    const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('Long response test')
     await page.keyboard.press('Enter')
 
@@ -744,7 +744,7 @@ test.describe('Connection recovery', () => {
     await newChat(page)
 
     // Send message → first stream completes.
-    const input = page.getByRole('textbox', { name: 'Message the agent...' })
+    const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('Recovery test')
     await page.keyboard.press('Enter')
 
@@ -799,7 +799,7 @@ test.describe('Connection recovery', () => {
     )
     await newChat(page)
 
-    const input = page.getByRole('textbox', { name: 'Message the agent...' })
+    const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('Reconnect test')
     await page.keyboard.press('Enter')
 

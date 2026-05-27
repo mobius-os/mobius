@@ -173,7 +173,7 @@ export default function SettingsView({ onThemeChange }) {
               {configured && <StatusDot color="--green">Configured</StatusDot>}
             </label>
             <p className="settings__subtext">
-              Get a key at{' '}
+              Get one at{' '}
               <TextLink href="https://aistudio.google.com/apikey" forceExternal>
                 aistudio.google.com
               </TextLink>.

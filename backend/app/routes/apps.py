@@ -81,6 +81,7 @@ async def create_app(
     jsx_source=body.jsx_source,
     chat_id=body.chat_id,
     source_dir=source_dir,
+    cross_app_access=body.cross_app_access,
     share_with_apps=body.share_with_apps,
   )
   db.add(app)
@@ -150,6 +151,8 @@ async def update_app(
     )
   if body.share_with_apps is not None:
     app.share_with_apps = body.share_with_apps
+  if body.cross_app_access is not None:
+    app.cross_app_access = body.cross_app_access
   db.commit()
   db.refresh(app)
   return app

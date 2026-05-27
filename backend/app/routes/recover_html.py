@@ -125,12 +125,7 @@ _STYLE = """
     color: var(--danger, #f87171);
     border: 1px solid var(--danger, #f87171);
   }
-  /* :active alone was leaving the button stuck on the filled
-     state on slow networks — touch ends, mouse moves elsewhere,
-     but the active style persists until the next paint. Pairing
-     `:active` with `:hover` scopes the fill to genuine cursor
-     interactions on desktop. On touch the `:hover` media query
-     below uses transitions so the tap-flash reverts smoothly. */
+  /* :active alone stays stuck on slow networks; pair with :hover to scope fill to cursor interactions on desktop. */
   @media (hover: hover) and (pointer: fine) {
     .btn-warn:hover { background: var(--danger, #f87171); color: #fff; }
     .btn-warn:hover:active { background: var(--danger, #f87171); color: #fff; }
@@ -255,7 +250,7 @@ def login_html(error: str = "", clear_storage: bool = False) -> str:
 <body>
   <div class="card">
     <h1>&#8734; Recovery</h1>
-    <p class="sub">Log in to access recovery tools.</p>
+    <p class="sub">Log in to continue.</p>
     {error_html}
     <form method="POST" action="/recover/auth">
       <label for="username">Username</label>
@@ -280,9 +275,8 @@ _CONFIRM_AUTH = (
   "Reset CLI auth? You will need to sign in again."
 )
 _CONFIRM_FACTORY = (
-  "FACTORY RESET: This deletes your account, all apps,"
-  " CLI credentials, and theme — but preserves chat history."
-  " Are you sure?"
+  "Factory reset: deletes your account, all apps, credentials,"
+  " and theme. Chat history is preserved. Continue?"
 )
 _CONFIRM_BACKUP = (
   "Backup includes OAuth credentials for Claude and Codex."
@@ -314,12 +308,12 @@ def dashboard_html(msg: str = "") -> str:
 <body>
   <div class="card">
     <h1>&#8734; Recovery</h1>
-    <p class="sub">Restore a working state. Your chats and data are safe.</p>
+    <p class="sub">Restore a working state. Chats and data are untouched.</p>
     {msg_html}
 
     <div class="recommended">
       <p class="label">&#10003; Talk to the agent</p>
-      <p class="desc">Opens a minimal chat with the agent so it can diagnose and fix what's broken. The agent has elevated write access to backend code, scripts, and shell from here.</p>
+      <p class="desc">Opens a minimal chat with the agent. From here the agent has write access to backend code, scripts, and shell.</p>
       <a class="btn btn-primary" href="/recover/chat" style="display:inline-block;text-decoration:none;">
         Open recovery chat
       </a>

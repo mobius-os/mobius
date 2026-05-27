@@ -112,7 +112,7 @@ export default function SetupWizard({ onDone, initialStep = 'account' }) {
           <img src={`${BASE}/moebius.png`} alt="Möbius" className="setup__logo" />
           <h1 className="setup__title">Image generation (optional)</h1>
           <p className="setup__subtitle">
-            Generate images in chat using Google's Gemini AI.
+            Generate images in chat with Google Gemini.
           </p>
           <p className="setup__subtitle">
             Get an API key at{' '}
@@ -244,7 +244,7 @@ function ProviderStep({ onSkip, onConnected, claudeAuthenticated }) {
           <ProviderRow
             id="codex"
             name="OpenAI Codex"
-            badge="Free account, limited usage"
+            badge="Free ChatGPT account"
             connected={codexConnected}
             showRadio={false}
             expanded={expanded === 'codex'}
@@ -270,8 +270,7 @@ function ProviderStep({ onSkip, onConnected, claudeAuthenticated }) {
         </div>
 
         <p className="setup__skip-warn">
-          Skipping means the AI agent won't work — all chat messages
-          will fail until you connect a provider.
+          Without a provider, all chat messages will fail.
         </p>
         <button className="setup__skip" onClick={onSkip}>
           Skip for now

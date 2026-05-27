@@ -61,7 +61,7 @@ async function newChat(page) {
 }
 
 async function sendMessage(page, text) {
-  const input = page.getByRole('textbox', { name: 'Message the agent...' })
+  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
   await page.keyboard.press('Enter')
   await page.waitForSelector('.chat__scroll', { timeout: 3000 })

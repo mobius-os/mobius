@@ -97,9 +97,9 @@ export default function ProviderAuth({ authenticated, onDone, compact = false, c
     return (
       <div className={`pa__flow ${className}`}>
         <p className="pa__muted">
-          A sign-in page should have opened.{' '}
-          <a href={authUrl} target="_blank" rel="noopener noreferrer">Click here</a>{' '}
-          if it didn't. Paste the code below.
+          A sign-in page opened. Paste the code below when done.{' '}
+          Didn't open?{' '}
+          <a href={authUrl} target="_blank" rel="noopener noreferrer">Click here</a>.
         </p>
         <form className="pa__form" onSubmit={submitCode}>
           <input
@@ -151,7 +151,7 @@ export default function ProviderAuth({ authenticated, onDone, compact = false, c
   return (
     <div className={`pa__flow ${className}`}>
       {compact && (
-        <p className="pa__muted">Not connected. Sign in to enable the AI agent.</p>
+        <p className="pa__muted">Not connected. Sign in to use the agent.</p>
       )}
       <button className="pa__btn" onClick={startAuth} disabled={starting}>
         {starting ? 'Starting…' : 'Sign in with Claude'}
