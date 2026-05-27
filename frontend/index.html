@@ -59,7 +59,29 @@
       // triggers a fresh sw.js fetch from network so deploys take
       // effect immediately. Belt-and-suspenders with the server-side
       // header in main.py.
-      if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
+        // Watchdog: if the registration we just installed sees a NEW
+        // SW available within the next 8s, refresh once it activates.
+        // Pairs with the SW's own skipWaiting() so users on stale
+        // precached bundles get a soft auto-reload without having
+        // to clear cache by hand. Single-shot via session flag so
+        // we don't loop on persistent update-pending states.
+        navigator.serviceWorker.ready.then(reg => {
+          reg.addEventListener('updatefound', () => {
+            const next = reg.installing
+            if (!next) return
+            next.addEventListener('statechange', () => {
+              if (next.state === 'activated'
+                  && navigator.serviceWorker.controller
+                  && !sessionStorage.getItem('sw-auto-reloaded')) {
+                sessionStorage.setItem('sw-auto-reloaded', '1')
+                window.location.reload()
+              }
+            })
+          })
+        }).catch(() => {})
+      }
       // Request persistent storage so cached app modules and offline
       // state aren't evicted under storage pressure. Best-effort —
       // browser may deny without prompting.
