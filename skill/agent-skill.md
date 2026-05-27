@@ -989,13 +989,20 @@ claude -p "Fetch today's data, process it, and write the result to \
   2>> /data/cron-logs/myapp.log
 ```
 
-### Managing the crontab
+### Installing a cron entry
+
+`/var/spool/cron/crontabs/` lives inside the container, NOT on `/data`, so a Railway redeploy (or any container rebuild) wipes the entry. The platform's entrypoint replays `/data/apps/*/init-cron.sh` on every boot to restore them — so every cron task needs a matching `init-cron.sh`, or the schedule silently disappears on the next deploy.
+
+Use the scaffold rather than calling `crontab` directly:
 
 ```bash
-(crontab -l 2>/dev/null; echo "0 10 * * * /data/apps/myapp/job.sh") | crontab -  # add
-crontab -l                                                                         # list
-crontab -l | grep -v "myapp" | crontab -                                           # remove
+bash /app/scripts/init-cron-scaffold.sh <slug> "<cron-schedule>"
+# e.g. init-cron-scaffold.sh news "*/10 * * * *"
 ```
+
+It writes `/data/apps/<slug>/job.sh` (stub, if absent), writes `/data/apps/<slug>/init-cron.sh` (the replay script), and installs the live entry. Idempotent — re-running with the same args is a no-op. Then edit `job.sh` for the actual work.
+
+To list / remove: `crontab -u mobius -l` and edit the matching `init-cron.sh` (or delete it before re-running the scaffold). Never call `crontab -u mobius` directly without writing an `init-cron.sh` alongside.
 
 ### Key details
 

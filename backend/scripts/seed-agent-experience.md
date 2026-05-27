@@ -248,9 +248,13 @@ contract-comment mismatch.
   $SCRIPTS_DIR/rebuild_shell.sh`, the running uvicorn still serves
   the old bundle until the process restarts. Tell the partner the
   shell will update after the next container restart.
-- **Cron entries don't survive container restarts.** For any app
-  using cron, write `/data/apps/<slug>/init-cron.sh` — the platform
-  re-runs it on boot to restore crontab.
+- **Cron entries don't survive container restarts.** `/var/spool/cron/`
+  lives inside the container, not on `/data`, so Railway redeploys
+  wipe every entry. Use the scaffold:
+  `bash /app/scripts/init-cron-scaffold.sh <slug> "<schedule>"`. It
+  writes `job.sh` + `init-cron.sh` + installs the live entry,
+  idempotent. Never call `crontab -u mobius` directly without
+  writing the matching `init-cron.sh`.
 - Cron + storage API can get out of sync. Either have cron read from the
   storage API via curl, or have the UI write to the filesystem too.
 - Cron scripts need `CLAUDE_CONFIG_DIR=/data/cli-auth/claude`.
