@@ -108,40 +108,6 @@ def test_mixed_tools_separate_correctly():
   assert result[1]["type"] == "tool_input"
 
 
-def test_post_question_suppression():
-  """Exercises the real filter_post_question function from chat.py."""
-  from app.chat import filter_post_question
-
-  events = [
-    ("text", False),       # before question — publish, suppress stays off
-    ("question", True),    # question itself — publish, suppress turns ON
-    ("tool_output", True), # auto-answer output — suppress
-    ("tool_end", True),    # auto-answer end — suppress
-    ("text", True),        # fallback text — suppress
-  ]
-  suppress = False
-  published = []
-  for event_type, expected_suppress in events:
-    publish, suppress = filter_post_question(event_type, suppress)
-    if publish:
-      published.append(event_type)
-    assert suppress == expected_suppress, (
-      f"After {event_type}: expected suppress={expected_suppress}, got {suppress}"
-    )
-
-  assert published == ["text", "question"]
-
-
-def test_filter_post_question_no_suppression_without_question():
-  """Normal events pass through when no question has been seen."""
-  from app.chat import filter_post_question
-
-  for event_type in ("text", "tool_output", "tool_end", "tool_start", "error"):
-    publish, suppress = filter_post_question(event_type, False)
-    assert publish is True
-    assert suppress is False
-
-
 def test_partial_ask_user_question_empty_questions_skipped():
   """Partial assistant events with empty questions array are skipped.
 

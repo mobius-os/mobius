@@ -1,8 +1,10 @@
-"""Agent chat via CLI subprocess.
+"""Agent chat via the official provider SDKs.
 
-Spawns the active provider's CLI tool, publishes events to a ChatBroadcast
-so any number of SSE clients can subscribe.  Provider-specific logic
-(command, args, output parsing) lives in providers.py.
+Routes each chat turn through the SDK-backed runner for the matching
+provider (`claude_sdk_runner.py`, `codex_sdk_runner.py`) and bridges the
+runner's events onto the chat's `ChatBroadcast` so any number of SSE
+clients can subscribe.  Provider env / auth wiring lives in
+`providers.py`; the subprocess fallback that used to live here is gone.
 """
 
 import asyncio
@@ -157,14 +159,6 @@ def _update_last_assistant_message(db: Session, chat_id: str, message: dict) -> 
     msgs.append(message)
   chat.messages = msgs
   return _safe_commit(db)
-
-
-async def _drain(stream: asyncio.StreamReader) -> None:
-  """Reads and discards a subprocess stream to prevent pipe deadlock."""
-  try:
-    await stream.read()
-  except Exception:
-    pass
 
 
 # Queue management (per-chat lock, promote, drain_and_release) lives
@@ -473,22 +467,6 @@ async def stop_chat_for(chat_id: str, db: Session = None) -> bool:
   _finalize_broadcast_if_running(chat_id)
   registry.discard_starting(chat_id)
   return all_stopped
-
-
-def filter_post_question(event_type: str, suppress_text: bool) -> tuple[bool, bool]:
-  """Decides whether a parsed event should be broadcast to SSE clients.
-
-  Returns (publish, new_suppress_text). After a question event,
-  suppresses text, tool_output, and tool_end (Claude's auto-answer
-  fallback). Only used on the subprocess fallback path; SDK paths
-  intercept AskUserQuestion via can_use_tool before any auto-answer
-  events would fire.
-  """
-  if event_type == "question":
-    return True, True
-  if suppress_text and event_type in ("text", "tool_output", "tool_end"):
-    return False, True
-  return True, suppress_text
 
 
 def _finalize_response(
@@ -854,12 +832,11 @@ async def _run_chat_impl(
   cwd = str(data_dir) if data_dir.exists() else str(Path.cwd())
 
   # SDK dispatch: route both Claude and Codex through their official
-  # Agent SDK runners when the feature flag is on (default 1). The
-  # subprocess path below is the fallback for `MOBIUS_USE_SDK=0`.
-  use_sdk = os.environ.get("MOBIUS_USE_SDK", "1") == "1"
+  # Agent SDK runners. The subprocess fallback is gone — the SDK path
+  # is the only supported path.
   is_claude = provider.name == "Claude Code"
   is_codex = provider.name == "Codex"
-  if use_sdk and is_codex:
+  if is_codex:
     log.info(
       "chat start chat_id=%s provider=%s session=%s msg_len=%d sdk=codex",
       chat_id, provider.name, session_id or "new", len(user_message),
@@ -989,7 +966,7 @@ async def _run_chat_impl(
     db.close()
     return
 
-  if use_sdk and is_claude:
+  if is_claude:
     log.info(
       "chat start chat_id=%s provider=%s session=%s msg_len=%d sdk=claude",
       chat_id, provider.name, session_id or "new", len(user_message),
@@ -1117,268 +1094,18 @@ async def _run_chat_impl(
     db.close()
     return
 
-  # Subprocess path (codex today; claude fallback when MOBIUS_USE_SDK=0).
-  result = provider.build(
-    user_message=user_message,
-    session_id=session_id,
-    base_env=base_env,
-    data_dir=settings.data_dir,
-    chat_id=chat_id,
-    agent_settings=agent_settings,
+  # Unknown provider — every supported provider is handled by an SDK
+  # branch above. Surface a clear error rather than hanging silently.
+  log.error(
+    "unsupported provider chat_id=%s provider=%s — no SDK path",
+    chat_id, provider.name,
   )
-
-  log.info(
-    "chat start chat_id=%s provider=%s session=%s msg_len=%d",
-    chat_id, provider.name, session_id or "new", len(user_message),
-  )
-  proc = None
-  try:
-    proc = await asyncio.create_subprocess_exec(
-      *result.cmd,
-      stdout=asyncio.subprocess.PIPE,
-      stderr=asyncio.subprocess.PIPE,
-      cwd=cwd,
-      env=result.env,
-      # 1 MB limit — protects against runaway tool output flooding
-      # the SSE queue.  Normal CLI lines are well under 100 KB.
-      limit=1024 * 1024,
-    )
-    if chat_id:
-      registry.register(SubprocessHandle(chat_id=chat_id, proc=proc))
-
-    stderr_task = asyncio.ensure_future(_drain(proc.stderr))
-    # Ordered blocks list — preserves interleaved text/tool order.
-    assistant_blocks = []
-    session_captured = False
-    last_save_time = 0.0
-    suppress_text = False
-    _DB_SAVE_INTERVAL = 1.0  # seconds between incremental DB saves
-
-    # Default 1 hour, clamped to [30, 7200].
-    _MAX_RUNTIME_SECS = max(
-      30,
-      min(int(os.environ.get("CHAT_TIMEOUT_SECS", "3600")), 7200),
-    )
-    try:
-      async with asyncio.timeout(_MAX_RUNTIME_SECS):
-        async for raw in proc.stdout:
-          line = raw.decode("utf-8", errors="replace").strip()
-          if not line:
-            continue
-
-          parsed = provider.parse_line(line)
-          if not parsed:
-            log.debug("skipped: %.200s", line)
-            continue
-          events = parsed
-
-          # Capture session_id from provider-normalized event.
-          if not session_captured:
-            for evt in events:
-              if evt.get("type") == "session_init":
-                sid = evt.get("session_id")
-                if sid and chat_id:
-                  from app.models import Chat
-                  chat_obj = (
-                    db.query(Chat)
-                    .filter(Chat.id == chat_id)
-                    .first()
-                  )
-                  if chat_obj:
-                    chat_obj.session_id = sid
-                    _safe_commit(db)
-                session_captured = True
-                break
-
-          for event in events:
-            if event.get("type") == "session_init":
-              continue  # internal event, don't broadcast
-            event_type = event.get("type")
-            log.debug("event type=%s", event_type)
-
-            if event_type == "done":
-              log.info(
-                "chat done chat_id=%s cost_usd=%.4f",
-                chat_id, event.get("cost_usd", 0),
-              )
-              break
-            elif event_type == "error":
-              log.error(
-                "provider error: %s", event.get("message"),
-              )
-
-            # AskUserQuestion auto-answers with is_error in -p mode.
-            # Suppress Claude's fallback text and the synthetic tool
-            # result. TODO: with the Agent SDK's canUseTool callback
-            # the auto-answer never fires and this is unnecessary.
-            publish, suppress_text = filter_post_question(
-              event_type, suppress_text,
-            )
-            if not publish:
-              continue
-
-            bc.publish(event)
-
-            # Accumulate blocks and throttle DB saves.
-            save_needed = process_event(
-              event, assistant_blocks,
-            )
-            if save_needed and chat_id:
-              now = time.monotonic()
-              if (now - last_save_time >= _DB_SAVE_INTERVAL
-                  or event_type in (
-                    "tool_start", "tool_end", "error",
-                    "question",
-                  )):
-                last_save_time = now
-                _update_last_assistant_message(
-                  db, chat_id,
-                  build_assistant_message(assistant_blocks),
-                )
-
-            # AskUserQuestion: end the turn. CLI 2.1.145 auto-resolves
-            # AskUserQuestion with `is_error="Answer questions?"` and
-            # the agent continues with assumed defaults (tool_start +
-            # tool_input bypass `filter_post_question`'s suppression
-            # set). Killing the proc here freezes the conversation at
-            # the question; the user's answer arrives via the existing
-            # hidden-message + --resume path. Confirmed coherent end-
-            # to-end in `tools/sdk_emulation` smoke tests.
-            if event_type == "question":
-              log.info(
-                "AskUserQuestion: ending turn early chat_id=%s",
-                chat_id,
-              )
-              save_message_to_db = (
-                build_assistant_message(assistant_blocks)
-              )
-              _update_last_assistant_message(
-                db, chat_id, save_message_to_db,
-              )
-              questions.notify(db, chat_id, event)
-              if proc and proc.returncode is None:
-                proc.kill()
-              bc.publish({"type": "done", "cost_usd": 0})
-              break
-          else:
-            continue
-          break  # break outer loop when inner breaks on "done"
-        else:
-          # stdout exhausted without "done" — CLI exited early.
-          log.warning("CLI exited without done event")
-    except asyncio.TimeoutError:
-      log.warning(
-        "chat timeout after %ds, killing subprocess",
-        _MAX_RUNTIME_SECS,
-      )
-      proc.kill()
-      await asyncio.shield(proc.wait())
-      bc.publish({
-        "type": "error",
-        "message": (
-          f"Agent timed out after {_MAX_RUNTIME_SECS} seconds."
-          " Use the stop button and try again."
-        ),
-      })
-
-    finally:
-      _finalize_response(db, chat_id, assistant_blocks)
-      current_handle = registry.get_handle(chat_id, RunnerKind.SUBPROCESS)
-      if isinstance(current_handle, SubprocessHandle) and current_handle.proc is proc:
-        registry.unregister(chat_id, RunnerKind.SUBPROCESS)
-      set_active_broadcast(None)
-      # Only drain the queue if we still own this generation. A Stop
-      # bumps the generation and clears pending_messages — we must not
-      # promote/continue after Stop.
-      we_own_gen = (
-        run_gen is None or current_run_generation(chat_id) == run_gen
-      )
-      # `_drain_and_release` takes the per-chat queue lock with no
-      # internal timeout — if another coroutine holds it (e.g. a
-      # concurrent POST appending a queued message), the finally
-      # block hangs HERE, before bc.publish(done) + mark_completed.
-      # Result: `_active_procs` is empty (proc already popped above)
-      # but broadcast stays `running=True` forever. Zombie chat.
-      # Cap the wait so any contention surfaces as a logged event
-      # and we still publish `done` + complete the broadcast.
-      try:
-        next_user, next_messages, next_session_id = await asyncio.wait_for(
-          _drain_and_release(db, chat_id, we_own_gen), timeout=5.0,
-        )
-      except asyncio.TimeoutError:
-        log.error(
-          "queue drain timed out chat_id=%s; completing broadcast", chat_id,
-        )
-        discard_starting(chat_id)
-        next_user, next_messages, next_session_id = None, [], None
-      if next_user:
-        bc.publish({
-          "type": "queued_turn_starting",
-          "ts": next_user.get("ts"),
-        })
-      bc.publish({"type": "done"})
-      bc.mark_completed()
-      if next_user:
-        _schedule_continuation(
-          chat_id=chat_id,
-          messages=next_messages,
-          session_id=next_session_id,
-          provider_id=provider_id,
-          next_user=next_user,
-  
-        )
-      stderr_task.cancel()
-      try:
-        await asyncio.wait_for(proc.wait(), timeout=5.0)
-      except asyncio.TimeoutError:
-        log.warning("subprocess did not exit cleanly, killing")
-        proc.kill()
-
-  except Exception as exc:
-    current_handle = registry.get_handle(chat_id, RunnerKind.SUBPROCESS)
-    if isinstance(current_handle, SubprocessHandle) and current_handle.proc is proc:
-      registry.unregister(chat_id, RunnerKind.SUBPROCESS)
-    log.exception("run_chat failed chat_id=%s: %s", chat_id, exc)
-    _finalize_response(db, chat_id, assistant_blocks)
-    bc.publish({"type": "error", "message": str(exc)})
-    set_active_broadcast(None)
-    # Even on error, drain the queue so queued messages aren't stranded.
-    # The user's next turn shouldn't be silently dropped because the
-    # previous turn crashed (e.g. transient network/CLI issue).
-    we_own_gen = (
-      run_gen is None or current_run_generation(chat_id) == run_gen
-    )
-    # Same drain-timeout guard as the success path — see comment above.
-    try:
-      next_user, next_messages, next_session_id = await asyncio.wait_for(
-        _drain_and_release(db, chat_id, we_own_gen), timeout=5.0,
-      )
-    except asyncio.TimeoutError:
-      log.error(
-        "queue drain timed out (error path) chat_id=%s; completing broadcast",
-        chat_id,
-      )
-      discard_starting(chat_id)
-      next_user, next_messages, next_session_id = None, [], None
-    if next_user:
-      bc.publish({
-        "type": "queued_turn_starting",
-        "ts": next_user.get("ts"),
-      })
-    bc.publish({"type": "done"})
-    bc.mark_completed()
-    if next_user:
-      _schedule_continuation(
-        chat_id=chat_id,
-        messages=next_messages,
-        session_id=next_session_id,
-        provider_id=provider_id,
-        next_user=next_user,
-
-      )
-  finally:
-    # Close agent-browser session exactly once, regardless of which
-    # code path completed/errored.  _close_browser_session is a no-op
-    # when agent-browser isn't installed (local dev).
-    await _close_browser_session(chat_id)
-    db.close()
+  bc.publish({
+    "type": "error",
+    "message": f"Provider {provider.name!r} has no supported runtime.",
+  })
+  set_active_broadcast(None)
+  bc.publish({"type": "done"})
+  bc.mark_completed()
+  await _close_browser_session(chat_id)
+  db.close()

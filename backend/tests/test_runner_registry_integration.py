@@ -1,7 +1,6 @@
-"""Integration coverage for commit-2 dual registration."""
+"""Integration coverage for SDK runner registration lifecycle."""
 
 import asyncio
-import os
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -17,108 +16,6 @@ class _FakeBroadcast:
 
   def mark_completed(self) -> None:
     return None
-
-
-class _EmptyAsyncIter:
-  def __aiter__(self):
-    return self
-
-  async def __anext__(self):
-    raise StopAsyncIteration
-
-
-class _BlockingStdout:
-  def __init__(self, release: asyncio.Event):
-    self._release = release
-    self._done = False
-
-  def __aiter__(self):
-    return self
-
-  async def __anext__(self):
-    if self._done:
-      raise StopAsyncIteration
-    await self._release.wait()
-    self._done = True
-    raise StopAsyncIteration
-
-
-class _FakeProc:
-  def __init__(self, release: asyncio.Event):
-    self.pid = 4321
-    self.returncode = None
-    self.stdout = _BlockingStdout(release)
-    self.stderr = _EmptyAsyncIter()
-
-  def kill(self) -> None:
-    self.returncode = -9
-
-  async def wait(self) -> int:
-    if self.returncode is None:
-      self.returncode = 0
-    return self.returncode
-
-
-def test_subprocess_run_registers_then_unregisters_handle(chat, db):
-  from app import chat as chat_mod, schemas
-  from app.broadcast import create_broadcast
-
-  release = asyncio.Event()
-  proc = _FakeProc(release)
-
-  class _FakeProvider:
-    name = "Fake CLI"
-
-    def check_auth(self, _data_dir):
-      return None
-
-    def build(
-      self,
-      user_message,
-      session_id,
-      base_env,
-      data_dir,
-      chat_id,
-      agent_settings=None,
-    ):
-      del user_message, session_id, base_env, data_dir, chat_id, agent_settings
-      return SimpleNamespace(cmd=["fake-cli"], env={})
-
-    def parse_line(self, _line):
-      return None
-
-  async def _fake_subprocess_exec(*_args, **_kwargs):
-    return proc
-
-  async def _scenario() -> None:
-    create_broadcast(chat.id)
-    task = asyncio.create_task(
-      chat_mod._run_chat_impl(
-        messages=[schemas.ChatMessage(role="user", content="hi")],
-        chat_id=chat.id,
-        session_id=None,
-        provider_id="fake",
-        run_gen=chat_mod.current_run_generation(chat.id),
-      )
-    )
-    for _ in range(20):
-      handle = registry.get_handle(chat.id, RunnerKind.SUBPROCESS)
-      if handle is not None:
-        break
-      await asyncio.sleep(0)
-    else:
-      raise AssertionError("subprocess handle never registered")
-
-    assert registry.get_handle(chat.id, RunnerKind.SUBPROCESS) is not None
-    release.set()
-    await asyncio.wait_for(task, timeout=2.0)
-    assert registry.get_handle(chat.id, RunnerKind.SUBPROCESS) is None
-
-  with patch.dict(os.environ, {"MOBIUS_USE_SDK": "0"}), \
-       patch("app.chat.get_provider", return_value=_FakeProvider()), \
-       patch("app.chat._read_skill_text", return_value=""), \
-       patch("app.chat.asyncio.create_subprocess_exec", side_effect=_fake_subprocess_exec):
-    asyncio.run(_scenario())
 
 
 def test_claude_runner_registers_then_unregisters_handle():
@@ -321,5 +218,4 @@ def test_codex_runner_registers_then_unregisters_handle(monkeypatch):
     assert registry.get_handle("chat-codex", RunnerKind.CODEX_SDK) is None
 
   monkeypatch.setattr(runner, "_sdk_imports", lambda: sdk)
-  monkeypatch.setattr(runner, "_load_agent_settings", lambda _env: {})
   asyncio.run(_scenario())

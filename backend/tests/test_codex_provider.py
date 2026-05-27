@@ -1,4 +1,10 @@
-"""Tests for CodexProvider event parsing."""
+"""Tests for CodexProvider event parsing + the codex_appserver translator.
+
+CodexProvider.parse_line is now a thin pass-through: lines arrive from
+`codex_appserver_runner.py` already shaped as Möbius events. The
+underlying translation from app-server JSON-RPC notifications lives in
+`app.codex_appserver` and is exercised directly below.
+"""
 
 import json
 from app.providers import CodexProvider
@@ -6,73 +12,18 @@ from app.providers import CodexProvider
 provider = CodexProvider()
 
 
-def test_thread_started_emits_session_init():
-  line = '{"type":"thread.started","thread_id":"abc-123"}'
-  result = provider.parse_line(line)
-  assert isinstance(result, list)
-  assert result == [{"type": "session_init", "session_id": "abc-123"}]
-
-
-def test_agent_message_emits_text():
-  line = json.dumps({
-    "type": "item.completed",
-    "item": {"id": "item_0", "type": "agent_message", "text": "Hello"},
-  })
+def test_parse_line_passes_through_runner_event():
+  line = json.dumps({"type": "text", "content": "Hello"})
   result = provider.parse_line(line)
   assert result == [{"type": "text", "content": "Hello"}]
 
 
-def test_command_started_emits_tool_start():
-  line = json.dumps({
-    "type": "item.started",
-    "item": {
-      "id": "item_0", "type": "command_execution",
-      "command": "/bin/bash -lc 'echo hi'",
-      "aggregated_output": "", "exit_code": None,
-      "status": "in_progress",
-    },
-  })
-  result = provider.parse_line(line)
-  assert result == [{
-    "type": "tool_start",
-    "tool": "Bash",
-    "input": "echo hi",
-  }]
-
-
-def test_command_completed_emits_tool_output_and_end():
-  line = json.dumps({
-    "type": "item.completed",
-    "item": {
-      "id": "item_0", "type": "command_execution",
-      "command": "/bin/bash -lc 'echo hi'",
-      "aggregated_output": "hi\n", "exit_code": 0,
-      "status": "completed",
-    },
-  })
-  result = provider.parse_line(line)
-  assert isinstance(result, list)
-  assert result[0] == {"type": "tool_output", "content": "hi"}
-  assert result[1] == {"type": "tool_end"}
-
-
-def test_turn_completed_emits_done():
-  line = json.dumps({
-    "type": "turn.completed",
-    "usage": {
-      "input_tokens": 100, "cached_input_tokens": 80,
-      "output_tokens": 10, "reasoning_output_tokens": 0,
-    },
-  })
-  result = provider.parse_line(line)
-  assert result[0]["type"] == "done"
-  assert result[0]["cost_usd"] == 0
-
-
-def test_turn_started_returns_none():
-  line = '{"type":"turn.started"}'
-  result = provider.parse_line(line)
-  assert result == []
+def test_parse_line_drops_unrecognized_envelope():
+  # Raw JSON-RPC notifications never reach the provider any more —
+  # the runner script translates them upstream. Anything that
+  # isn't already a Möbius event is dropped here.
+  line = json.dumps({"method": "turn/started"})
+  assert provider.parse_line(line) == []
 
 
 def test_invalid_json_returns_none():

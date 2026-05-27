@@ -583,174 +583,25 @@ class CodexProvider(BaseProvider):
     env["CODEX_HOME"] = str(Path(data_dir) / "cli-auth" / "codex")
     return env
 
-  def _extract_command(self, raw_cmd: str) -> str:
-    """Extracts the user command from Codex's bash -lc wrapper."""
-    prefix = "/bin/bash -lc '"
-    if raw_cmd.startswith(prefix) and raw_cmd.endswith("'"):
-      return raw_cmd[len(prefix):-1]
-    return raw_cmd
-
   def parse_line(self, line: str) -> list[ChatEvent]:
+    """Returns the runner-shaped event when present, else `[]`.
+
+    `scripts/codex_appserver_runner.py` already translates app-server
+    JSON-RPC notifications into Möbius event dicts (session_init / text /
+    tool_* / done / error). Lines this runner doesn't recognize are
+    dropped at the runner; parse_line just decodes the JSON envelope.
+    The translator in `app.codex_appserver` is the source of truth for
+    notification shapes — exercised directly by the runner and by tests.
+    """
     try:
       event = json.loads(line)
     except json.JSONDecodeError:
       return []
-
-    # The runner script (scripts/codex_appserver_runner.py) translates
-    # codex app-server JSON-RPC into clean Möbius events: session_init,
-    # text, tool_start, tool_input, tool_output, tool_end, done, error.
-    # When we see a top-level Möbius-shaped event, return it directly —
-    # this is the fast path that handles everything from the runner.
-    direct_type = event.get("type")
-    if direct_type in (
+    if event.get("type") in (
       "session_init", "text", "tool_start", "tool_input",
       "tool_output", "tool_end", "done", "error",
     ):
       return [event]
-
-    # Legacy fallback below: if for any reason raw `codex exec --json`
-    # output (or raw JSON-RPC notifications) leaks through to us, the
-    # branches below still translate them. Keeps the provider working
-    # even if the runner script regresses or is bypassed.
-    method = event.get("method")
-    if method:
-      etype = method.replace("/", ".")
-      event = {**(event.get("params") or {}), "type": etype}
-    else:
-      etype = direct_type
-
-    if etype in ("thread.started", "thread/started"):
-      # Exec mode uses thread_id; app-server uses thread.id.
-      tid = event.get("thread_id")
-      if not tid:
-        thread = event.get("thread") or {}
-        tid = thread.get("id")
-      if tid:
-        return [{"type": "session_init", "session_id": tid}]
-      return []
-
-    # App-server streaming delta — the headline feature.
-    if etype == "item.agentMessage.delta":
-      delta = event.get("delta", "")
-      if delta:
-        return [{"type": "text", "content": delta}]
-      return []
-
-    if etype == "turn.started":
-      return []
-
-    if etype == "item.started":
-      item = event.get("item", {})
-      itype = item.get("type")
-      if itype == "command_execution":
-        return [{
-          "type": "tool_start",
-          "tool": "Bash",
-          "input": self._extract_command(item.get("command", "")),
-        }]
-      if itype == "file_change":
-        changes = item.get("changes", [])
-        path = changes[0].get("path", "") if changes else ""
-        return [{"type": "tool_start", "tool": "Edit", "input": path}]
-      if itype == "mcp_tool_call":
-        server = item.get("server", "")
-        tool = item.get("tool", "")
-        return [{
-          "type": "tool_start",
-          "tool": f"{server}:{tool}" if server else tool,
-          "input": "",
-        }]
-      if itype == "web_search":
-        return [{
-          "type": "tool_start",
-          "tool": "WebSearch",
-          "input": item.get("query", ""),
-        }]
-      return []
-
-    if etype == "item.completed":
-      item = event.get("item", {})
-      itype = item.get("type")
-      # In app-server, deltas already streamed all the text — the
-      # completion event's text is redundant, ignore it. In exec mode,
-      # this is the ONLY source of agent text.
-      if itype == "agent_message":  # exec mode
-        text = item.get("text", "")
-        if text:
-          return [{"type": "text", "content": text}]
-        return []
-      if itype == "agentMessage":  # app-server: deltas already sent
-        return []
-      # App-server uses userMessage for the echo of the user's input —
-      # we don't display that (chat.py already saved it).
-      if itype == "userMessage":
-        return []
-      if itype == "command_execution":
-        output = item.get("aggregated_output", "").strip()
-        results = []
-        if output:
-          results.append({"type": "tool_output", "content": output})
-        results.append({"type": "tool_end"})
-        return results
-      if itype == "file_change":
-        # Upstream FileUpdateChange struct is {path, kind} — there is
-        # no diff field. Render the per-change list as the tool output
-        # so the user sees what was added/updated/deleted.
-        changes = item.get("changes", [])
-        lines = [
-          f"{c.get('kind', '?')} {c.get('path', '')}".strip()
-          for c in changes
-        ]
-        summary = "\n".join(l for l in lines if l)
-        results = []
-        if summary:
-          results.append({"type": "tool_output", "content": summary})
-        results.append({"type": "tool_end"})
-        return results
-      if itype == "web_search":
-        # The actual query is only available at item.completed; the
-        # item.started event has query="". Backfill via tool_input
-        # (events.py applies it to the most recent input-less tool)
-        # so the user sees what was searched.
-        query = item.get("query", "")
-        if not query:
-          # Codex sometimes lists multiple queries under action.queries.
-          action = item.get("action") or {}
-          queries = action.get("queries") or []
-          if queries:
-            query = "\n".join(str(q) for q in queries)
-        results = []
-        if query:
-          results.append({"type": "tool_input", "input": query})
-        results.append({"type": "tool_end"})
-        return results
-      if itype == "mcp_tool_call":
-        # MCP tool args / result may be carried in the completion item.
-        # Best-effort surfacing — show args as input, result as output.
-        args = item.get("arguments") or item.get("input") or ""
-        if isinstance(args, (dict, list)):
-          args = json.dumps(args, indent=2)
-        result = item.get("result") or item.get("output") or ""
-        if isinstance(result, (dict, list)):
-          result = json.dumps(result, indent=2)
-        results = []
-        if args:
-          results.append({"type": "tool_input", "input": str(args)})
-        if result:
-          results.append({"type": "tool_output", "content": str(result)})
-        results.append({"type": "tool_end"})
-        return results
-      return []
-
-    if etype == "turn.completed":
-      return [{"type": "done", "cost_usd": 0}]
-
-    if etype == "error":
-      return [{
-        "type": "error",
-        "message": event.get("message", "Codex error"),
-      }]
-
     return []
 
 
