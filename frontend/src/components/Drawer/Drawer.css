@@ -422,11 +422,14 @@
 
 /* ── Empty state ──────────────────────────────────── */
 
+/* SDK EmptyMessage carries its own internal padding + typography.
+   We only tighten the surrounding scope (keep it left-aligned and
+   not centred-block) so the empty hint sits flush with the rest
+   of the list. */
 .drawer__empty {
-  padding: 8px 10px;
-  font-size: 13px;
-  color: var(--muted);
-  opacity: 0.6;
+  padding: 4px 10px 8px;
+  text-align: left;
+  align-items: flex-start;
 }
 
 /* ── Bottom group (Settings) ───────────────────────── */

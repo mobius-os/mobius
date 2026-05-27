@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
+import { Alert } from '@openai/apps-sdk-ui/components/Alert'
+import { TextLink } from '@openai/apps-sdk-ui/components/TextLink'
 import { api } from '../../api/client.js'
 import { authQueries, settingsQueries, themeQueries } from '../../hooks/queries.js'
 import * as themeService from '../../lib/themeService.js'
@@ -169,9 +171,9 @@ export default function SettingsView({ onThemeChange }) {
             </label>
             <p className="settings__subtext">
               Get a key at{' '}
-              <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">
+              <TextLink href="https://aistudio.google.com/apikey" forceExternal>
                 aistudio.google.com
-              </a>.
+              </TextLink>.
             </p>
             <input
               className="settings__input"
@@ -182,10 +184,18 @@ export default function SettingsView({ onThemeChange }) {
               autoComplete="off"
             />
             {status === 'success' && (
-              <p className="settings__success">Saved successfully.</p>
+              <Alert
+                color="success"
+                variant="soft"
+                description="Saved successfully."
+              />
             )}
             {status === 'error' && (
-              <p className="settings__error">{errorMsg}</p>
+              <Alert
+                color="danger"
+                variant="soft"
+                description={errorMsg}
+              />
             )}
             <button
               className="settings__btn"
@@ -208,7 +218,11 @@ export default function SettingsView({ onThemeChange }) {
             />
           </div>
           {themeError && (
-            <p className="settings__error">{themeError}</p>
+            <Alert
+              color="danger"
+              variant="soft"
+              description={themeError}
+            />
           )}
         </section>
 

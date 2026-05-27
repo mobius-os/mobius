@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Plus, Chats, Grid, DotsVerticalMoreMenu, SettingsCog, Pin, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
 import { Menu } from '@openai/apps-sdk-ui/components/Menu'
+import { Tooltip } from '@openai/apps-sdk-ui/components/Tooltip'
+import { EmptyMessage } from '@openai/apps-sdk-ui/components/EmptyMessage'
 import { apiFetch } from '../../api/client.js'
 import { appQueries, chatQueries } from '../../hooks/queries.js'
 import './Drawer.css'
@@ -250,7 +252,11 @@ export default function Drawer({
                   onDelete={() => onDeleteChat(chat.id)}
                 />
               )) : (
-                <p className="drawer__empty">No conversations yet</p>
+                <EmptyMessage className="drawer__empty" fill="static">
+                  <EmptyMessage.Description>
+                    No conversations yet
+                  </EmptyMessage.Description>
+                </EmptyMessage>
               )}
             </div>
           </div>
@@ -438,13 +444,20 @@ function DrawerRow({
         onClose={() => onMenuToggle(false)}
       >
         <Menu.Trigger>
-          <button
-            type="button"
-            className="drawer__more"
-            aria-label={`More actions for ${label}`}
-          >
-            <DotsVerticalMoreMenu width={16} height={16} aria-hidden="true" />
-          </button>
+          {/* Tooltip shows on hover (desktop) / long-press (touch).
+              The aria-label is the source of truth for assistive
+              tech; the tooltip is the visible cue for sighted
+              keyboard / cursor users — discovery beats reading
+              the aria. */}
+          <Tooltip content="More actions" compact openDelay={500}>
+            <button
+              type="button"
+              className="drawer__more"
+              aria-label={`More actions for ${label}`}
+            >
+              <DotsVerticalMoreMenu width={16} height={16} aria-hidden="true" />
+            </button>
+          </Tooltip>
         </Menu.Trigger>
         <Menu.Content side="bottom" align="end" sideOffset={4} minWidth={200}>
           {!confirmingDelete ? (
