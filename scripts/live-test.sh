@@ -18,6 +18,11 @@
 #   bash scripts/live-test.sh               # rebuild + fresh container + run
 #   SKIP_REBUILD=1 bash scripts/live-test.sh  # reuse current mobius-test
 #   FLOWS="1 3 5" bash scripts/live-test.sh   # run a subset
+#   FAST_FLOWS=1 bash scripts/live-test.sh    # skip slow flows (3+5 each
+#                                             # sleep 12s inside the agent
+#                                             # turn to keep it streaming
+#                                             # while queueing more messages).
+#                                             # FLOWS takes precedence if both set.
 #
 # Output:
 #   /tmp/mobius-live-test/  — screenshots, snapshots, captured chat.log,
@@ -513,7 +518,19 @@ main() {
   fetch_token
   open_mobile_browser_and_login
 
-  local flows="${FLOWS:-1 2 3 4 5}"
+  # Flow selection precedence: explicit FLOWS wins; otherwise FAST_FLOWS
+  # drops the two flows that bake in a 12-second sleep inside the agent
+  # turn (flow 3 queue-while-streaming, flow 5 cancel-queued — both need
+  # the turn to keep streaming long enough to stack messages behind it).
+  local flows
+  if [ -n "${FLOWS:-}" ]; then
+    flows="${FLOWS}"
+  elif [ -n "${FAST_FLOWS:-}" ]; then
+    flows="1 2 4"
+    log "FAST_FLOWS=1 — skipping slow flows 3 + 5 (12s agent-side sleep each). Running: ${flows}"
+  else
+    flows="1 2 3 4 5"
+  fi
   for f in ${flows}; do
     case "${f}" in
       1) flow_1_message_order ;;
