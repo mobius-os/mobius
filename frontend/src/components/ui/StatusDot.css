@@ -1,0 +1,21 @@
+/* StatusDot — leading-dot + label status indicator.
+   Color cascades from the wrapping span's `color` property
+   (set inline by the JSX), so the dot and label share one
+   color source. */
+
+.status-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.status-dot__mark {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}

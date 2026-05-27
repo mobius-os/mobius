@@ -1,3 +1,5 @@
+import StatusDot from '../ui/StatusDot.jsx'
+import '../ui/StatusDot.css'
 import './ProviderAuth.css'
 
 /**
@@ -66,9 +68,9 @@ export default function ProviderRow({
             {badge && (
               <span className="provider-row__badge">{badge}</span>
             )}
-            <span className={`provider-row__status provider-row__status--${connected ? 'connected' : 'disconnected'}`}>
+            <StatusDot color={connected ? '--green' : '--muted'}>
               {connected ? 'Connected' : 'Not connected'}
-            </span>
+            </StatusDot>
           </span>
         </button>
       ) : (
@@ -78,9 +80,9 @@ export default function ProviderRow({
             {badge && (
               <span className="provider-row__badge">{badge}</span>
             )}
-            <span className={`provider-row__status provider-row__status--${connected ? 'connected' : 'disconnected'}`}>
+            <StatusDot color={connected ? '--green' : '--muted'}>
               {connected ? 'Connected' : 'Not connected'}
-            </span>
+            </StatusDot>
           </span>
         </div>
       )}
