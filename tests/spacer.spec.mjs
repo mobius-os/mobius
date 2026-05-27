@@ -376,9 +376,10 @@ test.describe('Short responses', () => {
     ))
 
     const afterReturn = await measure(page)
-    if (!afterReturn.error) {
-      assertSpacerReasonable(afterReturn)
-    }
+    // No `if (!afterReturn.error)` guard — when state pollution
+    // landed us on the wrong chat the older form silently passed.
+    expect(afterReturn.error).toBeUndefined()
+    assertSpacerReasonable(afterReturn)
   })
 
   test('10. New send after short response — old spacer replaced', async ({ page }) => {

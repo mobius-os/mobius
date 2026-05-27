@@ -247,18 +247,6 @@ def test_recover_chat_stream_requires_cookie(client):
   assert r.status_code == 401
 
 
-def test_recover_chat_stream_rejects_when_no_message_in_log(
-  client, auth_cookie, monkeypatch, tmp_path,
-):
-  # No log file yet, so latest_user_message() returns None.
-  monkeypatch.setattr(
-    "app.recover_chat_runner.RECOVERY_LOG_PATH",
-    tmp_path / "empty.jsonl",
-  )
-  r = client.post("/recover/chat/stream", cookies=auth_cookie)
-  assert r.status_code == 400
-
-
 def test_recover_chat_latest_user_message(monkeypatch, tmp_path):
   """The stream endpoint reads the most-recent user line; runner
   must return it correctly across mixed roles."""

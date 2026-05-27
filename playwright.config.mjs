@@ -10,6 +10,13 @@ export default defineConfig({
   // spacer test 9 times out under parallel load but passes solo).
   // No retries locally — flakes there should be investigated.
   retries: isCI ? 1 : 0,
+  // Per-file parallelism. Within a file, tests stay sequential
+  // because many spec files share state via send-then-read patterns
+  // (the streaming and queue tests in particular). Across files
+  // is safe: auth.setup.mjs wipes chats before the suite starts,
+  // and each spec file's tests operate on chats they create.
+  fullyParallel: false,
+  workers: isCI ? 2 : 4,
   // CI emits both `list` (for stdout / Actions log) and `html` (for
   // the playwright-report/ artifact uploaded on failure). Locally
   // just stdout.

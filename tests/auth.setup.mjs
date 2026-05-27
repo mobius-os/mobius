@@ -3,6 +3,11 @@
  *
  * On a fresh container (CI), the setup endpoint creates the owner account.
  * On an existing container, it 409s harmlessly.
+ *
+ * Also wipes chats from prior runs. The Playwright suite shares the
+ * mobius-test DB across runs and tests; without this, chats pile up
+ * (we've seen 400+) and every drawer-list fetch slows down until
+ * tests start timing out.
  */
 import { test as setup, expect } from '@playwright/test'
 
@@ -16,6 +21,27 @@ setup('authenticate', async ({ page, request }) => {
   await request.post(`${BASE}/api/auth/setup`, {
     data: { username: USER, password: PASS },
   })
+
+  // Wipe prior-run chats. Best-effort: get a token, list, delete each.
+  // If the token fetch fails (fresh container, no owner yet) we just
+  // skip — there's nothing to wipe anyway.
+  const tokRes = await request.post(`${BASE}/api/auth/token`, {
+    form: { username: USER, password: PASS },
+    failOnStatusCode: false,
+  })
+  if (tokRes.ok()) {
+    const { access_token } = await tokRes.json()
+    const headers = { Authorization: `Bearer ${access_token}` }
+    const listRes = await request.get(`${BASE}/api/chats`, { headers })
+    if (listRes.ok()) {
+      const chats = await listRes.json()
+      await Promise.all(chats.map(c =>
+        request.delete(`${BASE}/api/chats/${c.id}`, {
+          headers, failOnStatusCode: false,
+        })
+      ))
+    }
+  }
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
 

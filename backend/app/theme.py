@@ -87,7 +87,7 @@ def get_bg_color(data_dir: str) -> str:
   """Extracts the --bg color for use in the manifest."""
   css = get_theme_css(data_dir)
   m = re.search(r"--bg:\s*(#[0-9a-fA-F]{3,8})", css)
-  return m.group(1) if m else "#0c0f14"
+  return m.group(1) if m else "#0d0d0d"
 
 
 def get_theme_mode(data_dir: str) -> str:
@@ -229,7 +229,7 @@ def inject_theme_into_html(html: str, data_dir: str) -> str:
   """Inject the active theme CSS and background color into an HTML string.
 
   Replaces the </head> tag with a <style> block containing the theme CSS,
-  and replaces the default #0c0f14 background color placeholder with the
+  and replaces the default #0d0d0d background color placeholder with the
   active theme's --bg color. Used by both the SPA fallback and the
   app-frame endpoint.
 
@@ -259,8 +259,8 @@ def inject_theme_into_html(html: str, data_dir: str) -> str:
   html = html.replace(
     "</head>", f"{link_tags}<style>{safe_css}</style>\n</head>"
   )
-  html = html.replace("background:#0c0f14", f"background:{bg}")
-  html = html.replace('content="#0c0f14"', f'content="{bg}"')
+  html = html.replace("background:#0d0d0d", f"background:{bg}")
+  html = html.replace('content="#0d0d0d"', f'content="{bg}"')
   # `data-theme` on <html> activates the right `color-scheme` from
   # the very first paint. Without it, light-mode users see a flash of
   # dark-themed native widgets (scrollbars, autofill, date pickers)

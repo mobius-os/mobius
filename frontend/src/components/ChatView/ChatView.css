@@ -199,7 +199,7 @@
 }
 
 .chat__empty-glyph { opacity: 0.85; margin-bottom: 12px; }
-.chat__empty-title { font-size: 22px; font-weight: 600; color: var(--text); /* CONTRACT: high-contrast text on opaque fill */ letter-spacing: -0.02em; }
+/* .chat__empty-title lives in index.css (gradient text). */
 .chat__empty-sub { font-size: 14px; color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */ line-height: 1.7; }
 
 /* ── Messages ──────────────────────────────────────── */
@@ -235,14 +235,14 @@
   word-break: break-word;
 }
 
+/* Bubble layout only — background/color/box-shadow live in index.css
+   (gradient + accent-dim halo) so the visual treatment is owned in
+   one place. Do NOT re-declare those here. */
 .chat__text--user {
-  background: var(--accent); /* CONTRACT: vivid opaque accent fill */
-  color: #fff;
   padding: 11px 16px;
   border-radius: 18px 18px 5px 18px;
   max-width: min(85%, 75ch);
   white-space: pre-wrap;
-  box-shadow: 0 2px 12px var(--accent-dim); /* CONTRACT: translucent accent halo — relies on opaque surface beneath */
 }
 
 .chat__text--assistant {
@@ -621,13 +621,13 @@
 
 .chat__mic--active {
   color: var(--danger); /* CONTRACT: destructive accent on opaque fill */
-  border-color: rgba(248, 113, 113, 0.3);
+  border-color: color-mix(in srgb, var(--danger) 30%, transparent);
   animation: mic-pulse 1.5s ease-in-out infinite;
 }
 
 @keyframes mic-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(248, 113, 113, 0.2); }
-  50% { box-shadow: 0 0 0 6px rgba(248, 113, 113, 0); }
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--danger) 20%, transparent); }
+  50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--danger) 0%, transparent); }
 }
 
 
