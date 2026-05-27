@@ -1,9 +1,10 @@
 """AI provider adapters.
 
 Each provider knows how to:
-  1. Build the CLI command for a chat message.
-  2. Set up the subprocess environment (auth config, etc.).
-  3. Parse a line of CLI stdout into an SSE event dict, or None to skip.
+  1. Resolve auth credentials for the SDK runtime (`check_auth`).
+  2. Build the subprocess env the SDK runner inherits (`build_env`).
+  3. For providers that still launch a runner subprocess (Codex's
+     app-server bridge), build the argv and parse the runner's stdout.
 
 The chat module calls these to stay provider-agnostic.  Adding a new
 provider means writing a new class here and registering it in PROVIDERS.
@@ -16,7 +17,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from app.runtime_types import ChatEvent
-from app.tool_summaries import summarize_tool_input
 
 if TYPE_CHECKING:
   from app.schemas import AgentSettingsOverride
@@ -184,12 +184,13 @@ def effective_agent_settings(
 def get_skill_path() -> Path | None:
   """Resolves the agent skill file location. Single source of truth.
 
-  Both the subprocess fallback path in this module and the Codex SDK
-  runner (`codex_sdk_runner.py`) call this. The path is independent
-  of `data_dir` — the skill is part of the deployment, not per-instance
-  state, so resolution checks the baked container path first and falls
-  back to the in-repo path for local development. Returns None if
-  neither exists (callers handle skill-less startup gracefully).
+  The Codex `build()` (which still spawns the app-server runner) and
+  the SDK runners (`claude_sdk_runner.py`, `codex_sdk_runner.py`) all
+  call this. The path is independent of `data_dir` — the skill is part
+  of the deployment, not per-instance state, so resolution checks the
+  baked container path first and falls back to the in-repo path for
+  local development. Returns None if neither exists (callers handle
+  skill-less startup gracefully).
   """
   candidates = [
     Path("/app/skill/agent-skill.md"),
@@ -250,7 +251,13 @@ class BaseProvider:
 
 
 class ClaudeProvider(BaseProvider):
-  """Claude Code CLI (claude -p --output-format stream-json)."""
+  """Claude Code via the Anthropic Agent SDK.
+
+  Chat turns run through `app.claude_sdk_runner` — there is no
+  subprocess fallback. The CLI binary stays pinned in the Dockerfile
+  because `routes/auth.py` extracts PKCE OAuth constants from it, but
+  it is no longer spawned for chat traffic.
+  """
 
   name = "Claude Code"
   cli_cmd = "claude"
@@ -265,58 +272,6 @@ class ClaudeProvider(BaseProvider):
       )
     return None
 
-  def build(
-    self, user_message, session_id, base_env, data_dir,
-    chat_id=None, agent_settings=None,
-  ):
-    cmd = [
-      "claude",
-      "-p",
-      "--output-format", "stream-json",
-      "--verbose",
-      # DO NOT REMOVE --include-partial-messages. Without it the CLI
-      # closes stdout without emitting a result event — the stream
-      # ends silently and no assistant response appears. stream-json
-      # is used (instead of plain text) because it gives us structured
-      # events: tool_start/tool_end for collapsible tool blocks,
-      # session_id for multi-turn resume, and cost/usage in the result
-      # event. Side effect: intermediate assistant events arrive with
-      # incomplete tool input (e.g. empty questions array for
-      # AskUserQuestion). Those are filtered in _parse_tool_event.
-      "--include-partial-messages",
-      "--dangerously-skip-permissions",
-    ]
-    if session_id:
-      cmd += ["--resume", session_id]
-    else:
-      skill = get_skill_path()
-      if skill:
-        cmd += ["--system-prompt-file", str(skill)]
-
-    # The agent uses agent-browser (installed in the image) via Bash for
-    # screenshots and interactive testing — no MCP browser tools needed.
-
-    # Load user-configurable settings (model, effort). When the caller
-    # passes pre-merged effective settings (chat.py merges per-chat
-    # overrides on top of the file defaults), prefer those — keeps
-    # the merge logic in a single place.
-    merged = (
-      dict(agent_settings)
-      if agent_settings is not None
-      else _load_agent_settings(data_dir)
-    )
-    if merged.get("model"):
-      cmd += ["--model", merged["model"]]
-    if merged.get("effort"):
-      cmd += ["--effort", merged["effort"]]
-
-    # Message is a positional argument — always last.  The "--" terminates
-    # option parsing so the agent doesn't confuse it with a flag value.
-    cmd += ["--", user_message]
-
-    env = self.build_env(base_env, data_dir, chat_id=chat_id)
-    return ProviderResult(cmd=cmd, env=env)
-
   def build_env(
     self,
     base_env: dict[str, str],
@@ -328,160 +283,14 @@ class ClaudeProvider(BaseProvider):
     if creds.exists():
       env["CLAUDE_CONFIG_DIR"] = str(creds.parent)
     # Per-chat agent-browser session.  Every agent-browser invocation
-    # in this subprocess picks up AGENT_BROWSER_SESSION via env, so
-    # each chat gets its own isolated Chrome instance and they don't
-    # fight over the "default" session when building in parallel.
-    # The session is torn down by chat.py in the finally block.
+    # spawned by the SDK runner picks up AGENT_BROWSER_SESSION via env,
+    # so each chat gets its own isolated Chrome instance and they
+    # don't fight over the "default" session when building in
+    # parallel.  The session is torn down by chat.py in the finally
+    # block.
     if chat_id:
       env["AGENT_BROWSER_SESSION"] = f"chat-{chat_id}"
     return env
-
-  def _parse_stream_event(self, event: dict):
-    """Handles stream_event — text deltas and tool block starts."""
-    inner = event.get("event", {})
-    inner_type = inner.get("type")
-    if inner_type == "content_block_delta":
-      delta = inner.get("delta", {})
-      if delta.get("type") == "text_delta" and delta.get("text"):
-        return {"type": "text", "content": delta["text"]}
-    # Emit tool_start as soon as the content block begins streaming,
-    # not from the assistant event.  This handles max_tokens truncation
-    # where the assistant event is never sent.
-    elif inner_type == "content_block_start":
-      block = inner.get("content_block", {})
-      if block.get("type") == "tool_use":
-        name = block.get("name", "")
-        if name == "AskUserQuestion":
-          return None
-        return {
-          "type": "tool_start",
-          "tool": name,
-          "input": "",
-        }
-    return None
-
-  def _parse_tool_event(self, event: dict):
-    """Handles assistant events — backfills tool input summaries."""
-    # Tool starts are emitted from content_block_start (earlier, handles
-    # max_tokens truncation).  The assistant event arrives later with the
-    # full input, so we emit tool_input events to backfill the summaries.
-    results = []
-    for block in event.get("message", {}).get("content", []):
-      if block.get("type") == "tool_use":
-        name = block.get("name", "")
-        inp = block.get("input", {})
-        if name == "AskUserQuestion":
-          # --include-partial-messages causes the CLI to emit
-          # intermediate assistant events as tool input is assembled.
-          # The first partial has empty/incomplete input (questions: []
-          # or missing question text).  Skip those to avoid rendering
-          # an empty QuestionCard before the real one arrives.
-          questions = inp.get("questions", [])
-          if not questions or not all(q.get("question") for q in questions):
-            continue
-          results.append({
-            "type": "question",
-            "questions": questions,
-          })
-          continue
-        summary = summarize_tool_input(name, inp)
-        if summary:
-          results.append({
-            "type": "tool_input",
-            "tool": name,
-            "input": summary,
-          })
-    return results if results else None
-
-  def _parse_user_event(self, event: dict):
-    """Handles user events — tool results and tool_end markers."""
-    # Tool results come as user messages.  The shape varies:
-    # sometimes a top-level tool_use_result dict, sometimes
-    # content blocks inside message.content.
-    results = []
-    output = ""
-
-    result_data = event.get("tool_use_result")
-    if isinstance(result_data, dict):
-      stdout = result_data.get("stdout", "")
-      stderr = result_data.get("stderr", "")
-      output = (stdout + ("\n" + stderr if stderr else "")).strip()
-    elif isinstance(result_data, str):
-      output = result_data.strip()
-    else:
-      # Try content blocks.
-      for block in event.get("message", {}).get("content", []):
-        if (isinstance(block, dict)
-            and block.get("type") == "tool_result"):
-          content = block.get("content", "")
-          if isinstance(content, str):
-            output = content.strip()
-
-    if output:
-      results.append({"type": "tool_output", "content": output})
-    results.append({"type": "tool_end"})
-    return results
-
-  def _parse_result_event(self, event: dict):
-    """Handles result events — final cost info or error."""
-    if event.get("is_error"):
-      msg = event.get("result", "Unknown error.")
-      # Surface a friendly message for auth failures so the user
-      # knows where to fix it instead of seeing a raw CLI error.
-      lower = msg.lower() if isinstance(msg, str) else ""
-      if any(k in lower for k in ("auth", "login", "credential",
-                                   "not logged", "sign in")):
-        msg += (
-          "\n\nOpen Settings and reconnect under AI provider."
-        )
-      return {"type": "error", "message": msg}
-    return {
-      "type": "done",
-      "cost_usd": event.get("total_cost_usd", 0),
-    }
-
-  def parse_line(self, line: str) -> list[ChatEvent]:
-    """Parse one line of Claude CLI JSON output into agent events.
-
-    The Claude CLI emits several event shapes on stdout:
-      - {"type": "stream_event", ...} → text tokens during streaming
-      - {"type": "assistant", ...} → tool_use blocks (end of turn)
-      - {"type": "user", ...} → tool results
-      - {"type": "result", ...} → session ID and final cost/usage
-
-    Returns a list of normalized events. Unknown lines return `[]`.
-    """
-    try:
-      event = json.loads(line)
-    except json.JSONDecodeError:
-      return []
-
-    event_type = event.get("type")
-
-    if event_type == "system":
-      if event.get("subtype") == "init" and event.get("session_id"):
-        return [{
-          "type": "session_init",
-          "session_id": event["session_id"],
-        }]
-      return []
-
-    if event_type == "stream_event":
-      parsed = self._parse_stream_event(event)
-    elif event_type == "assistant":
-      parsed = self._parse_tool_event(event)
-    elif event_type == "user":
-      parsed = self._parse_user_event(event)
-    elif event_type == "result":
-      parsed = self._parse_result_event(event)
-    else:
-      parsed = None
-
-    if parsed is None:
-      return []
-    if isinstance(parsed, list):
-      return parsed
-    return [parsed]
 
 
 class CodexProvider(BaseProvider):

@@ -593,12 +593,13 @@ async def run_chat(
   timezone: str | None = None,
   viewport: dict | None = None,
 ) -> None:
-  """Runs the provider CLI as a subprocess and publishes events to the
-  chat's ChatBroadcast.  Caller must create the broadcast before calling.
+  """Runs a chat turn through the provider's SDK runner and publishes
+  events to the chat's ChatBroadcast.  Caller must create the broadcast
+  before calling.
 
   The entire body is wrapped in a top-level try/finally so the
   `_starting` guard is released even if setup code raises before we
-  reach the subprocess.  Without that, a crash during setup leaves the
+  reach the runner.  Without that, a crash during setup leaves the
   chat stuck 'starting' until process restart.
   """
   try:
@@ -763,9 +764,8 @@ async def _run_chat_impl(
   # global default in /data/shared/agent-settings.json. The slash
   # picker (see frontend/.../SlashPicker.jsx) writes overrides via
   # PATCH /api/chats/{id}; the file remains the fallback every chat
-  # starts from. Computed once here and threaded into every dispatch
-  # branch below so the SDK runners and the subprocess fallback all
-  # agree on the same merged dict.
+  # starts from. Computed once here and threaded into the SDK runner
+  # for each provider.
   chat_overrides: dict | None = None
   chat_row = None
   if chat_id:
@@ -817,8 +817,8 @@ async def _run_chat_impl(
         )
         db.rollback()
 
-  # Pre-flight: check that provider credentials exist before spawning
-  # the CLI. Without this, the CLI fails with a cryptic error.
+  # Pre-flight: check that provider credentials exist before invoking
+  # the SDK runner. Without this, the SDK fails with a cryptic error.
   auth_error = provider.check_auth(settings.data_dir)
   if auth_error:
     bc.publish({"type": "error", "message": auth_error})
@@ -833,8 +833,7 @@ async def _run_chat_impl(
   cwd = str(data_dir) if data_dir.exists() else str(Path.cwd())
 
   # SDK dispatch: route both Claude and Codex through their official
-  # Agent SDK runners. The subprocess fallback is gone — the SDK path
-  # is the only supported path.
+  # Agent SDK runners.
   is_claude = provider.name == "Claude Code"
   is_codex = provider.name == "Codex"
   if is_codex:
