@@ -72,18 +72,24 @@ export default function Shell() {
 
   usePushSubscription()
 
+  // Stable refresh callbacks. Earlier versions used
+  // `appsQuery.refetch` directly, but React Query returns a new
+  // QueryObserverResult ref on every subscription tick — that made
+  // these `useCallback`s recreate identity each render, and the
+  // drawer-open effect below would re-fire on every SSE tick,
+  // hammering `/api/apps` and `/api/chats` while streaming.
+  // Driving the refetch via the query client's stable
+  // `refetchQueries` keeps the callback identity steady.
   const refreshApps = useCallback(() => {
-    return appsQuery.refetch()
-      .then((result) => result.data || [])
+    return queryClient.refetchQueries({ queryKey: appQueries.keys.all })
+      .then(() => queryClient.getQueryData(appQueries.keys.all) || [])
       .catch(() => [])
-  }, [appsQuery])
-
-  // Load chats; restore activeChatId if still present, else pick the first.
+  }, [queryClient])
   const refreshChats = useCallback(() => {
-    return chatsQuery.refetch()
-      .then((result) => result.data || [])
+    return queryClient.refetchQueries({ queryKey: chatQueries.keys.all })
+      .then(() => queryClient.getQueryData(chatQueries.keys.all) || [])
       .catch(() => [])
-  }, [chatsQuery])
+  }, [queryClient])
 
   useEffect(() => {
     if (!chatsQuery.isFetched) return

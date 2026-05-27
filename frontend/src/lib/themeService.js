@@ -95,7 +95,17 @@ export function applyThemeToDom(css, bg) {
   // shell. Mode is inferred from --bg luminance — light backgrounds
   // mean light mode regardless of how the user got there.
   const mode = _inferThemeMode(cssBody, bg)
-  if (mode) document.documentElement.setAttribute('data-theme', mode)
+  if (mode) {
+    document.documentElement.setAttribute('data-theme', mode)
+    // iOS status bar — without this it stays "black" regardless of
+    // the active theme. `default` paints a white bar with dark
+    // glyphs (right for light mode), `black` is opaque dark (right
+    // for dark mode). Only matters when installed as a PWA.
+    const sb = document.querySelector(
+      'meta[name="apple-mobile-web-app-status-bar-style"]'
+    )
+    if (sb) sb.setAttribute('content', mode === 'light' ? 'default' : 'black')
+  }
 }
 
 /** Returns 'dark' if the active --bg is dark, 'light' otherwise.

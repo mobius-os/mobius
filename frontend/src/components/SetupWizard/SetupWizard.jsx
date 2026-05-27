@@ -120,24 +120,37 @@ export default function SetupWizard({ onDone, initialStep = 'account' }) {
               aistudio.google.com
             </a>
           </p>
-          <input
-            className="setup__input"
-            type="password"
-            placeholder="AIza..."
-            value={geminiKey}
-            onChange={(e) => { setGeminiKey(e.target.value); setGeminiError('') }}
-            autoComplete="off"
-          />
-          <p className="setup__hint">
-            Your key is encrypted before storage and is never sent to the browser.
-          </p>
-          {geminiError && <p className="setup__error">{geminiError}</p>}
-          <button className="setup__btn" onClick={handleGeminiSave} disabled={geminiSaving}>
-            {geminiSaving ? 'Saving…' : 'Save & continue'}
-          </button>
-          <button className="setup__skip" onClick={onDone}>
-            Skip for now
-          </button>
+          <form
+            className="setup__form"
+            onSubmit={(e) => { e.preventDefault(); handleGeminiSave() }}
+          >
+            <input
+              className="setup__input"
+              type="password"
+              placeholder="AIza..."
+              value={geminiKey}
+              onChange={(e) => { setGeminiKey(e.target.value); setGeminiError('') }}
+              autoComplete="off"
+            />
+            <p className="setup__hint">
+              Your key is encrypted at rest and never leaves the server.
+            </p>
+            {geminiError && <p className="setup__error">{geminiError}</p>}
+            <button
+              type="submit"
+              className="setup__btn"
+              disabled={geminiSaving}
+            >
+              {geminiSaving ? 'Saving…' : 'Save & continue'}
+            </button>
+            <button
+              type="button"
+              className="setup__skip"
+              onClick={onDone}
+            >
+              Skip for now
+            </button>
+          </form>
         </div>
       </div>
     )

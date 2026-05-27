@@ -339,6 +339,14 @@ def recover_chat_reset(
   """
   _require_session(moebius_recover)
   chat_id = _extract_chat_id(payload)
+  # Kill any in-flight subprocess before truncating. Otherwise its
+  # post-stream `append_log("assistant", ...)` lands on the freshly-
+  # reset file and orphans an assistant line with no preceding user
+  # message — the same shape `delete_chat` already guards against.
+  try:
+    recover_chat_runner.terminate_active_run_for(chat_id)
+  except Exception:
+    pass
   try:
     recover_chat_runner.reset_log(chat_id)
   except ValueError as exc:
