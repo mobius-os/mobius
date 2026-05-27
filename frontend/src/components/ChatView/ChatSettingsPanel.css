@@ -61,7 +61,7 @@
   color: var(--text);
   flex-shrink: 0;
 }
-body.theme-light .csp-row__icon { border-color: rgba(15, 18, 25, 0.10); }
+[data-theme="light"] .csp-row__icon { border-color: rgba(15, 18, 25, 0.10); }
 
 .csp-row--selected .csp-row__icon {
   background: var(--surface2);

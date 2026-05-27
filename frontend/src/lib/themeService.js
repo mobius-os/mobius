@@ -86,6 +86,39 @@ export function applyThemeToDom(css, bg) {
     const meta = document.querySelector('meta[name="theme-color"]')
     if (meta) meta.setAttribute('content', bg)
   }
+
+  // Tell the apps-sdk-ui design system which mode we're in. SDK
+  // tokens like --color-surface-elevated, --color-text, --color-bg
+  // are scoped under `:where([data-theme="dark"|"light"])` blocks;
+  // without this attribute the SDK defaults to LIGHT tokens, which
+  // make the SDK Menu render a white panel on top of our dark
+  // shell. Mode is inferred from --bg luminance — light backgrounds
+  // mean light mode regardless of how the user got there.
+  const mode = _inferThemeMode(cssBody, bg)
+  if (mode) document.documentElement.setAttribute('data-theme', mode)
+}
+
+/** Returns 'dark' if the active --bg is dark, 'light' otherwise.
+ *  Reads from the bg arg first (cheap) and falls back to parsing
+ *  the CSS body. Returns null if neither resolves to a usable hex. */
+function _inferThemeMode(cssBody, bg) {
+  let hex = (bg && HEX_RE.test(bg)) ? bg : null
+  if (!hex) {
+    const m = cssBody.match(/--bg:\s*(#[0-9a-fA-F]{3,8})/)
+    if (m) hex = m[1]
+  }
+  if (!hex) return null
+  // Quick luminance check: drop the # and average the RGB octets.
+  // 128 splits dark/light cleanly enough — exact perceptual lum
+  // isn't needed here, just dark-vs-light direction.
+  const raw = hex.slice(1)
+  const expanded = raw.length === 3
+    ? raw.split('').map(c => c + c).join('')
+    : raw.slice(0, 6)
+  const r = parseInt(expanded.slice(0, 2), 16)
+  const g = parseInt(expanded.slice(2, 4), 16)
+  const b = parseInt(expanded.slice(4, 6), 16)
+  return (r + g + b) / 3 < 128 ? 'dark' : 'light'
 }
 
 /**

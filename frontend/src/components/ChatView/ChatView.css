@@ -727,7 +727,7 @@
   overscroll-behavior: contain;
 }
 
-body.theme-light .composer-popover {
+[data-theme="light"] .composer-popover {
   box-shadow: 0 12px 32px -8px rgba(15, 18, 25, 0.18);
 }
 
@@ -777,7 +777,7 @@ body.theme-light .composer-popover {
   color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
   flex-shrink: 0;
 }
-body.theme-light .composer-popover__row-icon { border-color: rgba(15, 18, 25, 0.10); }
+[data-theme="light"] .composer-popover__row-icon { border-color: rgba(15, 18, 25, 0.10); }
 
 .composer-popover__row-main {
   flex: 1;
@@ -968,11 +968,11 @@ body.theme-light .composer-popover__row-icon { border-color: rgba(15, 18, 25, 0.
   z-index: 1;
 }
 .chat__attach-card-remove:hover { background: rgba(0, 0, 0, 0.8); }
-body.theme-light .chat__attach-card-remove {
+[data-theme="light"] .chat__attach-card-remove {
   background: rgba(255, 255, 255, 0.85);
   color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
 }
-body.theme-light .chat__attach-card-remove:hover { background: rgba(255, 255, 255, 1); }
+[data-theme="light"] .chat__attach-card-remove:hover { background: rgba(255, 255, 255, 1); }
 
 .chat__attach-card-spin {
   position: absolute;

@@ -9,10 +9,15 @@
    pipeline and SDK design tokens silently resolved to empty. */
 @import "@openai/apps-sdk-ui/css";
 
+/* Universal reset, scoped to box-sizing + tap-highlight only.
+   We previously zeroed margin + padding on every element — that
+   overrode the apps-sdk-ui's component-layer rules like
+   `.MenuList { padding: var(--menu-gutter) }` and made SDK
+   menus render with no internal padding. Tailwind v4 Preflight
+   already handles the common cases (body, h1, p, lists), so
+   resetting everything universally was over-aggressive. */
 *, *::before, *::after {
   box-sizing: border-box;
-  margin: 0;
-  padding: 0;
   /* Suppress the Android Chrome / iOS Safari tap-highlight on
      every interactive element. Tailwind v4 Preflight zeros
      border-radius on textareas/inputs, which makes the default
@@ -20,6 +25,32 @@
      our rounded composer pill. The shell uses its own focus
      rings (`:focus-visible`) so we don't need this default. */
   -webkit-tap-highlight-color: transparent;
+}
+
+/* Manual margin/padding resets on the elements that matter to
+   our layout. The previous `* { margin: 0; padding: 0 }` reset
+   was a Bootstrap-era pattern that conflicts with SDK components
+   shipping their own padding contracts. */
+body, h1, h2, h3, h4, h5, h6, p, ul, ol, li, dl, dd, figure, blockquote, fieldset {
+  margin: 0;
+  padding: 0;
+}
+
+/* Restore the apps-sdk-ui components' internal padding tokens.
+   Tailwind v4 Preflight emits an unlayered
+   `*, ::after, ::before, ::backdrop { padding: 0 }` rule, which
+   beats the SDK's component-layer `padding: var(--menu-gutter)`
+   even though component-layer rules theoretically rank higher
+   than base styles — Preflight is unlayered, so it actually wins.
+   Targeting the SDK's hashed class-name patterns with attribute
+   selectors gives us higher specificity than `*` so the SDK's
+   own tokens drive component padding as intended. */
+[class*=MenuList],
+[class*=MenuContent] {
+  padding: var(--menu-gutter, 0.375rem);
+}
+[class*=MenuItem]:not([class*=MenuItemContent]):not([class*=MenuItemActions]) {
+  padding: var(--menu-item-padding, 0.375rem 0.5rem);
 }
 
 /* Hide scrollbars globally. Shell-wide (not just .chat__scroll) so

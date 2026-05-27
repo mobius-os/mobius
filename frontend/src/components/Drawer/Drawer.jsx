@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Plus, Chats, Grid, DotsVerticalMoreMenu, SettingsCog, Pin, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
+import { Menu } from '@openai/apps-sdk-ui/components/Menu'
 import { apiFetch } from '../../api/client.js'
 import { appQueries, chatQueries } from '../../hooks/queries.js'
 import './Drawer.css'
@@ -329,57 +330,17 @@ function DrawerRow({
   onDelete,
 }) {
   const wrapRef = useRef(null)
-  const triggerRef = useRef(null)
   const inputRef = useRef(null)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
-  // Flip-up when the row is near the bottom of the scroll viewport so
-  // the menu doesn't clip. Measured on open from the row's rect vs
-  // the nearest .drawer__scroll ancestor.
-  const [flipUp, setFlipUp] = useState(false)
 
-  // Reset the inline-confirm state every time the menu opens/closes so
-  // the user doesn't reopen the menu and find the confirm chip still
-  // primed from a previous open. Also re-measure flip-up direction.
+  // Reset the inline-confirm two-step (apps only) whenever the menu
+  // closes — otherwise reopening would land the user back on the
+  // primed "Confirm delete?" view. The SDK Menu (Radix) handles
+  // open/close, outside-click, escape, and collision-aware
+  // positioning natively; we just listen for the close.
   useEffect(() => {
-    if (!menuOpen) {
-      setConfirmingDelete(false)
-      setFlipUp(false)
-      return
-    }
-    // Measure on open: if there isn't ~180px below the row inside the
-    // scroll container, flip the menu upward.
-    const row = wrapRef.current
-    const scroll = row?.closest('.drawer__scroll')
-    if (!row || !scroll) return
-    const rowRect = row.getBoundingClientRect()
-    const scrollRect = scroll.getBoundingClientRect()
-    const spaceBelow = scrollRect.bottom - rowRect.bottom
-    setFlipUp(spaceBelow < 180)
+    if (!menuOpen) setConfirmingDelete(false)
   }, [menuOpen])
-
-  // Outside-click + Escape close the menu. Matches the ComposerPopover
-  // pattern (pointerdown + keydown listeners on document) so behavior
-  // is consistent across popovers in the shell.
-  useEffect(() => {
-    if (!menuOpen) return
-    function onPointer(e) {
-      if (!wrapRef.current) return
-      if (wrapRef.current.contains(e.target)) return
-      onMenuToggle(false)
-    }
-    function onKey(e) {
-      if (e.key === 'Escape') {
-        onMenuToggle(false)
-        triggerRef.current?.focus()
-      }
-    }
-    document.addEventListener('pointerdown', onPointer)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('pointerdown', onPointer)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [menuOpen, onMenuToggle])
 
   // Cancel-on-outside-tap during rename. Capture-phase listeners on
   // pointerdown AND click anywhere outside the rename input call
@@ -458,10 +419,7 @@ function DrawerRow({
   }
 
   return (
-    <div
-      className={`drawer__row${flipUp ? ' drawer__row--flip-up' : ''}`}
-      ref={wrapRef}
-    >
+    <div className="drawer__row" ref={wrapRef}>
       <button
         type="button"
         className={`drawer__item ${active ? 'drawer__item--active' : ''}`}
@@ -474,59 +432,57 @@ function DrawerRow({
           </span>
         )}
       </button>
-      <button
-        ref={triggerRef}
-        type="button"
-        className="drawer__more"
-        onClick={(e) => { e.stopPropagation(); onMenuToggle(!menuOpen) }}
-        aria-label={`More actions for ${label}`}
-        aria-haspopup="menu"
-        aria-expanded={menuOpen}
+      <Menu
+        forceOpen={menuOpen}
+        onOpen={() => onMenuToggle(true)}
+        onClose={() => onMenuToggle(false)}
       >
-        <DotsVerticalMoreMenu width={16} height={16} aria-hidden="true" />
-      </button>
-      {menuOpen && (
-        <div className="drawer__menu" role="menu">
+        <Menu.Trigger>
           <button
             type="button"
-            role="menuitem"
-            className="drawer__menu-item drawer__menu-item--icon"
-            onClick={() => { onMenuToggle(false); onPin?.(!pinned) }}
+            className="drawer__more"
+            aria-label={`More actions for ${label}`}
           >
-            {pinned
-              ? <Pin width={14} height={14} aria-hidden="true" />
-              : <PinFilled width={14} height={14} aria-hidden="true" />}
-            <span>{pinned ? 'Unpin' : 'Pin to top'}</span>
+            <DotsVerticalMoreMenu width={16} height={16} aria-hidden="true" />
           </button>
-          <button
-            type="button"
-            role="menuitem"
-            className="drawer__menu-item"
-            onClick={() => { onMenuToggle(false); onRenameStart() }}
-          >
-            Rename
-          </button>
-          {kind === 'chat' ? (
-            // Chats soft-delete with 7-day recovery, so no confirm
-            // step — one tap deletes, the note below tells the user
-            // how to undo via the agent.
-            <button
-              type="button"
-              role="menuitem"
-              className="drawer__menu-item drawer__menu-item--danger"
-              onClick={() => { onMenuToggle(false); onDelete() }}
-            >
-              Delete
-            </button>
-          ) : !confirmingDelete ? (
-            <button
-              type="button"
-              role="menuitem"
-              className="drawer__menu-item drawer__menu-item--danger"
-              onClick={() => setConfirmingDelete(true)}
-            >
-              Delete
-            </button>
+        </Menu.Trigger>
+        <Menu.Content side="bottom" align="end" sideOffset={4} minWidth={200}>
+          {!confirmingDelete ? (
+            <>
+              <Menu.Item
+                onSelect={() => onPin?.(!pinned)}
+                className="drawer__menu-item--icon"
+              >
+                {pinned
+                  ? <Pin width={14} height={14} aria-hidden="true" />
+                  : <PinFilled width={14} height={14} aria-hidden="true" />}
+                <span>{pinned ? 'Unpin' : 'Pin to top'}</span>
+              </Menu.Item>
+              <Menu.Item onSelect={() => onRenameStart()}>Rename</Menu.Item>
+              {kind === 'chat' ? (
+                // Chats soft-delete with 7-day recovery, so no
+                // confirm step — one tap deletes, the note below
+                // tells the user how to undo via the agent.
+                <Menu.Item
+                  onSelect={() => onDelete()}
+                  className="drawer__menu-item--danger"
+                >
+                  Delete
+                </Menu.Item>
+              ) : (
+                // Apps are hard-deleted (no recovery), so we need a
+                // confirm step. `preventDefault` on onSelect stops
+                // Radix from auto-closing the menu when the item is
+                // selected — we want the menu to stay open and swap
+                // to the confirm-chip below.
+                <Menu.Item
+                  onSelect={(e) => { e.preventDefault(); setConfirmingDelete(true) }}
+                  className="drawer__menu-item--danger"
+                >
+                  Delete
+                </Menu.Item>
+              )}
+            </>
           ) : (
             <div className="drawer__menu-confirm">
               <span className="drawer__menu-confirm-label">Confirm delete?</span>
@@ -541,7 +497,7 @@ function DrawerRow({
                 <button
                   type="button"
                   className="drawer__menu-confirm-btn drawer__menu-confirm-btn--yes"
-                  onClick={() => { onMenuToggle(false); onDelete() }}
+                  onClick={() => { setConfirmingDelete(false); onDelete() }}
                 >
                   Delete
                 </button>
@@ -553,8 +509,8 @@ function DrawerRow({
               Deleted chats stay recoverable by the agent for 7 days.
             </p>
           )}
-        </div>
-      )}
+        </Menu.Content>
+      </Menu>
     </div>
   )
 }

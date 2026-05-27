@@ -198,7 +198,7 @@
 /* Light mode: subtle elevation so the row reads as a distinct
    card surface against the light page bg. Mirrors the
    .settings__section shadow contract — dark mode stays flat. */
-body.theme-light .provider-row {
+[data-theme="light"] .provider-row {
   box-shadow:
     0 1px 2px rgba(0, 0, 0, 0.03),
     0 1px 2px rgba(0, 0, 0, 0.03);
