@@ -435,6 +435,15 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
     .ic-btn--primary:active {{
       background: var(--accent-hover, #c4b5fd);
     }}
+    .ic-manual-hint {{
+      margin: 14px 0 0 0;
+      font-size: 12px;
+      color: var(--muted, #52525b);
+      line-height: 1.5;
+      text-align: center;
+    }}
+    .ic-manual-hint strong {{ color: var(--text, #d4d4d8); }}
+    #install-card.success .ic-manual-hint {{ display: none; }}
     .ic-success {{ display: none; text-align: center; padding: 8px 0; }}
     .ic-success-icon {{
       font-size: 36px; line-height: 1; margin-bottom: 10px;
@@ -484,6 +493,11 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       <button class="ic-btn ic-btn--secondary" id="ic-cancel">Not now</button>
       <button class="ic-btn ic-btn--primary" id="ic-install">Install</button>
     </div>
+    <p class="ic-manual-hint" id="ic-manual-hint">
+      Trouble installing? Use your browser's menu
+      (<span id="ic-menu-icon">⋮</span>) and tap
+      <strong>Add to Home screen</strong>.
+    </p>
     <div class="ic-success">
       <div class="ic-success-icon" aria-hidden="true">✓</div>
       <div class="ic-success-title">Installed</div>
@@ -875,11 +889,16 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         setTimeout(showOnce, 600);
         // Reversible suppression fallback — `onBipReady` restores
         // the normal layout if bip arrives late.
+        // 3s is enough — beforeinstallprompt fires immediately on
+        // install-eligible loads. If it hasn't fired by 3s, the
+        // browser has suppressed it (user dismissed too many times,
+        // engagement heuristics not met, etc.) and the user needs
+        // the manual-install hint sooner rather than later.
         if (!isIOSSafari) {{
           setTimeout(() => {{
             if (window.__bipDeferred) return;
             paintSuppressionFallback();
-          }}, 8000);
+          }}, 3000);
         }}
       }} else {{
         // Listen-and-show paths: bip event lands, or iOS detected.
