@@ -98,55 +98,10 @@
   pointer-events: auto;
 }
 
-/* ── PWA install banner ────────────────────────────── */
-
-.shell__pwa-banner {
-  position: fixed;
-  bottom: 80px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: var(--surface); /* CONTRACT: opaque raised-card fill, sits above .shell's --bg */
-  border: 1px solid var(--border); /* CONTRACT: 1px line on top of --surface */
-  border-radius: 12px;
-  padding: 12px 16px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  font-size: 13px;
-  color: var(--text); /* CONTRACT: high-contrast text on --surface */
-  z-index: 500;
-  box-shadow: 0 4px 20px rgba(0,0,0,0.3);
-  white-space: nowrap;
-}
-
-.shell__pwa-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.shell__pwa-btn {
-  border: 1px solid var(--border); /* CONTRACT: 1px line on --surface (banner bg) */
-  background: transparent;
-  color: var(--muted); /* CONTRACT: low-contrast text on --surface */
-  border-radius: 6px;
-  padding: 5px 12px;
-  font-size: 12px;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.shell__pwa-btn:hover {
-  background: var(--surface2); /* CONTRACT: opaque hover/raised fill, slightly above --surface */
-  color: var(--text); /* CONTRACT: high-contrast text on --surface2 */
-}
-
-.shell__pwa-btn--install {
-  background: var(--accent-dim); /* CONTRACT: translucent accent glow — NOT a fill; relies on --surface beneath */
-  border-color: var(--accent); /* CONTRACT: vivid accent line */
-  color: var(--accent); /* CONTRACT: vivid accent text */
-}
-
-.shell__pwa-btn--install:hover {
-  background: var(--accent); /* CONTRACT: vivid accent fill (opaque) */
-  color: var(--bg); /* CONTRACT: paint app-bg color on accent fill — needs --bg to be solid */
-}
+/* The PWA install affordance lives in the drawer now (see
+   .drawer__pwa-card in Drawer.css). The previous fixed-position
+   banner sat permanently above the composer, looked like a
+   notification, and — once dismissed — could not be brought back
+   even if the user later changed their mind. The drawer card keeps
+   the install path discoverable on every drawer-open as long as
+   beforeinstallprompt is captured and the dismiss flag isn't set. */

@@ -9,6 +9,7 @@ import usePushSubscription from '../../hooks/usePushSubscription.js'
 import useNavigation from '../../hooks/useNavigation.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import useTheme from '../../hooks/useTheme.js'
+import useProviderAuthStatus from '../../hooks/useProviderAuthStatus.js'
 import { appQueries, chatQueries } from '../../hooks/queries.js'
 import './Shell.css'
 
@@ -54,6 +55,47 @@ export default function Shell() {
   const creatingChatRef = useRef(false)
   const [builtApp, setBuiltApp] = useState(null)
   const [pwaPrompt, setPwaPrompt] = useState(null)
+
+  // Set of chat ids whose agent is currently streaming. Used to drive
+  // the pulsing dot next to the row in the drawer. ChatView's
+  // onStreamStart / onStreamEnd callbacks add and remove entries.
+  // Only the active chat's ChatView is mounted at a time, so this is
+  // a 0-or-1-element set in practice; switching chats while a turn is
+  // in flight removes the previous chat's id (ChatView unmount) — an
+  // honest limitation of single-mount ChatView. Surfacing background
+  // streaming for chats with no mounted ChatView would require a
+  // shell-level SSE on chat lifecycle events, which is out of scope
+  // here (the directive: "no new SSE subscriptions or polling").
+  const [streamingChatIds, setStreamingChatIds] = useState(() => new Set())
+
+  // Stable callbacks for ChatView — identity must not change across
+  // renders or ChatView's onStreamEnd-handler memoization breaks. The
+  // setter form lets us avoid depending on the previous state.
+  const markStreamingStart = useCallback((chatId) => {
+    if (!chatId) return
+    setStreamingChatIds(prev => {
+      if (prev.has(chatId)) return prev
+      const next = new Set(prev)
+      next.add(chatId)
+      return next
+    })
+  }, [])
+  const markStreamingEnd = useCallback((chatId) => {
+    if (!chatId) return
+    setStreamingChatIds(prev => {
+      if (!prev.has(chatId)) return prev
+      const next = new Set(prev)
+      next.delete(chatId)
+      return next
+    })
+  }, [])
+
+  // Passive auth-status check. Reads /api/auth/providers/status with
+  // a 5-minute TanStack cache + a visibilitychange-driven invalidation.
+  // Drives the small warning dot on the drawer's Settings row when
+  // any registered provider is disconnected — surfacing the "silent
+  // dead provider" failure mode without polling.
+  const providerAuth = useProviderAuthStatus()
 
   // Maintain the LRU: when activeAppId changes, move it to the front
   // of the cache (mounting it if new). Caps at APP_CACHE_MAX; the
@@ -391,6 +433,28 @@ export default function Shell() {
         onNewChat={newChat}
         onDeleteChat={deleteChat}
         onSettings={() => navTo('settings')}
+        streamingChatIds={streamingChatIds}
+        pwaPrompt={pwaPrompt}
+        onPwaInstall={() => {
+          // Fire the deferred prompt. userChoice resolves with the
+          // outcome but we treat both accept and dismiss as "user
+          // engaged" — set the dismiss flag so we don't ask again
+          // this session. The browser stops firing
+          // beforeinstallprompt after a successful install on its
+          // own; the localStorage flag covers the "dismiss"
+          // case (no re-fire until next session).
+          if (!pwaPrompt) return
+          pwaPrompt.prompt()
+          pwaPrompt.userChoice.then(() => {
+            localStorage.setItem('pwa-prompt-dismissed', '1')
+            setPwaPrompt(null)
+          })
+        }}
+        onPwaDismiss={() => {
+          localStorage.setItem('pwa-prompt-dismissed', '1')
+          setPwaPrompt(null)
+        }}
+        settingsWarning={providerAuth.anyDisconnected}
       />
 
       <main className="shell__content">
@@ -407,12 +471,26 @@ export default function Shell() {
           <ChatView
             key={activeChatId}
             chatId={activeChatId}
-            onStreamEnd={() => { refreshApps(); loadTheme(); refreshChats() }}
+            onStreamEnd={() => {
+              // ChatView calls this when the agent turn finishes
+              // streaming. Clear the drawer dot for this chat.
+              markStreamingEnd(activeChatId)
+              refreshApps()
+              loadTheme()
+              refreshChats()
+            }}
             onFirstMessage={refreshChats}
             onSystemEvent={handleSystemEvent}
             builtApp={builtApp}
             onOpenApp={(appId) => { navTo('canvas', { appId }); setBuiltApp(null) }}
-            onMessageStart={() => setBuiltApp(null)}
+            onMessageStart={() => {
+              // User just sent a message — the agent is about to
+              // stream a response. Mark this chat as streaming so the
+              // drawer's pulse dot picks it up immediately (no
+              // round-trip wait for the first SSE event).
+              markStreamingStart(activeChatId)
+              setBuiltApp(null)
+            }}
           />
         )}
         {/* Multi-iframe LRU cache: render every recently-visited app
@@ -446,31 +524,6 @@ export default function Shell() {
           <SettingsView onThemeChange={loadTheme} />
         )}
       </main>
-      {pwaPrompt && (
-        <div className="shell__pwa-banner">
-          <span>Install Möbius as an app?</span>
-          <div className="shell__pwa-actions">
-            <button
-              className="shell__pwa-btn shell__pwa-btn--install"
-              onClick={() => {
-                pwaPrompt.prompt()
-                pwaPrompt.userChoice.then(() => {
-                  localStorage.setItem('pwa-prompt-dismissed', '1')
-                  setPwaPrompt(null)
-                })
-              }}
-            >Install</button>
-            <button
-              className="shell__pwa-btn"
-              onClick={() => {
-                localStorage.setItem('pwa-prompt-dismissed', '1')
-                setPwaPrompt(null)
-              }}
-            >Not now</button>
-          </div>
-        </div>
-      )}
-
       {toast && (
         <div
           style={{

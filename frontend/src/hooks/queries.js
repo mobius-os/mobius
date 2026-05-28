@@ -135,6 +135,12 @@ function useProvidersStatusQuery({ enabled = true } = {}) {
     queryKey: providersStatusKey,
     queryFn: fetchProvidersStatus,
     enabled,
+    // Cheap query whose data rarely changes within a session — refresh
+    // tokens only flip after explicit re-auth or expiry on wake. The
+    // useProviderAuthStatus hook invalidates on visibilitychange so a
+    // wake-from-background triggers exactly one refetch; everything in
+    // between rides this 5-minute cache.
+    staleTime: 5 * 60_000,
   })
 }
 

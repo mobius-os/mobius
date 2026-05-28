@@ -1,11 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Plus, Chats, Grid, DotsVerticalMoreMenu, SettingsCog, Pin, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
+import { Plus, Chats, Grid, DotsVerticalMoreMenu, SettingsCog, Pin, PinFilled, Download, XCrossed } from '@openai/apps-sdk-ui/components/Icon'
 import { Menu } from '@openai/apps-sdk-ui/components/Menu'
 import { EmptyMessage } from '@openai/apps-sdk-ui/components/EmptyMessage'
 import { apiFetch } from '../../api/client.js'
 import { appQueries, chatQueries } from '../../hooks/queries.js'
 import './Drawer.css'
+
+// Module-level constant so the default for `streamingChatIds` is
+// stable across renders. A fresh `new Set()` per call would break the
+// `streamingSet.has(id)` identity-based memoization downstream.
+const EMPTY_SET = new Set()
 
 export default function Drawer({
   open,
@@ -20,7 +25,25 @@ export default function Drawer({
   onNewChat,
   onDeleteChat,
   onSettings,
+  // Set of chat ids whose agent is currently streaming. Used to
+  // pulse a small accent dot next to the row label so the user can
+  // see at a glance which background builds are still running.
+  // Sourced from Shell (the only place that knows when a turn is
+  // active across the whole app). Defaults to an empty Set so the
+  // drawer renders cleanly if no parent supplies the prop.
+  streamingChatIds,
+  // The captured `beforeinstallprompt` event if the PWA can be
+  // installed AND the user hasn't dismissed the prompt this session.
+  // null when there's no install affordance to surface.
+  pwaPrompt,
+  onPwaInstall,
+  onPwaDismiss,
+  // Truthy when any registered provider's refresh token is no longer
+  // valid. Drives a small warning dot on the Settings row — passive
+  // nudge toward Reconnect, no modal, no banner.
+  settingsWarning,
 }) {
+  const streamingSet = streamingChatIds || EMPTY_SET
   // Pinned-first sort: pinned rows by pinned_at desc, then unpinned
   // by updated_at desc. Server returns this order already (see
   // routes/chats.py list_chats), but we re-sort defensively so the
@@ -243,10 +266,10 @@ export default function Drawer({
             </button>
 
           <div className="drawer__group drawer__group--chats">
-            <p className="drawer__label drawer__label--chats">
+            <h2 className="drawer__label drawer__label--chats">
               <Chats width={16} height={16} aria-hidden="true" />
               <span>Chats</span>
-            </p>
+            </h2>
             <div className="drawer__scroll">
               {allChats.length > 0 ? allChats.map(chat => (
                 <DrawerRow
@@ -255,6 +278,7 @@ export default function Drawer({
                   id={chat.id}
                   label={chat.title}
                   pinned={!!chat.pinned_at}
+                  streaming={streamingSet.has(chat.id)}
                   active={activeView === 'chat' && activeChatId === chat.id}
                   onSelect={() => onChat(chat.id)}
                   menuOpen={openMenu && openMenu.kind === 'chat' && openMenu.id === chat.id}
@@ -285,10 +309,10 @@ export default function Drawer({
 
           {apps.length > 0 && (
             <div className="drawer__group drawer__group--apps">
-              <p className="drawer__label drawer__label--apps">
+              <h2 className="drawer__label drawer__label--apps">
                 <Grid width={16} height={16} aria-hidden="true" />
                 <span>Apps</span>
-              </p>
+              </h2>
               <div className="drawer__scroll">
                 {sortedApps.map(app => (
                   <DrawerRow
@@ -324,12 +348,59 @@ export default function Drawer({
           </div>{/* /.drawer__scroll-wrap */}
 
           <div className="drawer__group drawer__group--bottom">
+            {/* PWA install card. Renders only when (a) the browser
+                fired beforeinstallprompt and Shell stashed the
+                deferred event, and (b) the user hasn't dismissed it
+                (Shell's effect checks the same localStorage key).
+                Shape rhymes with .drawer__item--new — tinted bg,
+                accent border, rounded — so it reads as an actionable
+                affordance rather than a notification. The previous
+                fixed-position banner pinned bottom-of-screen was
+                visually noisy and unrecoverable once dismissed; this
+                card stays in the drawer where the user looks
+                deliberately. */}
+            {pwaPrompt && (
+              <div className="drawer__pwa-card">
+                <div className="drawer__pwa-card-row">
+                  <Download width={16} height={16} aria-hidden="true" />
+                  <span className="drawer__pwa-card-text">Install Möbius</span>
+                </div>
+                <div className="drawer__pwa-card-actions">
+                  <button
+                    type="button"
+                    className="drawer__pwa-btn drawer__pwa-btn--install"
+                    onClick={onPwaInstall}
+                  >
+                    Install
+                  </button>
+                  <button
+                    type="button"
+                    className="drawer__pwa-btn drawer__pwa-btn--dismiss"
+                    onClick={onPwaDismiss}
+                    aria-label="Dismiss install prompt"
+                  >
+                    <XCrossed width={14} height={14} aria-hidden="true" />
+                  </button>
+                </div>
+              </div>
+            )}
             <button
               className={`drawer__item ${activeView === 'settings' ? 'drawer__item--active' : ''}`}
               onClick={onSettings}
             >
               <SettingsCog width={16} height={16} aria-hidden="true" style={{ flexShrink: 0 }} />
               <span className="drawer__item-text">Settings</span>
+              {/* Passive nudge — any provider's refresh token is no
+                  longer valid. No banner, no modal: just a quiet dot
+                  that says "look here." Settings already owns the
+                  reconnect UI. */}
+              {settingsWarning && (
+                <span
+                  className="drawer__settings-warning-dot"
+                  aria-label="A provider needs attention"
+                  title="A provider needs attention"
+                />
+              )}
             </button>
           </div>
 
@@ -349,6 +420,7 @@ function DrawerRow({
   pinned,
   active,
   slug,
+  streaming,
   onSelect,
   menuOpen,
   onMenuToggle,
@@ -455,6 +527,17 @@ function DrawerRow({
         className={`drawer__item ${active ? 'drawer__item--active' : ''}`}
         onClick={onSelect}
       >
+        {/* Streaming pulse dot. Sits before the text so the user's eye
+            picks it up alongside the label rather than at the row's
+            edge (where the pin lives). aria-label exposes the state to
+            assistive tech; the dot itself is presentational. */}
+        {streaming && (
+          <span
+            className="drawer__streaming-dot"
+            aria-label="Currently streaming"
+            title="Currently streaming"
+          />
+        )}
         <span className="drawer__item-text">{label}</span>
         {pinned && (
           <span className="drawer__item-pin" aria-label="Pinned" title="Pinned">
