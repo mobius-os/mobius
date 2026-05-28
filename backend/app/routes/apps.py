@@ -232,8 +232,12 @@ async def update_icon(
       detail="App token can only modify its own icon.",
     )
   body = await request.body()
-  if len(body) > 2 * 1024 * 1024:
-    raise HTTPException(413, "Icon too large (max 2 MB).")
+  # 12 MB cap on the wire — phone camera photos routinely run 5-8 MB.
+  # The standalone shell downscales client-side before upload, so
+  # well-behaved clients never approach this; the cap is the safety
+  # net for direct-API uploads of giant originals.
+  if len(body) > 12 * 1024 * 1024:
+    raise HTTPException(413, "Icon too large (max 12 MB).")
   app = (
     db.query(models.App).filter(models.App.id == app_id).first()
   )
@@ -249,8 +253,22 @@ async def update_icon(
     img.load()
   except Exception:
     raise HTTPException(415, "Not a valid image.")
-  if img.mode != "RGB":
-    img = img.convert("RGB")
+  # Preserve alpha for PNG / WebP uploads — transparent icons are
+  # common (logos with no background) and flattening to RGB renders
+  # a hard black square on most home screens.
+  if img.mode not in ("RGB", "RGBA"):
+    has_alpha = "A" in img.mode or "transparency" in img.info
+    img = img.convert("RGBA" if has_alpha else "RGB")
+  # Center-square-crop before resize. Non-square inputs would
+  # otherwise stretch when the standalone icon route resizes to
+  # the requested manifest size (192/512), producing distorted
+  # icons. Cropping preserves the most likely subject.
+  w, h = img.size
+  if w != h:
+    side = min(w, h)
+    left = (w - side) // 2
+    top = (h - side) // 2
+    img = img.crop((left, top, left + side, top + side))
   img.thumbnail((1024, 1024), Image.LANCZOS)
   buf = io.BytesIO()
   img.save(buf, format="PNG", optimize=True)

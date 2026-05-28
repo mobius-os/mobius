@@ -135,6 +135,10 @@ def standalone_manifest(slug: str, db: Session = Depends(get_db)):
   """
   app = _get_app_by_slug(db, slug)
   base = f"/apps/{slug}/"
+  # Version the icon URLs by `updated_at` so when the owner uploads
+  # a fresh icon the browser refetches at install time instead of
+  # baking the stale image into the home-screen entry.
+  v = int(app.updated_at.timestamp()) if app.updated_at else 0
   return JSONResponse(
     {
       "id": base,
@@ -148,13 +152,13 @@ def standalone_manifest(slug: str, db: Session = Depends(get_db)):
       "theme_color": "#0c0f14",
       "icons": [
         {
-          "src": f"{base}icon-192.png",
+          "src": f"{base}icon-192.png?v={v}",
           "sizes": "192x192",
           "type": "image/png",
           "purpose": "any maskable",
         },
         {
-          "src": f"{base}icon-512.png",
+          "src": f"{base}icon-512.png?v={v}",
           "sizes": "512x512",
           "type": "image/png",
           "purpose": "any maskable",
@@ -612,22 +616,69 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       // whether it holds the owner token (cross-PWA contexts) or the
       // app-scoped token a prior render of this page minted (the bug
       // that caused a 403 before the endpoint relax shipped).
+      // Lightweight toast for upload feedback — non-blocking, auto-
+      // dismisses, doesn't interrupt like alert() does.
+      function toast(msg, ok) {{
+        const t = document.createElement('div');
+        t.textContent = msg;
+        t.style.cssText = (
+          'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);' +
+          'background:' + (ok ? 'var(--surface2,#1a1f28)' : 'var(--danger,#f87171)') + ';' +
+          'color:' + (ok ? 'var(--text,#d4d4d8)' : '#0c0f14') + ';' +
+          'padding:10px 18px;border-radius:10px;font-size:13px;' +
+          'box-shadow:0 4px 14px rgba(0,0,0,0.4);' +
+          'z-index:10001;opacity:0;transition:opacity 0.2s'
+        );
+        document.body.appendChild(t);
+        requestAnimationFrame(() => {{ t.style.opacity = '1'; }});
+        setTimeout(() => {{
+          t.style.opacity = '0';
+          setTimeout(() => t.remove(), 250);
+        }}, 2800);
+      }}
+
+      // Downscale a File to a square PNG blob client-side before
+      // upload. Phone camera photos are 5-10 MB and would otherwise
+      // hit the server's 12 MB cap. Center-square-crops too so the
+      // file the user picked is what their home screen gets.
+      async function downscaleToSquarePNG(file, maxSide) {{
+        const bitmap = await createImageBitmap(file);
+        try {{
+          const w = bitmap.width, h = bitmap.height;
+          const side = Math.min(w, h);
+          const target = Math.min(maxSide, side);
+          const canvas = document.createElement('canvas');
+          canvas.width = target; canvas.height = target;
+          const ctx = canvas.getContext('2d');
+          const sx = (w - side) / 2, sy = (h - side) / 2;
+          ctx.drawImage(bitmap, sx, sy, side, side, 0, 0, target, target);
+          return await new Promise(res => canvas.toBlob(res, 'image/png'));
+        }} finally {{
+          bitmap.close && bitmap.close();
+        }}
+      }}
+
       if (iconBtn && iconInput) {{
         iconBtn.addEventListener('click', () => iconInput.click());
         iconInput.addEventListener('change', async () => {{
           const file = iconInput.files && iconInput.files[0];
           if (!file) return;
           const token = localStorage.getItem('token');
-          if (!token) return;
+          if (!token) {{
+            toast('Not signed in — open Möbius first', false);
+            iconInput.value = '';
+            return;
+          }}
           iconBtn.classList.add('uploading');
           try {{
+            const blob = await downscaleToSquarePNG(file, 1024);
             const resp = await fetch('/api/apps/' + APP_ID + '/icon', {{
               method: 'PUT',
               headers: {{
-                'Content-Type': file.type || 'application/octet-stream',
+                'Content-Type': 'image/png',
                 Authorization: 'Bearer ' + token,
               }},
-              body: file,
+              body: blob,
             }});
             if (resp.ok) {{
               const bust = '?t=' + Date.now();
@@ -636,11 +687,12 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
               const touch = document.querySelector('link[rel="apple-touch-icon"]');
               if (fav) fav.href = '/apps/' + APP_SLUG + '/icon-192.png' + bust;
               if (touch) touch.href = '/apps/' + APP_SLUG + '/icon-192.png' + bust;
+              toast('Icon updated', true);
             }} else {{
-              alert('Upload failed: ' + resp.status);
+              toast('Upload failed (' + resp.status + ')', false);
             }}
           }} catch (e) {{
-            alert('Upload failed: ' + (e && e.message || e));
+            toast('Upload failed: ' + (e && e.message || e), false);
           }} finally {{
             iconBtn.classList.remove('uploading');
             iconInput.value = '';
@@ -726,12 +778,73 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         show();
       }}
 
-      // If the bip event is already in hand (fired before this
-      // script ran), wire and show. Otherwise listen for the early
-      // bridge event from the <script> at top of <body>.
+      // Track "fallback painted" so a late-arriving bip event can
+      // undo the suppression message and restore the Install button.
+      let fallbackPainted = false;
+      function buildDefaultInfo() {{
+        const make = (text) => {{
+          const row = document.createElement('div');
+          row.className = 'ic-info-row';
+          const dot = document.createElement('span');
+          dot.className = 'ic-info-dot';
+          dot.setAttribute('aria-hidden', 'true');
+          dot.textContent = '\u203A';
+          const span = document.createElement('span');
+          span.textContent = text;
+          row.appendChild(dot);
+          row.appendChild(span);
+          return row;
+        }};
+        info.textContent = '';
+        info.appendChild(make('One-tap launch from your home screen.'));
+        info.appendChild(make('Edit anytime \u2014 just open M\u00f6bius and chat.'));
+      }}
+      function paintSuppressionFallback() {{
+        if (fallbackPainted) return;
+        fallbackPainted = true;
+        subtitle.textContent = "Can't install right now";
+        info.textContent = '';
+        const hint = document.createElement('div');
+        hint.style.fontSize = '13px';
+        hint.style.color = 'var(--muted)';
+        hint.style.lineHeight = '1.6';
+        hint.textContent =
+          'Your browser blocked the automatic install (this ' +
+          'happens after dismissing too many times). Try: ' +
+          'Chrome menu (\u22ee) \u2192 "Install app" or "Add to ' +
+          'Home screen".';
+        info.appendChild(hint);
+        installBtn.style.display = 'none';
+        cancelBtn.textContent = 'Close';
+        cancelBtn.style.flex = '1';
+      }}
+      function restoreFromSuppression() {{
+        if (!fallbackPainted) return;
+        fallbackPainted = false;
+        buildDefaultInfo();
+        installBtn.style.display = '';
+        cancelBtn.textContent = 'Not now';
+        cancelBtn.style.flex = '';
+      }}
+      function onBipReady() {{
+        // Late-bip recovery: restore the install layout if we had
+        // already painted the suppression fallback.
+        restoreFromSuppression();
+        wireInstallButton();
+      }}
       if (window.__bipDeferred) wireInstallButton();
-      window.addEventListener('mobius:bip-ready', wireInstallButton);
+      window.addEventListener('mobius:bip-ready', onBipReady);
       window.addEventListener('mobius:installed', showSuccess);
+
+      // Strip `?install=1` from the URL once the page consumed it,
+      // so a refresh doesn't keep force-showing the card.
+      if (forceShow && window.history && window.history.replaceState) {{
+        try {{
+          const u = new URL(window.location.href);
+          u.searchParams.delete('install');
+          window.history.replaceState(null, '', u.pathname + u.search + u.hash);
+        }} catch (_) {{}}
+      }}
 
       // Show the card. Strategy:
       //   - forceShow (`?install=1`): show after a brief delay so
@@ -753,27 +866,12 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
           subtitle.textContent = 'Preparing install…';
         }}
         setTimeout(showOnce, 600);
-        // Fallback for Chromium install-suppression. 8s is long
-        // enough that any real bip event will have fired; if it
-        // hasn't, the browser likely won't fire it at all.
+        // Reversible suppression fallback — `onBipReady` restores
+        // the normal layout if bip arrives late.
         if (!isIOSSafari) {{
           setTimeout(() => {{
-            if (window.__bipDeferred) return;  // event arrived in time
-            subtitle.textContent = "Can't install right now";
-            info.textContent = '';
-            const hint = document.createElement('div');
-            hint.style.fontSize = '13px';
-            hint.style.color = 'var(--muted)';
-            hint.style.lineHeight = '1.6';
-            hint.textContent =
-              'Your browser blocked the automatic install (this ' +
-              'happens after dismissing too many times). Try: ' +
-              'Chrome menu (⋮) → "Install app" or "Add to Home ' +
-              'screen".';
-            info.appendChild(hint);
-            installBtn.style.display = 'none';
-            cancelBtn.textContent = 'Close';
-            cancelBtn.style.flex = '1';
+            if (window.__bipDeferred) return;
+            paintSuppressionFallback();
           }}, 8000);
         }}
       }} else {{
