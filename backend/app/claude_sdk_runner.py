@@ -202,17 +202,6 @@ async def _maybe_await(value: Any) -> Any:
   return value
 
 
-def _publish_event(bc, event: dict) -> None:
-  """Publishes a named SDK side-channel event (usage, thinking, etc.).
-
-  Centralized so all named-but-unrendered events flow through one
-  audit point. Today this is a thin wrapper; if we later want to
-  gate per-event-type emission separately from the unknown-event
-  toggle, this is the seam.
-  """
-  bc.publish(event)
-
-
 def _emit_unknown(bc, kind: str, raw: Any) -> None:
   """Logs an unknown SDK event and emits it on the wire when enabled.
 
@@ -262,7 +251,7 @@ def dispatch_sdk_message(
   """
   if isinstance(sdk_msg, SystemMessage):
     if isinstance(sdk_msg, TaskStartedMessage):
-      _publish_event(bc, {
+      bc.publish({
         "type": "task_start",
         "task_id": sdk_msg.task_id,
         "description": sdk_msg.description,
@@ -270,7 +259,7 @@ def dispatch_sdk_message(
       })
       return current_session_id, None
     if isinstance(sdk_msg, TaskProgressMessage):
-      _publish_event(bc, {
+      bc.publish({
         "type": "task_progress",
         "task_id": sdk_msg.task_id,
         "usage": dict(sdk_msg.usage) if sdk_msg.usage else None,
@@ -278,7 +267,7 @@ def dispatch_sdk_message(
       })
       return current_session_id, None
     if isinstance(sdk_msg, TaskNotificationMessage):
-      _publish_event(bc, {
+      bc.publish({
         "type": "task_done",
         "task_id": sdk_msg.task_id,
         "status": sdk_msg.status,
@@ -342,9 +331,9 @@ def dispatch_sdk_message(
         bc, f"assistant_block:{type(block).__name__}", block,
       )
     if sdk_msg.usage:
-      _publish_event(bc, _usage_event(sdk_msg.usage))
+      bc.publish(_usage_event(sdk_msg.usage))
     if sdk_msg.stop_reason:
-      _publish_event(bc, {
+      bc.publish({
         "type": "stop_reason",
         "reason": sdk_msg.stop_reason,
       })
@@ -365,7 +354,7 @@ def dispatch_sdk_message(
 
   if isinstance(sdk_msg, RateLimitEvent):
     info = sdk_msg.rate_limit_info
-    _publish_event(bc, {
+    bc.publish({
       "type": "rate_limit",
       "status": info.status,
       "resets_at": info.resets_at,
@@ -378,9 +367,9 @@ def dispatch_sdk_message(
     if sdk_msg.session_id:
       current_session_id = sdk_msg.session_id
     if sdk_msg.usage:
-      _publish_event(bc, _usage_event(sdk_msg.usage))
+      bc.publish(_usage_event(sdk_msg.usage))
     if sdk_msg.stop_reason:
-      _publish_event(bc, {
+      bc.publish({
         "type": "stop_reason",
         "reason": sdk_msg.stop_reason,
       })
