@@ -1,9 +1,9 @@
 # backend/tests/test_augmentation.py
 """Tests that send_message appends uploaded-file info to the user message."""
 import io
+from dataclasses import dataclass
 from unittest.mock import patch
 
-from app.chat import SubprocessHandle
 from app.broadcast import get_broadcast
 from app.runner_registry import RunnerKind, registry
 
@@ -15,8 +15,26 @@ def _mark_done(chat_id):
     bc.mark_completed()
 
 
+@dataclass
+class _FakeRunningHandle:
+  """Minimal registry handle that pretends a chat is mid-turn.
+
+  Only the registry protocol surface (`chat_id`, `kind`, `stop`) is
+  needed — these tests register a fake handle so `is_chat_running`
+  returns True, then exercise the queue/cancel paths.
+  """
+
+  chat_id: str
+  proc: object  # MagicMock with .returncode; kept for parity with prior shape
+  kind: RunnerKind = RunnerKind.SUBPROCESS
+
+  async def stop(self, timeout: float = 2.0) -> bool:
+    del timeout
+    return True
+
+
 def _register_proc(chat_id, proc):
-  registry.register(SubprocessHandle(chat_id=chat_id, proc=proc))
+  registry.register(_FakeRunningHandle(chat_id=chat_id, proc=proc))
 
 
 def test_no_augmentation_without_uploads(client, db, auth, chat):

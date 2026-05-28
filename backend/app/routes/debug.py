@@ -25,23 +25,11 @@ def debug_status(
 ):
   """Returns active agent runtimes, broadcasts, and starting state.
 
-  `active_procs` is retained for golden-fixture stability but is empty
-  in production now that the subprocess fallback is gone.
   `active_sdk_clients` and `active_sdk_sessions` list the SDK-backed
   runtimes (Claude via claude-agent-sdk, Codex via openai-codex).
   Completion monitors should treat a chat as "running" if it appears
-  in either of those two lists.
+  in `active_sdk_clients`, `active_sdk_sessions`, or `starting`.
   """
-  active = []
-  for handle in registry.handles_by_kind(RunnerKind.SUBPROCESS):
-    proc = handle.proc
-    active.append({
-      "chat_id": handle.chat_id,
-      "pid": proc.pid,
-      "running": proc.returncode is None,
-      "returncode": proc.returncode,
-    })
-
   sdk_clients = [
     {"chat_id": handle.chat_id}
     for handle in registry.handles_by_kind(RunnerKind.CLAUDE_SDK)
@@ -61,7 +49,6 @@ def debug_status(
     })
 
   return {
-    "active_procs": active,
     "active_sdk_clients": sdk_clients,
     "active_sdk_sessions": sdk_sessions,
     "starting": list(registry.starting_chat_ids()),
