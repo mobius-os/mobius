@@ -498,20 +498,19 @@ function DrawerRow({
               </Menu.Item>
               <Menu.Item onSelect={() => onRenameStart()}>Rename</Menu.Item>
               {kind === 'app' && slug && (
-                // Open the app's standalone PWA surface in a new tab.
-                // `_blank` is load-bearing on installed PWAs: a same-
-                // tab navigation inside an installed Möbius window
-                // stays in-scope (because Möbius's old scope was `/`
-                // when the user installed) and the browser routes to
-                // the existing PWA window rather than firing the
-                // sub-app's install prompt. Opening in a new top-level
-                // browser tab escapes the installed PWA → the sub-app's
-                // own manifest is honored → beforeinstallprompt fires
-                // (Chromium) or share-menu A2HS is available (iOS).
+                // Same-tab navigate with ?install=1 to the standalone
+                // surface. The destination page renders the app in the
+                // background and overlays a Möbius-styled install
+                // confirm card whose primary button calls
+                // `BeforeInstallPromptEvent.prompt()` — that's the only
+                // path where our button IS the install trigger, since
+                // `prompt()` is bound to the page's active manifest.
+                // The `?install=1` query forces the card open even if
+                // the user dismissed it in a prior session.
                 <Menu.Item
-                  onSelect={() => window.open(`/apps/${slug}/`, '_blank', 'noopener')}
+                  onSelect={() => { window.location.href = `/apps/${slug}/?install=1` }}
                 >
-                  Add to home screen
+                  Install to home screen
                 </Menu.Item>
               )}
               {kind === 'chat' ? (
