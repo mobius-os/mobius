@@ -68,9 +68,15 @@ from claude_agent_sdk.types import (
   AssistantMessage,
   PermissionResultAllow,
   PermissionResultDeny,
+  RateLimitEvent,
   ResultMessage,
   StreamEvent,
   SystemMessage,
+  TaskNotificationMessage,
+  TaskProgressMessage,
+  TaskStartedMessage,
+  TextBlock,
+  ThinkingBlock,
   ToolResultBlock,
   ToolUseBlock,
   UserMessage,
@@ -79,6 +85,7 @@ from claude_agent_sdk.types import (
 from app.pending_questions import PendingQuestion
 from app.runner_registry import RunnerKind, registry
 from app.runtime_types import RunnerResult
+from app.sdk_emit import emit_unknown_enabled, unknown_event
 from app.tool_summaries import summarize_tool_input
 
 
@@ -193,6 +200,208 @@ async def _maybe_await(value: Any) -> Any:
   if inspect.isawaitable(value):
     return await value
   return value
+
+
+def _publish_event(bc, event: dict) -> None:
+  """Publishes a named SDK side-channel event (usage, thinking, etc.).
+
+  Centralized so all named-but-unrendered events flow through one
+  audit point. Today this is a thin wrapper; if we later want to
+  gate per-event-type emission separately from the unknown-event
+  toggle, this is the seam.
+  """
+  bc.publish(event)
+
+
+def _emit_unknown(bc, kind: str, raw: Any) -> None:
+  """Logs an unknown SDK event and emits it on the wire when enabled.
+
+  The DEBUG log fires unconditionally so noisy sessions stay
+  inspectable in `chat.log` even when wire emission is turned off
+  via ``MOBIUS_EMIT_UNKNOWN=0``.
+  """
+  event = unknown_event(kind, raw)
+  if emit_unknown_enabled():
+    bc.publish(event)
+
+
+def _usage_event(usage: dict[str, Any]) -> dict:
+  """Builds the wire-shape `usage` event from an SDK usage dict.
+
+  The SDK's usage shape evolves — we extract the fields we know
+  about today and pass the full dict through under ``raw`` so a
+  later UI can pick up newly-added counters without a runner change.
+  """
+  return {
+    "type": "usage",
+    "input_tokens": usage.get("input_tokens"),
+    "output_tokens": usage.get("output_tokens"),
+    "cache_creation_input_tokens": usage.get("cache_creation_input_tokens"),
+    "cache_read_input_tokens": usage.get("cache_read_input_tokens"),
+    "raw": dict(usage),
+  }
+
+
+def dispatch_sdk_message(
+  sdk_msg: Any,
+  bc,
+  current_session_id: str | None,
+) -> tuple[str | None, dict | None]:
+  """Translates one SDK message into broadcast events.
+
+  Returns ``(new_session_id, terminal_result_or_None)``. When the
+  message is a ResultMessage, the caller receives the final result
+  dict and stops draining the SDK stream. For every other message
+  type the caller updates ``current_session_id`` from the first
+  return value and keeps reading.
+
+  Extracted from the runner loop so unit tests can exercise the
+  full dispatch matrix (named events, unknown fallthrough, usage
+  + stop_reason side channels) without spinning up a live SDK
+  subprocess.
+  """
+  if isinstance(sdk_msg, SystemMessage):
+    if isinstance(sdk_msg, TaskStartedMessage):
+      _publish_event(bc, {
+        "type": "task_start",
+        "task_id": sdk_msg.task_id,
+        "description": sdk_msg.description,
+        "task_type": sdk_msg.task_type,
+      })
+      return current_session_id, None
+    if isinstance(sdk_msg, TaskProgressMessage):
+      _publish_event(bc, {
+        "type": "task_progress",
+        "task_id": sdk_msg.task_id,
+        "usage": dict(sdk_msg.usage) if sdk_msg.usage else None,
+        "last_tool_name": sdk_msg.last_tool_name,
+      })
+      return current_session_id, None
+    if isinstance(sdk_msg, TaskNotificationMessage):
+      _publish_event(bc, {
+        "type": "task_done",
+        "task_id": sdk_msg.task_id,
+        "status": sdk_msg.status,
+        "summary": sdk_msg.summary,
+      })
+      return current_session_id, None
+    if sdk_msg.subtype == "init":
+      # Setup metadata only — no Möbius-side render.
+      return current_session_id, None
+    _emit_unknown(bc, f"system:{sdk_msg.subtype}", sdk_msg)
+    return current_session_id, None
+
+  if isinstance(sdk_msg, StreamEvent):
+    if sdk_msg.session_id:
+      current_session_id = sdk_msg.session_id
+    event = sdk_msg.event
+    event_type = event.get("type")
+    if event_type == "content_block_delta":
+      delta = event.get("delta", {})
+      delta_type = delta.get("type")
+      if delta_type == "text_delta":
+        text = delta.get("text")
+        if text:
+          bc.publish({"type": "text", "content": text})
+        return current_session_id, None
+      if delta_type == "thinking_delta":
+        thinking = delta.get("thinking") or delta.get("text") or ""
+        if thinking:
+          bc.publish({"type": "thinking", "content": thinking})
+        return current_session_id, None
+      _emit_unknown(bc, f"stream:content_block_delta:{delta_type}", delta)
+      return current_session_id, None
+    _emit_unknown(bc, f"stream:{event_type}", event)
+    return current_session_id, None
+
+  if isinstance(sdk_msg, AssistantMessage):
+    if sdk_msg.session_id:
+      current_session_id = sdk_msg.session_id
+    for block in sdk_msg.content:
+      if isinstance(block, ToolUseBlock):
+        bc.publish({
+          "type": "tool_start",
+          "tool": block.name,
+          "input": "",
+        })
+        summary = summarize_tool_input(block.name, block.input)
+        if summary:
+          bc.publish({
+            "type": "tool_input",
+            "tool": block.name,
+            "input": summary,
+          })
+        continue
+      if isinstance(block, ThinkingBlock):
+        bc.publish({"type": "thinking", "content": block.thinking})
+        continue
+      if isinstance(block, TextBlock):
+        # Streamed via text_delta already — snapshot duplicate.
+        continue
+      _emit_unknown(
+        bc, f"assistant_block:{type(block).__name__}", block,
+      )
+    if sdk_msg.usage:
+      _publish_event(bc, _usage_event(sdk_msg.usage))
+    if sdk_msg.stop_reason:
+      _publish_event(bc, {
+        "type": "stop_reason",
+        "reason": sdk_msg.stop_reason,
+      })
+    return current_session_id, None
+
+  if isinstance(sdk_msg, UserMessage):
+    content = sdk_msg.content if isinstance(sdk_msg.content, list) else []
+    for block in content:
+      if isinstance(block, ToolResultBlock):
+        bc.publish({
+          "type": "tool_output",
+          "content": _format_tool_output(block.content),
+        })
+        bc.publish({"type": "tool_end"})
+        continue
+      _emit_unknown(bc, f"user_block:{type(block).__name__}", block)
+    return current_session_id, None
+
+  if isinstance(sdk_msg, RateLimitEvent):
+    info = sdk_msg.rate_limit_info
+    _publish_event(bc, {
+      "type": "rate_limit",
+      "status": info.status,
+      "resets_at": info.resets_at,
+      "rate_limit_type": info.rate_limit_type,
+      "utilization": info.utilization,
+    })
+    return current_session_id, None
+
+  if isinstance(sdk_msg, ResultMessage):
+    if sdk_msg.session_id:
+      current_session_id = sdk_msg.session_id
+    if sdk_msg.usage:
+      _publish_event(bc, _usage_event(sdk_msg.usage))
+    if sdk_msg.stop_reason:
+      _publish_event(bc, {
+        "type": "stop_reason",
+        "reason": sdk_msg.stop_reason,
+      })
+    return current_session_id, {
+      "session_id": current_session_id,
+      "cost_usd": sdk_msg.total_cost_usd,
+      "usage": dict(sdk_msg.usage) if sdk_msg.usage else None,
+      "model_usage": (
+        dict(sdk_msg.model_usage) if sdk_msg.model_usage else None
+      ),
+      "permission_denials": sdk_msg.permission_denials or None,
+      "api_error_status": sdk_msg.api_error_status,
+      "error": (
+        _result_error_message(sdk_msg)
+        if sdk_msg.is_error else None
+      ),
+    }
+
+  # Any SDK message class we didn't enumerate — never silently dropped.
+  _emit_unknown(bc, f"sdk_message:{type(sdk_msg).__name__}", sdk_msg)
+  return current_session_id, None
 
 
 async def run_claude_sdk_turn(
@@ -380,70 +589,12 @@ async def run_claude_sdk_turn(
       await client.query(user_message)
 
       async for sdk_msg in client.receive_response():
-        if isinstance(sdk_msg, SystemMessage):
-          if sdk_msg.subtype == "init":
-            continue
-          continue
-
-        if isinstance(sdk_msg, StreamEvent):
-          current_session_id = sdk_msg.session_id or current_session_id
-          event = sdk_msg.event
-          if event.get("type") != "content_block_delta":
-            continue
-          delta = event.get("delta", {})
-          if delta.get("type") != "text_delta":
-            continue
-          text = delta.get("text")
-          if text:
-            bc.publish({"type": "text", "content": text})
-          continue
-
-        if isinstance(sdk_msg, AssistantMessage):
-          if sdk_msg.session_id:
-            current_session_id = sdk_msg.session_id
-          for block in sdk_msg.content:
-            if not isinstance(block, ToolUseBlock):
-              continue
-            bc.publish({
-              "type": "tool_start",
-              "tool": block.name,
-              "input": "",
-            })
-            summary = summarize_tool_input(block.name, block.input)
-            if not summary:
-              continue
-            bc.publish({
-              "type": "tool_input",
-              "tool": block.name,
-              "input": summary,
-            })
-          continue
-
-        if isinstance(sdk_msg, UserMessage):
-          for block in sdk_msg.content if isinstance(sdk_msg.content, list) else []:
-            if not isinstance(block, ToolResultBlock):
-              continue
-            bc.publish({
-              "type": "tool_output",
-              "content": _format_tool_output(block.content),
-            })
-            bc.publish({
-              "type": "tool_end",
-            })
-          continue
-
-        if isinstance(sdk_msg, ResultMessage):
-          current_session_id = sdk_msg.session_id or current_session_id
-          cost_usd = sdk_msg.total_cost_usd
-          return {
-            "session_id": current_session_id,
-            "cost_usd": cost_usd,
-            "usage": None,
-            "error": (
-              _result_error_message(sdk_msg)
-              if sdk_msg.is_error else None
-            ),
-          }
+        current_session_id, terminal = dispatch_sdk_message(
+          sdk_msg, bc, current_session_id,
+        )
+        if terminal is not None:
+          cost_usd = terminal.get("cost_usd")
+          return terminal
 
       return {
         "session_id": current_session_id,
