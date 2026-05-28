@@ -182,7 +182,7 @@
   padding: 10px 12px;
   background: none;
   border: none;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   color: var(--text);
   font-size: 14px;
   font-family: var(--font);
@@ -287,7 +287,7 @@
   justify-content: center;
   background: none;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   color: var(--muted);
   cursor: pointer;
   opacity: 0;
@@ -308,9 +308,10 @@
 }
 
 /* Always show on touch devices — :hover never fires there, and the
- * menu trigger has to be reachable without a hover state. */
+ * menu trigger has to be reachable without a hover state. 0.75 reads
+ * as a deliberate affordance; 0.5 (the prior value) read as disabled. */
 @media (hover: none) {
-  .drawer__more { opacity: 0.5; }
+  .drawer__more { opacity: 0.75; }
 }
 
 /* Menu roundness — outer 12px so the floating popover reads as a
@@ -344,7 +345,7 @@
   padding: 8px 10px;
   background: none;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   color: var(--text);
   font-size: 13px;
   font-family: var(--font);
@@ -404,7 +405,7 @@
 .drawer__menu-confirm-btn--yes {
   background: var(--danger);
   border-color: var(--danger);
-  color: #fff;
+  color: var(--on-danger);
 }
 
 .drawer__menu-note {

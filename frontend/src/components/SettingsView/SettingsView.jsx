@@ -23,6 +23,17 @@ export default function SettingsView({ onThemeChange }) {
   const [saving, setSaving] = useState(false)
   const [status, setStatus] = useState(null)
   const [errorMsg, setErrorMsg] = useState('')
+
+  // Auto-dismiss the success alert so it doesn't linger forever after
+  // the user moves on. 3 s matches the justConnected dismissal in
+  // ProviderAuth.jsx, keeping the visual rhythm consistent across the
+  // settings screen. Error alerts stay sticky — the user needs the
+  // message until they fix the input.
+  useEffect(() => {
+    if (status !== 'success') return
+    const t = setTimeout(() => setStatus(null), 3000)
+    return () => clearTimeout(t)
+  }, [status])
   const [lightMode, setLightMode] = useState(false)
   const [themeSwitching, setThemeSwitching] = useState(false)
   // Which provider has its inline auth panel expanded. null = none.

@@ -243,10 +243,10 @@ export default function Drawer({
             </button>
 
           <div className="drawer__group drawer__group--chats">
-            <p className="drawer__label drawer__label--chats">
+            <h2 className="drawer__label drawer__label--chats">
               <Chats width={16} height={16} aria-hidden="true" />
               <span>Chats</span>
-            </p>
+            </h2>
             <div className="drawer__scroll">
               {allChats.length > 0 ? allChats.map(chat => (
                 <DrawerRow
@@ -285,10 +285,10 @@ export default function Drawer({
 
           {apps.length > 0 && (
             <div className="drawer__group drawer__group--apps">
-              <p className="drawer__label drawer__label--apps">
+              <h2 className="drawer__label drawer__label--apps">
                 <Grid width={16} height={16} aria-hidden="true" />
                 <span>Apps</span>
-              </p>
+              </h2>
               <div className="drawer__scroll">
                 {sortedApps.map(app => (
                   <DrawerRow

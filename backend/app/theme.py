@@ -58,6 +58,23 @@ DEFAULT_THEME = """\
   /* Typography. */
   --font: 'Inter', system-ui, -apple-system, sans-serif;
   --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+
+  /* Border-radius scale — corners stay consistent across drawer,
+     settings, and provider surfaces. Components should pick from
+     this scale instead of hardcoding pixel values. --radius-full
+     is for pills and chips; 50% stays inline for true circles
+     (status dots) since it scales with the element. */
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-full: 9999px;
+
+  /* Text colors that paint ON TOP of accent / danger fills.
+     A theme that ships a lighter --danger could need a darker
+     --on-danger; centralizing avoids hardcoded #fff scattered
+     across delete buttons, primary CTAs, and step indicators. */
+  --on-accent: #ffffff;
+  --on-danger: #ffffff;
 }
 """
 

@@ -19,7 +19,7 @@
 .settings__section {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   padding: 20px;
   margin-bottom: 14px;
 }
@@ -87,7 +87,7 @@
 .settings__input {
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   color: var(--text);
   padding: 11px 14px;
   font-size: 14px;
@@ -116,9 +116,9 @@
 .settings__btn {
   align-self: flex-start;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   border: none;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 10px 18px;
   font-size: 14px;
   font-weight: 500;
@@ -216,7 +216,7 @@
   position: relative;
   width: 48px;
   height: 28px;
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   border: none;
   background: var(--border);
   cursor: pointer;
