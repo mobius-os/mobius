@@ -294,11 +294,28 @@ async def write_shared_file(
   request: Request,
   _: models.Owner = Depends(get_current_owner),
 ):
-  """Writes content to a file in the shared data directory."""
-  base = Path(get_settings().data_dir) / "shared"
+  """Writes content to a file in the shared data directory.
+
+  Auto-snapshots the prior `theme.css` to `theme.css.bak-<unix-ts>`
+  on every overwrite, so a theme that breaks the UI can always be
+  rolled back from the recovery page or via `?reset-theme=1`. The
+  snapshot is BEST-EFFORT — a snapshot failure must not block the
+  agent's write, since the write itself is the recovery target.
+  """
+  settings = get_settings()
+  base = Path(settings.data_dir) / "shared"
   file_path = _resolve(base, path)
   content = await _decode_write_body(request, file_path)
   file_path.parent.mkdir(parents=True, exist_ok=True)
+  # Snapshot the prior theme.css before any overwrite. The agent
+  # already does this informally; making it automatic means no
+  # accidental clobber when the agent forgets.
+  if file_path.name == "theme.css" and file_path.parent == base:
+    try:
+      from app.theme import snapshot_theme_if_present
+      snapshot_theme_if_present(settings.data_dir)
+    except Exception as exc:
+      _log.warning("theme.css snapshot failed: %s", exc)
   if isinstance(content, bytes):
     file_path.write_bytes(content)
   else:

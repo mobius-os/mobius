@@ -167,6 +167,11 @@ export const api = {
   },
   theme: {
     get: () => apiFetch('/theme'),
+    // Moves /data/shared/theme.css aside on the server so
+    // DEFAULT_THEME paints again. The previous theme is preserved
+    // as theme.css.reset-bak-<unix-ts> for rollback. Used by the
+    // `?reset-theme=1` URL-parameter recovery flow in useTheme.
+    reset: () => apiFetch('/theme/reset', { method: 'POST' }),
   },
   storage: {
     shared: {

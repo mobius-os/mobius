@@ -320,6 +320,19 @@ def dashboard_html(msg: str = "") -> str:
     </div>
 
     <div class="section">
+      <p class="section-title">Theme</p>
+      <p class="desc" style="margin-bottom:8px;">Use this if the current theme makes the main UI unusable. Your previous theme is saved as a backup.</p>
+      <div class="actions">
+        <form method="POST" action="/recover/action">
+          <input type="hidden" name="action" value="reset_theme">
+          <button class="btn btn-outline" type="submit">
+            Reset theme to default
+          </button>
+        </form>
+      </div>
+    </div>
+
+    <div class="section">
       <p class="section-title">Restore from baked sources</p>
       <p class="desc" style="margin-bottom:8px;">If the agent made things worse, copy the original baked source back over the live copy. Chats, mini-apps, and settings are untouched.</p>
       <div class="actions">
