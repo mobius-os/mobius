@@ -319,6 +319,37 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
     }}
     #edit-pill:hover {{ opacity: 1; background: var(--surface2); }}
     #edit-pill.hidden {{ display: none; }}
+    /* Install banner: full-width at the top, slides down on
+       beforeinstallprompt (Chromium) or after a short timeout on
+       iOS standalone-eligible Safari. Hidden when the page is
+       already running in standalone mode (the install already
+       happened) or after the user dismisses. */
+    #install-banner {{
+      position: fixed; top: 0; left: 0; right: 0;
+      background: var(--accent); color: #0c0f14;
+      padding: 12px 16px;
+      display: flex; align-items: center; gap: 12px;
+      font-size: 13px; font-weight: 500;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+      z-index: 10000;
+      transform: translateY(-100%);
+      transition: transform 0.25s ease-out;
+    }}
+    #install-banner.visible {{ transform: translateY(0); }}
+    #install-banner .ib-text {{ flex: 1; line-height: 1.35; }}
+    #install-banner .ib-btn {{
+      background: #0c0f14; color: var(--accent-hover, #c4b5fd);
+      border: none; border-radius: 8px;
+      padding: 7px 14px; font-size: 13px; font-weight: 600;
+      font-family: inherit; cursor: pointer;
+      white-space: nowrap;
+    }}
+    #install-banner .ib-dismiss {{
+      background: transparent; color: #0c0f14;
+      border: none; padding: 4px 8px; cursor: pointer;
+      font-size: 18px; line-height: 1; opacity: 0.7;
+    }}
+    #install-banner .ib-dismiss:hover {{ opacity: 1; }}
   </style>
 </head>
 <body>
@@ -327,6 +358,11 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   <button id="edit-pill" class="hidden" title="Edit this app in Möbius">
     <span>✏️</span><span>Edit</span>
   </button>
+  <div id="install-banner" role="region" aria-label="Install app">
+    <span class="ib-text" id="install-banner-text"></span>
+    <button class="ib-btn" id="install-banner-btn"></button>
+    <button class="ib-dismiss" id="install-banner-dismiss" aria-label="Dismiss">×</button>
+  </div>
   <script type="module">
     const APP_ID = {app_id};
     const APP_SLUG = {json.dumps(slug)};
@@ -399,8 +435,63 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       // For now, just go to the shell home — the chat-routing piece
       // lands in a later step. Once `chat_id` is plumbed into the
       // shell URL, this becomes `/shell/?chat=<chat_id>`.
-      window.location.href = '/';
+      window.location.href = '/shell/';
     }});
+
+    // Install banner: surfaces a one-tap install affordance.
+    // Chromium fires `beforeinstallprompt` when the manifest is valid
+    // and the page is install-eligible — we capture the event, defer
+    // it, and bind it to the banner button so the user gets a real
+    // install dialog on tap. Safari (iOS) doesn't fire the event,
+    // so we sniff for it and show share-menu instructions instead.
+    // Suppressed entirely when already running in standalone mode
+    // (the user already installed) or when previously dismissed
+    // this session.
+    (function setupInstallBanner() {{
+      const banner = document.getElementById('install-banner');
+      const text = document.getElementById('install-banner-text');
+      const btn = document.getElementById('install-banner-btn');
+      const dismiss = document.getElementById('install-banner-dismiss');
+      const inStandalone =
+        window.matchMedia('(display-mode: standalone)').matches ||
+        window.navigator.standalone === true;
+      if (inStandalone) return;
+      if (sessionStorage.getItem('mobius-install-dismissed-' + APP_SLUG)) return;
+      dismiss.addEventListener('click', () => {{
+        banner.classList.remove('visible');
+        sessionStorage.setItem('mobius-install-dismissed-' + APP_SLUG, '1');
+      }});
+      let deferred = null;
+      window.addEventListener('beforeinstallprompt', (e) => {{
+        e.preventDefault();
+        deferred = e;
+        text.textContent = 'Install ' + APP_NAME + ' to your home screen';
+        btn.textContent = 'Install';
+        btn.onclick = async () => {{
+          if (!deferred) return;
+          deferred.prompt();
+          const result = await deferred.userChoice;
+          deferred = null;
+          if (result.outcome === 'accepted') banner.classList.remove('visible');
+        }};
+        requestAnimationFrame(() => banner.classList.add('visible'));
+      }});
+      // iOS Safari fallback: no beforeinstallprompt support; show
+      // instructions referencing the share menu. Detect via UA
+      // because there's no feature-detect for "supports A2HS".
+      const isIOSSafari = /iphone|ipad|ipod/i.test(navigator.userAgent) &&
+        !window.MSStream &&
+        /safari/i.test(navigator.userAgent) &&
+        !/(crios|fxios|edgios)/i.test(navigator.userAgent);
+      if (isIOSSafari) {{
+        setTimeout(() => {{
+          if (deferred) return;  // beforeinstallprompt won the race
+          text.textContent = 'Tap Share, then "Add to Home Screen" to install ' + APP_NAME;
+          btn.style.display = 'none';
+          banner.classList.add('visible');
+        }}, 2500);
+      }}
+    }})();
   </script>
 </body>
 </html>"""
