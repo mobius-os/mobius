@@ -98,16 +98,39 @@ def run_migrations(eng) -> None:
       ))
       conn.commit()
   if "slug" not in apps_cols:
-    # Additive only — leave existing rows NULL. The standalone-route
-    # helper populates lazily on first access (derives from
-    # source_dir's last path segment, falling back to a slugified
-    # name, with a numeric suffix on collision). Doing the backfill
-    # in Python keeps this migration portable across SQLite/Postgres
-    # and avoids guessing at SQLite-specific string funcs.
+    # Additive column + proactive Python backfill. Lazy backfill from
+    # the standalone route alone would mean the frontend's three-dots
+    # menu silently hides on existing apps (it gates on app.slug) until
+    # someone visits the standalone URL — backwards-incompatible UX
+    # for any prod instance with apps predating this column. So we
+    # populate in Python here using the same slugify rule create_app
+    # uses, with a numeric suffix on collision so two apps with the
+    # same name don't blow up the unique index.
     with eng.connect() as conn:
       conn.execute(text(
         "ALTER TABLE apps ADD COLUMN slug VARCHAR(128) NULL"
       ))
+      conn.commit()
+      # Read existing rows ordered by id so deterministic; pure-Python
+      # slug allocation avoids SQLite-specific string functions and
+      # lets us reuse the exact same logic create_app calls.
+      from app.routes.apps import _slugify_for_source_dir
+      rows = conn.execute(
+        text("SELECT id, name FROM apps ORDER BY id")
+      ).fetchall()
+      taken: set[str] = set()
+      for row in rows:
+        base = _slugify_for_source_dir(row[1])
+        candidate = base
+        suffix = 2
+        while candidate in taken:
+          candidate = f"{base}-{suffix}"
+          suffix += 1
+        taken.add(candidate)
+        conn.execute(
+          text("UPDATE apps SET slug = :s WHERE id = :i"),
+          {"s": candidate, "i": row[0]},
+        )
       conn.execute(text(
         "CREATE UNIQUE INDEX IF NOT EXISTS ix_apps_slug ON apps (slug)"
       ))

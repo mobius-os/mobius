@@ -249,9 +249,13 @@ export default function useNavigation() {
   }
 
   useEffect(() => {
-    // Reset URL to / once on mount — deep-link path was parsed above
-    // into state, no need to keep it visible.
-    history.replaceState(null, '', '/')
+    // Reset URL to /shell/ once on mount — deep-link path was parsed
+    // above into state, no need to keep it visible. Must match the
+    // manifest scope (`/shell/`), otherwise an installed PWA whose
+    // start_url is /shell/ would land at /shell/ → 308 → /shell/ →
+    // SPA mount → rewrite back to / → Chromium sees "page outside
+    // scope" and may refuse the next manifest update in-place.
+    history.replaceState(null, '', '/shell/')
 
     function handleBack() {
       backFiredRef.current = true
