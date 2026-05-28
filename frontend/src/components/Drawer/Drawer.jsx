@@ -498,15 +498,22 @@ function DrawerRow({
               </Menu.Item>
               <Menu.Item onSelect={() => onRenameStart()}>Rename</Menu.Item>
               {kind === 'app' && slug && (
-                // Same-tab navigate with ?install=1 — sibling-scope
-                // sub-PWAs DO install separately on Chrome Android,
-                // confirmed empirically. The earlier assumption that
-                // Chrome's WebAPK blocks all same-origin sub-installs
-                // was wrong; it only blocks them when the parent PWA's
-                // scope contains the sub-page. Möbius's narrow
-                // `/shell/` scope is what unlocked this.
+                // Always open the standalone surface in a new browser
+                // tab (`_blank`). From inside the installed Möbius
+                // PWA, Chromium's installed-app registry remembers
+                // Möbius covers this origin and suppresses
+                // `beforeinstallprompt` for any same-origin sub-PWA.
+                // The only reliable install path is Chrome's own
+                // ⋮ → "Add to Home screen" menu — which requires
+                // the user to be in a real browser tab where that
+                // menu exists. `_blank` from an installed PWA pops
+                // to system browser; from a regular tab it just
+                // opens another tab. Either way the user lands in a
+                // context with browser chrome available.
                 <Menu.Item
-                  onSelect={() => { window.location.href = `/apps/${slug}/?install=1` }}
+                  onSelect={() => {
+                    window.open(`/apps/${slug}/?install=1`, '_blank', 'noopener');
+                  }}
                 >
                   Install to home screen
                 </Menu.Item>

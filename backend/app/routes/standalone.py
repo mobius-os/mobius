@@ -476,27 +476,25 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
              style="display:none">
       <div>
         <p class="ic-title" id="ic-title">{app_name_html}</p>
-        <p class="ic-subtitle" id="ic-subtitle">Install to home screen</p>
+        <p class="ic-subtitle" id="ic-subtitle">Add to home screen</p>
       </div>
     </div>
     <div class="ic-info" id="ic-info">
-      <div class="ic-info-row">
-        <span class="ic-info-dot">›</span>
-        <span>One-tap launch from your home screen.</span>
+      <div style="font-size:14px;line-height:1.55;color:var(--text)">
+        Tap the menu
+        <strong style="font-size:18px;vertical-align:-2px">⋮</strong>
+        at the top of this page, then
+        <strong>Add to Home screen</strong>
+        (or <strong>Install app</strong>).
       </div>
-      <div class="ic-info-row">
-        <span class="ic-info-dot">›</span>
-        <span>Edit anytime — just open Möbius and chat.</span>
+      <div style="font-size:12px;color:var(--muted);margin-top:10px;line-height:1.5">
+        Edit it anytime by opening Möbius and chatting with the agent.
       </div>
     </div>
     <div class="ic-actions">
-      <button class="ic-btn ic-btn--secondary" id="ic-cancel">Not now</button>
-      <button class="ic-btn ic-btn--primary" id="ic-install">Install</button>
+      <button class="ic-btn ic-btn--primary" id="ic-cancel">Got it</button>
+      <button class="ic-btn ic-btn--secondary" id="ic-install" style="display:none">Install</button>
     </div>
-    <p class="ic-manual-hint" id="ic-manual-hint">
-      Trouble installing? Use your browser's menu
-      (<span>⋮</span>) and tap <strong>Add to Home screen</strong>.
-    </p>
     <div class="ic-success">
       <div class="ic-success-icon" aria-hidden="true">✓</div>
       <div class="ic-success-title">Installed</div>
@@ -793,10 +791,16 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       }});
 
       function wireInstallButton() {{
+        // Opportunistic — only reveals the in-card Install button
+        // when Chromium actually fires beforeinstallprompt (desktop
+        // Chrome, first-time visitors who haven't installed Möbius).
+        // For the common case (installed Möbius PWA), BIP is
+        // suppressed and the button stays hidden — the user follows
+        // the Chrome-menu instruction in the card body.
         if (!window.__bipDeferred) return;
+        installBtn.style.display = '';
         installBtn.disabled = false;
         installBtn.style.opacity = '';
-        subtitle.textContent = 'Install to home screen';
         installBtn.onclick = async () => {{
           const deferred = window.__bipDeferred;
           if (!deferred) return;
@@ -841,56 +845,19 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       }}
 
       // Track "fallback painted" so a late-arriving bip event can
-      // undo the suppression message and restore the Install button.
-      let fallbackPainted = false;
-      function buildDefaultInfo() {{
-        const make = (text) => {{
-          const row = document.createElement('div');
-          row.className = 'ic-info-row';
-          const dot = document.createElement('span');
-          dot.className = 'ic-info-dot';
-          dot.setAttribute('aria-hidden', 'true');
-          dot.textContent = '\u203A';
-          const span = document.createElement('span');
-          span.textContent = text;
-          row.appendChild(dot);
-          row.appendChild(span);
-          return row;
-        }};
-        info.textContent = '';
-        info.appendChild(make('One-tap launch from your home screen.'));
-        info.appendChild(make('Edit anytime \u2014 just open M\u00f6bius and chat.'));
-      }}
-      function paintSuppressionFallback() {{
-        if (fallbackPainted) return;
-        fallbackPainted = true;
-        subtitle.textContent = "Can't install right now";
-        info.textContent = '';
-        const hint = document.createElement('div');
-        hint.style.fontSize = '13px';
-        hint.style.color = 'var(--muted)';
-        hint.style.lineHeight = '1.6';
-        hint.textContent =
-          'Your browser blocked the automatic install (this happens ' +
-          'after dismissing too many times). Try the browser menu ' +
-          '(\u22ee) and tap "Install app" or "Add to Home screen".';
-        info.appendChild(hint);
-        installBtn.style.display = 'none';
-        cancelBtn.textContent = 'Close';
-        cancelBtn.style.flex = '1';
-      }}
-      function restoreFromSuppression() {{
-        if (!fallbackPainted) return;
-        fallbackPainted = false;
-        buildDefaultInfo();
-        installBtn.style.display = '';
-        cancelBtn.textContent = 'Not now';
-        cancelBtn.style.flex = '';
-      }}
+      // The card's default state already IS the install instruction
+      // (Chrome \u22ee \u2192 Add to Home screen). `paintSuppressionFallback`
+      // is a no-op kept as a named hook in case a future iteration
+      // wants stronger visual cue when BIP doesn't fire in time.
+      function paintSuppressionFallback() {{ /* no-op */ }}
       function onBipReady() {{
-        // Late-bip recovery: restore the install layout if we had
-        // already painted the suppression fallback.
-        restoreFromSuppression();
+        // Chromium fires beforeinstallprompt only when both
+        // engagement + install-eligibility criteria are met AND the
+        // origin isn't already covered by an installed PWA. In the
+        // common case (M\u00f6bius already installed at this origin), BIP
+        // is suppressed entirely. When it DOES fire (desktop, fresh
+        // visitors), reveal the in-card Install button as a bonus
+        // one-tap path on top of the Chrome-menu instruction.
         wireInstallButton();
       }}
       if (window.__bipDeferred) wireInstallButton();
