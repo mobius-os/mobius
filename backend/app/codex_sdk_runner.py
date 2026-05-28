@@ -657,13 +657,14 @@ async def run_codex_sdk_turn(
   # Per-chat picker writes the `model` key; the legacy file format
   # uses `codex_model`. Honor both so existing setups don't regress.
   model = agent_settings.get("model") or agent_settings.get("codex_model")
-  # Cross-provider mismatch defense. Chats persisted before
-  # initial_chat_defaults learned to provider-validate the snapshot
-  # can end up with a Claude model on a Codex chat (the global
-  # default file remembered the last Claude pick when a fresh Codex
-  # chat was created). Sending that to Codex 400s every turn with
-  # "model not supported". Quietly normalize to the Codex default
-  # so existing chats keep working; the user can re-pick in the
+  # Cross-provider mismatch defense. Chats persisted before the
+  # snapshot logic learned to provider-validate (see chat.py
+  # snapshot-on-first-send and effective_agent_settings) can end up
+  # with a Claude model on a Codex chat (the global default file
+  # remembered the last Claude pick when a fresh Codex chat was
+  # created). Sending that to Codex 400s every turn with "model
+  # not supported". Quietly normalize to the Codex default so
+  # existing chats keep working; the user can re-pick in the
   # picker if they want a specific Codex model.
   from app.providers import _model_belongs_to_other_provider, DEFAULT_MODELS
   if model and _model_belongs_to_other_provider(model, "codex"):

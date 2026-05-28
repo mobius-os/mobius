@@ -325,10 +325,11 @@ async def run_claude_sdk_turn(
   _model = (agent_settings or {}).get("model") or None
   _effort = (agent_settings or {}).get("effort") or None
   # Cross-provider mismatch defense (mirrors codex_sdk_runner).
-  # Chats persisted before initial_chat_defaults provider-validated
-  # the snapshot can carry a Codex model on a Claude chat. Sending
-  # that through here would surface as an obscure SDK error.
-  # Quietly normalize so existing chats keep working.
+  # Chats persisted before the snapshot logic learned to
+  # provider-validate (see chat.py snapshot-on-first-send and
+  # effective_agent_settings) can carry a Codex model on a Claude
+  # chat. Sending that through here would surface as an obscure SDK
+  # error. Quietly normalize so existing chats keep working.
   from app.providers import _model_belongs_to_other_provider, DEFAULT_MODELS
   if _model and _model_belongs_to_other_provider(_model, "claude"):
     log.warning(

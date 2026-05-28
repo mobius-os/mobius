@@ -801,6 +801,10 @@ async def _run_chat_impl(
   # turn in the original — a real "why did my model change?" surprise.
   # The picker's PATCH path is the other commit point; this one covers
   # the "just typed and sent without opening the picker" path.
+  # Invariant: keep this block await-free through the commit below. A
+  # picker PATCH from another coroutine can only interleave at await
+  # points; if one is added here, a concurrent PATCH could clobber the
+  # user's pick.
   if chat_row is not None and chat_overrides is None:
     snapshot = {
       k: agent_settings[k]

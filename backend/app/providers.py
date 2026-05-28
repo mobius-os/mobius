@@ -93,35 +93,6 @@ def write_agent_settings(data_dir: str, settings: dict) -> bool:
     return False
 
 
-def initial_chat_defaults(data_dir: str, provider: str) -> dict:
-  """Returns the {model, effort} snapshot a brand-new chat should
-  start with — current global defaults merged with hard-coded
-  per-provider fallbacks so the picker always renders something
-  selected AND the model actually belongs to the chat's provider.
-
-  The global file holds ONE model (the user's last pick across
-  providers); when a new chat starts on a DIFFERENT provider, that
-  remembered model is the wrong one to seed — e.g. file has
-  `gpt-5.4` but owner.provider is still `claude`. In that case
-  ignore the file's model and use the provider's own top model.
-  Effort is provider-agnostic so the file's value carries cleanly.
-
-  This snapshot is written into chat.agent_settings_json so each
-  chat is fully self-contained: subsequent global-default changes
-  don't bleed into existing chats.
-  """
-  defaults = _load_agent_settings(data_dir)
-  file_model = defaults.get("model")
-  if file_model and not _model_belongs_to_other_provider(file_model, provider):
-    model = file_model
-  else:
-    model = DEFAULT_MODELS.get(provider, DEFAULT_MODELS["claude"])
-  return {
-    "model": model,
-    "effort": defaults.get("effort") or DEFAULT_EFFORT,
-  }
-
-
 def effective_agent_settings(
   data_dir: str,
   chat_overrides: "AgentSettingsOverride | dict[str, Any] | None" = None,

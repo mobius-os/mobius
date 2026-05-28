@@ -78,7 +78,7 @@ export default function SlashPicker({
   // are optimistic (UI updates immediately) but a PATCH failure
   // rolls back. The backend guarantees `effective` always has a
   // valid model + effort for this provider (see providers.py
-  // initial_chat_defaults + effective_agent_settings fallbacks).
+  // effective_agent_settings fallbacks).
   const [draftModel, setDraftModel] = useState(effective?.model || '')
   const [draftEffort, setDraftEffort] = useState(effective?.effort || '')
   // The provider radio is driven by the chat's current provider; a
