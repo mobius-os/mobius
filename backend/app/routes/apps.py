@@ -448,7 +448,7 @@ async def validate_app(
       js = path.read_text(encoding="utf-8")
       if not js.strip():
         issues.append("Compiled file is empty.")
-      elif "export default" not in js and "export{" not in js:
+      elif not re.search(r"export\s+default\b|export\s*\{[^}]*\bas\s+default\b", js):
         issues.append(
           "Compiled JS has no default export — "
           "the component won't mount."

@@ -347,6 +347,7 @@ async def run_claude_sdk_turn(
       "setting_sources": None,
       "include_partial_messages": True,
       "can_use_tool": can_use_tool,
+      "cli_path": "/usr/local/bin/claude",
       "hooks": {
         "PreToolUse": [
           HookMatcher(matcher=None, hooks=[keepalive_hook]),

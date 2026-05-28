@@ -1,5 +1,37 @@
 #!/bin/sh
+# pm-commit: stage and commit agent-touched files with a denylist guard.
+#
+# Default: stage everything visible to git (.gitignore already filters
+# most runtime state), then unstage anything in the denylist below. If
+# more than 50 files end up staged after that, abort — caller almost
+# certainly meant to scope narrower. Pass --allow-broad as the FIRST
+# arg to override.
+#
+# Usage:
+#   pm-commit "message"
+#   pm-commit --allow-broad "message"   # for legitimate big sweeps
 set -e
-git -C /data add -A
-git -C /data diff --cached --quiet && exit 0
-git -C /data commit -m "$1"
+cd /data
+
+ALLOW_BROAD=0
+if [ "$1" = "--allow-broad" ]; then
+  ALLOW_BROAD=1
+  shift
+fi
+
+DENY='^(agent-browser-profiles|compiled|logs|cron-logs|push|generated)/'
+
+git add -A
+# Unstage anything matching the denylist (belt-and-braces with .gitignore).
+git diff --cached --name-only | grep -E "$DENY" | xargs -r git reset HEAD --
+
+staged=$(git diff --cached --name-only | wc -l)
+if [ "$staged" -gt 50 ] && [ "$ALLOW_BROAD" -ne 1 ]; then
+  echo "pm-commit: $staged files staged — refusing without --allow-broad" >&2
+  echo "Top of staged set:" >&2
+  git diff --cached --stat | head -20 >&2
+  exit 2
+fi
+
+git diff --cached --quiet && exit 0
+git commit -m "$1"

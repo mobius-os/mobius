@@ -239,8 +239,11 @@ python3 /app/scripts/init_agent_context.py
 cat > /data/.gitignore <<'EOF'
 cli-auth/
 push/*.pem
+push/*.json
+push/*.txt
 service-token.txt
 .secret-key
+.pm-commit
 compiled/
 shell/dist/
 shell/node_modules/
@@ -253,6 +256,10 @@ backups/
 apps/*/data/
 recovery_chat.jsonl
 .recover-pending
+agent-browser-profiles/
+generated/
+logs/
+cron-logs/
 EOF
 chown mobius:mobius /data/.gitignore 2>/dev/null || true
 
@@ -321,6 +328,10 @@ if [ ! -f /data/.pm-commit ] || ! cmp -s /app/scripts/pm-commit /data/.pm-commit
   chmod +x /data/.pm-commit
   chown mobius:mobius /data/.pm-commit 2>/dev/null || true
 fi
+# POSIX shells don't search `.` in $PATH, so `pm-commit "msg"` from /data
+# would otherwise fail with "command not found". The symlink makes the
+# natural invocation work from any cwd.
+ln -sf /data/.pm-commit /usr/local/bin/pm-commit
 
 
 # Deferred restore: a previous boot's recovery chat may have written
