@@ -48,7 +48,11 @@
   background: var(--accent, #a78bfa);
   color: #fff;
   border: none;
-  border-radius: 6px;
+  /* Unified primary-CTA radius with .settings__btn (10px). Compact
+     action chips like .provider-row__action stay pill-shaped
+     (999px); .pa__btn is a form CTA, not a chip, so it joins the
+     primary family. */
+  border-radius: 10px;
   padding: 10px 20px;
   font-size: 14px;
   font-weight: 600;

@@ -103,6 +103,48 @@
   box-shadow: 0 0 0 3px var(--accent-dim);
 }
 
+/* Show/hide affix lives inside .settings__input-wrap, absolutely
+   positioned on the right. The input gets extra right-padding so
+   the value text never collides with the eye icon. */
+.settings__input-wrap {
+  position: relative;
+  width: 100%;
+}
+
+.settings__input--with-affix {
+  padding-right: 44px;
+}
+
+.settings__input-affix {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 8px;
+  transition: color 0.15s, background 0.15s;
+}
+
+.settings__input-affix:hover {
+  color: var(--text);
+  background: var(--surface2);
+}
+
+.settings__input-affix:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  color: var(--text);
+}
+
 .settings__success {
   font-size: 13px;
   color: var(--accent);
@@ -126,10 +168,9 @@
   transition: background 0.15s;
 }
 
-/* Keyboard focus ring on primary + outline buttons + toggle. */
+/* Keyboard focus ring on primary + outline buttons. */
 .settings__btn:focus-visible,
-.settings__btn--outline:focus-visible,
-.settings__toggle:focus-visible {
+.settings__btn--outline:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -211,44 +252,11 @@
   background: var(--switch-track-color-checked-disabled);
 }
 
-/* Toggle switch */
-.settings__toggle {
-  position: relative;
-  width: 48px;
-  height: 28px;
-  border-radius: 14px;
-  border: none;
-  background: var(--border);
-  cursor: pointer;
-  padding: 0;
-  flex-shrink: 0;
-  transition: background 0.2s;
-}
-
-.settings__toggle:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.settings__toggle--on {
-  background: var(--accent);
-}
-
-.settings__toggle-knob {
-  position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: #fff;
-  transition: transform 0.2s;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-}
-
-.settings__toggle--on .settings__toggle-knob {
-  transform: translateX(20px);
-}
+/* The bespoke `.settings__toggle*` rules that used to live below
+   here were deleted: SettingsView.jsx renders the SDK <Switch>
+   from `@openai/apps-sdk-ui/components/Switch`, which carries its
+   own track + knob markup, so the custom toggle classes were
+   unreachable. Removed instead of left as dead weight. */
 
 /* Provider rows + .settings__providers wrapper styles live in
    ../ProviderAuth/ProviderAuth.css since the component is shared
