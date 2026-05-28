@@ -1,6 +1,7 @@
 """Routes for managing the mini-app registry."""
 
 import asyncio
+import io
 import json
 import re
 import shutil
@@ -15,7 +16,9 @@ from app import auth, models, schemas
 from app.compiler import compile_jsx
 from app.config import get_settings
 from app.database import get_db
-from app.deps import get_current_owner, get_current_owner_or_app
+from app.deps import (
+  get_current_owner, get_current_owner_or_app, get_principal, Principal,
+)
 
 router = APIRouter(prefix="/api/apps", tags=["apps"])
 
@@ -195,6 +198,65 @@ async def update_app(
   db.commit()
   db.refresh(app)
   return app
+
+
+@router.put("/{app_id}/icon", status_code=204)
+async def update_icon(
+  app_id: int,
+  request: Request,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Owner uploads a custom icon for the app's standalone PWA install.
+
+  Accepts raw PNG / JPEG / WebP bytes (anything Pillow can decode).
+  The body is validated, converted to RGB, downscaled to fit
+  within 1024x1024 if larger, and re-encoded as PNG before storing
+  in `App.icon_png`. The standalone icon endpoint at
+  `/apps/<slug>/icon-<N>.png` resizes from this on the fly per
+  request size, so one upload covers every icon size the manifest
+  declares.
+
+  Authorized for the owner OR for an app-scoped token whose
+  `app_id` matches the path — the app can manage its own visual
+  identity, but cannot touch a sibling app's icon. The standalone
+  install card lives at `/apps/<slug>/` where the page context
+  has an app-scoped token in `localStorage['token']` (minted by
+  `claim-token` on first render), so requiring owner-only here
+  would 403 the upload from the install surface. To revert to
+  the auto-generated letter icon, send a zero-byte body.
+  """
+  if principal.app_id is not None and principal.app_id != app_id:
+    raise HTTPException(
+      status_code=403,
+      detail="App token can only modify its own icon.",
+    )
+  body = await request.body()
+  if len(body) > 2 * 1024 * 1024:
+    raise HTTPException(413, "Icon too large (max 2 MB).")
+  app = (
+    db.query(models.App).filter(models.App.id == app_id).first()
+  )
+  if not app:
+    raise HTTPException(404, "App not found.")
+  if not body:
+    app.icon_png = None
+    db.commit()
+    return Response(status_code=204)
+  from PIL import Image
+  try:
+    img = Image.open(io.BytesIO(body))
+    img.load()
+  except Exception:
+    raise HTTPException(415, "Not a valid image.")
+  if img.mode != "RGB":
+    img = img.convert("RGB")
+  img.thumbnail((1024, 1024), Image.LANCZOS)
+  buf = io.BytesIO()
+  img.save(buf, format="PNG", optimize=True)
+  app.icon_png = buf.getvalue()
+  db.commit()
+  return Response(status_code=204)
 
 
 @router.delete("/{app_id}", status_code=204)
