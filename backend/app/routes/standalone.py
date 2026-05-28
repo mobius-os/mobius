@@ -245,12 +245,10 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   # terminators inside JS strings and would otherwise corrupt the
   # source). Emit without surrounding quotes since json.dumps
   # already wraps in double-quotes.
-  app_name_js_literal = (
-    json.dumps(app_name)
-    .replace("</", "<\\/")
-    .replace(" ", "\\u2028")
-    .replace(" ", "\\u2029")
-  )
+  # json.dumps already escapes U+2028 and U+2029 (Python's json
+  # module is non-strict by default). All we need extra is to
+  # neutralize `</` for in-HTML embedding.
+  app_name_js_literal = json.dumps(app_name).replace("</", "<\\/")
   html = f"""<!doctype html>
 <html lang="en">
 <head>

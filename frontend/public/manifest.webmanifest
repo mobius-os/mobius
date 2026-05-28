@@ -2,7 +2,7 @@
   "name": "Möbius",
   "short_name": "Möbius",
   "description": "AI-powered personal app platform.",
-  "id": "/shell/",
+  "id": "/",
   "theme_color": "#0c0f14",
   "background_color": "#0c0f14",
   "display": "standalone",
