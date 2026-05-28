@@ -64,6 +64,7 @@ async def seed():
       description="A simple starter app — ask the agent to modify or replace it.",
       jsx_source=_JSX,
       compiled_path=compiled_path,
+      slug="hello-world",
     )
     db.add(app)
     db.commit()

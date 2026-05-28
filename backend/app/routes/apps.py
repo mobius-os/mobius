@@ -38,6 +38,43 @@ def _derive_source_dir(data_dir: str, name: str) -> str:
   return str(Path(data_dir) / "apps" / _slugify_for_source_dir(name))
 
 
+def allocate_unique_slug(db: Session, name: str, exclude_id: int | None = None) -> str:
+  """Returns a slug that isn't taken by any other App row.
+
+  Starts from the name's slug; if it collides, appends -2, -3, ...
+  until a free one is found. `exclude_id` lets callers re-allocate
+  for an existing row without colliding with itself (e.g. backfill).
+  Slugs pin standalone-install identity (manifest `id`) — keep them
+  stable across renames so home-screen icons don't orphan.
+  """
+  base = _slugify_for_source_dir(name)
+  candidate = base
+  suffix = 2
+  while True:
+    q = db.query(models.App).filter(models.App.slug == candidate)
+    if exclude_id is not None:
+      q = q.filter(models.App.id != exclude_id)
+    if q.first() is None:
+      return candidate
+    candidate = f"{base}-{suffix}"
+    suffix += 1
+
+
+def ensure_slug(db: Session, app: models.App) -> str:
+  """Returns the app's slug, populating it on first call for legacy rows.
+
+  Apps created before the slug column existed have NULL slug. Lazy
+  backfill on first standalone-route access keeps the migration
+  pure-additive and avoids guessing slugs we might not be able to
+  validate at migration time (uniqueness needs a transaction).
+  """
+  if app.slug:
+    return app.slug
+  app.slug = allocate_unique_slug(db, app.name, exclude_id=app.id)
+  db.commit()
+  return app.slug
+
+
 @router.get("/", response_model=list[schemas.AppOut])
 def list_apps(
   db: Session = Depends(get_db),
@@ -84,6 +121,7 @@ async def create_app(
     source_dir=source_dir,
     cross_app_access=body.cross_app_access,
     share_with_apps=body.share_with_apps,
+    slug=allocate_unique_slug(db, body.name),
   )
   db.add(app)
   db.flush()  # assigns app.id without committing

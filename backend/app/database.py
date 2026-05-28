@@ -97,6 +97,25 @@ def run_migrations(eng) -> None:
         "NOT NULL DEFAULT 'none'"
       ))
       conn.commit()
+  if "slug" not in apps_cols:
+    # Additive only — leave existing rows NULL. The standalone-route
+    # helper populates lazily on first access (derives from
+    # source_dir's last path segment, falling back to a slugified
+    # name, with a numeric suffix on collision). Doing the backfill
+    # in Python keeps this migration portable across SQLite/Postgres
+    # and avoids guessing at SQLite-specific string funcs.
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN slug VARCHAR(128) NULL"
+      ))
+      conn.execute(text(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_apps_slug ON apps (slug)"
+      ))
+      conn.commit()
+  if "icon_png" not in apps_cols:
+    with eng.connect() as conn:
+      conn.execute(text("ALTER TABLE apps ADD COLUMN icon_png BLOB NULL"))
+      conn.commit()
   if "chats" in tables:
     chats_cols = {c["name"] for c in inspector.get_columns("chats")}
     _add = []

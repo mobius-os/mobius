@@ -73,6 +73,11 @@ class AppOut(BaseModel):
   pinned_at: datetime | None = None
   cross_app_access: ShareLevel = "none"
   share_with_apps: ShareLevel = "none"
+  # URL slug for the standalone PWA install at /apps/<slug>/. Null
+  # only for legacy rows from before the slug column existed; lazy-
+  # backfilled on first access via standalone routes (see
+  # routes/apps.py:ensure_slug).
+  slug: str | None = None
   created_at: datetime
   updated_at: datetime
 

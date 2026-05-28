@@ -69,6 +69,7 @@ push_router = _load("push")
 notifications_router = _load("notifications")
 debug_router = _load("debug")
 theme_router = _load("theme")
+standalone_router = _load("standalone")
 
 __all__ = [
   "auth_router",
@@ -88,4 +89,5 @@ __all__ = [
   "notifications_router",
   "debug_router",
   "theme_router",
+  "standalone_router",
 ]

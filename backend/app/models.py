@@ -14,7 +14,9 @@ you'd otherwise add a column for, use per-app storage at
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, JSON
+from sqlalchemy import (
+  Column, DateTime, ForeignKey, Integer, JSON, LargeBinary, String, Text,
+)
 
 from app.database import Base
 
@@ -77,6 +79,21 @@ class App(Base):
   description = Column(Text, nullable=False, default="")
   jsx_source = Column(Text, nullable=False, default="")
   compiled_path = Column(String(512), nullable=False, default="")
+  # URL slug for the public standalone surface at /apps/<slug>/. Unique
+  # across apps. Derived from `name` at creation time via the same
+  # slugify rule as `source_dir`, with a numeric suffix on collision
+  # (e.g. `snake-2`) so a user creating two apps with the same name
+  # doesn't get a unique-constraint failure. Stable across renames —
+  # the slug pins the install identity (manifest `id`), and changing
+  # it after a user has installed the standalone PWA would orphan
+  # their home-screen icon.
+  slug = Column(String(128), nullable=True, unique=True, index=True)
+  # User-uploaded icon for the standalone PWA install (PNG bytes).
+  # Null means fall back to the auto-generated default (first letter
+  # of `name` on a deterministic color). Stored inline because icons
+  # are small (~10-50KB at 512x512) and per-app — avoids needing a
+  # separate file store + cleanup path.
+  icon_png = Column(LargeBinary, nullable=True, default=None)
   # Absolute directory under /data/apps/ holding this app's source
   # files (typically `/data/apps/<dirname>`).  Stored explicitly so
   # the file watcher can map a modified `index.jsx` back to its DB
