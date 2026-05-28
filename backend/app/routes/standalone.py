@@ -24,6 +24,7 @@ logged in.
 """
 
 import io
+import json
 import re
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -237,8 +238,18 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   # execute in the standalone scope with the user's JWT.
   from html import escape
   app_name_html = escape(app_name)
-  app_name_json = (
-    app_name.replace("\\", "\\\\").replace('"', '\\"')
+  # JSON-encode for safe inline-script embedding: json.dumps handles
+  # quotes/backslashes/control chars correctly, then neutralize the
+  # three sequences JSON-encoding doesn't cover for in-HTML use —
+  # `</` (script-tag breakout), U+2028, U+2029 (treated as line
+  # terminators inside JS strings and would otherwise corrupt the
+  # source). Emit without surrounding quotes since json.dumps
+  # already wraps in double-quotes.
+  app_name_js_literal = (
+    json.dumps(app_name)
+    .replace("</", "<\\/")
+    .replace(" ", "\\u2028")
+    .replace(" ", "\\u2029")
   )
   html = f"""<!doctype html>
 <html lang="en">
@@ -318,8 +329,8 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   </button>
   <script type="module">
     const APP_ID = {app_id};
-    const APP_SLUG = {slug!r};
-    const APP_NAME = "{app_name_json}";
+    const APP_SLUG = {json.dumps(slug)};
+    const APP_NAME = {app_name_js_literal};
 
     // Auth: read the owner JWT from localStorage (same origin so it's
     // visible). If missing, redirect to login with a return URL.

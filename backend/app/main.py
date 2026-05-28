@@ -243,6 +243,20 @@ def health():
   return {"status": "ok"}
 
 
+@app.get("/", include_in_schema=False)
+def root_redirect():
+  """Redirects the bare domain to the Möbius shell at `/shell/`.
+
+  The PWA manifest's `scope` is `/shell/` so per-app sub-PWAs at
+  `/apps/<slug>/` aren't absorbed into Möbius's install identity
+  (the platform suppresses install prompts for in-scope URLs).
+  Redirecting `/` keeps bookmarks and the bare-domain entry point
+  working — users land where the shell actually lives.
+  """
+  from fastapi.responses import RedirectResponse
+  return RedirectResponse(url="/shell/", status_code=308)
+
+
 # -- Frontend static files (single-container mode) ---------------------
 # Prefer the agent-editable build at /data/shell/dist/ if it exists and
 # is complete (both assets/ and index.html must be present).
