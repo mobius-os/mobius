@@ -303,46 +303,151 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       border-radius: 50%; animation: spin 0.8s linear infinite;
     }}
     @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
-    /* Install banner: full-width at the top, slides down on
-       beforeinstallprompt (Chromium) or after a short timeout on
-       iOS standalone-eligible Safari. Hidden when the page is
-       already running in standalone mode (the install already
-       happened) or after the user dismisses. */
-    #install-banner {{
-      position: fixed; top: 0; left: 0; right: 0;
-      background: var(--accent); color: #0c0f14;
-      padding: 12px 16px;
-      display: flex; align-items: center; gap: 12px;
-      font-size: 13px; font-weight: 500;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-      z-index: 10000;
-      transform: translateY(-100%);
-      transition: transform 0.25s ease-out;
+    /* Install confirm card: bottom-sheet style overlay that appears
+       after the app renders, with the icon + name + Install button.
+       The button is the install trigger — tapping it calls
+       `BeforeInstallPromptEvent.prompt()` directly, then Chromium's
+       native install dialog appears for the final OS-level confirm.
+       Hidden when already running in standalone mode (install
+       already happened) or after dismiss, unless `?install=1` is in
+       the URL (drawer's "Install to home screen" forces show even
+       on a previously-dismissed app). */
+    #install-backdrop {{
+      position: fixed; inset: 0;
+      background: rgba(0, 0, 0, 0.5);
+      backdrop-filter: blur(2px);
+      -webkit-backdrop-filter: blur(2px);
+      z-index: 9998;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease-out;
     }}
-    #install-banner.visible {{ transform: translateY(0); }}
-    #install-banner .ib-text {{ flex: 1; line-height: 1.35; }}
-    #install-banner .ib-btn {{
-      background: #0c0f14; color: var(--accent-hover, #c4b5fd);
-      border: none; border-radius: 8px;
-      padding: 7px 14px; font-size: 13px; font-weight: 600;
+    #install-backdrop.visible {{ opacity: 1; pointer-events: auto; }}
+    #install-card {{
+      position: fixed; left: 0; right: 0; bottom: 0;
+      background: var(--surface, #14181f);
+      color: var(--text, #d4d4d8);
+      padding: 24px 20px calc(24px + env(safe-area-inset-bottom));
+      border-radius: 18px 18px 0 0;
+      box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.5);
+      z-index: 9999;
+      transform: translateY(100%);
+      transition: transform 0.3s cubic-bezier(0.2, 0.9, 0.3, 1);
+      max-width: 520px;
+      margin: 0 auto;
+      font-family: var(--font);
+    }}
+    #install-card.visible {{ transform: translateY(0); }}
+    .ic-header {{
+      display: flex; align-items: center; gap: 14px;
+      margin-bottom: 16px;
+    }}
+    .ic-icon {{
+      width: 56px; height: 56px;
+      border-radius: 12px;
+      flex-shrink: 0;
+      background: var(--bg);
+    }}
+    .ic-title {{
+      font-size: 17px; font-weight: 600; color: var(--text);
+      margin: 0 0 2px 0;
+    }}
+    .ic-subtitle {{
+      font-size: 13px; color: var(--muted, #52525b);
+      margin: 0;
+    }}
+    .ic-info {{
+      font-size: 13px; color: var(--muted);
+      line-height: 1.5;
+      margin: 0 0 18px 0;
+      padding: 12px 14px;
+      background: var(--bg);
+      border-radius: 10px;
+      border: 1px solid var(--border, #252b36);
+    }}
+    .ic-info-row {{
+      display: flex; gap: 8px; align-items: flex-start;
+    }}
+    .ic-info-row + .ic-info-row {{ margin-top: 8px; }}
+    .ic-info-dot {{
+      color: var(--accent, #a78bfa);
+      flex-shrink: 0;
+    }}
+    .ic-actions {{
+      display: flex; gap: 10px;
+    }}
+    .ic-btn {{
+      flex: 1;
+      border: none; border-radius: 10px;
+      padding: 13px 16px;
+      font-size: 15px; font-weight: 600;
       font-family: inherit; cursor: pointer;
-      white-space: nowrap;
     }}
-    #install-banner .ib-dismiss {{
-      background: transparent; color: #0c0f14;
-      border: none; padding: 4px 8px; cursor: pointer;
-      font-size: 18px; line-height: 1; opacity: 0.7;
+    .ic-btn--secondary {{
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--border);
     }}
-    #install-banner .ib-dismiss:hover {{ opacity: 1; }}
+    .ic-btn--primary {{
+      background: var(--accent, #a78bfa);
+      color: #0c0f14;
+    }}
+    .ic-btn--primary:active {{
+      background: var(--accent-hover, #c4b5fd);
+    }}
+    .ic-success {{ display: none; text-align: center; padding: 8px 0; }}
+    .ic-success-icon {{
+      font-size: 36px; line-height: 1; margin-bottom: 10px;
+    }}
+    .ic-success-title {{
+      font-size: 17px; font-weight: 600; margin-bottom: 6px;
+    }}
+    .ic-success-hint {{
+      font-size: 13px; color: var(--muted); line-height: 1.5;
+      margin-bottom: 18px;
+    }}
+    #install-card.success .ic-header,
+    #install-card.success .ic-info,
+    #install-card.success .ic-actions {{ display: none; }}
+    #install-card.success .ic-success {{ display: block; }}
   </style>
 </head>
 <body>
   <div id="root"></div>
   <div id="loading"><div class="spinner"></div><div>Loading {app_name_html}…</div></div>
-  <div id="install-banner" role="region" aria-label="Install app">
-    <span class="ib-text" id="install-banner-text"></span>
-    <button class="ib-btn" id="install-banner-btn"></button>
-    <button class="ib-dismiss" id="install-banner-dismiss" aria-label="Dismiss">×</button>
+  <div id="install-backdrop"></div>
+  <div id="install-card" role="dialog" aria-modal="true" aria-labelledby="ic-title">
+    <div class="ic-header">
+      <img class="ic-icon" src="/apps/{slug}/icon-192.png" alt="">
+      <div>
+        <p class="ic-title" id="ic-title">{app_name_html}</p>
+        <p class="ic-subtitle" id="ic-subtitle">Install to home screen</p>
+      </div>
+    </div>
+    <div class="ic-info" id="ic-info">
+      <div class="ic-info-row">
+        <span class="ic-info-dot">›</span>
+        <span>One-tap launch from your home screen.</span>
+      </div>
+      <div class="ic-info-row">
+        <span class="ic-info-dot">›</span>
+        <span>Edit anytime — just open Möbius and chat.</span>
+      </div>
+    </div>
+    <div class="ic-actions">
+      <button class="ic-btn ic-btn--secondary" id="ic-cancel">Not now</button>
+      <button class="ic-btn ic-btn--primary" id="ic-install">Install</button>
+    </div>
+    <div class="ic-success">
+      <div class="ic-success-icon" aria-hidden="true">✓</div>
+      <div class="ic-success-title">Installed</div>
+      <div class="ic-success-hint">
+        Find {app_name_html} on your home screen and tap to launch.
+      </div>
+      <div class="ic-actions">
+        <button class="ic-btn ic-btn--primary" id="ic-done">Done</button>
+      </div>
+    </div>
   </div>
   <script type="module">
     const APP_ID = {app_id};
@@ -406,47 +511,89 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       }}
     }}
 
-    // Install banner: surfaces a one-tap install affordance.
-    // Chromium fires `beforeinstallprompt` when the manifest is valid
-    // and the page is install-eligible — we capture the event, defer
-    // it, and bind it to the banner button so the user gets a real
-    // install dialog on tap. Safari (iOS) doesn't fire the event,
-    // so we sniff for it and show share-menu instructions instead.
-    // Suppressed entirely when already running in standalone mode
-    // (the user already installed) or when previously dismissed
-    // this session.
-    (function setupInstallBanner() {{
-      const banner = document.getElementById('install-banner');
-      const text = document.getElementById('install-banner-text');
-      const btn = document.getElementById('install-banner-btn');
-      const dismiss = document.getElementById('install-banner-dismiss');
+    // Install confirm card: bottom-sheet overlay with the icon,
+    // app name, brief value-prop, and an Install button that IS the
+    // install trigger. The button calls
+    // `BeforeInstallPromptEvent.prompt()` directly, which is the
+    // only way to fire Chromium's native install dialog
+    // programmatically — and only works when (a) we have the
+    // deferred event in hand, (b) the call happens inside a real
+    // user gesture handler on the page whose manifest is being
+    // installed. That's why this card has to live here on
+    // `/apps/<slug>/`, not in the Möbius shell.
+    //
+    // Suppression: skipped when already running in standalone mode
+    // (install already happened). Session-storage dismiss is
+    // respected EXCEPT when `?install=1` is in the URL — the drawer
+    // sets that to force-show even if the user dismissed earlier.
+    (function setupInstallCard() {{
+      const card = document.getElementById('install-card');
+      const backdrop = document.getElementById('install-backdrop');
+      const installBtn = document.getElementById('ic-install');
+      const cancelBtn = document.getElementById('ic-cancel');
+      const doneBtn = document.getElementById('ic-done');
+      const subtitle = document.getElementById('ic-subtitle');
+      const info = document.getElementById('ic-info');
+
       const inStandalone =
         window.matchMedia('(display-mode: standalone)').matches ||
         window.navigator.standalone === true;
       if (inStandalone) return;
-      if (sessionStorage.getItem('mobius-install-dismissed-' + APP_SLUG)) return;
-      dismiss.addEventListener('click', () => {{
-        banner.classList.remove('visible');
-        sessionStorage.setItem('mobius-install-dismissed-' + APP_SLUG, '1');
+
+      const forceShow = new URLSearchParams(window.location.search).get('install') === '1';
+      const dismissKey = 'mobius-install-dismissed-' + APP_SLUG;
+      if (!forceShow && sessionStorage.getItem(dismissKey)) return;
+
+      function show() {{
+        backdrop.classList.add('visible');
+        card.classList.add('visible');
+      }}
+      function hideAndDismiss() {{
+        backdrop.classList.remove('visible');
+        card.classList.remove('visible');
+        sessionStorage.setItem(dismissKey, '1');
+      }}
+      function showSuccess() {{
+        card.classList.add('success');
+      }}
+      cancelBtn.addEventListener('click', hideAndDismiss);
+      backdrop.addEventListener('click', hideAndDismiss);
+      doneBtn.addEventListener('click', () => {{
+        backdrop.classList.remove('visible');
+        card.classList.remove('visible');
       }});
+
       let deferred = null;
       window.addEventListener('beforeinstallprompt', (e) => {{
         e.preventDefault();
         deferred = e;
-        text.textContent = 'Install ' + APP_NAME + ' to your home screen';
-        btn.textContent = 'Install';
-        btn.onclick = async () => {{
+        installBtn.onclick = async () => {{
           if (!deferred) return;
           deferred.prompt();
           const result = await deferred.userChoice;
           deferred = null;
-          if (result.outcome === 'accepted') banner.classList.remove('visible');
+          // `appinstalled` will also fire below on accept and swap
+          // to success — guard against double-handling here.
+          if (result.outcome === 'dismissed') {{
+            hideAndDismiss();
+          }}
         }};
-        requestAnimationFrame(() => banner.classList.add('visible'));
+        // Tiny delay so the user sees the app render first, then
+        // the card slides in over it (matches the "app loads, then
+        // confirm appears" feel the user asked for).
+        setTimeout(show, 600);
       }});
-      // iOS Safari fallback: no beforeinstallprompt support; show
-      // instructions referencing the share menu. Detect via UA
-      // because there's no feature-detect for "supports A2HS".
+
+      // `appinstalled` fires after the OS confirms the install,
+      // regardless of who triggered it (our button or the browser's
+      // own install menu). Swap to the success state so the user
+      // gets clear confirmation.
+      window.addEventListener('appinstalled', showSuccess);
+
+      // iOS Safari fallback: no beforeinstallprompt event. Detect
+      // via UA and swap the card to show share-menu instructions
+      // with the Install button hidden — the share menu is the
+      // only A2HS path on iOS.
       const isIOSSafari = /iphone|ipad|ipod/i.test(navigator.userAgent) &&
         !window.MSStream &&
         /safari/i.test(navigator.userAgent) &&
@@ -454,10 +601,39 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       if (isIOSSafari) {{
         setTimeout(() => {{
           if (deferred) return;  // beforeinstallprompt won the race
-          text.textContent = 'Tap Share, then "Add to Home Screen" to install ' + APP_NAME;
-          btn.style.display = 'none';
-          banner.classList.add('visible');
-        }}, 2500);
+          subtitle.textContent = 'Add to Home Screen';
+          info.textContent = '';
+          const ios = document.createElement('div');
+          ios.style.fontSize = '13px';
+          ios.style.color = 'var(--muted)';
+          ios.style.lineHeight = '1.6';
+          ios.textContent =
+            'Tap the Share button in Safari (the square with an ' +
+            'arrow), then choose "Add to Home Screen".';
+          info.appendChild(ios);
+          installBtn.style.display = 'none';
+          cancelBtn.textContent = 'Close';
+          cancelBtn.style.flex = '1';
+          show();
+        }}, 1200);
+      }}
+
+      // If the page is install-eligible but the browser hasn't
+      // fired `beforeinstallprompt` yet (rare — usually a slow SW
+      // registration), fall back to showing the card with a
+      // disabled Install button after a short timeout. Users still
+      // see the icon + name + reassurance text; tapping Install is
+      // a no-op until the event arrives.
+      if (forceShow) {{
+        setTimeout(() => {{
+          if (deferred) return;
+          if (isIOSSafari) return;
+          if (card.classList.contains('visible')) return;
+          installBtn.disabled = true;
+          installBtn.style.opacity = '0.5';
+          subtitle.textContent = 'Preparing install…';
+          show();
+        }}, 3000);
       }}
     }})();
   </script>
