@@ -1,9 +1,12 @@
 """Tests for CodexProvider event parsing + the codex_appserver translator.
 
-CodexProvider.parse_line is now a thin pass-through: lines arrive from
-`codex_appserver_runner.py` already shaped as Möbius events. The
-underlying translation from app-server JSON-RPC notifications lives in
-`app.codex_appserver` and is exercised directly below.
+`parse_line` is now Codex-only: after the Claude chat path migrated
+to the SDK, `ClaudeProvider.parse_line` no longer exists, so the
+pass-through contract documented here applies solely to
+`CodexProvider`. Lines arrive from `codex_appserver_runner.py`
+already shaped as Möbius events. The underlying translation from
+app-server JSON-RPC notifications lives in `app.codex_appserver`
+and is exercised directly below.
 """
 
 import json
