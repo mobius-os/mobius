@@ -88,8 +88,13 @@ as a disposable test fixture; cleaning up after that is fine.
 
 `/data/` is a git repo, initialized on first boot. After important
 or substantial changes, commit so undo is clean:
-`.pm-commit 'one-line what and why'` — wrapper around
-`git add -A && git commit`.
+`pm-commit 'one-line what and why'` — wrapper that stages, unstages
+a runtime-state denylist (`agent-browser-profiles/`, `compiled/`,
+`logs/`, `cron-logs/`, `push/`, `generated/`), then commits. If
+more than 50 files are staged after the denylist filter, it refuses
+with exit 2 and unstages everything (so you're not left holding a
+wedged index). Re-run as `pm-commit --allow-broad 'msg'` after
+confirming the staged set is actually what you meant to commit.
 
 ## Experience log
 

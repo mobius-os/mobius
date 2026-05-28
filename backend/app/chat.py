@@ -4,7 +4,7 @@ Routes each chat turn through the SDK-backed runner for the matching
 provider (`claude_sdk_runner.py`, `codex_sdk_runner.py`) and bridges the
 runner's events onto the chat's `ChatBroadcast` so any number of SSE
 clients can subscribe.  Provider env / auth wiring lives in
-`providers.py`; the subprocess fallback that used to live here is gone.
+`providers.py`.
 """
 
 import asyncio
@@ -13,7 +13,6 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -31,7 +30,7 @@ from app.events import (
   question_block_key,
 )
 from app.providers import effective_agent_settings, get_provider, get_skill_path
-from app.runner_registry import RunnerKind, registry
+from app.runner_registry import registry
 from app.runtime_types import ChatEvent
 
 
@@ -100,35 +99,6 @@ def _save_message(db: Session, chat_id: str, message: dict):
   msgs.append(message)
   chat.messages = msgs
   _safe_commit(db)
-
-
-@dataclass
-class SubprocessHandle:
-  """Registry handle for one subprocess-backed chat turn."""
-
-  chat_id: str
-  proc: asyncio.subprocess.Process
-  kind: RunnerKind = RunnerKind.SUBPROCESS
-
-  async def stop(self, timeout: float = 2.0) -> bool:
-    """Stops the subprocess and waits up to `timeout` seconds."""
-    try:
-      if self.proc.returncode is None:
-        self.proc.kill()
-      await asyncio.wait_for(self.proc.wait(), timeout=timeout)
-      return True
-    except asyncio.CancelledError:
-      raise
-    except asyncio.TimeoutError:
-      _get_logger().warning(
-        "Subprocess stop timed out chat_id=%s", self.chat_id,
-      )
-      return False
-    except Exception:
-      _get_logger().exception(
-        "Subprocess stop failed chat_id=%s", self.chat_id,
-      )
-      return False
 
 
 def _update_last_assistant_message(db: Session, chat_id: str, message: dict) -> bool:

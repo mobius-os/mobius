@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from app.sdk_emit import emit_unknown_enabled, unknown_event
+
 
 def _extract_bash_command(raw: str) -> str:
   """Strips Codex's /bin/bash -lc wrapper from a command string."""
@@ -65,8 +67,14 @@ def _canonical_item_type(itype: str | None) -> str | None:
 def translate_item_started(item: dict) -> list[dict]:
   """Returns Möbius events for an item/started notification.
 
-  Returns [] for items that don't map to a Möbius tool block
-  (reasoning, agentMessage, userMessage — the latter is just echo).
+  Tool-shaped items (commandExecution, fileChange, mcpToolCall,
+  webSearch) translate into tool_start blocks. Reasoning items
+  surface as `thinking` so users can see the model is working
+  before a tool fires. agentMessage and userMessage start no
+  block — agentMessage text streams via the delta channel and
+  userMessage is just echo. Anything else returns an
+  ``unknown_sdk_event`` (gated by MOBIUS_EMIT_UNKNOWN) so a new
+  Codex item type lands in chat.log instead of disappearing.
   """
   itype = _canonical_item_type(item.get("type"))
   if itype == "commandExecution":
@@ -96,8 +104,32 @@ def translate_item_started(item: dict) -> list[dict]:
       "tool": "WebSearch",
       "input": item.get("query", ""),
     }]
-  # reasoning / agentMessage / userMessage — no tool block.
-  return []
+  if itype == "reasoning":
+    # Codex sometimes emits the reasoning text in `textDelta`, sometimes
+    # in `text`, depending on app-server version. Take whichever has
+    # content; an empty reasoning header is a no-op so we don't pollute
+    # the wire with empty `thinking` events.
+    text = (
+      item.get("textDelta")
+      or item.get("text")
+      or item.get("content")
+      or ""
+    )
+    if not text:
+      return []
+    return [{"type": "thinking", "content": str(text)}]
+  if itype in ("agentMessage", "userMessage"):
+    # agentMessage text arrives via item/agentMessage/delta — don't
+    # double-emit. userMessage is just an echo of what we sent.
+    return []
+  return _unknown_events(f"item/started:{itype}", item)
+
+
+def _unknown_events(kind: str, raw: dict) -> list[dict]:
+  """Wraps `unknown_event` in the list shape translate_* callers want."""
+  if not emit_unknown_enabled():
+    return []
+  return [unknown_event(kind, raw)]
 
 
 def translate_item_completed(item: dict) -> list[dict]:
@@ -155,16 +187,25 @@ def translate_item_completed(item: dict) -> list[dict]:
       events.append({"type": "tool_input", "input": query})
     events.append({"type": "tool_end"})
     return events
-  # reasoning / userMessage — no Möbius event.
-  return []
+  if itype == "reasoning":
+    # The thinking text already streamed via item/started; the completed
+    # message just closes the reasoning span. No new content to surface.
+    return []
+  if itype == "userMessage":
+    # Pure echo of user input.
+    return []
+  return _unknown_events(f"item/completed:{itype}", item)
 
 
 def translate_notification(msg: dict) -> list[dict]:
   """Translates one JSON-RPC notification into Möbius events.
 
-  Returns [] for notifications that don't map to a user-visible event
-  (status updates, rate-limit updates, mcp startup status, etc.).
-  The runner calls this for every notification it reads from stdout.
+  Recognized notifications return their named event shape (text,
+  tool_*, session_init, usage, rate_limit, warning, compaction_event,
+  model_rerouted, done, error). Anything else returns an
+  `unknown_sdk_event` so future Codex protocol additions surface
+  on the wire instead of disappearing. ``MOBIUS_EMIT_UNKNOWN=0``
+  suppresses the unknown emission (DEBUG-logged either way).
   """
   method = msg.get("method")
   params = msg.get("params", {}) or {}
@@ -203,12 +244,84 @@ def translate_notification(msg: dict) -> list[dict]:
     msg_text = params.get("message") or params.get("error") or "Codex error"
     return [{"type": "error", "message": str(msg_text)}]
 
-  if method == "thread/status/changed":
-    # Status flips between active / idle.  Idle after turn/completed
-    # is the real end-of-turn marker, but turn/completed already gives
-    # us that — so we ignore status changes.
+  if method in (
+    "thread/status/changed",
+    "turn/started",
+  ):
+    # Status flips between active / idle. Idle after turn/completed
+    # is the real end-of-turn marker (turn/completed already covers
+    # it). turn/started is also redundant with the chat-side state
+    # machine. Both are intentionally suppressed, not unknown.
     return []
 
-  # Everything else (tokenUsage, rateLimits, configWarning, mcpServer
-  # startup, etc.) is informational — drop it.
-  return []
+  if method in ("thread/tokenUsage/updated", "tokenUsage"):
+    usage = params.get("usage") or params
+    return [{
+      "type": "usage",
+      "input_tokens": usage.get("input_tokens") or usage.get("inputTokens"),
+      "output_tokens": usage.get("output_tokens") or usage.get("outputTokens"),
+      "cache_creation_input_tokens": (
+        usage.get("cache_creation_input_tokens")
+        or usage.get("cachedInputTokens")
+      ),
+      "cache_read_input_tokens": (
+        usage.get("cache_read_input_tokens")
+        or usage.get("cachedReadTokens")
+      ),
+      "raw": dict(usage) if isinstance(usage, dict) else {},
+    }]
+
+  if method in (
+    "account/rateLimits/updated",
+    "rateLimits",
+  ):
+    info = params.get("rateLimits") or params
+    return [{
+      "type": "rate_limit",
+      "status": info.get("status") if isinstance(info, dict) else None,
+      "resets_at": info.get("resets_at") if isinstance(info, dict) else None,
+      "raw": dict(info) if isinstance(info, dict) else {},
+    }]
+
+  if method in (
+    "configWarning",
+    "deprecationNotice",
+    "guardianWarning",
+  ):
+    message = (
+      params.get("message")
+      or params.get("text")
+      or params.get("notice")
+      or ""
+    )
+    return [{
+      "type": "warning",
+      "source": method,
+      "message": str(message),
+    }]
+
+  if method == "mcpServer/startupStatus/updated":
+    status = params.get("status") or ""
+    error = params.get("error")
+    if not error and str(status).lower() not in ("error", "failed"):
+      # Healthy startup transitions are noise; only surface failures.
+      return []
+    return [{
+      "type": "warning",
+      "source": method,
+      "message": str(error or f"mcp server status: {status}"),
+    }]
+
+  if method == "thread/compacted":
+    return [{
+      "type": "compaction_event",
+      "turn": params.get("turn") or params.get("turnNumber"),
+    }]
+
+  if method == "model/rerouted":
+    return [{
+      "type": "model_rerouted",
+      "reason": str(params.get("reason") or params.get("message") or ""),
+    }]
+
+  return _unknown_events(str(method or "unknown"), msg)

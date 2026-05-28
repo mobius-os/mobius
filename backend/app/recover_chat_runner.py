@@ -797,11 +797,14 @@ async def stream_turn(
     # failure the round-4 fix was meant to prevent.
     #
     # Once released, a concurrent /stream POST can start a fresh
-    # turn. That turn's CLI subprocess is independent of ours; even
+    # turn. That turn's recovery CLI subprocess is independent of
+    # ours (recovery deliberately spawns the standalone Claude CLI
+    # for isolation; the main chat path has moved to the SDK); even
     # though our subprocess teardown is still in progress, the OS
-    # owns reaping it. Briefly two CLI processes may coexist (ours
-    # being killed, theirs starting); the spec is "one turn at a
-    # time" and our turn is logically over once cleanup begins.
+    # owns reaping it. Briefly two recovery CLI processes may
+    # coexist (ours being killed, theirs starting); the spec is
+    # "one turn at a time" and our turn is logically over once
+    # cleanup begins.
     _release_run(claim)
     proc = claim.get("proc")
     if proc is not None:
