@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import Drawer from '../Drawer/Drawer.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
-import AppMenu from '../AppMenu/AppMenu.jsx'
 import ChatView from '../ChatView/ChatView.jsx'
 import SettingsView from '../SettingsView/SettingsView.jsx'
 import { api, BASE } from '../../api/client.js'
@@ -146,7 +145,11 @@ export default function Shell() {
         drawerOpen,
         activeChatId,
       }))
-      window.history.replaceState(null, '', '/')
+      // Match the manifest scope so the post-reload page lands inside
+      // the installed PWA's declared scope — writing `/` here would
+      // briefly put the page out of scope and Chromium can refuse the
+      // next manifest update in-place.
+      window.history.replaceState(null, '', '/shell/')
       document.body.style.transition = 'opacity 0.2s ease'
       document.body.style.opacity = '0'
       setTimeout(() => window.location.reload(), 220)
@@ -373,9 +376,6 @@ export default function Shell() {
           <img className="shell__logo" src={`${BASE}/moebius.png`} alt="" width="30" height="30" />
           <span className="shell__wordmark">Möbius</span>
         </div>
-        {activeView === 'canvas' && activeAppId && (
-          <AppMenu app={apps.find(a => String(a.id) === String(activeAppId))} />
-        )}
       </header>
 
       <Drawer

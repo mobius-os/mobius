@@ -296,6 +296,7 @@ export default function Drawer({
                     kind="app"
                     id={app.id}
                     label={app.name}
+                    slug={app.slug}
                     pinned={!!app.pinned_at}
                     active={activeView === 'canvas' && Number(activeAppId) === Number(app.id)}
                     onSelect={() => onApp(app.id)}
@@ -347,6 +348,7 @@ function DrawerRow({
   label,
   pinned,
   active,
+  slug,
   onSelect,
   menuOpen,
   onMenuToggle,
@@ -495,6 +497,23 @@ function DrawerRow({
                 <span>{pinned ? 'Unpin' : 'Pin to top'}</span>
               </Menu.Item>
               <Menu.Item onSelect={() => onRenameStart()}>Rename</Menu.Item>
+              {kind === 'app' && slug && (
+                // Open the app's standalone PWA surface in a new tab.
+                // `_blank` is load-bearing on installed PWAs: a same-
+                // tab navigation inside an installed Möbius window
+                // stays in-scope (because Möbius's old scope was `/`
+                // when the user installed) and the browser routes to
+                // the existing PWA window rather than firing the
+                // sub-app's install prompt. Opening in a new top-level
+                // browser tab escapes the installed PWA → the sub-app's
+                // own manifest is honored → beforeinstallprompt fires
+                // (Chromium) or share-menu A2HS is available (iOS).
+                <Menu.Item
+                  onSelect={() => window.open(`/apps/${slug}/`, '_blank', 'noopener')}
+                >
+                  Add to home screen
+                </Menu.Item>
+              )}
               {kind === 'chat' ? (
                 // Chats soft-delete with 7-day recovery, so no
                 // confirm step — one tap deletes, the note below

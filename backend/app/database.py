@@ -97,29 +97,33 @@ def run_migrations(eng) -> None:
         "NOT NULL DEFAULT 'none'"
       ))
       conn.commit()
+  # Slug column: split into three independent idempotent gates so a
+  # crash anywhere in the sequence leaves a recoverable state. The
+  # previous shape gated the backfill on "column missing", which
+  # meant a mid-loop crash would commit the ALTER but skip the
+  # backfill+index on every subsequent boot — leaving NULL slugs
+  # forever and silently degrading the three-dots menu on every
+  # legacy app. Each gate below re-checks its own precondition.
   if "slug" not in apps_cols:
-    # Additive column + proactive Python backfill. Lazy backfill from
-    # the standalone route alone would mean the frontend's three-dots
-    # menu silently hides on existing apps (it gates on app.slug) until
-    # someone visits the standalone URL — backwards-incompatible UX
-    # for any prod instance with apps predating this column. So we
-    # populate in Python here using the same slugify rule create_app
-    # uses, with a numeric suffix on collision so two apps with the
-    # same name don't blow up the unique index.
     with eng.connect() as conn:
       conn.execute(text(
         "ALTER TABLE apps ADD COLUMN slug VARCHAR(128) NULL"
       ))
       conn.commit()
-      # Read existing rows ordered by id so deterministic; pure-Python
-      # slug allocation avoids SQLite-specific string functions and
-      # lets us reuse the exact same logic create_app calls.
-      from app.routes.apps import _slugify_for_source_dir
-      rows = conn.execute(
-        text("SELECT id, name FROM apps ORDER BY id")
+  # Backfill: runs whenever any row has a NULL slug. Idempotent —
+  # already-populated rows are filtered out by the WHERE clause and
+  # their slugs are read into `taken` so we don't collide with them.
+  from app.routes.apps import _slugify_for_source_dir
+  with eng.connect() as conn:
+    null_rows = conn.execute(
+      text("SELECT id, name FROM apps WHERE slug IS NULL ORDER BY id")
+    ).fetchall()
+    if null_rows:
+      existing = conn.execute(
+        text("SELECT slug FROM apps WHERE slug IS NOT NULL")
       ).fetchall()
-      taken: set[str] = set()
-      for row in rows:
+      taken: set[str] = {r[0] for r in existing if r[0]}
+      for row in null_rows:
         base = _slugify_for_source_dir(row[1])
         candidate = base
         suffix = 2
@@ -131,10 +135,15 @@ def run_migrations(eng) -> None:
           text("UPDATE apps SET slug = :s WHERE id = :i"),
           {"s": candidate, "i": row[0]},
         )
-      conn.execute(text(
-        "CREATE UNIQUE INDEX IF NOT EXISTS ix_apps_slug ON apps (slug)"
-      ))
       conn.commit()
+  # Unique index: separate gate so a crashed backfill on a prior boot
+  # doesn't leave us indexless forever. `IF NOT EXISTS` handles the
+  # happy-path re-run case at zero cost.
+  with eng.connect() as conn:
+    conn.execute(text(
+      "CREATE UNIQUE INDEX IF NOT EXISTS ix_apps_slug ON apps (slug)"
+    ))
+    conn.commit()
   if "icon_png" not in apps_cols:
     with eng.connect() as conn:
       conn.execute(text("ALTER TABLE apps ADD COLUMN icon_png BLOB NULL"))

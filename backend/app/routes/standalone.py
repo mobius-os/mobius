@@ -33,7 +33,6 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.database import get_db
-from app.routes.apps import ensure_slug
 
 router = APIRouter(tags=["standalone"])
 
@@ -225,11 +224,11 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   browser fetches the manifest + icons during install, and a 401 on
   the start_url would break the install flow).
   """
+  # `_get_app_by_slug` finds rows by exact slug match, so anything
+  # that resolves here already has a slug populated — the proactive
+  # migration backfill ensures legacy NULL-slug rows are filled at
+  # boot time. The earlier lazy-ensure call here was dead code.
   app = _get_app_by_slug(db, slug)
-  ensure_slug(db, app)
-  # The slug we serve in URLs may have been re-allocated above for
-  # a legacy NULL-slug app — re-read after the ensure to be safe.
-  slug = app.slug
   app_id = app.id
   app_name = app.name or slug
   # Escape user-controlled strings before interpolating into HTML.
@@ -304,19 +303,6 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       border-radius: 50%; animation: spin 0.8s linear infinite;
     }}
     @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
-    #edit-pill {{
-      position: fixed; bottom: 16px; right: 16px;
-      background: var(--surface); color: var(--text);
-      border: 1px solid var(--border); border-radius: 999px;
-      padding: 8px 14px; font-size: 12px;
-      cursor: pointer; opacity: 0.85;
-      display: flex; align-items: center; gap: 6px;
-      z-index: 9999;
-      backdrop-filter: blur(8px);
-      -webkit-backdrop-filter: blur(8px);
-    }}
-    #edit-pill:hover {{ opacity: 1; background: var(--surface2); }}
-    #edit-pill.hidden {{ display: none; }}
     /* Install banner: full-width at the top, slides down on
        beforeinstallprompt (Chromium) or after a short timeout on
        iOS standalone-eligible Safari. Hidden when the page is
@@ -353,9 +339,6 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
 <body>
   <div id="root"></div>
   <div id="loading"><div class="spinner"></div><div>Loading {app_name_html}…</div></div>
-  <button id="edit-pill" class="hidden" title="Edit this app in Möbius">
-    <span>✏️</span><span>Edit</span>
-  </button>
   <div id="install-banner" role="region" aria-label="Install app">
     <span class="ib-text" id="install-banner-text"></span>
     <button class="ib-btn" id="install-banner-btn"></button>
@@ -407,7 +390,6 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         const root = createRoot(document.getElementById('root'));
         root.render(React.createElement(Component, {{ appId: APP_ID, token: appToken }}));
         document.getElementById('loading').classList.add('hidden');
-        document.getElementById('edit-pill').classList.remove('hidden');
       }} catch (err) {{
         const loading = document.getElementById('loading');
         // Build error UI via DOM nodes (not innerHTML) — err.message
@@ -423,18 +405,6 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         loading.appendChild(msg);
       }}
     }}
-
-    // Edit pill: open the Möbius shell pointed at this app's build
-    // chat. On Chromium with Möbius installed, the OS routes the
-    // navigation into the Möbius PWA window. On iOS it opens Safari.
-    // Either way the user lands on the conversation that built this
-    // app and can ask for changes.
-    document.getElementById('edit-pill').addEventListener('click', () => {{
-      // For now, just go to the shell home — the chat-routing piece
-      // lands in a later step. Once `chat_id` is plumbed into the
-      // shell URL, this becomes `/shell/?chat=<chat_id>`.
-      window.location.href = '/shell/';
-    }});
 
     // Install banner: surfaces a one-tap install affordance.
     // Chromium fires `beforeinstallprompt` when the manifest is valid
