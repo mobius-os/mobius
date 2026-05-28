@@ -342,11 +342,40 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       display: flex; align-items: center; gap: 14px;
       margin-bottom: 16px;
     }}
+    .ic-icon-wrap {{
+      position: relative;
+      width: 56px; height: 56px;
+      flex-shrink: 0;
+      border: none; padding: 0;
+      background: transparent;
+      cursor: pointer;
+      border-radius: 12px;
+    }}
+    .ic-icon-wrap:focus-visible {{ outline: 2px solid var(--accent); outline-offset: 2px; }}
     .ic-icon {{
       width: 56px; height: 56px;
       border-radius: 12px;
-      flex-shrink: 0;
       background: var(--bg);
+      display: block;
+    }}
+    .ic-icon-edit {{
+      position: absolute; bottom: -4px; right: -4px;
+      width: 22px; height: 22px;
+      border-radius: 50%;
+      background: var(--accent, #a78bfa);
+      color: #0c0f14;
+      font-size: 11px;
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+      pointer-events: none;
+    }}
+    .ic-icon-wrap.uploading {{ opacity: 0.6; pointer-events: none; }}
+    .ic-icon-wrap.uploading::after {{
+      content: ''; position: absolute; inset: 0;
+      border-radius: 12px;
+      border: 2px solid var(--accent);
+      border-top-color: transparent;
+      animation: spin 0.7s linear infinite;
     }}
     .ic-title {{
       font-size: 17px; font-weight: 600; color: var(--text);
@@ -418,7 +447,13 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   <div id="install-backdrop"></div>
   <div id="install-card" role="dialog" aria-modal="true" aria-labelledby="ic-title">
     <div class="ic-header">
-      <img class="ic-icon" src="/apps/{slug}/icon-192.png" alt="">
+      <button class="ic-icon-wrap" id="ic-icon-btn" type="button"
+              aria-label="Change icon" title="Tap to change icon">
+        <img class="ic-icon" id="ic-icon-img" src="/apps/{slug}/icon-192.png" alt="">
+        <span class="ic-icon-edit" aria-hidden="true">✎</span>
+      </button>
+      <input type="file" id="ic-icon-input" accept="image/png,image/jpeg,image/webp"
+             style="display:none">
       <div>
         <p class="ic-title" id="ic-title">{app_name_html}</p>
         <p class="ic-subtitle" id="ic-subtitle">Install to home screen</p>
@@ -561,9 +596,57 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       const doneBtn = document.getElementById('ic-done');
       const subtitle = document.getElementById('ic-subtitle');
       const info = document.getElementById('ic-info');
+      const iconBtn = document.getElementById('ic-icon-btn');
+      const iconImg = document.getElementById('ic-icon-img');
+      const iconInput = document.getElementById('ic-icon-input');
 
       const forceShow = new URLSearchParams(window.location.search).get('install') === '1';
       const dismissKey = 'mobius-install-dismissed-' + APP_SLUG;
+
+      // Tap-to-upload custom icon. PUT /api/apps/<id>/icon accepts
+      // raw bytes; the standalone icon endpoint reads from icon_png
+      // on the next request, so after upload we bust the <img> cache
+      // with a fresh ?t= timestamp. The endpoint accepts either the
+      // owner JWT or an app-scoped token whose app_id matches the
+      // path — so reading `localStorage['token']` is enough here
+      // whether it holds the owner token (cross-PWA contexts) or the
+      // app-scoped token a prior render of this page minted (the bug
+      // that caused a 403 before the endpoint relax shipped).
+      if (iconBtn && iconInput) {{
+        iconBtn.addEventListener('click', () => iconInput.click());
+        iconInput.addEventListener('change', async () => {{
+          const file = iconInput.files && iconInput.files[0];
+          if (!file) return;
+          const token = localStorage.getItem('token');
+          if (!token) return;
+          iconBtn.classList.add('uploading');
+          try {{
+            const resp = await fetch('/api/apps/' + APP_ID + '/icon', {{
+              method: 'PUT',
+              headers: {{
+                'Content-Type': file.type || 'application/octet-stream',
+                Authorization: 'Bearer ' + token,
+              }},
+              body: file,
+            }});
+            if (resp.ok) {{
+              const bust = '?t=' + Date.now();
+              iconImg.src = '/apps/' + APP_SLUG + '/icon-192.png' + bust;
+              const fav = document.querySelector('link[rel="icon"]');
+              const touch = document.querySelector('link[rel="apple-touch-icon"]');
+              if (fav) fav.href = '/apps/' + APP_SLUG + '/icon-192.png' + bust;
+              if (touch) touch.href = '/apps/' + APP_SLUG + '/icon-192.png' + bust;
+            }} else {{
+              alert('Upload failed: ' + resp.status);
+            }}
+          }} catch (e) {{
+            alert('Upload failed: ' + (e && e.message || e));
+          }} finally {{
+            iconBtn.classList.remove('uploading');
+            iconInput.value = '';
+          }}
+        }});
+      }}
 
       // Honor display-mode standalone ONLY for the no-force path. A
       // user explicitly tapping Install in the drawer overrides this
