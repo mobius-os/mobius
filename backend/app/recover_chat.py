@@ -81,7 +81,9 @@ _limiter = Limiter(key_func=get_remote_address)
 
 # Bounded set of (chat_id, turn_id) pairs that have already been
 # streamed. A second /recover/chat/stream POST for the same pair
-# returns 409 instead of spawning a duplicate CLI subprocess. The
+# returns 409 instead of spawning a duplicate recovery CLI
+# subprocess (recovery deliberately spawns the standalone Claude
+# CLI for isolation; the main chat path has moved to the SDK). The
 # cap keeps memory bounded under any attack pattern; eviction is
 # FIFO so the most recent N pairs are always remembered. Key is
 # (chat_id, turn_id) — multi-chat means two chats can both have

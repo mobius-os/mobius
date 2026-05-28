@@ -1,8 +1,9 @@
 """Per-chat event broadcast for SSE delivery.
 
-Decouples the CLI subprocess from SSE clients.  The subprocess
-publishes events here; any number of SSE clients can subscribe
-and receive a catch-up burst of prior events plus live streaming.
+Decouples the runner (Claude SDK / Codex subprocess) from SSE
+subscribers.  The runner publishes events here; any number of SSE
+clients can subscribe and receive a catch-up burst of prior events
+plus live streaming.
 """
 
 import asyncio
