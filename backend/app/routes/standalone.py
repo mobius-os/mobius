@@ -632,6 +632,17 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         cancelBtn.style.flex = '1';
       }}
 
+      // `shown` guards against double-show across the multiple
+      // paths that can each request the card (immediate-wire,
+      // bip-ready listener, forceShow timer, iOS timer). First
+      // requester wins; subsequent calls are no-ops.
+      let shown = false;
+      function showOnce() {{
+        if (shown) return;
+        shown = true;
+        show();
+      }}
+
       // If the bip event is already in hand (fired before this
       // script ran), wire and show. Otherwise listen for the early
       // bridge event from the <script> at top of <body>.
@@ -643,8 +654,12 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       //   - forceShow (`?install=1`): show after a brief delay so
       //     the app paints first, regardless of event timing. If
       //     the event arrives later, the Install button activates
-      //     in place; if it never arrives, the button stays
-      //     disabled with a "Preparing install…" hint.
+      //     in place. If 8s pass with no event AND we're not in
+      //     iOS, swap to a manual-install fallback message rather
+      //     than leaving the user stuck on "Preparing install…"
+      //     forever — Chromium suppresses `beforeinstallprompt`
+      //     after a user has dismissed it too many times, and the
+      //     only path forward is the browser's own menu.
       //   - no forceShow: show only when the event fires or iOS UA
       //     is detected (lazy, doesn't interrupt unannounced).
       if (forceShow) {{
@@ -654,17 +669,47 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
           installBtn.style.opacity = '0.5';
           subtitle.textContent = 'Preparing install…';
         }}
-        setTimeout(show, 600);
+        setTimeout(showOnce, 600);
+        // Fallback for Chromium install-suppression. 8s is long
+        // enough that any real bip event will have fired; if it
+        // hasn't, the browser likely won't fire it at all.
+        if (!isIOSSafari) {{
+          setTimeout(() => {{
+            if (window.__bipDeferred) return;  // event arrived in time
+            subtitle.textContent = "Can't install right now";
+            info.textContent = '';
+            const hint = document.createElement('div');
+            hint.style.fontSize = '13px';
+            hint.style.color = 'var(--muted)';
+            hint.style.lineHeight = '1.6';
+            hint.textContent =
+              'Your browser blocked the automatic install (this ' +
+              'happens after dismissing too many times). Try: ' +
+              'Chrome menu (⋮) → "Install app" or "Add to Home ' +
+              'screen".';
+            info.appendChild(hint);
+            installBtn.style.display = 'none';
+            cancelBtn.textContent = 'Close';
+            cancelBtn.style.flex = '1';
+          }}, 8000);
+        }}
       }} else {{
         // Listen-and-show paths: bip event lands, or iOS detected.
-        window.addEventListener('mobius:bip-ready', () => {{
-          setTimeout(show, 600);
-        }});
+        // If `__bipDeferred` was ALREADY set when this script ran,
+        // the bridge event already fired and we won't get another
+        // — show immediately rather than waiting for a duplicate.
+        if (window.__bipDeferred) {{
+          setTimeout(showOnce, 600);
+        }} else {{
+          window.addEventListener('mobius:bip-ready', () => {{
+            setTimeout(showOnce, 600);
+          }});
+        }}
         if (isIOSSafari) {{
           setTimeout(() => {{
             if (window.__bipDeferred) return;
             paintIOSFallback();
-            show();
+            showOnce();
           }}, 1200);
         }}
       }}
