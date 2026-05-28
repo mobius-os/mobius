@@ -196,7 +196,14 @@ def standalone_icon(
   if app.icon_png:
     from PIL import Image
     img = Image.open(io.BytesIO(app.icon_png))
-    img = img.convert("RGB").resize((size, size), Image.LANCZOS)
+    # Preserve mode — the upload path already normalized to RGB or
+    # RGBA (and cropped to square), so don't strip alpha on serve.
+    # A force-`convert("RGB")` here flattened transparent uploads
+    # onto a black rectangle when the OS rendered them on a non-
+    # dark home screen.
+    if img.mode not in ("RGB", "RGBA"):
+      img = img.convert("RGBA" if "A" in img.mode else "RGB")
+    img = img.resize((size, size), Image.LANCZOS)
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     body = buf.getvalue()
