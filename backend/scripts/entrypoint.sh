@@ -301,9 +301,17 @@ else
   # the path isn't in the index — so this is safe to re-run every boot.
   # Runs as mobius (the .git owner); the pre-chown above guarantees
   # ownership is correct.
+  # Bare files are checked once; tree-shaped paths use git rm --cached -r
+  # so anything already committed under them gets untracked. The script's
+  # denylist + the .gitignore heredoc above stop NEW commits from staging
+  # these; this loop retroactively cleans instances that committed runtime
+  # state before the gitignore knew to exclude it.
   su -s /bin/sh mobius -c '
     for path in .secret-key db.sqlite3 mobius.db; do
       git -C /data rm --cached "$path" 2>/dev/null || true
+    done
+    for tree in agent-browser-profiles compiled logs cron-logs generated; do
+      git -C /data rm --cached -r "$tree" 2>/dev/null || true
     done
   '
 fi
