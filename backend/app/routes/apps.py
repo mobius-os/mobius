@@ -16,7 +16,9 @@ from app import auth, models, schemas
 from app.compiler import compile_jsx
 from app.config import get_settings
 from app.database import get_db
-from app.deps import get_current_owner, get_current_owner_or_app
+from app.deps import (
+  get_current_owner, get_current_owner_or_app, get_principal, Principal,
+)
 
 router = APIRouter(prefix="/api/apps", tags=["apps"])
 
@@ -203,22 +205,32 @@ async def update_icon(
   app_id: int,
   request: Request,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner),
+  principal: Principal = Depends(get_principal),
 ):
   """Owner uploads a custom icon for the app's standalone PWA install.
 
-  Accepts raw PNG or JPEG bytes (anything Pillow can decode). The
-  body is validated, converted to RGB, downscaled to fit within
-  1024x1024 if larger, and re-encoded as PNG before storing in
-  `App.icon_png`. The standalone icon endpoint at
+  Accepts raw PNG / JPEG / WebP bytes (anything Pillow can decode).
+  The body is validated, converted to RGB, downscaled to fit
+  within 1024x1024 if larger, and re-encoded as PNG before storing
+  in `App.icon_png`. The standalone icon endpoint at
   `/apps/<slug>/icon-<N>.png` resizes from this on the fly per
   request size, so one upload covers every icon size the manifest
   declares.
 
-  Owner-only (not app-scoped tokens) — apps shouldn't be able to
-  rewrite their own visual identity without owner consent. To
-  revert to the auto-generated letter icon, send a zero-byte body.
+  Authorized for the owner OR for an app-scoped token whose
+  `app_id` matches the path — the app can manage its own visual
+  identity, but cannot touch a sibling app's icon. The standalone
+  install card lives at `/apps/<slug>/` where the page context
+  has an app-scoped token in `localStorage['token']` (minted by
+  `claim-token` on first render), so requiring owner-only here
+  would 403 the upload from the install surface. To revert to
+  the auto-generated letter icon, send a zero-byte body.
   """
+  if principal.app_id is not None and principal.app_id != app_id:
+    raise HTTPException(
+      status_code=403,
+      detail="App token can only modify its own icon.",
+    )
   body = await request.body()
   if len(body) > 2 * 1024 * 1024:
     raise HTTPException(413, "Icon too large (max 2 MB).")
@@ -228,11 +240,9 @@ async def update_icon(
   if not app:
     raise HTTPException(404, "App not found.")
   if not body:
-    # Empty body = clear back to default.
     app.icon_png = None
     db.commit()
     return Response(status_code=204)
-  # Validate + normalize via Pillow.
   from PIL import Image
   try:
     img = Image.open(io.BytesIO(body))
@@ -500,7 +510,7 @@ async def validate_app(
       js = path.read_text(encoding="utf-8")
       if not js.strip():
         issues.append("Compiled file is empty.")
-      elif "export default" not in js and "export{" not in js:
+      elif not re.search(r"export\s+default\b|export\s*\{[^}]*\bas\s+default\b", js):
         issues.append(
           "Compiled JS has no default export — "
           "the component won't mount."
