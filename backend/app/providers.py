@@ -46,14 +46,21 @@ if TYPE_CHECKING:
 # fall back cleanly to the provider's own top entry.
 KNOWN_MODELS = {
   "claude": [
-    "claude-sonnet-4-5-20251001",
-    "claude-sonnet-4-7-20251215",
+    # Anthropic switched to dateless pinned IDs starting with 4.6;
+    # the dated entries below stay listed because existing chats
+    # persist them in agent_settings_json and the API still resolves
+    # them as aliases.
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
     "claude-opus-4-5-20251001",
-    "claude-opus-4-6-20251015",
-    "claude-opus-4-7-20251215",
+    "claude-sonnet-4-6",
+    "claude-sonnet-4-7-20251215",
+    "claude-sonnet-4-5-20251001",
     "claude-haiku-4-5-20251001",
   ],
   "codex": [
+    "gpt-5.5",
     "gpt-5.4",
   ],
 }
