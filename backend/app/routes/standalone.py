@@ -494,9 +494,9 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       <button class="ic-btn ic-btn--primary" id="ic-install">Install</button>
     </div>
     <p class="ic-manual-hint" id="ic-manual-hint">
-      Trouble installing? Use your browser's menu
-      (<span id="ic-menu-icon">⋮</span>) and tap
-      <strong>Add to Home screen</strong>.
+      Trouble installing?
+      <a href="#" id="ic-open-browser" style="color:var(--accent);text-decoration:underline">
+        Open this page in a browser tab</a>.
     </p>
     <div class="ic-success">
       <div class="ic-success-icon" aria-hidden="true">✓</div>
@@ -788,6 +788,19 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         cancelBtn.style.flex = '1';
       }}
 
+      // Wire the always-visible "Open this page in a browser tab"
+      // link — works from inside an installed PWA (`_blank` escapes
+      // to system browser) and from a regular browser tab alike
+      // (just opens another tab). This is the user's escape hatch
+      // when our in-card Install button is wedged or unavailable.
+      const openBrowserLink = document.getElementById('ic-open-browser');
+      if (openBrowserLink) {{
+        openBrowserLink.addEventListener('click', (e) => {{
+          e.preventDefault();
+          window.open(window.location.href, '_blank', 'noopener');
+        }});
+      }}
+
       // `shown` guards against double-show across the multiple
       // paths that can each request the card (immediate-wire,
       // bip-ready listener, forceShow timer, iOS timer). First
@@ -823,21 +836,43 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       function paintSuppressionFallback() {{
         if (fallbackPainted) return;
         fallbackPainted = true;
-        subtitle.textContent = "Can't install right now";
+        const inPWA = window.matchMedia('(display-mode: standalone)').matches
+          || window.navigator.standalone === true;
         info.textContent = '';
         const hint = document.createElement('div');
         hint.style.fontSize = '13px';
         hint.style.color = 'var(--muted)';
         hint.style.lineHeight = '1.6';
-        hint.textContent =
-          'Your browser blocked the automatic install (this ' +
-          'happens after dismissing too many times). Try: ' +
-          'Chrome menu (\u22ee) \u2192 "Install app" or "Add to ' +
-          'Home screen".';
-        info.appendChild(hint);
-        installBtn.style.display = 'none';
-        cancelBtn.textContent = 'Close';
-        cancelBtn.style.flex = '1';
+        if (inPWA) {{
+          // No browser chrome available — repurpose the Install
+          // button to escape this PWA into a system browser tab,
+          // where beforeinstallprompt actually fires for sub-PWAs.
+          subtitle.textContent = 'Open in browser to install';
+          hint.textContent =
+            "You're in a standalone app window where the install " +
+            "prompt can't fire. Tap below to open this page in a " +
+            "browser tab where install works.";
+          info.appendChild(hint);
+          installBtn.textContent = 'Open in browser';
+          installBtn.disabled = false;
+          installBtn.style.opacity = '';
+          installBtn.style.display = '';
+          installBtn.onclick = () => {{
+            window.open(window.location.href, '_blank', 'noopener');
+          }};
+          cancelBtn.textContent = 'Close';
+        }} else {{
+          subtitle.textContent = "Can't install right now";
+          hint.textContent =
+            'Your browser blocked the automatic install (this ' +
+            'happens after dismissing too many times). Try: ' +
+            'Chrome menu (\u22ee) \u2192 "Install app" or "Add to ' +
+            'Home screen".';
+          info.appendChild(hint);
+          installBtn.style.display = 'none';
+          cancelBtn.textContent = 'Close';
+          cancelBtn.style.flex = '1';
+        }}
       }}
       function restoreFromSuppression() {{
         if (!fallbackPainted) return;
