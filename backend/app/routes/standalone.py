@@ -449,6 +449,23 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       </div>
     </div>
   </div>
+  <script>
+    // Capture `beforeinstallprompt` AS EARLY AS POSSIBLE — Chromium
+    // fires it shortly after `DOMContentLoaded`, and if our listener
+    // isn't attached yet the event is lost. The module-script below
+    // does async fetches before its own listener attaches, so we'd
+    // miss it without this pre-listener. Stash on `window` so the
+    // module script can pick it up whenever it's ready.
+    window.__bipDeferred = null;
+    window.addEventListener('beforeinstallprompt', (e) => {{
+      e.preventDefault();
+      window.__bipDeferred = e;
+      window.dispatchEvent(new CustomEvent('mobius:bip-ready'));
+    }});
+    window.addEventListener('appinstalled', () => {{
+      window.dispatchEvent(new CustomEvent('mobius:installed'));
+    }});
+  </script>
   <script type="module">
     const APP_ID = {app_id};
     const APP_SLUG = {json.dumps(slug)};
@@ -512,20 +529,30 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
     }}
 
     // Install confirm card: bottom-sheet overlay with the icon,
-    // app name, brief value-prop, and an Install button that IS the
-    // install trigger. The button calls
-    // `BeforeInstallPromptEvent.prompt()` directly, which is the
-    // only way to fire Chromium's native install dialog
-    // programmatically — and only works when (a) we have the
-    // deferred event in hand, (b) the call happens inside a real
-    // user gesture handler on the page whose manifest is being
-    // installed. That's why this card has to live here on
-    // `/apps/<slug>/`, not in the Möbius shell.
+    // app name, brief value-prop, and an Install button that
+    // calls `BeforeInstallPromptEvent.prompt()` directly. That's
+    // the only programmatic path to Chromium's native install
+    // dialog — and only works when (a) we have the deferred event,
+    // (b) the call happens inside a real user gesture on the page
+    // whose manifest is being installed.
     //
-    // Suppression: skipped when already running in standalone mode
-    // (install already happened). Session-storage dismiss is
-    // respected EXCEPT when `?install=1` is in the URL — the drawer
-    // sets that to force-show even if the user dismissed earlier.
+    // The `beforeinstallprompt` listener is attached in a separate
+    // <script> tag at the top of <body> (not here) because Chromium
+    // fires the event very shortly after DOMContentLoaded — if our
+    // module script attaches the listener after its async loads, the
+    // event has already fired and been lost. The early listener
+    // stashes the event on `window.__bipDeferred` and dispatches a
+    // `mobius:bip-ready` event we listen for here.
+    //
+    // Visibility rules:
+    //   - `?install=1` in URL → ALWAYS show (drawer-initiated intent)
+    //     even if the page is somehow in display-mode: standalone
+    //     (e.g. the user navigated here from inside the parent
+    //     Möbius PWA window — Chromium reports the surrounding PWA's
+    //     display mode, not the not-yet-installed sub-app's).
+    //   - Without `?install=1`: skip when this app's PWA is already
+    //     running standalone (nothing to install), OR when the user
+    //     previously dismissed it this session.
     (function setupInstallCard() {{
       const card = document.getElementById('install-card');
       const backdrop = document.getElementById('install-backdrop');
@@ -535,14 +562,19 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       const subtitle = document.getElementById('ic-subtitle');
       const info = document.getElementById('ic-info');
 
-      const inStandalone =
-        window.matchMedia('(display-mode: standalone)').matches ||
-        window.navigator.standalone === true;
-      if (inStandalone) return;
-
       const forceShow = new URLSearchParams(window.location.search).get('install') === '1';
       const dismissKey = 'mobius-install-dismissed-' + APP_SLUG;
-      if (!forceShow && sessionStorage.getItem(dismissKey)) return;
+
+      // Honor display-mode standalone ONLY for the no-force path. A
+      // user explicitly tapping Install in the drawer overrides this
+      // even if they're inside the parent Möbius PWA window.
+      if (!forceShow) {{
+        const inStandalone =
+          window.matchMedia('(display-mode: standalone)').matches ||
+          window.navigator.standalone === true;
+        if (inStandalone) return;
+        if (sessionStorage.getItem(dismissKey)) return;
+      }}
 
       function show() {{
         backdrop.classList.add('visible');
@@ -563,77 +595,78 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         card.classList.remove('visible');
       }});
 
-      let deferred = null;
-      window.addEventListener('beforeinstallprompt', (e) => {{
-        e.preventDefault();
-        deferred = e;
+      function wireInstallButton() {{
+        if (!window.__bipDeferred) return;
+        installBtn.disabled = false;
+        installBtn.style.opacity = '';
+        subtitle.textContent = 'Install to home screen';
         installBtn.onclick = async () => {{
+          const deferred = window.__bipDeferred;
           if (!deferred) return;
           deferred.prompt();
           const result = await deferred.userChoice;
-          deferred = null;
-          // `appinstalled` will also fire below on accept and swap
-          // to success — guard against double-handling here.
-          if (result.outcome === 'dismissed') {{
-            hideAndDismiss();
-          }}
+          window.__bipDeferred = null;
+          if (result.outcome === 'dismissed') hideAndDismiss();
         }};
-        // Tiny delay so the user sees the app render first, then
-        // the card slides in over it (matches the "app loads, then
-        // confirm appears" feel the user asked for).
-        setTimeout(show, 600);
-      }});
+      }}
 
-      // `appinstalled` fires after the OS confirms the install,
-      // regardless of who triggered it (our button or the browser's
-      // own install menu). Swap to the success state so the user
-      // gets clear confirmation.
-      window.addEventListener('appinstalled', showSuccess);
-
-      // iOS Safari fallback: no beforeinstallprompt event. Detect
-      // via UA and swap the card to show share-menu instructions
-      // with the Install button hidden — the share menu is the
-      // only A2HS path on iOS.
+      // iOS UA detect — share-menu fallback uses the same card.
       const isIOSSafari = /iphone|ipad|ipod/i.test(navigator.userAgent) &&
         !window.MSStream &&
         /safari/i.test(navigator.userAgent) &&
         !/(crios|fxios|edgios)/i.test(navigator.userAgent);
-      if (isIOSSafari) {{
-        setTimeout(() => {{
-          if (deferred) return;  // beforeinstallprompt won the race
-          subtitle.textContent = 'Add to Home Screen';
-          info.textContent = '';
-          const ios = document.createElement('div');
-          ios.style.fontSize = '13px';
-          ios.style.color = 'var(--muted)';
-          ios.style.lineHeight = '1.6';
-          ios.textContent =
-            'Tap the Share button in Safari (the square with an ' +
-            'arrow), then choose "Add to Home Screen".';
-          info.appendChild(ios);
-          installBtn.style.display = 'none';
-          cancelBtn.textContent = 'Close';
-          cancelBtn.style.flex = '1';
-          show();
-        }}, 1200);
+
+      function paintIOSFallback() {{
+        subtitle.textContent = 'Add to Home Screen';
+        info.textContent = '';
+        const ios = document.createElement('div');
+        ios.style.fontSize = '13px';
+        ios.style.color = 'var(--muted)';
+        ios.style.lineHeight = '1.6';
+        ios.textContent =
+          'Tap the Share button in Safari (the square with an ' +
+          'arrow), then choose "Add to Home Screen".';
+        info.appendChild(ios);
+        installBtn.style.display = 'none';
+        cancelBtn.textContent = 'Close';
+        cancelBtn.style.flex = '1';
       }}
 
-      // If the page is install-eligible but the browser hasn't
-      // fired `beforeinstallprompt` yet (rare — usually a slow SW
-      // registration), fall back to showing the card with a
-      // disabled Install button after a short timeout. Users still
-      // see the icon + name + reassurance text; tapping Install is
-      // a no-op until the event arrives.
+      // If the bip event is already in hand (fired before this
+      // script ran), wire and show. Otherwise listen for the early
+      // bridge event from the <script> at top of <body>.
+      if (window.__bipDeferred) wireInstallButton();
+      window.addEventListener('mobius:bip-ready', wireInstallButton);
+      window.addEventListener('mobius:installed', showSuccess);
+
+      // Show the card. Strategy:
+      //   - forceShow (`?install=1`): show after a brief delay so
+      //     the app paints first, regardless of event timing. If
+      //     the event arrives later, the Install button activates
+      //     in place; if it never arrives, the button stays
+      //     disabled with a "Preparing install…" hint.
+      //   - no forceShow: show only when the event fires or iOS UA
+      //     is detected (lazy, doesn't interrupt unannounced).
       if (forceShow) {{
-        setTimeout(() => {{
-          if (deferred) return;
-          if (isIOSSafari) return;
-          if (card.classList.contains('visible')) return;
+        if (isIOSSafari) paintIOSFallback();
+        else if (!window.__bipDeferred) {{
           installBtn.disabled = true;
           installBtn.style.opacity = '0.5';
           subtitle.textContent = 'Preparing install…';
-          show();
-        }}, 3000);
+        }}
+        setTimeout(show, 600);
+      }} else {{
+        // Listen-and-show paths: bip event lands, or iOS detected.
+        window.addEventListener('mobius:bip-ready', () => {{
+          setTimeout(show, 600);
+        }});
+        if (isIOSSafari) {{
+          setTimeout(() => {{
+            if (window.__bipDeferred) return;
+            paintIOSFallback();
+            show();
+          }}, 1200);
+        }}
       }}
     }})();
   </script>
