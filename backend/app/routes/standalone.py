@@ -537,11 +537,11 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       const ret = encodeURIComponent(window.location.pathname);
       window.location.href = '/?return=' + ret;
     }} else {{
-      try {{
-        // Fetch theme + app-scoped token in parallel, then import the
-        // app module. App-scoped tokens are short-lived JWTs minted
-        // from the owner token; the app component receives this one
-        // (not the owner token) so a compromised app can't escalate.
+      // Module load can fail transiently during PWA install transitions,
+      // SW state swaps, and minibrowser-overlay contexts — wrap so we
+      // can silently auto-retry once, then surface a Retry button for
+      // the user if the second attempt also fails.
+      async function loadAndRender(cacheBust) {{
         const [themeRes, tokenRes] = await Promise.all([
           fetch('/api/theme', {{ headers: {{ Authorization: 'Bearer ' + token }} }}),
           fetch('/api/auth/app-token', {{
@@ -563,7 +563,11 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
           if (theme.bg) document.documentElement.style.setProperty('--bg', theme.bg);
         }}
         const appToken = tokenRes.ok ? (await tokenRes.json()).token : token;
-        const module = await import('/api/apps/' + APP_ID + '/module?token=' + encodeURIComponent(appToken));
+        const bust = cacheBust ? '&_=' + Date.now() : '';
+        const module = await import(
+          '/api/apps/' + APP_ID + '/module?token=' +
+          encodeURIComponent(appToken) + bust
+        );
         const Component = module.default;
         if (!Component) throw new Error('App module has no default export');
         const React = await import('react');
@@ -571,19 +575,57 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         const root = createRoot(document.getElementById('root'));
         root.render(React.createElement(Component, {{ appId: APP_ID, token: appToken }}));
         document.getElementById('loading').classList.add('hidden');
-      }} catch (err) {{
+      }}
+
+      function paintLoadError(err, allowRetry) {{
         const loading = document.getElementById('loading');
         // Build error UI via DOM nodes (not innerHTML) — err.message
         // can carry attacker-controlled strings from a misbehaving
         // app module, and the standalone shell sits on the same
-        // origin as Möbius (so an injected <script> would have JWT
+        // origin as Möbius (an injected <script> would have JWT
         // access via localStorage).
         loading.textContent = '';
         const msg = document.createElement('div');
         msg.style.color = 'var(--danger)';
         msg.style.fontSize = '13px';
+        msg.style.maxWidth = '420px';
+        msg.style.textAlign = 'center';
+        msg.style.lineHeight = '1.5';
         msg.textContent = 'Failed to load: ' + (err && err.message || String(err));
         loading.appendChild(msg);
+        if (allowRetry) {{
+          const btn = document.createElement('button');
+          btn.textContent = 'Try again';
+          btn.style.cssText =
+            'margin-top:16px;background:var(--accent,#a78bfa);color:#0c0f14;' +
+            'border:none;border-radius:8px;padding:10px 20px;font-size:13px;' +
+            'font-weight:600;font-family:inherit;cursor:pointer';
+          btn.onclick = () => {{
+            loading.textContent = '';
+            const sp = document.createElement('div');
+            sp.className = 'spinner';
+            const tx = document.createElement('div');
+            tx.textContent = 'Loading…';
+            loading.appendChild(sp);
+            loading.appendChild(tx);
+            loadAndRender(true).catch((e) => paintLoadError(e, true));
+          }};
+          loading.appendChild(btn);
+        }}
+      }}
+
+      try {{
+        await loadAndRender(false);
+      }} catch (firstErr) {{
+        // Silent auto-retry once with cache-bust — covers the common
+        // transient-network case during PWA install/SW swap. If it
+        // also fails, surface a manual Retry button.
+        try {{
+          await new Promise(r => setTimeout(r, 400));
+          await loadAndRender(true);
+        }} catch (secondErr) {{
+          paintLoadError(secondErr, true);
+        }}
       }}
     }}
 
