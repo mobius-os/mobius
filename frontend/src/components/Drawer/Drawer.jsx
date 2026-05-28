@@ -498,24 +498,15 @@ function DrawerRow({
               </Menu.Item>
               <Menu.Item onSelect={() => onRenameStart()}>Rename</Menu.Item>
               {kind === 'app' && slug && (
-                // From inside an installed PWA (display-mode: standalone),
-                // navigate via `window.open('_blank')` so the destination
-                // opens in a real browser tab — Chromium does not fire
-                // `beforeinstallprompt` for other PWAs from inside an
-                // installed PWA window, and there's no browser chrome to
-                // fall back on either. Outside a PWA, same-tab is fine
-                // (the user is already in a browser tab).
+                // Same-tab navigate with ?install=1 — sibling-scope
+                // sub-PWAs DO install separately on Chrome Android,
+                // confirmed empirically. The earlier assumption that
+                // Chrome's WebAPK blocks all same-origin sub-installs
+                // was wrong; it only blocks them when the parent PWA's
+                // scope contains the sub-page. Möbius's narrow
+                // `/shell/` scope is what unlocked this.
                 <Menu.Item
-                  onSelect={() => {
-                    const url = `/apps/${slug}/?install=1`;
-                    const inPWA = window.matchMedia('(display-mode: standalone)').matches
-                      || window.navigator.standalone === true;
-                    if (inPWA) {
-                      window.open(url, '_blank', 'noopener');
-                    } else {
-                      window.location.href = url;
-                    }
-                  }}
+                  onSelect={() => { window.location.href = `/apps/${slug}/?install=1` }}
                 >
                   Install to home screen
                 </Menu.Item>
