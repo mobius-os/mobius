@@ -2,9 +2,7 @@
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
 
-from app.chat import SubprocessHandle
 from app.runner_registry import RunnerKind, registry
 
 
@@ -19,10 +17,6 @@ class _Handle:
 
 
 def test_debug_status_shape_matches_golden(client, auth):
-  proc = MagicMock()
-  proc.pid = 4242
-  proc.returncode = None
-  registry.register(SubprocessHandle(chat_id="chat-subproc", proc=proc))
   registry.register(_Handle("chat-sdk-claude", RunnerKind.CLAUDE_SDK))
   registry.register(_Handle("chat-sdk-codex", RunnerKind.CODEX_SDK))
   registry.mark_starting("chat-starting")

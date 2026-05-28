@@ -1,13 +1,28 @@
 """AI provider adapters.
 
-Each provider knows how to:
-  1. Resolve auth credentials for the SDK runtime (`check_auth`).
-  2. Build the subprocess env the SDK runner inherits (`build_env`).
-  3. For providers that still launch a runner subprocess (Codex's
-     app-server bridge), build the argv and parse the runner's stdout.
+Post-SDK-migration the two providers run on different paths and share
+only the identity + auth surface, not a polymorphic command shape:
 
-The chat module calls these to stay provider-agnostic.  Adding a new
-provider means writing a new class here and registering it in PROVIDERS.
+  * `ClaudeProvider` — env-shaper for the SDK path. Chat turns run
+    through `app.claude_sdk_runner`, which calls `check_auth` and
+    `build_env` (for `CLAUDE_CONFIG_DIR` + `AGENT_BROWSER_SESSION`)
+    and then drives the Anthropic Agent SDK directly. There is no
+    argv to build and no stdout to parse on this path.
+  * `CodexProvider` — everything-shaper for the subprocess (app-server)
+    path. Codex still spawns `codex_appserver_runner.py` for per-token
+    streaming, so it owns `check_auth`, `build_env`, plus `build`
+    (argv + env for the runner) and `parse_line` (decode the runner's
+    JSON event lines).
+
+`BaseProvider` carries only the common surface (`check_auth`,
+`build_env`, and the `name`/`cli_cmd`/`auth_dir` identifiers).
+`build`/`parse_line` live on `CodexProvider` because the SDK path
+has no use for them — putting them on the base class would be
+fictional polymorphism that `NotImplementedError`s on Claude.
+
+Adding a new provider means writing a new class here and registering
+it in PROVIDERS. SDK-backed providers implement just `check_auth` +
+`build_env`; subprocess-backed providers add `build` + `parse_line`.
 """
 
 import json
@@ -178,7 +193,16 @@ class ProviderResult:
 
 
 class BaseProvider:
-  """Interface that all providers implement."""
+  """Identity + auth surface shared by every provider.
+
+  Both runtime paths (SDK and subprocess) need a display name, an auth
+  preflight, and a base environment dict. They diverge after that:
+  Codex builds argv and parses runner stdout; Claude hands `build_env`
+  straight to the Agent SDK. Methods specific to the subprocess path
+  (`build` / `parse_line`) live on `CodexProvider` rather than here so
+  the interface reflects the real contract instead of an abstract one
+  that would only ever raise `NotImplementedError` on the SDK side.
+  """
 
   # Display name shown in the setup wizard.
   name: str = ""
@@ -191,33 +215,21 @@ class BaseProvider:
     """Returns an error message if not authenticated, None if ok."""
     return None
 
-  def build(
-    self,
-    user_message: str,
-    session_id: str | None,
-    base_env: dict[str, str],
-    data_dir: str,
-  ) -> ProviderResult:
-    """Returns the command and env for the subprocess."""
-    raise NotImplementedError
-
   def build_env(
     self,
     base_env: dict[str, str],
     data_dir: str,
     chat_id: str | None = None,
   ) -> dict[str, str]:
-    """Returns just the env dict that build() would produce.
+    """Returns the subprocess env (credentials path, per-chat
+    agent-browser session) the runtime — SDK or subprocess — inherits.
 
-    The SDK path uses only the env (credentials path, per-chat
-    agent-browser session) and does not need the cmd list. Splitting
-    the env construction here keeps the SDK path from building and
-    discarding a full CLI argv.
+    Each provider shapes a different set of variables (Claude needs
+    `CLAUDE_CONFIG_DIR` + `AGENT_BROWSER_SESSION`; Codex needs
+    `CODEX_HOME`), so subclasses always override. Raises on the base
+    class to make a missing override loud instead of silently passing
+    an unshaped env to the runtime.
     """
-    raise NotImplementedError
-
-  def parse_line(self, line: str) -> list[ChatEvent]:
-    """Parses one stdout line into zero or more SSE events."""
     raise NotImplementedError
 
 

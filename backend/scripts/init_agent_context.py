@@ -15,12 +15,15 @@ DIFF_PATH = DATA_DIR / "shared" / "upstream-diff.txt"
 def _ensure_mobius_writable(path: Path) -> None:
   """Makes `path` owned+writable by the mobius user.
 
-  The entrypoint runs as root, so files/dirs it creates come out
-  root-owned and often without the execute bit on directories. The
-  CLI subprocess runs as `mobius` and silently fails any Edit tool
-  call against a root-owned file — or any `cd` / `stat` into a
-  directory without the execute bit. The agent never updates its own
-  experience log as a result.
+  This script itself does pure file I/O — it does not spawn any
+  agent process. But the entrypoint runs as root, so files/dirs it
+  creates come out root-owned and often without the execute bit on
+  directories. The agent process that later reads these files
+  (Claude SDK / Codex runner, plus the recovery CLI subprocess)
+  runs as `mobius` and silently fails any Edit tool call against a
+  root-owned file — or any `cd` / `stat` into a directory without
+  the execute bit. The agent never updates its own experience log
+  as a result.
 
   Chown everything to mobius:mobius and apply correct mode: 775 for
   directories (rwx + traverse), 664 for files (rw, no exec).
