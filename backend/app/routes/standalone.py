@@ -342,11 +342,40 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       display: flex; align-items: center; gap: 14px;
       margin-bottom: 16px;
     }}
+    .ic-icon-wrap {{
+      position: relative;
+      width: 56px; height: 56px;
+      flex-shrink: 0;
+      border: none; padding: 0;
+      background: transparent;
+      cursor: pointer;
+      border-radius: 12px;
+    }}
+    .ic-icon-wrap:focus-visible {{ outline: 2px solid var(--accent); outline-offset: 2px; }}
     .ic-icon {{
       width: 56px; height: 56px;
       border-radius: 12px;
-      flex-shrink: 0;
       background: var(--bg);
+      display: block;
+    }}
+    .ic-icon-edit {{
+      position: absolute; bottom: -4px; right: -4px;
+      width: 22px; height: 22px;
+      border-radius: 50%;
+      background: var(--accent, #a78bfa);
+      color: #0c0f14;
+      font-size: 11px;
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+      pointer-events: none;
+    }}
+    .ic-icon-wrap.uploading {{ opacity: 0.6; pointer-events: none; }}
+    .ic-icon-wrap.uploading::after {{
+      content: ''; position: absolute; inset: 0;
+      border-radius: 12px;
+      border: 2px solid var(--accent);
+      border-top-color: transparent;
+      animation: spin 0.7s linear infinite;
     }}
     .ic-title {{
       font-size: 17px; font-weight: 600; color: var(--text);
@@ -418,7 +447,13 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   <div id="install-backdrop"></div>
   <div id="install-card" role="dialog" aria-modal="true" aria-labelledby="ic-title">
     <div class="ic-header">
-      <img class="ic-icon" src="/apps/{slug}/icon-192.png" alt="">
+      <button class="ic-icon-wrap" id="ic-icon-btn" type="button"
+              aria-label="Change icon" title="Tap to change icon">
+        <img class="ic-icon" id="ic-icon-img" src="/apps/{slug}/icon-192.png" alt="">
+        <span class="ic-icon-edit" aria-hidden="true">✎</span>
+      </button>
+      <input type="file" id="ic-icon-input" accept="image/png,image/jpeg,image/webp"
+             style="display:none">
       <div>
         <p class="ic-title" id="ic-title">{app_name_html}</p>
         <p class="ic-subtitle" id="ic-subtitle">Install to home screen</p>
@@ -440,12 +475,14 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
     </div>
     <div class="ic-success">
       <div class="ic-success-icon" aria-hidden="true">✓</div>
-      <div class="ic-success-title">Installed</div>
+      <div class="ic-success-title">{app_name_html} is on your home screen</div>
       <div class="ic-success-hint">
-        Find {app_name_html} on your home screen and tap to launch.
+        Close this tab and tap the new icon to launch it as a
+        standalone app. To edit it, open Möbius and chat with the
+        agent.
       </div>
       <div class="ic-actions">
-        <button class="ic-btn ic-btn--primary" id="ic-done">Done</button>
+        <button class="ic-btn ic-btn--primary" id="ic-done">Got it</button>
       </div>
     </div>
   </div>
@@ -561,6 +598,56 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       const doneBtn = document.getElementById('ic-done');
       const subtitle = document.getElementById('ic-subtitle');
       const info = document.getElementById('ic-info');
+      const iconBtn = document.getElementById('ic-icon-btn');
+      const iconImg = document.getElementById('ic-icon-img');
+      const iconInput = document.getElementById('ic-icon-input');
+
+      // Tap-to-upload icon. PUT /api/apps/<id>/icon accepts raw
+      // bytes; the standalone icon endpoint reads from icon_png on
+      // the next request, so after upload we just bust the <img>
+      // cache with a new ?t= timestamp. Owner JWT from localStorage
+      // — the endpoint requires owner auth, app-scoped tokens are
+      // rejected (apps can't change their own visual identity).
+      iconBtn.addEventListener('click', () => iconInput.click());
+      iconInput.addEventListener('change', async () => {{
+        const file = iconInput.files && iconInput.files[0];
+        if (!file) return;
+        const ownerToken = localStorage.getItem('token');
+        if (!ownerToken) return;
+        iconBtn.classList.add('uploading');
+        try {{
+          const resp = await fetch('/api/apps/' + APP_ID + '/icon', {{
+            method: 'PUT',
+            headers: {{
+              'Content-Type': file.type || 'application/octet-stream',
+              Authorization: 'Bearer ' + ownerToken,
+            }},
+            body: file,
+          }});
+          if (resp.ok) {{
+            iconImg.src = '/apps/' + APP_SLUG + '/icon-192.png?t=' + Date.now();
+            // Also bump the favicon + apple-touch-icon link refs
+            // so the new icon flows to the install manifest the
+            // OS sees on the next prompt. (The manifest itself
+            // doesn't include a cache buster — the browser
+            // re-fetches manifest.json on its own schedule, so
+            // the OS dialog may briefly show the previous icon
+            // on a same-session install.)
+            const fav = document.querySelector('link[rel="icon"]');
+            const touch = document.querySelector('link[rel="apple-touch-icon"]');
+            const bust = '?t=' + Date.now();
+            if (fav) fav.href = '/apps/' + APP_SLUG + '/icon-192.png' + bust;
+            if (touch) touch.href = '/apps/' + APP_SLUG + '/icon-192.png' + bust;
+          }} else {{
+            alert('Upload failed: ' + resp.status);
+          }}
+        }} catch (e) {{
+          alert('Upload failed: ' + (e && e.message || e));
+        }} finally {{
+          iconBtn.classList.remove('uploading');
+          iconInput.value = '';
+        }}
+      }});
 
       const forceShow = new URLSearchParams(window.location.search).get('install') === '1';
       const dismissKey = 'mobius-install-dismissed-' + APP_SLUG;

@@ -1,6 +1,7 @@
 """Routes for managing the mini-app registry."""
 
 import asyncio
+import io
 import json
 import re
 import shutil
@@ -195,6 +196,57 @@ async def update_app(
   db.commit()
   db.refresh(app)
   return app
+
+
+@router.put("/{app_id}/icon", status_code=204)
+async def update_icon(
+  app_id: int,
+  request: Request,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Owner uploads a custom icon for the app's standalone PWA install.
+
+  Accepts raw PNG or JPEG bytes (anything Pillow can decode). The
+  body is validated, converted to RGB, downscaled to fit within
+  1024x1024 if larger, and re-encoded as PNG before storing in
+  `App.icon_png`. The standalone icon endpoint at
+  `/apps/<slug>/icon-<N>.png` resizes from this on the fly per
+  request size, so one upload covers every icon size the manifest
+  declares.
+
+  Owner-only (not app-scoped tokens) — apps shouldn't be able to
+  rewrite their own visual identity without owner consent. To
+  revert to the auto-generated letter icon, send a zero-byte body.
+  """
+  body = await request.body()
+  if len(body) > 2 * 1024 * 1024:
+    raise HTTPException(413, "Icon too large (max 2 MB).")
+  app = (
+    db.query(models.App).filter(models.App.id == app_id).first()
+  )
+  if not app:
+    raise HTTPException(404, "App not found.")
+  if not body:
+    # Empty body = clear back to default.
+    app.icon_png = None
+    db.commit()
+    return Response(status_code=204)
+  # Validate + normalize via Pillow.
+  from PIL import Image
+  try:
+    img = Image.open(io.BytesIO(body))
+    img.load()
+  except Exception:
+    raise HTTPException(415, "Not a valid image.")
+  if img.mode != "RGB":
+    img = img.convert("RGB")
+  img.thumbnail((1024, 1024), Image.LANCZOS)
+  buf = io.BytesIO()
+  img.save(buf, format="PNG", optimize=True)
+  app.icon_png = buf.getvalue()
+  db.commit()
+  return Response(status_code=204)
 
 
 @router.delete("/{app_id}", status_code=204)
