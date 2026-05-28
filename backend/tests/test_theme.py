@@ -4,7 +4,13 @@ os.environ.setdefault("DATABASE_URL", "sqlite:////tmp/mobius_test/test.db")
 os.environ.setdefault("DATA_DIR", "/tmp/mobius_test")
 os.environ.setdefault("FRONTEND_ORIGIN", "http://localhost:5173")
 
-from app.theme import inject_theme_into_html, extract_imports, _ensure_core_vars
+from app.theme import (
+  inject_theme_into_html,
+  extract_imports,
+  _ensure_core_vars,
+  snapshot_theme_if_present,
+  reset_theme_override,
+)
 
 
 def test_extract_imports_splits_imports_from_css():
@@ -322,3 +328,185 @@ def test_inject_theme_quotes_in_import_urls_dont_inject_attrs(tmp_path):
   parser = LinkAttrChecker()
   parser.feed(result.split("</head>")[0] + "</head>")
   assert not parser.bad, "extra attributes injected into <link>"
+
+
+# Recovery affordance tests ------------------------------------------------
+# Three changes ship together: auto-snapshot on theme write,
+# `reset_theme_override` helper, and `POST /api/theme/reset`. Each
+# is verified independently so a regression in one doesn't mask
+# breakage in another.
+
+def test_snapshot_theme_creates_backup_when_present(tmp_path):
+  """An existing theme.css produces a theme.css.bak-<ts> sibling."""
+  shared = tmp_path / "shared"
+  shared.mkdir()
+  src = shared / "theme.css"
+  src.write_text(":root { --bg: #ff0000; }")
+  backup = snapshot_theme_if_present(str(tmp_path))
+  assert backup is not None
+  bp = type(src)(backup)
+  assert bp.exists()
+  assert bp.name.startswith("theme.css.bak-")
+  # Backup contains the same bytes as the source pre-snapshot.
+  assert bp.read_text() == ":root { --bg: #ff0000; }"
+  # Source is left untouched — snapshot is copy, not move.
+  assert src.exists()
+  assert src.read_text() == ":root { --bg: #ff0000; }"
+
+
+def test_snapshot_theme_no_op_when_missing(tmp_path):
+  """A missing theme.css returns None without raising."""
+  (tmp_path / "shared").mkdir()
+  assert snapshot_theme_if_present(str(tmp_path)) is None
+
+
+def test_reset_theme_renames_to_reset_bak(tmp_path):
+  """reset_theme_override moves theme.css aside, returns the backup path."""
+  shared = tmp_path / "shared"
+  shared.mkdir()
+  src = shared / "theme.css"
+  src.write_text(":root { --bg: #00ff00; }")
+  result = reset_theme_override(str(tmp_path))
+  assert result["reset"] is True
+  backup_path = type(src)(result["backup"])
+  assert backup_path.exists()
+  assert backup_path.name.startswith("theme.css.reset-bak-")
+  assert backup_path.read_text() == ":root { --bg: #00ff00; }"
+  # Source is gone — DEFAULT_THEME would paint on next read.
+  assert not src.exists()
+
+
+def test_reset_theme_idempotent_when_no_override(tmp_path):
+  """reset_theme_override with no theme.css reports no-op."""
+  (tmp_path / "shared").mkdir()
+  result = reset_theme_override(str(tmp_path))
+  assert result == {"reset": False, "reason": "no override"}
+
+
+def test_api_theme_reset_endpoint_idempotent(client, auth):
+  """POST /api/theme/reset with no override returns reset=False."""
+  res = client.post("/api/theme/reset", headers=auth)
+  assert res.status_code == 200
+  body = res.json()
+  assert body["reset"] is False
+  assert "reason" in body
+
+
+def test_api_theme_reset_endpoint_creates_backup(client, auth):
+  """POST /api/theme/reset moves the override to a reset-bak file
+  and subsequent GET /api/theme returns DEFAULT_THEME."""
+  import os
+  from app.theme import DEFAULT_THEME
+  data_dir = os.environ["DATA_DIR"]
+  shared = os.path.join(data_dir, "shared")
+  os.makedirs(shared, exist_ok=True)
+  custom = ":root { --bg: #abcdef; }"
+  with open(os.path.join(shared, "theme.css"), "w") as f:
+    f.write(custom)
+  try:
+    res = client.post("/api/theme/reset", headers=auth)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["reset"] is True
+    assert "reset-bak-" in body["backup"]
+    # Backup file actually exists on disk.
+    assert os.path.exists(body["backup"])
+    # The override is gone — GET /api/theme falls back to defaults.
+    assert client.get("/api/theme", headers=auth).json()["css"] == DEFAULT_THEME
+  finally:
+    # Cleanup: remove backup + any stale source.
+    for entry in os.listdir(shared):
+      if entry.startswith("theme.css"):
+        os.remove(os.path.join(shared, entry))
+
+
+def test_api_theme_reset_requires_auth(client):
+  """Unauth POST to /api/theme/reset returns 401."""
+  res = client.post("/api/theme/reset")
+  assert res.status_code == 401
+
+
+def test_storage_write_theme_css_auto_snapshots(client, auth):
+  """Writing to /api/storage/shared/theme.css snapshots the prior
+  version automatically. First write has no prior — no backup; the
+  SECOND write produces theme.css.bak-<ts>."""
+  import os
+  data_dir = os.environ["DATA_DIR"]
+  shared = os.path.join(data_dir, "shared")
+  os.makedirs(shared, exist_ok=True)
+  # Clear any leftover bak files from prior tests.
+  for entry in list(os.listdir(shared)):
+    if entry.startswith("theme.css"):
+      os.remove(os.path.join(shared, entry))
+  try:
+    # First write: no prior, no backup expected.
+    res = client.put(
+      "/api/storage/shared/theme.css",
+      headers=auth,
+      json={"content": ":root { --bg: #111111; }"},
+    )
+    assert res.status_code in (200, 204)
+    baks = [
+      e for e in os.listdir(shared)
+      if e.startswith("theme.css.bak-")
+    ]
+    assert baks == []
+    # Second write: prior exists, snapshot must fire.
+    res = client.put(
+      "/api/storage/shared/theme.css",
+      headers=auth,
+      json={"content": ":root { --bg: #222222; }"},
+    )
+    assert res.status_code in (200, 204)
+    baks = [
+      e for e in os.listdir(shared)
+      if e.startswith("theme.css.bak-")
+    ]
+    assert len(baks) == 1
+    # Backup contains the FIRST write's contents — the snapshot
+    # fires before the new write lands.
+    bak_path = os.path.join(shared, baks[0])
+    with open(bak_path) as f:
+      assert f.read() == ":root { --bg: #111111; }"
+  finally:
+    for entry in list(os.listdir(shared)):
+      if entry.startswith("theme.css"):
+        os.remove(os.path.join(shared, entry))
+
+
+def test_recover_page_exposes_reset_theme_button():
+  """The recovery dashboard HTML includes a reset_theme form so a
+  user trapped in a broken theme can recover from outside the
+  main shell."""
+  from app.routes.recover_html import dashboard_html
+  html = dashboard_html()
+  # The hidden input is the contract — the action name must match
+  # the handler dispatch in routes/recover.py.
+  assert 'name="action" value="reset_theme"' in html
+  assert "Reset theme to default" in html
+
+
+def test_recover_action_reset_theme_idempotent(tmp_path, monkeypatch):
+  """`reset_theme` recovery action returns a friendly message when
+  there's no override to reset, without raising."""
+  from app.routes.recover import _action_reset_theme
+  (tmp_path / "shared").mkdir()
+  msg = _action_reset_theme(tmp_path)
+  assert "default" in msg.lower() or "no" in msg.lower()
+
+
+def test_recover_action_reset_theme_renames_inline(tmp_path):
+  """The recovery-page reset handler does the rename inline (no
+  import of app.theme) and preserves the prior theme as a
+  reset-bak file."""
+  from app.routes.recover import _action_reset_theme
+  shared = tmp_path / "shared"
+  shared.mkdir()
+  src = shared / "theme.css"
+  src.write_text(":root { --bg: #cafe42; }")
+  msg = _action_reset_theme(tmp_path)
+  assert "reset" in msg.lower()
+  assert not src.exists()
+  baks = [p for p in shared.iterdir() if p.name.startswith("theme.css.reset-bak-")]
+  assert len(baks) == 1
+  assert baks[0].read_text() == ":root { --bg: #cafe42; }"

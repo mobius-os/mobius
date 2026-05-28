@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends
 from app import models
 from app.config import Settings, get_settings
 from app.deps import get_current_owner
-from app.theme import get_theme_css, get_bg_color
+from app.theme import get_theme_css, get_bg_color, reset_theme_override
 
 
 router = APIRouter(prefix="/api/theme", tags=["theme"])
@@ -34,3 +34,23 @@ def get_theme(
     "css": get_theme_css(settings.data_dir),
     "bg": get_bg_color(settings.data_dir),
   }
+
+
+@router.post("/reset")
+def reset_theme(
+  _: models.Owner = Depends(get_current_owner),
+  settings: Settings = Depends(get_settings),
+):
+  """Moves `/data/shared/theme.css` aside so DEFAULT_THEME paints
+  again, preserving the previous theme as
+  `theme.css.reset-bak-<unix-ts>`.
+
+  This is the JSON endpoint used by the shell's `?reset-theme=1`
+  URL-parameter recovery flow. The recovery page (`/recover`)
+  performs the same rename inline so it can stay independent of
+  the regular API import chain.
+
+  Idempotent: with no override present, returns
+  `{"reset": false, "reason": "no override"}`.
+  """
+  return reset_theme_override(settings.data_dir)

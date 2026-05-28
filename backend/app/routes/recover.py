@@ -16,6 +16,7 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
+import time
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -213,6 +214,29 @@ def _action_reset_settings(data_dir: Path) -> str:
   return "CLI auth cleared.  Sign in again via the setup wizard."
 
 
+def _action_reset_theme(data_dir: Path) -> str:
+  """Moves /data/shared/theme.css aside so DEFAULT_THEME paints again.
+
+  Performed inline (no import of app.theme) so this action stays
+  inside the frozen-recovery-island contract: if app.theme is
+  broken, the recovery page still works. The behavior matches
+  `app.theme.reset_theme_override` — preserve the previous theme
+  as `theme.css.reset-bak-<unix-ts>` next to the live file.
+
+  Idempotent — no override present is reported as a no-op so the
+  user can tap the button without worrying about state.
+  """
+  theme_path = data_dir / "shared" / "theme.css"
+  if not theme_path.exists():
+    return "No custom theme override is set — already on defaults."
+  backup = theme_path.with_name(f"theme.css.reset-bak-{int(time.time())}")
+  theme_path.rename(backup)
+  return (
+    f"Theme reset to default. Your previous theme is saved as "
+    f"{backup.name}."
+  )
+
+
 def _action_restore_shell(data_dir: Path) -> str:
   """Rebuilds the frontend from the original source baked into the image.
 
@@ -391,6 +415,7 @@ _ACTION_HANDLERS = {
   "reset_apps": _action_reset_apps,
   "reset_chat": _action_reset_chat,
   "reset_settings": _action_reset_settings,
+  "reset_theme": _action_reset_theme,
   "restore_shell": _action_restore_shell,
   "restore_backend": _action_restore_backend,
   "restore_scripts": _action_restore_scripts,

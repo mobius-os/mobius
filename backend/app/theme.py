@@ -7,6 +7,8 @@ their own :root variables — they come from here.
 """
 
 import re
+import shutil
+import time
 from html import escape as html_escape
 from pathlib import Path
 
@@ -120,6 +122,70 @@ def get_theme_mode(data_dir: str) -> str:
   except OSError:
     pass
   return "dark"
+
+
+# =============================================================
+# THEME RECOVERY AFFORDANCES
+# =============================================================
+# A theme that makes the shell unresponsive (full-screen overlay,
+# pointer-events: none on the root, opaque ::before with z-index
+# 99999, etc.) traps the user inside a broken UI. The recovery
+# story is: (a) the prior theme.css is snapshotted automatically
+# before every overwrite, so the agent never silently destroys
+# work; (b) the recovery page has a "Reset theme" button that
+# moves theme.css aside so DEFAULT_THEME paints again; (c) the
+# main shell honors `?reset-theme=1` in the URL for cases where
+# the user can reach `/` from the address bar but can't click
+# anything inside the page.
+#
+# This is the "build for reversibility, not prevention" lever from
+# the design philosophy. The theme is allowed to break the UI;
+# recovery is trivial and reachable from outside the broken state.
+
+
+def snapshot_theme_if_present(data_dir: str) -> str | None:
+  """Copies the current theme.css to theme.css.bak-<ts> if it exists.
+
+  Returns the absolute path of the backup, or None when there was
+  nothing to snapshot. The convention (`theme.css.bak-<unix-ts>`
+  alongside the live file) matches the informal pattern already
+  present in `/data/shared/` from agent-driven swaps; this helper
+  makes it automatic so the agent never has to remember.
+
+  Idempotent on a missing source. Two snapshots within the same
+  second overwrite each other (timestamp granularity); this is the
+  same granularity the agent already uses informally and is fine
+  for a recovery audit trail — the goal is "previous version is
+  preserved," not "every keystroke."
+  """
+  src = Path(data_dir) / "shared" / "theme.css"
+  if not src.exists():
+    return None
+  ts = int(time.time())
+  dst = src.with_name(f"theme.css.bak-{ts}")
+  shutil.copy2(src, dst)
+  return str(dst)
+
+
+def reset_theme_override(data_dir: str) -> dict:
+  """Moves /data/shared/theme.css aside so DEFAULT_THEME paints again.
+
+  The override is preserved as `theme.css.reset-bak-<unix-ts>` so
+  the user can recover their previous theme if the reset was a
+  mistake. Idempotent — calling with no override present is a
+  no-op that reports `reset=False`.
+
+  Returns a dict shaped like the /api/theme/reset response:
+    {"reset": True,  "backup": "<absolute path>"} on success
+    {"reset": False, "reason": "no override"}   when no theme.css exists
+  """
+  src = Path(data_dir) / "shared" / "theme.css"
+  if not src.exists():
+    return {"reset": False, "reason": "no override"}
+  ts = int(time.time())
+  dst = src.with_name(f"theme.css.reset-bak-{ts}")
+  src.rename(dst)
+  return {"reset": True, "backup": str(dst)}
 
 
 def _escape_for_style_tag(css: str) -> str:
