@@ -475,14 +475,12 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
     </div>
     <div class="ic-success">
       <div class="ic-success-icon" aria-hidden="true">✓</div>
-      <div class="ic-success-title">{app_name_html} is on your home screen</div>
+      <div class="ic-success-title">Installed</div>
       <div class="ic-success-hint">
-        Close this tab and tap the new icon to launch it as a
-        standalone app. To edit it, open Möbius and chat with the
-        agent.
+        Find {app_name_html} on your home screen and tap to launch.
       </div>
       <div class="ic-actions">
-        <button class="ic-btn ic-btn--primary" id="ic-done">Got it</button>
+        <button class="ic-btn ic-btn--primary" id="ic-done">Done</button>
       </div>
     </div>
   </div>
@@ -602,55 +600,53 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       const iconImg = document.getElementById('ic-icon-img');
       const iconInput = document.getElementById('ic-icon-input');
 
-      // Tap-to-upload icon. PUT /api/apps/<id>/icon accepts raw
-      // bytes; the standalone icon endpoint reads from icon_png on
-      // the next request, so after upload we just bust the <img>
-      // cache with a new ?t= timestamp. Owner JWT from localStorage
-      // — the endpoint requires owner auth, app-scoped tokens are
-      // rejected (apps can't change their own visual identity).
-      iconBtn.addEventListener('click', () => iconInput.click());
-      iconInput.addEventListener('change', async () => {{
-        const file = iconInput.files && iconInput.files[0];
-        if (!file) return;
-        const ownerToken = localStorage.getItem('token');
-        if (!ownerToken) return;
-        iconBtn.classList.add('uploading');
-        try {{
-          const resp = await fetch('/api/apps/' + APP_ID + '/icon', {{
-            method: 'PUT',
-            headers: {{
-              'Content-Type': file.type || 'application/octet-stream',
-              Authorization: 'Bearer ' + ownerToken,
-            }},
-            body: file,
-          }});
-          if (resp.ok) {{
-            iconImg.src = '/apps/' + APP_SLUG + '/icon-192.png?t=' + Date.now();
-            // Also bump the favicon + apple-touch-icon link refs
-            // so the new icon flows to the install manifest the
-            // OS sees on the next prompt. (The manifest itself
-            // doesn't include a cache buster — the browser
-            // re-fetches manifest.json on its own schedule, so
-            // the OS dialog may briefly show the previous icon
-            // on a same-session install.)
-            const fav = document.querySelector('link[rel="icon"]');
-            const touch = document.querySelector('link[rel="apple-touch-icon"]');
-            const bust = '?t=' + Date.now();
-            if (fav) fav.href = '/apps/' + APP_SLUG + '/icon-192.png' + bust;
-            if (touch) touch.href = '/apps/' + APP_SLUG + '/icon-192.png' + bust;
-          }} else {{
-            alert('Upload failed: ' + resp.status);
-          }}
-        }} catch (e) {{
-          alert('Upload failed: ' + (e && e.message || e));
-        }} finally {{
-          iconBtn.classList.remove('uploading');
-          iconInput.value = '';
-        }}
-      }});
-
       const forceShow = new URLSearchParams(window.location.search).get('install') === '1';
       const dismissKey = 'mobius-install-dismissed-' + APP_SLUG;
+
+      // Tap-to-upload custom icon. PUT /api/apps/<id>/icon accepts
+      // raw bytes; the standalone icon endpoint reads from icon_png
+      // on the next request, so after upload we bust the <img> cache
+      // with a fresh ?t= timestamp. The endpoint accepts either the
+      // owner JWT or an app-scoped token whose app_id matches the
+      // path — so reading `localStorage['token']` is enough here
+      // whether it holds the owner token (cross-PWA contexts) or the
+      // app-scoped token a prior render of this page minted (the bug
+      // that caused a 403 before the endpoint relax shipped).
+      if (iconBtn && iconInput) {{
+        iconBtn.addEventListener('click', () => iconInput.click());
+        iconInput.addEventListener('change', async () => {{
+          const file = iconInput.files && iconInput.files[0];
+          if (!file) return;
+          const token = localStorage.getItem('token');
+          if (!token) return;
+          iconBtn.classList.add('uploading');
+          try {{
+            const resp = await fetch('/api/apps/' + APP_ID + '/icon', {{
+              method: 'PUT',
+              headers: {{
+                'Content-Type': file.type || 'application/octet-stream',
+                Authorization: 'Bearer ' + token,
+              }},
+              body: file,
+            }});
+            if (resp.ok) {{
+              const bust = '?t=' + Date.now();
+              iconImg.src = '/apps/' + APP_SLUG + '/icon-192.png' + bust;
+              const fav = document.querySelector('link[rel="icon"]');
+              const touch = document.querySelector('link[rel="apple-touch-icon"]');
+              if (fav) fav.href = '/apps/' + APP_SLUG + '/icon-192.png' + bust;
+              if (touch) touch.href = '/apps/' + APP_SLUG + '/icon-192.png' + bust;
+            }} else {{
+              alert('Upload failed: ' + resp.status);
+            }}
+          }} catch (e) {{
+            alert('Upload failed: ' + (e && e.message || e));
+          }} finally {{
+            iconBtn.classList.remove('uploading');
+            iconInput.value = '';
+          }}
+        }});
+      }}
 
       // Honor display-mode standalone ONLY for the no-force path. A
       // user explicitly tapping Install in the drawer overrides this
