@@ -1,8 +1,9 @@
 """Debug and observability endpoints.
 
-Provides structured access to chat logs, active processes, and broadcast
-state.  All endpoints require authentication.  The agent uses these when
-debugging issues instead of ad-hoc debug endpoints.
+Provides structured access to chat logs, active SDK runtimes (Claude +
+Codex), starting state, and broadcast state.  All endpoints require
+authentication.  The agent uses these when debugging issues instead of
+ad-hoc debug endpoints.
 """
 
 import os
