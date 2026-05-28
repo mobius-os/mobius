@@ -498,17 +498,24 @@ function DrawerRow({
               </Menu.Item>
               <Menu.Item onSelect={() => onRenameStart()}>Rename</Menu.Item>
               {kind === 'app' && slug && (
-                // Same-tab navigate with ?install=1 to the standalone
-                // surface. The destination page renders the app in the
-                // background and overlays a Möbius-styled install
-                // confirm card whose primary button calls
-                // `BeforeInstallPromptEvent.prompt()` — that's the only
-                // path where our button IS the install trigger, since
-                // `prompt()` is bound to the page's active manifest.
-                // The `?install=1` query forces the card open even if
-                // the user dismissed it in a prior session.
+                // From inside an installed PWA (display-mode: standalone),
+                // navigate via `window.open('_blank')` so the destination
+                // opens in a real browser tab — Chromium does not fire
+                // `beforeinstallprompt` for other PWAs from inside an
+                // installed PWA window, and there's no browser chrome to
+                // fall back on either. Outside a PWA, same-tab is fine
+                // (the user is already in a browser tab).
                 <Menu.Item
-                  onSelect={() => { window.location.href = `/apps/${slug}/?install=1` }}
+                  onSelect={() => {
+                    const url = `/apps/${slug}/?install=1`;
+                    const inPWA = window.matchMedia('(display-mode: standalone)').matches
+                      || window.navigator.standalone === true;
+                    if (inPWA) {
+                      window.open(url, '_blank', 'noopener');
+                    } else {
+                      window.location.href = url;
+                    }
+                  }}
                 >
                   Install to home screen
                 </Menu.Item>
