@@ -96,6 +96,21 @@ async def lifespan(app):
     await seed_hello()
   except Exception as exc:
     _log.error("seed_hello failed: %s", exc, exc_info=True)
+  # First-boot auto-install of the curated app-store mini-app so a
+  # fresh container shows the store in the drawer immediately. The
+  # bootstrap module is idempotent (no-op if slug='store' already
+  # exists) and swallows its own failures — a GitHub blip must not
+  # crash lifespan and brick the recovery surface.
+  try:
+    from app.bootstrap import ensure_store_installed
+    from app.database import SessionLocal as _BootstrapSession
+    _bs_db = _BootstrapSession()
+    try:
+      await ensure_store_installed(_bs_db)
+    finally:
+      _bs_db.close()
+  except Exception as exc:
+    _log.error("bootstrap store install wiring failed: %s", exc, exc_info=True)
   # Backfill source_dir for legacy app rows. The file watcher resolves
   # /data/apps/<slug>/index.jsx → app.id via exact source_dir match;
   # rows with NULL (older builds, or apps imported without going

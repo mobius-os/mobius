@@ -46,6 +46,10 @@ services:
       - DATABASE_URL=sqlite:////tmp/test.db
       - DATA_DIR=/tmp/testdata
       - FRONTEND_ORIGIN=http://localhost:5173
+      # Bootstrap fetches the curated store manifest from GitHub on
+      # first boot. Tests must not depend on outbound network — set
+      # this so ensure_store_installed() returns immediately.
+      - MOEBIUS_SKIP_BOOTSTRAP=1
     working_dir: /app
     entrypoint: ["python", "-m", "pytest", "tests/", "-v"]
 
