@@ -9,9 +9,11 @@ owner-scoped surface = define a sub-router in this file and
 `outer_router.include_router(...)` it below.
 """
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app import models, providers
@@ -143,6 +145,41 @@ def update_model_prefs(
   owner.model_prefs_json = {"hidden_ids": cleaned}
   db.commit()
   return {"hidden_ids": cleaned}
+
+
+@owner_router.get("/walkthrough")
+def get_walkthrough(
+  owner: models.Owner = Depends(get_current_owner),
+) -> dict:
+  """Reports whether the post-signup walkthrough should appear.
+
+  The shell calls this once on mount and shows the WalkthroughOverlay
+  iff `completed` is False. The timestamp is exposed so future
+  analytics can read when the user got onboarded; the shell ignores
+  it. Treats absence as "not completed yet" — fresh owners pre-
+  migration land here with NULL and see the walkthrough exactly once.
+  """
+  completed_at = owner.walkthrough_completed_at
+  return {
+    "completed": completed_at is not None,
+    "completed_at": completed_at.isoformat() if completed_at else None,
+  }
+
+
+@owner_router.post("/walkthrough/complete", status_code=204)
+def mark_walkthrough_complete(
+  owner: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+) -> Response:
+  """Records walkthrough completion. Idempotent and write-once: a
+  second POST is a no-op rather than refreshing the timestamp, so the
+  original completion time stays accurate for downstream analytics
+  (the model comment commits to that). We don't require a payload —
+  completion is a single bit and there's nothing to configure."""
+  if owner.walkthrough_completed_at is None:
+    owner.walkthrough_completed_at = datetime.now(UTC)
+    db.commit()
+  return Response(status_code=204)
 
 
 # Compose: a single outer router so routes/__init__.py's frozen

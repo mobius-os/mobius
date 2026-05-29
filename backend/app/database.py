@@ -201,6 +201,14 @@ def run_migrations(eng) -> None:
       _add_owner.append(
         "ALTER TABLE owner ADD COLUMN model_prefs_json JSON"
       )
+    if "walkthrough_completed_at" not in owner_cols:
+      # NULL = "show the walkthrough." No backfill: existing owners
+      # of this single-owner-per-install platform will see the
+      # walkthrough exactly once on their next sign-in, which is
+      # the explicitly chosen rollout for the new onboarding.
+      _add_owner.append(
+        "ALTER TABLE owner ADD COLUMN walkthrough_completed_at DATETIME"
+      )
     if _add_owner:
       with eng.connect() as conn:
         for stmt in _add_owner:
