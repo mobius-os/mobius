@@ -70,7 +70,6 @@ notifications_router = _load("notifications")
 debug_router = _load("debug")
 theme_router = _load("theme")
 standalone_router = _load("standalone")
-install_log_router = _load("install_log")
 
 __all__ = [
   "auth_router",
@@ -91,5 +90,4 @@ __all__ = [
   "debug_router",
   "theme_router",
   "standalone_router",
-  "install_log_router",
 ]

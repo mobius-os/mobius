@@ -442,40 +442,7 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
     // the same reason — it can fire before our module finishes booting
     // (the user can install via Chrome's own ⋮ menu while the app is
     // still loading).
-    //
-    // Every event is also beaconed to /api/install-log so we can see
-    // server-side what actually fired in real user sessions. Temporary
-    // diagnostic — remove once the install UX is stable.
     (function() {{
-      const _APP_SLUG = {json.dumps(slug)};
-      function beacon(event, ctx) {{
-        try {{
-          const body = JSON.stringify(Object.assign({{
-            surface: 'standalone',
-            slug: _APP_SLUG,
-            event: event,
-            url: location.href,
-            display_mode: (
-              window.matchMedia('(display-mode: standalone)').matches
-                ? 'standalone'
-                : (window.matchMedia('(display-mode: minimal-ui)').matches
-                    ? 'minimal-ui'
-                    : 'browser')
-            ),
-            referrer: document.referrer || null,
-          }}, ctx || {{}}));
-          // keepalive so the beacon survives a navigation away (the
-          // install dialog can trigger a navigation in some flows).
-          fetch('/api/install-log', {{
-            method: 'POST',
-            headers: {{ 'Content-Type': 'application/json' }},
-            body: body,
-            keepalive: true,
-          }}).catch(() => {{}});
-        }} catch (_) {{}}
-      }}
-      window.__mobiusBeacon = beacon;
-
       // Platform detection. Used by the install card to tailor the
       // fallback hint per browser/OS, since PWA install affordances
       // differ wildly:
@@ -530,54 +497,16 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       }}
       window.__mobiusPlatform = detectPlatform();
 
-      beacon('page_load', {{
-        has_install_param: new URLSearchParams(location.search).has('install'),
-        // `getInstalledRelatedApps` is the closest thing Chrome gives
-        // us to "is the parent Möbius PWA installed for this origin?".
-        // Surface its result so we can tell whether suppression is the
-        // expected behavior or something more exotic.
-        related_apps_available:
-          typeof navigator.getInstalledRelatedApps === 'function',
-        platform: window.__mobiusPlatform,
-      }});
-      if (typeof navigator.getInstalledRelatedApps === 'function') {{
-        navigator.getInstalledRelatedApps().then(
-          apps => beacon('related_apps', {{
-            apps: apps.map(a => ({{
-              id: a.id, platform: a.platform, url: a.url,
-            }})),
-          }}),
-          err => beacon('related_apps_error', {{
-            error: String(err && err.message || err),
-          }}),
-        );
-      }}
-
       window.addEventListener('beforeinstallprompt', function(e) {{
         e.preventDefault();
         window.__bipDeferred = e;
-        beacon('bip_fired', {{ platforms: e.platforms || null }});
         window.dispatchEvent(new CustomEvent('mobius:bip-ready'));
       }});
 
       window.addEventListener('appinstalled', function() {{
-        beacon('app_installed');
         window.__bipDeferred = null;
         window.dispatchEvent(new CustomEvent('mobius:installed'));
       }});
-
-      // Display-mode transitions are the cleanest signal that an
-      // install actually took effect on this origin, separate from
-      // the `appinstalled` event (which can be missed if the page
-      // navigated mid-install).
-      try {{
-        window.matchMedia('(display-mode: standalone)')
-          .addEventListener('change', function(e) {{
-            beacon('display_mode_change', {{
-              matches: e.matches, mode: 'standalone',
-            }});
-          }});
-      }} catch (_) {{}}
     }})();
   </script>
   <div id="root"></div>
@@ -731,7 +660,6 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
     //     running standalone (nothing to install), OR when the user
     //     dismissed earlier this session.
     (function setupInstallCard() {{
-      const beacon = window.__mobiusBeacon || function() {{}};
       const platform = window.__mobiusPlatform || {{}};
 
       // Element handles. All of these are rendered above in the same
@@ -844,11 +772,6 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       const copy = copyForPlatform();
       installBtn.textContent = copy.installLabel;
       fallback.innerHTML = copy.fallbackHTML;
-      beacon('platform_copy_selected', {{
-        label: copy.installLabel,
-        bip_expected: copy.bipExpected,
-        unsupported: !!copy.unsupported,
-      }});
 
       // `?install=1` is the drawer's intent signal — see the
       // visibility-rules comment above. Strip it after reading so a
@@ -895,17 +818,6 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       const suppressionLikely =
         displayStandalone || fromShell || forceShow;
 
-      beacon('card_decision', {{
-        force_show: forceShow,
-        display_standalone: displayStandalone,
-        from_shell: fromShell,
-        suppression_likely: suppressionLikely,
-        skip_already_installed: skipAlreadyInstalled,
-        was_dismissed: wasDismissed,
-        bip_already_captured: !!window.__bipDeferred,
-        unsupported_platform: !!copy.unsupported,
-      }});
-
       if (skipAlreadyInstalled) return;
 
       let shown = false;
@@ -924,18 +836,11 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         if (cardSub) cardSub.textContent =
           'Möbius is already installed, so this needs one quick step';
         installBtn.textContent = 'Show install steps';
-        beacon('suppression_aware_copy_applied');
       }}
 
       function showCard(reason) {{
         if (shown) return;
         shown = true;
-        beacon('card_shown', {{
-          reason: reason,
-          has_bip: !!window.__bipDeferred,
-          platform_label: installBtn.textContent,
-          suppression_likely: suppressionLikely,
-        }});
         backdrop.classList.add('visible');
         card.classList.add('visible');
         // Pre-reveal the fallback panel whenever we KNOW BIP won't
@@ -946,11 +851,6 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         const preReveal = !copy.bipExpected || suppressionLikely;
         if (preReveal) {{
           fallback.classList.add('visible');
-          beacon('fallback_pre_revealed', {{
-            reason: !copy.bipExpected
-              ? 'bip_not_expected_on_platform'
-              : 'suppression_likely',
-          }});
         }}
         // Chromium-only safety net: even when suppressionLikely is
         // false (e.g. user opened /apps/<slug>/ in a fresh tab with
@@ -960,14 +860,10 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         if (copy.bipExpected && !preReveal) {{
           setTimeout(() => {{
             if (!window.__bipDeferred && !installed) {{
-              beacon('bip_still_missing_after_3s');
               installBtn.textContent = 'Show install steps';
               fallback.classList.add('visible');
               fallback.scrollIntoView({{
                 behavior: 'smooth', block: 'nearest',
-              }});
-              beacon('fallback_pre_revealed', {{
-                reason: 'bip_timeout',
               }});
             }}
           }}, 3000);
@@ -975,7 +871,6 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       }}
 
       function hideCard(reason) {{
-        beacon('card_hidden', {{ reason: reason }});
         backdrop.classList.remove('visible');
         card.classList.remove('visible');
       }}
@@ -1018,7 +913,6 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       }}
 
       iconBtn.addEventListener('click', () => {{
-        beacon('icon_picker_opened');
         fileInput.click();
       }});
 
@@ -1026,14 +920,9 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         const file = fileInput.files && fileInput.files[0];
         fileInput.value = '';  // allow re-picking the same file
         if (!file) return;
-        beacon('icon_upload_start', {{
-          size: file.size,
-          type: file.type,
-        }});
         const token = localStorage.getItem('token');
         if (!token) {{
           showToast('Sign in first');
-          beacon('icon_upload_no_token');
           return;
         }}
         try {{
@@ -1051,14 +940,8 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
           }}
           // Cache-bust the preview so the new icon shows immediately.
           iconImg.src = '/apps/' + APP_SLUG + '/icon-192.png?t=' + Date.now();
-          beacon('icon_upload_success', {{
-            uploaded_size: blob.size,
-          }});
           showToast('Icon updated');
         }} catch (err) {{
-          beacon('icon_upload_error', {{
-            error: String(err && err.message || err),
-          }});
           showToast('Could not upload icon');
         }}
       }});
@@ -1073,7 +956,6 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         fallback.offsetHeight;  // force reflow
         fallback.style.animation = '';
         fallback.scrollIntoView({{ behavior: 'smooth', block: 'nearest' }});
-        beacon('fallback_revealed', {{ reason: reason }});
       }}
 
       installBtn.addEventListener('click', async () => {{
@@ -1081,14 +963,10 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         // user can paste into Safari. No BIP, no install dialog
         // possible. Fallback panel was pre-revealed at card-show.
         if (copy.unsupported && platform.iosNonSafari) {{
-          beacon('install_btn_tap_copy_url');
           try {{
             await navigator.clipboard.writeText(location.href);
             showToast('Link copied — paste in Safari');
           }} catch (err) {{
-            beacon('clipboard_error', {{
-              error: String(err && err.message || err),
-            }});
             showToast('Copy failed — long-press the URL bar');
           }}
           return;
@@ -1096,12 +974,10 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
 
         const deferred = window.__bipDeferred;
         if (deferred) {{
-          beacon('install_btn_tap_with_bip');
           bipUsed = true;
           try {{
             deferred.prompt();
             const result = await deferred.userChoice;
-            beacon('prompt_result', {{ outcome: result.outcome }});
             window.__bipDeferred = null;
             // Don't hide the card on accept — the appinstalled
             // listener swaps to the success state explicitly.
@@ -1112,9 +988,6 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
               revealFallback('native_dismissed');
             }}
           }} catch (err) {{
-            beacon('prompt_error', {{
-              error: String(err && err.message || err),
-            }});
             revealFallback('prompt_threw');
             installBtn.textContent = 'Show install steps';
           }}
@@ -1123,7 +996,6 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
           // instruction panel with pulse + scroll-into-view so the
           // user can't miss it (the brazil-trip trace showed two
           // dead taps before the user found the menu).
-          beacon('install_btn_tap_without_bip');
           revealFallback('no_bip_on_tap');
           installBtn.textContent = copy.bipExpected
             ? 'Show install steps' : copy.installLabel;
@@ -1131,13 +1003,11 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       }});
 
       cancelBtn.addEventListener('click', () => {{
-        beacon('card_dismissed');
         sessionStorage.setItem(DISMISS_KEY, '1');
         hideCard('cancel');
       }});
 
       doneBtn.addEventListener('click', () => {{
-        beacon('card_done');
         hideCard('done');
         // After install, return to Möbius rather than leaving the user
         // stranded on the sub-app's not-yet-launched-from-home-screen
@@ -1146,9 +1016,6 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         // /apps/<slug>/?install=1 flows where back-stack is empty.
         setTimeout(() => {{
           const cameFromShell = /\\/shell\\//.test(document.referrer);
-          beacon('post_install_navigate', {{
-            method: cameFromShell ? 'history_back' : 'shell_redirect',
-          }});
           if (cameFromShell && history.length > 1) {{
             history.back();
           }} else {{
@@ -1161,7 +1028,6 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       // we're in the success state, require the explicit Got it tap).
       backdrop.addEventListener('click', () => {{
         if (!success.classList.contains('visible')) {{
-          beacon('card_dismissed', {{ via: 'backdrop' }});
           sessionStorage.setItem(DISMISS_KEY, '1');
           hideCard('backdrop');
         }}
@@ -1172,7 +1038,6 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       // it to "Show install steps" — the native dialog will fire now.
       window.addEventListener('mobius:bip-ready', () => {{
         if (shown) {{
-          beacon('bip_arrived_while_card_open');
           installBtn.textContent = 'Install';
         }}
       }});
@@ -1181,7 +1046,6 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       window.addEventListener('mobius:installed', () => {{
         if (installed) return;
         installed = true;
-        beacon('card_success_state_shown', {{ used_bip: bipUsed }});
         successTitle.textContent = APP_NAME + ' is on your home screen';
         body.style.display = 'none';
         success.classList.add('visible');
@@ -1199,8 +1063,6 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       // looks broken.
       if (forceShow || !wasDismissed) {{
         setTimeout(() => showCard(forceShow ? 'force_show' : 'opportunistic'), 350);
-      }} else {{
-        beacon('card_skipped_dismissed_this_session');
       }}
     }})();
   </script>
