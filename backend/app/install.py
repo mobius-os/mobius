@@ -29,15 +29,19 @@ import io
 import ipaddress
 import json
 import logging
+import os
 import re
 import shutil
 import socket
 import subprocess
+import warnings as _warnings_mod
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urljoin, urlparse
 
 import httpx
 from fastapi import HTTPException
+from PIL import Image as _PILImage
 from sqlalchemy.orm import Session
 
 from app import models
@@ -46,6 +50,16 @@ from app.config import get_settings
 from app.routes.apps import (
   _derive_source_dir, _slugify_for_source_dir, allocate_unique_slug,
 )
+
+# Decompression-bomb defense. PIL's default MAX_IMAGE_PIXELS (~89M)
+# is generous enough that a malicious tiny PNG with a giant declared
+# dimension can still allocate gigabytes during `load()`. 32M pixels
+# (~5657×5657) is enough headroom for any reasonable icon while
+# bounding worst-case allocation. The hard ceiling below (4096×4096)
+# is a second gate on raw width/height — checked BEFORE `load()` so
+# we reject the bomb cheaply via metadata.
+_PILImage.MAX_IMAGE_PIXELS = 32_000_000
+_ICON_MAX_DIM = 4096
 
 log = logging.getLogger("mobius.install")
 
@@ -250,6 +264,11 @@ async def _http_get(
   a private IP gets rejected just like a direct request to one.
   `follow_redirects` is False on the client; we walk the chain
   ourselves with a hop count cap.
+
+  Reads the body as a stream and aborts as soon as the running byte
+  total crosses `max_bytes` — `r.content` would buffer the full
+  response before the cap fires, so a hostile upstream could force
+  us to allocate `max_bytes` × N pending requests in memory.
   """
   if _hops > _MAX_REDIRECTS:
     raise HTTPException(
@@ -257,32 +276,42 @@ async def _http_get(
     )
   _validate_url_safe(url)
   try:
-    r = await client.get(url)
+    async with client.stream("GET", url) as r:
+      # Handle redirects + error statuses with the stream closed
+      # quickly so we don't hold a connection while recursing.
+      if r.status_code in (301, 302, 303, 307, 308):
+        loc = r.headers.get("Location")
+        if not loc:
+          raise HTTPException(
+            502, f"Redirect from {url} missing Location header.",
+          )
+        next_url = urljoin(url, loc)
+      else:
+        next_url = None
+        if r.status_code == 404:
+          raise HTTPException(404, f"Not found: {url}")
+        if r.status_code >= 400:
+          raise HTTPException(
+            502, f"Upstream {r.status_code} fetching {url}",
+          )
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in r.aiter_bytes():
+          total += len(chunk)
+          if total > max_bytes:
+            raise HTTPException(
+              413,
+              f"{url} exceeds {max_bytes} byte cap ({total}+ received).",
+            )
+          chunks.append(chunk)
+        return b"".join(chunks)
   except httpx.TimeoutException:
     raise HTTPException(504, f"Timeout fetching {url}")
   except httpx.RequestError as exc:
     raise HTTPException(502, f"Failed to fetch {url}: {exc}")
-  # Manually follow redirects so we can re-validate each hop.
-  if r.status_code in (301, 302, 303, 307, 308):
-    loc = r.headers.get("Location")
-    if not loc:
-      raise HTTPException(
-        502, f"Redirect from {url} missing Location header.",
-      )
-    next_url = urljoin(url, loc)
-    return await _http_get(client, next_url, max_bytes, _hops + 1)
-  if r.status_code == 404:
-    raise HTTPException(404, f"Not found: {url}")
-  if r.status_code >= 400:
-    raise HTTPException(
-      502, f"Upstream {r.status_code} fetching {url}",
-    )
-  body = r.content
-  if len(body) > max_bytes:
-    raise HTTPException(
-      413, f"{url} exceeds {max_bytes} byte cap ({len(body)} received).",
-    )
-  return body
+  # Recurse outside the stream context so the previous connection is
+  # already released by the time we open the next one.
+  return await _http_get(client, next_url, max_bytes, _hops + 1)
 
 
 def _seed_value_is_inline(value) -> bool:
@@ -293,11 +322,34 @@ def _seed_value_is_inline(value) -> bool:
 
 def _process_icon(raw: bytes) -> bytes:
   """PIL pipeline matches routes/apps.py:update_icon — center-square,
-  resize-to-fit, preserve alpha, re-encode as PNG."""
+  resize-to-fit, preserve alpha, re-encode as PNG.
+
+  Decompression-bomb defense lives here: we inspect `img.size` BEFORE
+  calling `img.load()` (PIL reads only the IHDR/header to populate
+  `.size`, so the giant allocation is still avoidable at this point).
+  Anything above _ICON_MAX_DIM × _ICON_MAX_DIM is rejected as 415
+  alongside the PIL-bomb signals.
+  """
   from PIL import Image
   try:
     img = Image.open(io.BytesIO(raw))
-    img.load()
+    # PIL emits DecompressionBombWarning when an image's pixel count
+    # exceeds MAX_IMAGE_PIXELS. Locally promote it to an error so the
+    # bomb path goes through our 415 instead of a `warnings.warn` that
+    # silently lets `load()` proceed.
+    with _warnings_mod.catch_warnings():
+      _warnings_mod.simplefilter("error", Image.DecompressionBombWarning)
+      w, h = img.size
+      if w > _ICON_MAX_DIM or h > _ICON_MAX_DIM:
+        raise HTTPException(
+          415,
+          f"Icon dimensions {w}x{h} exceed {_ICON_MAX_DIM}x{_ICON_MAX_DIM} cap.",
+        )
+      img.load()
+  except HTTPException:
+    raise
+  except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+    raise HTTPException(415, f"Icon rejected as decompression bomb: {exc}")
   except Exception:
     raise HTTPException(415, "Icon is not a valid image.")
   if img.mode not in ("RGB", "RGBA"):
@@ -331,7 +383,7 @@ def _register_cron(slug: str, schedule_expr: str, job_path: Path,
   if bundled_job_bytes:
     job_path.write_bytes(bundled_job_bytes)
     job_path.chmod(0o755)
-  scaffold = Path("/app/scripts/init-cron-scaffold.sh")
+  scaffold = CRON_SCAFFOLD
   if not scaffold.exists():
     # In tests we mock this away; in containers it's always present.
     raise HTTPException(500, "init-cron-scaffold.sh missing from image.")
@@ -378,9 +430,19 @@ async def install_from_manifest(
       refreshed in place. Icon + cron are re-applied to keep the
       end state coherent with the new manifest.
 
-  Failure modes are all HTTPException — caller is the route handler
-  and FastAPI surfaces them as proper status codes. We don't catch
-  + swallow anything that lands the DB or filesystem in a half state.
+  Failure modes:
+    - Pre-commit failures (manifest fetch, validation, JSX compile,
+      seed write, icon process) all raise HTTPException. The DB
+      transaction rolls back, filesystem `_cleanup` removes anything
+      we created, and on the update path the old compiled bundle is
+      restored from its `.bak` snapshot — caller sees a clean failure.
+    - Post-commit failures: cron registration runs AFTER `db.commit()`.
+      The app is fully installed at that point; cron failure becomes a
+      non-fatal warning appended to the returned `warnings` list. The
+      owner can re-register cron manually by editing the schedule.
+    - FastAPI surfaces each HTTPException with its proper status code;
+      we never catch + swallow anything that would land the DB or
+      filesystem in a half state.
   """
   if (manifest_url is None) == (manifest is None):
     raise HTTPException(
@@ -455,7 +517,15 @@ async def install_from_manifest(
     warnings.append(icon_warning)
 
   # --- Phase 4: materialize. Wrapped so cleanup runs on any failure. --
+  # `created_paths`: files/dirs to delete on failure (and leave on
+  # success). `cleanup_actions`: callables run on the success path
+  # (commit) OR rollback path (revert) — used for backup-rename
+  # rollback on the update path's compiled bundle, so a failed
+  # recompile restores the previous good bundle on disk to match the
+  # DB row that rolled back.
   created_paths: list[Path] = []
+  rollback_actions: list[Callable[[], None]] = []
+  commit_actions: list[Callable[[], None]] = []
   data_dir = Path(get_settings().data_dir)
   perms = manifest.get("permissions") or {}
 
@@ -490,6 +560,33 @@ async def install_from_manifest(
       db.add(app)
       db.flush()  # assign app.id without committing yet
 
+    # On the update path, snapshot the existing compiled bundle to
+    # `.bak` BEFORE compile overwrites it. If anything downstream
+    # fails and the DB rolls back to the old compiled_path string,
+    # we restore the file at that path from the snapshot — otherwise
+    # the row points at a path holding the new (possibly broken)
+    # bundle. Fresh installs don't need this: rollback drops the row
+    # entirely and `_cleanup` removes the file we just created.
+    if mode == "update":
+      old_compiled = data_dir / "compiled" / f"app-{app.id}.js"
+      backup = old_compiled.with_suffix(".js.bak")
+      if old_compiled.exists():
+        # Best-effort: a stale .bak from a prior crashed install
+        # would block the rename. Clear it first.
+        if backup.exists():
+          try:
+            backup.unlink()
+          except OSError:
+            pass
+        os.rename(old_compiled, backup)
+        rollback_actions.append(
+          lambda b=backup, o=old_compiled: os.rename(b, o)
+            if b.exists() else None
+        )
+        commit_actions.append(
+          lambda b=backup: b.unlink() if b.exists() else None
+        )
+
     # Compile JSX → /data/compiled/app-<id>.js. Raises on syntax error
     # which our outer except catches + rolls everything back.
     app.compiled_path = await compile_jsx(app.id, jsx_source)
@@ -519,16 +616,44 @@ async def install_from_manifest(
     if icon_processed:
       app.icon_png = icon_processed
 
-    # Cron — register if declared. Skip silently when the scaffold
-    # isn't on disk (test env), with a warning so the caller knows.
-    if sched and sched.get("default"):
-      slug = app.slug
-      job_name = sched.get("job", "fetch.sh")
-      app_data_dir = data_dir / "apps" / slug
+    # COMMIT FIRST — once the DB row is durable, cron registration
+    # is a non-fatal "best effort" step. Doing cron BEFORE commit
+    # could leave a crontab entry firing for a row that rolled back
+    # (orphaned cron, mysterious 'app not found' errors at runtime).
+    db.commit()
+    db.refresh(app)
+
+    # Success: drop any .bak snapshots we made — the new bundle is
+    # now the canonical one.
+    for action in commit_actions:
+      try:
+        action()
+      except OSError as exc:
+        log.warning("install: post-commit cleanup failed — %s", exc)
+
+  except HTTPException:
+    db.rollback()
+    _run_rollback_actions(rollback_actions)
+    _cleanup(created_paths)
+    raise
+  except Exception as exc:
+    # Catch-all so a stray bug doesn't leak partial state. Re-raise
+    # as 500 with a useful detail; uvicorn already logs the traceback.
+    log.exception("install: unexpected failure during materialize")
+    db.rollback()
+    _run_rollback_actions(rollback_actions)
+    _cleanup(created_paths)
+    raise HTTPException(500, f"Install failed: {exc!r}")
+
+  # --- Phase 5: post-commit cron registration -------------------------
+  # The app is fully installed at this point. Cron failures become
+  # warnings, not 500s — the user just needs to re-set the schedule.
+  if sched and sched.get("default"):
+    slug = app.slug
+    job_name = sched.get("job", "fetch.sh")
+    app_data_dir = data_dir / "apps" / slug
+    try:
       app_data_dir.mkdir(parents=True, exist_ok=True)
-      if mode == "install":
-        # Only create the data dir entry on fresh install.
-        created_paths.append(app_data_dir)
       job_path = app_data_dir / job_name
       if CRON_SCAFFOLD.exists():
         await asyncio.to_thread(
@@ -549,22 +674,16 @@ async def install_from_manifest(
         warnings.append(
           "cron: scaffold script not available — registration pending"
         )
+    except HTTPException as exc:
+      # Cron failed but the app is installed. Surface as a warning.
+      log.warning("install: cron registration failed post-commit — %s",
+                  exc.detail)
+      warnings.append(f"cron: registration failed — {exc.detail}")
+    except Exception as exc:
+      log.exception("install: cron registration failed post-commit")
+      warnings.append(f"cron: registration failed — {exc!r}")
 
-    db.commit()
-    db.refresh(app)
-    return app, mode, warnings, manifest
-
-  except HTTPException:
-    db.rollback()
-    _cleanup(created_paths)
-    raise
-  except Exception as exc:
-    # Catch-all so a stray bug doesn't leak partial state. Re-raise
-    # as 500 with a useful detail; uvicorn already logs the traceback.
-    log.exception("install: unexpected failure during materialize")
-    db.rollback()
-    _cleanup(created_paths)
-    raise HTTPException(500, f"Install failed: {exc!r}")
+  return app, mode, warnings, manifest
 
 
 def _cleanup(paths: list[Path]) -> None:
@@ -579,3 +698,15 @@ def _cleanup(paths: list[Path]) -> None:
         p.unlink()
     except OSError as exc:
       log.warning("install cleanup: %s — %s", p, exc)
+
+
+def _run_rollback_actions(actions: list[Callable[[], None]]) -> None:
+  """Runs the rollback callables in reverse order. Best-effort like
+  `_cleanup`: a failure inside one rollback step shouldn't mask the
+  underlying install failure, but we log loudly so the operator can
+  fix the leftover state."""
+  for action in reversed(actions):
+    try:
+      action()
+    except OSError as exc:
+      log.warning("install rollback: %s", exc)

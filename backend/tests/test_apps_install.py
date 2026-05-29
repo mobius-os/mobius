@@ -40,18 +40,45 @@ JSX = "export default function App() { return <div>ok</div> }"
 PROMPT = "# default prompt\nDo the work.\n"
 
 
-def _make_response(status: int, body: bytes):
+def _make_response(status: int, body: bytes, headers: dict | None = None):
   r = MagicMock()
   r.status_code = status
   r.content = body
   r.text = body.decode("utf-8", errors="replace")
+  r.headers = headers or {}
   r.json = lambda: json.loads(body.decode("utf-8"))
   return r
 
 
+class _StreamCtx:
+  """Async-context-manager wrapping a single response, mirroring
+  `httpx.AsyncClient.stream(...)`. `aiter_bytes()` yields the whole
+  body as one chunk for happy-path tests; pass `chunks=` for tests
+  that need to verify mid-stream abort behavior."""
+
+  def __init__(self, status, body, headers=None, chunks=None):
+    self._resp = _make_response(status, body, headers)
+    self._chunks = chunks if chunks is not None else [body]
+
+  async def __aenter__(self):
+    return self
+
+  async def __aexit__(self, *exc):
+    return False
+
+  def __getattr__(self, name):
+    return getattr(self._resp, name)
+
+  async def aiter_bytes(self):
+    for chunk in self._chunks:
+      yield chunk
+
+
 def _fake_async_client(responses: dict):
-  """`responses` maps URL → (status, bytes). Returns a context-manager
-  factory matching `httpx.AsyncClient(...)` usage."""
+  """`responses` maps URL → (status, bytes) or (status, bytes, headers).
+  Returns a context-manager factory matching `httpx.AsyncClient(...)`
+  usage. Exposes `.stream("GET", url)` since the install module
+  switched from `.get(url)` + `r.content` to streamed reads."""
 
   class _FakeClient:
     async def __aenter__(self):
@@ -60,11 +87,15 @@ def _fake_async_client(responses: dict):
     async def __aexit__(self, *exc):
       return False
 
-    async def get(self, url):
+    def stream(self, method, url):
       if url not in responses:
-        return _make_response(404, b"")
-      status, body = responses[url]
-      return _make_response(status, body)
+        return _StreamCtx(404, b"")
+      tup = responses[url]
+      if len(tup) == 2:
+        status, body = tup
+        return _StreamCtx(status, body)
+      status, body, headers = tup
+      return _StreamCtx(status, body, headers=headers)
 
   return lambda *a, **kw: _FakeClient()
 
@@ -342,13 +373,6 @@ def test_install_rejects_redirect_to_private_ip(client, auth, bypass_url_validat
     ),
   }
 
-  class _Resp:
-    def __init__(self, status, body, headers=None):
-      self.status_code = status
-      self.content = body
-      self.text = body.decode("utf-8", errors="replace")
-      self.headers = headers or {}
-
   class _FakeClient:
     async def __aenter__(self):
       return self
@@ -356,10 +380,10 @@ def test_install_rejects_redirect_to_private_ip(client, auth, bypass_url_validat
     async def __aexit__(self, *exc):
       return False
 
-    async def get(self, url):
+    def stream(self, method, url):
       if url == base + "mobius.json":
-        return _Resp(302, b"", {"Location": evil})
-      return _Resp(404, b"")
+        return _StreamCtx(302, b"", headers={"Location": evil})
+      return _StreamCtx(404, b"")
 
   # Only validate the redirect target — the initial fetch goes through
   # the bypass fixture. This mirrors the real-world threat: legitimate
@@ -442,3 +466,143 @@ def test_install_accepts_valid_cron_shapes(client, auth, bypass_url_validation):
         "manifest_url": base + "mobius.json",
       })
     assert r.status_code == 201, f"{expr!r}: {r.text}"
+
+
+# --- Decompression-bomb defense (fix 2) -----------------------------
+
+
+def test_install_rejects_decompression_bomb_icon(client, auth, bypass_url_validation):
+  """Fix 2: a tiny PNG that decodes to a giant image must be rejected
+  before PIL's `load()` allocates gigabytes. We patch `Image.open` to
+  return a mock whose `.size` reports 50000x50000 — the dimension gate
+  fires before `load()`, so the install endpoint treats it as a 415
+  icon error and surfaces it as a non-fatal warning (icons are
+  optional). The app installs without the icon."""
+  from unittest.mock import patch as _patch, MagicMock
+  base = "https://x.test/bomb/"
+  responses = {
+    base + "mobius.json": (200, json.dumps({
+      **MANIFEST_NEWS, "id": "bomb-icon",
+    }).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, b"\x89PNG\r\n\x1a\n" + b"bogus"),  # any bytes
+    base + "prompt.md": (200, PROMPT.encode()),
+    base + "fetch.sh": (200, b""),
+  }
+  fake_img = MagicMock()
+  fake_img.size = (50000, 50000)
+  fake_img.mode = "RGB"
+  with _patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ), _patch("PIL.Image.open", return_value=fake_img):
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  # Icon rejection is non-fatal — the install succeeds, the icon path
+  # surfaces as a warning. The important assertion is that PIL.load()
+  # was NEVER called (i.e. no gigabyte allocation).
+  fake_img.load.assert_not_called()
+  assert r.status_code == 201, r.text
+  assert any("icon" in w.lower() for w in r.json()["warnings"])
+
+
+# --- Stream byte counter aborts mid-download (fix 3) ----------------
+
+
+def test_install_aborts_when_stream_exceeds_cap(client, auth, bypass_url_validation):
+  """Fix 3: `_http_get` now reads via `client.stream()` and tracks
+  bytes per chunk, aborting once the running total crosses the cap.
+  A response that totals well over the manifest cap MUST 413 — and
+  it must do so without buffering the whole body. We assert the
+  endpoint returns the upstream 413 surfaced as an install failure."""
+  base = "https://x.test/huge/"
+  # Build a multi-chunk body that crosses _MANIFEST_MAX_BYTES (64KB).
+  big_chunks = [b"x" * 32 * 1024 for _ in range(5)]  # 160 KB total
+  # We need a custom client that returns chunked bodies for the
+  # manifest URL specifically.
+  class _ChunkedClient:
+    async def __aenter__(self):
+      return self
+    async def __aexit__(self, *exc):
+      return False
+    def stream(self, method, url):
+      if url == base + "mobius.json":
+        return _StreamCtx(200, b"".join(big_chunks), chunks=big_chunks)
+      return _StreamCtx(404, b"")
+  with patch(
+    "app.install.httpx.AsyncClient",
+    lambda *a, **kw: _ChunkedClient(),
+  ):
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  # The install handler surfaces upstream 4xx fetch errors as 4xx;
+  # 413 cap-exceeded should reach the response.
+  assert r.status_code == 413, r.text
+  assert "cap" in r.json()["detail"].lower() or "exceeds" in r.json()["detail"].lower()
+
+
+# --- Update path rolls back compiled bundle (fix 4) -----------------
+
+
+def test_update_compile_failure_preserves_old_bundle(client, auth, bypass_url_validation):
+  """Fix 4: a failed v2 install must not leave the on-disk compiled
+  bundle in the broken-v2 state. We install v1 (good JSX), record the
+  compiled bytes, then attempt a v2 install with broken JSX — assert
+  the v2 install fails AND the v1 compiled bytes are still on disk."""
+  base = "https://x.test/upd-v1/"
+  responses_v1 = {
+    base + "mobius.json": (200, json.dumps({
+      **MANIFEST_NEWS, "id": "upd-target", "version": "1.0.0",
+    }).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, PROMPT.encode()),
+    base + "fetch.sh": (200, b""),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses_v1),
+  ):
+    r1 = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r1.status_code == 201, r1.text
+  app_id = r1.json()["id"]
+
+  data_dir = Path(get_settings().data_dir)
+  compiled_path = data_dir / "compiled" / f"app-{app_id}.js"
+  assert compiled_path.exists(), "v1 bundle should be on disk"
+  v1_bytes = compiled_path.read_bytes()
+  assert len(v1_bytes) > 0
+
+  # v2 attempt: same id (forces update path), broken JSX → compile fails
+  base2 = "https://x.test/upd-v2/"
+  responses_v2 = {
+    base2 + "mobius.json": (200, json.dumps({
+      **MANIFEST_NEWS, "id": "upd-target", "version": "2.0.0",
+    }).encode()),
+    base2 + "index.jsx": (200, b"this is not valid JSX <<>>"),
+    base2 + "icon.png": (200, _png_bytes()),
+    base2 + "prompt.md": (200, PROMPT.encode()),
+    base2 + "fetch.sh": (200, b""),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses_v2),
+  ):
+    r2 = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base2 + "mobius.json",
+    })
+  assert r2.status_code in (422, 500), r2.text
+
+  # The compiled bundle on disk must still be the v1 bytes — the
+  # rollback path restored the .bak snapshot.
+  assert compiled_path.exists(), "v1 bundle should still exist after failed v2"
+  assert compiled_path.read_bytes() == v1_bytes, (
+    "v1 bundle on disk was clobbered by failed v2 compile — "
+    "rollback didn't restore the snapshot"
+  )
+  # The .bak file should be gone (either restored or never created).
+  assert not compiled_path.with_suffix(".js.bak").exists()
