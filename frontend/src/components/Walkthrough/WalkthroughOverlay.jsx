@@ -133,12 +133,8 @@ export default function WalkthroughOverlay({ onDone }) {
       role="dialog"
       aria-modal="true"
       aria-labelledby="wt-title"
-      onClick={skip}
     >
-      <div
-        className={`wt__card wt__card--${step}`}
-        onClick={e => e.stopPropagation()}
-      >
+      <div className={`wt__card wt__card--${step}`}>
         <div className="wt__steps" aria-hidden="true">
           {STEPS.map((s, i) => (
             <span
@@ -150,7 +146,11 @@ export default function WalkthroughOverlay({ onDone }) {
 
         {step === 'intro' && (
           <>
-            <h2 id="wt-title" className="wt__title">Welcome to Möbius</h2>
+            {/* "Quick tour" avoids the title-collision with SetupWizard's
+                "Welcome to Möbius" heading — for a brand-new owner the
+                walkthrough renders moments after setup completes, and
+                seeing the same greeting twice reads as a regression. */}
+            <h2 id="wt-title" className="wt__title">Quick tour</h2>
             <p className="wt__body">
               Möbius is a chat surface in front of a coding agent that
               can build mini-apps and modify the platform itself for
@@ -177,11 +177,18 @@ export default function WalkthroughOverlay({ onDone }) {
 
         {step === 'install' && (
           <>
+            {/* Arrow-up renders BEFORE the card content so the visual
+                bounce points past the card edge toward the address-bar
+                menu (Chromium / Android Firefox), where the install
+                action actually lives. Arrow-down renders below the
+                body because Safari's Share button is at the bottom of
+                the screen — the arrow should point at it, not at the
+                card. */}
+            {installCopy.arrowDir === 'up' && (
+              <div className="wt__arrow wt__arrow--up wt__arrow--top" aria-hidden="true">↑</div>
+            )}
             <h2 id="wt-title" className="wt__title">{installCopy.title}</h2>
             <p className="wt__body">{installCopy.body}</p>
-            {installCopy.arrowDir === 'up' && (
-              <div className="wt__arrow wt__arrow--up" aria-hidden="true">↑</div>
-            )}
             {installCopy.arrowDir === 'down' && (
               <div className="wt__arrow wt__arrow--down" aria-hidden="true">↓</div>
             )}
