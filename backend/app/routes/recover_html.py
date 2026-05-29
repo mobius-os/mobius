@@ -264,16 +264,6 @@ def login_html(error: str = "", clear_storage: bool = False) -> str:
 </html>"""
 
 
-_CONFIRM_RESTORE = (
-  "Restore the interface from the original image?"
-  " Your chats and mini-apps will not be affected."
-)
-_CONFIRM_APPS = (
-  "Delete all mini-apps? Your data files will remain."
-)
-_CONFIRM_AUTH = (
-  "Reset CLI auth? You will need to sign in again."
-)
 _CONFIRM_FACTORY = (
   "Factory reset: deletes your account, all apps, credentials,"
   " and theme. Chat history is preserved. Continue?"
@@ -281,13 +271,6 @@ _CONFIRM_FACTORY = (
 _CONFIRM_BACKUP = (
   "Backup includes OAuth credentials for Claude and Codex."
   " Store the file securely. Continue?"
-)
-_CONFIRM_RESTORE_BACKEND = (
-  "Restore /app/app/ from the baked backend copy and restart the"
-  " server. Continue?"
-)
-_CONFIRM_RESTORE_SCRIPTS = (
-  "Restore /app/scripts/ from the baked scripts copy. Continue?"
 )
 
 
@@ -313,68 +296,21 @@ def dashboard_html(msg: str = "") -> str:
 
     <div class="recommended">
       <p class="label">&#10003; Talk to the agent</p>
-      <p class="desc">Opens a minimal chat with the agent. From here the agent has write access to backend code, scripts, and shell.</p>
+      <p class="desc">Describe the problem and ask the agent to fix it. The recovery chat has write access to backend code, scripts, shell, theme, and mini-apps — the agent that caused a break (or a sibling) can usually undo it. Faster, more surgical, and more reversible than the destructive buttons below.</p>
       <a class="btn btn-primary" href="/recover/chat" style="display:inline-block;text-decoration:none;">
         Open recovery chat
       </a>
     </div>
 
     <div class="section">
-      <p class="section-title">Theme</p>
-      <p class="desc" style="margin-bottom:8px;">Use this if the current theme makes the main UI unusable. Your previous theme is saved as a backup.</p>
-      <div class="actions">
-        <form method="POST" action="/recover/action">
-          <input type="hidden" name="action" value="reset_theme">
-          <button class="btn btn-outline" type="submit">
-            Reset theme to default
-          </button>
-        </form>
-      </div>
-    </div>
-
-    <div class="section">
-      <p class="section-title">Restore from baked sources</p>
-      <p class="desc" style="margin-bottom:8px;">If the agent made things worse, copy the original baked source back over the live copy. Chats, mini-apps, and settings are untouched.</p>
-      <div class="actions">
-        <form method="POST" action="/recover/action"
-              onsubmit="{_confirm_attr(_CONFIRM_RESTORE)}">
-          <input type="hidden" name="action" value="restore_shell">
-          <button class="btn btn-outline" type="submit">
-            Restore shell
-          </button>
-        </form>
-        <form method="POST" action="/recover/action"
-              onsubmit="{_confirm_attr(_CONFIRM_RESTORE_BACKEND)}">
-          <input type="hidden" name="action" value="restore_backend">
-          <button class="btn btn-outline" type="submit">
-            Restore backend
-          </button>
-        </form>
-        <form method="POST" action="/recover/action"
-              onsubmit="{_confirm_attr(_CONFIRM_RESTORE_SCRIPTS)}">
-          <input type="hidden" name="action" value="restore_scripts">
-          <button class="btn btn-outline" type="submit">
-            Restore scripts
-          </button>
-        </form>
-      </div>
-    </div>
-
-    <div class="section">
-      <p class="section-title">Other safe actions</p>
+      <p class="section-title">Backup</p>
+      <p class="desc" style="margin-bottom:8px;">Download a snapshot of chats, mini-apps, theme, and CLI credentials. Store securely — the .zip includes secrets.</p>
       <div class="actions">
         <form method="POST" action="/recover/action"
               onsubmit="{_confirm_attr(_CONFIRM_BACKUP)}">
           <input type="hidden" name="action" value="download_backup">
           <button class="btn btn-outline" type="submit">
             Download backup (.zip)
-          </button>
-          <p style="font-size:12px;color:#94a3b8;margin-top:6px;">Backup includes CLI auth credentials. Store the backup file securely.</p>
-        </form>
-        <form method="POST" action="/recover/action">
-          <input type="hidden" name="action" value="reset_chat">
-          <button class="btn btn-outline" type="submit">
-            Reset chat log
           </button>
         </form>
       </div>
@@ -383,22 +319,9 @@ def dashboard_html(msg: str = "") -> str:
     <hr>
 
     <div class="section">
-      <p class="section-title">Destructive actions</p>
+      <p class="section-title">Last resort</p>
+      <p class="desc" style="margin-bottom:8px;">Use only if the recovery chat itself is broken and the backup is safe. Wipes the account, all mini-apps, all chats, and CLI credentials — there is no undo.</p>
       <div class="actions">
-        <form method="POST" action="/recover/action"
-              onsubmit="{_confirm_attr(_CONFIRM_APPS)}">
-          <input type="hidden" name="action" value="reset_apps">
-          <button class="btn btn-warn" type="submit">
-            Reset all mini-apps
-          </button>
-        </form>
-        <form method="POST" action="/recover/action"
-              onsubmit="{_confirm_attr(_CONFIRM_AUTH)}">
-          <input type="hidden" name="action" value="reset_settings">
-          <button class="btn btn-warn" type="submit">
-            Reset CLI auth
-          </button>
-        </form>
         <form method="POST" action="/recover/action"
               onsubmit="{_confirm_attr(_CONFIRM_FACTORY)}">
           <input type="hidden" name="action" value="factory_reset">

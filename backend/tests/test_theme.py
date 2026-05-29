@@ -474,39 +474,3 @@ def test_storage_write_theme_css_auto_snapshots(client, auth):
         os.remove(os.path.join(shared, entry))
 
 
-def test_recover_page_exposes_reset_theme_button():
-  """The recovery dashboard HTML includes a reset_theme form so a
-  user trapped in a broken theme can recover from outside the
-  main shell."""
-  from app.routes.recover_html import dashboard_html
-  html = dashboard_html()
-  # The hidden input is the contract — the action name must match
-  # the handler dispatch in routes/recover.py.
-  assert 'name="action" value="reset_theme"' in html
-  assert "Reset theme to default" in html
-
-
-def test_recover_action_reset_theme_idempotent(tmp_path, monkeypatch):
-  """`reset_theme` recovery action returns a friendly message when
-  there's no override to reset, without raising."""
-  from app.routes.recover import _action_reset_theme
-  (tmp_path / "shared").mkdir()
-  msg = _action_reset_theme(tmp_path)
-  assert "default" in msg.lower() or "no" in msg.lower()
-
-
-def test_recover_action_reset_theme_renames_inline(tmp_path):
-  """The recovery-page reset handler does the rename inline (no
-  import of app.theme) and preserves the prior theme as a
-  reset-bak file."""
-  from app.routes.recover import _action_reset_theme
-  shared = tmp_path / "shared"
-  shared.mkdir()
-  src = shared / "theme.css"
-  src.write_text(":root { --bg: #cafe42; }")
-  msg = _action_reset_theme(tmp_path)
-  assert "reset" in msg.lower()
-  assert not src.exists()
-  baks = [p for p in shared.iterdir() if p.name.startswith("theme.css.reset-bak-")]
-  assert len(baks) == 1
-  assert baks[0].read_text() == ":root { --bg: #cafe42; }"

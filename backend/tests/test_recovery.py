@@ -552,36 +552,6 @@ def test_turn_id_streamed_set_is_bounded(monkeypatch):
 
 
 # ---------------------------------------------------------------------
-# _defer_restore mode validation
-# ---------------------------------------------------------------------
-
-def test_defer_restore_rejects_invalid_mode():
-  """Calling _defer_restore with an unknown mode must raise rather
-  than write a typo to /data/.recover-pending. Otherwise the
-  entrypoint silently falls through to restore_status='unknown-mode'
-  and the container reboots into the same broken state."""
-  from app.routes import recover as recover_routes
-
-  import pytest as _pytest
-  with _pytest.raises(ValueError):
-    recover_routes._defer_restore("shell")  # missing -dist or -src
-  with _pytest.raises(ValueError):
-    recover_routes._defer_restore("")  # empty
-  with _pytest.raises(ValueError):
-    recover_routes._defer_restore("backend ")  # trailing whitespace
-
-
-def test_defer_restore_valid_modes_listed():
-  """All four expected modes are in the allow-list. If this fails,
-  either a mode was renamed in entrypoint without updating the
-  Python guardrail, or vice versa — both cases are bugs."""
-  from app.routes import recover as recover_routes
-  assert recover_routes._VALID_MODES == frozenset({
-    "backend", "scripts", "shell-dist", "shell-src",
-  })
-
-
-# ---------------------------------------------------------------------
 # Structural fix #1: stream_turn must release its run-claim on client
 # disconnect so the next /stream call isn't blocked. The old design
 # held an asyncio.Lock across the whole generator; FastAPI stopping

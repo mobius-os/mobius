@@ -11,12 +11,8 @@ recovery page exists to be reachable when they're broken.
 import io
 import os
 import shutil
-import signal
 import sqlite3
-import subprocess
 import tempfile
-import threading
-import time
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -95,15 +91,6 @@ def _db_delete_all_owners() -> None:
 # form on their next /recover visit after deploy. One-time minor
 # friction; documented in the deploy runbook.
 _COOKIE = recover_auth.COOKIE_NAME
-
-# Serializes the restore-shell action. FastAPI runs sync route handlers
-# in a threadpool, so two concurrent /recover/action POSTs can run
-# _action_restore_shell in parallel — and the dist-swap (rename to
-# dist.bak, run build, rename back on failure) is not safe under
-# concurrency: thread A's rename clobbers thread B's backup, both end
-# up with no dist on a failure path. Lock at the action boundary so
-# only one shell restore runs at a time.
-_RESTORE_SHELL_LOCK = threading.Lock()
 
 
 def _verify_session(request: Request) -> str:
@@ -187,138 +174,6 @@ def recover_logout(request: Request):
   return resp
 
 
-def _action_reset_apps(data_dir: Path) -> str:
-  """Deletes all apps from the database and clears compiled output."""
-  _db_delete_all_apps()
-  _rm_tree(data_dir / "compiled")
-  (data_dir / "compiled").mkdir(parents=True, exist_ok=True)
-  return "All apps have been reset."
-
-
-def _action_reset_chat(data_dir: Path) -> str:
-  """Clears the debug log file at /data/logs/chat.log.
-
-  This does not affect chat history — conversations are stored server-side
-  in SQLite and are unaffected by this action.
-  """
-  log_file = data_dir / "logs" / "chat.log"
-  if log_file.exists():
-    log_file.write_text("", encoding="utf-8")
-  return "Debug chat log cleared."
-
-
-def _action_reset_settings(data_dir: Path) -> str:
-  """Clears CLI auth credentials so the user can re-authenticate."""
-  _rm_tree(data_dir / "cli-auth")
-  (data_dir / "cli-auth").mkdir(parents=True, exist_ok=True)
-  return "CLI auth cleared.  Sign in again via the setup wizard."
-
-
-def _action_reset_theme(data_dir: Path) -> str:
-  """Moves /data/shared/theme.css aside so DEFAULT_THEME paints again.
-
-  Performed inline (no import of app.theme) so this action stays
-  inside the frozen-recovery-island contract: if app.theme is
-  broken, the recovery page still works. The behavior matches
-  `app.theme.reset_theme_override` — preserve the previous theme
-  as `theme.css.reset-bak-<unix-ts>` next to the live file.
-
-  Idempotent — no override present is reported as a no-op so the
-  user can tap the button without worrying about state.
-  """
-  theme_path = data_dir / "shared" / "theme.css"
-  if not theme_path.exists():
-    return "No custom theme override is set — already on defaults."
-  backup = theme_path.with_name(f"theme.css.reset-bak-{int(time.time())}")
-  theme_path.rename(backup)
-  return (
-    f"Theme reset to default. Your previous theme is saved as "
-    f"{backup.name}."
-  )
-
-
-def _action_restore_shell(data_dir: Path) -> str:
-  """Rebuilds the frontend from the original source baked into the image.
-
-  Restores /data/shell/src from /app/shell-src/src, then runs npm build.
-  Does not touch the database, compiled mini-apps, or CLI auth.
-
-  Atomicity: Vite's build cleans the outDir before populating it. If
-  the build times out or fails partway, `dist` would be left empty
-  or partial — the React app would 404 on assets until /app/static
-  fallback is consulted. We preserve the current dist as `dist.bak`
-  before the build, restore from it on any failure, and only remove
-  the backup on success. Worst case, the user sees the same shell
-  they had before the action.
-
-  Concurrency: serialized by `_RESTORE_SHELL_LOCK`. Two simultaneous
-  POSTs from the recovery page would otherwise race the dist.bak
-  swap and end up with no dist on a failure path.
-  """
-  if not _RESTORE_SHELL_LOCK.acquire(blocking=False):
-    return "Another shell restore is already running. Wait for it to finish."
-  try:
-    return _do_restore_shell(data_dir)
-  finally:
-    _RESTORE_SHELL_LOCK.release()
-
-
-def _do_restore_shell(data_dir: Path) -> str:
-  """Inner restore-shell implementation. Caller holds _RESTORE_SHELL_LOCK."""
-  shell_dir = data_dir / "shell"
-  shell_src = Path("/app/shell-src")
-  if not shell_src.exists():
-    return "Error: /app/shell-src not found in image."
-  # Restore original source files (agent may have modified or corrupted them).
-  src_dest = shell_dir / "src"
-  _rm_tree(src_dest)
-  shutil.copytree(shell_src / "src", src_dest)
-  shutil.copy2(shell_src / "package.json", shell_dir / "package.json")
-  shutil.copy2(shell_src / "vite.config.js", shell_dir / "vite.config.js")
-  # Ensure node_modules are present (image has them in shell-src).
-  if not (shell_dir / "node_modules").exists():
-    shutil.copytree(shell_src / "node_modules", shell_dir / "node_modules")
-
-  dist_dir = shell_dir / "dist"
-  dist_bak = shell_dir / "dist.bak"
-  had_dist = dist_dir.exists()
-  if had_dist:
-    _rm_tree(dist_bak)
-    os.rename(dist_dir, dist_bak)
-
-  def _restore_backup() -> None:
-    """Restores the previous dist from dist.bak on failure paths."""
-    _rm_tree(dist_dir)
-    if dist_bak.exists():
-      os.rename(dist_bak, dist_dir)
-
-  try:
-    result = subprocess.run(
-      ["npm", "run", "build"],
-      cwd=str(shell_dir),
-      capture_output=True,
-      text=True,
-      timeout=120,
-    )
-  except subprocess.TimeoutExpired:
-    _restore_backup()
-    return (
-      "Build timed out after 120s — previous shell restored."
-      " Try again, or use Factory reset if it keeps failing."
-    )
-  except OSError as exc:
-    _restore_backup()
-    return f"Build could not start: {exc}"
-
-  if result.returncode != 0:
-    _restore_backup()
-    return f"Build failed (previous shell restored): {result.stderr[-600:]}"
-
-  # Success — drop the backup.
-  _rm_tree(dist_bak)
-  return "Shell restored and rebuilt from original source. Reload the app."
-
-
 def _action_factory_reset(data_dir: Path) -> None:
   """Deletes everything: apps, owner, storage, compiled files.
 
@@ -357,78 +212,19 @@ def _action_factory_reset(data_dir: Path) -> None:
     (data_dir / subdir).mkdir(parents=True, exist_ok=True)
 
 
-_RECOVER_PENDING_FILE = Path("/data/.recover-pending")
-
-# Modes the entrypoint's recovery_restore.sh knows how to handle.
-# Keep in sync with the case-statement in scripts/recovery_restore.sh
-# (`backend`, `scripts`, `shell-dist`, `shell-src`). A typo'd mode
-# would silently boot-loop into restore_status="unknown-mode", so
-# the validation here is the guardrail that turns a silent
-# misconfiguration into a loud caller-visible error.
-_VALID_MODES = frozenset({"backend", "scripts", "shell-dist", "shell-src"})
-
-
-def _defer_restore(mode: str) -> None:
-  """Writes a flag file then SIGTERMs uvicorn. The container restart
-  policy brings uvicorn back; entrypoint.sh reads the flag and runs
-  recovery_restore.sh AS ROOT before starting uvicorn.
-
-  Running the restore from entrypoint (not from this route handler)
-  is load-bearing: the route runs as `mobius` (uvicorn dropped
-  privilege), but `cp -a` from /app/<X>-baked/ to /app/<X>/ must
-  preserve root ownership on protected files for the frozen-island
-  invariant to hold. Mobius cannot `chown root:root`. Entrypoint
-  CAN — it runs as root before the `su -s mobius` exec at the end.
-
-  Raises ValueError on an unknown mode — entrypoint.sh would silently
-  fall through to restore_status="unknown-mode" and the container
-  would reboot into the same broken state. Better to reject the
-  typo at the call site than to ship a boot loop.
-  """
-  if mode not in _VALID_MODES:
-    raise ValueError(
-      f"invalid restore mode {mode!r}; expected one of {sorted(_VALID_MODES)}"
-    )
-  _RECOVER_PENDING_FILE.write_text(mode)
-  import threading
-  threading.Timer(0.2, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()
-
-
-def _action_restore_backend(data_dir: Path) -> str:
-  """Schedules restore of /app/app/ from /app/app-baked/ at next
-  boot, then SIGTERMs uvicorn. Docker restart policy (unless-stopped
-  on prod) recreates uvicorn; entrypoint.sh sees /data/.recover-pending
-  and runs recovery_restore.sh AS ROOT before starting uvicorn."""
-  _defer_restore("backend")
-  return "Backend restore scheduled. Server is restarting..."
-
-
-def _action_restore_scripts(data_dir: Path) -> str:
-  """Schedules restore of /app/scripts/ from /app/scripts-baked/."""
-  _defer_restore("scripts")
-  return "Scripts restore scheduled. Server is restarting..."
-
-
-# Maps action names to handler functions.  download_backup is handled
-# separately because it returns a StreamingResponse, not a plain message.
-_ACTION_HANDLERS = {
-  "reset_apps": _action_reset_apps,
-  "reset_chat": _action_reset_chat,
-  "reset_settings": _action_reset_settings,
-  "reset_theme": _action_reset_theme,
-  "restore_shell": _action_restore_shell,
-  "restore_backend": _action_restore_backend,
-  "restore_scripts": _action_restore_scripts,
-}
-
-
 @router.post("/recover/action")
 @_limiter.limit("10/minute")
 def recover_action(
   request: Request,
   action: str = Form(...),
 ):
-  """Executes a recovery action."""
+  """Executes a recovery action.
+
+  Only two actions remain: `download_backup` streams a zip, and
+  `factory_reset` wipes state and bounces to the setup wizard.
+  Everything else the dashboard used to expose (reset/restore knobs)
+  is now the recovery chat agent's job — see /recover/chat.
+  """
   _verify_session(request)
   data_dir = _DATA_DIR
 
@@ -448,12 +244,7 @@ def recover_action(
     resp.delete_cookie(_COOKIE)
     return resp
 
-  handler = _ACTION_HANDLERS.get(action)
-  if handler is None:
-    return HTMLResponse(dashboard_html(msg="Unknown action."))
-
-  msg = handler(data_dir)
-  return HTMLResponse(dashboard_html(msg=msg))
+  return HTMLResponse(dashboard_html(msg="Unknown action."))
 
 
 # -- Backup ------------------------------------------------------------
