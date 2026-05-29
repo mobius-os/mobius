@@ -474,13 +474,22 @@ export default function Shell() {
     await refreshChats()
   }
 
-  // Bootstrap: create an initial chat once the server confirms zero chats exist.
+  // Bootstrap: create an initial chat once the server confirms zero
+  // chats exist. Gate on live-fetch confirmation, not just any
+  // chatsLoadedRef flip — a stale persisted snapshot with chats=[]
+  // could be lying if a sibling session (other tab, other device)
+  // created chats server-side after the snapshot was written. Without
+  // the liveFetched guard, this effect would POST a spurious empty
+  // chat before the live refetch arrives.
   useEffect(() => {
     if (!chatsLoadedRef.current) return
+    const liveFetched = chatsQuery.isSuccess
+      && chatsQuery.dataUpdatedAt > mountTimeRef.current
+    if (!liveFetched) return
     if (chats.length === 0 && activeChatId === null) {
       newChat()
     }
-  }, [chats])
+  }, [chats, chatsQuery.isSuccess, chatsQuery.dataUpdatedAt])
 
   return (
     <div className="shell">
