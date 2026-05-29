@@ -296,7 +296,7 @@ def dashboard_html(msg: str = "") -> str:
 
     <div class="recommended">
       <p class="label">&#10003; Talk to the agent</p>
-      <p class="desc">Describe the problem and ask the agent to fix it. The recovery chat has write access to backend code, scripts, shell, theme, and mini-apps — the agent that caused a break (or a sibling) can usually undo it. Faster, more surgical, and more reversible than the destructive buttons below.</p>
+      <p class="desc">Describe the problem and ask the agent to fix it.</p>
       <a class="btn btn-primary" href="/recover/chat" style="display:inline-block;text-decoration:none;">
         Open recovery chat
       </a>
