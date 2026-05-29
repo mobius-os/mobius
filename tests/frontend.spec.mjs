@@ -454,7 +454,10 @@ test.describe('App canvas', () => {
 
     const result = await page.evaluate(async () => {
       const token = localStorage.getItem('token')
-      const res = await fetch('./api/apps/', {
+      // Origin-relative — the shell now lives under `/shell/` so a
+      // `./api/...` reference resolves to `/shell/api/...` and gets
+      // caught by the SPA index instead of the API router.
+      const res = await fetch('/api/apps/', {
         headers: { Authorization: `Bearer ${token}` },
       })
       if (!res.ok) return { ok: false, status: res.status }

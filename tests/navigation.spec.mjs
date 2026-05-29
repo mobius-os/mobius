@@ -124,11 +124,11 @@ async function goBack(page) {
 // ---------------------------------------------------------------------------
 
 test.describe('Navigation basics', () => {
-  test('1. Initial state — chat view, URL is /', async ({ page }) => {
+  test('1. Initial state — chat view, URL is /shell/', async ({ page }) => {
     await setup(page)
     const state = await getNavState(page)
     expect(state.hasChat).toBe(true)
-    expect(state.url).toBe('/')
+    expect(state.url).toBe('/shell/')
   })
 
   test('2. Navigate between two chats — back returns to first', async ({ page }) => {
@@ -214,16 +214,16 @@ test.describe('Back button edge cases', () => {
     }
   })
 
-  test('6. URL stays at / throughout navigation', async ({ page }) => {
+  test('6. URL stays at /shell/ throughout navigation', async ({ page }) => {
     await setup(page)
-    expect((await getNavState(page)).url).toBe('/')
+    expect((await getNavState(page)).url).toBe('/shell/')
 
     await openDrawer(page)
     await navigateToChat(page, 0)
-    expect((await getNavState(page)).url).toBe('/')
+    expect((await getNavState(page)).url).toBe('/shell/')
 
     await goBack(page)
-    expect((await getNavState(page)).url).toBe('/')
+    expect((await getNavState(page)).url).toBe('/shell/')
   })
 
   test('8. Drawer cycles return to the same view + closed state', async ({ page }) => {
