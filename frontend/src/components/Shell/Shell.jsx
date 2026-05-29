@@ -196,9 +196,16 @@ export default function Shell() {
     const prev = activeChatIdRef.current
     const prevInChats = prev && chats.some(c => c.id === prev)
     if (prevInChats) {
-      // No-op: cached and (eventual) live data both agree that
-      // `prev` is valid. Keep the chat mounted as-is so ChatView's
-      // scroll/spacer restore proceeds without remounting.
+      // Cached data shows `prev` is valid. Keep it mounted as-is so
+      // ChatView's scroll/spacer restore proceeds without remounting.
+      // BUT: if we're still on stale-cache hydration (not liveFetched),
+      // also nudge a refetch — the persisted snapshot can be a stale
+      // FALSE POSITIVE too (a chat the user deleted in another tab
+      // before reload still appears in the cache). Without the nudge,
+      // ChatView would mount on `prev`, fetch `/api/chats/{prev}`,
+      // 404, and show an error state for the full 30s staleTime
+      // window. The nudge resolves the situation in one round-trip.
+      if (!liveFetched && !chatsQuery.isFetching) refreshChats()
     } else if (prev && !liveFetched) {
       // Persisted snapshot is missing `prev` but we haven't heard
       // from the server yet. Hold `prev` as a tentative restore —
@@ -222,41 +229,6 @@ export default function Shell() {
       refreshChats, setActiveChatId, activeChatIdRef])
 
   useEffect(() => { if (drawerOpen) { refreshApps(); refreshChats() } }, [drawerOpen, refreshApps, refreshChats])
-
-  // Install-flow observability. We no longer capture BIP (the
-  // walkthrough's install step is now the single install affordance,
-  // and capturing here would only suppress the browser's own banner
-  // for users who skipped the walkthrough). The beacons stay so we
-  // can correlate appinstalled events against walkthrough completion
-  // in /data/logs/install.log. Strip the whole block when the
-  // diagnostic phase ends.
-  useEffect(() => {
-    const beacon = (event, ctx) => {
-      try {
-        fetch('/api/install-log', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            surface: 'shell',
-            event,
-            url: location.href,
-            display_mode: window.matchMedia('(display-mode: standalone)').matches
-              ? 'standalone' : 'browser',
-            ...(ctx || {}),
-          }),
-          keepalive: true,
-        }).catch(() => {})
-      } catch (_) {}
-    }
-    beacon('shell_mount')
-    function onAppInstalled() {
-      beacon('shell_app_installed')
-    }
-    window.addEventListener('appinstalled', onAppInstalled)
-    return () => {
-      window.removeEventListener('appinstalled', onAppInstalled)
-    }
-  }, [])
 
   // Handle non-content SSE events: theme changes, app updates, shell rebuilds.
   const handleSystemEvent = useCallback((ev) => {

@@ -184,8 +184,17 @@ function useModelPrefsQuery({ enabled = true } = {}) {
 async function fetchWalkthrough() {
   const res = await apiFetch('/owner/walkthrough')
   const data = await jsonOrThrow(res, 'walkthrough status fetch failed:')
+  // localStorage fallback: the WalkthroughOverlay writes this key on
+  // dismiss alongside the optimistic-cache update, so even when the
+  // POST to /owner/walkthrough/complete fails (flaky connection, tab
+  // closed before persist) the next session still considers the user
+  // onboarded. Server takes precedence — completed=true from either
+  // side wins. The local flag never reverts the server; reconciling
+  // happens via a successful POST on a future session.
+  let localCompleted = false
+  try { localCompleted = localStorage.getItem('mobius:walkthrough-completed') === '1' } catch (_) {}
   return {
-    completed: !!data?.completed,
+    completed: !!data?.completed || localCompleted,
     completed_at: data?.completed_at || null,
   }
 }
