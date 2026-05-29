@@ -181,6 +181,13 @@ export const api = {
         body: JSON.stringify({ hidden_ids: hiddenIds }),
       }),
     },
+    walkthrough: {
+      get: () => apiFetch('/owner/walkthrough'),
+      // Idempotent — completion is a single bit. No body needed.
+      complete: () => apiFetch('/owner/walkthrough/complete', {
+        method: 'POST',
+      }),
+    },
   },
   theme: {
     get: () => apiFetch('/theme'),

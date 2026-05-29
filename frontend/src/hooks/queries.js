@@ -20,6 +20,7 @@ const providerClaudeStatusKey = ['auth', 'provider', 'claude-status']
 const providersStatusKey = ['auth', 'providers', 'status']
 const modelRegistryKey = ['models', 'registry']
 const modelPrefsKey = ['owner', 'model-prefs']
+const walkthroughKey = ['owner', 'walkthrough']
 
 async function fetchTheme() {
   const res = await api.theme.get()
@@ -180,6 +181,28 @@ function useModelPrefsQuery({ enabled = true } = {}) {
   })
 }
 
+async function fetchWalkthrough() {
+  const res = await apiFetch('/owner/walkthrough')
+  const data = await jsonOrThrow(res, 'walkthrough status fetch failed:')
+  return {
+    completed: !!data?.completed,
+    completed_at: data?.completed_at || null,
+  }
+}
+
+function useWalkthroughQuery({ enabled = true } = {}) {
+  return useQuery({
+    queryKey: walkthroughKey,
+    queryFn: fetchWalkthrough,
+    enabled,
+    // Walkthrough state never reverts (completion is monotonic), so
+    // once we get a `completed: true` there's no point refetching.
+    // The 24h staleTime is just a safety net for the rare case where
+    // a sibling tab marks completion while this tab is open.
+    staleTime: 24 * 60 * 60_000,
+  })
+}
+
 export const themeQueries = {
   keys: {
     all: themeKey,
@@ -283,6 +306,15 @@ export const modelQueries = {
     fetch: fetchModelPrefs,
     useQuery: useModelPrefsQuery,
     invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: modelPrefsKey }),
+  },
+}
+
+export const ownerQueries = {
+  walkthrough: {
+    key: walkthroughKey,
+    fetch: fetchWalkthrough,
+    useQuery: useWalkthroughQuery,
+    invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: walkthroughKey }),
   },
 }
 

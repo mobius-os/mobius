@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Plus, Chats, Grid, DotsVerticalMoreMenu, SettingsCog, Pin, PinFilled, Download, XCrossed } from '@openai/apps-sdk-ui/components/Icon'
+import { Plus, Chats, Grid, DotsVerticalMoreMenu, SettingsCog, Pin, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
 import { Menu } from '@openai/apps-sdk-ui/components/Menu'
 import { EmptyMessage } from '@openai/apps-sdk-ui/components/EmptyMessage'
 import { apiFetch } from '../../api/client.js'
@@ -32,12 +32,6 @@ export default function Drawer({
   // active across the whole app). Defaults to an empty Set so the
   // drawer renders cleanly if no parent supplies the prop.
   streamingChatIds,
-  // The captured `beforeinstallprompt` event if the PWA can be
-  // installed AND the user hasn't dismissed the prompt this session.
-  // null when there's no install affordance to surface.
-  pwaPrompt,
-  onPwaInstall,
-  onPwaDismiss,
   // Truthy when any registered provider's refresh token is no longer
   // valid. Drives a small warning dot on the Settings row — passive
   // nudge toward Reconnect, no modal, no banner.
@@ -348,42 +342,6 @@ export default function Drawer({
           </div>{/* /.drawer__scroll-wrap */}
 
           <div className="drawer__group drawer__group--bottom">
-            {/* PWA install card. Renders only when (a) the browser
-                fired beforeinstallprompt and Shell stashed the
-                deferred event, and (b) the user hasn't dismissed it
-                (Shell's effect checks the same localStorage key).
-                Shape rhymes with .drawer__item--new — tinted bg,
-                accent border, rounded — so it reads as an actionable
-                affordance rather than a notification. The previous
-                fixed-position banner pinned bottom-of-screen was
-                visually noisy and unrecoverable once dismissed; this
-                card stays in the drawer where the user looks
-                deliberately. */}
-            {pwaPrompt && (
-              <div className="drawer__pwa-card">
-                <div className="drawer__pwa-card-row">
-                  <Download width={16} height={16} aria-hidden="true" />
-                  <span className="drawer__pwa-card-text">Install Möbius</span>
-                </div>
-                <div className="drawer__pwa-card-actions">
-                  <button
-                    type="button"
-                    className="drawer__pwa-btn drawer__pwa-btn--install"
-                    onClick={onPwaInstall}
-                  >
-                    Install
-                  </button>
-                  <button
-                    type="button"
-                    className="drawer__pwa-btn drawer__pwa-btn--dismiss"
-                    onClick={onPwaDismiss}
-                    aria-label="Dismiss install prompt"
-                  >
-                    <XCrossed width={14} height={14} aria-hidden="true" />
-                  </button>
-                </div>
-              </div>
-            )}
             <button
               className={`drawer__item ${activeView === 'settings' ? 'drawer__item--active' : ''}`}
               onClick={onSettings}

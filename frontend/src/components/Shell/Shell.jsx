@@ -4,13 +4,14 @@ import Drawer from '../Drawer/Drawer.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
 import ChatView from '../ChatView/ChatView.jsx'
 import SettingsView from '../SettingsView/SettingsView.jsx'
+import WalkthroughOverlay from '../Walkthrough/WalkthroughOverlay.jsx'
 import { api, BASE } from '../../api/client.js'
 import usePushSubscription from '../../hooks/usePushSubscription.js'
 import useNavigation from '../../hooks/useNavigation.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import useTheme from '../../hooks/useTheme.js'
 import useProviderAuthStatus from '../../hooks/useProviderAuthStatus.js'
-import { appQueries, chatQueries } from '../../hooks/queries.js'
+import { appQueries, chatQueries, ownerQueries } from '../../hooks/queries.js'
 import './Shell.css'
 
 export default function Shell() {
@@ -48,13 +49,32 @@ export default function Shell() {
   const [appCache, setAppCache] = useState([])
   const [toast, setToast] = useState(null)
   const chatsLoadedRef = useRef(false)
+  // Mount time stamp used by the active-chat restore effect to
+  // distinguish the persisted-cache hydration (chatsQuery.isFetched
+  // flips true with `dataUpdatedAt` from the prior session) from the
+  // live network fetch resolving (`dataUpdatedAt` > mountTime).
+  // Without this gate, a stale persisted cache that's missing the
+  // user's last-active chat silently demotes them to chats[0] —
+  // ChatView remounts under a new key, .chat__scroll disappears for
+  // a frame, and the spacer/scroll restore tied to the previous chat
+  // is lost. See tests/spacer.spec.mjs §9.
+  const mountTimeRef = useRef(Date.now())
   // In-flight guard for newChat. The function POSTs unconditionally now
   // (the old empty-chat-reuse path was the implicit deduper); without
   // this guard a rapid double-tap on "+ New chat" before the API
   // returns races two creates and leaves an extra empty chat behind.
   const creatingChatRef = useRef(false)
   const [builtApp, setBuiltApp] = useState(null)
-  const [pwaPrompt, setPwaPrompt] = useState(null)
+  // First-sign-in walkthrough. The query result is the source of
+  // truth — backend persists completion via
+  // POST /api/owner/walkthrough/complete. We render the overlay iff
+  // the query has resolved AND `completed` is false; both gates
+  // matter (rendering before resolution shows a flash for users who
+  // are already past it).
+  const walkthroughQuery = ownerQueries.walkthrough.useQuery()
+  const showWalkthrough = walkthroughQuery.isFetched
+    && walkthroughQuery.data
+    && !walkthroughQuery.data.completed
 
   // Set of chat ids whose agent is currently streaming. Used to drive
   // the pulsing dot next to the row in the drawer. ChatView's
@@ -129,23 +149,88 @@ export default function Shell() {
       .catch(() => [])
   }, [queryClient])
 
+  // Restore the active chat after Shell mount. Two cache layers can
+  // satisfy this effect: (1) the persisted TanStack cache hydrated
+  // from IndexedDB (flips `isFetched` to true with `dataUpdatedAt`
+  // from the prior session), and (2) the live network fetch.
+  //
+  // If `prev` (the localStorage-restored activeChatId) is present in
+  // the current `chats` list, we keep it immediately — both cache
+  // layers agree and there's nothing to wait for. The user's chat
+  // stays mounted and ChatView's spacer/scroll restore proceeds
+  // without remounting.
+  //
+  // If `prev` is NOT in the list, we MUST distinguish "the chat
+  // genuinely no longer exists" from "the persisted cache is stale
+  // and hasn't seen the live list yet". Demoting to chats[0]
+  // prematurely (on the stale-cache path) silently switches the
+  // user to a different chat, remounts ChatView under a new key,
+  // and destroys the spacer state from the previous session.
+  // Gate the demotion on `isSuccess && dataUpdatedAt > mountTime` —
+  // both conditions mean the live fetch has resolved at least once
+  // since this Shell mounted. Bootstrap (`prev === null`) is fine to
+  // run from either cache layer; ChatView only mounts when a real
+  // chatId is set, so there's no premature-remount cost.
+  //
+  // chatsLoadedRef gates the bootstrap-empty-chat effect below. We
+  // flip it as soon as `isFetched` is true (regardless of cache
+  // layer): the bootstrap effect's own check (chats.length === 0 &&
+  // activeChatId === null) is conservative enough — if persisted
+  // chats happen to be empty AND activeChatId is null AND the live
+  // fetch confirms the same, creating a bootstrap chat is correct.
+  // Holding chatsLoadedRef past first hydration would just delay an
+  // already-correct call.
+  //
+  // Defensive refetch: TanStack's default refetchOnMount + staleTime
+  // (30s in queryClient.js) can leave the persisted snapshot serving
+  // beyond a reload — if the snapshot was written <30s before the
+  // reload, the on-mount refetch is skipped as "fresh". When `prev`
+  // isn't in that snapshot, we'd otherwise wait forever for a live
+  // confirmation that never comes. Force a refetch in that case so
+  // `dataUpdatedAt` eventually advances and demotion (or
+  // confirmation) actually runs.
   useEffect(() => {
     if (!chatsQuery.isFetched) return
-    setActiveChatId(prev => {
-      if (prev && chats.some(c => c.id === prev)) return prev
-      return chats[0]?.id || null
-    })
+    const liveFetched = chatsQuery.isSuccess
+      && chatsQuery.dataUpdatedAt > mountTimeRef.current
+    const prev = activeChatIdRef.current
+    const prevInChats = prev && chats.some(c => c.id === prev)
+    if (prevInChats) {
+      // No-op: cached and (eventual) live data both agree that
+      // `prev` is valid. Keep the chat mounted as-is so ChatView's
+      // scroll/spacer restore proceeds without remounting.
+    } else if (prev && !liveFetched) {
+      // Persisted snapshot is missing `prev` but we haven't heard
+      // from the server yet. Hold `prev` as a tentative restore —
+      // ChatView mounts on it, and if it's gone server-side, the
+      // 404 from ChatView's own fetch surfaces a retryable error
+      // instead of a silent chat-switch. Nudge the chats query in
+      // case TanStack's staleTime (30s in queryClient.js) skipped
+      // the on-mount refetch — without that nudge a fresh persisted
+      // snapshot pins us here indefinitely.
+      if (!chatsQuery.isFetching) refreshChats()
+    } else {
+      // `prev` is null (cold cache, deep-link, etc.), or live data
+      // confirmed `prev` is gone. Demote to the most recent chat,
+      // or null when there genuinely are none (the bootstrap effect
+      // below handles that case).
+      setActiveChatId(chats[0]?.id || null)
+    }
     chatsLoadedRef.current = true
-  }, [chats, chatsQuery.isFetched, setActiveChatId])
+  }, [chats, chatsQuery.isFetched, chatsQuery.isSuccess,
+      chatsQuery.dataUpdatedAt, chatsQuery.isFetching,
+      refreshChats, setActiveChatId, activeChatIdRef])
 
   useEffect(() => { if (drawerOpen) { refreshApps(); refreshChats() } }, [drawerOpen, refreshApps, refreshChats])
 
-  // Capture PWA install prompt if the user hasn't dismissed it.
+  // Install-flow observability. We no longer capture BIP (the
+  // walkthrough's install step is now the single install affordance,
+  // and capturing here would only suppress the browser's own banner
+  // for users who skipped the walkthrough). The beacons stay so we
+  // can correlate appinstalled events against walkthrough completion
+  // in /data/logs/install.log. Strip the whole block when the
+  // diagnostic phase ends.
   useEffect(() => {
-    // Temporary install-flow observability — beacon every event the
-    // shell sees so we can compare against the standalone sub-app
-    // shell's beacons. Public endpoint, no auth, body is small.
-    // Remove this block once the install UX is stable.
     const beacon = (event, ctx) => {
       try {
         fetch('/api/install-log', {
@@ -157,7 +242,6 @@ export default function Shell() {
             url: location.href,
             display_mode: window.matchMedia('(display-mode: standalone)').matches
               ? 'standalone' : 'browser',
-            dismissed: !!localStorage.getItem('pwa-prompt-dismissed'),
             ...(ctx || {}),
           }),
           keepalive: true,
@@ -165,22 +249,11 @@ export default function Shell() {
       } catch (_) {}
     }
     beacon('shell_mount')
-    if (localStorage.getItem('pwa-prompt-dismissed')) {
-      beacon('shell_skip_dismissed')
-      return
-    }
-    function onBeforeInstall(e) {
-      e.preventDefault()
-      setPwaPrompt(e)
-      beacon('shell_bip_fired', { platforms: e.platforms || null })
-    }
     function onAppInstalled() {
       beacon('shell_app_installed')
     }
-    window.addEventListener('beforeinstallprompt', onBeforeInstall)
     window.addEventListener('appinstalled', onAppInstalled)
     return () => {
-      window.removeEventListener('beforeinstallprompt', onBeforeInstall)
       window.removeEventListener('appinstalled', onAppInstalled)
     }
   }, [])
@@ -468,28 +541,18 @@ export default function Shell() {
         onDeleteChat={deleteChat}
         onSettings={() => navTo('settings')}
         streamingChatIds={streamingChatIds}
-        pwaPrompt={pwaPrompt}
-        onPwaInstall={() => {
-          // Fire the deferred prompt. userChoice resolves with the
-          // outcome but we treat both accept and dismiss as "user
-          // engaged" — set the dismiss flag so we don't ask again
-          // this session. The browser stops firing
-          // beforeinstallprompt after a successful install on its
-          // own; the localStorage flag covers the "dismiss"
-          // case (no re-fire until next session).
-          if (!pwaPrompt) return
-          pwaPrompt.prompt()
-          pwaPrompt.userChoice.then(() => {
-            localStorage.setItem('pwa-prompt-dismissed', '1')
-            setPwaPrompt(null)
-          })
-        }}
-        onPwaDismiss={() => {
-          localStorage.setItem('pwa-prompt-dismissed', '1')
-          setPwaPrompt(null)
-        }}
         settingsWarning={providerAuth.anyDisconnected}
       />
+
+      {showWalkthrough && (
+        <WalkthroughOverlay
+          onDone={() => {
+            // Query invalidation inside WalkthroughOverlay flips
+            // `showWalkthrough` to false on the next render. Nothing
+            // else to do here.
+          }}
+        />
+      )}
 
       <main className="shell__content">
         {/* Single-mount ChatView, keyed by activeChatId. Switching
