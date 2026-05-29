@@ -328,18 +328,28 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
     }}
     #install-backdrop.visible {{ opacity: 1; pointer-events: auto; }}
     #install-card {{
-      position: fixed; left: 0; right: 0; bottom: 0;
+      position: fixed; top: 50%; left: 50%;
+      width: calc(100% - 32px); max-width: 420px;
+      max-height: calc(100% - 32px);
+      overflow-y: auto;
       background: var(--surface, #14181f); color: var(--text, #d4d4d8);
-      border-top: 1px solid var(--border, #252b36);
-      border-radius: 18px 18px 0 0;
-      padding: 22px 22px max(22px, env(safe-area-inset-bottom)) 22px;
-      box-shadow: 0 -12px 32px rgba(0,0,0,0.5);
+      border: 1px solid var(--border, #252b36);
+      border-radius: 20px;
+      padding: 22px;
+      box-shadow: 0 24px 60px rgba(0,0,0,0.55);
       font-family: var(--font);
       z-index: 9999;
-      transform: translateY(100%);
-      transition: transform 0.22s cubic-bezier(.2,.7,.2,1);
+      transform: translate(-50%, -50%) scale(0.92);
+      opacity: 0;
+      pointer-events: none;
+      transition: transform 0.22s cubic-bezier(.2,.7,.2,1),
+                  opacity 0.18s ease;
     }}
-    #install-card.visible {{ transform: translateY(0); }}
+    #install-card.visible {{
+      transform: translate(-50%, -50%) scale(1);
+      opacity: 1;
+      pointer-events: auto;
+    }}
     .ic-row {{ display: flex; gap: 14px; align-items: center; }}
     .ic-icon-wrap {{
       position: relative; width: 64px; height: 64px; flex: 0 0 64px;
@@ -1180,6 +1190,29 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       doneBtn.addEventListener('click', () => {{
         beacon('card_done');
         hideCard('done');
+        // After confirming the install, take the user back to Möbius
+        // instead of leaving them stranded on the sub-app page they
+        // came from. They can launch the sub-app fresh from its new
+        // home-screen icon now — keeping them here just makes the
+        // install feel disconnected from "I'm using Möbius."
+        //
+        // Path priority:
+        //   1. history.back() if we came from Möbius's shell (the
+        //      drawer-Install case — covers the common path).
+        //   2. location.href = '/shell/' as the unconditional fallback,
+        //      so opening /apps/<slug>/?install=1 in a fresh tab and
+        //      then installing still lands somewhere useful.
+        setTimeout(() => {{
+          const cameFromShell = /\\/shell\\//.test(document.referrer);
+          beacon('post_install_navigate', {{
+            method: cameFromShell ? 'history_back' : 'shell_redirect',
+          }});
+          if (cameFromShell && history.length > 1) {{
+            history.back();
+          }} else {{
+            location.href = '/shell/';
+          }}
+        }}, 250);
       }});
 
       // Backdrop tap dismisses (only when the body is visible — once
