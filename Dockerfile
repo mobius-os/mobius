@@ -106,11 +106,16 @@ COPY frontend/public/app-frame.html ./app-frame.html
 # a long cache. Eliminates the cold-load esm.sh waterfall for three.js
 # (cold-load saves 1-3s on any 3D app). Pinned to match the version
 # we previously served via CDN.
+# Copy the WHOLE build/ dir, not just three.module.js: since 0.163 the
+# library is split (three.module.js does `export * from './three.core.js'`),
+# so a single-file copy leaves three.core.js missing. Requests for it then
+# fall through to the SPA HTML fallback (200 text/html), and strict module
+# MIME checking rejects it as "failed to load dynamic module".
 RUN mkdir -p /tmp/vendor-install && cd /tmp/vendor-install \
     && npm init -y >/dev/null \
     && npm install --no-audit --no-fund --silent three@0.184.0 \
     && mkdir -p /app/static/vendor/three@0.184.0/addons \
-    && cp node_modules/three/build/three.module.js /app/static/vendor/three@0.184.0/three.module.js \
+    && cp -r node_modules/three/build/. /app/static/vendor/three@0.184.0/ \
     && cp -r node_modules/three/examples/jsm/. /app/static/vendor/three@0.184.0/addons/ \
     && cd / && rm -rf /tmp/vendor-install
 
