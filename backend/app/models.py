@@ -32,6 +32,17 @@ class Owner(Base):
   gemini_api_key_enc = Column(Text, nullable=True, default=None)
   # Must stay in sync with providers.PROVIDER_NAMES.
   provider = Column(String(32), nullable=False, default="claude")
+  # Per-owner model-picker preferences. Shape:
+  #   {"hidden_ids": ["claude-haiku-4-5-20251001", ...]}
+  # The picker filters out any registry entry whose ID appears in
+  # `hidden_ids`. Stored as JSON so future filter dimensions (sort
+  # overrides, pinned models, per-provider hiding) can land without
+  # a migration. Null means "show everything" — the picker treats
+  # absence as the default state. Stale IDs (an entry referring to
+  # a model the registry no longer returns) are tolerated silently:
+  # the picker simply doesn't filter anything it can't find, and
+  # cleanup happens lazily next time the owner edits prefs.
+  model_prefs_json = Column(JSON, nullable=True, default=None)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
 

@@ -192,6 +192,15 @@ def run_migrations(eng) -> None:
         "ALTER TABLE owner ADD COLUMN provider VARCHAR(32) "
         "NOT NULL DEFAULT 'claude'"
       )
+    if "model_prefs_json" not in owner_cols:
+      # Nullable JSON blob holding the owner's model-picker
+      # preferences (e.g. hidden model IDs). Null = "show
+      # everything" — no backfill needed; the picker treats
+      # absence as the default state. See models.Owner for the
+      # schema.
+      _add_owner.append(
+        "ALTER TABLE owner ADD COLUMN model_prefs_json JSON"
+      )
     if _add_owner:
       with eng.connect() as conn:
         for stmt in _add_owner:

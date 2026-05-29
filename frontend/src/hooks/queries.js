@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { api } from '../api/client.js'
+import { api, apiFetch } from '../api/client.js'
 
 function jsonOrThrow(res, label) {
   if (!res.ok) throw new Error(`${label} ${res.status}`)
@@ -18,6 +18,8 @@ const appsKey = ['apps']
 const chatsKey = ['chats']
 const providerClaudeStatusKey = ['auth', 'provider', 'claude-status']
 const providersStatusKey = ['auth', 'providers', 'status']
+const modelRegistryKey = ['models', 'registry']
+const modelPrefsKey = ['owner', 'model-prefs']
 
 async function fetchTheme() {
   const res = await api.theme.get()
@@ -144,6 +146,40 @@ function useProvidersStatusQuery({ enabled = true } = {}) {
   })
 }
 
+async function fetchModelRegistry({ refresh = false } = {}) {
+  const path = refresh ? '/models?refresh=true' : '/models'
+  const res = await apiFetch(path)
+  const data = await jsonOrThrow(res, 'model registry fetch failed:')
+  return data?.providers || {}
+}
+
+function useModelRegistryQuery({ enabled = true } = {}) {
+  return useQuery({
+    queryKey: modelRegistryKey,
+    queryFn: () => fetchModelRegistry(),
+    enabled,
+    // Mirror the server-side cache TTL so the client doesn't refetch
+    // more often than upstream gives us new data. Refetches happen
+    // through explicit invalidation (the manage-models modal's
+    // refresh button) — not on every popover open.
+    staleTime: 5 * 60_000,
+  })
+}
+
+async function fetchModelPrefs() {
+  const res = await apiFetch('/owner/model-prefs')
+  const data = await jsonOrThrow(res, 'model prefs fetch failed:')
+  return { hidden_ids: data?.hidden_ids || [] }
+}
+
+function useModelPrefsQuery({ enabled = true } = {}) {
+  return useQuery({
+    queryKey: modelPrefsKey,
+    queryFn: fetchModelPrefs,
+    enabled,
+  })
+}
+
 export const themeQueries = {
   keys: {
     all: themeKey,
@@ -228,6 +264,25 @@ export const authQueries = {
       useQuery: useProvidersStatusQuery,
       invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: providersStatusKey }),
     },
+  },
+}
+
+export const modelQueries = {
+  keys: {
+    registry: modelRegistryKey,
+    prefs: modelPrefsKey,
+  },
+  registry: {
+    key: modelRegistryKey,
+    fetch: fetchModelRegistry,
+    useQuery: useModelRegistryQuery,
+    invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: modelRegistryKey }),
+  },
+  prefs: {
+    key: modelPrefsKey,
+    fetch: fetchModelPrefs,
+    useQuery: useModelPrefsQuery,
+    invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: modelPrefsKey }),
   },
 }
 

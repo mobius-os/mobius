@@ -165,6 +165,23 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   },
+  models: {
+    // Pass refresh=true to bypass the 5-minute server cache. The
+    // manage-models modal's refresh button uses this; everything
+    // else rides the cache.
+    list: ({ refresh = false } = {}) => apiFetch(
+      `/models${refresh ? '?refresh=true' : ''}`,
+    ),
+  },
+  owner: {
+    modelPrefs: {
+      get: () => apiFetch('/owner/model-prefs'),
+      save: (hiddenIds) => apiFetch('/owner/model-prefs', {
+        method: 'PATCH',
+        body: JSON.stringify({ hidden_ids: hiddenIds }),
+      }),
+    },
+  },
   theme: {
     get: () => apiFetch('/theme'),
     // Moves /data/shared/theme.css aside on the server so

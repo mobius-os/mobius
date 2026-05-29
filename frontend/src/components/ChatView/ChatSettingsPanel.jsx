@@ -74,12 +74,14 @@
  * ╚══════════════════════════════════════════════════════════════════╝
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch } from '../../api/client.js'
+import { modelQueries } from '../../hooks/queries.js'
 import {
   CLAUDE_MODELS,
   CODEX_MODELS,
 } from '../ProviderModelPicker/ProviderModelPicker.jsx'
+import ManageModelsModal from './ManageModelsModal.jsx'
 import './ChatSettingsPanel.css'
 
 
@@ -137,7 +139,10 @@ const PROVIDER_INFO = {
     id: 'codex',
     label: 'OpenAI Codex',
     Logo: OpenAILogo,
-    models: CODEX_MODELS,
+    // Models come from the live `/api/models` registry at render
+    // time; this stays as a fallback for the panel-rendered-before-
+    // queries-resolve frame.
+    fallbackModels: CODEX_MODELS,
     efforts: [
       { value: 'none', label: 'None' },
       { value: 'minimal', label: 'Minimal' },
@@ -151,7 +156,7 @@ const PROVIDER_INFO = {
     id: 'claude',
     label: 'Claude Code',
     Logo: ClaudeLogo,
-    models: CLAUDE_MODELS,
+    fallbackModels: CLAUDE_MODELS,
     efforts: [
       { value: 'low', label: 'Low' },
       { value: 'medium', label: 'Medium' },
@@ -162,6 +167,33 @@ const PROVIDER_INFO = {
   },
 }
 const PROVIDER_ORDER = ['codex', 'claude']
+
+
+/** Resolves the displayed model list for `providerId` from the live
+ *  registry + owner prefs.
+ *
+ *  Rules (matches the codex-review spec):
+ *    - Sort by registry order. The backend already returns entries
+ *      in KNOWN_MODELS order followed by live-only IDs, so we just
+ *      keep that order.
+ *    - Hide entries whose ID appears in `hiddenIds`, UNLESS that ID
+ *      is the chat's currently-selected model (`selectedId`). The
+ *      currently-selected model is always visible so the user can
+ *      switch away from it.
+ *    - Stale prefs are tolerated: an entry in `hiddenIds` that
+ *      doesn't appear in the registry simply has no effect (we
+ *      can't filter out something we can't see). No error.
+ */
+function resolveDisplayedModels(
+  registryEntries, hiddenIds, selectedId,
+) {
+  if (!Array.isArray(registryEntries)) return []
+  if (!hiddenIds || hiddenIds.length === 0) return registryEntries
+  const hidden = new Set(hiddenIds)
+  return registryEntries.filter(
+    m => !hidden.has(m.id) || m.id === selectedId,
+  )
+}
 
 
 /** Horizontal stepper-slider for picking an effort level. Renders
@@ -218,8 +250,24 @@ export default function ChatSettingsPanel({
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [connectedProviders, setConnectedProviders] = useState(null)
+  // True while the manage-models modal is mounted. When the modal
+  // opens we still want the popover-anchored picker to live in the
+  // background so the user can return to it; the modal is fully
+  // self-contained.
+  const [manageOpen, setManageOpen] = useState(false)
   const fallbackReqId = useRef(0)
   const latestReqId = reqIdRef || fallbackReqId
+
+  // Live model registry + owner prefs. Both ride 5-minute caches so
+  // a popover open doesn't refetch. The deferred-render guard below
+  // waits for BOTH to resolve before applying the prefs filter —
+  // otherwise we'd render the unfiltered list briefly, then snap
+  // to the filtered list once prefs land, causing flicker.
+  const registryQuery = modelQueries.registry.useQuery()
+  const prefsQuery = modelQueries.prefs.useQuery()
+  const registry = registryQuery.data
+  const prefs = prefsQuery.data
+  const dataReady = !!registry && !!prefs
 
   const [draftModel, setDraftModel] = useState(effective?.model || '')
   const [draftEffort, setDraftEffort] = useState(effective?.effort || '')
@@ -376,11 +424,48 @@ export default function ChatSettingsPanel({
   )
 
   const connectedSet = connectedProviders ? new Set(connectedProviders) : null
+  const hiddenIds = prefs?.hidden_ids || []
+
+  // Build the per-provider displayed-models list once per render.
+  // Falls back to the bundled CLAUDE_MODELS / CODEX_MODELS until the
+  // registry query resolves — but we gate the actual model rows on
+  // `dataReady` below (showing a skeleton) to avoid the flicker the
+  // spec calls out (prefs filter applied AFTER the unfiltered list
+  // already painted).
+  const displayedByProvider = useMemo(() => {
+    const out = {}
+    for (const pid of PROVIDER_ORDER) {
+      const live = registry?.[pid]
+      const source = Array.isArray(live) && live.length
+        ? live
+        // Fallback: shape the static list to match the registry
+        // entry shape so the renderer downstream doesn't need to
+        // branch. Used only when the registry query is still
+        // loading AND the deferred-render gate has been bypassed
+        // (it normally hasn't — see `dataReady` above).
+        : PROVIDER_INFO[pid].fallbackModels.map(m => (
+          { id: m.value, label: m.label, provider: pid, available: true }
+        ))
+      const selectedHere = draftProvider === pid ? draftModel : null
+      out[pid] = resolveDisplayedModels(source, hiddenIds, selectedHere)
+    }
+    return out
+  }, [registry, hiddenIds, draftModel, draftProvider])
 
   return (
     <div className="csp">
       <div className="csp__label">Model</div>
-      {PROVIDER_ORDER.map(pid => {
+      {!dataReady && (
+        // Skeleton placeholder while registry + prefs resolve. Two
+        // rows mirror the typical visible count without committing
+        // to a specific model list — covers the case where prefs
+        // hide most of the rows once they land.
+        <div className="csp__skeleton" aria-hidden="true">
+          <div className="csp__skeleton-row" />
+          <div className="csp__skeleton-row" />
+        </div>
+      )}
+      {dataReady && PROVIDER_ORDER.map(pid => {
         const info = PROVIDER_INFO[pid]
         // Hide providers the user hasn't authenticated, EXCEPT the
         // chat's currently-selected provider (so the user can always
@@ -394,16 +479,17 @@ export default function ChatSettingsPanel({
         // Same-provider model swaps remain available because both
         // SDKs preserve context within a session on model change.
         const isCrossProvider = hasAssistantTurns && pid !== draftProvider
-        return info.models.map(m => {
-          const isSelected = draftModel === m.value && draftProvider === pid
+        const models = displayedByProvider[pid] || []
+        return models.map(m => {
+          const isSelected = draftModel === m.id && draftProvider === pid
           return (
-            <div key={`${pid}-${m.value}`}>
+            <div key={`${pid}-${m.id}`}>
               <button
                 type="button"
                 className={`csp-row${isSelected ? ' csp-row--selected' : ''}${isCrossProvider ? ' csp-row--locked' : ''}`}
                 // Keep textarea focused so the keyboard stays open.
                 onPointerDown={(ev) => ev.preventDefault()}
-                onClick={() => !isCrossProvider && handlePickModel(m.value, pid)}
+                onClick={() => !isCrossProvider && handlePickModel(m.id, pid)}
                 disabled={isCrossProvider}
                 title={isCrossProvider ? 'Cross-provider switch not allowed after the chat has started' : undefined}
               >
@@ -425,6 +511,17 @@ export default function ChatSettingsPanel({
           )
         })
       })}
+      {dataReady && (
+        <button
+          type="button"
+          className="csp__manage"
+          // Keep textarea focused so the keyboard stays open.
+          onPointerDown={(ev) => ev.preventDefault()}
+          onClick={() => setManageOpen(true)}
+        >
+          + Manage models
+        </button>
+      )}
       {(codexSwitchWarning || error) && (
         <div className="csp__foot">
           {codexSwitchWarning && (
@@ -435,6 +532,13 @@ export default function ChatSettingsPanel({
           )}
           {error && <p className="csp__error">{error}</p>}
         </div>
+      )}
+      {manageOpen && (
+        <ManageModelsModal
+          onClose={() => setManageOpen(false)}
+          providerOrder={PROVIDER_ORDER}
+          providerInfo={PROVIDER_INFO}
+        />
       )}
     </div>
   )

@@ -199,6 +199,58 @@
   text-align: right;
 }
 
+/* "+ Manage models" affordance at the bottom of the picker. Reads as
+   a row, not a button — same padding + border-radius as csp-row but
+   no icon column and the label sits flush with where row titles sit.
+   This is the entry point to the manage-models modal where the
+   owner can hide registry entries they don't want in the picker. */
+.csp__manage {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 10px 10px;
+  border: 0;
+  background: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  text-align: left;
+  transition: background 0.12s ease, color 0.12s ease;
+  margin-top: 2px;
+}
+
+.csp__manage:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+/* Skeleton placeholder rendered while the registry + prefs queries
+   resolve. Two rows mirror the typical visible count. Pulsing
+   opacity rather than a flashy shimmer — the popover is already
+   small enough that motion reads as distraction. */
+.csp__skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 10px;
+}
+
+.csp__skeleton-row {
+  height: 36px;
+  border-radius: 8px;
+  background: var(--surface);
+  opacity: 0.5;
+  animation: csp-skeleton-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes csp-skeleton-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.7; }
+}
+
 .csp__foot {
   display: flex;
   flex-direction: column;

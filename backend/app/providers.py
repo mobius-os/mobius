@@ -25,8 +25,11 @@ it in PROVIDERS. SDK-backed providers implement just `check_auth` +
 `build_env`; subprocess-backed providers add `build` + `parse_line`.
 """
 
+import asyncio
 import json
+import logging
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -35,6 +38,9 @@ from app.runtime_types import ChatEvent
 
 if TYPE_CHECKING:
   from app.schemas import AgentSettingsOverride
+
+
+log = logging.getLogger(__name__)
 
 
 # Known models per provider, with the top entry treated as the
@@ -63,6 +69,27 @@ KNOWN_MODELS = {
     "gpt-5.5",
     "gpt-5.4",
   ],
+}
+
+
+# Human-readable label for each known model ID. Live registry calls
+# return raw IDs without UI metadata (Anthropic's /v1/models returns
+# only `id` + a generic `display_name`; Codex's models() returns
+# slugs only), so the canonical label always comes from this map.
+# Models the live API returns that are NOT in this map fall back to
+# their raw ID as the label — the picker still renders, just with a
+# less polished name. Add a row here when you add to KNOWN_MODELS.
+MODEL_LABELS: dict[str, str] = {
+  "claude-opus-4-8": "Opus 4.8",
+  "claude-opus-4-7": "Opus 4.7",
+  "claude-opus-4-6": "Opus 4.6",
+  "claude-opus-4-5-20251001": "Opus 4.5",
+  "claude-sonnet-4-6": "Sonnet 4.6",
+  "claude-sonnet-4-7-20251215": "Sonnet 4.7",
+  "claude-sonnet-4-5-20251001": "Sonnet 4.5",
+  "claude-haiku-4-5-20251001": "Haiku 4.5",
+  "gpt-5.5": "gpt-5.5",
+  "gpt-5.4": "gpt-5.4",
 }
 
 DEFAULT_MODELS = {
@@ -431,3 +458,269 @@ def get_provider(provider_id: str | None = None) -> BaseProvider:
 def detect_available() -> list[str]:
   """Returns IDs of providers whose CLI tool is installed."""
   return [pid for pid, p in PROVIDERS.items() if shutil.which(p.cli_cmd)]
+
+
+# ─── Model registry (live fetch + per-provider fallback) ────────────
+#
+# The chat-settings picker (and the manage-models modal) queries
+# `list_models()` to know which models exist for each provider. Two
+# upstream sources back this:
+#
+#   - Anthropic /v1/models — REST API, called via httpx with the
+#     OAuth access token from /data/cli-auth/claude/.credentials.json.
+#     We don't import the `anthropic` SDK to keep dependency surface
+#     flat; one httpx GET is simpler than a transitive dep pull.
+#   - Codex `AsyncCodex.models()` — wraps the JSON-RPC `model/list`
+#     call. Works under the same ChatGPT-account auth the rest of the
+#     Codex bridge uses; no API key needed.
+#
+# Cache: 5 minutes per provider. The load-bearing scenario is "Claude
+# just released a new model" — a 5-minute TTL means the user sees it
+# within minutes of the upstream change, without hammering the API
+# on every popover open. Per-provider cache so one provider's stale
+# entry doesn't block the other's refresh.
+#
+# Fallback: if an upstream fetch raises (network, auth, rate limit),
+# we return KNOWN_MODELS[provider] for THAT provider. The other
+# provider's live data still flows. This is the "reversibility over
+# prevention" axis applied to the picker — a transient outage
+# shouldn't break the chat-creation surface.
+
+_MODEL_CACHE_TTL_SECONDS = 5 * 60
+
+# In-process cache. Single-process FastAPI means a dict is enough; if
+# we ever scale out we'll need a shared cache, but that's not the
+# constraint today.
+_model_registry_cache: dict[str, tuple[float, list[dict[str, str]]]] = {}
+# Per-provider lock so a concurrent caller waiting on a Claude refetch
+# isn't blocked by an in-flight Codex refetch (and vice versa). The
+# cache itself is read without a lock — Python dict reads are atomic
+# under the GIL — and a stale-read race on the boundary just means
+# both callers do a refetch and one overwrites the other's entry,
+# which is the same result.
+_model_registry_locks: dict[str, asyncio.Lock] = {
+  pid: asyncio.Lock() for pid in PROVIDERS
+}
+
+
+def _label_for(model_id: str) -> str:
+  """Returns the human-readable label for `model_id`, falling back
+  to the raw ID when the model isn't in MODEL_LABELS."""
+  return MODEL_LABELS.get(model_id, model_id)
+
+
+def _fallback_models(provider_id: str) -> list[dict[str, Any]]:
+  """Returns the KNOWN_MODELS list for `provider_id` as registry
+  entries. Used when the upstream fetch fails AND as the seed for
+  cross-referencing live IDs against the canonical order. `available`
+  is set explicitly here so non-route callers (tests, internal
+  helpers) get the same dict shape the route layer's Pydantic
+  serialization would produce."""
+  return [
+    {
+      "id": mid,
+      "label": _label_for(mid),
+      "provider": provider_id,
+      "available": True,
+    }
+    for mid in KNOWN_MODELS.get(provider_id, [])
+  ]
+
+
+def _merge_live_with_known(
+  provider_id: str, live_ids: list[str]
+) -> list[dict[str, str]]:
+  """Merges a live ID list with KNOWN_MODELS ordering + labels.
+
+  Known IDs appear first in KNOWN_MODELS order (so the picker stays
+  visually stable across an Anthropic-side reordering). Live-only
+  IDs (released since the last KNOWN_MODELS bump) follow, in the
+  order the upstream returned them. Stale-known IDs (in
+  KNOWN_MODELS but not in live) are kept — they may still resolve
+  as aliases server-side, and dropping them would silently break
+  existing chats that persisted them.
+  """
+  known = KNOWN_MODELS.get(provider_id, [])
+  live_set = set(live_ids)
+  entries: list[dict[str, str]] = []
+  for mid in known:
+    entries.append({
+      "id": mid,
+      "label": _label_for(mid),
+      "provider": provider_id,
+      "available": mid in live_set,
+    })
+  for mid in live_ids:
+    if mid in known:
+      continue
+    entries.append({
+      "id": mid,
+      "label": _label_for(mid),
+      "provider": provider_id,
+      "available": True,
+    })
+  return entries
+
+
+async def _fetch_claude_models(data_dir: str) -> list[str]:
+  """Calls Anthropic's /v1/models with the stored OAuth access token.
+
+  Raises on any non-2xx or missing credentials so the caller can fall
+  back to KNOWN_MODELS. The Claude Code OAuth flow grants the
+  user:inference scope which the models endpoint accepts. We use
+  httpx (already a requirement) instead of pulling the `anthropic`
+  SDK to keep dependency surface flat.
+  """
+  import httpx  # local import — only the registry path needs it
+
+  creds_path = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
+  if not creds_path.exists():
+    raise RuntimeError("claude credentials missing")
+  raw = json.loads(creds_path.read_text())
+  oauth = raw.get("claudeAiOauth") or {}
+  token = oauth.get("accessToken")
+  if not token:
+    raise RuntimeError("claude credentials malformed")
+  headers = {
+    "Authorization": f"Bearer {token}",
+    "anthropic-version": "2023-06-01",
+    "anthropic-beta": "oauth-2025-04-20",
+  }
+  async with httpx.AsyncClient(timeout=10.0) as client:
+    resp = await client.get(
+      "https://api.anthropic.com/v1/models?limit=200",
+      headers=headers,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+  ids: list[str] = []
+  for entry in payload.get("data", []):
+    mid = entry.get("id")
+    if isinstance(mid, str):
+      ids.append(mid)
+  return ids
+
+
+async def _fetch_codex_models(data_dir: str) -> list[str]:
+  """Calls the Codex SDK's `AsyncCodex.models()`.
+
+  Codex auth happens transparently inside the SDK — it reads the
+  same `CODEX_HOME` directory the chat path uses, so once the user
+  has connected Codex in Settings the call works.
+  """
+  from openai_codex import AsyncCodex
+  from openai_codex.client import AppServerConfig
+
+  codex_home = Path(data_dir) / "cli-auth" / "codex"
+  if not (codex_home / "auth.json").exists():
+    raise RuntimeError("codex credentials missing")
+  # Match codex_sdk_runner.py's binary resolution: pass the resolved
+  # path explicitly so AppServerConfig doesn't fall back to its own
+  # discovery, which has diverged from PATH in past SDK versions.
+  config = AppServerConfig(
+    codex_home=str(codex_home),
+    codex_bin=shutil.which("codex"),
+  )
+  ids: list[str] = []
+  async with AsyncCodex(config=config) as codex:
+    response = await codex.models()
+  # The SDK returns a ModelListResponse with `.models` list. Each
+  # entry exposes a `.slug` (the model ID). Defensive: tolerate
+  # bare strings too in case the upstream shape drifts.
+  raw_models = getattr(response, "models", None) or []
+  for entry in raw_models:
+    if isinstance(entry, str):
+      ids.append(entry)
+    else:
+      slug = getattr(entry, "slug", None) or getattr(entry, "id", None)
+      if isinstance(slug, str):
+        ids.append(slug)
+  return ids
+
+
+async def _fetch_provider_models(
+  provider_id: str, data_dir: str
+) -> list[str]:
+  """Dispatches to the right fetcher. Returns raw IDs; the caller
+  wraps them with labels."""
+  if provider_id == "claude":
+    return await _fetch_claude_models(data_dir)
+  if provider_id == "codex":
+    return await _fetch_codex_models(data_dir)
+  return []
+
+
+async def list_models(
+  data_dir: str,
+  force_refresh: bool = False,
+) -> dict[str, list[dict[str, str]]]:
+  """Returns `{provider_id: [{id, label, provider, available}, ...]}`.
+
+  Cache TTL is 5 minutes per provider. On upstream failure for a
+  given provider we serve KNOWN_MODELS for THAT provider (the live
+  data from the other provider still flows). `force_refresh=True`
+  bypasses the cache — used by the manage-models modal's refresh
+  button so the user can pull a just-released model on demand.
+
+  Never raises — a failure on both providers still returns the full
+  KNOWN_MODELS fallback for both.
+  """
+
+  def cache_fresh(provider_id: str) -> list[dict[str, str]] | None:
+    """Returns cached entries if a non-forced read can use them."""
+    if force_refresh:
+      return None
+    cached = _model_registry_cache.get(provider_id)
+    if not cached:
+      return None
+    if time.monotonic() - cached[0] >= _MODEL_CACHE_TTL_SECONDS:
+      return None
+    return cached[1]
+
+  async def fetch_one(provider_id: str) -> tuple[str, list[dict[str, str]]]:
+    """Refetches under the provider's lock, with a double-checked
+    cache read inside the lock so we don't redo a refetch another
+    caller just completed for us."""
+    async with _model_registry_locks[provider_id]:
+      hit = cache_fresh(provider_id)
+      if hit is not None:
+        return provider_id, hit
+      try:
+        live_ids = await _fetch_provider_models(provider_id, data_dir)
+        entries = _merge_live_with_known(provider_id, live_ids)
+      except Exception as exc:  # noqa: BLE001 — fallback is the contract
+        log.warning(
+          "model registry fetch failed for %s: %s; using KNOWN_MODELS",
+          provider_id, exc,
+        )
+        entries = _fallback_models(provider_id)
+      _model_registry_cache[provider_id] = (time.monotonic(), entries)
+      return provider_id, entries
+
+  # Serve hot reads (cache hit + not forced) without ever taking a
+  # lock — concurrent callers in the steady-state hit the cache
+  # directly. Only cache misses go through fetch_one.
+  result: dict[str, list[dict[str, str]]] = {}
+  cold: list[str] = []
+  for provider_id in PROVIDERS:
+    hit = cache_fresh(provider_id)
+    if hit is not None:
+      result[provider_id] = hit
+    else:
+      cold.append(provider_id)
+
+  if cold:
+    # Refetch missing providers in parallel — Claude and Codex have
+    # independent upstreams, so there's no reason to serialize them
+    # under one lock when both are stale.
+    fetched = await asyncio.gather(*(fetch_one(pid) for pid in cold))
+    for pid, entries in fetched:
+      result[pid] = entries
+
+  return result
+
+
+def invalidate_model_cache() -> None:
+  """Clears the per-provider cache. Used by tests and by the
+  manage-models modal's explicit refresh path."""
+  _model_registry_cache.clear()

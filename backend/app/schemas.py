@@ -223,6 +223,42 @@ class SettingsUpdate(BaseModel):
     return value
 
 
+class ModelEntry(BaseModel):
+  """One row in the model registry — what the picker renders."""
+
+  id: str
+  label: str
+  provider: str
+  # True when the live API confirms the model is currently available.
+  # KNOWN_MODELS entries the live API didn't return get `False`
+  # here (kept for chats that persisted them as aliases). On full
+  # fallback every entry is True since we have no live signal to
+  # contradict it.
+  available: bool = True
+
+
+class ModelRegistryResponse(BaseModel):
+  """`GET /api/models` response shape."""
+
+  # Map provider id → ordered list of models.
+  providers: dict[str, list[ModelEntry]]
+
+
+class ModelPrefsUpdate(BaseModel):
+  """`PATCH /api/owner/model-prefs` body.
+
+  `hidden_ids` replaces the persisted list verbatim — the modal
+  always sends the full set so partial-update merge logic isn't
+  needed. Passing an empty list clears all hidden entries (shows
+  everything). Unknown IDs are tolerated; they no-op until/unless
+  the registry surfaces them again.
+  """
+
+  model_config = ConfigDict(extra="forbid")
+
+  hidden_ids: list[str] = Field(default_factory=list)
+
+
 class NotificationOut(BaseModel):
   id: str
   source_type: str
