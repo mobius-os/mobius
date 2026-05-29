@@ -84,6 +84,37 @@ class AppOut(BaseModel):
   model_config = {"from_attributes": True}
 
 
+class AppInstall(BaseModel):
+  """Body for POST /api/apps/install — atomic install from a manifest.
+
+  Exactly one of `manifest_url` or `manifest` must be set:
+    - `manifest_url`: the installer GETs the manifest, derives raw_base
+      from the URL (everything before the trailing filename), and
+      fetches the entry JSX + icon + storage_seed files relative to it.
+    - `manifest`: an inline manifest object. The caller must also pass
+      `raw_base` so the installer knows where to fetch referenced files
+      from. Useful for tests + future "install from local tarball".
+  """
+  manifest_url: str | None = None
+  manifest: dict | None = None
+  raw_base: str | None = None
+
+
+class AppInstallOut(AppOut):
+  """Install endpoint response — AppOut plus install-only fields."""
+  # 'install' for a fresh row, 'update' if a same-slug app already
+  # existed and got its jsx_source / seeds / cron refreshed in place.
+  mode: Literal["install", "update"]
+  # The manifest's declared version that ended up applied. Lets the
+  # store mini-app refresh its installed-versions map without round-
+  # tripping the manifest itself.
+  version: str
+  # Steps that were skipped because mini-app permissions could only
+  # take them so far — e.g. "icon: 404 in source repo", "schedule:
+  # no shell access (manual agent step)". Empty list = full success.
+  warnings: list[str] = Field(default_factory=list)
+
+
 class ProviderCodeRequest(BaseModel):
   code: str
 
