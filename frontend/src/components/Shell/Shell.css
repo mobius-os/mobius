@@ -98,10 +98,10 @@
   pointer-events: auto;
 }
 
-/* The PWA install affordance lives in the drawer now (see
-   .drawer__pwa-card in Drawer.css). The previous fixed-position
-   banner sat permanently above the composer, looked like a
-   notification, and — once dismissed — could not be brought back
-   even if the user later changed their mind. The drawer card keeps
-   the install path discoverable on every drawer-open as long as
-   beforeinstallprompt is captured and the dismiss flag isn't set. */
+/* The install affordance lives in the first-sign-in walkthrough now
+   (see frontend/src/components/Walkthrough/WalkthroughOverlay.jsx).
+   beforeinstallprompt capture and the drawer banner that used to
+   live here are gone — the walkthrough's "Add to home screen" step
+   tells the user how to install for their platform exactly once,
+   then never appears again. Sub-app install lives in the standalone
+   card surfaced from drawer ⋮ on a mini-app. */

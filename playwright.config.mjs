@@ -47,19 +47,37 @@ export default defineConfig({
     {
       name: 'auth',
       testMatch: /auth\.setup\.mjs/,
-      // Auth setup races a 15s rAF poll for shell readiness and is
-      // the single point of failure for every spec — when it flakes,
-      // 12 spec files cascade-fail with misleading "auth state
-      // missing" errors. Override the global retries=0 (local) and
-      // retries=1 (CI) so the setup absorbs its own jitter without
-      // polluting test results.
-      retries: 2,
+      // Auth setup races a 15s rAF poll for shell readiness — if the
+      // shell genuinely never reaches ready, additional retries just
+      // multiply that wait. One retry is enough to absorb single-flake
+      // jitter (transient SQLite or CLI-auth races) without triple-
+      // billing wall-clock when the underlying issue is real. Cascade-
+      // fail risk is mitigated upstream by workers=2 reducing the
+      // contention that produced most auth flakes in the first place.
+      retries: 1,
     },
     {
       name: 'tests',
       testMatch: /\.spec\.mjs$/,
+      // Exclude SSE-timing specs from this project — they get their
+      // own project below with retries=0 so a 50%-flake regression
+      // can't be papered over by the global retries=1.
+      testIgnore: /(stream-reconnect|handleStop-sync-ordering)\.spec\.mjs$/,
       dependencies: ['auth'],
       use: { storageState: AUTH_FILE },
+    },
+    {
+      // SSE-timing-sensitive specs: a 50%-pass-rate regression here
+      // (e.g. a race in disconnect({clearStreaming:true}) or queue/
+      // stop ordering) would be masked by the global retries=1.
+      // Pin to retries=0 so the regression surfaces on the first
+      // attempt — these tests' contracts are explicitly about timing
+      // windows and shouldn't be retried into green.
+      name: 'tests-timing',
+      testMatch: /(stream-reconnect|handleStop-sync-ordering)\.spec\.mjs$/,
+      dependencies: ['auth'],
+      use: { storageState: AUTH_FILE },
+      retries: 0,
     },
   ],
 })

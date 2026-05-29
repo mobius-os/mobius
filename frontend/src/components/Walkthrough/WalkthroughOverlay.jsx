@@ -69,9 +69,18 @@ export default function WalkthroughOverlay({ onDone }) {
       ...(prev || { completed_at: null }),
       completed: true,
     }))
-    // Best-effort persist. On network failure the user sees the
-    // walkthrough again next sign-in — better than blocking forward
-    // navigation on a flaky API call.
+    // localStorage fallback: when the POST below fails on a flaky
+    // connection, the in-memory query cache is the ONLY record that
+    // the user dismissed. Logging out (or clearing the TanStack cache)
+    // would then re-show the walkthrough next sign-in even though the
+    // user already finished it once. Writing here gives the on-mount
+    // gate in Shell.jsx an eventually-consistent second source — see
+    // the walkthrough query function which OR-s server + localStorage.
+    try { localStorage.setItem('mobius:walkthrough-completed', '1') } catch (_) {}
+    // Best-effort persist to the server. On network failure the
+    // localStorage flag above keeps the user from re-onboarding;
+    // the next successful POST (next session attempt or manual
+    // dismiss) reconciles.
     api.owner.walkthrough.complete().catch(() => {})
     onDone?.()
   }

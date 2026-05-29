@@ -381,6 +381,16 @@ test.describe('Short responses', () => {
     // ChatView's GET /chats/:id?limit=20 then returns real messages,
     // showEmpty stays false, .chat__scroll mounts, scroll restoration
     // runs, and the spacer is recomputed under measurement.
+    // Fence: useNavigation persists activeChatId via useEffect after
+    // a render commit. sendMessage's two-rAF wait usually flushes that
+    // commit, but make the wait explicit so the race becomes
+    // structurally impossible: localStorage MUST agree with the chat
+    // ChatView is rendering before we PUT messages onto it.
+    await page.waitForFunction(
+      () => !!(document.querySelector('.chat__scroll')
+              && localStorage.getItem('moebius_active_chat')),
+      { timeout: 3000 },
+    )
     await page.evaluate(async () => {
       const token = localStorage.getItem('token')
       const chatId = localStorage.getItem('moebius_active_chat')
@@ -392,9 +402,13 @@ test.describe('Short responses', () => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
+          // `blocks: []` is explicit: ChatView tolerates missing blocks
+          // today via ?. guards but the contract isn't pinned. Set it
+          // here so a future tightening of the contract doesn't
+          // silently break the seed.
           messages: [
-            { role: 'user', content: 'Short test', ts: Date.now() - 1000 },
-            { role: 'assistant', content: 'Brief answer.', ts: Date.now() },
+            { role: 'user', content: 'Short test', ts: Date.now() - 1000, blocks: [] },
+            { role: 'assistant', content: 'Brief answer.', ts: Date.now(), blocks: [] },
           ],
         }),
       })
