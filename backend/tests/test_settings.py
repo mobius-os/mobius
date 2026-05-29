@@ -261,3 +261,50 @@ def test_resolve_displayed_models_keeps_selected_even_when_hidden():
     if m["id"] not in hidden or m["id"] == selected
   ]
   assert [m["id"] for m in visible] == ["a", "c"]
+
+
+def test_walkthrough_status_default_not_completed(client, auth):
+  """A fresh owner has not seen the walkthrough."""
+  res = client.get("/api/owner/walkthrough", headers=auth)
+  assert res.status_code == 200
+  body = res.json()
+  assert body["completed"] is False
+  assert body["completed_at"] is None
+
+
+def test_walkthrough_complete_then_status(client, auth):
+  """Posting `complete` flips the bit; subsequent GETs report
+  completed=true and a timestamp."""
+  before = client.get("/api/owner/walkthrough", headers=auth).json()
+  assert before["completed"] is False
+  done = client.post("/api/owner/walkthrough/complete", headers=auth)
+  assert done.status_code == 204
+  after = client.get("/api/owner/walkthrough", headers=auth).json()
+  assert after["completed"] is True
+  assert after["completed_at"] is not None
+
+
+def test_walkthrough_complete_is_write_once(client, auth):
+  """Posting `complete` twice succeeds both times AND the second
+  call does not advance the persisted timestamp — the route is
+  write-once on first success, so downstream analytics can correlate
+  the original completion time against other signals without
+  retry-or-idle-tab refreshes corrupting it."""
+  first = client.post("/api/owner/walkthrough/complete", headers=auth)
+  assert first.status_code == 204
+  ts1 = client.get("/api/owner/walkthrough", headers=auth).json()["completed_at"]
+  second = client.post("/api/owner/walkthrough/complete", headers=auth)
+  assert second.status_code == 204
+  ts2 = client.get("/api/owner/walkthrough", headers=auth).json()["completed_at"]
+  assert ts2 == ts1, (
+    "Second completion POST must NOT advance the timestamp — write-once"
+  )
+
+
+def test_walkthrough_endpoints_require_auth(client):
+  """Unauthenticated requests must 401, like every other /api/owner
+  surface."""
+  no_get = client.get("/api/owner/walkthrough")
+  assert no_get.status_code == 401
+  no_post = client.post("/api/owner/walkthrough/complete")
+  assert no_post.status_code == 401

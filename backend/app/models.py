@@ -43,6 +43,12 @@ class Owner(Base):
   # the picker simply doesn't filter anything it can't find, and
   # cleanup happens lazily next time the owner edits prefs.
   model_prefs_json = Column(JSON, nullable=True, default=None)
+  # Set the first time the user finishes (or explicitly skips) the
+  # post-signup walkthrough. NULL means "show the walkthrough on next
+  # sign-in." Once set, never re-shown. The timestamp is kept (rather
+  # than a boolean flag) so we can correlate first-completion against
+  # other onboarding signals later — same shape as a SCD type 1 row.
+  walkthrough_completed_at = Column(DateTime, nullable=True, default=None)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
 
