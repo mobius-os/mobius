@@ -894,21 +894,35 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       const DISMISS_KEY = 'mobius:install-card:dismissed:' + APP_SLUG;
       const wasDismissed = sessionStorage.getItem(DISMISS_KEY) === '1';
 
-      // Suppress card entirely on platforms where install is
-      // architecturally impossible from this context (iOS Chrome,
-      // desktop Firefox without install support). Showing it would
-      // just produce a dead-end CTA. The `unsupported` copy will
-      // still render if the user manually opens the card (the
-      // install button instead becomes an "Open in Safari" CTA on
-      // iOS-non-Safari, surfaced via the fallback panel directly).
+      // Strong-signal suppression detection. We KNOW Chrome will
+      // suppress BIP for sibling-scope sub-PWAs when the parent is
+      // installed at the same origin. We can't read the install
+      // registry directly, but three signals — any one of them
+      // sufficient on its own — tell us the user is in an
+      // already-Möbius-installed session:
       //
-      // Force-show ALWAYS overrides this — if the user explicitly
-      // tapped Install in the drawer, we owe them an explanation
-      // for why it can't proceed.
+      //   1. `display-mode: standalone` on this page  → surrounding
+      //      window is the installed Möbius PWA
+      //   2. Referrer is the Möbius shell             → drawer-Install
+      //      from inside installed Möbius
+      //   3. `?install=1`                             → drawer-Install
+      //      from anywhere (drawer doesn't render outside Möbius)
+      //
+      // When suppression is likely, we DON'T wait for BIP and DON'T
+      // promise a one-tap install. We surface the manual path
+      // upfront with honest copy. This is the difference between
+      // "card with disabled-feeling Install button" and "card that
+      // does what it says immediately."
+      const ref = document.referrer || '';
+      const fromShell = ref.indexOf(location.origin + '/shell/') === 0;
+      const suppressionLikely =
+        displayStandalone || fromShell || forceShow;
 
       beacon('card_decision', {{
         force_show: forceShow,
         display_standalone: displayStandalone,
+        from_shell: fromShell,
+        suppression_likely: suppressionLikely,
         skip_already_installed: skipAlreadyInstalled,
         was_dismissed: wasDismissed,
         bip_already_captured: !!window.__bipDeferred,
@@ -921,38 +935,56 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       let bipUsed = false;
       let installed = false;
 
+      // When suppression is likely on a Chromium platform, swap to
+      // honest "Add to home screen" framing — the user already has
+      // Möbius installed, so we tell them this needs a quick manual
+      // step instead of teasing a one-tap install that won't fire.
+      const cardTitle = document.getElementById('ic-title');
+      const cardSub = document.querySelector('.ic-sub');
+      const cardHint = document.querySelector('.ic-hint');
+      if (suppressionLikely && copy.bipExpected) {{
+        if (cardTitle) cardTitle.textContent = 'Add {app_name_html} to your home screen';
+        if (cardSub) cardSub.textContent =
+          'Möbius is already installed, so this needs one quick step';
+        installBtn.textContent = 'Show install steps';
+        beacon('suppression_aware_copy_applied');
+      }}
+
       function showCard(reason) {{
         if (shown) return;
         shown = true;
         beacon('card_shown', {{
           reason: reason,
           has_bip: !!window.__bipDeferred,
-          platform_label: copy.installLabel,
+          platform_label: installBtn.textContent,
+          suppression_likely: suppressionLikely,
         }});
         backdrop.classList.add('visible');
         card.classList.add('visible');
-        // On platforms where BIP can't fire, reveal the fallback
-        // immediately under the buttons so the path is obvious from
-        // the first frame — the user doesn't need to tap and discover
-        // there's no native dialog.
-        if (!copy.bipExpected) {{
+        // Pre-reveal the fallback panel whenever we KNOW BIP won't
+        // give us a one-tap install — either because the platform
+        // doesn't support BIP, OR because we've detected suppression
+        // signals. Saves the user from a dead tap and surfaces the
+        // real path immediately.
+        const preReveal = !copy.bipExpected || suppressionLikely;
+        if (preReveal) {{
           fallback.classList.add('visible');
           beacon('fallback_pre_revealed', {{
-            reason: 'bip_not_expected_on_platform',
+            reason: !copy.bipExpected
+              ? 'bip_not_expected_on_platform'
+              : 'suppression_likely',
           }});
         }}
-        // Chromium-only: BIP MIGHT still arrive late. Keep the
-        // "Install" label but flip to "Show install steps" after 3s
-        // if it really doesn't come (matches the brazil-trip trace
-        // where suppression held the whole session).
-        if (copy.bipExpected) {{
+        // Chromium-only safety net: even when suppressionLikely is
+        // false (e.g. user opened /apps/<slug>/ in a fresh tab with
+        // no Möbius installed), Chrome might STILL not fire BIP fast
+        // enough or at all. 3s probe flips the UI to manual steps
+        // before the user concludes the button is broken.
+        if (copy.bipExpected && !preReveal) {{
           setTimeout(() => {{
             if (!window.__bipDeferred && !installed) {{
               beacon('bip_still_missing_after_3s');
               installBtn.textContent = 'Show install steps';
-              // Pre-reveal the fallback too — the user already
-              // committed by tapping drawer-Install, no point
-              // making them tap again to discover the steps.
               fallback.classList.add('visible');
               fallback.scrollIntoView({{
                 behavior: 'smooth', block: 'nearest',
