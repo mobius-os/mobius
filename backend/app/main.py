@@ -27,7 +27,7 @@ from app import models
 from app.routes import (
   ai_router, apps_router, auth_router,
   chat_router, chats_router, chats_stream_router,
-  debug_router, generate_router, install_log_router,
+  debug_router, generate_router,
   notifications_router, notify_router, proxy_router, push_router,
   recover_router, settings_router, standalone_router, storage_router,
   theme_router, uploads_router,
@@ -229,7 +229,6 @@ app.include_router(generate_router)
 app.include_router(push_router)
 app.include_router(notifications_router)
 app.include_router(debug_router)
-app.include_router(install_log_router)
 app.include_router(theme_router)
 # Standalone PWA surface at /apps/<slug>/{,manifest.json,icon-N.png}.
 # Registered AFTER the API routers but BEFORE the SPA catch-all
