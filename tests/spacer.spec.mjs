@@ -365,6 +365,42 @@ test.describe('Short responses', () => {
     const beforeSwitch = await measure(page)
     expect(beforeSwitch.spacerH).toBeGreaterThan(0)
 
+    // Seed the chat with persisted messages before reload.
+    //
+    // setup()'s `/api/chats/:id/messages` mock prevented the agent
+    // CLI from running, which also means the user's send was never
+    // persisted server-side. Reloading against an empty `chat.messages`
+    // makes ChatView's post-mount fetch resolve with messages=[],
+    // showEmpty flips true, .chat__scroll unmounts and is replaced by
+    // .chat__empty-wrap — which is documented intentional behavior
+    // (see CLAUDE.md "Chat UX — non-negotiable constraints" #6: the
+    // scroll container only mounts after the first user send).
+    //
+    // To exercise the "returning to a chat that has messages" path
+    // honestly, PUT a user+assistant pair directly onto the chat row.
+    // ChatView's GET /chats/:id?limit=20 then returns real messages,
+    // showEmpty stays false, .chat__scroll mounts, scroll restoration
+    // runs, and the spacer is recomputed under measurement.
+    await page.evaluate(async () => {
+      const token = localStorage.getItem('token')
+      const chatId = localStorage.getItem('moebius_active_chat')
+      if (!token || !chatId) throw new Error('seed precondition: missing token or activeChatId')
+      const res = await fetch(`/api/chats/${chatId}`, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messages: [
+            { role: 'user', content: 'Short test', ts: Date.now() - 1000 },
+            { role: 'assistant', content: 'Brief answer.', ts: Date.now() },
+          ],
+        }),
+      })
+      if (!res.ok) throw new Error(`seed PUT failed: ${res.status}`)
+    })
+
     // Reload to simulate returning to the chat.
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
