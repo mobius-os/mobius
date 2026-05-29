@@ -41,6 +41,17 @@ setup('authenticate', async ({ page, request }) => {
         })
       ))
     }
+    // Mark walkthrough complete server-side so the WalkthroughOverlay
+    // doesn't render during tests. The overlay's centered-modal +
+    // backdrop intercepts every pointer event in the shell; without
+    // this, every spec that clicks shell UI (Send button, drawer
+    // items, chat rows) times out with "...wt__overlay intercepts
+    // pointer events". The walkthrough is a first-sign-in feature
+    // not relevant to any of these tests' contracts. POST is
+    // idempotent (write-once on the server) — re-running is safe.
+    await request.post(`${BASE}/api/owner/walkthrough/complete`, {
+      headers, failOnStatusCode: false,
+    })
   }
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
