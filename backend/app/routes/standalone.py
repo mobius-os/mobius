@@ -248,16 +248,12 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   # execute in the standalone scope with the user's JWT.
   from html import escape
   app_name_html = escape(app_name)
-  # JSON-encode for safe inline-script embedding: json.dumps handles
-  # quotes/backslashes/control chars correctly, then neutralize the
-  # three sequences JSON-encoding doesn't cover for in-HTML use —
-  # `</` (script-tag breakout), U+2028, U+2029 (treated as line
-  # terminators inside JS strings and would otherwise corrupt the
-  # source). Emit without surrounding quotes since json.dumps
-  # already wraps in double-quotes.
-  # json.dumps already escapes U+2028 and U+2029 (Python's json
-  # module is non-strict by default). All we need extra is to
-  # neutralize `</` for in-HTML embedding.
+  # JSON-encode for safe inline-script embedding. json.dumps handles
+  # quotes, backslashes, control chars, and U+2028/U+2029 (Python's
+  # json module escapes them by default). We additionally neutralize
+  # `</` to prevent script-tag breakout when the literal is emitted
+  # inside <script>. json.dumps already wraps the result in double
+  # quotes, so callers interpolate it bare.
   app_name_js_literal = json.dumps(app_name).replace("</", "<\\/")
   html = f"""<!doctype html>
 <html lang="en">
@@ -314,12 +310,12 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       border-radius: 50%; animation: spin 0.8s linear infinite;
     }}
     @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
-    /* Install confirm card. Bottom-sheet style overlay shown when the
-       user explicitly asked to install (drawer ⋮ → Install lands here
-       with `?install=1`). Has two action tiers — silent native prompt
-       when BIP is available, Chrome-menu guidance when it isn't —
-       because beforeinstallprompt is unreliable for sub-PWAs that
-       share an origin with an already-installed parent. */
+    /* Install confirm card. Centered modal overlay shown when the user
+       explicitly asked to install (drawer ⋮ → Install lands here with
+       `?install=1`). Has two action tiers — silent native prompt when
+       BIP is available, platform-specific manual guidance when it
+       isn't — because beforeinstallprompt is unreliable for sub-PWAs
+       that share an origin with an already-installed parent. */
     #install-backdrop {{
       position: fixed; inset: 0; background: rgba(0,0,0,0.55);
       backdrop-filter: blur(4px);
@@ -720,38 +716,28 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       }}
     }}
 
-    // Install confirm card: bottom-sheet overlay with the icon,
-    // app name, brief value-prop, and an Install button that
-    // calls `BeforeInstallPromptEvent.prompt()` directly. That's
-    // the only programmatic path to Chromium's native install
-    // dialog — and only works when (a) we have the deferred event,
-    // (b) the call happens inside a real user gesture on the page
-    // whose manifest is being installed.
-    //
-    // The `beforeinstallprompt` listener is attached in a separate
-    // <script> tag at the top of <body> (not here) because Chromium
-    // fires the event very shortly after DOMContentLoaded — if our
-    // module script attaches the listener after its async loads, the
-    // event has already fired and been lost. The early listener
-    // stashes the event on `window.__bipDeferred` and dispatches a
-    // `mobius:bip-ready` event we listen for here.
+    // Install confirm card controller. The Install button calls
+    // `BeforeInstallPromptEvent.prompt()` directly when we have the
+    // deferred event (captured by the early <script> at top of body
+    // and stashed on `window.__bipDeferred`); otherwise it reveals a
+    // platform-specific manual-steps panel.
     //
     // Visibility rules:
-    //   - `?install=1` in URL → ALWAYS show (drawer-initiated intent)
-    //     even if the page is somehow in display-mode: standalone
-    //     (e.g. the user navigated here from inside the parent
-    //     Möbius PWA window — Chromium reports the surrounding PWA's
-    //     display mode, not the not-yet-installed sub-app's).
+    //   - `?install=1` in URL → ALWAYS show (drawer-initiated intent),
+    //     even if display-mode reports standalone. The surrounding
+    //     parent-PWA window can report standalone while the sub-app
+    //     itself isn't installed, so display-mode alone can't suppress.
     //   - Without `?install=1`: skip when this app's PWA is already
     //     running standalone (nothing to install), OR when the user
-    //     previously dismissed it this session.
+    //     dismissed earlier this session.
     (function setupInstallCard() {{
       const beacon = window.__mobiusBeacon || function() {{}};
       const platform = window.__mobiusPlatform || {{}};
 
-      // Element handles, all required (the markup is part of this
-      // template, so missing elements would mean a template edit
-      // broke the contract — log and bail).
+      // Element handles. All of these are rendered above in the same
+      // template — a missing node here means the template was edited
+      // without updating this controller, which is a build-time bug,
+      // not a runtime condition worth guarding against.
       const backdrop = document.getElementById('install-backdrop');
       const card = document.getElementById('install-card');
       const body = document.getElementById('ic-body');
@@ -765,10 +751,6 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       const doneBtn = document.getElementById('ic-done');
       const fallback = document.getElementById('ic-fallback');
       const toast = document.getElementById('ic-toast');
-      if (!backdrop || !card || !installBtn) {{
-        beacon('card_dom_missing');
-        return;
-      }}
 
       // ----- Platform-specific copy + behavior -----
       // The fallback hint, install button label, and whether to show
@@ -868,17 +850,11 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         unsupported: !!copy.unsupported,
       }});
 
-      // `?install=1` is the drawer's intent signal. We honor it as
-      // the authoritative show-the-card override — display-mode
-      // detection cannot tell "sub-app installed" apart from "we're
-      // inside the parent PWA window" (the surrounding window's
-      // display mode is what `matchMedia('(display-mode: standalone)'
-      // returns, not the sub-app's). The drawer wouldn't have sent
-      // us here if the sub-app was already installed.
+      // `?install=1` is the drawer's intent signal — see the
+      // visibility-rules comment above. Strip it after reading so a
+      // refresh doesn't keep retriggering the card.
       const url = new URL(window.location.href);
       const forceShow = url.searchParams.has('install');
-      // Strip the param so a refresh doesn't keep retriggering. Done
-      // BEFORE the controller acts so reload is idempotent.
       if (forceShow && window.history && window.history.replaceState) {{
         try {{
           url.searchParams.delete('install');
@@ -888,41 +864,32 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         }} catch (_) {{}}
       }}
 
-      // If we're DEFINITELY in this sub-app's own installed standalone
-      // (display-mode standalone AND no `?install=1` override), the
-      // user is launching from their home screen — there's nothing
-      // to install. Skip silently.
+      // Skip silently when this sub-app is already running standalone
+      // and the user didn't ask for the card via `?install=1` — they
+      // launched from the home screen and there's nothing to install.
       const displayStandalone = window.matchMedia(
         '(display-mode: standalone)'
       ).matches;
       const skipAlreadyInstalled = displayStandalone && !forceShow;
 
-      // Session-scoped dismiss memory: if the user tapped Maybe
-      // later this browser session, don't re-show on subsequent
-      // opportunistic BIPs in the same session. Cleared on session
-      // end (window close).
+      // Session-scoped dismiss memory: tapping Maybe later suppresses
+      // opportunistic re-shows for the rest of the browser session.
       const DISMISS_KEY = 'mobius:install-card:dismissed:' + APP_SLUG;
       const wasDismissed = sessionStorage.getItem(DISMISS_KEY) === '1';
 
-      // Strong-signal suppression detection. We KNOW Chrome will
-      // suppress BIP for sibling-scope sub-PWAs when the parent is
-      // installed at the same origin. We can't read the install
-      // registry directly, but three signals — any one of them
-      // sufficient on its own — tell us the user is in an
-      // already-Möbius-installed session:
-      //
-      //   1. `display-mode: standalone` on this page  → surrounding
-      //      window is the installed Möbius PWA
-      //   2. Referrer is the Möbius shell             → drawer-Install
-      //      from inside installed Möbius
-      //   3. `?install=1`                             → drawer-Install
-      //      from anywhere (drawer doesn't render outside Möbius)
-      //
-      // When suppression is likely, we DON'T wait for BIP and DON'T
-      // promise a one-tap install. We surface the manual path
-      // upfront with honest copy. This is the difference between
-      // "card with disabled-feeling Install button" and "card that
-      // does what it says immediately."
+      // Suppression detection. Chrome silently swallows BIP for
+      // sibling-scope sub-PWAs when the parent Möbius PWA is already
+      // installed at this origin. We can't read the install registry,
+      // but any of these three signals means "the parent is already
+      // installed, so promising a one-tap install would be a lie":
+      //   1. display-mode: standalone here  → wrapping window is the
+      //      installed Möbius PWA
+      //   2. referrer is the Möbius shell   → drawer-Install from
+      //      inside the installed parent
+      //   3. ?install=1                     → drawer-Install at all
+      //      (the drawer only renders inside Möbius)
+      // When suppression is likely we pre-reveal the manual-steps
+      // panel and swap the title to honest "Add to home screen" copy.
       const ref = document.referrer || '';
       const fromShell = ref.indexOf(location.origin + '/shell/') === 0;
       const suppressionLikely =
@@ -1011,24 +978,6 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         beacon('card_hidden', {{ reason: reason }});
         backdrop.classList.remove('visible');
         card.classList.remove('visible');
-      }}
-
-      function updateInstallBtnState() {{
-        // Button is always tappable now. Label switches based on
-        // whether we have BIP — Install (fast path) or Show steps
-        // (fallback). This is intentionally permissive: the user
-        // expressed install intent, the button must always do
-        // SOMETHING in response to the tap.
-        installBtn.disabled = false;
-        if (!window.__bipDeferred && shown && card.classList.contains('visible')) {{
-          // After-3s timer may have already run; the label refresh
-          // is a no-op if it already matches.
-          if (installBtn.textContent === 'Install') {{
-            // Wait briefly for BIP to arrive after card show; if it
-            // does, the label stays Install. Otherwise the 3s
-            // timer above flips it.
-          }}
-        }}
       }}
 
       function showToast(msg, duration) {{
@@ -1190,18 +1139,11 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       doneBtn.addEventListener('click', () => {{
         beacon('card_done');
         hideCard('done');
-        // After confirming the install, take the user back to Möbius
-        // instead of leaving them stranded on the sub-app page they
-        // came from. They can launch the sub-app fresh from its new
-        // home-screen icon now — keeping them here just makes the
-        // install feel disconnected from "I'm using Möbius."
-        //
-        // Path priority:
-        //   1. history.back() if we came from Möbius's shell (the
-        //      drawer-Install case — covers the common path).
-        //   2. location.href = '/shell/' as the unconditional fallback,
-        //      so opening /apps/<slug>/?install=1 in a fresh tab and
-        //      then installing still lands somewhere useful.
+        // After install, return to Möbius rather than leaving the user
+        // stranded on the sub-app's not-yet-launched-from-home-screen
+        // page. Prefer history.back() when the referrer was the shell
+        // (covers drawer-Install); fall back to /shell/ for fresh-tab
+        // /apps/<slug>/?install=1 flows where back-stack is empty.
         setTimeout(() => {{
           const cameFromShell = /\\/shell\\//.test(document.referrer);
           beacon('post_install_navigate', {{
@@ -1225,16 +1167,12 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         }}
       }});
 
-      // BIP that arrives AFTER the card is open is good news — the
-      // button is already labeled Install; just re-enable in case
-      // the 3s fallback flipped it.
+      // BIP arriving after the card opened reverts the label to
+      // Install, even if the 3s timeout or no-BIP path already flipped
+      // it to "Show install steps" — the native dialog will fire now.
       window.addEventListener('mobius:bip-ready', () => {{
         if (shown) {{
           beacon('bip_arrived_while_card_open');
-          // BIP showed up; whatever the card was advertising
-          // (Show install steps / Install), make sure the button
-          // now says Install so the user knows the native dialog
-          // will fire on tap.
           installBtn.textContent = 'Install';
         }}
       }});
@@ -1259,7 +1197,7 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       // Show the card. Slight delay so the React app gets first
       // paint in — the card sliding in over an empty black canvas
       // looks broken.
-      if (forceShow || wasDismissed === false) {{
+      if (forceShow || !wasDismissed) {{
         setTimeout(() => showCard(forceShow ? 'force_show' : 'opportunistic'), 350);
       }} else {{
         beacon('card_skipped_dismissed_this_session');
