@@ -142,13 +142,47 @@ export default function Shell() {
 
   // Capture PWA install prompt if the user hasn't dismissed it.
   useEffect(() => {
-    if (localStorage.getItem('pwa-prompt-dismissed')) return
+    // Temporary install-flow observability — beacon every event the
+    // shell sees so we can compare against the standalone sub-app
+    // shell's beacons. Public endpoint, no auth, body is small.
+    // Remove this block once the install UX is stable.
+    const beacon = (event, ctx) => {
+      try {
+        fetch('/api/install-log', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            surface: 'shell',
+            event,
+            url: location.href,
+            display_mode: window.matchMedia('(display-mode: standalone)').matches
+              ? 'standalone' : 'browser',
+            dismissed: !!localStorage.getItem('pwa-prompt-dismissed'),
+            ...(ctx || {}),
+          }),
+          keepalive: true,
+        }).catch(() => {})
+      } catch (_) {}
+    }
+    beacon('shell_mount')
+    if (localStorage.getItem('pwa-prompt-dismissed')) {
+      beacon('shell_skip_dismissed')
+      return
+    }
     function onBeforeInstall(e) {
       e.preventDefault()
       setPwaPrompt(e)
+      beacon('shell_bip_fired', { platforms: e.platforms || null })
+    }
+    function onAppInstalled() {
+      beacon('shell_app_installed')
     }
     window.addEventListener('beforeinstallprompt', onBeforeInstall)
-    return () => window.removeEventListener('beforeinstallprompt', onBeforeInstall)
+    window.addEventListener('appinstalled', onAppInstalled)
+    return () => {
+      window.removeEventListener('beforeinstallprompt', onBeforeInstall)
+      window.removeEventListener('appinstalled', onAppInstalled)
+    }
   }, [])
 
   // Handle non-content SSE events: theme changes, app updates, shell rebuilds.

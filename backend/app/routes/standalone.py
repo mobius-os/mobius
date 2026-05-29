@@ -349,6 +349,102 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
     </style>
 </head>
 <body>
+  <script>
+    // Early BIP capture — MUST run before any async script load.
+    // Chromium fires `beforeinstallprompt` shortly after
+    // DOMContentLoaded; the module script below waits for the React
+    // imports + theme fetch + app-token fetch before attaching its
+    // listener. By that time BIP has already fired and been dropped.
+    //
+    // This handler stashes the event on `window.__bipDeferred` and
+    // dispatches a `mobius:bip-ready` event so the later module can
+    // wire up the install UI. `appinstalled` is captured here too for
+    // the same reason — it can fire before our module finishes booting
+    // (the user can install via Chrome's own ⋮ menu while the app is
+    // still loading).
+    //
+    // Every event is also beaconed to /api/install-log so we can see
+    // server-side what actually fired in real user sessions. Temporary
+    // diagnostic — remove once the install UX is stable.
+    (function() {{
+      const _APP_SLUG = {json.dumps(slug)};
+      function beacon(event, ctx) {{
+        try {{
+          const body = JSON.stringify(Object.assign({{
+            surface: 'standalone',
+            slug: _APP_SLUG,
+            event: event,
+            url: location.href,
+            display_mode: (
+              window.matchMedia('(display-mode: standalone)').matches
+                ? 'standalone'
+                : (window.matchMedia('(display-mode: minimal-ui)').matches
+                    ? 'minimal-ui'
+                    : 'browser')
+            ),
+            referrer: document.referrer || null,
+          }}, ctx || {{}}));
+          // keepalive so the beacon survives a navigation away (the
+          // install dialog can trigger a navigation in some flows).
+          fetch('/api/install-log', {{
+            method: 'POST',
+            headers: {{ 'Content-Type': 'application/json' }},
+            body: body,
+            keepalive: true,
+          }}).catch(() => {{}});
+        }} catch (_) {{}}
+      }}
+      window.__mobiusBeacon = beacon;
+
+      beacon('page_load', {{
+        has_install_param: new URLSearchParams(location.search).has('install'),
+        // `getInstalledRelatedApps` is the closest thing Chrome gives
+        // us to "is the parent Möbius PWA installed for this origin?".
+        // Surface its result so we can tell whether suppression is the
+        // expected behavior or something more exotic.
+        related_apps_available:
+          typeof navigator.getInstalledRelatedApps === 'function',
+      }});
+      if (typeof navigator.getInstalledRelatedApps === 'function') {{
+        navigator.getInstalledRelatedApps().then(
+          apps => beacon('related_apps', {{
+            apps: apps.map(a => ({{
+              id: a.id, platform: a.platform, url: a.url,
+            }})),
+          }}),
+          err => beacon('related_apps_error', {{
+            error: String(err && err.message || err),
+          }}),
+        );
+      }}
+
+      window.addEventListener('beforeinstallprompt', function(e) {{
+        e.preventDefault();
+        window.__bipDeferred = e;
+        beacon('bip_fired', {{ platforms: e.platforms || null }});
+        window.dispatchEvent(new CustomEvent('mobius:bip-ready'));
+      }});
+
+      window.addEventListener('appinstalled', function() {{
+        beacon('app_installed');
+        window.__bipDeferred = null;
+        window.dispatchEvent(new CustomEvent('mobius:installed'));
+      }});
+
+      // Display-mode transitions are the cleanest signal that an
+      // install actually took effect on this origin, separate from
+      // the `appinstalled` event (which can be missed if the page
+      // navigated mid-install).
+      try {{
+        window.matchMedia('(display-mode: standalone)')
+          .addEventListener('change', function(e) {{
+            beacon('display_mode_change', {{
+              matches: e.matches, mode: 'standalone',
+            }});
+          }});
+      }} catch (_) {{}}
+    }})();
+  </script>
   <div id="root"></div>
   <div id="loading"><div class="spinner"></div><div>Loading {app_name_html}…</div></div>
   <button id="install-pill" type="button" aria-label="Install to home screen">
@@ -486,6 +582,7 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
     //     running standalone (nothing to install), OR when the user
     //     previously dismissed it this session.
     (function setupInstall() {{
+      const beacon = window.__mobiusBeacon || function() {{}};
       // Two opportunistic UI hooks, no instructions, no overlays.
       //
       // 1. `beforeinstallprompt` — when Chromium fires it (desktop
@@ -524,28 +621,44 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         '(display-mode: standalone)'
       ).matches && window.location.pathname.startsWith('/apps/');
 
-      function wirePill() {{
+      beacon('setup_install', {{
+        in_this_standalone: inThisStandalone,
+        bip_already_captured: !!window.__bipDeferred,
+      }});
+
+      function wirePill(reason) {{
         const deferred = window.__bipDeferred;
+        beacon('wire_pill_called', {{
+          reason: reason,
+          has_deferred: !!deferred,
+          in_this_standalone: inThisStandalone,
+          will_show: !!(deferred && !inThisStandalone),
+        }});
         if (!deferred || inThisStandalone) return;
         pill.classList.add('visible');
         pill.onclick = async () => {{
+          beacon('install_pill_clicked');
           try {{
             deferred.prompt();
             const result = await deferred.userChoice;
+            beacon('prompt_result', {{ outcome: result.outcome }});
             window.__bipDeferred = null;
             if (result.outcome === 'accepted') {{
               pill.classList.remove('visible');
             }}
-          }} catch (_) {{
+          }} catch (err) {{
             // Prompt can throw if called after consumption — hide
             // and let the user retry from Chrome menu if they want.
+            beacon('prompt_error', {{
+              error: String(err && err.message || err),
+            }});
             pill.classList.remove('visible');
           }}
         }};
       }}
 
-      if (window.__bipDeferred) wirePill();
-      window.addEventListener('mobius:bip-ready', wirePill);
+      if (window.__bipDeferred) wirePill('initial');
+      window.addEventListener('mobius:bip-ready', () => wirePill('bip-ready'));
 
       window.addEventListener('mobius:installed', () => {{
         pill.classList.remove('visible');
@@ -553,6 +666,16 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         toast.classList.add('visible');
         setTimeout(() => toast.classList.remove('visible'), 3000);
       }});
+
+      // 10s probe: if BIP never fires, beacon a snapshot so we can
+      // tell "BIP suppressed" apart from "user never engaged enough".
+      setTimeout(() => {{
+        if (!window.__bipDeferred) {{
+          beacon('bip_not_fired_10s', {{
+            in_this_standalone: inThisStandalone,
+          }});
+        }}
+      }}, 10000);
     }})();
   </script>
 </body>
