@@ -26,6 +26,16 @@ def _bypass_cron_scaffold():
     yield
 
 
+@pytest.fixture
+def bypass_url_validation():
+  """Skip the SSRF URL-safety check so mocked-httpx tests using
+  hostnames that don't resolve via DNS (`x.test`, etc.) still work.
+  Tests that DO want to exercise URL validation request this fixture
+  by NOT including it — see test_install_rejects_*."""
+  with patch("app.install._validate_url_safe", lambda url: None):
+    yield
+
+
 JSX = "export default function App() { return <div>ok</div> }"
 PROMPT = "# default prompt\nDo the work.\n"
 
@@ -88,7 +98,7 @@ MANIFEST_NEWS = {
 }
 
 
-def test_install_fresh_app_writes_everything(client, auth, tmp_path):
+def test_install_fresh_app_writes_everything(client, auth, tmp_path, bypass_url_validation):
   """Happy path: install creates DB row, compiles JSX, populates
   source_dir, seeds storage, processes icon, returns mode=install."""
   base = "https://raw.githubusercontent.com/x/app-test-news/main/"
@@ -125,7 +135,7 @@ def test_install_fresh_app_writes_everything(client, auth, tmp_path):
   assert any("cron" in w for w in payload["warnings"])
 
 
-def test_install_validates_required_fields(client, auth):
+def test_install_validates_required_fields(client, auth, bypass_url_validation):
   """Missing id / version / description / entry → 400 with field names."""
   bad = {"name": "no fields"}
   base = "https://x.test/"
@@ -143,7 +153,7 @@ def test_install_validates_required_fields(client, auth):
     assert field in detail
 
 
-def test_install_update_path_in_place(client, auth):
+def test_install_update_path_in_place(client, auth, bypass_url_validation):
   """Second install of the same manifest.id PATCHes the existing app:
   same row, fresh jsx_source, preserved user data in seeds."""
   base = "https://x.test/v1/"
@@ -201,7 +211,7 @@ def test_install_update_path_in_place(client, auth):
   assert jsx_file.read_text() == jsx_v2
 
 
-def test_install_rolls_back_on_compile_failure(client, auth):
+def test_install_rolls_back_on_compile_failure(client, auth, bypass_url_validation):
   """Bad JSX → compile fails → no App row, no source_dir, no seeds."""
   base = "https://x.test/bad/"
   bad_jsx = "this is not valid JSX <<>>"
@@ -248,7 +258,7 @@ def test_install_rejects_both_manifest_and_url(client, auth):
   assert r.status_code == 400
 
 
-def test_install_icon_404_is_warning_not_failure(client, auth):
+def test_install_icon_404_is_warning_not_failure(client, auth, bypass_url_validation):
   """No icon at the declared path → install succeeds, warning records it."""
   base = "https://x.test/noicon/"
   responses = {
@@ -271,7 +281,7 @@ def test_install_icon_404_is_warning_not_failure(client, auth):
   assert any("icon" in w.lower() for w in r.json()["warnings"])
 
 
-def test_install_rejects_slug_with_path_traversal(client, auth):
+def test_install_rejects_slug_with_path_traversal(client, auth, bypass_url_validation):
   """Manifest `id` with characters that would let the cron script
   treat the slug as a path is rejected upfront."""
   base = "https://x.test/evil/"
@@ -285,3 +295,150 @@ def test_install_rejects_slug_with_path_traversal(client, auth):
       "manifest_url": base + "mobius.json",
     })
   assert r.status_code == 400
+
+
+# --- SSRF + argv-injection hardening (security review follow-up) ----
+
+
+@pytest.mark.parametrize("bad_url", [
+  "http://127.0.0.1:8000/api/owner/secret",
+  "http://localhost/admin",
+  "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+  "http://10.0.0.5/internal",
+  "http://192.168.1.1/router",
+])
+def test_install_rejects_private_and_loopback_targets(client, auth, bad_url):
+  """SSRF: manifest URLs that resolve to loopback / private / link-local /
+  cloud-metadata addresses are rejected before any fetch happens."""
+  r = client.post("/api/apps/install", headers=auth, json={
+    "manifest_url": bad_url,
+  })
+  assert r.status_code == 400
+  assert "block" in r.json()["detail"].lower() or "resolve" in r.json()["detail"].lower()
+
+
+def test_install_rejects_non_http_scheme(client, auth):
+  """SSRF: file:// and other schemes are rejected."""
+  for url in ("file:///etc/passwd", "ftp://x/y.json", "gopher://x/"):
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": url,
+    })
+    assert r.status_code == 400, url
+    assert "scheme" in r.json()["detail"].lower()
+
+
+def test_install_rejects_redirect_to_private_ip(client, auth, bypass_url_validation):
+  """SSRF: a 302 response pointing at 127.0.0.1 must be re-validated and
+  rejected by the manual redirect handler — even when the initial URL
+  passed validation."""
+  # We bypass the first validation via the fixture, then patch back IN
+  # the validation only for the redirect target so we exercise the
+  # manual-rewalk behavior independent of getaddrinfo.
+  base = "https://x.test/redir/"
+  evil = "http://127.0.0.1:8000/internal"
+  responses = {
+    base + "mobius.json": (
+      302, b"", {"Location": evil},
+    ),
+  }
+
+  class _Resp:
+    def __init__(self, status, body, headers=None):
+      self.status_code = status
+      self.content = body
+      self.text = body.decode("utf-8", errors="replace")
+      self.headers = headers or {}
+
+  class _FakeClient:
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *exc):
+      return False
+
+    async def get(self, url):
+      if url == base + "mobius.json":
+        return _Resp(302, b"", {"Location": evil})
+      return _Resp(404, b"")
+
+  # Only validate the redirect target — the initial fetch goes through
+  # the bypass fixture. This mirrors the real-world threat: legitimate
+  # CDN host issues a redirect to a private IP.
+  real_validate = __import__("app.install", fromlist=["_validate_url_safe"])._validate_url_safe
+  def _selective_validate(url):
+    if url == evil:
+      from fastapi import HTTPException
+      raise HTTPException(400, f"URL {url} resolves to blocked address")
+  with patch(
+    "app.install.httpx.AsyncClient", lambda *a, **kw: _FakeClient(),
+  ), patch(
+    "app.install._validate_url_safe", side_effect=_selective_validate,
+  ):
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r.status_code == 400
+  assert "block" in r.json()["detail"].lower()
+
+
+def test_install_rejects_slug_with_leading_dash(client, auth, bypass_url_validation):
+  """Argv injection: a slug like `-rf` could be parsed as a flag by
+  whatever tool downstream consumes it. Reject at the boundary."""
+  base = "https://x.test/argv/"
+  bad = {**MANIFEST_NEWS, "id": "-rf"}
+  responses = {base + "mobius.json": (200, json.dumps(bad).encode())}
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r.status_code == 400
+  assert "start with" in r.json()["detail"].lower()
+
+
+@pytest.mark.parametrize("bad_expr", [
+  "; rm -rf /",         # shell metachar — should never reach subprocess
+  "$(curl evil)",       # command substitution attempt
+  "`whoami`",           # backtick command substitution
+  "-flag */10 * * * *", # leading dash
+  "0 10",               # too few cron fields
+])
+def test_install_rejects_malformed_cron(client, auth, bypass_url_validation, bad_expr):
+  base = "https://x.test/cron/"
+  bad = {**MANIFEST_NEWS, "schedule": {"default": bad_expr, "job": "fetch.sh"}}
+  responses = {base + "mobius.json": (200, json.dumps(bad).encode())}
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r.status_code == 400, f"{bad_expr!r}: {r.text}"
+
+
+def test_install_accepts_valid_cron_shapes(client, auth, bypass_url_validation):
+  """Sanity: real cron expressions don't trip the new validator."""
+  good_exprs = ["0 10 * * *", "*/10 * * * *", "0,30 8-17 * * 1-5"]
+  for expr in good_exprs:
+    base = f"https://x.test/cronok-{hash(expr) & 0xffff}/"
+    m = {**MANIFEST_NEWS,
+         "id": f"cronok-{abs(hash(expr)) & 0xffff}",
+         "schedule": {"default": expr, "job": "fetch.sh"}}
+    responses = {
+      base + "mobius.json": (200, json.dumps(m).encode()),
+      base + "index.jsx": (200, JSX.encode()),
+      base + "icon.png": (200, _png_bytes()),
+      base + "prompt.md": (200, PROMPT.encode()),
+      base + "fetch.sh": (200, b""),
+    }
+    with patch(
+      "app.install.httpx.AsyncClient",
+      side_effect=_fake_async_client(responses),
+    ):
+      r = client.post("/api/apps/install", headers=auth, json={
+        "manifest_url": base + "mobius.json",
+      })
+    assert r.status_code == 201, f"{expr!r}: {r.text}"

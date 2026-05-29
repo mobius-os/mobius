@@ -26,11 +26,15 @@ from __future__ import annotations
 
 import asyncio
 import io
+import ipaddress
 import json
 import logging
+import re
 import shutil
+import socket
 import subprocess
 from pathlib import Path
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from fastapi import HTTPException
@@ -62,10 +66,43 @@ _ICON_MAX_BYTES = 12 * 1024 * 1024
 
 _HTTP_TIMEOUT = 15.0
 
+# Hard cap on redirect hops. Real GitHub raw URLs don't redirect at
+# all; legitimate community hosts shouldn't need more than a couple.
+# The cap is the safety net against redirect loops + redirect-based
+# SSRF where each hop slips through validation by aiming at a
+# different host.
+_MAX_REDIRECTS = 5
+
 # Cron scaffold lives at this path in the built image. Tests override
 # the module attribute to bypass the scaffold (which hardcodes
 # `/data/apps/<slug>/` and doesn't accept the test's `/tmp/testdata`).
 CRON_SCAFFOLD = Path("/app/scripts/init-cron-scaffold.sh")
+
+# Networks the install fetcher must never reach. Hitting them from
+# our (network-privileged) backend turns the install endpoint into
+# an SSRF springboard: a malicious manifest URL could probe the
+# container's own loopback (own API, metrics), Docker bridge
+# (sibling services), cloud-provider metadata (169.254.169.254 →
+# IAM credentials on AWS / GCP / Azure), or any other internal
+# resource the container can reach.
+_BLOCKED_NETS = [
+  ipaddress.ip_network("0.0.0.0/8"),
+  ipaddress.ip_network("10.0.0.0/8"),
+  ipaddress.ip_network("100.64.0.0/10"),     # CGNAT
+  ipaddress.ip_network("127.0.0.0/8"),
+  ipaddress.ip_network("169.254.0.0/16"),    # link-local + cloud metadata
+  ipaddress.ip_network("172.16.0.0/12"),
+  ipaddress.ip_network("192.168.0.0/16"),
+  ipaddress.ip_network("::1/128"),
+  ipaddress.ip_network("fc00::/7"),          # ULA
+  ipaddress.ip_network("fe80::/10"),         # link-local IPv6
+]
+
+# Cron field grammar: minute hour dom month dow, allowing the
+# standard wildcards / ranges / lists / step values. Deliberately
+# rejects every shell metacharacter — no `;`, no `$`, no backtick,
+# no quotes. Per-field count check below enforces 5 columns.
+_CRON_FIELD_OK = re.compile(r"^[\d\*/,\- ]+$")
 
 _REQUIRED_FIELDS = ("id", "name", "version", "description", "entry")
 
@@ -90,6 +127,14 @@ def _validate_manifest(m: dict) -> None:
       400,
       f"Manifest `id` {mid!r} contains invalid chars (allow a-z, 0-9, -, _).",
     )
+  # Reject leading `-` / `_` to prevent the slug from being smuggled
+  # as an argv flag into init-cron-scaffold.sh (or any other tool we
+  # hand it to). The scaffold uses `$1` directly so this is defense-
+  # in-depth — the real concern is future callers that do use getopt.
+  if mid[0] in "-_":
+    raise HTTPException(
+      400, f"Manifest `id` must not start with '-' or '_', got {mid!r}",
+    )
   if not isinstance(m.get("name"), str):
     raise HTTPException(400, "Manifest `name` must be a string.")
   if not isinstance(m.get("entry"), str):
@@ -104,6 +149,88 @@ def _validate_manifest(m: dict) -> None:
         400,
         f"Manifest `permissions.{key}` must be one of none/read/write.",
       )
+  sched = m.get("schedule")
+  if sched is not None:
+    if not isinstance(sched, dict):
+      raise HTTPException(400, "Manifest `schedule` must be an object.")
+    expr = sched.get("default")
+    if expr is not None:
+      _validate_cron_expr(expr)
+    job = sched.get("job")
+    if job is not None and (
+      not isinstance(job, str) or job.startswith("/") or ".." in job
+    ):
+      raise HTTPException(
+        400, f"Manifest `schedule.job` must be a relative repo path",
+      )
+
+
+def _validate_cron_expr(expr: str) -> None:
+  """5-field cron grammar, no shell metacharacters. Prevents the
+  schedule expression from being smuggled past the argv barrier into
+  whatever cron interpreter the scaffold installs it under."""
+  if not isinstance(expr, str):
+    raise HTTPException(400, "schedule.default must be a string.")
+  if not expr or expr[0] in "-":
+    raise HTTPException(
+      400, f"schedule.default must not be empty or start with '-': {expr!r}",
+    )
+  if not _CRON_FIELD_OK.match(expr):
+    raise HTTPException(
+      400,
+      f"schedule.default contains disallowed characters: {expr!r}. "
+      "Allowed: digits, *, /, ,, -, whitespace.",
+    )
+  if len(expr.split()) < 5:
+    raise HTTPException(
+      400,
+      f"schedule.default must have at least 5 cron fields, got {expr!r}",
+    )
+
+
+def _validate_url_safe(url: str) -> None:
+  """Rejects URLs whose hostname resolves to a private / loopback /
+  link-local / cloud-metadata range.
+
+  The install endpoint is the SSRF surface: we fetch arbitrary URLs
+  on behalf of an authenticated owner. From inside the container we
+  can reach our own loopback (the Möbius API itself), the Docker
+  bridge (sibling containers), and cloud metadata services (IAM
+  credential exfiltration on AWS/GCP/Azure). Reject those targets
+  before the connect.
+
+  TOCTOU caveat: DNS can change between this validation and the
+  actual TCP connect. The mitigation is acceptable for single-owner
+  Möbius — exploiting it requires racing a DNS flip against the
+  install handler, which is loud and slow. For multi-tenant or
+  reduced-trust deployments, switch to an httpx transport that
+  validates the *actual* connect IP. Tracked alongside ticket 062.
+  """
+  parsed = urlparse(url)
+  if parsed.scheme not in ("http", "https"):
+    raise HTTPException(
+      400, f"URL scheme must be http or https, got {parsed.scheme!r}",
+    )
+  host = parsed.hostname
+  if not host:
+    raise HTTPException(400, f"URL is missing a hostname: {url}")
+  try:
+    infos = socket.getaddrinfo(host, None)
+  except socket.gaierror as exc:
+    raise HTTPException(400, f"Cannot resolve host {host!r}: {exc}")
+  for info in infos:
+    ip_str = info[4][0]
+    try:
+      ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+      continue
+    for net in _BLOCKED_NETS:
+      if ip in net:
+        raise HTTPException(
+          400,
+          f"URL {host!r} resolves to blocked address {ip} "
+          f"(network {net}).",
+        )
 
 
 def _derive_raw_base(manifest_url: str) -> str:
@@ -114,14 +241,36 @@ def _derive_raw_base(manifest_url: str) -> str:
   return manifest_url.rsplit("/", 1)[0] + "/"
 
 
-async def _http_get(client: httpx.AsyncClient, url: str, max_bytes: int) -> bytes:
-  """GETs a URL with size cap + clean error mapping to HTTPException."""
+async def _http_get(
+  client: httpx.AsyncClient, url: str, max_bytes: int, _hops: int = 0,
+) -> bytes:
+  """GETs a URL with SSRF validation + manual redirect handling.
+
+  Each hop is re-validated through `_validate_url_safe` so a 302 to
+  a private IP gets rejected just like a direct request to one.
+  `follow_redirects` is False on the client; we walk the chain
+  ourselves with a hop count cap.
+  """
+  if _hops > _MAX_REDIRECTS:
+    raise HTTPException(
+      502, f"Too many redirects (>{_MAX_REDIRECTS}) starting from {url}",
+    )
+  _validate_url_safe(url)
   try:
     r = await client.get(url)
   except httpx.TimeoutException:
     raise HTTPException(504, f"Timeout fetching {url}")
   except httpx.RequestError as exc:
     raise HTTPException(502, f"Failed to fetch {url}: {exc}")
+  # Manually follow redirects so we can re-validate each hop.
+  if r.status_code in (301, 302, 303, 307, 308):
+    loc = r.headers.get("Location")
+    if not loc:
+      raise HTTPException(
+        502, f"Redirect from {url} missing Location header.",
+      )
+    next_url = urljoin(url, loc)
+    return await _http_get(client, next_url, max_bytes, _hops + 1)
   if r.status_code == 404:
     raise HTTPException(404, f"Not found: {url}")
   if r.status_code >= 400:
@@ -239,7 +388,10 @@ async def install_from_manifest(
     )
 
   # --- Phase 1: fetch + validate manifest -----------------------------
-  async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=True) as cli:
+  # follow_redirects=False — _http_get walks the chain manually so
+  # every hop runs through _validate_url_safe (a 302 to a private IP
+  # would otherwise bypass our pre-flight check).
+  async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=False) as cli:
     if manifest_url is not None:
       raw = await _http_get(cli, manifest_url, _MANIFEST_MAX_BYTES)
       try:
