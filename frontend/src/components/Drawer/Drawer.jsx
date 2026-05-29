@@ -498,21 +498,17 @@ function DrawerRow({
               </Menu.Item>
               <Menu.Item onSelect={() => onRenameStart()}>Rename</Menu.Item>
               {kind === 'app' && slug && (
-                // Always open the standalone surface in a new browser
-                // tab (`_blank`). From inside the installed Möbius
-                // PWA, Chromium's installed-app registry remembers
-                // Möbius covers this origin and suppresses
-                // `beforeinstallprompt` for any same-origin sub-PWA.
-                // The only reliable install path is Chrome's own
-                // ⋮ → "Add to Home screen" menu — which requires
-                // the user to be in a real browser tab where that
-                // menu exists. `_blank` from an installed PWA pops
-                // to system browser; from a regular tab it just
-                // opens another tab. Either way the user lands in a
-                // context with browser chrome available.
+                // Same-tab navigation to the standalone install
+                // surface. The destination renders the app under a
+                // Möbius-styled confirm card (icon picker + Install
+                // button). Same-tab keeps the user in the installed
+                // Möbius PWA context — no jarring browser-tab pop-
+                // out — and lets engagement from the parent shell
+                // count toward the per-origin Site Engagement score
+                // that gates beforeinstallprompt.
                 <Menu.Item
                   onSelect={() => {
-                    window.open(`/apps/${slug}/?install=1`, '_blank', 'noopener');
+                    window.location.href = `/apps/${slug}/?install=1`;
                   }}
                 >
                   Install to home screen

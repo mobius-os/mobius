@@ -322,40 +322,177 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
        doesn't fire, nothing overlays the app — the user can still
        install via Chrome's own ⋮ → "Add to Home screen" menu, which
        bypasses BIP entirely. */
-    #install-pill {{
-      position: fixed; bottom: 18px; right: 18px;
-      background: var(--accent, #a78bfa); color: #0c0f14;
-      border: none; border-radius: 999px;
-      padding: 10px 18px;
-      font-size: 13px; font-weight: 600;
-      font-family: var(--font);
-      cursor: pointer;
-      box-shadow: 0 6px 20px rgba(0,0,0,0.35);
-      display: none;
-      z-index: 9999;
+    /* Install confirm card: bottom-sheet slid up over a dimmed
+       backdrop. Shown when ?install=1 is in the URL (drawer's
+       'Install to home screen' navigates here). User can swap the
+       icon via tap-to-upload, then taps Install which fires
+       beforeinstallprompt.prompt() if available, or queues for
+       when it fires shortly after engagement crosses Chrome's
+       threshold. */
+    #install-backdrop {{
+      position: fixed; inset: 0;
+      background: rgba(0, 0, 0, 0.55);
+      backdrop-filter: blur(2px);
+      -webkit-backdrop-filter: blur(2px);
+      z-index: 9998;
+      opacity: 0; pointer-events: none;
+      transition: opacity 0.25s ease-out;
     }}
-    #install-pill.visible {{ display: inline-flex; align-items: center; gap: 6px; }}
-    #install-toast {{
+    #install-backdrop.visible {{ opacity: 1; pointer-events: auto; }}
+    #install-card {{
+      position: fixed; left: 0; right: 0; bottom: 0;
+      background: var(--surface, #14181f);
+      color: var(--text, #d4d4d8);
+      padding: 22px 20px calc(22px + env(safe-area-inset-bottom));
+      border-radius: 18px 18px 0 0;
+      box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.5);
+      z-index: 9999;
+      transform: translateY(100%);
+      transition: transform 0.32s cubic-bezier(0.2, 0.9, 0.3, 1);
+      max-width: 520px;
+      margin: 0 auto;
+      font-family: var(--font);
+    }}
+    #install-card.visible {{ transform: translateY(0); }}
+    .ic-header {{
+      display: flex; align-items: center; gap: 14px;
+      margin-bottom: 16px;
+    }}
+    .ic-icon-wrap {{
+      position: relative;
+      width: 64px; height: 64px;
+      flex-shrink: 0;
+      border: none; padding: 0;
+      background: transparent;
+      cursor: pointer;
+      border-radius: 14px;
+    }}
+    .ic-icon-wrap:focus-visible {{
+      outline: 2px solid var(--accent); outline-offset: 2px;
+    }}
+    .ic-icon {{
+      width: 64px; height: 64px;
+      border-radius: 14px;
+      background: var(--bg);
+      display: block;
+    }}
+    .ic-icon-edit {{
+      position: absolute; bottom: -4px; right: -4px;
+      width: 24px; height: 24px;
+      border-radius: 50%;
+      background: var(--accent, #a78bfa);
+      color: #0c0f14;
+      font-size: 12px; font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+      pointer-events: none;
+    }}
+    .ic-icon-wrap.uploading {{ opacity: 0.55; pointer-events: none; }}
+    .ic-icon-wrap.uploading::after {{
+      content: ''; position: absolute; inset: 0;
+      border-radius: 14px;
+      border: 2px solid var(--accent);
+      border-top-color: transparent;
+      animation: spin 0.7s linear infinite;
+    }}
+    .ic-title {{
+      font-size: 18px; font-weight: 600; color: var(--text);
+      margin: 0 0 2px 0;
+    }}
+    .ic-subtitle {{
+      font-size: 13px; color: var(--muted, #52525b);
+      margin: 0;
+    }}
+    .ic-hint {{
+      font-size: 12px; color: var(--muted);
+      line-height: 1.5;
+      margin: 0 0 18px 0;
+    }}
+    .ic-actions {{
+      display: flex; gap: 10px;
+    }}
+    .ic-btn {{
+      flex: 1;
+      border: none; border-radius: 11px;
+      padding: 13px 16px;
+      font-size: 15px; font-weight: 600;
+      font-family: inherit; cursor: pointer;
+    }}
+    .ic-btn--secondary {{
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--border, #252b36);
+    }}
+    .ic-btn--primary {{
+      background: var(--accent, #a78bfa);
+      color: #0c0f14;
+    }}
+    .ic-btn--primary[disabled] {{
+      opacity: 0.55; cursor: default;
+    }}
+    .ic-success {{ display: none; text-align: center; padding: 6px 0 4px; }}
+    #install-card.success .ic-header,
+    #install-card.success .ic-hint,
+    #install-card.success .ic-actions {{ display: none; }}
+    #install-card.success .ic-success {{ display: block; }}
+    .ic-success-icon {{ font-size: 36px; line-height: 1; margin-bottom: 10px; }}
+    .ic-success-title {{ font-size: 17px; font-weight: 600; margin-bottom: 6px; }}
+    .ic-success-hint {{
+      font-size: 13px; color: var(--muted);
+      line-height: 1.5; margin-bottom: 16px;
+    }}
+    /* Toast for icon-upload errors. */
+    #ic-toast {{
       position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
-      background: var(--surface2, #1a1f28); color: var(--text, #d4d4d8);
+      background: var(--danger, #f87171); color: #0c0f14;
       padding: 10px 18px; border-radius: 10px;
       font-size: 13px; font-family: var(--font);
       box-shadow: 0 4px 14px rgba(0,0,0,0.4);
-      z-index: 10000; opacity: 0;
+      z-index: 10001; opacity: 0;
       transition: opacity 0.2s;
       pointer-events: none;
     }}
-    #install-toast.visible {{ opacity: 1; }}
+    #ic-toast.visible {{ opacity: 1; }}
     </style>
 </head>
 <body>
   <div id="root"></div>
   <div id="loading"><div class="spinner"></div><div>Loading {app_name_html}…</div></div>
-  <button id="install-pill" type="button" aria-label="Install to home screen">
-    <span aria-hidden="true">+</span>
-    <span>Install</span>
-  </button>
-  <div id="install-toast" role="status" aria-live="polite"></div>
+  <div id="install-backdrop"></div>
+  <div id="install-card" role="dialog" aria-modal="true"
+       aria-labelledby="ic-title">
+    <div class="ic-header">
+      <button class="ic-icon-wrap" id="ic-icon-btn" type="button"
+              aria-label="Change icon" title="Tap to change icon">
+        <img class="ic-icon" id="ic-icon-img"
+             src="/apps/{slug}/icon-192.png" alt="">
+        <span class="ic-icon-edit" aria-hidden="true">✎</span>
+      </button>
+      <input type="file" id="ic-icon-input"
+             accept="image/png,image/jpeg,image/webp"
+             style="display:none">
+      <div>
+        <p class="ic-title" id="ic-title">{app_name_html}</p>
+        <p class="ic-subtitle">Add to home screen</p>
+      </div>
+    </div>
+    <p class="ic-hint">Tap the icon to upload your own.</p>
+    <div class="ic-actions">
+      <button class="ic-btn ic-btn--secondary" id="ic-cancel">Maybe later</button>
+      <button class="ic-btn ic-btn--primary" id="ic-install" disabled>Install</button>
+    </div>
+    <div class="ic-success" aria-hidden="true">
+      <div class="ic-success-icon">✓</div>
+      <div class="ic-success-title">{app_name_html} is on your home screen</div>
+      <div class="ic-success-hint">
+        Close this and tap the new icon to launch it.
+      </div>
+      <div class="ic-actions">
+        <button class="ic-btn ic-btn--primary" id="ic-done">Got it</button>
+      </div>
+    </div>
+  </div>
+  <div id="ic-toast" role="status" aria-live="polite"></div>
   <script type="module">
     const APP_ID = {app_id};
     const APP_SLUG = {json.dumps(slug)};
@@ -485,74 +622,182 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
     //   - Without `?install=1`: skip when this app's PWA is already
     //     running standalone (nothing to install), OR when the user
     //     previously dismissed it this session.
-    (function setupInstall() {{
-      // Two opportunistic UI hooks, no instructions, no overlays.
-      //
-      // 1. `beforeinstallprompt` — when Chromium fires it (desktop
-      //    Chrome, first-time visitors who haven't installed
-      //    Möbius), reveal a small floating Install pill bottom-
-      //    right. The pill is the entire install UI. When BIP
-      //    doesn't fire (the common case after the user has
-      //    Möbius installed — Chromium's installed-app registry
-      //    suppresses BIP for sibling-scope sub-PWAs), the pill
-      //    stays hidden and the user can install via Chrome's
-      //    own ⋮ menu (which bypasses BIP).
-      //
-      // 2. `appinstalled` — fires regardless of which path the
-      //    user took (our pill OR Chrome's menu). Shows a brief
-      //    Möbius-themed toast confirming the install.
-      //
-      // Strip `?install=1` from the URL on load so a refresh
-      // doesn't look weird (we don't act on it anymore, but it
-      // got there from the drawer's nav).
-      if (window.history && window.history.replaceState) {{
-        try {{
-          const u = new URL(window.location.href);
-          if (u.searchParams.has('install')) {{
-            u.searchParams.delete('install');
-            window.history.replaceState(null, '', u.pathname + u.search + u.hash);
-          }}
-        }} catch (_) {{}}
-      }}
+    (function setupInstallCard() {{
+      const card = document.getElementById('install-card');
+      const backdrop = document.getElementById('install-backdrop');
+      const installBtn = document.getElementById('ic-install');
+      const cancelBtn = document.getElementById('ic-cancel');
+      const doneBtn = document.getElementById('ic-done');
+      const iconBtn = document.getElementById('ic-icon-btn');
+      const iconImg = document.getElementById('ic-icon-img');
+      const iconInput = document.getElementById('ic-icon-input');
+      const toast = document.getElementById('ic-toast');
 
-      const pill = document.getElementById('install-pill');
-      const toast = document.getElementById('install-toast');
-
-      // Skip the pill entirely if we're already running standalone
-      // (sub-app already installed — install would be a no-op).
+      const forceShow = new URLSearchParams(window.location.search).get('install') === '1';
       const inThisStandalone = window.matchMedia(
         '(display-mode: standalone)'
       ).matches && window.location.pathname.startsWith('/apps/');
 
-      function wirePill() {{
-        const deferred = window.__bipDeferred;
-        if (!deferred || inThisStandalone) return;
-        pill.classList.add('visible');
-        pill.onclick = async () => {{
-          try {{
-            deferred.prompt();
-            const result = await deferred.userChoice;
-            window.__bipDeferred = null;
-            if (result.outcome === 'accepted') {{
-              pill.classList.remove('visible');
-            }}
-          }} catch (_) {{
-            // Prompt can throw if called after consumption — hide
-            // and let the user retry from Chrome menu if they want.
-            pill.classList.remove('visible');
-          }}
-        }};
+      // Strip `?install=1` from the URL so a refresh doesn't keep
+      // re-forcing the card and shared links stay clean.
+      if (forceShow && window.history && window.history.replaceState) {{
+        try {{
+          const u = new URL(window.location.href);
+          u.searchParams.delete('install');
+          window.history.replaceState(null, '', u.pathname + u.search + u.hash);
+        }} catch (_) {{}}
       }}
 
-      if (window.__bipDeferred) wirePill();
-      window.addEventListener('mobius:bip-ready', wirePill);
+      // Skip entirely if we're already in this app's standalone
+      // PWA — nothing to install.
+      if (inThisStandalone) return;
+      // Skip when no install intent (no ?install=1) and the user
+      // already dismissed in this session.
+      const dismissKey = 'mobius-install-dismissed-' + APP_SLUG;
+      if (!forceShow && sessionStorage.getItem(dismissKey)) return;
 
-      window.addEventListener('mobius:installed', () => {{
-        pill.classList.remove('visible');
-        toast.textContent = APP_NAME + ' is on your home screen';
+      function showCard() {{
+        backdrop.classList.add('visible');
+        card.classList.add('visible');
+      }}
+      function hideAndDismiss() {{
+        backdrop.classList.remove('visible');
+        card.classList.remove('visible');
+        sessionStorage.setItem(dismissKey, '1');
+      }}
+      function showToast(msg) {{
+        toast.textContent = msg;
         toast.classList.add('visible');
-        setTimeout(() => toast.classList.remove('visible'), 3000);
+        setTimeout(() => toast.classList.remove('visible'), 2800);
+      }}
+
+      cancelBtn.addEventListener('click', hideAndDismiss);
+      backdrop.addEventListener('click', hideAndDismiss);
+      doneBtn && doneBtn.addEventListener('click', () => {{
+        backdrop.classList.remove('visible');
+        card.classList.remove('visible');
       }});
+
+      // Tap-to-upload icon. Client-side downscales to 1024 square PNG
+      // before uploading (phone photos are 5-10 MB; the server cap is
+      // 12 MB but no reason to send the whole thing). PUT accepts
+      // either the owner JWT or an app-scoped token for the same app.
+      async function downscaleToSquarePNG(file, maxSide) {{
+        const bitmap = await createImageBitmap(file);
+        try {{
+          const w = bitmap.width, h = bitmap.height;
+          const side = Math.min(w, h);
+          const target = Math.min(maxSide, side);
+          const c = document.createElement('canvas');
+          c.width = target; c.height = target;
+          const ctx = c.getContext('2d');
+          ctx.drawImage(
+            bitmap, (w - side) / 2, (h - side) / 2, side, side,
+            0, 0, target, target,
+          );
+          return await new Promise(r => c.toBlob(r, 'image/png'));
+        }} finally {{
+          bitmap.close && bitmap.close();
+        }}
+      }}
+
+      iconBtn.addEventListener('click', () => iconInput.click());
+      iconInput.addEventListener('change', async () => {{
+        const file = iconInput.files && iconInput.files[0];
+        if (!file) return;
+        const token = localStorage.getItem('token');
+        if (!token) {{ showToast('Not signed in'); iconInput.value = ''; return; }}
+        iconBtn.classList.add('uploading');
+        try {{
+          const blob = await downscaleToSquarePNG(file, 1024);
+          const resp = await fetch('/api/apps/' + APP_ID + '/icon', {{
+            method: 'PUT',
+            headers: {{
+              'Content-Type': 'image/png',
+              Authorization: 'Bearer ' + token,
+            }},
+            body: blob,
+          }});
+          if (resp.ok) {{
+            const bust = '?t=' + Date.now();
+            iconImg.src = '/apps/' + APP_SLUG + '/icon-192.png' + bust;
+            const fav = document.querySelector('link[rel="icon"]');
+            const touch = document.querySelector('link[rel="apple-touch-icon"]');
+            if (fav) fav.href = '/apps/' + APP_SLUG + '/icon-192.png' + bust;
+            if (touch) touch.href = '/apps/' + APP_SLUG + '/icon-192.png' + bust;
+          }} else {{
+            showToast('Upload failed (' + resp.status + ')');
+          }}
+        }} catch (e) {{
+          showToast('Upload failed: ' + (e && e.message || e));
+        }} finally {{
+          iconBtn.classList.remove('uploading');
+          iconInput.value = '';
+        }}
+      }});
+
+      // Install button. Two scenarios:
+      //   - BIP fired already: prompt() immediately. Native dialog.
+      //   - BIP hasn't fired yet (engagement still building): wait
+      //     for the bip-ready event, THEN call prompt() — but only
+      //     within ~10s of the user's tap so we don't fire stale.
+      let bipReady = !!window.__bipDeferred;
+      function setInstallEnabled(enabled) {{
+        installBtn.disabled = !enabled;
+      }}
+      setInstallEnabled(bipReady);
+      window.addEventListener('mobius:bip-ready', () => {{
+        bipReady = true;
+        setInstallEnabled(true);
+      }});
+
+      async function firePrompt() {{
+        const deferred = window.__bipDeferred;
+        if (!deferred) return false;
+        try {{
+          deferred.prompt();
+          const result = await deferred.userChoice;
+          window.__bipDeferred = null;
+          if (result.outcome === 'dismissed') hideAndDismiss();
+          return true;
+        }} catch (_) {{
+          return false;
+        }}
+      }}
+
+      installBtn.addEventListener('click', async () => {{
+        // Fast path: BIP already in hand, fire immediately.
+        if (await firePrompt()) return;
+        // Slow path: wait briefly for BIP. Chrome often fires within
+        // 1-2s of the user's first real gesture on the page.
+        installBtn.disabled = true;
+        const originalText = installBtn.textContent;
+        installBtn.textContent = 'Preparing…';
+        const deadline = Date.now() + 10000;
+        while (Date.now() < deadline) {{
+          await new Promise(r => setTimeout(r, 250));
+          if (window.__bipDeferred) {{
+            installBtn.textContent = originalText;
+            if (await firePrompt()) return;
+            break;
+          }}
+        }}
+        // Still nothing — Chrome has suppressed the auto-prompt.
+        // Show a clear next-step toast and re-enable the button so
+        // the user can retry if more engagement helps.
+        installBtn.textContent = originalText;
+        installBtn.disabled = false;
+        showToast('Install will appear after a moment of interaction');
+      }});
+
+      // appinstalled fires regardless of who triggered it (our
+      // button or Chrome's own menu install).
+      window.addEventListener('mobius:installed', () => {{
+        card.classList.add('success');
+      }});
+
+      // Show the card. Brief delay so app paints first.
+      setTimeout(showCard, 300);
     }})();
   </script>
 </body>
