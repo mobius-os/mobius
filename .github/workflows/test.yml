@@ -2,7 +2,13 @@ name: Tests
 
 on:
   push:
-    branches: [main]
+    # All long-lived branches get CI on push, not just main. Today's
+    # session shipped three commits to integration/ux-recovery-mod
+    # that would have broken three frontend tests if main-only CI
+    # had been the gate — instead the breakage was found ~10 hours
+    # later during a manual mobius-test rebuild. CI minutes are
+    # cheap; finding regressions early is not.
+    branches: [main, 'integration/**', 'feat/**', 'fix/**']
   pull_request:
     branches: [main]
 
