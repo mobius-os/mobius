@@ -378,13 +378,29 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
     }}
     .ic-fallback {{
       display: none; margin-top: 14px;
-      padding: 12px 14px; border-radius: 12px;
+      padding: 14px 16px; border-radius: 12px;
       background: var(--surface2, #1a1f28); color: var(--text, #d4d4d8);
-      font-size: 13px; line-height: 1.5;
+      font-size: 13px; line-height: 1.55;
       border: 1px solid var(--border, #252b36);
     }}
-    .ic-fallback.visible {{ display: block; }}
+    .ic-fallback.visible {{
+      display: block;
+      animation: ic-fallback-pulse 1.6s ease-out;
+    }}
     .ic-fallback strong {{ color: var(--accent, #a78bfa); font-weight: 600; }}
+    .ic-fallback-arrow {{
+      display: inline-block; margin-right: 6px;
+      animation: ic-arrow-bounce 1.6s ease-in-out infinite;
+    }}
+    @keyframes ic-fallback-pulse {{
+      0%   {{ box-shadow: 0 0 0 0 rgba(167, 139, 250, 0.5); }}
+      60%  {{ box-shadow: 0 0 0 10px rgba(167, 139, 250, 0); }}
+      100% {{ box-shadow: 0 0 0 0 rgba(167, 139, 250, 0); }}
+    }}
+    @keyframes ic-arrow-bounce {{
+      0%, 100% {{ transform: translateY(0); }}
+      50%      {{ transform: translateY(-4px); }}
+    }}
     .ic-success {{ display: none; text-align: center; padding: 8px 0; }}
     .ic-success.visible {{ display: block; }}
     .ic-success-icon {{
@@ -454,6 +470,60 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       }}
       window.__mobiusBeacon = beacon;
 
+      // Platform detection. Used by the install card to tailor the
+      // fallback hint per browser/OS, since PWA install affordances
+      // differ wildly:
+      //   - Chrome/Edge Android  : ⋮ → Install app
+      //   - iOS Safari           : Share ↑ → Add to Home Screen
+      //   - iOS Chrome/Firefox   : impossible (until iOS 17.4 EU)
+      //   - Firefox Android      : ⋮ → Install
+      //   - Desktop Chrome/Edge  : install icon in address bar
+      //   - Desktop Firefox/Safari : varies, mostly menu items
+      // Detection is UA-based, which is fragile but acceptable for
+      // a hint that's user-actionable — if we guess wrong, the user
+      // still has the menu. Feature-detect when possible (matchMedia,
+      // navigator.standalone for iOS Safari).
+      function detectPlatform() {{
+        const ua = navigator.userAgent || '';
+        const ios = /iPad|iPhone|iPod/.test(ua) && !window.MSStream;
+        // iOS bundle: every browser is Safari/WebKit (Apple gates
+        // engine choice until iOS 17.4 EU). We test for the non-
+        // Safari iOS shells explicitly — CriOS=Chrome, FxiOS=Firefox,
+        // EdgiOS=Edge, OPiOS=Opera, GSA=Google app.
+        const iosNonSafari = ios && /CriOS|FxiOS|EdgiOS|OPiOS|GSA/.test(ua);
+        const iosSafari = ios && !iosNonSafari;
+        const android = /Android/.test(ua);
+        const samsung = /SamsungBrowser/.test(ua);
+        const edge = /\\bEdg\\//.test(ua);
+        const firefox = /Firefox|FxiOS/.test(ua);
+        // Chromium check — Chrome OR Edge OR Samsung (the BIP-capable
+        // family). CriOS is Chrome-on-iOS which is Safari-engine so
+        // does NOT support BIP, exclude it.
+        const chromium = !ios && (
+          (/Chrome/.test(ua) && !/Edge\\//.test(ua)) || edge || samsung
+        );
+        const desktop = !ios && !android;
+        return {{
+          ua: ua,
+          ios: ios,
+          iosSafari: iosSafari,
+          iosNonSafari: iosNonSafari,
+          android: android,
+          chromium: chromium,
+          edge: edge,
+          firefox: firefox,
+          samsung: samsung,
+          desktop: desktop,
+          // BIP can fire here? (Chromium-family browsers only.)
+          bip_capable: chromium,
+          // PWA install possible at all?
+          install_possible: iosSafari || chromium ||
+            // Firefox desktop has limited install support via menu
+            (firefox && !ios),
+        }};
+      }}
+      window.__mobiusPlatform = detectPlatform();
+
       beacon('page_load', {{
         has_install_param: new URLSearchParams(location.search).has('install'),
         // `getInstalledRelatedApps` is the closest thing Chrome gives
@@ -462,6 +532,7 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         // expected behavior or something more exotic.
         related_apps_available:
           typeof navigator.getInstalledRelatedApps === 'function',
+        platform: window.__mobiusPlatform,
       }});
       if (typeof navigator.getInstalledRelatedApps === 'function') {{
         navigator.getInstalledRelatedApps().then(
@@ -523,11 +594,7 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         <button id="ic-cancel" class="ic-btn ic-btn--secondary" type="button">Maybe later</button>
         <button id="ic-install" class="ic-btn ic-btn--primary" type="button">Install</button>
       </div>
-      <div id="ic-fallback" class="ic-fallback">
-        Your browser didn't offer a one-tap install. Open the
-        <strong>⋮</strong> menu in the address bar and tap
-        <strong>Install app</strong> (or <strong>Add to Home screen</strong>).
-      </div>
+      <div id="ic-fallback" class="ic-fallback"></div>
     </div>
     <div id="ic-success" class="ic-success">
       <div class="ic-success-icon" aria-hidden="true">✓</div>
@@ -670,6 +737,7 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
     //     previously dismissed it this session.
     (function setupInstallCard() {{
       const beacon = window.__mobiusBeacon || function() {{}};
+      const platform = window.__mobiusPlatform || {{}};
 
       // Element handles, all required (the markup is part of this
       // template, so missing elements would mean a template edit
@@ -691,6 +759,104 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         beacon('card_dom_missing');
         return;
       }}
+
+      // ----- Platform-specific copy + behavior -----
+      // The fallback hint, install button label, and whether to show
+      // the card at all all branch on what install path the user's
+      // browser actually exposes. Centralized here so the controller
+      // below stays agnostic.
+      function copyForPlatform() {{
+        if (platform.iosSafari) {{
+          return {{
+            installLabel: 'Show install steps',
+            // No BIP on iOS Safari — install is always the manual
+            // Share menu path. Tier-1 = reveal the steps panel.
+            bipExpected: false,
+            fallbackHTML:
+              '<span class="ic-fallback-arrow" aria-hidden="true">↓</span>' +
+              'Tap the <strong>Share</strong> button below ' +
+              '<span aria-hidden="true">(the square with the up-arrow)</span>, ' +
+              'then choose <strong>Add to Home Screen</strong>.',
+          }};
+        }}
+        if (platform.iosNonSafari) {{
+          return {{
+            installLabel: 'Open in Safari',
+            // iOS Chrome / Firefox / Edge are Safari-engine shells
+            // that don't expose install. The user must literally
+            // open the URL in Safari.app.
+            bipExpected: false,
+            unsupported: true,
+            fallbackHTML:
+              'On iPhone and iPad, only <strong>Safari</strong> can install ' +
+              'web apps. Copy this page\\'s address and open it in Safari, ' +
+              'then tap Share → <strong>Add to Home Screen</strong>.',
+          }};
+        }}
+        if (platform.firefox && platform.android) {{
+          return {{
+            installLabel: 'Show install steps',
+            bipExpected: false,
+            fallbackHTML:
+              '<span class="ic-fallback-arrow" aria-hidden="true">↑</span>' +
+              'Tap the <strong>⋮</strong> menu at the top right, then choose ' +
+              '<strong>Install</strong>.',
+          }};
+        }}
+        if (platform.firefox && platform.desktop) {{
+          return {{
+            installLabel: 'Show install steps',
+            bipExpected: false,
+            unsupported: true,
+            fallbackHTML:
+              'Firefox on desktop doesn\\'t install web apps. Open this ' +
+              'page in <strong>Chrome</strong> or <strong>Edge</strong>, ' +
+              'or use a bookmark.',
+          }};
+        }}
+        if (platform.chromium && platform.android) {{
+          return {{
+            installLabel: 'Install',
+            bipExpected: true,
+            // The user successfully used this path in the 11:41 trace.
+            // Bottom-bar ⋮ on Chrome Android, top-bar ⋮ on Edge/Samsung.
+            fallbackHTML:
+              '<span class="ic-fallback-arrow" aria-hidden="true">↑</span>' +
+              'Tap the <strong>⋮</strong> menu in the address bar, then ' +
+              '<strong>Install app</strong> ' +
+              '<span aria-hidden="true">(or <strong>Add to Home screen</strong>)</span>.',
+          }};
+        }}
+        if (platform.chromium && platform.desktop) {{
+          return {{
+            installLabel: 'Install',
+            bipExpected: true,
+            fallbackHTML:
+              '<span class="ic-fallback-arrow" aria-hidden="true">↑</span>' +
+              'Click the <strong>install icon</strong> ' +
+              '<span aria-hidden="true">(⊕ on the right side of the address bar)</span>, ' +
+              'or open the <strong>⋮</strong> menu and choose ' +
+              '<strong>Install {app_name_html}</strong>.',
+          }};
+        }}
+        // Fallback for unknown browsers — generic instruction.
+        return {{
+          installLabel: 'Show install steps',
+          bipExpected: false,
+          fallbackHTML:
+            'Look for an <strong>Install</strong> or <strong>Add to ' +
+            'Home Screen</strong> option in your browser\\'s menu ' +
+            '<span aria-hidden="true">(usually ⋮ or ⋯)</span>.',
+        }};
+      }}
+      const copy = copyForPlatform();
+      installBtn.textContent = copy.installLabel;
+      fallback.innerHTML = copy.fallbackHTML;
+      beacon('platform_copy_selected', {{
+        label: copy.installLabel,
+        bip_expected: copy.bipExpected,
+        unsupported: !!copy.unsupported,
+      }});
 
       // `?install=1` is the drawer's intent signal. We honor it as
       // the authoritative show-the-card override — display-mode
@@ -728,12 +894,25 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       const DISMISS_KEY = 'mobius:install-card:dismissed:' + APP_SLUG;
       const wasDismissed = sessionStorage.getItem(DISMISS_KEY) === '1';
 
+      // Suppress card entirely on platforms where install is
+      // architecturally impossible from this context (iOS Chrome,
+      // desktop Firefox without install support). Showing it would
+      // just produce a dead-end CTA. The `unsupported` copy will
+      // still render if the user manually opens the card (the
+      // install button instead becomes an "Open in Safari" CTA on
+      // iOS-non-Safari, surfaced via the fallback panel directly).
+      //
+      // Force-show ALWAYS overrides this — if the user explicitly
+      // tapped Install in the drawer, we owe them an explanation
+      // for why it can't proceed.
+
       beacon('card_decision', {{
         force_show: forceShow,
         display_standalone: displayStandalone,
         skip_already_installed: skipAlreadyInstalled,
         was_dismissed: wasDismissed,
         bip_already_captured: !!window.__bipDeferred,
+        unsupported_platform: !!copy.unsupported,
       }});
 
       if (skipAlreadyInstalled) return;
@@ -748,19 +927,42 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         beacon('card_shown', {{
           reason: reason,
           has_bip: !!window.__bipDeferred,
+          platform_label: copy.installLabel,
         }});
         backdrop.classList.add('visible');
         card.classList.add('visible');
-        updateInstallBtnState();
-        // After ~3s, if BIP STILL hasn't fired we know prompt()
-        // will throw — preemptively swap the button to a "Show
-        // install steps" affordance that opens the fallback panel.
-        setTimeout(() => {{
-          if (!window.__bipDeferred && !installed) {{
-            beacon('bip_still_missing_after_3s');
-            installBtn.textContent = 'Show install steps';
-          }}
-        }}, 3000);
+        // On platforms where BIP can't fire, reveal the fallback
+        // immediately under the buttons so the path is obvious from
+        // the first frame — the user doesn't need to tap and discover
+        // there's no native dialog.
+        if (!copy.bipExpected) {{
+          fallback.classList.add('visible');
+          beacon('fallback_pre_revealed', {{
+            reason: 'bip_not_expected_on_platform',
+          }});
+        }}
+        // Chromium-only: BIP MIGHT still arrive late. Keep the
+        // "Install" label but flip to "Show install steps" after 3s
+        // if it really doesn't come (matches the brazil-trip trace
+        // where suppression held the whole session).
+        if (copy.bipExpected) {{
+          setTimeout(() => {{
+            if (!window.__bipDeferred && !installed) {{
+              beacon('bip_still_missing_after_3s');
+              installBtn.textContent = 'Show install steps';
+              // Pre-reveal the fallback too — the user already
+              // committed by tapping drawer-Install, no point
+              // making them tap again to discover the steps.
+              fallback.classList.add('visible');
+              fallback.scrollIntoView({{
+                behavior: 'smooth', block: 'nearest',
+              }});
+              beacon('fallback_pre_revealed', {{
+                reason: 'bip_timeout',
+              }});
+            }}
+          }}, 3000);
+        }}
       }}
 
       function hideCard(reason) {{
@@ -871,7 +1073,36 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       }});
 
       // ----- Install button -----
+      function revealFallback(reason) {{
+        fallback.classList.add('visible');
+        // Remove + re-add the visible class is a no-op for the
+        // pulse animation, so explicitly retrigger by reflowing.
+        fallback.style.animation = 'none';
+        // eslint-disable-next-line no-unused-expressions
+        fallback.offsetHeight;  // force reflow
+        fallback.style.animation = '';
+        fallback.scrollIntoView({{ behavior: 'smooth', block: 'nearest' }});
+        beacon('fallback_revealed', {{ reason: reason }});
+      }}
+
       installBtn.addEventListener('click', async () => {{
+        // iOS-non-Safari path: the button copies the URL so the
+        // user can paste into Safari. No BIP, no install dialog
+        // possible. Fallback panel was pre-revealed at card-show.
+        if (copy.unsupported && platform.iosNonSafari) {{
+          beacon('install_btn_tap_copy_url');
+          try {{
+            await navigator.clipboard.writeText(location.href);
+            showToast('Link copied — paste in Safari');
+          }} catch (err) {{
+            beacon('clipboard_error', {{
+              error: String(err && err.message || err),
+            }});
+            showToast('Copy failed — long-press the URL bar');
+          }}
+          return;
+        }}
+
         const deferred = window.__bipDeferred;
         if (deferred) {{
           beacon('install_btn_tap_with_bip');
@@ -887,24 +1118,24 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
               // Dismissed in the native dialog: surface the fallback
               // hint so the user can try the menu route if they
               // actually do want to install.
-              fallback.classList.add('visible');
-              beacon('chrome_menu_hint_shown', {{
-                reason: 'native_dismissed',
-              }});
+              revealFallback('native_dismissed');
             }}
           }} catch (err) {{
             beacon('prompt_error', {{
               error: String(err && err.message || err),
             }});
-            fallback.classList.add('visible');
+            revealFallback('prompt_threw');
             installBtn.textContent = 'Show install steps';
           }}
         }} else {{
-          // No BIP available — open the Chrome-menu instructions.
+          // No BIP available — reveal the platform-specific
+          // instruction panel with pulse + scroll-into-view so the
+          // user can't miss it (the brazil-trip trace showed two
+          // dead taps before the user found the menu).
           beacon('install_btn_tap_without_bip');
-          fallback.classList.add('visible');
-          installBtn.textContent = 'Show install steps';
-          beacon('chrome_menu_hint_shown', {{ reason: 'no_bip_on_tap' }});
+          revealFallback('no_bip_on_tap');
+          installBtn.textContent = copy.bipExpected
+            ? 'Show install steps' : copy.installLabel;
         }}
       }});
 
@@ -935,6 +1166,10 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       window.addEventListener('mobius:bip-ready', () => {{
         if (shown) {{
           beacon('bip_arrived_while_card_open');
+          // BIP showed up; whatever the card was advertising
+          // (Show install steps / Install), make sure the button
+          // now says Install so the user knows the native dialog
+          // will fire on tap.
           installBtn.textContent = 'Install';
         }}
       }});
