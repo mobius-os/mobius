@@ -101,6 +101,50 @@ def list_apps(
   )
 
 
+@router.post("/install", response_model=schemas.AppInstallOut, status_code=201)
+async def install_app(
+  body: schemas.AppInstall,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Atomic install (or in-place update) of an app from a `mobius.json`.
+
+  See `app.install.install_from_manifest` for the lifecycle: fetch
+  manifest → fetch entry JSX + icon + seed files → compile → write
+  source_dir → seed storage → register cron, all inside one DB
+  transaction with filesystem rollback on failure.
+
+  Returns the new (or updated) App row plus the install `mode` and
+  any non-fatal `warnings` (e.g. icon 404, cron deferred).
+  """
+  # Late import to avoid circular import — install.py reads from
+  # routes/apps.py at module top.
+  from app.install import install_from_manifest
+  app, mode, warnings, manifest = await install_from_manifest(
+    db,
+    manifest_url=body.manifest_url,
+    manifest=body.manifest,
+    raw_base=body.raw_base,
+  )
+  return schemas.AppInstallOut(
+    id=app.id,
+    name=app.name,
+    description=app.description,
+    compiled_path=app.compiled_path,
+    chat_id=app.chat_id,
+    source_dir=app.source_dir,
+    pinned_at=app.pinned_at,
+    cross_app_access=app.cross_app_access,
+    share_with_apps=app.share_with_apps,
+    slug=app.slug,
+    created_at=app.created_at,
+    updated_at=app.updated_at,
+    mode=mode,
+    version=manifest.get("version", "unknown"),
+    warnings=warnings,
+  )
+
+
 @router.post("/", response_model=schemas.AppOut, status_code=201)
 async def create_app(
   body: schemas.AppCreate,
