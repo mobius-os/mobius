@@ -28,6 +28,15 @@ export function clearToken() {
   // they re-login.
   setupSession.clearResumeStep()
   setupSession.setInProgress(false)
+  // The walkthrough's local-completion flag is keyed by browser, not
+  // by owner. Without this clear, a logout + new-owner setup would
+  // hide the walkthrough for the new account AND trigger a
+  // reconciliation POST against the new owner (see fetchWalkthrough
+  // in hooks/queries.js — server-completed=false + localCompleted=true
+  // fires `/owner/walkthrough/complete`). Both are wrong: the new
+  // owner hasn't seen the walkthrough, and the server stamp should
+  // reflect their own dismissal, not a stale browser flag.
+  try { localStorage.removeItem('mobius:walkthrough-completed') } catch {}
 }
 
 // Wipes persisted client state on logout / token expiry: the
