@@ -215,6 +215,9 @@ function EffortSlider({ efforts, value, onChange }) {
             role="radio"
             aria-checked={i === selectedIndex}
             aria-label={e.label}
+            // Roving tabindex: Tab lands on the selected stop, arrows move
+            // within the group (idiomatic radiogroup keyboard nav).
+            tabIndex={i === selectedIndex ? 0 : -1}
             className={
               'csp-effort__stop'
               + (i === selectedIndex ? ' csp-effort__stop--on' : '')
@@ -223,6 +226,17 @@ function EffortSlider({ efforts, value, onChange }) {
             // Keep textarea focused so the keyboard stays open.
             onPointerDown={(ev) => ev.preventDefault()}
             onClick={() => onChange(e.value)}
+            onKeyDown={(ev) => {
+              let next
+              if (ev.key === 'ArrowRight' || ev.key === 'ArrowDown') next = Math.min(efforts.length - 1, i + 1)
+              else if (ev.key === 'ArrowLeft' || ev.key === 'ArrowUp') next = Math.max(0, i - 1)
+              else if (ev.key === 'Home') next = 0
+              else if (ev.key === 'End') next = efforts.length - 1
+              else return
+              ev.preventDefault()
+              onChange(efforts[next].value)
+              ev.currentTarget.parentElement?.children[next]?.focus()
+            }}
           />
         ))}
       </div>
