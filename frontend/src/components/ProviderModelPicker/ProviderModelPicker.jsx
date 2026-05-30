@@ -52,7 +52,9 @@ export const CODEX_MODELS = [
 // four since the lower two are rarely useful for build work. `max`
 // was previously exposed for Claude but isn't a recognized Codex tier;
 // dropped for consistency until both providers agree on a fifth level.
-export const EFFORT_LEVELS = [
+// Used internally by the radio-list render below; no external
+// importers (ChatSettingsPanel renders its own stepper).
+const EFFORT_LEVELS = [
   { value: 'low', label: 'Low' },
   { value: 'medium', label: 'Medium' },
   { value: 'high', label: 'High' },
@@ -63,29 +65,6 @@ export function modelsForProvider(providerId) {
   if (providerId === 'codex') return CODEX_MODELS
   return CLAUDE_MODELS
 }
-
-
-/** Provider list — referenced by the lock + tag-label paths below.
- *  Keep aligned with `modelsForProvider` — adding a provider here
- *  without a model list silently breaks the picker. */
-export const PROVIDERS = [
-  { value: 'claude', label: 'Claude' },
-  { value: 'codex', label: 'Codex' },
-]
-
-
-/** Flat list of every available model across all providers, used by
- *  the combined `/` picker. The provider tag is rendered next to each
- *  row so the user knows which agent they're picking; clicking a row
- *  from a non-current provider switches the chat in one PATCH. */
-export const ALL_MODELS = [
-  ...CLAUDE_MODELS.map(m => (
-    { ...m, provider: 'claude', providerLabel: 'Claude' }
-  )),
-  ...CODEX_MODELS.map(m => (
-    { ...m, provider: 'codex', providerLabel: 'Codex' }
-  )),
-]
 
 
 /**
