@@ -56,16 +56,6 @@ export default function Shell() {
   const [appCache, setAppCache] = useState([])
   const [toast, setToast] = useState(null)
   const chatsLoadedRef = useRef(false)
-  // Mount time stamp used by the active-chat restore effect to
-  // distinguish the persisted-cache hydration (chatsQuery.isFetched
-  // flips true with `dataUpdatedAt` from the prior session) from the
-  // live network fetch resolving (`dataUpdatedAt` > mountTime).
-  // Without this gate, a stale persisted cache that's missing the
-  // user's last-active chat silently demotes them to chats[0] —
-  // ChatView remounts under a new key, .chat__scroll disappears for
-  // a frame, and the spacer/scroll restore tied to the previous chat
-  // is lost. See tests/spacer.spec.mjs §9.
-  const mountTimeRef = useRef(Date.now())
   // In-flight guard for newChat. The function POSTs unconditionally now
   // (the old empty-chat-reuse path was the implicit deduper); without
   // this guard a rapid double-tap on "+ New chat" before the API
@@ -173,11 +163,20 @@ export default function Shell() {
   // prematurely (on the stale-cache path) silently switches the
   // user to a different chat, remounts ChatView under a new key,
   // and destroys the spacer state from the previous session.
-  // Gate the demotion on `isSuccess && dataUpdatedAt > mountTime` —
-  // both conditions mean the live fetch has resolved at least once
-  // since this Shell mounted. Bootstrap (`prev === null`) is fine to
-  // run from either cache layer; ChatView only mounts when a real
-  // chatId is set, so there's no premature-remount cost.
+  // Gate the demotion on `isSuccess && isFetchedAfterMount` — both
+  // conditions mean the live fetch has resolved at least once since
+  // this Shell mounted. `isFetchedAfterMount` is TanStack's
+  // observer-mount-vs-fetch-completion bool, semantically exact for
+  // this need. The prior heuristic was `dataUpdatedAt > mountTime`,
+  // which was clock-fragile: a same-tick fast response made the
+  // strict `>` permanently false, trapping fresh containers in a
+  // no-chat / no-ChatView state. The fragility went unnoticed until
+  // the offline-feature merge added a SW SWR cache on `/api/chats`,
+  // which made same-tick responses the common case and broke
+  // auth.setup.mjs on every CI push afterward. Bootstrap (`prev ===
+  // null`) is fine to run from either cache layer; ChatView only
+  // mounts when a real chatId is set, so there's no premature-
+  // remount cost.
   //
   // chatsLoadedRef gates the bootstrap-empty-chat effect below. We
   // flip it as soon as `isFetched` is true (regardless of cache
@@ -194,12 +193,12 @@ export default function Shell() {
   // reload, the on-mount refetch is skipped as "fresh". When `prev`
   // isn't in that snapshot, we'd otherwise wait forever for a live
   // confirmation that never comes. Force a refetch in that case so
-  // `dataUpdatedAt` eventually advances and demotion (or
+  // `isFetchedAfterMount` eventually flips and demotion (or
   // confirmation) actually runs.
   useEffect(() => {
     if (!chatsQuery.isFetched) return
     const liveFetched = chatsQuery.isSuccess
-      && chatsQuery.dataUpdatedAt > mountTimeRef.current
+      && chatsQuery.isFetchedAfterMount
     const prev = activeChatIdRef.current
     const prevInChats = prev && chats.some(c => c.id === prev)
     if (prevInChats) {
@@ -232,7 +231,7 @@ export default function Shell() {
     }
     chatsLoadedRef.current = true
   }, [chats, chatsQuery.isFetched, chatsQuery.isSuccess,
-      chatsQuery.dataUpdatedAt, chatsQuery.isFetching,
+      chatsQuery.isFetchedAfterMount, chatsQuery.isFetching,
       refreshChats, setActiveChatId, activeChatIdRef])
 
   useEffect(() => { if (drawerOpen) { refreshApps(); refreshChats() } }, [drawerOpen, refreshApps, refreshChats])
@@ -509,12 +508,12 @@ export default function Shell() {
   useEffect(() => {
     if (!chatsLoadedRef.current) return
     const liveFetched = chatsQuery.isSuccess
-      && chatsQuery.dataUpdatedAt > mountTimeRef.current
+      && chatsQuery.isFetchedAfterMount
     if (!liveFetched) return
     if (chats.length === 0 && activeChatId === null) {
       newChat()
     }
-  }, [chats, chatsQuery.isSuccess, chatsQuery.dataUpdatedAt])
+  }, [chats, chatsQuery.isSuccess, chatsQuery.isFetchedAfterMount])
 
   return (
     <div className="shell">

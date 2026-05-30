@@ -162,16 +162,46 @@ const stableModuleKey = {
   },
 }
 
-// Shell data GETs — last-known theme/app-list/chat-list so a cold
-// offline launch renders chrome + drawer instead of throwing. SWR:
-// serve cache, revalidate when online. Owner-scoped; wiped on logout.
+// Shell data GETs — last-known theme + app-list so a cold offline
+// launch renders chrome + drawer instead of throwing. SWR: serve
+// cache, revalidate when online. Owner-scoped; wiped on logout.
 registerRoute(
   ({ url }) =>
     url.origin === self.location.origin &&
     (url.pathname === '/api/theme' ||
-      url.pathname === '/api/apps/' ||
-      url.pathname === '/api/chats'),
+      url.pathname === '/api/apps/'),
   new StaleWhileRevalidate({ cacheName: 'mobius-shell-data' }),
+)
+
+// `/api/chats` — separate route, NetworkFirst not SWR. Same cache
+// name (one logical bucket of shell-data) but a different strategy.
+//
+// Why split: Shell.jsx's auto-create-starter-chat effect needs an
+// authoritative answer for "are there chats?" before it POSTs a
+// new one. SWR returns a cached body the same tick as the fetch
+// fires, so on fresh-container boots the response timestamp lands
+// in the same millisecond as Shell mount — the strict
+// `dataUpdatedAt > mountTime` comparison the effect used became
+// permanently false (every CI push after the offline-feature merge
+// failed auth.setup.mjs on this exact path). The Shell-side fix
+// (isFetchedAfterMount instead of the timestamp compare) closes
+// the test, but the SWR shape also leaves a race window where a
+// stale cached chats=[] reaches the effect before the network
+// revalidate, letting auto-create POST a duplicate. NetworkFirst
+// removes that window: online → fresh server truth → no race;
+// offline (or slow >5s) → falls back to cache so the drawer still
+// shows last-known chats. This preserves the offline-feature
+// agent's "drawer shows last-known list offline" contract (durable
+// past TanStack Query's 24h persister maxAge) while restoring
+// online correctness.
+registerRoute(
+  ({ url }) =>
+    url.origin === self.location.origin &&
+    url.pathname === '/api/chats',
+  new NetworkFirst({
+    cacheName: 'mobius-shell-data',
+    networkTimeoutSeconds: 5,
+  }),
 )
 
 // App frame/module — cached only for offline-capable apps (header
