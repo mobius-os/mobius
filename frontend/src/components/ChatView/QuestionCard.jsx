@@ -103,7 +103,14 @@ export default function QuestionCard({ questions, answeredMap, onAnswer, disable
               <div className="qcard__header">{q.header}</div>
             )}
             <div className="qcard__text">{q.question}</div>
-            <div className="qcard__opts">
+            {/* Selection state was conveyed only by a CSS class — silent to
+                screen readers. Expose it as a radiogroup (single) / group of
+                checkboxes (multi) with per-option aria-checked. */}
+            <div
+              className="qcard__opts"
+              role={isMulti ? 'group' : 'radiogroup'}
+              aria-label={q.question}
+            >
               {q.options?.map((opt, oi) => {
                 const isChosen = answeredValue === opt.label
                 const isActive = answered
@@ -114,6 +121,8 @@ export default function QuestionCard({ questions, answeredMap, onAnswer, disable
                   <button
                     key={oi}
                     type="button"
+                    role={isMulti ? 'checkbox' : 'radio'}
+                    aria-checked={isActive}
                     className={`qcard__opt${isActive ? ' qcard__opt--on' : ''}${dimmed ? ' qcard__opt--dim' : ''}`}
                     onClick={answered ? undefined : () => selectOption(q.question, opt.label)}
                     disabled={inactive}
@@ -126,6 +135,8 @@ export default function QuestionCard({ questions, answeredMap, onAnswer, disable
               {!answered && (
               <button
                 type="button"
+                role={isMulti ? 'checkbox' : 'radio'}
+                aria-checked={isOtherSelected}
                 className={`qcard__opt qcard__opt--other${isOtherSelected ? ' qcard__opt--on' : ''}`}
                 onClick={() => selectOther(q.question)}
                 disabled={inactive}
