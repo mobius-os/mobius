@@ -101,10 +101,16 @@ confirming the staged set is actually what you meant to commit.
 Add new entries at the bottom. Delete outdated ones. No timestamps;
 order is implicit.
 
-- Built **Hello World**. A welcome screen with an "ask the agent"
-  button that takes the user to chat. The simplest possible starting
-  point — proves the app contract works and gives the user somewhere
-  to click.
+- Auto-installed **App Store** on first boot (slug `store`, from
+  the curated manifest at `BOOTSTRAP_STORE_MANIFEST_URL`). The
+  store is the user's first surface for discovering installable
+  mini-apps and proves the install endpoint works end-to-end. If
+  the bootstrap install failed (offline at first boot, GitHub
+  blip), it will retry next container restart — the user can also
+  manually install via `POST /api/apps/install` with the manifest
+  URL. The earlier "Hello World" seed-on-first-boot was retired
+  on 2026-05-30 in favor of the store as the more useful starting
+  point.
 
 ## Querying the file structure
 

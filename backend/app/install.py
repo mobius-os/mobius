@@ -255,6 +255,17 @@ def _derive_raw_base(manifest_url: str) -> str:
   return manifest_url.rsplit("/", 1)[0] + "/"
 
 
+def _canonical_for_inline(raw_base: str, manifest_id: str) -> str:
+  """Synthesize a stable manifest_url for inline-manifest installs.
+
+  Used when the caller passed `manifest` + `raw_base` instead of a
+  manifest_url. We need SOMETHING to key update-vs-install
+  discrimination on; the raw_base + manifest_id is unique-enough for
+  that purpose."""
+  base = raw_base.rstrip("/")
+  return f"{base}#manifest-id={manifest_id}"
+
+
 async def _http_get(
   client: httpx.AsyncClient, url: str, max_bytes: int, _hops: int = 0,
 ) -> bytes:
@@ -506,9 +517,22 @@ async def install_from_manifest(
         )
 
   # --- Phase 3: decide install vs update -------------------------------
+  # Match by manifest_url, NOT by slug. Slug is now a routing concern
+  # only — two apps (one user-built, one installed from a manifest)
+  # may want the same slug stem, and allocate_unique_slug already
+  # handles the collision by appending -2/-3/... Identity for "is
+  # this the same app re-installed" is keyed on the URL it came
+  # from. Inline manifests synthesize a canonical key from raw_base
+  # + manifest.id so they still get update-on-reinstall behavior.
   manifest_id = manifest["id"]
+  canonical_manifest_url = (
+    manifest_url if manifest_url is not None
+    else _canonical_for_inline(raw_base, manifest_id)
+  )
   existing = (
-    db.query(models.App).filter(models.App.slug == manifest_id).first()
+    db.query(models.App)
+    .filter(models.App.manifest_url == canonical_manifest_url)
+    .first()
   )
   mode = "update" if existing else "install"
 
@@ -539,11 +563,14 @@ async def install_from_manifest(
       app.share_with_apps = perms.get("share_with_apps", app.share_with_apps)
       db.flush()
     else:
+      # Identity by manifest_url means we're now genuinely in the
+      # install branch — but slug is a separate concern. The user
+      # may already own an app whose slug stem happens to match
+      # manifest.id (most commonly: they built one, then the store
+      # ships an "official" one with the same id). allocate_unique_slug
+      # appends -2/-3/... so both rows coexist; the partner sees both
+      # in the drawer and picks the one they want.
       slug = manifest_id
-      # If id collides with an existing slug we'd already be in update
-      # mode — this branch only runs for a genuinely new id. Belt and
-      # braces via allocate_unique_slug in case of a race or a slug
-      # taken by an unrelated app.
       taken = db.query(models.App).filter(models.App.slug == slug).first()
       if taken:
         slug = allocate_unique_slug(db, manifest["name"])
@@ -554,6 +581,7 @@ async def install_from_manifest(
         jsx_source=jsx_source,
         source_dir=source_dir,
         slug=slug,
+        manifest_url=canonical_manifest_url,
         cross_app_access=perms.get("cross_app_access", "none"),
         share_with_apps=perms.get("share_with_apps", "none"),
       )

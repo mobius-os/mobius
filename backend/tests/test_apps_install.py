@@ -185,9 +185,11 @@ def test_install_validates_required_fields(client, auth, bypass_url_validation):
 
 
 def test_install_update_path_in_place(client, auth, bypass_url_validation):
-  """Second install of the same manifest.id PATCHes the existing app:
-  same row, fresh jsx_source, preserved user data in seeds."""
-  base = "https://x.test/v1/"
+  """Second install of the same manifest_url PATCHes the existing app:
+  same row, fresh jsx_source, preserved user data in seeds. Identity
+  is keyed on manifest_url (the URL the app was installed from), so
+  the two installs must use the same URL to land on the update path."""
+  base = "https://x.test/repo/"
   responses_v1 = {
     base + "mobius.json": (200, json.dumps({
       **MANIFEST_NEWS, "version": "1.0.0",
@@ -212,23 +214,22 @@ def test_install_update_path_in_place(client, auth, bypass_url_validation):
   user_prompt_path = data_dir / "apps" / str(v1_id) / "prompt.md"
   user_prompt_path.write_text("USER EDITED")
 
-  base2 = "https://x.test/v2/"
   jsx_v2 = JSX.replace("ok", "ok v2")
   responses_v2 = {
-    base2 + "mobius.json": (200, json.dumps({
+    base + "mobius.json": (200, json.dumps({
       **MANIFEST_NEWS, "version": "1.2.0",
     }).encode()),
-    base2 + "index.jsx": (200, jsx_v2.encode()),
-    base2 + "icon.png": (200, _png_bytes()),
-    base2 + "prompt.md": (200, b"v2 default prompt"),  # should NOT clobber
-    base2 + "fetch.sh": (200, b""),
+    base + "index.jsx": (200, jsx_v2.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, b"v2 default prompt"),  # should NOT clobber
+    base + "fetch.sh": (200, b""),
   }
   with patch(
     "app.install.httpx.AsyncClient",
     side_effect=_fake_async_client(responses_v2),
   ):
     r2 = client.post("/api/apps/install", headers=auth, json={
-      "manifest_url": base2 + "mobius.json",
+      "manifest_url": base + "mobius.json",
     })
   assert r2.status_code == 201, r2.text
   payload = r2.json()
@@ -550,8 +551,10 @@ def test_update_compile_failure_preserves_old_bundle(client, auth, bypass_url_va
   """Fix 4: a failed v2 install must not leave the on-disk compiled
   bundle in the broken-v2 state. We install v1 (good JSX), record the
   compiled bytes, then attempt a v2 install with broken JSX — assert
-  the v2 install fails AND the v1 compiled bytes are still on disk."""
-  base = "https://x.test/upd-v1/"
+  the v2 install fails AND the v1 compiled bytes are still on disk.
+  The update branch is now keyed on manifest_url, so both installs
+  use the same URL to exercise that path."""
+  base = "https://x.test/upd/"
   responses_v1 = {
     base + "mobius.json": (200, json.dumps({
       **MANIFEST_NEWS, "id": "upd-target", "version": "1.0.0",
@@ -577,23 +580,22 @@ def test_update_compile_failure_preserves_old_bundle(client, auth, bypass_url_va
   v1_bytes = compiled_path.read_bytes()
   assert len(v1_bytes) > 0
 
-  # v2 attempt: same id (forces update path), broken JSX → compile fails
-  base2 = "https://x.test/upd-v2/"
+  # v2 attempt: same manifest_url (forces update path), broken JSX → compile fails
   responses_v2 = {
-    base2 + "mobius.json": (200, json.dumps({
+    base + "mobius.json": (200, json.dumps({
       **MANIFEST_NEWS, "id": "upd-target", "version": "2.0.0",
     }).encode()),
-    base2 + "index.jsx": (200, b"this is not valid JSX <<>>"),
-    base2 + "icon.png": (200, _png_bytes()),
-    base2 + "prompt.md": (200, PROMPT.encode()),
-    base2 + "fetch.sh": (200, b""),
+    base + "index.jsx": (200, b"this is not valid JSX <<>>"),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, PROMPT.encode()),
+    base + "fetch.sh": (200, b""),
   }
   with patch(
     "app.install.httpx.AsyncClient",
     side_effect=_fake_async_client(responses_v2),
   ):
     r2 = client.post("/api/apps/install", headers=auth, json={
-      "manifest_url": base2 + "mobius.json",
+      "manifest_url": base + "mobius.json",
     })
   assert r2.status_code in (422, 500), r2.text
 
@@ -606,3 +608,103 @@ def test_update_compile_failure_preserves_old_bundle(client, auth, bypass_url_va
   )
   # The .bak file should be gone (either restored or never created).
   assert not compiled_path.with_suffix(".js.bak").exists()
+
+
+# --- manifest_url is the new identity key (slug is routing only) ----
+
+
+def test_install_with_same_slug_different_manifest_keeps_both(
+  client, auth, bypass_url_validation,
+):
+  """A user-built app and a store-installed app may want the same
+  slug stem. After the manifest_url refactor, identity is keyed on
+  manifest_url, so the store install must NOT clobber the user app —
+  it lands as a fresh row with slug='news-2' (or similar) instead."""
+  # 1. User builds an app named "News" via the regular create path.
+  r0 = client.post("/api/apps/", headers=auth, json={
+    "name": "News",
+    "description": "user-built news reader",
+    "jsx_source": JSX,
+  })
+  assert r0.status_code == 201, r0.text
+  user_app = r0.json()
+  user_id = user_app["id"]
+  assert user_app["slug"] == "news"
+  assert user_app["manifest_url"] is None
+
+  # 2. Store installs a manifest whose id is also "news".
+  base = "https://raw.githubusercontent.com/x/app-news/main/"
+  manifest = {**MANIFEST_NEWS, "id": "news", "name": "News"}
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, PROMPT.encode()),
+    base + "fetch.sh": (200, b""),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r.status_code == 201, r.text
+  installed = r.json()
+  # Must be a fresh install (NOT an update of the user's app).
+  assert installed["mode"] == "install"
+  assert installed["id"] != user_id
+  # Slug collided so allocate_unique_slug bumped it.
+  assert installed["slug"] != "news"
+  assert installed["slug"].startswith("news-")
+  assert installed["manifest_url"] == base + "mobius.json"
+
+  # User's app is untouched.
+  r_user = client.get(f"/api/apps/{user_id}", headers=auth)
+  assert r_user.status_code == 200
+  preserved = r_user.json()
+  assert preserved["name"] == "News"
+  assert preserved["slug"] == "news"
+  assert preserved["manifest_url"] is None
+
+
+def test_install_same_manifest_twice_updates(
+  client, auth, bypass_url_validation,
+):
+  """Re-installing the same manifest_url updates the existing row
+  in place (mode='update', same id) — identity now keyed on URL."""
+  base = "https://raw.githubusercontent.com/x/app-same/main/"
+  manifest = {**MANIFEST_NEWS, "id": "same-manifest"}
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, PROMPT.encode()),
+    base + "fetch.sh": (200, b""),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    r1 = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r1.status_code == 201, r1.text
+  first = r1.json()
+  assert first["mode"] == "install"
+  first_id = first["id"]
+  assert first["manifest_url"] == base + "mobius.json"
+
+  # Second install of the same manifest_url.
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    r2 = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r2.status_code == 201, r2.text
+  second = r2.json()
+  assert second["mode"] == "update"
+  assert second["id"] == first_id
+  assert second["manifest_url"] == base + "mobius.json"

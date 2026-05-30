@@ -45,6 +45,12 @@ class AppCreate(BaseModel):
   source_dir: str | None = None
   cross_app_access: ShareLevel = "none"
   share_with_apps: ShareLevel = "none"
+  # Note: `manifest_url` is NOT accepted here. It is the identity key
+  # the install endpoint uses to discriminate install-vs-update — a
+  # caller spoofing it via direct POST could trick a later legitimate
+  # install of the same URL into update-mode (clobbering the spoofed
+  # app's jsx_source + permissions). Only `POST /api/apps/install`
+  # may set `manifest_url`; this route always leaves it NULL.
 
 
 class AppUpdate(BaseModel):
@@ -78,6 +84,10 @@ class AppOut(BaseModel):
   # backfilled on first access via standalone routes (see
   # routes/apps.py:ensure_slug).
   slug: str | None = None
+  # URL the app was installed from (manifest URL passed to
+  # POST /api/apps/install). Null for user-built apps. The install
+  # endpoint matches by this for update-vs-install discrimination.
+  manifest_url: str | None = None
   created_at: datetime
   updated_at: datetime
 

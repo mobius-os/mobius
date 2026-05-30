@@ -140,6 +140,16 @@
   color: var(--muted, #9ca3af);
 }
 
+.wt__link {
+  color: var(--accent, #a78bfa);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.wt__link:hover {
+  color: var(--accent-hover, #c4b5fd);
+}
+
 .wt__actions {
   display: flex;
   gap: 10px;

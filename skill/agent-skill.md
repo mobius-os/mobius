@@ -147,7 +147,7 @@ their register; otherwise the mechanism stays out of the chat.
    chat.py freezes the turn at the question event, so the runner
    stays paused until the partner answers or stops the turn.
 
-   **Use `AskUserQuestion` (the tool, not prose) by default** for
+   **Use the clarifying-question tool (Claude: `AskUserQuestion`, Codex: `request_user_input`), not prose, by default** for
    1–3 short clarifying questions with enumerable choices — include
    a "Recommended" option. Use plain chat when the answer is open-ended
    (a story idea, paragraph of context) or for destructive confirmation
@@ -290,6 +290,10 @@ their register; otherwise the mechanism stays out of the chat.
    about to stop tool-calling and write the final assistant message
    for this turn, walk through this table. Each row is "if you did
    X this turn, do Y before you stop."
+
+   (Tool names below are Claude's. On Codex use its equivalents —
+   `shell` for `Bash`, `apply_patch` for `Edit`/`Write`, `view_image`
+   to view an image — whichever your runtime provides.)
 
    The experience file this references is at
    `/data/shared/agent-experience.md`. The `<agent_experience>`

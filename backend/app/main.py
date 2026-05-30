@@ -87,15 +87,6 @@ async def lifespan(app):
     init_vapid()
   except Exception as exc:
     _log.error("init_vapid failed: %s", exc, exc_info=True)
-  # Seed a Hello World app on first boot (no-op if apps already exist).
-  # Wrapped: scripts/seed_hello.py is on the agent's write surface, and
-  # a SyntaxError or runtime failure here would kill lifespan startup
-  # and take /recover/chat down with it.
-  try:
-    from scripts.seed_hello import seed as seed_hello
-    await seed_hello()
-  except Exception as exc:
-    _log.error("seed_hello failed: %s", exc, exc_info=True)
   # First-boot auto-install of the curated app-store mini-app so a
   # fresh container shows the store in the drawer immediately. The
   # bootstrap module is idempotent (no-op if slug='store' already
