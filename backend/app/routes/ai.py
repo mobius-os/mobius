@@ -9,9 +9,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app import models
 from app.database import get_db
-from app.deps import get_current_owner_or_app
+from app.deps import Principal, get_principal
 
 router = APIRouter(prefix="/api/ai", tags=["ai"])
 
@@ -110,7 +109,7 @@ async def _stream(messages: list[dict], system: str, allowed_tools: str):
 @router.post("")
 async def ai_chat(
   body: AiRequest,
-  _: models.Owner = Depends(get_current_owner_or_app),
+  principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
 ):
   """Streams a Claude response for use inside mini-apps.
@@ -121,6 +120,17 @@ async def ai_chat(
   # Validate tools BEFORE opening the stream so a bad tool name
   # returns 400 instead of an SSE error mid-stream.
   allowed_tools = _resolve_tools(body.tools)
+  # Tools are OWNER-ONLY. The spawned `claude` CLI runs with the owner's
+  # credentials and no cwd restriction, so letting an app-scoped (mini-app)
+  # token request Bash/Write/Edit — or even Read — would let a sandboxed
+  # app execute shell or read the owner's filesystem, collapsing the
+  # app-vs-owner boundary the storage layer otherwise enforces. App-scoped
+  # callers still get text-only AI (the documented primary use).
+  if principal.app_id is not None and allowed_tools != "none":
+    raise HTTPException(
+      status_code=403,
+      detail="App-scoped callers cannot request tools; tools are owner-only.",
+    )
   return StreamingResponse(
     _stream(body.messages, body.system, allowed_tools),
     media_type="text/event-stream",
