@@ -416,6 +416,63 @@ async def providers_status(
   return out
 
 
+def _claude_tier(model_id: str) -> str | None:
+  """Derives the marketing tier (opus / sonnet / haiku) from a Claude
+  model id. Used by `/providers/models` so mini-app pickers don't need
+  to parse model ids themselves to group rows by tier. Returns None
+  for ids that don't match a known tier substring — the caller leaves
+  the field out rather than fabricating a label."""
+  lowered = model_id.lower()
+  for tier in ("opus", "sonnet", "haiku"):
+    if tier in lowered:
+      return tier
+  return None
+
+
+@router.get("/providers/models")
+async def providers_models(
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Per-provider model list for mini-app pickers.
+
+  Mini-apps (news, future siblings) can't import the shell's JS
+  constants, so they ask the backend for the same list the shell
+  shows. Data flows through `providers.list_models()` — the SDK-
+  aware path that hits Anthropic's `/v1/models` for Claude and
+  `AsyncCodex.models()` for Codex, with a 5-minute cache and a
+  KNOWN_MODELS fallback per provider so a transient upstream blip
+  still returns a usable list.
+
+  Response shape is tighter than `/api/models` (which the shell uses):
+  no `available` flag, no `provider` key inside each row (the outer
+  key already says it), and a derived `tier` for Claude models so
+  pickers can group by Opus/Sonnet/Haiku without parsing ids. The
+  shell keeps its own endpoint because its picker depends on the
+  richer fields; mini-apps get a stable, narrow surface.
+
+  Owner-only (GET, no CSRF concern). Same auth posture as
+  `/providers/status` next door.
+  """
+  from app.providers import list_models
+  data_dir = get_settings().data_dir
+  registry = await list_models(data_dir)
+  out: dict[str, list[dict[str, str]]] = {}
+  for provider_id, entries in registry.items():
+    rows: list[dict[str, str]] = []
+    for entry in entries:
+      row: dict[str, str] = {
+        "id": entry["id"],
+        "name": entry["label"],
+      }
+      if provider_id == "claude":
+        tier = _claude_tier(entry["id"])
+        if tier:
+          row["tier"] = tier
+      rows.append(row)
+    out[provider_id] = rows
+  return out
+
+
 # -- Codex device-auth flow -------------------------------------------------
 #
 # Uses `codex login --device-auth` subprocess. The backend starts the
