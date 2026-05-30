@@ -40,7 +40,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy.orm import Session
 
-from app import models
+from app import activity, models
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
@@ -247,12 +247,34 @@ async def write_app_file(
   _check_cross_app(db, principal, app_id, mode="write")
   base = Path(get_settings().data_dir) / "apps" / str(app_id)
   file_path = _resolve(base, path)
+  # Snapshot the pre-write size for size_delta. A missing file is
+  # zero; a stat failure (race with delete) is also zero — best-
+  # effort signal, not load-bearing.
+  try:
+    before_size = file_path.stat().st_size if file_path.is_file() else 0
+  except OSError:
+    before_size = 0
   content = await _decode_write_body(request, file_path)
   file_path.parent.mkdir(parents=True, exist_ok=True)
   if isinstance(content, bytes):
     file_path.write_bytes(content)
   else:
     file_path.write_text(content, encoding="utf-8")
+  # storage_write: debounced per (app_id, path) to ≤1 event per
+  # minute. Agents writing many small files in a single chat shouldn't
+  # flood the log. size_delta uses post-write size minus pre-write
+  # size — negative when a file shrank.
+  if activity.should_emit_storage_write(app_id, path):
+    try:
+      after_size = file_path.stat().st_size
+    except OSError:
+      after_size = 0
+    activity.log_event(
+      "storage_write",
+      app_id=app_id,
+      path=path,
+      size_delta=after_size - before_size,
+    )
   return Response(status_code=204)
 
 
@@ -271,7 +293,20 @@ def delete_app_file(
     raise HTTPException(status_code=404, detail="File not found.")
   if not file_path.is_file():
     raise HTTPException(status_code=400, detail="Path is not a file.")
+  # Capture size before unlink so size_delta reflects the full
+  # removal (negative number = freed bytes).
+  try:
+    deleted_size = file_path.stat().st_size
+  except OSError:
+    deleted_size = 0
   file_path.unlink()
+  if activity.should_emit_storage_write(app_id, path):
+    activity.log_event(
+      "storage_write",
+      app_id=app_id,
+      path=path,
+      size_delta=-deleted_size,
+    )
   return Response(status_code=204)
 
 

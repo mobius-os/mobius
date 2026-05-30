@@ -50,6 +50,7 @@ def _load(name: str) -> APIRouter:
     return stub
 
 
+admin_router = _load("admin")
 ai_router = _load("ai")
 apps_router = _load("apps")
 auth_router = _load("auth")
@@ -72,6 +73,7 @@ theme_router = _load("theme")
 standalone_router = _load("standalone")
 
 __all__ = [
+  "admin_router",
   "auth_router",
   "apps_router",
   "storage_router",

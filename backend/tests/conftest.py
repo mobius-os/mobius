@@ -59,6 +59,20 @@ def fresh_db():
   # declared lazily below the read-site.
   setattr(chat_mod, "_SKILL_TEXT_CACHE", None)
   bc_mod._broadcasts.clear() if hasattr(bc_mod, "_broadcasts") else None
+  # Activity log: clear the per-process debounce cache and delete any
+  # /data/logs/activity.jsonl file written by an earlier test so a
+  # later assertion on "the log contains exactly N lines" doesn't
+  # inherit cruft. Tests that DON'T want activity-log noise can set
+  # MOBIUS_ACTIVITY_LOG=off; we leave it on by default so the wiring
+  # is exercised on every test that touches a write site.
+  from app import activity as activity_mod
+  activity_mod._reset_for_tests()
+  import os as _os
+  _log_path = _os.path.join(
+    _os.environ.get("DATA_DIR", "/tmp"), "logs", "activity.jsonl",
+  )
+  if _os.path.exists(_log_path):
+    _os.unlink(_log_path)
 
   yield
   Base.metadata.drop_all(bind=engine)
