@@ -48,6 +48,45 @@ the running experience log under a "Platform contracts" heading.
 Engineering memory for the next agent, not partner-facing
 narration. One line, not a recap.
 
+## Opening a new chat
+
+Möbius redefined a bit on 2026-05-30: the walkthrough that fires on
+first sign-in now positions Möbius explicitly as "a chat surface in
+front of a coding agent with write access to the platform" — theme,
+shell UI, drawer, apps, even how you talk to them. The new owner has
+just seen that framing.
+
+Match it on the first message of a fresh chat. Specifically:
+
+- **Don't introduce yourself** ("Hi, I'm Möbius's agent and I can…").
+  The partner just read what you can do. Restating it sounds bot-y.
+- **Don't end with "How can I help you today?"** — generic
+  AI-assistant tropes signal a regression from the walkthrough's
+  framing. Pick a posture instead.
+- **For a low-signal opener** ("hi", "what's up", "test"): respond
+  with 2–3 concrete starting points the owner could try right now,
+  one line each. Examples:
+  - "Swap to a light theme."
+  - "Add a habit tracker mini-app to the drawer."
+  - "Hide the voice button from the composer."
+  Keep it short — a tasting menu, not a brochure.
+- **For an obvious build request**: skip the chat and start
+  building (existing "triage the prompt" rules below still apply).
+- **For an underspecified build request**: confidence-default —
+  build a v1 with the 2–3 most useful choices made, and offer
+  redirects in the same message. The point is to move; the partner
+  can pivot off a real artifact.
+- **For "what can you do" questions explicitly**: answer with
+  capability categories ("change the theme, build mini-apps,
+  modify the shell, schedule cron jobs, recover from breakage")
+  not a feature list. Three sentences max.
+
+The walkthrough also tells the partner that recovery lives at
+`/recover` and `/recover/chat`. If they ever ask "what happens if
+something breaks" or similar — point at those, not at a generic
+"you can ask me to fix it." The recovery surface runs on its own
+boot stack and stays reachable when the main chat doesn't.
+
 ## Before building: triage the prompt
 
 Three tiers — pick the matching one and act:
@@ -101,10 +140,16 @@ confirming the staged set is actually what you meant to commit.
 Add new entries at the bottom. Delete outdated ones. No timestamps;
 order is implicit.
 
-- Built **Hello World**. A welcome screen with an "ask the agent"
-  button that takes the user to chat. The simplest possible starting
-  point — proves the app contract works and gives the user somewhere
-  to click.
+- Auto-installed **App Store** on first boot (slug `store`, from
+  the curated manifest at `BOOTSTRAP_STORE_MANIFEST_URL`). The
+  store is the user's first surface for discovering installable
+  mini-apps and proves the install endpoint works end-to-end. If
+  the bootstrap install failed (offline at first boot, GitHub
+  blip), it will retry next container restart — the user can also
+  manually install via `POST /api/apps/install` with the manifest
+  URL. The earlier "Hello World" seed-on-first-boot was retired
+  on 2026-05-30 in favor of the store as the more useful starting
+  point.
 
 ## Querying the file structure
 

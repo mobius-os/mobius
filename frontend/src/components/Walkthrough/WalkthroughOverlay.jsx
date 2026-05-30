@@ -27,12 +27,18 @@ import './WalkthroughOverlay.css'
 // On iOS-non-Safari (Chrome on iOS, Firefox on iOS, etc.) PWA install
 // is impossible without switching to Safari first. Showing the
 // "Add to home screen" step there is a dead end. We skip the step
-// entirely so the walkthrough remains a 2-step intro + first-chat
-// pair. If the user later opens Möbius in Safari they'll naturally
+// entirely. If the user later opens Möbius in Safari they'll naturally
 // encounter the install affordances through the standalone-shell
 // install card (a separate, drawer-triggered surface).
-const STEPS_FULL = ['intro', 'install', 'first-chat']
-const STEPS_NO_INSTALL = ['intro', 'first-chat']
+//
+// Step order is deliberate: orient → empower → install →
+// safety-net → CTA. The "customize" and "safety-net" steps were
+// added on 2026-05-30 because the agent's write access (covers
+// theme, shell behavior, building apps) and the recovery flow are
+// the two things a new user genuinely cannot discover by tapping
+// around — everything else is visible from the drawer.
+const STEPS_FULL = ['intro', 'customize', 'install', 'safety-net', 'first-chat']
+const STEPS_NO_INSTALL = ['intro', 'customize', 'safety-net', 'first-chat']
 
 export default function WalkthroughOverlay({ onDone }) {
   const queryClient = useQueryClient()
@@ -155,6 +161,84 @@ export default function WalkthroughOverlay({ onDone }) {
               Möbius is a chat surface in front of a coding agent that
               can build mini-apps and modify the platform itself for
               you. Tell it what you want — it writes the code.
+            </p>
+            <div className="wt__actions">
+              <button
+                type="button"
+                className="wt__btn wt__btn--ghost"
+                onClick={skip}
+              >
+                Skip
+              </button>
+              <button
+                type="button"
+                className="wt__btn wt__btn--primary"
+                onClick={next}
+              >
+                Next
+              </button>
+            </div>
+          </>
+        )}
+
+        {step === 'customize' && (
+          <>
+            <h2 id="wt-title" className="wt__title">Make it yours</h2>
+            <p className="wt__body">
+              The agent has write access to almost everything: the theme,
+              the shell UI, what the drawer looks like, the apps you
+              install or build, even how it talks to you. Just ask in
+              chat — "switch to a light theme," "build me a trip
+              planner," "remove the voice button." It edits the code
+              and shows you the result.
+            </p>
+            <div className="wt__actions">
+              <button
+                type="button"
+                className="wt__btn wt__btn--ghost"
+                onClick={skip}
+              >
+                Skip
+              </button>
+              <button
+                type="button"
+                className="wt__btn wt__btn--primary"
+                onClick={next}
+              >
+                Next
+              </button>
+            </div>
+          </>
+        )}
+
+        {step === 'safety-net' && (
+          <>
+            <h2 id="wt-title" className="wt__title">If something breaks</h2>
+            <p className="wt__body">
+              The agent can break things — that's the trade for full
+              write access. Open{' '}
+              <a
+                href="/recover/chat"
+                className="wt__link"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                /recover/chat
+              </a>
+              {' '}to talk to a fresh agent with its own boot path —
+              it can roll back the shell, the backend, or your last
+              changes. From{' '}
+              <a
+                href="/recover"
+                className="wt__link"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                /recover
+              </a>
+              {' '}you can also back up the database or reset to factory.
+              Bookmark these — they stay reachable when the main chat
+              isn't.
             </p>
             <div className="wt__actions">
               <button
