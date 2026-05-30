@@ -202,11 +202,22 @@ their register; otherwise the mechanism stays out of the chat.
    - `agent-browser screenshot <path>` — save a PNG of the rendered
      page (the only way to see what actually rendered — colors,
      layout, overlaps, broken CSS)
-   - `agent-browser wait <ms>` — pause for async content to settle
-     before capturing. **Scale the wait to the heaviest asset**:
-     Three.js textures / WebGL / large fonts → 6000–8000ms; ordinary
-     React apps with local state → 1000–1500ms; static HTML → 200ms.
-     Blanket-8000 everywhere wastes session time.
+   - `agent-browser wait` — **wait on a signal, don't guess a
+     duration**: `wait @eN` (element appears), `wait --text "Done"`,
+     `wait --fn "<js cond>"`, `wait --url "**/x"` all block until the
+     thing is actually there — this kills the "captured a half-rendered
+     page" problem. Fall back to `wait <ms>` only when there's no signal
+     to wait on, scaled to the heaviest asset (Three.js / WebGL / large
+     fonts → 6000–8000ms; ordinary React → 1000–1500ms; static HTML →
+     200ms); blanket-8000 everywhere wastes session time.
+   - `agent-browser batch "open <url>" "snapshot -i"` — run 2+ steps in
+     one call (ordered, fewer round-trips). Drop to single commands only
+     when you must read one step's output to choose the next (e.g. read
+     a `snapshot` for refs, then `batch` the rest).
+   - `agent-browser diff snapshot` (after an action: what changed in the
+     a11y tree) and `diff screenshot --baseline <before>.png` (visual
+     pixel diff) — cheap confirmation that a click or edit actually took
+     effect, complementing the "✓ Done ≠ state changed" gotcha below.
 
    Seeing the app as it renders is usually more informative than
    trusting the code for anything visual.
@@ -228,9 +239,11 @@ their register; otherwise the mechanism stays out of the chat.
      action silently no-ops. Verify state with `snapshot` or a
      screenshot after any click that's supposed to transition UI.
 
-6. **Screenshots: Read is private to you; embedding is what the
-   partner sees.** Taking a screenshot and calling `Read` on the
-   PNG lets your vision process the rendered image. **But `Read` is
+6. **Screenshots: viewing is private to you; embedding is what the
+   partner sees.** Taking a screenshot and loading the PNG into your
+   vision lets you inspect the rendered image — use the `Read` tool if
+   you're the Claude runtime, or the `view_image` tool if you're Codex
+   (both take the file path; Codex has no `Read` tool). **But this is
    vision input to you only — it does NOT appear in the chat the
    partner reads.** The partner sees ONLY your text plus any
    `![caption](/api/chats/$CHAT_ID/generated/<name>.png)` embeds
@@ -240,7 +253,7 @@ their register; otherwise the mechanism stays out of the chat.
    claim because no embed was emitted. Don't do this. Pattern:
 
    1. `Bash`: `agent-browser screenshot <path>`
-   2. `Read`: `<path>`
+   2. `Read` (Claude) / `view_image` (Codex): `<path>`
    3. **Text output** (same message, BEFORE interpreting):
       `![first render](/api/chats/$CHAT_ID/generated/<name>.png)`
       then your one-line description ("grid is showing but the
@@ -289,7 +302,7 @@ their register; otherwise the mechanism stays out of the chat.
    | Created an app (`POST /api/apps/`) | `Bash`: `echo '- Built **X** (id N). <short description>' >> /data/shared/agent-experience.md`, then `Bash` the notification curl (see Notifications section). |
    | Updated an app (`PATCH /api/apps/{id}`) | `Bash` the notification curl. Don't append to the log — updates aren't logged. |
    | Deleted an app (`DELETE /api/apps/{id}`) | `Bash`: `echo '- Deleted **X** (id N). <reason>' >> /data/shared/agent-experience.md`. Apps cannot be recovered — record it so future agents don't try to extend something that's gone. |
-   | Took a screenshot | In the SAME message: emit `![caption](/api/chats/$CHAT_ID/generated/<name>.png)` before any description of what's in it. `Read` is private to you; only the `![]` embed is visible to the partner. See step 6. |
+   | Took a screenshot | In the SAME message: emit `![caption](/api/chats/$CHAT_ID/generated/<name>.png)` before any description of what's in it. Viewing the PNG (`Read` on Claude, `view_image` on Codex) is private to you; only the `![]` embed is visible to the partner. See step 6. |
    | Screenshot embeds | Before sending any text block that mentions a screenshot, confirm it contains `![alt](path)` — if absent, insert the embed before sending. |
    | Discovered a gotcha or workaround | `Bash`: `echo '- Gotcha: <one-line note>' >> /data/shared/agent-experience.md`. |
    | Learned a partner preference | `Bash`: `echo '- Partner preference: <one-line note>' >> /data/shared/agent-experience.md`. |

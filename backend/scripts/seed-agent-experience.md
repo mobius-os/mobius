@@ -236,7 +236,7 @@ contract-comment mismatch.
      recompile broadcasts `app_updated` which busts the iframe
      cache, but a cached iframe in the partner's drawer LRU may
      need to be reopened. Take a screenshot via
-     `bash "$SCRIPTS_DIR/preview_app.sh" <id>` and Read it — if
+     `bash "$SCRIPTS_DIR/preview_app.sh" <id>` and view it — if
      it shows the old UI but the file is new, the iframe is the
      stale layer.
   3. **Module-load error?** App stuck on a loading spinner means
