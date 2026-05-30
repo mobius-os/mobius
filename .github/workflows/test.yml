@@ -28,8 +28,10 @@ jobs:
           node-version: 20
       - name: Install esbuild
         # compile_jsx shells out to esbuild; /api/apps/ tests need it.
-        # Keep the version aligned with Dockerfile's pin.
-        run: npm install -g esbuild@0.20.2
+        # Keep aligned with the Dockerfile pin (the source of truth) — drift
+        # here means a 0.25-only compile regression passes green CI but
+        # breaks the prod image build.
+        run: npm install -g esbuild@0.25.12
       - name: Install backend deps
         working-directory: backend
         run: pip install -r requirements.txt
