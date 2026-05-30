@@ -1,6 +1,7 @@
 """Routes for managing the mini-app registry."""
 
 import asyncio
+import hashlib
 import io
 import json
 import re
@@ -401,6 +402,36 @@ def _not_modified_if_match(request: Request, etag: str) -> Response | None:
   return None
 
 
+def _frame_etag(app: models.App, frame_path: Path) -> str | None:
+  """Validator for the `/frame` response, combining the app's
+  `updated_at` with the shared runtime-frame file's mtime.
+
+  Unlike the per-app module, the frame serves `app-frame.html` — the
+  importmap + runtime shell — which changes INDEPENDENTLY of any app
+  row. Keying only on `app.updated_at` (as `_etag_for_app` does) means
+  an edit to the frame (e.g. bumping a vendored import path) never
+  invalidates an already-installed PWA: it keeps revalidating against
+  an unchanged validator, gets a 304, and runs the stale frame forever.
+  That is exactly how a dropped `/vendor/three/` path pinned clients to
+  a spinner. Folding a hash of the frame's CONTENT in busts every app's
+  frame cache on the next load whenever app-frame.html changes.
+
+  Content hash, not mtime: `cp`, bind-mounts, and backup/restore rewrite
+  mtimes independently of content, which risks UNDER-invalidation (a
+  real content change that keeps its mtime) — the precise failure mode
+  here. The frame file is small, so hashing per request is cheap."""
+  parts: list[str] = []
+  if app.updated_at:
+    parts.append(str(int(app.updated_at.timestamp() * 1_000_000)))
+  try:
+    parts.append(hashlib.sha256(frame_path.read_bytes()).hexdigest()[:16])
+  except OSError:
+    pass
+  if not parts:
+    return None
+  return 'W/"' + "-".join(parts) + '"'
+
+
 @router.get("/{app_id}/frame")
 def get_frame(
   app_id: int,
@@ -442,15 +473,12 @@ def get_frame(
   if not compiled.exists():
     raise HTTPException(status_code=404, detail="Compiled module missing.")
 
-  etag = _etag_for_app(app)
-  if etag:
-    not_modified = _not_modified_if_match(request, etag)
-    if not_modified is not None:
-      return not_modified
-
   # Frame priority: agent-editable copy first, then dev-mode path, then
   # the baked-in fallback. The agent can edit
-  # /data/shell/public/app-frame.html directly.
+  # /data/shell/public/app-frame.html directly. Resolve this BEFORE the
+  # ETag so the validator reflects the frame file's content (see
+  # _frame_etag) — otherwise a changed frame never reaches installed
+  # PWAs.
   frame_candidates = [
     Path(get_settings().data_dir) / "shell" / "public" / "app-frame.html",
     Path(__file__).parent.parent.parent.parent
@@ -460,6 +488,12 @@ def get_frame(
   frame_path = next((p for p in frame_candidates if p.exists()), None)
   if frame_path is None:
     raise HTTPException(status_code=404, detail="Frame not found.")
+
+  etag = _frame_etag(app, frame_path)
+  if etag:
+    not_modified = _not_modified_if_match(request, etag)
+    if not_modified is not None:
+      return not_modified
 
   html = frame_path.read_text(encoding="utf-8")
 

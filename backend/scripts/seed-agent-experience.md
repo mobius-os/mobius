@@ -297,8 +297,12 @@ contract-comment mismatch.
 - Back gesture in apps: use `pushState`/`popstate` for internal navigation.
 - Three.js: `import * as THREE from 'three'` and
   `import { OrbitControls } from 'three/addons/controls/OrbitControls.js'`
-  just work (self-hosted at `/vendor/three/` via the app-frame
-  import map — no esm.sh waterfall).
+  just work (self-hosted via the app-frame import map — no esm.sh
+  waterfall). Always use the bare `'three'` specifier; never hardcode a
+  `/vendor/three@<version>/…` URL in app code — the import map points at
+  the pinned version, so the specifier is version-proof and a three bump
+  won't break your app. (A `/vendor/three/` alias is kept for
+  compatibility, but prefer the specifier.)
 
 ## Screenshot helpers (instance-specific scripts)
 
