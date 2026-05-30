@@ -9,7 +9,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -285,6 +285,27 @@ def _is_complete_build(d: Path) -> bool:
   return d.is_dir() and (d / "assets").is_dir() and (d / "index.html").is_file()
 
 
+def _is_static_asset_path(path: str) -> bool:
+  """True for paths that must 404 on a miss rather than fall through to
+  the SPA HTML.
+
+  A module/asset URL served as `200 text/html` (the SPA fallback) is
+  rejected by the browser's strict module-MIME check AND poisons a
+  cache-first service worker — this is exactly how a missing
+  `three.core.js` surfaced as "failed to load dynamic module". The HTML
+  fallback is only meaningful for app routes, which have no file
+  extension. We keep the set narrow (code/style assets) so a missing
+  image still degrades gracefully instead of 404-ing a real route.
+  """
+  return (
+    # First path segment — catches both `vendor` and `vendor/<file>`
+    # without over-matching a route like `vendorfoo`.
+    path.split("/", 1)[0] in {"vendor", "assets"}
+    or path == "sw.js"
+    or path.rsplit(".", 1)[-1] in {"js", "mjs", "css", "map", "wasm", "json"}
+  )
+
+
 _static_dir = _live_dir if _is_complete_build(_live_dir) else _baked_dir
 if _static_dir.is_dir():
   try:
@@ -352,6 +373,12 @@ if _static_dir.is_dir():
       baked = _baked_dir / path
       if baked.is_file():
         return FileResponse(str(baked))
+    # Static asset namespaces 404 on a miss — they must never receive the
+    # SPA HTML below (a module URL served as text/html is MIME-rejected by
+    # the browser and poisons the cache-first service worker). Only app
+    # routes get the HTML fallback.
+    if _is_static_asset_path(path):
+      raise HTTPException(status_code=404, detail="Not found.")
     # Always inject theme CSS (default or override) so colors are
     # consistent from the first paint.
     from fastapi.responses import HTMLResponse
