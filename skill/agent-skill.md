@@ -476,6 +476,46 @@ files (markdown, CSS) on non-`.json` paths.
 
 Use `/api/storage/shared/{path}` for files shared across apps.
 
+### Offline-capable apps (opt-in)
+
+By DEFAULT an app is NOT offline-capable: it talks to the server and
+needs a connection. Separately — and automatically for EVERY app — the
+shell's service worker shields apps from the browser's native "no
+internet" page: offline, it serves a branded offline screen, so an
+installed PWA never drops out of standalone mode into raw browser
+chrome. You get that for free; do nothing for it.
+
+What is opt-in is making an app actually RUN offline. Set
+`offline_capable: true` in the create or PATCH body when you register or
+update the app. That does two things: the service worker caches the
+app's code so it loads with no network, and the host exposes
+`window.mobius.storage` — an offline-aware wrapper over the storage API
+that queues writes made offline and auto-syncs them on reconnect.
+
+An offline-capable app MUST persist through `window.mobius.storage`
+instead of raw `fetch` to `/api/storage`:
+
+```jsx
+// reads hit the network; offline (or on error) return null
+const notes = (await window.mobius.storage.get('notes.json')) || []
+// writes go through when online; queue + auto-sync when offline
+await window.mobius.storage.set('notes.json', notes)
+await window.mobius.storage.remove('items/abc.json')
+window.mobius.online                        // boolean
+await window.mobius.storage.pendingCount()  // unsynced writes
+```
+
+`get()` returns null when OFFLINE (there is no local read cache) — so
+load once into React state and don't depend on re-reading while offline.
+Conflict policy is last-write-wins per path; where a lost edit would
+matter, store one file per record (e.g. `items/<uuid>.json`) so
+concurrent offline edits to different records don't clobber each other.
+
+Only set `offline_capable` when the app genuinely works without the
+server (notes, a tracker, a game). A network-dependent app marked
+offline-capable will cache stale/empty state and look broken offline —
+leave those at the default.
+
 ### Styling — theme-aware colors
 
 **Use CSS variables for structural elements** (backgrounds, text, borders,
