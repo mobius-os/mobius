@@ -544,6 +544,55 @@ def test_storage_delete_emits_storage_write_with_negative_delta(client, auth):
   assert len(writes) == 1
 
 
+def test_shared_storage_put_emits_storage_write(client, auth):
+  """Shared writes (theme.css, agent-experience.md, etc.) emit too —
+  the dreaming agent treats those as platform activity. app_id=0 +
+  scope='shared' is the documented sentinel for platform-level events."""
+  r = client.put(
+    "/api/storage/shared/agent-experience.md",
+    headers={**auth, "Content-Type": "text/plain"},
+    data="seed content\n",
+  )
+  assert r.status_code == 204, r.text
+
+  writes = [l for l in _read_lines() if l["ev"] == "storage_write"]
+  assert len(writes) == 1
+  assert writes[0]["app_id"] == 0
+  assert writes[0]["scope"] == "shared"
+  assert writes[0]["path"] == "agent-experience.md"
+  assert writes[0]["size_delta"] > 0
+
+
+def test_shared_storage_delete_emits_negative_delta(client, auth):
+  """DELETE of a shared file emits with size_delta = -(prior size)."""
+  client.put(
+    "/api/storage/shared/scratch.txt",
+    headers={**auth, "Content-Type": "text/plain"},
+    data="bye\n",
+  )
+  activity._reset_for_tests()
+  r = client.delete("/api/storage/shared/scratch.txt", headers=auth)
+  assert r.status_code == 204
+  writes = [l for l in _read_lines() if l["ev"] == "storage_write"
+            and l.get("scope") == "shared"
+            and l["size_delta"] < 0]
+  assert len(writes) == 1
+
+
+def test_shared_storage_put_debounces_within_window(client, auth):
+  """Two PUTs to the same shared path within 60s emit ONE event —
+  same rate-limit policy as per-app writes."""
+  for _ in range(3):
+    r = client.put(
+      "/api/storage/shared/agent-experience.md",
+      headers={**auth, "Content-Type": "text/plain"},
+      data="v\n",
+    )
+    assert r.status_code == 204
+  writes = [l for l in _read_lines() if l["ev"] == "storage_write"]
+  assert len(writes) == 1
+
+
 # --- Cron wrapper script -----------------------------------------------
 
 

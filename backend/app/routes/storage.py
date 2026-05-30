@@ -336,10 +336,21 @@ async def write_shared_file(
   rolled back from the recovery page or via `?reset-theme=1`. The
   snapshot is BEST-EFFORT — a snapshot failure must not block the
   agent's write, since the write itself is the recovery target.
+
+  Also emits a `storage_write` activity event with `app_id=0` and
+  `scope="shared"` so the dreaming agent sees theme + experience-file
+  edits as platform activity. Per-app writes already emit; without
+  this branch shared/* changes were invisible.
   """
   settings = get_settings()
   base = Path(settings.data_dir) / "shared"
   file_path = _resolve(base, path)
+  # Snapshot pre-write size for size_delta. Same best-effort pattern
+  # as the per-app write path: missing file or stat failure = 0.
+  try:
+    before_size = file_path.stat().st_size if file_path.is_file() else 0
+  except OSError:
+    before_size = 0
   content = await _decode_write_body(request, file_path)
   file_path.parent.mkdir(parents=True, exist_ok=True)
   # Snapshot the prior theme.css before any overwrite. The agent
@@ -355,6 +366,23 @@ async def write_shared_file(
     file_path.write_bytes(content)
   else:
     file_path.write_text(content, encoding="utf-8")
+  # storage_write for shared/* — debounced per (0, path) to match the
+  # per-app rate-limit. app_id=0 is the documented platform-level
+  # sentinel (see activity.py docstring); scope="shared" disambiguates
+  # in the consumer (a future per-app event with id=0 would still be
+  # distinguishable by absence of the scope field).
+  if activity.should_emit_storage_write(0, path):
+    try:
+      after_size = file_path.stat().st_size
+    except OSError:
+      after_size = 0
+    activity.log_event(
+      "storage_write",
+      app_id=0,
+      scope="shared",
+      path=path,
+      size_delta=after_size - before_size,
+    )
   return Response(status_code=204)
 
 
@@ -363,14 +391,31 @@ def delete_shared_file(
   path: str,
   _: models.Owner = Depends(get_current_owner),
 ):
-  """Deletes a file from the shared data directory. 404 if missing."""
+  """Deletes a file from the shared data directory. 404 if missing.
+
+  Emits a `storage_write` event with negative size_delta so the
+  dreaming agent sees shared-file removals symmetrically with
+  creations / updates.
+  """
   base = Path(get_settings().data_dir) / "shared"
   file_path = _resolve(base, path)
   if not file_path.exists():
     raise HTTPException(status_code=404, detail="File not found.")
   if not file_path.is_file():
     raise HTTPException(status_code=400, detail="Path is not a file.")
+  try:
+    deleted_size = file_path.stat().st_size
+  except OSError:
+    deleted_size = 0
   file_path.unlink()
+  if activity.should_emit_storage_write(0, path):
+    activity.log_event(
+      "storage_write",
+      app_id=0,
+      scope="shared",
+      path=path,
+      size_delta=-deleted_size,
+    )
   return Response(status_code=204)
 
 
