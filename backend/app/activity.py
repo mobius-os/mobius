@@ -214,29 +214,54 @@ def _reset_for_tests() -> None:
   _debounce.clear()
 
 
-def read_events(
-  since: datetime,
-  until: datetime,
-  app_id: int | None = None,
-):
-  """Yields event dicts from /data/logs/activity.jsonl whose `ts`
-  falls in [since, until] and (if `app_id` is given) whose `app_id`
-  matches. Generator so a large window doesn't buffer the whole
-  file into memory.
+def _candidate_files(active: Path) -> list[Path]:
+  """Returns activity log files to scan for a read: every rotated
+  archive (`activity.YYYY-W##.jsonl`, plus any counter-suffixed
+  collision variant), oldest first by mtime, then the active file
+  last.
 
-  Reads only the active file. Rotated files (activity.YYYY-WW.jsonl)
-  are deliberately out of scope: the read endpoint targets the
-  last-24h dreaming-agent use case; historical analysis would be a
-  different surface. If the ticket ever grows that requirement, walk
-  the rotated files in mtime order and chain them in.
+  Ordering matters: events inside one file are roughly time-ordered
+  (the emitter appends with `ts=now()`), and archives are themselves
+  ordered by when they rotated. Yielding files oldest→newest keeps
+  the merged stream in roughly ascending ts so consumers that scan
+  forward (the dreaming agent's "since X" window) see the natural
+  shape.
 
-  Malformed lines (corrupt JSON, missing ts) are skipped silently —
-  the log is best-effort sidecar data, not a database; a single bad
-  line must not block the rest from reaching the consumer.
+  No window-based pruning happens here. With 90-day retention and
+  weekly rotation the worst case is ~13 archive files; for any
+  realistic window the per-event ts filter in `read_events` is
+  cheaper than pre-filtering by archive mtime (which can drift if
+  someone touches the file, sweeps it late, etc).
   """
-  path = _activity_path()
-  if not path.exists():
-    return
+  parent = active.parent
+  try:
+    archives = list(parent.glob("activity.*.jsonl"))
+  except OSError:
+    archives = []
+  # Exclude the active file from the archive list. `activity.jsonl`
+  # doesn't match `activity.*.jsonl` (there's no segment between the
+  # two dots), but be explicit so a future rename can't silently
+  # double-yield the active file's events.
+  archives = [p for p in archives if p != active]
+  try:
+    archives.sort(key=lambda p: p.stat().st_mtime)
+  except OSError:
+    # A stat failure on one file would crash the whole read.
+    # Fall back to name-sort: archive names contain the ISO year +
+    # week so lexicographic order tracks chronological order well
+    # enough for the dreaming-agent use case.
+    archives.sort(key=lambda p: p.name)
+  result = list(archives)
+  if active.exists():
+    result.append(active)
+  return result
+
+
+def _yield_events_from(path: Path):
+  """Iterates parsed event dicts from one JSONL file. Malformed lines
+  are skipped silently — the log is sidecar data, not a database, and
+  a single bad line must not block the rest from reaching the consumer.
+  Missing `ts` or non-string `ts` likewise drops the line."""
   try:
     with path.open("r", encoding="utf-8") as f:
       for line in f:
@@ -259,11 +284,40 @@ def read_events(
         # hand-crafted test inputs.
         if ts.tzinfo is None:
           ts = ts.replace(tzinfo=timezone.utc)
-        if ts < since or ts > until:
-          continue
-        if app_id is not None and ev.get("app_id") != app_id:
-          continue
-        yield ev
+        yield ev, ts
   except OSError as exc:
-    log.warning("activity log read failed: %s", exc)
+    log.warning("activity log read failed for %s: %s", path, exc)
     return
+
+
+def read_events(
+  since: datetime,
+  until: datetime,
+  app_id: int | None = None,
+):
+  """Yields event dicts from /data/logs/activity.jsonl AND every
+  rotated archive (activity.YYYY-W##.jsonl) whose `ts` falls in
+  [since, until] and (if `app_id` is given) whose `app_id` matches.
+
+  Cross-file reads matter for the dreaming-agent's "since 24h ago"
+  window: a Monday-6am-UTC run lands after the Sunday-night rotation,
+  so the active file holds only ~6 hours of Monday events; the prior
+  ~18 hours live in last week's archive. Reading the active file
+  alone dropped that window — fixed by enumerating archives via
+  `_candidate_files` and chaining through them in mtime order.
+
+  Generator so a large window doesn't buffer events into memory:
+  files are opened one at a time, each line filtered and yielded as
+  it's parsed. Worst case (90-day retention, weekly rotation) is
+  ~13 archive files plus active — bounded.
+
+  Malformed lines (corrupt JSON, missing ts) are skipped silently.
+  """
+  active = _activity_path()
+  for path in _candidate_files(active):
+    for ev, ts in _yield_events_from(path):
+      if ts < since or ts > until:
+        continue
+      if app_id is not None and ev.get("app_id") != app_id:
+        continue
+      yield ev
