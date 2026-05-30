@@ -19,6 +19,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.deps import (
   get_current_owner, get_current_owner_or_app, get_principal, Principal,
+  reject_cross_site,
 )
 
 router = APIRouter(prefix="/api/apps", tags=["apps"])
@@ -383,6 +384,70 @@ def delete_app(
         shutil.rmtree(resolved, ignore_errors=True)
     except OSError:
       pass
+
+
+@router.post(
+  "/{app_id}/run-job",
+  status_code=202,
+  dependencies=[Depends(reject_cross_site)],
+)
+def run_app_job(
+  app_id: int,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Spawns the app's scheduled job script as a non-blocking subprocess.
+
+  Mini-apps cannot shell out themselves — this is the bridge that lets
+  a Reports tab's "Generate now" button trigger the same job the cron
+  schedule would run. The endpoint returns 202 immediately with a
+  started_at timestamp; the job may take 30s+ to complete. Callers
+  observe completion by polling the app's storage for newly-written
+  output (e.g. `/api/storage/apps/{id}/reports/<date>.json`).
+
+  The job script lives at `<source_dir>/<job_name>` where source_dir
+  is the app's on-disk source tree (per the install-from-manifest
+  layout in `app.install`) and job_name comes from the manifest's
+  `schedule.job` field (default "fetch.sh"). Both candidates are
+  tried so apps installed before the manifest convention solidified
+  still work.
+
+  Owner-only — passes the same defense-in-depth CSRF guard the other
+  state-changing endpoints (settings, model-prefs) use.
+  """
+  from datetime import UTC, datetime
+  app = db.query(models.App).filter(models.App.id == app_id).first()
+  if not app:
+    raise HTTPException(status_code=404, detail="App not found.")
+  if not app.source_dir:
+    raise HTTPException(
+      status_code=400, detail="App has no source_dir; cannot locate job.",
+    )
+  source_dir = Path(app.source_dir)
+  # Try the conventional names: fetch.sh (current app-news convention)
+  # and job.sh (the install-from-manifest default). First hit wins.
+  job_path = None
+  for candidate in ("fetch.sh", "job.sh"):
+    p = source_dir / candidate
+    if p.is_file():
+      job_path = p
+      break
+  if job_path is None:
+    raise HTTPException(
+      status_code=400,
+      detail="No job script found (looked for fetch.sh, job.sh).",
+    )
+  # Non-blocking. stdout/stderr go to /dev/null so the subprocess
+  # doesn't inherit the FastAPI worker's pipes; the job script itself
+  # is expected to log to /data/cron-logs/.
+  subprocess.Popen(
+    ["bash", str(job_path), str(app_id)],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    cwd=str(source_dir),
+    close_fds=True,
+  )
+  return {"started_at": datetime.now(UTC).isoformat()}
 
 
 def _etag_for_app(app: models.App) -> str | None:
