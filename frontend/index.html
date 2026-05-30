@@ -28,6 +28,20 @@
     </div>
     <div id="root"></div>
     <script>
+      // Apply the persisted theme background before first paint so a
+      // cold-offline shell boot (served from the SW's cached, NOT
+      // theme-injected, index.html) matches the owner's theme instead
+      // of flashing the default. useTheme writes this key on every
+      // successful theme load. Best-effort; default stays if absent.
+      try {
+        var __bg = localStorage.getItem('mobius-theme-bg')
+        if (__bg) {
+          document.documentElement.style.setProperty('--bg', __bg)
+          document.body.style.background = __bg
+          var sp = document.getElementById('splash')
+          if (sp) sp.style.background = __bg
+        }
+      } catch (e) {}
       // Hide splash immediately on refresh (user already logged in).
       if (localStorage.getItem('token')) {
         var s = document.getElementById('splash')

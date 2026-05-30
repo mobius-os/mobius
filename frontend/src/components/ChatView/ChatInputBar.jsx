@@ -82,7 +82,7 @@ _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
 /** The primary action button — Send / Stop / Mic — auto-resolved
  *  from the bar's input/sending/listening/uploading state. */
 function PrimaryAction({
-  sending, listening, hasInput, hasUploading,
+  sending, listening, hasInput, hasUploading, offline,
   onSubmit, onStop, onToggleVoice,
 }) {
   if (sending && !hasInput) {
@@ -102,7 +102,7 @@ function PrimaryAction({
         onTouchEnd={(e) => { e.preventDefault(); onSubmit(e) }}
         onClick={onSubmit}
         aria-label="Send"
-        disabled={hasUploading}
+        disabled={hasUploading || offline}
       >
         <ArrowUp width={22} height={22} />
       </button>
@@ -257,6 +257,7 @@ export default function ChatInputBar({
   listeningRef,
   onToggleVoice,
   onStop,
+  offline,
   pendingFiles,
   onAddFiles,
   onRemoveFile,
@@ -348,6 +349,11 @@ export default function ChatInputBar({
         onChange={handleFileSelect}
         style={{ display: 'none' }}
       />
+      {offline && (
+        <div className="chat__offline-note">
+          You're offline — chat needs a connection.
+        </div>
+      )}
       <div className="chat__input-row">
         {leftButtons}
         <div className={`chat__pill${hasFiles ? ' chat__pill--with-attach' : ''}`}>
@@ -370,6 +376,7 @@ export default function ChatInputBar({
               listening={listening}
               hasInput={hasInput}
               hasUploading={hasUploading}
+              offline={offline}
               onSubmit={onSubmit}
               onStop={onStop}
               onToggleVoice={onToggleVoice}

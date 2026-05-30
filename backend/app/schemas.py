@@ -45,6 +45,7 @@ class AppCreate(BaseModel):
   source_dir: str | None = None
   cross_app_access: ShareLevel = "none"
   share_with_apps: ShareLevel = "none"
+  offline_capable: bool = False
 
 
 class AppUpdate(BaseModel):
@@ -61,6 +62,7 @@ class AppUpdate(BaseModel):
   pinned: bool | None = None
   cross_app_access: ShareLevel | None = None
   share_with_apps: ShareLevel | None = None
+  offline_capable: bool | None = None
 
 
 class AppOut(BaseModel):
@@ -73,6 +75,7 @@ class AppOut(BaseModel):
   pinned_at: datetime | None = None
   cross_app_access: ShareLevel = "none"
   share_with_apps: ShareLevel = "none"
+  offline_capable: bool = False
   # URL slug for the standalone PWA install at /apps/<slug>/. Null
   # only for legacy rows from before the slug column existed; lazy-
   # backfilled on first access via standalone routes (see

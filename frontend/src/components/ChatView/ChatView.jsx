@@ -7,6 +7,7 @@ import useStreamConnection from './useStreamConnection.js'
 import useScrollMode from './useScrollMode.js'
 import useVoiceInput from './useVoiceInput.js'
 import useFileUpload from './useFileUpload.js'
+import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import usePendingQueue from './hooks/usePendingQueue.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
 import ChatInputBar from './ChatInputBar.jsx'
@@ -71,6 +72,10 @@ function sameMessageList(a, b) {
 
 export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystemEvent, builtApp, onOpenApp, onMessageStart }) {
   const queryClient = useQueryClient()
+  // Chat is online-only (it spawns a server-side agent). When offline
+  // the composer disables send and says so, rather than failing into a
+  // dead stream.
+  const online = useOnlineStatus()
   // Read the query cache synchronously on mount. If we've viewed this
   // chat before, messages render immediately on remount — no empty
   // placeholder, no fetch wait, no flash. The query is then refreshed
@@ -1347,6 +1352,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           listeningRef={listeningRef}
           onToggleVoice={toggleVoice}
           onStop={handleStop}
+          offline={!online}
           pendingFiles={pendingFiles}
           onAddFiles={addFiles}
           onRemoveFile={removeFile}

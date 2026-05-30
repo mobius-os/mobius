@@ -15,7 +15,8 @@ you'd otherwise add a column for, use per-app storage at
 from datetime import UTC, datetime
 
 from sqlalchemy import (
-  Column, DateTime, ForeignKey, Integer, JSON, LargeBinary, String, Text,
+  Boolean, Column, DateTime, ForeignKey, Integer, JSON, LargeBinary, String,
+  Text,
 )
 
 from app.database import Base
@@ -143,6 +144,14 @@ class App(Base):
   share_with_apps = Column(
     String(16), nullable=False, default="none"
   )
+  # Offline capability. The agent opts an app in (default False) only
+  # when it's built to run without the network — it uses
+  # window.mobius.storage (which queues writes and syncs on reconnect)
+  # and tolerates last-write-wins. This drives client + service-worker
+  # caching only; the server does NOT block network use by non-capable
+  # apps. The flag is a declaration, not a firewall (design philosophy
+  # §4 "code empowers the agent; it does not police it").
+  offline_capable = Column(Boolean, nullable=False, default=False)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)

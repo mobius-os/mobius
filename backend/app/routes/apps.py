@@ -124,6 +124,7 @@ async def create_app(
     source_dir=source_dir,
     cross_app_access=body.cross_app_access,
     share_with_apps=body.share_with_apps,
+    offline_capable=body.offline_capable,
     slug=allocate_unique_slug(db, body.name),
   )
   db.add(app)
@@ -195,6 +196,8 @@ async def update_app(
     app.share_with_apps = body.share_with_apps
   if body.cross_app_access is not None:
     app.cross_app_access = body.cross_app_access
+  if body.offline_capable is not None:
+    app.offline_capable = body.offline_capable
   db.commit()
   db.refresh(app)
   return app
@@ -347,13 +350,20 @@ def _etag_for_app(app: models.App) -> str | None:
   return f'W/"{ts_us}"'
 
 
-def _not_modified_if_match(request: Request, etag: str) -> Response | None:
+def _not_modified_if_match(
+  request: Request, etag: str, offline: bool = False
+) -> Response | None:
   """Returns a 304 Response if the request's If-None-Match matches
-  `etag`, else None. The 304 must keep the ETag header so a browser
-  re-validating an existing cache entry can keep its validator."""
+  `etag`, else None. The 304 keeps the ETag header so a browser
+  re-validating an existing cache entry can keep its validator, and
+  mirrors the X-Mobius-Offline marker so the 304 carries the same
+  cache directive as the 200 it stands in for."""
   match = request.headers.get("if-none-match")
   if match and etag in [v.strip() for v in match.split(",")]:
-    return Response(status_code=304, headers={"ETag": etag})
+    headers = {"ETag": etag}
+    if offline:
+      headers["X-Mobius-Offline"] = "1"
+    return Response(status_code=304, headers=headers)
   return None
 
 
@@ -400,7 +410,7 @@ def get_frame(
 
   etag = _etag_for_app(app)
   if etag:
-    not_modified = _not_modified_if_match(request, etag)
+    not_modified = _not_modified_if_match(request, etag, app.offline_capable)
     if not_modified is not None:
       return not_modified
 
@@ -435,6 +445,13 @@ def get_frame(
   headers = {"Cache-Control": "no-cache"}
   if etag:
     headers["ETag"] = etag
+  # Tells the service worker this app is safe to cache for offline use
+  # (Tier 4a). The SW NetworkFirst-caches frame/module only when this
+  # is present, so non-offline_capable apps keep their current
+  # network-only behavior. Cacheability is a function of server state,
+  # not a client-pushed list — consistent with the ETag freshness model.
+  if app.offline_capable:
+    headers["X-Mobius-Offline"] = "1"
   return HTMLResponse(html, headers=headers)
 
 
@@ -480,13 +497,17 @@ def get_module(
 
   etag = _etag_for_app(app)
   if etag:
-    not_modified = _not_modified_if_match(request, etag)
+    not_modified = _not_modified_if_match(request, etag, app.offline_capable)
     if not_modified is not None:
       return not_modified
 
   headers = {"Cache-Control": "no-cache"}
   if etag:
     headers["ETag"] = etag
+  # See get_frame — marks an offline_capable app's module cacheable by
+  # the service worker (Tier 4a).
+  if app.offline_capable:
+    headers["X-Mobius-Offline"] = "1"
   return FileResponse(
     path,
     media_type="application/javascript",

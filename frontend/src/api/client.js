@@ -48,8 +48,24 @@ export function clearToken() {
 export function clearQueryCache() {
   return Promise.all([
     idbDel('mobius-query-cache').catch(() => {}),
+    delOutboxDb().catch(() => {}),
     wipeSwCaches().catch(() => {}),
   ])
+}
+
+// The offline outbox (mobius-runtime.js) is its OWN IndexedDB database,
+// not an idb-keyval key — so it must be dropped with deleteDatabase, not
+// idbDel. It holds owner-scoped queued writes; clearing it on logout
+// keeps the next owner on a shared device from inheriting them.
+function delOutboxDb() {
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.deleteDatabase('mobius-outbox')
+      req.onsuccess = req.onerror = req.onblocked = () => resolve()
+    } catch {
+      resolve()
+    }
+  })
 }
 
 async function wipeSwCaches() {

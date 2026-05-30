@@ -430,6 +430,17 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
 </head>
 <body>
   <script>
+    // Register the shared root-scoped SW (/sw.js, scope /) so
+    // standalone-only launches — the user installed this mini-app but
+    // never opened the Möbius shell — still get the offline navigation
+    // fallback that keeps the PWA in standalone mode offline. No
+    // auto-reload watchdog (that's a shell concern); a silent SW swap
+    // here is harmless. Fire-and-forget so it never delays BIP capture.
+    if ('serviceWorker' in navigator) {{
+      navigator.serviceWorker.register('/sw.js', {{ updateViaCache: 'none' }}).catch(function(){{}});
+    }}
+  </script>
+  <script>
     // Early BIP capture — MUST run before any async script load.
     // Chromium fires `beforeinstallprompt` shortly after
     // DOMContentLoaded; the module script below waits for the React
@@ -558,8 +569,15 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       // can silently auto-retry once, then surface a Retry button for
       // the user if the second attempt also fails.
       async function loadAndRender(cacheBust) {{
+        // Reject-resilient: offline these fetches THROW (network error),
+        // not return a non-ok response. Degrade instead of failing the
+        // whole boot, so an offline-capable app whose code is cached
+        // still renders — theme falls back to the inline default
+        // palette, the app token falls back to the owner JWT (which
+        // authenticates as owner against /api/storage; offline that
+        // call queues anyway via window.mobius).
         const [themeRes, tokenRes] = await Promise.all([
-          fetch('/api/theme', {{ headers: {{ Authorization: 'Bearer ' + token }} }}),
+          fetch('/api/theme', {{ headers: {{ Authorization: 'Bearer ' + token }} }}).catch(function(){{ return null }}),
           fetch('/api/auth/app-token', {{
             method: 'POST',
             headers: {{
@@ -567,9 +585,9 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
               Authorization: 'Bearer ' + token,
             }},
             body: JSON.stringify({{ app_id: APP_ID }}),
-          }}),
+          }}).catch(function(){{ return null }}),
         ]);
-        if (themeRes.ok) {{
+        if (themeRes && themeRes.ok) {{
           const theme = await themeRes.json();
           if (theme.css) {{
             const style = document.createElement('style');
@@ -578,7 +596,14 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
           }}
           if (theme.bg) document.documentElement.style.setProperty('--bg', theme.bg);
         }}
-        const appToken = tokenRes.ok ? (await tokenRes.json()).token : token;
+        const appToken = (tokenRes && tokenRes.ok) ? (await tokenRes.json()).token : token;
+        // Expose window.mobius (offline storage queue + sync on
+        // reconnect, Tier 4b) before rendering so the component sees it
+        // on mount. Precached, so the import resolves offline.
+        try {{
+          const rt = await import('/mobius-runtime.js');
+          rt.init({{ appId: APP_ID, getToken: async function(){{ return appToken; }} }});
+        }} catch (e) {{}}
         const bust = cacheBust ? '&_=' + Date.now() : '';
         const module = await import(
           '/api/apps/' + APP_ID + '/module?token=' +
@@ -1068,7 +1093,10 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   </script>
 </body>
 </html>"""
-  return HTMLResponse(
-    content=html,
-    headers={"Cache-Control": "no-cache, must-revalidate"},
-  )
+  headers = {"Cache-Control": "no-cache, must-revalidate"}
+  # Lets the service worker cache this standalone page for offline use
+  # (Tier 4a) — only for apps the agent declared offline_capable. The
+  # SW's cacheWillUpdate gate keys on this header.
+  if app.offline_capable:
+    headers["X-Mobius-Offline"] = "1"
+  return HTMLResponse(content=html, headers=headers)

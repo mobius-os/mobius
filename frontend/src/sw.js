@@ -24,9 +24,13 @@
  *   - HTML and other `/api/*` — straight to network.
  */
 
-import { precacheAndRoute, cleanupOutdatedCaches } from 'workbox-precaching'
-import { registerRoute } from 'workbox-routing'
-import { CacheFirst, StaleWhileRevalidate } from 'workbox-strategies'
+import {
+  precacheAndRoute, cleanupOutdatedCaches, matchPrecache,
+} from 'workbox-precaching'
+import { registerRoute, setCatchHandler } from 'workbox-routing'
+import {
+  CacheFirst, StaleWhileRevalidate, NetworkFirst,
+} from 'workbox-strategies'
 import { clientsClaim } from 'workbox-core'
 
 // LOAD-BEARING: these two calls are NOT injected by vite-plugin-pwa
@@ -104,6 +108,109 @@ registerRoute(
   },
   new StaleWhileRevalidate({ cacheName: 'mobius-proxy' }),
 )
+
+// ── Offline support ─────────────────────────────────────────────
+//
+// One root-scoped SW controls the shell (/shell/*), the bare domain
+// (308 → /shell/), and standalone mini-apps (/apps/<slug>/*). The
+// rule that keeps an installed PWA in standalone display mode offline:
+// every navigation must resolve to a same-origin Response from the SW.
+// If a navigation falls through to the network and fails (offline),
+// the browser renders its NATIVE error page, which on Android exits
+// standalone mode and reveals browser chrome. So all navigations are
+// handled here, and setCatchHandler guarantees a fallback Response.
+//
+// These caches are DURABLE by design (they hold offline data) — they
+// are NOT swept on activate; only logout clears them (client.js
+// wipes all mobius-* caches).
+
+// Cache a response only when the server marks the app offline-capable
+// (X-Mobius-Offline header, set by routes/apps.py + standalone.py for
+// offline_capable apps). Non-capable apps are never cached, so their
+// current network-only behavior is preserved exactly. Cacheability is
+// a function of server state, mirroring the ETag freshness model.
+const offlineCapableOnly = {
+  cacheWillUpdate: async ({ response }) =>
+    response && response.headers.get('X-Mobius-Offline') === '1'
+      ? response
+      : null,
+}
+
+// The module URL carries a rotating auth token (and a retry `_=` buster);
+// strip both so the cache key is stable across token rotation — otherwise
+// every load is a cache miss and the offline entry is unreachable.
+const stableModuleKey = {
+  cacheKeyWillBeUsed: async ({ request }) => {
+    const u = new URL(request.url)
+    u.searchParams.delete('token')
+    u.searchParams.delete('_')
+    return u.href
+  },
+}
+
+// Shell data GETs — last-known theme/app-list/chat-list so a cold
+// offline launch renders chrome + drawer instead of throwing. SWR:
+// serve cache, revalidate when online. Owner-scoped; wiped on logout.
+registerRoute(
+  ({ url }) =>
+    url.origin === self.location.origin &&
+    (url.pathname === '/api/theme' ||
+      url.pathname === '/api/apps/' ||
+      url.pathname === '/api/chats'),
+  new StaleWhileRevalidate({ cacheName: 'mobius-shell-data' }),
+)
+
+// App frame/module — cached only for offline-capable apps (header
+// gate). NetworkFirst keeps the network authoritative online (fresh
+// module + ETag revalidation), so this does NOT reintroduce the
+// stale-module bug class (that was CacheFirst). Offline → cached.
+registerRoute(
+  ({ url }) => /^\/api\/apps\/\d+\/(frame|module)$/.test(url.pathname),
+  new NetworkFirst({
+    cacheName: 'mobius-offline-apps',
+    networkTimeoutSeconds: 5,
+    plugins: [offlineCapableOnly, stableModuleKey],
+  }),
+)
+
+// Shell + bare-domain navigations: network wins online (fresh
+// theme-injected HTML + current asset hashes), cache serves offline.
+registerRoute(
+  ({ request, url }) =>
+    request.mode === 'navigate' && !url.pathname.startsWith('/apps/'),
+  new NetworkFirst({
+    cacheName: 'mobius-shell-nav',
+    networkTimeoutSeconds: 4,
+  }),
+)
+
+// Standalone mini-app navigations: cached only for offline-capable
+// apps (header gate). A non-capable app offline caches nothing →
+// NetworkFirst throws → catch handler serves the branded offline page.
+registerRoute(
+  ({ request, url }) =>
+    request.mode === 'navigate' && url.pathname.startsWith('/apps/'),
+  new NetworkFirst({
+    cacheName: 'mobius-standalone',
+    networkTimeoutSeconds: 4,
+    plugins: [offlineCapableOnly],
+  }),
+)
+
+// Last resort for any document we still couldn't serve: the cached
+// shell for /shell/*, the branded offline page for standalone +
+// everything else. matchPrecache resolves the content-hashed entry.
+setCatchHandler(async ({ request, url }) => {
+  if (request.destination !== 'document') return Response.error()
+  if (!url.pathname.startsWith('/apps/')) {
+    return (
+      (await matchPrecache('/index.html')) ||
+      (await matchPrecache('/offline.html')) ||
+      Response.error()
+    )
+  }
+  return (await matchPrecache('/offline.html')) || Response.error()
+})
 
 // ── Web Push ────────────────────────────────────────────────────
 //

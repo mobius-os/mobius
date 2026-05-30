@@ -62,6 +62,10 @@ export default function useTheme() {
   useEffect(() => {
     if (!data || !data.css) return
     applyThemeToDom(data.css, data.bg)
+    // Persist the background so the cold-offline shell boot and the
+    // branded offline.html can match the owner's theme before any JS
+    // or network is available (read in index.html + offline.html).
+    try { if (data.bg) localStorage.setItem('mobius-theme-bg', data.bg) } catch {}
   }, [data])
 
   return {

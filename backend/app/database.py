@@ -97,6 +97,13 @@ def run_migrations(eng) -> None:
         "NOT NULL DEFAULT 'none'"
       ))
       conn.commit()
+  if "offline_capable" not in apps_cols:
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN offline_capable BOOLEAN "
+        "NOT NULL DEFAULT 0"
+      ))
+      conn.commit()
   # Slug column: split into three independent idempotent gates so a
   # crash anywhere in the sequence leaves a recoverable state. The
   # previous shape gated the backfill on "column missing", which

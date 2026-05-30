@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Offline — Möbius</title>
+  <!-- Self-contained on purpose: this page renders when there is no
+       network, so it must not fetch anything. The service worker serves
+       it as the fallback for any navigation it can't satisfy (see
+       sw.js setCatchHandler), which keeps an installed PWA in standalone
+       display mode instead of dropping to the browser's native error
+       page (which shows browser chrome). -->
+  <style>
+    :root { --bg:#0d0d0d; --text:#ececec; --muted:#a8a8a8; --accent:#8b6cf7; }
+    * { box-sizing:border-box; margin:0; padding:0; }
+    html, body { height:100%; }
+    body {
+      background:var(--bg); color:var(--text);
+      font-family:'Inter', system-ui, -apple-system, sans-serif;
+      display:flex; align-items:center; justify-content:center;
+      flex-direction:column; gap:18px; padding:24px; text-align:center;
+    }
+    img { width:56px; height:56px; opacity:.5; }
+    h1 { font-size:18px; font-weight:600; }
+    p { font-size:14px; color:var(--muted); max-width:320px; line-height:1.55; }
+    button {
+      margin-top:6px; padding:11px 22px; border:none; border-radius:12px;
+      background:var(--accent); color:#0c0f14; font:inherit;
+      font-weight:600; font-size:14px; cursor:pointer;
+    }
+  </style>
+</head>
+<body>
+  <img src="/moebius.png" alt="" />
+  <h1>You're offline</h1>
+  <p>This needs a connection. Möbius and any offline-ready apps still work — reconnect to load everything else.</p>
+  <button onclick="location.reload()">Try again</button>
+  <script>
+    // Match the owner's theme background if the shell persisted it on a
+    // previous online visit (see useTheme). Best-effort; falls back to
+    // the inline default above.
+    try {
+      var bg = localStorage.getItem('mobius-theme-bg');
+      if (bg) document.documentElement.style.setProperty('--bg', bg);
+    } catch (e) {}
+  </script>
+</body>
+</html>
