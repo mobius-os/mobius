@@ -116,11 +116,28 @@ def emit_activity_event(
   cross-process flock needed. cron-emit.sh is the canonical caller;
   see backend/scripts/cron-emit.sh.
 
-  Owner-token-gated (service token is an owner JWT). Storage_write
-  events are intentionally NOT debounced here — debounce is a
-  request-handler concern (the storage PUT/DELETE handlers already
-  decide whether to emit). External callers that want a debounced
-  emit can implement that policy on their side.
+  Auth model. The service-token at /data/service-token.txt and the
+  interactive owner JWT are the same shape (signed by SECRET_KEY,
+  `sub=<username>`, no scope claim) — there is intentionally no
+  separate "service principal" today, since Möbius is single-owner
+  and adding a second principal type would multiply auth-surface for
+  one endpoint. The trade-off: a logged-in owner *could* POST here
+  via the browser fetch path and write events. That's accepted
+  because:
+    - the events are sidecar telemetry, never load-bearing,
+    - _KNOWN_EVENTS bounds the vocabulary so a misuse can only emit
+      one of the four already-legitimate event types,
+    - rotation + 90-day retention bound disk pressure from spam,
+    - same-origin CSRF baseline (Sec-Fetch-Site / CORS preflight)
+      keeps cross-origin pages from emitting on the owner's behalf.
+  If a future use case needs hard service/owner separation (e.g. an
+  external probe with audit requirements), mint service tokens with
+  an extra `scope: "service"` claim and gate this endpoint on it.
+
+  Storage_write events are intentionally NOT debounced here —
+  debounce is a request-handler concern (the storage PUT/DELETE
+  handlers already decide whether to emit). External callers that
+  want a debounced emit can implement that policy on their side.
   """
   if body.ev not in _KNOWN_EVENTS:
     raise HTTPException(400, f"Unknown event type: {body.ev!r}")
