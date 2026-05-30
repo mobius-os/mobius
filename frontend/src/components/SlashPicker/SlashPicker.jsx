@@ -1,25 +1,18 @@
 /**
- * SlashPicker — the "/" button next to file-attach in the chat
- * composer. Opens a popover with provider / model / effort pickers
- * scoped to THIS chat (per-chat override). When the chat has no
- * override, the popover shows what the chat is effectively using
- * (global default) so the user always sees the active configuration
- * at a glance.
+ * RETIRED — replaced by ComposerPopover + ChatSettingsPanel
+ * (see CLAUDE.md "Composer popover — model + effort + provider, all
+ * in one place"). No file in frontend/src/ imports this component
+ * anymore; it's kept in the tree as a reference implementation in
+ * case the slash-key entry point ever returns. Don't add new
+ * importers — point them at ChatSettingsPanel instead.
  *
- * Persistence: PATCH /api/chats/{id} with the partial
- * `agent_settings_json`. Backend merges last-write-wins per key onto
- * the existing override; passing `clear_agent_settings=true` reverts
- * the chat to the global default.
- *
- * Apply semantics: NEXT TURN ONLY. Both SDKs accept per-turn model /
- * effort overrides on resume — see .pm/features/_002-mid-chat-
- * switching-research.md. Once a chat has assistant turns, the
- * provider is locked (sessions are not cross-provider portable);
- * `lockedProvider` greys out the other provider's models.
- *
- * Codex model swaps mid-chat emit a one-time "model-switch" system
- * message on the next turn — the picker surfaces that as a small
- * footnote so the user isn't surprised by a one-off in-thread blip.
+ * Original behavior, preserved for context: "/" button next to
+ * file-attach in the chat composer, opens a popover with provider /
+ * model / effort pickers scoped to THIS chat (per-chat override),
+ * persistence via PATCH /api/chats/{id} with `agent_settings_json`,
+ * NEXT-TURN-ONLY apply semantics, provider-locked once the chat has
+ * assistant turns. Codex model swaps emit a one-time "model-switch"
+ * system message on the next turn.
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react'
