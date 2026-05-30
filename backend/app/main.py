@@ -287,6 +287,13 @@ def _is_static_asset_path(path: str) -> bool:
   fallback is only meaningful for app routes, which have no file
   extension. We keep the set narrow (code/style assets) so a missing
   image still degrades gracefully instead of 404-ing a real route.
+
+  The extension check matches code/asset URLs ANYWHERE (not just under
+  `vendor/`/`assets/`) on purpose: a module miss outside those namespaces
+  must also 404 rather than poison the SW with text/html. SPA client
+  routes are extensionless by convention here, so this never 404s a real
+  route — but if a future client route needs a `.js`/`.json` suffix,
+  drop that extension from the set.
   """
   return (
     # First path segment — catches both `vendor` and `vendor/<file>`

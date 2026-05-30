@@ -45,6 +45,10 @@ export function isCacheableAssetResponse(response) {
 // that hit the old bug. The KEEP check MUST come first: `mobius-vendor-v2`
 // also matches the legacy `-v\d+$` pattern and would otherwise be
 // deleted every activate, re-fetching vendor on every deploy.
+// Maintenance trap: the legacy regex below matches `mobius-proxy-v\d+`. The
+// live proxy cache is currently un-versioned (`mobius-proxy`, kept), but if
+// it's ever versioned, add it to KEEP_RUNTIME_CACHES or it'll be evicted
+// every activate (re-fetching all proxied assets on every deploy).
 export function isStaleRuntimeCache(name) {
   if (KEEP_RUNTIME_CACHES.has(name)) return false
   if (/^mobius-(vendor|assets|apps|proxy|esm)-v\d+$/.test(name)) return true
