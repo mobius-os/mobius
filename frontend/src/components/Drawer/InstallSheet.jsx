@@ -37,7 +37,7 @@ async function fileToSquarePng(file, size = 512) {
  * reload. The standalone install page keeps its own icon picker for
  * direct (non-shell) visitors.
  */
-export default function InstallSheet({ appId, appName, appSlug, onClose }) {
+export default function InstallSheet({ appId, appName, appSlug, appUpdatedAt, onClose }) {
   const queryClient = useQueryClient()
   const fileRef = useRef(null)
   const [draftName, setDraftName] = useState(appName || '')
@@ -137,7 +137,10 @@ export default function InstallSheet({ appId, appName, appSlug, onClose }) {
             <img
               className="is__icon"
               alt=""
-              src={iconPreview || `/apps/${appSlug}/icon-192.png`}
+              src={
+                iconPreview ||
+                `/apps/${appSlug}/icon-192.png?v=${encodeURIComponent(appUpdatedAt || '')}`
+              }
             />
             <span className="is__icon-edit" aria-hidden="true">✎</span>
           </button>

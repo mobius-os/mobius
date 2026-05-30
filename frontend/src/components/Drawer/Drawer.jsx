@@ -338,7 +338,7 @@ export default function Drawer({
                     }}
                     onPin={(next) => pinApp(app.id, next)}
                     onDelete={() => deleteApp(app.id)}
-                    onInstall={() => setInstallingApp({ id: app.id, name: app.name, slug: app.slug })}
+                    onInstall={() => setInstallingApp({ id: app.id, name: app.name, slug: app.slug, updatedAt: app.updated_at })}
                   />
                 ))}
               </div>
@@ -375,6 +375,7 @@ export default function Drawer({
           appId={installingApp.id}
           appName={installingApp.name}
           appSlug={installingApp.slug}
+          appUpdatedAt={installingApp.updatedAt}
           onClose={() => setInstallingApp(null)}
         />
       )}
