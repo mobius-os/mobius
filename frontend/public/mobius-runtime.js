@@ -99,11 +99,16 @@ function makeStorage({ appId, getToken }) {
       init.headers['Content-Type'] = 'application/json'
       init.body = JSON.stringify(op.data)
     }
-    const res = await fetch(url, init)
-    if (res.status === 401) throw new Error('AUTH')
-    if (!res.ok && !(op.method === 'DELETE' && res.status === 404)) {
-      throw new Error(`HTTP ${res.status}`)
-    }
+    const res = await fetch(url, init)   // network failure throws -> transient
+    if (op.method === 'DELETE' && res.status === 404) return  // already absent
+    if (res.ok) return
+    // Classify so one bad op can't wedge the queue (drainInner reads
+    // err.fatal): 401 auth / 408 timeout / 429 rate-limit / 5xx / network
+    // are transient (keep + retry); any other 4xx is fatal (drop poison op).
+    const err = new Error(`HTTP ${res.status}`)
+    err.fatal = res.status >= 400 && res.status < 500 &&
+      ![401, 408, 429].includes(res.status)
+    throw err
   }
 
   async function drainInner() {

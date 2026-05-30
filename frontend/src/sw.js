@@ -144,7 +144,8 @@ registerRoute(
 // a function of server state, mirroring the ETag freshness model.
 const offlineCapableOnly = {
   cacheWillUpdate: async ({ response }) =>
-    response && response.headers.get('X-Mobius-Offline') === '1'
+    response && response.status === 200 &&
+    response.headers.get('X-Mobius-Offline') === '1'
       ? response
       : null,
 }
