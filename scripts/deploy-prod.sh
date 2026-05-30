@@ -209,6 +209,53 @@ before_hash=$(served_bundle)
 info "current bundle: ${before_hash:-<none>}"
 info "target: ${C_BOLD}${TARGET}${C_RESET} (${CONTAINER})"
 
+# Capture the CURRENTLY-RUNNING image so we can roll back to it if the new
+# build fails its post-cutover health check. A build can succeed yet
+# crash-loop at runtime (a SyntaxError fails Python at import, not
+# `docker build` — exactly the 2026-05-30 conflict-marker outage), and the
+# recreate has already replaced the live container by the time we notice.
+# PREV_IMAGE is the image ID (stable); IMAGE_TAG is the tag compose
+# resolves (e.g. `mobius-app`) that we re-point at it to restore.
+PREV_IMAGE=$(docker inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null || echo "")
+IMAGE_TAG=$(docker inspect -f '{{.Config.Image}}' "$CONTAINER" 2>/dev/null || echo "")
+info "rollback image: ${IMAGE_TAG:-<unknown>} (${PREV_IMAGE:0:19}…)"
+
+# Best-effort restore of the previous image after a failed cutover. Called
+# as `attempt_rollback || true`, which disables errexit inside the function,
+# so a failing docker step here can't itself abort the script. It is
+# BEST-EFFORT, not guaranteed: each docker step is explicitly guarded so a
+# failure is reported (not silently swallowed by the surrounding `|| true`),
+# and we `--force-recreate` so compose can't no-op when the resolved image
+# digest looks unchanged. A tag-succeeds-then-recreate-fails path can leave
+# the tag pointing at the old image while the broken container still runs —
+# hence the loud failure message for manual follow-up.
+attempt_rollback() {
+  if [ -z "$PREV_IMAGE" ] || [ -z "$IMAGE_TAG" ]; then
+    fail "no previous image captured — cannot auto-roll back; recover ${CONTAINER} manually."
+    return 1
+  fi
+  warn "auto-rolling back ${CONTAINER} to the previous image (${IMAGE_TAG} = ${PREV_IMAGE:0:19}…)"
+  intent "docker tag ${PREV_IMAGE} ${IMAGE_TAG} && docker compose ${COMPOSE_ARGS[*]} up -d --force-recreate"
+  if ! docker tag "$PREV_IMAGE" "$IMAGE_TAG"; then
+    fail "rollback: could not re-tag ${IMAGE_TAG} → ${PREV_IMAGE:0:19}… — recover ${CONTAINER} manually."
+    return 1
+  fi
+  if ! docker compose "${COMPOSE_ARGS[@]}" up -d --force-recreate; then
+    fail "rollback: 'compose up -d --force-recreate' failed — recover ${CONTAINER} manually."
+    return 1
+  fi
+  for i in $(seq 1 30); do
+    code=$(docker exec "$CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/health'" 2>/dev/null || echo "000")
+    if [ "$code" = "200" ]; then
+      ok "rolled back — ${CONTAINER} healthy on the previous image again"
+      return 0
+    fi
+    sleep 1
+  done
+  fail "rollback did not restore health within 30s — manual intervention required."
+  return 1
+}
+
 # ── prod source-safety guard ────────────────────────────────────────────
 # The project pin above stops worktree junk, but a worktree (or a stale
 # checkout) builds ITS branch — deploying non-main code to prod. Warn +
@@ -280,7 +327,8 @@ for i in $(seq 1 30); do
   fi
   sleep 1
   if [ "$i" = "30" ]; then
-    fail "health check never returned 200 (last: ${code})"
+    fail "health check never returned 200 (last: ${code}) — the new image is not serving."
+    attempt_rollback || true
     exit 1
   fi
 done
@@ -326,6 +374,7 @@ for i in $(seq 1 30); do
   sleep 1
   if [ "$i" = "30" ]; then
     fail "post-restart health check never returned 200 (last: ${code})"
+    attempt_rollback || true
     exit 1
   fi
 done
