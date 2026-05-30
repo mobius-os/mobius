@@ -217,6 +217,72 @@ def test_read_events_filters_by_app_id():
   assert events[0]["app_id"] == 2
 
 
+def test_read_events_spans_rotated_archives():
+  """Cross-week read: events that landed in an archive BEFORE the most
+  recent rotation must still appear in a window that covers them.
+  The dreaming agent runs at 6am Monday with a 24h window; if Sunday's
+  rotation already pushed Sunday-evening events into an archive, those
+  would silently vanish from the read response."""
+  active = _activity_path()
+  active.parent.mkdir(parents=True, exist_ok=True)
+  # Lay down an archive with an event from "last week".
+  archive = active.parent / "activity.2026-W18.jsonl"
+  archive.write_text(
+    '{"ev":"app_open","ts":"2026-05-03T22:00:00+00:00","app_id":1,"slug":"a"}\n'
+    '{"ev":"app_open","ts":"2026-05-03T23:30:00+00:00","app_id":2,"slug":"b"}\n'
+  )
+  # Active file: an event from "this week" (post-rotation).
+  active.write_text(
+    '{"ev":"app_open","ts":"2026-05-04T06:00:00+00:00","app_id":3,"slug":"c"}\n'
+  )
+
+  # Window covers both files: late Sunday into Monday morning.
+  events = list(activity.read_events(
+    since=datetime(2026, 5, 3, 21, 0, 0, tzinfo=timezone.utc),
+    until=datetime(2026, 5, 4, 7, 0, 0, tzinfo=timezone.utc),
+  ))
+  ids = [e["app_id"] for e in events]
+  assert ids == [1, 2, 3], f"got {ids}"
+
+
+def test_read_events_archive_only_window():
+  """A window that ends BEFORE the active file's earliest event must
+  still return the matching archive events."""
+  active = _activity_path()
+  active.parent.mkdir(parents=True, exist_ok=True)
+  archive = active.parent / "activity.2026-W18.jsonl"
+  archive.write_text(
+    '{"ev":"app_open","ts":"2026-05-03T22:00:00+00:00","app_id":1,"slug":"a"}\n'
+  )
+  active.write_text(
+    '{"ev":"app_open","ts":"2026-05-04T06:00:00+00:00","app_id":99,"slug":"c"}\n'
+  )
+  # Window deliberately excludes the active file's event.
+  events = list(activity.read_events(
+    since=datetime(2026, 5, 3, 21, 0, 0, tzinfo=timezone.utc),
+    until=datetime(2026, 5, 3, 23, 0, 0, tzinfo=timezone.utc),
+  ))
+  assert [e["app_id"] for e in events] == [1]
+
+
+def test_read_events_archive_with_counter_suffix():
+  """The counter-suffixed collision variant (activity.YYYY-W##.2.jsonl)
+  is also picked up — rotation never silently drops it."""
+  active = _activity_path()
+  active.parent.mkdir(parents=True, exist_ok=True)
+  (active.parent / "activity.2026-W18.jsonl").write_text(
+    '{"ev":"app_open","ts":"2026-05-03T10:00:00+00:00","app_id":1,"slug":"a"}\n'
+  )
+  (active.parent / "activity.2026-W18.2.jsonl").write_text(
+    '{"ev":"app_open","ts":"2026-05-03T11:00:00+00:00","app_id":2,"slug":"b"}\n'
+  )
+  events = list(activity.read_events(
+    since=datetime(2026, 5, 3, 0, 0, 0, tzinfo=timezone.utc),
+    until=datetime(2026, 5, 4, 0, 0, 0, tzinfo=timezone.utc),
+  ))
+  assert sorted(e["app_id"] for e in events) == [1, 2]
+
+
 def test_read_events_skips_malformed_lines():
   """A corrupt JSON line in the middle must not block the rest from
   yielding."""
