@@ -29,6 +29,10 @@ function makeDomStub() {
   const fontLinks = []
   const headChildren = []
   const meta = { content: '#000000', getAttribute: (k) => meta[k], setAttribute: (k, v) => { meta[k] = v } }
+  // Light/dark mode support added documentElement.setAttribute and the
+  // status-bar meta lookup — same drift fix as themeService.test.js.
+  const statusBar = { content: 'black', getAttribute: (k) => statusBar[k], setAttribute: (k, v) => { statusBar[k] = v } }
+  const documentElement = { _attrs: {}, getAttribute: (k) => documentElement._attrs[k], setAttribute: (k, v) => { documentElement._attrs[k] = v } }
   const body = { style: {} }
   function makeNode(tag) {
     return {
@@ -46,7 +50,11 @@ function makeDomStub() {
     document: {
       createElement(tag) { return makeNode(tag) },
       getElementById(id) { return styleNodes.get(id) || null },
-      querySelector(sel) { return sel === 'meta[name="theme-color"]' ? meta : null },
+      querySelector(sel) {
+        if (sel === 'meta[name="theme-color"]') return meta
+        if (sel.includes('apple-mobile-web-app-status-bar-style')) return statusBar
+        return null
+      },
       querySelectorAll(sel) { return sel.includes('data-theme-font') ? fontLinks.slice() : [] },
       head: {
         appendChild(node) {
@@ -58,8 +66,9 @@ function makeDomStub() {
         },
       },
       body,
+      documentElement,
     },
-    meta, fontLinks, styleNodes, headChildren,
+    meta, statusBar, documentElement, fontLinks, styleNodes, headChildren,
   }
 }
 
@@ -234,7 +243,11 @@ test('toggleTheme light → dark works the same way', async () => {
   const api = makeApi(LIGHT_CSS)
   const result = await themeService.toggleTheme(qc, 'light', api)
   assert.equal(result.newMode, 'dark')
-  assert.equal(result.newBg, '#0d0f14')
+  // DARK_COLORS.--bg in src/theme.js is the authoritative dark default;
+  // kept in sync with backend/app/theme.py DEFAULT_THEME. Was #0d0f14
+  // in early 2026-05; rolled to #0d0d0d when the design refresh
+  // tightened the neutrals against the lighter --surface stack.
+  assert.equal(result.newBg, '#0d0d0d')
 })
 
 test('toggleTheme throws when persist fails (caller does rollback)', async () => {

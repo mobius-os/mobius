@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "npm run test:lib && npm run test:hooks",
+    "test:lib": "node --loader=./src/lib/__tests__/vite-env-loader.mjs --test src/lib src/utils src/components/ProviderAuth",
+    "test:hooks": "node --loader=./src/components/ChatView/hooks/__tests__/react-loader.mjs --test src/components/ChatView/hooks"
   },
   "dependencies": {
     "@openai/apps-sdk-ui": "0.2.2",

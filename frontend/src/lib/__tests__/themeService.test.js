@@ -22,7 +22,15 @@ function makeDomStub() {
   const fontLinks = []
   const headChildren = []
   const meta = { content: '#000000', getAttribute: (k) => meta[k], setAttribute: (k, v) => { meta[k] = v } }
+  // Status-bar meta only resolves on PWA/iOS. Stub it as present so
+  // themeService's `if (sb) sb.setAttribute(...)` exercises the path
+  // (and the stub captures the assignment for the assertions below).
+  const statusBar = { content: 'black', getAttribute: (k) => statusBar[k], setAttribute: (k, v) => { statusBar[k] = v } }
   const body = { style: {} }
+  // documentElement was added when light/dark mode support landed (set
+  // data-theme attribute drives the CSS variable cascade). The stub
+  // captures the assignment so tests can assert mode inference.
+  const documentElement = { _attrs: {}, getAttribute: (k) => documentElement._attrs[k], setAttribute: (k, v) => { documentElement._attrs[k] = v } }
 
   function makeNode(tag) {
     const node = {
@@ -50,6 +58,7 @@ function makeDomStub() {
       getElementById(id) { return styleNodes.get(id) || null },
       querySelector(sel) {
         if (sel === 'meta[name="theme-color"]') return meta
+        if (sel.includes('apple-mobile-web-app-status-bar-style')) return statusBar
         return null
       },
       querySelectorAll(sel) {
@@ -73,8 +82,11 @@ function makeDomStub() {
         get children() { return headChildren },
       },
       body,
+      documentElement,
     },
     meta,
+    statusBar,
+    documentElement,
     fontLinks,
     headChildren,
     styleNodes,

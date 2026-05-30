@@ -37,6 +37,27 @@ jobs:
         working-directory: backend
         run: pytest -q
 
+  frontend-unit:
+    # Wires up the node:test unit suite that lives under
+    # frontend/src/**/__tests__/. Two loaders are needed: vite-env-loader
+    # rewrites import.meta.env.* literals for lib/utils tests; react-loader
+    # aliases bare `react` imports to a hook-only shim for ChatView hook
+    # tests. They can't run as one step because the hook shim doesn't
+    # implement React.createContext (which TanStack Query needs transitively).
+    # Previously these tests were documented as run-by-hand and silently
+    # rotted — drift in themeService.js + DOM-stub gaps cascaded for ~5
+    # days before anyone noticed. CI guards that gap.
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run frontend unit tests
+        working-directory: frontend
+        run: npm test
+
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 15
