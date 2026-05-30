@@ -137,8 +137,10 @@ def standalone_manifest(slug: str, db: Session = Depends(get_db)):
   base = f"/apps/{slug}/"
   # Version the icon URLs by `updated_at` so when the owner uploads
   # a fresh icon the browser refetches at install time instead of
-  # baking the stale image into the home-screen entry.
-  v = int(app.updated_at.timestamp()) if app.updated_at else 0
+  # baking the stale image into the home-screen entry. Microsecond
+  # resolution (matching the apps-module ETag) so a name PATCH + icon
+  # PUT landing in the same second still produce distinct `?v=`.
+  v = int(app.updated_at.timestamp() * 1_000_000) if app.updated_at else 0
   return JSONResponse(
     {
       "id": base,
@@ -166,6 +168,11 @@ def standalone_manifest(slug: str, db: Session = Depends(get_db)):
       ],
     },
     media_type="application/manifest+json",
+    # Revalidate on every fetch so a freshly-renamed app never serves a
+    # stale name/short_name/icon to the OS at install time. The body is
+    # tiny; `no-cache` keeps it cheap (304 when unchanged) without
+    # letting the browser pin an old manifest.
+    headers={"Cache-Control": "no-cache, must-revalidate"},
   )
 
 

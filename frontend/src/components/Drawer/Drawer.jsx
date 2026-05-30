@@ -5,6 +5,7 @@ import { Menu } from '@openai/apps-sdk-ui/components/Menu'
 import { EmptyMessage } from '@openai/apps-sdk-ui/components/EmptyMessage'
 import { apiFetch } from '../../api/client.js'
 import { appQueries, chatQueries } from '../../hooks/queries.js'
+import InstallSheet from './InstallSheet.jsx'
 import './Drawer.css'
 
 // Module-level constant so the default for `streamingChatIds` is
@@ -69,6 +70,10 @@ export default function Drawer({
   // handler per row.
   const [openMenu, setOpenMenu] = useState(null) // { kind, id } | null
   const [renamingState, setRenamingState] = useState(null) // { kind, id } | null
+  // The app whose "Add to home screen" sheet is open ({id,name,slug}),
+  // or null. Mirrors openMenu/renamingState — one at a time, owned here
+  // rather than in Shell so this stays drawer-local.
+  const [installingApp, setInstallingApp] = useState(null)
 
   // Mirrors `renaming` synchronously (not via useEffect — that's
   // one render behind). The overlay's pointerdown handler must see
@@ -333,6 +338,7 @@ export default function Drawer({
                     }}
                     onPin={(next) => pinApp(app.id, next)}
                     onDelete={() => deleteApp(app.id)}
+                    onInstall={() => setInstallingApp({ id: app.id, name: app.name, slug: app.slug })}
                   />
                 ))}
               </div>
@@ -364,6 +370,14 @@ export default function Drawer({
 
         </div>
       </nav>
+      {installingApp && (
+        <InstallSheet
+          appId={installingApp.id}
+          appName={installingApp.name}
+          appSlug={installingApp.slug}
+          onClose={() => setInstallingApp(null)}
+        />
+      )}
     </>
   )
 }
@@ -388,6 +402,7 @@ function DrawerRow({
   onRenameSubmit,
   onPin,
   onDelete,
+  onInstall,
 }) {
   const wrapRef = useRef(null)
   const inputRef = useRef(null)
@@ -539,19 +554,14 @@ function DrawerRow({
               </Menu.Item>
               <Menu.Item onSelect={() => onRenameStart()}>Rename</Menu.Item>
               {kind === 'app' && slug && (
-                // Same-tab navigation to the standalone install
-                // surface. The destination renders the app under a
-                // Möbius-styled confirm card (icon picker + Install
-                // button). Same-tab keeps the user in the installed
-                // Möbius PWA context — no jarring browser-tab pop-
-                // out — and lets engagement from the parent shell
-                // count toward the per-origin Site Engagement score
-                // that gates beforeinstallprompt.
-                <Menu.Item
-                  onSelect={() => {
-                    window.location.href = `/apps/${slug}/?install=1`;
-                  }}
-                >
+                // Opens the in-PWA InstallSheet to set the home-screen
+                // name + icon first; the sheet saves, then navigates
+                // same-tab to `/apps/<slug>/?install=1`. Same-tab keeps
+                // the user in the installed Möbius PWA context — no
+                // jarring browser-tab pop-out — and lets engagement
+                // from the parent shell count toward the per-origin
+                // Site Engagement score that gates beforeinstallprompt.
+                <Menu.Item onSelect={() => onInstall?.()}>
                   Install to home screen
                 </Menu.Item>
               )}
