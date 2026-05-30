@@ -45,10 +45,12 @@ class AppCreate(BaseModel):
   source_dir: str | None = None
   cross_app_access: ShareLevel = "none"
   share_with_apps: ShareLevel = "none"
-  # URL the app was installed from. Set by the install endpoint
-  # only; user-built apps that came in through this endpoint leave
-  # it null. See `models.App.manifest_url`.
-  manifest_url: str | None = None
+  # Note: `manifest_url` is NOT accepted here. It is the identity key
+  # the install endpoint uses to discriminate install-vs-update — a
+  # caller spoofing it via direct POST could trick a later legitimate
+  # install of the same URL into update-mode (clobbering the spoofed
+  # app's jsx_source + permissions). Only `POST /api/apps/install`
+  # may set `manifest_url`; this route always leaves it NULL.
 
 
 class AppUpdate(BaseModel):

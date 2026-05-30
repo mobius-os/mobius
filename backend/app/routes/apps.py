@@ -170,7 +170,9 @@ async def create_app(
     cross_app_access=body.cross_app_access,
     share_with_apps=body.share_with_apps,
     slug=allocate_unique_slug(db, body.name),
-    manifest_url=body.manifest_url,
+    # manifest_url stays NULL on this route. Only the install endpoint
+    # may set it — it's the identity key for install-vs-update
+    # discrimination. See AppCreate's docstring for the threat model.
   )
   db.add(app)
   db.flush()  # assigns app.id without committing
