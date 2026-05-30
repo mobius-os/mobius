@@ -1,7 +1,8 @@
-/* Shared model + effort radio picker. Used by SlashPicker (per-chat)
-   and SettingsView (future global defaults editor). Keep the markup
-   theme-driven via CSS vars so the agent's theme.css customizations
-   apply to both call sites with no extra work. */
+/* Shared model + effort radio picker. Used by ChatSettingsPanel
+   (the live per-chat override surface). SlashPicker is retired but
+   still compiles against this file. Keep the markup theme-driven via
+   CSS vars so the agent's theme.css customizations apply with no
+   extra work. */
 
 .pmp {
   display: flex;

@@ -344,3 +344,22 @@ def test_model_prefs_patch_rejects_cross_site_request(client, auth):
     headers={**auth, "Sec-Fetch-Site": "cross-site"},
   )
   assert cross.status_code == 403
+
+
+def test_settings_post_rejects_cross_site_request(client, auth):
+  """POST /api/settings writes gemini_api_key + provider — both owner-
+  state mutations — and shares the reject_cross_site defense applied
+  to walkthrough/complete and model-prefs PATCH. Catches the case
+  where a future refactor accidentally drops the dep."""
+  cross = client.post(
+    "/api/settings",
+    json={"gemini_api_key": "AIzaSyTestCrossSite"},
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert cross.status_code == 403
+  same_origin = client.post(
+    "/api/settings",
+    json={"gemini_api_key": ""},
+    headers={**auth, "Sec-Fetch-Site": "same-origin"},
+  )
+  assert same_origin.status_code == 200

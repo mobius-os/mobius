@@ -1,12 +1,13 @@
 /**
  * Shared model + effort picker. Used by:
- *   • SlashPicker (per-chat override, via PATCH /api/chats/{id})
- *   • SettingsView (future: global default editor)
+ *   • ChatSettingsPanel (per-chat override, via PATCH /api/chats/{id})
+ *   • SlashPicker (RETIRED — kept as reference; no active importers)
  *
- * The pickers' UX is the same; only the persistence path differs. By
- * extracting the option lists and the radio-list shape here, the two
- * callers stay in lockstep — adding a model in this file shows up in
- * both places with zero code churn.
+ * ChatSettingsPanel is the live consumer; SlashPicker still compiles
+ * against this file but is no longer wired into any composer. The
+ * shared option lists and radio-list shape are extracted here so a
+ * model addition in this file lights up the live picker with no code
+ * churn elsewhere.
  *
  * Why not a select element: radio rows make the current choice and
  * the alternatives visible at once, which matches the Claude.ai and
