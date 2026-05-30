@@ -147,5 +147,13 @@ def get_principal(
   )
   if not owner:
     raise HTTPException(status_code=401, detail="Owner not found.")
-  app_id = payload.get("app_id") if payload.get("scope") == "app" else None
+  scope = payload.get("scope")
+  app_id = payload.get("app_id") if scope == "app" else None
+  # Invariant: an app-scoped token MUST carry an integer app_id. A signed
+  # token with scope='app' but a null/absent app_id would resolve to
+  # app_id=None and then read as an *owner* caller downstream (Principal
+  # .app_id is the owner-vs-app discriminator, e.g. the /api/ai tool gate).
+  # Reject it so every app-scope route can trust app_id is real.
+  if scope == "app" and not isinstance(app_id, int):
+    raise HTTPException(status_code=401, detail="Malformed app token.")
   return Principal(owner=owner, app_id=app_id)

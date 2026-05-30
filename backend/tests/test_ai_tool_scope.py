@@ -49,12 +49,13 @@ def test_app_token_cannot_request_named_tool(client, owner_token):
 
 
 def test_app_token_unknown_tool_is_rejected(client, owner_token):
-  # Tool-name validation (400) runs before the scope gate; either way the
-  # request is rejected and no subprocess is spawned.
+  # Tool-name validation (_resolve_tools) runs BEFORE the scope gate, so an
+  # unknown tool returns 400 specifically (not the 403 scope rejection).
+  # Either way no subprocess is spawned.
   app_token = _app_token(client, owner_token)
   r = client.post(
     "/api/ai",
     json={"messages": [{"role": "user", "content": "hi"}], "tools": ["NotATool"]},
     headers={"Authorization": f"Bearer {app_token}"},
   )
-  assert r.status_code in (400, 403)
+  assert r.status_code == 400
