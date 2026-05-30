@@ -158,9 +158,9 @@ export default function WalkthroughOverlay({ onDone }) {
                 seeing the same greeting twice reads as a regression. */}
             <h2 id="wt-title" className="wt__title">Quick tour</h2>
             <p className="wt__body">
-              Möbius is a chat surface in front of a coding agent that
-              can build mini-apps and modify the platform itself for
-              you. Tell it what you want — it writes the code.
+              Möbius is a chat surface in front of a coding agent. It
+              can build mini-apps and modify the platform itself. Tell
+              it what you want, and it writes the code.
             </p>
             <div className="wt__actions">
               <button
@@ -186,11 +186,10 @@ export default function WalkthroughOverlay({ onDone }) {
             <h2 id="wt-title" className="wt__title">Make it yours</h2>
             <p className="wt__body">
               The agent has write access to almost everything: the theme,
-              the shell UI, what the drawer looks like, the apps you
-              install or build, even how it talks to you. Just ask in
-              chat — "switch to a light theme," "build me a trip
-              planner," "remove the voice button." It edits the code
-              and shows you the result.
+              the shell UI, the drawer, the apps you install or build,
+              even how it talks to you. Ask in chat — "switch to a
+              light theme," or "remove the voice button" — and it
+              edits the code and shows you the result.
             </p>
             <div className="wt__actions">
               <button
@@ -215,7 +214,7 @@ export default function WalkthroughOverlay({ onDone }) {
           <>
             <h2 id="wt-title" className="wt__title">If something breaks</h2>
             <p className="wt__body">
-              The agent can break things — that's the trade for full
+              The agent can break things. That's the trade for full
               write access. Open{' '}
               <a
                 href="/recover/chat"
@@ -225,9 +224,9 @@ export default function WalkthroughOverlay({ onDone }) {
               >
                 /recover/chat
               </a>
-              {' '}to talk to a fresh agent with its own boot path —
-              it can roll back the shell, the backend, or your last
-              changes. From{' '}
+              {' '}to talk to a fresh agent with its own boot path. It
+              can roll back the shell, the backend, or recent changes.
+              From{' '}
               <a
                 href="/recover"
                 className="wt__link"
@@ -237,8 +236,8 @@ export default function WalkthroughOverlay({ onDone }) {
                 /recover
               </a>
               {' '}you can also back up the database or reset to factory.
-              Bookmark these — they stay reachable when the main chat
-              isn't.
+              Bookmark these. They stay reachable even when the main
+              chat doesn't.
             </p>
             <div className="wt__actions">
               <button
@@ -306,9 +305,9 @@ export default function WalkthroughOverlay({ onDone }) {
             <h2 id="wt-title" className="wt__title">Start your first chat</h2>
             <p className="wt__body">
               Tap the chat input at the bottom and tell Möbius what
-              you want to build or change. The agent picks the model,
-              writes the code, and shows you the result. You can
-              switch chats anytime from the drawer.
+              you want to build or change. It writes the code and
+              shows you the result. You can switch chats anytime
+              from the drawer.
             </p>
             <div className="wt__actions">
               <button
