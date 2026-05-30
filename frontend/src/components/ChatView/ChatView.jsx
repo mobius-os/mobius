@@ -98,6 +98,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // real problem. loadError flips on the catch so we can render a
   // retry message instead of pretending the chat is empty.
   const [loadError, setLoadError] = useState(false)
+  // Bumped by the load-error Retry button to re-run the load effect in
+  // place, instead of a hard window.location.reload (which would nuke the
+  // Query cache, scroll positions, drafts, the app-iframe LRU, and the
+  // back-stack — and contradicts the project's no-hard-reload principle).
+  const [loadNonce, setLoadNonce] = useState(0)
   const [sending, setSending] = useState(false)
   const [input, setInput] = useState(() => {
     try {
@@ -636,7 +641,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       loadingOlder.current = false
       disconnect()
     }
-  }, [chatId])
+  }, [chatId, loadNonce])
 
 
   // Paginate older messages. Captures a pre-prepend anchor so we can
@@ -1171,9 +1176,9 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
               onClick={() => {
                 setLoadError(false)
                 setLoading(true)
-                // Re-run the load-effect by toggling chatId-derived
-                // state. Cheapest path is a soft reload of the route.
-                window.location.reload()
+                // Re-run the load effect in place (bump its nonce dep) —
+                // no hard reload, so cache/scroll/drafts/back-stack survive.
+                setLoadNonce(n => n + 1)
               }}
             >
               Retry
