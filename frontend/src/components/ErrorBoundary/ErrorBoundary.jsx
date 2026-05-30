@@ -1,4 +1,5 @@
 import { Component } from 'react'
+import { recordClientError } from '../../lib/errorLog.js'
 import './ErrorBoundary.css'
 
 /**
@@ -27,27 +28,14 @@ export default class ErrorBoundary extends Component {
   }
 
   componentDidCatch(error, info) {
-    const where = this.props.label || 'app'
-    const componentStack = info?.componentStack || ''
-    // Console for live debugging, plus a small persisted record the recovery
-    // surface can show ("the shell last crashed with X"). This is the
-    // minimal version of the missing client-error telemetry; a real sink can
-    // hook the same spot later.
-    console.error(`[ErrorBoundary:${where}]`, error, componentStack)
-    try {
-      sessionStorage.setItem(
-        'mobius:last-error',
-        JSON.stringify({
-          where,
-          message: String(error?.message || error),
-          stack: String(error?.stack || '').slice(0, 2000),
-          componentStack: componentStack.slice(0, 2000),
-          at: new Date().toISOString(),
-        }),
-      )
-    } catch {
-      /* storage full/disabled — the console line above still stands */
-    }
+    // Record through the shared client-error log (console + ring buffer the
+    // recovery surface can read), same sink the global window handlers use.
+    recordClientError({
+      where: this.props.label || 'app',
+      message: error?.message || error,
+      error,
+      componentStack: info?.componentStack,
+    })
   }
 
   handleRetry = () => {
