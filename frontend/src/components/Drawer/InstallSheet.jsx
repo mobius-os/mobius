@@ -70,10 +70,10 @@ export default function InstallSheet({ appId, appName, appSlug, onClose }) {
     try {
       const png = await fileToSquarePng(file)
       setIconBlob(png)
-      setIconPreview(prev => {
-        if (prev) URL.revokeObjectURL(prev)
-        return URL.createObjectURL(png)
-      })
+      // The effect cleanup (keyed on iconPreview) revokes the previous
+      // URL — don't also revoke here, to avoid a revoke racing the next
+      // commit's <img src>.
+      setIconPreview(URL.createObjectURL(png))
     } catch {
       setError("That image couldn't be read — try a PNG or JPEG.")
     }
