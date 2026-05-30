@@ -49,7 +49,13 @@ done
 
 if [ "$TARGET" = "prod" ]; then
   CONTAINER="mobius"
-  COMPOSE_ARGS=()                       # default compose project + file
+  # Pin the compose project to `mobius`. Without this, the project name
+  # defaults to the cwd directory — so running this from a git worktree
+  # gives project `<slug>` instead of `mobius`, which then collides on the
+  # fixed `container_name: mobius` and creates junk `<slug>_*` volumes.
+  # (A real incident: a worktree deploy spawned substrate-freshness_* vols
+  # + a name conflict.) Pinning makes it correct from any cwd.
+  COMPOSE_ARGS=(-p mobius)
   INTERNAL_BASE="http://localhost:8000"  # checked via `docker exec curl`
   PUBLIC_URL="https://mobius.hamzamerzic.info/api/health"
 else
@@ -161,6 +167,21 @@ if [ "$CHECK_ONLY" = "1" ]; then
   exit 0
 fi
 
+# ── deploy lock: serialize concurrent deploys ───────────────────────────
+# Multiple Claude sessions run against this repo. Two deploys to the same
+# container at once race (recreate clobbers, half-built /data/shell). Take
+# a non-blocking per-target flock; the fd stays open for the script's life
+# and releases on exit. (--check above skips this — it doesn't deploy.)
+DEPLOY_LOCK="/tmp/mobius-deploy-${TARGET}.lock"
+exec 9>"$DEPLOY_LOCK" || true
+if command -v flock >/dev/null 2>&1; then
+  if ! flock -n 9; then
+    fail "another ${TARGET} deploy is already running (lock: ${DEPLOY_LOCK})."
+    fail "wait for it to finish (check 'docker ps' / the other session) and retry."
+    exit 1
+  fi
+fi
+
 # ── prod guardrail ──────────────────────────────────────────────────────
 # Refuse to run if the configured CONTAINER name isn't actually running.
 # (`mobius` is the default; an operator targeting a renamed container
@@ -181,11 +202,47 @@ before_hash=$(served_bundle)
 info "current bundle: ${before_hash:-<none>}"
 info "target: ${C_BOLD}${TARGET}${C_RESET} (${CONTAINER})"
 
+# ── prod source-safety guard ────────────────────────────────────────────
+# The project pin above stops worktree junk, but a worktree (or a stale
+# checkout) builds ITS branch — deploying non-main code to prod. Warn +
+# confirm so prod always ships a deliberate, current main.
+if [ "$TARGET" = "prod" ]; then
+  if [ -f "$REPO_ROOT/.git" ]; then
+    warn "running from a git worktree (${REPO_ROOT})."
+    warn "prod normally deploys main from the canonical checkout; a worktree builds its own branch."
+    confirm_yes "deploy prod from this worktree anyway?" || { fail "aborted — use the main checkout"; exit 1; }
+  fi
+  if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    git -C "$REPO_ROOT" fetch origin main -q 2>/dev/null || true
+    head_sha=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "")
+    main_sha=$(git -C "$REPO_ROOT" rev-parse origin/main 2>/dev/null || echo "")
+    if [ -n "$head_sha" ] && [ -n "$main_sha" ] && [ "$head_sha" != "$main_sha" ]; then
+      warn "HEAD $(git -C "$REPO_ROOT" rev-parse --short HEAD) != origin/main $(git -C "$REPO_ROOT" rev-parse --short origin/main 2>/dev/null) — you may deploy non-main code."
+      confirm_yes "deploy this non-main checkout to prod?" || { fail "aborted"; exit 1; }
+    elif [ -z "$main_sha" ]; then
+      warn "couldn't resolve origin/main (no network/remote?) — skipping the non-main check; confirm you're on current main."
+    fi
+  fi
+fi
+
 # ── step 1: build (with cache-prune guard) ─────────────────────────────
 if [ "$SKIP_BUILD" = "1" ]; then
   step "[1/4] SKIPPED docker compose build (--skip-build)"
 else
   step "[1/4] docker compose build"
+  # Refuse to build source that still carries unresolved merge-conflict
+  # markers. A sibling once committed `<<<<<<< HEAD` into apps.py and
+  # deployed it — the image crash-looped on a SyntaxError and prod went
+  # 502. A sub-second grep is the cheapest possible backstop against
+  # shipping a half-resolved merge to prod.
+  intent "scanning build source for merge-conflict markers"
+  if markers=$(grep -rlIE '^(<<<<<<<|>>>>>>>) ' backend/app backend/scripts frontend/src skill 2>/dev/null) && [ -n "$markers" ]; then
+    fail "unresolved merge-conflict markers in:"
+    printf '%s\n' "$markers" | sed 's/^/    /' >&2
+    fail "resolve them before building (this exact class 502'd prod once)."
+    exit 1
+  fi
+  ok "build source is conflict-free"
   cache_gb=$(build_cache_gb)
   info "current build cache: ~${cache_gb}GB"
   if [ "$cache_gb" -ge 6 ]; then
