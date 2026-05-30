@@ -137,6 +137,7 @@ async def install_app(
     cross_app_access=app.cross_app_access,
     share_with_apps=app.share_with_apps,
     slug=app.slug,
+    manifest_url=app.manifest_url,
     created_at=app.created_at,
     updated_at=app.updated_at,
     mode=mode,
@@ -169,6 +170,7 @@ async def create_app(
     cross_app_access=body.cross_app_access,
     share_with_apps=body.share_with_apps,
     slug=allocate_unique_slug(db, body.name),
+    manifest_url=body.manifest_url,
   )
   db.add(app)
   db.flush()  # assigns app.id without committing

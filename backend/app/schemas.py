@@ -45,6 +45,10 @@ class AppCreate(BaseModel):
   source_dir: str | None = None
   cross_app_access: ShareLevel = "none"
   share_with_apps: ShareLevel = "none"
+  # URL the app was installed from. Set by the install endpoint
+  # only; user-built apps that came in through this endpoint leave
+  # it null. See `models.App.manifest_url`.
+  manifest_url: str | None = None
 
 
 class AppUpdate(BaseModel):
@@ -78,6 +82,10 @@ class AppOut(BaseModel):
   # backfilled on first access via standalone routes (see
   # routes/apps.py:ensure_slug).
   slug: str | None = None
+  # URL the app was installed from (manifest URL passed to
+  # POST /api/apps/install). Null for user-built apps. The install
+  # endpoint matches by this for update-vs-install discrimination.
+  manifest_url: str | None = None
   created_at: datetime
   updated_at: datetime
 
