@@ -12,7 +12,7 @@ import useNavigation from '../../hooks/useNavigation.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import useTheme from '../../hooks/useTheme.js'
 import useProviderAuthStatus from '../../hooks/useProviderAuthStatus.js'
-import { appQueries, chatQueries, ownerQueries } from '../../hooks/queries.js'
+import { appQueries, chatQueries, modelQueries, ownerQueries } from '../../hooks/queries.js'
 import './Shell.css'
 
 export default function Shell() {
@@ -32,6 +32,12 @@ export default function Shell() {
   const chatsQuery = chatQueries.list.useQuery()
   const apps = appsQuery.data ?? []
   const chats = chatsQuery.data ?? []
+  // Warm the model registry as soon as a chat is open so the composer's
+  // model picker is instant on the first '+'. The /api/models fetch
+  // otherwise runs cold on the first picker open (it's 5-min cached after
+  // that); this just moves that one fetch to chat-open time, in the
+  // background. Shares the cache key, so the picker's own useQuery reuses it.
+  modelQueries.registry.useQuery({ enabled: !!activeChatId })
 
   // Cache key from app.updated_at (server-side). Stable across reloads.
   const versionForApp = useCallback((id) => {
