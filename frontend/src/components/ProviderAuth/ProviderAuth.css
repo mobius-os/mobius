@@ -40,22 +40,25 @@
 }
 
 .pa__input:focus {
-  border-color: var(--accent, #a78bfa);
+  border-color: var(--accent, #8b6cf7);
 }
 
 .pa__btn {
   align-self: inherit;
-  background: var(--accent, #a78bfa);
+  background: var(--accent, #8b6cf7);
   color: #fff;
   border: none;
   /* Unified primary-CTA radius with .settings__btn (10px). Compact
      action chips like .provider-row__action stay pill-shaped
      (999px); .pa__btn is a form CTA, not a chip, so it joins the
      primary family. */
+  /* Match .settings__btn exactly (10px radius / 10px 18px / weight 500)
+     so the provider CTA and the settings Save button read as one button
+     family — they previously drifted to 20px padding + weight 600. */
   border-radius: 10px;
-  padding: 10px 20px;
+  padding: 10px 18px;
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 500;
   cursor: pointer;
   transition: background 0.15s;
 }
@@ -93,7 +96,7 @@
 }
 
 .pa__muted a {
-  color: var(--accent, #a78bfa);
+  color: var(--accent, #8b6cf7);
   text-decoration: underline;
 }
 
