@@ -136,8 +136,13 @@ build_cache_gb() {
 
 # Pull the served bundle filename out of the index.html the container is
 # currently serving. Empty if the container is down or has no bundle.
+#
+# Probes /shell/ explicitly because the SPA lives under /shell/ since the
+# manifest-scope migration (commit e451f01) — `/` 308-redirects there and
+# `curl` without `-L` returns a redirect response with no <script> tag.
+# We use `-L` so the same code works pre- and post-/shell/ scope.
 served_bundle() {
-  docker exec "$CONTAINER" sh -c "curl -fsS '${INTERNAL_BASE}/' 2>/dev/null" \
+  docker exec "$CONTAINER" sh -c "curl -fsSL '${INTERNAL_BASE}/shell/' 2>/dev/null" \
     | grep -oE 'index-[A-Za-z0-9_-]+\.js' \
     | head -n1 || true
 }
@@ -222,6 +227,19 @@ done
 # main.py picks _live_dir over _baked_dir at module load, so without
 # this step uvicorn keeps serving the stale dist.
 step "[3/4] refresh /data/shell/ from new image's /app/shell-src"
+# Clear /data/shell first so cp -a can land symlinks where the previous
+# deploy wrote regular files (or vice versa). Without this, npm packages
+# whose internal layout shifted between builds (e.g.
+# micromark-extension-math's hoisted katex bin: file in v3 → symlink in
+# v4) cause `cp: cannot create symbolic link ... File exists` because
+# cp -a's `-d` flag preserves the source symlink but won't overwrite an
+# existing destination of a different type. Trying to be defensive with
+# rm -rf /data/shell/dist alone (the previous behavior) missed the
+# node_modules sub-tree entirely. We're about to rebuild from scratch
+# anyway — clear everything in /data/shell. /app/static/ remains as the
+# baked fallback if anything goes wrong.
+intent "docker exec ${CONTAINER} sh -c 'rm -rf /data/shell/* /data/shell/.[!.]* 2>/dev/null; true'"
+docker exec "$CONTAINER" sh -c 'rm -rf /data/shell/* /data/shell/.[!.]* 2>/dev/null; true'
 intent "docker exec ${CONTAINER} cp -a /app/shell-src/. /data/shell/"
 docker exec "$CONTAINER" cp -a /app/shell-src/. /data/shell/
 intent "docker exec ${CONTAINER} rm -rf /data/shell/dist"
