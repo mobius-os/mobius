@@ -249,6 +249,11 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   app = _get_app_by_slug(db, slug)
   app_id = app.id
   app_name = app.name or slug
+  # Cache-bust the install-card icon preview + tab/apple-touch icons on
+  # every app update (same microsecond version the manifest uses), so a
+  # just-changed name/icon doesn't show a stale preview here while the
+  # 5-minute icon cache is warm.
+  icon_v = int(app.updated_at.timestamp() * 1_000_000) if app.updated_at else 0
   # Escape user-controlled strings before interpolating into HTML.
   # The agent generates app names so they're nominally trusted, but
   # belt-and-suspenders: a stray `<script>` in a name would otherwise
@@ -273,8 +278,8 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   <meta name="apple-mobile-web-app-title" content="{app_name_html}">
   <title>{app_name_html}</title>
   <link rel="manifest" href="/apps/{slug}/manifest.json">
-  <link rel="icon" type="image/png" sizes="192x192" href="/apps/{slug}/icon-192.png">
-  <link rel="apple-touch-icon" href="/apps/{slug}/icon-192.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/apps/{slug}/icon-192.png?v={icon_v}">
+  <link rel="apple-touch-icon" href="/apps/{slug}/icon-192.png?v={icon_v}">
   <script type="importmap">
   {{
     "imports": {{
@@ -523,7 +528,7 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
     <div id="ic-body">
       <div class="ic-row">
         <button id="ic-icon-btn" class="ic-icon-wrap" type="button" aria-label="Change icon">
-          <img id="ic-icon-img" class="ic-icon" alt="" src="/apps/{slug}/icon-192.png">
+          <img id="ic-icon-img" class="ic-icon" alt="" src="/apps/{slug}/icon-192.png?v={icon_v}">
           <span class="ic-icon-edit" aria-hidden="true">✎</span>
         </button>
         <div class="ic-text">
