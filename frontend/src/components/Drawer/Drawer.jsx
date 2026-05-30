@@ -133,19 +133,44 @@ export default function Drawer({
   }
 
   async function pinChat(id, pinned) {
+    // Optimistic: stamp/clear pinned_at locally so the row reorders the
+    // instant you tap — the sort and the row's pin badge both key off
+    // pinned_at. Without this the row only moves after the PATCH + refetch
+    // round-trips, which reads as "nothing happened, then it did."
+    // Reconcile with the server on success; roll back on failure.
+    const key = chatQueries.keys.all
+    const prev = queryClient.getQueryData(key)
+    queryClient.setQueryData(key, (list) =>
+      (list || []).map((c) =>
+        c.id === id
+          ? { ...c, pinned_at: pinned ? new Date().toISOString() : null }
+          : c,
+      ),
+    )
     const res = await apiFetch(`/chats/${id}`, {
       method: 'PATCH',
       body: JSON.stringify({ pinned }),
     })
     if (res.ok) refreshChats()
+    else queryClient.setQueryData(key, prev)
   }
 
   async function pinApp(id, pinned) {
+    const key = appQueries.keys.all
+    const prev = queryClient.getQueryData(key)
+    queryClient.setQueryData(key, (list) =>
+      (list || []).map((a) =>
+        a.id === id
+          ? { ...a, pinned_at: pinned ? new Date().toISOString() : null }
+          : a,
+      ),
+    )
     const res = await apiFetch(`/apps/${id}`, {
       method: 'PATCH',
       body: JSON.stringify({ pinned }),
     })
     if (res.ok) refreshApps()
+    else queryClient.setQueryData(key, prev)
   }
 
   async function deleteApp(id) {
