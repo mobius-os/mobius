@@ -30,8 +30,13 @@ def fresh_db():
   leak state into one another."""
   Base.metadata.drop_all(bind=engine)
   Base.metadata.create_all(bind=engine)
-  auth_module._login_failures = 0
-  auth_module._login_cooldown_until = 0.0
+  # Reset to empty dicts — the module declares both as `dict[str, ...]`
+  # and the routes do per-username lookups. Setting them to scalar 0
+  # (the prior reset, written before auth was rate-limited per-user)
+  # made `_ensure_login_tracking_maps` paper over the type mismatch on
+  # every login. Cleaner to reset to the right type from the start.
+  auth_module._login_failures = {}
+  auth_module._login_cooldown_until = {}
 
   # Clear chat runtime state across tests. Includes the SDK
   # registries even though no current test populates them — once SDK

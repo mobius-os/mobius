@@ -49,7 +49,7 @@ def get_settings_view(
   }
 
 
-@settings_router.post("")
+@settings_router.post("", dependencies=[Depends(reject_cross_site)])
 def update_settings(
   body: SettingsUpdate,
   owner: models.Owner = Depends(get_current_owner),
