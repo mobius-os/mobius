@@ -32,9 +32,10 @@ log (most of them) use this so they don't litter /data/logs/.
 Per-process write lock — a `threading.Lock` serializes writes from
 the FastAPI worker so two concurrent storage PUTs can't interleave
 half-lines. Cross-process serialization isn't needed: the container
-runs a single uvicorn worker today, and cron jobs that want to log
-go through the same emitter via `cron-emit.sh` (which calls back
-into the API path, not direct file writes).
+runs a single uvicorn worker today, and cron jobs that opt into
+outcome logging go through the same emitter via `cron-emit.sh`,
+which POSTs to /api/admin/activity/emit (not direct file writes) so
+all writes funnel through this lock.
 """
 
 from __future__ import annotations

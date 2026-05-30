@@ -4,11 +4,19 @@
 # Usage:
 #   cron-emit.sh <app_id> <job_path> [arg1 arg2 ...]
 #
-# Crontab entries authored by init-cron-scaffold.sh + the cron-sync
-# path wrap their actual command in this script so every run produces
-# one `cron_outcome` event in /data/logs/activity.jsonl. The dreaming
-# agent reads from that log to see which scheduled jobs ran in the
-# last 24h and how they finished.
+# Agents (or the user) opt into outcome logging by wrapping their
+# cron entry's command in this script. Resulting crontab line shape:
+#   <schedule>  /app/scripts/cron-emit.sh <app_id> /data/apps/<slug>/job.sh
+# Each run then emits one `cron_outcome` event into
+# /data/logs/activity.jsonl. The dreaming agent reads from that log
+# to see which scheduled jobs ran in the last 24h and how they
+# finished.
+#
+# init-cron-scaffold.sh authors the raw crontab entry today (not
+# wrapped). Opting into outcome logging is a manual edit:
+#   crontab -u mobius -l \
+#     | sed "s|^\(.*\) /data/apps/<slug>/job.sh|\1 $0 <app_id> /data/apps/<slug>/job.sh|" \
+#     | crontab -u mobius -
 #
 # Failure modes:
 #   - Wrapped job exits non-zero → we still emit the event with the
