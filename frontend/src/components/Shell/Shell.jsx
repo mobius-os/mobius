@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import Drawer from '../Drawer/Drawer.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
 import ChatView from '../ChatView/ChatView.jsx'
+import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
 import SettingsView from '../SettingsView/SettingsView.jsx'
 import WalkthroughOverlay from '../Walkthrough/WalkthroughOverlay.jsx'
 import { api, BASE } from '../../api/client.js'
@@ -564,6 +565,11 @@ export default function Shell() {
             hide-then-reveal is structurally simpler and locked in
             by tests. */}
         {activeView === 'chat' && activeChatId && (
+          // Guard the chat view: it renders agent-generated markdown
+          // (marked + KaTeX/hljs), the likeliest render-crash source. Keyed
+          // by activeChatId so switching chats clears a crashed boundary —
+          // a broken chat doesn't strand the whole shell.
+          <ErrorBoundary key={activeChatId} variant="inline" label="chat">
           <ChatView
             key={activeChatId}
             chatId={activeChatId}
@@ -588,6 +594,7 @@ export default function Shell() {
               setBuiltApp(null)
             }}
           />
+          </ErrorBoundary>
         )}
         {/* Multi-iframe LRU cache: render every recently-visited app
             as its own persisted iframe; only the matching one is

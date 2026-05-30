@@ -1,0 +1,89 @@
+/* Error-boundary fallback. Uses theme tokens so it themes correctly, but
+   carries CURRENT-palette fallbacks (theme.js) because a crash may itself be
+   theme-related or pre-injection — this surface must always be legible.
+   Fallbacks are the live dark palette, not the stale literals scattered
+   elsewhere in the codebase. */
+.errbound {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: max(24px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom));
+  background: var(--bg, #0d0d0d);
+  color: var(--text, #ececec);
+}
+
+/* Inline variant: fill the nearest positioned ancestor (e.g. .shell__content)
+   instead of the whole viewport, so a single view can fail without covering
+   the drawer/nav — the user can switch to another chat to recover. */
+.errbound--inline {
+  position: absolute;
+}
+
+.errbound__card {
+  width: 100%;
+  max-width: 28rem;
+  padding: 24px;
+  background: var(--surface, #171717);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  border-radius: 14px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.errbound__title {
+  margin: 0 0 8px;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.errbound__body {
+  margin: 0 0 16px;
+  font-size: 14px;
+  line-height: 1.5;
+  opacity: 0.8;
+}
+
+.errbound__detail {
+  margin: 0 0 20px;
+  padding: 10px 12px;
+  max-height: 8rem;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--danger, #f87171);
+  background: color-mix(in srgb, var(--danger, #f87171) 12%, transparent);
+  border-radius: 8px;
+}
+
+.errbound__actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.errbound__btn {
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  padding: 9px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.14));
+  background: transparent;
+  color: var(--text, #ececec);
+  cursor: pointer;
+  transition: opacity 0.15s var(--spring, ease);
+}
+
+.errbound__btn:hover {
+  opacity: 0.85;
+}
+
+.errbound__btn--primary {
+  background: var(--accent, #8b6cf7);
+  border-color: var(--accent, #8b6cf7);
+  color: var(--accent-fg, #ffffff);
+}

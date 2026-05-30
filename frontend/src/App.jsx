@@ -4,6 +4,7 @@ import { useIsRestoring } from '@tanstack/react-query'
 import SetupWizard from './components/SetupWizard/SetupWizard.jsx'
 import LoginForm from './components/LoginForm/LoginForm.jsx'
 import Shell from './components/Shell/Shell.jsx'
+import ErrorBoundary from './components/ErrorBoundary/ErrorBoundary.jsx'
 import { getToken } from './api/client.js'
 import * as setupSession from './lib/setupSession.js'
 import { setupQueries } from './hooks/queries.js'
@@ -12,7 +13,9 @@ import { queryClient, persistOptions } from './queryClient.js'
 export default function App() {
   return (
     <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
-      <AppRoot />
+      <ErrorBoundary label="app">
+        <AppRoot />
+      </ErrorBoundary>
     </PersistQueryClientProvider>
   )
 }
