@@ -39,7 +39,19 @@ _SKIP_ENV = "MOEBIUS_SKIP_BOOTSTRAP"
 
 
 async def ensure_store_installed(db: Session) -> None:
-  """Idempotent: if no App with slug='store' exists, install it.
+  """Idempotent: if no App installed from BOOTSTRAP_STORE_MANIFEST_URL
+  exists, install it.
+
+  Identity is keyed on `manifest_url`, not slug. Two reasons:
+    1. The bootstrapped store doesn't always end up with slug='store'
+       — if the user already built an app called "store", first-boot
+       slug-assignment hands it a fallback like 'app-store'. A slug
+       check would then mis-treat the bootstrapped store as absent
+       and try to install it again every boot.
+    2. If the user uninstalls the bootstrapped store (DELETE
+       /api/apps/<id>), the next container restart should reinstall
+       it. Keying on manifest_url makes the re-install fire correctly
+       regardless of what slug the deleted row had.
 
   Caller is the FastAPI lifespan/startup handler. Owns no transaction
   state — `install_from_manifest` commits its own work on success and
@@ -49,7 +61,9 @@ async def ensure_store_installed(db: Session) -> None:
     log.info("bootstrap: %s=1, skipping store install", _SKIP_ENV)
     return
   existing = (
-    db.query(models.App).filter(models.App.slug == "store").first()
+    db.query(models.App)
+    .filter(models.App.manifest_url == BOOTSTRAP_STORE_MANIFEST_URL)
+    .first()
   )
   if existing is not None:
     log.info("bootstrap: store already installed (app id=%s)", existing.id)

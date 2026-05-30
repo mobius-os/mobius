@@ -244,7 +244,78 @@ def recover_action(
     resp.delete_cookie(_COOKIE)
     return resp
 
+  if action == "reinstall_store":
+    msg = _action_reinstall_store()
+    return HTMLResponse(dashboard_html(msg=msg))
+
   return HTMLResponse(dashboard_html(msg="Unknown action."))
+
+
+def _action_reinstall_store() -> str:
+  """Re-runs the first-boot store bootstrap and returns a status msg.
+
+  Idempotent by design — `ensure_store_installed` is keyed on
+  `manifest_url`, so calling it when the store is already installed
+  is a no-op (logs + returns), and calling it after the user
+  uninstalled the store reinstalls it without needing a container
+  restart.
+
+  The bootstrap function swallows its own failures (a GitHub blip
+  must not crash lifespan), so we look at the DB state after the
+  call to tell the user what actually happened: a row appeared (new
+  install), a row was already there (no-op), or neither (install
+  attempt failed — point them at logs). Imports are lazy: recovery
+  endpoints intentionally avoid `app.bootstrap` / `app.database` at
+  module import so the recovery surface keeps loading even when the
+  install / models / config chain is broken. The reinstall action
+  is the deliberate exception — it CAN'T work if those modules are
+  broken, but reaching it requires the surrounding recovery page to
+  render first, so the lazy import preserves the contract.
+  """
+  try:
+    from app.bootstrap import (
+      BOOTSTRAP_STORE_MANIFEST_URL,
+      ensure_store_installed,
+    )
+    from app.database import SessionLocal
+    from app import models
+  except Exception as exc:  # noqa: BLE001
+    return f"App store install failed during import: {exc}"
+
+  import asyncio
+
+  db = SessionLocal()
+  try:
+    pre_existing = (
+      db.query(models.App)
+      .filter(models.App.manifest_url == BOOTSTRAP_STORE_MANIFEST_URL)
+      .first()
+    )
+    try:
+      asyncio.run(ensure_store_installed(db))
+    except Exception as exc:  # noqa: BLE001
+      # ensure_store_installed already catches its own exceptions and
+      # logs them. Belt-and-braces in case a future refactor changes
+      # that contract — the recovery dashboard must not 500.
+      return f"App store install failed: {exc}"
+    # Refresh the session so we see any row install_from_manifest
+    # committed via its own session.
+    db.expire_all()
+    post = (
+      db.query(models.App)
+      .filter(models.App.manifest_url == BOOTSTRAP_STORE_MANIFEST_URL)
+      .first()
+    )
+    if post is None:
+      return (
+        "App store install attempted but no row was created. "
+        "Check /data/logs for the bootstrap error."
+      )
+    if pre_existing is not None:
+      return "App store was already installed — no action taken."
+    return "App store installed."
+  finally:
+    db.close()
 
 
 # -- Backup ------------------------------------------------------------

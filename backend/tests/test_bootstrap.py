@@ -24,8 +24,20 @@ from app.bootstrap import BOOTSTRAP_STORE_MANIFEST_URL, ensure_store_installed
 
 @pytest.mark.asyncio
 async def test_bootstrap_installs_store_when_absent(db, monkeypatch):
-  """Empty DB → install_from_manifest called with the pinned URL."""
+  """No App with the bootstrap manifest_url → install_from_manifest
+  called with the pinned URL.
+
+  Pre-assert that no row matches the manifest_url so the test's
+  starting state is unambiguous — a slug='store' row with a different
+  manifest_url would still satisfy "bootstrap absent" under the new
+  identity rule.
+  """
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  assert (
+    db.query(models.App)
+    .filter(models.App.manifest_url == BOOTSTRAP_STORE_MANIFEST_URL)
+    .first()
+  ) is None
   mock_app = models.App(id=1, name="Store", slug="store")
   install_mock = AsyncMock(return_value=(mock_app, "install", [], {}))
   with patch("app.bootstrap.install_from_manifest", install_mock):
@@ -39,13 +51,22 @@ async def test_bootstrap_installs_store_when_absent(db, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_bootstrap_skips_when_store_already_installed(db, monkeypatch):
-  """Pre-existing slug='store' → install_from_manifest never called."""
+  """Pre-existing row with the bootstrap manifest_url → install never
+  called.
+
+  Identity is keyed on manifest_url (not slug) so an app the user
+  built that happens to be called "store" doesn't accidentally
+  satisfy this check, and the bootstrapped store's actual slug
+  (which may be 'app-store' if 'store' was taken) doesn't have to
+  be guessed.
+  """
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
   existing = models.App(
     name="Store",
     description="already here",
     jsx_source="export default function App() {}",
-    slug="store",
+    slug="app-store",
+    manifest_url=BOOTSTRAP_STORE_MANIFEST_URL,
   )
   db.add(existing)
   db.commit()
@@ -54,6 +75,35 @@ async def test_bootstrap_skips_when_store_already_installed(db, monkeypatch):
   with patch("app.bootstrap.install_from_manifest", install_mock):
     await ensure_store_installed(db)
   install_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_ignores_unrelated_store_slug(db, monkeypatch):
+  """A user-built app with slug='store' but no bootstrap manifest_url
+  does NOT prevent bootstrap. Under the prior slug-keyed check, this
+  case mis-treated the bootstrapped store as already-installed and
+  skipped the real install.
+  """
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  user_built = models.App(
+    name="Store",
+    description="user's own app, unrelated to the bootstrap manifest",
+    jsx_source="export default function App() {}",
+    slug="store",
+    manifest_url=None,
+  )
+  db.add(user_built)
+  db.commit()
+
+  mock_app = models.App(id=2, name="Store", slug="app-store")
+  install_mock = AsyncMock(return_value=(mock_app, "install", [], {}))
+  with patch("app.bootstrap.install_from_manifest", install_mock):
+    await ensure_store_installed(db)
+  assert install_mock.await_count == 1
+  assert (
+    install_mock.await_args.kwargs["manifest_url"]
+    == BOOTSTRAP_STORE_MANIFEST_URL
+  )
 
 
 @pytest.mark.asyncio
