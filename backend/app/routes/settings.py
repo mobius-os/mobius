@@ -20,7 +20,7 @@ from app import models, providers
 from app.auth import encrypt_api_key
 from app.config import get_settings as get_app_settings
 from app.database import get_db
-from app.deps import get_current_owner
+from app.deps import get_current_owner, reject_cross_site
 from app.schemas import (
   ModelPrefsUpdate,
   ModelRegistryResponse,
@@ -49,7 +49,7 @@ def get_settings_view(
   }
 
 
-@settings_router.post("")
+@settings_router.post("", dependencies=[Depends(reject_cross_site)])
 def update_settings(
   body: SettingsUpdate,
   owner: models.Owner = Depends(get_current_owner),
@@ -119,7 +119,7 @@ def get_model_prefs(
   return {"hidden_ids": [s for s in hidden if isinstance(s, str)]}
 
 
-@owner_router.patch("/model-prefs")
+@owner_router.patch("/model-prefs", dependencies=[Depends(reject_cross_site)])
 def update_model_prefs(
   body: ModelPrefsUpdate,
   owner: models.Owner = Depends(get_current_owner),
@@ -166,7 +166,11 @@ def get_walkthrough(
   }
 
 
-@owner_router.post("/walkthrough/complete", status_code=204)
+@owner_router.post(
+  "/walkthrough/complete",
+  status_code=204,
+  dependencies=[Depends(reject_cross_site)],
+)
 def mark_walkthrough_complete(
   owner: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),

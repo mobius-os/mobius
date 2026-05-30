@@ -36,6 +36,21 @@ import './AppCanvas.css'
 //      CSS so the iframe refreshes without remounting — preserves
 //      in-app state).
 //
+// Intra-app nav (`moebius:nav-push` / `nav-pop` / `nav-push-ack` /
+// `nav-push-rejected` / `nav-back`) is handled below — see the
+// `onMessage` handler. These wire the iframe's own back-stack into
+// the shell's pushState so device-back unwinds in-app routes first.
+//
+// Shell-level messages (handled by Shell.jsx, NOT this file):
+//   - {type: 'moebius:app-error', appId, error, chatId?}    frame → shell
+//   - {type: 'moebius:new-chat', draft?}                    frame → shell
+//   - {type: 'moebius:open-app', appId}                     frame → shell
+//     Switch the shell to another installed app. `appId` may be the
+//     numeric DB id or the slug; Shell matches against its apps list
+//     and silently ignores unknown ids. This is app-SWITCHING (closes
+//     the source iframe's view, opens another app's iframe), distinct
+//     from `nav-push` which is intra-app routing within one iframe.
+//
 // Why token-free frame URL: `GET /api/apps/{id}/frame?v={version}` is
 // unauthenticated and served `Cache-Control: immutable`. Token arrives
 // via postMessage so the SW + browser cache can keep the HTML across

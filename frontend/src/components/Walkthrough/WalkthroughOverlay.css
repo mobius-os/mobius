@@ -98,6 +98,13 @@
   animation: wt-arrow-bounce 1.6s ease-in-out infinite;
 }
 
+/* Up-arrow placed at top-of-card (before the title) — wants negative
+   margin so it visually points past the card edge toward the browser
+   chrome above, not just into the card's whitespace. */
+.wt__arrow--top {
+  margin: -8px 0 4px;
+}
+
 .wt__arrow--up {
   animation-name: wt-arrow-bounce-up;
 }
@@ -131,6 +138,16 @@
 .wt__note--warn {
   background: var(--surface2, #1a1f28);
   color: var(--muted, #9ca3af);
+}
+
+.wt__link {
+  color: var(--accent, #a78bfa);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.wt__link:hover {
+  color: var(--accent-hover, #c4b5fd);
 }
 
 .wt__actions {

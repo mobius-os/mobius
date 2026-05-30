@@ -189,12 +189,21 @@ async function fetchWalkthrough() {
   // POST to /owner/walkthrough/complete fails (flaky connection, tab
   // closed before persist) the next session still considers the user
   // onboarded. Server takes precedence — completed=true from either
-  // side wins. The local flag never reverts the server; reconciling
-  // happens via a successful POST on a future session.
+  // side wins.
   let localCompleted = false
   try { localCompleted = localStorage.getItem('mobius:walkthrough-completed') === '1' } catch (_) {}
+  const completed = !!data?.completed || localCompleted
+  // Reconcile: if local says completed but server doesn't, fire a
+  // background POST to land the persist that didn't make it last
+  // time. Without this the localStorage write would be a one-way door
+  // — Owner.walkthrough_completed_at would stay NULL forever, breaking
+  // downstream onboarding analytics. Fire-and-forget; the next fetch
+  // sees the updated server state OR the local flag still holds.
+  if (localCompleted && !data?.completed) {
+    apiFetch('/owner/walkthrough/complete', { method: 'POST' }).catch(() => {})
+  }
   return {
-    completed: !!data?.completed || localCompleted,
+    completed,
     completed_at: data?.completed_at || null,
   }
 }

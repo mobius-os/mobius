@@ -8,8 +8,7 @@
  *
  *   <ChatInputBar
  *     leftButtons={[
- *       <AttachButton ... />,
- *       <SlashPicker ... />,  // future: model / skill / thinking
+ *       <ComposerPopover ... />,  // attach files + model picker
  *     ]}
  *     ...
  *   />

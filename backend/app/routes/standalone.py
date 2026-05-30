@@ -70,6 +70,47 @@ def _initial_for(name: str) -> str:
   return "?"
 
 
+def _dominant_opaque_color(icon_png: bytes | None, fallback: str = "#0c0f14") -> str:
+  """Returns a #RRGGBB hex from the most common opaque-ish pixel of the
+  app icon. Used to set the standalone PWA's `theme_color` /
+  `background_color` so the OS splash + status bar match the icon's
+  natural fill instead of being a uniform dark slab.
+
+  A transparent icon (the canonical Möbius app-news case — a cream
+  newspaper on alpha=0 background) used to render with a hardcoded
+  `#0c0f14` background underneath, giving the OS-level splash a
+  jarring black halo around the cream paper. Sampling the icon's
+  own dominant non-transparent color, then setting BOTH theme/
+  background colors to it, makes the splash bleed seamlessly into
+  the icon — what we already do for Möbius itself.
+
+  Quantizes to 32-step buckets so noise doesn't fragment the
+  count. Returns `fallback` when the icon is missing or fully
+  transparent.
+  """
+  if not icon_png:
+    return fallback
+  try:
+    from PIL import Image
+    from collections import Counter
+    img = Image.open(io.BytesIO(icon_png)).convert("RGBA")
+    # Downsample first — analysing 1024x1024 of pixels is wasted CPU
+    # for a coarse dominant-color check. 64x64 still has 4K samples,
+    # which is more than enough resolution for the most-common bucket.
+    img.thumbnail((64, 64))
+    buckets = Counter()
+    for r, g, b, a in img.getdata():
+      if a < 200:
+        continue
+      buckets[(r // 32 * 32, g // 32 * 32, b // 32 * 32)] += 1
+    if not buckets:
+      return fallback
+    r, g, b = buckets.most_common(1)[0][0]
+    return f"#{r:02x}{g:02x}{b:02x}"
+  except Exception:
+    return fallback
+
+
 def _generate_icon_png(name: str, slug: str, size: int = 512) -> bytes:
   """Default icon: a single letter centered on a colored background.
 
@@ -137,8 +178,16 @@ def standalone_manifest(slug: str, db: Session = Depends(get_db)):
   base = f"/apps/{slug}/"
   # Version the icon URLs by `updated_at` so when the owner uploads
   # a fresh icon the browser refetches at install time instead of
-  # baking the stale image into the home-screen entry.
-  v = int(app.updated_at.timestamp()) if app.updated_at else 0
+  # baking the stale image into the home-screen entry. Microsecond
+  # resolution (matching the apps-module ETag) so a name PATCH + icon
+  # PUT landing in the same second still produce distinct `?v=`.
+  v = int(app.updated_at.timestamp() * 1_000_000) if app.updated_at else 0
+  # Background + theme color sampled from the icon's dominant opaque
+  # pixel — see _dominant_opaque_color. Both manifest fields take the
+  # SAME value so the OS splash (background_color) blends with the
+  # status-bar tint (theme_color) and the icon (which we composite
+  # onto the same color server-side, see /icon-NNN.png).
+  bg = _dominant_opaque_color(app.icon_png)
   return JSONResponse(
     {
       "id": base,
@@ -148,8 +197,8 @@ def standalone_manifest(slug: str, db: Session = Depends(get_db)):
       "start_url": base,
       "scope": base,
       "display": "standalone",
-      "background_color": "#0c0f14",
-      "theme_color": "#0c0f14",
+      "background_color": bg,
+      "theme_color": bg,
       "icons": [
         {
           "src": f"{base}icon-192.png?v={v}",
@@ -166,6 +215,11 @@ def standalone_manifest(slug: str, db: Session = Depends(get_db)):
       ],
     },
     media_type="application/manifest+json",
+    # Revalidate on every fetch so a freshly-renamed app never serves a
+    # stale name/short_name/icon to the OS at install time. The body is
+    # tiny; `no-cache` keeps it cheap (304 when unchanged) without
+    # letting the browser pin an old manifest.
+    headers={"Cache-Control": "no-cache, must-revalidate"},
   )
 
 
@@ -196,14 +250,24 @@ def standalone_icon(
   if app.icon_png:
     from PIL import Image
     img = Image.open(io.BytesIO(app.icon_png))
-    # Preserve mode — the upload path already normalized to RGB or
-    # RGBA (and cropped to square), so don't strip alpha on serve.
-    # A force-`convert("RGB")` here flattened transparent uploads
-    # onto a black rectangle when the OS rendered them on a non-
-    # dark home screen.
     if img.mode not in ("RGB", "RGBA"):
       img = img.convert("RGBA" if "A" in img.mode else "RGB")
     img = img.resize((size, size), Image.LANCZOS)
+    # Composite onto the dominant-color background so transparency
+    # renders as the manifest's background_color instead of black on
+    # iOS / Android Chrome splash screens. The OS spec says splash
+    # should fill with background_color and paint the icon on top;
+    # in practice browsers vary, and a transparent PNG over a
+    # background_color CSS frequently shows a halo around the icon
+    # edges on iOS. Server-side composite eliminates the variability.
+    if img.mode == "RGBA":
+      bg_hex = _dominant_opaque_color(app.icon_png)
+      r = int(bg_hex[1:3], 16)
+      g = int(bg_hex[3:5], 16)
+      b = int(bg_hex[5:7], 16)
+      bg_layer = Image.new("RGB", img.size, (r, g, b))
+      bg_layer.paste(img, mask=img.split()[3])
+      img = bg_layer
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     body = buf.getvalue()
@@ -242,6 +306,11 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   app = _get_app_by_slug(db, slug)
   app_id = app.id
   app_name = app.name or slug
+  # Cache-bust the install-card icon preview + tab/apple-touch icons on
+  # every app update (same microsecond version the manifest uses), so a
+  # just-changed name/icon doesn't show a stale preview here while the
+  # 5-minute icon cache is warm.
+  icon_v = int(app.updated_at.timestamp() * 1_000_000) if app.updated_at else 0
   # Escape user-controlled strings before interpolating into HTML.
   # The agent generates app names so they're nominally trusted, but
   # belt-and-suspenders: a stray `<script>` in a name would otherwise
@@ -266,8 +335,8 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   <meta name="apple-mobile-web-app-title" content="{app_name_html}">
   <title>{app_name_html}</title>
   <link rel="manifest" href="/apps/{slug}/manifest.json">
-  <link rel="icon" type="image/png" sizes="192x192" href="/apps/{slug}/icon-192.png">
-  <link rel="apple-touch-icon" href="/apps/{slug}/icon-192.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/apps/{slug}/icon-192.png?v={icon_v}">
+  <link rel="apple-touch-icon" href="/apps/{slug}/icon-192.png?v={icon_v}">
   <script type="importmap">
   {{
     "imports": {{
@@ -527,7 +596,7 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
     <div id="ic-body">
       <div class="ic-row">
         <button id="ic-icon-btn" class="ic-icon-wrap" type="button" aria-label="Change icon">
-          <img id="ic-icon-img" class="ic-icon" alt="" src="/apps/{slug}/icon-192.png">
+          <img id="ic-icon-img" class="ic-icon" alt="" src="/apps/{slug}/icon-192.png?v={icon_v}">
           <span class="ic-icon-edit" aria-hidden="true">✎</span>
         </button>
         <div class="ic-text">

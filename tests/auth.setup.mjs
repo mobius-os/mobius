@@ -16,6 +16,23 @@ const USER = process.env.MOBIUS_USER || 'admin'
 const PASS = process.env.MOBIUS_PASS || 'admin'
 const AUTH_FILE = 'tests/.auth/state.json'
 
+// Safety: refuse to run against anything that isn't a local mobius-test
+// container. Setup wipes ALL chats for the owner and write-once stamps
+// walkthrough_completed_at (irreversible via the API). A stray MOBIUS_URL
+// pointing at prod + matching admin/admin creds would destroy data and
+// permanently mark prod walkthrough done. Match scripts/live-test.sh's
+// own guard: localhost only, port 8000 is explicitly off-limits.
+const allowedHosts = ['localhost', '127.0.0.1', '0.0.0.0', '172.17.0.1']
+const baseUrl = new URL(BASE)
+if (!allowedHosts.includes(baseUrl.hostname) || baseUrl.port === '8000') {
+  throw new Error(
+    `auth.setup refuses to run against ${BASE} — only local mobius-test ` +
+    `(non-prod port, localhost-family host) is allowed. ` +
+    `Setup destructively wipes chats and write-once stamps the walkthrough; ` +
+    `running against prod would corrupt owner state irreversibly.`
+  )
+}
+
 setup('authenticate', async ({ page, request }) => {
   // Ensure the owner account exists (idempotent — 409 if already set up).
   await request.post(`${BASE}/api/auth/setup`, {
@@ -41,6 +58,17 @@ setup('authenticate', async ({ page, request }) => {
         })
       ))
     }
+    // Mark walkthrough complete server-side so the WalkthroughOverlay
+    // doesn't render during tests. The overlay's centered-modal +
+    // backdrop intercepts every pointer event in the shell; without
+    // this, every spec that clicks shell UI (Send button, drawer
+    // items, chat rows) times out with "...wt__overlay intercepts
+    // pointer events". The walkthrough is a first-sign-in feature
+    // not relevant to any of these tests' contracts. POST is
+    // idempotent (write-once on the server) — re-running is safe.
+    await request.post(`${BASE}/api/owner/walkthrough/complete`, {
+      headers, failOnStatusCode: false,
+    })
   }
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })

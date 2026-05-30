@@ -308,3 +308,58 @@ def test_walkthrough_endpoints_require_auth(client):
   assert no_get.status_code == 401
   no_post = client.post("/api/owner/walkthrough/complete")
   assert no_post.status_code == 401
+
+
+def test_walkthrough_complete_rejects_cross_site_request(client, auth):
+  """Defense-in-depth: when the browser sends Sec-Fetch-Site:
+  cross-site (a genuine CSRF attempt), the write is blocked even if
+  the attacker somehow obtained the bearer token. Same-origin and
+  same-site stay allowed."""
+  cross = client.post(
+    "/api/owner/walkthrough/complete",
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert cross.status_code == 403, (
+    "cross-site Sec-Fetch-Site must be rejected"
+  )
+  same_origin = client.post(
+    "/api/owner/walkthrough/complete",
+    headers={**auth, "Sec-Fetch-Site": "same-origin"},
+  )
+  assert same_origin.status_code == 204
+  none_origin = client.post(
+    "/api/owner/walkthrough/complete",
+    headers={**auth, "Sec-Fetch-Site": "none"},
+  )
+  # Already write-once stamped above, still 204 — point is "not blocked."
+  assert none_origin.status_code == 204
+
+
+def test_model_prefs_patch_rejects_cross_site_request(client, auth):
+  """Same defense-in-depth as walkthrough/complete — any owner-state
+  PATCH should reject cross-site origin requests."""
+  cross = client.patch(
+    "/api/owner/model-prefs",
+    json={"hidden_ids": []},
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert cross.status_code == 403
+
+
+def test_settings_post_rejects_cross_site_request(client, auth):
+  """POST /api/settings writes gemini_api_key + provider — both owner-
+  state mutations — and shares the reject_cross_site defense applied
+  to walkthrough/complete and model-prefs PATCH. Catches the case
+  where a future refactor accidentally drops the dep."""
+  cross = client.post(
+    "/api/settings",
+    json={"gemini_api_key": "AIzaSyTestCrossSite"},
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert cross.status_code == 403
+  same_origin = client.post(
+    "/api/settings",
+    json={"gemini_api_key": ""},
+    headers={**auth, "Sec-Fetch-Site": "same-origin"},
+  )
+  assert same_origin.status_code == 200

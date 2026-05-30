@@ -1157,7 +1157,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           <div className="chat__empty">
             <img className="chat__empty-glyph" src={`${BASE}/moebius.png`} alt="" width="120" height="120" />
             <p className="chat__empty-title">What's on your mind?</p>
-            <p className="chat__empty-sub">Try: "What can you do?" or "Build me a weather app"<br />It gets sharper the more you use it.</p>
+            <p className="chat__empty-sub">Ask questions, build and modify apps, schedule tasks.<br />Möbius improves the more you use it.</p>
           </div>
         </div>
       )}

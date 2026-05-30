@@ -1,12 +1,13 @@
 /**
  * Shared model + effort picker. Used by:
- *   • SlashPicker (per-chat override, via PATCH /api/chats/{id})
- *   • SettingsView (future: global default editor)
+ *   • ChatSettingsPanel (per-chat override, via PATCH /api/chats/{id})
+ *   • SlashPicker (RETIRED — kept as reference; no active importers)
  *
- * The pickers' UX is the same; only the persistence path differs. By
- * extracting the option lists and the radio-list shape here, the two
- * callers stay in lockstep — adding a model in this file shows up in
- * both places with zero code churn.
+ * ChatSettingsPanel is the live consumer; SlashPicker still compiles
+ * against this file but is no longer wired into any composer. The
+ * shared option lists and radio-list shape are extracted here so a
+ * model addition in this file lights up the live picker with no code
+ * churn elsewhere.
  *
  * Why not a select element: radio rows make the current choice and
  * the alternatives visible at once, which matches the Claude.ai and
@@ -52,7 +53,9 @@ export const CODEX_MODELS = [
 // four since the lower two are rarely useful for build work. `max`
 // was previously exposed for Claude but isn't a recognized Codex tier;
 // dropped for consistency until both providers agree on a fifth level.
-export const EFFORT_LEVELS = [
+// Used internally by the radio-list render below; no external
+// importers (ChatSettingsPanel renders its own stepper).
+const EFFORT_LEVELS = [
   { value: 'low', label: 'Low' },
   { value: 'medium', label: 'Medium' },
   { value: 'high', label: 'High' },
@@ -63,29 +66,6 @@ export function modelsForProvider(providerId) {
   if (providerId === 'codex') return CODEX_MODELS
   return CLAUDE_MODELS
 }
-
-
-/** Provider list — referenced by the lock + tag-label paths below.
- *  Keep aligned with `modelsForProvider` — adding a provider here
- *  without a model list silently breaks the picker. */
-export const PROVIDERS = [
-  { value: 'claude', label: 'Claude' },
-  { value: 'codex', label: 'Codex' },
-]
-
-
-/** Flat list of every available model across all providers, used by
- *  the combined `/` picker. The provider tag is rendered next to each
- *  row so the user knows which agent they're picking; clicking a row
- *  from a non-current provider switches the chat in one PATCH. */
-export const ALL_MODELS = [
-  ...CLAUDE_MODELS.map(m => (
-    { ...m, provider: 'claude', providerLabel: 'Claude' }
-  )),
-  ...CODEX_MODELS.map(m => (
-    { ...m, provider: 'codex', providerLabel: 'Codex' }
-  )),
-]
 
 
 /**

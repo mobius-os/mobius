@@ -1,15 +1,68 @@
 """FastAPI dependency functions."""
 
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
 from app import auth, models
+from app.config import get_settings
 from app.database import get_db
 
 _oauth2 = OAuth2PasswordBearer(tokenUrl="/api/auth/token")
+
+
+def reject_cross_site(request: Request) -> None:
+  """Defense-in-depth CSRF guard for state-changing endpoints.
+
+  Möbius's baseline CSRF posture is "Authorization: Bearer + CORS" —
+  cross-origin JS can't read the token from localStorage without a
+  preflight that fails (allow_credentials=False, allow_origins is
+  pinned). This dependency adds a second layer that doesn't require
+  token plumbing: reject any request whose `Sec-Fetch-Site` claims
+  cross-site origin. Modern browsers always send this header; on
+  ancient clients without it we fall back to a same-origin Referer
+  check before allowing the request through.
+
+  Apply to POST/PATCH/DELETE endpoints that mutate owner state. Read-
+  only GETs don't need it (CORS already gates them).
+
+  See CLAUDE.md "CSRF policy for state-changing endpoints" section.
+  """
+  sec_fetch_site = request.headers.get("sec-fetch-site")
+  if sec_fetch_site is not None:
+    # Browsers send "same-origin" for fetch from the page, "same-site"
+    # for sibling subdomains, "none" for user-initiated navigations
+    # (address-bar typing), "cross-site" for genuine cross-origin
+    # attacks. Same-origin + none + same-site are all OK; only
+    # cross-site is rejected.
+    if sec_fetch_site == "cross-site":
+      raise HTTPException(
+        status_code=403,
+        detail="Cross-site request blocked.",
+      )
+    return
+  # Fallback for ancient browsers that don't send Sec-Fetch-Site.
+  # Require the Referer (or Origin) to match the configured
+  # frontend_origin. Missing both is allowed — same-origin GETs
+  # often omit Referer, and a missing header is not by itself
+  # evidence of cross-site abuse.
+  referer = request.headers.get("referer") or request.headers.get("origin")
+  if not referer:
+    return
+  expected = get_settings().frontend_origin
+  try:
+    ref_host = urlparse(referer).netloc
+    exp_host = urlparse(expected).netloc
+  except Exception:
+    return
+  if exp_host and ref_host and ref_host != exp_host:
+    raise HTTPException(
+      status_code=403,
+      detail="Cross-origin referer blocked.",
+    )
 
 
 @dataclass

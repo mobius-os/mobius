@@ -32,6 +32,12 @@ import {
   CacheFirst, StaleWhileRevalidate, NetworkFirst,
 } from 'workbox-strategies'
 import { clientsClaim } from 'workbox-core'
+import {
+  VENDOR_CACHE,
+  ESM_CACHE,
+  isCacheableAssetResponse,
+  isStaleRuntimeCache,
+} from './sw-cache-policy.js'
 
 // LOAD-BEARING: these two calls are NOT injected by vite-plugin-pwa
 // when using the `injectManifest` strategy + `injectRegister: null`
@@ -59,21 +65,28 @@ clientsClaim()
 precacheAndRoute(self.__WB_MANIFEST)
 cleanupOutdatedCaches()
 
-// One-time migration: the previous hand-written SW created caches
-// named `mobius-{vendor,assets,apps,proxy,esm}-vN`. After this
-// migration none of those names match the new runtime cache names
-// or the Workbox precache names, so they'd linger as dead disk
-// until the browser evicts under pressure. Sweep them on activate.
+// On activate: evict stale runtime caches — the legacy hand-written
+// `mobius-*-vN` caches AND the poisoned un-suffixed `mobius-vendor` /
+// `mobius-esm` left on installs that hit the SPA-fallback bug. The
+// current `-v2` caches are kept. See sw-cache-policy.js for the rules.
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
     const keys = await caches.keys()
     await Promise.all(
-      keys
-        .filter(k => /^mobius-(vendor|assets|apps|proxy|esm)-v\d+$/.test(k))
-        .map(k => caches.delete(k)),
+      keys.filter(isStaleRuntimeCache).map(k => caches.delete(k)),
     )
   })())
 })
+
+// Refuse to cache an SPA-fallback HTML body (or an esm.sh `text/plain`
+// error page) in the cache-first asset caches — the structural fix for
+// the poisoning class. Returning null from `cacheWillUpdate` skips the
+// cache write but still hands the response to the page (Workbox
+// CacheFirst contract).
+const assetCacheGuard = {
+  cacheWillUpdate: async ({ response }) =>
+    isCacheableAssetResponse(response) ? response : null,
+}
 
 // /vendor/* — immutable bundled libs (three.js etc.). Vite copies
 // these in unchanged; URLs aren't content-hashed but the bytes are
@@ -81,7 +94,7 @@ self.addEventListener('activate', (event) => {
 registerRoute(
   ({ url }) =>
     url.origin === self.location.origin && url.pathname.startsWith('/vendor/'),
-  new CacheFirst({ cacheName: 'mobius-vendor' }),
+  new CacheFirst({ cacheName: VENDOR_CACHE, plugins: [assetCacheGuard] }),
 )
 
 // esm.sh/* — third-party module CDN. Their URLs encode the version
@@ -89,7 +102,7 @@ registerRoute(
 // cache-first indefinitely.
 registerRoute(
   ({ url }) => url.hostname === 'esm.sh',
-  new CacheFirst({ cacheName: 'mobius-esm' }),
+  new CacheFirst({ cacheName: ESM_CACHE, plugins: [assetCacheGuard] }),
 )
 
 // /api/proxy — server-side CORS bypass. Only cache asset

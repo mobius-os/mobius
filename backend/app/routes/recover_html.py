@@ -272,6 +272,10 @@ _CONFIRM_BACKUP = (
   "Backup includes OAuth credentials for Claude and Codex."
   " Store the file securely. Continue?"
 )
+_CONFIRM_REINSTALL_STORE = (
+  "Reinstall the app store from its pinned manifest URL?"
+  " Skips if the store is already installed."
+)
 
 
 def dashboard_html(msg: str = "") -> str:
@@ -311,6 +315,20 @@ def dashboard_html(msg: str = "") -> str:
           <input type="hidden" name="action" value="download_backup">
           <button class="btn btn-outline" type="submit">
             Download backup (.zip)
+          </button>
+        </form>
+      </div>
+    </div>
+
+    <div class="section">
+      <p class="section-title">App store</p>
+      <p class="desc" style="margin-bottom:8px;">Reinstalls the curated app store mini-app from its pinned manifest URL. Safe: skips if the store is already installed. Use this if the store was uninstalled by accident.</p>
+      <div class="actions">
+        <form method="POST" action="/recover/action"
+              onsubmit="{_confirm_attr(_CONFIRM_REINSTALL_STORE)}">
+          <input type="hidden" name="action" value="reinstall_store">
+          <button class="btn btn-outline" type="submit">
+            Reinstall app store
           </button>
         </form>
       </div>

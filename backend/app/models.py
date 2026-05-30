@@ -106,6 +106,13 @@ class App(Base):
   # it after a user has installed the standalone PWA would orphan
   # their home-screen icon.
   slug = Column(String(128), nullable=True, unique=True, index=True)
+  # URL the app was installed from (manifest URL passed to
+  # POST /api/apps/install). Null for user-built apps that didn't
+  # come through the install endpoint. The install endpoint matches
+  # by this for update-vs-install discrimination — slug collisions
+  # between user-built apps and store-installed apps are tolerated
+  # because allocate_unique_slug just picks the next free suffix.
+  manifest_url = Column(String(1024), nullable=True, index=True)
   # User-uploaded icon for the standalone PWA install (PNG bytes).
   # Null means fall back to the auto-generated default (first letter
   # of `name` on a deterministic color). Stored inline because icons

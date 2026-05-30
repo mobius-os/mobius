@@ -46,6 +46,12 @@ class AppCreate(BaseModel):
   cross_app_access: ShareLevel = "none"
   share_with_apps: ShareLevel = "none"
   offline_capable: bool = False
+  # Note: `manifest_url` is NOT accepted here. It is the identity key
+  # the install endpoint uses to discriminate install-vs-update — a
+  # caller spoofing it via direct POST could trick a later legitimate
+  # install of the same URL into update-mode (clobbering the spoofed
+  # app's jsx_source + permissions). Only `POST /api/apps/install`
+  # may set `manifest_url`; this route always leaves it NULL.
 
 
 class AppUpdate(BaseModel):
@@ -81,10 +87,45 @@ class AppOut(BaseModel):
   # backfilled on first access via standalone routes (see
   # routes/apps.py:ensure_slug).
   slug: str | None = None
+  # URL the app was installed from (manifest URL passed to
+  # POST /api/apps/install). Null for user-built apps. The install
+  # endpoint matches by this for update-vs-install discrimination.
+  manifest_url: str | None = None
   created_at: datetime
   updated_at: datetime
 
   model_config = {"from_attributes": True}
+
+
+class AppInstall(BaseModel):
+  """Body for POST /api/apps/install — atomic install from a manifest.
+
+  Exactly one of `manifest_url` or `manifest` must be set:
+    - `manifest_url`: the installer GETs the manifest, derives raw_base
+      from the URL (everything before the trailing filename), and
+      fetches the entry JSX + icon + storage_seed files relative to it.
+    - `manifest`: an inline manifest object. The caller must also pass
+      `raw_base` so the installer knows where to fetch referenced files
+      from. Useful for tests + future "install from local tarball".
+  """
+  manifest_url: str | None = None
+  manifest: dict | None = None
+  raw_base: str | None = None
+
+
+class AppInstallOut(AppOut):
+  """Install endpoint response — AppOut plus install-only fields."""
+  # 'install' for a fresh row, 'update' if a same-slug app already
+  # existed and got its jsx_source / seeds / cron refreshed in place.
+  mode: Literal["install", "update"]
+  # The manifest's declared version that ended up applied. Lets the
+  # store mini-app refresh its installed-versions map without round-
+  # tripping the manifest itself.
+  version: str
+  # Steps that were skipped because mini-app permissions could only
+  # take them so far — e.g. "icon: 404 in source repo", "schedule:
+  # no shell access (manual agent step)". Empty list = full success.
+  warnings: list[str] = Field(default_factory=list)
 
 
 class ProviderCodeRequest(BaseModel):

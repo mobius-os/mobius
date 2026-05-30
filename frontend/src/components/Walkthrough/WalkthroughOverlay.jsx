@@ -27,12 +27,18 @@ import './WalkthroughOverlay.css'
 // On iOS-non-Safari (Chrome on iOS, Firefox on iOS, etc.) PWA install
 // is impossible without switching to Safari first. Showing the
 // "Add to home screen" step there is a dead end. We skip the step
-// entirely so the walkthrough remains a 2-step intro + first-chat
-// pair. If the user later opens Möbius in Safari they'll naturally
+// entirely. If the user later opens Möbius in Safari they'll naturally
 // encounter the install affordances through the standalone-shell
 // install card (a separate, drawer-triggered surface).
-const STEPS_FULL = ['intro', 'install', 'first-chat']
-const STEPS_NO_INSTALL = ['intro', 'first-chat']
+//
+// Step order is deliberate: orient → empower → install →
+// safety-net → CTA. The "customize" and "safety-net" steps were
+// added on 2026-05-30 because the agent's write access (covers
+// theme, shell behavior, building apps) and the recovery flow are
+// the two things a new user genuinely cannot discover by tapping
+// around — everything else is visible from the drawer.
+const STEPS_FULL = ['intro', 'customize', 'install', 'safety-net', 'first-chat']
+const STEPS_NO_INSTALL = ['intro', 'customize', 'safety-net', 'first-chat']
 
 export default function WalkthroughOverlay({ onDone }) {
   const queryClient = useQueryClient()
@@ -133,12 +139,8 @@ export default function WalkthroughOverlay({ onDone }) {
       role="dialog"
       aria-modal="true"
       aria-labelledby="wt-title"
-      onClick={skip}
     >
-      <div
-        className={`wt__card wt__card--${step}`}
-        onClick={e => e.stopPropagation()}
-      >
+      <div className={`wt__card wt__card--${step}`}>
         <div className="wt__steps" aria-hidden="true">
           {STEPS.map((s, i) => (
             <span
@@ -150,11 +152,92 @@ export default function WalkthroughOverlay({ onDone }) {
 
         {step === 'intro' && (
           <>
-            <h2 id="wt-title" className="wt__title">Welcome to Möbius</h2>
+            {/* "Quick tour" avoids the title-collision with SetupWizard's
+                "Welcome to Möbius" heading — for a brand-new owner the
+                walkthrough renders moments after setup completes, and
+                seeing the same greeting twice reads as a regression. */}
+            <h2 id="wt-title" className="wt__title">Quick tour</h2>
             <p className="wt__body">
-              Möbius is a chat surface in front of a coding agent that
-              can build mini-apps and modify the platform itself for
-              you. Tell it what you want — it writes the code.
+              Möbius is a chat surface in front of a coding agent. It
+              can build mini-apps and modify the platform itself. Tell
+              it what you want, and it writes the code.
+            </p>
+            <div className="wt__actions">
+              <button
+                type="button"
+                className="wt__btn wt__btn--ghost"
+                onClick={skip}
+              >
+                Skip
+              </button>
+              <button
+                type="button"
+                className="wt__btn wt__btn--primary"
+                onClick={next}
+              >
+                Next
+              </button>
+            </div>
+          </>
+        )}
+
+        {step === 'customize' && (
+          <>
+            <h2 id="wt-title" className="wt__title">Make it yours</h2>
+            <p className="wt__body">
+              The agent has write access to almost everything: the theme,
+              the shell UI, the drawer, the apps you install or build,
+              even how it talks to you. Ask in chat — "switch to a
+              light theme," or "remove the voice button" — and it
+              edits the code and shows you the result.
+            </p>
+            <div className="wt__actions">
+              <button
+                type="button"
+                className="wt__btn wt__btn--ghost"
+                onClick={skip}
+              >
+                Skip
+              </button>
+              <button
+                type="button"
+                className="wt__btn wt__btn--primary"
+                onClick={next}
+              >
+                Next
+              </button>
+            </div>
+          </>
+        )}
+
+        {step === 'safety-net' && (
+          <>
+            <h2 id="wt-title" className="wt__title">If something breaks</h2>
+            <p className="wt__body">
+              The agent can break things. That's the trade for full
+              write access. Open{' '}
+              <a
+                href="/recover/chat"
+                className="wt__link"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                /recover/chat
+              </a>
+              {' '}to talk to a fresh agent with its own boot path. It
+              can roll back the shell, the backend, or recent changes.
+              From{' '}
+              <a
+                href="/recover"
+                className="wt__link"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                /recover
+              </a>
+              {' '}you can also back up the database or reset to factory.
+              Bookmark these. They stay reachable even when the main
+              chat doesn't.
             </p>
             <div className="wt__actions">
               <button
@@ -177,11 +260,18 @@ export default function WalkthroughOverlay({ onDone }) {
 
         {step === 'install' && (
           <>
+            {/* Arrow-up renders BEFORE the card content so the visual
+                bounce points past the card edge toward the address-bar
+                menu (Chromium / Android Firefox), where the install
+                action actually lives. Arrow-down renders below the
+                body because Safari's Share button is at the bottom of
+                the screen — the arrow should point at it, not at the
+                card. */}
+            {installCopy.arrowDir === 'up' && (
+              <div className="wt__arrow wt__arrow--up wt__arrow--top" aria-hidden="true">↑</div>
+            )}
             <h2 id="wt-title" className="wt__title">{installCopy.title}</h2>
             <p className="wt__body">{installCopy.body}</p>
-            {installCopy.arrowDir === 'up' && (
-              <div className="wt__arrow wt__arrow--up" aria-hidden="true">↑</div>
-            )}
             {installCopy.arrowDir === 'down' && (
               <div className="wt__arrow wt__arrow--down" aria-hidden="true">↓</div>
             )}
@@ -215,9 +305,9 @@ export default function WalkthroughOverlay({ onDone }) {
             <h2 id="wt-title" className="wt__title">Start your first chat</h2>
             <p className="wt__body">
               Tap the chat input at the bottom and tell Möbius what
-              you want to build or change. The agent picks the model,
-              writes the code, and shows you the result. You can
-              switch chats anytime from the drawer.
+              you want to build or change. It writes the code and
+              shows you the result. You can switch chats anytime
+              from the drawer.
             </p>
             <div className="wt__actions">
               <button

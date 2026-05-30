@@ -124,14 +124,17 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     await page.goto(`${BASE}/app/${appId}`, { waitUntil: 'domcontentloaded' })
 
     // Spinner must appear initially (the iframe hasn't posted mounted
-    // yet because there's a 50ms delay).
-    await expect(page.locator('.canvas-loading')).toBeVisible({ timeout: 5000 })
+    // yet because there's a 50ms delay). 10s timeout because CI's
+    // bundled chromium + cold container can take 3-4s to reach this
+    // state on first-app-load; local Chrome hits it in ~200ms.
+    await expect(page.locator('.canvas-loading')).toBeVisible({ timeout: 10000 })
 
-    // And it must hide once the mounted event lands. The 3s budget
-    // is generous — the contract is sub-second; if this fails the
-    // listener never matched the message (origin mismatch, source
-    // mismatch, or appId stringify drift).
-    await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 3000 })
+    // And it must hide once the mounted event lands. The contract
+    // is sub-second locally; bumped to 6s for CI cold-cache iframe
+    // boot. If this fails after 6s the listener genuinely never
+    // matched the message (origin mismatch, source mismatch, or
+    // appId stringify drift) — not a timing flake.
+    await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 6000 })
   })
 
   test('spinner stays visible when frame never posts mounted', async ({ page }) => {

@@ -1,6 +1,7 @@
 """Routes for managing the mini-app registry."""
 
 import asyncio
+import hashlib
 import io
 import json
 import re
@@ -18,6 +19,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.deps import (
   get_current_owner, get_current_owner_or_app, get_principal, Principal,
+  reject_cross_site,
 )
 
 router = APIRouter(prefix="/api/apps", tags=["apps"])
@@ -101,6 +103,51 @@ def list_apps(
   )
 
 
+@router.post("/install", response_model=schemas.AppInstallOut, status_code=201)
+async def install_app(
+  body: schemas.AppInstall,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Atomic install (or in-place update) of an app from a `mobius.json`.
+
+  See `app.install.install_from_manifest` for the lifecycle: fetch
+  manifest → fetch entry JSX + icon + seed files → compile → write
+  source_dir → seed storage → register cron, all inside one DB
+  transaction with filesystem rollback on failure.
+
+  Returns the new (or updated) App row plus the install `mode` and
+  any non-fatal `warnings` (e.g. icon 404, cron deferred).
+  """
+  # Late import to avoid circular import — install.py reads from
+  # routes/apps.py at module top.
+  from app.install import install_from_manifest
+  app, mode, warnings, manifest = await install_from_manifest(
+    db,
+    manifest_url=body.manifest_url,
+    manifest=body.manifest,
+    raw_base=body.raw_base,
+  )
+  return schemas.AppInstallOut(
+    id=app.id,
+    name=app.name,
+    description=app.description,
+    compiled_path=app.compiled_path,
+    chat_id=app.chat_id,
+    source_dir=app.source_dir,
+    pinned_at=app.pinned_at,
+    cross_app_access=app.cross_app_access,
+    share_with_apps=app.share_with_apps,
+    slug=app.slug,
+    manifest_url=app.manifest_url,
+    created_at=app.created_at,
+    updated_at=app.updated_at,
+    mode=mode,
+    version=manifest.get("version", "unknown"),
+    warnings=warnings,
+  )
+
+
 @router.post("/", response_model=schemas.AppOut, status_code=201)
 async def create_app(
   body: schemas.AppCreate,
@@ -126,6 +173,9 @@ async def create_app(
     share_with_apps=body.share_with_apps,
     offline_capable=body.offline_capable,
     slug=allocate_unique_slug(db, body.name),
+    # manifest_url stays NULL on this route. Only the install endpoint
+    # may set it — it's the identity key for install-vs-update
+    # discrimination. See AppCreate's docstring for the threat model.
   )
   db.add(app)
   db.flush()  # assigns app.id without committing
@@ -339,6 +389,70 @@ def delete_app(
       pass
 
 
+@router.post(
+  "/{app_id}/run-job",
+  status_code=202,
+  dependencies=[Depends(reject_cross_site)],
+)
+def run_app_job(
+  app_id: int,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Spawns the app's scheduled job script as a non-blocking subprocess.
+
+  Mini-apps cannot shell out themselves — this is the bridge that lets
+  a Reports tab's "Generate now" button trigger the same job the cron
+  schedule would run. The endpoint returns 202 immediately with a
+  started_at timestamp; the job may take 30s+ to complete. Callers
+  observe completion by polling the app's storage for newly-written
+  output (e.g. `/api/storage/apps/{id}/reports/<date>.json`).
+
+  The job script lives at `<source_dir>/<job_name>` where source_dir
+  is the app's on-disk source tree (per the install-from-manifest
+  layout in `app.install`) and job_name comes from the manifest's
+  `schedule.job` field (default "fetch.sh"). Both candidates are
+  tried so apps installed before the manifest convention solidified
+  still work.
+
+  Owner-only — passes the same defense-in-depth CSRF guard the other
+  state-changing endpoints (settings, model-prefs) use.
+  """
+  from datetime import UTC, datetime
+  app = db.query(models.App).filter(models.App.id == app_id).first()
+  if not app:
+    raise HTTPException(status_code=404, detail="App not found.")
+  if not app.source_dir:
+    raise HTTPException(
+      status_code=400, detail="App has no source_dir; cannot locate job.",
+    )
+  source_dir = Path(app.source_dir)
+  # Try the conventional names: fetch.sh (current app-news convention)
+  # and job.sh (the install-from-manifest default). First hit wins.
+  job_path = None
+  for candidate in ("fetch.sh", "job.sh"):
+    p = source_dir / candidate
+    if p.is_file():
+      job_path = p
+      break
+  if job_path is None:
+    raise HTTPException(
+      status_code=400,
+      detail="No job script found (looked for fetch.sh, job.sh).",
+    )
+  # Non-blocking. stdout/stderr go to /dev/null so the subprocess
+  # doesn't inherit the FastAPI worker's pipes; the job script itself
+  # is expected to log to /data/cron-logs/.
+  subprocess.Popen(
+    ["bash", str(job_path), str(app_id)],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    cwd=str(source_dir),
+    close_fds=True,
+  )
+  return {"started_at": datetime.now(UTC).isoformat()}
+
+
 def _etag_for_app(app: models.App) -> str | None:
   """Weak ETag derived from `app.updated_at`. Microsecond precision
   so two updates within the same wall-clock second produce different
@@ -357,7 +471,8 @@ def _not_modified_if_match(
   `etag`, else None. The 304 keeps the ETag header so a browser
   re-validating an existing cache entry can keep its validator, and
   mirrors the X-Mobius-Offline marker so the 304 carries the same
-  cache directive as the 200 it stands in for."""
+  cache directive as the 200 it stands in for (the SW's
+  cacheWillUpdate gate keys on that header)."""
   match = request.headers.get("if-none-match")
   if match and etag in [v.strip() for v in match.split(",")]:
     headers = {"ETag": etag}
@@ -365,6 +480,36 @@ def _not_modified_if_match(
       headers["X-Mobius-Offline"] = "1"
     return Response(status_code=304, headers=headers)
   return None
+
+
+def _frame_etag(app: models.App, frame_path: Path) -> str | None:
+  """Validator for the `/frame` response, combining the app's
+  `updated_at` with the shared runtime-frame file's mtime.
+
+  Unlike the per-app module, the frame serves `app-frame.html` — the
+  importmap + runtime shell — which changes INDEPENDENTLY of any app
+  row. Keying only on `app.updated_at` (as `_etag_for_app` does) means
+  an edit to the frame (e.g. bumping a vendored import path) never
+  invalidates an already-installed PWA: it keeps revalidating against
+  an unchanged validator, gets a 304, and runs the stale frame forever.
+  That is exactly how a dropped `/vendor/three/` path pinned clients to
+  a spinner. Folding a hash of the frame's CONTENT in busts every app's
+  frame cache on the next load whenever app-frame.html changes.
+
+  Content hash, not mtime: `cp`, bind-mounts, and backup/restore rewrite
+  mtimes independently of content, which risks UNDER-invalidation (a
+  real content change that keeps its mtime) — the precise failure mode
+  here. The frame file is small, so hashing per request is cheap."""
+  parts: list[str] = []
+  if app.updated_at:
+    parts.append(str(int(app.updated_at.timestamp() * 1_000_000)))
+  try:
+    parts.append(hashlib.sha256(frame_path.read_bytes()).hexdigest()[:16])
+  except OSError:
+    pass
+  if not parts:
+    return None
+  return 'W/"' + "-".join(parts) + '"'
 
 
 @router.get("/{app_id}/frame")
@@ -408,15 +553,12 @@ def get_frame(
   if not compiled.exists():
     raise HTTPException(status_code=404, detail="Compiled module missing.")
 
-  etag = _etag_for_app(app)
-  if etag:
-    not_modified = _not_modified_if_match(request, etag, app.offline_capable)
-    if not_modified is not None:
-      return not_modified
-
   # Frame priority: agent-editable copy first, then dev-mode path, then
   # the baked-in fallback. The agent can edit
-  # /data/shell/public/app-frame.html directly.
+  # /data/shell/public/app-frame.html directly. Resolve this BEFORE the
+  # ETag so the validator reflects the frame file's content (see
+  # _frame_etag) — otherwise a changed frame never reaches installed
+  # PWAs.
   frame_candidates = [
     Path(get_settings().data_dir) / "shell" / "public" / "app-frame.html",
     Path(__file__).parent.parent.parent.parent
@@ -426,6 +568,12 @@ def get_frame(
   frame_path = next((p for p in frame_candidates if p.exists()), None)
   if frame_path is None:
     raise HTTPException(status_code=404, detail="Frame not found.")
+
+  etag = _frame_etag(app, frame_path)
+  if etag:
+    not_modified = _not_modified_if_match(request, etag, app.offline_capable)
+    if not_modified is not None:
+      return not_modified
 
   html = frame_path.read_text(encoding="utf-8")
 
@@ -447,7 +595,7 @@ def get_frame(
     headers["ETag"] = etag
   # Tells the service worker this app is safe to cache for offline use
   # (Tier 4a). The SW NetworkFirst-caches frame/module only when this
-  # is present, so non-offline_capable apps keep their current
+  # header is present, so non-offline_capable apps keep their current
   # network-only behavior. Cacheability is a function of server state,
   # not a client-pushed list — consistent with the ETag freshness model.
   if app.offline_capable:

@@ -111,12 +111,17 @@ COPY frontend/public/app-frame.html ./app-frame.html
 # so a single-file copy leaves three.core.js missing. Requests for it then
 # fall through to the SPA HTML fallback (200 text/html), and strict module
 # MIME checking rejects it as "failed to load dynamic module".
+# The bare `/vendor/three/` is a maintained compat alias (relative
+# symlink) — the seed documents that path, and PWAs that cached an older
+# app-frame whose importmap pointed at the unversioned URL still request
+# it. Without the alias those requests 404 → SPA HTML → spinner-forever.
 RUN mkdir -p /tmp/vendor-install && cd /tmp/vendor-install \
     && npm init -y >/dev/null \
     && npm install --no-audit --no-fund --silent three@0.184.0 \
     && mkdir -p /app/static/vendor/three@0.184.0/addons \
     && cp -r node_modules/three/build/. /app/static/vendor/three@0.184.0/ \
     && cp -r node_modules/three/examples/jsm/. /app/static/vendor/three@0.184.0/addons/ \
+    && ln -s three@0.184.0 /app/static/vendor/three \
     && cd / && rm -rf /tmp/vendor-install
 
 # Full frontend source so the agent can edit and rebuild the shell.

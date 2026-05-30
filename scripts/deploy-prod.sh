@@ -49,7 +49,13 @@ done
 
 if [ "$TARGET" = "prod" ]; then
   CONTAINER="mobius"
-  COMPOSE_ARGS=()                       # default compose project + file
+  # Pin the compose project to `mobius`. Without this, the project name
+  # defaults to the cwd directory — so running this from a git worktree
+  # gives project `<slug>` instead of `mobius`, which then collides on the
+  # fixed `container_name: mobius` and creates junk `<slug>_*` volumes.
+  # (A real incident: a worktree deploy spawned substrate-freshness_* vols
+  # + a name conflict.) Pinning makes it correct from any cwd.
+  COMPOSE_ARGS=(-p mobius)
   INTERNAL_BASE="http://localhost:8000"  # checked via `docker exec curl`
   PUBLIC_URL="https://mobius.hamzamerzic.info/api/health"
 else
@@ -136,8 +142,13 @@ build_cache_gb() {
 
 # Pull the served bundle filename out of the index.html the container is
 # currently serving. Empty if the container is down or has no bundle.
+#
+# Probes /shell/ explicitly because the SPA lives under /shell/ since the
+# manifest-scope migration (commit e451f01) — `/` 308-redirects there and
+# `curl` without `-L` returns a redirect response with no <script> tag.
+# We use `-L` so the same code works pre- and post-/shell/ scope.
 served_bundle() {
-  docker exec "$CONTAINER" sh -c "curl -fsS '${INTERNAL_BASE}/' 2>/dev/null" \
+  docker exec "$CONTAINER" sh -c "curl -fsSL '${INTERNAL_BASE}/shell/' 2>/dev/null" \
     | grep -oE 'index-[A-Za-z0-9_-]+\.js' \
     | head -n1 || true
 }
@@ -154,6 +165,28 @@ if [ "$CHECK_ONLY" = "1" ]; then
     info "public  /api/health: ${pcode}  (${PUBLIC_URL})"
   fi
   exit 0
+fi
+
+# ── deploy lock: serialize concurrent deploys ───────────────────────────
+# Multiple Claude sessions run against this repo. Two deploys to the same
+# container at once race (recreate clobbers, half-built /data/shell). Take
+# a non-blocking per-target flock; the fd stays open for the script's life
+# and releases on exit. (--check above skips this — it doesn't deploy.)
+# Lock in a user-private 0700 dir, not world-writable /tmp — a local
+# symlink in /tmp could otherwise redirect the open (fd 9 is opened for
+# write). `install -d` guarantees the dir is ours, so dropping the old
+# `|| true` is safe: a failed open is now fatal (via set -e), not a
+# silently-unbound fd 9 that would make the lock a no-op.
+DEPLOY_LOCK_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/mobius"
+install -d -m 0700 "$DEPLOY_LOCK_DIR"
+DEPLOY_LOCK="$DEPLOY_LOCK_DIR/deploy-${TARGET}.lock"
+exec 9>"$DEPLOY_LOCK"
+if command -v flock >/dev/null 2>&1; then
+  if ! flock -n 9; then
+    fail "another ${TARGET} deploy is already running (lock: ${DEPLOY_LOCK})."
+    fail "wait for it to finish (check 'docker ps' / the other session) and retry."
+    exit 1
+  fi
 fi
 
 # ── prod guardrail ──────────────────────────────────────────────────────
@@ -176,11 +209,47 @@ before_hash=$(served_bundle)
 info "current bundle: ${before_hash:-<none>}"
 info "target: ${C_BOLD}${TARGET}${C_RESET} (${CONTAINER})"
 
+# ── prod source-safety guard ────────────────────────────────────────────
+# The project pin above stops worktree junk, but a worktree (or a stale
+# checkout) builds ITS branch — deploying non-main code to prod. Warn +
+# confirm so prod always ships a deliberate, current main.
+if [ "$TARGET" = "prod" ]; then
+  if [ -f "$REPO_ROOT/.git" ]; then
+    warn "running from a git worktree (${REPO_ROOT})."
+    warn "prod normally deploys main from the canonical checkout; a worktree builds its own branch."
+    confirm_yes "deploy prod from this worktree anyway?" || { fail "aborted — use the main checkout"; exit 1; }
+  fi
+  if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    git -C "$REPO_ROOT" fetch origin main -q 2>/dev/null || true
+    head_sha=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "")
+    main_sha=$(git -C "$REPO_ROOT" rev-parse origin/main 2>/dev/null || echo "")
+    if [ -n "$head_sha" ] && [ -n "$main_sha" ] && [ "$head_sha" != "$main_sha" ]; then
+      warn "HEAD $(git -C "$REPO_ROOT" rev-parse --short HEAD) != origin/main $(git -C "$REPO_ROOT" rev-parse --short origin/main 2>/dev/null) — you may deploy non-main code."
+      confirm_yes "deploy this non-main checkout to prod?" || { fail "aborted"; exit 1; }
+    elif [ -z "$main_sha" ]; then
+      warn "couldn't resolve origin/main (no network/remote?) — skipping the non-main check; confirm you're on current main."
+    fi
+  fi
+fi
+
 # ── step 1: build (with cache-prune guard) ─────────────────────────────
 if [ "$SKIP_BUILD" = "1" ]; then
   step "[1/4] SKIPPED docker compose build (--skip-build)"
 else
   step "[1/4] docker compose build"
+  # Refuse to build source that still carries unresolved merge-conflict
+  # markers. A sibling once committed `<<<<<<< HEAD` into apps.py and
+  # deployed it — the image crash-looped on a SyntaxError and prod went
+  # 502. A sub-second grep is the cheapest possible backstop against
+  # shipping a half-resolved merge to prod.
+  intent "scanning build source for merge-conflict markers"
+  if markers=$(grep -rlIE '^(<<<<<<<|>>>>>>>) ' backend/app backend/scripts frontend/src skill 2>/dev/null) && [ -n "$markers" ]; then
+    fail "unresolved merge-conflict markers in:"
+    printf '%s\n' "$markers" | sed 's/^/    /' >&2
+    fail "resolve them before building (this exact class 502'd prod once)."
+    exit 1
+  fi
+  ok "build source is conflict-free"
   cache_gb=$(build_cache_gb)
   info "current build cache: ~${cache_gb}GB"
   if [ "$cache_gb" -ge 6 ]; then
@@ -222,6 +291,19 @@ done
 # main.py picks _live_dir over _baked_dir at module load, so without
 # this step uvicorn keeps serving the stale dist.
 step "[3/4] refresh /data/shell/ from new image's /app/shell-src"
+# Clear /data/shell first so cp -a can land symlinks where the previous
+# deploy wrote regular files (or vice versa). Without this, npm packages
+# whose internal layout shifted between builds (e.g.
+# micromark-extension-math's hoisted katex bin: file in v3 → symlink in
+# v4) cause `cp: cannot create symbolic link ... File exists` because
+# cp -a's `-d` flag preserves the source symlink but won't overwrite an
+# existing destination of a different type. Trying to be defensive with
+# rm -rf /data/shell/dist alone (the previous behavior) missed the
+# node_modules sub-tree entirely. We're about to rebuild from scratch
+# anyway — clear everything in /data/shell. /app/static/ remains as the
+# baked fallback if anything goes wrong.
+intent "docker exec ${CONTAINER} sh -c 'rm -rf /data/shell/* /data/shell/.[!.]* 2>/dev/null; true'"
+docker exec "$CONTAINER" sh -c 'rm -rf /data/shell/* /data/shell/.[!.]* 2>/dev/null; true'
 intent "docker exec ${CONTAINER} cp -a /app/shell-src/. /data/shell/"
 docker exec "$CONTAINER" cp -a /app/shell-src/. /data/shell/
 intent "docker exec ${CONTAINER} rm -rf /data/shell/dist"

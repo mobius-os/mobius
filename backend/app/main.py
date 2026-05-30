@@ -9,7 +9,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -87,15 +87,21 @@ async def lifespan(app):
     init_vapid()
   except Exception as exc:
     _log.error("init_vapid failed: %s", exc, exc_info=True)
-  # Seed a Hello World app on first boot (no-op if apps already exist).
-  # Wrapped: scripts/seed_hello.py is on the agent's write surface, and
-  # a SyntaxError or runtime failure here would kill lifespan startup
-  # and take /recover/chat down with it.
+  # First-boot auto-install of the curated app-store mini-app so a
+  # fresh container shows the store in the drawer immediately. The
+  # bootstrap module is idempotent (no-op if slug='store' already
+  # exists) and swallows its own failures — a GitHub blip must not
+  # crash lifespan and brick the recovery surface.
   try:
-    from scripts.seed_hello import seed as seed_hello
-    await seed_hello()
+    from app.bootstrap import ensure_store_installed
+    from app.database import SessionLocal as _BootstrapSession
+    _bs_db = _BootstrapSession()
+    try:
+      await ensure_store_installed(_bs_db)
+    finally:
+      _bs_db.close()
   except Exception as exc:
-    _log.error("seed_hello failed: %s", exc, exc_info=True)
+    _log.error("bootstrap store install wiring failed: %s", exc, exc_info=True)
   # Backfill source_dir for legacy app rows. The file watcher resolves
   # /data/apps/<slug>/index.jsx → app.id via exact source_dir match;
   # rows with NULL (older builds, or apps imported without going
@@ -270,6 +276,34 @@ def _is_complete_build(d: Path) -> bool:
   return d.is_dir() and (d / "assets").is_dir() and (d / "index.html").is_file()
 
 
+def _is_static_asset_path(path: str) -> bool:
+  """True for paths that must 404 on a miss rather than fall through to
+  the SPA HTML.
+
+  A module/asset URL served as `200 text/html` (the SPA fallback) is
+  rejected by the browser's strict module-MIME check AND poisons a
+  cache-first service worker — this is exactly how a missing
+  `three.core.js` surfaced as "failed to load dynamic module". The HTML
+  fallback is only meaningful for app routes, which have no file
+  extension. We keep the set narrow (code/style assets) so a missing
+  image still degrades gracefully instead of 404-ing a real route.
+
+  The extension check matches code/asset URLs ANYWHERE (not just under
+  `vendor/`/`assets/`) on purpose: a module miss outside those namespaces
+  must also 404 rather than poison the SW with text/html. SPA client
+  routes are extensionless by convention here, so this never 404s a real
+  route — but if a future client route needs a `.js`/`.json` suffix,
+  drop that extension from the set.
+  """
+  return (
+    # First path segment — catches both `vendor` and `vendor/<file>`
+    # without over-matching a route like `vendorfoo`.
+    path.split("/", 1)[0] in {"vendor", "assets"}
+    or path == "sw.js"
+    or path.rsplit(".", 1)[-1] in {"js", "mjs", "css", "map", "wasm", "json"}
+  )
+
+
 _static_dir = _live_dir if _is_complete_build(_live_dir) else _baked_dir
 if _static_dir.is_dir():
   try:
@@ -337,6 +371,12 @@ if _static_dir.is_dir():
       baked = _baked_dir / path
       if baked.is_file():
         return FileResponse(str(baked))
+    # Static asset namespaces 404 on a miss — they must never receive the
+    # SPA HTML below (a module URL served as text/html is MIME-rejected by
+    # the browser and poisons the cache-first service worker). Only app
+    # routes get the HTML fallback.
+    if _is_static_asset_path(path):
+      raise HTTPException(status_code=404, detail="Not found.")
     # Always inject theme CSS (default or override) so colors are
     # consistent from the first paint.
     from fastapi.responses import HTMLResponse
