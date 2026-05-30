@@ -173,27 +173,28 @@ registerRoute(
   new StaleWhileRevalidate({ cacheName: 'mobius-shell-data' }),
 )
 
-// `/api/chats` — separate route, NetworkFirst not SWR. Same cache
-// name (one logical bucket of shell-data) but a different strategy.
+// `/api/chats` — same cache bucket as above (one logical
+// shell-data store) but NetworkFirst instead of SWR. The two
+// strategies share `cacheName` cleanly because Workbox isolates
+// cache storage from fetch strategy.
 //
 // Why split: Shell.jsx's auto-create-starter-chat effect needs an
 // authoritative answer for "are there chats?" before it POSTs a
-// new one. SWR returns a cached body the same tick as the fetch
-// fires, so on fresh-container boots the response timestamp lands
-// in the same millisecond as Shell mount — the strict
-// `dataUpdatedAt > mountTime` comparison the effect used became
-// permanently false (every CI push after the offline-feature merge
-// failed auth.setup.mjs on this exact path). The Shell-side fix
-// (isFetchedAfterMount instead of the timestamp compare) closes
-// the test, but the SWR shape also leaves a race window where a
-// stale cached chats=[] reaches the effect before the network
-// revalidate, letting auto-create POST a duplicate. NetworkFirst
-// removes that window: online → fresh server truth → no race;
-// offline (or slow >5s) → falls back to cache so the drawer still
-// shows last-known chats. This preserves the offline-feature
-// agent's "drawer shows last-known list offline" contract (durable
-// past TanStack Query's 24h persister maxAge) while restoring
-// online correctness.
+// new one. SWR returns the cached body the same tick the fetch
+// fires; under a fast-online network that effectively erases the
+// "did a fetch resolve after Shell mounted?" signal the auto-
+// create effect relies on. NetworkFirst keeps the hot path going
+// to the network so the live response, not the cache, is what the
+// effect sees. The 5s timeout still permits a cached-`[]` fallback
+// on a degraded (but technically online) connection — that's the
+// narrow residual window where the auto-create can over-fire, but
+// the duplicate is recoverable and far less likely than under SWR.
+//
+// Offline / >5s → cache wins, drawer keeps showing the last-known
+// list. This is the offline-feature agent's stated contract; the
+// SW cache outlives TanStack Query's 24h persister maxAge so it's
+// the durable layer for cold-offline launches. See Shell.jsx's
+// isFetchedAfterMount comment for the consumer-side of this fix.
 registerRoute(
   ({ url }) =>
     url.origin === self.location.origin &&

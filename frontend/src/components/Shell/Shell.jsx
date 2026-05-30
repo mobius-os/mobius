@@ -505,6 +505,20 @@ export default function Shell() {
   // created chats server-side after the snapshot was written. Without
   // the liveFetched guard, this effect would POST a spurious empty
   // chat before the live refetch arrives.
+  //
+  // `activeChatId` is in the deps array because the demote-cached-
+  // chat effect above this one can transition it from a real id to
+  // null on the same chats reference (live fetch confirms the
+  // restored chat is gone server-side, so it sets chats[0]?.id || null
+  // which can be null if the list emptied). Without activeChatId in
+  // deps, that transition wouldn't re-run this bootstrap effect, and
+  // a user whose last chat was deleted out-of-band (another tab,
+  // backend cleanup) would land in a no-chat / no-ChatView state with
+  // an empty `<main>` until the next refresh. newChat is intentionally
+  // NOT in deps — it's a plain function declaration recreated every
+  // render, so adding it would re-fire the effect every render. The
+  // call site doesn't depend on its identity, only on invoking it
+  // once when the guards line up.
   useEffect(() => {
     if (!chatsLoadedRef.current) return
     const liveFetched = chatsQuery.isSuccess
@@ -513,7 +527,7 @@ export default function Shell() {
     if (chats.length === 0 && activeChatId === null) {
       newChat()
     }
-  }, [chats, chatsQuery.isSuccess, chatsQuery.isFetchedAfterMount])
+  }, [chats, activeChatId, chatsQuery.isSuccess, chatsQuery.isFetchedAfterMount])
 
   return (
     <div className="shell">
