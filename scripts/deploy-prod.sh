@@ -172,8 +172,15 @@ fi
 # container at once race (recreate clobbers, half-built /data/shell). Take
 # a non-blocking per-target flock; the fd stays open for the script's life
 # and releases on exit. (--check above skips this — it doesn't deploy.)
-DEPLOY_LOCK="/tmp/mobius-deploy-${TARGET}.lock"
-exec 9>"$DEPLOY_LOCK" || true
+# Lock in a user-private 0700 dir, not world-writable /tmp — a local
+# symlink in /tmp could otherwise redirect the open (fd 9 is opened for
+# write). `install -d` guarantees the dir is ours, so dropping the old
+# `|| true` is safe: a failed open is now fatal (via set -e), not a
+# silently-unbound fd 9 that would make the lock a no-op.
+DEPLOY_LOCK_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/mobius"
+install -d -m 0700 "$DEPLOY_LOCK_DIR"
+DEPLOY_LOCK="$DEPLOY_LOCK_DIR/deploy-${TARGET}.lock"
+exec 9>"$DEPLOY_LOCK"
 if command -v flock >/dev/null 2>&1; then
   if ! flock -n 9; then
     fail "another ${TARGET} deploy is already running (lock: ${DEPLOY_LOCK})."
