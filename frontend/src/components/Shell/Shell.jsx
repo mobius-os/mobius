@@ -294,6 +294,12 @@ export default function Shell() {
   //     the building chat was deleted. Error is set as a draft (not auto-sent)
   //     so the user can review before sending.
   //   moebius:new-chat — open a new chat with optional pre-filled draft text.
+  //   moebius:open-app — switch the shell to an installed app. Payload
+  //     {appId} accepts either the numeric DB id or the slug; we match
+  //     against the installed apps list and silently ignore unknown ids
+  //     (don't crash the shell on a stale or malicious payload). Mirrors
+  //     the drawer's onApp wiring (navTo('canvas', { appId })) so the
+  //     existing iframe LRU + back-stack behavior applies.
   useEffect(() => {
     async function handleAppError(e) {
       const appEntry = apps.find(a => String(a.id) === String(e.data.appId))
@@ -324,6 +330,18 @@ export default function Shell() {
         handleAppError(e)
       } else if (e.data?.type === 'moebius:new-chat') {
         newChat({ draft: e.data.draft, forceNew: true })
+      } else if (e.data?.type === 'moebius:open-app') {
+        // Match against installed apps by numeric id OR slug, so the
+        // sender can use whichever it has on hand. String() coercion
+        // covers the numeric-id case without trusting the payload's
+        // type. Unknown ids are dropped silently — a stale catalog
+        // entry or a buggy mini-app shouldn't take down the shell.
+        const target = e.data.appId
+        if (target == null) return
+        const app = apps.find(a =>
+          String(a.id) === String(target) || a.slug === target)
+        if (!app) return
+        navTo('canvas', { appId: app.id })
       }
     }
 
