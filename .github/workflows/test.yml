@@ -54,6 +54,19 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - name: Cache frontend node_modules
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend deps
+        # Required because themeService.test.js transitively imports
+        # @tanstack/react-query (via hooks/queries.js). Without
+        # node_modules the loader can't resolve the bare specifier
+        # and the whole test suite fails on ERR_MODULE_NOT_FOUND.
+        working-directory: frontend
+        run: npm ci
       - name: Run frontend unit tests
         working-directory: frontend
         run: npm test
