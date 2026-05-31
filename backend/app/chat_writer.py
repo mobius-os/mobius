@@ -33,6 +33,7 @@ resolution back inside a `with` block.
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import itertools
 import logging
@@ -49,6 +50,33 @@ from app import schemas
 from app.events import build_assistant_message, finalize_blocks, question_block_key
 
 log = logging.getLogger("moebius.chat_writer")
+
+
+# Bounded wait for a strict (commit-before-ack) writer-actor command.
+# Every must-persist caller (QuestionCommit / Finalize / AnswerQuestion /
+# StartTurn / PromotePending / ...) awaits the ack before taking the next
+# step — broadcasting a card, promoting the queue, resolving a future. The
+# timeout is defense-in-depth: the actor's own `db.commit()` is bounded by
+# SQLite's 5s busy_timeout, so a healthy-but-contended write completes well
+# inside this bound; exceeding it means the writer thread is wedged, which
+# the failure-semantics paths treat as persistence-unavailable (transport
+# error / 503) rather than hanging the turn forever.
+ACK_TIMEOUT_SECS = 30.0
+
+
+async def await_ack(ack: Future, *, timeout: float = ACK_TIMEOUT_SECS):
+  """Await a writer-actor ack on the loop, bounded by `timeout`.
+
+  Wraps the actor's `concurrent.futures.Future` with `asyncio.wrap_future`
+  so the event loop stays free while the writer thread commits, then awaits
+  it under a timeout. Re-raises the actor's exception on a failed write (the
+  caller maps it to its own failure-semantics response — deny / 503 /
+  transport error) and raises `asyncio.TimeoutError` when the actor never
+  acked in time. The single seam every strict path uses, so the timeout
+  policy lives in one place; lives here (not chat.py) so chat_queue can use
+  it without importing back into chat.py.
+  """
+  return await asyncio.wait_for(asyncio.wrap_future(ack), timeout=timeout)
 
 
 # -- Commands (domain-level; a later milestone swaps their dispatch) -----

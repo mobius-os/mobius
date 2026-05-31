@@ -408,7 +408,7 @@ def test_promote_pending_messages(db):
   db.commit()
 
   next_msgs, next_user, session_id = asyncio.run(
-    _promote_pending_messages(db, "promote-test"),
+    _promote_pending_messages(db, "promote-test", "rt-pt"),
   )
 
   db.refresh(chat)
@@ -449,22 +449,22 @@ def test_promote_drains_all_sequentially(db):
   db.add(chat)
   db.commit()
 
-  _, first, _ = asyncio.run(_promote_pending_messages(db, "drain-test"))
+  _, first, _ = asyncio.run(_promote_pending_messages(db, "drain-test", "rt-d1"))
   assert first["content"] == "a"
   db.refresh(chat)
   assert len(chat.pending_messages) == 2
 
-  _, second, _ = asyncio.run(_promote_pending_messages(db, "drain-test"))
+  _, second, _ = asyncio.run(_promote_pending_messages(db, "drain-test", "rt-d2"))
   assert second["content"] == "b"
   db.refresh(chat)
   assert len(chat.pending_messages) == 1
 
-  _, third, _ = asyncio.run(_promote_pending_messages(db, "drain-test"))
+  _, third, _ = asyncio.run(_promote_pending_messages(db, "drain-test", "rt-d3"))
   assert third["content"] == "c"
   db.refresh(chat)
   assert len(chat.pending_messages) == 0
 
-  _, none_user, _ = asyncio.run(_promote_pending_messages(db, "drain-test"))
+  _, none_user, _ = asyncio.run(_promote_pending_messages(db, "drain-test", "rt-d4"))
   assert none_user is None
 
 
@@ -520,7 +520,9 @@ def test_promote_locked_atomic_with_append(db):
       await asyncio.sleep(0)  # give appender a chance to await acquire
       # Inside the lock, promote unlocked. Pending should be empty
       # (appender is still waiting).
-      _, user, _ = _promote_pending_messages_locked(db, "late-drain-test")
+      _, user, _ = await _promote_pending_messages_locked(
+        db, "late-drain-test", "rt-ld",
+      )
       return user
 
   async def run():
@@ -572,7 +574,7 @@ def test_promote_succeeds_when_starting_is_held_by_current_run(db):
   registry.mark_starting("starting-held-test")
   try:
     msgs, user, sid = asyncio.run(
-      _promote_pending_messages(db, "starting-held-test"),
+      _promote_pending_messages(db, "starting-held-test", "rt-sh"),
     )
     # MUST succeed despite _starting being held — this is the bug fix.
     assert user is not None
@@ -610,7 +612,7 @@ def test_promote_and_append_dont_lose_messages(db):
     s = SessionLocal()
     try:
       await asyncio.sleep(0)  # let append get into the lock queue
-      await _promote_pending_messages(s, "race-test")
+      await _promote_pending_messages(s, "race-test", "rt-rc")
     finally:
       s.close()
 

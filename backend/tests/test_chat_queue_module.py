@@ -6,10 +6,15 @@ to satisfy the same contract: lock is per-chat, atomic get-or-create,
 no await in the get path, and the drain critical section calls the
 injected discard_starting + forget_chat exactly once when (and only
 when) the queue is empty.
+
+C2: promote_pending_messages_locked / drain_and_release now route the
+JSON-blob RMW through the writer actor's PromotePending command (the
+actor is the sole runtime mutator), so they are async and take a
+`run_token`. The conftest fresh_db fixture starts the actor per test, so
+these drive the real actor against the test DB.
 """
 
 import asyncio
-from datetime import UTC, datetime
 
 import pytest
 
@@ -64,9 +69,12 @@ def test_promote_pending_messages_locked_drains_head(db):
   db.add(chat)
   db.commit()
 
-  next_msgs, head, sid = (
-    chat_queue.promote_pending_messages_locked(db, "cq-head-test")
-  )
+  async def go():
+    return await chat_queue.promote_pending_messages_locked(
+      db, "cq-head-test", "rt-cq",
+    )
+
+  next_msgs, head, sid = asyncio.run(go())
 
   assert head is not None
   assert head["content"] == "first"
@@ -88,9 +96,12 @@ def test_promote_pending_messages_locked_returns_none_on_empty_queue(db):
   db.add(chat)
   db.commit()
 
-  next_msgs, head, sid = (
-    chat_queue.promote_pending_messages_locked(db, "cq-empty")
-  )
+  async def go():
+    return await chat_queue.promote_pending_messages_locked(
+      db, "cq-empty", "rt-cq",
+    )
+
+  next_msgs, head, sid = asyncio.run(go())
   assert head is None
   assert next_msgs == []
   assert sid == "sess-empty"
@@ -115,7 +126,7 @@ def test_drain_and_release_promotes_then_holds_starting(db):
 
   async def go():
     return await chat_queue.drain_and_release(
-      db, "cq-drain-with-head", we_own_gen=True,
+      db, "cq-drain-with-head", we_own_gen=True, run_token="rt-cq",
       discard_starting=discarded.append,
       forget_chat=forgotten.append,
     )
@@ -146,7 +157,7 @@ def test_drain_and_release_releases_when_queue_empty(db):
 
   async def go():
     return await chat_queue.drain_and_release(
-      db, "cq-drain-empty", we_own_gen=True,
+      db, "cq-drain-empty", we_own_gen=True, run_token="rt-cq",
       discard_starting=discarded.append,
       forget_chat=forgotten.append,
     )
@@ -176,7 +187,7 @@ def test_drain_and_release_no_op_when_not_owning_generation(db):
 
   async def go():
     return await chat_queue.drain_and_release(
-      db, "cq-not-owner", we_own_gen=False,
+      db, "cq-not-owner", we_own_gen=False, run_token="rt-cq",
       discard_starting=discarded.append,
       forget_chat=forgotten.append,
     )
@@ -218,7 +229,7 @@ def test_drain_serializes_with_concurrent_lock_holder(db):
 
   async def drain_run():
     head, _, _ = await chat_queue.drain_and_release(
-      db, "cq-serialize", we_own_gen=True,
+      db, "cq-serialize", we_own_gen=True, run_token="rt-cq",
       discard_starting=lambda _cid: None,
       forget_chat=lambda _cid: None,
     )

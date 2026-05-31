@@ -93,6 +93,28 @@ def claim(chat_id: str) -> "PendingQuestion | None":
   return _pending.pop(chat_id, None)
 
 
+def claim_if(chat_id: str, expected: "PendingQuestion") -> bool:
+  """Pop the pending question ONLY if it is still `expected` (by identity).
+
+  The stop-races-answer guard: the answer route PEEKS the pending entry,
+  submits AnswerQuestion to the actor, and AWAITS its ack — during that
+  await a concurrent Stop can `cancel()` (pop + cancel the future) the
+  same chat's question. After the ack, the route calls this to re-claim
+  the entry by identity before resolving its future. Returns True (and
+  removes it) when the registry still holds exactly `expected`; False
+  when it was removed or replaced (Stop cancelled it, or a newer question
+  superseded it) — in which case the caller must NOT resolve the future
+  (it is already cancelled / belongs to a different question) and returns
+  410. Single-thread asyncio makes the check-and-pop atomic (no await
+  between get + pop).
+  """
+  current = _pending.get(chat_id)
+  if current is expected:
+    _pending.pop(chat_id, None)
+    return True
+  return False
+
+
 def cancel(chat_id: str) -> None:
   """Cancels and drops any live AskUserQuestion for the chat.
 

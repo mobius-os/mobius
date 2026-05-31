@@ -225,18 +225,47 @@ def create_chat(
 
 
 @router.put("/{chat_id}")
-def update_chat(
+async def update_chat(
   body: ChatUpdate,
   chat_id: str,
   _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
-  """Updates a chat's title and/or messages."""
+  """Updates a chat's title and/or messages.
+
+  A transcript replacement (`messages` present) MUST route through the
+  writer actor's `ReplaceTranscript` — the actor is the sole runtime
+  mutator of `messages`, and ReplaceTranscript broad-fences every
+  in-flight streaming snapshot for the chat so a concurrent turn's save
+  can't clobber the replacement (or vice versa). This holds regardless
+  of caller (the agent editing its own transcript, a recovery flow, a
+  direct API client).
+
+  A title-only PUT (no `messages`) dirties only the title column — an
+  allowed direct write (see the design's "can stay direct" list); it
+  stays on this request's session so it does NOT broad-fence and wipe an
+  in-flight streaming snapshot the way ReplaceTranscript intentionally
+  does for a full replace.
+  """
+  from app.chat_writer import ReplaceTranscript, await_ack, get_writer
+
+  get_active_chat_or_404(db, chat_id)
+  if body.messages is not None:
+    ack = get_writer().submit(
+      ReplaceTranscript(
+        chat_id=chat_id,
+        run_token="",
+        messages=body.messages,
+        title=body.title,  # None leaves the title unchanged
+      )
+    )
+    await await_ack(ack)
+    return {"ok": True}
+
+  # Title-only update — direct write (no transcript mutation).
   chat = get_active_chat_or_404(db, chat_id)
   if body.title is not None:
     chat.title = body.title
-  if body.messages is not None:
-    chat.messages = body.messages
   # Always touch updated_at so the chat moves to the top of history.
   chat.updated_at = datetime.now(UTC)
   db.commit()
@@ -535,41 +564,32 @@ async def save_question_answers(
 ):
   """Saves the user's answers into the question block being answered.
 
-  Prefers an exact `question_id` match when supplied (precise routing
-  with two open questions); falls back to the LAST assistant message's
-  last question block when absent, unchanged from prior behaviour.
+  Legacy path (no live SDK turn waiting): routes the merge through the
+  writer actor's `AnswerQuestion` with NO run_token — a tokenless answer
+  broad-fences EVERY pending streaming snapshot for the chat (the
+  exact-key fence can't reach a snapshot under the live streaming token),
+  so a stale snapshot can't clobber the answer after it commits. Prefers
+  an exact `question_id` match when supplied (precise routing with two
+  open questions); falls back to the LAST assistant message's last
+  question block when absent (unchanged behaviour). The actor raises when
+  no matching block exists, which maps to the route's 404 contract.
   """
-  from sqlalchemy.orm.attributes import flag_modified
+  from app.chat_writer import AnswerQuestion, await_ack, get_writer
 
-  chat = get_active_chat_or_404(db, chat_id)
-  msgs = list(chat.messages or [])
-
-  if body.question_id:
-    for msg in reversed(msgs):
-      if msg.get("role") != "assistant":
-        continue
-      for block in msg.get("blocks", []):
-        if (block.get("type") == "question"
-            and block.get("question_id") == body.question_id):
-          block["answers"] = body.answers
-          chat.messages = msgs
-          flag_modified(chat, "messages")
-          db.commit()
-          return {"ok": True}
-    raise HTTPException(status_code=404, detail="No question block found.")
-
-  log.debug(
-    "question-answers without question_id; using latest-question "
-    "fallback chat_id=%s", chat_id,
+  get_active_chat_or_404(db, chat_id)
+  ack = get_writer().submit(
+    AnswerQuestion(
+      chat_id=chat_id,
+      run_token="",  # tokenless → broad-fence by chat
+      question_id=body.question_id,
+      answers=body.answers,
+    )
   )
-  for msg in reversed(msgs):
-    if msg.get("role") != "assistant":
-      continue
-    for block in reversed(msg.get("blocks", [])):
-      if block.get("type") == "question":
-        block["answers"] = body.answers
-        chat.messages = msgs
-        flag_modified(chat, "messages")
-        db.commit()
-        return {"ok": True}
-  raise HTTPException(status_code=404, detail="No question block found.")
+  try:
+    await await_ack(ack)
+  except Exception:
+    # No matching question block (or the write dropped). Preserve the
+    # route's 404 contract — the client treats it as "the question card
+    # is no longer addressable".
+    raise HTTPException(status_code=404, detail="No question block found.")
+  return {"ok": True}

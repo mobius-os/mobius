@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import time
-from datetime import UTC, datetime
 from pathlib import Path as FilePath
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -23,7 +22,13 @@ from app.chat import (
 )
 from app import chat_queue
 from app.chat_writer import (
-  apply_answers_to_last_question as _apply_answers_to_last_question,
+  AnswerQuestion,
+  AppendPending,
+  CancelPending,
+  StartTurn,
+  alloc_run_token,
+  await_ack,
+  get_writer,
 )
 from app.config import get_settings
 from app.database import get_db
@@ -101,37 +106,37 @@ def _ensure_unique_ts(new_msg: dict, pending: list[dict]) -> None:
 async def _append_to_pending(
   chat: models.Chat, body: schemas.SendMessage, db: Session,
 ) -> dict:
-  """Appends a queued message and commits. Returns the stored dict.
+  """Queue a message via the actor's AppendPending; return the stored dict.
 
-  Serialized per chat via the queue lock from app.chat — concurrent
-  POSTs (and concurrent DELETE/promote) are made safe by refreshing
-  the chat row from the DB inside the lock so each caller sees the
-  committed state of the previous one.
+  The JSON-blob RMW (collision-free ts, append, optional answer merge,
+  commit) is the actor's `AppendPending` command — the SOLE runtime
+  mutator of `pending_messages`, so concurrent POST/DELETE/promote can't
+  lost-update. The per-chat queue lock is still held by the caller around
+  the compound queue decision; the actor never acquires it.
 
-  AskUserQuestion answers: when the body carries `answers` (user is
-  submitting a hidden answer to a question), the answers are written
-  into the LAST assistant message's question block inside this same
-  lock + commit. Applying answers BEFORE the refresh would be
-  overwritten by the refresh; applying them OUTSIDE the lock could
-  race with a concurrent send. So they ride along with the queue
-  append, atomic.
+  AskUserQuestion answers ride along: when the body carries `answers`,
+  AppendPending merges them into the matching question block in the SAME
+  commit as the append, so the answer + the queued message land
+  atomically (the race that used to leave answers missing on a mid-stream
+  remount).
+
+  The append is keyed on an empty run_token: a queued message isn't a
+  streaming turn, so it has no snapshot key of its own to fence.
   """
-  async with chat_queue.get_lock(chat.id):
-    db.refresh(chat)
-    # Apply answers AFTER refresh so we don't lose the write.
-    _apply_answers_to_last_question(chat, body.answers, body.question_id)
-    pending = list(chat.pending_messages or [])
-    new_msg = _user_message_from_body(chat, body)
-    # Clear BOTH queued and persisted messages: assistant ts is now
-    # allocated off chat.messages (chat._next_message_ts), so a user ts
-    # that only cleared `pending` could equal a persisted assistant ts
-    # and collide once it promotes (duplicate React keys client-side).
-    _ensure_unique_ts(new_msg, pending + list(chat.messages or []))
-    pending.append(new_msg)
-    chat.pending_messages = pending
-    chat.updated_at = datetime.now(UTC)
-    db.commit()
-  return new_msg
+  ack = get_writer().submit(
+    AppendPending(
+      chat_id=chat.id,
+      run_token="",
+      user_msg=_user_message_from_body(chat, body),
+      answers=body.answers,
+      question_id=body.question_id,
+    )
+  )
+  result = await await_ack(ack)
+  # Reflect the committed state on the request's session so a later
+  # `db.refresh(chat)` in this handler sees the actor's write.
+  db.expire(chat)
+  return result["stored"]
 
 
 def _answer_delivered_response(chat_id: str) -> JSONResponse:
@@ -177,12 +182,12 @@ def _user_message_from_body(
   return user_msg
 
 
-# `_apply_answers_to_last_question` now lives in `chat_writer.py` and is
-# imported above under its old underscore name. It moved so the writer
-# actor's `AnswerQuestion` command can reuse the exact same merge logic
-# without importing back into this route module. Behaviour is unchanged:
-# the route still calls it inline as part of the POST /messages
-# transaction, atomic with the queue append + turn start.
+# The answer-merge logic lives in `chat_writer.apply_answers_to_last_
+# question` and is no longer called from this route directly: C2 routes
+# every answer write through the writer actor's `AnswerQuestion` command
+# (the sole runtime mutator of `chat.messages`), and the queue append
+# carries answers via `AppendPending`. The merge runs on the actor thread
+# so it can't lost-update against a concurrent streaming snapshot.
 
 
 @router.post("/{chat_id}/messages", status_code=202)
@@ -196,64 +201,82 @@ async def send_message(
   and returns 202 immediately.  The client streams via GET /stream."""
   chat = get_active_chat_or_404(db, chat_id)
 
-  # Atomic answer persistence: when the user is submitting a hidden
-  # answer to an AskUserQuestion (body.hidden=true with body.answers),
-  # write those answers into the existing question block BEFORE any
-  # branching. This eliminates the dual-request race (old flow: a
-  # separate POST /question-answers wrote them, racing with the GET on
-  # remount). The actual commit happens in whichever branch below runs
-  # (queue path, stale-pending path, or fresh-start path) — they each
-  # call db.commit() on the chat row.
+  # SDK in-process answer delivery: if a live SDK turn is blocked waiting
+  # for an AskUserQuestion answer (held in `questions._pending[chat_id]`),
+  # persist the answer through the writer actor, then resolve the future
+  # in-place and return — the SDK continues the active turn. The answer
+  # merge is NO LONGER written inline on this request's session: the
+  # actor's `AnswerQuestion` command re-reads the chat fresh, merges the
+  # answer into the right question block (by id), and commits — the SOLE
+  # runtime mutator of the JSON blob, so the answer can't lost-update
+  # against a concurrent streaming snapshot.
   #
-  # Load-bearing for the SDK answer-delivery path below (committed at
-  # the questions.claim short-circuit). Redundant for the queue path,
-  # where _append_to_pending re-applies after db.refresh. Don't remove
-  # without re-tracing both paths.
-  _apply_answers_to_last_question(chat, body.answers, body.question_id)
-
-  # SDK in-process answer delivery: if the Claude Agent SDK is blocked
-  # in a PreToolUse hook waiting for an AskUserQuestion answer (held
-  # in `questions._pending[chat_id]`), resolve the future in-place and
-  # return — the SDK then continues the active turn with the answer.
-  # The subprocess providers leave `questions._pending` empty (their
-  # AskUserQuestion intercept kills the proc and the answer becomes a
-  # new queued turn), so this short-circuit no-ops for them and the
-  # existing queue path takes over.
-  #
-  # Registration race: the frontend renders the question card the
-  # instant the `question` SSE event lands, but the bridge handler
-  # that inserts into `questions._pending` runs in a separate task
-  # (Codex marshals it via `run_coroutine_threadsafe` from the SDK's
-  # sync worker thread; Claude's `can_use_tool` is an SDK callback).
-  # A user who taps an answer chip in the ~tens-of-ms window between
-  # "event published" and "registry populated" used to hit 410. We
-  # poll with a short grace period — `await asyncio.sleep(0.05)`
-  # yields to the loop so the bridge's pending coroutine can advance
-  # and write the entry. 500ms total is long enough to cover the
-  # registration race in practice but short enough that a genuinely
-  # stale UI still gets the 410 fast.
+  # Registration race: the frontend renders the card the instant the
+  # `question` SSE event lands, but the runner registers the pending
+  # entry in a separate task (Codex via `run_coroutine_threadsafe` from
+  # the SDK worker thread; Claude's `can_use_tool` callback). A user who
+  # answers in the tens-of-ms window before the entry lands used to hit
+  # 410. We PEEK (not pop) with a short grace period; the `await sleep`
+  # yields so the runner can write the entry. 500ms covers the race in
+  # practice; a genuinely stale UI still gets the 410 fast.
   if body.answers:
     async with chat_queue.get_lock(chat_id):
       _GRACE_ATTEMPTS = 10
       _GRACE_INTERVAL = 0.05  # seconds — total ~500ms
-      pending = questions.claim(chat_id)
+      pending = questions.get(chat_id)
       for _ in range(_GRACE_ATTEMPTS):
         if pending is not None:
           break
         await asyncio.sleep(_GRACE_INTERVAL)
-        pending = questions.claim(chat_id)
+        pending = questions.get(chat_id)
       if pending is not None:
-        db.commit()  # persist the answers we just wrote
+        # Persist the answer through the actor FIRST (commit-before-
+        # resolve). Keyed on the turn's run_token so the actor fences the
+        # right (chat_id, run_token) snapshot; a tokenless pending (no
+        # run_token) submits an empty token, which broad-fences by chat.
+        # The body's explicit question_id wins over the pending's
+        # (precise routing when two questions were open).
+        ack = get_writer().submit(
+          AnswerQuestion(
+            chat_id=chat_id,
+            run_token=pending.run_token or "",
+            question_id=(body.question_id or pending.question_id),
+            answers=body.answers,
+          )
+        )
+        try:
+          await await_ack(ack)
+        except Exception as exc:
+          # The answer write did NOT land (no matching block, dropped
+          # commit, or a wedged writer past the timeout). Do NOT resolve
+          # the future — the pending question stays registered so the
+          # user can retry. 503 tells the client "try again".
+          log.warning(
+            "AnswerQuestion did not persist chat_id=%s: %s", chat_id, exc,
+          )
+          raise HTTPException(
+            status_code=503,
+            detail="Could not save your answer; please try again.",
+          )
+        # Stop-races-answer guard: a concurrent Stop may have cancelled
+        # this question (popping the entry + cancelling the future) WHILE
+        # we awaited the ack. Re-claim by identity before resolving — if
+        # the registry no longer holds exactly this pending entry, Stop
+        # (or a superseding question) took it; do NOT resolve a cancelled
+        # / foreign future. The answer is durable regardless (the actor
+        # committed it); 410 tells the client the card is no longer live.
+        if not questions.claim_if(chat_id, pending):
+          raise HTTPException(
+            status_code=410,
+            detail="The question is no longer accepting answers.",
+          )
         if not pending.future.done():
           pending.future.set_result(body.answers)
         return _answer_delivered_response(chat_id)
-      # No pending question (Stop cancelled it, or stale UI). If we
-      # fell through, the answer text would land as a new turn prompt
-      # (e.g. "- Which color?: Red") which is nonsense to the agent.
-      # 410 Gone tells the client "the question you're answering is
-      # no longer accepting answers" so the UI can hide the card and
-      # surface the right error.
-      db.rollback()  # don't keep the answer-write we just did
+      # No pending question (Stop cancelled it, or stale UI). Falling
+      # through would land the answer text as a new turn prompt (e.g.
+      # "- Which color?: Red"), nonsense to the agent. 410 tells the
+      # client the question is no longer accepting answers.
       raise HTTPException(
         status_code=410,
         detail="The question is no longer accepting answers.",
@@ -293,8 +316,13 @@ async def send_message(
       # (e.g., two stale-pending POSTs racing).
       if mark_starting(chat_id):
         try:
+          # The drained turn gets its own run_token: PromotePending sets
+          # its run marker under it, and the spawned runner reuses it.
+          drain_token = alloc_run_token()
           next_messages, next_user, next_session_id = (
-            await chat_queue.promote_pending_messages(db, chat_id)
+            await chat_queue.promote_pending_messages(
+              db, chat_id, drain_token,
+            )
           )
           if next_user:
             _schedule_continuation(
@@ -303,6 +331,7 @@ async def send_message(
               session_id=next_session_id,
               provider_id=chat.provider,
               next_user=next_user,
+              run_token=drain_token,
             )
           else:
             # Nothing to promote (queue race, malformed) — release.
@@ -313,8 +342,9 @@ async def send_message(
 
     # Re-read pending after the potential promote so the reported
     # position reflects the user-visible queue (excludes the message
-    # that just became the active turn).
-    db.refresh(chat)
+    # that just became the active turn). expire() drops the identity-map
+    # copy so this read reflects the actor's committed write.
+    db.expire(chat)
     remaining = list(chat.pending_messages or [])
     try:
       position = [m.get("ts") for m in remaining].index(new_msg["ts"]) + 1
@@ -333,30 +363,36 @@ async def send_message(
   # the chat is stuck "starting" until process restart.  run_chat's
   # outer finally only fires after the task is scheduled.
   try:
-    # Set provider on first message (new chat).
-    if not chat.messages:
-      owner = db.query(models.Owner).first()
-      chat.provider = (owner.provider if owner else "claude") or "claude"
-
-    # Build the full message history for the agent.
-    msgs = [schemas.ChatMessage(role=m["role"], content=m.get("content", ""))
-            for m in (chat.messages or [])]
-
-    content = _content_with_uploads(chat, body)
-
-    msgs.append(schemas.ChatMessage(role="user", content=content))
-
-    # Save the user message to the DB immediately so the chat list
-    # reflects it before the background task starts.  This also sets
-    # the title from the first message.
+    # The initial-send write — append the user message, set the title +
+    # provider on the first message, AND set the run marker — is one
+    # atomic actor command (StartTurn). Keyed on this turn's run_token,
+    # which the spawned runner reuses, so the marker StartTurn sets
+    # matches the runner's streaming/terminal writes. Building the user
+    # message (uploads notice, attachments, ts) stays on the route; the
+    # actor owns the JSON-blob mutation.
+    run_token = alloc_run_token()
     user_msg = _user_message_from_body(chat, body)
-    existing = list(chat.messages or [])
-    existing.append(user_msg)
-    chat.messages = existing
-    if len(existing) == 1:
-      chat.title = body.content[:40] or "New chat"
-    chat.updated_at = datetime.now(UTC)
-    db.commit()
+    owner = db.query(models.Owner).first()
+    default_provider = (owner.provider if owner else "claude") or "claude"
+
+    ack = get_writer().submit(
+      StartTurn(
+        chat_id=chat_id,
+        run_token=run_token,
+        user_msg=user_msg,
+        title_source=body.content,
+        default_provider=default_provider,
+      )
+    )
+    # StartTurn returns the agent history (schemas.ChatMessage list built
+    # exactly as the pre-C2 inline path), the session_id, and the
+    # provider it set/kept. Awaited so the user message + run marker are
+    # durable before the background task starts (the chat list reflects
+    # the send immediately, and run_chat sees the marker).
+    result = await await_ack(ack)
+    msgs = result["history"]
+    session_id = result["session_id"]
+    provider = result["provider"]
 
     # Create the broadcast before spawning the task so the stream
     # endpoint can subscribe immediately without a race.
@@ -366,10 +402,10 @@ async def send_message(
     gen = current_run_generation(chat_id)
     asyncio.create_task(
       run_chat(
-        msgs, chat_id=chat_id, session_id=chat.session_id,
-        provider_id=chat.provider, run_gen=gen,
+        msgs, chat_id=chat_id, session_id=session_id,
+        provider_id=provider, run_gen=gen,
         attachments=body.attachments, timezone=body.timezone,
-        viewport=body.viewport,
+        viewport=body.viewport, run_token=run_token,
       )
     )
   except Exception:
@@ -393,22 +429,20 @@ async def cancel_pending_message(
   drift (e.g. the backend promoted a message into the active turn
   between the user clicking X and the DELETE landing).
   """
-  chat = get_active_chat_or_404(db, chat_id)
+  # Existence check only — the actor's CancelPending does the RMW. The
+  # 404 here keeps the route's contract (unknown / deleted chat → 404).
+  get_active_chat_or_404(db, chat_id)
 
-  # Same per-chat lock as POST queue append + promote. Without it, a
-  # DELETE that races a concurrent POST/promote can read a stale
-  # snapshot and commit, undoing the other operation. Serializing
-  # here makes all three queue mutations pairwise atomic.
-  async with chat_queue.get_lock(chat_id):
-    db.refresh(chat)
-    pending = list(chat.pending_messages or [])
-    remaining = [m for m in pending if m.get("ts") != ts]
-    if len(remaining) != len(pending):
-      chat.pending_messages = remaining
-      chat.updated_at = datetime.now(UTC)
-      db.commit()
-
-  return {"pending_messages": remaining}
+  # The actor's CancelPending removes the matching ts and commits — the
+  # SOLE runtime mutator of pending_messages, so a DELETE racing a
+  # concurrent POST/promote can't lost-update. Returns the remaining
+  # queue so the client can reconcile drift (e.g. the backend promoted a
+  # message into the active turn between the click and the DELETE).
+  ack = get_writer().submit(
+    CancelPending(chat_id=chat_id, run_token="", ts=ts)
+  )
+  result = await await_ack(ack)
+  return {"pending_messages": result["pending"]}
 
 
 @router.get("/{chat_id}/stream")

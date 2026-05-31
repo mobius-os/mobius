@@ -13,7 +13,6 @@ import json
 import logging
 import os
 import re
-import threading
 import time
 from datetime import UTC, datetime, timedelta
 from logging.handlers import RotatingFileHandler
@@ -25,12 +24,15 @@ from sqlalchemy.orm import Session
 from app import auth, chat_queue, models, questions, schemas
 from app.broadcast import ChatBroadcast, create_broadcast, get_broadcast, set_active_broadcast
 from app.chat_writer import (
+  ClearPending,
+  ClearRunStatus,
   Finalize,
   PersistError,
   PersistTranscript,
   QuestionCommit,
   alloc_run_token,
   apply_answers_to_last_question as _apply_answers_to_last_question,
+  await_ack as _await_ack,
   finalize_response as _finalize_response,
   get_writer,
   next_message_ts as _next_message_ts,
@@ -123,30 +125,10 @@ def _save_message(db: Session, chat_id: str, message: dict):
 # would cycle on `alloc_run_token`).
 
 
-# Bounded wait for a strict (commit-before-ack) writer-actor command.
-# Questions/finalize/answers all await an actor ack before taking the
-# next step (broadcasting a card, promoting the queue, resolving a
-# future); the timeout is defense-in-depth so a wedged actor surfaces a
-# transport error rather than hanging the turn forever. The actor's own
-# `db.commit()` is bounded by SQLite's 5s busy_timeout, so a healthy but
-# contended write completes well inside this bound; exceeding it means
-# the writer thread is wedged, which the failure-semantics paths treat as
-# persistence-unavailable.
-_ACK_TIMEOUT_SECS = 30.0
-
-
-async def _await_ack(ack, *, timeout: float = _ACK_TIMEOUT_SECS):
-  """Awaits a writer-actor ack future on the loop, bounded by `timeout`.
-
-  Wraps the actor's `concurrent.futures.Future` with
-  `asyncio.wrap_future` so the event loop stays free while the writer
-  thread commits, then awaits it under a timeout. Re-raises the actor's
-  exception on a failed write (the caller maps that to its own
-  failure-semantics response — deny / 503 / transport error), and raises
-  `TimeoutError` when the actor never acked in time. The single seam every
-  strict path uses, so the timeout policy lives in one place.
-  """
-  return await asyncio.wait_for(asyncio.wrap_future(ack), timeout=timeout)
+# `_await_ack` (the bounded asyncio.wrap_future seam for strict
+# commit-before-ack actor commands) lives in chat_writer and is imported
+# above under its old underscore name — it's there, not here, so
+# chat_queue can use it without importing back into chat.py.
 
 
 # Queue management (per-chat lock, promote, drain_and_release) lives
@@ -155,149 +137,120 @@ async def _await_ack(ack, *, timeout: float = _ACK_TIMEOUT_SECS):
 # directly; no shims remain.
 
 class _ChatEventSink:
-  """Bridges SDK-runner events to broadcast + DB state.
+  """Bridges SDK-runner events to broadcast + the chat-writer actor.
 
   SDK runners publish Möbius events via `sink.publish(event)`. The
-  sink forwards each event to the real broadcast, accumulates
-  assistant content blocks for the message-in-progress, throttles
-  DB writes, and captures `session_id` + `cost_usd` from terminal
-  events. This keeps SDK runners pure (one-way SDK → events) while
-  the chat-side state stays here.
+  sink forwards each event to the real broadcast, accumulates assistant
+  content blocks for the message-in-progress, captures
+  `session_id` + `cost_usd` from terminal events, and routes every
+  transcript write through the single-writer actor (`chat_writer`) keyed
+  on `(chat_id, run_token)`. This keeps SDK runners pure (one-way SDK →
+  events) while the chat-side state stays here.
 
   Lifetime: one sink per `_run_chat_impl` call. After the runner
-  returns, the chat-impl wrapper calls `finalize()` which writes the
-  final assistant message + persists session_id/cost on the chat row.
+  returns, the chat-impl wrapper awaits `finalize()`, which submits the
+  terminal `Finalize` to the actor and awaits its ack before the turn's
+  queue-drain / continuation runs.
 
-  Commit offload (why publish is sync but flush is async): the
-  streaming save is a `db.commit()` against SQLite. With
-  `busy_timeout=5000` (database.py) a commit under write contention
-  can block the calling thread for up to 5s. `publish()` runs
-  synchronously inside the runner's `async for` loop — on the event
-  loop thread — so an inline commit there stalls the whole loop, and
-  with it every OTHER chat's SSE stream, for the duration of the lock
-  wait. To keep the loop free, `publish()` does only the cheap,
-  ordered work (accumulate + broadcast) and records the due save as a
-  `_pending_save` snapshot; the runner loop then `await`s `flush()`,
-  which runs the blocking commit via `asyncio.to_thread` so the loop
-  keeps serving other chats while SQLite does I/O. (Full aiosqlite
-  migration would remove the thread hop entirely, but is out of scope
-  — see the streaming notes in CLAUDE.md.)
+  Why the actor (this is the C2 activation): the streaming save is a
+  `db.commit()` against SQLite. With `busy_timeout=5000` (database.py) a
+  commit under write contention can block its thread for up to 5s.
+  Running that on the event loop stalled every other chat's SSE; running
+  it inline on the request session re-introduced the lost-update race
+  (the actor builds a snapshot from an old read while a request commits
+  an answer, then the actor's stale snapshot clobbers it). The actor is
+  the SOLE runtime mutator of both JSON blobs (`messages`,
+  `pending_messages`), so the blocking commit is off-loop AND
+  serialized: no lost update, no SSE stall.
 
-  Thread-safety of the offload: the coroutine-owned `db` Session
-  never crosses into the worker thread. Each worker save opens and
-  closes its own `SessionLocal`, while `_persist_lock` serializes it
-  with inline question and final saves. The lock is needed because a
-  Codex approval callback can publish a question while an older
-  streaming flush is still in flight.
-
-  DB-lock-drop behavior: broadcasts still happen even when the DB
-  write path hits `_safe_commit()` returning False (for example a
-  transient SQLite lock). The commit outcome is exposed via
-  `flush()`'s boolean return (and `publish()`'s return for the one
-  inline-commit case, `question`) so callers can observe a
-  broadcast-without-persist gap if they care.
+  Write semantics:
+    - ordinary events (text/tool/etc.) → `PersistTranscript`
+      (coalescible, fire-and-forget; a later snapshot or Finalize
+      repairs a dropped write — a done-callback logs an exception so a
+      failure is visible);
+    - `error` → `PersistError` (fire-and-forget, non-coalescing);
+    - `question` is REJECTED by `publish()` — it must go through
+      `publish_question()` (save-before-broadcast), so a runner can't
+      bypass the QuestionCommit barrier;
+    - `finalize()` → `Finalize` (commit-before-ack: the queue only
+      drains / a continuation only schedules once the terminal state is
+      durable).
   """
 
   _SAVE_INTERVAL_SECS = 1.0
   # Subset of app.events.EventType that forces a save so the user does
-  # not reconnect into a stale transcript mid-turn. The save is still
-  # offloaded via flush() for every type except `question` (which must
-  # persist before its broadcast — see publish()).
+  # not reconnect into a stale transcript mid-turn. Every type here is a
+  # fire-and-forget PersistTranscript / PersistError except `question`,
+  # which publish() rejects (it must go through publish_question()).
   _IMMEDIATE_SAVE_TYPES = frozenset(
     {"tool_start", "tool_end", "error", "question"}
   )
 
-  def __init__(self, bc, chat_id: str, db: Session, run_token: str | None = None):
+  def __init__(self, bc, chat_id: str, run_token: str | None = None):
     self.bc = bc
     self.chat_id = chat_id
-    self.db = db
-    # Per-turn run identity, allocated centrally in `_run_chat_impl` (see
-    # `chat_writer.alloc_run_token`). DORMANT in this milestone: the sink
-    # only parks it so a later milestone can stamp it on writer-actor
-    # commands `(chat_id, run_token)`. Nothing here uses it to alter the
-    # existing persist path — `run_token=None` keeps legacy/test callers
-    # working with zero behavior change.
+    # Per-turn run identity, allocated by the scheduler and threaded in
+    # via `_run_chat_impl`. The sink stamps it on every writer-actor
+    # command so the actor coalesces/fences this turn's snapshots under
+    # `(chat_id, run_token)`. `""` for a tokenless legacy/test caller —
+    # the actor tolerates an empty token (its own key).
     self.run_token = run_token
     self.assistant_blocks: list = []
     self.session_id: str | None = None
     self.cost_usd: float | None = None
     self._last_save = 0.0
-    # Assistant-message snapshot recorded by publish() when a non-
-    # question save comes due, drained by flush() into an off-loop
-    # commit. None means nothing to write. Snapshots coalesce: a later
-    # publish overwrites an undrained snapshot, and since each snapshot
-    # is the FULL current message, the drained one still reflects every
-    # block accumulated up to the flush.
-    self._pending_save: tuple[int, dict] | None = None
-    self._save_generation = 0
-    self._persist_lock = threading.Lock()
 
-  def _persist_in_worker(self, generation: int, snapshot: dict) -> bool:
-    """Persists one snapshot with a worker-owned session."""
-    from app.database import SessionLocal
-    db = SessionLocal()
-    try:
-      with self._persist_lock:
-        if generation != self._save_generation:
-          return True
-        return _update_last_assistant_message(
-          db, self.chat_id, snapshot,
+  def _submit_fire_and_forget(self, cmd) -> None:
+    """Submit a fire-and-forget transcript write; log a failed ack.
+
+    `PersistTranscript` / `PersistError` are coalescible / non-terminal:
+    a dropped write is repaired by a later snapshot or the terminal
+    `Finalize`, so the caller does NOT await the ack. But a silently
+    failing ack would hide a real persistence problem, so attach a
+    done-callback that logs the exception (a `None` result — a coalesced
+    snapshot superseded before it committed — is the normal drop and is
+    not logged).
+    """
+    ack = get_writer().submit(cmd)
+
+    def _log_if_failed(fut, _kind=type(cmd).__name__, _cid=self.chat_id):
+      try:
+        fut.result()
+      except Exception:
+        _get_logger().exception(
+          "chat writer %s ack failed chat_id=%s (a later snapshot/"
+          "Finalize repairs)", _kind, _cid,
         )
-    finally:
-      db.close()
+
+    ack.add_done_callback(_log_if_failed)
 
   def publish(self, event: ChatEvent) -> bool:
-    """Publishes an event; records any due save for a later `flush()`.
+    """Publishes an ordinary event and routes any due save to the actor.
 
     Live broadcast is best-effort independent from persistence and
     always happens here, synchronously, so SSE ordering is preserved.
-    The blocking `db.commit()` is deferred to `flush()` (run off the
-    event loop) for every event type EXCEPT `question`.
+    The blocking `db.commit()` runs on the actor thread (off-loop,
+    serialized), submitted fire-and-forget so the loop never waits.
 
-    Returns True except when the one inline commit path (`question`)
-    fails; the deferred-save outcome is surfaced by `flush()`.
+    `question` events are a programming error here — they must go
+    through `publish_question()` so the QuestionCommit save-before-
+    broadcast barrier can't be bypassed. Returns True (the bool is
+    vestigial now that no commit runs inline; kept so the runner's
+    call-site contract is unchanged).
     """
     event_type = event.get("type")
-    commit_ok = True
+    assert event_type != "question", (
+      "question events must go through publish_question(), not publish()"
+    )
 
     # Accumulate the event into assistant_blocks and decide whether a
     # save is due (immediate for save-triggering types, throttled
     # otherwise).
     accumulated = process_event(event, self.assistant_blocks)
-    needs_save = accumulated and self.chat_id and (
+    needs_save = accumulated and self.chat_id and self.run_token and (
       event_type in self._IMMEDIATE_SAVE_TYPES
       or time.monotonic() - self._last_save >= self._SAVE_INTERVAL_SECS
     )
-
-    # AskUserQuestion is the one event that MUST persist before the
-    # broadcast: the frontend renders the question card the moment the
-    # broadcast lands, and a fast user Submit races the DB write
-    # otherwise. _apply_answers_to_last_question (chats_stream.py)
-    # iterates chat.messages looking for the latest assistant
-    # message's question block — if the runner hasn't written it yet,
-    # the lookup silently returns False, the SDK future resolves
-    # without persisted answers, and the answer disappears on the
-    # next runner writeback (which has no block.answers to carry over).
-    # This commit stays INLINE (on the loop): questions are rare, the
-    # save-before-broadcast ordering is load-bearing, and the brief
-    # block on a clarification is an acceptable trade for keeping the
-    # invariant trivially correct. Persist an undrained older snapshot
-    # first and serialize behind any in-flight worker save so no stale
-    # flush can land after this fuller write.
-    if needs_save and event_type == "question":
-      self._last_save = time.monotonic()
-      pending = self._pending_save
-      self._pending_save = None
-      with self._persist_lock:
-        if pending is not None and pending[0] == self._save_generation:
-          commit_ok = _update_last_assistant_message(
-            self.db, self.chat_id, pending[1],
-          )
-        self._save_generation += 1
-        commit_ok = _update_last_assistant_message(
-          self.db, self.chat_id,
-          build_assistant_message(self.assistant_blocks),
-        ) and commit_ok
 
     self.bc.publish(event)
 
@@ -305,62 +258,74 @@ class _ChatEventSink:
     if event_type == "done":
       self.cost_usd = event.get("cost_usd")
 
-    # All other event types save AFTER broadcast and OFF the loop:
-    # record the snapshot and let the next flush() commit it. Most
-    # text deltas don't even get here (the 1s throttle), and the ones
-    # that do no longer block the loop on SQLite I/O.
+    # Route the due save to the actor AFTER broadcast. An `error` is a
+    # non-coalescing PersistError (it must not be collapsed away by a
+    # later text snapshot); everything else is a coalescible
+    # PersistTranscript. Both fire-and-forget — the off-loop commit can't
+    # stall the stream, and a dropped write is repaired by a later
+    # snapshot or the terminal Finalize.
     #
     # Deep-copy is load-bearing: build_assistant_message aliases
     # self.assistant_blocks (its "blocks" IS that live list, and
-    # process_event mutates those block dicts in place). flush()
-    # serializes this snapshot on a WORKER thread; copying here means
-    # the worker reads a frozen value that no later publish()/
-    # process_event on the loop can mutate underneath it. Without the
-    # copy, a concurrent loop event (e.g. a same-chat question park)
-    # racing the in-flight commit thread is a cross-thread mutation of
-    # the very list being read. Snapshots are <=1/sec (throttle) and
-    # tiny next to a commit, so the copy is free.
-    if needs_save and event_type != "question":
+    # process_event mutates those block dicts in place). The actor reads
+    # the snapshot on its own thread; copying here means it reads a
+    # frozen value no later publish()/process_event on the loop can
+    # mutate underneath it. Snapshots are <=1/sec (throttle) and tiny
+    # next to a commit, so the copy is free.
+    if needs_save:
       self._last_save = time.monotonic()
-      self._save_generation += 1
-      self._pending_save = (
-        self._save_generation,
-        copy.deepcopy(build_assistant_message(self.assistant_blocks)),
+      snapshot = copy.deepcopy(build_assistant_message(self.assistant_blocks))
+      if event_type == "error":
+        self._submit_fire_and_forget(
+          PersistError(
+            chat_id=self.chat_id, run_token=self.run_token, snapshot=snapshot,
+          )
+        )
+      else:
+        self._submit_fire_and_forget(
+          PersistTranscript(
+            chat_id=self.chat_id, run_token=self.run_token, snapshot=snapshot,
+          )
+        )
+    return True
+
+  async def flush(self) -> None:
+    """No-op shim retained for the runner's per-iteration call.
+
+    Pre-C2 the runner awaited `flush()` to run a deferred commit off the
+    loop. The actor now owns every transcript commit (submitted
+    fire-and-forget from `publish()`), so there is nothing to flush. The
+    shim stays because the runners still call it once per stream
+    iteration (`_maybe_flush`); removing that call is deferred to
+    milestone D.
+    """
+    return None
+
+  async def finalize(self) -> None:
+    """Submit the terminal assistant-message write and await its ack.
+
+    Runs once per turn AFTER the runner's stream loop returns, BEFORE the
+    queue drain / continuation. `Finalize` is commit-before-ack and
+    must-persist: the actor force-completes any running tool block and
+    writes the terminal snapshot, raising (failing the ack) if the write
+    did not land. The caller (`_run_chat_impl`) awaits this and, on a
+    failed ack, emits a transport-only error + `done` and does NOT
+    promote the queue or schedule a continuation (the run marker is left
+    set for reconciliation to repair) — see the design's failure
+    semantics. No fallback direct write.
+
+    No-op when there's nothing to finalize (no chat_id, no token, or no
+    accumulated blocks — an empty turn), matching the pre-C2 guard.
+    """
+    if not (self.chat_id and self.run_token and self.assistant_blocks):
+      return
+    snapshot = build_assistant_message(self.assistant_blocks)
+    ack = get_writer().submit(
+      Finalize(
+        chat_id=self.chat_id, run_token=self.run_token, snapshot=snapshot,
       )
-    return commit_ok
-
-  async def flush(self) -> bool:
-    """Commits a pending streaming save off the event loop.
-
-    Called by the runner once per stream-loop iteration. Drains the
-    snapshot recorded by `publish()` and runs the blocking
-    `db.commit()` in a worker thread (`asyncio.to_thread`) so the loop
-    stays responsive for other chats during a SQLite lock wait. The
-    worker opens its own SQLAlchemy Session and serializes its write
-    with inline question/final saves. No-op (returns True) when
-    nothing is pending.
-    """
-    pending = self._pending_save
-    if pending is None:
-      return True
-    self._pending_save = None
-    return await asyncio.to_thread(
-      self._persist_in_worker, *pending,
     )
-
-  def finalize(self) -> None:
-    """Write the final assistant message snapshot to the DB.
-
-    Runs once per turn AFTER the runner's stream loop returns (not in
-    the hot streaming path), so this commit stays synchronous. It
-    supersedes any undrained `_pending_save`, persisting the complete
-    final message regardless of whether the last flush ran.
-    """
-    self._pending_save = None
-    if self.chat_id and self.assistant_blocks:
-      with self._persist_lock:
-        self._save_generation += 1
-        _finalize_response(self.db, self.chat_id, self.assistant_blocks)
+    await _await_ack(ack)
 
   async def publish_question(self, event: ChatEvent) -> None:
     """Save-before-broadcast for an AskUserQuestion card (Candidate B).
@@ -475,44 +440,38 @@ def forget_chat(chat_id: str) -> None:
 
 
 # Durable run marker. The runner registry holds the live "is this chat
-# running" truth in memory; these two helpers mirror it onto the Chat
-# row so it survives a process death. The pair (set on turn start,
-# clear on turn end) is what lets startup reconciliation distinguish a
-# chat that genuinely finished from one whose process was killed
-# mid-turn. Best-effort, like the other small DB writers here: a
-# missed write degrades to "reconciliation has nothing to fix" (clear
-# missed) or "reconciliation resolves a turn that actually finished"
-# (set missed) — both are self-correcting and never strand the chat.
+# running" truth in memory; the row's run_status mirrors it so it
+# survives a process death. The pair (set on turn start, clear on turn
+# end) is what lets startup reconciliation distinguish a chat that
+# genuinely finished from one whose process was killed mid-turn.
+#
+# C2: SET is folded into the turn's StartTurn / PromotePending
+# writer-actor command (atomic with the user-message write, no separate
+# _mark_run_started). CLEAR routes through the actor's ClearRunStatus
+# below. Both stay best-effort — a missed clear degrades to
+# "reconciliation resolves a turn that actually finished", which is
+# self-correcting and never strands the chat.
 
-def _mark_run_started(db: Session, chat_id: str) -> None:
-  """Marks the chat's row as having a turn in flight (durable copy of
-  the in-memory registry state)."""
+
+async def _clear_run_status(chat_id: str) -> None:
+  """Clears the chat's durable run marker once the turn has ended.
+
+  Routes through the actor's `ClearRunStatus` (the sole runtime mutator
+  of the row) and awaits the ack so a clear can't lose-update against an
+  in-flight transcript snapshot for the same chat. Best-effort: a failed
+  ack is logged and swallowed — reconciliation resolves a marker left set
+  by a dropped clear, so this never strands the turn or the caller.
+  """
   if not chat_id:
     return
   try:
-    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
-    if chat is not None:
-      chat.run_status = "running"
-      chat.run_started_at = datetime.now(UTC)
-      db.commit()
+    ack = get_writer().submit(ClearRunStatus(chat_id=chat_id, run_token=""))
+    await _await_ack(ack)
   except Exception:
-    db.rollback()
-
-
-def _clear_run_status(db: Session, chat_id: str) -> None:
-  """Clears the chat's durable run marker once the turn has ended."""
-  if not chat_id:
-    return
-  try:
-    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
-    if chat is not None and (
-      chat.run_status is not None or chat.run_started_at is not None
-    ):
-      chat.run_status = None
-      chat.run_started_at = None
-      db.commit()
-  except Exception:
-    db.rollback()
+    _get_logger().warning(
+      "ClearRunStatus did not persist chat_id=%s (reconciliation will "
+      "repair)", chat_id, exc_info=True,
+    )
 
 
 def reconcile_interrupted_chats(db: Session) -> list[str]:
@@ -540,9 +499,19 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
     - clear the durable run marker.
 
   No queue lock is taken: this runs single-threaded at startup before
-  any POST /messages can land, so the serialization invariant that
-  ``_clear_pending_messages`` documents has no concurrent writer to
-  guard against here.
+  any POST /messages can land, so the serialization invariant that the
+  per-chat queue lock documents has no concurrent writer to guard
+  against here.
+
+  Intentional direct-write exception to the C2 single-writer rule: this
+  mutates `chat.messages` / `chat.pending_messages` / the run marker
+  DIRECTLY on its own session rather than through the writer actor. That
+  is deliberate — reconciliation runs in the FastAPI lifespan BEFORE
+  `start_writer()` (recovery must work even when persistence is degraded,
+  so it can't depend on a healthy actor), and there is no concurrent
+  runtime writer at that point (the registry is empty at a cold boot, and
+  a still-alive chat is skipped above). So the lost-update race the actor
+  exists to close cannot occur here.
 
   Returns the ids of the chats it reconciled (empty list if none) so
   the caller can log/observe the recovery rather than have it happen
@@ -625,28 +594,30 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
   return reconciled
 
 
-def _clear_pending_messages(db: Session | None, chat_id: str) -> None:
-  """Clears persisted queued messages for the chat, best-effort.
+async def _clear_pending(chat_id: str) -> None:
+  """Clears persisted queued messages for the chat via the actor.
 
-  Caller MUST hold ``chat_queue.get_lock(chat_id)`` — this mutation
-  shares the queue's serialization invariant with every other RMW
-  on ``chat.pending_messages`` (append in routes/chats_stream.py:POST
-  /messages, cancel in DELETE /pending, promote in
-  chat_queue.drain_and_release). Without the lock, a concurrent
-  append can read the queue, this clear can overwrite it with [],
-  and the appender then writes back its stale snapshot — the user's
-  freshly-queued message vanishes. See CLAUDE.md "Message queue +
-  send-while-generating".
+  Routes through the actor's `ClearPending` (the sole runtime mutator of
+  `pending_messages`), so the lost-update race the old direct write
+  guarded with the queue lock is closed at the source. Callers still
+  hold `chat_queue.get_lock(chat_id)` around this — that lock now guards
+  the COMPOUND decision (e.g. clear-then-bail) against a racing POST that
+  checks `is_chat_running`, not the DB write itself.
+
+  Awaits the ack so a clear-then-bail caller sees the queue emptied
+  before it returns. Best-effort on a failed ack: logged + swallowed (a
+  stranded queue is reconciled on the next interaction), so a clear
+  failure never blocks Stop or a terminal-error bail.
   """
-  if db is None:
+  if not chat_id:
     return
   try:
-    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
-    if chat and chat.pending_messages:
-      chat.pending_messages = []
-      db.commit()
+    ack = get_writer().submit(ClearPending(chat_id=chat_id, run_token=""))
+    await _await_ack(ack)
   except Exception:
-    db.rollback()
+    _get_logger().warning(
+      "ClearPending did not persist chat_id=%s", chat_id, exc_info=True,
+    )
 
 
 def _finalize_broadcast_if_running(chat_id: str) -> None:
@@ -718,13 +689,13 @@ async def stop_chat_for(chat_id: str, db: Session = None) -> bool:
   handles = registry.get_handles(chat_id)
   if handles:
     _clear_after_terminal_generation[chat_id] = stopped_gen
-  # The queue-lock window guards the pending_messages clear from
-  # racing concurrent append/cancel/promote paths. Generation bump
-  # happens BEFORE the lock so the dying runner sees the new gen as
-  # soon as it next checks (no need for the lock — generation is its
-  # own state).
+  # The queue-lock window guards the clear's COMPOUND decision against a
+  # racing append/cancel/promote (the actor's ClearPending serializes the
+  # DB write itself). Generation bump happens BEFORE the lock so the dying
+  # runner sees the new gen as soon as it next checks (no need for the
+  # lock — generation is its own state).
   async with chat_queue.get_lock(chat_id):
-    _clear_pending_messages(db, chat_id)
+    await _clear_pending(chat_id)
   questions.cancel(chat_id)
   all_stopped = True
   log = _get_logger()
@@ -739,43 +710,17 @@ async def stop_chat_for(chat_id: str, db: Session = None) -> bool:
       all_stopped = False
     registry.unregister(chat_id, handle.kind)
   # With no active handle there is no runner-side final save left to
-  # await, so clear immediately. Active handles hand this clear back to
-  # run_chat's finally block: SDK stop waiters resolve before chat.py's
-  # final sink save, and a SQLite-blocked flush can exceed Stop's 2s
-  # timeout. If the process dies first, the retained marker lets crash
-  # recovery reconcile the interrupted turn.
+  # await, so clear immediately (via the actor's ClearRunStatus). Active
+  # handles hand this clear back to run_chat's finally block: SDK stop
+  # waiters resolve before chat.py's final sink save, and a
+  # SQLite-blocked commit can exceed Stop's 2s timeout. If the process
+  # dies first, the retained marker lets crash recovery reconcile the
+  # interrupted turn.
   if not handles:
-    if db is not None:
-      _clear_run_status(db, chat_id)
-    else:
-      from app.database import SessionLocal
-      _db = SessionLocal()
-      try:
-        _clear_run_status(_db, chat_id)
-      finally:
-        _db.close()
+    await _clear_run_status(chat_id)
   _finalize_broadcast_if_running(chat_id)
   registry.discard_starting(chat_id)
   return all_stopped
-
-
-def _clear_pending_queue(db: Session, chat_id: str) -> None:
-  """Empties the pending_messages queue for a chat. Used on terminal
-  setup errors (no owner, missing auth) so queued messages don't pile
-  up repeating the same error.
-
-  Caller MUST hold ``chat_queue.get_lock(chat_id)`` — same invariant
-  as ``_clear_pending_messages``; see that docstring.
-  """
-  if not chat_id:
-    return
-  try:
-    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
-    if chat and chat.pending_messages:
-      chat.pending_messages = []
-      db.commit()
-  except Exception:
-    db.rollback()
 
 
 def _schedule_continuation(
@@ -849,14 +794,31 @@ def _schedule_continuation(
     # outgoing turn's finally won't clear the durable run marker (it no
     # longer owns the generation). Clear it here so the chat isn't left
     # falsely "running" — a real terminal state, just reached via a
-    # scheduling failure rather than a normal turn end.
+    # scheduling failure rather than a normal turn end. This function is
+    # sync (can't await the ack), so submit ClearRunStatus
+    # fire-and-forget through the actor with a logging done-callback; a
+    # dropped clear is repaired by reconciliation.
     if chat_id:
-      from app.database import SessionLocal
-      _db = SessionLocal()
       try:
-        _clear_run_status(_db, chat_id)
-      finally:
-        _db.close()
+        _ack = get_writer().submit(
+          ClearRunStatus(chat_id=chat_id, run_token="")
+        )
+
+        def _log_clear(fut, _cid=chat_id):
+          try:
+            fut.result()
+          except Exception:
+            log.warning(
+              "ClearRunStatus (continuation-failure) did not persist "
+              "chat_id=%s (reconciliation repairs)", _cid, exc_info=True,
+            )
+
+        _ack.add_done_callback(_log_clear)
+      except Exception:
+        log.warning(
+          "could not submit ClearRunStatus on continuation failure "
+          "chat_id=%s", chat_id, exc_info=True,
+        )
 
 
 # Queue drain helpers — pre-bound to the chat-side callbacks so the
@@ -869,12 +831,17 @@ async def _drain_and_release(
   db: Session,
   chat_id: str,
   we_own_gen: bool,
+  run_token: str,
 ) -> tuple[dict | None, list, str | None]:
   """Local helper around chat_queue.drain_and_release that binds the
-  chat.py-owned discard_starting + forget_chat callbacks. Behavior is
-  identical to ticket 033's pre-extract _drain_and_release."""
+  chat.py-owned discard_starting + forget_chat callbacks.
+
+  `run_token` is the CONTINUATION's token: the drain's `PromotePending`
+  command sets the next turn's run marker under it, and the same token
+  is handed to `_schedule_continuation` so the spawned runner reuses it.
+  """
   return await chat_queue.drain_and_release(
-    db, chat_id, we_own_gen,
+    db, chat_id, we_own_gen, run_token,
     discard_starting=discard_starting,
     forget_chat=forget_chat,
   )
@@ -905,6 +872,126 @@ async def _close_browser_session(chat_id: str) -> None:
     log.warning("agent-browser close timed out for chat %s", chat_id)
   except Exception as exc:
     log.warning("agent-browser close failed for chat %s: %s", chat_id, exc)
+
+
+async def _complete_turn(
+  *,
+  bc,
+  sink: "_ChatEventSink",
+  db: Session,
+  chat_id: str,
+  run_gen: int | None,
+  provider_id: str | None,
+  cost_usd: float | int,
+  close_browser: bool,
+) -> None:
+  """Terminal sequence shared by both providers' success + error exits.
+
+  One place owns the C2 failure semantics so the four call-sites (codex
+  success/except, claude success/except) can't drift:
+
+    1. `await sink.finalize()` — submit `Finalize` and await its ack
+       (commit-before-ack). On a FAILED ack (the actor couldn't persist
+       the terminal state — missing row, dropped commit, or a wedged
+       writer past the timeout): emit a transport-only error + `done`,
+       do NOT drain the queue or schedule a continuation, and leave the
+       durable run marker SET (reconciliation repairs it on the next
+       boot). No fallback direct write — silent loss is worse than a
+       visible "couldn't save" error.
+    2. On success: allocate the CONTINUATION's run_token, drain the
+       queue through the actor's `PromotePending` (keyed on that token,
+       which sets the next turn's run marker), broadcast
+       `queued_turn_starting` + `done`, then schedule the continuation
+       with the same token so the spawned runner reuses it.
+
+  A drain that itself raises (the `PromotePending` ack failed) is treated
+  like a finalize failure: the queue is left intact and no continuation
+  is scheduled, so a lost promote can't strand or double-fire the queue.
+  """
+  try:
+    await sink.finalize()
+  except Exception as exc:
+    log = _get_logger()
+    log.error(
+      "finalize did not persist chat_id=%s: %s — emitting transport "
+      "error, leaving run marker for reconciliation", chat_id, exc,
+    )
+    bc.publish({
+      "type": "error",
+      "message": (
+        "Your last response could not be saved (persistence "
+        "unavailable). It will be recovered automatically."
+      ),
+    })
+    set_active_broadcast(None)
+    bc.publish({"type": "done"})
+    bc.mark_completed()
+    if close_browser:
+      await _close_browser_session(chat_id)
+    db.close()
+    return
+
+  set_active_broadcast(None)
+  # The continuation is a fresh turn — give it its own run_token. The
+  # turn-end drain's PromotePending sets the next turn's run marker under
+  # this token, and _schedule_continuation hands the SAME token to the
+  # spawned runner so its sink keys on it.
+  next_run_token = alloc_run_token()
+  we_own_gen = run_gen is None or current_run_generation(chat_id) == run_gen
+  try:
+    next_user, next_messages, next_session_id = await asyncio.wait_for(
+      _drain_and_release(db, chat_id, we_own_gen, next_run_token),
+      timeout=5.0,
+    )
+  except asyncio.TimeoutError:
+    log = _get_logger()
+    log.error("queue drain timed out chat_id=%s", chat_id)
+    discard_starting(chat_id)
+    next_user, next_messages, next_session_id = None, [], None
+  except Exception as exc:
+    # The PromotePending ack failed: the promote write didn't land. Don't
+    # schedule a continuation on a lost write — surface a transport error
+    # and end the turn; the queued message stays for the user to retry.
+    log = _get_logger()
+    log.error(
+      "queue drain failed chat_id=%s: %s — not scheduling continuation",
+      chat_id, exc,
+    )
+    bc.publish({
+      "type": "error",
+      "message": (
+        "A queued message could not be started (persistence "
+        "unavailable). Please resend it."
+      ),
+    })
+    bc.publish({"type": "done"})
+    bc.mark_completed()
+    if close_browser:
+      await _close_browser_session(chat_id)
+    db.close()
+    return
+
+  if next_user:
+    bc.publish({
+      "type": "queued_turn_starting",
+      "ts": next_user.get("ts"),
+    })
+  # Any error event was already broadcast via sink.publish before
+  # finalize; don't re-emit it here (it would double-deliver).
+  bc.publish({"type": "done", "cost_usd": cost_usd})
+  bc.mark_completed()
+  if next_user:
+    _schedule_continuation(
+      chat_id=chat_id,
+      messages=next_messages,
+      session_id=next_session_id,
+      provider_id=provider_id,
+      next_user=next_user,
+      run_token=next_run_token,
+    )
+  if close_browser:
+    await _close_browser_session(chat_id)
+  db.close()
 
 
 async def run_chat(
@@ -971,12 +1058,7 @@ async def run_chat(
       )
     )
     if chat_id and should_clear_status:
-      from app.database import SessionLocal
-      _db = SessionLocal()
-      try:
-        _clear_run_status(_db, chat_id)
-      finally:
-        _db.close()
+      await _clear_run_status(chat_id)
 
 
 async def _run_chat_impl(
@@ -1013,13 +1095,17 @@ async def _run_chat_impl(
   if run_token is None:
     run_token = alloc_run_token()
 
-  # Durable run marker: record that a turn is in flight so a process
-  # death (OOM / SIGKILL) mid-turn is recoverable on the next boot
-  # (see reconcile_interrupted_chats). The matching clear lives in
-  # run_chat's finally, gated on the same generation-ownership check
-  # that releases the _starting claim, so a continuation handoff keeps
-  # the marker continuously set across the whole chain of turns.
-  _mark_run_started(db, chat_id)
+  # Durable run marker: the turn's StartTurn (initial send) or
+  # PromotePending (continuation / stale-pending drain) writer-actor
+  # command ALREADY set run_status="running" atomically with the
+  # user-message write, keyed on this same run_token — so there is no
+  # separate _mark_run_started here (it was a direct write the actor now
+  # owns, eliminating the gap between the user-message commit and the
+  # marker). The matching clear lives in run_chat's finally (routed
+  # through the actor's ClearRunStatus), gated on the same
+  # generation-ownership check that releases the _starting claim, so a
+  # continuation handoff keeps the marker continuously set across the
+  # whole chain of turns.
 
   # On the first message of a session, prepend the agent experience file so
   # the agent always sees it without needing a tool call.  The system prompt
@@ -1084,7 +1170,7 @@ async def _run_chat_impl(
   if not owner:
     bc.publish({"type": "error", "message": "No owner configured."})
     async with chat_queue.get_lock(chat_id):
-      _clear_pending_queue(db, chat_id)
+      await _clear_pending(chat_id)
     bc.publish({"type": "done"})
     set_active_broadcast(None)
     bc.mark_completed()
@@ -1214,7 +1300,7 @@ async def _run_chat_impl(
   if auth_error:
     bc.publish({"type": "error", "message": auth_error})
     async with chat_queue.get_lock(chat_id):
-      _clear_pending_queue(db, chat_id)
+      await _clear_pending(chat_id)
     bc.publish({"type": "done"})
     set_active_broadcast(None)
     bc.mark_completed()
@@ -1237,7 +1323,7 @@ async def _run_chat_impl(
       data_dir=settings.data_dir,
       chat_id=chat_id,
     )
-    sink = _ChatEventSink(bc, chat_id, db, run_token=run_token)
+    sink = _ChatEventSink(bc, chat_id, run_token=run_token)
     runner_result: dict = {}
     try:
       from app.codex_sdk_runner import run_codex_sdk_turn
@@ -1273,42 +1359,10 @@ async def _run_chat_impl(
       # Publish through the sink BEFORE finalize so the error lands
       # in the persisted assistant transcript, not just the live wire.
       sink.publish({"type": "error", "message": str(exc)})
-      sink.finalize()
-      set_active_broadcast(None)
-      # Mirror the success-path drain. Crucially, still check gen
-      # ownership: if a concurrent Stop bumped gen, we must NOT
-      # promote queued messages — the frontend's stop-handler will
-      # resend them as one combined turn (see AGENTS.md Stop-chat
-      # contract). Otherwise we'd double-fire the queue.
-      we_own_gen = (
-        run_gen is None or current_run_generation(chat_id) == run_gen
+      await _complete_turn(
+        bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
+        provider_id=provider_id, cost_usd=0, close_browser=False,
       )
-      try:
-        next_user, next_messages, next_session_id = await asyncio.wait_for(
-          _drain_and_release(db, chat_id, we_own_gen), timeout=5.0,
-        )
-      except asyncio.TimeoutError:
-        log.error(
-          "queue drain timed out chat_id=%s (codex sdk except)", chat_id,
-        )
-        discard_starting(chat_id)
-        next_user, next_messages, next_session_id = None, [], None
-      if next_user:
-        bc.publish({
-          "type": "queued_turn_starting",
-          "ts": next_user.get("ts"),
-        })
-      bc.publish({"type": "done"})
-      bc.mark_completed()
-      if next_user:
-        _schedule_continuation(
-          chat_id=chat_id,
-          messages=next_messages,
-          session_id=next_session_id,
-          provider_id=provider_id,
-          next_user=next_user,
-        )
-      db.close()
       return
     err = runner_result.get("error")
     if err:
@@ -1316,45 +1370,11 @@ async def _run_chat_impl(
       # the error is persisted alongside any partial response that
       # streamed before the failure.
       sink.publish({"type": "error", "message": err})
-    sink.finalize()
-    set_active_broadcast(None)
-    we_own_gen = (
-      run_gen is None or current_run_generation(chat_id) == run_gen
+    await _complete_turn(
+      bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
+      provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,
+      close_browser=True,
     )
-    try:
-      next_user, next_messages, next_session_id = await asyncio.wait_for(
-        _drain_and_release(db, chat_id, we_own_gen), timeout=5.0,
-      )
-    except asyncio.TimeoutError:
-      log.error(
-        "queue drain timed out chat_id=%s (codex sdk path)", chat_id,
-      )
-      discard_starting(chat_id)
-      next_user, next_messages, next_session_id = None, [], None
-    if next_user:
-      bc.publish({
-        "type": "queued_turn_starting",
-        "ts": next_user.get("ts"),
-      })
-    # Error event already broadcast via sink.publish before finalize
-    # (R2-5). Don't re-emit here — it would double-deliver to live
-    # subscribers.
-    bc.publish({
-      "type": "done",
-      "cost_usd": runner_result.get("cost_usd") or 0,
-    })
-    bc.mark_completed()
-    if next_user:
-      _schedule_continuation(
-        chat_id=chat_id,
-        messages=next_messages,
-        session_id=next_session_id,
-        provider_id=provider_id,
-        next_user=next_user,
-
-      )
-    await _close_browser_session(chat_id)
-    db.close()
     return
 
   if is_claude:
@@ -1367,7 +1387,7 @@ async def _run_chat_impl(
       data_dir=settings.data_dir,
       chat_id=chat_id,
     )
-    sink = _ChatEventSink(bc, chat_id, db, run_token=run_token)
+    sink = _ChatEventSink(bc, chat_id, run_token=run_token)
     try:
       from app.claude_sdk_runner import run_claude_sdk_turn
       runner_result = await run_claude_sdk_turn(
@@ -1403,86 +1423,20 @@ async def _run_chat_impl(
       # Publish through the sink BEFORE finalize so the error lands
       # in the persisted assistant transcript, not just the live wire.
       sink.publish({"type": "error", "message": str(exc)})
-      sink.finalize()
-      set_active_broadcast(None)
-      # Mirror the success-path drain. Crucially, still check gen
-      # ownership: if a concurrent Stop bumped gen, we must NOT
-      # promote queued messages — the frontend's stop-handler will
-      # resend them as one combined turn (see AGENTS.md Stop-chat
-      # contract). Otherwise we'd double-fire the queue.
-      we_own_gen = (
-        run_gen is None or current_run_generation(chat_id) == run_gen
+      await _complete_turn(
+        bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
+        provider_id=provider_id, cost_usd=0, close_browser=False,
       )
-      try:
-        next_user, next_messages, next_session_id = await asyncio.wait_for(
-          _drain_and_release(db, chat_id, we_own_gen), timeout=5.0,
-        )
-      except asyncio.TimeoutError:
-        log.error(
-          "queue drain timed out chat_id=%s (claude sdk except)", chat_id,
-        )
-        discard_starting(chat_id)
-        next_user, next_messages, next_session_id = None, [], None
-      if next_user:
-        bc.publish({
-          "type": "queued_turn_starting",
-          "ts": next_user.get("ts"),
-        })
-      bc.publish({"type": "done"})
-      bc.mark_completed()
-      if next_user:
-        _schedule_continuation(
-          chat_id=chat_id,
-          messages=next_messages,
-          session_id=next_session_id,
-          provider_id=provider_id,
-          next_user=next_user,
-        )
-      db.close()
       return
     if err:
       # Same R2-5 rationale: persist the error alongside any partial
       # response that streamed before the failure.
       sink.publish({"type": "error", "message": err})
-    sink.finalize()
-    set_active_broadcast(None)
-    we_own_gen = (
-      run_gen is None or current_run_generation(chat_id) == run_gen
+    await _complete_turn(
+      bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
+      provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,
+      close_browser=True,
     )
-    try:
-      next_user, next_messages, next_session_id = await asyncio.wait_for(
-        _drain_and_release(db, chat_id, we_own_gen), timeout=5.0,
-      )
-    except asyncio.TimeoutError:
-      log.error(
-        "queue drain timed out chat_id=%s (sdk path)", chat_id,
-      )
-      discard_starting(chat_id)
-      next_user, next_messages, next_session_id = None, [], None
-    if next_user:
-      bc.publish({
-        "type": "queued_turn_starting",
-        "ts": next_user.get("ts"),
-      })
-    # Error event already broadcast via sink.publish before finalize
-    # (R2-5). Don't re-emit here — it would double-deliver to live
-    # subscribers.
-    bc.publish({
-      "type": "done",
-      "cost_usd": runner_result.get("cost_usd") or 0,
-    })
-    bc.mark_completed()
-    if next_user:
-      _schedule_continuation(
-        chat_id=chat_id,
-        messages=next_messages,
-        session_id=next_session_id,
-        provider_id=provider_id,
-        next_user=next_user,
-
-      )
-    await _close_browser_session(chat_id)
-    db.close()
     return
 
   # Unknown provider — every supported provider is handled by an SDK

@@ -71,6 +71,17 @@ def fresh_db():
   # show up in any later test's read_events() merged stream.
   from app import activity as activity_mod
   activity_mod._reset_for_tests()
+  # The single-writer chat-persistence actor is a process singleton the
+  # FastAPI lifespan starts in production. TestClient(app) (no `with`)
+  # doesn't run lifespan, and the C2 live write paths now route through
+  # `get_writer()`, so start a fresh actor per test bound to the
+  # recreated test DB. Restarting each test gives the actor a fresh
+  # session that sees the just-created tables — its long-lived session
+  # would otherwise hold a stale identity map across the drop/create.
+  from app import chat_writer as chat_writer_mod
+  chat_writer_mod.stop_writer(timeout=5)
+  from app.database import SessionLocal as _WriterSession
+  chat_writer_mod.start_writer(_WriterSession)
   import glob as _glob
   import os as _os
   _logs_dir = _os.path.join(
@@ -83,6 +94,8 @@ def fresh_db():
       pass
 
   yield
+  from app import chat_writer as _cw
+  _cw.stop_writer(timeout=5)
   Base.metadata.drop_all(bind=engine)
 
 

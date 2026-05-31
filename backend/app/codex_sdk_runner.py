@@ -444,22 +444,40 @@ def _install_request_user_input_handler(
       question_id=str(uuid4()),
       questions=questions_payload,
       future=future,
+      # The turn's persistence run token (the sink carries it). The
+      # answer route submits AnswerQuestion keyed on this so the writer
+      # actor fences the right (chat_id, run_token) snapshot before
+      # merging the answer; None for a sink/broadcast without one →
+      # broad-fence by chat.
+      run_token=getattr(bc, "run_token", None),
     )
     pending_questions[chat_id] = pending
 
     try:
-      bc.publish({
-        "type": "question",
-        "question_id": pending.question_id,
-        "questions": questions_payload,
-      })
-      # Push notification on AskUserQuestion is AGENT-DRIVEN now: the
+      # Save-before-broadcast (Candidate B): the card's question_id MUST
+      # persist before the SSE event shows it. `publish_question` submits
+      # a QuestionCommit, awaits its ack, then broadcasts — and RAISES if
+      # the commit didn't land. A failed commit is surfaced as a
+      # _BridgeError so the sync handler returns a real error to Codex
+      # (no unpersisted card on the wire, no fallback direct write).
+      #
+      # Push notification on AskUserQuestion is AGENT-DRIVEN: the
       # skill/seed tells the agent to `curl POST /api/notifications/send`
-      # itself when it asks a question. That gives the agent direct
-      # visibility into push success/failure (via bash tool output)
-      # and lets it decide per-question whether to buzz the user.
-      # The cb arg is kept in the signature for compatibility but
-      # not invoked here.
+      # itself, so it sees push success/failure (bash output) and decides
+      # per-question whether to buzz the user. The cb arg is kept in the
+      # signature for compatibility but not invoked here.
+      try:
+        await bc.publish_question({
+          "type": "question",
+          "question_id": pending.question_id,
+          "questions": questions_payload,
+        })
+      except Exception as exc:
+        log.error(
+          "AskUserQuestion save-before-broadcast failed chat_id=%s: %s",
+          chat_id, exc,
+        )
+        raise _BridgeError("could not save the question")
 
       try:
         answers = await future

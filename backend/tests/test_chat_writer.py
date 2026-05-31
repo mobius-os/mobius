@@ -206,6 +206,11 @@ def _boom():
 def test_startup_failure_is_caught_and_writer_reports_unhealthy():
   from app import chat_writer
 
+  # Reset the process singleton: the conftest fresh_db fixture pre-starts
+  # a healthy writer (production lifespan parity), but this test exercises
+  # start_writer's OWN construction from a clean slate, so drop the
+  # existing one first (start_writer no-ops on a live writer by design).
+  chat_writer.stop_writer(timeout=5)
   # A session_factory that raises must NOT crash start_writer; get_writer()
   # returns a writer whose submit() acks with an exception (never hangs).
   chat_writer.start_writer(session_factory=_boom)
@@ -580,6 +585,9 @@ def test_repeated_start_is_rejected():
 def test_start_writer_is_idempotent_no_orphan_thread():
   from app import chat_writer
 
+  # Reset the conftest-started singleton so this test measures
+  # start_writer's OWN thread spawning from a clean slate.
+  chat_writer.stop_writer(timeout=5)
   before = {t.name for t in threading.enumerate()}
   chat_writer.start_writer(session_factory=lambda: _RecordingSession([]))
   try:
@@ -867,6 +875,8 @@ def test_concurrent_start_writer_single_writer_no_orphan_threads():
   # daemon thread may be left consuming a stranded queue.
   from app import chat_writer
 
+  # Reset the conftest-started singleton so the race starts from no writer.
+  chat_writer.stop_writer(timeout=5)
   before = {id(t) for t in threading.enumerate()}
   writers: list = []
   writers_lock = threading.Lock()

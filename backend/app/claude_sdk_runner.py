@@ -483,21 +483,47 @@ async def run_claude_sdk_turn(
       question_id=str(uuid4()),
       questions=questions,
       future=future,
+      # The turn's persistence run token (the sink carries it). The
+      # answer route submits AnswerQuestion keyed on this so the writer
+      # actor fences the right (chat_id, run_token) snapshot before
+      # merging the answer; None for a sink/broadcast without one
+      # (legacy/test) → the answer route broad-fences by chat.
+      run_token=getattr(bc, "run_token", None),
     )
     pending_questions[chat_id] = pending
 
-    bc.publish({
-      "type": "question",
-      "question_id": pending.question_id,
-      "questions": questions,
-    })
-    # Push notification on AskUserQuestion is now AGENT-DRIVEN: the
-    # skill/seed tells the agent to `curl POST /api/notifications/send`
-    # itself when it asks a question. That gives the agent direct
-    # visibility into push success/failure via the bash tool output,
-    # avoids the silent-failure-mode the auto-notify path had, and
-    # lets the agent decide whether a particular question is worth a
-    # phone buzz.
+    # Save-before-broadcast (Candidate B): the card's question_id MUST be
+    # durably persisted before the SSE event shows it, or a fast Submit
+    # races the DB write and the answer is lost. `publish_question`
+    # submits a QuestionCommit, awaits its ack, then broadcasts — and
+    # RAISES if the commit didn't land. We register the pending entry
+    # first (so the finally below always pops it) but on a failed commit
+    # DENY the tool with a persistence-unavailable message rather than
+    # broadcasting an unpersisted card or writing the blob directly.
+    #
+    # Push notification on AskUserQuestion is AGENT-DRIVEN: the skill/seed
+    # tells the agent to `curl POST /api/notifications/send` itself, so it
+    # has direct visibility into push success/failure and decides whether
+    # a given question is worth a phone buzz.
+    try:
+      await bc.publish_question({
+        "type": "question",
+        "question_id": pending.question_id,
+        "questions": questions,
+      })
+    except Exception as exc:
+      log.error(
+        "AskUserQuestion save-before-broadcast failed chat_id=%s: %s",
+        chat_id, exc,
+      )
+      if pending_questions.get(chat_id) is pending:
+        pending_questions.pop(chat_id, None)
+      return PermissionResultDeny(
+        message=(
+          "Could not save the question (persistence unavailable); not "
+          "asking. Please try again."
+        )
+      )
 
     try:
       answers = await future
