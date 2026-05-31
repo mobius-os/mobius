@@ -8,6 +8,7 @@ clients can subscribe.  Provider env / auth wiring lives in
 """
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -150,15 +151,44 @@ class _ChatEventSink:
   returns, the chat-impl wrapper calls `finalize()` which writes the
   final assistant message + persists session_id/cost on the chat row.
 
+  Commit offload (why publish is sync but flush is async): the
+  streaming save is a `db.commit()` against SQLite. With
+  `busy_timeout=5000` (database.py) a commit under write contention
+  can block the calling thread for up to 5s. `publish()` runs
+  synchronously inside the runner's `async for` loop — on the event
+  loop thread — so an inline commit there stalls the whole loop, and
+  with it every OTHER chat's SSE stream, for the duration of the lock
+  wait. To keep the loop free, `publish()` does only the cheap,
+  ordered work (accumulate + broadcast) and records the due save as a
+  `_pending_save` snapshot; the runner loop then `await`s `flush()`,
+  which runs the blocking commit via `asyncio.to_thread` so the loop
+  keeps serving other chats while SQLite does I/O. (Full aiosqlite
+  migration would remove the thread hop entirely, but is out of scope
+  — see the streaming notes in CLAUDE.md.)
+
+  Thread-safety of the offload: the `db` Session is owned by the
+  `_run_chat_impl` coroutine and, during streaming, is touched ONLY
+  through this sink. `publish()`/`flush()` calls are strictly serial
+  per turn (the runner drives them one at a time and `await`s each
+  flush before the next loop iteration), so at most one thread ever
+  touches the Session at a time and each `await` establishes a clean
+  happens-before with the loop's own later Session use. SQLite's
+  `check_same_thread=False` (database.py) makes the sequential
+  cross-thread use legal at the DBAPI layer.
+
   DB-lock-drop behavior: broadcasts still happen even when the DB
   write path hits `_safe_commit()` returning False (for example a
-  transient SQLite lock). `publish()` returns that commit outcome so
-  callers can observe a broadcast-without-persist gap if they care.
+  transient SQLite lock). The commit outcome is exposed via
+  `flush()`'s boolean return (and `publish()`'s return for the one
+  inline-commit case, `question`) so callers can observe a
+  broadcast-without-persist gap if they care.
   """
 
   _SAVE_INTERVAL_SECS = 1.0
-  # Subset of app.events.EventType that forces a sync DB commit so the
-  # user does not reconnect into a stale transcript mid-turn.
+  # Subset of app.events.EventType that forces a save so the user does
+  # not reconnect into a stale transcript mid-turn. The save is still
+  # offloaded via flush() for every type except `question` (which must
+  # persist before its broadcast — see publish()).
   _IMMEDIATE_SAVE_TYPES = frozenset(
     {"tool_start", "tool_end", "error", "question"}
   )
@@ -171,14 +201,24 @@ class _ChatEventSink:
     self.session_id: str | None = None
     self.cost_usd: float | None = None
     self._last_save = 0.0
+    # Assistant-message snapshot recorded by publish() when a non-
+    # question save comes due, drained by flush() into an off-loop
+    # commit. None means nothing to write. Snapshots coalesce: a later
+    # publish overwrites an undrained snapshot, and since each snapshot
+    # is the FULL current message, the drained one still reflects every
+    # block accumulated up to the flush.
+    self._pending_save: dict | None = None
 
   def publish(self, event: ChatEvent) -> bool:
-    """Publishes an event and returns whether persistence succeeded.
+    """Publishes an event; records any due save for a later `flush()`.
 
-    Live broadcast is best-effort independent from persistence. When
-    `_safe_commit()` returns False because the database is locked, the
-    event is still published to SSE subscribers and the boolean return
-    exposes that observability gap to the caller.
+    Live broadcast is best-effort independent from persistence and
+    always happens here, synchronously, so SSE ordering is preserved.
+    The blocking `db.commit()` is deferred to `flush()` (run off the
+    event loop) for every event type EXCEPT `question`.
+
+    Returns True except when the one inline commit path (`question`)
+    fails; the deferred-save outcome is surfaced by `flush()`.
     """
     event_type = event.get("type")
     commit_ok = True
@@ -201,8 +241,14 @@ class _ChatEventSink:
     # the lookup silently returns False, the SDK future resolves
     # without persisted answers, and the answer disappears on the
     # next runner writeback (which has no block.answers to carry over).
+    # This commit stays INLINE (on the loop): questions are rare, the
+    # save-before-broadcast ordering is load-bearing, and the brief
+    # block on a clarification is an acceptable trade for keeping the
+    # invariant trivially correct. A pending (offloaded) snapshot is
+    # superseded by this fuller write, so drop it.
     if needs_save and event_type == "question":
       self._last_save = time.monotonic()
+      self._pending_save = None
       commit_ok = _update_last_assistant_message(
         self.db, self.chat_id,
         build_assistant_message(self.assistant_blocks),
@@ -214,19 +260,56 @@ class _ChatEventSink:
     if event_type == "done":
       self.cost_usd = event.get("cost_usd")
 
-    # All other event types save AFTER broadcast — preserves streaming
-    # latency for text events (most don't trigger save anyway due to
-    # the 1s throttle).
+    # All other event types save AFTER broadcast and OFF the loop:
+    # record the snapshot and let the next flush() commit it. Most
+    # text deltas don't even get here (the 1s throttle), and the ones
+    # that do no longer block the loop on SQLite I/O.
+    #
+    # Deep-copy is load-bearing: build_assistant_message aliases
+    # self.assistant_blocks (its "blocks" IS that live list, and
+    # process_event mutates those block dicts in place). flush()
+    # serializes this snapshot on a WORKER thread; copying here means
+    # the worker reads a frozen value that no later publish()/
+    # process_event on the loop can mutate underneath it. Without the
+    # copy, a concurrent loop event (e.g. a same-chat question park)
+    # racing the in-flight commit thread is a cross-thread mutation of
+    # the very list being read. Snapshots are <=1/sec (throttle) and
+    # tiny next to a commit, so the copy is free.
     if needs_save and event_type != "question":
       self._last_save = time.monotonic()
-      commit_ok = _update_last_assistant_message(
-        self.db, self.chat_id,
-        build_assistant_message(self.assistant_blocks),
+      self._pending_save = copy.deepcopy(
+        build_assistant_message(self.assistant_blocks)
       )
     return commit_ok
 
+  async def flush(self) -> bool:
+    """Commits a pending streaming save off the event loop.
+
+    Called by the runner once per stream-loop iteration. Drains the
+    snapshot recorded by `publish()` and runs the blocking
+    `db.commit()` in a worker thread (`asyncio.to_thread`) so the loop
+    stays responsive for other chats during a SQLite lock wait. No-op
+    (returns True) when nothing is pending. The await point is what
+    serializes the offload with the loop's own Session use — see the
+    class docstring's thread-safety note.
+    """
+    snapshot = self._pending_save
+    if snapshot is None:
+      return True
+    self._pending_save = None
+    return await asyncio.to_thread(
+      _update_last_assistant_message, self.db, self.chat_id, snapshot,
+    )
+
   def finalize(self) -> None:
-    """Write the final assistant message snapshot to the DB."""
+    """Write the final assistant message snapshot to the DB.
+
+    Runs once per turn AFTER the runner's stream loop returns (not in
+    the hot streaming path), so this commit stays synchronous. It
+    supersedes any undrained `_pending_save`, persisting the complete
+    final message regardless of whether the last flush ran.
+    """
+    self._pending_save = None
     if self.chat_id and self.assistant_blocks:
       _finalize_response(self.db, self.chat_id, self.assistant_blocks)
 
