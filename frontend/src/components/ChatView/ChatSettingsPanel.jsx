@@ -4,7 +4,7 @@
  * (provider logo + title + subtitle + radio dot; effort slider under
  * the selected row) instead of the older `ProviderModelPicker` radio
  * list. Logic (stale-PATCH guard, optimistic state, providers fetch)
- * is unchanged from the SlashPicker era.
+ * is unchanged from the earlier slash-key picker it replaced.
  *
  * ╔══════════════════════════════════════════════════════════════════╗
  * ║                                                                  ║
