@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# Möbius pre-push gate.
+#
+# Catches the classes of breakage that have actually reached `main` and
+# hurt — merge-conflict markers (which once crash-looped prod), syntax
+# errors, and frontend-unit regressions — BEFORE they're pushed. Fast by
+# design: conflict + syntax checks are instant; frontend-unit (~6s) runs
+# only when frontend changed; backend pytest runs only if a local venv
+# exists (CI is the backstop otherwise).
+#
+# Install: scripts/install-hooks.sh (symlinks this into the shared hooks
+# dir, so every worktree is covered). Bypass once: `git push --no-verify`.
+#
+# Design note: this is a GATE, not a full CI replacement. It mirrors the
+# fast CI jobs (frontend-unit, syntax) so a red push is caught in seconds
+# instead of minutes — but e2e + the full backend suite still run in CI.
+
+set -uo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT" || exit 1
+
+FAIL=0
+c_ok=$'\033[1;32m'; c_warn=$'\033[1;33m'; c_err=$'\033[1;31m'; c_off=$'\033[0m'
+ok()   { printf '%s[pre-push]%s %s\n' "$c_ok"  "$c_off" "$*"; }
+warn() { printf '%s[pre-push]%s %s\n' "$c_warn" "$c_off" "$*"; }
+err()  { printf '%s[pre-push]%s %s\n' "$c_err" "$c_off" "$*" >&2; }
+
+# Commits being pushed = everything on HEAD not yet on origin/main.
+BASE="$(git merge-base HEAD origin/main 2>/dev/null || echo HEAD~1)"
+CHANGED="$(git diff --name-only --diff-filter=d "$BASE"..HEAD 2>/dev/null || true)"
+changed_match() { echo "$CHANGED" | grep -qE "$1"; }
+changed_list()  { echo "$CHANGED" | grep -E "$1" || true; }
+
+# 1. Conflict markers — the prod-outage preventer. Matches the real git
+#    marker shape (`<<<<<<< ` / `>>>>>>> `), not bare `=======` which is a
+#    common doc separator. Scans the tip being pushed.
+if git grep -nIE '^(<<<<<<<|>>>>>>>) ' HEAD -- \
+     'backend' 'frontend/src' 'skill' 'scripts' >/tmp/_pp_confl 2>/dev/null; then
+  err "merge-conflict markers in the tree you're pushing:"
+  sed 's/^/    /' /tmp/_pp_confl >&2
+  FAIL=1
+else
+  ok "no conflict markers"
+fi
+
+# 2. Python syntax on changed .py files (instant; no deps beyond python3).
+PY="$(changed_list '\.py$')"
+if [ -n "$PY" ]; then
+  if python3 -m py_compile $PY 2>/tmp/_pp_py; then
+    ok "python syntax ok ($(echo "$PY" | wc -l | tr -d ' ') file(s))"
+  else
+    err "python syntax errors:"; sed 's/^/    /' /tmp/_pp_py >&2; FAIL=1
+  fi
+fi
+
+# 3. JSX/JS parse on changed frontend files via esbuild (no import
+#    resolution — pure syntax). Skipped if esbuild isn't installed.
+ESB="$ROOT/frontend/node_modules/.bin/esbuild"
+JSX="$(changed_list '^frontend/src/.*\.(jsx|js)$')"
+if [ -n "$JSX" ] && [ -x "$ESB" ]; then
+  jsx_fail=0
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    "$ESB" "$f" --loader=jsx --outfile=/dev/null >/tmp/_pp_esb 2>&1 || {
+      err "jsx parse error in $f:"; sed 's/^/    /' /tmp/_pp_esb >&2; jsx_fail=1; }
+  done <<< "$JSX"
+  [ "$jsx_fail" -eq 0 ] && ok "jsx parse ok" || FAIL=1
+fi
+
+# 4. Frontend-unit — only when frontend changed (~6s). Mirrors the CI
+#    frontend-unit job, so a logic regression is caught here in seconds.
+if changed_match '^frontend/'; then
+  warn "running frontend-unit…"
+  if (cd frontend && npm test >/tmp/_pp_fe 2>&1); then
+    ok "frontend-unit passed"
+  else
+    err "frontend-unit FAILED:"; tail -n 30 /tmp/_pp_fe | sed 's/^/    /' >&2; FAIL=1
+  fi
+fi
+
+# 5. Backend pytest — only if a local venv exists AND backend changed.
+#    No venv → skip with a one-time setup hint (CI still runs the suite).
+if changed_match '^backend/'; then
+  VENV="$ROOT/backend/.venv/bin/python"
+  if [ -x "$VENV" ]; then
+    warn "running backend pytest…"
+    if (cd backend && "$VENV" -m pytest -q -p no:cacheprovider >/tmp/_pp_be 2>&1); then
+      ok "backend pytest passed"
+    else
+      err "backend pytest FAILED:"; tail -n 30 /tmp/_pp_be | sed 's/^/    /' >&2; FAIL=1
+    fi
+  else
+    warn "backend changed, no backend/.venv — skipping pytest (CI runs it)."
+    warn "  enable local backend tests: python3 -m venv backend/.venv && \\"
+    warn "    backend/.venv/bin/pip install -r backend/requirements.txt"
+  fi
+fi
+
+if [ "$FAIL" -ne 0 ]; then
+  err "push blocked. Fix the above, or bypass with:  git push --no-verify"
+  exit 1
+fi
+ok "all gate checks passed — pushing"
+exit 0
