@@ -406,8 +406,15 @@ export default function Shell() {
     // Resolve chatId BEFORE switching views — setting activeView='chat'
     // with the old chatId causes a visible flash of the previous chat.
     let chatId
+    // Reuse an existing empty chat to avoid accumulating invisible empties,
+    // BUT never reuse the chat we're already on: reusing the active empty
+    // makes setActiveChatId a no-op, so "+ New chat" appears to do nothing
+    // (the reported bug). Excluding the active id means the tap always lands
+    // on a different — or freshly created — blank chat. Bounded: at most one
+    // spare empty exists (the next tap reuses it), so this doesn't reopen the
+    // empty-spam path the reuse was added to close.
     const empty = !forceNew && [...chats]
-      .filter(c => !c.has_messages)
+      .filter(c => !c.has_messages && String(c.id) !== String(activeChatIdRef.current))
       .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''))
       [0]
     if (empty) {
