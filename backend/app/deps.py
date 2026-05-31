@@ -183,7 +183,11 @@ def get_owner_or_app_with_cross_write(
   app = db.query(models.App).filter(models.App.id == principal.app_id).first()
   if not app:
     raise HTTPException(status_code=401, detail="App not found.")
-  if app.cross_app_access != "write":
+  # Normalise on read — install.py stores perms.get('cross_app_access',
+  # 'none') verbatim, so a manifest typoing 'Write' or 'WRITE' would land
+  # in the DB and never compare equal to the lower-case 'write' literal.
+  level = (app.cross_app_access or "none").strip().lower()
+  if level != "write":
     raise HTTPException(
       status_code=403,
       detail=(

@@ -103,7 +103,12 @@ def list_apps(
   )
 
 
-@router.post("/install", response_model=schemas.AppInstallOut, status_code=201)
+@router.post(
+  "/install",
+  response_model=schemas.AppInstallOut,
+  status_code=201,
+  dependencies=[Depends(reject_cross_site)],
+)
 async def install_app(
   body: schemas.AppInstall,
   db: Session = Depends(get_db),
@@ -330,7 +335,11 @@ async def update_icon(
   return Response(status_code=204)
 
 
-@router.delete("/{app_id}", status_code=204)
+@router.delete(
+  "/{app_id}",
+  status_code=204,
+  dependencies=[Depends(reject_cross_site)],
+)
 def delete_app(
   app_id: int,
   db: Session = Depends(get_db),
