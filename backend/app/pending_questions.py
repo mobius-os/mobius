@@ -23,8 +23,17 @@ class PendingQuestion:
   `can_use_tool` callback is blocked on `await future`. The
   `POST /messages` handler resolves `future` when an answers payload
   arrives, which unblocks the callback and lets the SDK continue.
+
+  `run_token` is the persistence run identity of the turn that parked
+  this question — the runner stamps the turn's token here so the answer
+  route can submit `AnswerQuestion(chat_id, run_token, ...)` and the
+  writer actor fences the right `(chat_id, run_token)` snapshot key
+  before merging the answer. None for callers that don't allocate a
+  token (legacy/test paths); a tokenless `AnswerQuestion` broad-fences
+  by chat_id instead.
   """
 
   question_id: str
   questions: list[dict[str, Any]]
   future: asyncio.Future
+  run_token: str | None = None
