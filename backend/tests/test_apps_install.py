@@ -708,3 +708,99 @@ def test_install_same_manifest_twice_updates(
   assert second["mode"] == "update"
   assert second["id"] == first_id
   assert second["manifest_url"] == base + "mobius.json"
+
+
+# --------------------------------------------------------------------------
+# Tests for the cross_app_access='write' install path
+# (post-71ea870 — the App Store mini-app drives installs via its
+# app-scoped JWT instead of the owner JWT it doesn't hold).
+# --------------------------------------------------------------------------
+
+def _seed_app_with_perms(db, perms_cross_write: str):
+  """Insert an App row with the given cross_app_access level, return id."""
+  from app import models
+  app = models.App(
+    name="test-installer",
+    description="",
+    jsx_source="export default function App() { return null }",
+    source_dir="/tmp/test-installer",
+    slug="test-installer",
+    manifest_url="https://example/test-installer/mobius.json",
+    cross_app_access=perms_cross_write,
+    share_with_apps="none",
+    offline_capable=False,
+  )
+  db.add(app)
+  db.flush()
+  return app.id
+
+
+def test_install_accepts_app_token_with_cross_write(
+  client, db_session, bypass_url_validation
+):
+  """App-scoped JWT whose App row has cross_app_access='write' should pass."""
+  from app.auth import create_access_token
+  app_id = _seed_app_with_perms(db_session, "write")
+  db_session.commit()
+  token = create_access_token({"sub": "test", "scope": "app", "app_id": app_id})
+
+  base = "https://raw.githubusercontent.com/x/app-installable/main/"
+  responses = {
+    base + "mobius.json": (200, json.dumps({
+      "id": "installable",
+      "name": "Installable",
+      "version": "1.0.0",
+      "description": "x",
+      "author": "x",
+      "license": "MIT",
+      "homepage": "https://example",
+      "entry": "index.jsx",
+      "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
+    }).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    r = client.post(
+      "/api/apps/install",
+      headers={"Authorization": f"Bearer {token}"},
+      json={"manifest_url": base + "mobius.json"},
+    )
+  assert r.status_code == 201, r.text
+
+
+def test_install_rejects_app_token_with_cross_read(
+  client, db_session, bypass_url_validation
+):
+  """App-scoped JWT whose App row has cross_app_access='read' must 403."""
+  from app.auth import create_access_token
+  app_id = _seed_app_with_perms(db_session, "read")
+  db_session.commit()
+  token = create_access_token({"sub": "test", "scope": "app", "app_id": app_id})
+
+  r = client.post(
+    "/api/apps/install",
+    headers={"Authorization": f"Bearer {token}"},
+    json={"manifest_url": "https://x/y/mobius.json"},
+  )
+  assert r.status_code == 403, r.text
+  assert "cross_app_access" in r.json()["detail"].lower()
+
+
+def test_install_rejects_app_token_with_cross_none(
+  client, db_session, bypass_url_validation
+):
+  """App-scoped JWT whose App row has cross_app_access='none' must 403."""
+  from app.auth import create_access_token
+  app_id = _seed_app_with_perms(db_session, "none")
+  db_session.commit()
+  token = create_access_token({"sub": "test", "scope": "app", "app_id": app_id})
+
+  r = client.post(
+    "/api/apps/install",
+    headers={"Authorization": f"Bearer {token}"},
+    json={"manifest_url": "https://x/y/mobius.json"},
+  )
+  assert r.status_code == 403, r.text
