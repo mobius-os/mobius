@@ -21,7 +21,7 @@ from concurrent.futures import Future
 
 import pytest
 
-from app import models
+from app import models, schemas
 from app.chat_writer import (
   AnswerQuestion,
   AppendPending,
@@ -345,7 +345,11 @@ def test_start_turn_is_atomic(actor):
   result = _await(fut)
   assert result["session_id"] == "sess-x"
   assert result["provider"] == "codex"
-  assert result["history"][-1]["content"] == "build me a todo app"
+  # History entries are schemas.ChatMessage, exactly as the production
+  # initial-send path builds them — run_chat consumes `.content`, so a raw
+  # dict (no `.content` attribute) would break attribute access.
+  assert isinstance(result["history"][-1], schemas.ChatMessage)
+  assert result["history"][-1].content == "build me a todo app"
   chat = _load_chat()
   assert chat["messages"][-1]["content"] == "build me a todo app"
   assert chat["title"] == "build me a todo app"
@@ -380,6 +384,72 @@ def test_promote_pending_empty_queue_is_noop(actor):
   assert result["promoted"] is None
   chat = _load_chat()
   assert chat["messages"] == [{"role": "user", "content": "hi", "ts": 1}]
+
+
+# -- BLOCKING 1: history entries are schemas.ChatMessage ------------------
+def test_promote_pending_history_entries_are_chat_messages(actor):
+  """PromotePending's returned history is built from schemas.ChatMessage,
+  exactly like chat_queue.promote_pending_messages_locked. run_chat consumes
+  `messages[-1].content` (attribute access); a raw dict has no `.content`
+  attribute, so the history MUST carry ChatMessage objects."""
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[{"role": "user", "content": "next turn", "ts": 10}],
+  )
+  result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
+  assert result["promoted"]["content"] == "next turn"
+  history = result["history"]
+  assert history, "promoted turn must carry a non-empty history"
+  assert all(isinstance(m, schemas.ChatMessage) for m in history)
+  # The promoted message is the last history entry the runner sends.
+  assert history[-1].role == "user"
+  assert history[-1].content == "next turn"
+
+
+def test_promote_pending_malformed_entry_leaves_queue_intact(actor):
+  """A transcript entry whose `content` is not a string must NOT silently
+  consume the pending turn. This is the validation the raw-dict build
+  skipped: `m.get('content', '') or ''` keeps a truthy non-string (a dict
+  here) and a raw-dict history would carry it straight to the runner. Built
+  as schemas.ChatMessage it raises ValidationError, which the production
+  try/except in promote_pending_messages_locked turns into promoted=None +
+  queue-intact-for-retry. With raw dicts this test fails: the malformed
+  entry promotes and the pending queue is consumed."""
+  # `content` is a dict, not a string: a real dict (so `.get` works) but
+  # ChatMessage(content={...}) raises ValidationError. The defensive
+  # `or ""` does NOT coerce it because the dict is truthy.
+  _seed_chat(
+    messages=[{"role": "user", "content": {"nested": "not a string"}, "ts": 1}],
+    pending=[{"role": "user", "content": "should survive", "ts": 10}],
+  )
+  result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
+  # Validation failed: nothing promoted, queue intact for retry.
+  assert result["promoted"] is None
+  assert result["history"] == []
+  chat = _load_chat()
+  assert [m.get("content") for m in chat["pending_messages"]] == [
+    "should survive"
+  ]
+
+
+def test_start_turn_history_entries_are_chat_messages(actor):
+  """StartTurn's returned history is schemas.ChatMessage objects, so the
+  runner's `messages[-1].content` works on the initial send too."""
+  _seed_chat(messages=[{"role": "user", "content": "earlier", "ts": 1}])
+  result = _await(
+    actor.submit(
+      StartTurn(
+        chat_id="c1",
+        run_token="rt1",
+        user_msg={"role": "user", "content": "new send", "ts": 2},
+        title_source="new send",
+      )
+    )
+  )
+  history = result["history"]
+  assert all(isinstance(m, schemas.ChatMessage) for m in history)
+  assert history[0].content == "earlier"
+  assert history[-1].content == "new send"
 
 
 # -- 9. DB-error session-recreate -----------------------------------------
