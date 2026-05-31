@@ -380,16 +380,21 @@ def _process_icon(raw: bytes) -> bytes:
 
 def _register_cron(slug: str, schedule_expr: str, job_path: Path,
                    bundled_job_bytes: bytes | None) -> None:
-  """Writes job.sh (if bundled in the repo) then runs init-cron-scaffold.sh.
+  """Writes the bundled job (if any) then runs init-cron-scaffold.sh.
 
   The scaffold script writes init-cron.sh + installs the crontab entry
   AND restores it on the next container restart by replaying every
   /data/apps/*/init-cron.sh from the entrypoint. Idempotent — calling
-  it for an unchanged (slug, schedule) is a no-op.
+  it for an unchanged (slug, schedule, job) is a no-op.
 
   If the manifest bundled a job script, write it first so the scaffold
-  doesn't stub-out the same path. The scaffold preserves existing
-  job.sh files; the agent or user can edit them later.
+  doesn't stub-out the same path. The scaffold preserves existing job
+  files; the agent or user can edit them later.
+
+  The job filename (e.g. fetch.sh, from the manifest's schedule.job) is
+  passed to the scaffold so the crontab entry points at the real job —
+  the scaffold defaults to job.sh otherwise, which would leave a
+  manifest that ships fetch.sh firing an empty stub.
   """
   if bundled_job_bytes:
     job_path.write_bytes(bundled_job_bytes)
@@ -399,7 +404,7 @@ def _register_cron(slug: str, schedule_expr: str, job_path: Path,
     # In tests we mock this away; in containers it's always present.
     raise HTTPException(500, "init-cron-scaffold.sh missing from image.")
   result = subprocess.run(
-    [str(scaffold), slug, schedule_expr],
+    [str(scaffold), slug, schedule_expr, job_path.name],
     capture_output=True, text=True, timeout=30,
   )
   if result.returncode != 0:
