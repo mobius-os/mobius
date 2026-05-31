@@ -12,6 +12,7 @@ import useNavigation from '../../hooks/useNavigation.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import useTheme from '../../hooks/useTheme.js'
 import useProviderAuthStatus from '../../hooks/useProviderAuthStatus.js'
+import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import { appQueries, chatQueries, modelQueries, ownerQueries } from '../../hooks/queries.js'
 import './Shell.css'
 
@@ -55,6 +56,10 @@ export default function Shell() {
   const APP_CACHE_MAX = 4
   const [appCache, setAppCache] = useState([])
   const [toast, setToast] = useState(null)
+  // Global connectivity indicator. The composer already disables send when
+  // offline (ChatView); this surfaces the state shell-wide so the user is
+  // never tapping in the dark about whether they're connected.
+  const online = useOnlineStatus()
   const chatsLoadedRef = useRef(false)
   // In-flight guard for newChat. The function POSTs unconditionally now
   // (the old empty-chat-reuse path was the implicit deduper); without
@@ -588,6 +593,11 @@ export default function Shell() {
           <img className="shell__logo" src={`${BASE}/moebius.png`} alt="" width="30" height="30" />
           <span className="shell__wordmark">Möbius</span>
         </div>
+        {!online && (
+          <span className="shell__offline" role="status" aria-live="polite">
+            Offline
+          </span>
+        )}
       </header>
 
       <Drawer

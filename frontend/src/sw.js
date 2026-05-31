@@ -57,6 +57,26 @@ import {
 self.skipWaiting()
 clientsClaim()
 
+// Identifies THIS service-worker generation. Bump on any meaningful SW
+// change so /diag.html can confirm which SW a device is actually running
+// (the whole class of "did my fix even reach the phone?" questions — a SW
+// only updates on an online visit, so an installed PWA can run an old SW
+// for a while). Served offline by the route below because the SW
+// synthesizes the response; no network needed.
+const SW_VERSION = '2026-05-31-offline-apps-reload'
+
+// /api/__sw_version — a synthetic, SW-generated response so /diag.html can
+// read the live SW generation even offline. Registered before the catch
+// handler; never hits the network.
+registerRoute(
+  ({ url }) => url.pathname === '/api/__sw_version',
+  async () =>
+    new Response(
+      JSON.stringify({ version: SW_VERSION, ts: Date.now() }),
+      { headers: { 'Content-Type': 'application/json' } },
+    ),
+)
+
 // Self-hosted React for the mini-app import map. These live in
 // /app/static/vendor (copied by the Dockerfile AFTER the Vite build, so
 // Vite's manifest can't glob them) and are referenced by the import maps
@@ -197,12 +217,22 @@ function offlineCapableHandler(cacheName) {
     key.searchParams.delete('_')
     const cacheKey = key.href
     try {
-      // request.url keeps the token (the server needs it to auth /module);
-      // cache:'reload' forces a fresh 200 body past the HTTP cache.
-      const resp = await fetch(request.url, {
-        cache: 'reload',
-        credentials: 'same-origin',
-      })
+      // Forward the ORIGINAL request (preserving mode/headers/credentials —
+      // notably navigate mode for the standalone-app route) with cache:'reload'
+      // forced so we get a fresh 200 body past the HTTP cache, never a 304.
+      // Constructing a Request from a navigate-mode request with an init
+      // throws in some engines; fall back to a plain same-origin GET on the
+      // same URL (the previously-shipped, browser-verified form) if so. The
+      // token stays in request.url either way so /module auth still works.
+      let resp
+      try {
+        resp = await fetch(new Request(request, { cache: 'reload' }))
+      } catch {
+        resp = await fetch(request.url, {
+          cache: 'reload',
+          credentials: 'same-origin',
+        })
+      }
       if (
         resp && resp.status === 200 &&
         resp.headers.get('X-Mobius-Offline') === '1'

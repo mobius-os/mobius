@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Möbius offline diagnostics</title>
+  <!-- Self-contained on purpose: this page must render with no network so
+       it can diagnose the OFFLINE state. It deliberately does NOT depend on
+       the SW, React, or any /api call to display. It reports device-side
+       facts (online flag, active SW, cache contents) so we can debug
+       offline behavior from a phone instead of testing blind. -->
+  <style>
+    :root { --bg:#0c0f14; --fg:#d4d4d8; --muted:#8a8f98; --ok:#6ee7b7; --bad:#f87171; --accent:#a78bfa; --card:#14181f; --border:#252b36; }
+    * { box-sizing:border-box; margin:0; padding:0; }
+    body { background:var(--bg); color:var(--fg); font:14px/1.5 system-ui,sans-serif; padding:16px; -webkit-text-size-adjust:100%; }
+    h1 { font-size:16px; margin-bottom:4px; }
+    .sub { color:var(--muted); font-size:12px; margin-bottom:14px; }
+    .row { display:flex; justify-content:space-between; gap:10px; padding:8px 0; border-bottom:1px solid var(--border); }
+    .row .k { color:var(--muted); }
+    .row .v { text-align:right; font-weight:600; word-break:break-all; }
+    .ok { color:var(--ok); } .bad { color:var(--bad); }
+    .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:12px 14px; margin:12px 0; }
+    .card h2 { font-size:13px; color:var(--accent); margin-bottom:6px; }
+    pre { white-space:pre-wrap; word-break:break-all; font:11px/1.45 ui-monospace,monospace; color:var(--fg); }
+    button { background:var(--accent); color:#0c0f14; border:none; border-radius:8px; padding:10px 16px; font:600 14px system-ui; margin:4px 6px 4px 0; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:99px; font-size:12px; font-weight:600; }
+    .pill.on { background:rgba(110,231,183,.15); color:var(--ok); }
+    .pill.off { background:rgba(248,113,113,.15); color:var(--bad); }
+  </style>
+</head>
+<body>
+  <h1>Möbius offline diagnostics</h1>
+  <div class="sub">Open this online once, then in airplane mode. Screenshot both.</div>
+
+  <div class="card">
+    <div class="row"><span class="k">Network</span><span class="v"><span id="net" class="pill">…</span></span></div>
+    <div class="row"><span class="k">Service worker</span><span class="v" id="swstate">…</span></div>
+    <div class="row"><span class="k">SW controlling page</span><span class="v" id="swctrl">…</span></div>
+    <div class="row"><span class="k">SW version</span><span class="v" id="swver">…</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Snake (app 22) offline-readiness</h2>
+    <div class="row"><span class="k">frame cached</span><span class="v" id="f22">…</span></div>
+    <div class="row"><span class="k">module cached</span><span class="v" id="m22">…</span></div>
+    <div class="row"><span class="k">React precached</span><span class="v" id="react">…</span></div>
+  </div>
+
+  <div>
+    <button onclick="probe22()">Probe Snake (fetch frame+module)</button>
+    <button onclick="refresh()">Refresh</button>
+  </div>
+
+  <div class="card">
+    <h2>All caches</h2>
+    <pre id="caches">…</pre>
+  </div>
+
+  <div class="card">
+    <h2>SW version response (/api/__sw_version via SW)</h2>
+    <pre id="swresp">…</pre>
+  </div>
+
+  <script>
+    function setNet() {
+      var el = document.getElementById('net');
+      el.textContent = navigator.onLine ? 'ONLINE' : 'OFFLINE';
+      el.className = 'pill ' + (navigator.onLine ? 'on' : 'off');
+    }
+    window.addEventListener('online', setNet);
+    window.addEventListener('offline', setNet);
+
+    async function dumpCaches() {
+      try {
+        var keys = await caches.keys();
+        var report = {};
+        var f22 = false, m22 = false, react = false;
+        for (var i=0;i<keys.length;i++) {
+          var c = await caches.open(keys[i]);
+          var reqs = await c.keys();
+          var urls = reqs.map(function(r){ return r.url.replace(location.origin,''); });
+          report[keys[i]] = urls;
+          urls.forEach(function(u){
+            if (u.indexOf('/api/apps/22/frame') === 0 || u.indexOf('/api/apps/22/frame') > -1) f22 = true;
+            if (u.indexOf('/api/apps/22/module') > -1) m22 = true;
+            if (u.indexOf('/vendor/react@') > -1) react = true;
+          });
+        }
+        document.getElementById('caches').textContent = JSON.stringify(report, null, 1);
+        mark('f22', f22); mark('m22', m22); mark('react', react);
+      } catch (e) {
+        document.getElementById('caches').textContent = 'ERR ' + e.message;
+      }
+    }
+    function mark(id, ok) {
+      var el = document.getElementById(id);
+      el.textContent = ok ? 'YES' : 'NO';
+      el.className = 'v ' + (ok ? 'ok' : 'bad');
+    }
+
+    async function swInfo() {
+      if (!('serviceWorker' in navigator)) {
+        document.getElementById('swstate').textContent = 'unsupported';
+        return;
+      }
+      var reg = await navigator.serviceWorker.getRegistration();
+      var active = reg && reg.active;
+      document.getElementById('swstate').textContent = active ? 'active' : (reg ? 'registered (no active)' : 'none');
+      var ctrl = navigator.serviceWorker.controller;
+      var ce = document.getElementById('swctrl');
+      ce.textContent = ctrl ? 'YES' : 'NO';
+      ce.className = 'v ' + (ctrl ? 'ok' : 'bad');
+      if (active) {
+        var url = active.scriptURL || '';
+        document.getElementById('swver').textContent = url.replace(location.origin,'');
+      }
+    }
+
+    // Ask the SW for its version via a message channel; falls back to a
+    // fetch the SW can answer offline. Both are best-effort.
+    async function swVersion() {
+      var out = document.getElementById('swresp');
+      try {
+        var r = await fetch('/api/__sw_version', { cache: 'no-store' });
+        out.textContent = 'HTTP ' + r.status + '  ' + (await r.text()).slice(0, 200);
+      } catch (e) {
+        out.textContent = 'fetch threw: ' + e.message + ' (offline + SW has no version route → expected on old SW)';
+      }
+    }
+
+    async function probe22() {
+      var out = document.getElementById('swresp');
+      var lines = [];
+      for (var path of ['/api/apps/22/frame', '/api/apps/22/module']) {
+        try {
+          var r = await fetch(path, { cache: 'no-store' });
+          lines.push(path + ' → ' + r.status + ' xmo=' + r.headers.get('X-Mobius-Offline') + ' ct=' + (r.headers.get('Content-Type')||''));
+        } catch (e) {
+          lines.push(path + ' → THREW ' + e.message);
+        }
+      }
+      out.textContent = lines.join('\n');
+      await dumpCaches();
+    }
+
+    async function refresh() { setNet(); await swInfo(); await dumpCaches(); await swVersion(); }
+    refresh();
+  </script>
+</body>
+</html>
