@@ -561,6 +561,13 @@ async def install_from_manifest(
       app.jsx_source = jsx_source
       app.cross_app_access = perms.get("cross_app_access", app.cross_app_access)
       app.share_with_apps = perms.get("share_with_apps", app.share_with_apps)
+      # Mirror manifest.offline_capable into the App row on every
+      # update, so an app that flips its offline behaviour between
+      # versions (e.g. news 1.5.1 online-only → 1.5.2 offline-capable)
+      # gets the SW + outbox semantics matching what it ships, not
+      # what it used to ship.
+      if "offline_capable" in manifest:
+        app.offline_capable = bool(manifest["offline_capable"])
       db.flush()
     else:
       # Identity by manifest_url means we're now genuinely in the
@@ -584,6 +591,13 @@ async def install_from_manifest(
         manifest_url=canonical_manifest_url,
         cross_app_access=perms.get("cross_app_access", "none"),
         share_with_apps=perms.get("share_with_apps", "none"),
+        # The manifest's `offline_capable: true` opts the app into the
+        # SW frame cache + the window.mobius.storage outbox. Without
+        # this line every installed app defaulted to offline_capable=
+        # false on the App row regardless of what the manifest declared
+        # — apps that paid the cost of being offline-ready in code
+        # didn't actually behave offline-ready end-to-end.
+        offline_capable=bool(manifest.get("offline_capable", False)),
       )
       db.add(app)
       db.flush()  # assign app.id without committing yet
