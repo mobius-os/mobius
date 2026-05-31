@@ -832,3 +832,93 @@ def test_install_rejects_app_token_with_cross_none(
     json={"manifest_url": "https://x/y/mobius.json"},
   )
   assert r.status_code == 403, r.text
+
+
+# --- SystemBroadcast notification on install/update -----------------
+
+
+def test_install_publishes_app_updated_on_success(
+  client, auth, bypass_url_validation,
+):
+  """Shell drawer auto-refresh: a successful install must emit an
+  `app_updated` SystemBroadcast event with the new app's id.
+  Without this the Shell only learns about the new app on the next
+  page reload — which is exactly the "install succeeded but the
+  drawer is empty" failure the app-store currently reports."""
+  base = "https://x.test/notify/"
+  responses = {
+    base + "mobius.json": (200, json.dumps({
+      **MANIFEST_NEWS, "id": "notify-target",
+    }).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, PROMPT.encode()),
+    base + "fetch.sh": (200, b""),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ), patch("app.routes.apps.get_system_broadcast") as mock_get_sb:
+    fake_sb = MagicMock()
+    mock_get_sb.return_value = fake_sb
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r.status_code == 201, r.text
+  app_id = r.json()["id"]
+  # Exactly one publish for this install — and it carries the new
+  # app's id as a string (matches the file-watcher's payload shape).
+  fake_sb.publish.assert_called_once_with({
+    "type": "app_updated", "appId": str(app_id),
+  })
+
+
+def test_install_does_not_publish_when_install_fails(
+  client, auth, bypass_url_validation,
+):
+  """No SSE event when the install rolls back — the Shell would
+  refetch only to find the row absent, but emitting an event for a
+  non-event is noise. install_from_manifest raises before we reach
+  the publish call, so the assertion is on `not_called`."""
+  base = "https://x.test/fail-notify/"
+  responses = {
+    base + "mobius.json": (200, json.dumps({
+      **MANIFEST_NEWS, "id": "fail-notify",
+    }).encode()),
+    base + "index.jsx": (200, b"this is not valid JSX <<>>"),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, PROMPT.encode()),
+    base + "fetch.sh": (200, b""),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ), patch("app.routes.apps.get_system_broadcast") as mock_get_sb:
+    fake_sb = MagicMock()
+    mock_get_sb.return_value = fake_sb
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r.status_code in (422, 500), r.text
+  fake_sb.publish.assert_not_called()
+
+
+def test_delete_publishes_app_updated(client, auth):
+  """Uninstall must also refresh the drawer — Shell.jsx's app_updated
+  handler refetches /api/apps/, which then no longer contains the
+  deleted row, so the entry disappears without a page reload."""
+  r0 = client.post("/api/apps/", headers=auth, json={
+    "name": "Doomed",
+    "description": "",
+    "jsx_source": JSX,
+  })
+  assert r0.status_code == 201, r0.text
+  app_id = r0.json()["id"]
+  with patch("app.routes.apps.get_system_broadcast") as mock_get_sb:
+    fake_sb = MagicMock()
+    mock_get_sb.return_value = fake_sb
+    r = client.delete(f"/api/apps/{app_id}", headers=auth)
+  assert r.status_code == 204, r.text
+  fake_sb.publish.assert_called_once_with({
+    "type": "app_updated", "appId": str(app_id),
+  })
