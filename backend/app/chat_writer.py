@@ -38,8 +38,11 @@ import logging
 import queue
 import sys
 import threading
+import time
 from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass, field
+
+from app.events import build_assistant_message, finalize_blocks, question_block_key
 
 log = logging.getLogger("moebius.chat_writer")
 
@@ -678,6 +681,185 @@ def alloc_run_token() -> str:
   """
   with _token_lock:
     return f"rt-{next(_token_counter)}"
+
+
+# -- chat-transcript persistence helpers ---------------------------------
+# These mutate the two JSON blobs on the Chat row (`messages`,
+# `pending_messages`).  They moved here from `chat.py` / `routes/
+# chats_stream.py` so the writer actor can call them on its own thread
+# without importing back into `chat.py` (which imports `alloc_run_token`
+# from this module — the reverse import would cycle).  `chat.py` and the
+# routes import them BACK from here; the dependency runs one way
+# (chat.py -> chat_writer).  Behavior is byte-for-byte the moved code:
+# until the activation milestone the sink/routes still CALL these exactly
+# as before, so moving them changes nothing at runtime.
+
+
+def _commit_or_rollback(db) -> bool:
+  """Commit and return True; on OperationalError roll back and return False.
+
+  A local copy of `chat._safe_commit` so this module doesn't import back
+  into `chat.py`.  A transient SQLite lock returns False (the caller skips
+  and a later write repairs) rather than poisoning the session — without
+  it one lock burst raises PendingRollbackError on every subsequent
+  operation in the turn.
+  """
+  from sqlalchemy.exc import OperationalError
+
+  try:
+    db.commit()
+    return True
+  except OperationalError as exc:
+    log.warning("db commit dropped (rolled back): %s", exc)
+    try:
+      db.rollback()
+    except Exception:
+      pass
+    return False
+
+
+def next_message_ts(existing: list) -> int:
+  """A wall-clock-ms timestamp strictly greater than every ts in `existing`.
+
+  The streamed-assistant path doesn't flow through the queue's
+  `_ensure_unique_ts`, so a fast first assistant write could otherwise
+  land in the same millisecond as the user message — two sibling messages
+  with equal ts produce duplicate React keys client-side.  Callers pass
+  the union of persisted + pending messages so the new ts clears both
+  collections.
+  """
+  now = int(time.time() * 1000)
+  max_ts = max((m.get("ts") or 0 for m in existing), default=0)
+  return max(now, max_ts + 1)
+
+
+def update_last_assistant_message(db, chat_id: str, message: dict) -> bool:
+  """Updates the last assistant message in the chat (for streaming updates)."""
+  if not chat_id:
+    return True
+  from app.models import Chat
+
+  chat = db.query(Chat).filter(Chat.id == chat_id).first()
+  if not chat or not chat.messages:
+    return True
+  msgs = list(chat.messages)
+  if msgs and msgs[-1].get("role") == "assistant":
+    # Carry answers forward: apply_answers_to_last_question writes
+    # them here; the runner rebuilds from assistant_blocks (no
+    # answers), so merge keyed by question_block_key to avoid wiping
+    # them on writeback. Multi-question turns are supported.
+    existing_answers_by_key = {}
+    for ob in msgs[-1].get("blocks") or []:
+      if ob.get("type") == "question" and ob.get("answers"):
+        existing_answers_by_key[question_block_key(ob)] = ob["answers"]
+    for nb in message.get("blocks") or []:
+      if nb.get("type") == "question" and not nb.get("answers"):
+        carried = existing_answers_by_key.get(question_block_key(nb))
+        if carried:
+          nb["answers"] = carried
+    # Carry a STABLE per-turn ts. build_assistant_message omits ts, so
+    # assistant messages historically persisted with ts=None — which
+    # silently defeated the frontend bridge gate (useBridgePartial keys
+    # the kept partial by ts). On reconnect mid-question the persisted
+    # card AND the replayed stream card both rendered (the duplicate
+    # question/answer bug). Preserve the existing message's ts across
+    # every streaming replace so the id stays stable for the whole turn;
+    # backfill one only if an older, tsless message is being updated.
+    message["ts"] = msgs[-1].get("ts")
+    if message["ts"] is None:
+      # Backfilling an older, tsless assistant message. Allocate against
+      # persisted messages EXCLUDING msgs[-1] (it's the tsless one being
+      # stamped, so it can only contribute 0) plus queued messages, so the
+      # new ts can't collide with a pending user msg once it promotes into
+      # chat.messages (equal ts -> duplicate React keys). The pending read
+      # is here, not on the hot path, so the common replace does no extra
+      # work. Mirrors chats_stream._ensure_unique_ts (it now clears
+      # chat.messages too), so the two allocators can't hand out the same ms.
+      message["ts"] = next_message_ts(
+        msgs[:-1] + list(chat.pending_messages or [])
+      )
+    msgs[-1] = message
+  else:
+    # First write of this turn's assistant message — stamp a ts greater
+    # than every persisted AND queued message so the bridge gate and the
+    # frontend's ts-keyed rendering get a stable, collision-free id.
+    message["ts"] = next_message_ts(msgs + list(chat.pending_messages or []))
+    msgs.append(message)
+  chat.messages = msgs
+  return _commit_or_rollback(db)
+
+
+def finalize_response(db, chat_id: str, assistant_blocks: list) -> bool:
+  """End-of-response cleanup: force-complete tool blocks and save.
+
+  Returns the underlying commit result (True on success, False on a
+  dropped commit or when there is nothing to persist) so the writer
+  actor can ack-fail a `Finalize` whose commit didn't land.
+  """
+  if not assistant_blocks:
+    return False
+  finalize_blocks(assistant_blocks)
+  return update_last_assistant_message(
+    db, chat_id, build_assistant_message(assistant_blocks)
+  )
+
+
+def apply_answers_to_last_question(
+  chat, answers: dict | None, question_id: str | None = None
+) -> bool:
+  """Writes `answers` into the question block being answered.
+
+  When `question_id` is supplied, the answers are written into the block
+  whose `question_id` matches EXACTLY — this routes the answer to the
+  right question when two are open at once (the latest-question search
+  below would hit the wrong, later one). An unknown id matches nothing
+  and returns False rather than silently falling back, which would
+  re-introduce the wrong-block bug. When `question_id` is absent, the
+  LAST assistant message's last question block is updated (backward-
+  compatible with clients that don't send the id).
+
+  Returns True if a question block was found and updated.
+  """
+  if not answers:
+    return False
+  from sqlalchemy.orm.attributes import flag_modified
+
+  msgs = list(chat.messages or [])
+
+  if question_id:
+    # Identity match: scan every assistant message's question blocks for
+    # the exact id. Precise — never falls back to "latest".
+    for msg in reversed(msgs):
+      if msg.get("role") != "assistant":
+        continue
+      for block in msg.get("blocks") or []:
+        if (
+          block.get("type") == "question"
+          and block.get("question_id") == question_id
+        ):
+          block["answers"] = answers
+          chat.messages = msgs  # rebind so SQLAlchemy detects the mutation
+          flag_modified(chat, "messages")
+          return True
+    return False
+
+  # No question_id supplied — preserve the legacy latest-question
+  # behaviour (older clients that don't send the id).
+  log.debug(
+    "answer applied without question_id; using latest-question fallback "
+    "chat_id=%s",
+    getattr(chat, "id", "?"),
+  )
+  for msg in reversed(msgs):
+    if msg.get("role") != "assistant":
+      continue
+    for block in reversed(msg.get("blocks") or []):
+      if block.get("type") == "question":
+        block["answers"] = answers
+        chat.messages = msgs  # rebind so SQLAlchemy detects JSON mutation
+        flag_modified(chat, "messages")
+        return True
+  return False
 
 
 # -- module singleton + lifespan accessors -------------------------------
