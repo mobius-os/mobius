@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from app import auth, models, schemas
 from app.config import get_settings
 from app.database import get_db
-from app.deps import get_current_owner
+from app.deps import get_current_owner, get_current_owner_or_app
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 _limiter = Limiter(key_func=get_remote_address)
@@ -431,7 +431,7 @@ def _claude_tier(model_id: str) -> str | None:
 
 @router.get("/providers/models")
 async def providers_models(
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_or_app),
 ):
   """Per-provider model list for mini-app pickers.
 
@@ -450,8 +450,12 @@ async def providers_models(
   shell keeps its own endpoint because its picker depends on the
   richer fields; mini-apps get a stable, narrow surface.
 
-  Owner-only (GET, no CSRF concern). Same auth posture as
-  `/providers/status` next door.
+  Accepts owner OR app-scoped tokens — mini-app Settings tabs (news
+  picker, Dreaming Settings, recovery chat picker) need this list to
+  render real choices. Rejecting app tokens here was the silent reason
+  those pickers fell back to FALLBACK_GROUPS (one model per provider).
+  This is a read; no state changes and no cross-app concerns — the
+  CLI runtime already exposes the same list to every running app.
   """
   from app.providers import list_models
   data_dir = get_settings().data_dir
