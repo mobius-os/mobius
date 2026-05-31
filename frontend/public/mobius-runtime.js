@@ -20,10 +20,15 @@
 //   window.mobius.storage.remove(path)        -> {synced} | {queued}
 //   window.mobius.storage.pendingCount()      -> Promise<number>
 //
-// Conflict policy: last-write-wins at the path granularity. An app that
-// needs per-record LWW stores one file per record (…/items/<uuid>.json)
-// so concurrent edits to different records don't clobber each other.
-// CRDTs are out of scope (overkill for single-owner personal apps).
+// Conflict policy: last-write-wins at the path granularity. The newest
+// write for a path supersedes any earlier one — enforced by coalescing
+// the outbox on every write (a queued op for a path is dropped when a
+// newer write for that path is enqueued OR sent directly online), so a
+// stale queued op can never replay over a newer value on drain. An app
+// that needs per-record LWW stores one file per record
+// (…/items/<uuid>.json) so concurrent edits to different records don't
+// clobber each other. CRDTs are out of scope (overkill for single-owner
+// personal apps).
 //
 // Smells: see the block at the bottom of this file.
 
@@ -63,8 +68,35 @@ async function withStore(mode, fn) {
 }
 
 function makeStorage({ appId, getToken }) {
-  function enqueue(op) {
+  // Drop every queued op for this app + path in one transaction, then run
+  // `after(store)` (if given) inside the SAME transaction. Used to enforce
+  // last-write-wins at path granularity: a newer write for a path
+  // supersedes any older queued write for it, so the stale op must not
+  // survive to be replayed on drain. Filtering happens in the cursor
+  // because the store is keyed by `seq` (FIFO), with `appId`/`path` as
+  // plain fields. Doing the purge and the follow-up add in one tx keeps
+  // the coalesce atomic — no window where the path has zero ops queued.
+  function purgePath(path, after) {
     return withStore('readwrite', (store) => {
+      store.openCursor().onsuccess = (e) => {
+        const cursor = e.target.result
+        if (!cursor) {
+          if (after) after(store)
+          return
+        }
+        const v = cursor.value
+        if (v.appId === appId && v.path === path) cursor.delete()
+        cursor.continue()
+      }
+    })
+  }
+
+  // Enqueue coalesces: the newest write for a path replaces any older
+  // queued writes for it, so a stale op can never clobber a newer one
+  // when the queue drains. (FIFO ordering across DIFFERENT paths is
+  // still preserved — drainInner walks `seq` in order.)
+  function enqueue(op) {
+    return purgePath(op.path, (store) => {
       store.add({ ...op, appId, ts: Date.now() })
     })
   }
@@ -177,8 +209,16 @@ function makeStorage({ appId, getToken }) {
     },
     async set(path, data) {
       if (navigator.onLine) {
-        try { await send({ method: 'PUT', path, data }); return { synced: true } }
-        catch (e) { /* fall through to queue */ }
+        try {
+          await send({ method: 'PUT', path, data })
+          // This direct write is newer than anything still queued for
+          // the path (e.g. an offline write left over from before we
+          // came online). Drop those stale ops so the next drain can't
+          // replay one over the value we just wrote — the last-write-
+          // wins violation this guards against.
+          await purgePath(path)
+          return { synced: true }
+        } catch (e) { /* fall through to queue */ }
       }
       await enqueue({ method: 'PUT', path, data })
       drain()
@@ -186,8 +226,13 @@ function makeStorage({ appId, getToken }) {
     },
     async remove(path) {
       if (navigator.onLine) {
-        try { await send({ method: 'DELETE', path }); return { synced: true } }
-        catch (e) { /* fall through to queue */ }
+        try {
+          await send({ method: 'DELETE', path })
+          // Same as set(): the delete just landed, so any older queued
+          // write/delete for this path is stale and must not replay.
+          await purgePath(path)
+          return { synced: true }
+        } catch (e) { /* fall through to queue */ }
       }
       await enqueue({ method: 'DELETE', path })
       drain()

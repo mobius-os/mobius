@@ -14,7 +14,7 @@ import './AppCanvas.css'
 // type, renaming a field, or changing payload shape requires editing
 // both files in the same PR.
 //
-// Three message types, all gated on `e.origin === window.location.origin`:
+// Core message types, all gated on `e.origin === window.location.origin`:
 //
 //   1. {type: 'moebius:frame-init', token, themeCss, bg}    parent → frame
 //      Fired by `sendInit()` below — on iframe.onLoad AND whenever the
@@ -29,6 +29,13 @@ import './AppCanvas.css'
 //      Fired by the frame AFTER `createRoot.render()` returns. Parent
 //      hides the loading overlay only on this signal — `iframe.onLoad`
 //      is too early (document loaded ≠ React rendered).
+//
+//   2b. {type: 'moebius:frame-error', appId}               frame → parent
+//      Fired by the frame on a TERMINAL load failure (bad import, no
+//      token, no default export, init timeout) instead of (2). Parent
+//      hides the loading overlay so the frame's own error panel shows —
+//      otherwise the opaque spinner covers it and the app looks like a
+//      dead, never-resolving spinner.
 //
 //   3. {type: 'moebius:frame-theme', themeCss, bg}         parent → frame
 //      Fired when the active theme changes (SSE `theme_updated` event
@@ -166,6 +173,16 @@ export default function AppCanvas({
       const msg = e.data
       if (!msg || typeof msg !== 'object') return
       if (msg.type === 'moebius:frame-mounted' && String(msg.appId) === String(appId)) {
+        setLoaded(true)
+      }
+      // The frame hit a terminal load failure (bad import, no token, no
+      // default export, init timeout) and is showing its own error panel.
+      // Hide the loading overlay so that panel is visible — without this
+      // the opaque spinner covers it and the app looks like a dead,
+      // never-resolving spinner. Same origin + source + appId guards as
+      // frame-mounted; the offline panel (rendered when !loaded) is a
+      // separate path and is unaffected.
+      if (msg.type === 'moebius:frame-error' && String(msg.appId) === String(appId)) {
         setLoaded(true)
       }
       // Mini-app back-nav protocol (see useNavigation.appNavPush /
