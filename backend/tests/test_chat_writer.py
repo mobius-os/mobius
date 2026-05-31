@@ -20,6 +20,7 @@ from app.chat_writer import (
   Finalize,
   PersistError,
   PersistTranscript,
+  alloc_run_token,
 )
 
 
@@ -975,3 +976,36 @@ def test_fatal_drain_resolving_ack_can_reenter_stop_without_deadlock():
     reentered.result(timeout=3)
   finally:
     actor.stop(timeout=5)
+
+
+# -- TASK 4: process-scoped run_token allocation -----------------------------
+def test_alloc_run_token_returns_unique_values():
+  # Every call returns a distinct opaque token — no two turns ever share one.
+  tokens = [alloc_run_token() for _ in range(1000)]
+  assert len(set(tokens)) == 1000, "alloc_run_token returned a duplicate"
+  # Tokens are opaque strings (no semantics callers can lean on).
+  assert all(isinstance(t, str) and t for t in tokens)
+
+
+def test_alloc_run_token_is_thread_safe_under_contention():
+  # The allocator runs from arbitrary threads (each turn's run_chat); a
+  # contended burst across threads must still never collide.
+  tokens: list = []
+  tokens_lock = threading.Lock()
+  n_threads = 16
+  per_thread = 200
+  barrier = threading.Barrier(n_threads)
+
+  def racer():
+    barrier.wait()  # release all at once to maximise contention
+    local = [alloc_run_token() for _ in range(per_thread)]
+    with tokens_lock:
+      tokens.extend(local)
+
+  threads = [threading.Thread(target=racer) for _ in range(n_threads)]
+  for t in threads:
+    t.start()
+  for t in threads:
+    t.join(timeout=10)
+  assert len(tokens) == n_threads * per_thread
+  assert len(set(tokens)) == len(tokens), "concurrent alloc produced a collision"
