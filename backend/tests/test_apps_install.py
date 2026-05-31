@@ -878,38 +878,30 @@ def test_install_accepts_app_token_with_manage_apps(
   assert r.status_code == 201, r.text
 
 
-def test_install_still_accepts_legacy_cross_write(
+def test_install_rejects_app_token_with_cross_write_but_no_manage_apps(
   client, db, owner_token, bypass_url_validation,
 ):
-  """Transitional: cross_app_access='write' alone is still honoured.
-
-  Pre-073 manifests granted install authority implicitly through
-  cross_app_access='write'. Until those installs update to declare
-  manage_apps=true, the dep must keep accepting the legacy shape so
-  the install button doesn't brick on day one of the rollout.
-  """
+  """cross_app_access='write' alone is NOT enough — manage_apps is the
+  install-authority key now. Apps that want to drive installs must
+  declare permissions.manage_apps=true in their manifest."""
   from app.auth import create_access_token
   app_id = _seed_app_with_perms(db, perms_cross_write="write", manage_apps=False)
   db.commit()
   token = create_access_token({"sub": "test", "scope": "app", "app_id": app_id})
 
-  base = "https://raw.githubusercontent.com/x/app-installable/main/"
-  with patch(
-    "app.install.httpx.AsyncClient",
-    side_effect=_fake_async_client(_install_responses(base)),
-  ):
-    r = client.post(
-      "/api/apps/install",
-      headers={"Authorization": f"Bearer {token}"},
-      json={"manifest_url": base + "mobius.json"},
-    )
-  assert r.status_code == 201, r.text
+  r = client.post(
+    "/api/apps/install",
+    headers={"Authorization": f"Bearer {token}"},
+    json={"manifest_url": "https://x/y/mobius.json"},
+  )
+  assert r.status_code == 403, r.text
+  assert "manage_apps" in r.json()["detail"].lower()
 
 
-def test_install_rejects_app_token_without_manage_apps_and_without_cross_write(
+def test_install_rejects_app_token_with_cross_read(
   client, db, owner_token, bypass_url_validation,
 ):
-  """App with neither manage_apps nor cross_app_access='write' is denied."""
+  """cross_app_access='read' alone is not install authority."""
   from app.auth import create_access_token
   app_id = _seed_app_with_perms(db, perms_cross_write="read", manage_apps=False)
   db.commit()

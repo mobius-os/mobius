@@ -571,19 +571,6 @@ async def install_from_manifest(
     .filter(models.App.manifest_url == canonical_manifest_url)
     .first()
   )
-  # Backwards-compat read path: rows installed before the canonical
-  # shape landed still carry the un-stripped URL (e.g. literally
-  # `.../mobius.json`). Match those too so re-installing an
-  # already-installed app updates the existing row rather than
-  # creating a duplicate. On the update branch below we rewrite
-  # `app.manifest_url` to the canonical shape so the legacy form
-  # ages out one install at a time.
-  if existing is None and manifest_url is not None:
-    existing = (
-      db.query(models.App)
-      .filter(models.App.manifest_url == manifest_url)
-      .first()
-    )
   mode = "update" if existing else "install"
 
   warnings: list[str] = []
@@ -617,10 +604,8 @@ async def install_from_manifest(
       app.cross_app_access = perms.get("cross_app_access", app.cross_app_access)
       app.share_with_apps = perms.get("share_with_apps", app.share_with_apps)
       # Mirror manage_apps on update too — an app can gain or lose
-      # install authority across versions (e.g. the App Store moves
-      # from the transitional cross_app_access='write' fallback to
-      # explicitly declaring manage_apps=true). Default to the
-      # existing value when the manifest omits the key.
+      # install authority across versions. Default to the existing
+      # value when the manifest omits the key.
       if "manage_apps" in perms:
         app.manage_apps = bool(perms["manage_apps"])
       # Mirror manifest.offline_capable into the App row on every
