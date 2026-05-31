@@ -163,6 +163,10 @@ def _validate_manifest(m: dict) -> None:
         400,
         f"Manifest `permissions.{key}` must be one of none/read/write.",
       )
+  if "manage_apps" in perms and not isinstance(perms["manage_apps"], bool):
+    raise HTTPException(
+      400, "Manifest `permissions.manage_apps` must be a boolean.",
+    )
   sched = m.get("schedule")
   if sched is not None:
     if not isinstance(sched, dict):
@@ -608,6 +612,13 @@ async def install_from_manifest(
       app.manifest_url = canonical_manifest_url
       app.cross_app_access = perms.get("cross_app_access", app.cross_app_access)
       app.share_with_apps = perms.get("share_with_apps", app.share_with_apps)
+      # Mirror manage_apps on update too — an app can gain or lose
+      # install authority across versions (e.g. the App Store moves
+      # from the transitional cross_app_access='write' fallback to
+      # explicitly declaring manage_apps=true). Default to the
+      # existing value when the manifest omits the key.
+      if "manage_apps" in perms:
+        app.manage_apps = bool(perms["manage_apps"])
       # Mirror manifest.offline_capable into the App row on every
       # update, so an app that flips its offline behaviour between
       # versions (e.g. news 1.5.1 online-only → 1.5.2 offline-capable)
@@ -638,6 +649,7 @@ async def install_from_manifest(
         manifest_url=canonical_manifest_url,
         cross_app_access=perms.get("cross_app_access", "none"),
         share_with_apps=perms.get("share_with_apps", "none"),
+        manage_apps=bool(perms.get("manage_apps", False)),
         # The manifest's `offline_capable: true` opts the app into the
         # SW frame cache + the window.mobius.storage outbox. Without
         # this line every installed app defaulted to offline_capable=

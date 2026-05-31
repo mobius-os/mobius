@@ -104,6 +104,18 @@ def run_migrations(eng) -> None:
         "NOT NULL DEFAULT 0"
       ))
       conn.commit()
+  if "manage_apps" not in apps_cols:
+    # Install authority — distinct from cross_app_access (storage).
+    # Defaults to 0 so existing rows stay locked out of /install +
+    # DELETE; the legacy cross_app_access='write' fallback in deps.py
+    # keeps the current app-store install working through the
+    # transition until owners reinstall it with the new manifest.
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN manage_apps BOOLEAN "
+        "NOT NULL DEFAULT 0"
+      ))
+      conn.commit()
   # Slug column: split into three independent idempotent gates so a
   # crash anywhere in the sequence leaves a recoverable state. The
   # previous shape gated the backfill on "column missing", which
