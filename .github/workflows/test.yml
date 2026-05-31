@@ -12,6 +12,15 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel an in-flight run when a newer commit lands on the same ref.
+# Several agents push to main in bursts; without this, each push spins up
+# a fresh full run (incl. the 15-min e2e job) and they pile up — the older
+# ones are stale the moment the newer push lands. cancel-in-progress keeps
+# only the latest run per ref alive.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   backend:
     runs-on: ubuntu-latest
@@ -116,23 +125,50 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Run tests
-        run: npx playwright test
+        id: pw
+        # Inner timeout BELOW the job's timeout-minutes (15) so a hang ends
+        # as a captured failure, NOT a hard job cancel that skips the
+        # diagnostics below. That skip is exactly why CI kept losing the
+        # backend logs on the e2e hang — a cancelled job runs no further
+        # steps. INT lets Playwright write its report before exiting; the
+        # captured exit code is converted back to pass/fail at the end.
+        run: |
+          set +e
+          timeout --signal=INT 12m npx playwright test
+          echo "exit=$?" >> "$GITHUB_OUTPUT"
+          exit 0
         env:
           CI: '1'
           MOBIUS_URL: http://localhost:8001
           MOBIUS_USER: admin
           MOBIUS_PASS: admin
 
-      - name: Container logs (on failure)
-        if: failure()
-        run: docker logs mobius-test --tail 200
+      - name: Container logs
+        if: always()
+        run: docker logs mobius-test --tail 400 2>&1 || true
 
-      - name: Upload Playwright HTML report (on failure)
-        if: failure()
+      - name: Upload Playwright HTML report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report
           path: playwright-report/
+          if-no-files-found: ignore
+
+      - name: Report e2e result
+        if: always()
+        env:
+          PW_EXIT: ${{ steps.pw.outputs.exit }}
+        run: |
+          if [ "$PW_EXIT" = '124' ]; then
+            echo "::error::e2e hit the inner 12m timeout — see the 'Container logs' step above and the playwright-report artifact for where it wedged."
+            exit 1
+          fi
+          if [ "$PW_EXIT" != '0' ]; then
+            echo "::error::e2e tests failed (playwright exit $PW_EXIT)."
+            exit 1
+          fi
+          echo "e2e passed"
           retention-days: 7
           if-no-files-found: warn
 
