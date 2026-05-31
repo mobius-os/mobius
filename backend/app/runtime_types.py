@@ -43,6 +43,12 @@ class SessionInitEvent(ChatEventBase):
 
 class QuestionEvent(ChatEventBase):
   questions: list[dict]
+  # The PendingQuestion id the runner stamps on the event so the answer
+  # routes can match the exact open question by identity, and the
+  # save-before-broadcast QuestionCommit can persist it before the card
+  # is shown. Optional: a defensive runner that omits it still dedups by
+  # question_block_key (see app.events).
+  question_id: NotRequired[str]
 
 
 class ErrorEvent(ChatEventBase):
