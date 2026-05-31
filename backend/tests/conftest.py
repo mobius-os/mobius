@@ -58,6 +58,7 @@ def fresh_db():
   # will re-read from disk. Using setattr in case the attribute is
   # declared lazily below the read-site.
   setattr(chat_mod, "_SKILL_TEXT_CACHE", None)
+  chat_mod._clear_after_terminal_generation.clear()
   bc_mod._broadcasts.clear() if hasattr(bc_mod, "_broadcasts") else None
   # Activity log: clear the per-process debounce cache and delete any
   # /data/logs/activity*.jsonl files written by an earlier test so a
