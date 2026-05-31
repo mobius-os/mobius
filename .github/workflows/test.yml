@@ -13,13 +13,14 @@ on:
     branches: [main]
 
 # Cancel an in-flight run when a newer commit lands on the same ref.
-# Several agents push to main in bursts; without this, each push spins up
-# a fresh full run (incl. the 15-min e2e job) and they pile up — the older
-# ones are stale the moment the newer push lands. cancel-in-progress keeps
-# only the latest run per ref alive.
+# Several agents push to main in bursts. cancel-in-progress is scoped to
+# pull_request events: a superseded PR commit gets cancelled (no point
+# testing a force-pushed-over commit), but pushes to main QUEUE and each
+# completes — so main always gets a real per-commit e2e signal instead of
+# being starved when the next push lands mid-run.
 concurrency:
   group: tests-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   backend:
@@ -134,7 +135,9 @@ jobs:
         # captured exit code is converted back to pass/fail at the end.
         run: |
           set +e
-          timeout --signal=INT 12m npx playwright test
+          # --kill-after sends SIGKILL 30s after the SIGINT if Playwright
+          # ignores the interrupt, so the step can't hang past the cap.
+          timeout --signal=INT --kill-after=30s 12m npx playwright test
           echo "exit=$?" >> "$GITHUB_OUTPUT"
           exit 0
         env:
@@ -169,8 +172,6 @@ jobs:
             exit 1
           fi
           echo "e2e passed"
-          retention-days: 7
-          if-no-files-found: warn
 
       - name: Upload Playwright test-results (on failure)
         if: failure()

@@ -142,7 +142,10 @@ cat > "$INIT_PATH" <<INIT
 # Drop any prior line for this job path, then re-add the canonical
 # entry. Idempotent (no duplicates) AND self-healing: a stale entry
 # written before the app id was appended is replaced, not skipped.
-# Matching on the full job path keeps "news" from touching "news-2".
+# grep -vF on the full job path is prefix-safe (news vs news-2). A
+# contrived line that puts this exact path in ITS OWN args would be an
+# over-match, but it self-heals on the next boot replay; the install-side
+# delete path (_crontab_without_app) anchors on the command precisely.
 #
 # Capture the existing crontab ONCE and check rc. Piping a second live
 # `crontab -l` into the rewrite risks a transient empty read collapsing

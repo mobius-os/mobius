@@ -124,11 +124,6 @@ def _update_last_assistant_message(db: Session, chat_id: str, message: dict) -> 
   if not chat or not chat.messages:
     return True
   msgs = list(chat.messages)
-  # Allocate any new ts against persisted AND queued messages — a pending
-  # user message (stamped by chats_stream._ensure_unique_ts off a disjoint
-  # collection) must not collide with this assistant's ts once it promotes
-  # into chat.messages (equal ts -> duplicate React keys).
-  pending = list(chat.pending_messages or [])
   if msgs and msgs[-1].get("role") == "assistant":
     # Carry answers forward: _apply_answers_to_last_question writes
     # them here; the runner rebuilds from assistant_blocks (no
@@ -153,12 +148,22 @@ def _update_last_assistant_message(db: Session, chat_id: str, message: dict) -> 
     # backfill one only if an older, tsless message is being updated.
     message["ts"] = msgs[-1].get("ts")
     if message["ts"] is None:
-      message["ts"] = _next_message_ts(msgs[:-1] + pending)
+      # Backfilling an older, tsless assistant message. Allocate against
+      # persisted messages EXCLUDING msgs[-1] (it's the tsless one being
+      # stamped, so it can only contribute 0) plus queued messages, so the
+      # new ts can't collide with a pending user msg once it promotes into
+      # chat.messages (equal ts -> duplicate React keys). The pending read
+      # is here, not on the hot path, so the common replace does no extra
+      # work. Mirrors chats_stream._ensure_unique_ts (it now clears
+      # chat.messages too), so the two allocators can't hand out the same ms.
+      message["ts"] = _next_message_ts(
+        msgs[:-1] + list(chat.pending_messages or []))
     msgs[-1] = message
   else:
-    # First write of this turn's assistant message — stamp a ts so the
-    # bridge gate and the frontend's ts-keyed rendering have a stable id.
-    message["ts"] = _next_message_ts(msgs + pending)
+    # First write of this turn's assistant message — stamp a ts greater
+    # than every persisted AND queued message so the bridge gate and the
+    # frontend's ts-keyed rendering get a stable, collision-free id.
+    message["ts"] = _next_message_ts(msgs + list(chat.pending_messages or []))
     msgs.append(message)
   chat.messages = msgs
   return _safe_commit(db)
