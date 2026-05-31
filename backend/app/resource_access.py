@@ -19,6 +19,40 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app import models
+from app.deps import Principal
+
+
+def get_active_chat_for_principal(
+  db: Session, chat_id: str, principal: Principal,
+) -> models.Chat:
+  """Fetches an active chat the principal may DRIVE, else 404/403.
+
+  The actor gate for the app-attributed chat contract (design §1):
+    - Owner tokens may drive ANY active chat (the column is an actor
+      tag, not a fence against the owner).
+    - An app token may drive ONLY a chat it created — i.e.
+      `chat.created_by_app_id == principal.app_id`. Sending to or
+      streaming a foreign chat (owner-created or another app's) is 403.
+
+  This is the enforceable boundary that lets an app open and converse in
+  its own chat without holding the keys to the owner's whole history.
+  Reuse it everywhere an app-driven mutation touches a chat — don't
+  re-derive the `created_by_app_id` comparison inline.
+
+  Raises:
+    HTTPException: 404 when the chat is missing/soft-deleted (same shape
+      the owner sees, so an app can't probe existence of chats it can't
+      reach); 403 when an app token targets a chat it doesn't own.
+  """
+  chat = get_active_chat_or_404(db, chat_id)
+  if principal.app_id is None:
+    return chat  # owner drives anything
+  if chat.created_by_app_id != principal.app_id:
+    raise HTTPException(
+      status_code=403,
+      detail="This chat is not owned by your app.",
+    )
+  return chat
 
 
 def get_active_chat_or_404(

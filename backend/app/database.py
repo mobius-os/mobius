@@ -204,6 +204,14 @@ def run_migrations(eng) -> None:
       _add.append("ALTER TABLE chats ADD COLUMN run_status VARCHAR(16) NULL")
     if "run_started_at" not in chats_cols:
       _add.append("ALTER TABLE chats ADD COLUMN run_started_at DATETIME NULL")
+    if "created_by_app_id" not in chats_cols:
+      # App that opened this chat via the app-attributed chat contract
+      # (design §1). NULL = an ordinary owner chat. No FK constraint in
+      # the ALTER — SQLite can't add one post-hoc, and the column is an
+      # attribution tag, not a referential-integrity guarantee (a
+      # deleted app leaving a stale id behind just reads as "no live
+      # owner app," which the route tolerates). See models.Chat.
+      _add.append("ALTER TABLE chats ADD COLUMN created_by_app_id INTEGER NULL")
     if _add:
       with eng.connect() as conn:
         for stmt in _add:
