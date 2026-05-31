@@ -5,8 +5,9 @@
 # hurt — merge-conflict markers (which once crash-looped prod), syntax
 # errors, and frontend-unit regressions — BEFORE they're pushed. Fast by
 # design: conflict + syntax checks are instant; frontend-unit (~6s) runs
-# only when frontend changed; backend pytest runs only if a local venv
-# exists (CI is the backstop otherwise).
+# when frontend changed (if node_modules is present); the backend suite
+# runs on backend changes via the shared venv (~2m; --no-verify to skip).
+# CI is the backstop for anything skipped (e.g. from a deps-less worktree).
 #
 # Install: scripts/install-hooks.sh (copies this into the shared hooks
 # dir, so every worktree is covered). Bypass once: `git push --no-verify`.
@@ -19,6 +20,12 @@ set -uo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT" || exit 1
+
+# Main checkout (parent of the shared .git dir). Worktrees don't get their
+# own node_modules / backend venv, so the dep-bearing checks below resolve
+# their tools from here — the venv runs the WORKTREE's code (its cwd is on
+# sys.path), it just supplies the deps. Equals $ROOT in the main checkout.
+MAIN="$(cd "$(dirname "$(git rev-parse --git-common-dir)")" && pwd 2>/dev/null)" || MAIN="$ROOT"
 
 # Per-invocation temp dir for check output (mode 0700, unguessable name),
 # removed on exit. Avoids the symlink-race / clobber vector of fixed
@@ -53,8 +60,11 @@ fi
 # 2. Python syntax on changed .py files (instant; no deps beyond python3).
 PY="$(changed_list '\.py$')"
 if [ -n "$PY" ]; then
-  if python3 -m py_compile $PY 2>"$PP_TMP/py"; then
-    ok "python syntax ok ($(echo "$PY" | wc -l | tr -d ' ') file(s))"
+  # Read into an array so a path with spaces survives — unquoted $PY would
+  # word-split it, and a quoted "$PY" would pass the whole list as one arg.
+  mapfile -t _py < <(printf '%s\n' "$PY")
+  if python3 -m py_compile "${_py[@]}" 2>"$PP_TMP/py"; then
+    ok "python syntax ok (${#_py[@]} file(s))"
   else
     err "python syntax errors:"; sed 's/^/    /' "$PP_TMP/py" >&2; FAIL=1
   fi
@@ -62,7 +72,7 @@ fi
 
 # 3. JSX/JS parse on changed frontend files via esbuild (no import
 #    resolution — pure syntax). Skipped if esbuild isn't installed.
-ESB="$ROOT/frontend/node_modules/.bin/esbuild"
+ESB="$MAIN/frontend/node_modules/.bin/esbuild"
 JSX="$(changed_list '^frontend/src/.*\.(jsx|js)$')"
 if [ -n "$JSX" ] && [ -x "$ESB" ]; then
   jsx_fail=0
@@ -81,29 +91,39 @@ fi
 # 4. Frontend-unit — only when frontend changed (~6s). Mirrors the CI
 #    frontend-unit job, so a logic regression is caught here in seconds.
 if changed_match '^frontend/'; then
-  warn "running frontend-unit…"
-  if (cd frontend && npm test >"$PP_TMP/fe" 2>&1); then
-    ok "frontend-unit passed"
+  if [ -d "$ROOT/frontend/node_modules" ]; then
+    warn "running frontend-unit…"
+    if (cd frontend && npm test >"$PP_TMP/fe" 2>&1); then
+      ok "frontend-unit passed"
+    else
+      err "frontend-unit FAILED:"; tail -n 30 "$PP_TMP/fe" | sed 's/^/    /' >&2; FAIL=1
+    fi
   else
-    err "frontend-unit FAILED:"; tail -n 30 "$PP_TMP/fe" | sed 's/^/    /' >&2; FAIL=1
+    warn "frontend changed, no frontend/node_modules here (worktree?) — skipping frontend-unit (CI runs it)."
   fi
 fi
 
 # 5. Backend pytest — only if a local venv exists AND backend changed.
 #    No venv → skip with a one-time setup hint (CI still runs the suite).
 if changed_match '^backend/'; then
-  VENV="$ROOT/backend/.venv/bin/python"
+  VENV="$MAIN/backend/.venv/bin/python"
   if [ -x "$VENV" ]; then
-    warn "running backend pytest…"
-    if (cd backend && "$VENV" -m pytest -q -p no:cacheprovider >"$PP_TMP/be" 2>&1); then
+    warn "running backend pytest (full suite ~2m; bypass with --no-verify)…"
+    # esbuild on PATH (compile tests shell out to it) + a throwaway
+    # SECRET_KEY so Settings validates. The shared venv supplies deps; cwd
+    # ($ROOT/backend) supplies the code under test.
+    if (cd backend \
+        && PATH="$MAIN/frontend/node_modules/.bin:$PATH" \
+           SECRET_KEY="${SECRET_KEY:-$(python3 -c 'import secrets;print(secrets.token_hex(32))')}" \
+           "$VENV" -m pytest -q -p no:cacheprovider >"$PP_TMP/be" 2>&1); then
       ok "backend pytest passed"
     else
       err "backend pytest FAILED:"; tail -n 30 "$PP_TMP/be" | sed 's/^/    /' >&2; FAIL=1
     fi
   else
-    warn "backend changed, no backend/.venv — skipping pytest (CI runs it)."
-    warn "  enable local backend tests: python3 -m venv backend/.venv && \\"
-    warn "    backend/.venv/bin/pip install -r backend/requirements.txt"
+    warn "backend changed, no shared venv ($MAIN/backend/.venv) — skipping pytest (CI runs it)."
+    warn "  enable: python3 -m venv \"$MAIN/backend/.venv\" \\"
+    warn "    && \"$MAIN/backend/.venv/bin/pip\" install -r \"$MAIN/backend/requirements.txt\""
   fi
 fi
 

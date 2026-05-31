@@ -247,6 +247,17 @@ def test_crontab_without_app_is_prefix_safe_and_preserves_header():
   assert "/data/apps/news-2/fetch.sh" not in out2
   assert "/data/apps/news/fetch.sh 12" in out2
 
+  # An unrelated app whose ARGS merely reference the deleted app's dir is
+  # NOT collateral — only the line whose COMMAND is under the dir is dropped.
+  with_argref = (
+    "0 9 * * * /data/apps/news/fetch.sh 12\n"
+    "0 6 * * * /data/apps/agg/run.sh --feed /data/apps/news/headlines\n"
+  )
+  out3 = install._crontab_without_app(with_argref, Path("/data/apps/news"))
+  assert out3 is not None
+  assert "/data/apps/news/fetch.sh" not in out3
+  assert "/data/apps/agg/run.sh --feed /data/apps/news/headlines" in out3
+
   # No matching entry → None (caller skips the rewrite entirely).
   assert install._crontab_without_app(crontab, Path("/data/apps/ghost")) is None
 

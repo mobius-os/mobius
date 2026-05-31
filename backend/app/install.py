@@ -176,10 +176,14 @@ def _validate_manifest(m: dict) -> None:
       _validate_cron_expr(expr)
     job = sched.get("job")
     if job is not None and (
-      not isinstance(job, str) or job.startswith("/") or ".." in job
+      not isinstance(job, str) or "/" in job or ".." in job
     ):
       raise HTTPException(
-        400, f"Manifest `schedule.job` must be a relative repo path",
+        400,
+        "Manifest `schedule.job` must be a bare filename (no path "
+        "separators): cron registration and the run-job endpoint both use "
+        "only the basename, so a nested path would silently register/run a "
+        "different file than the manifest names.",
       )
 
 
@@ -453,19 +457,28 @@ def _register_cron(slug: str, schedule_expr: str, job_path: Path,
 
 
 def _crontab_without_app(current: str, source_dir: Path) -> str | None:
-  """Return `current` crontab text with every line that invokes a script
-  under `source_dir` removed — or None if nothing matched, so the caller
-  can skip rewriting entirely.
+  """Return `current` crontab text with every line whose COMMAND runs a
+  script under `source_dir` removed — or None if nothing matched, so the
+  caller can skip rewriting entirely.
 
-  Matches on the directory path WITH a trailing slash, so deleting
-  "news" (/data/apps/news/) does not also strip "news-2"
-  (/data/apps/news-2/). Non-job lines (e.g. the `PATH=` header the
-  entrypoint prepends) contain no app path and are always preserved.
+  A crontab job line is `<5 schedule fields> <command...>`. We match only
+  the command's own path (its first token) against the dir-with-trailing-
+  slash, NOT the whole line: that keeps the news/news-2 prefix safe AND
+  avoids dropping an unrelated app whose ARGUMENTS merely reference this
+  app's dir (e.g. `... /data/apps/agg/run.sh --feed /data/apps/news/x`).
+  Non-job lines (the `PATH=` header the entrypoint prepends, blanks) have
+  no 6th field, so their command path is "" and they're always preserved.
   """
   needle = f"{str(source_dir).rstrip('/')}/"
-  lines = current.splitlines()
-  kept = [ln for ln in lines if needle not in ln]
-  if len(kept) == len(lines):
+  kept, dropped = [], False
+  for ln in current.splitlines():
+    parts = ln.split(None, 5)
+    cmd_path = parts[5].split(None, 1)[0] if len(parts) == 6 else ""
+    if cmd_path.startswith(needle):
+      dropped = True
+    else:
+      kept.append(ln)
+  if not dropped:
     return None
   return ("\n".join(kept) + "\n") if kept else ""
 

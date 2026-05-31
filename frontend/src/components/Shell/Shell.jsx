@@ -390,7 +390,7 @@ export default function Shell() {
     }
   }, [apps, chats, navTo])
 
-  async function newChat({ draft, forceNew } = {}) {
+  async function newChat({ draft, forceNew, exclude } = {}) {
     // Reuse the most-recently-updated empty chat if one exists; only
     // POST a fresh row when no empty is available. Safe to reuse now
     // that create_chat leaves agent_settings_json NULL — an untouched
@@ -432,6 +432,10 @@ export default function Shell() {
     // on message start, so it closes that stale-cache window.
     const empty = !forceNew && [...chats]
       .filter(c => !c.has_messages
+        // `exclude` skips a chat the caller knows is invalid — e.g. the
+        // just-deleted active chat, still present in `chats` until the
+        // post-delete refreshChats lands (else reuse would re-open it).
+        && (exclude == null || String(c.id) !== String(exclude))
         && !streamingChatIds.has(c.id)
         && (!draft || String(c.id) !== String(activeChatIdRef.current)))
       .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''))
@@ -542,7 +546,10 @@ export default function Shell() {
     // user navigation.
     navStackRef.current = navStackRef.current.filter(e => e.chatId !== id)
     if (activeChatId === id) {
-      await newChat()
+      // Exclude the just-deleted id: it's still in `chats` until the
+      // refreshChats below, and the reuse filter would otherwise pick it
+      // (empty + was active) and navigate straight back into a 404 chat.
+      await newChat({ exclude: id })
     }
     await refreshChats()
   }
