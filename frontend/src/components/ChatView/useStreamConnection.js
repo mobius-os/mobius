@@ -566,6 +566,11 @@ export default function useStreamConnection(chatId, {
         // Null the stale controller so visibility/online handlers can
         // trigger reconnection after retries exhaust.
         abortRef.current = null
+        // Retries are exhausted and no reconnect is scheduled, so this is
+        // a terminal end of the stream. Signal stream-end like the normal
+        // close path above does, otherwise ChatView's `sending` stays true
+        // and the thinking dots spin forever.
+        requestAnimationFrame(() => onStreamEndRef.current?.())
       } else {
         setConnectionError('retrying')
         const delay = Math.pow(2, retryCount.current) * 1000

@@ -367,6 +367,7 @@ export default function ChatInputBar({
               onChange={handleTextareaChange}
               onKeyDown={handleKeyDown}
               placeholder="Message Möbius…"
+              aria-label="Message Möbius"
               rows={1}
             />
             {rightButtons}
