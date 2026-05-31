@@ -80,6 +80,25 @@ async def lifespan(app):
   except Exception as exc:
     _log.error("provider defaults check skipped: %s", exc, exc_info=True)
   _init_db()
+  # Crash recovery: a process death (OOM / SIGKILL — a recurring
+  # failure mode on this host) mid-turn leaves the chat's durable
+  # run marker set but the in-memory registry empty. Reconcile those
+  # stranded chats now, before the server accepts requests, so a
+  # mid-turn crash resolves cleanly on reopen instead of spinning
+  # "running" forever and stranding queued messages. Wrapped like the
+  # other lifespan steps: a failure here must not brick the recovery
+  # surface. Runs single-threaded pre-serving, so no queue-lock
+  # contention — see reconcile_interrupted_chats for the argument.
+  try:
+    from app.chat import reconcile_interrupted_chats
+    from app.database import SessionLocal as _ReconcileSession
+    _rc_db = _ReconcileSession()
+    try:
+      reconcile_interrupted_chats(_rc_db)
+    finally:
+      _rc_db.close()
+  except Exception as exc:
+    _log.error("startup chat reconciliation failed: %s", exc, exc_info=True)
   # Wrapped: push.py is on the agent's write surface. VAPID init is
   # nice-to-have (no push notifications without it) but not boot-critical.
   try:

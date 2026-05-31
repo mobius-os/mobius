@@ -81,6 +81,27 @@ class Chat(Base):
   # column DESC (newest pin at top of pinned group). PATCH
   # /api/chats/{id} accepts `pinned: bool` to toggle.
   pinned_at = Column(DateTime, nullable=True, default=None)
+  # Crash-recovery run marker. "running" while a turn is in flight,
+  # NULL otherwise. The runner registry holds the same truth in
+  # memory; this column is the DURABLE copy that survives an OOM /
+  # SIGKILL. On the next process start, lifespan reconciliation
+  # (chat.reconcile_interrupted_chats) finds any row still marked
+  # "running" — the in-memory registry is always empty at boot, so
+  # such a row is by definition a turn the dead process never
+  # finished — and resolves it (finalize the transcript, clear the
+  # marker, drop stranded pending_messages) instead of stranding the
+  # chat "running" forever in the user's view. Set at the top of
+  # chat._run_chat_impl, cleared in chat.run_chat's finally under the
+  # same generation-ownership guard that releases the _starting claim.
+  run_status = Column(String(16), nullable=True, default=None)
+  # When the in-flight turn started (UTC). Set alongside run_status;
+  # cleared to NULL when the turn ends. Not consulted by the startup
+  # reconciliation decision (run_status alone is sufficient — a boot
+  # with an empty registry makes every "running" row stale regardless
+  # of age) but kept for observability: the reconciliation log line
+  # reports how long the interrupted turn had been running, and a
+  # future liveness probe can read it without another migration.
+  run_started_at = Column(DateTime, nullable=True, default=None)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
