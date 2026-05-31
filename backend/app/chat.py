@@ -25,9 +25,14 @@ from sqlalchemy.orm import Session
 from app import auth, chat_queue, models, questions, schemas
 from app.broadcast import ChatBroadcast, create_broadcast, get_broadcast, set_active_broadcast
 from app.chat_writer import (
+  Finalize,
+  PersistError,
+  PersistTranscript,
+  QuestionCommit,
   alloc_run_token,
   apply_answers_to_last_question as _apply_answers_to_last_question,
   finalize_response as _finalize_response,
+  get_writer,
   next_message_ts as _next_message_ts,
   update_last_assistant_message as _update_last_assistant_message,
 )
@@ -116,6 +121,32 @@ def _save_message(db: Session, chat_id: str, message: dict):
 # names, so existing call-sites are unchanged. They moved so the writer
 # actor can run them on its own thread without importing `chat.py` (which
 # would cycle on `alloc_run_token`).
+
+
+# Bounded wait for a strict (commit-before-ack) writer-actor command.
+# Questions/finalize/answers all await an actor ack before taking the
+# next step (broadcasting a card, promoting the queue, resolving a
+# future); the timeout is defense-in-depth so a wedged actor surfaces a
+# transport error rather than hanging the turn forever. The actor's own
+# `db.commit()` is bounded by SQLite's 5s busy_timeout, so a healthy but
+# contended write completes well inside this bound; exceeding it means
+# the writer thread is wedged, which the failure-semantics paths treat as
+# persistence-unavailable.
+_ACK_TIMEOUT_SECS = 30.0
+
+
+async def _await_ack(ack, *, timeout: float = _ACK_TIMEOUT_SECS):
+  """Awaits a writer-actor ack future on the loop, bounded by `timeout`.
+
+  Wraps the actor's `concurrent.futures.Future` with
+  `asyncio.wrap_future` so the event loop stays free while the writer
+  thread commits, then awaits it under a timeout. Re-raises the actor's
+  exception on a failed write (the caller maps that to its own
+  failure-semantics response — deny / 503 / transport error), and raises
+  `TimeoutError` when the actor never acked in time. The single seam every
+  strict path uses, so the timeout policy lives in one place.
+  """
+  return await asyncio.wait_for(asyncio.wrap_future(ack), timeout=timeout)
 
 
 # Queue management (per-chat lock, promote, drain_and_release) lives
@@ -330,6 +361,44 @@ class _ChatEventSink:
       with self._persist_lock:
         self._save_generation += 1
         _finalize_response(self.db, self.chat_id, self.assistant_blocks)
+
+  async def publish_question(self, event: ChatEvent) -> None:
+    """Save-before-broadcast for an AskUserQuestion card (Candidate B).
+
+    A question is a protocol barrier: its `question_id` MUST be durably
+    persisted before the SSE card is shown, or a fast user Submit races
+    the DB write and the answer is lost. So this does NOT go through the
+    coalescible `publish()` path; it:
+
+      1. accumulates the question into `assistant_blocks` (so the saved
+         snapshot carries the card), then
+      2. submits a `QuestionCommit` and AWAITS its ack — a distinct,
+         non-coalescing writer-actor command that commits the full
+         assistant-message snapshot before resolving, and
+      3. ONLY THEN broadcasts the event.
+
+    On a failed commit the actor's ack raises (missing row / empty
+    transcript / dropped commit); this method propagates that and does
+    NOT broadcast the card. The runner catches it and ends the turn with
+    a transport-only error (Claude → PermissionResultDeny, Codex →
+    _BridgeError) — no fallback direct write, no unpersisted card on the
+    wire. `deepcopy` freezes the snapshot the actor reads so a later
+    same-loop event can't mutate the block list out from under it.
+    """
+    assert event.get("type") == "question", (
+      "publish_question only accepts question events; ordinary events go "
+      "through publish()"
+    )
+    process_event(event, self.assistant_blocks)
+    snapshot = copy.deepcopy(build_assistant_message(self.assistant_blocks))
+    ack = get_writer().submit(
+      QuestionCommit(
+        chat_id=self.chat_id, run_token=self.run_token or "", snapshot=snapshot,
+      )
+    )
+    await _await_ack(ack)
+    # Committed durably — now (and only now) show the card.
+    self.bc.publish(event)
 
 
 _SKILL_TEXT_CACHE: str | None = None
@@ -715,8 +784,16 @@ def _schedule_continuation(
   session_id: str | None,
   provider_id: str | None,
   next_user: dict,
+  run_token: str | None = None,
 ) -> None:
   """Bumps generation and spawns the next-turn run_chat.
+
+  `run_token` is the per-turn persistence run identity. The continuation
+  is a fresh turn, so it gets its OWN token: when the caller already
+  allocated one (the turn-end drain, where `PromotePending` set the run
+  marker under that token), it is passed in so the runner reuses it;
+  otherwise one is allocated here so the runner still keys on a non-None
+  token.
 
   Precondition: the caller already holds the 'starting' claim for
   this chat. Two paths satisfy that:
@@ -731,6 +808,8 @@ def _schedule_continuation(
   log = _get_logger()
   bc = None
   coro = None
+  if run_token is None:
+    run_token = alloc_run_token()
   try:
     # Inside the try so any exception (even from these lines) releases
     # the _starting claim the caller held. Without this, a failure
@@ -749,6 +828,7 @@ def _schedule_continuation(
       attachments=next_user.get("attachments"),
       timezone=next_user.get("timezone"),
       viewport=next_user.get("viewport"),
+      run_token=run_token,
     )
     asyncio.create_task(coro)
     # Task owns the coroutine now — don't close it in the except.
@@ -836,10 +916,20 @@ async def run_chat(
   attachments: list[dict] | None = None,
   timezone: str | None = None,
   viewport: dict | None = None,
+  run_token: str | None = None,
 ) -> None:
   """Runs a chat turn through the provider's SDK runner and publishes
   events to the chat's ChatBroadcast.  Caller must create the broadcast
   before calling.
+
+  `run_token` is the per-turn persistence run identity. It is allocated
+  by the SCHEDULER (the initial-send route, the continuation, the
+  stale-pending drain) — one token per turn — and threaded through to
+  the sink + runner so writer-actor commands key on `(chat_id,
+  run_token)`. The scheduler owns allocation because `StartTurn` /
+  `PromotePending` must be submitted with the same token the runner then
+  uses. A None token is tolerated only for legacy/test callers that
+  bypass the actor; production schedulers always pass one.
 
   The entire body is wrapped in a top-level try/finally so the
   `_starting` guard is released even if setup code raises before we
@@ -851,6 +941,7 @@ async def run_chat(
       messages, chat_id=chat_id, session_id=session_id,
       provider_id=provider_id, run_gen=run_gen,
       attachments=attachments, timezone=timezone, viewport=viewport,
+      run_token=run_token,
     )
   finally:
     stopped_gen = _clear_after_terminal_generation.get(chat_id)
@@ -897,6 +988,7 @@ async def _run_chat_impl(
   attachments: list[dict] | None = None,
   timezone: str | None = None,
   viewport: dict | None = None,
+  run_token: str | None = None,
 ) -> None:
   """Inner implementation of run_chat; see wrapper for lifecycle notes."""
   # Check if a newer send superseded this one while we were queued.
@@ -912,13 +1004,14 @@ async def _run_chat_impl(
   settings = get_settings()
   user_message = messages[-1].content
 
-  # Allocate exactly one run token per turn. `_run_chat_impl` is invoked
-  # once per turn (the initial send and each scheduled continuation are
-  # separate invocations), so this single allocation gives every turn a
-  # distinct, process-unique token. DORMANT: it is threaded into the sink
-  # for a later milestone to key writer-actor commands on; nothing routes
-  # through the actor yet.
-  run_token = alloc_run_token()
+  # The per-turn run token is allocated by the scheduler (the route /
+  # continuation / stale-pending drain) and passed in, so the SAME token
+  # that keys the turn's writer-actor commands is the one the sink +
+  # runner use for streaming/terminal writes. A None token (legacy/test
+  # caller bypassing the actor) gets a last-resort allocation so the sink
+  # always has a non-None key.
+  if run_token is None:
+    run_token = alloc_run_token()
 
   # Durable run marker: record that a turn is in flight so a process
   # death (OOM / SIGKILL) mid-turn is recoverable on the next boot
