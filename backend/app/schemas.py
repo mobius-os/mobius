@@ -215,11 +215,19 @@ class SendMessage(BaseModel):
   hidden: bool = False
   # When `hidden=True` and the user is answering an AskUserQuestion,
   # frontend includes the resolved answers here. Backend writes them
-  # into the LAST assistant message's question block in the same
-  # transaction that appends the hidden user message — eliminating the
-  # POST /question-answers + POST /messages race that left answers
-  # missing on mid-stream remounts.
+  # into the question block in the same transaction that appends the
+  # hidden user message — eliminating the POST /question-answers +
+  # POST /messages race that left answers missing on mid-stream
+  # remounts.
   answers: dict | None = None
+  # Optional identity of the question being answered (the runner-
+  # published PendingQuestion id). When supplied, the backend writes
+  # the answers into the question block with this exact `question_id`
+  # instead of the latest assistant message's question block — fixing
+  # the wrong-block bug when two questions are open at once. Optional
+  # so older clients that omit it keep working via the latest-question
+  # fallback (no behaviour change when absent).
+  question_id: str | None = None
 
 
 class PushKeys(BaseModel):

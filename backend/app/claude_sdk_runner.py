@@ -488,6 +488,7 @@ async def run_claude_sdk_turn(
 
     bc.publish({
       "type": "question",
+      "question_id": pending.question_id,
       "questions": questions,
     })
     # Push notification on AskUserQuestion is now AGENT-DRIVEN: the

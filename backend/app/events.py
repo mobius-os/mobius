@@ -117,13 +117,27 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     # provided question id, falling back to the first question's
     # text — instead of "is the last block a question?". Adjacency-
     # based dedup left duplicate cards when anything interleaved.
+    #
+    # The runner now publishes a `question_id` (the PendingQuestion's
+    # id) on the event. When present, stamp it on the block so the
+    # answer routes can match the exact open question by identity
+    # (fixing the wrong-block bug when two questions are open at once),
+    # and prefer it as the coalescing key — it is the most stable
+    # identity for the call, independent of the sub-questions' shape.
+    # When absent (legacy/defensive), behaviour is unchanged: no
+    # question_id key on the block and dedup by `question_block_key`.
     questions = event.get("questions", [])
+    question_id = event.get("question_id")
     new_block = {"type": "question", "questions": questions}
+    if question_id:
+      new_block["question_id"] = question_id
     key = question_block_key(new_block)
     for i, existing in enumerate(assistant_blocks):
       if (existing.get("type") == "question"
           and question_block_key(existing) == key):
         existing["questions"] = questions
+        if question_id:
+          existing["question_id"] = question_id
         return True
     assistant_blocks.append(new_block)
     return True
@@ -135,15 +149,21 @@ def question_block_key(block: dict) -> tuple:
   """Stable identity for an AskUserQuestion call across partial events.
 
   Two question blocks compare equal iff they represent the same
-  AskUserQuestion invocation. Prefer the SDK-assigned id (Claude
-  and Codex both supply one); fall back to the first question's
-  text so a defensive runner that omits ids still dedups correctly.
+  AskUserQuestion invocation. Prefer the block-level `question_id`
+  (the PendingQuestion id the runner now publishes) — it is the most
+  stable identity for the call and is unaffected by the sub-questions'
+  shape. Fall back to the first sub-question's SDK-assigned id, then
+  its text, so a defensive runner that omits the question_id still
+  dedups correctly.
 
   The first question is enough — a single AskUserQuestion call can
   carry multiple sub-questions, but their order and first member
   are stable across the partial-message stream while the trailing
   list grows progressively.
   """
+  question_id = block.get("question_id")
+  if question_id:
+    return ("question_id", question_id)
   questions = block.get("questions") or []
   if not questions:
     return ("empty",)

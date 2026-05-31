@@ -448,7 +448,11 @@ def _install_request_user_input_handler(
     pending_questions[chat_id] = pending
 
     try:
-      bc.publish({"type": "question", "questions": questions_payload})
+      bc.publish({
+        "type": "question",
+        "question_id": pending.question_id,
+        "questions": questions_payload,
+      })
       # Push notification on AskUserQuestion is AGENT-DRIVEN now: the
       # skill/seed tells the agent to `curl POST /api/notifications/send`
       # itself when it asks a question. That gives the agent direct
