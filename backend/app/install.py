@@ -163,6 +163,18 @@ def _validate_manifest(m: dict) -> None:
         400,
         f"Manifest `permissions.{key}` must be one of none/read/write.",
       )
+  # chat_log_access has its own value space (the redaction tiers), not
+  # the storage read/write/none ladder. 'full' is reserved but the read
+  # API rejects it until a concrete consumer lands (design §2) — we
+  # accept it in the manifest so the column round-trips, and surface the
+  # "deferred" gap at request time rather than install time.
+  log_access = perms.get("chat_log_access", "none")
+  if log_access not in ("none", "summary", "full"):
+    raise HTTPException(
+      400,
+      "Manifest `permissions.chat_log_access` must be one of "
+      "none/summary/full.",
+    )
   if "manage_apps" in perms and not isinstance(perms["manage_apps"], bool):
     raise HTTPException(
       400, "Manifest `permissions.manage_apps` must be a boolean.",
@@ -671,6 +683,7 @@ async def install_from_manifest(
       app.manifest_url = canonical_manifest_url
       app.cross_app_access = perms.get("cross_app_access", app.cross_app_access)
       app.share_with_apps = perms.get("share_with_apps", app.share_with_apps)
+      app.chat_log_access = perms.get("chat_log_access", app.chat_log_access)
       # Mirror manage_apps on update too — an app can gain or lose
       # install authority across versions. Default to the existing
       # value when the manifest omits the key.
@@ -706,6 +719,7 @@ async def install_from_manifest(
         manifest_url=canonical_manifest_url,
         cross_app_access=perms.get("cross_app_access", "none"),
         share_with_apps=perms.get("share_with_apps", "none"),
+        chat_log_access=perms.get("chat_log_access", "none"),
         manage_apps=bool(perms.get("manage_apps", False)),
         # The manifest's `offline_capable: true` opts the app into the
         # SW frame cache + the window.mobius.storage outbox. Without

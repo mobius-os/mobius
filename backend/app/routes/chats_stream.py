@@ -24,8 +24,10 @@ from app.chat import (
 from app import chat_queue
 from app.config import get_settings
 from app.database import get_db
-from app.deps import get_current_owner
-from app.resource_access import get_active_chat_or_404
+from app.deps import Principal, get_current_owner, get_principal
+from app.resource_access import (
+  get_active_chat_for_principal, get_active_chat_or_404,
+)
 
 router = APIRouter(prefix="/api/chats", tags=["chats"])
 
@@ -206,12 +208,18 @@ def _apply_answers_to_last_question(
 async def send_message(
   body: schemas.SendMessage,
   chat_id: str,
-  _: models.Owner = Depends(get_current_owner),
+  principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
 ):
   """Saves the user message, starts the agent as a background task,
-  and returns 202 immediately.  The client streams via GET /stream."""
-  chat = get_active_chat_or_404(db, chat_id)
+  and returns 202 immediately.  The client streams via GET /stream.
+
+  Owner tokens may send to any active chat. App tokens may send only to
+  a chat they created (`created_by_app_id == app_id`) — the app-
+  attributed contract (design §1). Foreign chats are 403; the runner /
+  queue / SSE internals are reused unchanged for both actors.
+  """
+  chat = get_active_chat_for_principal(db, chat_id, principal)
 
   # Atomic answer persistence: when the user is submitting a hidden
   # answer to an AskUserQuestion (body.hidden=true with body.answers),
@@ -432,14 +440,25 @@ async def cancel_pending_message(
 async def stream_chat(
   request: Request,
   chat_id: str,
-  _: models.Owner = Depends(get_current_owner),
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
 ):
   """SSE endpoint: subscribes to the chat's broadcast and streams events.
 
   Sends a catch-up burst of all prior events, then streams live events
   until the broadcast is completed or the client disconnects.  Keepalive
   comments are sent every 30 s to prevent proxy timeouts.
+
+  Same actor gate as send_message: owner streams any chat; an app token
+  streams only a chat it created (403 otherwise). The ownership check
+  runs against the DB row up front so an app can't read another chat's
+  event stream by guessing its id, even though the events themselves
+  flow from the in-memory broadcast.
   """
+  # Gate before touching the broadcast. Raises 404 (missing/deleted) or
+  # 403 (app token, foreign chat) — matching send_message's surface.
+  get_active_chat_for_principal(db, chat_id, principal)
+
   bc = get_broadcast(chat_id)
   if bc is None:
     # No broadcast either because none was ever created or because the

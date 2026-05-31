@@ -19,13 +19,21 @@ from app.chat import (
   stop_chat_for,
 )
 from app.database import get_db
-from app.deps import get_current_owner
+from app.deps import (
+  Principal, get_current_owner, get_principal, reject_cross_site,
+)
 from app.resource_access import get_active_chat_or_404
 from app.schemas import ChatPatch
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chats", tags=["chats"])
+
+# Separate router for the app-attributed chat contract (design §1). It
+# lives under its own /api/app-chats prefix so the owner-only /api/chats
+# surface stays unambiguously owner-only — the app path is additive and
+# greppable, not a flag threaded through the owner routes.
+app_chat_router = APIRouter(prefix="/api/app-chats", tags=["app-chats"])
 
 SOFT_DELETE_TTL = timedelta(days=7)
 
@@ -514,6 +522,61 @@ def recover_chat(
   chat.deleted_at = None
   db.commit()
   return {"ok": True}
+
+
+class AppChatCreate(BaseModel):
+  title: str | None = None
+
+
+@app_chat_router.post(
+  "", status_code=201, dependencies=[Depends(reject_cross_site)],
+)
+def create_app_chat(
+  body: AppChatCreate,
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+):
+  """Creates a chat owned by the calling app (app-attributed contract).
+
+  App-token-only: the new chat is stamped with `created_by_app_id =
+  principal.app_id`, so only that app's token (and the owner) may send
+  to it or stream it (see `get_active_chat_for_principal`). The chat is
+  otherwise an ordinary Chat row — it shows in the owner's drawer and
+  the owner can drive it. This is the surface that unblocks an in-iframe
+  app's chat panel, which `/api/chats` rejects because that route is
+  owner-only.
+
+  Owner tokens are rejected here on purpose: the owner's create path is
+  `POST /api/chats`, which leaves `created_by_app_id` NULL. Allowing the
+  owner through this endpoint would just produce an unattributed chat by
+  a second route — needless ambiguity. One path per actor.
+  """
+  if principal.app_id is None:
+    raise HTTPException(
+      status_code=403,
+      detail="Use POST /api/chats for owner-created chats.",
+    )
+  import uuid
+
+  owner = db.query(models.Owner).first()
+  provider = (owner.provider if owner else None) or "claude"
+
+  chat = models.Chat(
+    id=str(uuid.uuid4()),
+    title=body.title or "New chat",
+    messages=[],
+    provider=provider,
+    agent_settings_json=None,
+    created_by_app_id=principal.app_id,
+  )
+  db.add(chat)
+  db.commit()
+  db.refresh(chat)
+  return {
+    "id": chat.id,
+    "title": chat.title,
+    "created_by_app_id": chat.created_by_app_id,
+  }
 
 
 class QuestionAnswers(BaseModel):
