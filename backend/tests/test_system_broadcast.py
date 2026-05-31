@@ -11,6 +11,13 @@
   regardless of whether a per-chat broadcast is currently active.
   Without this the user gets a forever-spinner after the agent
   updates a mini-app because the iframe version never bumps.
+
+- Commit offload: the streaming save's blocking `db.commit()` must
+  run OFF the event loop. `publish()` defers non-question saves to an
+  async `flush()` that commits via `asyncio.to_thread`; the question
+  save stays inline (the save-before-broadcast invariant above). A
+  slow commit on one chat must not stall the loop and starve other
+  chats' SSE.
 """
 
 import asyncio
@@ -102,9 +109,12 @@ def test_question_event_is_saved_before_broadcast(db, chat):
   assert any(b.get("type") == "question" for b in blocks)
 
 
-def test_text_event_keeps_legacy_publish_then_save_order(db, chat):
-  """Text events stay on the throttled save-after-publish path so
-  per-token streaming latency isn't penalized by a DB write."""
+def test_non_question_save_is_deferred_to_flush_off_loop(db, chat):
+  """Non-question events broadcast immediately and DEFER their DB
+  commit to `flush()` so the blocking `db.commit()` runs off the
+  event loop (chat._ChatEventSink offload). `publish()` must NOT
+  commit inline for these; it records the snapshot and the runner's
+  later `await flush()` performs the write."""
   chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
   db.commit()
   db.refresh(chat)
@@ -113,36 +123,118 @@ def test_text_event_keeps_legacy_publish_then_save_order(db, chat):
   original = chat_mod._update_last_assistant_message
   def spy(db_, chat_id, message):
     bc.timeline.append(("save", chat_id))
-    original(db_, chat_id, message)
+    return original(db_, chat_id, message)
   chat_mod._update_last_assistant_message = spy
   try:
-    # First text event: throttle has never fired, so no save (last_save=0
-    # was set in __init__, and the elapsed check uses 1s interval). We
-    # force the throttle to fire by aging _last_save.
+    # tool_start is an IMMEDIATE_SAVE_TYPE, so a save is due — but it
+    # must be deferred, not committed inside publish().
     sink._last_save = 0.0
-    # Take a deliberate slow path — emit a tool_start which is in
-    # IMMEDIATE_SAVE_TYPES so we DO get a save event, and check that
-    # for non-question types the save still lands AFTER publish.
     sink.publish({"type": "tool_start", "tool": "Bash", "input": "ls"})
+    # publish() broadcast but did NOT save: no save in the timeline,
+    # and a snapshot is parked for flush().
+    assert ("publish", "tool_start") in bc.timeline
+    assert not any(kind == "save" for kind, _ in bc.timeline), (
+      f"publish() must defer the commit, not run it inline. "
+      f"timeline={bc.timeline}"
+    )
+    assert sink._pending_save is not None
+
+    # flush() performs the deferred commit (off-loop via to_thread).
+    ok = asyncio.run(sink.flush())
   finally:
     chat_mod._update_last_assistant_message = original
 
-  pub_idx = next(
-    i for i, (kind, _) in enumerate(bc.timeline) if kind == "publish"
+  assert ok is True
+  assert any(kind == "save" for kind, _ in bc.timeline), (
+    f"flush() must perform the deferred save. timeline={bc.timeline}"
   )
-  save_idx = next(
-    (i for i, (kind, _) in enumerate(bc.timeline) if kind == "save"),
-    None,
-  )
-  assert save_idx is not None, f"timeline={bc.timeline}"
-  assert pub_idx < save_idx, (
-    "Non-question events must keep the legacy publish-then-save "
-    f"order (text streaming latency). timeline={bc.timeline}"
+  assert sink._pending_save is None
+  # And the tool block is actually persisted.
+  db.refresh(chat)
+  msgs = list(chat.messages or [])
+  assert msgs and msgs[-1].get("role") == "assistant"
+
+
+def test_flush_runs_commit_off_the_event_loop_thread(db, chat):
+  """The deferred commit must execute on a worker thread, not the
+  loop thread — that is the whole point of the offload (a slow
+  SQLite commit can't stall the loop). Pin it by capturing the
+  thread `_update_last_assistant_message` runs on and asserting it
+  differs from the loop thread."""
+  import threading
+
+  chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
+  db.commit()
+  db.refresh(chat)
+  bc = _OrderedBroadcast(chat.id)
+  sink = chat_mod._ChatEventSink(bc, chat.id, db)
+
+  seen: dict = {}
+  original = chat_mod._update_last_assistant_message
+  def spy(db_, chat_id, message):
+    seen["thread"] = threading.get_ident()
+    return original(db_, chat_id, message)
+  chat_mod._update_last_assistant_message = spy
+
+  async def _scenario():
+    seen["loop_thread"] = threading.get_ident()
+    sink._last_save = 0.0
+    sink.publish({"type": "tool_start", "tool": "Bash", "input": "ls"})
+    await sink.flush()
+
+  try:
+    asyncio.run(_scenario())
+  finally:
+    chat_mod._update_last_assistant_message = original
+
+  assert "thread" in seen, "flush() never ran the commit"
+  assert seen["thread"] != seen["loop_thread"], (
+    "the streaming commit ran on the event loop thread — it must be "
+    "offloaded via asyncio.to_thread so a SQLite lock can't stall the "
+    "loop and starve other chats' SSE"
   )
 
 
-def test_sink_publish_returns_false_on_safe_commit_failure(db, chat, monkeypatch):
-  """publish() exposes DB write failure via its boolean return."""
+def test_question_commit_stays_inline_and_blocks_the_loop_thread(db, chat):
+  """The question save MUST stay synchronous (save-before-broadcast
+  invariant), i.e. run inline on the calling thread inside publish()
+  — NOT deferred. This is the deliberate exception to the offload."""
+  import threading
+
+  chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
+  db.commit()
+  db.refresh(chat)
+  bc = _OrderedBroadcast(chat.id)
+  sink = chat_mod._ChatEventSink(bc, chat.id, db)
+
+  seen: dict = {}
+  original = chat_mod._update_last_assistant_message
+  def spy(db_, chat_id, message):
+    seen["thread"] = threading.get_ident()
+    return original(db_, chat_id, message)
+  chat_mod._update_last_assistant_message = spy
+  try:
+    seen["caller_thread"] = threading.get_ident()
+    sink.publish({
+      "type": "question",
+      "questions": [{
+        "id": "q1",
+        "question": "Color?",
+        "options": [{"label": "Red"}, {"label": "Blue"}],
+      }],
+    })
+  finally:
+    chat_mod._update_last_assistant_message = original
+
+  assert seen.get("thread") == seen["caller_thread"], (
+    "question commit must run inline on the calling thread"
+  )
+  assert sink._pending_save is None
+
+
+def test_flush_surfaces_commit_failure_via_return(db, chat, monkeypatch):
+  """The deferred-save outcome is observable: flush() returns the
+  commit result (False on a dropped/locked write)."""
   chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
   db.commit()
   db.refresh(chat)
@@ -151,9 +243,66 @@ def test_sink_publish_returns_false_on_safe_commit_failure(db, chat, monkeypatch
 
   monkeypatch.setattr(chat_mod, "_safe_commit", lambda _db: False)
 
-  ok = sink.publish({"type": "tool_start", "tool": "Bash", "input": "ls"})
+  # publish records the pending save; flush attempts the commit.
+  sink._last_save = 0.0
+  publish_ok = sink.publish({"type": "tool_start", "tool": "Bash", "input": "ls"})
+  flush_ok = asyncio.run(sink.flush())
 
-  assert ok is False
+  # publish() reports True (it didn't commit inline); flush() exposes
+  # the False from the failed commit.
+  assert publish_ok is True
+  assert flush_ok is False
+
+
+def test_slow_flush_does_not_block_a_concurrent_coroutine(db, chat, monkeypatch):
+  """The headline bug: a slow streaming commit must NOT block the
+  event loop. Simulate a commit that sleeps (a SQLite busy_timeout
+  wait) and assert a concurrent coroutine keeps making progress while
+  the flush is in-flight — which is only possible if the commit runs
+  off the loop via asyncio.to_thread."""
+  chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
+  db.commit()
+  db.refresh(chat)
+  bc = _OrderedBroadcast(chat.id)
+  sink = chat_mod._ChatEventSink(bc, chat.id, db)
+
+  import time as _time
+
+  def slow_commit(_db_, _chat_id, _message):
+    # Stand in for a lock-contended commit blocking on busy_timeout.
+    _time.sleep(0.3)
+    return True
+
+  monkeypatch.setattr(chat_mod, "_update_last_assistant_message", slow_commit)
+
+  ticks = {"count": 0}
+
+  async def _other_chat_loop():
+    # A different chat's coroutine; each tick is a loop turn. If the
+    # slow commit were inline on the loop, these ticks would stall for
+    # the whole 0.3s.
+    for _ in range(30):
+      ticks["count"] += 1
+      await asyncio.sleep(0.01)
+
+  async def _scenario():
+    other = asyncio.create_task(_other_chat_loop())
+    sink._last_save = 0.0
+    sink.publish({"type": "tool_start", "tool": "Bash", "input": "ls"})
+    await sink.flush()  # blocks ~0.3s, but OFF the loop
+    ticks_at_flush_return = ticks["count"]
+    await other
+    return ticks_at_flush_return
+
+  ticks_at_flush_return = asyncio.run(_scenario())
+
+  # During the ~0.3s commit the other coroutine should have ticked
+  # several times (0.3s / 0.01s ≈ 30, minus scheduling slack). If the
+  # commit blocked the loop, this would be ~0.
+  assert ticks_at_flush_return >= 5, (
+    f"concurrent coroutine only ticked {ticks_at_flush_return} times "
+    "during the commit — the loop was blocked (commit not offloaded)"
+  )
 
 
 # --- Bug 4: SystemBroadcast end-to-end --------------------------------
