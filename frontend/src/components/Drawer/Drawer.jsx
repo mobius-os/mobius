@@ -69,6 +69,17 @@ export default function Drawer({
   // ⋮ button close any open menu without needing a global outside-click
   // handler per row.
   const [openMenu, setOpenMenu] = useState(null) // { kind, id } | null
+  // Belt-and-braces orphan cleanup: if the row whose menu was open
+  // disappears from the list (delete, chat soft-delete, agent-side
+  // removal), openMenu would still reference a dead id and the next
+  // row to occupy that slot can look "pressed". Drop the reference
+  // the moment its id is no longer in the relevant collection.
+  useEffect(() => {
+    if (!openMenu) return
+    const collection = openMenu.kind === 'chat' ? (chats || []) : (apps || [])
+    const stillThere = collection.some(item => item.id === openMenu.id)
+    if (!stillThere) setOpenMenu(null)
+  }, [openMenu, chats, apps])
   const [renamingState, setRenamingState] = useState(null) // { kind, id } | null
   // The app whose "Add to home screen" sheet is open ({id,name,slug}),
   // or null. Mirrors openMenu/renamingState — one at a time, owned here
@@ -595,8 +606,13 @@ function DrawerRow({
                 // Chats soft-delete with 7-day recovery, so no
                 // confirm step — one tap deletes, the note below
                 // tells the user how to undo via the agent.
+                // Close the parent's menu state BEFORE onDelete fires:
+                // the row unmounts as soon as the refetch lands, but
+                // the parent's openMenu still references this row's
+                // id, leaving a Radix trigger looking "pressed" on
+                // whichever row slides up into the slot.
                 <Menu.Item
-                  onSelect={() => onDelete()}
+                  onSelect={() => { onMenuToggle(false); onDelete() }}
                   className="drawer__menu-item--danger"
                 >
                   Delete
@@ -629,7 +645,18 @@ function DrawerRow({
                 <button
                   type="button"
                   className="drawer__menu-confirm-btn drawer__menu-confirm-btn--yes"
-                  onClick={() => { setConfirmingDelete(false); onDelete() }}
+                  onClick={() => {
+                    // Order matters. Closing the parent's openMenu
+                    // state BEFORE the delete fires keeps Radix's
+                    // open-trigger bookkeeping in sync with the row
+                    // that's about to unmount. Without this, the
+                    // three-dots button on whatever row slides up
+                    // into the deleted slot looks stuck pressed
+                    // because openMenu still references the dead id.
+                    setConfirmingDelete(false)
+                    onMenuToggle(false)
+                    onDelete()
+                  }}
                 >
                   Delete
                 </button>
