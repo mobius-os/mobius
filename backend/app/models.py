@@ -114,6 +114,16 @@ class Chat(Base):
   # reports how long the interrupted turn had been running, and a
   # future liveness probe can read it without another migration.
   run_started_at = Column(DateTime, nullable=True, default=None)
+  # App that created this chat, when it was opened through the
+  # app-attributed chat contract (design §1) rather than by the owner
+  # in the shell. NULL = an ordinary owner chat. Set, this chat is
+  # "owned" by that app: its token (and only its token, plus the owner)
+  # may send to it, and app-driven turns are attributable + cappable
+  # back to the app. The owner can always see + drive these chats; the
+  # column is the actor tag, not an access fence against the owner.
+  created_by_app_id = Column(
+    Integer, ForeignKey("apps.id"), nullable=True, default=None
+  )
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
