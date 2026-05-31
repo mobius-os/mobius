@@ -21,9 +21,11 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from app import activity, models
-from app.deps import get_current_owner
+from app.database import get_db
+from app.deps import get_current_owner, reject_cross_site
 
 # Event names the emit endpoint will accept. Restricting at the
 # boundary keeps the file's vocabulary closed (a typo or stray
@@ -144,3 +146,32 @@ def emit_activity_event(
   fields: dict[str, Any] = body.model_dump(exclude_none=True)
   ev = fields.pop("ev")
   activity.log_event(ev, **fields)
+
+
+@router.post("/sign-out-everywhere", status_code=204)
+def sign_out_everywhere(
+  _: None = Depends(reject_cross_site),
+  owner: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Revokes every outstanding token for the owner in one step.
+
+  Increments owner.token_epoch. Every owner-derived JWT (login,
+  app-scoped, agent, service) was stamped with the epoch that was
+  current when it was minted, and deps._resolve_owner rejects any token
+  whose stamped epoch is now behind — so this single bump strands the
+  whole fleet, including the caller's own token and the on-disk
+  90-day service token. This is the answer to an exfiltrated token: no
+  SECRET_KEY rotation (which would also break Fernet-encrypted API keys
+  and the CLI credential derivation), just one integer.
+
+  Owner-only via get_current_owner (app tokens are 403'd) so a
+  compromised mini-app can't sign the owner out. After this returns,
+  the next request on any old token 401s and the frontend clears it
+  back to login; the owner signs back in to mint a fresh-epoch token.
+  The on-disk service token stays stale until re-minted (entrypoint
+  refresh on the next container restart, or first-boot setup).
+  """
+  owner.token_epoch += 1
+  db.add(owner)
+  db.commit()

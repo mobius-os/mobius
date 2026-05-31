@@ -27,24 +27,44 @@ def verify_password(plain: str, hashed: str) -> bool:
 def create_access_token(
   data: dict,
   expires_delta: Optional[timedelta] = None,
+  token_epoch: Optional[int] = None,
 ) -> str:
-  """Creates and returns a signed JWT from the given payload."""
+  """Creates and returns a signed JWT from the given payload.
+
+  When `token_epoch` is given it is stamped as the `epoch` claim so the
+  owner-resolving dependency can revoke the token by bumping the
+  owner's `token_epoch` (see models.Owner.token_epoch and
+  deps._resolve_owner). Callers that mint a token on the owner's behalf
+  pass `owner.token_epoch`; callers that don't (none today) leave it
+  absent, which the resolver reads as epoch 0.
+  """
   settings = get_settings()
   payload = data.copy()
   expire = datetime.now(UTC) + (
     expires_delta or timedelta(days=30)
   )
   payload["exp"] = expire
+  if token_epoch is not None:
+    payload["epoch"] = token_epoch
   return jwt.encode(
     payload, settings.secret_key, algorithm="HS256"
   )
 
 
-def create_app_token(app_id: int, owner_username: str) -> str:
-  """Creates a short-lived JWT scoped to a specific mini-app."""
+def create_app_token(
+  app_id: int, owner_username: str, token_epoch: int
+) -> str:
+  """Creates a short-lived JWT scoped to a specific mini-app.
+
+  Carries the owner's `token_epoch` so a "sign out everywhere" revokes
+  outstanding app tokens too — an app token resolves to the Owner row
+  and acts on the owner's behalf, so an exfiltrated one is the same
+  threat as an exfiltrated login token (only shorter-lived).
+  """
   return create_access_token(
     {"sub": owner_username, "scope": "app", "app_id": app_id},
     expires_delta=timedelta(hours=8),
+    token_epoch=token_epoch,
   )
 
 

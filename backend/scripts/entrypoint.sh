@@ -99,7 +99,12 @@ except Exception:
 if not owner:
     exit(0)
 
-# Check if existing token is still valid with more than 30 days remaining.
+# Check if existing token is still valid with more than 30 days remaining
+# AND not revoked. A "sign out everywhere" bumps owner.token_epoch, which
+# strands the on-disk service token even though it hasn't expired — so we
+# re-mint when the stored token's epoch is behind the owner's current one.
+# This restart is the documented recovery path for the service token after
+# revocation (see routes/admin.py:sign_out_everywhere).
 token_file = '/data/service-token.txt'
 if os.path.exists(token_file):
     try:
@@ -107,12 +112,18 @@ if os.path.exists(token_file):
         payload = decode_access_token(existing)
         exp = payload.get('exp', 0)
         remaining = exp - datetime.now(UTC).timestamp()
-        if remaining > 30 * 86400:  # more than 30 days left — keep it
+        fresh = remaining > 30 * 86400  # more than 30 days left
+        current_epoch = payload.get('epoch', 0) == owner.token_epoch
+        if fresh and current_epoch:
             exit(0)
     except Exception:
         pass  # expired or invalid — fall through to regenerate
 
-token = create_access_token({'sub': owner.username}, expires_delta=timedelta(days=90))
+token = create_access_token(
+    {'sub': owner.username},
+    expires_delta=timedelta(days=90),
+    token_epoch=owner.token_epoch,
+)
 print(token, end='')
 ")
 if [ -n "$_token" ]; then
