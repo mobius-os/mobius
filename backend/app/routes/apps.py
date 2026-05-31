@@ -13,14 +13,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy.orm import Session
 
-from app import activity, auth, models, schemas
+from app import activity, models, schemas
 from app.broadcast import get_system_broadcast
 from app.compiler import compile_jsx
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
   get_current_owner, get_current_owner_or_app, get_principal, Principal,
-  get_owner_or_app_with_manage_apps, reject_cross_site,
+  get_owner_or_app_with_manage_apps, reject_cross_site, resolve_owner_or_app,
 )
 
 router = APIRouter(prefix="/api/apps", tags=["apps"])
@@ -697,11 +697,16 @@ def get_module(
   # may legitimately want to import or interop across them. Any
   # valid token (owner or app-scoped) is allowed to fetch any
   # module by id. See CLAUDE.md "Mini-app sandbox — accepted
-  # same-origin decision" for the broader trust model.
-  if not token or not auth.decode_access_token(token):
+  # same-origin decision" for the broader trust model. resolve_owner_
+  # or_app runs the same decode + revocation check the header deps use,
+  # so a signed-out token can't keep pulling module source; the empty-
+  # token guard stays explicit to keep the "Valid token required" 401
+  # (and to avoid feeding a None token into the JWT decoder).
+  if not token:
     raise HTTPException(
       status_code=401, detail="Valid token required."
     )
+  resolve_owner_or_app(token, db)
   app = (
     db.query(models.App).filter(models.App.id == app_id).first()
   )

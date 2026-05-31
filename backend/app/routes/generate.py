@@ -15,11 +15,11 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from app import models
-from app.auth import decode_access_token, decrypt_api_key
+from app.auth import decrypt_api_key
 from app.auth_helpers import get_auth_token
 from app.config import get_settings
 from app.database import get_db
-from app.deps import get_current_owner
+from app.deps import get_current_owner, resolve_owner_only
 from app.path_utils import validate_path_within_base
 from app.resource_access import get_active_chat_or_404
 
@@ -173,24 +173,13 @@ def serve_generated_image(
   """Serves a generated image. Accepts JWT from header or ?token= param.
 
   Owner-only. The token rides on `?token=` because <img>/iframe
-  fetches can't set headers, so we decode it by hand rather than via
-  the get_current_owner dependency — but the same scope check applies:
-  an app-scoped token must not read a chat's generated images outside
-  any per-app policy (the gated chat-log capability isn't built yet).
+  fetches can't set headers, so we resolve it from the string rather
+  than via the get_current_owner header dependency — but it goes
+  through the same resolve_owner_only path, which rejects app-scoped
+  tokens (an app token must not read a chat's generated images) and
+  enforces token revocation (a signed-out token is rejected here too).
   """
-  payload = decode_access_token(raw_token)
-  if not payload:
-    raise HTTPException(status_code=401, detail="Invalid token.")
-  if payload.get("scope") == "app":
-    raise HTTPException(
-      status_code=403,
-      detail="App tokens cannot access this endpoint.",
-    )
-  owner = db.query(models.Owner).filter(
-    models.Owner.username == payload.get("sub")
-  ).first()
-  if not owner:
-    raise HTTPException(status_code=401, detail="Owner not found.")
+  resolve_owner_only(raw_token, db)
 
   settings = get_settings()
   gen_dir = Path(settings.data_dir) / "chats" / chat_id / "generated"
