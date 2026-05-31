@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api, getToken } from '../../api/client.js'
 import { appQueries, themeQueries } from '../../hooks/queries.js'
+import { WifiOff } from 'lucide-react'
 import './AppCanvas.css'
 
 // =================================================================
@@ -70,7 +71,7 @@ import './AppCanvas.css'
 // across React remounts — a 5-minute staleTime is well within the
 // server-side validity window.
 export default function AppCanvas({
-  appId, version = 0, appName,
+  appId, version = 0, appName, offlineCapable = false,
   onNavPush, onNavPop, onNavReset,
 }) {
   // The app-scoped token is fetched from the server and isn't available
@@ -302,9 +303,26 @@ export default function AppCanvas({
       />
       {!loaded && (
         <div className="canvas-loading" aria-live="polite">
-          <div className="canvas-loading__spinner" />
-          {appName && (
-            <div className="canvas-loading__name">{appName}</div>
+          {offline && !offlineCapable ? (
+            // Non-offline-capable apps are never cached by the SW, so
+            // offline their frame + module can't load and the spinner
+            // would hang forever (a blank screen). Show why instead.
+            <div className="canvas-loading__offline">
+              <WifiOff className="canvas-loading__offline-icon" aria-hidden="true" />
+              <div className="canvas-loading__offline-title">You're offline</div>
+              <div className="canvas-loading__offline-detail">
+                {appName ? `${appName} needs a connection to open.`
+                         : 'This app needs a connection to open.'}{' '}
+                It'll work once you're back online.
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="canvas-loading__spinner" />
+              {appName && (
+                <div className="canvas-loading__name">{appName}</div>
+              )}
+            </>
           )}
         </div>
       )}

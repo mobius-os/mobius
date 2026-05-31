@@ -656,6 +656,7 @@ export default function Shell() {
               appId={id}
               version={versionForApp(id)}
               appName={apps.find(a => String(a.id) === String(id))?.name}
+              offlineCapable={!!apps.find(a => String(a.id) === String(id))?.offline_capable}
               onNavPush={appNavPush}
               onNavPop={appNavPop}
               onNavReset={appNavReset}
