@@ -456,25 +456,48 @@ def _register_cron(slug: str, schedule_expr: str, job_path: Path,
     )
 
 
+def _crontab_command_path(line: str) -> str:
+  """The executable path a crontab job line runs, or "" for a line that
+  runs no job (blank, comment, or a `NAME=value` env/setting line).
+
+  The schedule is either a single `@shorthand` token (@daily/@reboot/…) or
+  five whitespace-separated fields; the rest is the command. cron also lets
+  the command be prefixed with inline `NAME=value` assignments, which we
+  skip to reach the real executable (the first non-assignment token).
+  """
+  s = line.strip()
+  if not s or s.startswith("#"):
+    return ""
+  first = s.split(None, 1)[0]
+  if first.startswith("@"):
+    cmd = (s.split(None, 1) + [""])[1]
+  elif "=" in first:
+    return ""  # NAME=value env/setting line — runs no command
+  else:
+    parts = s.split(None, 5)
+    cmd = parts[5] if len(parts) == 6 else ""
+  toks = cmd.split()
+  while toks and "=" in toks[0] and not toks[0].startswith("/"):
+    toks.pop(0)
+  return toks[0] if toks else ""
+
+
 def _crontab_without_app(current: str, source_dir: Path) -> str | None:
   """Return `current` crontab text with every line whose COMMAND runs a
   script under `source_dir` removed — or None if nothing matched, so the
   caller can skip rewriting entirely.
 
-  A crontab job line is `<5 schedule fields> <command...>`. We match only
-  the command's own path (its first token) against the dir-with-trailing-
-  slash, NOT the whole line: that keeps the news/news-2 prefix safe AND
+  Matches on the command's executable path (see `_crontab_command_path`),
+  NOT a whole-line substring: that keeps the news/news-2 prefix safe AND
   avoids dropping an unrelated app whose ARGUMENTS merely reference this
   app's dir (e.g. `... /data/apps/agg/run.sh --feed /data/apps/news/x`).
-  Non-job lines (the `PATH=` header the entrypoint prepends, blanks) have
-  no 6th field, so their command path is "" and they're always preserved.
+  Comments, blanks, and `PATH=`/env lines run no command and are preserved;
+  `@daily`/`@reboot` shorthand and inline `VAR=val <cmd>` are handled too.
   """
   needle = f"{str(source_dir).rstrip('/')}/"
   kept, dropped = [], False
   for ln in current.splitlines():
-    parts = ln.split(None, 5)
-    cmd_path = parts[5].split(None, 1)[0] if len(parts) == 6 else ""
-    if cmd_path.startswith(needle):
+    if _crontab_command_path(ln).startswith(needle):
       dropped = True
     else:
       kept.append(ln)
