@@ -130,6 +130,10 @@ class ChatWriterActor:
     self._q: "queue.Queue[_Command]" = queue.Queue()
     self._thread: threading.Thread | None = None
     self._fatal = False
+    # Serializes the fatal check+enqueue in `submit` against the
+    # set-fatal+drain in the thread's fatal handler, so a command can't
+    # slip into the queue after the final drain and then hang forever.
+    self._fatal_lock = threading.Lock()
     # Coalescing state, guarded on the producer side by `_pending_lock`.
     # `_pending` holds the latest snapshot command per key; `_outstanding`
     # is the set of keys whose `_SnapshotReady` marker is already queued,
@@ -166,16 +170,22 @@ class ChatWriterActor:
     """
     if cmd.ack is None:
       cmd.ack = Future()
-    if self._fatal:
-      _safe_set_exception(cmd.ack, RuntimeError("chat writer is in a fatal state"))
-      return cmd.ack
-    if isinstance(cmd, (Finalize, PersistError, AnswerQuestion)):
-      self._invalidate_pending(cmd.chat_id, cmd.run_token)
-      self._q.put(cmd)
-    elif isinstance(cmd, PersistTranscript):
-      self._enqueue_snapshot(cmd)
-    else:
-      self._q.put(cmd)
+    # Hold `_fatal_lock` across the check + enqueue so the thread's fatal
+    # handler (which takes the same lock to set `_fatal` then drain) can't
+    # interleave and strand this command in the queue after the drain.
+    with self._fatal_lock:
+      if self._fatal:
+        _safe_set_exception(
+          cmd.ack, RuntimeError("chat writer is in a fatal state")
+        )
+        return cmd.ack
+      if isinstance(cmd, (Finalize, PersistError, AnswerQuestion)):
+        self._invalidate_pending(cmd.chat_id, cmd.run_token)
+        self._q.put(cmd)
+      elif isinstance(cmd, PersistTranscript):
+        self._enqueue_snapshot(cmd)
+      else:
+        self._q.put(cmd)
     return cmd.ack
 
   def submit_test_persist(self, chat_id, run_token, payload) -> Future:
@@ -266,9 +276,8 @@ class ChatWriterActor:
       # The session factory raising at first use is thread-fatal: there
       # is no session to write through.  Mark fatal and fail every queued
       # ack rather than dying silently and hanging awaiters.
-      self._fatal = True
       log.exception("chat writer session factory failed")
-      self._drain_failing()
+      self._go_fatal()
       return
     cmd: _Command | None = None
     try:
@@ -301,10 +310,9 @@ class ChatWriterActor:
       # outstanding and future ack so no awaiter hangs forever.  Also
       # fail the in-flight command's ack, which the inner handler never
       # reached.
-      self._fatal = True
       log.exception("chat writer thread died")
       _safe_set_exception(cmd.ack if cmd is not None else None, sys.exc_info()[1])
-      self._drain_failing()
+      self._go_fatal()
     finally:
       try:
         db.close()
@@ -351,18 +359,33 @@ class ChatWriterActor:
       db.record_commit(snapshot)
     return True
 
-  def _drain_failing(self) -> None:
-    """Fail every queued command's ack after a thread-fatal error.
+  def _go_fatal(self) -> None:
+    """Mark the actor fatal and fail every queued ack — under `_fatal_lock`.
 
-    `_fatal` is already set, so `submit()` fails future acks inline; this
-    drains whatever was already queued so no awaiter hangs.
+    Holding the lock across set-fatal + drain serializes with `submit`,
+    which checks `_fatal` and enqueues under the same lock.  So a
+    concurrent `submit` either (a) sees `_fatal=True` and fails its ack
+    inline without enqueuing, or (b) finished its enqueue first, in which
+    case the drain below catches that command.  Either way no awaiter is
+    stranded.  Snapshot markers carry no ack (their `PersistTranscript`'s
+    ack is the submitter's, already failed by submit or by being in
+    `_pending`), so failing them is a harmless no-op.  Also fail any
+    pending coalesced snapshots so their acks don't hang.
     """
-    while True:
-      try:
-        cmd = self._q.get_nowait()
-      except queue.Empty:
-        return
-      _safe_set_exception(cmd.ack, RuntimeError("chat writer is dead"))
+    with self._fatal_lock:
+      self._fatal = True
+      while True:
+        try:
+          cmd = self._q.get_nowait()
+        except queue.Empty:
+          break
+        _safe_set_exception(cmd.ack, RuntimeError("chat writer is dead"))
+    with self._pending_lock:
+      pending = list(self._pending.values())
+      self._pending.clear()
+      self._outstanding.clear()
+    for snap in pending:
+      _safe_set_exception(snap.ack, RuntimeError("chat writer is dead"))
 
 
 # -- ack guards (double-set safe) ----------------------------------------
@@ -374,3 +397,48 @@ def _safe_set_result(ack: Future | None, value) -> None:
 def _safe_set_exception(ack: Future | None, exc: BaseException | None) -> None:
   if ack is not None and not ack.done():
     ack.set_exception(exc or RuntimeError("chat writer failed"))
+
+
+# -- module singleton + lifespan accessors -------------------------------
+# One actor per process.  `start_writer` is called from the FastAPI
+# lifespan AFTER db init + crash reconciliation (which must run before the
+# actor exists — recovery cannot depend on a healthy writer); `stop_writer`
+# drains on shutdown.
+_writer: ChatWriterActor | None = None
+
+
+def start_writer(session_factory=None) -> None:
+  """Construct and start the process writer.
+
+  Defaults to `app.database.SessionLocal`.  A startup failure (thread
+  spawn) is caught and the writer is marked fatal rather than raised —
+  the app must boot even when persistence is degraded, so the recovery
+  surface stays reachable.  A session factory that only raises when
+  CALLED is tolerated separately on the writer thread (see `_run`), which
+  sets `_fatal` and fails acks rather than dying silently.
+  """
+  global _writer
+  if session_factory is None:
+    from app.database import SessionLocal
+    session_factory = SessionLocal
+  _writer = ChatWriterActor(session_factory)
+  try:
+    _writer.start()
+  except Exception:
+    log.exception("chat writer failed to start; persistence degraded")
+    _writer._fatal = True  # submit() will ack-with-exception
+
+
+def get_writer() -> ChatWriterActor:
+  """Return the process writer; raise if `start_writer` hasn't run."""
+  if _writer is None:
+    raise RuntimeError("chat writer not started")
+  return _writer
+
+
+def stop_writer(timeout: float = 10.0) -> None:
+  """Drain + join the process writer if it exists."""
+  global _writer
+  if _writer is not None:
+    _writer.stop(timeout=timeout)
+    _writer = None
