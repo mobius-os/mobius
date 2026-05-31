@@ -116,7 +116,7 @@ async def _append_to_pending(
   async with chat_queue.get_lock(chat.id):
     db.refresh(chat)
     # Apply answers AFTER refresh so we don't lose the write.
-    _apply_answers_to_last_question(chat, body.answers)
+    _apply_answers_to_last_question(chat, body.answers, body.question_id)
     pending = list(chat.pending_messages or [])
     new_msg = _user_message_from_body(chat, body)
     # Clear BOTH queued and persisted messages: assistant ts is now
@@ -176,19 +176,53 @@ def _user_message_from_body(
 
 def _apply_answers_to_last_question(
   chat: models.Chat, answers: dict | None,
+  question_id: str | None = None,
 ) -> bool:
-  """Writes `answers` into the LAST assistant message's question block.
+  """Writes `answers` into the question block being answered.
 
   Atomic with the rest of the POST /messages transaction — when the
   user submits a question-card answer, the answers + the hidden user
   message + the new turn start happen in one DB commit, eliminating
   the race that used to leave answers missing on mid-stream remounts.
 
+  When `question_id` is supplied, the answers are written into the
+  block whose `question_id` matches EXACTLY — this routes the answer
+  to the right question when two are open at once (the latest-question
+  search below would hit the wrong, later one). An unknown id matches
+  nothing and returns False rather than silently falling back, which
+  would re-introduce the wrong-block bug. When `question_id` is absent,
+  the existing behaviour is preserved: the LAST assistant message's
+  last question block is updated (backward-compatible with clients
+  that don't send the id).
+
   Returns True if a question block was found and updated.
   """
   if not answers:
     return False
+  from sqlalchemy.orm.attributes import flag_modified
   msgs = list(chat.messages or [])
+
+  if question_id:
+    # Identity match: scan every assistant message's question blocks for
+    # the exact id. Precise — never falls back to "latest".
+    for msg in reversed(msgs):
+      if msg.get("role") != "assistant":
+        continue
+      for block in msg.get("blocks") or []:
+        if (block.get("type") == "question"
+            and block.get("question_id") == question_id):
+          block["answers"] = answers
+          chat.messages = msgs  # rebind so SQLAlchemy detects the mutation
+          flag_modified(chat, "messages")
+          return True
+    return False
+
+  # No question_id supplied — preserve the legacy latest-question
+  # behaviour (older clients that don't send the id).
+  log.debug(
+    "answer applied without question_id; using latest-question fallback "
+    "chat_id=%s", getattr(chat, "id", "?"),
+  )
   for msg in reversed(msgs):
     if msg.get("role") != "assistant":
       continue
@@ -196,7 +230,6 @@ def _apply_answers_to_last_question(
       if block.get("type") == "question":
         block["answers"] = answers
         chat.messages = msgs  # rebind so SQLAlchemy detects JSON mutation
-        from sqlalchemy.orm.attributes import flag_modified
         flag_modified(chat, "messages")
         return True
   return False
@@ -226,7 +259,7 @@ async def send_message(
   # the questions.claim short-circuit). Redundant for the queue path,
   # where _append_to_pending re-applies after db.refresh. Don't remove
   # without re-tracing both paths.
-  _apply_answers_to_last_question(chat, body.answers)
+  _apply_answers_to_last_question(chat, body.answers, body.question_id)
 
   # SDK in-process answer delivery: if the Claude Agent SDK is blocked
   # in a PreToolUse hook waiting for an AskUserQuestion answer (held

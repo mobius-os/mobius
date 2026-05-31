@@ -518,6 +518,12 @@ def recover_chat(
 
 class QuestionAnswers(BaseModel):
   answers: dict
+  # Optional identity of the question being answered (the runner-
+  # published PendingQuestion id). When supplied, the matching block is
+  # located by this exact id rather than "the latest question block" —
+  # fixing the wrong-block bug when two questions are open. Optional so
+  # older clients keep working via the latest-question fallback.
+  question_id: str | None = None
 
 
 @router.post("/{chat_id}/question-answers")
@@ -527,11 +533,35 @@ async def save_question_answers(
   _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
-  """Saves the user's answers into the last question block."""
+  """Saves the user's answers into the question block being answered.
+
+  Prefers an exact `question_id` match when supplied (precise routing
+  with two open questions); falls back to the LAST assistant message's
+  last question block when absent, unchanged from prior behaviour.
+  """
   from sqlalchemy.orm.attributes import flag_modified
 
   chat = get_active_chat_or_404(db, chat_id)
   msgs = list(chat.messages or [])
+
+  if body.question_id:
+    for msg in reversed(msgs):
+      if msg.get("role") != "assistant":
+        continue
+      for block in msg.get("blocks", []):
+        if (block.get("type") == "question"
+            and block.get("question_id") == body.question_id):
+          block["answers"] = body.answers
+          chat.messages = msgs
+          flag_modified(chat, "messages")
+          db.commit()
+          return {"ok": True}
+    raise HTTPException(status_code=404, detail="No question block found.")
+
+  log.debug(
+    "question-answers without question_id; using latest-question "
+    "fallback chat_id=%s", chat_id,
+  )
   for msg in reversed(msgs):
     if msg.get("role") != "assistant":
       continue
