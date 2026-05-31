@@ -271,6 +271,57 @@ def test_install_update_path_in_place(client, auth, bypass_url_validation):
   assert jsx_file.read_text() == jsx_v2
 
 
+def test_install_same_manifest_via_url_and_inline_matches(
+  client, auth, bypass_url_validation,
+):
+  """Same app installed twice — once via `manifest_url` pointing at
+  `.../mobius.json`, once via inline `manifest` + `raw_base` — must
+  collapse onto a single App row. The two paths used to write
+  visibly different strings into `App.manifest_url` (literal URL vs
+  synthesized `<base>#manifest-id=<id>`), so the re-install lookup
+  missed and produced a duplicate. The canonicaliser now folds both
+  into the same identity key."""
+  base = "https://x.test/dup/"
+  manifest = {**MANIFEST_NEWS, "id": "dup-target"}
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, PROMPT.encode()),
+    base + "fetch.sh": (200, b""),
+  }
+
+  # First install: URL form.
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    r1 = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r1.status_code == 201, r1.text
+  assert r1.json()["mode"] == "install"
+  first_id = r1.json()["id"]
+
+  # Second install: inline form pointing at the same base. The
+  # canonicaliser must recognise these as the same app.
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    r2 = client.post("/api/apps/install", headers=auth, json={
+      "manifest": manifest,
+      "raw_base": base,
+    })
+  assert r2.status_code == 201, r2.text
+  payload = r2.json()
+  assert payload["mode"] == "update", (
+    "Re-installing the same manifest via inline + raw_base should "
+    "update the existing row, not create a duplicate."
+  )
+  assert payload["id"] == first_id
+
+
 def test_install_rolls_back_on_compile_failure(client, auth, bypass_url_validation):
   """Bad JSX → compile fails → no App row, no source_dir, no seeds."""
   base = "https://x.test/bad/"
@@ -685,7 +736,12 @@ def test_install_with_same_slug_different_manifest_keeps_both(
   # Slug collided so allocate_unique_slug bumped it.
   assert installed["slug"] != "news"
   assert installed["slug"].startswith("news-")
-  assert installed["manifest_url"] == base + "mobius.json"
+  # `manifest_url` is stored in the canonical identity-key shape so
+  # the same app installed via inline-manifest + raw_base lands on
+  # the same row instead of duplicating.
+  assert installed["manifest_url"] == (
+    base.rstrip("/") + "#manifest-id=news"
+  )
 
   # User's app is untouched.
   r_user = client.get(f"/api/apps/{user_id}", headers=auth)
@@ -721,7 +777,10 @@ def test_install_same_manifest_twice_updates(
   first = r1.json()
   assert first["mode"] == "install"
   first_id = first["id"]
-  assert first["manifest_url"] == base + "mobius.json"
+  # The literal URL gets folded into the canonical identity shape
+  # before it lands in the column. See `_canonical_identity_key`.
+  canonical = base.rstrip("/") + "#manifest-id=same-manifest"
+  assert first["manifest_url"] == canonical
 
   # Second install of the same manifest_url.
   with patch(
@@ -735,7 +794,7 @@ def test_install_same_manifest_twice_updates(
   second = r2.json()
   assert second["mode"] == "update"
   assert second["id"] == first_id
-  assert second["manifest_url"] == base + "mobius.json"
+  assert second["manifest_url"] == canonical
 
 
 # --------------------------------------------------------------------------

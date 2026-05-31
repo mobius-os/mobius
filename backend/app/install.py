@@ -266,6 +266,26 @@ def _canonical_for_inline(raw_base: str, manifest_id: str) -> str:
   return f"{base}#manifest-id={manifest_id}"
 
 
+def _canonical_identity_key(url_or_base: str, manifest_id: str) -> str:
+  """Single canonical shape for the `manifest_url` column.
+
+  The two install paths (inline-manifest install with `raw_base`, and
+  URL install with `manifest_url=.../mobius.json`) used to write
+  visibly different strings into `App.manifest_url` for the same
+  underlying app. Re-installing via the other path then missed the
+  update branch and created a duplicate row.
+
+  Strip the fragment, strip a trailing `/mobius.json`, strip a
+  trailing slash, then append `#manifest-id=<id>` so both paths
+  produce identical strings. The fragment is purely a marker — it's
+  never dereferenced over the wire."""
+  base = url_or_base.split("#", 1)[0]
+  if base.endswith("/mobius.json"):
+    base = base[: -len("/mobius.json")]
+  base = base.rstrip("/")
+  return f"{base}#manifest-id={manifest_id}"
+
+
 async def _http_get(
   client: httpx.AsyncClient, url: str, max_bytes: int, _hops: int = 0,
 ) -> bytes:
@@ -526,19 +546,35 @@ async def install_from_manifest(
   # only — two apps (one user-built, one installed from a manifest)
   # may want the same slug stem, and allocate_unique_slug already
   # handles the collision by appending -2/-3/... Identity for "is
-  # this the same app re-installed" is keyed on the URL it came
-  # from. Inline manifests synthesize a canonical key from raw_base
-  # + manifest.id so they still get update-on-reinstall behavior.
+  # this the same app re-installed" is keyed on a canonical form of
+  # the URL it came from. The same app installed via
+  # `manifest_url=.../mobius.json` and via inline manifest +
+  # `raw_base=...` would otherwise produce two distinct strings; the
+  # canonicaliser folds both into `<base>#manifest-id=<id>` so
+  # re-install reliably hits the update branch.
   manifest_id = manifest["id"]
-  canonical_manifest_url = (
-    manifest_url if manifest_url is not None
-    else _canonical_for_inline(raw_base, manifest_id)
+  source_for_key = manifest_url if manifest_url is not None else raw_base
+  canonical_manifest_url = _canonical_identity_key(
+    source_for_key, manifest_id,
   )
   existing = (
     db.query(models.App)
     .filter(models.App.manifest_url == canonical_manifest_url)
     .first()
   )
+  # Backwards-compat read path: rows installed before the canonical
+  # shape landed still carry the un-stripped URL (e.g. literally
+  # `.../mobius.json`). Match those too so re-installing an
+  # already-installed app updates the existing row rather than
+  # creating a duplicate. On the update branch below we rewrite
+  # `app.manifest_url` to the canonical shape so the legacy form
+  # ages out one install at a time.
+  if existing is None and manifest_url is not None:
+    existing = (
+      db.query(models.App)
+      .filter(models.App.manifest_url == manifest_url)
+      .first()
+    )
   mode = "update" if existing else "install"
 
   warnings: list[str] = []
@@ -564,6 +600,11 @@ async def install_from_manifest(
       app.name = manifest["name"]
       app.description = manifest.get("description", "")
       app.jsx_source = jsx_source
+      # Rewrite the manifest_url column to the canonical shape so
+      # rows installed before the canonicaliser landed migrate
+      # forward on their next update. New installs already write
+      # the canonical form below.
+      app.manifest_url = canonical_manifest_url
       app.cross_app_access = perms.get("cross_app_access", app.cross_app_access)
       app.share_with_apps = perms.get("share_with_apps", app.share_with_apps)
       # Mirror manifest.offline_capable into the App row on every
