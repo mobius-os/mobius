@@ -293,6 +293,18 @@ textarea:focus-visible {
    subtle accent colors leave selections nearly invisible against the
    message background. */
 ::selection {
-  background: var(--accent, #4f8cff);
+  background: var(--accent, #8b6cf7);
   color: var(--text);
+}
+
+/* Your OWN messages sit on the accent-gradient bubble (see
+   .chat__text--user), so the accent ::selection above is accent-on-accent
+   — invisible. Invert it just here: a near-white (faint accent tint)
+   highlight with dark-accent text, so the selection clearly pops against
+   the purple bubble while staying on-brand. Scoped to the bubble so the
+   global rule still governs selection everywhere else. */
+.chat__text--user::selection,
+.chat__text--user ::selection {
+  background: color-mix(in srgb, var(--accent) 14%, #fff);
+  color: color-mix(in srgb, var(--accent) 78%, #000);
 }
