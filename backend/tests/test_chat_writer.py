@@ -183,3 +183,22 @@ def test_thread_death_fails_pending_acks():
       after.result(timeout=5)
   finally:
     actor.stop(timeout=5)
+
+
+def _boom():
+  raise RuntimeError("session factory unavailable")
+
+
+def test_startup_failure_is_caught_and_writer_reports_unhealthy():
+  from app import chat_writer
+
+  # A session_factory that raises must NOT crash start_writer; get_writer()
+  # returns a writer whose submit() acks with an exception (never hangs).
+  chat_writer.start_writer(session_factory=_boom)
+  try:
+    w = chat_writer.get_writer()
+    fut = w.submit(chat_writer.Barrier())
+    with pytest.raises(RuntimeError):
+      fut.result(timeout=5)
+  finally:
+    chat_writer.stop_writer(timeout=5)

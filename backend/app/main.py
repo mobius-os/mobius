@@ -99,6 +99,19 @@ async def lifespan(app):
       _rc_db.close()
   except Exception as exc:
     _log.error("startup chat reconciliation failed: %s", exc, exc_info=True)
+  # Start the single-writer chat-persistence actor AFTER db init and
+  # crash reconciliation. Order is load-bearing: reconcile_interrupted_chats
+  # must run BEFORE the actor exists — recovery has to work even when
+  # persistence is degraded, so it never routes through the actor.
+  # start_writer catches its own startup failure (marks the writer fatal
+  # rather than raising), so a writer that can't start can't brick boot
+  # or the recovery surface. The actor is dormant in this milestone: no
+  # production write path routes through it yet.
+  try:
+    from app.chat_writer import start_writer
+    start_writer()
+  except Exception as exc:
+    _log.error("chat writer start wiring failed: %s", exc, exc_info=True)
   # Wrapped: push.py is on the agent's write surface. VAPID init is
   # nice-to-have (no push notifications without it) but not boot-critical.
   try:
@@ -165,6 +178,14 @@ async def lifespan(app):
   try:
     yield
   finally:
+    # Drain + join the chat-writer actor so any in-flight persistence
+    # completes before the process exits. Wrapped: a stop failure must
+    # not mask the rest of shutdown.
+    try:
+      from app.chat_writer import stop_writer
+      stop_writer()
+    except Exception as exc:
+      _log.error("chat writer stop failed: %s", exc, exc_info=True)
     # Drain pending debounce timers first so they can't post coroutines
     # to a loop that's about to close, then stop+join the observer.
     if _handler is not None:
