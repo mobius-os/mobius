@@ -115,6 +115,17 @@
       document.getElementById('error-detail').textContent = detail
       document.getElementById('error-panel').classList.add('visible')
       document.getElementById('root').style.display = 'none'
+      // Tell the parent the frame reached a terminal error so it hides
+      // its loading overlay. Without this, a load failure BEFORE
+      // 'frame-mounted' (bad import, no token, no default export, init
+      // timeout) leaves AppCanvas's opaque spinner covering this error
+      // panel forever — a dead spinner the user can't get past. Posting
+      // after mount (a runtime/unhandledrejection error) is harmless:
+      // the parent already hid the overlay and the handler is idempotent.
+      window.parent.postMessage(
+        { type: 'moebius:frame-error', appId: _FRAME_APP_ID },
+        window.location.origin
+      )
     }
 
     function reportError() {
@@ -158,6 +169,9 @@
     //   3. iframe applies theme, imports module with token, mounts.
     //   4. iframe posts {type:'moebius:frame-mounted', appId} —
     //      parent hides the loading overlay.
+    //   4b. on a terminal load failure instead of (4), iframe posts
+    //      {type:'moebius:frame-error', appId} so the parent hides the
+    //      overlay and this frame's error panel becomes visible.
     //   5. parent may later post {type:'moebius:frame-theme', ...}
     //      to update theme without reloading the iframe.
     //
