@@ -340,10 +340,10 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   <script type="importmap">
   {{
     "imports": {{
-      "react": "https://esm.sh/react@18.3.1",
-      "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
-      "react-dom": "https://esm.sh/react-dom@18.3.1",
-      "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+      "react": "/vendor/react@19.2.6/react.mjs",
+      "react/jsx-runtime": "/vendor/react@19.2.6/jsx-runtime.mjs",
+      "react-dom": "/vendor/react@19.2.6/react-dom.mjs",
+      "react-dom/client": "/vendor/react@19.2.6/client.mjs",
       "recharts": "https://esm.sh/recharts@2.15.4?exports=LineChart,BarChart,PieChart,AreaChart,Line,Bar,Pie,Area,XAxis,YAxis,ZAxis,Tooltip,CartesianGrid,Legend,ResponsiveContainer,Cell,LabelList,Brush,ComposedChart,ScatterChart,Scatter,RadarChart,Radar,PolarGrid,PolarAngleAxis,PolarRadiusAxis,RadialBarChart,RadialBar&external=react,react-dom",
       "date-fns": "https://esm.sh/date-fns@4.3.0",
       "three": "/vendor/three@0.184.0/three.module.js",
