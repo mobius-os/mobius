@@ -13,7 +13,6 @@ import json
 import logging
 import os
 import re
-import threading
 import time
 from datetime import UTC, datetime, timedelta
 from logging.handlers import RotatingFileHandler
@@ -183,41 +182,16 @@ class _ChatEventSink:
   returns, the chat-impl wrapper calls `finalize()` which writes the
   final assistant message + persists session_id/cost on the chat row.
 
-  Commit offload (why publish is sync but flush is async): the
-  streaming save is a `db.commit()` against SQLite. With
-  `busy_timeout=5000` (database.py) a commit under write contention
-  can block the calling thread for up to 5s. `publish()` runs
-  synchronously inside the runner's `async for` loop — on the event
-  loop thread — so an inline commit there stalls the whole loop, and
-  with it every OTHER chat's SSE stream, for the duration of the lock
-  wait. To keep the loop free, `publish()` does only the cheap,
-  ordered work (accumulate + broadcast) and records the due save as a
-  `_pending_save` snapshot; the runner loop then `await`s `flush()`,
-  which runs the blocking commit via `asyncio.to_thread` so the loop
-  keeps serving other chats while SQLite does I/O. (Full aiosqlite
-  migration would remove the thread hop entirely, but is out of scope
-  — see the streaming notes in CLAUDE.md.)
-
-  Thread-safety of the offload: the coroutine-owned `db` Session
-  never crosses into the worker thread. Each worker save opens and
-  closes its own `SessionLocal`, while `_persist_lock` serializes it
-  with inline question and final saves. The lock is needed because a
-  Codex approval callback can publish a question while an older
-  streaming flush is still in flight.
-
-  DB-lock-drop behavior: broadcasts still happen even when the DB
-  write path hits `_safe_commit()` returning False (for example a
-  transient SQLite lock). The commit outcome is exposed via
-  `flush()`'s boolean return (and `publish()`'s return for the one
-  inline-commit case, `question`) so callers can observe a
-  broadcast-without-persist gap if they care.
+  `publish()` is deliberately synchronous and cheap: it only queues
+  an ordered command. One loop-owned consumer performs event
+  accumulation, broadcasts, snapshot parking, and worker commits.
+  This preserves SSE order without a threading lock while keeping
+  SQLite I/O off the event loop.
   """
 
   _SAVE_INTERVAL_SECS = 1.0
   # Subset of app.events.EventType that forces a save so the user does
-  # not reconnect into a stale transcript mid-turn. The save is still
-  # offloaded via flush() for every type except `question` (which must
-  # persist before its broadcast — see publish()).
+  # not reconnect into a stale transcript mid-turn.
   _IMMEDIATE_SAVE_TYPES = frozenset(
     {"tool_start", "tool_end", "error", "question"}
   )
@@ -230,145 +204,180 @@ class _ChatEventSink:
     self.session_id: str | None = None
     self.cost_usd: float | None = None
     self._last_save = 0.0
-    # Assistant-message snapshot recorded by publish() when a non-
-    # question save comes due, drained by flush() into an off-loop
+    # Assistant-message snapshot recorded by the consumer when a non-
+    # question save comes due, drained by a flush barrier into an off-loop
     # commit. None means nothing to write. Snapshots coalesce: a later
     # publish overwrites an undrained snapshot, and since each snapshot
     # is the FULL current message, the drained one still reflects every
     # block accumulated up to the flush.
     self._pending_save: tuple[int, dict] | None = None
     self._save_generation = 0
-    self._persist_lock = threading.Lock()
+    self._persist_queue: asyncio.Queue = asyncio.Queue()
+    self._consumer_task: asyncio.Task | None = None
+    self._consumer_error: BaseException | None = None
 
-  def _persist_in_worker(self, generation: int, snapshot: dict) -> bool:
+  def _persist_in_worker(self, _generation: int, snapshot: dict) -> bool:
     """Persists one snapshot with a worker-owned session."""
     from app.database import SessionLocal
     db = SessionLocal()
     try:
-      with self._persist_lock:
-        if generation != self._save_generation:
-          return True
-        return _update_last_assistant_message(
-          db, self.chat_id, snapshot,
-        )
+      return _update_last_assistant_message(db, self.chat_id, snapshot)
     finally:
       db.close()
 
+  def _start_consumer_if_running(self) -> None:
+    """Starts the queue consumer when construction happened on a loop."""
+    if self._consumer_task is not None:
+      return
+    # Some unit tests and sync callers construct sinks without a running
+    # loop. Lazy start lets those callers enqueue safely; the first async
+    # flush/finalize starts the consumer and drains the accumulated work.
+    try:
+      loop = asyncio.get_event_loop()
+    except RuntimeError:
+      return
+    if loop.is_running():
+      self._consumer_task = loop.create_task(self._run_persist_queue())
+
   def publish(self, event: ChatEvent) -> bool:
-    """Publishes an event; records any due save for a later `flush()`.
+    """Queues an event for ordered loop-owned processing."""
+    self._persist_queue.put_nowait(("event", event, None))
+    self._start_consumer_if_running()
+    return True
 
-    Live broadcast is best-effort independent from persistence and
-    always happens here, synchronously, so SSE ordering is preserved.
-    The blocking `db.commit()` is deferred to `flush()` (run off the
-    event loop) for every event type EXCEPT `question`.
-
-    Returns True except when the one inline commit path (`question`)
-    fails; the deferred-save outcome is surfaced by `flush()`.
-    """
+  async def _process_event(self, event: ChatEvent) -> None:
+    """Processes one event in queue order."""
     event_type = event.get("type")
-    commit_ok = True
-
-    # Accumulate the event into assistant_blocks and decide whether a
-    # save is due (immediate for save-triggering types, throttled
-    # otherwise).
     accumulated = process_event(event, self.assistant_blocks)
     needs_save = accumulated and self.chat_id and (
       event_type in self._IMMEDIATE_SAVE_TYPES
       or time.monotonic() - self._last_save >= self._SAVE_INTERVAL_SECS
     )
 
-    # AskUserQuestion is the one event that MUST persist before the
-    # broadcast: the frontend renders the question card the moment the
-    # broadcast lands, and a fast user Submit races the DB write
-    # otherwise. _apply_answers_to_last_question (chats_stream.py)
-    # iterates chat.messages looking for the latest assistant
-    # message's question block — if the runner hasn't written it yet,
-    # the lookup silently returns False, the SDK future resolves
-    # without persisted answers, and the answer disappears on the
-    # next runner writeback (which has no block.answers to carry over).
-    # This commit stays INLINE (on the loop): questions are rare, the
-    # save-before-broadcast ordering is load-bearing, and the brief
-    # block on a clarification is an acceptable trade for keeping the
-    # invariant trivially correct. Persist an undrained older snapshot
-    # first and serialize behind any in-flight worker save so no stale
-    # flush can land after this fuller write.
+    # Questions are saved before their broadcast so a fast answer submit
+    # always finds the persisted block. The same consumer serializes this
+    # behind prior barriers, so no lock or inline loop-thread commit exists.
     if needs_save and event_type == "question":
-      self._last_save = time.monotonic()
-      pending = self._pending_save
       self._pending_save = None
-      with self._persist_lock:
-        if pending is not None and pending[0] == self._save_generation:
-          commit_ok = _update_last_assistant_message(
-            self.db, self.chat_id, pending[1],
-          )
-        self._save_generation += 1
-        commit_ok = _update_last_assistant_message(
-          self.db, self.chat_id,
-          build_assistant_message(self.assistant_blocks),
-        ) and commit_ok
+      self._save_generation += 1
+      self._last_save = time.monotonic()
+      snapshot = copy.deepcopy(
+        build_assistant_message(self.assistant_blocks)
+      )
+      await asyncio.to_thread(
+        self._persist_in_worker, self._save_generation, snapshot,
+      )
 
     self.bc.publish(event)
-
-    # done: capture cost.
     if event_type == "done":
       self.cost_usd = event.get("cost_usd")
 
-    # All other event types save AFTER broadcast and OFF the loop:
-    # record the snapshot and let the next flush() commit it. Most
-    # text deltas don't even get here (the 1s throttle), and the ones
-    # that do no longer block the loop on SQLite I/O.
-    #
-    # Deep-copy is load-bearing: build_assistant_message aliases
-    # self.assistant_blocks (its "blocks" IS that live list, and
-    # process_event mutates those block dicts in place). flush()
-    # serializes this snapshot on a WORKER thread; copying here means
-    # the worker reads a frozen value that no later publish()/
-    # process_event on the loop can mutate underneath it. Without the
-    # copy, a concurrent loop event (e.g. a same-chat question park)
-    # racing the in-flight commit thread is a cross-thread mutation of
-    # the very list being read. Snapshots are <=1/sec (throttle) and
-    # tiny next to a commit, so the copy is free.
     if needs_save and event_type != "question":
       self._last_save = time.monotonic()
       self._save_generation += 1
+      # build_assistant_message aliases assistant_blocks. Freeze the
+      # snapshot before a later event mutates the live list.
       self._pending_save = (
         self._save_generation,
         copy.deepcopy(build_assistant_message(self.assistant_blocks)),
       )
-    return commit_ok
 
-  async def flush(self) -> bool:
-    """Commits a pending streaming save off the event loop.
-
-    Called by the runner once per stream-loop iteration. Drains the
-    snapshot recorded by `publish()` and runs the blocking
-    `db.commit()` in a worker thread (`asyncio.to_thread`) so the loop
-    stays responsive for other chats during a SQLite lock wait. The
-    worker opens its own SQLAlchemy Session and serializes its write
-    with inline question/final saves. No-op (returns True) when
-    nothing is pending.
-    """
+  async def _flush_pending(self) -> bool:
+    """Persists the latest parked snapshot, if any."""
     pending = self._pending_save
     if pending is None:
       return True
     self._pending_save = None
-    return await asyncio.to_thread(
-      self._persist_in_worker, *pending,
-    )
+    # The loop-owned consumer bumps generations before parking a
+    # replacement snapshot. Drop stale work rather than letting an
+    # older save overwrite a fuller question/final snapshot.
+    if pending[0] != self._save_generation:
+      return True
+    return await asyncio.to_thread(self._persist_in_worker, *pending)
 
-  def finalize(self) -> None:
-    """Write the final assistant message snapshot to the DB.
+  def _fail_queued_futures(self, exc: BaseException) -> None:
+    """Fails barriers left behind by a consumer-side exception."""
+    while True:
+      try:
+        _, _, future = self._persist_queue.get_nowait()
+      except asyncio.QueueEmpty:
+        return
+      if future is not None and not future.done():
+        future.set_exception(exc)
 
-    Runs once per turn AFTER the runner's stream loop returns (not in
-    the hot streaming path), so this commit stays synchronous. It
-    supersedes any undrained `_pending_save`, persisting the complete
-    final message regardless of whether the last flush ran.
-    """
-    self._pending_save = None
-    if self.chat_id and self.assistant_blocks:
-      with self._persist_lock:
-        self._save_generation += 1
-        _finalize_response(self.db, self.chat_id, self.assistant_blocks)
+  async def _run_persist_queue(self) -> None:
+    """Consumes commands until finalize drains and terminates the sink."""
+    # This task is the sole owner of assistant_blocks, pending snapshot
+    # state, save generations, save throttling, broadcasts, and worker
+    # commit dispatch. Keeping that ownership on one loop task removes
+    # the old cross-thread lock and makes command ordering explicit.
+    while True:
+      command, payload, future = await self._persist_queue.get()
+      try:
+        if command == "event":
+          await self._process_event(payload)
+        elif command == "barrier":
+          result = await self._flush_pending()
+          if not future.done():
+            future.set_result(result)
+        elif command == "finalize":
+          # Finalization supersedes any undrained streaming snapshot and
+          # runs before run_chat clears its durable Stop marker.
+          self._pending_save = None
+          if self.chat_id and self.assistant_blocks:
+            self._save_generation += 1
+            snapshot = copy.deepcopy(self.assistant_blocks)
+            await asyncio.to_thread(self._finalize_in_worker, snapshot)
+          if not future.done():
+            future.set_result(None)
+          return
+      except Exception as exc:
+        # Never let the consumer die silently: fail the active barrier
+        # plus every queued flush/finalize future so awaiters cannot hang.
+        _get_logger().exception("chat event sink consumer failed: %s", exc)
+        self._consumer_error = exc
+        if future is not None and not future.done():
+          future.set_exception(exc)
+        self._fail_queued_futures(exc)
+        return
+
+  def _finalize_in_worker(self, blocks: list) -> bool:
+    """Finalizes a response using a worker-owned session."""
+    from app.database import SessionLocal
+    db = SessionLocal()
+    try:
+      _finalize_response(db, self.chat_id, blocks)
+      return True
+    finally:
+      db.close()
+
+  async def flush(self) -> bool:
+    """Queues a barrier and waits until prior commands are persisted."""
+    if self._consumer_error is not None:
+      raise self._consumer_error
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    self._persist_queue.put_nowait(("barrier", None, future))
+    self._start_consumer_if_running()
+    return await future
+
+  async def finalize(self) -> None:
+    """Queues terminal persistence, drains the consumer, and awaits exit."""
+    if self._consumer_error is not None:
+      if self._consumer_task is not None:
+        await self._consumer_task
+      raise self._consumer_error
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    self._persist_queue.put_nowait(("finalize", None, future))
+    self._start_consumer_if_running()
+    try:
+      await future
+    finally:
+      # Every terminal caller awaits this method, including SDK success,
+      # SDK error-result, exception, and Stop-driven exits.
+      if self._consumer_task is not None:
+        await self._consumer_task
 
 
 _SKILL_TEXT_CACHE: str | None = None
@@ -1224,7 +1233,7 @@ async def _run_chat_impl(
       # Publish through the sink BEFORE finalize so the error lands
       # in the persisted assistant transcript, not just the live wire.
       sink.publish({"type": "error", "message": str(exc)})
-      sink.finalize()
+      await sink.finalize()
       set_active_broadcast(None)
       # Mirror the success-path drain. Crucially, still check gen
       # ownership: if a concurrent Stop bumped gen, we must NOT
@@ -1267,7 +1276,7 @@ async def _run_chat_impl(
       # the error is persisted alongside any partial response that
       # streamed before the failure.
       sink.publish({"type": "error", "message": err})
-    sink.finalize()
+    await sink.finalize()
     set_active_broadcast(None)
     we_own_gen = (
       run_gen is None or current_run_generation(chat_id) == run_gen
@@ -1354,7 +1363,7 @@ async def _run_chat_impl(
       # Publish through the sink BEFORE finalize so the error lands
       # in the persisted assistant transcript, not just the live wire.
       sink.publish({"type": "error", "message": str(exc)})
-      sink.finalize()
+      await sink.finalize()
       set_active_broadcast(None)
       # Mirror the success-path drain. Crucially, still check gen
       # ownership: if a concurrent Stop bumped gen, we must NOT
@@ -1395,7 +1404,7 @@ async def _run_chat_impl(
       # Same R2-5 rationale: persist the error alongside any partial
       # response that streamed before the failure.
       sink.publish({"type": "error", "message": err})
-    sink.finalize()
+    await sink.finalize()
     set_active_broadcast(None)
     we_own_gen = (
       run_gen is None or current_run_generation(chat_id) == run_gen
