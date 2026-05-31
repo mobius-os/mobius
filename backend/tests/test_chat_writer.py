@@ -13,8 +13,11 @@ import threading
 import pytest
 
 from app.chat_writer import (
+  AnswerQuestion,
   Barrier,
   ChatWriterActor,
+  Finalize,
+  PersistError,
   PersistTranscript,
 )
 
@@ -57,5 +60,126 @@ def test_actor_processes_commands_in_fifo_order():
     fut = actor.submit(Barrier())  # acked only after all prior processed
     fut.result(timeout=5)
     assert seen == [0, 1, 2, 3, 4]
+  finally:
+    actor.stop(timeout=5)
+
+
+def test_persist_transcript_coalesces_per_run_token():
+  commits: list = []
+  actor = ChatWriterActor(session_factory=lambda: _RecordingSession(commits))
+  actor.start()
+  try:
+    actor.pause_for_test()  # hold the consumer so the batch accumulates
+    for i in range(10):
+      actor.submit(
+        PersistTranscript(chat_id="c1", run_token="t1", snapshot={"n": i})
+      )
+    actor.resume_for_test()
+    actor.submit(Barrier()).result(timeout=5)
+    # Only the LATEST snapshot for (c1,t1) must commit; earlier ones drop.
+    assert commits == [{"n": 9}]
+  finally:
+    actor.stop(timeout=5)
+
+
+def test_finalize_and_error_never_coalesce():
+  commits: list = []
+  actor = ChatWriterActor(session_factory=lambda: _RecordingSession(commits))
+  actor.start()
+  try:
+    actor.pause_for_test()
+    # Interleave coalescible snapshots with must-persist commands. Each
+    # Finalize/PersistError must commit its own snapshot — never dropped,
+    # never replaced by a neighbouring transcript snapshot.
+    actor.submit(PersistTranscript(chat_id="c1", run_token="t1", snapshot={"n": 0}))
+    actor.submit(Finalize(chat_id="c1", run_token="t1", snapshot={"final": 1}))
+    actor.submit(PersistTranscript(chat_id="c1", run_token="t1", snapshot={"n": 2}))
+    actor.submit(PersistError(chat_id="c1", run_token="t1", snapshot={"error": 3}))
+    actor.resume_for_test()
+    actor.submit(Barrier()).result(timeout=5)
+    assert {"final": 1} in commits
+    assert {"error": 3} in commits
+  finally:
+    actor.stop(timeout=5)
+
+
+def test_failed_command_acks_with_exception_but_actor_survives():
+  class _BoomOnFirst:
+    """Raises on the first commit, then behaves normally."""
+
+    def __init__(self, sink: list):
+      self._sink = sink
+      self._calls = 0
+
+    def record_commit(self, snapshot):
+      self._calls += 1
+      if self._calls == 1:
+        raise ValueError("boom")
+      self._sink.append(snapshot)
+
+    def commit(self):
+      pass
+
+    def rollback(self):
+      pass
+
+    def close(self):
+      pass
+
+  committed: list = []
+  actor = ChatWriterActor(session_factory=lambda: _BoomOnFirst(committed))
+  actor.start()
+  try:
+    bad = actor.submit(
+      Finalize(chat_id="c1", run_token="t1", snapshot={"bad": True})
+    )
+    with pytest.raises(ValueError):
+      bad.result(timeout=5)
+    # The actor survives: the next command still commits.
+    good = actor.submit(
+      Finalize(chat_id="c1", run_token="t1", snapshot={"ok": True})
+    )
+    assert good.result(timeout=5) is True
+    assert committed == [{"ok": True}]
+  finally:
+    actor.stop(timeout=5)
+
+
+def test_thread_death_fails_pending_acks():
+  class _DeadlySession:
+    """Closing raises, but the real kill is commit raising a non-Exception.
+
+    To force the thread-fatal path (distinct from a per-command failure),
+    `record_commit` raises BaseException, which the per-command try/except
+    (Exception) does not catch — it propagates to the outer handler that
+    sets `_fatal` and fails every ack.
+    """
+
+    def record_commit(self, snapshot):
+      raise KeyboardInterrupt("thread-fatal")
+
+    def commit(self):
+      pass
+
+    def rollback(self):
+      pass
+
+    def close(self):
+      pass
+
+  actor = ChatWriterActor(session_factory=lambda: _DeadlySession())
+  actor.start()
+  try:
+    # This command triggers the fatal path on the thread.
+    killer = actor.submit(
+      Finalize(chat_id="c1", run_token="t1", snapshot={"x": 1})
+    )
+    with pytest.raises(BaseException):
+      killer.result(timeout=5)
+    # A command submitted AFTER the thread died must still fail fast, not
+    # hang forever.
+    after = actor.submit(Barrier())
+    with pytest.raises(RuntimeError):
+      after.result(timeout=5)
   finally:
     actor.stop(timeout=5)
