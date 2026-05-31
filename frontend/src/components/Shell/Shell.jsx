@@ -406,15 +406,29 @@ export default function Shell() {
     // Resolve chatId BEFORE switching views — setting activeView='chat'
     // with the old chatId causes a visible flash of the previous chat.
     let chatId
-    // Reuse an existing empty chat to avoid accumulating invisible empties,
-    // BUT never reuse the chat we're already on: reusing the active empty
-    // makes setActiveChatId a no-op, so "+ New chat" appears to do nothing
-    // (the reported bug). Excluding the active id means the tap always lands
-    // on a different — or freshly created — blank chat. Bounded: at most one
-    // spare empty exists (the next tap reuses it), so this doesn't reopen the
-    // empty-spam path the reuse was added to close.
+    // Reuse the most-recently-updated empty chat if one exists — INCLUDING
+    // the one we're already on. An earlier fix excluded the active chat (to
+    // avoid a no-op setActiveChatId), but that backfired: a tap on a blank
+    // chat then spawned a SECOND blank, or hopped to an identical-looking
+    // spare, and repeated taps ping-ponged between indistinguishable empties
+    // — which is the "+ New chat does nothing" report. Reusing
+    // deterministically (active included) means blanks never accumulate and a
+    // tap on a blank simply keeps you on it (the drawer closing is the
+    // acknowledgement). One exception: a `draft` must land on a chat that
+    // REMOUNTS ChatView to deliver the pending draft, and setActiveChatId to
+    // the current id won't remount — so draft calls still skip the active
+    // chat. forceNew bypasses reuse entirely.
+    //
+    // Also exclude any chat that's mid-stream: the cached `has_messages`
+    // flag lags the send, so for a beat after the user sends, the chat
+    // they just sent to still reads has_messages=false — reusing it would
+    // drop them onto a running turn instead of a blank chat (another flavor
+    // of "+ New chat did nothing"). streamingChatIds is marked synchronously
+    // on message start, so it closes that stale-cache window.
     const empty = !forceNew && [...chats]
-      .filter(c => !c.has_messages && String(c.id) !== String(activeChatIdRef.current))
+      .filter(c => !c.has_messages
+        && !streamingChatIds.has(c.id)
+        && (!draft || String(c.id) !== String(activeChatIdRef.current)))
       .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''))
       [0]
     if (empty) {
@@ -436,7 +450,13 @@ export default function Shell() {
       // Spam-click guard: when no empty exists, two rapid taps would
       // race two POSTs and leave an extra empty behind. The in-flight
       // ref short-circuits the second call until the first resolves.
-      if (creatingChatRef.current) return
+      if (creatingChatRef.current) {
+        // A 2nd rapid tap while the first create is in flight — that
+        // create will land and navigate; close the drawer so the tap is
+        // acknowledged instead of leaving the menu hanging open.
+        closeDrawer()
+        return
+      }
       creatingChatRef.current = true
       try {
         const res = await api.chats.create({ title: 'New chat' })
@@ -444,6 +464,10 @@ export default function Shell() {
         chatId = chat.id
         await refreshChats()
       } catch {
+        // Don't leave a dead, drawer-still-open tap on a failed create.
+        setToast('Couldn’t start a new chat — please try again.')
+        setTimeout(() => setToast(null), 4000)
+        closeDrawer()
         return
       } finally {
         creatingChatRef.current = false
