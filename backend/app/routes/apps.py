@@ -20,7 +20,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.deps import (
   get_current_owner, get_current_owner_or_app, get_principal, Principal,
-  get_owner_or_app_with_cross_write, reject_cross_site,
+  get_owner_or_app_with_manage_apps, reject_cross_site,
 )
 
 router = APIRouter(prefix="/api/apps", tags=["apps"])
@@ -113,7 +113,7 @@ def list_apps(
 async def install_app(
   body: schemas.AppInstall,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_owner_or_app_with_cross_write),
+  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
 ):
   """Atomic install (or in-place update) of an app from a `mobius.json`.
 
@@ -355,7 +355,7 @@ async def update_icon(
 def delete_app(
   app_id: int,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_owner_or_app_with_cross_write),
+  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
 ):
   """Permanently deletes a mini-app — DB row, compiled bundle, source tree.
 

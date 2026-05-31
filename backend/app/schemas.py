@@ -82,6 +82,8 @@ class AppOut(BaseModel):
   cross_app_access: ShareLevel = "none"
   share_with_apps: ShareLevel = "none"
   offline_capable: bool = False
+  # Install authority — see models.App.manage_apps for the contract.
+  manage_apps: bool = False
   # URL slug for the standalone PWA install at /apps/<slug>/. Null
   # only for legacy rows from before the slug column existed; lazy-
   # backfilled on first access via standalone routes (see

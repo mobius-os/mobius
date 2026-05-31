@@ -798,13 +798,25 @@ def test_install_same_manifest_twice_updates(
 
 
 # --------------------------------------------------------------------------
-# Tests for the cross_app_access='write' install path
-# (post-71ea870 — the App Store mini-app drives installs via its
+# Tests for the install-authority gate on /api/apps/install
+# (post-073 — the App Store mini-app drives installs via its
 # app-scoped JWT instead of the owner JWT it doesn't hold).
+#
+# Three branches:
+#   1. App row carries manage_apps=True             → accept (canonical).
+#   2. App row carries cross_app_access='write'     → accept (TRANSITIONAL
+#      fallback so pre-073 installs of the app-store keep working until
+#      they update; logs a deprecation warning).
+#   3. Neither granted                              → 403 with an error
+#      that names manage_apps as the canonical permission.
 # --------------------------------------------------------------------------
 
-def _seed_app_with_perms(db, perms_cross_write: str):
-  """Insert an App row with the given cross_app_access level, return id."""
+def _seed_app_with_perms(
+  db,
+  perms_cross_write: str = "none",
+  manage_apps: bool = False,
+):
+  """Insert an App row with the given install-authority shape, return id."""
   from app import models
   app = models.App(
     name="test-installer",
@@ -816,26 +828,16 @@ def _seed_app_with_perms(db, perms_cross_write: str):
     cross_app_access=perms_cross_write,
     share_with_apps="none",
     offline_capable=False,
+    manage_apps=manage_apps,
   )
   db.add(app)
   db.flush()
   return app.id
 
 
-def test_install_accepts_app_token_with_cross_write(
-  client, db, owner_token, bypass_url_validation,
-):
-  """App-scoped JWT whose App row has cross_app_access='write' should pass."""
-  # owner_token is requested for its side-effect: it creates the Owner
-  # row with sub='test' that the minted app-scoped JWT below resolves
-  # against. Without it the dep returns 401 "Owner not found."
-  from app.auth import create_access_token
-  app_id = _seed_app_with_perms(db, "write")
-  db.commit()
-  token = create_access_token({"sub": "test", "scope": "app", "app_id": app_id})
-
-  base = "https://raw.githubusercontent.com/x/app-installable/main/"
-  responses = {
+def _install_responses(base):
+  """Stock manifest+entry pair for happy-path install tests."""
+  return {
     base + "mobius.json": (200, json.dumps({
       "id": "installable",
       "name": "Installable",
@@ -849,9 +851,24 @@ def test_install_accepts_app_token_with_cross_write(
     }).encode()),
     base + "index.jsx": (200, JSX.encode()),
   }
+
+
+def test_install_accepts_app_token_with_manage_apps(
+  client, db, owner_token, bypass_url_validation,
+):
+  """App-scoped JWT whose App row has manage_apps=True passes the gate."""
+  # owner_token is requested for its side-effect: it creates the Owner
+  # row with sub='test' that the minted app-scoped JWT below resolves
+  # against. Without it the dep returns 401 "Owner not found."
+  from app.auth import create_access_token
+  app_id = _seed_app_with_perms(db, perms_cross_write="none", manage_apps=True)
+  db.commit()
+  token = create_access_token({"sub": "test", "scope": "app", "app_id": app_id})
+
+  base = "https://raw.githubusercontent.com/x/app-installable/main/"
   with patch(
     "app.install.httpx.AsyncClient",
-    side_effect=_fake_async_client(responses),
+    side_effect=_fake_async_client(_install_responses(base)),
   ):
     r = client.post(
       "/api/apps/install",
@@ -861,12 +878,40 @@ def test_install_accepts_app_token_with_cross_write(
   assert r.status_code == 201, r.text
 
 
-def test_install_rejects_app_token_with_cross_read(
+def test_install_still_accepts_legacy_cross_write(
   client, db, owner_token, bypass_url_validation,
 ):
-  """App-scoped JWT whose App row has cross_app_access='read' must 403."""
+  """Transitional: cross_app_access='write' alone is still honoured.
+
+  Pre-073 manifests granted install authority implicitly through
+  cross_app_access='write'. Until those installs update to declare
+  manage_apps=true, the dep must keep accepting the legacy shape so
+  the install button doesn't brick on day one of the rollout.
+  """
   from app.auth import create_access_token
-  app_id = _seed_app_with_perms(db, "read")
+  app_id = _seed_app_with_perms(db, perms_cross_write="write", manage_apps=False)
+  db.commit()
+  token = create_access_token({"sub": "test", "scope": "app", "app_id": app_id})
+
+  base = "https://raw.githubusercontent.com/x/app-installable/main/"
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(_install_responses(base)),
+  ):
+    r = client.post(
+      "/api/apps/install",
+      headers={"Authorization": f"Bearer {token}"},
+      json={"manifest_url": base + "mobius.json"},
+    )
+  assert r.status_code == 201, r.text
+
+
+def test_install_rejects_app_token_without_manage_apps_and_without_cross_write(
+  client, db, owner_token, bypass_url_validation,
+):
+  """App with neither manage_apps nor cross_app_access='write' is denied."""
+  from app.auth import create_access_token
+  app_id = _seed_app_with_perms(db, perms_cross_write="read", manage_apps=False)
   db.commit()
   token = create_access_token({"sub": "test", "scope": "app", "app_id": app_id})
 
@@ -876,15 +921,15 @@ def test_install_rejects_app_token_with_cross_read(
     json={"manifest_url": "https://x/y/mobius.json"},
   )
   assert r.status_code == 403, r.text
-  assert "cross_app_access" in r.json()["detail"].lower()
+  assert "manage_apps" in r.json()["detail"].lower()
 
 
 def test_install_rejects_app_token_with_cross_none(
   client, db, owner_token, bypass_url_validation,
 ):
-  """App-scoped JWT whose App row has cross_app_access='none' must 403."""
+  """Default-perms app (cross_app_access='none', manage_apps=False) is denied."""
   from app.auth import create_access_token
-  app_id = _seed_app_with_perms(db, "none")
+  app_id = _seed_app_with_perms(db, perms_cross_write="none", manage_apps=False)
   db.commit()
   token = create_access_token({"sub": "test", "scope": "app", "app_id": app_id})
 

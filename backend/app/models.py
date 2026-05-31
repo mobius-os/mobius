@@ -151,6 +151,13 @@ class App(Base):
   share_with_apps = Column(
     String(16), nullable=False, default="none"
   )
+  # Install authority. When True, the app's token can call POST
+  # /api/apps/install + DELETE /api/apps/{id} on the owner's behalf.
+  # Distinct from `cross_app_access` so the install consent is a
+  # separate user-visible permission rather than overloaded onto
+  # storage-write. The App Store mini-app is the canonical caller.
+  # Default False — only granted by manifest declaration on install.
+  manage_apps = Column(Boolean, nullable=False, default=False)
   # Offline capability. The agent opts an app in (default False) only
   # when it's built to run without the network — it uses
   # window.mobius.storage (which queues writes and syncs on reconnect)
