@@ -101,6 +101,18 @@ def _save_message(db: Session, chat_id: str, message: dict):
   _safe_commit(db)
 
 
+def _next_message_ts(existing: list) -> int:
+  """A wall-clock-ms timestamp strictly greater than every ts already in
+  `existing`. The streamed-assistant path doesn't flow through the queue's
+  `_ensure_unique_ts`, so a fast first assistant write could otherwise land
+  in the same millisecond as the user message — two sibling messages with
+  equal ts produce duplicate React keys client-side. Callers pass the union
+  of persisted + pending messages so the new ts clears both collections."""
+  now = int(time.time() * 1000)
+  max_ts = max((m.get("ts") or 0 for m in existing), default=0)
+  return max(now, max_ts + 1)
+
+
 def _update_last_assistant_message(db: Session, chat_id: str, message: dict) -> bool:
   """Updates the last assistant message in the chat (for streaming updates)."""
   if not chat_id:
@@ -110,6 +122,11 @@ def _update_last_assistant_message(db: Session, chat_id: str, message: dict) -> 
   if not chat or not chat.messages:
     return True
   msgs = list(chat.messages)
+  # Allocate any new ts against persisted AND queued messages — a pending
+  # user message (stamped by chats_stream._ensure_unique_ts off a disjoint
+  # collection) must not collide with this assistant's ts once it promotes
+  # into chat.messages (equal ts -> duplicate React keys).
+  pending = list(chat.pending_messages or [])
   if msgs and msgs[-1].get("role") == "assistant":
     # Carry answers forward: _apply_answers_to_last_question writes
     # them here; the runner rebuilds from assistant_blocks (no
@@ -124,8 +141,22 @@ def _update_last_assistant_message(db: Session, chat_id: str, message: dict) -> 
         carried = existing_answers_by_key.get(question_block_key(nb))
         if carried:
           nb["answers"] = carried
+    # Carry a STABLE per-turn ts. build_assistant_message omits ts, so
+    # assistant messages historically persisted with ts=None — which
+    # silently defeated the frontend bridge gate (useBridgePartial keys
+    # the kept partial by ts). On reconnect mid-question the persisted
+    # card AND the replayed stream card both rendered (the duplicate
+    # question/answer bug). Preserve the existing message's ts across
+    # every streaming replace so the id stays stable for the whole turn;
+    # backfill one only if an older, tsless message is being updated.
+    message["ts"] = msgs[-1].get("ts")
+    if message["ts"] is None:
+      message["ts"] = _next_message_ts(msgs[:-1] + pending)
     msgs[-1] = message
   else:
+    # First write of this turn's assistant message — stamp a ts so the
+    # bridge gate and the frontend's ts-keyed rendering have a stable id.
+    message["ts"] = _next_message_ts(msgs + pending)
     msgs.append(message)
   chat.messages = msgs
   return _safe_commit(db)
