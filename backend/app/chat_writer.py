@@ -1396,9 +1396,9 @@ class _WriteOutcome(enum.Enum):
   (`QuestionCommit`/`Finalize`) instead treats NOOP as a FAILURE: there was a
   durable write the caller depends on (the question card it's about to
   broadcast, the terminal turn state), and "nothing was written" must fail
-  the ack rather than falsely succeed (silent loss).  `_apply_outcome`
-  returns this; `update_last_assistant_message` collapses it to the bool the
-  sink caller still expects.
+  the ack rather than falsely succeed (silent loss).
+  `_apply_last_assistant_message` returns this; `update_last_assistant_message`
+  collapses it to the bool the sink caller still expects.
   """
 
   APPLIED = "applied"  # found a row + assistant slot, committed cleanly
