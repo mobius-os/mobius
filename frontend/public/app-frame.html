@@ -115,6 +115,14 @@
     // (esp. the offline game-over blank) and read it from /diag.html without
     // screenshots or a console. Capped so it can't grow unbounded. Remove
     // once the offline mini-app issues are confirmed fixed.
+    // Redact the per-session auth token before anything is persisted. The
+    // module URL is `/api/apps/<id>/module?token=<JWT>`, and an import
+    // failure surfaces that URL inside the error string — which would
+    // otherwise land in this localStorage ring buffer in plaintext. Scrub at
+    // the single chokepoint so every caller is covered.
+    function redact(s) {
+      return String(s == null ? '' : s).replace(/([?&]token=)[^&\s"']+/gi, '$1[REDACTED]')
+    }
     function mlog(tag, msg) {
       try {
         var key = 'mobius-diag-log'
@@ -123,8 +131,8 @@
           t: new Date().toISOString(),
           src: 'frame:' + _FRAME_APP_ID,
           online: (typeof navigator !== 'undefined') ? navigator.onLine : null,
-          tag: String(tag),
-          msg: (msg == null ? '' : String(msg)).slice(0, 600),
+          tag: redact(tag),
+          msg: redact(msg).slice(0, 600),
         })
         if (arr.length > 100) arr = arr.slice(-100)
         localStorage.setItem(key, JSON.stringify(arr))
