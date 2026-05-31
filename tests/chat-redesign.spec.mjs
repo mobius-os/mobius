@@ -170,8 +170,9 @@ test.describe('Bug 1: AskUserQuestion', () => {
       3, // 2 real options + "Other"
       { timeout: 2000 }
     )
-    await expect(page.getByRole('button', { name: 'Fix' })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Skip' })).toBeVisible()
+    // Options are radios (single-select) — single AskUserQuestion radiogroup.
+    await expect(page.getByRole('radio', { name: 'Fix' })).toBeVisible()
+    await expect(page.getByRole('radio', { name: 'Skip' })).toBeVisible()
   })
 
 
