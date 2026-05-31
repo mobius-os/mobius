@@ -764,12 +764,12 @@ def _seed_app_with_perms(db, perms_cross_write: str):
 
 
 def test_install_accepts_app_token_with_cross_write(
-  client, db_session, bypass_url_validation
+  client, db, bypass_url_validation
 ):
   """App-scoped JWT whose App row has cross_app_access='write' should pass."""
   from app.auth import create_access_token
-  app_id = _seed_app_with_perms(db_session, "write")
-  db_session.commit()
+  app_id = _seed_app_with_perms(db, "write")
+  db.commit()
   token = create_access_token({"sub": "test", "scope": "app", "app_id": app_id})
 
   base = "https://raw.githubusercontent.com/x/app-installable/main/"
@@ -800,12 +800,12 @@ def test_install_accepts_app_token_with_cross_write(
 
 
 def test_install_rejects_app_token_with_cross_read(
-  client, db_session, bypass_url_validation
+  client, db, bypass_url_validation
 ):
   """App-scoped JWT whose App row has cross_app_access='read' must 403."""
   from app.auth import create_access_token
-  app_id = _seed_app_with_perms(db_session, "read")
-  db_session.commit()
+  app_id = _seed_app_with_perms(db, "read")
+  db.commit()
   token = create_access_token({"sub": "test", "scope": "app", "app_id": app_id})
 
   r = client.post(
@@ -818,12 +818,12 @@ def test_install_rejects_app_token_with_cross_read(
 
 
 def test_install_rejects_app_token_with_cross_none(
-  client, db_session, bypass_url_validation
+  client, db, bypass_url_validation
 ):
   """App-scoped JWT whose App row has cross_app_access='none' must 403."""
   from app.auth import create_access_token
-  app_id = _seed_app_with_perms(db_session, "none")
-  db_session.commit()
+  app_id = _seed_app_with_perms(db, "none")
+  db.commit()
   token = create_access_token({"sub": "test", "scope": "app", "app_id": app_id})
 
   r = client.post(
