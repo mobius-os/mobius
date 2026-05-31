@@ -283,7 +283,11 @@ def _canonical_identity_key(url_or_base: str, manifest_id: str) -> str:
   trailing slash, then append `#manifest-id=<id>` so both paths
   produce identical strings. The fragment is purely a marker — it's
   never dereferenced over the wire."""
-  base = url_or_base.split("#", 1)[0]
+  # Strip BOTH fragment and query string. Without ?-strip, two paste-
+  # a-URL flows for the same app (with vs without `?utm_source=…` etc.)
+  # would canonicalise to different keys and split the app into two
+  # App rows on the second install.
+  base = url_or_base.split("#", 1)[0].split("?", 1)[0]
   if base.endswith("/mobius.json"):
     base = base[: -len("/mobius.json")]
   base = base.rstrip("/")
