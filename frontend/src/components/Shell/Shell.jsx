@@ -580,10 +580,21 @@ export default function Shell() {
     const liveFetched = chatsQuery.isSuccess
       && chatsQuery.isFetchedAfterMount
     if (!liveFetched) return
-    if (chats.length === 0 && activeChatId === null) {
+    // Only bootstrap a starter chat while the chat view is what's
+    // showing. A deep-link to /app/:id (push-notification tap, PWA
+    // launch-at-app) sets activeView='canvas' with activeChatId still
+    // null; without the activeView guard this fires newChat(), which
+    // flips activeView to 'chat' and buries the deep-linked app behind
+    // the empty chat. It only bites a zero-chat instance — a populated
+    // instance skips it on the length===0 guard, which is why apps
+    // deep-link fine in practice but the empty-list app-canvas tests
+    // failed. When the user later opens chat, activeView flips to
+    // 'chat' and this effect re-runs (activeView is in deps) to create
+    // the starter chat then.
+    if (chats.length === 0 && activeChatId === null && activeView === 'chat') {
       newChat()
     }
-  }, [chats, activeChatId, chatsQuery.isSuccess, chatsQuery.isFetchedAfterMount])
+  }, [chats, activeChatId, activeView, chatsQuery.isSuccess, chatsQuery.isFetchedAfterMount])
 
   return (
     <div className="shell">
