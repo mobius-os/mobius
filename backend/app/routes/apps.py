@@ -155,6 +155,8 @@ async def install_app(
     pinned_at=app.pinned_at,
     cross_app_access=app.cross_app_access,
     share_with_apps=app.share_with_apps,
+    offline_capable=app.offline_capable,
+    manage_apps=app.manage_apps,
     slug=app.slug,
     manifest_url=app.manifest_url,
     created_at=app.created_at,
