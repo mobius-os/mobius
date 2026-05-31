@@ -228,6 +228,16 @@ def run_migrations(eng) -> None:
       _add_owner.append(
         "ALTER TABLE owner ADD COLUMN walkthrough_completed_at DATETIME"
       )
+    if "token_epoch" not in owner_cols:
+      # JWT-revocation generation counter. DEFAULT 0 means existing
+      # owners migrate to epoch 0 and their already-issued tokens
+      # (which carry no epoch claim) keep validating as epoch 0 — no
+      # forced sign-out on upgrade. The owner bumps it to 1+ via "sign
+      # out everywhere", which strands every pre-bump token. See
+      # models.Owner.token_epoch.
+      _add_owner.append(
+        "ALTER TABLE owner ADD COLUMN token_epoch INTEGER NOT NULL DEFAULT 0"
+      )
     if _add_owner:
       with eng.connect() as conn:
         for stmt in _add_owner:

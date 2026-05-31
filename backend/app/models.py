@@ -50,6 +50,18 @@ class Owner(Base):
   # than a boolean flag) so we can correlate first-completion against
   # other onboarding signals later — same shape as a SCD type 1 row.
   walkthrough_completed_at = Column(DateTime, nullable=True, default=None)
+  # Monotonic JWT-validity generation. Every owner-derived token (the
+  # 30-day login token, the 8h app token, the 2h agent token, the
+  # 90-day service token) is stamped with the owner's token_epoch at
+  # mint time; the owner-resolving dependency in deps.py rejects any
+  # token whose stamped epoch is behind this value. Incrementing it is
+  # "sign out everywhere" — it invalidates every outstanding token at
+  # once without rotating SECRET_KEY (which would also break the
+  # Fernet-encrypted API keys and the CLI credential derivation). A
+  # token minted before this column existed carries no epoch claim and
+  # reads as epoch 0, which equals a freshly-migrated owner's epoch, so
+  # legacy tokens stay valid until the first bump.
+  token_epoch = Column(Integer, nullable=False, default=0)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
 

@@ -687,6 +687,7 @@ async def _run_chat_impl(
   agent_token = auth.create_access_token(
     {"sub": owner.username},
     expires_delta=timedelta(hours=2),
+    token_epoch=owner.token_epoch,
   )
 
   # Build the base environment shared by all providers.

@@ -78,6 +78,62 @@ class Principal:
   app_id: int | None
 
 
+def _resolve_owner(
+  token: str, db: Session
+) -> tuple[models.Owner, dict]:
+  """Decodes the JWT, loads the owner, and enforces token revocation.
+
+  Returns the (owner, payload) pair every owner-resolving dependency
+  needs. Centralizing the decode + lookup + epoch check here is what
+  makes revocation unforgettable: there is no token-validation path
+  that can skip the epoch comparison, because every dependency below
+  goes through this one function.
+
+  Revocation contract: a token carries the owner's `token_epoch` at
+  mint time (see auth.create_access_token). "Sign out everywhere"
+  bumps owner.token_epoch, so a stale token's stamped epoch falls
+  behind and is rejected with 401 — the same status the frontend
+  already treats as "clear token and return to login". A token minted
+  before the epoch claim existed has no `epoch` and reads as 0, which
+  matches a never-revoked owner (token_epoch defaults to 0), so legacy
+  tokens keep working until the first bump.
+  """
+  payload = auth.decode_access_token(token)
+  if not payload:
+    raise HTTPException(status_code=401, detail="Invalid token.")
+  owner = (
+    db.query(models.Owner)
+    .filter(models.Owner.username == payload.get("sub"))
+    .first()
+  )
+  if not owner:
+    raise HTTPException(status_code=401, detail="Owner not found.")
+  if payload.get("epoch", 0) != owner.token_epoch:
+    raise HTTPException(status_code=401, detail="Token revoked.")
+  return owner, payload
+
+
+def resolve_owner_only(token: str, db: Session) -> models.Owner:
+  """Resolves an owner from a raw token string, rejecting app scope.
+
+  The owner-only counterpart to `_resolve_owner`, exposed for the two
+  routes that take the token on a `?token=` query param instead of the
+  Authorization header (img/iframe fetches can't set headers):
+  uploads.serve_upload and generate.serve_generated_image. They used to
+  hand-roll decode + scope-reject + lookup, which silently skipped the
+  revocation check — routing them through here keeps "sign out
+  everywhere" effective on those surfaces too. `get_current_owner` is
+  the same logic wired to the OAuth2 header dependency.
+  """
+  owner, payload = _resolve_owner(token, db)
+  if payload.get("scope") == "app":
+    raise HTTPException(
+      status_code=403,
+      detail="App tokens cannot access this endpoint.",
+    )
+  return owner
+
+
 def get_current_owner(
   token: str = Depends(_oauth2),
   db: Session = Depends(get_db),
@@ -87,21 +143,20 @@ def get_current_owner(
   Rejects app-scoped tokens — use get_current_owner_or_app for
   routes that should be accessible to mini-apps.
   """
-  payload = auth.decode_access_token(token)
-  if not payload:
-    raise HTTPException(status_code=401, detail="Invalid token.")
-  if payload.get("scope") == "app":
-    raise HTTPException(
-      status_code=403,
-      detail="App tokens cannot access this endpoint.",
-    )
-  owner = (
-    db.query(models.Owner)
-    .filter(models.Owner.username == payload.get("sub"))
-    .first()
-  )
-  if not owner:
-    raise HTTPException(status_code=401, detail="Owner not found.")
+  return resolve_owner_only(token, db)
+
+
+def resolve_owner_or_app(token: str, db: Session) -> models.Owner:
+  """Resolves an owner (from a full OR app-scoped token string).
+
+  The owner-or-app counterpart to `resolve_owner_only`, exposed for the
+  module route in routes/apps.py, which takes the token on a `?token=`
+  query param (iframe `import()` can't set headers) and deliberately
+  accepts any valid token. Going through here applies the same
+  revocation check the header dependencies use, so a signed-out token
+  can't still pull module source.
+  """
+  owner, _ = _resolve_owner(token, db)
   return owner
 
 
@@ -119,17 +174,7 @@ def get_current_owner_or_app(
   scoping), use `get_principal` instead — it returns a Principal with
   both the owner and the app_id.
   """
-  payload = auth.decode_access_token(token)
-  if not payload:
-    raise HTTPException(status_code=401, detail="Invalid token.")
-  owner = (
-    db.query(models.Owner)
-    .filter(models.Owner.username == payload.get("sub"))
-    .first()
-  )
-  if not owner:
-    raise HTTPException(status_code=401, detail="Owner not found.")
-  return owner
+  return resolve_owner_or_app(token, db)
 
 
 def get_principal(
@@ -137,16 +182,7 @@ def get_principal(
   db: Session = Depends(get_db),
 ) -> Principal:
   """Same as get_current_owner_or_app but also exposes the token's app_id."""
-  payload = auth.decode_access_token(token)
-  if not payload:
-    raise HTTPException(status_code=401, detail="Invalid token.")
-  owner = (
-    db.query(models.Owner)
-    .filter(models.Owner.username == payload.get("sub"))
-    .first()
-  )
-  if not owner:
-    raise HTTPException(status_code=401, detail="Owner not found.")
+  owner, payload = _resolve_owner(token, db)
   scope = payload.get("scope")
   app_id = payload.get("app_id") if scope == "app" else None
   # Invariant: an app-scoped token MUST carry an integer app_id. A signed

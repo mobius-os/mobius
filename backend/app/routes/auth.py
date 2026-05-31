@@ -108,16 +108,23 @@ def setup_status(db: Session = Depends(get_db)):
   return schemas.SetupStatus(configured=configured)
 
 
-def _write_service_token(username: str) -> None:
+def _write_service_token(username: str, token_epoch: int) -> None:
   """Mints a 90-day service token for cron jobs and writes it to
   /data/service-token.txt (chmod 600). The entrypoint refresh path
   only runs when an owner exists at boot, so on first-time setup we
   have to seed it here — otherwise the file is missing until the
-  next container restart."""
+  next container restart.
+
+  Stamped with the owner's token_epoch so "sign out everywhere"
+  revokes it too — a 90-day unrevocable token would be the largest
+  hole in the revocation story. The owner must re-mint it afterward
+  (the entrypoint refresh path does this on the next restart)."""
   settings = get_settings()
   path = os.path.join(settings.data_dir, "service-token.txt")
   token = auth.create_access_token(
-    {"sub": username}, expires_delta=timedelta(days=90)
+    {"sub": username},
+    expires_delta=timedelta(days=90),
+    token_epoch=token_epoch,
   )
   fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
   with os.fdopen(fd, "w") as f:
@@ -141,11 +148,14 @@ def setup(
   )
   db.add(owner)
   db.commit()
+  db.refresh(owner)
   try:
-    _write_service_token(body.username)
+    _write_service_token(owner.username, owner.token_epoch)
   except OSError as exc:
     log.warning("Could not write service token: %s", exc)
-  token = auth.create_access_token({"sub": body.username})
+  token = auth.create_access_token(
+    {"sub": owner.username}, token_epoch=owner.token_epoch
+  )
   return schemas.TokenResponse(access_token=token)
 
 
@@ -173,7 +183,9 @@ def login(
       headers={"WWW-Authenticate": "Bearer"},
     )
   _reset_login_failures(form.username)
-  token = auth.create_access_token({"sub": owner.username})
+  token = auth.create_access_token(
+    {"sub": owner.username}, token_epoch=owner.token_epoch
+  )
   return schemas.TokenResponse(access_token=token)
 
 
@@ -187,7 +199,9 @@ def create_app_token_endpoint(
   app = db.query(models.App).filter(models.App.id == body.app_id).first()
   if not app:
     raise HTTPException(status_code=404, detail="App not found.")
-  token = auth.create_app_token(body.app_id, owner.username)
+  token = auth.create_app_token(
+    body.app_id, owner.username, owner.token_epoch
+  )
   return {"token": token}
 
 
