@@ -126,43 +126,33 @@ RUN mkdir -p /tmp/vendor-install && cd /tmp/vendor-install \
 
 # Self-hosted React for the mini-app import map — same rationale as
 # three.js above, but load-bearing for OFFLINE rather than just cold-load
-# speed. Mini-apps import react/react-dom via app-frame.html's importmap.
-# Serving these from esm.sh meant offline-capable apps depended on a
-# third-party CDN whose React entry is a multi-hop re-export chain
-# (react@19.2.6 → /react@19.2.6/es2022/react.bundle.mjs → …; react-dom
-# pulls scheduler + sub-chunks as separate URLs). The service worker
-# cache-firsts esm.sh, but only opportunistically per URL, so a single
-# uncached hop (or a version bump invalidating the prior cache) left an
-# offline app blank on its top-level `import 'react-dom/client'`. Serving
-# React same-origin under /vendor removes the third-party dependency
-# entirely and makes offline deterministic.
+# speed. Mini-apps import react/react-dom via app-frame.html's (and
+# standalone.py's) import map. Serving these from esm.sh meant offline-
+# capable apps depended on a third-party CDN whose React entry is a
+# multi-hop re-export chain (react@19.2.6 → /react@19.2.6/es2022/
+# react.bundle.mjs → …; react-dom pulls scheduler + sub-chunks as separate
+# URLs). The service worker cache-firsts esm.sh, but only opportunistically
+# per URL, so a single uncached hop (or a version bump invalidating the
+# prior cache) left an offline app blank on its top-level
+# `import 'react-dom/client'`. Serving React same-origin under /vendor
+# removes the third-party dependency entirely and makes offline
+# deterministic.
 #
-# esbuild bundles each entry into a self-contained ESM file. jsx-runtime,
-# react-dom and client mark `react` (and client also `react-dom`)
-# EXTERNAL so all four resolve back through the importmap to ONE shared
-# React instance — bundling copies into each would give react-dom its own
-# React and break hooks across the boundary. NODE_ENV=production strips
-# React's dev-only code (which also reads `process`, undefined in the
-# browser). Versioned path mirrors three's primary pattern; no unversioned
-# alias because nothing referenced /vendor/react before this.
+# The build (backend/scripts/build-react-vendor.mjs) bundles all four
+# import-map entries into ONE core.mjs (so React is included exactly once)
+# and emits tiny facades that re-export it — every specifier resolves to a
+# single shared React instance. Bundling each entry separately with
+# `--external:react` does NOT work: react/react-dom are CommonJS, so
+# esbuild emits a throwing `__require("react")` shim that breaks every
+# mini-app in the browser. See the script header for the full rationale.
+COPY backend/scripts/build-react-vendor.mjs /tmp/build-react-vendor.mjs
 RUN mkdir -p /tmp/react-install && cd /tmp/react-install \
     && npm init -y >/dev/null \
     && npm install --no-audit --no-fund --silent react@19.2.6 react-dom@19.2.6 \
     && mkdir -p /app/static/vendor/react@19.2.6 \
-    && esbuild node_modules/react/index.js --bundle --format=esm \
-         --define:process.env.NODE_ENV='"production"' \
-         --outfile=/app/static/vendor/react@19.2.6/react.mjs \
-    && esbuild node_modules/react/jsx-runtime.js --bundle --format=esm \
-         --define:process.env.NODE_ENV='"production"' --external:react \
-         --outfile=/app/static/vendor/react@19.2.6/jsx-runtime.mjs \
-    && esbuild node_modules/react-dom/index.js --bundle --format=esm \
-         --define:process.env.NODE_ENV='"production"' --external:react \
-         --outfile=/app/static/vendor/react@19.2.6/react-dom.mjs \
-    && esbuild node_modules/react-dom/client.js --bundle --format=esm \
-         --define:process.env.NODE_ENV='"production"' \
-         --external:react --external:react-dom \
-         --outfile=/app/static/vendor/react@19.2.6/client.mjs \
-    && cd / && rm -rf /tmp/react-install
+    && node /tmp/build-react-vendor.mjs /tmp/react-install \
+         /app/static/vendor/react@19.2.6 "$(command -v esbuild)" \
+    && cd / && rm -rf /tmp/react-install /tmp/build-react-vendor.mjs
 
 # Full frontend source so the agent can edit and rebuild the shell.
 # /app/shell-src/ is the read-only reference (originals for recovery).
