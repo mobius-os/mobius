@@ -34,26 +34,32 @@ const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
  *  origin handling) so we test the wire contract, not just the
  *  parent's React state. */
 function mockFrameHTML(appId, opts = {}) {
-  const { sendMounted = true, mountDelayMs = 0 } = opts
+  // mountOnSignal: post frame-mounted only when the TEST sends a
+  // 'moebius-test:mount' message — lets a test assert the spinner is
+  // visible first and hidden after, deterministically, instead of racing
+  // a timer-based auto-mount that can hide the spinner before the
+  // assertion observes it.
+  const { sendMounted = true, mountDelayMs = 0, mountOnSignal = false } = opts
   return `<!doctype html>
 <html><head><meta charset="utf-8"></head><body>
 <div id="root">mock app ${appId}</div>
 <script>
   var initialized = false;
+  function postMounted() {
+    window.parent.postMessage(
+      { type: 'moebius:frame-mounted', appId: ${JSON.stringify(String(appId))} },
+      window.location.origin
+    );
+  }
   window.addEventListener('message', function (e) {
     if (e.origin !== window.location.origin) return;
     var msg = e.data;
     if (!msg || typeof msg !== 'object') return;
     if (msg.type === 'moebius:frame-init' && !initialized) {
       initialized = true;
-      ${sendMounted ? `
-      setTimeout(function () {
-        window.parent.postMessage(
-          { type: 'moebius:frame-mounted', appId: ${JSON.stringify(String(appId))} },
-          window.location.origin
-        );
-      }, ${mountDelayMs});` : '/* deliberately never post mounted */'}
+      ${sendMounted ? `setTimeout(postMounted, ${mountDelayMs});` : '/* deliberately never auto-post mounted */'}
     }
+    ${mountOnSignal ? `if (msg.type === 'moebius-test:mount') postMounted();` : ''}
   });
 </script>
 </body></html>`
@@ -119,21 +125,32 @@ test.describe('AppCanvas: iframe-mount contract', () => {
 
   test('loading spinner hides as soon as frame posts moebius:frame-mounted', async ({ page }) => {
     const appId = 99
-    await setupAppRoutes(page, appId, mockFrameHTML(appId, { mountDelayMs: 50 }))
+    // Mount only on the test's signal — NOT a timer. The old
+    // mountDelayMs:50 auto-mount made this flaky: on a fast/variable
+    // container the spinner could hide before the toBeVisible below
+    // observed it (a transient-state race, not a real timing bound).
+    // With test-controlled mount the spinner is reliably visible first,
+    // then reliably hidden after we trigger mount — deterministic.
+    await setupAppRoutes(page, appId, mockFrameHTML(appId, { sendMounted: false, mountOnSignal: true }))
 
     await page.goto(`${BASE}/app/${appId}`, { waitUntil: 'domcontentloaded' })
 
-    // Spinner must appear initially (the iframe hasn't posted mounted
-    // yet because there's a 50ms delay). 10s timeout because CI's
-    // bundled chromium + cold container can take 3-4s to reach this
-    // state on first-app-load; local Chrome hits it in ~200ms.
+    // No mount yet → the spinner is visible and STAYS visible (no race).
+    // 10s covers CI's cold-container first-app mount; it won't hide on us.
     await expect(page.locator('.canvas-loading')).toBeVisible({ timeout: 10000 })
 
-    // And it must hide once the mounted event lands. The contract
-    // is sub-second locally; bumped to 6s for CI cold-cache iframe
-    // boot. If this fails after 6s the listener genuinely never
-    // matched the message (origin mismatch, source mismatch, or
-    // appId stringify drift) — not a timing flake.
+    // Trigger mount from inside the iframe (correct source + origin, so it
+    // passes the parent's source/origin checks like a real frame would).
+    await page.evaluate(() => {
+      document.querySelector('iframe').contentWindow.postMessage(
+        { type: 'moebius-test:mount' },
+        window.location.origin,
+      )
+    })
+
+    // Now it must hide. If this fails the listener genuinely never matched
+    // the message (origin/source mismatch or appId stringify drift) — not
+    // a timing flake, since the mount is now deterministic.
     await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 6000 })
   })
 
@@ -149,7 +166,10 @@ test.describe('AppCanvas: iframe-mount contract', () => {
 
     await page.goto(`${BASE}/app/${appId}`, { waitUntil: 'domcontentloaded' })
 
-    await expect(page.locator('.canvas-loading')).toBeVisible({ timeout: 5000 })
+    // 10s (was 5s) — this waits for the genuinely slow cold-CI first-app
+    // mount to render the spinner, which is a real state, not a race; 5s
+    // was too tight for the cold container and made this flaky.
+    await expect(page.locator('.canvas-loading')).toBeVisible({ timeout: 10000 })
 
     // Give the iframe a full second to fire onLoad and any
     // alternative signals — spinner must still be there.
