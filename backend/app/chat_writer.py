@@ -327,6 +327,29 @@ _FENCE_COMMANDS = (
 )
 
 
+def _needs_broad_chat_fence(cmd: _Command) -> bool:
+  """True when a must-persist command must fence ALL of the chat's snapshots.
+
+  The exact-key fence (`_invalidate_pending`) only invalidates the command's
+  own `(chat_id, run_token)` snapshot.  Two cases can be clobbered by a
+  snapshot pending under a DIFFERENT run_token and so need a broad-by-chat
+  fence (`_invalidate_chat`):
+
+  - `ReplaceTranscript` replaces the WHOLE `messages` blob, so ANY in-flight
+    snapshot for the chat (any run_token) could overwrite the replacement.
+  - A legacy `/question-answers` `AnswerQuestion` has no live run_token (the
+    tokenless path), so its exact-key fence reaches nothing — a snapshot under
+    the live streaming token would survive and clobber the answer.
+
+  A token-bearing `AnswerQuestion` (the live path) keeps the precise key fence.
+  """
+  if isinstance(cmd, ReplaceTranscript):
+    return True
+  if isinstance(cmd, AnswerQuestion):
+    return not cmd.run_token
+  return False
+
+
 class ChatWriterActor:
   """A single thread that serializes chat-domain persistence.
 
@@ -430,9 +453,10 @@ class ChatWriterActor:
     if cmd.ack is None:
       cmd.ack = Future()
     # Collect every ack to resolve and DEFER its resolution until after the
-    # lock is released (see the deadlock note below).
+    # lock is released (see the deadlock note below).  A broad-chat fence can
+    # drop several snapshots at once, so this is a list rather than a scalar.
     reject_exc: BaseException | None = None
-    dropped_ack: Future | None = None
+    dropped_acks: list[Future] = []
     # Hold `_fatal_lock` across the check + enqueue so the thread's fatal
     # handler (which takes the same lock to set `_fatal` then drain) and
     # `stop` (which takes it to set `_stopping` then enqueue the marker)
@@ -447,13 +471,23 @@ class ChatWriterActor:
       elif self._stopping:
         reject_exc = RuntimeError("chat writer is stopping")
       elif isinstance(cmd, _FENCE_COMMANDS):
-        # Must-persist, non-coalescing: invalidate any pending coalescible
-        # snapshot for the key (so a stale transcript snapshot can't land
-        # after this terminal write) then enqueue directly in FIFO order.
-        dropped_ack = self._invalidate_pending(cmd.chat_id, cmd.run_token)
+        # Must-persist, non-coalescing.  A `ReplaceTranscript` (whole-blob
+        # replace) or a tokenless legacy `AnswerQuestion` (no live run_token)
+        # can be clobbered by a snapshot pending under ANY other run_token for
+        # the chat, which the exact-key fence cannot reach — so they fence
+        # BROADLY by chat_id.  Every other must-persist command fences only
+        # its own (chat_id, run_token) key.  Then enqueue in FIFO order.
+        if _needs_broad_chat_fence(cmd):
+          dropped_acks = self._invalidate_chat(cmd.chat_id)
+        else:
+          dropped = self._invalidate_pending(cmd.chat_id, cmd.run_token)
+          if dropped is not None:
+            dropped_acks = [dropped]
         self._q.put(cmd)
       elif isinstance(cmd, PersistTranscript):
-        dropped_ack = self._enqueue_snapshot(cmd)
+        dropped = self._enqueue_snapshot(cmd)
+        if dropped is not None:
+          dropped_acks = [dropped]
       else:
         self._q.put(cmd)
     # Lock released — now safe to resolve acks even if a done-callback
@@ -461,8 +495,8 @@ class ChatWriterActor:
     if reject_exc is not None:
       _safe_set_exception(cmd.ack, reject_exc)
       return cmd.ack
-    if dropped_ack is not None:
-      _safe_set_result(dropped_ack, None)
+    for dropped in dropped_acks:
+      _safe_set_result(dropped, None)
     return cmd.ack
 
   def submit_test_persist(self, chat_id, run_token, payload) -> Future:
@@ -547,6 +581,43 @@ class ChatWriterActor:
       stale = self._pending.pop(key, None)
       self._outstanding.discard(key)
     return stale.ack if stale is not None else None
+
+  def _invalidate_chat(self, chat_id: str) -> list[Future]:
+    """Broad fence: drop EVERY coalescible snapshot for `chat_id`, all tokens.
+
+    A `ReplaceTranscript` (replaces the whole `messages` blob) or a tokenless
+    legacy `AnswerQuestion` (no live run_token) can be clobbered by a snapshot
+    pending under ANY run_token for the chat — the exact-key `_invalidate_pending`
+    only reaches one key, so a snapshot under a different (e.g. the streaming)
+    token would survive and overwrite the write.  This fences every key whose
+    chat_id matches: it bumps each key's generation (so an in-flight
+    `_SnapshotReady` marker stamped with the OLD generation becomes a no-op in
+    `_take_pending`, even if a new snapshot for the key arrives afterward) and
+    pops every pending snapshot + outstanding marker for the chat.
+
+    Returns the list of dropped snapshot acks (each to be resolved with `None`
+    by the caller AFTER releasing `submit`'s `_fatal_lock` — the same deferred
+    contract as `_invalidate_pending`, collecting under the lock and resolving
+    outside it so a synchronous done-callback can't deadlock on a producer lock).
+    """
+    dropped: list[Future] = []
+    with self._pending_lock:
+      # Snapshot the matching keys first: bumping generation reads the union
+      # of every key the chat currently touches across the three maps.
+      matching = {
+        key
+        for key in (
+          set(self._pending) | set(self._outstanding) | set(self._generation)
+        )
+        if key[0] == chat_id
+      }
+      for key in matching:
+        self._generation[key] = self._generation.get(key, 0) + 1
+        stale = self._pending.pop(key, None)
+        self._outstanding.discard(key)
+        if stale is not None:
+          dropped.append(stale.ack)
+    return dropped
 
   def _take_pending(
     self, chat_id: str, run_token: str, generation: int

@@ -367,6 +367,41 @@ def test_replace_transcript_serializes_with_snapshots(actor):
   assert chat["messages"][-1]["blocks"][0]["content"] == "replaced"
 
 
+# -- FIX 4: ReplaceTranscript broad-fences snapshots under ANY run_token --
+def test_replace_transcript_broad_fences_other_token_snapshot(actor):
+  """ReplaceTranscript replaces the WHOLE transcript, so ANY in-flight
+  snapshot for the chat — under ANY run_token — must be fenced or it could
+  overwrite the replacement. The exact-key fence only reaches the replace's
+  own (chat_id, run_token); a snapshot under a DIFFERENT token would survive
+  and clobber. Assert the broad-by-chat fence catches the other-token
+  snapshot: its ack resolves None and the replacement wins."""
+  _seed_chat(messages=[{"role": "user", "content": "hi", "ts": 1}])
+  actor.pause_for_test()
+  # A snapshot under the streaming token 'rt-stream'.
+  stale = actor.submit(
+    PersistTranscript(
+      chat_id="c1",
+      run_token="rt-stream",
+      snapshot=_assistant_msg([{"type": "text", "content": "stream-stale"}]),
+    )
+  )
+  replaced = [
+    {"role": "user", "content": "hi", "ts": 1},
+    _assistant_msg([{"type": "text", "content": "replaced"}]),
+  ]
+  # A ReplaceTranscript under a DIFFERENT token ('rt-edit').
+  fut = actor.submit(
+    ReplaceTranscript(chat_id="c1", run_token="rt-edit", messages=replaced)
+  )
+  actor.resume_for_test()
+  assert _await(fut) is True
+  # The other-token snapshot was broad-fenced on the replace's submit.
+  assert _await(stale) is None
+  _await(actor.submit(Barrier()))
+  chat = _load_chat()
+  assert chat["messages"][-1]["blocks"][0]["content"] == "replaced"
+
+
 # -- 6. concurrent append/cancel/promote preserve order -------------------
 def test_concurrent_append_cancel_promote_preserve_order(actor):
   """Concurrent AppendPending / CancelPending / PromotePending never lose a
@@ -653,41 +688,53 @@ def test_fatal_actor_fails_callers():
 
 
 # -- 11. legacy answer broad-fence ----------------------------------------
-def test_legacy_answer_without_question_id_uses_latest_and_fences(actor):
-  """An AnswerQuestion with no question_id (legacy /question-answers, no live
-  token) targets the latest question block, and still fences any pending
-  coalescible snapshot for the key so a stale snapshot can't clobber it."""
+def test_legacy_answer_without_question_id_broad_fences_other_tokens(actor):
+  """A legacy /question-answers AnswerQuestion has NO live run_token, so the
+  exact-key fence cannot reach a snapshot pending under the streaming token.
+  The tokenless answer must broad-fence by chat_id — invalidating EVERY
+  pending snapshot for the chat across all run_tokens — or a stale snapshot
+  under the streaming token clobbers the answer after it commits.
+
+  Distinct keys are the point: the snapshot is under the streaming token
+  'rt-stream'; the legacy answer carries no token. The exact-key fence would
+  miss 'rt-stream'; the broad fence catches it."""
   _seed_chat(messages=[{"role": "user", "content": "hi", "ts": 1}])
-  # Persist a question card (no explicit id on the answer path).
+  # Persist a question card under the streaming token.
   _await(
     actor.submit(
       QuestionCommit(
         chat_id="c1",
-        run_token="rt1",
+        run_token="rt-stream",
         snapshot=_assistant_msg(
           [{"type": "question", "questions": [{"question": "Color?"}]}]
         ),
       )
     )
   )
-  # A stale snapshot is queued, then the legacy answer fences it on submit.
+  # Queue a stale snapshot under the STREAMING token (a different key from the
+  # tokenless answer), then submit the legacy answer with no run_token.
   actor.pause_for_test()
-  actor.submit(
+  stale = actor.submit(
     PersistTranscript(
       chat_id="c1",
-      run_token="rt1",
+      run_token="rt-stream",
       snapshot=_assistant_msg(
+        # No answers — this is the snapshot that would WIPE the answer.
         [{"type": "question", "questions": [{"question": "Color?"}]}]
       ),
     )
   )
   fut = actor.submit(
     AnswerQuestion(
-      chat_id="c1", run_token="rt1", question_id=None, answers={"a": "Blue"}
+      chat_id="c1", run_token="", question_id=None, answers={"a": "Blue"}
     )
   )
   actor.resume_for_test()
   assert _await(fut) is True
+  # The stale snapshot under rt-stream was broad-fenced on the answer's
+  # submit: its ack resolves to None (accepted, then dropped), it never
+  # commits.
+  assert _await(stale) is None
   _await(actor.submit(Barrier()))
   chat = _load_chat()
   block = chat["messages"][-1]["blocks"][0]
