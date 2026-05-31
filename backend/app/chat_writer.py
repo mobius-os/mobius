@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from app import schemas
 from app.events import build_assistant_message, finalize_blocks, question_block_key
 
 log = logging.getLogger("moebius.chat_writer")
@@ -156,7 +157,8 @@ class StartTurn(_Command):
   first message, sets `provider` when the chat had no messages, stamps
   `updated_at`, and sets the durable run marker — all in one commit.
   Returns `{"history", "session_id", "provider"}` for the caller to spawn
-  the runner.
+  the runner; `history` is a list of `schemas.ChatMessage` (run_chat reads
+  `messages[-1].content`), built exactly as the production initial-send path.
   """
 
   chat_id: str = ""
@@ -189,8 +191,9 @@ class PromotePending(_Command):
   """Move the pending-queue head into the transcript and mark the run.
 
   Replicates `promote_pending_messages_locked`: refreshes the row, builds
-  the next-turn message history BEFORE committing (so a malformed entry
-  can't silently consume a turn), moves the head of `pending_messages`
+  the next-turn message history (a list of `schemas.ChatMessage`) BEFORE
+  committing (so a malformed entry can't silently consume a turn — building
+  the validated schema surfaces it), moves the head of `pending_messages`
   into `messages`, sets the durable run marker, stamps `updated_at`, and
   commits.  Returns `{"history", "promoted", "session_id"}`; `promoted`
   is None (with the unchanged queue left intact) when there was nothing
@@ -897,15 +900,24 @@ class ChatWriterActor:
     existing = list(chat.messages or [])
     if not existing:
       chat.provider = cmd.default_provider or "claude"
+    # Build the agent history as schemas.ChatMessage objects, exactly as the
+    # production initial-send path in routes/chats_stream.py does — run_chat
+    # consumes `messages[-1].content` (attribute access), so a raw dict would
+    # break.  An initial send starts a fresh chat (no prior transcript) so a
+    # malformed entry is not expected here; if one ever appeared, the
+    # ValidationError surfaces (the consumer fails the ack) rather than being
+    # silently consumed, matching how production validates.
     history = [
-      {"role": m.get("role", "user"), "content": m.get("content", "") or ""}
+      schemas.ChatMessage(
+        role=m.get("role", "user"), content=m.get("content", "") or ""
+      )
       for m in existing
     ]
     history.append(
-      {
-        "role": cmd.user_msg.get("role", "user"),
-        "content": cmd.user_msg.get("content", "") or "",
-      }
+      schemas.ChatMessage(
+        role=cmd.user_msg.get("role", "user"),
+        content=cmd.user_msg.get("content", "") or "",
+      )
     )
     existing.append(cmd.user_msg)
     chat.messages = existing
@@ -969,16 +981,24 @@ class ChatWriterActor:
       return {"history": [], "promoted": None, "session_id": chat.session_id}
     existing = list(chat.messages or [])
     first_pending = pending[0]
+    # Build the next-turn history as schemas.ChatMessage objects BEFORE
+    # committing, exactly as chat_queue.promote_pending_messages_locked does —
+    # run_chat consumes `messages[-1].content` (attribute access).  A
+    # malformed transcript entry (e.g. a non-string content) raises here, so
+    # the except below leaves the pending queue intact for retry rather than
+    # silently consuming the turn — the validation a raw-dict build skipped.
     try:
       history = [
-        {"role": m.get("role", "user"), "content": m.get("content", "") or ""}
+        schemas.ChatMessage(
+          role=m.get("role", "user"), content=m.get("content", "") or ""
+        )
         for m in existing
       ]
       history.append(
-        {
-          "role": first_pending.get("role", "user"),
-          "content": first_pending.get("content", "") or "",
-        }
+        schemas.ChatMessage(
+          role=first_pending.get("role", "user"),
+          content=first_pending.get("content", "") or "",
+        )
       )
     except Exception:
       log.exception(
