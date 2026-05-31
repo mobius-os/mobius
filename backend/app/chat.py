@@ -24,13 +24,18 @@ from sqlalchemy.orm import Session
 
 from app import auth, chat_queue, models, questions, schemas
 from app.broadcast import ChatBroadcast, create_broadcast, get_broadcast, set_active_broadcast
-from app.chat_writer import alloc_run_token
+from app.chat_writer import (
+  alloc_run_token,
+  apply_answers_to_last_question as _apply_answers_to_last_question,
+  finalize_response as _finalize_response,
+  next_message_ts as _next_message_ts,
+  update_last_assistant_message as _update_last_assistant_message,
+)
 from app.config import get_settings
 from app.events import (
   build_assistant_message,
   finalize_blocks,
   process_event,
-  question_block_key,
 )
 from app.providers import effective_agent_settings, get_provider, get_skill_path
 from app.runner_registry import registry
@@ -104,70 +109,13 @@ def _save_message(db: Session, chat_id: str, message: dict):
   _safe_commit(db)
 
 
-def _next_message_ts(existing: list) -> int:
-  """A wall-clock-ms timestamp strictly greater than every ts already in
-  `existing`. The streamed-assistant path doesn't flow through the queue's
-  `_ensure_unique_ts`, so a fast first assistant write could otherwise land
-  in the same millisecond as the user message — two sibling messages with
-  equal ts produce duplicate React keys client-side. Callers pass the union
-  of persisted + pending messages so the new ts clears both collections."""
-  now = int(time.time() * 1000)
-  max_ts = max((m.get("ts") or 0 for m in existing), default=0)
-  return max(now, max_ts + 1)
-
-
-def _update_last_assistant_message(db: Session, chat_id: str, message: dict) -> bool:
-  """Updates the last assistant message in the chat (for streaming updates)."""
-  if not chat_id:
-    return True
-  from app.models import Chat
-  chat = db.query(Chat).filter(Chat.id == chat_id).first()
-  if not chat or not chat.messages:
-    return True
-  msgs = list(chat.messages)
-  if msgs and msgs[-1].get("role") == "assistant":
-    # Carry answers forward: _apply_answers_to_last_question writes
-    # them here; the runner rebuilds from assistant_blocks (no
-    # answers), so merge keyed by question_block_key to avoid wiping
-    # them on writeback. Multi-question turns are supported.
-    existing_answers_by_key = {}
-    for ob in msgs[-1].get("blocks") or []:
-      if ob.get("type") == "question" and ob.get("answers"):
-        existing_answers_by_key[question_block_key(ob)] = ob["answers"]
-    for nb in message.get("blocks") or []:
-      if nb.get("type") == "question" and not nb.get("answers"):
-        carried = existing_answers_by_key.get(question_block_key(nb))
-        if carried:
-          nb["answers"] = carried
-    # Carry a STABLE per-turn ts. build_assistant_message omits ts, so
-    # assistant messages historically persisted with ts=None — which
-    # silently defeated the frontend bridge gate (useBridgePartial keys
-    # the kept partial by ts). On reconnect mid-question the persisted
-    # card AND the replayed stream card both rendered (the duplicate
-    # question/answer bug). Preserve the existing message's ts across
-    # every streaming replace so the id stays stable for the whole turn;
-    # backfill one only if an older, tsless message is being updated.
-    message["ts"] = msgs[-1].get("ts")
-    if message["ts"] is None:
-      # Backfilling an older, tsless assistant message. Allocate against
-      # persisted messages EXCLUDING msgs[-1] (it's the tsless one being
-      # stamped, so it can only contribute 0) plus queued messages, so the
-      # new ts can't collide with a pending user msg once it promotes into
-      # chat.messages (equal ts -> duplicate React keys). The pending read
-      # is here, not on the hot path, so the common replace does no extra
-      # work. Mirrors chats_stream._ensure_unique_ts (it now clears
-      # chat.messages too), so the two allocators can't hand out the same ms.
-      message["ts"] = _next_message_ts(
-        msgs[:-1] + list(chat.pending_messages or []))
-    msgs[-1] = message
-  else:
-    # First write of this turn's assistant message — stamp a ts greater
-    # than every persisted AND queued message so the bridge gate and the
-    # frontend's ts-keyed rendering get a stable, collision-free id.
-    message["ts"] = _next_message_ts(msgs + list(chat.pending_messages or []))
-    msgs.append(message)
-  chat.messages = msgs
-  return _safe_commit(db)
+# Streaming-persistence helpers (`_next_message_ts`,
+# `_update_last_assistant_message`, `_finalize_response`,
+# `_apply_answers_to_last_question`) now live in `chat_writer.py` and are
+# imported back at the top of this module under their old underscore
+# names, so existing call-sites are unchanged. They moved so the writer
+# actor can run them on its own thread without importing `chat.py` (which
+# would cycle on `alloc_run_token`).
 
 
 # Queue management (per-chat lock, promote, drain_and_release) lives
@@ -740,20 +688,6 @@ async def stop_chat_for(chat_id: str, db: Session = None) -> bool:
   _finalize_broadcast_if_running(chat_id)
   registry.discard_starting(chat_id)
   return all_stopped
-
-
-def _finalize_response(
-  db: Session,
-  chat_id: str,
-  assistant_blocks: list,
-) -> None:
-  """End-of-response cleanup: force-complete tool blocks and save."""
-  if not assistant_blocks:
-    return
-  finalize_blocks(assistant_blocks)
-  _update_last_assistant_message(
-    db, chat_id, build_assistant_message(assistant_blocks),
-  )
 
 
 def _clear_pending_queue(db: Session, chat_id: str) -> None:
