@@ -403,24 +403,38 @@ def delete_app(
 
   # Source tree under /data/apps/.  Newer apps store the exact source
   # directory; legacy apps fall back to name-based cleanup.
+  #
+  # Before removing the tree, drop any crontab entry that invokes a
+  # script under it — delete_app never did this, so an uninstalled app
+  # kept firing its (now-missing) job until the next container restart,
+  # and reinstalls left orphan lines accumulating. Lazy import to avoid
+  # a circular import at module load (mirrors install_from_manifest).
+  from app.install import _unregister_cron
+
   settings = get_settings()
   apps_root = (Path(settings.data_dir) / "apps").resolve()
   if app_source_dir:
     source_dir = Path(app_source_dir)
     try:
       resolved = source_dir.resolve()
-      if (resolved.is_dir()
-          and str(resolved).startswith(str(apps_root) + "/")):
-        shutil.rmtree(resolved, ignore_errors=True)
+      if str(resolved).startswith(str(apps_root) + "/"):
+        # Drop the cron entry even if the tree is already gone — a live
+        # entry can outlive a partial cleanup, and a cron firing a
+        # missing script is the exact orphan we're killing. Only rmtree
+        # when the tree still exists.
+        _unregister_cron(resolved)
+        if resolved.is_dir():
+          shutil.rmtree(resolved, ignore_errors=True)
     except OSError:
       pass
   elif app_name and re.fullmatch(r"[a-zA-Z0-9_-]+", app_name):
     source_dir = Path(settings.data_dir) / "apps" / app_name
     try:
       resolved = source_dir.resolve()
-      if (resolved.is_dir()
-          and str(resolved).startswith(str(apps_root) + "/")):
-        shutil.rmtree(resolved, ignore_errors=True)
+      if str(resolved).startswith(str(apps_root) + "/"):
+        _unregister_cron(resolved)
+        if resolved.is_dir():
+          shutil.rmtree(resolved, ignore_errors=True)
     except OSError:
       pass
 

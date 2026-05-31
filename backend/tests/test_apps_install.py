@@ -186,12 +186,73 @@ def test_register_cron_passes_job_name_to_scaffold(tmp_path):
     mock_run.return_value = MagicMock(returncode=0, stderr="")
     install._register_cron(
       "dreaming", "0 6 * * *", job_path, b"#!/bin/bash\necho real work\n",
+      42,
     )
 
   assert job_path.read_text() == "#!/bin/bash\necho real work\n"
+  # 5th arg is the app id — so a reusable fetch.sh that reads "$1" fires
+  # from cron, not just from the run-job endpoint. Regression for news-2:
+  # a bundled fetch.sh requires its id and exits 2 without it.
   assert mock_run.call_args.args[0] == [
-    str(fake_scaffold), "dreaming", "0 6 * * *", "fetch.sh",
+    str(fake_scaffold), "dreaming", "0 6 * * *", "fetch.sh", "42",
   ]
+
+
+def test_register_cron_omits_app_id_when_none(tmp_path):
+  """A self-contained job (hardcoded id) needs no app-id arg — the
+  scaffold call stays 4 elements so the crontab command stays bare."""
+  from app import install
+
+  app_dir = tmp_path / "selfcontained"
+  app_dir.mkdir()
+  job_path = app_dir / "job.sh"
+  fake_scaffold = tmp_path / "init-cron-scaffold.sh"
+  fake_scaffold.write_text("#!/bin/bash\n")
+
+  with patch("app.install.CRON_SCAFFOLD", fake_scaffold), \
+       patch("app.install.subprocess.run") as mock_run:
+    mock_run.return_value = MagicMock(returncode=0, stderr="")
+    install._register_cron("selfcontained", "0 6 * * *", job_path, None)
+
+  assert mock_run.call_args.args[0] == [
+    str(fake_scaffold), "selfcontained", "0 6 * * *", "job.sh",
+  ]
+
+
+def test_crontab_without_app_is_prefix_safe_and_preserves_header():
+  """Deleting an app drops only its own crontab lines. The dir match
+  carries a trailing slash so 'news' never strips 'news-2', and the
+  non-job PATH= header is always kept."""
+  from pathlib import Path
+  from app import install
+
+  crontab = (
+    "PATH=/usr/local/bin:/usr/bin:/bin\n"
+    "0 9 * * * /data/apps/news/fetch.sh 12\n"
+    "0 10 * * * /data/apps/news-2/fetch.sh 42\n"
+    "*/10 * * * * /data/apps/news/sync-cron.sh\n"
+  )
+
+  # Removing "news" keeps the PATH header AND every news-2 line.
+  out = install._crontab_without_app(crontab, Path("/data/apps/news"))
+  assert out is not None
+  assert "/data/apps/news/fetch.sh" not in out
+  assert "/data/apps/news/sync-cron.sh" not in out
+  assert "/data/apps/news-2/fetch.sh 42" in out      # prefix not clobbered
+  assert "PATH=/usr/local/bin:/usr/bin:/bin" in out   # header preserved
+
+  # Removing "news-2" leaves both news lines untouched.
+  out2 = install._crontab_without_app(crontab, Path("/data/apps/news-2"))
+  assert out2 is not None
+  assert "/data/apps/news-2/fetch.sh" not in out2
+  assert "/data/apps/news/fetch.sh 12" in out2
+
+  # No matching entry → None (caller skips the rewrite entirely).
+  assert install._crontab_without_app(crontab, Path("/data/apps/ghost")) is None
+
+  # Removing the only entries yields an empty crontab (not None).
+  single = "0 9 * * * /data/apps/solo/job.sh\n"
+  assert install._crontab_without_app(single, Path("/data/apps/solo")) == ""
 
 
 def test_install_validates_required_fields(client, auth, bypass_url_validation):

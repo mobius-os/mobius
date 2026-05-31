@@ -407,7 +407,8 @@ def _process_icon(raw: bytes) -> bytes:
 
 
 def _register_cron(slug: str, schedule_expr: str, job_path: Path,
-                   bundled_job_bytes: bytes | None) -> None:
+                   bundled_job_bytes: bytes | None,
+                   app_id: int | None = None) -> None:
   """Writes the bundled job (if any) then runs init-cron-scaffold.sh.
 
   The scaffold script writes init-cron.sh + installs the crontab entry
@@ -423,6 +424,13 @@ def _register_cron(slug: str, schedule_expr: str, job_path: Path,
   passed to the scaffold so the crontab entry points at the real job —
   the scaffold defaults to job.sh otherwise, which would leave a
   manifest that ships fetch.sh firing an empty stub.
+
+  `app_id`, when given, is passed as the scaffold's 4th arg so the
+  crontab command becomes `<job-path> <app_id>`. A reusable job that
+  reads its target app from "$1" (the same contract as the run-job
+  "Generate now" endpoint) then fires correctly from cron. Without it,
+  such a job runs with no id and exits early — which is exactly how a
+  freshly-installed news app's cron lands dead on arrival.
   """
   if bundled_job_bytes:
     job_path.write_bytes(bundled_job_bytes)
@@ -431,14 +439,74 @@ def _register_cron(slug: str, schedule_expr: str, job_path: Path,
   if not scaffold.exists():
     # In tests we mock this away; in containers it's always present.
     raise HTTPException(500, "init-cron-scaffold.sh missing from image.")
+  cmd = [str(scaffold), slug, schedule_expr, job_path.name]
+  if app_id is not None:
+    cmd.append(str(app_id))
   result = subprocess.run(
-    [str(scaffold), slug, schedule_expr, job_path.name],
-    capture_output=True, text=True, timeout=30,
+    cmd, capture_output=True, text=True, timeout=30,
   )
   if result.returncode != 0:
     raise HTTPException(
       500,
       f"Cron registration failed: {result.stderr.strip()[:400]}",
+    )
+
+
+def _crontab_without_app(current: str, source_dir: Path) -> str | None:
+  """Return `current` crontab text with every line that invokes a script
+  under `source_dir` removed — or None if nothing matched, so the caller
+  can skip rewriting entirely.
+
+  Matches on the directory path WITH a trailing slash, so deleting
+  "news" (/data/apps/news/) does not also strip "news-2"
+  (/data/apps/news-2/). Non-job lines (e.g. the `PATH=` header the
+  entrypoint prepends) contain no app path and are always preserved.
+  """
+  needle = f"{str(source_dir).rstrip('/')}/"
+  lines = current.splitlines()
+  kept = [ln for ln in lines if needle not in ln]
+  if len(kept) == len(lines):
+    return None
+  return ("\n".join(kept) + "\n") if kept else ""
+
+
+def _unregister_cron(source_dir: Path) -> None:
+  """Remove crontab entries that invoke scripts under `source_dir`.
+
+  Called on app delete so a removed app does not leave a crontab entry
+  firing a now-missing script. The spool isn't on the /data volume, so
+  an orphan self-clears on the next container restart anyway — this just
+  stops it firing (and erroring) in the meantime, and prevents stale
+  lines like the `news-2/job.sh` orphan from accumulating across
+  reinstalls. Best-effort: every failure is swallowed, exactly like the
+  source-tree rmtree this accompanies. Runs `crontab -u mobius` (the
+  server runs as mobius, which may edit its own crontab).
+  """
+  try:
+    listing = subprocess.run(
+      ["crontab", "-u", "mobius", "-l"],
+      capture_output=True, text=True, timeout=10,
+    )
+  except (OSError, subprocess.SubprocessError):
+    return
+  if listing.returncode != 0:
+    # No crontab yet, or no crontab binary (as in the test image) —
+    # nothing to clean.
+    return
+  new_crontab = _crontab_without_app(listing.stdout, source_dir)
+  if new_crontab is None:
+    return  # no entry referenced this app — leave the crontab untouched
+  try:
+    proc = subprocess.run(
+      ["crontab", "-u", "mobius", "-"],
+      input=new_crontab, text=True, timeout=10, check=False,
+    )
+  except (OSError, subprocess.SubprocessError):
+    return
+  if proc.returncode != 0:
+    log.warning(
+      "cron: failed to rewrite mobius crontab on app delete (rc=%s)",
+      proc.returncode,
     )
 
 
@@ -760,7 +828,7 @@ async def install_from_manifest(
       if CRON_SCAFFOLD.exists():
         await asyncio.to_thread(
           _register_cron,
-          slug, sched["default"], job_path, bundled_job,
+          slug, sched["default"], job_path, bundled_job, app.id,
         )
       else:
         # In tests we mock the scaffold; persist a sentinel so the
