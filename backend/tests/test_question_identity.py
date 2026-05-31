@@ -18,7 +18,12 @@ The actor stays dormant; nothing here routes through it.
 from app import models
 from app.events import process_event
 from app.routes.chats import save_question_answers  # noqa: F401 (import guard)
-from app.routes.chats_stream import _apply_answers_to_last_question
+# The answer-merge helper moved to chat_writer (C1) and the answer routes
+# now route through the actor's AnswerQuestion (C2); the merge logic this
+# test exercises directly is the same function under its canonical name.
+from app.chat_writer import (
+  apply_answers_to_last_question as _apply_answers_to_last_question,
+)
 
 
 # -- (c) the published question event carries question_id (event level) ------
@@ -299,6 +304,13 @@ def test_claude_runner_publishes_question_id_on_question_event(monkeypatch):
     def publish(self, event):
       events.append(event)
 
+    async def publish_question(self, event):
+      # C2: the runner calls the sink's async save-before-broadcast for
+      # question events. This fake records the event (the save is the
+      # actor's job, exercised in the writer-contention suite); the test
+      # asserts the question_id reaches the wire.
+      events.append(event)
+
   pending_registry: dict = {}
 
   async def go():
@@ -353,6 +365,13 @@ def test_codex_runner_publishes_question_id_on_question_event():
 
   class _Bc:
     def publish(self, event):
+      with events_lock:
+        events.append(dict(event))
+
+    async def publish_question(self, event):
+      # C2: park_question awaits the sink's save-before-broadcast for the
+      # question event. This fake records it (the durable save is the
+      # actor's job); the test asserts the question_id reaches the wire.
       with events_lock:
         events.append(dict(event))
 

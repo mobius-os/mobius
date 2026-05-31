@@ -178,15 +178,20 @@ def test_reconcile_skips_chat_with_live_registry_entry(db):
   assert len(row.messages) == 1
 
 
-def test_mark_and_clear_run_status_roundtrip(db, chat):
-  """The set/clear helpers mirror the in-memory registry onto the row."""
-  chat_mod._mark_run_started(db, chat.id)
-  db.expire_all()
-  row = db.query(models.Chat).filter(models.Chat.id == chat.id).first()
-  assert row.run_status == "running"
-  assert row.run_started_at is not None
+def test_clear_run_status_clears_the_durable_marker(db, chat):
+  """C2: the SET is folded into the turn's StartTurn / PromotePending
+  writer-actor command (covered in the writer-contention suite); the
+  CLEAR routes through the actor's ClearRunStatus. Seed a running marker
+  directly, then assert the actor-routed clear empties it."""
+  import asyncio
+  from datetime import UTC, datetime
 
-  chat_mod._clear_run_status(db, chat.id)
+  chat.run_status = "running"
+  chat.run_started_at = datetime.now(UTC)
+  db.commit()
+
+  asyncio.run(chat_mod._clear_run_status(chat.id))
+
   db.expire_all()
   row = db.query(models.Chat).filter(models.Chat.id == chat.id).first()
   assert row.run_status is None

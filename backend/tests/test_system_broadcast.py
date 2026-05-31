@@ -1,23 +1,23 @@
 """Tests for the load-bearing event-bus contracts:
 
-- Bug 3: `_ChatEventSink.publish` MUST persist a `question` event
-  to the DB BEFORE broadcasting it. The frontend renders the
-  question card on broadcast; a user Submit that races the save
-  would find no question block in `chat.messages` and the answer
-  would be silently dropped.
+- Bug 3 (now Candidate B): a `question` event MUST be persisted to the
+  DB BEFORE its card is broadcast. The frontend renders the card on
+  broadcast; a user Submit that races the save would find no question
+  block in `chat.messages` and the answer would be silently dropped. C2
+  enforces this via `_ChatEventSink.publish_question`, which submits a
+  `QuestionCommit` to the writer actor, AWAITS its ack, and only then
+  broadcasts — and `publish()` REJECTS question events so no runner can
+  bypass the barrier.
 
 - Bug 4: System events (theme_updated, app_updated, shell_*) MUST
   reach the `SystemBroadcast` so a Shell subscriber sees them
   regardless of whether a per-chat broadcast is currently active.
-  Without this the user gets a forever-spinner after the agent
-  updates a mini-app because the iframe version never bumps.
 
-- Commit offload: the streaming save's blocking `db.commit()` must
-  run OFF the event loop. `publish()` defers non-question saves to an
-  async `flush()` that commits via `asyncio.to_thread`; the question
-  save stays inline (the save-before-broadcast invariant above). A
-  slow commit on one chat must not stall the loop and starve other
-  chats' SSE.
+- Commit offload (C2): the streaming save's blocking `db.commit()` runs
+  OFF the event loop on the writer-actor thread. `publish()` submits a
+  fire-and-forget `PersistTranscript` (or `PersistError`); `flush()` is a
+  no-op shim. A slow commit on one chat can't stall the loop and starve
+  other chats' SSE because it never runs on the loop.
 """
 
 import asyncio
@@ -33,19 +33,16 @@ from app.broadcast import (
   SystemBroadcast,
   get_system_broadcast,
 )
+from app.chat_writer import Barrier, get_writer
 from app.routes.notify import NotifyBody
 
 
-# --- Bug 3: question save-before-publish ------------------------------
+# --- Bug 3 / Candidate B: question save-before-broadcast --------------
 
 
 class _OrderedBroadcast(ChatBroadcast):
-  """ChatBroadcast that records the order of publish vs save calls.
-
-  Tests inject one of these into a sink and assert the SAVE step
-  (which happens via `_update_last_assistant_message` on the same
-  thread) lands BEFORE the publish for question events.
-  """
+  """ChatBroadcast that records each publish so a test can inspect what
+  reached the wire (and in what order relative to the actor commit)."""
 
   def __init__(self, chat_id):
     super().__init__(chat_id)
@@ -56,355 +53,173 @@ class _OrderedBroadcast(ChatBroadcast):
     super().publish(event)
 
 
+def _drain_actor():
+  """Block until the writer actor has processed everything queued so far.
+
+  publish() submits fire-and-forget commands; a Barrier ack resolves only
+  after every prior command has been dispatched, so awaiting it from a
+  test gives a deterministic "the commit has landed" point."""
+  get_writer().submit(Barrier()).result(timeout=5)
+
+
 def test_question_event_is_saved_before_broadcast(db, chat):
-  """User-Submit-races-save regression: AskUserQuestion events must
-  land in chat.messages BEFORE the broadcast reaches a frontend
-  that might POST an answer.
-
-  Seed the chat with a user message first — in real usage the
-  runner only emits a question event AFTER the user sent something,
-  so chat.messages is non-empty by then. _update_last_assistant_message
-  early-returns when chat.messages is empty (otherwise it'd silently
-  drop the first assistant write).
-  """
+  """User-Submit-races-save regression: an AskUserQuestion card must land
+  in chat.messages BEFORE the broadcast reaches a frontend that might
+  POST an answer. C2 enforces this in publish_question via QuestionCommit
+  (commit-before-ack); the card is broadcast only after the ack."""
   chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
   db.commit()
-  db.refresh(chat)
   bc = _OrderedBroadcast(chat.id)
-  sink = chat_mod._ChatEventSink(bc, chat.id, db)
+  sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-q")
 
-  # Spy: monkey-patch _update_last_assistant_message so we can
-  # record when it ran relative to bc.publish().
-  original = chat_mod._update_last_assistant_message
-  def spy(db_, chat_id, message):
-    bc.timeline.append(("save", chat_id))
-    original(db_, chat_id, message)
-  chat_mod._update_last_assistant_message = spy
-  try:
-    questions = [{
-      "id": "q1",
-      "question": "Color?",
-      "options": [{"label": "Red"}, {"label": "Blue"}],
-    }]
-    sink.publish({"type": "question", "questions": questions})
-  finally:
-    chat_mod._update_last_assistant_message = original
+  questions = [{
+    "id": "q1",
+    "question": "Color?",
+    "options": [{"label": "Red"}, {"label": "Blue"}],
+  }]
 
-  # Save must precede publish in the timeline.
-  save_idx = next(
-    i for i, (kind, _) in enumerate(bc.timeline) if kind == "save"
-  )
-  pub_idx = next(
-    i for i, (kind, _) in enumerate(bc.timeline) if kind == "publish"
-  )
-  assert save_idx < pub_idx, (
-    f"save_idx={save_idx} pub_idx={pub_idx} timeline={bc.timeline}"
-  )
-
-  # And the question block is actually persisted in chat.messages.
-  db.refresh(chat)
-  msgs = list(chat.messages or [])
-  assert msgs and msgs[-1].get("role") == "assistant"
-  blocks = msgs[-1].get("blocks") or []
-  assert any(b.get("type") == "question" for b in blocks)
-
-
-def test_non_question_save_is_deferred_to_flush_off_loop(db, chat):
-  """Non-question events broadcast immediately and DEFER their DB
-  commit to `flush()` so the blocking `db.commit()` runs off the
-  event loop (chat._ChatEventSink offload). `publish()` must NOT
-  commit inline for these; it records the snapshot and the runner's
-  later `await flush()` performs the write."""
-  chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
-  db.commit()
-  db.refresh(chat)
-  bc = _OrderedBroadcast(chat.id)
-  sink = chat_mod._ChatEventSink(bc, chat.id, db)
-  original = chat_mod._update_last_assistant_message
-  def spy(db_, chat_id, message):
-    bc.timeline.append(("save", chat_id))
-    return original(db_, chat_id, message)
-  chat_mod._update_last_assistant_message = spy
-  try:
-    # tool_start is an IMMEDIATE_SAVE_TYPE, so a save is due — but it
-    # must be deferred, not committed inside publish().
-    sink._last_save = 0.0
-    sink.publish({"type": "tool_start", "tool": "Bash", "input": "ls"})
-    # publish() broadcast but did NOT save: no save in the timeline,
-    # and a snapshot is parked for flush().
-    assert ("publish", "tool_start") in bc.timeline
-    assert not any(kind == "save" for kind, _ in bc.timeline), (
-      f"publish() must defer the commit, not run it inline. "
-      f"timeline={bc.timeline}"
+  async def go():
+    # When publish_question returns, the QuestionCommit ack has resolved
+    # (the block is durable) AND the card has been broadcast — in that
+    # order, by construction.
+    await sink.publish_question(
+      {"type": "question", "question_id": "q1", "questions": questions}
     )
-    assert sink._pending_save is not None
+    # The block is already persisted at this point: re-read on a fresh
+    # session proves it landed before the broadcast that just happened.
+    from app.database import SessionLocal
+    s = SessionLocal()
+    try:
+      row = s.query(models.Chat).filter(models.Chat.id == chat.id).one()
+      blocks = row.messages[-1].get("blocks") or []
+      assert any(b.get("type") == "question" for b in blocks), (
+        "question block must be persisted before the broadcast"
+      )
+    finally:
+      s.close()
 
-    # flush() performs the deferred commit (off-loop via to_thread).
-    ok = asyncio.run(sink.flush())
-  finally:
-    chat_mod._update_last_assistant_message = original
+  asyncio.run(go())
+  # The card reached the wire.
+  assert ("publish", "question") in bc.timeline
 
+
+def test_publish_rejects_question_events(db, chat):
+  """publish() must REJECT question events so a runner can't bypass the
+  save-before-broadcast barrier — they MUST go through publish_question."""
+  chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
+  db.commit()
+  bc = _OrderedBroadcast(chat.id)
+  sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-q")
+  with pytest.raises(AssertionError):
+    sink.publish({"type": "question", "questions": [{"id": "q1"}]})
+
+
+def test_non_question_save_routes_to_actor_off_loop(db, chat):
+  """Non-question events broadcast immediately and route their DB commit
+  to the writer actor (off the event loop). publish() submits a
+  fire-and-forget PersistTranscript; the block is durable once the actor
+  drains."""
+  chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
+  db.commit()
+  bc = _OrderedBroadcast(chat.id)
+  sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-t")
+
+  sink._last_save = 0.0
+  ok = sink.publish({"type": "tool_start", "tool": "Bash", "input": "ls"})
   assert ok is True
-  assert any(kind == "save" for kind, _ in bc.timeline), (
-    f"flush() must perform the deferred save. timeline={bc.timeline}"
-  )
-  assert sink._pending_save is None
-  # And the tool block is actually persisted.
-  db.refresh(chat)
-  msgs = list(chat.messages or [])
-  assert msgs and msgs[-1].get("role") == "assistant"
+  # Broadcast happened synchronously on the calling thread.
+  assert ("publish", "tool_start") in bc.timeline
+  # The actor commits off-loop; drain it, then the tool block is durable.
+  _drain_actor()
+  db.expire_all()
+  row = db.query(models.Chat).filter(models.Chat.id == chat.id).one()
+  assert row.messages and row.messages[-1].get("role") == "assistant"
+  assert any(b.get("type") == "tool" for b in row.messages[-1]["blocks"])
 
 
-def test_flush_runs_commit_off_the_event_loop_thread(db, chat):
-  """The deferred commit must execute on a worker thread, not the
-  loop thread — that is the whole point of the offload (a slow
-  SQLite commit can't stall the loop). Pin it by capturing the
-  thread `_update_last_assistant_message` runs on and asserting it
-  differs from the loop thread."""
+def test_streaming_commit_runs_off_the_event_loop_thread(db, chat):
+  """The streaming commit must execute on the writer-actor thread, not
+  the loop thread — that is the whole point of the offload (a slow SQLite
+  commit can't stall the loop). The actor owns a dedicated thread named
+  'chat-writer'; the publish call on the loop only enqueues."""
   import threading
 
   chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
   db.commit()
-  db.refresh(chat)
   bc = _OrderedBroadcast(chat.id)
-  sink = chat_mod._ChatEventSink(bc, chat.id, db)
+  sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-t")
 
   seen: dict = {}
-  original = chat_mod._update_last_assistant_message
-  def spy(db_, chat_id, message):
-    seen["thread"] = threading.get_ident()
-    return original(db_, chat_id, message)
-  chat_mod._update_last_assistant_message = spy
+  from app import chat_writer as chat_writer_mod
+  original = chat_writer_mod.update_last_assistant_message
 
-  async def _scenario():
+  def spy(db_, chat_id, message):
+    seen["commit_thread"] = threading.get_ident()
+    return original(db_, chat_id, message)
+
+  chat_writer_mod.update_last_assistant_message = spy
+  try:
     seen["loop_thread"] = threading.get_ident()
     sink._last_save = 0.0
     sink.publish({"type": "tool_start", "tool": "Bash", "input": "ls"})
-    await sink.flush()
-
-  try:
-    asyncio.run(_scenario())
+    _drain_actor()
   finally:
-    chat_mod._update_last_assistant_message = original
+    chat_writer_mod.update_last_assistant_message = original
 
-  assert "thread" in seen, "flush() never ran the commit"
-  assert seen["thread"] != seen["loop_thread"], (
-    "the streaming commit ran on the event loop thread — it must be "
-    "offloaded via asyncio.to_thread so a SQLite lock can't stall the "
-    "loop and starve other chats' SSE"
+  assert "commit_thread" in seen, "the actor never ran the commit"
+  assert seen["commit_thread"] != seen["loop_thread"], (
+    "the streaming commit ran on the event loop thread — it must run on "
+    "the writer-actor thread so a SQLite lock can't stall the loop"
   )
 
 
-def test_flush_worker_uses_its_own_session(db, chat, monkeypatch):
-  """The off-loop save must open a SessionLocal in the worker thread
-  instead of sharing the sink's loop-owned session."""
-  import threading
+def test_flush_is_a_noop_shim(db, chat):
+  """flush() is retained for the runner's per-iteration call but does
+  nothing now that the actor owns every commit (removal deferred to D)."""
+  bc = _OrderedBroadcast(chat.id)
+  sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-t")
+  assert asyncio.run(sink.flush()) is None
 
-  from app import database as db_mod
 
+def test_finalize_awaits_actor_and_persists(db, chat):
+  """finalize() submits a Finalize and AWAITS its ack: the terminal
+  message is durable the instant finalize() returns (commit-before-ack)."""
   chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
   db.commit()
   bc = _OrderedBroadcast(chat.id)
-  sink = chat_mod._ChatEventSink(bc, chat.id, db)
+  sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-f")
+  sink.assistant_blocks = [{"type": "text", "content": "done"}]
 
-  seen: dict = {"factory_threads": []}
-  original_factory = db_mod.SessionLocal
-  original_update = chat_mod._update_last_assistant_message
-
-  def session_factory():
-    seen["factory_threads"].append(threading.get_ident())
-    return original_factory()
-
-  def spy(worker_db, chat_id, message):
-    seen["worker_db"] = worker_db
-    return original_update(worker_db, chat_id, message)
-
-  monkeypatch.setattr(db_mod, "SessionLocal", session_factory)
-  monkeypatch.setattr(chat_mod, "_update_last_assistant_message", spy)
-
-  async def _scenario():
-    seen["loop_thread"] = threading.get_ident()
-    sink.publish({"type": "tool_start", "tool": "Bash", "input": "ls"})
-    await sink.flush()
-
-  asyncio.run(_scenario())
-
-  assert len(seen["factory_threads"]) == 1
-  assert seen["factory_threads"][0] != seen["loop_thread"]
-  assert seen["worker_db"] is not db
-
-
-def test_question_survives_overlapping_stale_flush(db, chat, monkeypatch):
-  """A stale worker flush that overlaps question parking must finish
-  before the inline question write, so it cannot erase the question."""
-  import threading
-  import time as _time
-
-  chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
-  db.commit()
-  bc = _OrderedBroadcast(chat.id)
-  sink = chat_mod._ChatEventSink(bc, chat.id, db)
-
-  flush_entered = threading.Event()
-  release_flush = threading.Event()
-  original = chat_mod._update_last_assistant_message
-
-  def hold_stale_flush(db_, chat_id, message):
-    if threading.get_ident() != loop_thread and not flush_entered.is_set():
-      flush_entered.set()
-      assert release_flush.wait(timeout=2.0)
-    return original(db_, chat_id, message)
-
-  monkeypatch.setattr(
-    chat_mod, "_update_last_assistant_message", hold_stale_flush,
-  )
-
-  async def _scenario():
-    nonlocal loop_thread
-    loop_thread = threading.get_ident()
-    sink.publish({"type": "tool_start", "tool": "Bash", "input": "ls"})
-    flush_task = asyncio.create_task(sink.flush())
-    assert await asyncio.to_thread(flush_entered.wait, 1.0)
-
-    def release_after_question_blocks():
-      _time.sleep(0.05)
-      release_flush.set()
-
-    releaser = threading.Thread(target=release_after_question_blocks)
-    releaser.start()
-    sink.publish({
-      "type": "question",
-      "questions": [{
-        "id": "q1",
-        "question": "Color?",
-        "options": [{"label": "Red"}, {"label": "Blue"}],
-      }],
-    })
-    releaser.join()
-    await flush_task
-
-  loop_thread = 0
-  asyncio.run(_scenario())
+  asyncio.run(sink.finalize())
 
   db.expire_all()
-  persisted = db.query(models.Chat).filter(models.Chat.id == chat.id).one()
-  blocks = persisted.messages[-1].get("blocks") or []
-  assert any(block.get("type") == "question" for block in blocks)
+  row = db.query(models.Chat).filter(models.Chat.id == chat.id).one()
+  assert row.messages[-1].get("role") == "assistant"
+  assert row.messages[-1]["blocks"][-1]["content"] == "done"
 
 
-def test_question_commit_stays_inline_and_blocks_the_loop_thread(db, chat):
-  """The question save MUST stay synchronous (save-before-broadcast
-  invariant), i.e. run inline on the calling thread inside publish()
-  — NOT deferred. This is the deliberate exception to the offload."""
-  import threading
-
-  chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
+def test_error_event_routes_to_persist_error(db, chat):
+  """An `error` event routes to a PersistError (non-coalescing) so it
+  can't be collapsed away by a later text snapshot; it lands durably."""
+  chat.messages = [
+    {"role": "user", "content": "hi", "ts": 1},
+    {"role": "assistant", "content": "", "ts": 2,
+     "blocks": [{"type": "text", "content": "partial"}]},
+  ]
   db.commit()
-  db.refresh(chat)
   bc = _OrderedBroadcast(chat.id)
-  sink = chat_mod._ChatEventSink(bc, chat.id, db)
+  sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-e")
+  sink.assistant_blocks = [{"type": "text", "content": "partial"}]
 
-  seen: dict = {}
-  original = chat_mod._update_last_assistant_message
-  def spy(db_, chat_id, message):
-    seen["thread"] = threading.get_ident()
-    return original(db_, chat_id, message)
-  chat_mod._update_last_assistant_message = spy
-  try:
-    seen["caller_thread"] = threading.get_ident()
-    sink.publish({
-      "type": "question",
-      "questions": [{
-        "id": "q1",
-        "question": "Color?",
-        "options": [{"label": "Red"}, {"label": "Blue"}],
-      }],
-    })
-  finally:
-    chat_mod._update_last_assistant_message = original
-
-  assert seen.get("thread") == seen["caller_thread"], (
-    "question commit must run inline on the calling thread"
-  )
-  assert sink._pending_save is None
-
-
-def test_flush_surfaces_commit_failure_via_return(db, chat, monkeypatch):
-  """The deferred-save outcome is observable: flush() returns the
-  commit result (False on a dropped/locked write)."""
-  chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
-  db.commit()
-  db.refresh(chat)
-  bc = _OrderedBroadcast(chat.id)
-  sink = chat_mod._ChatEventSink(bc, chat.id, db)
-
-  # The streaming commit now runs through chat_writer.update_last_assistant_
-  # message, which commits via chat_writer._commit_or_rollback (the helpers
-  # moved out of chat.py so the writer actor can call them without an import
-  # cycle). Patch that seam so a dropped commit surfaces as flush() -> False.
-  from app import chat_writer as chat_writer_mod
-
-  monkeypatch.setattr(chat_writer_mod, "_commit_or_rollback", lambda _db: False)
-
-  # publish records the pending save; flush attempts the commit.
   sink._last_save = 0.0
-  publish_ok = sink.publish({"type": "tool_start", "tool": "Bash", "input": "ls"})
-  flush_ok = asyncio.run(sink.flush())
+  sink.publish({"type": "error", "message": "boom"})
+  _drain_actor()
 
-  # publish() reports True (it didn't commit inline); flush() exposes
-  # the False from the failed commit.
-  assert publish_ok is True
-  assert flush_ok is False
-
-
-def test_slow_flush_does_not_block_a_concurrent_coroutine(db, chat, monkeypatch):
-  """The headline bug: a slow streaming commit must NOT block the
-  event loop. Simulate a commit that sleeps (a SQLite busy_timeout
-  wait) and assert a concurrent coroutine keeps making progress while
-  the flush is in-flight — which is only possible if the commit runs
-  off the loop via asyncio.to_thread."""
-  chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
-  db.commit()
-  db.refresh(chat)
-  bc = _OrderedBroadcast(chat.id)
-  sink = chat_mod._ChatEventSink(bc, chat.id, db)
-
-  import time as _time
-
-  def slow_commit(_db_, _chat_id, _message):
-    # Stand in for a lock-contended commit blocking on busy_timeout.
-    _time.sleep(0.3)
-    return True
-
-  monkeypatch.setattr(chat_mod, "_update_last_assistant_message", slow_commit)
-
-  ticks = {"count": 0}
-
-  async def _other_chat_loop():
-    # A different chat's coroutine; each tick is a loop turn. If the
-    # slow commit were inline on the loop, these ticks would stall for
-    # the whole 0.3s.
-    for _ in range(30):
-      ticks["count"] += 1
-      await asyncio.sleep(0.01)
-
-  async def _scenario():
-    other = asyncio.create_task(_other_chat_loop())
-    sink._last_save = 0.0
-    sink.publish({"type": "tool_start", "tool": "Bash", "input": "ls"})
-    await sink.flush()  # blocks ~0.3s, but OFF the loop
-    ticks_at_flush_return = ticks["count"]
-    await other
-    return ticks_at_flush_return
-
-  ticks_at_flush_return = asyncio.run(_scenario())
-
-  # During the ~0.3s commit the other coroutine should have ticked
-  # several times (0.3s / 0.01s ≈ 30, minus scheduling slack). If the
-  # commit blocked the loop, this would be ~0.
-  assert ticks_at_flush_return >= 5, (
-    f"concurrent coroutine only ticked {ticks_at_flush_return} times "
-    "during the commit — the loop was blocked (commit not offloaded)"
+  db.expire_all()
+  row = db.query(models.Chat).filter(models.Chat.id == chat.id).one()
+  blocks = row.messages[-1]["blocks"]
+  assert any(
+    b.get("type") == "error" and b.get("message") == "boom" for b in blocks
   )
 
 

@@ -24,7 +24,8 @@ from uuid import uuid4
 
 import pytest
 
-from app import questions
+from app import models, questions
+from app.database import SessionLocal
 from app.pending_questions import PendingQuestion
 
 
@@ -42,6 +43,41 @@ def _make_pending(future: asyncio.Future) -> PendingQuestion:
   )
 
 
+def _seed_question_block(chat_id: str, question_id: str) -> None:
+  """Persist an assistant message carrying the open question block.
+
+  C2 routes the answer write through the actor's AnswerQuestion, which
+  re-reads the chat and merges the answer into the question block matched
+  by `question_id` — so a durable block must exist or the write raises.
+  Pre-C2 the route wrote the answer inline regardless; the block is what
+  the SDK runner's QuestionCommit would have persisted save-before-
+  broadcast in production.
+  """
+  db = SessionLocal()
+  try:
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    chat.messages = [
+      {"role": "user", "content": "go", "ts": 1},
+      {
+        "role": "assistant",
+        "content": "",
+        "ts": 2,
+        "blocks": [
+          {
+            "type": "question",
+            "question_id": question_id,
+            "questions": [
+              {"id": "q1", "question": "Pick one", "options": ["a", "b"]}
+            ],
+          }
+        ],
+      },
+    ]
+    db.commit()
+  finally:
+    db.close()
+
+
 def test_answer_delivers_immediately_when_pending_registered(
   client, auth, chat,
 ):
@@ -52,6 +88,8 @@ def test_answer_delivers_immediately_when_pending_registered(
     fut = loop.create_future()
     pending = _make_pending(fut)
     questions.register(chat.id, pending)
+    # The actor's AnswerQuestion merges into a durable question block.
+    _seed_question_block(chat.id, pending.question_id)
 
     started = time.monotonic()
     res = client.post(
@@ -60,6 +98,7 @@ def test_answer_delivers_immediately_when_pending_registered(
         "content": "answer",
         "hidden": True,
         "answers": {"Pick one": "a"},
+        "question_id": pending.question_id,
       },
       headers=auth,
     )
@@ -98,7 +137,13 @@ def test_answer_delivers_after_late_registration_within_grace(
     await asyncio.sleep(0.2)
     fut = loop_holder["loop"].create_future()
     future_holder["future"] = fut
-    questions.register(chat.id, _make_pending(fut))
+    pending = _make_pending(fut)
+    # The actor's AnswerQuestion merges into a durable question block;
+    # the runner's QuestionCommit would have persisted it before
+    # publishing the card in production.
+    _seed_question_block(chat.id, pending.question_id)
+    future_holder["question_id"] = pending.question_id
+    questions.register(chat.id, pending)
 
   async def go():
     loop_holder["loop"] = asyncio.get_event_loop()

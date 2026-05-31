@@ -28,12 +28,13 @@ class _FakeBroadcast:
 
 
 def test_sink_stores_run_token_passed_at_construction():
-  # The sink parks the per-turn token on `self.run_token` so a later
-  # milestone can stamp it on actor commands. It must not be used to
-  # alter the existing persist path yet (dormant).
+  # The sink parks the per-turn token on `self.run_token` and stamps it
+  # on every writer-actor command so the actor coalesces/fences this
+  # turn's snapshots under (chat_id, run_token). C2 dropped the `db` arg
+  # — the actor owns the session now.
   bc = _FakeBroadcast()
   token = alloc_run_token()
-  sink = _ChatEventSink(bc, "chat-1", db=None, run_token=token)
+  sink = _ChatEventSink(bc, "chat-1", run_token=token)
   assert sink.run_token == token
 
 
@@ -41,28 +42,28 @@ def test_sink_run_token_defaults_when_omitted():
   # Backward-compatible construction: callers that don't pass a token
   # (e.g. legacy/test code) still get a working sink with run_token None.
   bc = _FakeBroadcast()
-  sink = _ChatEventSink(bc, "chat-1", db=None)
+  sink = _ChatEventSink(bc, "chat-1")
   assert sink.run_token is None
 
 
 def test_initial_and_continuation_turns_get_distinct_tokens():
-  # _run_chat_impl allocates one token per turn; an initial send and any
+  # The scheduler allocates one token per turn; an initial send and any
   # continuation must receive DISTINCT tokens. We capture the token each
   # sink is built with across two sequential turns and assert they differ.
   captured: list = []
   real_init = _ChatEventSink.__init__
 
-  def spy_init(self, bc, chat_id, db, run_token=None):
+  def spy_init(self, bc, chat_id, run_token=None):
     captured.append(run_token)
-    real_init(self, bc, chat_id, db, run_token=run_token)
+    real_init(self, bc, chat_id, run_token=run_token)
 
   bc = _FakeBroadcast()
   with mock.patch.object(_ChatEventSink, "__init__", spy_init):
     # Simulate two turns each allocating their own token and constructing
-    # a sink with it (the exact pattern _run_chat_impl follows).
+    # a sink with it (the exact pattern the scheduler + runner follow).
     for _ in range(2):
       turn_token = alloc_run_token()
-      _ChatEventSink(bc, "chat-1", None, run_token=turn_token)
+      _ChatEventSink(bc, "chat-1", run_token=turn_token)
 
   assert len(captured) == 2
   assert captured[0] is not None and captured[1] is not None
