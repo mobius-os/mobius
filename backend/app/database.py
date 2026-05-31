@@ -197,6 +197,15 @@ def run_migrations(eng) -> None:
     if "pinned_at" not in chats_cols:
       # NOT NULL = pinned. Drawer sort key (see routes/chats.py).
       _add.append("ALTER TABLE chats ADD COLUMN pinned_at DATETIME NULL")
+    if "run_status" not in chats_cols:
+      # Crash-recovery run marker. "running" while a turn is in
+      # flight, NULL otherwise. Existing rows default to NULL (idle),
+      # which is correct: a row written before this column existed was
+      # not mid-turn at the moment we add the column. See
+      # models.Chat.run_status and chat.reconcile_interrupted_chats.
+      _add.append("ALTER TABLE chats ADD COLUMN run_status VARCHAR(16) NULL")
+    if "run_started_at" not in chats_cols:
+      _add.append("ALTER TABLE chats ADD COLUMN run_started_at DATETIME NULL")
     if _add:
       with eng.connect() as conn:
         for stmt in _add:
