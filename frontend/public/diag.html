@@ -33,7 +33,8 @@
   <div class="sub">Open this online once, then in airplane mode. Screenshot both.</div>
 
   <div class="card">
-    <div class="row"><span class="k">Network</span><span class="v"><span id="net" class="pill">…</span></span></div>
+    <div class="row"><span class="k">navigator.onLine (hint)</span><span class="v"><span id="net" class="pill">…</span></span></div>
+    <div class="row"><span class="k">real reachability (/api/health)</span><span class="v"><span id="reach" class="pill">…</span></span></div>
     <div class="row"><span class="k">Service worker</span><span class="v" id="swstate">…</span></div>
     <div class="row"><span class="k">SW controlling page</span><span class="v" id="swctrl">…</span></div>
     <div class="row"><span class="k">SW version</span><span class="v" id="swver">…</span></div>
@@ -67,8 +68,27 @@
       el.textContent = navigator.onLine ? 'ONLINE' : 'OFFLINE';
       el.className = 'pill ' + (navigator.onLine ? 'on' : 'off');
     }
-    window.addEventListener('online', setNet);
-    window.addEventListener('offline', setNet);
+    // Real reachability: a no-store GET to /api/health, which the SW does
+    // NOT cache, so it actually hits the network. This is the truth;
+    // navigator.onLine above is just the (often stale) browser hint.
+    async function setReach() {
+      var el = document.getElementById('reach');
+      el.textContent = '…'; el.className = 'pill';
+      var ctrl = ('AbortController' in window) ? new AbortController() : null;
+      var timer = ctrl ? setTimeout(function(){ ctrl.abort(); }, 4000) : null;
+      try {
+        var r = await fetch('/api/health', { cache: 'no-store', signal: ctrl ? ctrl.signal : undefined });
+        el.textContent = r.ok ? 'REACHABLE' : ('HTTP ' + r.status);
+        el.className = 'pill ' + (r.ok ? 'on' : 'off');
+      } catch (e) {
+        el.textContent = 'UNREACHABLE';
+        el.className = 'pill off';
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+    window.addEventListener('online', function(){ setNet(); setReach(); });
+    window.addEventListener('offline', function(){ setNet(); setReach(); });
 
     async function dumpCaches() {
       try {
@@ -143,7 +163,7 @@
       await dumpCaches();
     }
 
-    async function refresh() { setNet(); await swInfo(); await dumpCaches(); await swVersion(); }
+    async function refresh() { setNet(); setReach(); await swInfo(); await dumpCaches(); await swVersion(); }
     refresh();
   </script>
 </body>
