@@ -119,7 +119,11 @@ async def _append_to_pending(
     _apply_answers_to_last_question(chat, body.answers)
     pending = list(chat.pending_messages or [])
     new_msg = _user_message_from_body(chat, body)
-    _ensure_unique_ts(new_msg, pending)
+    # Clear BOTH queued and persisted messages: assistant ts is now
+    # allocated off chat.messages (chat._next_message_ts), so a user ts
+    # that only cleared `pending` could equal a persisted assistant ts
+    # and collide once it promotes (duplicate React keys client-side).
+    _ensure_unique_ts(new_msg, pending + list(chat.messages or []))
     pending.append(new_msg)
     chat.pending_messages = pending
     chat.updated_at = datetime.now(UTC)
