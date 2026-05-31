@@ -195,6 +195,103 @@ def test_flush_runs_commit_off_the_event_loop_thread(db, chat):
   )
 
 
+def test_flush_worker_uses_its_own_session(db, chat, monkeypatch):
+  """The off-loop save must open a SessionLocal in the worker thread
+  instead of sharing the sink's loop-owned session."""
+  import threading
+
+  from app import database as db_mod
+
+  chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
+  db.commit()
+  bc = _OrderedBroadcast(chat.id)
+  sink = chat_mod._ChatEventSink(bc, chat.id, db)
+
+  seen: dict = {"factory_threads": []}
+  original_factory = db_mod.SessionLocal
+  original_update = chat_mod._update_last_assistant_message
+
+  def session_factory():
+    seen["factory_threads"].append(threading.get_ident())
+    return original_factory()
+
+  def spy(worker_db, chat_id, message):
+    seen["worker_db"] = worker_db
+    return original_update(worker_db, chat_id, message)
+
+  monkeypatch.setattr(db_mod, "SessionLocal", session_factory)
+  monkeypatch.setattr(chat_mod, "_update_last_assistant_message", spy)
+
+  async def _scenario():
+    seen["loop_thread"] = threading.get_ident()
+    sink.publish({"type": "tool_start", "tool": "Bash", "input": "ls"})
+    await sink.flush()
+
+  asyncio.run(_scenario())
+
+  assert len(seen["factory_threads"]) == 1
+  assert seen["factory_threads"][0] != seen["loop_thread"]
+  assert seen["worker_db"] is not db
+
+
+def test_question_survives_overlapping_stale_flush(db, chat, monkeypatch):
+  """A stale worker flush that overlaps question parking must finish
+  before the inline question write, so it cannot erase the question."""
+  import threading
+  import time as _time
+
+  chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
+  db.commit()
+  bc = _OrderedBroadcast(chat.id)
+  sink = chat_mod._ChatEventSink(bc, chat.id, db)
+
+  flush_entered = threading.Event()
+  release_flush = threading.Event()
+  original = chat_mod._update_last_assistant_message
+
+  def hold_stale_flush(db_, chat_id, message):
+    if threading.get_ident() != loop_thread and not flush_entered.is_set():
+      flush_entered.set()
+      assert release_flush.wait(timeout=2.0)
+    return original(db_, chat_id, message)
+
+  monkeypatch.setattr(
+    chat_mod, "_update_last_assistant_message", hold_stale_flush,
+  )
+
+  async def _scenario():
+    nonlocal loop_thread
+    loop_thread = threading.get_ident()
+    sink.publish({"type": "tool_start", "tool": "Bash", "input": "ls"})
+    flush_task = asyncio.create_task(sink.flush())
+    assert await asyncio.to_thread(flush_entered.wait, 1.0)
+
+    def release_after_question_blocks():
+      _time.sleep(0.05)
+      release_flush.set()
+
+    releaser = threading.Thread(target=release_after_question_blocks)
+    releaser.start()
+    sink.publish({
+      "type": "question",
+      "questions": [{
+        "id": "q1",
+        "question": "Color?",
+        "options": [{"label": "Red"}, {"label": "Blue"}],
+      }],
+    })
+    releaser.join()
+    await flush_task
+
+  loop_thread = 0
+  asyncio.run(_scenario())
+
+  db.expire_all()
+  persisted = db.query(models.Chat).filter(models.Chat.id == chat.id).one()
+  blocks = persisted.messages[-1].get("blocks") or []
+  assert any(block.get("type") == "question" for block in blocks)
+
+
 def test_question_commit_stays_inline_and_blocks_the_loop_thread(db, chat):
   """The question save MUST stay synchronous (save-before-broadcast
   invariant), i.e. run inline on the calling thread inside publish()

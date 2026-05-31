@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from logging.handlers import RotatingFileHandler
@@ -197,15 +198,12 @@ class _ChatEventSink:
   migration would remove the thread hop entirely, but is out of scope
   — see the streaming notes in CLAUDE.md.)
 
-  Thread-safety of the offload: the `db` Session is owned by the
-  `_run_chat_impl` coroutine and, during streaming, is touched ONLY
-  through this sink. `publish()`/`flush()` calls are strictly serial
-  per turn (the runner drives them one at a time and `await`s each
-  flush before the next loop iteration), so at most one thread ever
-  touches the Session at a time and each `await` establishes a clean
-  happens-before with the loop's own later Session use. SQLite's
-  `check_same_thread=False` (database.py) makes the sequential
-  cross-thread use legal at the DBAPI layer.
+  Thread-safety of the offload: the coroutine-owned `db` Session
+  never crosses into the worker thread. Each worker save opens and
+  closes its own `SessionLocal`, while `_persist_lock` serializes it
+  with inline question and final saves. The lock is needed because a
+  Codex approval callback can publish a question while an older
+  streaming flush is still in flight.
 
   DB-lock-drop behavior: broadcasts still happen even when the DB
   write path hits `_safe_commit()` returning False (for example a
@@ -238,7 +236,23 @@ class _ChatEventSink:
     # publish overwrites an undrained snapshot, and since each snapshot
     # is the FULL current message, the drained one still reflects every
     # block accumulated up to the flush.
-    self._pending_save: dict | None = None
+    self._pending_save: tuple[int, dict] | None = None
+    self._save_generation = 0
+    self._persist_lock = threading.Lock()
+
+  def _persist_in_worker(self, generation: int, snapshot: dict) -> bool:
+    """Persists one snapshot with a worker-owned session."""
+    from app.database import SessionLocal
+    db = SessionLocal()
+    try:
+      with self._persist_lock:
+        if generation != self._save_generation:
+          return True
+        return _update_last_assistant_message(
+          db, self.chat_id, snapshot,
+        )
+    finally:
+      db.close()
 
   def publish(self, event: ChatEvent) -> bool:
     """Publishes an event; records any due save for a later `flush()`.
@@ -275,15 +289,23 @@ class _ChatEventSink:
     # This commit stays INLINE (on the loop): questions are rare, the
     # save-before-broadcast ordering is load-bearing, and the brief
     # block on a clarification is an acceptable trade for keeping the
-    # invariant trivially correct. A pending (offloaded) snapshot is
-    # superseded by this fuller write, so drop it.
+    # invariant trivially correct. Persist an undrained older snapshot
+    # first and serialize behind any in-flight worker save so no stale
+    # flush can land after this fuller write.
     if needs_save and event_type == "question":
       self._last_save = time.monotonic()
+      pending = self._pending_save
       self._pending_save = None
-      commit_ok = _update_last_assistant_message(
-        self.db, self.chat_id,
-        build_assistant_message(self.assistant_blocks),
-      )
+      with self._persist_lock:
+        if pending is not None and pending[0] == self._save_generation:
+          commit_ok = _update_last_assistant_message(
+            self.db, self.chat_id, pending[1],
+          )
+        self._save_generation += 1
+        commit_ok = _update_last_assistant_message(
+          self.db, self.chat_id,
+          build_assistant_message(self.assistant_blocks),
+        ) and commit_ok
 
     self.bc.publish(event)
 
@@ -308,8 +330,10 @@ class _ChatEventSink:
     # tiny next to a commit, so the copy is free.
     if needs_save and event_type != "question":
       self._last_save = time.monotonic()
-      self._pending_save = copy.deepcopy(
-        build_assistant_message(self.assistant_blocks)
+      self._save_generation += 1
+      self._pending_save = (
+        self._save_generation,
+        copy.deepcopy(build_assistant_message(self.assistant_blocks)),
       )
     return commit_ok
 
@@ -319,17 +343,17 @@ class _ChatEventSink:
     Called by the runner once per stream-loop iteration. Drains the
     snapshot recorded by `publish()` and runs the blocking
     `db.commit()` in a worker thread (`asyncio.to_thread`) so the loop
-    stays responsive for other chats during a SQLite lock wait. No-op
-    (returns True) when nothing is pending. The await point is what
-    serializes the offload with the loop's own Session use — see the
-    class docstring's thread-safety note.
+    stays responsive for other chats during a SQLite lock wait. The
+    worker opens its own SQLAlchemy Session and serializes its write
+    with inline question/final saves. No-op (returns True) when
+    nothing is pending.
     """
-    snapshot = self._pending_save
-    if snapshot is None:
+    pending = self._pending_save
+    if pending is None:
       return True
     self._pending_save = None
     return await asyncio.to_thread(
-      _update_last_assistant_message, self.db, self.chat_id, snapshot,
+      self._persist_in_worker, *pending,
     )
 
   def finalize(self) -> None:
@@ -342,10 +366,16 @@ class _ChatEventSink:
     """
     self._pending_save = None
     if self.chat_id and self.assistant_blocks:
-      _finalize_response(self.db, self.chat_id, self.assistant_blocks)
+      with self._persist_lock:
+        self._save_generation += 1
+        _finalize_response(self.db, self.chat_id, self.assistant_blocks)
 
 
 _SKILL_TEXT_CACHE: str | None = None
+# A stopped SDK handle drains before `_run_chat_impl` performs its final
+# sink save. Hand durable-marker clearing back to that run's wrapper so
+# the marker survives until persistence is complete.
+_clear_after_terminal_generation: dict[str, int] = {}
 
 
 def _read_skill_text() -> str:
@@ -653,7 +683,11 @@ async def stop_chat_for(chat_id: str, db: Session = None) -> bool:
 
   Waits for the process to die with a bounded timeout.
   """
+  stopped_gen = current_run_generation(chat_id)
   bump_run_generation(chat_id)
+  handles = registry.get_handles(chat_id)
+  if handles:
+    _clear_after_terminal_generation[chat_id] = stopped_gen
   # The queue-lock window guards the pending_messages clear from
   # racing concurrent append/cancel/promote paths. Generation bump
   # happens BEFORE the lock so the dying runner sees the new gen as
@@ -661,26 +695,10 @@ async def stop_chat_for(chat_id: str, db: Session = None) -> bool:
   # own state).
   async with chat_queue.get_lock(chat_id):
     _clear_pending_messages(db, chat_id)
-  # Stop is a terminal transition: clear the durable run marker so a
-  # later crash+restart doesn't replay a spurious "interrupted" note
-  # for a turn the user already stopped. The dying run_chat's finally
-  # won't do it — the gen bump above transferred ownership away from
-  # it. Use the caller's session when present (the /chat/stop route
-  # passes one); fall back to a short-lived session for callers that
-  # pass db=None (internal stop paths).
-  if db is not None:
-    _clear_run_status(db, chat_id)
-  else:
-    from app.database import SessionLocal
-    _db = SessionLocal()
-    try:
-      _clear_run_status(_db, chat_id)
-    finally:
-      _db.close()
   questions.cancel(chat_id)
   all_stopped = True
   log = _get_logger()
-  for handle in registry.get_handles(chat_id):
+  for handle in handles:
     stopped = await handle.stop(timeout=2.0)
     if not stopped:
       log.warning(
@@ -690,6 +708,22 @@ async def stop_chat_for(chat_id: str, db: Session = None) -> bool:
       )
       all_stopped = False
     registry.unregister(chat_id, handle.kind)
+  # With no active handle there is no runner-side final save left to
+  # await, so clear immediately. Active handles hand this clear back to
+  # run_chat's finally block: SDK stop waiters resolve before chat.py's
+  # final sink save, and a SQLite-blocked flush can exceed Stop's 2s
+  # timeout. If the process dies first, the retained marker lets crash
+  # recovery reconcile the interrupted turn.
+  if not handles:
+    if db is not None:
+      _clear_run_status(db, chat_id)
+    else:
+      from app.database import SessionLocal
+      _db = SessionLocal()
+      try:
+        _clear_run_status(_db, chat_id)
+      finally:
+        _db.close()
   _finalize_broadcast_if_running(chat_id)
   registry.discard_starting(chat_id)
   return all_stopped
@@ -872,26 +906,39 @@ async def run_chat(
       attachments=attachments, timezone=timezone, viewport=viewport,
     )
   finally:
+    stopped_gen = _clear_after_terminal_generation.get(chat_id)
+    clear_stopped_run = run_gen is not None and stopped_gen == run_gen
+    if clear_stopped_run:
+      _clear_after_terminal_generation.pop(chat_id, None)
     # Only clear _starting if we still own this generation.
     # A newer stop_chat_for may have bumped the generation and
     # taken ownership of _starting.
     if run_gen is None or current_run_generation(chat_id) == run_gen:
       discard_starting(chat_id)
-      # Clear the durable run marker under the SAME ownership guard so
-      # a continuation handoff (which bumps the generation before this
-      # finally fires) leaves the marker set — the next turn owns it
-      # and will clear it at its own end. Without the guard, the old
-      # turn's finally would clear "running" out from under a
-      # just-scheduled continuation and reopen the crash-recovery gap
-      # for that chain. Use a fresh short-lived session: _run_chat_impl
-      # opened and closed its own.
-      if chat_id:
-        from app.database import SessionLocal
-        _db = SessionLocal()
-        try:
-          _clear_run_status(_db, chat_id)
-        finally:
-          _db.close()
+    # Clear the durable marker only while this run still owns the
+    # generation. A continuation handoff leaves it set for the next
+    # turn. A Stop handoff is handled separately below after the final
+    # sink save, because Stop deliberately bumps the generation first.
+    # Stop bumps the generation before interrupting the SDK handle, so
+    # the normal ownership branch above deliberately skips this run.
+    # Once _run_chat_impl returns, its final sink save is complete and
+    # the stopped generation may clear the marker unless a newer run
+    # has already claimed it.
+    should_clear_status = (
+      run_gen is None
+      or current_run_generation(chat_id) == run_gen
+      or (
+        clear_stopped_run
+        and current_run_generation(chat_id) == run_gen + 1
+      )
+    )
+    if chat_id and should_clear_status:
+      from app.database import SessionLocal
+      _db = SessionLocal()
+      try:
+        _clear_run_status(_db, chat_id)
+      finally:
+        _db.close()
 
 
 async def _run_chat_impl(
