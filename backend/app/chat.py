@@ -677,6 +677,11 @@ async def _run_chat_impl(
     bc.publish({"type": "done"})
     set_active_broadcast(None)
     bc.mark_completed()
+    # Close the session before bailing — every other terminal path in
+    # run_chat closes explicitly, and a misconfigured instance hitting
+    # this branch on every turn would otherwise leak a connection each
+    # time.
+    db.close()
     return
 
   agent_token = auth.create_access_token(

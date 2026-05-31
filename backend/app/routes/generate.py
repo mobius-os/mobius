@@ -170,10 +170,22 @@ def serve_generated_image(
   raw_token: str = Depends(get_auth_token),
   db: Session = Depends(get_db),
 ):
-  """Serves a generated image. Accepts JWT from header or ?token= param."""
+  """Serves a generated image. Accepts JWT from header or ?token= param.
+
+  Owner-only. The token rides on `?token=` because <img>/iframe
+  fetches can't set headers, so we decode it by hand rather than via
+  the get_current_owner dependency — but the same scope check applies:
+  an app-scoped token must not read a chat's generated images outside
+  any per-app policy (the gated chat-log capability isn't built yet).
+  """
   payload = decode_access_token(raw_token)
   if not payload:
     raise HTTPException(status_code=401, detail="Invalid token.")
+  if payload.get("scope") == "app":
+    raise HTTPException(
+      status_code=403,
+      detail="App tokens cannot access this endpoint.",
+    )
   owner = db.query(models.Owner).filter(
     models.Owner.username == payload.get("sub")
   ).first()

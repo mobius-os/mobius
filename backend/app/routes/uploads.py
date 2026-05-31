@@ -16,7 +16,7 @@ from app.auth import decode_access_token
 from app.auth_helpers import get_auth_token
 from app.config import get_settings
 from app.database import get_db
-from app.deps import get_current_owner, get_current_owner_or_app
+from app.deps import get_current_owner
 from app.path_utils import validate_path_within_base
 from app.resource_access import get_active_chat_or_404
 
@@ -117,10 +117,16 @@ async def upload_files(
 @router.get("/{chat_id}/uploads")
 def list_uploads(
   chat_id: str,
-  owner: models.Owner = Depends(get_current_owner_or_app),
+  owner: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
-  """Returns the list of uploaded files for a chat."""
+  """Returns the list of uploaded files for a chat.
+
+  Owner-only. A chat's uploads are partner attachments outside any
+  per-app policy, so an app-scoped token must not list them — the
+  gated chat-log capability that would grant scoped app access here
+  is not built yet.
+  """
   chat = get_active_chat_or_404(db, chat_id)
   return chat.uploads or []
 
@@ -156,10 +162,22 @@ def serve_upload(
   raw_token: str = Depends(get_auth_token),
   db: Session = Depends(get_db),
 ):
-  """Serves an uploaded file. Accepts JWT from header or ?token= param."""
+  """Serves an uploaded file. Accepts JWT from header or ?token= param.
+
+  Owner-only. The token rides on `?token=` because <img>/iframe
+  fetches can't set headers, so we decode it by hand rather than via
+  the get_current_owner dependency — but the same scope check applies:
+  an app-scoped token must not read partner attachments outside any
+  per-app policy (the gated chat-log capability isn't built yet).
+  """
   payload = decode_access_token(raw_token)
   if not payload:
     raise HTTPException(status_code=401, detail="Invalid token.")
+  if payload.get("scope") == "app":
+    raise HTTPException(
+      status_code=403,
+      detail="App tokens cannot access this endpoint.",
+    )
   owner = db.query(models.Owner).filter(
     models.Owner.username == payload.get("sub")
   ).first()
