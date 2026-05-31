@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy.orm import Session
 
-from app import auth, models, schemas
+from app import activity, auth, models, schemas
 from app.broadcast import get_system_broadcast
 from app.compiler import compile_jsx
 from app.config import get_settings
@@ -133,6 +133,7 @@ async def install_app(
     manifest_url=body.manifest_url,
     manifest=body.manifest,
     raw_base=body.raw_base,
+    source="store",
   )
   # Notify the Shell to refetch its app list so a new install (or an
   # in-place update) shows up in the drawer without a page reload.
@@ -644,6 +645,15 @@ def get_frame(
   # not a client-pushed list — consistent with the ETag freshness model.
   if app.offline_capable:
     headers["X-Mobius-Offline"] = "1"
+
+  # app_open: emit on the 200 path only — the 304 short-circuit above
+  # already returned for cache-revalidating loads, which would
+  # otherwise double-count every time the iframe checks freshness on
+  # a navigation back. Best-effort: a log failure must not block the
+  # frame response (activity.log_event swallows its own OSError).
+  activity.log_event(
+    "app_open", app_id=app.id, slug=ensure_slug(db, app),
+  )
   return HTMLResponse(html, headers=headers)
 
 
