@@ -764,9 +764,12 @@ def _seed_app_with_perms(db, perms_cross_write: str):
 
 
 def test_install_accepts_app_token_with_cross_write(
-  client, db, bypass_url_validation
+  client, db, owner_token, bypass_url_validation,
 ):
   """App-scoped JWT whose App row has cross_app_access='write' should pass."""
+  # owner_token is requested for its side-effect: it creates the Owner
+  # row with sub='test' that the minted app-scoped JWT below resolves
+  # against. Without it the dep returns 401 "Owner not found."
   from app.auth import create_access_token
   app_id = _seed_app_with_perms(db, "write")
   db.commit()
@@ -800,7 +803,7 @@ def test_install_accepts_app_token_with_cross_write(
 
 
 def test_install_rejects_app_token_with_cross_read(
-  client, db, bypass_url_validation
+  client, db, owner_token, bypass_url_validation,
 ):
   """App-scoped JWT whose App row has cross_app_access='read' must 403."""
   from app.auth import create_access_token
@@ -818,7 +821,7 @@ def test_install_rejects_app_token_with_cross_read(
 
 
 def test_install_rejects_app_token_with_cross_none(
-  client, db, bypass_url_validation
+  client, db, owner_token, bypass_url_validation,
 ):
   """App-scoped JWT whose App row has cross_app_access='none' must 403."""
   from app.auth import create_access_token
