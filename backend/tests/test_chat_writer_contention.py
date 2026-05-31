@@ -865,3 +865,117 @@ def test_reconciliation_works_independent_of_actor():
   assert all(
     b.get("status") != "running" for b in blocks if b.get("type") == "tool"
   )
+
+
+# -- TEST-GAP cleanup: real-dispatch coverage -----------------------------
+# These commands were imported but never actually dispatched against the real
+# DB; assert each mutates the row (or no-ops correctly) as the production
+# helper it replicates would.
+def test_clear_pending_empties_queue_and_returns_count(actor):
+  """ClearPending empties pending_messages and returns the count removed —
+  the Stop / terminal-setup-error path."""
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[
+      {"role": "user", "content": "q1", "ts": 10},
+      {"role": "user", "content": "q2", "ts": 11},
+    ],
+  )
+  result = _await(actor.submit(ClearPending(chat_id="c1", run_token="rt1")))
+  assert result == {"cleared": 2}
+  chat = _load_chat()
+  assert chat["pending_messages"] == []
+
+
+def test_clear_pending_empty_queue_is_noop(actor):
+  """ClearPending on an already-empty queue returns cleared=0 and commits
+  nothing (the production helper skips the commit when nothing changed)."""
+  _seed_chat(messages=[{"role": "user", "content": "hi", "ts": 1}], pending=[])
+  result = _await(actor.submit(ClearPending(chat_id="c1", run_token="rt1")))
+  assert result == {"cleared": 0}
+  chat = _load_chat()
+  assert chat["pending_messages"] == []
+
+
+def test_clear_run_status_clears_durable_marker(actor):
+  """ClearRunStatus clears run_status + run_started_at once a turn has ended."""
+  from datetime import UTC, datetime
+
+  cid = _seed_chat(messages=[{"role": "user", "content": "hi", "ts": 1}])
+  # Mark the run via a throwaway session (the marker the command clears).
+  db = SessionLocal()
+  try:
+    chat = db.query(models.Chat).filter(models.Chat.id == cid).first()
+    chat.run_status = "running"
+    chat.run_started_at = datetime.now(UTC)
+    db.commit()
+  finally:
+    db.close()
+  result = _await(actor.submit(ClearRunStatus(chat_id="c1", run_token="rt1")))
+  assert result is None
+  chat = _load_chat()
+  assert chat["run_status"] is None
+  assert chat["run_started_at"] is None
+
+
+def test_append_pending_bumps_colliding_ts(actor):
+  """Two messages submitted with the SAME ts must not collide: AppendPending
+  bumps the second so it is strictly greater (unique React keys client-side
+  + unambiguous DELETE-by-ts). The actor serializes the RMW, so the bump is
+  deterministic even under concurrency."""
+  _seed_chat(messages=[{"role": "user", "content": "hi", "ts": 1}])
+  first = _await(
+    actor.submit(
+      AppendPending(
+        chat_id="c1",
+        run_token="rt1",
+        user_msg={"role": "user", "content": "a", "ts": 500},
+      )
+    )
+  )
+  second = _await(
+    actor.submit(
+      AppendPending(
+        chat_id="c1",
+        run_token="rt1",
+        user_msg={"role": "user", "content": "b", "ts": 500},
+      )
+    )
+  )
+  assert first["stored"]["ts"] == 500
+  # The colliding ts was bumped strictly above the existing max.
+  assert second["stored"]["ts"] > first["stored"]["ts"]
+  chat = _load_chat()
+  ts_values = [m["ts"] for m in chat["pending_messages"]]
+  assert len(set(ts_values)) == len(ts_values)  # all unique
+
+
+def test_persist_error_writes_error_snapshot_to_row(actor):
+  """PersistError commits the error-state snapshot as the chat's last
+  assistant message — a real DB mutation, fire-and-forget (acks without
+  raising)."""
+  _seed_chat(
+    messages=[
+      {"role": "user", "content": "hi", "ts": 1},
+      _assistant_msg([{"type": "text", "content": "partial"}]),
+    ]
+  )
+  fut = actor.submit(
+    PersistError(
+      chat_id="c1",
+      run_token="rt1",
+      snapshot=_assistant_msg(
+        [
+          {"type": "text", "content": "partial"},
+          {"type": "error", "content": "provider error"},
+        ]
+      ),
+    )
+  )
+  assert _await(fut) is True
+  chat = _load_chat()
+  blocks = chat["messages"][-1]["blocks"]
+  assert any(
+    b.get("type") == "error" and b.get("content") == "provider error"
+    for b in blocks
+  )
