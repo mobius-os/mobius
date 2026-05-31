@@ -163,26 +163,18 @@ def get_owner_or_app_with_manage_apps(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
 ) -> models.Owner:
-  """Owner JWT, OR an app-scoped JWT whose App row carries install authority.
+  """Owner JWT, OR an app-scoped JWT whose App row has manage_apps=true.
 
   The App Store mini-app is the canonical caller — it ships
   `permissions.manage_apps: true` in its manifest so it can drive
   installs (POST /api/apps/install) and uninstalls (DELETE
   /api/apps/{id}) on the owner's behalf without holding the owner
   JWT directly. Any other app declaring the same permission inherits
-  the same trust: that's the documented contract surfaced in the
-  App Store's install-confirm modal.
+  the same trust.
 
   Permission is gated by the App row, not the manifest the JWT was
   issued for — so revoking manage_apps (PATCH /api/apps/{id}) cuts
   off install access on the next request without rotating the JWT.
-
-  Transitional fallback: `cross_app_access == 'write'` is ALSO
-  accepted to keep currently-installed app-store builds (which
-  predate manage_apps) working through the rollout window. The
-  fallback emits a deprecation warning on every hit so we can spot
-  apps that never updated their manifest, and is scheduled to drop
-  once the new app-store has been live for two weeks (see PM 073).
   """
   if principal.app_id is None:
     return principal.owner
@@ -190,22 +182,6 @@ def get_owner_or_app_with_manage_apps(
   if not app:
     raise HTTPException(status_code=401, detail="App not found.")
   if bool(app.manage_apps):
-    return principal.owner
-  # Transitional fallback: pre-073 manifests granted install authority
-  # implicitly via cross_app_access='write'. Keep accepting it so
-  # already-installed app-stores don't brick the install button the
-  # moment the new dep ships. Normalise on read — install.py stores
-  # the manifest value verbatim, so a stray 'Write'/'WRITE' would
-  # otherwise miss the comparison.
-  level = (app.cross_app_access or "none").strip().lower()
-  if level == "write":
-    import logging
-    logging.getLogger("mobius.deps").warning(
-      "manage_apps fallback: app id=%s name=%r used legacy "
-      "cross_app_access='write' to authorise install/uninstall. "
-      "Update the manifest to declare permissions.manage_apps=true.",
-      app.id, app.name,
-    )
     return principal.owner
   raise HTTPException(
     status_code=403,
