@@ -166,6 +166,34 @@ def test_install_fresh_app_writes_everything(client, auth, tmp_path, bypass_url_
   assert any("cron" in w for w in payload["warnings"])
 
 
+def test_register_cron_passes_job_name_to_scaffold(tmp_path):
+  """The scaffold defaults its job filename to job.sh; the installer must
+  pass the manifest's job name (e.g. fetch.sh) as the 3rd scaffold arg so
+  the crontab points at the real bundled job, not the empty stub.
+  Regression for the bug where every scheduled app fired an empty job.sh."""
+  from app import install
+
+  app_dir = tmp_path / "dreaming"
+  app_dir.mkdir()
+  job_path = app_dir / "fetch.sh"
+  fake_scaffold = tmp_path / "init-cron-scaffold.sh"
+  fake_scaffold.write_text("#!/bin/bash\n")
+
+  # The inner CRON_SCAFFOLD patch overrides the autouse bypass so we reach
+  # the subprocess call; subprocess.run is mocked so nothing shells out.
+  with patch("app.install.CRON_SCAFFOLD", fake_scaffold), \
+       patch("app.install.subprocess.run") as mock_run:
+    mock_run.return_value = MagicMock(returncode=0, stderr="")
+    install._register_cron(
+      "dreaming", "0 6 * * *", job_path, b"#!/bin/bash\necho real work\n",
+    )
+
+  assert job_path.read_text() == "#!/bin/bash\necho real work\n"
+  assert mock_run.call_args.args[0] == [
+    str(fake_scaffold), "dreaming", "0 6 * * *", "fetch.sh",
+  ]
+
+
 def test_install_validates_required_fields(client, auth, bypass_url_validation):
   """Missing id / version / description / entry → 400 with field names."""
   bad = {"name": "no fields"}

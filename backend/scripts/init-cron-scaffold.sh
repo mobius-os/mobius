@@ -11,25 +11,34 @@
 # the live entry, in one idempotent step.
 #
 # Usage:
-#   init-cron-scaffold.sh <slug> "<cron-schedule>"
+#   init-cron-scaffold.sh <slug> "<cron-schedule>" [job-filename]
 #
 # Example:
-#   init-cron-scaffold.sh news "*/10 * * * *"
+#   init-cron-scaffold.sh news "*/10 * * * *"            # runs job.sh
+#   init-cron-scaffold.sh dreaming "0 6 * * *" fetch.sh  # runs fetch.sh
 #
-# After running, edit /data/apps/<slug>/job.sh to do the actual work.
+# The optional job filename (default job.sh) is the script the crontab
+# entry actually runs. The installer passes the manifest's
+# `schedule.job` so the cron points at the bundled job, not the stub.
+# After running, edit /data/apps/<slug>/<job-filename> to do the work.
 # init-cron.sh is checked-in scaffolding — re-running this scaffold for
 # the same slug + schedule is a no-op (idempotent on every layer).
 
 set -euo pipefail
 
 if [ $# -lt 2 ]; then
-  echo "Usage: $0 <slug> \"<cron-schedule>\"" >&2
-  echo "Example: $0 news \"*/10 * * * *\"" >&2
+  echo "Usage: $0 <slug> \"<cron-schedule>\" [job-filename]" >&2
+  echo "Example: $0 news \"*/10 * * * *\" fetch.sh" >&2
   exit 2
 fi
 
 SLUG="$1"
 SCHEDULE="$2"
+# Optional 3rd arg: the script the crontab entry runs, relative to the
+# app dir. Defaults to job.sh (the agent's scaffold convention). The
+# installer passes the manifest's `schedule.job` (e.g. fetch.sh) so the
+# crontab points at the real bundled job rather than the empty stub.
+JOB_NAME="${3:-job.sh}"
 
 # Slug guard: anything outside `[A-Za-z0-9_-]+` silently breaks the
 # init-cron.sh heredoc + the matching grep in the replay path. Hard
@@ -39,8 +48,19 @@ if ! printf '%s' "$SLUG" | grep -qE '^[A-Za-z0-9_-]+$'; then
   exit 2
 fi
 
-APP_DIR="/data/apps/${SLUG}"
-JOB_PATH="${APP_DIR}/job.sh"
+# Job-name guard: it becomes a path component and lands in the
+# init-cron.sh heredoc, so keep it a clean basename — no slashes, no
+# traversal.
+if ! printf '%s' "$JOB_NAME" | grep -qE '^[A-Za-z0-9_.-]+$'; then
+  echo "ERROR: job filename must match [A-Za-z0-9_.-]+, got: $JOB_NAME" >&2
+  exit 2
+fi
+
+# APP_BASE is overridable only so the scaffold is testable without a
+# container; production never sets it, so the base stays /data/apps.
+APP_BASE="${MOBIUS_APP_BASE:-/data/apps}"
+APP_DIR="${APP_BASE}/${SLUG}"
+JOB_PATH="${APP_DIR}/${JOB_NAME}"
 INIT_PATH="${APP_DIR}/init-cron.sh"
 
 if [ ! -d "$APP_DIR" ]; then
@@ -48,11 +68,13 @@ if [ ! -d "$APP_DIR" ]; then
   exit 1
 fi
 
-# 1. Write a job.sh stub (only if absent — never clobber agent work).
+# 1. Write a job stub (only if absent — never clobber agent or bundled
+#    work; a manifest-bundled job script is written by the installer
+#    before this runs, so this branch is skipped for it).
 if [ ! -f "$JOB_PATH" ]; then
   cat > "$JOB_PATH" <<JOB
 #!/bin/bash
-# /data/apps/$SLUG/job.sh — scheduled work for the "$SLUG" mini-app.
+# ${APP_DIR}/${JOB_NAME} — scheduled work for the "$SLUG" mini-app.
 # Runs as the mobius user. Stderr captured to /data/cron-logs/$SLUG.log.
 set -e
 
