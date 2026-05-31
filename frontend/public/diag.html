@@ -62,6 +62,15 @@
     <pre id="swresp">…</pre>
   </div>
 
+  <div class="card">
+    <h2>Frame diagnostic log (newest first)</h2>
+    <div style="margin-bottom:8px">
+      <button onclick="showLog()">Reload log</button>
+      <button onclick="clearLog()">Clear log</button>
+    </div>
+    <pre id="dlog">…</pre>
+  </div>
+
   <script>
     function setNet() {
       var el = document.getElementById('net');
@@ -163,7 +172,25 @@
       await dumpCaches();
     }
 
-    async function refresh() { setNet(); setReach(); await swInfo(); await dumpCaches(); await swVersion(); }
+    // Reads the same-origin ring buffer the mini-app frame writes to
+    // (localStorage 'mobius-diag-log'). Works offline — pure localStorage.
+    function showLog() {
+      var el = document.getElementById('dlog');
+      try {
+        var arr = JSON.parse(localStorage.getItem('mobius-diag-log') || '[]');
+        if (!arr.length) { el.textContent = '(empty — open a mini-app to generate entries)'; return; }
+        el.textContent = arr.slice().reverse().map(function(e) {
+          var on = (e.online === true) ? 'on' : (e.online === false ? 'OFF' : '?');
+          return e.t + '  [' + on + '] ' + (e.src || '') + '  ' + e.tag + (e.msg ? ': ' + e.msg : '');
+        }).join('\n');
+      } catch (e) { el.textContent = 'ERR ' + e.message; }
+    }
+    function clearLog() {
+      try { localStorage.removeItem('mobius-diag-log'); } catch (e) {}
+      showLog();
+    }
+
+    async function refresh() { setNet(); setReach(); await swInfo(); await dumpCaches(); await swVersion(); showLog(); }
     refresh();
   </script>
 </body>
