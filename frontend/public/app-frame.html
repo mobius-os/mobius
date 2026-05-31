@@ -109,7 +109,31 @@
     var capturedError = ''
     var capturedErrorOnce = false  // only the first error is reported (root cause)
 
+    // TEMPORARY diagnostic ring-buffer. The mini-app iframe is same-origin
+    // (allow-same-origin), so this localStorage is THE SAME store the shell
+    // and /diag.html read — letting us capture what happens inside the frame
+    // (esp. the offline game-over blank) and read it from /diag.html without
+    // screenshots or a console. Capped so it can't grow unbounded. Remove
+    // once the offline mini-app issues are confirmed fixed.
+    function mlog(tag, msg) {
+      try {
+        var key = 'mobius-diag-log'
+        var arr = JSON.parse(localStorage.getItem(key) || '[]')
+        arr.push({
+          t: new Date().toISOString(),
+          src: 'frame:' + _FRAME_APP_ID,
+          online: (typeof navigator !== 'undefined') ? navigator.onLine : null,
+          tag: String(tag),
+          msg: (msg == null ? '' : String(msg)).slice(0, 600),
+        })
+        if (arr.length > 100) arr = arr.slice(-100)
+        localStorage.setItem(key, JSON.stringify(arr))
+      } catch (e) {}
+    }
+    window.mlog = mlog
+
     function showErr(title, detail) {
+      mlog('showErr', title + ': ' + detail)
       if (!capturedErrorOnce) { capturedError = detail; capturedErrorOnce = true; }
       document.getElementById('error-title').textContent = title
       document.getElementById('error-detail').textContent = detail
@@ -140,11 +164,25 @@
       btn.className = 'error-btn error-btn--reported'
     }
 
+    // Post-mount runtime errors must NOT blank a running app. The frame's
+    // error panel hides #root, which is correct for a LOAD failure (nothing
+    // useful is on screen yet) but wrong once the app is mounted and
+    // interactive: a transient unhandled rejection — e.g. an offline
+    // fetch/storage save failing at Snake's game-over — would otherwise
+    // destroy the whole app to a blank/error screen. So once mounted we LOG
+    // the error (visible in /diag.html) but leave the app on screen; only
+    // pre-mount errors still surface the panel. `window.__frameMounted` is
+    // set right after createRoot().render() below.
+    function handleFrameError(title, detail) {
+      mlog(title, detail)
+      if (window.__frameMounted) return  // app is live — keep it on screen
+      showErr(title, detail)
+    }
     window.addEventListener('error', function(e) {
-      showErr('Runtime error', e.error ? e.error.stack || e.message : e.message)
+      handleFrameError('Runtime error', e.error ? e.error.stack || e.message : e.message)
     })
     window.addEventListener('unhandledrejection', function(e) {
-      showErr('Unhandled error', e.reason ? (e.reason.stack || String(e.reason)) : String(e))
+      handleFrameError('Unhandled error', e.reason ? (e.reason.stack || String(e.reason)) : String(e))
     })
   </script>
 

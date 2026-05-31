@@ -15,9 +15,13 @@ import { useEffect, useState } from 'react'
 // sw.js), so it genuinely hits the network. Success = online, failure or
 // timeout = offline.
 //
-// `navigator.onLine === false` IS trusted in that one direction — if the OS
-// reports no network interface at all, we're definitely offline and skip the
-// probe. Only `navigator.onLine === true` is unreliable and gets confirmed.
+// navigator.onLine is NOT trusted in either direction — it can read `false`
+// even after the network is back (it only updates when a real request
+// resolves, and the SW serves most requests from cache). So the probe always
+// runs; the /api/health fetch is the sole source of truth. The window
+// `offline` event still flips the UI to offline immediately (it's a prompt
+// hint and the next probe confirms), but RECOVERY to online only ever comes
+// from a successful probe — never from navigator.onLine going true.
 //
 // Re-probes on: window online/offline events, tab becoming visible, and a
 // periodic interval while visible. Used by the chat composer (chat is
@@ -31,10 +35,14 @@ const PROBE_TIMEOUT_MS = 4000
 const POLL_INTERVAL_MS = 20000
 
 async function probeReachable() {
-  // navigator.onLine === false is reliable: no interface, definitely offline.
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-    return false
-  }
+  // ALWAYS probe — do not short-circuit on navigator.onLine. That flag is
+  // stale in BOTH directions in a SW-served PWA: it can read `false` even
+  // after the network is back (the browser only updates it when a real
+  // request resolves, and the SW serves most requests from cache). An
+  // earlier version returned false when navigator.onLine was false, which
+  // wedged the indicator "offline" forever after reconnecting. The
+  // /api/health fetch below is the only trustworthy signal: it actually
+  // hits the network (the SW does not cache it), so success = truly online.
   let timer
   const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null
   try {
@@ -64,6 +72,29 @@ export default function useOnlineStatus() {
   useEffect(() => {
     let cancelled = false
     let inflight = false
+    let lastLogged = null
+
+    // TEMPORARY: log connectivity transitions to the same-origin ring buffer
+    // the mini-app frame uses, so /diag.html shows shell + app events
+    // together (confirms the offline-pill behaviour). Transition-only, so the
+    // 20s poll doesn't spam it. Remove with the rest of the diag scaffolding.
+    function logTransition(reachable, reason) {
+      if (reachable === lastLogged) return
+      lastLogged = reachable
+      try {
+        const key = 'mobius-diag-log'
+        const arr = JSON.parse(localStorage.getItem(key) || '[]')
+        arr.push({
+          t: new Date().toISOString(),
+          src: 'shell',
+          online: typeof navigator !== 'undefined' ? navigator.onLine : null,
+          tag: 'online=' + reachable,
+          msg: reason + ' (navigator.onLine=' +
+            (typeof navigator !== 'undefined' ? navigator.onLine : '?') + ')',
+        })
+        localStorage.setItem(key, JSON.stringify(arr.slice(-100)))
+      } catch (e) { /* ignore */ }
+    }
 
     async function check() {
       // Coalesce overlapping triggers (event + interval landing together).
@@ -71,7 +102,10 @@ export default function useOnlineStatus() {
       inflight = true
       try {
         const reachable = await probeReachable()
-        if (!cancelled) setOnline(reachable)
+        if (!cancelled) {
+          logTransition(reachable, 'probe')
+          setOnline(reachable)
+        }
       } finally {
         inflight = false
       }
@@ -79,7 +113,9 @@ export default function useOnlineStatus() {
 
     // A definite offline event is trustworthy — reflect it immediately
     // without waiting for a probe to time out.
-    const onOffline = () => { if (!cancelled) setOnline(false) }
+    const onOffline = () => {
+      if (!cancelled) { logTransition(false, 'offline-event'); setOnline(false) }
+    }
     const onOnline = () => { check() }
     const onVisible = () => {
       if (document.visibilityState === 'visible') check()
