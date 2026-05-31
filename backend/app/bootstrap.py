@@ -75,6 +75,7 @@ async def ensure_store_installed(db: Session) -> None:
       manifest_url=BOOTSTRAP_STORE_MANIFEST_URL,
       manifest=None,
       raw_base=None,
+      source="bootstrap",
     )
   except Exception as exc:
     # Catch-all on purpose: HTTPException, network errors, JSON parse

@@ -44,7 +44,7 @@ from fastapi import HTTPException
 from PIL import Image as _PILImage
 from sqlalchemy.orm import Session
 
-from app import models
+from app import activity, models
 from app.compiler import compile_jsx
 from app.config import get_settings
 from app.routes.apps import (
@@ -453,6 +453,7 @@ async def install_from_manifest(
   manifest_url: str | None,
   manifest: dict | None,
   raw_base: str | None,
+  source: str = "url",
 ) -> tuple[models.App, str, list[str], dict]:
   """Returns `(app, mode, warnings, manifest)`.
 
@@ -710,6 +711,18 @@ async def install_from_manifest(
     # (orphaned cron, mysterious 'app not found' errors at runtime).
     db.commit()
     db.refresh(app)
+
+    # app_install: log only after the row is durable so the timestamp
+    # in the activity log reflects when the install actually landed,
+    # not when we entered the install pipeline. mode="update" still
+    # emits an event — re-installs of the same manifest_url are
+    # meaningful platform signals for the dreaming agent.
+    activity.log_event(
+      "app_install",
+      app_id=app.id,
+      slug=app.slug,
+      source=source,
+    )
 
     # Success: drop any .bak snapshots we made — the new bundle is
     # now the canonical one.
