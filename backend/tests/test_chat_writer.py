@@ -330,9 +330,14 @@ def test_stale_marker_does_not_reorder_finalize_before_post_fence_snapshot():
     assert f.result(timeout=5) is True
     # S1 was superseded/invalidated by the fence; its ack resolves to None.
     assert s1.result(timeout=5) is None
-    # S2 committed AFTER F — the stale marker did not reorder it.
+    # S2 committed AFTER F — the stale marker did not reorder it. The EXACT
+    # recorded sequence must be [F, S2]: an order-proving assertion that fails
+    # if the stale M1 ever commits S2 ahead of F (the reordering bug).
     assert commits == [{"final": True}, {"n": 2}]
-    assert s2.result(timeout=5) is None or s2.result(timeout=5) is True
+    # S2 was committed by its OWN (post-fence) marker M2, so its ack resolves
+    # to True — not None. The earlier `is None or is True` accepted both and so
+    # could never fail; this pins the determinate outcome.
+    assert s2.result(timeout=5) is True
   finally:
     release_take.set()
     actor.stop(timeout=5)
@@ -491,6 +496,16 @@ def test_cancellation_race_in_set_result_does_not_break_concurrent_submit():
     actor.submit(Barrier()).result(timeout=5)
     assert commits == [{"n": 1}]
     assert c2.result(timeout=5) is True
+    # The no-break property, made genuine: the racing stub absorbed exactly one
+    # set_result (the supersession), and the producer swallowed the resulting
+    # InvalidStateError rather than letting it strand c2. The stub itself stays
+    # unresolved — that models the cancelled future the race represents — so
+    # resolve it here to leave no dangling Future. Now-`_raised`, set_result
+    # actually completes it; result() proves it never leaked into a hang.
+    assert c1.ack._raised, "the supersession should have hit the race window"
+    assert not c1.ack.done()
+    c1.ack.set_result(None)
+    assert c1.ack.result(timeout=1) is None
   finally:
     actor.stop(timeout=5)
 
@@ -522,6 +537,15 @@ def test_cancellation_race_in_set_exception_does_not_break_actor():
     good = actor.submit(Finalize(chat_id="c1", run_token="t1", snapshot={"ok": True}))
     assert good.result(timeout=5) is True
     assert commits == [{"ok": True}]
+    # The consumer's set_exception hit the race window (the stub raised once)
+    # and the per-command handler swallowed it. The stub is left unresolved
+    # (the cancelled-future state); resolve it so no Future dangles, and prove
+    # it never silently hung the actor.
+    assert bad.ack._raised, "the failure-path set_exception should have raced"
+    assert not bad.ack.done()
+    bad.ack.set_exception(RuntimeError("post-test resolution"))
+    with pytest.raises(RuntimeError):
+      bad.ack.result(timeout=1)
   finally:
     actor.stop(timeout=5)
 
@@ -667,3 +691,287 @@ def test_concurrent_submits_with_a_barrier_all_resolve():
     assert len(commits) == 10
   finally:
     actor.stop(timeout=10)
+
+
+# -- FIX C: the per-key generation map must not leak across finalized turns ----
+def test_generation_dict_does_not_leak_across_finalized_turns():
+  # Each turn (snapshot... -> Finalize) bumps _generation[key] via the fence
+  # but the entry was never deleted, so every finalized turn permanently leaked
+  # one dict entry (run_token is per-turn). After N full turns for DISTINCT
+  # run_tokens, no _generation entry may survive — the keys are all dead.
+  commits: list = []
+  actor = ChatWriterActor(session_factory=lambda: _RecordingSession(commits))
+  actor.start()
+  try:
+    n = 30
+    for i in range(n):
+      rt = f"rt-{i}"
+      # A coalescible snapshot then a terminal Finalize for the same turn.
+      actor.submit(PersistTranscript(chat_id="c1", run_token=rt, snapshot={"n": i}))
+      actor.submit(Finalize(chat_id="c1", run_token=rt, snapshot={"final": i}))
+    actor.submit(Barrier()).result(timeout=10)
+    # Every turn finalized; no key is live, so _generation must be empty.
+    assert actor._generation == {}, (
+      f"_generation leaked {len(actor._generation)} dead entries"
+    )
+    # Sanity: the pending/outstanding maps are also clean.
+    assert actor._pending == {}
+    assert actor._outstanding == set()
+  finally:
+    actor.stop(timeout=10)
+
+
+def test_generation_gc_keeps_live_keys_and_drops_only_dead_ones():
+  # GC must delete _generation[key] ONLY when the key is fully quiescent. The
+  # dangerous case: a post-fence snapshot re-adds the SAME key to
+  # _pending/_outstanding before the fence's GC runs — the GC must then leave
+  # the (live, new-generation) epoch alone, or the post-fence snapshot's marker
+  # would lose its fence and could reorder.
+  commits: list = []
+  actor = ChatWriterActor(session_factory=lambda: _RecordingSession(commits))
+  actor.start()
+  try:
+    actor.pause_for_test()  # hold the consumer so the queue accumulates
+    # Fence F1 bumps _generation['cB'] to 1, then snapshot S2 (post-fence) is
+    # enqueued at generation 1 and stays pending/outstanding behind the pause.
+    actor.submit(Finalize(chat_id="cB", run_token="rtB", snapshot={"f1": 1}))
+    actor.submit(PersistTranscript(chat_id="cB", run_token="rtB", snapshot={"s2": 2}))
+    # Live: the post-fence snapshot re-added the key; its epoch must survive F1's
+    # GC because the key is NOT quiescent.
+    assert ("cB", "rtB") in actor._pending
+    assert ("cB", "rtB") in actor._outstanding
+    assert actor._generation.get(("cB", "rtB")) == 1
+    # Drain: F1 dispatched -> GC sees the key is still live (S2 pending) -> keeps
+    # the epoch; then S2's marker commits and the now-dead key is reclaimed.
+    actor.resume_for_test()
+    actor.submit(Barrier()).result(timeout=5)
+    assert commits == [{"f1": 1}, {"s2": 2}], "post-fence snapshot lost its order"
+    assert ("cB", "rtB") not in actor._generation, "committed key not reclaimed"
+  finally:
+    actor.stop(timeout=5)
+
+
+def test_recycled_key_after_generation_gc_commits_without_stale_double_commit():
+  # After a key's generation is GC'd (turn finalized), a NEW snapshot for the
+  # SAME (chat_id, run_token) must commit correctly, and no stale marker left
+  # over from the first turn may double-commit. Drive a full turn, let it GC,
+  # then reuse the key.
+  commits: list = []
+  actor = ChatWriterActor(session_factory=lambda: _RecordingSession(commits))
+  actor.start()
+  try:
+    key_rt = "recycled"
+    # Turn 1: snapshot + finalize. After this the generation entry is GC'd.
+    actor.submit(PersistTranscript(chat_id="c1", run_token=key_rt, snapshot={"t1": 0}))
+    actor.submit(Finalize(chat_id="c1", run_token=key_rt, snapshot={"t1-final": 1}))
+    actor.submit(Barrier()).result(timeout=5)
+    assert ("c1", key_rt) not in actor._generation
+    assert commits == [{"t1-final": 1}]
+    # Turn 2: reuse the recycled key. A fresh snapshot must commit exactly once
+    # (the generation restarted at 0; no stale turn-1 marker double-commits it).
+    s2 = actor.submit(
+      PersistTranscript(chat_id="c1", run_token=key_rt, snapshot={"t2": 9})
+    )
+    actor.submit(Barrier()).result(timeout=5)
+    assert commits == [{"t1-final": 1}, {"t2": 9}]
+    assert s2.result(timeout=5) is True
+    # Recycled key is dead again after its snapshot committed.
+    assert ("c1", key_rt) not in actor._generation
+  finally:
+    actor.stop(timeout=5)
+
+
+# -- FIX F: concurrent start() / start_writer() must not spawn two consumers ---
+#
+# The race window is between the `_thread is None` check and the assignment;
+# the GIL makes it tiny, so a naive thread-burst almost never reproduces it.
+# These tests WIDEN the window deterministically: a Thread subclass that sleeps
+# in its constructor (which the unfixed `start()` calls inside the window) lets
+# every racer pass the check before any assigns. With the fix (atomic
+# check-and-set under a lock) exactly one wins.
+import time as _time
+from unittest import mock as _mock
+
+
+class _SlowConstructThread(threading.Thread):
+  """A Thread whose construction sleeps, widening any check-then-create race."""
+
+  def __init__(self, *args, **kwargs):
+    _time.sleep(0.05)
+    super().__init__(*args, **kwargs)
+
+
+def test_concurrent_start_spawns_exactly_one_consumer_thread():
+  # Two+ concurrent start() callers both passing the `_thread is None` check
+  # would each spawn a consumer thread, violating the single-consumer
+  # invariant. Exactly one must win; the rest must raise RuntimeError.
+  actor = ChatWriterActor(session_factory=lambda: _RecordingSession([]))
+  before = {id(t) for t in threading.enumerate()}
+  results: list = []
+  results_lock = threading.Lock()
+  n = 10
+  barrier = threading.Barrier(n)
+
+  def racer():
+    barrier.wait()  # release all callers as simultaneously as possible
+    try:
+      actor.start()
+      with results_lock:
+        results.append("ok")
+    except RuntimeError:
+      with results_lock:
+        results.append("rejected")
+
+  # Patch only the actor's own consumer-thread construction (inside start()),
+  # not the racer threads themselves, by patching the module symbol.
+  with _mock.patch("app.chat_writer.threading.Thread", _SlowConstructThread):
+    threads = [threading.Thread(target=racer) for _ in range(n)]
+    for t in threads:
+      t.start()
+    for t in threads:
+      t.join(timeout=5)
+  try:
+    # Exactly one start() succeeded; the other n-1 were rejected.
+    assert results.count("ok") == 1, f"expected 1 winner, got {results}"
+    assert results.count("rejected") == n - 1, f"expected {n-1} rejected, got {results}"
+    writer_threads = [
+      t for t in threading.enumerate()
+      if t.name == "chat-writer" and id(t) not in before
+    ]
+    assert len(writer_threads) == 1, (
+      f"expected one consumer thread, found {len(writer_threads)}"
+    )
+  finally:
+    actor.stop(timeout=5)
+
+
+def test_concurrent_start_writer_single_writer_no_orphan_threads():
+  # Concurrent start_writer() callers race on the module-level singleton's
+  # check+create. Only one writer + one consumer thread may result; no orphan
+  # daemon thread may be left consuming a stranded queue.
+  from app import chat_writer
+
+  before = {id(t) for t in threading.enumerate()}
+  writers: list = []
+  writers_lock = threading.Lock()
+  n = 10
+  barrier = threading.Barrier(n)
+
+  def racer():
+    barrier.wait()
+    chat_writer.start_writer(session_factory=lambda: _RecordingSession([]))
+    with writers_lock:
+      writers.append(chat_writer.get_writer())
+
+  # Widen the singleton check+create window the same way (the consumer thread is
+  # constructed inside start_writer -> ChatWriterActor.start()).
+  with _mock.patch("app.chat_writer.threading.Thread", _SlowConstructThread):
+    threads = [threading.Thread(target=racer) for _ in range(n)]
+    for t in threads:
+      t.start()
+    for t in threads:
+      t.join(timeout=5)
+  try:
+    # All callers observe the SAME singleton (no replacement mid-race).
+    assert writers, "no writer was created"
+    assert all(w is writers[0] for w in writers), "start_writer race forked the singleton"
+    writer_threads = [
+      t for t in threading.enumerate()
+      if t.name == "chat-writer" and id(t) not in before
+    ]
+    assert len(writer_threads) == 1, (
+      f"start_writer race spawned {len(writer_threads)} consumer threads"
+    )
+  finally:
+    chat_writer.stop_writer(timeout=5)
+
+
+# -- FIX E: acks must resolve OUTSIDE producer locks (no re-entrancy deadlock) --
+def test_synchronous_done_callback_reentering_submit_does_not_deadlock():
+  # A synchronous add_done_callback on a submitted command's future that itself
+  # re-enters submit() must NOT deadlock: the producer paths that resolve acks
+  # (supersession, invalidation, fatal drain) must release their lock BEFORE
+  # resolving, so the callback's re-entrant submit() can take the same lock.
+  commits: list = []
+  actor = ChatWriterActor(session_factory=lambda: _RecordingSession(commits))
+  actor.start()
+  reentered = Future()
+
+  try:
+    actor.pause_for_test()  # hold the consumer so c1's ack resolves on the
+                            # PRODUCER thread (supersession), not the consumer
+    c1 = PersistTranscript(chat_id="c1", run_token="t1", snapshot={"n": 0})
+
+    def on_done(fut):
+      # Re-enter the actor from inside the ack resolution. If the producer
+      # resolved c1's ack while still holding _pending_lock, this submit()
+      # would deadlock reacquiring it (single-process, non-reentrant Lock).
+      try:
+        f = actor.submit(
+          PersistTranscript(chat_id="c1", run_token="t1", snapshot={"reentrant": 1})
+        )
+        reentered.set_result(f)
+      except BaseException as exc:  # pragma: no cover - surfaces a real failure
+        reentered.set_exception(exc)
+
+    c1.ack = Future()
+    c1.ack.add_done_callback(on_done)
+    actor.submit(c1)
+    # Supersede c1 -> producer calls _safe_set_result(c1.ack, None), which fires
+    # on_done synchronously. This whole call must complete (no deadlock).
+    actor.submit(PersistTranscript(chat_id="c1", run_token="t1", snapshot={"n": 1}))
+    # The re-entrant submit must have completed within a short timeout.
+    reentered.result(timeout=3)
+    actor.resume_for_test()
+    actor.submit(Barrier()).result(timeout=5)
+    # c1's ack resolved to None (superseded); both later snapshots coalesced to
+    # the last one submitted.
+    assert c1.ack.result(timeout=1) is None
+  finally:
+    actor.resume_for_test()
+    actor.stop(timeout=5)
+
+
+def test_fatal_drain_resolving_ack_can_reenter_stop_without_deadlock():
+  # The fatal-reject path in submit() (and _go_fatal's drain) resolve acks with
+  # an exception. A synchronous done-callback that re-enters stop()/submit()
+  # from that resolution must not deadlock on _fatal_lock.
+  class _DeadlySession:
+    def record_commit(self, snapshot):
+      raise KeyboardInterrupt("thread-fatal")
+
+    def commit(self):
+      pass
+
+    def rollback(self):
+      pass
+
+    def close(self):
+      pass
+
+  actor = ChatWriterActor(session_factory=lambda: _DeadlySession())
+  actor.start()
+  reentered = Future()
+  try:
+    # Drive the actor fatal.
+    killer = actor.submit(Finalize(chat_id="c1", run_token="t1", snapshot={"x": 1}))
+    with pytest.raises(BaseException):
+      killer.result(timeout=5)
+    # Now submit a command whose ack-failure (fatal-reject path) fires a
+    # synchronous callback that re-enters submit(). If submit resolved the ack
+    # while still holding _fatal_lock, the re-entrant submit would deadlock.
+    after = Finalize(chat_id="c1", run_token="t1", snapshot={"y": 2})
+    after.ack = Future()
+
+    def on_done(fut):
+      try:
+        actor.submit(Barrier())  # re-enter; must not deadlock on _fatal_lock
+        reentered.set_result(True)
+      except BaseException as exc:  # pragma: no cover
+        reentered.set_exception(exc)
+
+    after.ack.add_done_callback(on_done)
+    actor.submit(after)  # fatal -> ack failed -> on_done fires
+    reentered.result(timeout=3)
+  finally:
+    actor.stop(timeout=5)
