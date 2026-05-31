@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { api } from '../../api/client.js'
+import { api, getToken } from '../../api/client.js'
 import { appQueries, themeQueries } from '../../hooks/queries.js'
 import './AppCanvas.css'
 
@@ -73,7 +73,18 @@ export default function AppCanvas({
   appId, version = 0, appName,
   onNavPush, onNavPop, onNavReset,
 }) {
-  const { data: token } = appQueries.token.useQuery(appId)
+  // The app-scoped token is fetched from the server and isn't available
+  // offline (short-lived; not persisted). Offline, fall back to the
+  // owner JWT from localStorage so an offline-capable app still renders
+  // and its /api/storage/apps/{id} calls authenticate (owner can reach
+  // any app's storage). Without this the `if (!token) return null` gate
+  // below short-circuits offline and the app shows nothing. The iframe
+  // is same-origin and can already read this JWT (documented sandbox
+  // trade-off), so passing it is not a new exposure. Online behavior is
+  // unchanged: the app-scoped token wins as soon as the query resolves.
+  const { data: appToken } = appQueries.token.useQuery(appId)
+  const offline = typeof navigator !== 'undefined' && !navigator.onLine
+  const token = appToken || (offline ? getToken() : undefined)
 
   // AppCanvas was passive (enabled: false) — relied on Shell's
   // useTheme to write the cache. After ticket 047, AppCanvas owns

@@ -420,6 +420,19 @@ export default function Shell() {
     if (empty) {
       chatId = empty.id
     } else {
+      // Creating a fresh chat needs the server (POST allocates the row,
+      // and a chat is only useful once the server-side agent can run).
+      // Offline the POST below throws into the `catch { return }` — a
+      // dead "New chat" tap with no feedback. Tell the user instead.
+      // (The reuse-existing-empty branch above already handled the
+      // offline-friendly case, so reaching here means we truly need
+      // the network.)
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        setToast('You’re offline — new chats need a connection.')
+        setTimeout(() => setToast(null), 4000)
+        closeDrawer()
+        return
+      }
       // Spam-click guard: when no empty exists, two rapid taps would
       // race two POSTs and leave an extra empty behind. The in-flight
       // ref short-circuits the second call until the first resolves.
