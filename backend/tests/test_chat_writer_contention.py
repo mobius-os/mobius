@@ -259,6 +259,84 @@ def test_finalize_ack_only_after_commit(actor):
   assert tool["status"] != "running"
 
 
+# -- BLOCKING 2: must-persist commands fail (not falsely ack) on a no-op ---
+# update_last_assistant_message returns True (lenient) when the chat row is
+# absent OR has no messages — the streaming-path early return. For the
+# MUST-PERSIST commands that means the ack would fire success while NOTHING
+# was persisted (silent loss; for QuestionCommit the card would broadcast
+# despite no durable write). These assert the dispatch RAISES on a no-op.
+def test_question_commit_missing_chat_raises(actor):
+  """QuestionCommit against a chat row that does not exist must RAISE, not
+  falsely ack success — otherwise the runner broadcasts a card whose
+  question_id was never persisted."""
+  # No _seed_chat: the row is absent.
+  fut = actor.submit(
+    QuestionCommit(
+      chat_id="ghost", run_token="rt1", snapshot=_question_msg("q1")
+    )
+  )
+  with pytest.raises(Exception):
+    _await(fut)
+
+
+def test_question_commit_empty_transcript_raises(actor):
+  """QuestionCommit against a chat with no messages must RAISE: there is no
+  assistant message to write the question into, so the question card has no
+  durable home. The lenient streaming early-return would falsely ack True."""
+  _seed_chat(messages=[])
+  fut = actor.submit(
+    QuestionCommit(chat_id="c1", run_token="rt1", snapshot=_question_msg("q1"))
+  )
+  with pytest.raises(Exception):
+    _await(fut)
+
+
+def test_finalize_missing_chat_raises(actor):
+  """Finalize against a missing chat row must RAISE so the caller doesn't
+  promote the queue / schedule a continuation on a write that never landed."""
+  fut = actor.submit(
+    Finalize(
+      chat_id="ghost",
+      run_token="rt1",
+      snapshot=_assistant_msg([{"type": "text", "content": "done"}]),
+    )
+  )
+  with pytest.raises(Exception):
+    _await(fut)
+
+
+def test_finalize_empty_transcript_raises(actor):
+  """Finalize against a chat with no messages must RAISE — there is no
+  assistant message to finalize, so a True ack would be a silent loss."""
+  _seed_chat(messages=[])
+  fut = actor.submit(
+    Finalize(
+      chat_id="c1",
+      run_token="rt1",
+      snapshot=_assistant_msg([{"type": "text", "content": "done"}]),
+    )
+  )
+  with pytest.raises(Exception):
+    _await(fut)
+
+
+def test_question_commit_happy_path_acks_and_persists(actor):
+  """The happy path is unchanged: an assistant message to write into ->
+  QuestionCommit acks True and the block is durably persisted."""
+  _seed_chat(
+    messages=[
+      {"role": "user", "content": "hi", "ts": 1},
+      _assistant_msg([{"type": "text", "content": "thinking"}]),
+    ]
+  )
+  fut = actor.submit(
+    QuestionCommit(chat_id="c1", run_token="rt1", snapshot=_question_msg("q1"))
+  )
+  assert _await(fut) is True
+  chat = _load_chat()
+  assert chat["messages"][-1]["blocks"][0]["question_id"] == "q1"
+
+
 # -- 5. ReplaceTranscript serializes with snapshots -----------------------
 def test_replace_transcript_serializes_with_snapshots(actor):
   """A ReplaceTranscript and a PersistTranscript for the same chat run in FIFO
