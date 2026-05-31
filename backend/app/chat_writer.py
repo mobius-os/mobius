@@ -17,13 +17,18 @@ See ~/mobius-persistence-redesign-2026-05-31.md for the rationale and
 This module is dormant until the activation milestone wires the runners
 and routes onto it.
 
-Concurrency invariant: ack `Future`s are resolved synchronously inside
-`submit`/the consumer while `_fatal_lock` may be held.  The intended
-consumer is `asyncio.wrap_future`, whose done-callback only *schedules*
-resolution on the loop thread — it does NOT run caller code synchronously
-inside `set_result`/`set_exception`.  Do NOT attach a synchronous
-`add_done_callback` that re-enters `submit()`/`stop()`: it would deadlock
-reacquiring `_fatal_lock`.
+Concurrency invariant: ack `Future`s are NEVER resolved while a producer
+lock (`_fatal_lock`/`_pending_lock`) is held.  Every method that resolves an
+ack from a producer path (`submit`'s fatal/stopping reject, `_enqueue_snapshot`'s
+supersession, `_invalidate_pending`'s stale drop, `_go_fatal`'s queue drain)
+collects the `(ack, value)` pairs while holding the lock and resolves them AFTER
+releasing it; the consumer (`_dispatch`/`_take_pending`) likewise resolves
+outside `_pending_lock`.  The intended consumer of an ack is
+`asyncio.wrap_future`, whose done-callback only *schedules* resolution on the
+loop thread.  But because no `set_*` runs under a lock, even a SYNCHRONOUS
+`add_done_callback` that re-enters `submit()`/`stop()` cannot deadlock — the
+re-entrant call reacquires a free lock.  Keep it that way: do not move an ack
+resolution back inside a `with` block.
 """
 
 from __future__ import annotations
@@ -161,6 +166,11 @@ class ChatWriterActor:
     self._session_factory = session_factory
     self._q: "queue.Queue[_Command]" = queue.Queue()
     self._thread: threading.Thread | None = None
+    # Serializes the check-and-set in `start()` so two concurrent callers
+    # can't both pass the `_thread is None` check and each spawn a consumer
+    # thread (which would violate the single-consumer invariant and corrupt
+    # FIFO ordering).  The second caller raises instead.
+    self._start_lock = threading.Lock()
     self._fatal = False
     # `_stopping` is set under `_fatal_lock` by `stop()` before it enqueues
     # the `DrainAndStop` marker.  Once set, `submit()` rejects new commands
@@ -207,14 +217,19 @@ class ChatWriterActor:
 
     Enforces the one-thread invariant: a second `start()` on the same actor
     raises rather than spawning an orphan daemon thread that would consume
-    the same queue and corrupt FIFO ordering.
+    the same queue and corrupt FIFO ordering.  The check-and-set runs under
+    `_start_lock` so two CONCURRENT callers can't both pass the
+    `_thread is None` check (the window between check and assignment, widened
+    by the `Thread(...)` construction, is otherwise a real race) — exactly
+    one wins, the rest raise.
     """
-    if self._thread is not None:
-      raise RuntimeError("chat writer already started")
-    self._thread = threading.Thread(
-      target=self._run, name="chat-writer", daemon=True
-    )
-    self._thread.start()
+    with self._start_lock:
+      if self._thread is not None:
+        raise RuntimeError("chat writer already started")
+      self._thread = threading.Thread(
+        target=self._run, name="chat-writer", daemon=True
+      )
+      self._thread.start()
 
   def submit(self, cmd: _Command) -> Future:
     """Enqueue a command and return its ack `Future`.
@@ -233,29 +248,37 @@ class ChatWriterActor:
     """
     if cmd.ack is None:
       cmd.ack = Future()
+    # Collect every ack to resolve and DEFER its resolution until after the
+    # lock is released (see the deadlock note below).
+    reject_exc: BaseException | None = None
+    dropped_ack: Future | None = None
     # Hold `_fatal_lock` across the check + enqueue so the thread's fatal
     # handler (which takes the same lock to set `_fatal` then drain) and
     # `stop` (which takes it to set `_stopping` then enqueue the marker)
     # can't interleave and strand this command in the queue after the drain
-    # or behind the stop marker.
+    # or behind the stop marker.  No `_safe_set_*` runs INSIDE this block: a
+    # synchronous `add_done_callback` could re-enter `submit()`/`stop()` and
+    # deadlock reacquiring `_fatal_lock`, so all ack resolution is hoisted
+    # below the `with`.
     with self._fatal_lock:
       if self._fatal:
-        _safe_set_exception(
-          cmd.ack, RuntimeError("chat writer is in a fatal state")
-        )
-        return cmd.ack
-      if self._stopping:
-        _safe_set_exception(
-          cmd.ack, RuntimeError("chat writer is stopping")
-        )
-        return cmd.ack
-      if isinstance(cmd, (Finalize, PersistError, AnswerQuestion)):
-        self._invalidate_pending(cmd.chat_id, cmd.run_token)
+        reject_exc = RuntimeError("chat writer is in a fatal state")
+      elif self._stopping:
+        reject_exc = RuntimeError("chat writer is stopping")
+      elif isinstance(cmd, (Finalize, PersistError, AnswerQuestion)):
+        dropped_ack = self._invalidate_pending(cmd.chat_id, cmd.run_token)
         self._q.put(cmd)
       elif isinstance(cmd, PersistTranscript):
-        self._enqueue_snapshot(cmd)
+        dropped_ack = self._enqueue_snapshot(cmd)
       else:
         self._q.put(cmd)
+    # Lock released — now safe to resolve acks even if a done-callback
+    # re-enters the actor.
+    if reject_exc is not None:
+      _safe_set_exception(cmd.ack, reject_exc)
+      return cmd.ack
+    if dropped_ack is not None:
+      _safe_set_result(dropped_ack, None)
     return cmd.ack
 
   def submit_test_persist(self, chat_id, run_token, payload) -> Future:
@@ -281,7 +304,7 @@ class ChatWriterActor:
     self._gate.set()
 
   # -- coalescing helpers (producer side) --------------------------------
-  def _enqueue_snapshot(self, cmd: PersistTranscript) -> None:
+  def _enqueue_snapshot(self, cmd: PersistTranscript) -> Future | None:
     """Record the latest snapshot for the key; enqueue one marker if none.
 
     A snapshot that supersedes an earlier uncommitted one acks the
@@ -295,6 +318,12 @@ class ChatWriterActor:
     (latest wins, one marker); a fence (`_invalidate_pending`) bumps the
     generation so a marker queued before the fence cannot commit a snapshot
     recorded after it.
+
+    Returns the superseded snapshot's ack (to be resolved with `None` by the
+    caller AFTER it has released `submit`'s `_fatal_lock`) or `None`.  The
+    resolution is deferred to the caller because a synchronous
+    `add_done_callback` could re-enter `submit()`/`stop()` and deadlock if the
+    ack were resolved while a producer lock is still held (see `submit`).
     """
     key = (cmd.chat_id, cmd.run_token)
     with self._pending_lock:
@@ -304,16 +333,15 @@ class ChatWriterActor:
       self._pending[key] = cmd
       already_queued = key in self._outstanding
       self._outstanding.add(key)
-    if superseded is not None:
-      _safe_set_result(superseded.ack, None)
     if not already_queued:
       self._q.put(
         _SnapshotReady(
           chat_id=cmd.chat_id, run_token=cmd.run_token, generation=generation
         )
       )
+    return superseded.ack if superseded is not None else None
 
-  def _invalidate_pending(self, chat_id: str, run_token: str) -> None:
+  def _invalidate_pending(self, chat_id: str, run_token: str) -> Future | None:
     """Drop any coalescible snapshot for the key before a must-persist write.
 
     Prevents a stale snapshot enqueued before a `Finalize`/`PersistError`/
@@ -323,14 +351,18 @@ class ChatWriterActor:
     already in the queue (stamped with the OLD generation) becomes a no-op
     in `_take_pending`, even if a NEW snapshot for the key is enqueued
     afterward (which gets the new generation and its own marker).
+
+    Returns the stale snapshot's ack (to be resolved with `None` by the
+    caller AFTER releasing `submit`'s `_fatal_lock`) or `None` — same
+    deferred-resolution contract as `_enqueue_snapshot`, to keep ack
+    resolution off the producer locks.
     """
     key = (chat_id, run_token)
     with self._pending_lock:
       self._generation[key] = self._generation.get(key, 0) + 1
       stale = self._pending.pop(key, None)
       self._outstanding.discard(key)
-    if stale is not None:
-      _safe_set_result(stale.ack, None)
+    return stale.ack if stale is not None else None
 
   def _take_pending(
     self, chat_id: str, run_token: str, generation: int
@@ -358,6 +390,26 @@ class ChatWriterActor:
       self._pending.pop(key, None)
       self._outstanding.discard(key)
       return pending
+
+  def _gc_generation(self, chat_id: str, run_token: str) -> None:
+    """Delete a dead key's fence epoch so `_generation` can't grow unbounded.
+
+    `_pending`/`_outstanding` are cleaned per key, but `_generation[key]` was
+    never deleted, so every finalized turn (run_token is per-turn) leaked one
+    permanent entry.  Called by the consumer after a TERMINAL dispatch
+    (`Finalize`/`PersistError`/`AnswerQuestion`) and after a coalesced
+    snapshot commits.  Deletes the entry ONLY when the key is fully quiescent
+    — neither `_pending` nor `_outstanding` holds it — so a still-outstanding
+    marker (or a post-fence snapshot enqueued for the same key) keeps its
+    epoch.  A later snapshot for a deleted key simply restarts its generation
+    at 0; that is safe because the deletion happens between turns (the fence
+    write already drained), so no stale marker can use the reset epoch to
+    reorder a snapshot ahead of an earlier fence.
+    """
+    key = (chat_id, run_token)
+    with self._pending_lock:
+      if key not in self._pending and key not in self._outstanding:
+        self._generation.pop(key, None)
 
   def stop(self, timeout: float = 10.0) -> None:
     """Drain to a `DrainAndStop`, wait its ack, then join the thread.
@@ -448,6 +500,14 @@ class ChatWriterActor:
           _safe_set_exception(cmd.ack, exc)
           _safe_set_exception(self._inflight_ack, exc)
           self._inflight_ack = None
+        finally:
+          # A terminal command ends its turn; reclaim the key's fence epoch
+          # whether the commit succeeded or raised (the run_token won't be
+          # reused).  GC is a no-op unless the key is fully quiescent, so a
+          # post-fence snapshot enqueued for the same key keeps its epoch
+          # (FIX C).
+          if isinstance(cmd, (Finalize, PersistError, AnswerQuestion)):
+            self._gc_generation(cmd.chat_id, cmd.run_token)
     except BaseException:
       # Thread-fatal (a BaseException the per-command handler didn't
       # catch — e.g. the queue or session itself broke): fail every
@@ -493,6 +553,10 @@ class ChatWriterActor:
       result = self._commit_snapshot(db, pending.snapshot)
       _safe_set_result(pending.ack, result)
       self._inflight_ack = None
+      # The committed snapshot was popped from `_pending`/`_outstanding`; if no
+      # newer snapshot re-added the key it is now dead — reclaim its generation
+      # epoch so the map can't grow unbounded (FIX C).
+      self._gc_generation(cmd.chat_id, cmd.run_token)
       return None
     if isinstance(cmd, _TestPersist):
       # Test-only non-coalescing per-command persist (raw FIFO ordering).
@@ -532,7 +596,15 @@ class ChatWriterActor:
     ack is the submitter's, already failed by submit or by being in
     `_pending`), so failing them is a harmless no-op.  Also fail any
     pending coalesced snapshots so their acks don't hang.
+
+    Ack resolution is hoisted OUT of both locks: the queue is fully drained
+    (and `_pending` snapshotted) under the lock — preserving the
+    set-fatal-then-drain race contract above — but every `_safe_set_*` runs
+    after the `with` block, so a synchronous `add_done_callback` re-entering
+    `submit()`/`stop()` can't deadlock on `_fatal_lock`/`_pending_lock`.
     """
+    dead = RuntimeError("chat writer is dead")
+    drained: list[Future | None] = []
     with self._fatal_lock:
       self._fatal = True
       while True:
@@ -540,17 +612,20 @@ class ChatWriterActor:
           cmd = self._q.get_nowait()
         except queue.Empty:
           break
-        _safe_set_exception(cmd.ack, RuntimeError("chat writer is dead"))
+        drained.append(cmd.ack)
     with self._pending_lock:
       pending = list(self._pending.values())
       self._pending.clear()
       self._outstanding.clear()
+    # Locks released — resolve every collected ack now.
+    for ack in drained:
+      _safe_set_exception(ack, dead)
     for snap in pending:
-      _safe_set_exception(snap.ack, RuntimeError("chat writer is dead"))
+      _safe_set_exception(snap.ack, dead)
     # Belt-and-suspenders: if a popped-but-uncommitted snapshot's ack is
     # still in flight (it's no longer in `_pending`, so the loop above
     # missed it), fail it too.  Already-resolved acks are a no-op.
-    _safe_set_exception(self._inflight_ack, RuntimeError("chat writer is dead"))
+    _safe_set_exception(self._inflight_ack, dead)
     self._inflight_ack = None
 
 
@@ -584,6 +659,11 @@ def _safe_set_exception(ack: Future | None, exc: BaseException | None) -> None:
 # actor exists — recovery cannot depend on a healthy writer); `stop_writer`
 # drains on shutdown.
 _writer: ChatWriterActor | None = None
+# Serializes the singleton check+create in `start_writer` (and the
+# clear in `stop_writer`) so two concurrent callers can't both pass the
+# "already started" check and each construct + start a writer, orphaning one
+# daemon thread that keeps consuming a stranded queue (FIX F).
+_writer_lock = threading.Lock()
 
 
 def start_writer(session_factory=None) -> None:
@@ -596,25 +676,30 @@ def start_writer(session_factory=None) -> None:
   CALLED is tolerated separately on the writer thread (see `_run`), which
   sets `_fatal` and fails acks rather than dying silently.
 
-  Idempotent: if a live (non-fatal) writer already exists, this is a
-  no-op rather than overwriting the singleton — that would orphan the
-  old daemon thread (still consuming its queue) and strand its awaiters.
-  A previously-fatal writer IS replaced so a degraded process can recover
-  by re-calling `start_writer`.
+  Idempotent + concurrency-safe: the singleton check+create runs under
+  `_writer_lock`, so concurrent callers see exactly one writer.  If a live
+  (non-fatal) writer already exists this is a no-op rather than overwriting
+  the singleton — that would orphan the old daemon thread (still consuming
+  its queue) and strand its awaiters.  A previously-fatal writer IS replaced
+  so a degraded process can recover by re-calling `start_writer`.
   """
   global _writer
-  if _writer is not None and not _writer._fatal:
-    log.debug("chat writer already started; start_writer is a no-op")
-    return
-  if session_factory is None:
-    from app.database import SessionLocal
-    session_factory = SessionLocal
-  _writer = ChatWriterActor(session_factory)
-  try:
-    _writer.start()
-  except Exception:
-    log.exception("chat writer failed to start; persistence degraded")
-    _writer._fatal = True  # submit() will ack-with-exception
+  with _writer_lock:
+    if _writer is not None and not _writer._fatal:
+      log.debug("chat writer already started; start_writer is a no-op")
+      return
+    if session_factory is None:
+      from app.database import SessionLocal
+      session_factory = SessionLocal
+    writer = ChatWriterActor(session_factory)
+    try:
+      writer.start()
+    except Exception:
+      log.exception("chat writer failed to start; persistence degraded")
+      writer._fatal = True  # submit() will ack-with-exception
+    # Publish only after construction + start, so a concurrent caller either
+    # sees the old singleton (and no-ops) or the fully-started new one.
+    _writer = writer
 
 
 def get_writer() -> ChatWriterActor:
@@ -627,6 +712,8 @@ def get_writer() -> ChatWriterActor:
 def stop_writer(timeout: float = 10.0) -> None:
   """Drain + join the process writer if it exists."""
   global _writer
-  if _writer is not None:
-    _writer.stop(timeout=timeout)
+  with _writer_lock:
+    writer = _writer
     _writer = None
+  if writer is not None:
+    writer.stop(timeout=timeout)
