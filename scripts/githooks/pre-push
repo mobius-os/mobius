@@ -68,7 +68,11 @@ if [ -n "$JSX" ] && [ -x "$ESB" ]; then
   jsx_fail=0
   while IFS= read -r f; do
     [ -z "$f" ] && continue
-    "$ESB" "$f" --loader=jsx --outfile=/dev/null >"$PP_TMP/esb" 2>&1 || {
+    # `--loader=jsx` (no extension) is stdin-only; for a file argument it
+    # errors "loader without extension only applies when reading from stdin"
+    # and false-fails EVERY frontend file. `--loader:.js=jsx` applies the jsx
+    # loader to .js (and .jsx is inferred from its extension) for file args.
+    "$ESB" "$f" --loader:.js=jsx --outfile=/dev/null >"$PP_TMP/esb" 2>&1 || {
       err "jsx parse error in $f:"; sed 's/^/    /' "$PP_TMP/esb" >&2; jsx_fail=1; }
   done <<< "$JSX"
   [ "$jsx_fail" -eq 0 ] && ok "jsx parse ok" || FAIL=1
