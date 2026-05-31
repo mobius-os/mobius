@@ -105,3 +105,19 @@
    tells the user how to install for their platform exactly once,
    then never appears again. Sub-app install lives in the standalone
    card surfaced from drawer ⋮ on a mini-app. */
+
+  /* Global offline indicator pill in the top bar. Shown only when the
+     browser reports offline (useOnlineStatus). Keeps the user oriented
+     so they aren't guessing about connectivity. */
+  .shell__offline {
+    margin-left: auto;
+    align-self: center;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--danger, #f87171);
+    background: color-mix(in srgb, var(--danger, #f87171) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--danger, #f87171) 35%, transparent);
+    white-space: nowrap;
+  }
