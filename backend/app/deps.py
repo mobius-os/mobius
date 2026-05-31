@@ -157,3 +157,38 @@ def get_principal(
   if scope == "app" and not isinstance(app_id, int):
     raise HTTPException(status_code=401, detail="Malformed app token.")
   return Principal(owner=owner, app_id=app_id)
+
+
+def get_owner_or_app_with_cross_write(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """Owner JWT, OR an app-scoped JWT whose App row has cross_app_access='write'.
+
+  The App Store mini-app is the canonical caller — it ships
+  `permissions.cross_app_access: "write"` in its manifest exactly so
+  it can drive installs (POST /api/apps/install) and uninstalls
+  (DELETE /api/apps/{id}) on the owner's behalf without holding the
+  owner JWT directly. Any other app declaring the same permission
+  inherits the same trust: that's the documented contract surfaced
+  in the App Store's install-confirm modal.
+
+  Permission is gated by the App row, not the manifest the JWT was
+  issued for — so revoking cross_app_access (PATCH /api/apps/{id})
+  cuts off install access on the next request without rotating the
+  JWT.
+  """
+  if principal.app_id is None:
+    return principal.owner
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  if app.cross_app_access != "write":
+    raise HTTPException(
+      status_code=403,
+      detail=(
+        "This app needs cross_app_access='write' in its manifest to "
+        "install or uninstall apps on your behalf."
+      ),
+    )
+  return principal.owner
