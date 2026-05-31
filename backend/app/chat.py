@@ -445,12 +445,22 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
         blocks = list(msgs[-1].get("blocks") or [])
         finalize_blocks(blocks)
         blocks.append(err_block)
+        # build_assistant_message omits ts; carry the turn's existing
+        # stable ts (the frontend bridge + React keys rely on it — a
+        # ts-less message is dropped by useBridgePartial). Mirrors the
+        # ts-carry in _update_last_assistant_message.
+        prev_ts = msgs[-1].get("ts")
         msgs[-1] = build_assistant_message(blocks)
+        msgs[-1]["ts"] = (
+          prev_ts if prev_ts is not None else _next_message_ts(msgs[:-1])
+        )
       else:
         # Process died before any assistant content persisted — surface
         # the interruption as a standalone assistant turn so the user
         # isn't left staring at their own unanswered message.
-        msgs.append(build_assistant_message([err_block]))
+        new_msg = build_assistant_message([err_block])
+        new_msg["ts"] = _next_message_ts(msgs)
+        msgs.append(new_msg)
       chat.messages = msgs
       chat.pending_messages = []
       chat.run_status = None

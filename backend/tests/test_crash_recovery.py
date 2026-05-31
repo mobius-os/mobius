@@ -191,3 +191,35 @@ def test_mark_and_clear_run_status_roundtrip(db, chat):
   row = db.query(models.Chat).filter(models.Chat.id == chat.id).first()
   assert row.run_status is None
   assert row.run_started_at is None
+
+
+def test_reconcile_assigns_ts_to_interrupted_messages(db):
+  """Reconciled assistant messages must carry a stable ts: build_assistant_message
+  omits ts and the frontend bridge drops ts-less messages, so reconciliation has
+  to preserve an existing ts or assign a fresh one."""
+  _make_chat(
+    db, "had-assistant",
+    run_status="running",
+    messages=[
+      {"role": "user", "content": "hi", "ts": 1},
+      {"role": "assistant",
+       "blocks": [{"type": "text", "content": "partial"}], "ts": 2},
+    ],
+  )
+  _make_chat(
+    db, "no-assistant",
+    run_status="running",
+    messages=[{"role": "user", "content": "hi", "ts": 5}],
+  )
+
+  chat_mod.reconcile_interrupted_chats(db)
+  db.expire_all()
+
+  a = db.query(models.Chat).filter(models.Chat.id == "had-assistant").first()
+  assert a.messages[-1]["role"] == "assistant"
+  assert a.messages[-1].get("ts") == 2, "existing assistant ts must be preserved"
+
+  b = db.query(models.Chat).filter(models.Chat.id == "no-assistant").first()
+  assert b.messages[-1]["role"] == "assistant"
+  assert b.messages[-1].get("ts") is not None, "standalone reconciled msg needs a ts"
+  assert b.messages[-1]["ts"] > 5, "fresh ts must follow existing messages"
