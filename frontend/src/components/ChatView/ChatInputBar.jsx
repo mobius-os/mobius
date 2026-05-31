@@ -348,11 +348,6 @@ export default function ChatInputBar({
         onChange={handleFileSelect}
         style={{ display: 'none' }}
       />
-      {offline && (
-        <div className="chat__offline-note">
-          You're offline.
-        </div>
-      )}
       <div className="chat__input-row">
         {leftButtons}
         <div className={`chat__pill${hasFiles ? ' chat__pill--with-attach' : ''}`}>
