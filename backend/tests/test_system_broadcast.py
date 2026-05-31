@@ -338,7 +338,13 @@ def test_flush_surfaces_commit_failure_via_return(db, chat, monkeypatch):
   bc = _OrderedBroadcast(chat.id)
   sink = chat_mod._ChatEventSink(bc, chat.id, db)
 
-  monkeypatch.setattr(chat_mod, "_safe_commit", lambda _db: False)
+  # The streaming commit now runs through chat_writer.update_last_assistant_
+  # message, which commits via chat_writer._commit_or_rollback (the helpers
+  # moved out of chat.py so the writer actor can call them without an import
+  # cycle). Patch that seam so a dropped commit surfaces as flush() -> False.
+  from app import chat_writer as chat_writer_mod
+
+  monkeypatch.setattr(chat_writer_mod, "_commit_or_rollback", lambda _db: False)
 
   # publish records the pending save; flush attempts the commit.
   sink._last_save = 0.0
