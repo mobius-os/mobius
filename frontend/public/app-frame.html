@@ -206,6 +206,18 @@
         return;
       }
       try {
+        // Expose window.mobius BEFORE importing/rendering the app, so the
+        // component sees it on mount — mirrors the standalone host
+        // (routes/standalone.py). Until this landed the runtime was
+        // standalone-only and in-shell apps fell back to plainFetch
+        // against /api/storage with no offline queue and no
+        // window.mobius.chat(). getToken returns the current frame token
+        // (refreshed when the parent re-inits). The import is best-effort:
+        // a runtime fetch failure must not block the app from rendering.
+        try {
+          const rt = await import('/mobius-runtime.js');
+          rt.init({ appId: _FRAME_APP_ID, getToken: async () => token });
+        } catch (e) {}
         const url = `/api/apps/${_FRAME_APP_ID}/module?token=${encodeURIComponent(token)}`;
         const mod = await import(url);
         const Component = mod.default;

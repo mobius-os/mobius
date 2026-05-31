@@ -1,0 +1,25 @@
+/* The embed host fills its iframe viewport. ChatView's own `.chat`
+   layout owns scroll + the fixed composer; the embed adds no chrome
+   (no drawer, no logo bar) — that's the whole point of the
+   stripped-chrome renderer (design §1.2). Fixed-height panel: we do
+   NOT relay content height across the three frames; ChatView manages
+   its own scroll/spacer. */
+.chat-embed {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.chat-embed--empty {
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-embed__notice {
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+  padding: 24px;
+}

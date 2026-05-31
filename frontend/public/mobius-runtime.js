@@ -19,6 +19,10 @@
 //   window.mobius.storage.set(path, data)     -> {synced} | {queued}
 //   window.mobius.storage.remove(path)        -> {synced} | {queued}
 //   window.mobius.storage.pendingCount()      -> Promise<number>
+//   window.mobius.chat({mount, chatId?, ...}) -> Promise<handle>
+//     Embeds the real agent chat (ChatView) in a nested iframe inside
+//     `mount`. handle.on('ready'|'message-sent'|'turn-done'|'error', cb)
+//     and handle.destroy(). See the "Agent-chat embed" block below.
 //
 // Conflict policy: last-write-wins at the path granularity. The newest
 // write for a path supersedes any earlier one — enforced by coalescing
@@ -245,12 +249,162 @@ function makeStorage({ appId, getToken }) {
   }
 }
 
+// ── Agent-chat embed (capability A, design §1) ──────────────────────
+//
+// `window.mobius.chat(opts)` mounts the real ChatView (the shell's chat
+// UI) inside a nested same-origin iframe at the shell embed route, so an
+// app gets a live agent conversation WITHOUT reimplementing chat. The
+// embed is a RENDERER, never the trust boundary (§0b): a same-origin app
+// already holds the owner JWT, so enforcement is server-side.
+//
+// This is the PARENT side of the embed postMessage protocol. The CHILD
+// side is frontend/src/components/ChatEmbed/ChatEmbed.jsx, and the shapes
+// are defined once in frontend/src/lib/chatEmbed.js. mobius-runtime.js is
+// served verbatim from /public and can't import that bundled /src module,
+// so the few constants below are MIRRORED (not imported) — keep them in
+// sync, the way app-frame.html ↔ AppCanvas.jsx already are.
+const EMBED_NS = 'moebius:chat-embed:'
+const EMBED_INIT = EMBED_NS + 'init'
+const EMBED_READY = EMBED_NS + 'ready'
+const EMBED_MESSAGE_SENT = EMBED_NS + 'message-sent'
+const EMBED_TURN_DONE = EMBED_NS + 'turn-done'
+const EMBED_ERROR = EMBED_NS + 'error'
+
+let _embedSeq = 0
+
+function makeChat({ appId, getToken }) {
+  // Lazily create a chat the agent turn can be attributed to, via the
+  // app-attributed backend contract (design §1.1: POST /api/chats gated
+  // by get_principal so an app token is accepted and the row is stamped
+  // created_by_app_id). DEPENDENCY: that gating is built by the backend
+  // capability-A work; until it lands, app tokens are rejected by
+  // /api/chats and this returns null (the embed then shows its no-chat
+  // notice). Owner-token callers already work today.
+  async function createChat(opts) {
+    const token = await getToken()
+    // Root-relative, same as storage above — the app frame is same-origin
+    // with the shell, so /api/chats resolves regardless of the deploy
+    // prefix the browser uses for the embed iframe src.
+    const res = await fetch('/api/chats', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        title: opts && opts.title ? opts.title : 'App chat',
+        // systemPrompt / model / provider are part of the contract the
+        // backend agent is shaping (per-app system prompt is its own
+        // small design, design §1.5). Forward them so they're honored
+        // the moment the backend accepts them; harmless extra fields
+        // until then.
+        ...(opts && opts.systemPrompt ? { system_prompt: opts.systemPrompt } : {}),
+        ...(opts && opts.model ? { model: opts.model } : {}),
+        ...(opts && opts.provider ? { provider: opts.provider } : {}),
+      }),
+    })
+    if (!res.ok) return null
+    const data = await res.json()
+    return data && data.id ? String(data.id) : null
+  }
+
+  // Open the embed in a nested iframe inside `mount` (an element the app
+  // controls). Returns a handle: { chatId, instanceId, iframe, destroy,
+  // on(event, cb) }. Events: 'ready' | 'message-sent' | 'turn-done' |
+  // 'error', each carrying { chatId }.
+  return async function chat(opts = {}) {
+    const mount = opts.mount
+    if (!mount || typeof mount.appendChild !== 'function') {
+      throw new Error('window.mobius.chat: opts.mount must be a DOM element')
+    }
+    let chatId = opts.chatId ? String(opts.chatId) : await createChat(opts)
+    const instanceId = `${appId}:${++_embedSeq}:${Date.now()}`
+    const listeners = { ready: [], 'message-sent': [], 'turn-done': [], error: [] }
+    const emit = (name, detail) => { for (const cb of listeners[name] || []) { try { cb(detail) } catch (e) {} } }
+
+    const iframe = document.createElement('iframe')
+    iframe.title = 'Agent chat'
+    // Fixed-height panel (design §1.2): the app sizes `mount`; the iframe
+    // fills it. We deliberately do NOT relay content height across the
+    // three frames — ChatView owns its own scroll + spacer.
+    iframe.style.cssText = 'width:100%;height:100%;border:0;display:block'
+    // Same sandbox as the app frame so ChatView (which reads the owner
+    // JWT from localStorage and hits /api/chats) works same-origin.
+    iframe.setAttribute(
+      'sandbox',
+      'allow-scripts allow-same-origin allow-forms allow-popups allow-top-navigation-by-user-activation',
+    )
+    iframe.src = chatId
+      ? `/shell/embed/chat?chatId=${encodeURIComponent(chatId)}`
+      : '/shell/embed/chat'
+
+    function sendInit() {
+      const w = iframe.contentWindow
+      if (!w) return
+      w.postMessage(
+        { type: EMBED_INIT, instanceId, chatId: chatId || undefined },
+        window.location.origin,
+      )
+    }
+
+    function onMessage(e) {
+      // §1.4 hardening: three same-origin frames share this origin, so
+      // origin alone is insufficient — also require the message to come
+      // from THIS embed's contentWindow and carry OUR instanceId.
+      if (e.origin !== window.location.origin) return
+      if (e.source !== iframe.contentWindow) return
+      const msg = e.data
+      if (!msg || typeof msg !== 'object') return
+      if (typeof msg.type !== 'string' || !msg.type.startsWith(EMBED_NS)) return
+      if (msg.instanceId && msg.instanceId !== instanceId) return
+      if (msg.type === EMBED_READY) {
+        // The embed resolved its chatId (e.g. it was opened without one
+        // and INIT carried it, or a future lazy path). Adopt it.
+        if (msg.chatId) chatId = String(msg.chatId)
+        emit('ready', { chatId })
+      } else if (msg.type === EMBED_MESSAGE_SENT) {
+        emit('message-sent', { chatId })
+      } else if (msg.type === EMBED_TURN_DONE) {
+        emit('turn-done', { chatId })
+      } else if (msg.type === EMBED_ERROR) {
+        emit('error', { chatId, error: msg.error })
+      }
+    }
+
+    // Register the message listener BEFORE appending the iframe, so it's
+    // live before the embed can post its mount-time READY. INIT is sent
+    // on the iframe's load event, which (per the HTML spec) fires after
+    // the embed document's scripts have run and its own message listener
+    // is registered — so the single INIT reaches it without a race, the
+    // same handshake AppCanvas ↔ app-frame.html rely on.
+    window.addEventListener('message', onMessage)
+    iframe.addEventListener('load', sendInit)
+    mount.appendChild(iframe)
+
+    return {
+      chatId,
+      instanceId,
+      iframe,
+      on(event, cb) {
+        if (listeners[event]) listeners[event].push(cb)
+        return this
+      },
+      destroy() {
+        window.removeEventListener('message', onMessage)
+        iframe.removeEventListener('load', sendInit)
+        if (iframe.parentNode) iframe.parentNode.removeChild(iframe)
+      },
+    }
+  }
+}
+
 export function init({ appId, getToken }) {
   const storage = makeStorage({ appId, getToken })
   window.mobius = {
     appId,
     get online() { return navigator.onLine },
     storage,
+    chat: makeChat({ appId, getToken }),
   }
   storage._drain()    // flush anything left from a previous offline session
   return window.mobius
