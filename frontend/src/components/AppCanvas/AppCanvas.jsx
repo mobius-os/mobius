@@ -169,21 +169,24 @@ export default function AppCanvas({
   function sendInit() {
     if (!loadedRef.current) return
     if (!token) return
-    // Gate on theme being resolved too. Sending init with
-    // `themeCss: undefined` lets the iframe render its first paint
-    // with the fallback theme, then `frame-theme` arrives later and
-    // re-paints — a visible flash on cold cache. The iframe's own
-    // "Loading…" state is already shown until init arrives, so
-    // deferring init by a few ms costs nothing.
-    if (!theme) return
+    // NOTE: do NOT gate on `theme`. Previously this returned early until the
+    // theme query resolved, to avoid a one-frame flash from the iframe's
+    // fallback theme repainting when `frame-theme` arrives. But offline (cold
+    // reopen) the theme query can be slow/undefined, and gating on it meant
+    // `frame-init` was never sent → the iframe mounted but its React never
+    // booted → it sat on the frame's own "Loading…" spinner until the 10s
+    // init-timeout. That spinner-forever (and the slow offline load) is far
+    // worse than a brief theme flash. So we send init as soon as the token is
+    // ready; the frame applies its fallback theme and a later `frame-theme`
+    // message (the effect below + the theme-broadcast effect) repaints it.
     const iframe = iframeRef.current
     if (!iframe || !iframe.contentWindow) return
     iframe.contentWindow.postMessage(
       {
         type: 'moebius:frame-init',
         token,
-        themeCss: theme.css,
-        bg: theme.bg,
+        themeCss: theme?.css,
+        bg: theme?.bg,
       },
       window.location.origin,
     )
