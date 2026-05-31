@@ -57,12 +57,38 @@ import {
 self.skipWaiting()
 clientsClaim()
 
-// Inject point — Workbox replaces this with the precache manifest
-// derived from the Vite build's content-hashed assets. The result
+// Self-hosted React for the mini-app import map. These live in
+// /app/static/vendor (copied by the Dockerfile AFTER the Vite build, so
+// Vite's manifest can't glob them) and are referenced by the import maps
+// in app-frame.html (in-shell iframe) and standalone.py (installed PWA).
+// They MUST be PRECACHED, not left to the runtime CacheFirst /vendor route
+// below: that route only fills lazily after a successful ONLINE fetch of
+// each exact URL, so on an installed PWA the React URLs were never warmed
+// and the iframe's STATIC `import 'react-dom/client'` failed offline —
+// aborting the whole module before any error UI, a silent blank screen.
+// Precaching makes React install-time guaranteed offline, the same tier as
+// the shell bundle. The version in the path is the cache-bust (revision:
+// null); bumping React here means bumping it in app-frame.html + the
+// standalone.py import map + the Dockerfile vendor step in lockstep.
+// Registered in the SAME precacheAndRoute as the shell so its precache
+// route takes precedence over the runtime /vendor CacheFirst route below
+// (first-registered route wins) — the precached copy shadows any stale
+// runtime-cached vendor entry from before this fix.
+const REACT_VENDOR = '/vendor/react@19.2.6'
+const VENDORED_REACT = [
+  `${REACT_VENDOR}/core.mjs`,
+  `${REACT_VENDOR}/react.mjs`,
+  `${REACT_VENDOR}/react-dom.mjs`,
+  `${REACT_VENDOR}/client.mjs`,
+  `${REACT_VENDOR}/jsx-runtime.mjs`,
+].map(url => ({ url, revision: null }))
+
+// Inject point — Workbox replaces `self.__WB_MANIFEST` with the precache
+// manifest derived from the Vite build's content-hashed assets. The result
 // is that every release's shell precache lives under a unique
 // content-versioned cache name; `cleanupOutdatedCaches()` purges
 // older precaches when this SW activates.
-precacheAndRoute(self.__WB_MANIFEST)
+precacheAndRoute([...self.__WB_MANIFEST, ...VENDORED_REACT])
 cleanupOutdatedCaches()
 
 // On activate: evict stale runtime caches — the legacy hand-written
