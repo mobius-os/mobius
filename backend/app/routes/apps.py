@@ -430,7 +430,7 @@ def delete_app(
 def run_app_job(
   app_id: int,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner),
+  principal: Principal = Depends(get_principal),
 ):
   """Spawns the app's scheduled job script as a non-blocking subprocess.
 
@@ -448,10 +448,21 @@ def run_app_job(
   tried so apps installed before the manifest convention solidified
   still work.
 
-  Owner-only — passes the same defense-in-depth CSRF guard the other
-  state-changing endpoints (settings, model-prefs) use.
+  Authorized for the owner OR for an app-scoped token whose `app_id`
+  matches the path — the News "run now" button fires from inside the
+  mini-app iframe, which only holds an app-scoped token, so requiring
+  owner-only here would 403 the very caller the endpoint exists for.
+  The app can trigger its own job but not a sibling's. The same
+  defense-in-depth CSRF guard the other state-changing endpoints
+  (settings, model-prefs) use still applies. Mirrors the self-scope
+  check on the icon-write route above.
   """
   from datetime import UTC, datetime
+  if principal.app_id is not None and principal.app_id != app_id:
+    raise HTTPException(
+      status_code=403,
+      detail="App token can only run its own job.",
+    )
   app = db.query(models.App).filter(models.App.id == app_id).first()
   if not app:
     raise HTTPException(status_code=404, detail="App not found.")
