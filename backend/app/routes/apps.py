@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy.orm import Session
 
 from app import auth, models, schemas
+from app.broadcast import get_system_broadcast
 from app.compiler import compile_jsx
 from app.config import get_settings
 from app.database import get_db
@@ -132,6 +133,16 @@ async def install_app(
     manifest_url=body.manifest_url,
     manifest=body.manifest,
     raw_base=body.raw_base,
+  )
+  # Notify the Shell to refetch its app list so a new install (or an
+  # in-place update) shows up in the drawer without a page reload.
+  # Published only on the success path: install_from_manifest raises
+  # HTTPException on any pre-commit failure, so reaching this line
+  # means the DB row is durable. Cron-registration warnings are
+  # collected into `warnings` and do not block the event — the app
+  # IS installed at this point.
+  get_system_broadcast().publish(
+    {"type": "app_updated", "appId": str(app.id)}
   )
   return schemas.AppInstallOut(
     id=app.id,
@@ -363,9 +374,22 @@ def delete_app(
   compiled_path = app.compiled_path
   app_name = app.name
   app_source_dir = app.source_dir
+  deleted_app_id = app.id
 
   db.delete(app)
   db.commit()
+
+  # Notify the Shell that the app registry changed. The handler in
+  # Shell.jsx refetches /api/apps/ and reconciles the drawer; an
+  # app_updated for an id that no longer exists simply causes that id
+  # to disappear from the next render. We could introduce a separate
+  # `app_removed` type, but app_updated already covers the refresh
+  # semantics and avoids growing SYSTEM_EVENT_TYPES for no behavioral
+  # difference. Published after the commit so an event never refers to
+  # an app the rollback would have kept alive.
+  get_system_broadcast().publish(
+    {"type": "app_updated", "appId": str(deleted_app_id)}
+  )
 
   # Compiled bundle — one file under /data/compiled/.
   if compiled_path:
