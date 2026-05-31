@@ -328,6 +328,25 @@ def _file_change_patch_summary(changes: list[Any]) -> str:
   return "\n".join(lines)
 
 
+async def _maybe_flush(bc) -> None:
+  """Commits any pending streaming save off the event loop, if `bc`
+  supports it.
+
+  The runner's `bc` is the chat's `_ChatEventSink` in production,
+  which defers its blocking `db.commit()` and exposes an async
+  `flush()` so the runner can run that commit off-thread (see
+  `chat._ChatEventSink`). `flush` is an OPTIONAL extension of the
+  broadcast contract: a plain `ChatBroadcast` (or a test double) has
+  no deferred commit, so the absence of `flush` means "nothing to
+  persist," not a bug to guard. Keeping it optional lets the runner
+  stay decoupled from the sink type and avoids forcing every
+  broadcast-like double to grow a method it has no concept of.
+  """
+  flush = getattr(bc, "flush", None)
+  if flush is not None:
+    await flush()
+
+
 def _is_closed_turn_error(exc: BaseException) -> bool:
   """Returns True when the live turn handle is already closed/dead."""
   sdk: dict[str, Any] | None = None
@@ -838,6 +857,13 @@ async def run_codex_sdk_turn(
       registry.register(active_turn)
 
       async for notification in turn.stream():
+        # Commit the prior iteration's streaming save off the loop
+        # before handling this notification. `bc` is the chat's event
+        # sink (chat.py); the blocking db.commit() runs in a worker
+        # thread here so a SQLite lock can't stall the event loop and
+        # starve other chats' SSE. No-op when nothing is pending or
+        # when `bc` is a plain broadcast. See _ChatEventSink.
+        await _maybe_flush(bc)
         payload = notification.payload
 
         if isinstance(payload, sdk["AgentMessageDeltaNotification"]):
