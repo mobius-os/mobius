@@ -163,29 +163,59 @@ registerRoute(
 // are NOT swept on activate; only logout clears them (client.js
 // wipes all mobius-* caches).
 
-// Cache a response only when the server marks the app offline-capable
-// (X-Mobius-Offline header, set by routes/apps.py + standalone.py for
-// offline_capable apps). Non-capable apps are never cached, so their
-// current network-only behavior is preserved exactly. Cacheability is
-// a function of server state, mirroring the ETag freshness model.
-const offlineCapableOnly = {
-  cacheWillUpdate: async ({ response }) =>
-    response && response.status === 200 &&
-    response.headers.get('X-Mobius-Offline') === '1'
-      ? response
-      : null,
-}
-
-// The module URL carries a rotating auth token (and a retry `_=` buster);
-// strip both so the cache key is stable across token rotation — otherwise
-// every load is a cache miss and the offline entry is unreachable.
-const stableModuleKey = {
-  cacheKeyWillBeUsed: async ({ request }) => {
-    const u = new URL(request.url)
-    u.searchParams.delete('token')
-    u.searchParams.delete('_')
-    return u.href
-  },
+// Offline runtime caching for the per-app frame + module and the
+// standalone-app navigation. Only stores responses the server marks
+// offline-capable (X-Mobius-Offline header, set by routes/apps.py +
+// standalone.py for offline_capable apps), so non-capable apps keep
+// their network-only behavior exactly.
+//
+// Why a hand-written handler instead of NetworkFirst + a cacheWillUpdate
+// gate: these routes carry an ETag and `Cache-Control: no-cache`. Once the
+// browser HTTP-caches a response, the SW's own `fetch(request)` revalidates
+// with If-None-Match and the server answers `304 Not Modified` — which has
+// no body and status 304, so the offline-capable gate (status === 200)
+// rejected it and NOTHING was ever written to the offline cache. The app's
+// module was then absent offline and the in-shell iframe's dynamic
+// `import()` of /module rejected, blanking the app (React kept working only
+// because it is precached). The 304 made this intermittent and is why it
+// survived several server-side fixes — the broken artifact lived in the
+// device cache, untouched by any server change.
+//
+// The fix: fetch with `cache: 'reload'` to BYPASS the browser HTTP cache,
+// so every online load is a full 200 with a body (never a 304); store that
+// under a token-stripped key; serve the stored copy when the network fails.
+// This makes offline availability a deterministic function of "was it
+// loaded online once," independent of HTTP-cache revalidation state.
+function offlineCapableHandler(cacheName) {
+  return async ({ request }) => {
+    const cache = await caches.open(cacheName)
+    // The module URL carries a rotating auth token and a retry `_=` buster;
+    // strip both so the cache key is stable across token rotation (else
+    // every load is a miss and the offline entry is unreachable).
+    const key = new URL(request.url)
+    key.searchParams.delete('token')
+    key.searchParams.delete('_')
+    const cacheKey = key.href
+    try {
+      // request.url keeps the token (the server needs it to auth /module);
+      // cache:'reload' forces a fresh 200 body past the HTTP cache.
+      const resp = await fetch(request.url, {
+        cache: 'reload',
+        credentials: 'same-origin',
+      })
+      if (
+        resp && resp.status === 200 &&
+        resp.headers.get('X-Mobius-Offline') === '1'
+      ) {
+        await cache.put(cacheKey, resp.clone())
+      }
+      return resp
+    } catch (err) {
+      const cached = await cache.match(cacheKey)
+      if (cached) return cached
+      throw err
+    }
+  }
 }
 
 // Shell data GETs — last-known theme + app-list so a cold offline
@@ -231,17 +261,14 @@ registerRoute(
   }),
 )
 
-// App frame/module — cached only for offline-capable apps (header
-// gate). NetworkFirst keeps the network authoritative online (fresh
-// module + ETag revalidation), so this does NOT reintroduce the
-// stale-module bug class (that was CacheFirst). Offline → cached.
+// App frame/module — stored for offline-capable apps via the
+// reload-bypass handler (see offlineCapableHandler). Network wins online
+// (always a fresh 200 body, so no stale module), cache serves offline.
+// This is the route whose NetworkFirst+304 interaction left the module
+// uncached and blanked the in-shell iframe offline.
 registerRoute(
   ({ url }) => /^\/api\/apps\/\d+\/(frame|module)$/.test(url.pathname),
-  new NetworkFirst({
-    cacheName: 'mobius-offline-apps',
-    networkTimeoutSeconds: 5,
-    plugins: [offlineCapableOnly, stableModuleKey],
-  }),
+  offlineCapableHandler('mobius-offline-apps'),
 )
 
 // Shell + bare-domain navigations: network wins online (fresh
@@ -255,17 +282,16 @@ registerRoute(
   }),
 )
 
-// Standalone mini-app navigations: cached only for offline-capable
-// apps (header gate). A non-capable app offline caches nothing →
-// NetworkFirst throws → catch handler serves the branded offline page.
+// Standalone mini-app navigations: stored for offline-capable apps via
+// the same reload-bypass handler — the standalone page carries the same
+// ETag + `Cache-Control: no-cache`, so it had the identical 304-never-
+// cached defect as the frame/module route. A non-capable app caches
+// nothing → handler rethrows offline → catch handler serves the branded
+// offline page.
 registerRoute(
   ({ request, url }) =>
     request.mode === 'navigate' && url.pathname.startsWith('/apps/'),
-  new NetworkFirst({
-    cacheName: 'mobius-standalone',
-    networkTimeoutSeconds: 4,
-    plugins: [offlineCapableOnly],
-  }),
+  offlineCapableHandler('mobius-standalone'),
 )
 
 // Last resort for any document we still couldn't serve: the cached
