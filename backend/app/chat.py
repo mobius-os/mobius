@@ -331,6 +331,147 @@ def forget_chat(chat_id: str) -> None:
   registry.forget(chat_id)
 
 
+# Durable run marker. The runner registry holds the live "is this chat
+# running" truth in memory; these two helpers mirror it onto the Chat
+# row so it survives a process death. The pair (set on turn start,
+# clear on turn end) is what lets startup reconciliation distinguish a
+# chat that genuinely finished from one whose process was killed
+# mid-turn. Best-effort, like the other small DB writers here: a
+# missed write degrades to "reconciliation has nothing to fix" (clear
+# missed) or "reconciliation resolves a turn that actually finished"
+# (set missed) — both are self-correcting and never strand the chat.
+
+def _mark_run_started(db: Session, chat_id: str) -> None:
+  """Marks the chat's row as having a turn in flight (durable copy of
+  the in-memory registry state)."""
+  if not chat_id:
+    return
+  try:
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    if chat is not None:
+      chat.run_status = "running"
+      chat.run_started_at = datetime.now(UTC)
+      db.commit()
+  except Exception:
+    db.rollback()
+
+
+def _clear_run_status(db: Session, chat_id: str) -> None:
+  """Clears the chat's durable run marker once the turn has ended."""
+  if not chat_id:
+    return
+  try:
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    if chat is not None and (
+      chat.run_status is not None or chat.run_started_at is not None
+    ):
+      chat.run_status = None
+      chat.run_started_at = None
+      db.commit()
+  except Exception:
+    db.rollback()
+
+
+def reconcile_interrupted_chats(db: Session) -> list[str]:
+  """Resolve chats stranded "running" by a process that died mid-turn.
+
+  Called once from the FastAPI lifespan startup, BEFORE the server
+  accepts requests. The runner registry is in-memory, so at boot it is
+  always empty: every chat whose row still reads ``run_status ==
+  "running"`` is therefore a turn the previous process never finished
+  (a clean shutdown clears the marker in run_chat's finally; only a
+  crash — OOM / SIGKILL — leaves it set). For each such chat we:
+
+    - finalize the persisted transcript so a reopen renders a resolved
+      turn rather than a forever-spinning tool block: any tool block
+      still marked "running" on the last assistant message is forced
+      to "done" (server-side truth, not just the client-side mask in
+      ChatView), and a short interrupted-turn error block is appended;
+    - drop any stranded ``pending_messages`` (queued sends that would
+      otherwise never drain). They are CLEARED, not auto-resumed: the
+      process most likely died from resource pressure, so re-spawning
+      agent turns during boot risks a crash loop, and there is no live
+      SSE client to receive them. Clearing is the reversible choice —
+      the user resends if they still want the work. The count is noted
+      in the appended error so the surprise is visible;
+    - clear the durable run marker.
+
+  No queue lock is taken: this runs single-threaded at startup before
+  any POST /messages can land, so the serialization invariant that
+  ``_clear_pending_messages`` documents has no concurrent writer to
+  guard against here.
+
+  Returns the ids of the chats it reconciled (empty list if none) so
+  the caller can log/observe the recovery rather than have it happen
+  silently.
+  """
+  log = _get_logger()
+  reconciled: list[str] = []
+  try:
+    stale = (
+      db.query(models.Chat)
+      .filter(models.Chat.run_status == "running")
+      .filter(models.Chat.deleted_at.is_(None))
+      .all()
+    )
+  except Exception:
+    log.exception("reconcile_interrupted_chats: query failed")
+    return reconciled
+
+  for chat in stale:
+    # Belt-and-suspenders: if a live registry entry somehow exists for
+    # this chat (it cannot at a cold boot, but a future warm-restart
+    # path might call this), the turn is genuinely in flight — leave it
+    # alone rather than yank a running turn's transcript out from under
+    # it.
+    if registry.is_alive(chat.id):
+      continue
+    try:
+      dropped = len(chat.pending_messages or [])
+      msgs = list(chat.messages or [])
+      note = "The previous turn was interrupted (the server restarted)."
+      if dropped:
+        note += (
+          f" {dropped} queued message(s) were cleared — resend them if"
+          " you still need them."
+        )
+      # `message` (not `content`) is the error-block field the
+      # transcript renderer reads — see MsgContent.jsx's error branch
+      # and events.process_event's "error" handler, which both key on
+      # block["message"]. Matching that shape makes the synthetic note
+      # render identically to a live provider error.
+      err_block = {"type": "error", "message": note}
+      if msgs and msgs[-1].get("role") == "assistant":
+        blocks = list(msgs[-1].get("blocks") or [])
+        finalize_blocks(blocks)
+        blocks.append(err_block)
+        msgs[-1] = build_assistant_message(blocks)
+      else:
+        # Process died before any assistant content persisted — surface
+        # the interruption as a standalone assistant turn so the user
+        # isn't left staring at their own unanswered message.
+        msgs.append(build_assistant_message([err_block]))
+      chat.messages = msgs
+      chat.pending_messages = []
+      chat.run_status = None
+      chat.run_started_at = None
+      db.commit()
+      reconciled.append(chat.id)
+    except Exception:
+      db.rollback()
+      log.exception(
+        "reconcile_interrupted_chats: failed to reconcile chat_id=%s",
+        chat.id,
+      )
+
+  if reconciled:
+    log.info(
+      "reconciled %d interrupted chat(s) on startup: %s",
+      len(reconciled), ", ".join(reconciled),
+    )
+  return reconciled
+
+
 def _clear_pending_messages(db: Session | None, chat_id: str) -> None:
   """Clears persisted queued messages for the chat, best-effort.
 
@@ -427,6 +568,22 @@ async def stop_chat_for(chat_id: str, db: Session = None) -> bool:
   # own state).
   async with chat_queue.get_lock(chat_id):
     _clear_pending_messages(db, chat_id)
+  # Stop is a terminal transition: clear the durable run marker so a
+  # later crash+restart doesn't replay a spurious "interrupted" note
+  # for a turn the user already stopped. The dying run_chat's finally
+  # won't do it — the gen bump above transferred ownership away from
+  # it. Use the caller's session when present (the /chat/stop route
+  # passes one); fall back to a short-lived session for callers that
+  # pass db=None (internal stop paths).
+  if db is not None:
+    _clear_run_status(db, chat_id)
+  else:
+    from app.database import SessionLocal
+    _db = SessionLocal()
+    try:
+      _clear_run_status(_db, chat_id)
+    finally:
+      _db.close()
   questions.cancel(chat_id)
   all_stopped = True
   log = _get_logger()
@@ -534,6 +691,18 @@ def _schedule_continuation(
     if coro is not None:
       coro.close()
     discard_starting(chat_id)
+    # The continuation never started, and the gen bump above means the
+    # outgoing turn's finally won't clear the durable run marker (it no
+    # longer owns the generation). Clear it here so the chat isn't left
+    # falsely "running" — a real terminal state, just reached via a
+    # scheduling failure rather than a normal turn end.
+    if chat_id:
+      from app.database import SessionLocal
+      _db = SessionLocal()
+      try:
+        _clear_run_status(_db, chat_id)
+      finally:
+        _db.close()
 
 
 # Queue drain helpers — pre-bound to the chat-side callbacks so the
@@ -615,6 +784,21 @@ async def run_chat(
     # taken ownership of _starting.
     if run_gen is None or current_run_generation(chat_id) == run_gen:
       discard_starting(chat_id)
+      # Clear the durable run marker under the SAME ownership guard so
+      # a continuation handoff (which bumps the generation before this
+      # finally fires) leaves the marker set — the next turn owns it
+      # and will clear it at its own end. Without the guard, the old
+      # turn's finally would clear "running" out from under a
+      # just-scheduled continuation and reopen the crash-recovery gap
+      # for that chain. Use a fresh short-lived session: _run_chat_impl
+      # opened and closed its own.
+      if chat_id:
+        from app.database import SessionLocal
+        _db = SessionLocal()
+        try:
+          _clear_run_status(_db, chat_id)
+        finally:
+          _db.close()
 
 
 async def _run_chat_impl(
@@ -640,6 +824,14 @@ async def _run_chat_impl(
   log = _get_logger()
   settings = get_settings()
   user_message = messages[-1].content
+
+  # Durable run marker: record that a turn is in flight so a process
+  # death (OOM / SIGKILL) mid-turn is recoverable on the next boot
+  # (see reconcile_interrupted_chats). The matching clear lives in
+  # run_chat's finally, gated on the same generation-ownership check
+  # that releases the _starting claim, so a continuation handoff keeps
+  # the marker continuously set across the whole chain of turns.
+  _mark_run_started(db, chat_id)
 
   # On the first message of a session, prepend the agent experience file so
   # the agent always sees it without needing a tool call.  The system prompt
