@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from app import auth, chat_queue, models, questions, schemas
 from app.broadcast import ChatBroadcast, create_broadcast, get_broadcast, set_active_broadcast
+from app.chat_writer import alloc_run_token
 from app.config import get_settings
 from app.events import (
   build_assistant_message,
@@ -227,10 +228,17 @@ class _ChatEventSink:
     {"tool_start", "tool_end", "error", "question"}
   )
 
-  def __init__(self, bc, chat_id: str, db: Session):
+  def __init__(self, bc, chat_id: str, db: Session, run_token: str | None = None):
     self.bc = bc
     self.chat_id = chat_id
     self.db = db
+    # Per-turn run identity, allocated centrally in `_run_chat_impl` (see
+    # `chat_writer.alloc_run_token`). DORMANT in this milestone: the sink
+    # only parks it so a later milestone can stamp it on writer-actor
+    # commands `(chat_id, run_token)`. Nothing here uses it to alter the
+    # existing persist path — `run_token=None` keeps legacy/test callers
+    # working with zero behavior change.
+    self.run_token = run_token
     self.assistant_blocks: list = []
     self.session_id: str | None = None
     self.cost_usd: float | None = None
@@ -970,6 +978,14 @@ async def _run_chat_impl(
   settings = get_settings()
   user_message = messages[-1].content
 
+  # Allocate exactly one run token per turn. `_run_chat_impl` is invoked
+  # once per turn (the initial send and each scheduled continuation are
+  # separate invocations), so this single allocation gives every turn a
+  # distinct, process-unique token. DORMANT: it is threaded into the sink
+  # for a later milestone to key writer-actor commands on; nothing routes
+  # through the actor yet.
+  run_token = alloc_run_token()
+
   # Durable run marker: record that a turn is in flight so a process
   # death (OOM / SIGKILL) mid-turn is recoverable on the next boot
   # (see reconcile_interrupted_chats). The matching clear lives in
@@ -1194,7 +1210,7 @@ async def _run_chat_impl(
       data_dir=settings.data_dir,
       chat_id=chat_id,
     )
-    sink = _ChatEventSink(bc, chat_id, db)
+    sink = _ChatEventSink(bc, chat_id, db, run_token=run_token)
     runner_result: dict = {}
     try:
       from app.codex_sdk_runner import run_codex_sdk_turn
@@ -1324,7 +1340,7 @@ async def _run_chat_impl(
       data_dir=settings.data_dir,
       chat_id=chat_id,
     )
-    sink = _ChatEventSink(bc, chat_id, db)
+    sink = _ChatEventSink(bc, chat_id, db, run_token=run_token)
     try:
       from app.claude_sdk_runner import run_claude_sdk_turn
       runner_result = await run_claude_sdk_turn(

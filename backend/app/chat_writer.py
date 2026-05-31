@@ -33,6 +33,7 @@ resolution back inside a `with` block.
 
 from __future__ import annotations
 
+import itertools
 import logging
 import queue
 import sys
@@ -651,6 +652,32 @@ def _safe_set_exception(ack: Future | None, exc: BaseException | None) -> None:
     ack.set_exception(exc or RuntimeError("chat writer failed"))
   except InvalidStateError:
     pass
+
+
+# -- per-turn run identity ------------------------------------------------
+# Process-scoped, unique, monotonic run-token allocation.  One token is
+# allocated per TURN (initial send and each continuation get their own),
+# centrally — outside the per-turn sink — so run identity has a single
+# source rather than being derived from sink/chat state.  The token is an
+# OPAQUE string with no semantics callers may lean on; at a later milestone
+# it BECOMES the durable `chat_runs.id`, so keeping it opaque now avoids a
+# second identity to migrate.  `itertools.count` under a lock makes the
+# sequence both unique and monotonic even when turns start concurrently on
+# different threads.
+_token_counter = itertools.count(1)
+_token_lock = threading.Lock()
+
+
+def alloc_run_token() -> str:
+  """Allocate the next process-unique, monotonic run token.
+
+  Thread-safe: `itertools.count.__next__` is not guaranteed atomic across
+  arbitrary producers, so the increment runs under `_token_lock`.  Returns
+  an opaque `"rt-<n>"` string — callers must treat it as an identity tag,
+  not a number.
+  """
+  with _token_lock:
+    return f"rt-{next(_token_counter)}"
 
 
 # -- module singleton + lifespan accessors -------------------------------
