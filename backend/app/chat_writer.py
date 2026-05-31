@@ -33,6 +33,7 @@ resolution back inside a `with` block.
 
 from __future__ import annotations
 
+import enum
 import itertools
 import logging
 import queue
@@ -805,15 +806,21 @@ class ChatWriterActor:
     if isinstance(cmd, QuestionCommit):
       # Save-before-broadcast: the commit MUST land before the ack resolves
       # so the runner only broadcasts the card after the question_id
-      # persisted.  False -> raise so the caller does NOT broadcast.
-      ok = self._persist_message(db, cmd.chat_id, cmd.snapshot)
-      if not ok:
-        raise _PersistFailed("QuestionCommit did not persist")
+      # persisted.  Anything but APPLIED (a NOOP on a missing row / empty
+      # transcript, or a DROPPED commit) raises so the caller does NOT
+      # broadcast a card whose question was never written.
+      outcome = self._persist_message_required(db, cmd.chat_id, cmd.snapshot)
+      if outcome is not _WriteOutcome.APPLIED:
+        raise _PersistFailed(f"QuestionCommit did not persist ({outcome.value})")
       return True
     if isinstance(cmd, Finalize):
-      ok = self._finalize(db, cmd.chat_id, cmd.snapshot)
-      if not ok:
-        raise _PersistFailed("Finalize did not persist")
+      # Must-persist terminal write: a NOOP (missing row / empty transcript /
+      # no blocks) is a silent loss, not a success — raise so the caller does
+      # not promote the queue / schedule a continuation on a write that never
+      # landed.
+      outcome = self._finalize_required(db, cmd.chat_id, cmd.snapshot)
+      if outcome is not _WriteOutcome.APPLIED:
+        raise _PersistFailed(f"Finalize did not persist ({outcome.value})")
       return True
     if isinstance(cmd, AnswerQuestion):
       return self._answer_question(db, cmd)
@@ -851,6 +858,19 @@ class ChatWriterActor:
       return self._commit_snapshot(db, snapshot)
     return update_last_assistant_message(db, chat_id, snapshot)
 
+  def _persist_message_required(self, db, chat_id: str, snapshot: dict):
+    """Must-persist variant of `_persist_message`, returning a `_WriteOutcome`.
+
+    Backs `QuestionCommit`: the dispatch raises unless this is APPLIED, so a
+    NOOP (missing row / empty transcript) fails the ack instead of falsely
+    succeeding.  On the DB-free recording stub a recorded commit IS the write,
+    so it reports APPLIED.
+    """
+    if hasattr(db, "record_commit"):
+      self._commit_snapshot(db, snapshot)
+      return _WriteOutcome.APPLIED
+    return _apply_last_assistant_message(db, chat_id, snapshot)
+
   def _finalize(self, db, chat_id: str, snapshot: dict) -> bool:
     """Force-complete tool blocks and write the terminal assistant message.
 
@@ -860,6 +880,17 @@ class ChatWriterActor:
     if hasattr(db, "record_commit"):
       return self._commit_snapshot(db, snapshot)
     return finalize_response(db, chat_id, snapshot.get("blocks") or [])
+
+  def _finalize_required(self, db, chat_id: str, snapshot: dict):
+    """Must-persist variant of `_finalize`, returning a `_WriteOutcome`.
+
+    Backs `Finalize`: the dispatch raises unless APPLIED.  On the recording
+    stub the recorded commit IS the terminal write, so it reports APPLIED.
+    """
+    if hasattr(db, "record_commit"):
+      self._commit_snapshot(db, snapshot)
+      return _WriteOutcome.APPLIED
+    return finalize_response_outcome(db, chat_id, snapshot.get("blocks") or [])
 
   def _answer_question(self, db, cmd: AnswerQuestion) -> bool:
     """Re-read the chat fresh, merge answers into the question block, commit.
@@ -1286,15 +1317,40 @@ def next_message_ts(existing: list) -> int:
   return max(now, max_ts + 1)
 
 
-def update_last_assistant_message(db, chat_id: str, message: dict) -> bool:
-  """Updates the last assistant message in the chat (for streaming updates)."""
+class _WriteOutcome(enum.Enum):
+  """Tri-state result of an assistant-message write.
+
+  The streaming sink path treats NOOP as success (a write with "nothing to
+  update yet" is normal mid-stream).  A MUST-PERSIST command
+  (`QuestionCommit`/`Finalize`) instead treats NOOP as a FAILURE: there was a
+  durable write the caller depends on (the question card it's about to
+  broadcast, the terminal turn state), and "nothing was written" must fail
+  the ack rather than falsely succeed (silent loss).  `_apply_outcome`
+  returns this; `update_last_assistant_message` collapses it to the bool the
+  sink caller still expects.
+  """
+
+  APPLIED = "applied"  # found a row + assistant slot, committed cleanly
+  NOOP = "noop"  # no chat_id / missing row / no messages to write into
+  DROPPED = "dropped"  # write attempted but the commit dropped (lock)
+
+
+def _apply_last_assistant_message(db, chat_id: str, message: dict):
+  """Core assistant-message write, returning a `_WriteOutcome`.
+
+  Distinguishes APPLIED (the write landed), NOOP (no chat_id / missing row /
+  empty transcript — nothing to update yet), and DROPPED (the commit dropped
+  on a transient lock).  The lenient sink path (`PersistTranscript`/
+  `PersistError`) and `update_last_assistant_message` map NOOP to success; a
+  must-persist command maps it to a raised ack.
+  """
   if not chat_id:
-    return True
+    return _WriteOutcome.NOOP
   from app.models import Chat
 
   chat = db.query(Chat).filter(Chat.id == chat_id).first()
   if not chat or not chat.messages:
-    return True
+    return _WriteOutcome.NOOP
   msgs = list(chat.messages)
   if msgs and msgs[-1].get("role") == "assistant":
     # Carry answers forward: apply_answers_to_last_question writes
@@ -1339,21 +1395,54 @@ def update_last_assistant_message(db, chat_id: str, message: dict) -> bool:
     message["ts"] = next_message_ts(msgs + list(chat.pending_messages or []))
     msgs.append(message)
   chat.messages = msgs
-  return _commit_or_rollback(db)
+  return (
+    _WriteOutcome.APPLIED
+    if _commit_or_rollback(db)
+    else _WriteOutcome.DROPPED
+  )
+
+
+def update_last_assistant_message(db, chat_id: str, message: dict) -> bool:
+  """Updates the last assistant message in the chat (for streaming updates).
+
+  The bool adapter the streaming sink still consumes: APPLIED/NOOP -> True
+  (a mid-stream write with nothing to update yet is fine), DROPPED -> False.
+  Must-persist commands call `_apply_last_assistant_message` directly so they
+  can fail their ack on a NOOP (silent-loss guard); this wrapper's semantics
+  are unchanged for the sink caller.
+  """
+  return _apply_last_assistant_message(db, chat_id, message) is not (
+    _WriteOutcome.DROPPED
+  )
+
+
+def finalize_response_outcome(db, chat_id: str, assistant_blocks: list):
+  """End-of-response cleanup, returning a `_WriteOutcome`.
+
+  Empty blocks -> NOOP (no terminal state to write); otherwise force-complete
+  the tool blocks and delegate to `_apply_last_assistant_message`, which
+  distinguishes APPLIED / NOOP (missing row, empty transcript) / DROPPED.  A
+  must-persist `Finalize` raises on anything but APPLIED so it never acks
+  success on a write that did not land.
+  """
+  if not assistant_blocks:
+    return _WriteOutcome.NOOP
+  finalize_blocks(assistant_blocks)
+  return _apply_last_assistant_message(
+    db, chat_id, build_assistant_message(assistant_blocks)
+  )
 
 
 def finalize_response(db, chat_id: str, assistant_blocks: list) -> bool:
   """End-of-response cleanup: force-complete tool blocks and save.
 
-  Returns the underlying commit result (True on success, False on a
-  dropped commit or when there is nothing to persist) so the writer
-  actor can ack-fail a `Finalize` whose commit didn't land.
+  The bool adapter (the sink ignores the return, but the contract is
+  preserved): True on APPLIED, False on NOOP (nothing to persist) or DROPPED
+  (the commit dropped).  The actor's `Finalize` dispatch uses
+  `finalize_response_outcome` directly so it can fail the ack on a NOOP.
   """
-  if not assistant_blocks:
-    return False
-  finalize_blocks(assistant_blocks)
-  return update_last_assistant_message(
-    db, chat_id, build_assistant_message(assistant_blocks)
+  return finalize_response_outcome(db, chat_id, assistant_blocks) is (
+    _WriteOutcome.APPLIED
   )
 
 
