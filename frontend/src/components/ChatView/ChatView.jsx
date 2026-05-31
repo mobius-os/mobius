@@ -2,7 +2,6 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { apiFetch, getToken, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
-import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode from './useScrollMode.js'
 import useVoiceInput from './useVoiceInput.js'
@@ -13,8 +12,7 @@ import useBridgePartial from './hooks/useBridgePartial.js'
 import ChatInputBar from './ChatInputBar.jsx'
 import ComposerPopover from './ComposerPopover.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
-import ToolBlock from './ToolBlock.jsx'
-import QuestionCard from './QuestionCard.jsx'
+import StreamingMessage from './StreamingMessage.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
 import MsgContent from './MsgContent.jsx'
 import { questionKey } from './questionKey.js'
@@ -1258,62 +1256,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           )})}
 
           {sending && streamItems.length > 0 && (
-            <li
-              className="chat__msg chat__msg--assistant"
-              data-key={streamingDataKey}
-            >
-              {streamItems.map((item, i) => {
-                if (item.type === 'tool') {
-                  return (
-                    <div key={`s-${i}`} className="chat__tools">
-                      <ToolBlock t={item} />
-                    </div>
-                  )
-                }
-                if (item.type === 'question') {
-                  // QuestionCard tracks its own `submitted` state and
-                  // disables itself after the user answers. The agent
-                  // is paused on the AskUserQuestion future, so the
-                  // user MUST be able to click these chips even while
-                  // the turn is otherwise "streaming". No external
-                  // disabled gate.
-                  return (
-                    <div key={`s-${i}`}>
-                      <QuestionCard
-                        questions={item.questions}
-                        onAnswer={doSendSilent}
-                      />
-                    </div>
-                  )
-                }
-                if (item.type === 'text') {
-                  const isLast = i === streamItems.length - 1
-                  return (
-                    <div key={`s-${i}`} className="chat__text chat__text--assistant">
-                      <ProgressiveMarkdown text={item.content} />
-                      {isLast && <span className="chat__cursor" />}
-                    </div>
-                  )
-                }
-                if (item.type === 'error') {
-                  // StandardMarkdown so URLs in provider errors
-                  // (quota links, billing pages) become clickable.
-                  // Same shape as the post-promote render in
-                  // MsgContent so the user gets the same affordance
-                  // before and after the streaming `<li>` is
-                  // replaced by the persisted message.
-                  return (
-                    <div key={`s-${i}`} className="chat__text--error" role="alert">
-                      <span className="chat__error-label">Error</span>
-                      <StandardMarkdown
-                        text={item.message || 'The agent ran into an issue.'}
-                      />
-                    </div>
-                  )
-                }
-                return null
-              })}
-            </li>
+            <StreamingMessage
+              streamItems={streamItems}
+              dataKey={streamingDataKey}
+              onAnswer={doSendSilent}
+            />
           )}
 
           {sending && streamItems.length === 0 && !loading && (
