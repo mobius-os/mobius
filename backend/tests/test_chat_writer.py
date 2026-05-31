@@ -51,6 +51,12 @@ class _RecordingSession:
   def close(self) -> None:
     pass
 
+  def expire_all(self) -> None:
+    # The actor calls expire_all() before every command (to re-read rows
+    # an allowed direct writer may have dirtied). On the DB-free stub
+    # there is no identity map to expire — no-op.
+    pass
+
 
 def test_actor_processes_commands_in_fifo_order():
   seen: list = []
@@ -128,6 +134,9 @@ def test_failed_command_acks_with_exception_but_actor_survives():
     def close(self):
       pass
 
+    def expire_all(self):
+      pass
+
   committed: list = []
   actor = ChatWriterActor(session_factory=lambda: _BoomOnFirst(committed))
   actor.start()
@@ -167,6 +176,9 @@ def test_thread_death_fails_pending_acks():
       pass
 
     def close(self):
+      pass
+
+    def expire_all(self):
       pass
 
   actor = ChatWriterActor(session_factory=lambda: _DeadlySession())
@@ -232,6 +244,9 @@ class _BoomOnNthCommit:
     pass
 
   def rollback(self):
+    pass
+
+  def expire_all(self):
     pass
 
   def close(self):
@@ -948,6 +963,9 @@ def test_fatal_drain_resolving_ack_can_reenter_stop_without_deadlock():
       pass
 
     def close(self):
+      pass
+
+    def expire_all(self):
       pass
 
   actor = ChatWriterActor(session_factory=lambda: _DeadlySession())
