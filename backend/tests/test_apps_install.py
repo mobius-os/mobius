@@ -265,6 +265,23 @@ def test_crontab_without_app_is_prefix_safe_and_preserves_header():
   single = "0 9 * * * /data/apps/solo/job.sh\n"
   assert install._crontab_without_app(single, Path("/data/apps/solo")) == ""
 
+  # Edge shapes: @shorthand schedules + inline VAR=val command prefixes are
+  # cleaned; comments + env lines that merely contain the path are kept.
+  edge = (
+    "MAILTO=root\n"
+    "# nightly /data/apps/news/fetch.sh — note, keep me\n"
+    "@daily /data/apps/news/fetch.sh\n"
+    "0 6 * * * TZ=UTC /data/apps/news/fetch.sh\n"
+    "@reboot /data/apps/other/boot.sh\n"
+  )
+  out4 = install._crontab_without_app(edge, Path("/data/apps/news"))
+  assert out4 is not None
+  assert "@daily /data/apps/news/fetch.sh" not in out4        # shorthand dropped
+  assert "TZ=UTC /data/apps/news/fetch.sh" not in out4        # env-prefixed dropped
+  assert "# nightly /data/apps/news/fetch.sh" in out4          # comment kept
+  assert "MAILTO=root" in out4                                 # env line kept
+  assert "@reboot /data/apps/other/boot.sh" in out4           # other app kept
+
 
 def test_install_validates_required_fields(client, auth, bypass_url_validation):
   """Missing id / version / description / entry → 400 with field names."""
