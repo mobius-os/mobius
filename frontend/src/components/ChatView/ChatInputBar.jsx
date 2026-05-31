@@ -350,7 +350,7 @@ export default function ChatInputBar({
       />
       {offline && (
         <div className="chat__offline-note">
-          You're offline — chat needs a connection.
+          You're offline.
         </div>
       )}
       <div className="chat__input-row">

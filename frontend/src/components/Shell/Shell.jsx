@@ -450,8 +450,8 @@ export default function Shell() {
       // (The reuse-existing-empty branch above already handled the
       // offline-friendly case, so reaching here means we truly need
       // the network.)
-      if (typeof navigator !== 'undefined' && !navigator.onLine) {
-        setToast('You’re offline — new chats need a connection.')
+      if (!online) {
+        setToast('You’re offline.')
         setTimeout(() => setToast(null), 4000)
         closeDrawer()
         return

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api, getToken } from '../../api/client.js'
 import { appQueries, themeQueries } from '../../hooks/queries.js'
+import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import { WifiOff } from 'lucide-react'
 import './AppCanvas.css'
 
@@ -91,8 +92,25 @@ export default function AppCanvas({
   // trade-off), so passing it is not a new exposure. Online behavior is
   // unchanged: the app-scoped token wins as soon as the query resolves.
   const { data: appToken } = appQueries.token.useQuery(appId)
-  const offline = typeof navigator !== 'undefined' && !navigator.onLine
-  const token = appToken || (offline ? getToken() : undefined)
+  // Real reachability (probes /api/health), NOT navigator.onLine — which reads
+  // a stale "true" on a COLD offline reopen (close the PWA offline, reopen,
+  // open an app from the drawer): the SW serves the shell from cache so the
+  // browser never makes a real network attempt to update the flag.
+  const online = useOnlineStatus()
+  // Token choice, gated ONLY on real reachability:
+  //   • online  → wait for the app-scoped token; NEVER substitute the owner
+  //     JWT (keeps the long-lived owner JWT out of the module URL/history).
+  //     We deliberately do NOT fall back on the token query's error state: a
+  //     transient server error while ONLINE must not leak the owner JWT, and
+  //     React Query pauses the query offline so its error is unreliable there.
+  //   • offline → use the owner JWT from localStorage so a fully-cached
+  //     offline-capable app still boots. The iframe is same-origin and can
+  //     already read this JWT (documented sandbox trade-off) — not a new
+  //     exposure.
+  // The old gate used navigator.onLine, which on a cold offline reopen left
+  // `token` undefined → the `if (!token)` branch rendered blank below despite
+  // the app being fully cached.
+  const token = appToken || (online ? undefined : getToken())
 
   // AppCanvas was passive (enabled: false) — relied on Shell's
   // useTheme to write the cache. After ticket 047, AppCanvas owns
@@ -119,6 +137,28 @@ export default function AppCanvas({
     setLoaded(false)
     loadedRef.current = false
   }, [appId, version])
+
+  // TEMPORARY diagnostics: record the token DECISION to the same-origin ring
+  // buffer /diag.html reads, so a cold-offline-reopen blank shows exactly why
+  // the canvas did/didn't get a token (`if (!token) return null` below is the
+  // in-shell blank's last mile). Logs only the decision, never the token
+  // value. Remove with the rest of the offline diag scaffolding.
+  useEffect(() => {
+    try {
+      const key = 'mobius-diag-log'
+      const arr = JSON.parse(localStorage.getItem(key) || '[]')
+      arr.push({
+        t: new Date().toISOString(),
+        src: 'AppCanvas:' + appId,
+        online,
+        tag: 'token',
+        msg: 'appToken=' + (appToken ? 'yes' : 'no') +
+          ' online=' + online +
+          ' using=' + (appToken ? 'app' : (token ? 'owner' : 'NONE-blank')),
+      })
+      localStorage.setItem(key, JSON.stringify(arr.slice(-100)))
+    } catch (e) { /* ignore */ }
+  }, [appId, appToken, online, token])
 
   // Send init to the iframe. Idempotent on the iframe side — its
   // own `initialized` flag dedups. We do NOT track sent-state on the
@@ -275,7 +315,21 @@ export default function AppCanvas({
     )
   }
 
-  if (!token) return null
+  if (!token) {
+    // No token yet. With the token logic above this only happens while
+    // ONLINE and the app-scoped token is still fetching (offline always has
+    // the owner-JWT fallback). Render the loading spinner rather than null so
+    // there is never a blank frame — a cold reopen shows a spinner that
+    // resolves into the app, not a black screen.
+    return (
+      <div className="canvas-wrap">
+        <div className="canvas-loading" aria-live="polite">
+          <div className="canvas-loading__spinner" />
+          {appName && <div className="canvas-loading__name">{appName}</div>}
+        </div>
+      </div>
+    )
+  }
 
   // Token NOT in URL anymore — sent via postMessage above. Frame URL
   // is stable per appId (no `?v=` query). Cache freshness is handled
@@ -320,7 +374,7 @@ export default function AppCanvas({
       />
       {!loaded && (
         <div className="canvas-loading" aria-live="polite">
-          {offline && !offlineCapable ? (
+          {!online && !offlineCapable ? (
             // Non-offline-capable apps are never cached by the SW, so
             // offline their frame + module can't load and the spinner
             // would hang forever (a blank screen). Show why instead.
