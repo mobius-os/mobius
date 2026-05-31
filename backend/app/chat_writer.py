@@ -42,6 +42,8 @@ import time
 from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass, field
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from app.events import build_assistant_message, finalize_blocks, question_block_key
 
 log = logging.getLogger("moebius.chat_writer")
@@ -100,13 +102,158 @@ class PersistError(_Command):
 
 
 @dataclass
+class QuestionCommit(_Command):
+  """Save-before-broadcast write for an AskUserQuestion card.
+
+  A question is a protocol barrier: its `question_id` must be persisted
+  before the SSE card is shown, or a fast Submit races the DB write and
+  the answer is lost.  Distinct from `PersistTranscript` (not just a
+  flag) so the runner can `await` the commit ack and only then broadcast.
+  Never coalesces; commits the full assistant-message snapshot via
+  `update_last_assistant_message` and RAISES (fails its ack) if the
+  commit didn't land, so the caller does NOT broadcast the card.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  snapshot: dict = field(default_factory=dict)
+
+
+@dataclass
 class AnswerQuestion(_Command):
-  """Identity-keyed answer write.  Never coalesces."""
+  """Identity-keyed answer write.  Never coalesces.
+
+  Re-reads the Chat row fresh, applies the answers to the question block
+  matched by `question_id` (or the latest question when absent), and
+  commits.  Raises (fails its ack) when no matching block was found or
+  the commit didn't land, so the answer route returns 503 and keeps the
+  pending question registered for retry rather than resolving the future
+  with answers that never persisted.
+  """
 
   chat_id: str = ""
   run_token: str = ""
   question_id: str = ""
   answers: dict = field(default_factory=dict)
+
+
+# -- queue + turn commands (the JSON-blob RMW the actor owns at C2) -------
+# These replicate the read-modify-write logic that today lives in
+# routes/chats_stream.py (initial-send / _append_to_pending / cancel),
+# chat_queue.py (promote), and chat.py (clear-pending / run markers).
+# In C1 they are exercised only by tests; the route/queue copies stay
+# active and are the production path until the C2 flip.  Each is
+# must-persist (commit-before-ack, non-coalescing) and fences any pending
+# coalescible snapshot for its (chat_id, run_token) key on submit.
+
+
+@dataclass
+class StartTurn(_Command):
+  """Initial send: append the user message, set title/provider, mark run.
+
+  Replicates the fresh-start branch of `send_message`: appends `user_msg`
+  to `chat.messages`, sets the chat title from `title_source` on the
+  first message, sets `provider` when the chat had no messages, stamps
+  `updated_at`, and sets the durable run marker — all in one commit.
+  Returns `{"history", "session_id", "provider"}` for the caller to spawn
+  the runner.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  user_msg: dict = field(default_factory=dict)
+  title_source: str = ""
+  default_provider: str = "claude"
+
+
+@dataclass
+class AppendPending(_Command):
+  """Queue a send behind an active turn (or stale pending).
+
+  Replicates `_append_to_pending`: optionally applies `answers` to the
+  last question block, bumps the new message's `ts` so it is unique
+  within the queue + transcript, appends it to `pending_messages`, stamps
+  `updated_at`, and commits.  Returns `{"stored", "pending"}` — the stored
+  message (with its final ts) and the resulting queue.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  user_msg: dict = field(default_factory=dict)
+  answers: dict | None = None
+  question_id: str | None = None
+
+
+@dataclass
+class PromotePending(_Command):
+  """Move the pending-queue head into the transcript and mark the run.
+
+  Replicates `promote_pending_messages_locked`: refreshes the row, builds
+  the next-turn message history BEFORE committing (so a malformed entry
+  can't silently consume a turn), moves the head of `pending_messages`
+  into `messages`, sets the durable run marker, stamps `updated_at`, and
+  commits.  Returns `{"history", "promoted", "session_id"}`; `promoted`
+  is None (with the unchanged queue left intact) when there was nothing
+  to promote or construction failed.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+
+
+@dataclass
+class CancelPending(_Command):
+  """Remove a queued (not-yet-started) message by its `ts`.
+
+  Replicates the `DELETE /pending/{ts}` route: drops the entry whose `ts`
+  matches, stamps `updated_at` only when something changed, commits.
+  Returns `{"pending"}` — the remaining queue.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  ts: int = 0
+
+
+@dataclass
+class ClearPending(_Command):
+  """Empty the pending queue (Stop / terminal-setup-error paths).
+
+  Replicates `_clear_pending_messages` / `_clear_pending_queue`: clears
+  `pending_messages` and commits when it was non-empty.  Returns
+  `{"cleared"}` — the count removed.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+
+
+@dataclass
+class ReplaceTranscript(_Command):
+  """Replace the whole `messages` blob (PUT /api/chats/{id}).
+
+  Replicates `update_chat`'s transcript branch: sets `messages` to
+  `messages` (when not None), `title` (when supplied), stamps
+  `updated_at`, and commits.  Must route through the actor at C2 so it
+  serializes with streaming snapshots for the same chat.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  messages: list | None = None
+  title: str | None = None
+
+
+@dataclass
+class ClearRunStatus(_Command):
+  """Clear the durable run marker once a turn has ended.
+
+  Replicates `_clear_run_status`: clears `run_status` / `run_started_at`
+  when either is set, commits.  Returns None.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
 
 
 @dataclass
@@ -155,6 +302,27 @@ class _TestPersist(_Command):
   payload: object = None
 
 
+# Every must-persist command: non-coalescing, takes the fence path in
+# `submit` (invalidate any pending coalescible snapshot for the key, then
+# enqueue in FIFO order) and the GC path in the consumer's `finally`
+# (reclaim the key's fence epoch once the unit of work for that
+# (chat_id, run_token) is done).  PersistTranscript is the ONLY
+# coalescible command and is deliberately absent.
+_FENCE_COMMANDS = (
+  Finalize,
+  PersistError,
+  QuestionCommit,
+  AnswerQuestion,
+  StartTurn,
+  AppendPending,
+  PromotePending,
+  CancelPending,
+  ClearPending,
+  ReplaceTranscript,
+  ClearRunStatus,
+)
+
+
 class ChatWriterActor:
   """A single thread that serializes chat-domain persistence.
 
@@ -170,6 +338,11 @@ class ChatWriterActor:
     self._session_factory = session_factory
     self._q: "queue.Queue[_Command]" = queue.Queue()
     self._thread: threading.Thread | None = None
+    # The single session the actor owns, opened on its thread in `_run`.
+    # Held as an attribute (not a `_run` local) so the DB-error branch can
+    # swap in a fresh session via `_recreate_session` mid-loop.  None
+    # before startup and after a recreate-failure escalates to fatal.
+    self._db = None
     # Serializes the check-and-set in `start()` so two concurrent callers
     # can't both pass the `_thread is None` check and each spawn a consumer
     # thread (which would violate the single-consumer invariant and corrupt
@@ -269,7 +442,10 @@ class ChatWriterActor:
         reject_exc = RuntimeError("chat writer is in a fatal state")
       elif self._stopping:
         reject_exc = RuntimeError("chat writer is stopping")
-      elif isinstance(cmd, (Finalize, PersistError, AnswerQuestion)):
+      elif isinstance(cmd, _FENCE_COMMANDS):
+        # Must-persist, non-coalescing: invalidate any pending coalescible
+        # snapshot for the key (so a stale transcript snapshot can't land
+        # after this terminal write) then enqueue directly in FIFO order.
         dropped_ack = self._invalidate_pending(cmd.chat_id, cmd.run_token)
         self._q.put(cmd)
       elif isinstance(cmd, PersistTranscript):
@@ -465,7 +641,7 @@ class ChatWriterActor:
   # -- consumer (the writer thread) --------------------------------------
   def _run(self) -> None:
     try:
-      db = self._session_factory()
+      self._db = self._session_factory()
     except BaseException:
       # The session factory raising at first use is thread-fatal: there
       # is no session to write through.  Mark fatal and fail every queued
@@ -485,19 +661,41 @@ class ChatWriterActor:
           _safe_set_result(cmd.ack, None)
           continue
         try:
-          result = self._dispatch(db, cmd)
+          # `expire_all` before each command so a row dirtied by an
+          # ALLOWED direct writer (e.g. session_id persistence, still on
+          # the loop at C2) is re-read fresh — the actor's long-lived
+          # session would otherwise serve a stale identity-map copy and
+          # clobber that write.
+          self._db.expire_all()
+          result = self._dispatch(self._db, cmd)
           _safe_set_result(cmd.ack, result)
+        except SQLAlchemyError:
+          # A DB-level failure (broken session / commit error the helpers
+          # didn't swallow) can poison the session for every later command.
+          # Roll back, fail this ack, and recreate the session so the actor
+          # keeps serving.  If recreation itself fails there is no session
+          # to write through — escalate to the thread-fatal path so callers
+          # see a raised ack rather than a hang.
+          log.exception(
+            "chat writer DB error on %s; recreating session",
+            type(cmd).__name__,
+          )
+          exc = sys.exc_info()[1]
+          _safe_set_exception(cmd.ack, exc)
+          _safe_set_exception(self._inflight_ack, exc)
+          self._inflight_ack = None
+          self._recreate_session()  # raises to the outer handler on failure
         except Exception:
-          # One bad command must not kill the actor: log, roll back the
-          # poisoned transaction, fail this command's ack, keep serving.
-          # For a coalesced `_SnapshotReady`, `cmd.ack` is the marker's None
-          # ack — the ack a caller awaits is the popped snapshot's
-          # (`_inflight_ack`), so fail that too.
+          # A non-DB command failure must not kill the actor: log, roll
+          # back the poisoned transaction, fail this command's ack, keep
+          # serving.  For a coalesced `_SnapshotReady`, `cmd.ack` is the
+          # marker's None ack — the ack a caller awaits is the popped
+          # snapshot's (`_inflight_ack`), so fail that too.
           log.exception(
             "chat writer command failed: %s", type(cmd).__name__
           )
           try:
-            db.rollback()
+            self._db.rollback()
           except Exception:
             log.exception("chat writer rollback failed")
           exc = sys.exc_info()[1]
@@ -505,20 +703,20 @@ class ChatWriterActor:
           _safe_set_exception(self._inflight_ack, exc)
           self._inflight_ack = None
         finally:
-          # A terminal command ends its turn; reclaim the key's fence epoch
-          # whether the commit succeeded or raised (the run_token won't be
-          # reused).  GC is a no-op unless the key is fully quiescent, so a
-          # post-fence snapshot enqueued for the same key keeps its epoch
-          # (FIX C).
-          if isinstance(cmd, (Finalize, PersistError, AnswerQuestion)):
+          # A must-persist command ends a unit of work for its key; reclaim
+          # the key's fence epoch whether the commit succeeded or raised (the
+          # run_token won't be reused).  GC is a no-op unless the key is fully
+          # quiescent, so a post-fence snapshot enqueued for the same key
+          # keeps its epoch (FIX C).
+          if isinstance(cmd, _FENCE_COMMANDS):
             self._gc_generation(cmd.chat_id, cmd.run_token)
     except BaseException:
       # Thread-fatal (a BaseException the per-command handler didn't
-      # catch — e.g. the queue or session itself broke): fail every
-      # outstanding and future ack so no awaiter hangs forever.  Also
-      # fail the in-flight command's ack, which the inner handler never
-      # reached, AND the popped snapshot's ack (`_inflight_ack`) — which
-      # `_go_fatal` can't reach because it was already removed from
+      # catch — e.g. the queue broke, or session recreation failed): fail
+      # every outstanding and future ack so no awaiter hangs forever.
+      # Also fail the in-flight command's ack, which the inner handler
+      # never reached, AND the popped snapshot's ack (`_inflight_ack`) —
+      # which `_go_fatal` can't reach because it was already removed from
       # `_pending`.
       log.exception("chat writer thread died")
       exc = sys.exc_info()[1]
@@ -528,18 +726,46 @@ class ChatWriterActor:
       self._go_fatal()
     finally:
       try:
-        db.close()
+        if self._db is not None:
+          self._db.close()
       except Exception:
         log.exception("chat writer session close failed")
 
-  def _dispatch(self, db, cmd: _Command):
-    """Apply one command's persistence effect.
+  def _recreate_session(self) -> None:
+    """Roll back + close the poisoned session and open a fresh one.
 
-    Test-backed and minimal for the dormant milestone: snapshot-bearing
-    commands route their snapshot through the session stub's record
-    hooks.  A later milestone replaces these branches with the real
-    `_update_last_assistant_message` / `_finalize_response` writes (and
-    the `AnswerQuestion` block-merge), reusing this same dispatch seam.
+    Called from the consumer's DB-error branch.  Any failure here (the
+    factory raising, or the old session refusing to close) is re-raised so
+    the outer `except BaseException` runs `_go_fatal` — a writer with no
+    usable session must fail callers' acks, not silently spin.
+    """
+    old = self._db
+    self._db = None
+    try:
+      old.rollback()
+    except Exception:
+      log.exception("chat writer rollback failed during session recreate")
+    try:
+      old.close()
+    except Exception:
+      log.exception("chat writer close failed during session recreate")
+    self._db = self._session_factory()
+
+  def _dispatch(self, db, cmd: _Command):
+    """Apply one command's persistence effect against the actor's session.
+
+    Each command maps to a real DB mutation (the dispatch table in
+    ~/mobius-activation-design-2026-05-31.md).  Must-persist commands
+    commit before their ack resolves and RAISE to fail the ack when the
+    commit didn't land; `PersistTranscript`/`PersistError` are
+    fire-and-forget (a later snapshot/Finalize repairs a dropped write).
+
+    The mechanics tests in `test_chat_writer.py` drive the actor with a
+    `_RecordingSession` stub (no `.query`) to assert ordering / coalescing
+    / fencing without a DB; the snapshot commands detect that stub via its
+    `record_commit`/`commit_test` hooks and route there instead of the
+    real helpers.  The contention tests in `test_chat_writer_contention`
+    drive a real `SessionLocal`, exercising the real dispatch below.
     """
     if isinstance(cmd, _SnapshotReady):
       if self._on_snapshot_ready_for_test is not None:
@@ -554,7 +780,7 @@ class ChatWriterActor:
       # (the marker's own ack is None).  Cleared only after the commit and
       # its ack succeed.
       self._inflight_ack = pending.ack
-      result = self._commit_snapshot(db, pending.snapshot)
+      result = self._persist_message(db, pending.chat_id, pending.snapshot)
       _safe_set_result(pending.ack, result)
       self._inflight_ack = None
       # The committed snapshot was popped from `_pending`/`_outstanding`; if no
@@ -565,22 +791,303 @@ class ChatWriterActor:
     if isinstance(cmd, _TestPersist):
       # Test-only non-coalescing per-command persist (raw FIFO ordering).
       return self._commit_snapshot(db, {"_test_payload": cmd.payload})
+    if isinstance(cmd, PersistError):
+      # Fire-and-forget like PersistTranscript: an unwritten error state is
+      # repaired by a later Finalize/snapshot; never raises.
+      return self._persist_message(db, cmd.chat_id, cmd.snapshot)
     if isinstance(cmd, PersistTranscript):
       # Defensive: a directly-enqueued PersistTranscript (no current path
       # does this) still commits its own snapshot.
-      return self._commit_snapshot(db, cmd.snapshot)
-    if isinstance(cmd, (Finalize, PersistError)):
-      return self._commit_snapshot(db, cmd.snapshot)
+      return self._persist_message(db, cmd.chat_id, cmd.snapshot)
+    if isinstance(cmd, QuestionCommit):
+      # Save-before-broadcast: the commit MUST land before the ack resolves
+      # so the runner only broadcasts the card after the question_id
+      # persisted.  False -> raise so the caller does NOT broadcast.
+      ok = self._persist_message(db, cmd.chat_id, cmd.snapshot)
+      if not ok:
+        raise _PersistFailed("QuestionCommit did not persist")
+      return True
+    if isinstance(cmd, Finalize):
+      ok = self._finalize(db, cmd.chat_id, cmd.snapshot)
+      if not ok:
+        raise _PersistFailed("Finalize did not persist")
+      return True
+    if isinstance(cmd, AnswerQuestion):
+      return self._answer_question(db, cmd)
+    if isinstance(cmd, StartTurn):
+      return self._start_turn(db, cmd)
+    if isinstance(cmd, AppendPending):
+      return self._append_pending(db, cmd)
+    if isinstance(cmd, PromotePending):
+      return self._promote_pending(db, cmd)
+    if isinstance(cmd, CancelPending):
+      return self._cancel_pending(db, cmd)
+    if isinstance(cmd, ClearPending):
+      return self._clear_pending(db, cmd)
+    if isinstance(cmd, ReplaceTranscript):
+      return self._replace_transcript(db, cmd)
+    if isinstance(cmd, ClearRunStatus):
+      return self._clear_run_status(db, cmd)
     raise NotImplementedError(type(cmd).__name__)
+
+  # -- real DB dispatch (one method per command) -------------------------
+  # Each method runs on the actor thread against `db` (the actor's single
+  # session).  They reuse the persistence helpers moved into this module
+  # so the actor and the still-live route/sink copies share one source of
+  # truth.  `_RecordingSession`-stub detection (`record_commit`) keeps the
+  # mechanics tests DB-free.
+
+  def _persist_message(self, db, chat_id: str, snapshot: dict) -> bool:
+    """Write `snapshot` as the chat's last assistant message.
+
+    Backs `PersistTranscript`/`PersistError`/`QuestionCommit`/the coalesced
+    snapshot path — all of which replace the in-progress assistant message
+    with the full current snapshot.
+    """
+    if hasattr(db, "record_commit"):
+      return self._commit_snapshot(db, snapshot)
+    return update_last_assistant_message(db, chat_id, snapshot)
+
+  def _finalize(self, db, chat_id: str, snapshot: dict) -> bool:
+    """Force-complete tool blocks and write the terminal assistant message.
+
+    `snapshot["blocks"]` is the accumulated block list; `finalize_response`
+    mutates it (closing running tool blocks) and persists.
+    """
+    if hasattr(db, "record_commit"):
+      return self._commit_snapshot(db, snapshot)
+    return finalize_response(db, chat_id, snapshot.get("blocks") or [])
+
+  def _answer_question(self, db, cmd: AnswerQuestion) -> bool:
+    """Re-read the chat fresh, merge answers into the question block, commit.
+
+    Raises `_PersistFailed` when no matching block was found or the commit
+    dropped, so the answer route returns 503 and the pending question stays
+    registered for retry instead of the future resolving on a lost write.
+    """
+    from app.models import Chat
+
+    chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
+    if chat is None:
+      raise _PersistFailed("AnswerQuestion: chat not found")
+    applied = apply_answers_to_last_question(
+      chat, cmd.answers, cmd.question_id
+    )
+    if not applied:
+      raise _PersistFailed("AnswerQuestion: no matching question block")
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("AnswerQuestion did not persist")
+    return True
+
+  def _start_turn(self, db, cmd: StartTurn) -> dict:
+    """Append the initial user message, set title/provider, mark the run.
+
+    Replicates the fresh-start branch of `send_message`: builds the agent
+    history, appends `user_msg`, sets the title from `title_source` on the
+    first message, sets the provider when the chat had no messages, sets
+    the durable run marker, commits.  Returns history/session/provider.
+    """
+    from datetime import UTC, datetime
+
+    from app.models import Chat
+
+    chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
+    if chat is None:
+      raise _PersistFailed("StartTurn: chat not found")
+    existing = list(chat.messages or [])
+    if not existing:
+      chat.provider = cmd.default_provider or "claude"
+    history = [
+      {"role": m.get("role", "user"), "content": m.get("content", "") or ""}
+      for m in existing
+    ]
+    history.append(
+      {
+        "role": cmd.user_msg.get("role", "user"),
+        "content": cmd.user_msg.get("content", "") or "",
+      }
+    )
+    existing.append(cmd.user_msg)
+    chat.messages = existing
+    if len(existing) == 1:
+      chat.title = cmd.title_source[:40] or "New chat"
+    chat.run_status = "running"
+    chat.run_started_at = datetime.now(UTC)
+    chat.updated_at = datetime.now(UTC)
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("StartTurn did not persist")
+    return {
+      "history": history,
+      "session_id": chat.session_id,
+      "provider": chat.provider,
+    }
+
+  def _append_pending(self, db, cmd: AppendPending) -> dict:
+    """Queue `user_msg` behind the active turn; optionally apply answers.
+
+    Replicates `_append_to_pending`: applies `answers` to the last question
+    block (when present), bumps the message `ts` so it is unique within the
+    queue + transcript, appends to `pending_messages`, commits.  Returns the
+    stored message (with its final ts) and the resulting queue.
+    """
+    from datetime import UTC, datetime
+
+    from app.models import Chat
+
+    chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
+    if chat is None:
+      raise _PersistFailed("AppendPending: chat not found")
+    apply_answers_to_last_question(chat, cmd.answers, cmd.question_id)
+    pending = list(chat.pending_messages or [])
+    new_msg = dict(cmd.user_msg)
+    _ensure_unique_ts(new_msg, pending + list(chat.messages or []))
+    pending.append(new_msg)
+    chat.pending_messages = pending
+    chat.updated_at = datetime.now(UTC)
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("AppendPending did not persist")
+    return {"stored": new_msg, "pending": pending}
+
+  def _promote_pending(self, db, cmd: PromotePending) -> dict:
+    """Move the pending-queue head into the transcript and mark the run.
+
+    Replicates `promote_pending_messages_locked`: builds the next-turn
+    history BEFORE committing (a malformed entry can't silently consume a
+    turn), moves the head into `messages`, sets the durable run marker,
+    commits.  `promoted` is None (queue left intact) when there was nothing
+    to promote or construction failed.
+    """
+    from datetime import UTC, datetime
+
+    from app.models import Chat
+
+    chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
+    if chat is None:
+      raise _PersistFailed("PromotePending: chat not found")
+    pending = list(chat.pending_messages or [])
+    if not pending:
+      return {"history": [], "promoted": None, "session_id": chat.session_id}
+    existing = list(chat.messages or [])
+    first_pending = pending[0]
+    try:
+      history = [
+        {"role": m.get("role", "user"), "content": m.get("content", "") or ""}
+        for m in existing
+      ]
+      history.append(
+        {
+          "role": first_pending.get("role", "user"),
+          "content": first_pending.get("content", "") or "",
+        }
+      )
+    except Exception:
+      log.exception(
+        "promote: next_messages construction failed chat_id=%s — leaving "
+        "pending queue intact",
+        cmd.chat_id,
+      )
+      return {"history": [], "promoted": None, "session_id": chat.session_id}
+    chat.messages = existing + [first_pending]
+    chat.pending_messages = pending[1:]
+    chat.run_status = "running"
+    chat.run_started_at = datetime.now(UTC)
+    chat.updated_at = datetime.now(UTC)
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("PromotePending did not persist")
+    return {
+      "history": history,
+      "promoted": first_pending,
+      "session_id": chat.session_id,
+    }
+
+  def _cancel_pending(self, db, cmd: CancelPending) -> dict:
+    """Remove the queued message whose `ts` matches; return the remainder.
+
+    Replicates the `DELETE /pending/{ts}` route: stamps `updated_at` and
+    commits only when something was removed.
+    """
+    from datetime import UTC, datetime
+
+    from app.models import Chat
+
+    chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
+    if chat is None:
+      raise _PersistFailed("CancelPending: chat not found")
+    pending = list(chat.pending_messages or [])
+    remaining = [m for m in pending if m.get("ts") != cmd.ts]
+    if len(remaining) != len(pending):
+      chat.pending_messages = remaining
+      chat.updated_at = datetime.now(UTC)
+      if not _commit_or_rollback(db):
+        raise _PersistFailed("CancelPending did not persist")
+    return {"pending": remaining}
+
+  def _clear_pending(self, db, cmd: ClearPending) -> dict:
+    """Empty the pending queue; return the count removed.
+
+    Replicates `_clear_pending_messages` / `_clear_pending_queue`: commits
+    only when the queue was non-empty.
+    """
+    from app.models import Chat
+
+    chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
+    if chat is None:
+      raise _PersistFailed("ClearPending: chat not found")
+    cleared = len(chat.pending_messages or [])
+    if cleared:
+      chat.pending_messages = []
+      if not _commit_or_rollback(db):
+        raise _PersistFailed("ClearPending did not persist")
+    return {"cleared": cleared}
+
+  def _replace_transcript(self, db, cmd: ReplaceTranscript) -> bool:
+    """Replace the whole `messages` blob (and optional title); commit.
+
+    Replicates `update_chat`'s transcript branch.  Routes through the actor
+    so it serializes with streaming snapshots for the same chat.
+    """
+    from datetime import UTC, datetime
+
+    from app.models import Chat
+
+    chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
+    if chat is None:
+      raise _PersistFailed("ReplaceTranscript: chat not found")
+    if cmd.title is not None:
+      chat.title = cmd.title
+    if cmd.messages is not None:
+      chat.messages = cmd.messages
+    chat.updated_at = datetime.now(UTC)
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("ReplaceTranscript did not persist")
+    return True
+
+  def _clear_run_status(self, db, cmd: ClearRunStatus):
+    """Clear the durable run marker when set; commit.
+
+    Replicates `chat._clear_run_status`.
+    """
+    from app.models import Chat
+
+    chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
+    if chat is not None and (
+      chat.run_status is not None or chat.run_started_at is not None
+    ):
+      chat.run_status = None
+      chat.run_started_at = None
+      if not _commit_or_rollback(db):
+        raise _PersistFailed("ClearRunStatus did not persist")
+    return None
 
   @staticmethod
   def _commit_snapshot(db, snapshot: dict):
-    """Persist one snapshot through the session.
+    """Record one snapshot through the test recording stub.
 
-    Dormant-milestone behavior routes through the session stub's record
-    hooks: `_test_payload` (FIFO test) records the bare payload, anything
-    else records the full snapshot.  Real DB writes arrive in the
-    activation milestone.
+    The mechanics tests in `test_chat_writer.py` drive the actor with a
+    `_RecordingSession` (no real DB) to assert ordering / coalescing /
+    fencing: `_test_payload` (FIFO test) records the bare payload, anything
+    else the full snapshot.  Real DB writes go through the per-command
+    dispatch methods above; this stays only as the DB-free test seam.
     """
     if "_test_payload" in snapshot:
       db.commit_test(snapshot["_test_payload"])
@@ -683,6 +1190,16 @@ def alloc_run_token() -> str:
     return f"rt-{next(_token_counter)}"
 
 
+class _PersistFailed(Exception):
+  """A must-persist command's write did not land (no row, no block, or a
+  dropped commit).  Raised inside `_dispatch` so the consumer's generic
+  `except Exception` fails that command's ack — the awaiting caller then
+  declines to broadcast / resolve, per the design's failure semantics —
+  without poisoning the actor.  Distinct from `SQLAlchemyError`, so it
+  does NOT trigger a session recreate (the session is fine; the write was
+  legitimately impossible)."""
+
+
 # -- chat-transcript persistence helpers ---------------------------------
 # These mutate the two JSON blobs on the Chat row (`messages`,
 # `pending_messages`).  They moved here from `chat.py` / `routes/
@@ -693,6 +1210,22 @@ def alloc_run_token() -> str:
 # (chat.py -> chat_writer).  Behavior is byte-for-byte the moved code:
 # until the activation milestone the sink/routes still CALL these exactly
 # as before, so moving them changes nothing at runtime.
+
+
+def _ensure_unique_ts(new_msg: dict, others: list) -> None:
+  """Bump `new_msg['ts']` so it's strictly greater than every ts in `others`.
+
+  A local copy of `chats_stream._ensure_unique_ts` for the `AppendPending`
+  command — two sends in the same millisecond would otherwise collide,
+  producing duplicate React keys client-side and ambiguous DELETE-by-ts.
+  Callers pass the union of pending + persisted messages (so a queued ts
+  can't equal a persisted assistant ts once it promotes).
+  """
+  if not others:
+    return
+  max_ts = max((m.get("ts", 0) for m in others), default=0)
+  if new_msg.get("ts", 0) <= max_ts:
+    new_msg["ts"] = max_ts + 1
 
 
 def _commit_or_rollback(db) -> bool:
