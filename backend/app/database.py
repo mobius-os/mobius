@@ -165,6 +165,17 @@ def run_migrations(eng) -> None:
     with eng.connect() as conn:
       conn.execute(text("ALTER TABLE apps ADD COLUMN icon_png BLOB NULL"))
       conn.commit()
+  if "chat_log_access" not in apps_cols:
+    # Chat-log read tier (none/summary/full) gating GET /api/chat-logs.
+    # Defaults to 'none'; an app gains read access by declaring
+    # permissions.chat_log_access in its manifest (validated in
+    # install.py) and the owner consenting at install. See models.App.
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN chat_log_access VARCHAR(16) "
+        "NOT NULL DEFAULT 'none'"
+      ))
+      conn.commit()
   if "chats" in tables:
     chats_cols = {c["name"] for c in inspector.get_columns("chats")}
     _add = []
@@ -204,6 +215,14 @@ def run_migrations(eng) -> None:
       _add.append("ALTER TABLE chats ADD COLUMN run_status VARCHAR(16) NULL")
     if "run_started_at" not in chats_cols:
       _add.append("ALTER TABLE chats ADD COLUMN run_started_at DATETIME NULL")
+    if "created_by_app_id" not in chats_cols:
+      # App that opened this chat via the app-attributed chat contract
+      # (design §1). NULL = an ordinary owner chat. No FK constraint in
+      # the ALTER — SQLite can't add one post-hoc, and the column is an
+      # attribution tag, not a referential-integrity guarantee (a
+      # deleted app leaving a stale id behind just reads as "no live
+      # owner app," which the route tolerates). See models.Chat.
+      _add.append("ALTER TABLE chats ADD COLUMN created_by_app_id INTEGER NULL")
     if _add:
       with eng.connect() as conn:
         for stmt in _add:

@@ -102,6 +102,16 @@ class Chat(Base):
   # reports how long the interrupted turn had been running, and a
   # future liveness probe can read it without another migration.
   run_started_at = Column(DateTime, nullable=True, default=None)
+  # App that created this chat, when it was opened through the
+  # app-attributed chat contract (design §1) rather than by the owner
+  # in the shell. NULL = an ordinary owner chat. Set, this chat is
+  # "owned" by that app: its token (and only its token, plus the owner)
+  # may send to it, and app-driven turns are attributable + cappable
+  # back to the app. The owner can always see + drive these chats; the
+  # column is the actor tag, not an access fence against the owner.
+  created_by_app_id = Column(
+    Integer, ForeignKey("apps.id"), nullable=True, default=None
+  )
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
@@ -187,6 +197,28 @@ class App(Base):
   # apps. The flag is a declaration, not a firewall (design philosophy
   # §4 "code empowers the agent; it does not police it").
   offline_capable = Column(Boolean, nullable=False, default=False)
+  # Chat-log read tier this app's token may request against
+  # GET /api/chat-logs. Read at request time (not baked into the JWT)
+  # so flipping it revokes access on the very next request — the
+  # Settings "Data access" revoke is a column flip, not a token
+  # rotation.
+  #   'none'    (default) — GET /api/chat-logs returns 403 for this app
+  #   'summary' — whitelisted {role, text} per chat, server-side
+  #               structurally redacted (tool/thinking/question/error
+  #               blocks, attachments, fs-path augmentation, titles all
+  #               stripped; surviving text secret-scrubbed). "Reduced
+  #               exposure," not "safe" — regex can't catch pasted
+  #               documents or encoded secrets.
+  #   'full'    — DEFERRED. Reserved so the column's value space is
+  #               stable; the read API rejects it until a concrete
+  #               consumer + louder consent lands (design §2).
+  # This is consent/attribution/audit, NOT a sandbox: a same-origin app
+  # holds the owner JWT and can hit /api/chats directly. The enforceable
+  # control is that THIS gated surface returns redacted data; the owner-
+  # only routes stay closed (design §0b).
+  chat_log_access = Column(
+    String(16), nullable=False, default="none"
+  )
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
