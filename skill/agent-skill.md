@@ -488,6 +488,12 @@ files (markdown, CSS) on non-`.json` paths.
 
 Use `/api/storage/shared/{path}` for files shared across apps.
 
+This raw-`fetch` pattern is the online default. If you mark an app
+`offline_capable`, route the SAME calls through `window.mobius.storage`
+instead (API-compatible — it adds the offline write-queue + read-through
+cache so reads/writes keep working offline). See "Offline-capable apps"
+below; using bare `fetch` in an offline-capable app silently fails offline.
+
 ### Offline-capable apps (opt-in)
 
 By DEFAULT an app is NOT offline-capable: it talks to the server and
@@ -508,11 +514,17 @@ An offline-capable app MUST persist through `window.mobius.storage`
 instead of raw `fetch` to `/api/storage`:
 
 ```jsx
-// reads hit the network; offline (or on error) return null
+// read-through: online reads hit the network AND mirror to a local cache;
+// offline (or on error) they return the last-known value overlaid with any
+// pending writes (read-your-writes). null only for a path never cached.
 const notes = (await window.mobius.storage.get('notes.json')) || []
 // writes go through when online; queue + auto-sync when offline
 await window.mobius.storage.set('notes.json', notes)
 await window.mobius.storage.remove('items/abc.json')
+// reactive read: cb fires with the current value, then on every set/remove
+// for the path — prefer this over re-reading so the UI updates when a sync
+// lands. Returns an unsubscribe fn.
+const unsub = window.mobius.storage.subscribe('notes.json', v => setNotes(v || []))
 // enumerate a directory instead of brute-force-probing filenames:
 // returns [{name, path, type, size, modified_at, mime_type}], [] when
 // empty/not-yet-created, null on network failure (list() has no
@@ -522,18 +534,25 @@ window.mobius.online                        // boolean
 await window.mobius.storage.pendingCount()  // unsynced writes
 ```
 
-To list a directory's contents directly (e.g. from a cron script or
-the agent itself), `GET /api/storage/apps-list/{appId}/{prefix}` —
-immediate children only, `?limit=` + `?cursor=` for pagination,
-`{"entries": [...], "next_cursor": null}` shaped. Use this instead of
-probing for filenames; there is no need to guess what an app stored.
+`get()` works OFFLINE: it serves the last-known cached value (overlaid with
+your pending offline writes), so you can re-read freely; it returns null only
+for a path that was never cached while online. Prefer `subscribe(path, cb)`
+for reads that should update reactively when a value changes or a sync lands.
+`list(prefix)` enumerates a directory's immediate children so an app can
+discover what it stored instead of probing for filenames — but it has NO
+offline mirror (null offline), so apps that need offline enumeration keep their
+own snapshot. To list from outside an app (a cron script, or the agent itself):
+`GET /api/storage/apps-list/{appId}/{prefix}` — immediate children only,
+`?limit=` + `?cursor=` for pagination, `{"entries": [...], "next_cursor": null}`.
 
-`get()` returns the last-known cached value offline (null only if never
-successfully fetched); `list()` has NO offline mirror — null offline, so
-apps that need offline enumeration keep their own snapshot.
-Conflict policy is last-write-wins per path; where a lost edit would
-matter, store one file per record (e.g. `items/<uuid>.json`) so
-concurrent offline edits to different records don't clobber each other.
+Conflict policy is last-write-wins per path; where a lost edit would matter,
+store one file per record (e.g. `items/<uuid>.json`) so concurrent offline
+edits to different records don't clobber each other.
+
+`window.mobius.storage` is the easy DEFAULT, not a cage: an app is free to
+ignore it and use raw IndexedDB / OPFS / its own backend directly (the iframe
+is same-origin, so all browser storage works). The platform provides the
+on-ramp; it never blocks the escape hatch.
 
 Only set `offline_capable` when the app genuinely works without the
 server (notes, a tracker, a game). A network-dependent app marked

@@ -55,3 +55,40 @@ export function isStaleRuntimeCache(name) {
   if (/^mobius-(vendor|esm)/.test(name)) return true
   return false
 }
+
+// How long a page connectivity verdict (posted to the SW from useOnlineStatus's
+// /api/health probe) is trusted before it's considered stale. After this, the
+// SW treats connectivity as unknown rather than trusting a possibly-stale
+// verdict across a long background gap or a reconnection.
+export const VERDICT_MAX_AGE_MS = 60000
+
+// PURE: is the device KNOWN to be online — i.e. is there a FRESH, POSITIVE page
+// verdict? Gates the offline-capable frame/module fast path in sw.js: a cached
+// app is served cache-first UNLESS isKnownOnline() (then network-first keeps an
+// agent's edit fresh on the current open). Requiring a POSITIVE online proof
+// (pageOnline === true), not merely the absence of an offline proof, is what
+// makes a cold SW-restart open instant: at restart pageOnline is undefined →
+// not known-online → cached app served instantly, no race against the verdict
+// postMessage. A wrong "offline" guess (cold-restart-while-actually-online)
+// costs at most one stale open — the detached revalidate + the version-bump
+// iframe remount on reconnect self-heal it. Exported pure so the gate's truth
+// table is unit-testable without a service-worker context.
+//
+// @param {boolean|undefined} pageOnline last verdict (true/false/undefined)
+// @param {number} verdictAt  Date.now() when the verdict was recorded (0 if none)
+// @param {number} now        current Date.now()
+// @param {number} maxAgeMs   freshness window (default VERDICT_MAX_AGE_MS)
+export function isKnownOnline(pageOnline, verdictAt, now, maxAgeMs = VERDICT_MAX_AGE_MS) {
+  return pageOnline === true && (now - verdictAt) < maxAgeMs
+}
+
+// PURE: should offlineCapableHandler serve the CACHED copy first (instant) vs go
+// network-first? Cache-first only when we HAVE a cached copy AND are not
+// known-online — so a cold SW restart (connectivity unknown) still serves
+// instantly, while a known-online open stays network-first to keep an agent's
+// app edit fresh on the current open. No cached copy → always network (cold
+// path). A wrong "offline" guess self-heals via the background revalidate.
+// Extracted + exported so the branch is unit-testable without a SW context.
+export function shouldServeCacheFirst(hasCached, online) {
+  return hasCached && !online
+}

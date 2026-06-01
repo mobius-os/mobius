@@ -300,6 +300,18 @@ contract-comment mismatch.
   JSON.stringify(data)`; everything else → `body:
   JSON.stringify({content: text})`. GET returns the raw file (parses
   cleanly with `await res.json()`); GET does not mirror PUT shape.
+- **Offline-capable apps persist via `window.mobius.storage`, not bare
+  `fetch`.** Setting `offline_capable` caches the app's code AND exposes
+  `window.mobius.storage` (an offline write-queue + read-through cache).
+  An offline_capable app that persists with raw `fetch('/api/storage/...')`
+  silently drops writes while offline. With the wrapper, `get()` serves the
+  last-known value offline (null only if never fetched online) and
+  `subscribe(path, cb)` gives reactive reads — see the skill's
+  "Offline-capable apps" for the full contract. Don't mark a
+  network-dependent app offline_capable: it caches empty/stale state and
+  looks broken offline. (The platform makes offline open instant by serving
+  cached frame/module/storage when it's not known-online — you don't manage
+  any of that; just use the wrapper.)
 - **Floating composer:** `.chat__foot` is `position:absolute` with
   transparent background. Do NOT add background to `.chat__foot` or
   wrap its controls in a shared opaque container — that breaks the

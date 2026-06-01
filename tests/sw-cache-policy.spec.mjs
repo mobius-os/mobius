@@ -15,6 +15,9 @@ import {
   ESM_CACHE,
   isCacheableAssetResponse,
   isStaleRuntimeCache,
+  isKnownOnline,
+  shouldServeCacheFirst,
+  VERDICT_MAX_AGE_MS,
 } from '../frontend/src/sw-cache-policy.js'
 
 const resp = (status, ct) => ({ status, headers: { get: () => ct } })
@@ -52,5 +55,46 @@ test.describe('sw cache policy — isStaleRuntimeCache', () => {
   test('leaves non-mobius caches (e.g. workbox precache) untouched', () => {
     expect(isStaleRuntimeCache('workbox-precache-v2-https://x/')).toBe(false)
     expect(isStaleRuntimeCache('mobius-proxy')).toBe(false)
+  })
+})
+
+test.describe('sw cache policy — isKnownOnline (offline-capable frame/module gate)', () => {
+  const NOW = 1_000_000
+
+  test('fresh positive verdict → known online (network-first keeps app code fresh)', () => {
+    expect(isKnownOnline(true, NOW - 1000, NOW)).toBe(true)
+  })
+
+  test('fresh negative verdict → NOT known online (cache-first instant offline)', () => {
+    expect(isKnownOnline(false, NOW - 1000, NOW)).toBe(false)
+  })
+
+  test('unknown verdict (cold SW restart, no postMessage yet) → NOT known online → cache-first, no race', () => {
+    // The cold-start win: undefined !== true, so a cached app is served instantly
+    // on the very first request without waiting for the verdict to arrive.
+    expect(isKnownOnline(undefined, 0, NOW)).toBe(false)
+  })
+
+  test('stale positive verdict → NOT known online (do not trust an old "online" across a gap)', () => {
+    expect(isKnownOnline(true, NOW - (VERDICT_MAX_AGE_MS + 1), NOW)).toBe(false)
+    // exactly at the boundary is stale (strict <)
+    expect(isKnownOnline(true, NOW - VERDICT_MAX_AGE_MS, NOW)).toBe(false)
+    // just inside the window is fresh
+    expect(isKnownOnline(true, NOW - (VERDICT_MAX_AGE_MS - 1), NOW)).toBe(true)
+  })
+})
+
+test.describe('sw cache policy — shouldServeCacheFirst (frame/module serve strategy)', () => {
+  test('cached + NOT known-online → cache-first (instant offline / cold-restart)', () => {
+    expect(shouldServeCacheFirst(true, false)).toBe(true)
+  })
+  test('cached + known-online → network-first (agent edit fresh on current open)', () => {
+    expect(shouldServeCacheFirst(true, true)).toBe(false)
+  })
+  test('no cache + NOT known-online → network (cold path, nothing to serve)', () => {
+    expect(shouldServeCacheFirst(false, false)).toBe(false)
+  })
+  test('no cache + known-online → network', () => {
+    expect(shouldServeCacheFirst(false, true)).toBe(false)
   })
 })
