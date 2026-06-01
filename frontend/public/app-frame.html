@@ -286,6 +286,21 @@
       try {
         mlog('sw-controller', (navigator.serviceWorker && navigator.serviceWorker.controller) ? 'present' : 'NULL (iframe not SW-controlled)');
       } catch (e) { mlog('sw-controller', 'err ' + e.message); }
+      // Initialize window.mobius BEFORE importing the app module, so an app's
+      // top-level code can call window.mobius.storage immediately. Previously
+      // the runtime was wired ONLY in the standalone PWA path (standalone.py),
+      // so in-shell apps (opened from the drawer) had no window.mobius at all —
+      // their storage calls fell back to bare fetch with NO offline outbox or
+      // cache. This is the in-shell half of the offline-storage story; it
+      // mirrors standalone.py's rt.init. Best-effort: a runtime-load failure
+      // must not block the app from mounting (it just loses offline queueing).
+      try {
+        const rt = await import('/mobius-runtime.js');
+        rt.init({ appId: _FRAME_APP_ID, getToken: async () => token });
+        mlog('runtime', 'window.mobius ready');
+      } catch (e) {
+        mlog('runtime', 'init failed: ' + (e && e.message));
+      }
       try {
         const url = `/api/apps/${_FRAME_APP_ID}/module?token=${encodeURIComponent(token)}`;
         mlog('module:import:start', url.split('?')[0]);

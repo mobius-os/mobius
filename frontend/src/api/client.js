@@ -69,13 +69,23 @@ export function clearQueryCache() {
 
 // The offline outbox (mobius-runtime.js) is its OWN IndexedDB database,
 // not an idb-keyval key — so it must be dropped with deleteDatabase, not
-// idbDel. It holds owner-scoped queued writes; clearing it on logout
-// keeps the next owner on a shared device from inheriting them.
+// idbDel. It holds owner-scoped queued writes AND the read-through cache
+// mirror (the `cache` store in the same DB), both owner-scoped — clearing it
+// on logout keeps the next owner on a shared device from inheriting either.
+// `onblocked` does NOT mean done: an open runtime connection is holding the DB.
+// The runtime now closes its handles per-transaction and on `versionchange`,
+// so a delete should not stay blocked; if it does we still resolve (logout must
+// not hang) but warn, rather than silently claiming a clean wipe.
 function delOutboxDb() {
   return new Promise((resolve) => {
     try {
       const req = indexedDB.deleteDatabase('mobius-outbox')
-      req.onsuccess = req.onerror = req.onblocked = () => resolve()
+      req.onsuccess = req.onerror = () => resolve()
+      req.onblocked = () => {
+        // eslint-disable-next-line no-console
+        console.warn('mobius: outbox DB delete blocked by an open connection on logout')
+        resolve()
+      }
     } catch {
       resolve()
     }
