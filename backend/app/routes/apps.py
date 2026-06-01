@@ -51,6 +51,44 @@ def _derive_source_dir(data_dir: str, name: str) -> str:
   return str(Path(data_dir) / "apps" / _slugify_for_source_dir(name))
 
 
+def _validate_source_dir(source_dir: str, data_dir: str) -> str:
+  """Validates a caller-supplied source_dir, returning its resolved path.
+
+  A source dir must be an IMMEDIATE child of /data/apps with a non-numeric
+  basename — the exact shape every production source dir already has (built
+  apps and installs both land at /data/apps/<slug>; register_app passes the
+  dirname of a jsx file the agent wrote under /data/apps/<slug>). Enforcing it
+  here is free defense-in-depth on the create/patch/register_app inputs, which
+  arrive verbatim:
+    - `resolved.parent != apps_root` rejects traversal and arbitrary
+      locations (`/data/apps/../etc` resolves to /etc, whose parent isn't
+      apps_root) so source_dir can't point the run-job script runner or the
+      uninstall rmtree at a path outside the app source tree, and
+    - a purely-numeric basename would collide with the per-app STORAGE tree
+      /data/apps/<id> (storage is keyed by the integer app id): a write to
+      that app's storage could clobber this app's source, and uninstall's
+      rmtree could delete the other app's storage tree (Codex review #4).
+  Raises 400 on either violation. `.resolve()` collapses symlinks and `..`
+  before the containment check.
+  """
+  apps_root = (Path(data_dir) / "apps").resolve()
+  resolved = Path(source_dir).resolve()
+  if resolved.parent != apps_root:
+    raise HTTPException(
+      status_code=400,
+      detail="source_dir must be an immediate child of /data/apps.",
+    )
+  if resolved.name.isdigit():
+    raise HTTPException(
+      status_code=400,
+      detail=(
+        "source_dir basename must not be purely numeric — bare integers "
+        "are reserved for the per-app storage path /data/apps/<id>."
+      ),
+    )
+  return str(resolved)
+
+
 def allocate_unique_slug(db: Session, name: str, exclude_id: int | None = None) -> str:
   """Returns a slug that isn't taken by any other App row.
 
@@ -186,8 +224,11 @@ async def create_app(
   # auto-recompile and the partner gets the silent "save doesn't
   # land" failure mode. Derive from the name slug (same convention
   # register_app.py uses) when the caller didn't provide one.
-  source_dir = body.source_dir or _derive_source_dir(
-    get_settings().data_dir, body.name
+  data_dir = get_settings().data_dir
+  source_dir = (
+    _validate_source_dir(body.source_dir, data_dir)
+    if body.source_dir
+    else _derive_source_dir(data_dir, body.name)
   )
   app = models.App(
     name=body.name,
@@ -262,7 +303,9 @@ async def update_app(
   if body.chat_id is not None:
     app.chat_id = body.chat_id
   if body.source_dir is not None:
-    app.source_dir = body.source_dir
+    app.source_dir = _validate_source_dir(
+      body.source_dir, get_settings().data_dir
+    )
   if body.pinned is not None:
     from datetime import UTC, datetime
     app.pinned_at = (
