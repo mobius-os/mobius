@@ -374,13 +374,25 @@ function makeStorage({ appId, getToken }) {
   async function listInner(prefix) {
     try {
       const token = await getToken()
-      const res = await fetchBounded(
-        `/api/storage/apps-list/${appId}/${prefix || ''}`,
-        { headers: { Authorization: `Bearer ${token}` } },
-      )
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const body = await res.json()
-      return body.entries || []
+      // Page through the whole listing so list() is true enumeration,
+      // not just the server's first page (it caps a page at 500). The
+      // guard bounds a pathological/looping cursor; any HTTP error
+      // surfaces as null (offline/transient) like the single-fetch case.
+      const entries = []
+      let cursor = null
+      for (let guard = 0; guard < 10000; guard++) {
+        const q = `?limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
+        const res = await fetchBounded(
+          `/api/storage/apps-list/${appId}/${prefix || ''}${q}`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        )
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const body = await res.json()
+        for (const e of body.entries || []) entries.push(e)
+        cursor = body.next_cursor
+        if (!cursor) break
+      }
+      return entries
     } catch (e) {
       return null
     }

@@ -222,6 +222,28 @@ def test_list_root_and_nested(client, auth, owner_token):
   assert [e["name"] for e in nested.json()["entries"]] == ["deep.json"]
 
 
+def test_list_skips_symlinks_and_unsafe_names(client, auth, owner_token):
+  """Listings omit symlinks and names the read/PUT whitelist rejects, so
+  every listed entry round-trips back through get()/put()."""
+  import os
+  app_id = _make_app(client, owner_token)
+  client.put(
+    f"/api/storage/apps/{app_id}/safe/ok.json", json={"k": 1}, headers=auth,
+  )
+  base = os.path.join(os.environ["DATA_DIR"], "apps", str(app_id), "safe")
+  # Created on disk directly, bypassing the storage API: a symlink
+  # (following it could leak a target outside the tree) and a file whose
+  # name _SAFE_RE rejects. Both must be absent from the listing.
+  os.symlink("/etc/hostname", os.path.join(base, "link.json"))
+  with open(os.path.join(base, "bad name.json"), "w") as f:
+    f.write("{}")
+
+  r = client.get(f"/api/storage/apps-list/{app_id}/safe", headers=auth)
+  assert r.status_code == 200
+  names = {e["name"] for e in r.json()["entries"]}
+  assert names == {"ok.json"}
+
+
 def test_list_missing_dir_returns_empty(client, auth, owner_token):
   """Listing a not-yet-created directory is empty, NOT a 404."""
   app_id = _make_app(client, owner_token)

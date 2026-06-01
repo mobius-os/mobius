@@ -150,10 +150,18 @@ def _list_entry(child: Path, prefix: str) -> dict | None:
   compose each entry's `path`. Directories report no size of their own
   (the byte count is the file's; a directory's is meaningless here) and
   no mime_type; files carry both. `modified_at` is ISO-8601 UTC with a
-  trailing `Z`, derived from the child's mtime. Returns None for an
-  entry that can't be stat'd (e.g. a dangling symlink) so one broken
-  dirent doesn't 500 the whole listing — the caller filters Nones.
+  trailing `Z`, derived from the child's mtime.
+
+  Returns None for any child the listing must not surface, so the caller
+  filters it out: a symlink (following it with stat() could leak the
+  mtime/size of a target outside the storage tree, and a read of that
+  path is rejected anyway), a name the read/PUT whitelist rejects (so
+  every listed entry round-trips back through get()/put()), or one that
+  can't be stat'd (e.g. a dangling link). One bad dirent never 500s the
+  whole listing.
   """
+  if child.is_symlink() or not _SAFE_RE.match(child.name):
+    return None
   try:
     stat = child.stat()
   except OSError:
@@ -525,6 +533,12 @@ def list_app_dir(
     return {"entries": [], "next_cursor": None}
   limit = max(1, min(limit, _LIST_MAX_LIMIT))
   after = _decode_cursor(cursor)
+  # Materializes + sorts the whole directory per page, so deep
+  # pagination of a very large directory is O(n log n) per page. Fine at
+  # single-owner scale (app dirs hold tens-to-low-thousands of files); if
+  # an app ever needs millions, maintain an indexed listing manifest on
+  # write/delete rather than scanning here. See the storage-listing-gap
+  # note in the project memory.
   children = sorted(dir_path.iterdir(), key=lambda c: c.name)
   if after is not None:
     children = [c for c in children if c.name > after]
