@@ -715,7 +715,14 @@ def test_start_writer_is_idempotent_no_orphan_thread():
   # Reset the conftest-started singleton so this test measures
   # start_writer's OWN thread spawning from a clean slate.
   chat_writer.stop_writer(timeout=5)
-  before = {t.name for t in threading.enumerate()}
+  # Snapshot thread OBJECTS (identity), not names. Every writer thread is
+  # named "chat-writer", so a prior test's writer thread still winding down
+  # (e.g. a stop_writer join that timed out under full-suite load) is, by
+  # NAME, indistinguishable from a fresh one and corrupts the count — that
+  # was an order-dependent flake (passed alone, failed after the heavy
+  # actor-thread files). Identity excludes any pre-existing thread regardless
+  # of name, so we count only the writer thread THIS test spawned.
+  before = set(threading.enumerate())
   chat_writer.start_writer(session_factory=lambda: _RecordingSession([]))
   try:
     first = chat_writer.get_writer()
@@ -723,11 +730,11 @@ def test_start_writer_is_idempotent_no_orphan_thread():
     chat_writer.start_writer(session_factory=lambda: _RecordingSession([]))
     second = chat_writer.get_writer()
     assert first is second
-    writer_threads = [
+    new_writer_threads = [
       t for t in threading.enumerate()
-      if t.name == "chat-writer" and t.name not in before
+      if t.name == "chat-writer" and t not in before
     ]
-    assert len(writer_threads) == 1, "start_writer spawned an orphan thread"
+    assert len(new_writer_threads) == 1, "start_writer spawned an orphan thread"
   finally:
     chat_writer.stop_writer(timeout=5)
 
