@@ -471,11 +471,16 @@ def test_stop_handoff_clears_only_immediate_successor_marker(monkeypatch):
 
   chat_mod.mark_starting("t6")
   gen = chat_mod.current_run_generation("t6")
-  # Simulate Stop: bump the generation and register the stopped-generation
-  # handoff exactly as stop_chat_for does for an active handle.
+  # Simulate Stop exactly as stop_chat_for does for an active handle: register
+  # the stopped-generation handoff, bump the generation, AND release _starting
+  # (stop_chat_for calls registry.discard_starting at the end). Releasing
+  # _starting is load-bearing for FIX B's clear gate — a leftover claim would
+  # read as "a newer owner reclaimed the chat" and (correctly) suppress the
+  # clear, which is why a faithful Stop simulation must drop it here.
   chat_mod._clear_after_terminal_generation["t6"] = gen
   successor_gen = chat_mod.bump_run_generation("t6")
   assert successor_gen == gen + 1
+  chat_mod.discard_starting("t6")
 
   published = []
   _run_real_chat("t6", run_token="rt-6", run_gen=gen, published=published)
@@ -675,57 +680,66 @@ def test_continuation_schedule_failure_after_promote_leaves_marker(monkeypatch):
 
 
 # -- 10 (FIX B). Stop-handoff clear must NOT erase a racing fresh marker ----
-def test_stop_handoff_clear_does_not_erase_newer_start_turn_marker(monkeypatch):
-  """A dying Stop-bumped run reaches `run_chat`'s finally to clear the marker
-  for the immediate successor generation it owns. But a FRESH StartTurn (a new
-  send) raced in first: it bumped the generation again and re-set the marker.
-  The dying run's clear is generation-conditional UNDER the queue lock, so it
-  observes that a newer generation now owns the chat and does NOT clear — the
-  new run's marker SURVIVES."""
+def test_stop_handoff_clear_does_not_erase_racing_fresh_start_turn_marker(
+  monkeypatch
+):
+  """The critical race the brief flags: a dying Stop-bumped run is about to
+  clear the marker for the immediate successor generation it owns, but a FRESH
+  StartTurn (a new send) raced in first via `mark_starting`. Because
+  `mark_starting` does NOT bump the generation, the dying run's gen-only check
+  (`current == run_gen + 1`) STILL passes even though a new run now owns the
+  chat — so the old (gen-only, outside-the-lock) clear would wipe the new run's
+  marker. The fix re-checks ownership UNDER the bounded queue lock and requires
+  that no newer owner has reclaimed the chat (`not is_chat_running`); the fresh
+  send's mark_starting makes the chat alive again, so the dying run leaves the
+  marker. The new run's marker SURVIVES."""
   _seed_owner_and_creds()
   _seed_chat("t10", messages=[{"role": "user", "content": "hi", "ts": 1}],
              pending=[], run_status="running")
   _patch_claude_runner(monkeypatch)
 
-  # Set up the dying run as a Stop handoff: it owns `gen`, Stop bumped to the
-  # immediate successor (gen + 1) and registered the stopped-generation
-  # handoff exactly as stop_chat_for does for an active handle.
+  # Set up the dying run as a Stop handoff: it owns `gen`; Stop bumped to the
+  # immediate successor (gen + 1) and registered the stopped-generation handoff
+  # exactly as stop_chat_for does for an active handle. (stop_chat_for releases
+  # _starting at the end, so the chat is idle and a fresh send can claim it.)
   chat_mod.mark_starting("t10")
   gen = chat_mod.current_run_generation("t10")
   chat_mod._clear_after_terminal_generation["t10"] = gen
   chat_mod.bump_run_generation("t10")  # Stop's immediate successor: gen + 1
+  chat_mod.discard_starting("t10")  # Stop released _starting; chat now idle
 
-  # Race a FRESH StartTurn in: a new send bumps the generation again (gen + 2)
-  # and re-sets the durable marker. This happens BEFORE the dying run's
-  # finally runs its clear. We splice this into the terminal transition by
-  # latching it onto the drain (the dying run is STALE_NO_ACTION so its drain
-  # is a no-op return — we trigger the fresh StartTurn just before the finally
-  # by wrapping _clear_run_status_strict, which the Stop-handoff clear calls).
-  fresh_marker_set = {"done": False}
-  real_strict = chat_mod._clear_run_status_strict
+  # A FRESH send claims the now-idle chat: mark_starting succeeds (NO gen bump,
+  # by design) and a StartTurn re-sets the durable marker under the new run's
+  # token. The new run is in flight (mark_starting kept _starting set), so the
+  # chat is alive again at gen + 1 — exactly the state where the dying run's
+  # gen-only check is ambiguous.
+  assert chat_mod.mark_starting("t10") is True
+  assert chat_mod.current_run_generation("t10") == gen + 1, (
+    "mark_starting must NOT bump the generation (the race precondition)"
+  )
+  from app.chat_writer import StartTurn, await_ack, get_writer
 
-  async def racing_strict(chat_id_):
-    if not fresh_marker_set["done"] and chat_id_ == "t10":
-      # A fresh StartTurn lands: newer generation claims the chat and re-sets
-      # the durable marker under its own (newer) run token.
-      chat_mod.bump_run_generation("t10")  # newer run: gen + 2
-      from app.chat_writer import StartTurn, await_ack, get_writer
-      ack = get_writer().submit(StartTurn(
-        chat_id="t10", run_token="rt-10-fresh",
-        user_msg={"role": "user", "content": "fresh", "ts": 9},
-      ))
-      await await_ack(ack)
-      fresh_marker_set["done"] = True
-    return await real_strict(chat_id_)
+  async def _set_fresh_marker():
+    ack = get_writer().submit(StartTurn(
+      chat_id="t10", run_token="rt-10-fresh",
+      user_msg={"role": "user", "content": "fresh", "ts": 9},
+    ))
+    await await_ack(ack)
 
-  monkeypatch.setattr(chat_mod, "_clear_run_status_strict", racing_strict)
+  asyncio.run(_set_fresh_marker())
+  assert _load("t10")["run_status"] == "running", "fresh StartTurn set marker"
 
+  # Now the dying Stop-bumped run reaches its finally. Its gen-only check
+  # (current == run_gen + 1) still passes, but the lock-gated is_chat_running
+  # re-check must observe the fresh owner and SKIP the clear.
   published = []
   _run_real_chat("t10", run_token="rt-10", run_gen=gen, published=published)
   _drain_actor()
 
-  assert fresh_marker_set["done"], "the racing fresh StartTurn must have run"
   state = _load("t10")
   assert state["run_status"] == "running", (
-    "the dying Stop-bumped run must NOT clear the newer run's marker"
+    "the dying Stop-bumped run must NOT clear the racing fresh run's marker"
   )
+  # The fresh owner is still alive (its run never ran here — we only set its
+  # marker), so the chat remains claimed.
+  assert chat_mod.is_chat_running("t10")
