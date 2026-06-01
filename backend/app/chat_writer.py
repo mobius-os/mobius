@@ -274,8 +274,8 @@ class CancelPending(_Command):
 class ClearPending(_Command):
   """Empty the pending queue (Stop / terminal-setup-error paths).
 
-  Replicates `_clear_pending_messages` / `_clear_pending_queue`: clears
-  `pending_messages` and commits when it was non-empty.  Returns
+  Clears `pending_messages` and commits only when the queue was
+  non-empty (an empty queue is a no-op, so we skip the commit).  Returns
   `{"cleared"}` — the count removed.
   """
 
@@ -1233,8 +1233,8 @@ class ChatWriterActor:
   def _clear_pending(self, db, cmd: ClearPending) -> dict:
     """Empty the pending queue; return the count removed.
 
-    Replicates `_clear_pending_messages` / `_clear_pending_queue`: commits
-    only when the queue was non-empty.
+    Commits only when the queue was non-empty — clearing an already-empty
+    queue is a no-op and skips the commit.
     """
     from app.models import Chat
 
