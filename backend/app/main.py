@@ -9,7 +9,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -285,8 +285,17 @@ app.include_router(standalone_router)
 
 
 @app.get("/api/health")
-def health():
-  """Returns a simple health check response."""
+def health(response: Response):
+  """Returns a simple health check response.
+
+  `Cache-Control: no-store` so the client's reachability probe
+  (`useOnlineStatus`) can never be answered from any HTTP cache or heuristic
+  freshness — the probe must reflect a real network round-trip. The probe
+  already sends `cache: 'no-store'`, but the response carrying the directive
+  too is belt-and-suspenders against an intermediary or a stale-200 path
+  (a suspected contributor to the Android offline-probe-returns-true anomaly).
+  """
+  response.headers["Cache-Control"] = "no-store"
   return {"status": "ok"}
 
 

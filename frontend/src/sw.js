@@ -327,7 +327,12 @@ registerRoute(
     url.pathname === '/api/chats',
   new NetworkFirst({
     cacheName: 'mobius-shell-data',
-    networkTimeoutSeconds: 5,
+    // 2s, not 5s: the cached chat list serves the drawer fast offline. The
+    // auto-create-starter-chat safeguard still relies on a CONFIRMED live fetch
+    // (isFetchedAfterMount in Shell.jsx), so a cache fallback here just shows
+    // the last-known list without firing the POST — the safeguard holds, the
+    // offline launch no longer eats up to 5s.
+    networkTimeoutSeconds: 2,
   }),
 )
 
@@ -348,7 +353,12 @@ registerRoute(
     request.mode === 'navigate' && !url.pathname.startsWith('/apps/'),
   new NetworkFirst({
     cacheName: 'mobius-shell-nav',
-    networkTimeoutSeconds: 4,
+    // 2s, not 4s: online this is ample for the theme-injected HTML; offline
+    // (or on a stalled Android radio that doesn't fail fast) it bounds the
+    // shell's cold-launch wait before the cached HTML is served. Half of the
+    // reported ~10s offline open was this timeout; the other half was the
+    // app-token reachability gate (fixed in useOnlineStatus + the latch).
+    networkTimeoutSeconds: 2,
   }),
 )
 

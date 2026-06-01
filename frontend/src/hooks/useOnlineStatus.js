@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { resolveOnline } from '../lib/onlineStatus.js'
 
 // Single source of truth for connectivity.
 //
@@ -62,9 +63,21 @@ async function probeReachable() {
 }
 
 export default function useOnlineStatus() {
-  // Seed optimistically from the hint so the UI doesn't flash "offline" on
-  // a fast online load before the first probe resolves. The probe corrects
-  // it within a few ms if wrong.
+  // Seed from navigator.onLine, treating it ASYMMETRICALLY (the key to fast
+  // offline cold-open). The flag is unreliable only in the recovery direction:
+  // it can read a stale `true` AFTER the network is back, OR (the bug we're
+  // fixing) a stale `true` while genuinely offline on an Android PWA. But
+  // `false` is NEVER a false negative — the browser does not claim offline when
+  // a network exists. So:
+  //   • navigator.onLine === false  → seed `false` and TRUST it. The app shows
+  //     cached data instantly; no waiting on a multi-second probe that has to
+  //     time out. (Previously we seeded `true` here and the app sat ~5s until
+  //     the probe finally failed — the reported ~10s offline load.)
+  //   • navigator.onLine !== false → seed `true` optimistically; the background
+  //     probe demotes to offline within the probe window if it's wrong.
+  // Promotion back to online ONLY ever comes from a successful /api/health
+  // probe, never from the flag flipping true — that asymmetry is what kept the
+  // earlier "wedged offline after reconnect" bug from recurring.
   const [online, setOnline] = useState(
     typeof navigator === 'undefined' ? true : navigator.onLine !== false,
   )
@@ -102,10 +115,11 @@ export default function useOnlineStatus() {
       inflight = true
       try {
         const reachable = await probeReachable()
-        if (!cancelled) {
-          logTransition(reachable, 'probe')
-          setOnline(reachable)
-        }
+        if (cancelled) return
+        const navOnLine = typeof navigator !== 'undefined' ? navigator.onLine : true
+        const next = resolveOnline(reachable, navOnLine)
+        logTransition(next, reachable === next ? 'probe' : 'probe (navOffline-veto)')
+        setOnline(next)
       } finally {
         inflight = false
       }
