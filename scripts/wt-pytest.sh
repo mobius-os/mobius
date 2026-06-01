@@ -46,6 +46,6 @@ cd "$ROOT/backend" || exit 1
 # The worktree's backend/ is on sys.path (cwd); the venv supplies deps; the
 # generated SECRET_KEY satisfies pydantic Settings for tests that build it.
 exec env \
-  PATH="$ESB_DIR:$PATH" \
+  PATH="$ESB_DIR:${PATH:-}" \
   SECRET_KEY="${SECRET_KEY:-$(python3 -c 'import secrets;print(secrets.token_hex(32))')}" \
   "$VENV" -m pytest -p no:cacheprovider "$@"

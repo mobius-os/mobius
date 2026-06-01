@@ -248,8 +248,11 @@ class PromotePending(_Command):
   the validated schema surfaces it), moves the head of `pending_messages`
   into `messages`, sets the durable run marker, stamps `updated_at`, and
   commits.  Returns `{"history", "promoted", "session_id"}`; `promoted`
-  is None (with the unchanged queue left intact) when there was nothing
-  to promote or construction failed.
+  is None (queue unchanged) only when there was nothing to promote. A
+  malformed head that can't build a valid history instead RAISES
+  `_PersistFailed` — the turn-end drain maps that to FAILED_LEAVE_MARKER
+  (leave the marker for reconciliation) rather than confusing it with an
+  empty queue and clearing the marker on stranded work.
   """
 
   chat_id: str = ""
@@ -1159,8 +1162,10 @@ class ChatWriterActor:
     Replicates `promote_pending_messages_locked`: builds the next-turn
     history BEFORE committing (a malformed entry can't silently consume a
     turn), moves the head into `messages`, sets the durable run marker,
-    commits.  `promoted` is None (queue left intact) when there was nothing
-    to promote or construction failed.
+    commits.  `promoted` is None (queue left intact) only when there was
+    nothing to promote; a malformed head that fails schema construction
+    instead RAISES `_PersistFailed` (the drain maps that to
+    FAILED_LEAVE_MARKER, not an empty-queue clear).
     """
     from datetime import UTC, datetime
 
