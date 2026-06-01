@@ -192,6 +192,16 @@ def get_principal(
   # Reject it so every app-scope route can trust app_id is real.
   if scope == "app" and not isinstance(app_id, int):
     raise HTTPException(status_code=401, detail="Malformed app token.")
+  # An app-scoped JWT outlives the app by up to its TTL. If the app was
+  # uninstalled, the token must stop working at once — otherwise it could
+  # keep reading, recreating, listing, or deleting the (now-orphan)
+  # /data/apps/<id> storage tree for hours (Codex review #1). Mandatory row
+  # existence IS the revocation mechanism: no row, no access. Owner tokens
+  # (app_id is None) skip this — they aren't app-scoped.
+  if app_id is not None and (
+    not db.query(models.App.id).filter(models.App.id == app_id).first()
+  ):
+    raise HTTPException(status_code=401, detail="App no longer exists.")
   return Principal(owner=owner, app_id=app_id)
 
 

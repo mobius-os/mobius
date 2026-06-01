@@ -23,6 +23,7 @@
 //   window.mobius.storage.remove(path)        -> {synced} | {queued}
 //   window.mobius.storage.list(prefix)        -> entries[] | null
 //   window.mobius.storage.subscribe(path, cb) -> unsubscribe fn (cb(value))
+//   window.mobius.storage.onSyncError(cb)     -> unsubscribe fn (cb({path,method,message}))
 //   window.mobius.storage.pendingCount()      -> Promise<number>
 //
 // "No walls": this runtime is the easy DEFAULT, not a cage. An app is free to
@@ -145,7 +146,7 @@ function makeStorage({ appId, getToken }) {
   // because the store is keyed by `seq` (FIFO), with `appId`/`path` as
   // plain fields. Doing the purge and the follow-up add in one tx keeps
   // the coalesce atomic — no window where the path has zero ops queued.
-  function purgePath(path, after) {
+  function purgePath(path, after, upTo) {
     return withStore(STORE, 'readwrite', (store) => {
       store.openCursor().onsuccess = (e) => {
         const cursor = e.target.result
@@ -154,7 +155,31 @@ function makeStorage({ appId, getToken }) {
           return
         }
         const v = cursor.value
-        if (v.appId === appId && v.path === path) cursor.delete()
+        // `upTo` (optional) bounds the purge to ops queued AT OR BEFORE a
+        // captured seq, so a newer op enqueued by another context during a
+        // direct send (higher seq) is NOT clobbered (cross-context LWW; see
+        // setInner). When upTo is undefined, purge every op for the path
+        // (the coalesce enqueue() relies on — newest write supersedes all).
+        if (v.appId === appId && v.path === path &&
+            (upTo == null || v.seq <= upTo)) cursor.delete()
+        cursor.continue()
+      }
+    })
+  }
+
+  // Highest seq currently queued for this app+path, or null if none. Captured
+  // BEFORE a direct online send so the post-send purge removes only ops that
+  // were already queued at that point — an op another context enqueues during
+  // the send gets a higher seq and survives (Codex review #7).
+  function maxSeqForPath(path) {
+    return withStore(STORE, 'readonly', (store, box) => {
+      box.value = null
+      store.openCursor().onsuccess = (e) => {
+        const cursor = e.target.result
+        if (!cursor) return
+        const v = cursor.value
+        if (v.appId === appId && v.path === path &&
+            (box.value === null || v.seq > box.value)) box.value = v.seq
         cursor.continue()
       }
     })
@@ -254,8 +279,10 @@ function makeStorage({ appId, getToken }) {
 
   // ── Reactivity: per-path subscribers ─────────────────────────────────
   // Notify a path's listeners whenever its value changes locally (set/remove)
-  // or a sync lands (drain). Lets a UI re-render without polling. In-memory,
-  // per runtime instance — not persisted (it's view wiring, not data).
+  // or a dead-lettered write is reconciled to server truth. A SUCCESSFUL
+  // background drain does NOT notify — it confirms the already-notified value
+  // server-side without changing it. In-memory, per runtime instance — not
+  // persisted (it's view wiring, not data).
   const subscribers = new Map()   // path -> Set<cb>
 
   function notify(path, data) {
@@ -263,6 +290,21 @@ function makeStorage({ appId, getToken }) {
     if (!set) return
     for (const cb of [...set]) {
       try { cb(data) } catch (e) { /* a listener throwing must not break others */ }
+    }
+  }
+
+  // ── Sync-error listeners ──────────────────────────────────────────────
+  // A write can be permanently rejected by the server (a "poison op": an
+  // invalid path, a malformed body — any non-retryable 4xx). The outbox
+  // dead-letters it so it can't block the queue forever, but the app needs to
+  // KNOW its write was lost rather than silently believing it persisted.
+  // onSyncError(cb) registers a listener; emitSyncError fires it with
+  // {path, method, message}. In-memory, per runtime instance.
+  const errorListeners = new Set()
+
+  function emitSyncError(info) {
+    for (const cb of [...errorListeners]) {
+      try { cb(info) } catch (e) { /* one bad listener can't break the rest */ }
     }
   }
 
@@ -307,14 +349,18 @@ function makeStorage({ appId, getToken }) {
           // eslint-disable-next-line no-console
           console.warn('mobius: dropping un-syncable write', op.method, op.path, e.message)
           await deleteOp(op.seq)
-          // The optimistic cache still holds this rejected write's value. The
-          // server never accepted it, so re-fetch the authoritative value (or
-          // known-absence) and notify subscribers so the UI doesn't show a
-          // value that will never persist (Codex review, Medium #4).
-          try {
-            const fresh = await get(op.path)
-            notify(op.path, fresh)
-          } catch (re) { /* best-effort reconciliation */ }
+          // The optimistic cache still holds this rejected write's value, and
+          // for an un-GETtable path (e.g. an invalid name that 400s on read
+          // too) the reconciling get() would fall straight back to that very
+          // value. INVALIDATE the mirror first so the reconcile reads server
+          // truth (or genuine absence), never the rejected optimistic value
+          // (Codex review #8). Then notify subscribers and surface a
+          // sync-error so the app can tell the user the write was lost.
+          try { await cacheDelete(op.path) } catch (ce) { /* best effort */ }
+          let fresh = null
+          try { fresh = await get(op.path) } catch (re) { /* best-effort */ }
+          notify(op.path, fresh)
+          emitSyncError({ path: op.path, method: op.method, message: e.message })
           continue
         }
         // Transient (offline / 5xx / 401): stop so order is preserved
@@ -374,13 +420,22 @@ function makeStorage({ appId, getToken }) {
   async function listInner(prefix) {
     try {
       const token = await getToken()
-      // Page through the whole listing so list() is true enumeration,
-      // not just the server's first page (it caps a page at 500). The
-      // guard bounds a pathological/looping cursor; any HTTP error
-      // surfaces as null (offline/transient) like the single-fetch case.
+      // Page through the whole listing so list() is true enumeration, not
+      // just the server's first page (it caps a page at 500). Two guards keep
+      // this bounded and HONEST rather than silently truncating (Codex review
+      // #9): a page cap (MAX_LIST_PAGES × 500 entries) and a non-advancing
+      // cursor check. Hitting either THROWS — which surfaces as null, the same
+      // contract a network error uses — so the app falls back to its own
+      // snapshot instead of acting on half a directory. Any HTTP error
+      // likewise surfaces as null (offline/transient).
+      const MAX_LIST_PAGES = 200   // ×500/page = 100k entries, far past single-owner scale
       const entries = []
       let cursor = null
-      for (let guard = 0; guard < 10000; guard++) {
+      let prevCursor = null
+      for (let page = 0; ; page++) {
+        if (page >= MAX_LIST_PAGES) {
+          throw new Error(`mobius: listing exceeded ${MAX_LIST_PAGES * 500} entries`)
+        }
         const q = `?limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
         const res = await fetchBounded(
           `/api/storage/apps-list/${appId}/${prefix || ''}${q}`,
@@ -391,6 +446,12 @@ function makeStorage({ appId, getToken }) {
         for (const e of body.entries || []) entries.push(e)
         cursor = body.next_cursor
         if (!cursor) break
+        // A server that returns the same cursor twice would loop forever; fail
+        // fast rather than spin.
+        if (cursor === prevCursor) {
+          throw new Error('mobius: listing cursor did not advance')
+        }
+        prevCursor = cursor
       }
       return entries
     } catch (e) {
@@ -437,12 +498,14 @@ function makeStorage({ appId, getToken }) {
     notify(path, data)
     if (navigator.onLine) {
       try {
+        // Capture the highest seq queued for this path BEFORE sending. The
+        // post-send purge drops only ops at or below it (the stale offline
+        // leftovers this write supersedes), so a NEWER op another context
+        // enqueues during the send — higher seq — survives instead of being
+        // clobbered (cross-context LWW; Codex review #7).
+        const upTo = await maxSeqForPath(path)
         await send({ method: 'PUT', path, data })
-        // This direct write is newer than anything still queued for the path
-        // (e.g. an offline write left over from before we came online). Drop
-        // those stale ops so the next drain can't replay one over the value we
-        // just wrote — the last-write-wins violation this guards against.
-        await purgePath(path)
+        if (upTo != null) await purgePath(path, undefined, upTo)
         return { synced: true }
       } catch (e) { /* fall through to queue */ }
     }
@@ -456,8 +519,12 @@ function makeStorage({ appId, getToken }) {
     notify(path, null)
     if (navigator.onLine) {
       try {
+        // Same seq-bounded coalesce as setInner: purge only ops queued at or
+        // before this delete, so a concurrent context's newer write isn't
+        // dropped (Codex review #7).
+        const upTo = await maxSeqForPath(path)
         await send({ method: 'DELETE', path })
-        await purgePath(path)
+        if (upTo != null) await purgePath(path, undefined, upTo)
         return { synced: true }
       } catch (e) { /* fall through to queue */ }
     }
@@ -493,6 +560,14 @@ function makeStorage({ appId, getToken }) {
         const s = subscribers.get(path)
         if (s) { s.delete(wrapped); if (!s.size) subscribers.delete(path) }
       }
+    },
+    // Register a listener for permanently-failed writes (poison ops the outbox
+    // had to dead-letter). Fires cb({path, method, message}) so the app can
+    // tell the user a write was lost instead of silently assuming it synced.
+    // Returns an unsubscribe fn.
+    onSyncError(cb) {
+      errorListeners.add(cb)
+      return () => errorListeners.delete(cb)
     },
     async pendingCount() {
       return (await listOps()).length

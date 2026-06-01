@@ -32,10 +32,13 @@ accepted for `.json` paths.
 
 import base64
 import datetime
+import heapq
 import json
 import logging
 import mimetypes
+import os
 import re
+import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -78,6 +81,16 @@ def _check_cross_app(
 
   mode: 'read' or 'write'.
   """
+  # The target app must EXIST for any storage access — owner, own-app, or
+  # cross-app. Without this, a token (or an owner) addressing a deleted or
+  # never-created app id could read, recreate, list, or delete an orphan
+  # /data/apps/<id> storage tree (Codex review #1). Load it once up front so
+  # every branch below can assume the row is real.
+  target = (
+    db.query(models.App).filter(models.App.id == target_app_id).first()
+  )
+  if not target:
+    raise HTTPException(status_code=404, detail="App not found.")
   if principal.app_id is None:
     return  # owner token
   if principal.app_id == target_app_id:
@@ -98,11 +111,6 @@ def _check_cross_app(
         f"insufficient for {mode}."
       ),
     )
-  target = (
-    db.query(models.App).filter(models.App.id == target_app_id).first()
-  )
-  if not target:
-    raise HTTPException(status_code=404, detail="App not found.")
   target_level = _LEVELS.get(
     (target.share_with_apps or "none").lower(), 0
   )
@@ -130,7 +138,25 @@ def _resolve(base: Path, rel: str) -> Path:
     raise HTTPException(status_code=400, detail="Invalid path.")
   if ".." in Path(rel).parts:
     raise HTTPException(status_code=400, detail="Path traversal not allowed.")
-  return validate_path_within_base(rel, base)
+  resolved = validate_path_within_base(rel, base)
+  # Reject a symlink ANYWHERE in the path. validate_path_within_base resolves
+  # symlinks before its containment check, so an in-tree symlink (target also
+  # under base) passes containment — yet listings already omit symlinks
+  # (_list_entry), so letting read/PUT/DELETE follow one is an inconsistent,
+  # surprising policy (a DELETE through a link removes the TARGET, not the
+  # link). Walk the literal, unresolved path and reject any existing symlink
+  # component so the resolve-based routes match the listing's no-symlink
+  # contract (Codex review #12). is_symlink() is lstat-based (never follows)
+  # and is False for not-yet-created components, so a write that creates new
+  # dirs/files is unaffected.
+  walk = base
+  for part in Path(rel).parts:
+    walk = walk / part
+    if walk.is_symlink():
+      raise HTTPException(
+        status_code=400, detail="Symlinks are not allowed in storage paths."
+      )
+  return resolved
 
 
 # Text MIME types that are safe to read as UTF-8.
@@ -206,6 +232,80 @@ def _decode_cursor(cursor: str | None) -> str | None:
 def _encode_cursor(name: str) -> str:
   """Encodes a last-seen name into the opaque next-page cursor."""
   return base64.urlsafe_b64encode(name.encode("utf-8")).decode("ascii")
+
+
+def _atomic_write(file_path: Path, content: str | bytes) -> None:
+  """Writes content to file_path atomically — no torn or interleaved reads.
+
+  A reader (or the listing-based completion poll a mini-app runs after a
+  job) must never observe a half-written file, and two concurrent writers
+  to the same path must not interleave bytes into one corrupt file. Write
+  the full body to a uniquely-named temp file in the SAME directory, fsync
+  it, then os.replace() onto the target — a same-filesystem rename is
+  atomic on POSIX, so a reader sees either the old file or the new one,
+  never a truncation (Codex review #3). A crash mid-write leaves only the
+  temp file; the target is never partial.
+  """
+  file_path.parent.mkdir(parents=True, exist_ok=True)
+  data = content.encode("utf-8") if isinstance(content, str) else content
+  # Unique temp name (mkstemp) so concurrent writers to the same path don't
+  # collide on the temp file itself. mkstemp creates 0600; chmod to 0644 to
+  # match the prior write_text/write_bytes default (umask 022) so the file
+  # is readable the same way it was before.
+  fd, tmp = tempfile.mkstemp(
+    dir=file_path.parent, prefix=f".{file_path.name}.", suffix=".tmp"
+  )
+  try:
+    with os.fdopen(fd, "wb") as f:
+      f.write(data)
+      f.flush()
+      os.fsync(f.fileno())
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, file_path)
+  except BaseException:
+    try:
+      os.unlink(tmp)
+    except OSError:
+      pass
+    raise
+
+
+def _list_directory_page(
+  dir_path: Path, prefix: str, limit: int, cursor: str | None
+) -> tuple[list[dict], str | None]:
+  """Returns one keyset page `(entries, next_cursor)` of a directory.
+
+  Shared by the app and shared listing routes so both enforce the SAME
+  contract (Codex review #10): symlinks and names that can't round-trip
+  through `_resolve` are dropped by `_list_entry` (a listing never
+  advertises a child a read/PUT would reject), one un-stat-able dirent
+  drops out instead of 500-ing the page, and pagination is identical.
+
+  Selection uses a bounded heap: the smallest `limit`+1 child names
+  strictly greater than the decoded cursor, walked in O(n log limit) time
+  and O(limit) memory — it never materializes or sorts the whole directory
+  per page, so a large directory can't be turned into a repeated expensive
+  full scan (Codex review #9). `limit` is clamped to `_LIST_MAX_LIMIT`.
+  """
+  limit = max(1, min(limit, _LIST_MAX_LIMIT))
+  after = _decode_cursor(cursor)
+  try:
+    scan = os.scandir(dir_path)
+  except OSError:
+    return [], None
+  with scan:
+    candidates = (
+      Path(e.path) for e in scan if after is None or e.name > after
+    )
+    # nsmallest keeps only limit+1 in a heap, so memory stays O(limit) even
+    # for a directory of millions. The +1 tells us whether a next page
+    # exists without a second pass.
+    page_plus = heapq.nsmallest(limit + 1, candidates, key=lambda c: c.name)
+  has_more = len(page_plus) > limit
+  page = page_plus[:limit]
+  entries = [e for e in (_list_entry(c, prefix) for c in page) if e]
+  next_cursor = _encode_cursor(page[-1].name) if has_more and page else None
+  return entries, next_cursor
 
 
 def _serve_file(file_path: Path):
@@ -303,7 +403,10 @@ def read_app_file(
   _check_cross_app(db, principal, app_id, mode="read")
   base = Path(get_settings().data_dir) / "apps" / str(app_id)
   file_path = _resolve(base, path)
-  if not file_path.exists():
+  # is_file() (not exists()) so a directory path 404s cleanly instead of
+  # reaching _serve_file, which would try to read a directory and 500
+  # (Codex review #11).
+  if not file_path.is_file():
     raise HTTPException(status_code=404, detail="File not found.")
   return _serve_file(file_path)
 
@@ -320,6 +423,10 @@ async def write_app_file(
   _check_cross_app(db, principal, app_id, mode="write")
   base = Path(get_settings().data_dir) / "apps" / str(app_id)
   file_path = _resolve(base, path)
+  # A directory destination would make the write below raise IsADirectory
+  # and surface as an opaque 500; reject it explicitly (Codex review #11).
+  if file_path.is_dir():
+    raise HTTPException(status_code=400, detail="Destination is a directory.")
   # Snapshot the pre-write size for size_delta. A missing file is
   # zero; a stat failure (race with delete) is also zero — best-
   # effort signal, not load-bearing.
@@ -328,11 +435,7 @@ async def write_app_file(
   except OSError:
     before_size = 0
   content = await _decode_write_body(request, file_path)
-  file_path.parent.mkdir(parents=True, exist_ok=True)
-  if isinstance(content, bytes):
-    file_path.write_bytes(content)
-  else:
-    file_path.write_text(content, encoding="utf-8")
+  _atomic_write(file_path, content)
   # storage_write: debounced per (app_id, path) to ≤1 event per
   # minute. Agents writing many small files in a single chat shouldn't
   # flood the log. size_delta uses post-write size minus pre-write
@@ -391,7 +494,9 @@ def read_shared_file(
   """Returns a file from the shared data directory."""
   base = Path(get_settings().data_dir) / "shared"
   file_path = _resolve(base, path)
-  if not file_path.exists():
+  # is_file() so a directory path 404s instead of 500-ing in _serve_file
+  # (Codex review #11) — same contract as the per-app read above.
+  if not file_path.is_file():
     raise HTTPException(status_code=404, detail="File not found.")
   return _serve_file(file_path)
 
@@ -418,6 +523,10 @@ async def write_shared_file(
   settings = get_settings()
   base = Path(settings.data_dir) / "shared"
   file_path = _resolve(base, path)
+  # Reject a directory destination explicitly rather than 500-ing on the
+  # write below (Codex review #11) — same contract as the per-app write.
+  if file_path.is_dir():
+    raise HTTPException(status_code=400, detail="Destination is a directory.")
   # Snapshot pre-write size for size_delta. Same best-effort pattern
   # as the per-app write path: missing file or stat failure = 0.
   try:
@@ -425,7 +534,6 @@ async def write_shared_file(
   except OSError:
     before_size = 0
   content = await _decode_write_body(request, file_path)
-  file_path.parent.mkdir(parents=True, exist_ok=True)
   # Snapshot the prior theme.css before any overwrite. The agent
   # already does this informally; making it automatic means no
   # accidental clobber when the agent forgets.
@@ -435,10 +543,7 @@ async def write_shared_file(
       snapshot_theme_if_present(settings.data_dir)
     except Exception as exc:
       _log.warning("theme.css snapshot failed: %s", exc)
-  if isinstance(content, bytes):
-    file_path.write_bytes(content)
-  else:
-    file_path.write_text(content, encoding="utf-8")
+  _atomic_write(file_path, content)
   # storage_write for shared/* — debounced per (0, path) to match the
   # per-app rate-limit. app_id=0 is the documented platform-level
   # sentinel (see activity.py docstring); scope="shared" disambiguates
@@ -531,46 +636,30 @@ def list_app_dir(
   dir_path = base if prefix == "" else _resolve(base, prefix)
   if not dir_path.is_dir():
     return {"entries": [], "next_cursor": None}
-  limit = max(1, min(limit, _LIST_MAX_LIMIT))
-  after = _decode_cursor(cursor)
-  # Materializes + sorts the whole directory per page, so deep
-  # pagination of a very large directory is O(n log n) per page. Fine at
-  # single-owner scale (app dirs hold tens-to-low-thousands of files); if
-  # an app ever needs millions, maintain an indexed listing manifest on
-  # write/delete rather than scanning here. See the storage-listing-gap
-  # note in the project memory.
-  children = sorted(dir_path.iterdir(), key=lambda c: c.name)
-  if after is not None:
-    children = [c for c in children if c.name > after]
-  page = children[:limit]
-  entries = [e for e in (_list_entry(c, prefix) for c in page) if e]
-  # A next_cursor is only meaningful when more children remain past
-  # this page; otherwise the listing is exhausted and we return null.
-  next_cursor = (
-    _encode_cursor(page[-1].name)
-    if len(children) > limit and page
-    else None
-  )
+  entries, next_cursor = _list_directory_page(dir_path, prefix, limit, cursor)
   return {"entries": entries, "next_cursor": next_cursor}
 
 
 @router.get("/shared-list/{path:path}")
 def list_shared_dir(
   path: str,
+  limit: int = _LIST_DEFAULT_LIMIT,
+  cursor: str | None = None,
   _: models.Owner = Depends(get_current_owner_or_app),
 ):
-  """Lists files in a shared subdirectory. Returns name, size, mime."""
+  """Lists the immediate children of a shared-storage directory.
+
+  Same hardened contract and `{entries, next_cursor}` shape as the
+  per-app `apps-list` route (Codex review #10): symlinks and unsafe names
+  are dropped by `_list_entry`, `OSError` on a racing dirent can't 500 the
+  page, and the listing is keyset-paginated. An empty `path` is the shared
+  root; a path that doesn't resolve to a directory returns an empty
+  listing rather than 404, matching `apps-list` (enumerating a not-yet-
+  created directory is a normal call).
+  """
   base = Path(get_settings().data_dir) / "shared"
-  dir_path = _resolve(base, path)
+  dir_path = base if path == "" else _resolve(base, path)
   if not dir_path.is_dir():
-    raise HTTPException(status_code=404, detail="Directory not found.")
-  entries = []
-  for f in sorted(dir_path.iterdir()):
-    if f.is_file():
-      mime, _ = mimetypes.guess_type(f.name)
-      entries.append({
-        "name": f.name,
-        "size": f.stat().st_size,
-        "mime_type": mime,
-      })
-  return entries
+    return {"entries": [], "next_cursor": None}
+  entries, next_cursor = _list_directory_page(dir_path, path, limit, cursor)
+  return {"entries": entries, "next_cursor": next_cursor}

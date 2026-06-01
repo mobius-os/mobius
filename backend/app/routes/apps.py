@@ -438,6 +438,20 @@ def delete_app(
     except OSError:
       pass
 
+  # Per-app STORAGE tree under /data/apps/<numeric-id>/ — distinct from the
+  # slug-keyed SOURCE tree above. /api/storage/apps/{id}/... writes land here
+  # keyed by the integer id, so an uninstall that cleaned only the source dir
+  # left this tree orphaned — stale data a freshly-minted token for a recycled
+  # id (or a not-yet-expired token for the deleted app) could still read
+  # (Codex review #1). deleted_app_id is an int from the path, so the join
+  # can't traverse out of apps_root.
+  storage_dir = apps_root / str(deleted_app_id)
+  if storage_dir.is_dir():
+    try:
+      shutil.rmtree(storage_dir, ignore_errors=True)
+    except OSError:
+      pass
+
 
 @router.post(
   "/{app_id}/run-job",
