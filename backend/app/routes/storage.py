@@ -30,6 +30,8 @@ treated as the envelope; anything else is the inner object and is only
 accepted for `.json` paths.
 """
 
+import base64
+import datetime
 import json
 import logging
 import mimetypes
@@ -134,6 +136,64 @@ def _resolve(base: Path, rel: str) -> Path:
 # Text MIME types that are safe to read as UTF-8.
 _TEXT_PREFIXES = ("text/", "application/json", "application/xml")
 
+# Listing page size: the default when the caller omits `?limit`, and
+# the hard cap so a single request can't be made to walk an unbounded
+# directory in one shot.
+_LIST_DEFAULT_LIMIT = 100
+_LIST_MAX_LIMIT = 500
+
+
+def _list_entry(child: Path, prefix: str) -> dict:
+  """Builds one listing entry for an immediate child of a directory.
+
+  `prefix` is the request's prefix (relative to the app dir), used to
+  compose each entry's `path`. Directories report no size of their own
+  (the byte count is the file's; a directory's is meaningless here) and
+  no mime_type; files carry both. `modified_at` is ISO-8601 UTC with a
+  trailing `Z`, derived from the child's mtime.
+  """
+  stat = child.stat()
+  modified = datetime.datetime.fromtimestamp(
+    stat.st_mtime, tz=datetime.timezone.utc
+  )
+  # Compose the entry's path from the request prefix so the caller can
+  # round-trip it straight back into a get()/HEAD without reconstructing
+  # the join itself.
+  rel = f"{prefix.rstrip('/')}/{child.name}" if prefix else child.name
+  is_dir = child.is_dir()
+  entry = {
+    "name": child.name,
+    "path": rel,
+    "type": "directory" if is_dir else "file",
+    "size": 0 if is_dir else stat.st_size,
+    "modified_at": modified.isoformat().replace("+00:00", "Z"),
+  }
+  if not is_dir:
+    mime, _ = mimetypes.guess_type(child.name)
+    entry["mime_type"] = mime
+  return entry
+
+
+def _decode_cursor(cursor: str | None) -> str | None:
+  """Decodes the opaque pagination cursor back to the last-seen name.
+
+  The cursor is just the base64 of the last entry's `name` from the
+  previous page; an unparseable cursor is treated as no cursor (start
+  from the top) rather than an error, so a stale or hand-edited cursor
+  degrades to a fresh listing instead of a 400.
+  """
+  if not cursor:
+    return None
+  try:
+    return base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
+  except Exception:
+    return None
+
+
+def _encode_cursor(name: str) -> str:
+  """Encodes a last-seen name into the opaque next-page cursor."""
+  return base64.urlsafe_b64encode(name.encode("utf-8")).decode("ascii")
+
 
 def _serve_file(file_path: Path):
   """Serve a file with the right content type — binary or text."""
@@ -233,6 +293,32 @@ def read_app_file(
   if not file_path.exists():
     raise HTTPException(status_code=404, detail="File not found.")
   return _serve_file(file_path)
+
+
+@router.head("/apps/{app_id}/{path:path}")
+def head_app_file(
+  app_id: int,
+  path: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Reports an app file's existence and size without sending a body.
+
+  Reuses the GET authorization and path-resolution path, so existence
+  probing obeys the same cross-app rules as a read. The body is empty
+  by design — HEAD callers only want existence + Content-Length, and
+  serving via _serve_file would read the whole file into memory just to
+  discard it. A missing file is a 404 so a probe can distinguish absent
+  from present; the listing endpoint is the non-probing alternative.
+  """
+  _check_cross_app(db, principal, app_id, mode="read")
+  base = Path(get_settings().data_dir) / "apps" / str(app_id)
+  file_path = _resolve(base, path)
+  if not file_path.is_file():
+    raise HTTPException(status_code=404, detail="File not found.")
+  return Response(
+    headers={"Content-Length": str(file_path.stat().st_size)}
+  )
 
 
 @router.put("/apps/{app_id}/{path:path}", status_code=204)
@@ -417,6 +503,62 @@ def delete_shared_file(
       size_delta=-deleted_size,
     )
   return Response(status_code=204)
+
+
+@router.get("/apps-list/{app_id}/{prefix:path}")
+def list_app_dir(
+  app_id: int,
+  prefix: str,
+  limit: int = _LIST_DEFAULT_LIMIT,
+  cursor: str | None = None,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Lists the immediate children of an app-storage directory.
+
+  Lives under a separate `apps-list` namespace so the route does not
+  collide with the catch-all `GET /apps/{app_id}/{path}` file read.
+  Authorization mirrors a file read exactly (`_check_cross_app` in read
+  mode), so owner, own-app, and declared cross-app callers all behave
+  the same as they would fetching a file.
+
+  Listing is NON-recursive — only direct children of `prefix` are
+  returned, each as a `_list_entry` with name, path, type, size,
+  modified_at, and (for files) mime_type. Entries sort lexically by
+  name, which is also what makes the `cursor` pagination deterministic:
+  the cursor is the last name returned, and the next page resumes at the
+  first name strictly greater than it.
+
+  A `prefix` that does not resolve to an existing directory returns an
+  empty listing rather than a 404 — enumerating a not-yet-created
+  directory (the first run of an app before it has written anything) is
+  a normal, expected call, not an error. The response is API metadata
+  and is NOT subject to the stored-file JSON-envelope rules.
+  """
+  _check_cross_app(db, principal, app_id, mode="read")
+  base = Path(get_settings().data_dir) / "apps" / str(app_id)
+  # An empty prefix means the app's root dir; _resolve's whitelist
+  # rejects the empty string, so short-circuit to base here. A
+  # non-empty prefix goes through the same containment + traversal
+  # checks every file path does.
+  dir_path = base if prefix == "" else _resolve(base, prefix)
+  if not dir_path.is_dir():
+    return {"entries": [], "next_cursor": None}
+  limit = max(1, min(limit, _LIST_MAX_LIMIT))
+  after = _decode_cursor(cursor)
+  children = sorted(dir_path.iterdir(), key=lambda c: c.name)
+  if after is not None:
+    children = [c for c in children if c.name > after]
+  page = children[:limit]
+  entries = [_list_entry(c, prefix) for c in page]
+  # A next_cursor is only meaningful when more children remain past
+  # this page; otherwise the listing is exhausted and we return null.
+  next_cursor = (
+    _encode_cursor(page[-1].name)
+    if len(children) > limit and page
+    else None
+  )
+  return {"entries": entries, "next_cursor": next_cursor}
 
 
 @router.get("/shared-list/{path:path}")

@@ -21,6 +21,7 @@
 //   window.mobius.storage.get(path)           -> data | null  (offline-capable)
 //   window.mobius.storage.set(path, data)     -> {synced} | {queued}
 //   window.mobius.storage.remove(path)        -> {synced} | {queued}
+//   window.mobius.storage.list(prefix)        -> entries[] | null
 //   window.mobius.storage.subscribe(path, cb) -> unsubscribe fn (cb(value))
 //   window.mobius.storage.pendingCount()      -> Promise<number>
 //
@@ -361,6 +362,30 @@ function makeStorage({ appId, getToken }) {
   function set(path, data) { return withPathLock(path, () => setInner(path, data)) }
   function remove(path) { return withPathLock(path, () => removeInner(path)) }
 
+  // Enumerate the immediate children of a stored directory (the platform
+  // alternative to brute-force-probing filenames). Returns the entries ARRAY
+  // (each {name, path, type, size, modified_at, mime_type?}), `[]` for an empty
+  // or not-yet-created directory, and `null` on network failure — the same
+  // online→data / offline→null contract get() exposes, so an app falls back to
+  // its own snapshot on null but treats `[]` as a real (empty) result. No read
+  // mirror: listings aren't a per-path value, and a stale cached listing would
+  // resurrect deleted children; an app that wants offline listing keeps its own
+  // snapshot keyed off the last successful call.
+  async function listInner(prefix) {
+    try {
+      const token = await getToken()
+      const res = await fetchBounded(
+        `/api/storage/apps-list/${appId}/${prefix || ''}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      )
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const body = await res.json()
+      return body.entries || []
+    } catch (e) {
+      return null
+    }
+  }
+
   async function getInner(path) {
     // Read-through: online, fetch and MIRROR into the cache so the value is
     // available offline later. Offline or on any error, serve the last-known
@@ -433,6 +458,7 @@ function makeStorage({ appId, getToken }) {
     get,
     set,
     remove,
+    list: listInner,
     // Subscribe to local changes for a path: cb(value) fires immediately with
     // the current value, then on every set/remove for that path. Returns an
     // unsubscribe fn. (A successful background drain does NOT re-fire — it
@@ -492,3 +518,8 @@ export function init({ appId, getToken }) {
 // - The cache is unbounded in principle (one entry per app:path). For the
 //   personal-app scale this is fine; if an app writes thousands of distinct
 //   paths, add an LRU/size cap. Not built now (YAGNI).
+// - list() has NO offline mirror (returns null offline), unlike get(). A
+//   cached listing would resurrect deleted children once a sibling delete
+//   synced, so an app that needs offline enumeration keeps its own snapshot of
+//   the last successful list() and falls back to it on null. Revisit only if
+//   offline directory enumeration becomes a common need.

@@ -514,9 +514,19 @@ const notes = (await window.mobius.storage.get('notes.json')) || []
 // writes go through when online; queue + auto-sync when offline
 await window.mobius.storage.set('notes.json', notes)
 await window.mobius.storage.remove('items/abc.json')
+// enumerate a directory instead of brute-force-probing filenames:
+// returns [{name, path, type, size, modified_at, mime_type}], [] when
+// empty/not-yet-created, null on network failure (mirrors get()).
+const entries = await window.mobius.storage.list('items/')
 window.mobius.online                        // boolean
 await window.mobius.storage.pendingCount()  // unsynced writes
 ```
+
+To list a directory's contents directly (e.g. from a cron script or
+the agent itself), `GET /api/storage/apps-list/{appId}/{prefix}` —
+immediate children only, `?limit=` + `?cursor=` for pagination,
+`{"entries": [...], "next_cursor": null}` shaped. Use this instead of
+probing for filenames; there is no need to guess what an app stored.
 
 `get()` returns null when OFFLINE (there is no local read cache) — so
 load once into React state and don't depend on re-reading while offline.
