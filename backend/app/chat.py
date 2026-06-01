@@ -948,10 +948,19 @@ async def _close_browser_session(chat_id: str) -> None:
     return
   log = _get_logger()
   try:
-    proc = await asyncio.create_subprocess_exec(
-      "agent-browser", "--session", f"chat-{chat_id}", "close",
-      stdout=asyncio.subprocess.DEVNULL,
-      stderr=asyncio.subprocess.DEVNULL,
+    # FIX C — bound the subprocess CREATION too, not just the wait below.
+    # This runs on the terminal/cleanup path; an unbounded create_subprocess
+    # (e.g. a wedged event-loop child watcher or fork) would hang the whole
+    # turn's teardown. The wait() is already bounded at 5s; cap creation at
+    # the same budget. On either timeout we just stop waiting and let cleanup
+    # continue — a lingering Chrome is far cheaper than a hung turn.
+    proc = await asyncio.wait_for(
+      asyncio.create_subprocess_exec(
+        "agent-browser", "--session", f"chat-{chat_id}", "close",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+      ),
+      timeout=5.0,
     )
     await asyncio.wait_for(proc.wait(), timeout=5.0)
     log.info("agent-browser session closed chat_id=%s", chat_id)

@@ -190,11 +190,20 @@ async def promote_pending_messages(
   This function does NOT claim _starting — the caller ensures exclusive
   promotion (mark_starting before call in the stale-pending path, or by
   being the only finally block for a given run in the turn-end path).
+
+  FIX C — the lock acquisition is bounded by `TERMINAL_LOCK_TIMEOUT_SECS`,
+  matching every other terminal lock (the turn-end drain, the setup-error
+  cleanups, Stop's queue cleanup). This is the stale-pending promotion path
+  (chats_stream.send_message): a wedged lock holder would otherwise hang the
+  POST that triggered the drain. On a timeout the asyncio.TimeoutError
+  propagates to the caller, which discards _starting and surfaces the error
+  rather than blocking on a stuck lock; the queue stays intact for retry.
   """
   if not chat_id:
     return [], None, None
-  async with get_lock(chat_id):
-    return await promote_pending_messages_locked(db, chat_id, run_token)
+  async with asyncio.timeout(TERMINAL_LOCK_TIMEOUT_SECS):
+    async with get_lock(chat_id):
+      return await promote_pending_messages_locked(db, chat_id, run_token)
 
 
 async def drain_and_release(
