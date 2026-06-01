@@ -150,28 +150,6 @@ def test_put_text_accepts_non_json_content_type(client, auth, owner_token):
   assert r.status_code == 204
 
 
-def test_head_existing_file(client, auth, owner_token):
-  """HEAD on an existing file → 200, empty body, correct Content-Length."""
-  app_id = _make_app(client, owner_token)
-  client.put(
-    f"/api/storage/apps/{app_id}/notes.txt",
-    data="plain text body",
-    headers={**auth, "Content-Type": "text/plain"},
-  )
-
-  r = client.head(f"/api/storage/apps/{app_id}/notes.txt", headers=auth)
-  assert r.status_code == 200
-  assert r.content == b""
-  assert r.headers["content-length"] == str(len("plain text body"))
-
-
-def test_head_missing_file(client, auth, owner_token):
-  """HEAD on a missing file → 404."""
-  app_id = _make_app(client, owner_token)
-  r = client.head(f"/api/storage/apps/{app_id}/nope.txt", headers=auth)
-  assert r.status_code == 404
-
-
 def test_list_returns_entries_with_metadata(client, auth, owner_token):
   """Listing a directory returns deterministic entries + metadata."""
   app_id = _make_app(client, owner_token)

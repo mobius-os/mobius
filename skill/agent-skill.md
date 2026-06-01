@@ -516,7 +516,8 @@ await window.mobius.storage.set('notes.json', notes)
 await window.mobius.storage.remove('items/abc.json')
 // enumerate a directory instead of brute-force-probing filenames:
 // returns [{name, path, type, size, modified_at, mime_type}], [] when
-// empty/not-yet-created, null on network failure (mirrors get()).
+// empty/not-yet-created, null on network failure (list() has no
+// offline cache, unlike get()).
 const entries = await window.mobius.storage.list('items/')
 window.mobius.online                        // boolean
 await window.mobius.storage.pendingCount()  // unsynced writes
@@ -528,8 +529,9 @@ immediate children only, `?limit=` + `?cursor=` for pagination,
 `{"entries": [...], "next_cursor": null}` shaped. Use this instead of
 probing for filenames; there is no need to guess what an app stored.
 
-`get()` returns null when OFFLINE (there is no local read cache) — so
-load once into React state and don't depend on re-reading while offline.
+`get()` returns the last-known cached value offline (null only if never
+successfully fetched); `list()` has NO offline mirror — null offline, so
+apps that need offline enumeration keep their own snapshot.
 Conflict policy is last-write-wins per path; where a lost edit would
 matter, store one file per record (e.g. `items/<uuid>.json`) so
 concurrent offline edits to different records don't clobber each other.

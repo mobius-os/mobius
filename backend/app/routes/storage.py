@@ -143,22 +143,27 @@ _LIST_DEFAULT_LIMIT = 100
 _LIST_MAX_LIMIT = 500
 
 
-def _list_entry(child: Path, prefix: str) -> dict:
+def _list_entry(child: Path, prefix: str) -> dict | None:
   """Builds one listing entry for an immediate child of a directory.
 
   `prefix` is the request's prefix (relative to the app dir), used to
   compose each entry's `path`. Directories report no size of their own
   (the byte count is the file's; a directory's is meaningless here) and
   no mime_type; files carry both. `modified_at` is ISO-8601 UTC with a
-  trailing `Z`, derived from the child's mtime.
+  trailing `Z`, derived from the child's mtime. Returns None for an
+  entry that can't be stat'd (e.g. a dangling symlink) so one broken
+  dirent doesn't 500 the whole listing — the caller filters Nones.
   """
-  stat = child.stat()
+  try:
+    stat = child.stat()
+  except OSError:
+    return None
   modified = datetime.datetime.fromtimestamp(
     stat.st_mtime, tz=datetime.timezone.utc
   )
   # Compose the entry's path from the request prefix so the caller can
-  # round-trip it straight back into a get()/HEAD without reconstructing
-  # the join itself.
+  # round-trip it straight back into a storage read without
+  # reconstructing the join itself.
   rel = f"{prefix.rstrip('/')}/{child.name}" if prefix else child.name
   is_dir = child.is_dir()
   entry = {
@@ -293,32 +298,6 @@ def read_app_file(
   if not file_path.exists():
     raise HTTPException(status_code=404, detail="File not found.")
   return _serve_file(file_path)
-
-
-@router.head("/apps/{app_id}/{path:path}")
-def head_app_file(
-  app_id: int,
-  path: str,
-  db: Session = Depends(get_db),
-  principal: Principal = Depends(get_principal),
-):
-  """Reports an app file's existence and size without sending a body.
-
-  Reuses the GET authorization and path-resolution path, so existence
-  probing obeys the same cross-app rules as a read. The body is empty
-  by design — HEAD callers only want existence + Content-Length, and
-  serving via _serve_file would read the whole file into memory just to
-  discard it. A missing file is a 404 so a probe can distinguish absent
-  from present; the listing endpoint is the non-probing alternative.
-  """
-  _check_cross_app(db, principal, app_id, mode="read")
-  base = Path(get_settings().data_dir) / "apps" / str(app_id)
-  file_path = _resolve(base, path)
-  if not file_path.is_file():
-    raise HTTPException(status_code=404, detail="File not found.")
-  return Response(
-    headers={"Content-Length": str(file_path.stat().st_size)}
-  )
 
 
 @router.put("/apps/{app_id}/{path:path}", status_code=204)
@@ -550,7 +529,7 @@ def list_app_dir(
   if after is not None:
     children = [c for c in children if c.name > after]
   page = children[:limit]
-  entries = [_list_entry(c, prefix) for c in page]
+  entries = [e for e in (_list_entry(c, prefix) for c in page) if e]
   # A next_cursor is only meaningful when more children remain past
   # this page; otherwise the listing is exhausted and we return null.
   next_cursor = (
