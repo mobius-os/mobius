@@ -327,12 +327,14 @@ registerRoute(
     url.pathname === '/api/chats',
   new NetworkFirst({
     cacheName: 'mobius-shell-data',
-    // 2s, not 5s: the cached chat list serves the drawer fast offline. The
-    // auto-create-starter-chat safeguard still relies on a CONFIRMED live fetch
-    // (isFetchedAfterMount in Shell.jsx), so a cache fallback here just shows
-    // the last-known list without firing the POST — the safeguard holds, the
-    // offline launch no longer eats up to 5s.
-    networkTimeoutSeconds: 2,
+    // KEPT at 5s deliberately. Workbox returns a cache fallback as a
+    // successful fetch that TanStack can't distinguish from a confirmed live
+    // response (isFetchedAfterMount), so a too-fast fallback of a stale `[]`
+    // could wrongly trip Shell.jsx's auto-create-starter-chat. /api/chats does
+    // NOT gate the visible shell render — the shell-nav route does (now 2s) —
+    // so there's no load-speed reason to shorten this; the correctness risk
+    // wins. (Codex review Medium #2.)
+    networkTimeoutSeconds: 5,
   }),
 )
 
@@ -346,20 +348,27 @@ registerRoute(
   offlineCapableHandler('mobius-offline-apps'),
 )
 
-// Shell + bare-domain navigations: network wins online (fresh
-// theme-injected HTML + current asset hashes), cache serves offline.
+// Shell + bare-domain navigations: STALE-WHILE-REVALIDATE — the app-shell
+// pattern. Serve the cached shell HTML INSTANTLY (online AND offline; no
+// network race, no timeout — this is what removes the multi-second cold-open
+// wait), and refresh the cache in the background for the next launch.
+//
+// Why this is safe here (the two reasons the route used to be NetworkFirst are
+// both handled WITHOUT a network race):
+//   • Theme: index.html applies the owner's theme client-side from
+//     localStorage('mobius-theme-bg') before first paint, so the cached
+//     (non-theme-injected) HTML renders correctly — server-side theme injection
+//     is not needed on the navigation.
+//   • Asset freshness: asset URLs are content-hashed and precached by the SW;
+//     a shell deploy ships a new SW (SW_VERSION bump) whose activate swaps the
+//     precache, and index.html's updatefound watchdog soft-reloads once the new
+//     SW takes over. So a deployed shell update lands on the next launch (the
+//     standard PWA one-version-behind-then-auto-reload), not via blocking this
+//     request on the network.
 registerRoute(
   ({ request, url }) =>
     request.mode === 'navigate' && !url.pathname.startsWith('/apps/'),
-  new NetworkFirst({
-    cacheName: 'mobius-shell-nav',
-    // 2s, not 4s: online this is ample for the theme-injected HTML; offline
-    // (or on a stalled Android radio that doesn't fail fast) it bounds the
-    // shell's cold-launch wait before the cached HTML is served. Half of the
-    // reported ~10s offline open was this timeout; the other half was the
-    // app-token reachability gate (fixed in useOnlineStatus + the latch).
-    networkTimeoutSeconds: 2,
-  }),
+  new StaleWhileRevalidate({ cacheName: 'mobius-shell-nav' }),
 )
 
 // Standalone mini-app navigations: stored for offline-capable apps via
