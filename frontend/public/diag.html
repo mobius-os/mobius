@@ -172,12 +172,21 @@
       await dumpCaches();
     }
 
-    // Reads the same-origin ring buffer the mini-app frame writes to
-    // (localStorage 'mobius-diag-log'). Works offline — pure localStorage.
+    // Reads the same-origin ring buffers the boot handshake writes to. The
+    // PARENT shell writes 'mobius-diag-log' (AppCanvas + useOnlineStatus); the
+    // IFRAME writes 'mobius-diag-log-frame' (app-frame.html mlog). They are
+    // separate keys on purpose — same-key sharing across the two documents
+    // caused cross-document last-writer-wins that erased the iframe's events.
+    // We merge both here and sort by ISO timestamp so the full handshake is
+    // visible in one stream. Works offline — pure localStorage.
     function showLog() {
       var el = document.getElementById('dlog');
       try {
-        var arr = JSON.parse(localStorage.getItem('mobius-diag-log') || '[]');
+        var parent = JSON.parse(localStorage.getItem('mobius-diag-log') || '[]');
+        var frame = JSON.parse(localStorage.getItem('mobius-diag-log-frame') || '[]');
+        var arr = parent.concat(frame).sort(function(a, b) {
+          return (a.t || '') < (b.t || '') ? -1 : (a.t || '') > (b.t || '') ? 1 : 0;
+        });
         if (!arr.length) { el.textContent = '(empty — open a mini-app to generate entries)'; return; }
         el.textContent = arr.slice().reverse().map(function(e) {
           var on = (e.online === true) ? 'on' : (e.online === false ? 'OFF' : '?');
@@ -187,6 +196,7 @@
     }
     function clearLog() {
       try { localStorage.removeItem('mobius-diag-log'); } catch (e) {}
+      try { localStorage.removeItem('mobius-diag-log-frame'); } catch (e) {}
       showLog();
     }
 

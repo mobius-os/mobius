@@ -125,7 +125,14 @@
     }
     function mlog(tag, msg) {
       try {
-        var key = 'mobius-diag-log'
+        // SEPARATE key from the parent shell's 'mobius-diag-log'. The iframe
+        // and the shell are different documents (different JS realms) both
+        // doing read-modify-write on localStorage; sharing one key meant the
+        // parent's frame-mounted write clobbered the iframe's earlier
+        // sw-controller / module:import:* entries (cross-document
+        // last-writer-wins), erasing the exact boot-handshake boundary this
+        // log exists to show. diag.html reads + merges both keys by timestamp.
+        var key = 'mobius-diag-log-frame'
         var arr = JSON.parse(localStorage.getItem(key) || '[]')
         arr.push({
           t: new Date().toISOString(),
@@ -139,6 +146,24 @@
       } catch (e) {}
     }
     window.mlog = mlog
+
+    // Synchronous boot markers — emitted from THIS classic <script>, which has
+    // no imports, so they fire even if the module <script> below never runs
+    // (e.g. a static `import` of React from /vendor hangs offline because the
+    // sandboxed iframe isn't SW-controlled on this browser — the purest
+    // forever-spinner path, where no module-body mlog would ever execute).
+    // Reading /diag.html then distinguishes the failure boundary:
+    //   • frame:boot present, sw-controller present, but NO module:import:* →
+    //     React static import hung (iframe bypassed the SW for subresources).
+    //   • NO frame:* entries at all → the frame navigation itself hung (iframe
+    //     never even loaded this document offline).
+    //   • module:import:start but no module:import:ok → the /module dynamic
+    //     import hung.
+    mlog('frame:boot', 'doc loaded')
+    try {
+      mlog('sw-controller', (navigator.serviceWorker && navigator.serviceWorker.controller)
+        ? 'present' : 'NULL (iframe not SW-controlled — subresources bypass SW)')
+    } catch (e) { mlog('sw-controller', 'err ' + e.message) }
 
     function showErr(title, detail) {
       mlog('showErr', title + ': ' + detail)
