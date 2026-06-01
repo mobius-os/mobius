@@ -86,6 +86,11 @@ export default function useOnlineStatus() {
     let cancelled = false
     let inflight = false
     let lastLogged = null
+    // Consecutive successful probes — held across check() calls so resolveOnline
+    // can require a STREAK before promoting to online when navigator.onLine is
+    // stale-false. A one-shot Android offline false-positive (streak 1) stays
+    // offline; a genuine reconnect (repeated successes) promotes on the 2nd.
+    let successStreak = 0
 
     // TEMPORARY: log connectivity transitions to the same-origin ring buffer
     // the mini-app frame uses, so /diag.html shows shell + app events
@@ -117,9 +122,10 @@ export default function useOnlineStatus() {
         const reachable = await probeReachable()
         if (cancelled) return
         const navOnLine = typeof navigator !== 'undefined' ? navigator.onLine : true
-        const next = resolveOnline(reachable, navOnLine)
-        logTransition(next, reachable === next ? 'probe' : 'probe (navOffline-veto)')
-        setOnline(next)
+        const res = resolveOnline(reachable, navOnLine, successStreak)
+        successStreak = res.successStreak
+        logTransition(res.online, reachable === res.online ? 'probe' : 'probe (flag-offline streak=' + successStreak + ')')
+        setOnline(res.online)
       } finally {
         inflight = false
       }
@@ -128,7 +134,7 @@ export default function useOnlineStatus() {
     // A definite offline event is trustworthy — reflect it immediately
     // without waiting for a probe to time out.
     const onOffline = () => {
-      if (!cancelled) { logTransition(false, 'offline-event'); setOnline(false) }
+      if (!cancelled) { successStreak = 0; logTransition(false, 'offline-event'); setOnline(false) }
     }
     const onOnline = () => { check() }
     const onVisible = () => {
