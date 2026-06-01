@@ -4,8 +4,9 @@ The actor (`app.chat_writer.ChatWriterActor`) owns one Session on a
 dedicated thread and consumes a FIFO queue of domain commands. These
 tests exercise the actor in isolation with a `_RecordingSession` stub
 that records committed payloads instead of touching SQLite — no DB, no
-asyncio, no broadcast. The production write path is wired in a later
-milestone; here the actor is dormant.
+asyncio, no broadcast. The actor is now the live production write path;
+these isolation tests still drive it directly to assert
+ordering/coalescing/fencing without the route + DB layers around it.
 """
 
 import threading
@@ -154,6 +155,74 @@ def test_failed_command_acks_with_exception_but_actor_survives():
     assert committed == [{"ok": True}]
   finally:
     actor.stop(timeout=5)
+
+
+def test_actor_dispatch_failure_is_operator_visible_in_chat_log():
+  """An actor commit failure must land in the chat.log /api/debug/logs reads.
+
+  The actor logs via `moebius.chat.writer`, a CHILD of `moebius.chat`, so its
+  records propagate to the RotatingFileHandler `chat._get_logger` attaches to
+  `moebius.chat` — the same `DATA_DIR/logs/chat.log` file `routes/debug.py`
+  serves. Before this wiring the actor logged under a sibling name that hit no
+  handler, so a commit failure during a must-persist command (the exact
+  failure the redesign routes through the actor) left no operator-visible
+  trace. This forces such a failure on a `Finalize` and asserts the record
+  reaches the file the debug endpoint reads, computing that path EXACTLY the
+  way `debug_logs` does so the test breaks if either the logger parentage or
+  the file location drifts apart.
+  """
+  import logging
+  from pathlib import Path
+
+  from app import chat as chat_mod
+  from app.config import get_settings
+
+  class _BoomOnFinalize:
+    """`record_commit` always raises, forcing the consumer's failure path."""
+
+    def record_commit(self, snapshot):
+      raise ValueError("commit blew up")
+
+    def commit(self):
+      pass
+
+    def rollback(self):
+      pass
+
+    def close(self):
+      pass
+
+    def expire_all(self):
+      pass
+
+  # Build the production chat.log handler on `moebius.chat` the same way the
+  # running server does (lazy, memoized), then point the debug endpoint's path
+  # computation at the same file. Truncate so we assert only on this turn.
+  chat_log_path = Path(get_settings().data_dir) / "logs" / "chat.log"
+  logger = chat_mod._get_logger()
+  for handler in logger.handlers:
+    handler.flush()
+  chat_log_path.parent.mkdir(parents=True, exist_ok=True)
+  chat_log_path.write_text("", encoding="utf-8")
+
+  actor = ChatWriterActor(session_factory=lambda: _BoomOnFinalize())
+  actor.start()
+  try:
+    bad = actor.submit(
+      Finalize(chat_id="boomchat", run_token="t1", snapshot={"x": 1})
+    )
+    with pytest.raises(ValueError):
+      bad.result(timeout=5)
+  finally:
+    actor.stop(timeout=5)
+    for handler in logging.getLogger("moebius.chat").handlers:
+      handler.flush()
+
+  contents = chat_log_path.read_text(encoding="utf-8")
+  # The consumer's `except Exception` logs `chat writer command failed: <cmd>`
+  # for the failing Finalize, and the propagated record carries the traceback.
+  assert "chat writer command failed: Finalize" in contents
+  assert "commit blew up" in contents
 
 
 def test_thread_death_fails_pending_acks():
