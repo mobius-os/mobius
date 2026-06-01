@@ -349,52 +349,73 @@ def test_drain_lock_bound_exceeded_leaves_marker_then_reconcile_clears(
 def test_failed_question_commit_appended_scrub_by_identity(monkeypatch):
   """A failed QuestionCommit where the question was APPENDED: only that
   block is removed (by identity), the prior text block and a block appended
-  AFTER the question (a concurrent same-loop append) both survive, and no
-  orphan card is persisted by a later Finalize."""
+  DURING the ACK wait (a concurrent same-loop append) both survive, and no
+  orphan card is persisted by a later Finalize.
+
+  The concurrent append is injected WHILE publish_question is awaiting the
+  QuestionCommit ack (the window the wrong tail-slice scrub would have
+  clobbered): we latch the actor's commit handler, run publish_question as a
+  task, append the text block while the handler is blocked, then release the
+  latch so the commit fails — exercising the exact interleaving the
+  identity-based scrub guards against."""
   _seed_chat("t5a", messages=[{"role": "user", "content": "hi", "ts": 1}])
   bc = ChatBroadcast("t5a")
   sink = chat_mod._ChatEventSink(bc, "t5a", run_token="rt-5a")
   sink.publish({"type": "text", "content": "thinking"})
 
-  fail = {"on": True}
+  # Latch the actor's QuestionCommit handler so it blocks INSIDE the commit
+  # (after dispatch, while publish_question awaits the ack), then fails. While
+  # it is blocked, a concurrent same-loop append lands.
+  in_commit = threading.Event()
+  release = threading.Event()
   real_apply = chat_writer._apply_last_assistant_message
 
-  def maybe_boom(db_, chat_id, snapshot):
-    if fail["on"]:
-      from app.chat_writer import _PersistFailed
-      raise _PersistFailed("forced question-commit failure")
-    return real_apply(db_, chat_id, snapshot)
+  def latched_boom(db_, chat_id, snapshot):
+    in_commit.set()
+    release.wait(timeout=10)
+    from app.chat_writer import _PersistFailed
+    raise _PersistFailed("forced question-commit failure")
 
-  monkeypatch.setattr(chat_writer, "_apply_last_assistant_message", maybe_boom)
+  monkeypatch.setattr(chat_writer, "_apply_last_assistant_message", latched_boom)
 
   published = []
   orig = bc.publish
   bc.publish = lambda e: (published.append(e.get("type")), orig(e))[1]
 
   async def go():
-    with pytest.raises(Exception):
-      await sink.publish_question(
-        {"type": "question", "question_id": "q1",
-         "questions": [{"id": "q1", "question": "Color?"}]}
-      )
-    # A later same-loop append (a text block) lands AFTER the failed question
-    # block would have been appended — it must survive the scrub. We append
-    # it here to model the concurrent-append hazard the tail-slice deleted.
+    task = asyncio.create_task(sink.publish_question(
+      {"type": "question", "question_id": "q1",
+       "questions": [{"id": "q1", "question": "Color?"}]}
+    ))
+    # Wait until the actor is blocked INSIDE the commit (the ack is pending),
+    # then inject the concurrent append DURING the ACK wait.
+    while not in_commit.is_set():
+      await asyncio.sleep(0.005)
     sink.publish({"type": "text", "content": " more"})
+    # Release the latch so the commit fails and the scrub undo runs.
+    release.set()
+    with pytest.raises(Exception):
+      await task
 
   asyncio.run(go())
 
-  # The orphan question block is gone; neither neighbour was collaterally
+  # The orphan question block is gone; neither neighbour (the prior "thinking"
+  # text, nor the " more" text appended DURING the ACK wait) was collaterally
   # deleted.
   assert all(b.get("type") != "question" for b in sink.assistant_blocks), (
     sink.assistant_blocks
   )
-  texts = [b for b in sink.assistant_blocks if b.get("type") == "text"]
-  assert texts, "prior text block must survive the scrub"
+  texts = [b.get("content") for b in sink.assistant_blocks
+           if b.get("type") == "text"]
+  joined = "".join(texts)
+  assert "thinking" in joined, "prior text block must survive the scrub"
+  assert "more" in joined, (
+    "a text block appended DURING the ACK wait must survive the identity scrub"
+  )
   assert "question" not in published, "the card must NOT be broadcast"
 
   # A subsequent Finalize persists NO question card (the scrub held).
-  fail["on"] = False
+  monkeypatch.setattr(chat_writer, "_apply_last_assistant_message", real_apply)
   asyncio.run(sink.finalize())
   _drain_actor()
   blocks = _load("t5a")["messages"][-1].get("blocks") or []
@@ -743,3 +764,164 @@ def test_stop_handoff_clear_does_not_erase_racing_fresh_start_turn_marker(
   # The fresh owner is still alive (its run never ran here — we only set its
   # marker), so the chat remains claimed.
   assert chat_mod.is_chat_running("t10")
+
+
+# -- 11 (FIX D). no-owner setup cleanup: marker cleared, pending dropped ----
+def test_no_owner_cleanup_clears_marker_before_registry_release(monkeypatch):
+  """The no-owner setup-error early return routes through the bounded
+  terminal cleanup: the pending queue is cleared durably, the marker is
+  cleared, the registry is released, and no continuation is scheduled."""
+  # Seed creds but NO owner so run_chat bails at the no-owner guard (which
+  # is checked before the auth guard).
+  creds = (
+    pathlib.Path(os.environ["DATA_DIR"]) / "cli-auth" / "claude"
+    / ".credentials.json"
+  )
+  creds.parent.mkdir(parents=True, exist_ok=True)
+  creds.write_text("{}", encoding="utf-8")
+  _seed_chat(
+    "t11", messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[{"role": "user", "content": "queued", "ts": 3}],
+    run_status="running",
+  )
+
+  scheduled = []
+  orig_sched = chat_mod._schedule_continuation
+  chat_mod._schedule_continuation = lambda **kw: scheduled.append(kw)
+
+  chat_mod.mark_starting("t11")
+  gen = chat_mod.current_run_generation("t11")
+  published = []
+  try:
+    _run_real_chat("t11", run_token="rt-11", run_gen=gen, published=published)
+  finally:
+    chat_mod._schedule_continuation = orig_sched
+  _drain_actor()
+
+  assert "error" in published
+  assert "queued_turn_starting" not in published
+  assert scheduled == []
+  state = _load("t11")
+  assert state["run_status"] is None, "no-owner cleanup must clear the marker"
+  assert state["pending_messages"] == [], "pending must be cleared durably"
+  assert not chat_mod.registry.is_alive("t11"), "registry released"
+
+
+# -- 12 (FIX D). auth-error setup cleanup: marker cleared, pending dropped --
+def test_auth_error_cleanup_clears_marker_before_registry_release(monkeypatch):
+  """The auth-error setup early return routes through the same bounded
+  terminal cleanup: pending cleared, marker cleared, registry released, no
+  continuation."""
+  # Seed an owner but NO creds file → Claude check_auth returns an error.
+  # The DATA_DIR tmpdir is shared across tests and conftest does not sweep
+  # the creds file, so a prior _seed_owner_and_creds may have written one —
+  # remove it explicitly to guarantee the auth-error precondition.
+  from app import auth as auth_mod
+
+  creds = (
+    pathlib.Path(os.environ["DATA_DIR"]) / "cli-auth" / "claude"
+    / ".credentials.json"
+  )
+  if creds.exists():
+    creds.unlink()
+  dbx = SessionLocal()
+  try:
+    dbx.add(models.Owner(
+      username="o", hashed_password=auth_mod.hash_password("x"),
+      provider="claude",
+    ))
+    dbx.commit()
+  finally:
+    dbx.close()
+  _seed_chat(
+    "t12", messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[{"role": "user", "content": "queued", "ts": 3}],
+    run_status="running",
+  )
+
+  scheduled = []
+  orig_sched = chat_mod._schedule_continuation
+  chat_mod._schedule_continuation = lambda **kw: scheduled.append(kw)
+
+  chat_mod.mark_starting("t12")
+  gen = chat_mod.current_run_generation("t12")
+  published = []
+  try:
+    _run_real_chat("t12", run_token="rt-12", run_gen=gen, published=published)
+  finally:
+    chat_mod._schedule_continuation = orig_sched
+  _drain_actor()
+
+  assert "error" in published
+  assert "queued_turn_starting" not in published
+  assert scheduled == []
+  state = _load("t12")
+  assert state["run_status"] is None, "auth-error cleanup must clear the marker"
+  assert state["pending_messages"] == [], "pending must be cleared durably"
+  assert not chat_mod.registry.is_alive("t12"), "registry released"
+
+
+# -- 13 (FIX D). strict marker-clear ACK timeout → FAILED_LEAVE_MARKER ------
+def test_empty_queue_marker_clear_ack_timeout_leaves_marker(monkeypatch):
+  """The empty-queue terminal path issues a STRICT ClearRunStatus. Latch the
+  actor inside `_clear_run_status` AFTER dispatch so its commit blocks past a
+  deterministically-small ACK_TIMEOUT_SECS. The strict clear's await_ack
+  times out → drain_and_release raises → _complete_turn maps it to
+  FAILED_LEAVE_MARKER: marker LEFT set (NOT cleared), no continuation,
+  transport error surfaced. A reconcile-after-restart then clears it."""
+  _seed_owner_and_creds()
+  _seed_chat(
+    "t13", messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[], run_status="running",
+  )
+  # No streamed text → finalize() is a no-op, so the turn reaches the
+  # empty-queue drain (which issues the strict ClearRunStatus we latch).
+  _patch_claude_runner(monkeypatch, text=None)
+  monkeypatch.setattr(chat_writer, "ACK_TIMEOUT_SECS", 0.2)
+
+  writer = get_writer()
+  release = threading.Event()
+  orig_clear = writer._clear_run_status
+
+  def latched_clear(db, cmd):
+    release.wait(timeout=10)  # block the actor inside the clear commit
+    return orig_clear(db, cmd)
+
+  writer._clear_run_status = latched_clear
+
+  scheduled = []
+  orig_sched = chat_mod._schedule_continuation
+  chat_mod._schedule_continuation = lambda **kw: scheduled.append(kw)
+
+  chat_mod.mark_starting("t13")
+  gen = chat_mod.current_run_generation("t13")
+  published = []
+  try:
+    _run_real_chat("t13", run_token="rt-13", run_gen=gen, published=published)
+
+    # The caller's await_ack timed out and returned FAILED_LEAVE_MARKER. The
+    # latched clear has NOT committed yet (release is still unset), so the
+    # marker is observably LEFT SET — the caller did not wipe it on the lost
+    # ack, which is the whole point of the strict variant.
+    assert scheduled == [], (
+      "a timed-out marker clear must NOT schedule a continuation"
+    )
+    assert "queued_turn_starting" not in published
+    assert "error" in published
+    assert _load("t13")["run_status"] == "running", (
+      "a timed-out strict marker clear must LEAVE the marker set"
+    )
+  finally:
+    # Release the latch — the clear now lands behind the caller's back (the
+    # accept-and-document late-landing outcome; it converges the marker to
+    # cleared, the same state a restart reconcile would reach).
+    release.set()
+    _drain_actor()
+    writer._clear_run_status = orig_clear
+    chat_mod._schedule_continuation = orig_sched
+
+  # Late-landing clear converged the marker (the documented accept-and-document
+  # outcome). Had it NOT landed (commit dropped rather than delayed), the
+  # marker would stay set and a restart reconcile would clear it — both
+  # outcomes are covered by reconcile's mid-commit-timeout contract.
+  assert _load("t13")["run_status"] is None

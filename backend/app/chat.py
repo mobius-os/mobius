@@ -557,6 +557,22 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
       assistant note rather than mutating it, and the marker is cleared.
   Either way the chat converges to a resolved, non-spinning state.
 
+  Known gap — late-promote live-recovery requires a restart (accept-and-
+  document, same class as the mid-commit-timeout edge above; live-marker-
+  gating is a deferred follow-up, NOT implemented here). This function is
+  STARTUP-ONLY (the lifespan calls it once, before the server accepts
+  requests). So if a PromotePending lands AFTER its await_ack timed out while
+  the process is STILL RUNNING — the promote moved the head into `messages`
+  and re-set the marker, but the caller already returned FAILED_LEAVE_MARKER
+  and scheduled no continuation — that promoted-but-unscheduled turn is NOT
+  recovered live: the marker stays set and reconciliation only sees it on the
+  next boot. Under the single-owner restart-recovery contract this is
+  acceptable: the turn is durable, the marker is the recovery handle, and a
+  restart resolves it. FIX A's continuation-scheduling-failure path is the
+  same shape (marker left, recovered on restart). A future live-recovery would
+  gate the marker on an in-process watcher that reschedules a late promote
+  without a restart; deliberately deferred.
+
   Intentional direct-write exception to the C2 single-writer rule: this
   mutates `chat.messages` / `chat.pending_messages` / the run marker
   DIRECTLY on its own session rather than through the writer actor. That
@@ -1108,6 +1124,14 @@ async def _complete_turn(
     # reconciliation recovers the turn. The queued message stays intact for
     # the user to retry. Never "abandon and continue" — that is what
     # stranded a half-promoted turn.
+    #
+    # Late-promote live-recovery gap (accept-and-document; see
+    # reconcile_interrupted_chats' "Known gap" note): if the PromotePending
+    # actually LANDS after this await_ack timed out, while THIS process keeps
+    # running, the promoted-but-unscheduled turn is not rescheduled live — the
+    # marker stays set and only a restart's reconciliation resolves it.
+    # Acceptable for single-owner under the restart-recovery contract; live
+    # marker-gating is a deferred follow-up.
     log = _get_logger()
     log.error(
       "queue drain failed chat_id=%s: %s — not scheduling continuation, "
