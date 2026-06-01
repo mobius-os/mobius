@@ -205,18 +205,24 @@ async def drain_and_release(
   *,
   discard_starting,
   forget_chat,
-) -> tuple[dict | None, list, str | None]:
+  clear_run_status_strict,
+) -> tuple[dict | None, list, str | None, "TerminalDisposition"]:
   """End-of-turn queue drain. Returns (next_user, next_messages,
-  next_session_id) for the caller to publish + schedule.
+  next_session_id, disposition) for the caller to publish + schedule.
 
-  Under the per-chat queue lock:
+  Under ONE bounded per-chat queue lock acquisition
+  (`asyncio.timeout(TERMINAL_LOCK_TIMEOUT_SECS)` around `get_lock`):
     - Promotes the head of pending_messages (if any) via the actor's
       `PromotePending` (keyed on `run_token`, the continuation's token).
-    - If nothing to promote AND we_own_gen, releases _starting so
-      any subsequent POST sees is_chat_running=False and starts a
-      fresh run, then forgets the chat (drops the per-chat
-      generation counter so long-running containers don't
-      accumulate one entry per chat-ever-touched).
+      A promoted head → `CONTINUATION_PROMOTED`: the marker stays
+      continuously set (PromotePending re-set it for the next turn) and
+      ownership passes to the scheduled continuation; do NOT clear/forget.
+    - If nothing to promote AND we_own_gen, clears the durable run marker
+      (strict `ClearRunStatus`), then releases _starting, then forgets the
+      chat — the clear-before-forget ordering, ALL inside this lock. This
+      also closes the race where clearing AFTER releasing _starting would
+      erase a racing new `StartTurn` marker (ClearRunStatus is NOT
+      generation-conditional). Returns `EMPTY_TERMINAL_CLEARED`.
 
   Doing this in a single locked critical section closes the race
   between the run_chat finally and a POST that arrives in the window
@@ -226,25 +232,45 @@ async def drain_and_release(
   promoted here or POST takes the start path.
 
   When we_own_gen is False (Stop bumped the gen), we must not
-  promote or release _starting — the newer owner (Stop, or the
-  continuation it scheduled) is responsible for those.
+  promote / clear / release _starting — the newer owner (Stop, or the
+  continuation it scheduled) is responsible. Returns `STALE_NO_ACTION`.
 
-  `discard_starting` and `forget_chat` are injected so this module
-  stays free of an import-cycle back into chat.py / runner_registry.
-  Caller (chat.py:_run_chat_impl) keeps responsibility for the
-  post-lock `_schedule_continuation` call — this function does NOT
-  schedule continuations or call back into `run_chat`. A failed actor
-  ack (promote write didn't land) propagates so the caller leaves the
-  run marker set for reconciliation rather than scheduling a
-  continuation on a lost write.
+  Bounding: the lock acquisition is wrapped in
+  `asyncio.timeout(TERMINAL_LOCK_TIMEOUT_SECS)`. A lock-acquisition timeout
+  (another task holds the lock past the bound) OR a failed strict ack
+  (PromotePending / ClearRunStatus didn't land or timed out) raises out of
+  this function; the caller maps that to `FAILED_LEAVE_MARKER`, leaving the
+  marker set for reconciliation rather than scheduling a continuation /
+  clearing on a lost write.
+
+  `discard_starting`, `forget_chat`, and `clear_run_status_strict` are
+  injected so this module stays free of an import cycle back into chat.py /
+  runner_registry. Caller (chat.py:_complete_turn) keeps responsibility for
+  the post-lock `_schedule_continuation` call — this function does NOT
+  schedule continuations or call back into `run_chat`.
   """
   if not we_own_gen:
-    return None, [], None
-  async with get_lock(chat_id):
-    next_messages, first_pending, next_session_id = (
-      await promote_pending_messages_locked(db, chat_id, run_token)
-    )
-    if first_pending is None:
-      discard_starting(chat_id)
-      forget_chat(chat_id)
-    return first_pending, next_messages, next_session_id
+    return None, [], None, TerminalDisposition.STALE_NO_ACTION
+  async with asyncio.timeout(TERMINAL_LOCK_TIMEOUT_SECS):
+    async with get_lock(chat_id):
+      next_messages, first_pending, next_session_id = (
+        await promote_pending_messages_locked(db, chat_id, run_token)
+      )
+      if first_pending is None:
+        # Clear-before-forget, all under this one lock: clear the durable
+        # marker (strict — a failed ack raises and the caller leaves the
+        # marker for reconciliation), THEN release _starting, THEN forget.
+        # Clearing before releasing _starting closes the race where a racing
+        # new StartTurn's marker (set after we released _starting) would be
+        # erased by a clear running outside the lock.
+        await clear_run_status_strict(chat_id)
+        discard_starting(chat_id)
+        forget_chat(chat_id)
+        return (
+          None, next_messages, next_session_id,
+          TerminalDisposition.EMPTY_TERMINAL_CLEARED,
+        )
+      return (
+        first_pending, next_messages, next_session_id,
+        TerminalDisposition.CONTINUATION_PROMOTED,
+      )

@@ -21,6 +21,24 @@ import pytest
 from app import chat_queue, models
 
 
+def _record_clear(sink: list):
+  """Build an async `clear_run_status_strict` stub recording its chat_id.
+
+  drain_and_release awaits this strict clear INSIDE the lock for the
+  empty-queue case (clear-before-forget) and never for a promoted
+  continuation, so the recorded list pins which disposition fired.
+  """
+  async def _clear(chat_id):
+    sink.append(chat_id)
+
+  return _clear
+
+
+async def _noop_clear(_chat_id):
+  """An async clear stub that records nothing (for paths that don't clear)."""
+  return None
+
+
 def test_get_lock_returns_same_instance_per_chat_id():
   async def go():
     a = chat_queue.get_lock("chat-a")
@@ -123,20 +141,26 @@ def test_drain_and_release_promotes_then_holds_starting(db):
 
   discarded: list[str] = []
   forgotten: list[str] = []
+  cleared: list[str] = []
 
   async def go():
     return await chat_queue.drain_and_release(
       db, "cq-drain-with-head", we_own_gen=True, run_token="rt-cq",
       discard_starting=discarded.append,
       forget_chat=forgotten.append,
+      clear_run_status_strict=_record_clear(cleared),
     )
 
-  head, next_messages, sid = asyncio.run(go())
+  head, next_messages, sid, disposition = asyncio.run(go())
   assert head is not None
   assert head["content"] == "go"
   assert sid == "sess-dwh"
   assert discarded == []
   assert forgotten == []
+  # A promoted continuation must NOT clear the marker — it stays set for
+  # the next turn.
+  assert cleared == []
+  assert disposition is chat_queue.TerminalDisposition.CONTINUATION_PROMOTED
 
 
 def test_drain_and_release_releases_when_queue_empty(db):
@@ -154,18 +178,24 @@ def test_drain_and_release_releases_when_queue_empty(db):
 
   discarded: list[str] = []
   forgotten: list[str] = []
+  cleared: list[str] = []
 
   async def go():
     return await chat_queue.drain_and_release(
       db, "cq-drain-empty", we_own_gen=True, run_token="rt-cq",
       discard_starting=discarded.append,
       forget_chat=forgotten.append,
+      clear_run_status_strict=_record_clear(cleared),
     )
 
-  head, _, _ = asyncio.run(go())
+  head, _, _, disposition = asyncio.run(go())
   assert head is None
+  # Clear-before-forget ordering: the marker is cleared, THEN _starting is
+  # released, THEN the chat is forgotten — all under the one lock.
+  assert cleared == ["cq-drain-empty"]
   assert discarded == ["cq-drain-empty"]
   assert forgotten == ["cq-drain-empty"]
+  assert disposition is chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
 
 
 def test_drain_and_release_no_op_when_not_owning_generation(db):
@@ -184,20 +214,25 @@ def test_drain_and_release_no_op_when_not_owning_generation(db):
 
   discarded: list[str] = []
   forgotten: list[str] = []
+  cleared: list[str] = []
 
   async def go():
     return await chat_queue.drain_and_release(
       db, "cq-not-owner", we_own_gen=False, run_token="rt-cq",
       discard_starting=discarded.append,
       forget_chat=forgotten.append,
+      clear_run_status_strict=_record_clear(cleared),
     )
 
-  head, msgs, sid = asyncio.run(go())
+  head, msgs, sid, disposition = asyncio.run(go())
   assert head is None
   assert msgs == []
   assert sid is None
   assert discarded == []
   assert forgotten == []
+  # A newer generation owns the chat — we must not clear its marker.
+  assert cleared == []
+  assert disposition is chat_queue.TerminalDisposition.STALE_NO_ACTION
   # The pending queue is intact — Stop's cleanup hasn't run, so the
   # message must still be visible to a subsequent claim.
   db.refresh(chat)
@@ -228,10 +263,11 @@ def test_drain_serializes_with_concurrent_lock_holder(db):
       observed_order.append("holder-releasing")
 
   async def drain_run():
-    head, _, _ = await chat_queue.drain_and_release(
+    head, _, _, _ = await chat_queue.drain_and_release(
       db, "cq-serialize", we_own_gen=True, run_token="rt-cq",
       discard_starting=lambda _cid: None,
       forget_chat=lambda _cid: None,
+      clear_run_status_strict=_noop_clear,
     )
     observed_order.append("drain-finished")
     return head
