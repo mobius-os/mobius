@@ -259,6 +259,16 @@ contract-comment mismatch.
   $SCRIPTS_DIR/rebuild_shell.sh`, the running uvicorn still serves
   the old bundle until the process restarts. Tell the partner the
   shell will update after the next container restart.
+- **`python3 -m py_compile <file>` a `/app/app/` backend edit before
+  asking the partner to restart.** A bad import kills uvicorn at boot —
+  everything except `/recover` goes down. A clean compile isn't proof the
+  change is correct, but a failing one is proof you'll break boot
+  (recoverable via `/recover` → "Restore backend", but avoidable). The
+  backend-edit *contracts* — edits live in the container's writable layer
+  (a `--build` wipes them unless the host repo is patched too), and ALL
+  chat-persistence writes must route through the `chat_writer` actor, never
+  direct `Chat.messages`/`pending_messages` assignment — are in the skill's
+  "Write surface" section; read it before touching this layer.
 - **Cron entries don't survive container rebuilds.** `/var/spool/cron/`
   lives in the image layer, not on `/data`, so any rebuild
   (`docker compose build && up`, Railway/Fly/Render redeploy, image
