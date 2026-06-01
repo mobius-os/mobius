@@ -29,7 +29,19 @@ import { resolveOnline } from '../lib/onlineStatus.js'
 // online-only) and the shell's global offline indicator.
 
 const HEALTH_URL = '/api/health'
-const PROBE_TIMEOUT_MS = 4000
+// 2s, not 4s. Online, /api/health answers in tens of ms, so 2s is a generous
+// margin. The timeout only bites in the pathological Android case where an
+// offline fetch hangs PENDING instead of failing fast (stale radio state) —
+// there it caps how long an offline-capable mini-app waits for `online` to
+// resolve false before it mounts with the owner token. (Combined with the
+// frame/module stale-while-revalidate in sw.js — which serves the cached app
+// instantly — this is what takes the offline mini-app open from ~12s, where the
+// gate + two 3s network-first waits stacked, down to ~2s worst case.) NOTE: we
+// deliberately do NOT mount with the owner JWT BEFORE `online` resolves — that
+// would put the long-lived owner JWT in the module URL during what might be a
+// genuine online session (access-log exposure). Capping the probe is the safe
+// lever; the JWT-in-URL boundary stays intact.
+const PROBE_TIMEOUT_MS = 2000
 // Periodic re-probe while the tab is visible. Connectivity can change
 // without any window event firing (captive portal, flaky mobile data), so
 // we poll, but only when visible to avoid waking a backgrounded tab.
@@ -114,6 +126,36 @@ export default function useOnlineStatus() {
       } catch (e) { /* ignore */ }
     }
 
+    // Tell the service worker our connectivity verdict so its offline-capable
+    // frame/module handler can serve cache-first instantly when we're offline
+    // instead of trusting navigator.onLine (which lies on Android PWAs). The SW
+    // caches the latest verdict; see sw.js 'Page → SW connectivity channel'.
+    //
+    // We deliberately post the SAME reconciled `online` value the UI uses (the
+    // streak-gated resolveOnline result), NOT the raw probe `reachable`. One
+    // connectivity truth, shared by the UI pill and the SW, avoids them
+    // disagreeing — and the reconciled value is the conservative one (it only
+    // flips to online once a probe success is confirmed, filtering the device's
+    // probe false-positives), which is exactly what the SW gate wants: err
+    // toward cache-first (fast offline). The cost is a brief window after a
+    // stale-`false`-navigator reconnect where the SW stays cache-first; that's
+    // the already-accepted self-healing "one stale open" class.
+    function postToSW(online) {
+      try {
+        navigator.serviceWorker?.controller?.postMessage({
+          type: 'moebius:connectivity', online,
+        })
+      } catch (e) { /* no controller yet / unsupported — SW gate treats unknown
+        as not-known-online, i.e. cache-first when cached; self-heals on the
+        next verdict. */ }
+    }
+
+    function publish(next, reason) {
+      logTransition(next, reason)
+      setOnline(next)
+      postToSW(next)
+    }
+
     async function check() {
       // Coalesce overlapping triggers (event + interval landing together).
       if (inflight) return
@@ -124,8 +166,7 @@ export default function useOnlineStatus() {
         const navOnLine = typeof navigator !== 'undefined' ? navigator.onLine : true
         const res = resolveOnline(reachable, navOnLine, successStreak)
         successStreak = res.successStreak
-        logTransition(res.online, reachable === res.online ? 'probe' : 'probe (flag-offline streak=' + successStreak + ')')
-        setOnline(res.online)
+        publish(res.online, reachable === res.online ? 'probe' : 'probe (flag-offline streak=' + successStreak + ')')
       } finally {
         inflight = false
       }
@@ -134,7 +175,7 @@ export default function useOnlineStatus() {
     // A definite offline event is trustworthy — reflect it immediately
     // without waiting for a probe to time out.
     const onOffline = () => {
-      if (!cancelled) { successStreak = 0; logTransition(false, 'offline-event'); setOnline(false) }
+      if (!cancelled) { successStreak = 0; publish(false, 'offline-event') }
     }
     const onOnline = () => { check() }
     const onVisible = () => {

@@ -655,10 +655,12 @@ def get_frame(
   if etag:
     headers["ETag"] = etag
   # Tells the service worker this app is safe to cache for offline use
-  # (Tier 4a). The SW NetworkFirst-caches frame/module only when this
-  # header is present, so non-offline_capable apps keep their current
-  # network-only behavior. Cacheability is a function of server state,
-  # not a client-pushed list — consistent with the ETag freshness model.
+  # (Tier 4a). The SW's offlineCapableHandler caches frame/module only when
+  # this header is present, so non-offline_capable apps keep their network-only
+  # behavior. The SW serves them connectivity-aware: network-first when
+  # known-online (fresh app code on an edit), cache-first when not (instant
+  # offline). Cacheability is a function of server state, not a client-pushed
+  # list — consistent with the ETag freshness model.
   if app.offline_capable:
     headers["X-Mobius-Offline"] = "1"
 

@@ -14,14 +14,21 @@
  *   - Web Push handlers (push, notificationclick). These are
  *     domain-specific behavior that doesn't fit a Workbox recipe.
  *
- * What this file deliberately does NOT cache:
- *   - `/api/apps/{id}/{frame,module}` — the server returns an
- *     ETag derived from `app.updated_at`, and the browser HTTP
- *     cache handles revalidation natively. SW interception used
- *     to cache-first these and held stale modules across reloads
- *     (the "spinner-forever" bug class). See AGENTS.md "Service
- *     Worker" for the broader rationale.
- *   - HTML and other `/api/*` — straight to network.
+ * Caching model for `/api/apps/{id}/{frame,module}` (offline-capable apps):
+ *   - These ARE cached, by `offlineCapableHandler`, but ONLY for apps the
+ *     server marks `X-Mobius-Offline: 1` (offline_capable). The strategy is
+ *     connectivity-aware: NETWORK-FIRST when we're known-online (so an agent's
+ *     app edit is fresh on the current open), CACHE-FIRST when we're not
+ *     known-online (instant offline open + background revalidate). "Known
+ *     online" is the PAGE's /api/health probe verdict, posted to this SW (see
+ *     the connectivity channel below) — NOT navigator.onLine, which reads
+ *     stale-true while offline on Android PWAs.
+ *   - cache:'reload' on the network attempt avoids the 304-no-body trap that
+ *     previously left the module uncached (the old "spinner-forever" class).
+ *   - Non-offline-capable apps are NEVER cached (no X-Mobius-Offline header) →
+ *     always network, never stale.
+ *   - HTML/shell navigations: StaleWhileRevalidate (instant cached shell);
+ *     other `/api/*`: straight to network.
  */
 
 import {
@@ -37,6 +44,9 @@ import {
   ESM_CACHE,
   isCacheableAssetResponse,
   isStaleRuntimeCache,
+  isKnownOnline,
+  shouldServeCacheFirst,
+  VERDICT_MAX_AGE_MS,
 } from './sw-cache-policy.js'
 
 // LOAD-BEARING: these two calls are NOT injected by vite-plugin-pwa
@@ -63,7 +73,49 @@ clientsClaim()
 // only updates on an online visit, so an installed PWA can run an old SW
 // for a while). Served offline by the route below because the SW
 // synthesizes the response; no network needed.
-const SW_VERSION = '2026-06-01-offline-hang-fix'
+const SW_VERSION = '2026-06-02-sw-connectivity-channel'
+
+// ── Page → SW connectivity channel ───────────────────────────────────
+// The AUTHORITATIVE connectivity signal lives in the page: useOnlineStatus
+// probes /api/health (a real network round-trip), which is trustworthy where
+// `navigator.onLine` lies — notably an Android installed PWA reads
+// navigator.onLine === true while genuinely offline. The SW cannot run that
+// probe meaningfully itself, and reading navigator.onLine in the SW inherits
+// the same lie. So the page POSTS its probe verdict here and the SW caches it,
+// letting offlineCapableHandler take the instant cache-first path on a truly-
+// offline open instead of waiting out a network timeout. While the verdict is
+// `undefined` (cold SW restart before the first postMessage, or a stale verdict)
+// we are NOT known-online, so a CACHED app is still served cache-first (instant
+// — this is what removes the cold-restart race); only a cache MISS falls through
+// to network-first. A wrong "offline" guess self-heals via the background
+// revalidate, so erring cache-first on unknown connectivity is the right default
+// for speed.
+let _pageOnline   // true | false | undefined(unknown)
+let _pageOnlineAt = 0
+self.addEventListener('message', (e) => {
+  const m = e.data
+  if (!m || m.type !== 'moebius:connectivity') return
+  if (typeof m.online === 'boolean') {
+    _pageOnline = m.online
+    _pageOnlineAt = Date.now()
+  }
+})
+// Are we KNOWN to be online — i.e. is there a FRESH, POSITIVE page verdict? Used
+// to gate the offline-capable frame/module fast path: a cached app is served
+// cache-first UNLESS we're known-online (then network-first keeps the agent's
+// edit→see-it-immediately loop fresh on the current open). "Not known online"
+// covers genuinely-offline AND unknown (e.g. a cold SW restart before the first
+// /api/health verdict postMessage arrives, or a stale verdict) — in all of those
+// we prefer the instant cached app, which is safe because a wrong "offline"
+// guess costs at most ONE stale open: the detached revalidate() refreshes the
+// cache, and an app edit additionally remounts the iframe (version bump) on
+// reconnect. Requiring a POSITIVE online proof (not merely the absence of an
+// offline proof) is what makes the cold-restart first open instant WITHOUT a
+// race against the verdict postMessage. See web.dev two-way-communication +
+// Workbox #2892 for the pattern.
+function knownOnline() {
+  return isKnownOnline(_pageOnline, _pageOnlineAt, Date.now(), VERDICT_MAX_AGE_MS)
+}
 
 // /api/__sw_version — a synthetic, SW-generated response so /diag.html can
 // read the live SW generation even offline. Registered before the catch
@@ -206,20 +258,21 @@ registerRoute(
 // under a token-stripped key; serve the stored copy when the network fails.
 // This makes offline availability a deterministic function of "was it
 // loaded online once," independent of HTTP-cache revalidation state.
-// Bounded NETWORK-FIRST. The route stays network-first to preserve online
-// freshness — these responses carry a server ETag and an agent's app edit must
-// be seen on the next online load, so a cache-first serve (which would boot
-// stale app code after an edit) is NOT acceptable. The ONLY change from a bare
-// network-first is a timeout: offline on Android the browser's connectivity
-// state can be stale, so a same-origin `fetch()` stays PENDING (never resolves,
-// never rejects) instead of failing fast — the "navigator.onLine lies"
-// symptom. The old handler did `await fetch(...)` with no timeout, so when the
-// network hung the cache-fallback `catch` NEVER ran: the iframe's
-// `import('/module')` waited forever and the app span. (Confirmed on-device:
-// the diag log ended on `module:import:start` with no `module:import:ok`.) Now
-// the network attempt is bounded and AbortController-cancelled on timeout, then
-// we fall back to the cached copy — fixing the hang without sacrificing online
-// freshness.
+// Offline-capable frame/module strategy: CACHE-FIRST unless KNOWN-ONLINE (see
+// the handler). A cached app is served instantly + revalidated in the background
+// unless there's a fresh POSITIVE online verdict from the page (knownOnline()),
+// in which case NETWORK-FIRST keeps the agent's edit→see-it loop fresh on the
+// current open. The connectivity signal is the page's /api/health probe verdict
+// (posted to this SW), NOT navigator.onLine (stale-true offline on Android).
+//
+// NET_TIMEOUT_MS bounds the network attempt — it is a HANG-GUARD for the
+// pathological Android "fetch stays pending forever" case, NOT a latency lever.
+// Kept at 3000: a real frame/module fetch on a slow-but-online 2G/3G connection
+// can legitimately exceed a shorter bound, and aborting it would SILENTLY serve
+// stale cached app code to an online user (an adversarial review flagged 1.5s as
+// exactly this regression). The genuinely-offline fast path comes from the
+// knownOnline() gate (instant cache-first when not known-online), not from
+// shrinking this guard into the range of real slow fetches.
 const NET_TIMEOUT_MS = 3000
 
 // Run ONE fetch, bounded by NET_TIMEOUT_MS, aborting the underlying request on
@@ -249,7 +302,7 @@ async function boundedFetch(buildRequest) {
 }
 
 function offlineCapableHandler(cacheName) {
-  return async ({ request }) => {
+  return async ({ request, event }) => {
     const cache = await caches.open(cacheName)
     // The module URL carries a rotating auth token and a retry `_=` buster;
     // strip both so the cache key is stable across token rotation (else
@@ -258,12 +311,13 @@ function offlineCapableHandler(cacheName) {
     key.searchParams.delete('token')
     key.searchParams.delete('_')
     const cacheKey = key.href
-    try {
-      // cache:'reload' bypasses the browser HTTP cache so we get a full 200
-      // body, never a 304 (see the 304-trap note above). Constructing a
-      // Request from a navigate-mode request with an init throws in some
-      // engines; the builder falls back to a plain same-origin GET. Any throw
-      // from the builder or the fetch is caught below → cache fallback.
+
+    // The (bounded) network fetch that refreshes the cache. cache:'reload'
+    // bypasses the browser HTTP cache so we get a full 200 body, never a 304
+    // (see the 304-trap note above). Constructing a Request from a navigate-
+    // mode request with an init throws in some engines; the builder falls back
+    // to a plain same-origin GET.
+    const revalidate = async () => {
       const resp = await boundedFetch((signal) => {
         try {
           return new Request(request, { cache: 'reload', signal })
@@ -271,18 +325,61 @@ function offlineCapableHandler(cacheName) {
           return new Request(request.url, { cache: 'reload', credentials: 'same-origin', signal })
         }
       })
-      if (
-        resp && resp.status === 200 &&
-        resp.headers.get('X-Mobius-Offline') === '1'
-      ) {
-        await cache.put(cacheKey, resp.clone())
+      if (resp && resp.status === 200) {
+        if (resp.headers.get('X-Mobius-Offline') === '1') {
+          await cache.put(cacheKey, resp.clone())
+        } else {
+          // 200 but no offline header → the app was toggled offline_capable OFF.
+          // Purge the now-stale entry so a not-known-online open stops serving
+          // it cache-first (otherwise it would persist forever — cache.put is
+          // skipped for header-less responses, so the old body never gets
+          // overwritten). Self-heals a de-capabled app on the next refresh.
+          await cache.delete(cacheKey)
+        }
       }
       return resp
+    }
+
+    const cached = await cache.match(cacheKey)
+
+    // CACHE-FIRST unless KNOWN-ONLINE. A cached offline-capable app is served
+    // instantly + revalidated in the background UNLESS we have a fresh positive
+    // online verdict from the page. Requiring positive online proof (not the
+    // mere absence of an offline proof) is the key: on a cold SW restart the
+    // verdict postMessage hasn't arrived yet (_pageOnline=undefined), so
+    // knownOnline() is false and we serve the cached app INSTANTLY on the very
+    // first request — no race, no timeout. We do NOT key off navigator.onLine
+    // (it reads stale-true offline on the target Android device).
+    //
+    // Safety of guessing-offline-while-actually-online (cold-restart online, or
+    // a stale verdict): the detached revalidate() refreshes the cache in the
+    // background, and an app edit remounts the iframe (version bump) on
+    // reconnect — so a wrong guess costs at most ONE stale open, self-healing.
+    // When genuinely online with the SW warm, knownOnline() is true → network-
+    // first → the agent's edit is fresh on the current open (the build loop the
+    // first review insisted on). NET_TIMEOUT_MS stays a generous hang-guard on
+    // the network path, never a short latency lever (a slow-but-real fetch must
+    // not be aborted into a stale serve).
+    if (shouldServeCacheFirst(!!cached, knownOnline())) {
+      // Background-refresh, but tie it to the fetch event's lifetime so the
+      // browser keeps the SW alive until the fetch + cache.put finish — a bare
+      // detached promise can be cut off when the worker is terminated right
+      // after the cached response returns, leaving stale code cached for the
+      // next open (Codex review). event may be absent in non-FetchEvent
+      // dispatch; fall back to detached then.
+      const refresh = revalidate().catch(() => {})  // rejects harmlessly when offline
+      if (event && typeof event.waitUntil === 'function') event.waitUntil(refresh)
+      return cached
+    }
+
+    // Known-online (or no cached copy yet): network-first. On success the
+    // freshest body is served on THIS open + the cache is refreshed for the next
+    // offline open. On timeout/failure, fall back to the cached copy.
+    try {
+      return await revalidate()
     } catch (err) {
-      // Timed out, aborted, or network failed → serve the cached copy if we
-      // have one. This is the path that fixes the offline hang.
-      const cached = await cache.match(cacheKey)
-      if (cached) return cached
+      const late = await cache.match(cacheKey)
+      if (late) return late
       throw err
     }
   }
@@ -338,11 +435,11 @@ registerRoute(
   }),
 )
 
-// App frame/module — stored for offline-capable apps via the
-// reload-bypass handler (see offlineCapableHandler). Network wins online
-// (always a fresh 200 body, so no stale module), cache serves offline.
-// This is the route whose NetworkFirst+304 interaction left the module
-// uncached and blanked the in-shell iframe offline.
+// App frame/module — offline-capable apps only (X-Mobius-Offline:1). Served by
+// offlineCapableHandler: cache-first-unless-known-online (instant offline,
+// fresh-on-current-open when known-online) — see its full contract above. The
+// network attempt uses cache:'reload' to dodge the NetworkFirst+304 trap that
+// once left the module uncached and blanked the in-shell iframe offline.
 registerRoute(
   ({ url }) => /^\/api\/apps\/\d+\/(frame|module)$/.test(url.pathname),
   offlineCapableHandler('mobius-offline-apps'),
