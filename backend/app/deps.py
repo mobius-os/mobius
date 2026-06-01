@@ -146,6 +146,41 @@ def get_current_owner(
   return resolve_owner_only(token, db)
 
 
+def _enforce_app_scope(payload: dict, db: Session) -> int | None:
+  """Validates an app-scoped token's app identity; returns its app_id.
+
+  Returns the int app_id for an app-scoped token, or None for an owner
+  token. Raises 401 when the token is app-scoped but:
+    - it carries no integer app_id (malformed — it would otherwise read
+      as an owner caller downstream), or
+    - the app no longer exists (uninstalled: the token must stop working
+      at once so it can't keep touching the orphan storage tree), or
+    - the token's stamped `app_nonce` no longer matches the row's
+      `token_nonce` (the app was deleted and its integer id reused by a
+      DIFFERENT app — the replacement has a fresh nonce, so the old
+      token can't authenticate against it).
+
+  Centralized here so EVERY app-accepting dependency (numeric per-app
+  routes via get_principal AND shared/other routes via
+  resolve_owner_or_app) enforces it identically — there is no
+  app-token path that skips the check (Codex review #1, #2). A legacy
+  token minted before the `app_nonce` claim existed has no nonce and
+  falls back to row-existence only; such tokens expire within 8h.
+  """
+  if payload.get("scope") != "app":
+    return None
+  app_id = payload.get("app_id")
+  if not isinstance(app_id, int):
+    raise HTTPException(status_code=401, detail="Malformed app token.")
+  app = db.query(models.App).filter(models.App.id == app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App no longer exists.")
+  stamped = payload.get("app_nonce")
+  if stamped is not None and stamped != app.token_nonce:
+    raise HTTPException(status_code=401, detail="App token no longer valid.")
+  return app_id
+
+
 def resolve_owner_or_app(token: str, db: Session) -> models.Owner:
   """Resolves an owner (from a full OR app-scoped token string).
 
@@ -154,9 +189,11 @@ def resolve_owner_or_app(token: str, db: Session) -> models.Owner:
   query param (iframe `import()` can't set headers) and deliberately
   accepts any valid token. Going through here applies the same
   revocation check the header dependencies use, so a signed-out token
-  can't still pull module source.
+  can't still pull module source, plus the app-scope validation so a
+  deleted/reused-id app token can't read shared storage either.
   """
-  owner, _ = _resolve_owner(token, db)
+  owner, payload = _resolve_owner(token, db)
+  _enforce_app_scope(payload, db)
   return owner
 
 
@@ -181,27 +218,15 @@ def get_principal(
   token: str = Depends(_oauth2),
   db: Session = Depends(get_db),
 ) -> Principal:
-  """Same as get_current_owner_or_app but also exposes the token's app_id."""
+  """Same as get_current_owner_or_app but also exposes the token's app_id.
+
+  The app-scope validation (malformed app_id, deleted app, reused-id
+  nonce mismatch) is shared with resolve_owner_or_app via
+  _enforce_app_scope, so the numeric per-app routes and the shared
+  routes reject a stale app token identically.
+  """
   owner, payload = _resolve_owner(token, db)
-  scope = payload.get("scope")
-  app_id = payload.get("app_id") if scope == "app" else None
-  # Invariant: an app-scoped token MUST carry an integer app_id. A signed
-  # token with scope='app' but a null/absent app_id would resolve to
-  # app_id=None and then read as an *owner* caller downstream (Principal
-  # .app_id is the owner-vs-app discriminator, e.g. the /api/ai tool gate).
-  # Reject it so every app-scope route can trust app_id is real.
-  if scope == "app" and not isinstance(app_id, int):
-    raise HTTPException(status_code=401, detail="Malformed app token.")
-  # An app-scoped JWT outlives the app by up to its TTL. If the app was
-  # uninstalled, the token must stop working at once — otherwise it could
-  # keep reading, recreating, listing, or deleting the (now-orphan)
-  # /data/apps/<id> storage tree for hours (Codex review #1). Mandatory row
-  # existence IS the revocation mechanism: no row, no access. Owner tokens
-  # (app_id is None) skip this — they aren't app-scoped.
-  if app_id is not None and (
-    not db.query(models.App.id).filter(models.App.id == app_id).first()
-  ):
-    raise HTTPException(status_code=401, detail="App no longer exists.")
+  app_id = _enforce_app_scope(payload, db)
   return Principal(owner=owner, app_id=app_id)
 
 

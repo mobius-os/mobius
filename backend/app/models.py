@@ -12,6 +12,7 @@ you'd otherwise add a column for, use per-app storage at
 `/data/apps/<app_id>/...` via the storage API.
 """
 
+import secrets
 from datetime import UTC, datetime
 
 from sqlalchemy import (
@@ -149,6 +150,17 @@ class App(Base):
   # it after a user has installed the standalone PWA would orphan
   # their home-screen icon.
   slug = Column(String(128), nullable=True, unique=True, index=True)
+  # Per-app secret stamped into every app-scoped token at mint and
+  # verified on each request (deps._enforce_app_scope). It rotates with
+  # the row: a freshly-created app gets a fresh random nonce, so a token
+  # minted for a DELETED app can't authenticate against a DIFFERENT app
+  # that later reused its SQLite integer id (which `INTEGER PRIMARY KEY`
+  # does, lacking AUTOINCREMENT). Nullable so the additive migration can
+  # backfill existing rows; tokens minted before the `app_nonce` claim
+  # existed fall back to row-existence only (Codex review #1).
+  token_nonce = Column(
+    String(32), nullable=True, default=lambda: secrets.token_hex(16)
+  )
   # URL the app was installed from (manifest URL passed to
   # POST /api/apps/install). Null for user-built apps that didn't
   # come through the install endpoint. The install endpoint matches
