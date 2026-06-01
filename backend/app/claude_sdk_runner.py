@@ -214,25 +214,6 @@ def _emit_unknown(bc, kind: str, raw: Any) -> None:
     bc.publish(event)
 
 
-async def _maybe_flush(bc) -> None:
-  """Commits any pending streaming save off the event loop, if `bc`
-  supports it.
-
-  The runner's `bc` is the chat's `_ChatEventSink` in production,
-  which defers its blocking `db.commit()` and exposes an async
-  `flush()` so the runner can run that commit off-thread (see
-  `chat._ChatEventSink`). `flush` is an OPTIONAL extension of the
-  broadcast contract: a plain `ChatBroadcast` (or a test double) has
-  no deferred commit, so the absence of `flush` means "nothing to
-  persist," not a bug to guard. Keeping it optional lets the runner
-  stay decoupled from the sink type and avoids forcing every
-  broadcast-like double to grow a method it has no concept of.
-  """
-  flush = getattr(bc, "flush", None)
-  if flush is not None:
-    await flush()
-
-
 def _usage_event(usage: dict[str, Any]) -> dict:
   """Builds the wire-shape `usage` event from an SDK usage dict.
 
@@ -624,14 +605,6 @@ async def run_claude_sdk_turn(
       await client.query(user_message)
 
       async for sdk_msg in client.receive_response():
-        # Commit the prior iteration's streaming save off the loop
-        # before processing this message. `bc` is the chat's event
-        # sink (chat.py); flush() is a no-op for a plain broadcast or
-        # when nothing is pending. dispatch_sdk_message stays sync —
-        # it only broadcasts + records the save; the blocking commit
-        # happens here so a SQLite lock can't stall the event loop and
-        # starve other chats' SSE. See _ChatEventSink for the why.
-        await _maybe_flush(bc)
         current_session_id, terminal = dispatch_sdk_message(
           sdk_msg, bc, current_session_id,
         )

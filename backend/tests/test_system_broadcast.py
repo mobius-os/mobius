@@ -15,9 +15,9 @@
 
 - Commit offload (C2): the streaming save's blocking `db.commit()` runs
   OFF the event loop on the writer-actor thread. `publish()` submits a
-  fire-and-forget `PersistTranscript` (or `PersistError`); `flush()` is a
-  no-op shim. A slow commit on one chat can't stall the loop and starve
-  other chats' SSE because it never runs on the loop.
+  fire-and-forget `PersistTranscript` (or `PersistError`). A slow commit
+  on one chat can't stall the loop and starve other chats' SSE because it
+  never runs on the loop.
 """
 
 import asyncio
@@ -171,14 +171,6 @@ def test_streaming_commit_runs_off_the_event_loop_thread(db, chat):
     "the streaming commit ran on the event loop thread — it must run on "
     "the writer-actor thread so a SQLite lock can't stall the loop"
   )
-
-
-def test_flush_is_a_noop_shim(db, chat):
-  """flush() is retained for the runner's per-iteration call but does
-  nothing now that the actor owns every commit (removal deferred to D)."""
-  bc = _OrderedBroadcast(chat.id)
-  sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-t")
-  assert asyncio.run(sink.flush()) is None
 
 
 def test_finalize_awaits_actor_and_persists(db, chat):
