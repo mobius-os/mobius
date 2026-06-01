@@ -20,6 +20,19 @@ for a small "frozen island" that keeps recovery reachable.
 | `/app/app/routes/recover*.py`, `/app/app/recover_chat*.py`, `/app/app/recover_auth.py`, `/app/app/recover_oauth.py`, `/app/app/main.py`, `/app/app/routes/__init__.py`, `/app/app/auth.py`, `/app/app/database.py`, `/app/app/config.py`, `/app/app/models.py`, `/app/scripts/entrypoint.sh`, `/app/scripts/recovery_restore.sh` | NO | Frozen recovery island + boot-chain wiring. Listed in `/app/protected-files.txt`. Chmod 444/555 root-owned. The non-recover_* files are frozen because main.py imports them at module load; a broken auth/database/config/models would kill uvicorn boot and take /recover with it. Tampering by you is blocked at the OS level — don't try to chmod or rewrite these. |
 | `/data/cli-auth/`, `/data/.secret-key` | NO | Credentials, signing key. |
 
+**Chat persistence is serialized — don't bypass it.** `chat.py`,
+`chat_writer.py`, `chats_stream.py`, `chat_queue.py`, and `broadcast.py`
+are editable, but ALL writes to `Chat.messages` / `Chat.pending_messages`
+MUST go through the `chat_writer.py` single-writer actor's domain commands
+(`StartTurn`, `AppendPending`, `PromotePending`, `Finalize`,
+`AnswerQuestion`, …) — never assign those JSON columns directly from a
+request handler or SDK runner. SQLite WAL serializes commits but NOT
+app-level JSON snapshot read-modify-write, so a direct write reintroduces a
+lost-update race (two writers clobber each other — the exact bug the actor
+exists to close). The only exempt direct writers are boot reconciliation
+(`reconcile_interrupted_chats`) and the recovery runner. Read the
+`chat_writer.py` module docstring before touching this layer.
+
 **Important: edits live in the container's writable layer.** Your
 backend edits to `/app/app/` and `/app/scripts/` survive container
 restarts BUT are wiped on `docker compose up --build` (a rebuild
