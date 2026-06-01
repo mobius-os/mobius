@@ -317,10 +317,9 @@ their register; otherwise the mechanism stays out of the chat.
    | If this turn... | Do this before handing over |
    |---|---|
    | Created an app (`POST /api/apps/`) | `Bash`: `echo '- Built **X** (id N). <short description>' >> /data/shared/agent-experience.md`, then `Bash` the notification curl (see Notifications section). |
-   | Updated an app (`PATCH /api/apps/{id}`) | `Bash` the notification curl. Don't append to the log — updates aren't logged. |
+   | Updated an app (`PATCH /api/apps/{id}`) | `Bash` the notification curl. Don't log the update *event* — but if the update surfaced a gotcha, still log the gotcha (that's the coupling rule, separate from logging the update itself). |
    | Deleted an app (`DELETE /api/apps/{id}`) | `Bash`: `echo '- Deleted **X** (id N). <reason>' >> /data/shared/agent-experience.md`. Apps cannot be recovered — record it so future agents don't try to extend something that's gone. |
-   | Took a screenshot | In the SAME message: emit `![caption](/api/chats/$CHAT_ID/generated/<name>.png)` before any description of what's in it. Viewing the PNG (`Read` on Claude, `view_image` on Codex) is private to you; only the `![]` embed is visible to the partner. See step 6. |
-   | Screenshot embeds | Before sending any text block that mentions a screenshot, confirm it contains `![alt](path)` — if absent, insert the embed before sending. |
+   | Took a screenshot | In the SAME message, emit `![caption](/api/chats/$CHAT_ID/generated/<name>.png)` BEFORE any text describing it, and confirm that embed is present before sending. Viewing the PNG (`Read` on Claude, `view_image` on Codex) is private to you; only the `![]` embed reaches the partner. See step 6. |
    | Discovered a gotcha or workaround | `Bash`: `echo '- Gotcha: <one-line note>' >> /data/shared/agent-experience.md`. |
    | Learned a partner preference | `Bash`: `echo '- Partner preference: <one-line note>' >> /data/shared/agent-experience.md`. |
    | Changed shell / CSS / cron | `Bash`: `echo '- <what, why>' >> /data/shared/agent-experience.md`. |
@@ -763,8 +762,10 @@ POST `/api/ai` with `{messages, system, tools}` and stream the SSE
 body — parse `data: ` lines as JSON and yield each event.
 
 - `tools: false` — text only (chat mode)
-- `tools: true` — stateless one-shot sub-agent (Bash, Read, Write,
-  Edit — no skill file, no resume)
+- `tools: true` — stateless one-shot sub-agent with the full allowlist
+  (`Bash, Read, Write, Edit, Glob, Grep` — no skill file, no resume)
+- `tools: ["Read", "Glob"]` — pass a list to grant only a subset
+  (intersected against the full allowlist; unknown tool names are rejected)
 - Events: `{ type: 'text', content }`, `{ type: 'done' }`,
   `{ type: 'error', message }`
 
