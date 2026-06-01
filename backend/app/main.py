@@ -105,8 +105,8 @@ async def lifespan(app):
   # persistence is degraded, so it never routes through the actor.
   # start_writer catches its own startup failure (marks the writer fatal
   # rather than raising), so a writer that can't start can't brick boot
-  # or the recovery surface. The actor is dormant in this milestone: no
-  # production write path routes through it yet.
+  # or the recovery surface. The actor is LIVE: it is the chat-persistence
+  # path the C2 write routes/runners submit every transcript write through.
   try:
     from app.chat_writer import start_writer
     start_writer()

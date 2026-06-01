@@ -14,8 +14,9 @@ writes without rewriting the actor.
 
 See ~/mobius-persistence-redesign-2026-05-31.md for the rationale and
 ~/mobius-chat-writer-actor-plan-2026-05-31.md for the staged rollout.
-This module is dormant until the activation milestone wires the runners
-and routes onto it.
+The activation milestone has landed: this actor IS the live chat-persistence
+path — the runners and routes (`get_writer()` in the C2 write paths) submit
+every transcript write through it.
 
 Concurrency invariant: ack `Future`s are NEVER resolved while a producer
 lock (`_fatal_lock`/`_pending_lock`) is held.  Every method that resolves an
@@ -49,7 +50,19 @@ from sqlalchemy.exc import SQLAlchemyError
 from app import schemas
 from app.events import build_assistant_message, finalize_blocks, question_block_key
 
-log = logging.getLogger("moebius.chat_writer")
+# Child of `moebius.chat` (NOT a sibling `moebius.chat_writer`) so the actor's
+# records PROPAGATE to the RotatingFileHandler that `chat._get_logger` attaches
+# to `moebius.chat` — the same `chat.log` file `/api/debug/logs` serves. A
+# persistence failure during Finalize/PersistTranscript/AnswerQuestion is
+# exactly the failure the redesign's failure-semantics route here, so it has to
+# be operator-visible; under the old `moebius.chat_writer` name (a sibling) the
+# records landed on no handler and the post-mortem was blind. No double-logging:
+# `moebius.chat` holds the only handler, this child adds none, and the root
+# logger has none — so a propagated record hits exactly one handler. The parent
+# handler is built lazily by `chat._get_logger`, which the lifespan's
+# `reconcile_interrupted_chats` always calls BEFORE `start_writer()`, so the
+# handler exists by the time the writer thread can log.
+log = logging.getLogger("moebius.chat.writer")
 
 
 # Bounded wait for a strict (commit-before-ack) writer-actor command.
