@@ -188,14 +188,16 @@ class AnswerQuestion(_Command):
   answers: dict = field(default_factory=dict)
 
 
-# -- queue + turn commands (the JSON-blob RMW the actor owns at C2) -------
-# These replicate the read-modify-write logic that today lives in
-# routes/chats_stream.py (initial-send / _append_to_pending / cancel),
-# chat_queue.py (promote), and chat.py (clear-pending / run markers).
-# In C1 they are exercised only by tests; the route/queue copies stay
-# active and are the production path until the C2 flip.  Each is
-# must-persist (commit-before-ack, non-coalescing) and fences any pending
-# coalescible snapshot for its (chat_id, run_token) key on submit.
+# -- queue + turn commands (the JSON-blob RMW the actor owns) ------------
+# These own the read-modify-write of the chat's `messages` /
+# `pending_messages` blobs: initial-send (`StartTurn`, from
+# routes/chats_stream.py), append (`AppendPending`), cancel
+# (`CancelPending`), promote (`PromotePending`, from chat_queue.py), and
+# clear / run markers (`ClearPending`, from chat.py).  The routes/queue
+# submit these instead of mutating the row directly, so every mutation is
+# serialized on the actor thread.  Each is must-persist (commit-before-ack,
+# non-coalescing) and fences any pending coalescible snapshot for its
+# (chat_id, run_token) key on submit.
 
 
 @dataclass
@@ -285,10 +287,10 @@ class ClearPending(_Command):
 class ReplaceTranscript(_Command):
   """Replace the whole `messages` blob (PUT /api/chats/{id}).
 
-  Replicates `update_chat`'s transcript branch: sets `messages` to
-  `messages` (when not None), `title` (when supplied), stamps
-  `updated_at`, and commits.  Must route through the actor at C2 so it
-  serializes with streaming snapshots for the same chat.
+  Backs `update_chat`'s transcript branch: sets `messages` to `messages`
+  (when not None), `title` (when supplied), stamps `updated_at`, and
+  commits.  Routes through the actor so the replace serializes with
+  streaming snapshots for the same chat.
   """
 
   chat_id: str = ""
@@ -761,6 +763,18 @@ class ChatWriterActor:
     # with the writer thread still alive.
     if self._thread:
       self._thread.join(timeout=timeout)
+      if self._thread.is_alive():
+        # The bounded join expired but the thread is still running — a
+        # command's DB work outlasted the timeout (a wedged commit, a
+        # stuck session).  stop() still returns (callers must not block
+        # teardown), but a surviving writer thread is an operator-visible
+        # anomaly, so log it loudly via `moebius.chat.writer` (propagates
+        # to chat.log).
+        log.warning(
+          "chat writer thread still alive after %.1fs join timeout "
+          "(a command's DB work outlasted the join); stop() returning anyway",
+          timeout,
+        )
 
   # -- consumer (the writer thread) --------------------------------------
   def _run(self) -> None:
@@ -992,10 +1006,9 @@ class ChatWriterActor:
 
   # -- real DB dispatch (one method per command) -------------------------
   # Each method runs on the actor thread against `db` (the actor's single
-  # session).  They reuse the persistence helpers moved into this module
-  # so the actor and the still-live route/sink copies share one source of
-  # truth.  `_RecordingSession`-stub detection (`record_commit`) keeps the
-  # mechanics tests DB-free.
+  # session), delegating to the module-level persistence helpers below so
+  # the RMW logic lives in one place.  `_RecordingSession`-stub detection
+  # (`record_commit`) keeps the mechanics tests DB-free.
 
   def _persist_message(self, db, chat_id: str, snapshot: dict) -> bool:
     """Write `snapshot` as the chat's last assistant message.
@@ -1021,21 +1034,15 @@ class ChatWriterActor:
       return _WriteOutcome.APPLIED
     return _apply_last_assistant_message(db, chat_id, snapshot)
 
-  def _finalize(self, db, chat_id: str, snapshot: dict) -> bool:
+  def _finalize_required(self, db, chat_id: str, snapshot: dict):
     """Force-complete tool blocks and write the terminal assistant message.
 
-    `snapshot["blocks"]` is the accumulated block list; `finalize_response`
-    mutates it (closing running tool blocks) and persists.
-    """
-    if hasattr(db, "record_commit"):
-      return self._commit_snapshot(db, snapshot)
-    return finalize_response(db, chat_id, snapshot.get("blocks") or [])
-
-  def _finalize_required(self, db, chat_id: str, snapshot: dict):
-    """Must-persist variant of `_finalize`, returning a `_WriteOutcome`.
-
-    Backs `Finalize`: the dispatch raises unless APPLIED.  On the recording
-    stub the recorded commit IS the terminal write, so it reports APPLIED.
+    Backs `Finalize` and returns a `_WriteOutcome`: the dispatch raises
+    unless APPLIED, so a NOOP (missing row / empty transcript / no blocks)
+    fails the ack instead of falsely succeeding.  `snapshot["blocks"]` is
+    the accumulated block list; `finalize_response_outcome` closes any
+    running tool blocks before persisting.  On the recording stub the
+    recorded commit IS the terminal write, so it reports APPLIED.
     """
     if hasattr(db, "record_commit"):
       self._commit_snapshot(db, snapshot)
@@ -1403,24 +1410,21 @@ class _PersistFailed(Exception):
 
 # -- chat-transcript persistence helpers ---------------------------------
 # These mutate the two JSON blobs on the Chat row (`messages`,
-# `pending_messages`).  They moved here from `chat.py` / `routes/
-# chats_stream.py` so the writer actor can call them on its own thread
-# without importing back into `chat.py` (which imports `alloc_run_token`
-# from this module — the reverse import would cycle).  `chat.py` and the
-# routes import them BACK from here; the dependency runs one way
-# (chat.py -> chat_writer).  Behavior is byte-for-byte the moved code:
-# until the activation milestone the sink/routes still CALL these exactly
-# as before, so moving them changes nothing at runtime.
+# `pending_messages`).  They live here so the writer actor can call them
+# on its own thread without importing back into `chat.py` (which imports
+# `alloc_run_token` from this module — the reverse import would cycle).
+# `chat.py` re-imports the few it still needs BACK from here, so the
+# dependency runs one way (chat.py -> chat_writer).
 
 
 def _ensure_unique_ts(new_msg: dict, others: list) -> None:
   """Bump `new_msg['ts']` so it's strictly greater than every ts in `others`.
 
-  A local copy of `chats_stream._ensure_unique_ts` for the `AppendPending`
-  command — two sends in the same millisecond would otherwise collide,
-  producing duplicate React keys client-side and ambiguous DELETE-by-ts.
-  Callers pass the union of pending + persisted messages (so a queued ts
-  can't equal a persisted assistant ts once it promotes).
+  Used by the `AppendPending` command — two sends in the same millisecond
+  would otherwise collide, producing duplicate React keys client-side and
+  ambiguous DELETE-by-ts.  Callers pass the union of pending + persisted
+  messages (so a queued ts can't equal a persisted assistant ts once it
+  promotes).
   """
   if not others:
     return
@@ -1532,8 +1536,9 @@ def _apply_last_assistant_message(db, chat_id: str, message: dict):
       # new ts can't collide with a pending user msg once it promotes into
       # chat.messages (equal ts -> duplicate React keys). The pending read
       # is here, not on the hot path, so the common replace does no extra
-      # work. Mirrors chats_stream._ensure_unique_ts (it now clears
-      # chat.messages too), so the two allocators can't hand out the same ms.
+      # work. Mirrors `_ensure_unique_ts` (the queue allocator, which also
+      # unions in chat.messages), so the two allocators can't hand out the
+      # same ms.
       message["ts"] = next_message_ts(
         msgs[:-1] + list(chat.pending_messages or [])
       )
@@ -1580,19 +1585,6 @@ def finalize_response_outcome(db, chat_id: str, assistant_blocks: list):
   finalize_blocks(assistant_blocks)
   return _apply_last_assistant_message(
     db, chat_id, build_assistant_message(assistant_blocks)
-  )
-
-
-def finalize_response(db, chat_id: str, assistant_blocks: list) -> bool:
-  """End-of-response cleanup: force-complete tool blocks and save.
-
-  The bool adapter (the sink ignores the return, but the contract is
-  preserved): True on APPLIED, False on NOOP (nothing to persist) or DROPPED
-  (the commit dropped).  The actor's `Finalize` dispatch uses
-  `finalize_response_outcome` directly so it can fail the ack on a NOOP.
-  """
-  return finalize_response_outcome(db, chat_id, assistant_blocks) is (
-    _WriteOutcome.APPLIED
   )
 
 
