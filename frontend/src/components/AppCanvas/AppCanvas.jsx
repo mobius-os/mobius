@@ -6,6 +6,25 @@ import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import { WifiOff } from 'lucide-react'
 import './AppCanvas.css'
 
+// TEMPORARY diagnostics — write to the same-origin ring buffer /diag.html
+// reads, so the in-shell mini-app boot handshake is observable on-device
+// (parent side; the iframe writes its own via app-frame.html mlog). Never
+// logs token values. Remove with the rest of the offline diag scaffolding.
+function aclog(appId, tag, msg) {
+  try {
+    const key = 'mobius-diag-log'
+    const arr = JSON.parse(localStorage.getItem(key) || '[]')
+    arr.push({
+      t: new Date().toISOString(),
+      src: 'AppCanvas:' + appId,
+      online: typeof navigator !== 'undefined' ? navigator.onLine : null,
+      tag: String(tag),
+      msg: msg == null ? '' : String(msg).slice(0, 200),
+    })
+    localStorage.setItem(key, JSON.stringify(arr.slice(-150)))
+  } catch (e) { /* ignore */ }
+}
+
 // =================================================================
 // AppCanvas ↔ iframe postMessage protocol
 // =================================================================
@@ -167,8 +186,8 @@ export default function AppCanvas({
   // it needs a fresh init. A parent-side dedup would silently drop
   // the re-init and the iframe would hit its 10s timeout.
   function sendInit() {
-    if (!loadedRef.current) return
-    if (!token) return
+    if (!loadedRef.current) { aclog(appId, 'sendInit', 'skip: iframe not loaded'); return }
+    if (!token) { aclog(appId, 'sendInit', 'skip: no token yet'); return }
     // NOTE: do NOT gate on `theme`. Previously this returned early until the
     // theme query resolved, to avoid a one-frame flash from the iframe's
     // fallback theme repainting when `frame-theme` arrives. But offline (cold
@@ -216,6 +235,7 @@ export default function AppCanvas({
       const msg = e.data
       if (!msg || typeof msg !== 'object') return
       if (msg.type === 'moebius:frame-mounted' && String(msg.appId) === String(appId)) {
+        aclog(appId, 'recv', 'frame-mounted → hide overlay')
         setLoaded(true)
       }
       // The frame hit a terminal load failure (bad import, no token, no
@@ -226,6 +246,7 @@ export default function AppCanvas({
       // frame-mounted; the offline panel (rendered when !loaded) is a
       // separate path and is unaffected.
       if (msg.type === 'moebius:frame-error' && String(msg.appId) === String(appId)) {
+        aclog(appId, 'recv', 'frame-error → hide overlay')
         setLoaded(true)
       }
       // Mini-app back-nav protocol (see useNavigation.appNavPush /

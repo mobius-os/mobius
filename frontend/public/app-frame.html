@@ -251,9 +251,21 @@
         showErr('Configuration error', 'No token received from parent.');
         return;
       }
+      // DECISIVE diagnostic: is THIS iframe controlled by the service worker?
+      // A sandboxed iframe WITHOUT allow-same-origin is NOT SW-controlled, so
+      // its same-origin sub-resource imports (the module + /vendor React)
+      // bypass the SW and hit the network → hang/fail offline even though the
+      // top-level page (and /diag.html) show everything cached. We DO pass
+      // allow-same-origin, which should keep it controlled — this logs whether
+      // that's actually true on the device. (See whatwg/html#10585.)
+      try {
+        mlog('sw-controller', (navigator.serviceWorker && navigator.serviceWorker.controller) ? 'present' : 'NULL (iframe not SW-controlled)');
+      } catch (e) { mlog('sw-controller', 'err ' + e.message); }
       try {
         const url = `/api/apps/${_FRAME_APP_ID}/module?token=${encodeURIComponent(token)}`;
+        mlog('module:import:start', url.split('?')[0]);
         const mod = await import(url);
+        mlog('module:import:ok', '');
         const Component = mod.default;
         if (!Component) {
           showErr('Module error', 'The app module has no default export.');
@@ -262,6 +274,7 @@
         createRoot(document.getElementById('root')).render(
           createElement(Component, { appId: _FRAME_APP_ID, token })
         );
+        mlog('module:mounted', '');
         // Tell the parent we've kicked off the React render so it
         // can hide the loading overlay. iframe.onLoad alone fires
         // BEFORE this point (it's the document's load event, not the
@@ -285,6 +298,7 @@
         return;
       }
       if (msg.type === 'moebius:frame-init' && !initialized) {
+        mlog('frame-init', 'received (token=' + (msg.token ? 'yes' : 'NO') + ' theme=' + (msg.themeCss ? 'yes' : 'no') + ')');
         initialized = true;
         applyTheme(msg.themeCss, msg.bg);
         loadModule(msg.token);
