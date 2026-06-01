@@ -1,7 +1,7 @@
 """Terminal-completion state-machine tests (design 2026-06-01, §F).
 
-Eight tests, all driving the REAL `run_chat` wrapper (never `_complete_turn`
-directly) so they cover `run_chat`'s `finally` + the locked terminal
+Every test here drives the REAL `run_chat` wrapper (never `_complete_turn`
+directly) so it covers `run_chat`'s `finally` + the locked terminal
 transition together — the layer where the marker-clear decision now lives.
 Tests 3 and 4 use DETERMINISTIC SMALL-TIMEOUT SEAMS (monkeypatching the
 module constants small) so the bound trips without waiting 65 real seconds.

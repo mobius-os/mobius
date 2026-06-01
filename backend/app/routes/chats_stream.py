@@ -318,7 +318,9 @@ async def send_message(
               run_token=drain_token,
             )
           else:
-            # Nothing to promote (queue race, malformed) — release.
+            # Nothing to promote (empty queue / queue race) — release. A
+            # MALFORMED head no longer lands here: it raises in the actor and
+            # is handled by the `except` below (→ FAILED_LEAVE_MARKER).
             discard_starting(chat_id)
         except Exception:
           discard_starting(chat_id)

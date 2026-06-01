@@ -1210,7 +1210,8 @@ Use the exact model string from the picker.
 Effort enum varies by provider: Claude accepts `low`, `medium`,
 `high`, `xhigh`, `max`; Codex accepts `none`, `minimal`, `low`,
 `medium`, `high`, `xhigh`. Pick a value valid for whichever provider
-this chat is using (check the slash picker), and prefer leaving it
+this chat is using (check the model picker in the composer's `+` popover),
+and prefer leaving it
 unset unless you have a specific reason — the per-provider default
 is sensible.
 

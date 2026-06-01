@@ -489,7 +489,7 @@ export default function ChatSettingsPanel({
         }
         // Provider lock: once the chat has assistant turns, the
         // other provider's models grey out — cross-provider switch
-        // loses session context (see CLAUDE.md slash-picker section).
+        // loses session context (see the "Composer popover" section in AGENTS.md).
         // Same-provider model swaps remain available because both
         // SDKs preserve context within a session on model change.
         const isCrossProvider = hasAssistantTurns && pid !== draftProvider
