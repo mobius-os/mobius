@@ -74,9 +74,13 @@ fi
 
 echo "[4/5] full backend pytest (worktree-scoped container)"
 slug="$(basename "$PWD" | sed 's/^session-//')"
-docker compose -p "mobius-test-$slug" -f docker-compose.test.yml \
-  --project-directory "$PWD" run --rm pytest >/tmp/preship-pytest.log 2>&1
-if ! tail -3 /tmp/preship-pytest.log | grep -qE '[0-9]+ passed'; then
+# pytest's EXIT CODE is the source of truth (non-zero on any failure or a
+# non-pytest error like a missing image) — grepping "N passed" off the tail
+# is fragile to plugin output ordering and can both false-pass (a stray
+# "N passed" in unrelated output) and false-fail (summary pushed past the
+# last 3 lines). Keep the grep only for the human-readable count on success.
+if ! docker compose -p "mobius-test-$slug" -f docker-compose.test.yml \
+     --project-directory "$PWD" run --rm pytest >/tmp/preship-pytest.log 2>&1; then
   tail -15 /tmp/preship-pytest.log >&2
   fail "pytest not green (see /tmp/preship-pytest.log)"
 fi
