@@ -732,6 +732,17 @@ async def install_from_manifest(
       taken = db.query(models.App).filter(models.App.slug == slug).first()
       if taken:
         slug = allocate_unique_slug(db, manifest["name"])
+        # Non-behavioral telemetry: the install still succeeds under the
+        # suffixed slug, but a collision means two apps now share a stem
+        # (user-built vs store, or two store apps). Logging requested-vs-
+        # assigned makes that observable to the dreaming agent / store UI
+        # without a DB rename. Best-effort like every activity emit.
+        activity.log_event(
+          "slug_collision",
+          requested_slug=manifest_id,
+          assigned_slug=slug,
+          source=source,
+        )
       source_dir = str(data_dir / "apps" / slug)
       app = models.App(
         name=manifest["name"],

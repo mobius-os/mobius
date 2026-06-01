@@ -164,6 +164,19 @@ def test_install_fresh_app_writes_everything(client, auth, tmp_path, bypass_url_
   assert sched == {"hour": 10, "minute": 0}
   # warning expected: scaffold script isn't on PATH in the test image
   assert any("cron" in w for w in payload["warnings"])
+  # A clean install (no pre-existing app owns "test-news") must NOT emit
+  # a slug_collision telemetry event.
+  assert not [e for e in _read_activity() if e["ev"] == "slug_collision"]
+
+
+def _read_activity() -> list[dict]:
+  """Parse /data/logs/activity.jsonl into a list of event dicts (empty
+  if the file doesn't exist). Mirrors test_activity.py's reader so the
+  install tests can assert on the telemetry the installer emits."""
+  path = Path(get_settings().data_dir) / "logs" / "activity.jsonl"
+  if not path.exists():
+    return []
+  return [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
 
 
 def test_register_cron_passes_job_name_to_scaffold(tmp_path):
@@ -831,6 +844,14 @@ def test_install_with_same_slug_different_manifest_keeps_both(
   assert installed["manifest_url"] == (
     base.rstrip("/") + "#manifest-id=news"
   )
+
+  # Telemetry fired: the requested slug ("news") collided with the
+  # user-built app, so the installer logged requested-vs-assigned. The
+  # install still succeeded — this is observability, not a behavior change.
+  collisions = [e for e in _read_activity() if e["ev"] == "slug_collision"]
+  assert len(collisions) == 1
+  assert collisions[0]["requested_slug"] == "news"
+  assert collisions[0]["assigned_slug"] == installed["slug"]
 
   # User's app is untouched.
   r_user = client.get(f"/api/apps/{user_id}", headers=auth)
