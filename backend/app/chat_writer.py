@@ -763,6 +763,36 @@ class ChatWriterActor:
         if isinstance(cmd, Barrier):
           _safe_set_result(cmd.ack, None)
           continue
+        # Cheap defense against an abandoned ack on a run-marker-SETTING
+        # command: a `StartTurn` / `PromotePending` whose caller already gave
+        # up (its `asyncio.wrap_future` ack was cancelled, or is otherwise
+        # done) must NOT mutate state — the awaiter has moved on, so
+        # committing now would promote/start a turn nobody will run AND set
+        # the durable run marker for it, stranding a queued send (the FIX-1
+        # hazard: a timed-out promote that still commits after the
+        # continuation flow abandoned it).
+        #
+        # Scope is deliberately narrow: only these two. `AnswerQuestion` must
+        # persist EVEN when its ack is abandoned (the Stop-races-answer
+        # contract — the route re-claims by identity and returns 410, but the
+        # answer is durable regardless; see chats_stream + the
+        # stop-races-answer tests). `Finalize`/`QuestionCommit`/`PersistError`
+        # are terminal transcript writes that are beneficial to land even if
+        # the awaiter went away. `Clear*`/`Cancel*`/`Replace*` are idempotent
+        # convergence writes. So the skip targets exactly the commands whose
+        # post-abandon commit strands a turn. The `finally` still GCs the
+        # key's fence epoch for the skipped command.
+        if (
+          isinstance(cmd, (StartTurn, PromotePending))
+          and cmd.ack is not None
+          and cmd.ack.done()
+        ):
+          log.warning(
+            "chat writer skipping %s with abandoned ack chat_id=%s",
+            type(cmd).__name__, cmd.chat_id,
+          )
+          self._gc_generation(cmd.chat_id, cmd.run_token)
+          continue
         try:
           # `expire_all` before each command so a row dirtied by an
           # ALLOWED direct writer (e.g. session_id persistence, still on
