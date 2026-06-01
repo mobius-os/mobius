@@ -388,18 +388,22 @@ if [ -z "$after_hash" ]; then
   fail "could not parse bundle hash from ${INTERNAL_BASE}/ — check manually"
   exit 1
 fi
-# Hash match is OK only if the bundle genuinely didn't change. After a
-# rebuild we expect rotation; same hash means either rebuild_shell.sh
-# silently failed or the source on disk was identical to what was
-# already in dist. Fail loud — the operator can re-run with --skip-build
-# if they truly meant "no-op deploy".
+# An unchanged hash is EXPECTED for a backend-only deploy (no frontend
+# source changed → rebuild_shell.sh legitimately produces an identical
+# bundle), so it's a warning, not a failure — the real success signals are
+# the health checks below + rebuild_shell's own exit status (a hard rebuild
+# failure already aborts step 3 under `set -e`). On a deploy you EXPECTED to
+# change the frontend, an unchanged hash means rebuild_shell no-op'd or
+# produced an identical bundle — the warning + the before/after hashes are
+# the cue to investigate. (Previously this was a hard exit 1, which
+# false-failed every backend-only deploy.)
 if [ -n "$before_hash" ] && [ "$before_hash" = "$after_hash" ]; then
-  fail "bundle hash unchanged (${after_hash}). expected rotation after rebuild."
-  fail "either rebuild_shell.sh produced an identical bundle, or the rebuild was a no-op."
-  fail "if you meant to redeploy without a frontend change, rerun with --skip-build."
-  exit 1
+  warn "bundle hash unchanged (${after_hash})."
+  warn "expected for a backend-only deploy; if you changed the frontend, check"
+  warn "rebuild_shell.sh didn't no-op. Container is recreated + healthy regardless."
+else
+  ok "bundle rotated: ${before_hash:-<none>} → ${after_hash}"
 fi
-ok "bundle rotated: ${before_hash:-<none>} → ${after_hash}"
 
 # Internal /api/health (we already checked this twice during waits, but
 # repeat it in the verification block so the final summary stands alone).
