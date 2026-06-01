@@ -433,3 +433,45 @@ def test_uninstall_deletes_storage_tree(client, owner_token):
     headers={"Authorization": f"Bearer {owner_token}"},
   ).status_code == 204
   assert not os.path.isdir(storage_dir)
+
+
+def test_deleted_app_token_rejected_on_shared_storage(client, owner_token):
+  """The shared-storage routes reject a deleted app's token too.
+
+  The shared routes use resolve_owner_or_app, not get_principal — the
+  fix centralizes the app-row check so BOTH paths reject a stale token
+  (Codex review #2)."""
+  app_id, app_token = _make_app_and_token(client, owner_token)
+  app_auth = {"Authorization": f"Bearer {app_token}"}
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  client.put("/api/storage/shared/s.txt", json={"content": "x"},
+             headers=owner_auth)
+  # App token can read shared while the app exists.
+  assert client.get("/api/storage/shared/s.txt",
+                    headers=app_auth).status_code == 200
+  assert client.delete(f"/api/apps/{app_id}",
+                       headers=owner_auth).status_code == 204
+  # After uninstall the token is rejected on shared read AND shared-list,
+  # not just the numeric per-app routes.
+  assert client.get("/api/storage/shared/s.txt",
+                    headers=app_auth).status_code == 401
+  assert client.get("/api/storage/shared-list/",
+                    headers=app_auth).status_code == 401
+
+
+def test_app_token_rejected_after_id_reuse(client, owner_token, db):
+  """A token can't authenticate against a DIFFERENT app that reused its
+  SQLite integer id — the row's rotated token_nonce no longer matches the
+  token's stamped app_nonce (Codex review #1)."""
+  import app.models as models
+  app_id, app_token = _make_app_and_token(client, owner_token)
+  app_auth = {"Authorization": f"Bearer {app_token}"}
+  assert client.put(f"/api/storage/apps/{app_id}/x.json", json={"k": 1},
+                    headers=app_auth).status_code == 204
+  # Simulate id reuse: the row at this id is now a different app identity
+  # (a fresh install would get a fresh random nonce).
+  row = db.query(models.App).filter(models.App.id == app_id).first()
+  row.token_nonce = "rotated-deadbeef-nonce"
+  db.commit()
+  assert client.get(f"/api/storage/apps/{app_id}/x.json",
+                    headers=app_auth).status_code == 401

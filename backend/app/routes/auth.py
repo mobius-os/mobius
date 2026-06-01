@@ -200,7 +200,7 @@ def create_app_token_endpoint(
   if not app:
     raise HTTPException(status_code=404, detail="App not found.")
   token = auth.create_app_token(
-    body.app_id, owner.username, owner.token_epoch
+    body.app_id, owner.username, owner.token_epoch, app_nonce=app.token_nonce
   )
   return {"token": token}
 

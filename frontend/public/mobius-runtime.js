@@ -146,7 +146,7 @@ function makeStorage({ appId, getToken }) {
   // because the store is keyed by `seq` (FIFO), with `appId`/`path` as
   // plain fields. Doing the purge and the follow-up add in one tx keeps
   // the coalesce atomic — no window where the path has zero ops queued.
-  function purgePath(path, after, upTo) {
+  function purgePath(path, after) {
     return withStore(STORE, 'readwrite', (store) => {
       store.openCursor().onsuccess = (e) => {
         const cursor = e.target.result
@@ -155,34 +155,28 @@ function makeStorage({ appId, getToken }) {
           return
         }
         const v = cursor.value
-        // `upTo` (optional) bounds the purge to ops queued AT OR BEFORE a
-        // captured seq, so a newer op enqueued by another context during a
-        // direct send (higher seq) is NOT clobbered (cross-context LWW; see
-        // setInner). When upTo is undefined, purge every op for the path
-        // (the coalesce enqueue() relies on — newest write supersedes all).
-        if (v.appId === appId && v.path === path &&
-            (upTo == null || v.seq <= upTo)) cursor.delete()
+        if (v.appId === appId && v.path === path) cursor.delete()
         cursor.continue()
       }
     })
   }
 
-  // Highest seq currently queued for this app+path, or null if none. Captured
-  // BEFORE a direct online send so the post-send purge removes only ops that
-  // were already queued at that point — an op another context enqueues during
-  // the send gets a higher seq and survives (Codex review #7).
-  function maxSeqForPath(path) {
-    return withStore(STORE, 'readonly', (store, box) => {
-      box.value = null
-      store.openCursor().onsuccess = (e) => {
-        const cursor = e.target.result
-        if (!cursor) return
-        const v = cursor.value
-        if (v.appId === appId && v.path === path &&
-            (box.value === null || v.seq > box.value)) box.value = v.seq
-        cursor.continue()
-      }
-    })
+  // Run `fn` holding the per-app outbox Web Lock — the SAME lock drain()
+  // takes. Every outbox mutation (offline enqueue, online direct-send +
+  // coalesce, and drain) runs under it, so across ALL contexts (in-shell
+  // iframe + standalone tab for the same app) they are strictly serialized
+  // and never interleave. This is what makes the post-send unbounded
+  // purgePath correct: inside the lock no other context can enqueue, so
+  // every queued op for the path is genuinely older than the write we just
+  // sent and is safe to drop; a newer write can only enqueue AFTER we
+  // release (later in the lock order), so it survives and wins — closing the
+  // cross-context last-write-wins race (Codex review #7). Falls back to a
+  // plain call where Web Locks is unavailable (same posture as drain()).
+  function withOutboxLock(fn) {
+    if (navigator.locks && navigator.locks.request) {
+      return navigator.locks.request(`mobius-outbox-${appId}`, fn)
+    }
+    return fn()
   }
 
   // Enqueue coalesces: the newest write for a path replaces any older
@@ -190,9 +184,11 @@ function makeStorage({ appId, getToken }) {
   // when the queue drains. (FIFO ordering across DIFFERENT paths is
   // still preserved — drainInner walks `seq` in order.)
   function enqueue(op) {
-    return purgePath(op.path, (store) => {
+    // Under the outbox lock so an enqueue can't interleave with a concurrent
+    // context's direct-send+purge (which would otherwise drop this op).
+    return withOutboxLock(() => purgePath(op.path, (store) => {
       store.add({ ...op, appId, ts: Date.now() })
-    })
+    }))
   }
 
   function listOps() {
@@ -498,15 +494,14 @@ function makeStorage({ appId, getToken }) {
     notify(path, data)
     if (navigator.onLine) {
       try {
-        // Capture the highest seq queued for this path BEFORE sending. The
-        // post-send purge drops only ops at or below it (the stale offline
-        // leftovers this write supersedes), so a NEWER op another context
-        // enqueues during the send — higher seq — survives instead of being
-        // clobbered (cross-context LWW; Codex review #7).
-        const upTo = await maxSeqForPath(path)
-        await send({ method: 'PUT', path, data })
-        if (upTo != null) await purgePath(path, undefined, upTo)
-        return { synced: true }
+        // Hold the outbox lock across send + coalesce so a concurrent
+        // context can't enqueue a newer write that this purge would drop, and
+        // a drain can't replay a stale op mid-send (Codex review #7).
+        return await withOutboxLock(async () => {
+          await send({ method: 'PUT', path, data })
+          await purgePath(path)
+          return { synced: true }
+        })
       } catch (e) { /* fall through to queue */ }
     }
     await enqueue({ method: 'PUT', path, data })
@@ -519,13 +514,12 @@ function makeStorage({ appId, getToken }) {
     notify(path, null)
     if (navigator.onLine) {
       try {
-        // Same seq-bounded coalesce as setInner: purge only ops queued at or
-        // before this delete, so a concurrent context's newer write isn't
-        // dropped (Codex review #7).
-        const upTo = await maxSeqForPath(path)
-        await send({ method: 'DELETE', path })
-        if (upTo != null) await purgePath(path, undefined, upTo)
-        return { synced: true }
+        // Same lock-held send + coalesce as setInner (Codex review #7).
+        return await withOutboxLock(async () => {
+          await send({ method: 'DELETE', path })
+          await purgePath(path)
+          return { synced: true }
+        })
       } catch (e) { /* fall through to queue */ }
     }
     await enqueue({ method: 'DELETE', path })

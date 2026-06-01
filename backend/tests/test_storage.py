@@ -411,3 +411,14 @@ def test_shared_list_paginates_and_skips_symlinks(client, auth):
   # The symlink (evil.txt) is dropped, so only the real 02.txt remains.
   assert [e["name"] for e in page2["entries"]] == ["02.txt"]
   assert page2["next_cursor"] is None
+
+
+def test_numeric_slug_is_prefixed():
+  """A purely-numeric name can't become a bare-integer source dir that
+  would collide with the numeric-id storage tree (Codex review #4)."""
+  from app.routes.apps import _slugify_for_source_dir
+  assert _slugify_for_source_dir("123") == "app-123"
+  assert not _slugify_for_source_dir("42").isdigit()
+  # Non-numeric names are untouched.
+  assert _slugify_for_source_dir("news") == "news"
+  assert _slugify_for_source_dir("Snake 2") == "snake-2"

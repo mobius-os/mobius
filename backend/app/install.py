@@ -149,6 +149,16 @@ def _validate_manifest(m: dict) -> None:
     raise HTTPException(
       400, f"Manifest `id` must not start with '-' or '_', got {mid!r}",
     )
+  # A purely-numeric id becomes the slug and source dir /data/apps/<id>,
+  # which collides with the numeric-id storage tree another app writes to
+  # (storage uses /data/apps/<integer app id>). Reserve bare integers for
+  # storage (Codex review #4).
+  if mid.isdigit():
+    raise HTTPException(
+      400,
+      f"Manifest `id` {mid!r} must not be purely numeric — bare integers "
+      "are reserved for the per-app storage path /data/apps/<id>.",
+    )
   if not isinstance(m.get("name"), str):
     raise HTTPException(400, "Manifest `name` must be a string.")
   if not isinstance(m.get("entry"), str):

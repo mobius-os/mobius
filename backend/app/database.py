@@ -165,6 +165,28 @@ def run_migrations(eng) -> None:
     with eng.connect() as conn:
       conn.execute(text("ALTER TABLE apps ADD COLUMN icon_png BLOB NULL"))
       conn.commit()
+  # Per-app token nonce (Codex review #1). Add the column, then backfill
+  # any NULL row with a fresh random nonce so existing apps get the same
+  # id-reuse protection as new ones. Two independent idempotent gates so a
+  # crash between them still converges on the next boot.
+  if "token_nonce" not in apps_cols:
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN token_nonce VARCHAR(32) NULL"
+      ))
+      conn.commit()
+  import secrets
+  with eng.connect() as conn:
+    null_nonce = conn.execute(
+      text("SELECT id FROM apps WHERE token_nonce IS NULL")
+    ).fetchall()
+    for row in null_nonce:
+      conn.execute(
+        text("UPDATE apps SET token_nonce = :n WHERE id = :i"),
+        {"n": secrets.token_hex(16), "i": row[0]},
+      )
+    if null_nonce:
+      conn.commit()
   if "chats" in tables:
     chats_cols = {c["name"] for c in inspector.get_columns("chats")}
     _add = []

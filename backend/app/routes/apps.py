@@ -34,7 +34,14 @@ def _slugify_for_source_dir(name: str) -> str:
   ).strip("-")
   while "--" in slug:
     slug = slug.replace("--", "-")
-  return slug or "app"
+  slug = slug or "app"
+  # A purely-numeric slug would collide with the numeric-id storage tree:
+  # an app named "123" derives source dir /data/apps/123, which is exactly
+  # where /api/storage/apps/123/... writes land for app id 123. Prefix it
+  # so a source-dir name is never a bare integer (Codex review #4).
+  if slug.isdigit():
+    slug = f"app-{slug}"
+  return slug
 
 
 def _derive_source_dir(data_dir: str, name: str) -> str:

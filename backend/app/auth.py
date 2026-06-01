@@ -52,7 +52,10 @@ def create_access_token(
 
 
 def create_app_token(
-  app_id: int, owner_username: str, token_epoch: int
+  app_id: int,
+  owner_username: str,
+  token_epoch: int,
+  app_nonce: str | None = None,
 ) -> str:
   """Creates a short-lived JWT scoped to a specific mini-app.
 
@@ -60,9 +63,18 @@ def create_app_token(
   outstanding app tokens too — an app token resolves to the Owner row
   and acts on the owner's behalf, so an exfiltrated one is the same
   threat as an exfiltrated login token (only shorter-lived).
+
+  `app_nonce` is the target app's `token_nonce`. Stamping it lets the
+  resolver reject a token whose app was deleted and whose integer id was
+  reused by a different app (the new app has a different nonce). Omitted
+  only by callers without the row; the resolver then falls back to
+  row-existence (Codex review #1).
   """
+  claims = {"sub": owner_username, "scope": "app", "app_id": app_id}
+  if app_nonce is not None:
+    claims["app_nonce"] = app_nonce
   return create_access_token(
-    {"sub": owner_username, "scope": "app", "app_id": app_id},
+    claims,
     expires_delta=timedelta(hours=8),
     token_epoch=token_epoch,
   )

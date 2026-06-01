@@ -169,6 +169,22 @@ _LIST_DEFAULT_LIMIT = 100
 _LIST_MAX_LIMIT = 500
 
 
+def _is_listable_dirent(entry: os.DirEntry) -> bool:
+  """Whether a directory entry may appear in a listing.
+
+  Mirrors `_list_entry`'s skip rules WITHOUT a stat (the DirEntry's cached
+  type answers `is_symlink`; the name answers the whitelist), so the
+  paginator can exclude symlinks and unsafe names DURING the scan instead
+  of after selecting them — see `_list_directory_page` (Codex review #5).
+  """
+  try:
+    if entry.is_symlink():
+      return False
+  except OSError:
+    return False
+  return bool(_SAFE_RE.match(entry.name))
+
+
 def _list_entry(child: Path, prefix: str) -> dict | None:
   """Builds one listing entry for an immediate child of a directory.
 
@@ -277,15 +293,20 @@ def _list_directory_page(
 
   Shared by the app and shared listing routes so both enforce the SAME
   contract (Codex review #10): symlinks and names that can't round-trip
-  through `_resolve` are dropped by `_list_entry` (a listing never
-  advertises a child a read/PUT would reject), one un-stat-able dirent
-  drops out instead of 500-ing the page, and pagination is identical.
+  through `_resolve` are excluded (a listing never advertises a child a
+  read/PUT would reject), one un-stat-able dirent drops out instead of
+  500-ing the page, and pagination is identical.
 
-  Selection uses a bounded heap: the smallest `limit`+1 child names
+  Selection uses a bounded heap: the smallest `limit`+1 VALID child names
   strictly greater than the decoded cursor, walked in O(n log limit) time
   and O(limit) memory — it never materializes or sorts the whole directory
   per page, so a large directory can't be turned into a repeated expensive
-  full scan (Codex review #9). `limit` is clamped to `_LIST_MAX_LIMIT`.
+  full scan (Codex review #9). Validity (not a symlink, name passes the
+  whitelist) is checked DURING the scan, so excluded entries don't consume
+  page slots — a page returns `limit` real entries and the cursor advances
+  past the skipped ones, rather than selecting raw dirents and filtering
+  after (which produced short/empty pages while valid entries remained
+  further along — Codex review #5). `limit` is clamped to `_LIST_MAX_LIMIT`.
   """
   limit = max(1, min(limit, _LIST_MAX_LIMIT))
   after = _decode_cursor(cursor)
@@ -294,15 +315,20 @@ def _list_directory_page(
   except OSError:
     return [], None
   with scan:
+    # Filter to listable entries (cheap: dirent type cache + name regex, no
+    # stat) BEFORE selection, so symlinks/unsafe names never occupy a page
+    # slot. nsmallest then keeps only limit+1 in a heap → O(limit) memory
+    # even for a directory of millions; the +1 tells us a next page exists
+    # without a second pass.
     candidates = (
-      Path(e.path) for e in scan if after is None or e.name > after
+      Path(e.path) for e in scan
+      if (after is None or e.name > after) and _is_listable_dirent(e)
     )
-    # nsmallest keeps only limit+1 in a heap, so memory stays O(limit) even
-    # for a directory of millions. The +1 tells us whether a next page
-    # exists without a second pass.
     page_plus = heapq.nsmallest(limit + 1, candidates, key=lambda c: c.name)
   has_more = len(page_plus) > limit
   page = page_plus[:limit]
+  # _list_entry still runs (it does the stat for size/mtime and re-checks the
+  # same predicates); a dirent that vanished between scan and stat drops out.
   entries = [e for e in (_list_entry(c, prefix) for c in page) if e]
   next_cursor = _encode_cursor(page[-1].name) if has_more and page else None
   return entries, next_cursor
