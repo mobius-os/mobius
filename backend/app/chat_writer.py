@@ -64,7 +64,7 @@ log = logging.getLogger("moebius.chat_writer")
 ACK_TIMEOUT_SECS = 30.0
 
 
-async def await_ack(ack: Future, *, timeout: float = ACK_TIMEOUT_SECS):
+async def await_ack(ack: Future, *, timeout: float | None = None):
   """Await a writer-actor ack on the loop, bounded by `timeout`.
 
   Wraps the actor's `concurrent.futures.Future` with `asyncio.wrap_future`
@@ -75,7 +75,15 @@ async def await_ack(ack: Future, *, timeout: float = ACK_TIMEOUT_SECS):
   acked in time. The single seam every strict path uses, so the timeout
   policy lives in one place; lives here (not chat.py) so chat_queue can use
   it without importing back into chat.py.
+
+  When `timeout` is None (the default for every production caller) the bound
+  is read from the MODULE-LEVEL `ACK_TIMEOUT_SECS` at call time — not bound
+  into the signature default — so a test can `monkeypatch.setattr(
+  chat_writer, "ACK_TIMEOUT_SECS", small)` and have the seam take effect for
+  every strict path without touching call sites.
   """
+  if timeout is None:
+    timeout = ACK_TIMEOUT_SECS
   return await asyncio.wait_for(asyncio.wrap_future(ack), timeout=timeout)
 
 
