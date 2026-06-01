@@ -47,8 +47,35 @@ class _OrderedBroadcast(ChatBroadcast):
   def __init__(self, chat_id):
     super().__init__(chat_id)
     self.timeline = []
+    # At the instant a `question` event is broadcast, was the question
+    # block ALREADY durable? A fresh-session re-read taken inside publish()
+    # is the only way to ENFORCE the ordering. Two independent post-hoc
+    # checks — the block is persisted after publish_question returns AND
+    # the event reached the timeline — both pass even for a regression
+    # that broadcasts BEFORE awaiting the QuestionCommit ack, because by
+    # the time the test re-reads the DB the (out-of-order) commit has
+    # already landed. Capturing durability AT broadcast time is what
+    # closes that gap.
+    self.question_block_persisted_at_publish = None
 
   def publish(self, event):
+    if event.get("type") == "question":
+      from app.database import SessionLocal
+      s = SessionLocal()
+      try:
+        row = (
+          s.query(models.Chat)
+          .filter(models.Chat.id == self.chat_id)
+          .one_or_none()
+        )
+        blocks = (
+          row.messages[-1].get("blocks") if row and row.messages else []
+        ) or []
+        self.question_block_persisted_at_publish = any(
+          b.get("type") == "question" for b in blocks
+        )
+      finally:
+        s.close()
     self.timeline.append(("publish", event.get("type")))
     super().publish(event)
 
@@ -101,6 +128,15 @@ def test_question_event_is_saved_before_broadcast(db, chat):
   asyncio.run(go())
   # The card reached the wire.
   assert ("publish", "question") in bc.timeline
+  # The ORDERING guarantee: the question block was already durable AT the
+  # moment its card was broadcast. This is what makes the test catch a
+  # regression that reorders publish() ahead of the QuestionCommit ack —
+  # the two checks above would still pass for such a regression.
+  assert bc.question_block_persisted_at_publish is True, (
+    "save-before-broadcast: the question block MUST be durable at the moment "
+    "its card is broadcast — broadcasting before the QuestionCommit ack would "
+    "let a racing user Submit find no question block to attach the answer to"
+  )
 
 
 def test_publish_rejects_question_events(db, chat):
