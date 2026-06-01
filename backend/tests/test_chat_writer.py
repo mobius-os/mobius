@@ -225,6 +225,64 @@ def test_actor_dispatch_failure_is_operator_visible_in_chat_log():
   assert "commit blew up" in contents
 
 
+def test_stop_warns_when_writer_thread_outlasts_join_timeout(caplog):
+  """A writer thread still alive after stop()'s bounded join logs a WARNING.
+
+  stop() must not block teardown, so on a wedged command (a commit that
+  outlasts the join timeout) it returns anyway — but a surviving writer
+  thread is an operator-visible anomaly, so it logs via `moebius.chat.writer`
+  (which propagates to chat.log). Here a `Finalize`'s `record_commit`
+  blocks on an Event past a tiny join timeout; the consumer is wedged in
+  dispatch and never reaches the `DrainAndStop`, so the join expires with
+  the thread alive and the warning fires. Releasing the Event afterwards
+  lets the thread finish so the test cleans up.
+  """
+  import logging
+
+  release = threading.Event()
+  entered = threading.Event()
+
+  class _BlockingFinalize:
+    """`record_commit` blocks until the test releases it."""
+
+    def record_commit(self, snapshot):
+      entered.set()
+      release.wait(timeout=5)
+
+    def commit(self):
+      pass
+
+    def rollback(self):
+      pass
+
+    def close(self):
+      pass
+
+    def expire_all(self):
+      pass
+
+  actor = ChatWriterActor(session_factory=lambda: _BlockingFinalize())
+  actor.start()
+  try:
+    actor.submit(
+      Finalize(chat_id="wedged", run_token="t1", snapshot={"x": 1})
+    )
+    # Wait until the consumer is actually wedged inside record_commit so the
+    # join below is guaranteed to find a live thread (no timing race).
+    assert entered.wait(timeout=5)
+    with caplog.at_level(logging.WARNING, logger="moebius.chat.writer"):
+      actor.stop(timeout=0.1)
+    assert any(
+      "still alive after" in r.getMessage()
+      and "join timeout" in r.getMessage()
+      for r in caplog.records
+    ), "expected a join-timeout WARNING when the writer thread survived stop()"
+  finally:
+    # Unblock the wedged command so the thread can exit and not leak.
+    release.set()
+    actor.stop(timeout=5)
+
+
 def test_thread_death_fails_pending_acks():
   class _DeadlySession:
     """Closing raises, but the real kill is commit raising a non-Exception.
