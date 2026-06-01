@@ -70,6 +70,10 @@ export function overlayPending(ops, path, fallback) {
 // the cache". Mirrors the bounded-fetch the service worker uses for frame/
 // module.
 const READ_TIMEOUT_MS = 2500
+// Writes are held under the outbox lock, so a stalled send must not pin it
+// forever (Codex review #2). Longer than the read bound — a write that takes
+// a few seconds on a slow link is normal; only a genuine hang is aborted.
+const WRITE_TIMEOUT_MS = 10000
 function fetchBounded(url, init) {
   const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null
   const opts = ctrl ? { ...init, signal: ctrl.signal } : init
@@ -170,13 +174,24 @@ function makeStorage({ appId, getToken }) {
   // every queued op for the path is genuinely older than the write we just
   // sent and is safe to drop; a newer write can only enqueue AFTER we
   // release (later in the lock order), so it survives and wins — closing the
-  // cross-context last-write-wins race (Codex review #7). Falls back to a
-  // plain call where Web Locks is unavailable (same posture as drain()).
+  // cross-context last-write-wins race (Codex review #7).
+  //
+  // Fallback when Web Locks is unavailable: serialize within THIS context via
+  // a promise chain so same-context outbox ops still never interleave (a plain
+  // pass-through would let an enqueue and a direct-send+purge interleave even
+  // in one tab — Codex review #1). FULL cross-context serialization requires
+  // the Web Locks API (Baseline across browsers since 2022); without it we
+  // fall back to the historical per-context guarantee — two SEPARATE contexts
+  // of the same app writing the same path at the same instant can still race,
+  // the long-documented single-owner accepted bound (see the pathChains note).
+  let outboxFallbackChain = Promise.resolve()
   function withOutboxLock(fn) {
     if (navigator.locks && navigator.locks.request) {
       return navigator.locks.request(`mobius-outbox-${appId}`, fn)
     }
-    return fn()
+    const run = outboxFallbackChain.then(fn, fn)
+    outboxFallbackChain = run.then(() => {}, () => {})
+    return run
   }
 
   // Enqueue coalesces: the newest write for a path replaces any older
@@ -318,7 +333,23 @@ function makeStorage({ appId, getToken }) {
       init.headers['Content-Type'] = 'application/json'
       init.body = JSON.stringify(op.data)
     }
-    const res = await fetch(url, init)   // network failure throws -> transient
+    // BOUND the write. The outbox lock is held across this send (so a
+    // direct write and the drain can't interleave); an unbounded fetch
+    // that stalls — Android's `navigator.onLine` reads a stale `true` so
+    // we take the online path and the request hangs — would pin the
+    // app-wide lock indefinitely and block every other context from even
+    // enqueueing (Codex review #2). Aborting after WRITE_TIMEOUT_MS makes
+    // the lock-hold bounded: the abort throws (transient), the lock
+    // releases, and the caller re-queues for the next drain.
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null
+    let timer
+    if (ctrl) { init.signal = ctrl.signal; timer = setTimeout(() => ctrl.abort(), WRITE_TIMEOUT_MS) }
+    let res
+    try {
+      res = await fetch(url, init)   // network failure / abort throws -> transient
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
     if (op.method === 'DELETE' && res.status === 404) return  // already absent
     if (res.ok) return
     // Classify so one bad op can't wedge the queue (drainInner reads
@@ -353,8 +384,17 @@ function makeStorage({ appId, getToken }) {
           // (Codex review #8). Then notify subscribers and surface a
           // sync-error so the app can tell the user the write was lost.
           try { await cacheDelete(op.path) } catch (ce) { /* best effort */ }
+          // Reconcile via getInner, NOT the public get(): drainInner runs
+          // while HOLDING the outbox lock, and the public get() takes the
+          // per-path chain. A concurrent set() holds the path chain while
+          // waiting for the outbox lock (path → outbox order), so a drain
+          // that took the path chain here (outbox → path order) could
+          // deadlock against it. getInner skips the path chain, so the
+          // outbox lock is the only lock a drain ever holds — no inversion
+          // (Codex review #3). The reconcile read is best-effort, so it
+          // doesn't need the per-path ordering guarantee.
           let fresh = null
-          try { fresh = await get(op.path) } catch (re) { /* best-effort */ }
+          try { fresh = await getInner(op.path) } catch (re) { /* best-effort */ }
           notify(op.path, fresh)
           emitSyncError({ path: op.path, method: op.method, message: e.message })
           continue
@@ -367,9 +407,13 @@ function makeStorage({ appId, getToken }) {
     }
   }
 
-  // Web Locks serializes draining across contexts (an in-shell iframe
-  // and a standalone page for the same app can both be open). Falls
-  // back to a plain drain where Web Locks is unavailable.
+  // Drain under the outbox lock so it can't interleave with a direct
+  // send+purge or an enqueue (same lock as withOutboxLock). Uses
+  // `ifAvailable` when Web Locks is present — an event-driven flush should
+  // SKIP rather than queue behind an in-flight write (that write already
+  // sent its op); the next event re-fires it. Without Web Locks it routes
+  // through withOutboxLock's in-context fallback chain so a drain still
+  // can't interleave with a same-context enqueue/send (Codex review #1).
   function drain() {
     if (navigator.locks && navigator.locks.request) {
       navigator.locks.request(
@@ -377,7 +421,7 @@ function makeStorage({ appId, getToken }) {
         async (lock) => { if (lock) await drainInner() },
       ).catch(() => {})
     } else {
-      drainInner().catch(() => {})
+      withOutboxLock(drainInner).catch(() => {})
     }
   }
 

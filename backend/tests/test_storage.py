@@ -422,3 +422,32 @@ def test_numeric_slug_is_prefixed():
   # Non-numeric names are untouched.
   assert _slugify_for_source_dir("news") == "news"
   assert _slugify_for_source_dir("Snake 2") == "snake-2"
+
+
+def test_create_app_rejects_unsafe_source_dir(client, owner_token):
+  """A caller-supplied source_dir must be an immediate, non-numeric child of
+  /data/apps — closing both traversal/arbitrary-location and the numeric-id
+  storage collision (Codex review #4 + security review)."""
+  import os
+  data_dir = os.environ["DATA_DIR"]
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  jsx = "export default function App(){ return <div/> }"
+  # Bare-integer dir directly under /data/apps → 400 (storage collision).
+  assert client.post("/api/apps/", json={
+    "name": "evil", "description": "x", "jsx_source": jsx,
+    "source_dir": os.path.join(data_dir, "apps", "123"),
+  }, headers=auth).status_code == 400
+  # Not an immediate child of /data/apps → 400 (traversal / arbitrary path).
+  assert client.post("/api/apps/", json={
+    "name": "evil2", "description": "x", "jsx_source": jsx,
+    "source_dir": os.path.join(data_dir, "apps", "sub", "deep"),
+  }, headers=auth).status_code == 400
+  assert client.post("/api/apps/", json={
+    "name": "evil3", "description": "x", "jsx_source": jsx,
+    "source_dir": os.path.join(data_dir, "apps", "..", "etc"),
+  }, headers=auth).status_code == 400
+  # A normal slug dir under /data/apps is accepted.
+  assert client.post("/api/apps/", json={
+    "name": "fine", "description": "x", "jsx_source": jsx,
+    "source_dir": os.path.join(data_dir, "apps", "fine"),
+  }, headers=auth).status_code == 201
