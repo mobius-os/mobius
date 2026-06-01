@@ -1,8 +1,15 @@
 services:
   app:
-    image: mobius-test:ci
+    # container_name and image are GLOBAL (not Compose-project-scoped), so two
+    # runs with the same defaults collide even when -p differs. For full
+    # isolation set MOBIUS_CONTAINER and MOBIUS_IMAGE in addition to -p:
+    #   MOBIUS_CONTAINER=mobius-test-foo MOBIUS_IMAGE=mobius-test-foo:ci \
+    #     docker compose -p mobius-test-foo -f docker-compose.test.yml ...
+    # The volume is already project-scoped (<project>_test_data) and needs
+    # no override — only container_name + image are global.
+    image: ${MOBIUS_IMAGE:-mobius-test:ci}
     build: .
-    container_name: mobius-test
+    container_name: ${MOBIUS_CONTAINER:-mobius-test}
     init: true
     # `unless-stopped` so the recovery chat's Restart button works in
     # test: SIGTERMing uvicorn relies on Docker bringing the container
@@ -21,6 +28,10 @@ services:
       - AGENT_BROWSER_STREAM_PORT=9225
     volumes:
       - test_data:/data
+    # To use a custom port without merge-appending the default, you MUST use
+    # the !override tag — a plain second `ports:` entry adds to this list and
+    # leaves the default 8001:8000 binding colliding with the original run:
+    #   ports: !override ["${TEST_PORT:-8001}:8000"]
     ports:
       - "8001:8000"
     healthcheck:
@@ -31,7 +42,7 @@ services:
       start_period: 30s
 
   pytest:
-    image: mobius-test:ci
+    image: ${MOBIUS_IMAGE:-mobius-test:ci}
     profiles: ["test"]
     volumes:
       - ./backend/app:/app/app
