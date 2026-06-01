@@ -63,7 +63,7 @@ clientsClaim()
 // only updates on an online visit, so an installed PWA can run an old SW
 // for a while). Served offline by the route below because the SW
 // synthesizes the response; no network needed.
-const SW_VERSION = '2026-05-31-offline-apps-reload'
+const SW_VERSION = '2026-06-01-token-latch'
 
 // /api/__sw_version — a synthetic, SW-generated response so /diag.html can
 // read the live SW generation even offline. Registered before the catch
