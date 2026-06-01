@@ -323,7 +323,7 @@ their register; otherwise the mechanism stays out of the chat.
    | Discovered a gotcha or workaround | `Bash`: `echo '- Gotcha: <one-line note>' >> /data/shared/agent-experience.md`. |
    | Learned a partner preference | `Bash`: `echo '- Partner preference: <one-line note>' >> /data/shared/agent-experience.md`. |
    | Changed shell / CSS / cron | `Bash`: `echo '- <what, why>' >> /data/shared/agent-experience.md`. |
-   | About to overwrite `theme.css` | `Bash` snapshot first: `curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/storage/shared/theme.css" > "/tmp/theme.backup.$(date +%s).css"`. There is no built-in revert; the snapshot is the only undo. |
+   | About to overwrite `theme.css` | The server auto-snapshots the prior `theme.css` to `theme.css.bak-<unix-ts>` on every overwrite, and `?reset-theme=1` (or the recovery page) rolls back a theme that breaks the UI — so a revert path always exists. Still snapshot first for your own named undo: `Bash` `curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/storage/shared/theme.css" > "/tmp/theme.backup.$(date +%s).css"`. |
    | **(second to last)** Scan the session for missed gotchas | Review the tool calls you made this turn. Any wrong assumptions, workarounds, or infrastructure surprises? Each is worth logging — don't let "building mode" make you skip this. |
    | **(final check)** Re-read the partner's latest message | Confirm every question, concern, or requested change has been addressed. Then ask the partner: does this look right? Anything to change? |
 
@@ -528,9 +528,11 @@ const notes = (await window.mobius.storage.get('notes.json')) || []
 // writes go through when online; queue + auto-sync when offline
 await window.mobius.storage.set('notes.json', notes)
 await window.mobius.storage.remove('items/abc.json')
-// reactive read: cb fires with the current value, then on every set/remove
-// for the path — prefer this over re-reading so the UI updates when a sync
-// lands. Returns an unsubscribe fn.
+// reactive read: cb fires with the current value, then on every LOCAL
+// set/remove for the path — prefer this over re-reading so the UI updates
+// itself. (A successful background sync does NOT re-fire — it confirms the
+// value you already saw; only a local change or a dead-letter reconcile
+// does.) Returns an unsubscribe fn.
 const unsub = window.mobius.storage.subscribe('notes.json', v => setNotes(v || []))
 // enumerate a directory instead of brute-force-probing filenames:
 // returns [{name, path, type, size, modified_at, mime_type}], [] when
@@ -544,7 +546,7 @@ await window.mobius.storage.pendingCount()  // unsynced writes
 `get()` works OFFLINE: it serves the last-known cached value (overlaid with
 your pending offline writes), so you can re-read freely; it returns null only
 for a path that was never cached while online. Prefer `subscribe(path, cb)`
-for reads that should update reactively when a value changes or a sync lands.
+for reads that should update reactively when the value changes locally.
 `list(prefix)` enumerates a directory's immediate children so an app can
 discover what it stored instead of probing for filenames — but it has NO
 offline mirror (null offline), so apps that need offline enumeration keep their

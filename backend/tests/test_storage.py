@@ -298,3 +298,116 @@ def test_list_pagination(client, auth, owner_token):
   assert [e["name"] for e in page3["entries"]] == ["04.json"]
   # Last page is exhausted.
   assert page3["next_cursor"] is None
+
+
+def test_write_is_atomic_no_temp_leftover(client, auth, owner_token):
+  """A successful write leaves the target file and NO stray temp file.
+
+  _atomic_write writes to a temp file then os.replace()s it; a torn read
+  is impossible and the temp must not survive (Codex review #3)."""
+  import os
+  app_id = _make_app(client, owner_token)
+  r = client.put(
+    f"/api/storage/apps/{app_id}/notes.json", json={"k": 1}, headers=auth,
+  )
+  assert r.status_code == 204
+  app_dir = os.path.join(os.environ["DATA_DIR"], "apps", str(app_id))
+  names = os.listdir(app_dir)
+  assert "notes.json" in names
+  assert not [n for n in names if n.endswith(".tmp")]
+  assert client.get(
+    f"/api/storage/apps/{app_id}/notes.json", headers=auth
+  ).json() == {"k": 1}
+
+
+def test_read_directory_path_404(client, auth, owner_token):
+  """GET on a directory path 404s cleanly instead of 500 (Codex review #11)."""
+  app_id = _make_app(client, owner_token)
+  client.put(
+    f"/api/storage/apps/{app_id}/sub/a.json", json={"k": 1}, headers=auth,
+  )
+  r = client.get(f"/api/storage/apps/{app_id}/sub", headers=auth)
+  assert r.status_code == 404
+
+
+def test_write_to_directory_path_400(client, auth, owner_token):
+  """PUT onto an existing directory is a clean 400, not an opaque 500."""
+  app_id = _make_app(client, owner_token)
+  client.put(
+    f"/api/storage/apps/{app_id}/sub/a.json", json={"k": 1}, headers=auth,
+  )
+  r = client.put(
+    f"/api/storage/apps/{app_id}/sub", json={"k": 2}, headers=auth,
+  )
+  assert r.status_code == 400
+
+
+def test_symlink_component_rejected(client, auth, owner_token):
+  """read/PUT/DELETE through an in-tree symlink are rejected (Codex review #12).
+
+  Listings already omit symlinks; the resolve-based routes now match that
+  no-symlink contract, so a DELETE can't remove a link's target."""
+  import os
+  app_id = _make_app(client, owner_token)
+  client.put(
+    f"/api/storage/apps/{app_id}/real/x.json", json={"k": 1}, headers=auth,
+  )
+  app_dir = os.path.join(os.environ["DATA_DIR"], "apps", str(app_id))
+  os.symlink(os.path.join(app_dir, "real"), os.path.join(app_dir, "link"))
+  assert client.get(
+    f"/api/storage/apps/{app_id}/link/x.json", headers=auth
+  ).status_code == 400
+  assert client.put(
+    f"/api/storage/apps/{app_id}/link/x.json", json={"k": 2}, headers=auth
+  ).status_code == 400
+  assert client.delete(
+    f"/api/storage/apps/{app_id}/link/x.json", headers=auth
+  ).status_code == 400
+
+
+def test_write_to_nonexistent_app_404(client, auth):
+  """Owner cannot create an orphan storage tree for a missing app id.
+
+  _check_cross_app loads the target app first and 404s if absent (Codex
+  review #1), so /data/apps/<missing-id> is never created."""
+  import os
+  r = client.put(
+    "/api/storage/apps/999999/x.json", json={"k": 1}, headers=auth,
+  )
+  assert r.status_code == 404
+  assert not os.path.isdir(
+    os.path.join(os.environ["DATA_DIR"], "apps", "999999")
+  )
+
+
+def test_shared_list_missing_dir_returns_empty(client, auth):
+  """shared-list of a not-yet-created dir is empty, matching apps-list."""
+  r = client.get("/api/storage/shared-list/ghost", headers=auth)
+  assert r.status_code == 200
+  assert r.json() == {"entries": [], "next_cursor": None}
+
+
+def test_shared_list_paginates_and_skips_symlinks(client, auth):
+  """shared-list keyset-paginates and omits symlinks (Codex review #10)."""
+  import os
+  for i in range(3):
+    client.put(
+      f"/api/storage/shared/slist/{i:02d}.txt",
+      json={"content": str(i)},
+      headers=auth,
+    )
+  shared_dir = os.path.join(os.environ["DATA_DIR"], "shared", "slist")
+  os.symlink("/etc/hostname", os.path.join(shared_dir, "evil.txt"))
+
+  page1 = client.get(
+    "/api/storage/shared-list/slist?limit=2", headers=auth
+  ).json()
+  assert [e["name"] for e in page1["entries"]] == ["00.txt", "01.txt"]
+  assert page1["next_cursor"] is not None
+  page2 = client.get(
+    f"/api/storage/shared-list/slist?limit=2&cursor={page1['next_cursor']}",
+    headers=auth,
+  ).json()
+  # The symlink (evil.txt) is dropped, so only the real 02.txt remains.
+  assert [e["name"] for e in page2["entries"]] == ["02.txt"]
+  assert page2["next_cursor"] is None

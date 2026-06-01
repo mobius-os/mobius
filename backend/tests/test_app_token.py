@@ -330,8 +330,12 @@ def test_app_token_can_list_shared_storage(client, owner_token):
     headers={"Authorization": f"Bearer {app_token}"},
   )
   assert r.status_code == 200
-  names = [e["name"] for e in r.json()]
+  # shared-list now returns the same {entries, next_cursor} shape as
+  # apps-list (Codex review #10), each entry a full _list_entry.
+  body = r.json()
+  names = [e["name"] for e in body["entries"]]
   assert "listed.txt" in names
+  assert "next_cursor" in body
 
 
 def test_app_token_can_list_own_app_storage(client, owner_token):
@@ -385,3 +389,47 @@ def test_cross_app_list_blocked_when_not_permitted(client, owner_token):
     headers={"Authorization": f"Bearer {caller_token}"},
   )
   assert r.status_code == 403
+
+
+def test_deleted_app_token_rejected(client, owner_token):
+  """An app token stops working the instant its app is uninstalled.
+
+  get_principal requires the app row to still exist, so a not-yet-expired
+  token for a deleted app can't read/recreate/list its storage tree (Codex
+  review #1)."""
+  app_id, app_token = _make_app_and_token(client, owner_token)
+  app_auth = {"Authorization": f"Bearer {app_token}"}
+  # Token works while the app exists.
+  client.put(f"/api/storage/apps/{app_id}/x.json", json={"k": 1},
+             headers=app_auth)
+  assert client.get(f"/api/storage/apps/{app_id}/x.json",
+                    headers=app_auth).status_code == 200
+  # Owner uninstalls the app.
+  assert client.delete(
+    f"/api/apps/{app_id}",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  ).status_code == 204
+  # The same token now fails auth — not a 404, a 401 (the principal can't
+  # be resolved at all).
+  assert client.get(f"/api/storage/apps/{app_id}/x.json",
+                    headers=app_auth).status_code == 401
+  assert client.put(f"/api/storage/apps/{app_id}/y.json", json={"k": 2},
+                    headers=app_auth).status_code == 401
+
+
+def test_uninstall_deletes_storage_tree(client, owner_token):
+  """Uninstall removes the numeric /data/apps/<id> storage tree, not just
+  the slug source dir (Codex review #1)."""
+  import os
+  app_id, app_token = _make_app_and_token(client, owner_token)
+  client.put(
+    f"/api/storage/apps/{app_id}/data.json", json={"k": 1},
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  storage_dir = os.path.join(os.environ["DATA_DIR"], "apps", str(app_id))
+  assert os.path.isdir(storage_dir)
+  assert client.delete(
+    f"/api/apps/{app_id}",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  ).status_code == 204
+  assert not os.path.isdir(storage_dir)
