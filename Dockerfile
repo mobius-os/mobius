@@ -170,6 +170,14 @@ RUN useradd -m -s /bin/bash mobius \
 COPY backend/scripts/entrypoint.sh ./scripts/entrypoint.sh
 RUN chmod +x ./scripts/entrypoint.sh
 
+# Build identity — passed at `docker compose build` time (deploy-prod.sh
+# exports BUILD_SHA=$(git rev-parse HEAD)). Declared LATE, after the heavy
+# apt/pip/npm layers, so a per-build SHA change invalidates only these trivial
+# trailing layers — the expensive ones stay cached. Surfaced at GET
+# /api/version so a deploy can verify the served backend matches the commit.
+ARG BUILD_SHA=unknown
+ENV BUILD_SHA=${BUILD_SHA}
+
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \

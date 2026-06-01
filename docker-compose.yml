@@ -19,7 +19,10 @@ services:
         condition: service_healthy
 
   app:
-    build: .
+    build:
+      context: .
+      args:
+        BUILD_SHA: ${BUILD_SHA:-unknown}
     container_name: mobius
     init: true
     restart: unless-stopped
