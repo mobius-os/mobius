@@ -148,11 +148,13 @@ async def promote_pending_messages_locked(
   but kept in the signature so the two callers' shape is unchanged.
 
   Returns (next_messages, first_pending, session_id) on success.
-  Returns ([], None, session_id) when the pending queue is empty or when
-  the actor left the queue intact (malformed transcript entry). Raises if
-  the actor ack fails (missing row / dropped commit) so the turn-end
-  caller surfaces a transport error rather than promoting a write that
-  never landed.
+  Returns ([], None, session_id) when the pending queue is empty. Raises
+  if the actor ack fails — missing row / dropped commit / a MALFORMED
+  queue head (the actor leaves the queue intact and fails the ack rather
+  than returning promoted=None, which would be indistinguishable from an
+  empty queue and let the caller clear the marker on stranded work) — so
+  the turn-end caller surfaces a transport error / leaves the marker
+  rather than promoting a write that never landed.
   """
   del db  # the actor owns the JSON-blob write on its own session
   if not chat_id:
@@ -165,8 +167,9 @@ async def promote_pending_messages_locked(
   result = await await_ack(ack)
   promoted = result["promoted"]
   if promoted is None:
-    # Empty queue OR a malformed head left the queue intact for retry —
-    # the actor logged and returned promoted=None with an empty history.
+    # Empty queue — nothing to promote (the actor returned promoted=None
+    # with an empty history). A MALFORMED head instead RAISES out of
+    # await_ack above (the actor fails the ack), so it never reaches here.
     return [], None, result["session_id"]
   return result["history"], promoted, result["session_id"]
 
@@ -247,10 +250,10 @@ async def drain_and_release(
   Bounding: the lock acquisition is wrapped in
   `asyncio.timeout(TERMINAL_LOCK_TIMEOUT_SECS)`. A lock-acquisition timeout
   (another task holds the lock past the bound) OR a failed strict ack
-  (PromotePending / ClearRunStatus didn't land or timed out) raises out of
-  this function; the caller maps that to `FAILED_LEAVE_MARKER`, leaving the
-  marker set for reconciliation rather than scheduling a continuation /
-  clearing on a lost write.
+  (PromotePending / ClearRunStatus didn't land, timed out, or hit a
+  malformed queue head) raises out of this function; the caller maps that
+  to `FAILED_LEAVE_MARKER`, leaving the marker set for reconciliation
+  rather than scheduling a continuation / clearing on a lost write.
 
   `discard_starting`, `forget_chat`, and `clear_run_status_strict` are
   injected so this module stays free of an import cycle back into chat.py /

@@ -612,6 +612,18 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
       if msgs and msgs[-1].get("role") == "assistant":
         blocks = list(msgs[-1].get("blocks") or [])
         finalize_blocks(blocks)
+        # Drop any UNANSWERED question block. The in-memory pending-question
+        # future died with the process, so the card can never be answered —
+        # the answer route returns 410 (no registered pending). Leaving it
+        # renders an interactive card (questionAnswerable = hasQuestion &&
+        # isLastMsg && !sending, none of which reconcile changes) that
+        # dead-ends on submit. An ALREADY-answered question (has "answers")
+        # is real transcript and is kept; the interruption note below is the
+        # turn's outcome.
+        blocks = [
+          b for b in blocks
+          if not (b.get("type") == "question" and not b.get("answers"))
+        ]
         blocks.append(err_block)
         # build_assistant_message omits ts; carry the turn's existing
         # stable ts (the frontend bridge + React keys rely on it — a
@@ -1471,8 +1483,8 @@ async def _run_chat_impl(
 
   # Resolve effective agent settings (model, effort, ...) for this turn.
   # Per-chat overrides from `Chat.agent_settings_json` win over the
-  # global default in /data/shared/agent-settings.json. The slash
-  # picker (see frontend/.../SlashPicker.jsx) writes overrides via
+  # global default in /data/shared/agent-settings.json. The composer
+  # popover (ComposerPopover → ChatSettingsPanel) writes overrides via
   # PATCH /api/chats/{id}; the file remains the fallback every chat
   # starts from. Computed once here and threaded into the SDK runner
   # for each provider.
