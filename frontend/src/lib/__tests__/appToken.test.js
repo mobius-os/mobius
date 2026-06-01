@@ -10,9 +10,16 @@
  * signal must NOT revoke a token we already resolved, because that unmounted
  * the live iframe and span forever.
  */
-import { test } from 'node:test'
+import { test, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { liveAppToken, latchedAppToken } from '../appToken.js'
+import {
+  liveAppToken,
+  latchedAppToken,
+  resolveLatchedToken,
+  _resetLatchStore,
+} from '../appToken.js'
+
+beforeEach(() => { _resetLatchStore() })
 
 const OWNER = 'owner-jwt'
 const APP = 'app-scoped-tok'
@@ -81,6 +88,59 @@ test('reproduce-android-online-flap: token stays stable across online oscillatio
     const online = i % 2 === 0
     assert.ok(step(undefined, online, OWNER), `flap iter ${i} keeps a token`)
   }
+})
+
+// resolveLatchedToken is the real component path: it must survive a REMOUNT
+// (module-scoped store, not a useRef) and reset synchronously on app switch.
+test('resolveLatchedToken: holds token across a simulated AppCanvas remount', () => {
+  // First mount: online boot resolves app token.
+  assert.equal(resolveLatchedToken(22, 0, APP, APP), APP)
+  // Go offline: live token = owner JWT, latched.
+  assert.equal(resolveLatchedToken(22, 0, OWNER, undefined), OWNER)
+  // *** REMOUNT *** — in the real component every useRef would reset here.
+  // We simulate it by simply calling again with the flap's bad live value
+  // (online blip → liveToken undefined). The module store must still hold.
+  assert.equal(resolveLatchedToken(22, 0, undefined, undefined), OWNER,
+    'token must survive a remount during the online flap')
+  // Several flap iterations across "remounts" — never drops.
+  for (let i = 0; i < 5; i++) {
+    assert.ok(resolveLatchedToken(22, 0, undefined, undefined), `remount flap ${i}`)
+  }
+})
+
+test('resolveLatchedToken: a different app does NOT inherit the previous latch', () => {
+  assert.equal(resolveLatchedToken(22, 0, OWNER, undefined), OWNER)
+  // Switch to app 99 while offline with no live token — must NOT get app 22's.
+  assert.equal(resolveLatchedToken(99, 0, undefined, undefined), undefined,
+    'a switched app must start with no latched token')
+})
+
+test('resolveLatchedToken: a version bump resets the latch for the same app', () => {
+  assert.equal(resolveLatchedToken(22, 0, OWNER, undefined), OWNER)
+  // version 1 of the same app is a real teardown → fresh.
+  assert.equal(resolveLatchedToken(22, 1, undefined, undefined), undefined,
+    'a version bump must not reuse the old version latch')
+})
+
+// The iframe LRU mounts up to 4 AppCanvas siblings concurrently; each renders
+// and calls resolveLatchedToken. One sibling's render must NOT evict another
+// sibling's latch (the bug if we deleted "all other keys" — caught by Codex).
+test('resolveLatchedToken: concurrent sibling apps keep their own latches', () => {
+  const A = 'tok-A', B = 'tok-B'
+  assert.equal(resolveLatchedToken(10, 0, A, undefined), A)
+  assert.equal(resolveLatchedToken(20, 0, B, undefined), B)
+  // Re-render app 10 during a flap (no live token) — still A, and 20 untouched.
+  assert.equal(resolveLatchedToken(10, 0, undefined, undefined), A, 'app 10 keeps its latch')
+  assert.equal(resolveLatchedToken(20, 0, undefined, undefined), B, 'app 20 keeps its latch')
+  assert.equal(resolveLatchedToken(10, 0, undefined, undefined), A)
+  assert.equal(resolveLatchedToken(20, 0, undefined, undefined), B)
+})
+
+test('clearLatchedTokens drops everything (logout)', () => {
+  assert.equal(resolveLatchedToken(10, 0, 'x', undefined), 'x')
+  _resetLatchStore()
+  assert.equal(resolveLatchedToken(10, 0, undefined, undefined), undefined,
+    'after logout the latch must be empty')
 })
 
 // Guard the security intent: a GENUINE online session that never went offline

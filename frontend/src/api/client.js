@@ -5,6 +5,7 @@
  */
 import { del as idbDel } from 'idb-keyval'
 import * as setupSession from '../lib/setupSession.js'
+import { clearLatchedTokens } from '../lib/appToken.js'
 
 export const BASE = (import.meta.env.BASE_URL || '/').replace(/\/$/, '')
 
@@ -55,6 +56,10 @@ export function clearToken() {
 // a promise so callers can `await` it before reloading the page
 // (otherwise the browser would abort the in-flight delete).
 export function clearQueryCache() {
+  // Owner-scoped in-memory state: the AppCanvas token latch holds resolved
+  // app/owner tokens across iframe remounts; drop it on logout so a remount
+  // after the session ends can't reuse the previous owner's token.
+  try { clearLatchedTokens() } catch {}
   return Promise.all([
     idbDel('mobius-query-cache').catch(() => {}),
     delOutboxDb().catch(() => {}),
