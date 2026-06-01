@@ -1227,11 +1227,20 @@ async def run_chat(
       try:
         async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
           await _clear_run_status_strict(chat_id)
+        disposition = chat_queue.TerminalDisposition.STOP_HANDOFF_CLEARED
       except (Exception, asyncio.TimeoutError):
         _get_logger().warning(
           "Stop-handoff ClearRunStatus did not persist chat_id=%s "
           "(reconciliation will repair)", chat_id, exc_info=True,
         )
+        disposition = chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
+    # One observable record of how this turn's terminal transition resolved
+    # — DEBUG so chat.log stays one-line-per-turn at INFO, but available when
+    # MOEBIUS_CHAT_DEBUG is on to trace a marker-left/cleared decision.
+    if chat_id:
+      _get_logger().debug(
+        "terminal disposition chat_id=%s %s", chat_id, disposition.value,
+      )
 
 
 async def _run_chat_impl(
