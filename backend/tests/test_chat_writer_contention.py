@@ -519,15 +519,24 @@ def test_promote_pending_history_entries_are_chat_messages(actor):
   assert history[-1].content == "next turn"
 
 
-def test_promote_pending_malformed_entry_leaves_queue_intact(actor):
+def test_promote_pending_malformed_entry_raises_and_leaves_queue_intact(actor):
   """A transcript entry whose `content` is not a string must NOT silently
-  consume the pending turn. This is the validation the raw-dict build
-  skipped: `m.get('content', '') or ''` keeps a truthy non-string (a dict
-  here) and a raw-dict history would carry it straight to the runner. Built
-  as schemas.ChatMessage it raises ValidationError, which the production
-  try/except in promote_pending_messages_locked turns into promoted=None +
-  queue-intact-for-retry. With raw dicts this test fails: the malformed
-  entry promotes and the pending queue is consumed."""
+  consume the pending turn. Built as schemas.ChatMessage it raises
+  ValidationError inside `_promote_pending`, which now RAISES `_PersistFailed`
+  (it formerly returned promoted=None) so the turn-end drain maps it to
+  FAILED_LEAVE_MARKER — the run marker is LEFT set and the queue stays intact
+  for reconciliation / next-POST self-heal. Returning promoted=None was
+  indistinguishable from an EMPTY queue, so drain_and_release cleared the
+  marker + forgot the chat while the malformed message remained (claiming
+  EMPTY_TERMINAL_CLEARED while work remained). The marker-left half is proven
+  end-to-end in test_terminal_completion.py
+  ::test_malformed_pending_head_leaves_marker_then_reconcile_repairs.
+
+  The CORE invariant this test has always protected is UNCHANGED: the pending
+  message is never consumed by a malformed promote.
+  """
+  from app.chat_writer import _PersistFailed
+
   # `content` is a dict, not a string: a real dict (so `.get` works) but
   # ChatMessage(content={...}) raises ValidationError. The defensive
   # `or ""` does NOT coerce it because the dict is truthy.
@@ -535,10 +544,9 @@ def test_promote_pending_malformed_entry_leaves_queue_intact(actor):
     messages=[{"role": "user", "content": {"nested": "not a string"}, "ts": 1}],
     pending=[{"role": "user", "content": "should survive", "ts": 10}],
   )
-  result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
-  # Validation failed: nothing promoted, queue intact for retry.
-  assert result["promoted"] is None
-  assert result["history"] == []
+  with pytest.raises(_PersistFailed):
+    _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
+  # The malformed head was NOT consumed: the queue is intact for retry.
   chat = _load_chat()
   assert [m.get("content") for m in chat["pending_messages"]] == [
     "should survive"

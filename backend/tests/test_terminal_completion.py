@@ -925,3 +925,226 @@ def test_empty_queue_marker_clear_ack_timeout_leaves_marker(monkeypatch):
   # marker would stay set and a restart reconcile would clear it — both
   # outcomes are covered by reconcile's mid-commit-timeout contract.
   assert _load("t13")["run_status"] is None
+
+
+# -- 14 (final-review Bug B). malformed queue head LEAVES the marker --------
+def test_malformed_pending_head_leaves_marker_then_reconcile_repairs(monkeypatch):
+  """A MALFORMED pending head (content that can't build a schemas.ChatMessage)
+  makes `_promote_pending` RAISE rather than return promoted=None. The drain
+  maps that to FAILED_LEAVE_MARKER: the run marker is LEFT set and the
+  malformed message stays queued — NOT EMPTY_TERMINAL_CLEARED, which would
+  clear the marker + forget the chat while work still remains (the bug). A
+  reconcile-after-restart then repairs it.
+
+  Regression: before the fix, the except branch returned promoted=None,
+  indistinguishable from an empty queue, so drain_and_release cleared the
+  marker and forgot the chat with the malformed message still in the queue.
+  """
+  _seed_owner_and_creds()
+  _seed_chat(
+    "tb",
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    # A truthy non-string content survives the `... or ""` guard and makes
+    # schemas.ChatMessage(content=[...]) raise inside _promote_pending.
+    pending=[{"role": "user", "content": ["malformed"], "ts": 3}],
+    run_status="running",
+  )
+  # No streamed text → finalize() is a no-op, so the turn reaches the drain
+  # (the promote) which is what raises on the malformed head.
+  _patch_claude_runner(monkeypatch, text=None)
+
+  scheduled = []
+  orig_sched = chat_mod._schedule_continuation
+  chat_mod._schedule_continuation = lambda **kw: scheduled.append(kw)
+
+  chat_mod.mark_starting("tb")
+  gen = chat_mod.current_run_generation("tb")
+  published = []
+  try:
+    _run_real_chat("tb", run_token="rt-b", run_gen=gen, published=published)
+  finally:
+    chat_mod._schedule_continuation = orig_sched
+  _drain_actor()
+
+  assert scheduled == [], "a malformed promote must NOT schedule a continuation"
+  assert "queued_turn_starting" not in published
+  assert "error" in published
+  state = _load("tb")
+  assert state["run_status"] == "running", (
+    "a malformed queue head must LEAVE the marker set, not clear it"
+  )
+  assert len(state["pending_messages"]) == 1, "the malformed message stays queued"
+
+  # Reconcile-after-restart repairs it: clears the marker, drops the stranded
+  # queue, appends an interrupted-turn note.
+  chat_mod.registry.reset_for_tests()
+  db = SessionLocal()
+  try:
+    reconciled = chat_mod.reconcile_interrupted_chats(db)
+  finally:
+    db.close()
+  assert "tb" in reconciled
+  state = _load("tb")
+  assert state["run_status"] is None
+  assert state["pending_messages"] == []
+
+
+# -- 15 (final-review Area 6). reconcile scrubs an orphan question card -----
+def test_reconcile_scrubs_unanswered_question_card():
+  """A crash after a QuestionCommit (the unanswered question block is durable)
+  but before the next turn leaves an orphan card: the in-memory pending future
+  died with the process, so the card 410s on submit yet renders interactive
+  (questionAnswerable = hasQuestion && isLastMsg && !sending — none of which
+  reconcile changes). Reconcile must DROP the unanswered question block while
+  KEEPING an already-answered one + other blocks, then append the
+  interruption note.
+
+  Regression: before the fix, reconcile left the unanswered question block in
+  place, so the reloaded UI showed an interactive card that dead-ended on
+  submit.
+  """
+  _seed_chat(
+    "tq",
+    messages=[
+      {"role": "user", "content": "hi", "ts": 1},
+      {"role": "assistant", "ts": 2, "blocks": [
+        {"type": "text", "content": "thinking"},
+        {"type": "question", "question_id": "q-answered",
+         "questions": [{"id": "q-answered", "question": "Old?"}],
+         "answers": {"Old?": "yes"}},
+        {"type": "question", "question_id": "q-open",
+         "questions": [{"id": "q-open", "question": "Color?"}]},
+      ]},
+    ],
+    run_status="running",
+  )
+  db = SessionLocal()
+  try:
+    reconciled = chat_mod.reconcile_interrupted_chats(db)
+  finally:
+    db.close()
+  assert "tq" in reconciled
+  state = _load("tq")
+  assert state["run_status"] is None
+  blocks = state["messages"][-1]["blocks"]
+  qids = [b.get("question_id") for b in blocks if b.get("type") == "question"]
+  assert "q-open" not in qids, "the unanswered orphan card must be scrubbed"
+  assert "q-answered" in qids, "an already-answered question is real transcript"
+  assert any(
+    b.get("type") == "text" and b.get("content") == "thinking" for b in blocks
+  ), "non-question blocks must survive the scrub"
+  assert any(
+    b.get("type") == "error" and "interrupted" in b["message"].lower()
+    for b in blocks
+  ), "the interruption note must be appended"
+
+
+# -- 16 (final-review Bug A). Stop during the StartTurn commit: no spawn ----
+#
+# These two drive send_message DIRECTLY (no TestClient) for determinism: the
+# fix's observable is that the broadcast + the run_chat spawn are created
+# together in the same branch, so `get_broadcast(cid)` is the bulletproof
+# signal (independent of whether a run_chat monkeypatch intercepts). Creds are
+# seeded + the SDK runner patched so a stray real run_chat is harmless rather
+# than erroring on a missing CLI.
+def _direct_send(cid):
+  """Call the real send_message coroutine for `cid` with content 'hello' on a
+  fresh session; returns the JSONResponse."""
+  from app.routes import chats_stream
+  body = chat_mod.schemas.SendMessage(content="hello")
+  db = SessionLocal()
+  try:
+    return asyncio.run(chats_stream.send_message(body, cid, None, db))
+  finally:
+    db.close()
+
+
+def test_stop_during_starting_does_not_spawn_superseded_turn(monkeypatch):
+  """A Stop that lands DURING the initial StartTurn commit (it bumps the
+  generation, clears the marker, and releases _starting while no SDK handle is
+  registered yet) must NOT let send_message spawn the now-superseded turn.
+  send_message captures the generation BEFORE the StartTurn await and
+  revalidates after the ack; a bump means 'a Stop raced' → do not spawn (no
+  broadcast, no run_chat).
+
+  Regression: before the fix, the generation was read AFTER the ack, adopting
+  Stop's bumped value, so the route spawned the already-stopped turn (with no
+  durable marker).
+  """
+  from app.routes import chats_stream
+  from app.broadcast import get_broadcast
+
+  _seed_owner_and_creds()
+  _patch_claude_runner(monkeypatch, text=None)  # harmless if run_chat runs
+  cid = "bugA"
+  _seed_chat(cid, messages=[], pending=[])
+
+  spawned = []
+
+  async def _noop(*a, **k):
+    return None
+
+  def fake_run_chat(*a, **k):
+    spawned.append(k)
+    return _noop()
+
+  monkeypatch.setattr(chats_stream, "run_chat", fake_run_chat)
+
+  # Bump the generation right after the StartTurn ack resolves (exactly what a
+  # racing stop_chat_for does), inside send_message's capture→ack→revalidate
+  # window. The bump is synchronous within the coroutine, so it is observed at
+  # the revalidation.
+  real_await_ack = chats_stream.await_ack
+
+  async def bumping_await_ack(ack):
+    result = await real_await_ack(ack)
+    chat_mod.bump_run_generation(cid)
+    return result
+
+  monkeypatch.setattr(chats_stream, "await_ack", bumping_await_ack)
+
+  resp = _direct_send(cid)
+  _drain_actor()
+
+  assert resp.status_code == 202
+  assert spawned == [], (
+    "a Stop that raced the StartTurn commit must not spawn the superseded turn"
+  )
+  assert get_broadcast(cid) is None, (
+    "no broadcast may be created when a Stop raced the start (broadcast + "
+    "spawn are gated together in the same branch)"
+  )
+  # The user message is durable (StartTurn committed it before the bump).
+  state = _load(cid)
+  assert state is not None and len(state["messages"]) == 1
+
+
+def test_normal_send_spawns_turn(monkeypatch):
+  """Control for the Bug A guard: with NO racing Stop (generation unchanged
+  across the StartTurn await), send_message creates the broadcast and spawns
+  the turn. Proves the guard gates only the raced case, not every send."""
+  from app.routes import chats_stream
+  from app.broadcast import get_broadcast
+
+  _seed_owner_and_creds()
+  _patch_claude_runner(monkeypatch, text=None)
+  cid = "okA"
+  _seed_chat(cid, messages=[], pending=[])
+
+  spawned = []
+
+  async def _noop(*a, **k):
+    return None
+
+  def fake_run_chat(*a, **k):
+    spawned.append(k)
+    return _noop()
+
+  monkeypatch.setattr(chats_stream, "run_chat", fake_run_chat)
+
+  resp = _direct_send(cid)
+  _drain_actor()
+
+  assert resp.status_code == 202
+  assert len(spawned) == 1, "a normal send must spawn exactly one turn"
+  assert get_broadcast(cid) is not None, "a normal send creates the broadcast"

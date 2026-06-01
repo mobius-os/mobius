@@ -354,6 +354,18 @@ async def send_message(
     # matches the runner's streaming/terminal writes. Building the user
     # message (uploads notice, attachments, ts) stays on the route; the
     # actor owns the JSON-blob mutation.
+    from app.chat import current_run_generation
+    # Capture the run generation BEFORE the StartTurn await. A Stop that
+    # lands during the await bumps the generation, clears the marker, and
+    # releases _starting (stop_chat_for, while no live handle is registered
+    # yet). Reading the generation AFTER the ack (as this code once did)
+    # would adopt Stop's bumped value, so the spawned run_chat's run_gen
+    # would MATCH current and the already-stopped turn would run anyway —
+    # with no durable marker (Stop cleared it), invisible to crash
+    # recovery. Capturing here + revalidating after the ack closes that
+    # window; a Stop that lands AFTER the spawn is caught by run_chat's own
+    # generation guard.
+    start_gen = current_run_generation(chat_id)
     run_token = alloc_run_token()
     user_msg = _user_message_from_body(chat, body)
     owner = db.query(models.Owner).first()
@@ -378,20 +390,28 @@ async def send_message(
     session_id = result["session_id"]
     provider = result["provider"]
 
-    # Create the broadcast before spawning the task so the stream
-    # endpoint can subscribe immediately without a race.
-    bc = create_broadcast(chat_id)  # noqa: F841 — registered in global registry
-
-    from app.chat import current_run_generation
-    gen = current_run_generation(chat_id)
-    asyncio.create_task(
-      run_chat(
-        msgs, chat_id=chat_id, session_id=session_id,
-        provider_id=provider, run_gen=gen,
-        attachments=body.attachments, timezone=body.timezone,
-        viewport=body.viewport, run_token=run_token,
+    if current_run_generation(chat_id) == start_gen:
+      # No Stop raced during the StartTurn commit. Create the broadcast
+      # before spawning so the stream endpoint can subscribe without a
+      # race, then spawn the turn keyed on the generation we captured.
+      bc = create_broadcast(chat_id)  # noqa: F841 — registered in global registry
+      asyncio.create_task(
+        run_chat(
+          msgs, chat_id=chat_id, session_id=session_id,
+          provider_id=provider, run_gen=start_gen,
+          attachments=body.attachments, timezone=body.timezone,
+          viewport=body.viewport, run_token=run_token,
+        )
       )
-    )
+    else:
+      # A Stop raced during the StartTurn commit: it bumped the generation,
+      # cleared the marker, and released _starting. The user message is
+      # durable (StartTurn committed it) and the chat is now idle. Do NOT
+      # spawn — running the already-stopped turn here would leave no durable
+      # marker. Release _starting (idempotent — Stop already did) and let
+      # the response fall through; the client's reconnect gets a 204 (no
+      # active broadcast) and refreshes the now-idle, message-saved chat.
+      discard_starting(chat_id)
   except Exception:
     discard_starting(chat_id)
     raise

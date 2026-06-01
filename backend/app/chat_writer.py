@@ -654,7 +654,12 @@ class ChatWriterActor:
     dropped: list[Future] = []
     with self._pending_lock:
       # Snapshot the matching keys first: bumping generation reads the union
-      # of every key the chat currently touches across the three maps.
+      # of every key the chat currently touches across the three maps. The
+      # `_generation` term is load-bearing, not redundant: between turns a
+      # key lives ONLY in `_generation` (no pending snapshot, no outstanding
+      # marker — `_gc_generation` drops it only once it is quiescent in both
+      # other maps), so a broad fence must bump it too, or a late stale
+      # marker for that key could slip past after this fence ran.
       matching = {
         key
         for key in (
@@ -1188,13 +1193,23 @@ class ChatWriterActor:
           content=first_pending.get("content", "") or "",
         )
       )
-    except Exception:
+    except Exception as exc:
+      # A malformed head can't be turned into a turn. RAISE (not return
+      # promoted=None) so the ack fails and the turn-end drain maps it to
+      # FAILED_LEAVE_MARKER — the run marker is LEFT set and the queue is
+      # left intact for reconciliation / next-POST self-heal. Returning
+      # promoted=None here would be indistinguishable from an empty queue,
+      # so drain_and_release would clear the marker + forget the chat while
+      # the malformed message still sits in the queue (claiming
+      # EMPTY_TERMINAL_CLEARED while work remains). No DB mutation has
+      # happened yet (chat.messages / pending_messages are reassigned only
+      # below, after this try), so nothing is half-written.
       log.exception(
         "promote: next_messages construction failed chat_id=%s — leaving "
-        "pending queue intact",
+        "pending queue intact, failing the ack so the marker is kept",
         cmd.chat_id,
       )
-      return {"history": [], "promoted": None, "session_id": chat.session_id}
+      raise _PersistFailed("PromotePending: malformed queue head") from exc
     chat.messages = existing + [first_pending]
     chat.pending_messages = pending[1:]
     chat.run_status = "running"
