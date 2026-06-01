@@ -27,6 +27,11 @@ class Settings(BaseSettings):
   data_dir: str = "/data"
   frontend_origin: str = "http://localhost:5173"
   api_base_url: str = f"http://localhost:{os.environ.get('PORT', '8000')}"
+  # Git commit the running image was built from, baked at `docker build` time
+  # via the BUILD_SHA build-arg (Dockerfile + deploy-prod.sh). "unknown" for a
+  # local `docker compose up` that didn't pass it. Surfaced at GET /api/version
+  # so a deploy can verify the SERVED backend matches the intended commit.
+  build_sha: str = "unknown"
 
   model_config = SettingsConfigDict(env_file=".env")
 

@@ -299,6 +299,19 @@ def health(response: Response):
   return {"status": "ok"}
 
 
+@app.get("/api/version")
+def version():
+  """Returns the git commit the running image was built from.
+
+  Baked at `docker build` time via the `BUILD_SHA` build-arg (Dockerfile +
+  deploy-prod.sh); "unknown" for a local `docker compose up` that didn't pass
+  it. Lets a deploy verify the SERVED backend matches the intended commit —
+  the backend analogue of the frontend bundle-hash check (bundle-info.sh /
+  verify-fresh.sh, which only see the shell bundle, not the backend).
+  """
+  return {"sha": get_settings().build_sha}
+
+
 @app.get("/", include_in_schema=False)
 def root_redirect():
   """Redirects the bare domain to the Möbius shell at `/shell/`.

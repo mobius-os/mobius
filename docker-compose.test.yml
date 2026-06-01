@@ -8,7 +8,10 @@ services:
     # The volume is already project-scoped (<project>_test_data) and needs
     # no override — only container_name + image are global.
     image: ${MOBIUS_IMAGE:-mobius-test:ci}
-    build: .
+    build:
+      context: .
+      args:
+        BUILD_SHA: ${BUILD_SHA:-unknown}
     container_name: ${MOBIUS_CONTAINER:-mobius-test}
     init: true
     # `unless-stopped` so the recovery chat's Restart button works in

@@ -29,6 +29,8 @@ TARGET="prod"
 SKIP_BUILD=0
 ASSUME_YES=0
 CHECK_ONLY=0
+BUILT_THIS_RUN=0  # set to 1 once we actually build, so the verify step only
+                  # compares the served SHA when THIS run produced the image
 for arg in "$@"; do
   case "$arg" in
     --target=prod) TARGET="prod" ;;
@@ -153,11 +155,23 @@ served_bundle() {
     | head -n1 || true
 }
 
+# The git commit the SERVED backend reports at /api/version (baked at build
+# time via the BUILD_SHA build-arg). Empty if the route is missing; "unknown"
+# if the image predates the stamp or the arg wasn't passed. The backend
+# analogue of served_bundle (which only sees the frontend shell).
+served_sha() {
+  docker exec "$CONTAINER" sh -c "curl -fsS '${INTERNAL_BASE}/api/version' 2>/dev/null" \
+    | sed -n 's/.*"sha":"\([^"]*\)".*/\1/p' \
+    | head -n1 || true
+}
+
 # ── --check shortcut: verification-only, no deploy ─────────────────────
 if [ "$CHECK_ONLY" = "1" ]; then
   step "[check] verifying ${CONTAINER}"
   hash=$(served_bundle)
   info "bundle: ${hash:-<none>}"
+  sha=$(served_sha)
+  info "backend sha: ${sha:-<none>}"
   code=$(docker exec "$CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/health'" 2>/dev/null || echo "000")
   info "internal /api/health: ${code}"
   if [ -n "$PUBLIC_URL" ]; then
@@ -305,6 +319,18 @@ else
     docker builder prune -af --filter "until=24h" >/dev/null
     ok "build cache pruned"
   fi
+  # Bake the commit being deployed into the image (→ GET /api/version), so
+  # the verify step + future --check can confirm the served backend matches.
+  # compose reads BUILD_SHA from the env via `args: BUILD_SHA: ${BUILD_SHA:-…}`.
+  # docker build includes the WORKING TREE, not just HEAD — so if the tree is
+  # dirty, mark the SHA `-dirty` rather than claim an exact commit it isn't.
+  _sha="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+  if [ "$_sha" != "unknown" ] && ! git -C "$REPO_ROOT" diff --quiet HEAD 2>/dev/null; then
+    _sha="${_sha}-dirty"
+  fi
+  export BUILD_SHA="$_sha"
+  BUILT_THIS_RUN=1
+  info "baking BUILD_SHA=${BUILD_SHA:0:18}… into the image"
   intent "docker compose ${COMPOSE_ARGS[*]} build"
   if ! confirm_yes "${C_YELLOW}slow step (5-15 min, has OOM'd before).${C_RESET} proceed?"; then
     fail "aborted by user at build step"
@@ -403,6 +429,31 @@ if [ -n "$before_hash" ] && [ "$before_hash" = "$after_hash" ]; then
   warn "rebuild_shell.sh didn't no-op. Container is recreated + healthy regardless."
 else
   ok "bundle rotated: ${before_hash:-<none>} → ${after_hash}"
+fi
+
+# Backend version stamp: confirm the SERVED backend is the commit we built —
+# the backend analogue of the bundle-hash check above (which only sees the
+# frontend). A mismatch after a successful build+recreate means the new image
+# isn't actually serving; worth investigating, but the health checks are the
+# hard gate, so this warns rather than aborts.
+served=$(served_sha)
+if [ "$BUILT_THIS_RUN" = "1" ]; then
+  # We built the image this run, so the served SHA SHOULD equal the one we
+  # baked. Anything else — a mismatch, or an empty/"unknown" stamp the new
+  # image was supposed to carry — means the build-arg pipeline broke or the
+  # recreate didn't pick up the new image. Warn (the health checks are the
+  # hard gate; this is a provenance signal, not a liveness one).
+  if [ -n "$served" ] && [ "$served" = "$BUILD_SHA" ]; then
+    ok "backend sha: ${served:0:18}… (matches the commit just built)"
+  else
+    warn "backend sha: served '${served:-<none>}' != built '${BUILD_SHA:0:18}…'"
+    warn "the new image's stamp didn't reach the served backend — investigate"
+    warn "(build-arg pipeline, or the recreate didn't pick up the new image)."
+  fi
+else
+  # --skip-build: we didn't build, so don't compare against a possibly stale,
+  # shell-inherited BUILD_SHA — just report what's serving.
+  info "backend sha: ${served:-<none>} (no build this run; not compared)"
 fi
 
 # Internal /api/health (we already checked this twice during waits, but
