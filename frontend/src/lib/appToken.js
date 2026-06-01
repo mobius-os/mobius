@@ -66,3 +66,65 @@ export function liveAppToken(appToken, online, ownerToken) {
 export function latchedAppToken(appToken, latched) {
   return appToken || latched || undefined
 }
+
+// MODULE-LEVEL latch store, keyed by `${appId}:${version}`.
+//
+// A React useRef is NOT enough: the on-device log showed the token dropping
+// back to NONE-blank AFTER the app had mounted, which means AppCanvas itself
+// REMOUNTS during the offline flap (a remount resets every useRef, evaporating
+// the latch). Persisting the resolved token at module scope lets it survive an
+// AppCanvas remount for the SAME app+version. The compound key keeps each app's
+// token isolated — a different app simply reads a different key and never
+// inherits another's token, so NO cross-key deletion is needed (and must NOT be
+// done: the Shell mounts up to 4 AppCanvas siblings at once via the iframe LRU,
+// so deleting "other" keys on each sibling render would clobber the others'
+// latches by render order). We only drop STALE VERSIONS of the SAME app (a
+// version bump is a real teardown) and cap the map as a backstop.
+const _latchStore = new Map()
+const _LATCH_CAP = 16
+
+function _latchKey(appId, version) {
+  return `${appId}:${version}`
+}
+
+/**
+ * Resolve the token for AppCanvas, latching across remounts. Call once per
+ * render with the live (un-latched) choice; it stores any non-empty live token
+ * under the app+version key and returns the best available (fresh app token >
+ * latched). Drops older-version latches for the SAME app, but leaves other
+ * apps' latches intact (the 4-up iframe LRU mounts siblings concurrently).
+ *
+ * @param {string|number} appId
+ * @param {string|number} version
+ * @param {string|undefined} liveToken the un-latched choice this render
+ * @param {string|undefined|null} appToken freshest app-scoped token
+ * @returns {string|undefined}
+ */
+export function resolveLatchedToken(appId, version, liveToken, appToken) {
+  const key = _latchKey(appId, version)
+  const samePrefix = `${appId}:`
+  // A version bump is a real teardown for THIS app — forget its older versions
+  // so a remount can't reuse a stale-version token. Leave OTHER apps alone.
+  for (const k of [..._latchStore.keys()]) {
+    if (k !== key && k.startsWith(samePrefix)) _latchStore.delete(k)
+  }
+  if (liveToken) {
+    _latchStore.set(key, liveToken)
+    // Backstop against unbounded growth if apps churn without logout.
+    if (_latchStore.size > _LATCH_CAP) {
+      const oldest = _latchStore.keys().next().value
+      if (oldest !== key) _latchStore.delete(oldest)
+    }
+  }
+  return latchedAppToken(appToken, _latchStore.get(key))
+}
+
+// Clear all latched tokens. Called on logout so a remount after a session ends
+// can't reuse the previous owner's token (the store is owner-scoped state, like
+// the SW caches client.js wipes).
+export function clearLatchedTokens() {
+  _latchStore.clear()
+}
+
+// Test-only alias.
+export const _resetLatchStore = clearLatchedTokens

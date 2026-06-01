@@ -63,7 +63,7 @@ clientsClaim()
 // only updates on an online visit, so an installed PWA can run an old SW
 // for a while). Served offline by the route below because the SW
 // synthesizes the response; no network needed.
-const SW_VERSION = '2026-06-01-token-latch'
+const SW_VERSION = '2026-06-01-offline-hang-fix'
 
 // /api/__sw_version — a synthetic, SW-generated response so /diag.html can
 // read the live SW generation even offline. Registered before the catch
@@ -206,6 +206,48 @@ registerRoute(
 // under a token-stripped key; serve the stored copy when the network fails.
 // This makes offline availability a deterministic function of "was it
 // loaded online once," independent of HTTP-cache revalidation state.
+// Bounded NETWORK-FIRST. The route stays network-first to preserve online
+// freshness — these responses carry a server ETag and an agent's app edit must
+// be seen on the next online load, so a cache-first serve (which would boot
+// stale app code after an edit) is NOT acceptable. The ONLY change from a bare
+// network-first is a timeout: offline on Android the browser's connectivity
+// state can be stale, so a same-origin `fetch()` stays PENDING (never resolves,
+// never rejects) instead of failing fast — the "navigator.onLine lies"
+// symptom. The old handler did `await fetch(...)` with no timeout, so when the
+// network hung the cache-fallback `catch` NEVER ran: the iframe's
+// `import('/module')` waited forever and the app span. (Confirmed on-device:
+// the diag log ended on `module:import:start` with no `module:import:ok`.) Now
+// the network attempt is bounded and AbortController-cancelled on timeout, then
+// we fall back to the cached copy — fixing the hang without sacrificing online
+// freshness.
+const NET_TIMEOUT_MS = 3000
+
+// Run ONE fetch, bounded by NET_TIMEOUT_MS, aborting the underlying request on
+// timeout so pending offline fetches can't accumulate across repeated opens.
+// `buildRequest(signal)` constructs the Request (its own throw is caught by the
+// handler → cache fallback, so we never spin a second parallel fetch). Rejects
+// on timeout, abort, or network failure — the handler treats all the same.
+async function boundedFetch(buildRequest) {
+  const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null
+  const req = buildRequest(ctrl ? ctrl.signal : undefined)
+  let timer
+  try {
+    const p = fetch(req)
+    if (!ctrl) {
+      // Engine without AbortController: still bound the wait (underlying fetch
+      // may linger — best-effort).
+      return await Promise.race([
+        p,
+        new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('sw-fetch-timeout')), NET_TIMEOUT_MS) }),
+      ])
+    }
+    timer = setTimeout(() => ctrl.abort(), NET_TIMEOUT_MS)
+    return await p
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 function offlineCapableHandler(cacheName) {
   return async ({ request }) => {
     const cache = await caches.open(cacheName)
@@ -217,22 +259,18 @@ function offlineCapableHandler(cacheName) {
     key.searchParams.delete('_')
     const cacheKey = key.href
     try {
-      // Forward the ORIGINAL request (preserving mode/headers/credentials —
-      // notably navigate mode for the standalone-app route) with cache:'reload'
-      // forced so we get a fresh 200 body past the HTTP cache, never a 304.
-      // Constructing a Request from a navigate-mode request with an init
-      // throws in some engines; fall back to a plain same-origin GET on the
-      // same URL (the previously-shipped, browser-verified form) if so. The
-      // token stays in request.url either way so /module auth still works.
-      let resp
-      try {
-        resp = await fetch(new Request(request, { cache: 'reload' }))
-      } catch {
-        resp = await fetch(request.url, {
-          cache: 'reload',
-          credentials: 'same-origin',
-        })
-      }
+      // cache:'reload' bypasses the browser HTTP cache so we get a full 200
+      // body, never a 304 (see the 304-trap note above). Constructing a
+      // Request from a navigate-mode request with an init throws in some
+      // engines; the builder falls back to a plain same-origin GET. Any throw
+      // from the builder or the fetch is caught below → cache fallback.
+      const resp = await boundedFetch((signal) => {
+        try {
+          return new Request(request, { cache: 'reload', signal })
+        } catch {
+          return new Request(request.url, { cache: 'reload', credentials: 'same-origin', signal })
+        }
+      })
       if (
         resp && resp.status === 200 &&
         resp.headers.get('X-Mobius-Offline') === '1'
@@ -241,6 +279,8 @@ function offlineCapableHandler(cacheName) {
       }
       return resp
     } catch (err) {
+      // Timed out, aborted, or network failed → serve the cached copy if we
+      // have one. This is the path that fixes the offline hang.
       const cached = await cache.match(cacheKey)
       if (cached) return cached
       throw err
