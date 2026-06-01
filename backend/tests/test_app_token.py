@@ -332,3 +332,56 @@ def test_app_token_can_list_shared_storage(client, owner_token):
   assert r.status_code == 200
   names = [e["name"] for e in r.json()]
   assert "listed.txt" in names
+
+
+def test_app_token_can_list_own_app_storage(client, owner_token):
+  """An app's own token can list that app's storage directory."""
+  app_id, app_token = _make_app_and_token(client, owner_token)
+  client.put(
+    f"/api/storage/apps/{app_id}/items/a.json",
+    json={"k": 1},
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  r = client.get(
+    f"/api/storage/apps-list/{app_id}/items",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert r.status_code == 200
+  names = [e["name"] for e in r.json()["entries"]]
+  assert "a.json" in names
+
+
+def test_cross_app_list_allowed_when_both_sides_permit(client, owner_token):
+  """Permitted cross-app read → listing the other app's storage works."""
+  caller_id = _create_app(client, owner_token, "caller", cross="read")
+  caller_token = _make_app_token(client, owner_token, caller_id)
+  target_id = _create_app(client, owner_token, "target", share="read")
+  client.put(
+    f"/api/storage/apps/{target_id}/items/shared.json",
+    json={"k": 1},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  r = client.get(
+    f"/api/storage/apps-list/{target_id}/items",
+    headers={"Authorization": f"Bearer {caller_token}"},
+  )
+  assert r.status_code == 200
+  names = [e["name"] for e in r.json()["entries"]]
+  assert "shared.json" in names
+
+
+def test_cross_app_list_blocked_when_not_permitted(client, owner_token):
+  """Denied cross-app read → listing the other app's storage is 403."""
+  caller_id = _create_app(client, owner_token, "caller")  # cross='none'
+  caller_token = _make_app_token(client, owner_token, caller_id)
+  target_id = _create_app(client, owner_token, "target", share="read")
+  client.put(
+    f"/api/storage/apps/{target_id}/items/secret.json",
+    json={"k": 1},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  r = client.get(
+    f"/api/storage/apps-list/{target_id}/items",
+    headers={"Authorization": f"Bearer {caller_token}"},
+  )
+  assert r.status_code == 403

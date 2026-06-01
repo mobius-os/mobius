@@ -148,3 +148,153 @@ def test_put_text_accepts_non_json_content_type(client, auth, owner_token):
     headers={**auth, "Content-Type": "text/plain"},
   )
   assert r.status_code == 204
+
+
+def test_head_existing_file(client, auth, owner_token):
+  """HEAD on an existing file → 200, empty body, correct Content-Length."""
+  app_id = _make_app(client, owner_token)
+  client.put(
+    f"/api/storage/apps/{app_id}/notes.txt",
+    data="plain text body",
+    headers={**auth, "Content-Type": "text/plain"},
+  )
+
+  r = client.head(f"/api/storage/apps/{app_id}/notes.txt", headers=auth)
+  assert r.status_code == 200
+  assert r.content == b""
+  assert r.headers["content-length"] == str(len("plain text body"))
+
+
+def test_head_missing_file(client, auth, owner_token):
+  """HEAD on a missing file → 404."""
+  app_id = _make_app(client, owner_token)
+  r = client.head(f"/api/storage/apps/{app_id}/nope.txt", headers=auth)
+  assert r.status_code == 404
+
+
+def test_list_returns_entries_with_metadata(client, auth, owner_token):
+  """Listing a directory returns deterministic entries + metadata."""
+  app_id = _make_app(client, owner_token)
+  client.put(
+    f"/api/storage/apps/{app_id}/reports/2026-06-01.html",
+    data="<p>hi</p>",
+    headers={**auth, "Content-Type": "text/html"},
+  )
+  client.put(
+    f"/api/storage/apps/{app_id}/reports/2026-06-02.json",
+    json={"k": 1},
+    headers=auth,
+  )
+
+  r = client.get(f"/api/storage/apps-list/{app_id}/reports", headers=auth)
+  assert r.status_code == 200
+  body = r.json()
+  assert body["next_cursor"] is None
+  entries = body["entries"]
+  # Sorted lexically by name → deterministic order.
+  assert [e["name"] for e in entries] == [
+    "2026-06-01.html",
+    "2026-06-02.json",
+  ]
+  html = entries[0]
+  assert html["path"] == "reports/2026-06-01.html"
+  assert html["type"] == "file"
+  assert html["size"] == len("<p>hi</p>")
+  assert html["mime_type"] == "text/html"
+  # ISO-8601 UTC with a trailing Z.
+  assert html["modified_at"].endswith("Z")
+
+
+def test_list_includes_directories(client, auth, owner_token):
+  """Immediate-child directories show up with type 'directory'."""
+  app_id = _make_app(client, owner_token)
+  client.put(
+    f"/api/storage/apps/{app_id}/nested/inner.json",
+    json={"k": 1},
+    headers=auth,
+  )
+
+  r = client.get(f"/api/storage/apps-list/{app_id}/", headers=auth)
+  assert r.status_code == 200
+  entries = r.json()["entries"]
+  by_name = {e["name"]: e for e in entries}
+  assert by_name["nested"]["type"] == "directory"
+  assert by_name["nested"]["path"] == "nested"
+  # Directories carry no mime_type.
+  assert "mime_type" not in by_name["nested"]
+
+
+def test_list_root_and_nested(client, auth, owner_token):
+  """Root listing and nested listing both work."""
+  app_id = _make_app(client, owner_token)
+  client.put(
+    f"/api/storage/apps/{app_id}/top.json", json={"k": 1}, headers=auth,
+  )
+  client.put(
+    f"/api/storage/apps/{app_id}/sub/deep.json", json={"k": 2}, headers=auth,
+  )
+
+  root = client.get(f"/api/storage/apps-list/{app_id}/", headers=auth)
+  assert root.status_code == 200
+  root_names = {e["name"] for e in root.json()["entries"]}
+  assert {"top.json", "sub"} <= root_names
+
+  nested = client.get(f"/api/storage/apps-list/{app_id}/sub", headers=auth)
+  assert nested.status_code == 200
+  assert [e["name"] for e in nested.json()["entries"]] == ["deep.json"]
+
+
+def test_list_missing_dir_returns_empty(client, auth, owner_token):
+  """Listing a not-yet-created directory is empty, NOT a 404."""
+  app_id = _make_app(client, owner_token)
+  r = client.get(f"/api/storage/apps-list/{app_id}/ghost", headers=auth)
+  assert r.status_code == 200
+  assert r.json() == {"entries": [], "next_cursor": None}
+
+
+def test_list_rejects_traversal(client, auth, owner_token):
+  """A traversal prefix is rejected by the same containment check.
+
+  The `..` segments are percent-encoded so the HTTP client doesn't
+  normalize them away before the request leaves — the server decodes
+  them back to literal `..` parts, which `_resolve` rejects with 400.
+  """
+  app_id = _make_app(client, owner_token)
+  r = client.get(
+    f"/api/storage/apps-list/{app_id}/%2e%2e/%2e%2e/etc", headers=auth,
+  )
+  assert r.status_code == 400
+
+
+def test_list_pagination(client, auth, owner_token):
+  """limit + opaque cursor walk the directory in deterministic pages."""
+  app_id = _make_app(client, owner_token)
+  for i in range(5):
+    client.put(
+      f"/api/storage/apps/{app_id}/items/{i:02d}.json",
+      json={"i": i},
+      headers=auth,
+    )
+
+  page1 = client.get(
+    f"/api/storage/apps-list/{app_id}/items?limit=2", headers=auth,
+  ).json()
+  assert [e["name"] for e in page1["entries"]] == ["00.json", "01.json"]
+  assert page1["next_cursor"] is not None
+
+  page2 = client.get(
+    f"/api/storage/apps-list/{app_id}/items?limit=2"
+    f"&cursor={page1['next_cursor']}",
+    headers=auth,
+  ).json()
+  assert [e["name"] for e in page2["entries"]] == ["02.json", "03.json"]
+  assert page2["next_cursor"] is not None
+
+  page3 = client.get(
+    f"/api/storage/apps-list/{app_id}/items?limit=2"
+    f"&cursor={page2['next_cursor']}",
+    headers=auth,
+  ).json()
+  assert [e["name"] for e in page3["entries"]] == ["04.json"]
+  # Last page is exhausted.
+  assert page3["next_cursor"] is None

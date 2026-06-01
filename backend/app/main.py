@@ -241,7 +241,7 @@ app.add_middleware(
   # All sensitive endpoints are independently protected by JWT.
   allow_origins=[settings.frontend_origin, "null"],
   allow_credentials=False,
-  allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allow_methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allow_headers=["Authorization", "Content-Type"],
 )
 
