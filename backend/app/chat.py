@@ -833,8 +833,12 @@ def _schedule_continuation(
       and gets handed off to the new run via the generation bump.
     - Stale-pending drain (chats_stream.py send_message): the route
       explicitly calls mark_starting before _promote_pending_messages.
-  If scheduling fails, this function releases the claim so the chat
-  isn't stuck 'starting' until process restart.
+  Both call-sites reach here only AFTER a successful PromotePending — the
+  queued head is already in the transcript and the next turn's run marker is
+  set. If scheduling then fails, this function releases the _starting claim
+  (so the chat isn't stuck 'starting') but LEAVES the durable run marker set:
+  the turn is promoted-but-unscheduled, so reconciliation must recover it
+  (FIX A — clearing the marker here would strand the promoted turn).
   """
   log = _get_logger()
   bc = None
@@ -868,43 +872,36 @@ def _schedule_continuation(
     log.exception(
       "continuation scheduling failed chat_id=%s: %s", chat_id, exc,
     )
-    # Clean up the broadcast we just registered so is_chat_running
-    # doesn't report this chat as permanently active.
-    if bc is not None:
-      bc.mark_completed()
     # Close the orphan coroutine to silence the unawaited-coro warning.
     if coro is not None:
       coro.close()
     discard_starting(chat_id)
-    # The continuation never started, and the gen bump above means the
-    # outgoing turn's finally won't clear the durable run marker (it no
-    # longer owns the generation). Clear it here so the chat isn't left
-    # falsely "running" — a real terminal state, just reached via a
-    # scheduling failure rather than a normal turn end. This function is
-    # sync (can't await the ack), so submit ClearRunStatus
-    # fire-and-forget through the actor with a logging done-callback; a
-    # dropped clear is repaired by reconciliation.
-    if chat_id:
-      try:
-        _ack = get_writer().submit(
-          ClearRunStatus(chat_id=chat_id, run_token="")
-        )
-
-        def _log_clear(fut, _cid=chat_id):
-          try:
-            fut.result()
-          except Exception:
-            log.warning(
-              "ClearRunStatus (continuation-failure) did not persist "
-              "chat_id=%s (reconciliation repairs)", _cid, exc_info=True,
-            )
-
-        _ack.add_done_callback(_log_clear)
-      except Exception:
-        log.warning(
-          "could not submit ClearRunStatus on continuation failure "
-          "chat_id=%s", chat_id, exc_info=True,
-        )
+    # FIX A — LEAVE the durable run marker SET. Both call-sites (the turn-end
+    # drain in _complete_turn, the stale-pending drain in chats_stream)
+    # reach here ONLY after a successful PromotePending: the queued head was
+    # already moved into the transcript and the next turn's run marker was
+    # set under `run_token`. The continuation task never spawned, so this is
+    # a promoted-but-unscheduled turn — "work remains" under the single
+    # marker invariant, so the marker must stay set for
+    # reconcile_interrupted_chats to recover on the next boot. Clearing here
+    # (the previous behavior) wiped the very marker recovery needs, leaving
+    # the promoted message stranded with no recovery handle. We do NOT clear.
+    #
+    # Surface the failure to the frontend the same way the other terminal
+    # failure paths do — a transport error + done on the continuation's
+    # broadcast (the one a reconnecting SSE client subscribes to after the
+    # queued_turn_starting event the drain emitted) — then mark it completed
+    # so is_chat_running doesn't report this chat as permanently active.
+    if bc is not None:
+      bc.publish({
+        "type": "error",
+        "message": (
+          "A queued message could not be started (the next turn failed "
+          "to schedule). It will be recovered automatically."
+        ),
+      })
+      bc.publish({"type": "done"})
+      bc.mark_completed()
 
 
 # Queue drain helpers — pre-bound to the chat-side callbacks so the

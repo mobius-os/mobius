@@ -608,3 +608,124 @@ def test_actor_fatal_leaves_marker_then_reconcile_repairs(monkeypatch):
   state = _load("t8")
   assert state["run_status"] is None
   assert state["pending_messages"] == []
+
+
+# -- 9 (FIX A). post-promote continuation scheduling failure LEAVES marker -
+def test_continuation_schedule_failure_after_promote_leaves_marker(monkeypatch):
+  """The promote landed (the queued head moved into `messages` and the
+  continuation's run marker was set by PromotePending), but spawning the
+  continuation task then raises. The turn is now promoted-but-unscheduled, so
+  the marker MUST be left set (NOT cleared) — clearing it would strand the
+  promoted turn with no recovery handle. A transport error + done is surfaced
+  on the continuation's broadcast, and a reconcile-after-restart recovers the
+  promoted-but-unscheduled turn (appends an interrupted-turn note + clears)."""
+  _seed_owner_and_creds()
+  _seed_chat(
+    "t9",
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[{"role": "user", "content": "queued", "ts": 3}],
+    run_status="running",
+  )
+  _patch_claude_runner(monkeypatch)
+
+  # Force the continuation scheduling to raise AFTER the promote lands.
+  # `_schedule_continuation` builds its broadcast via chat.py's module-level
+  # `create_broadcast`; making that raise simulates a scheduling failure that
+  # occurs once the promote (in drain_and_release) has already committed.
+  boom_calls = {"n": 0}
+  real_create = chat_mod.create_broadcast
+
+  def boom_create(chat_id_):
+    boom_calls["n"] += 1
+    raise RuntimeError("forced continuation scheduling failure")
+
+  monkeypatch.setattr(chat_mod, "create_broadcast", boom_create)
+
+  chat_mod.mark_starting("t9")
+  gen = chat_mod.current_run_generation("t9")
+  published = []
+  _run_real_chat("t9", run_token="rt-9", run_gen=gen, published=published)
+  _drain_actor()
+
+  assert boom_calls["n"] == 1, "the continuation scheduler must have been hit"
+  # The drain promoted the head (queued_turn_starting was emitted before the
+  # continuation spawn), so the promote DID land before the failure.
+  assert "queued_turn_starting" in published
+  state = _load("t9")
+  assert state["run_status"] == "running", (
+    "a promoted-but-unscheduled turn MUST leave the marker set"
+  )
+  # The promote moved the head into messages — the user message is now last.
+  assert state["pending_messages"] == [], "the head was promoted out of pending"
+  assert state["messages"][-1]["content"] == "queued"
+
+  # Reconcile-after-restart recovers the promoted-but-unscheduled turn.
+  monkeypatch.setattr(chat_mod, "create_broadcast", real_create)
+  chat_mod.registry.reset_for_tests()
+  db = SessionLocal()
+  try:
+    reconciled = chat_mod.reconcile_interrupted_chats(db)
+  finally:
+    db.close()
+  assert "t9" in reconciled
+  state = _load("t9")
+  assert state["run_status"] is None, "reconcile must clear the marker"
+  assert state["messages"][-1]["role"] == "assistant"
+  assert any(b["type"] == "error" for b in state["messages"][-1]["blocks"])
+
+
+# -- 10 (FIX B). Stop-handoff clear must NOT erase a racing fresh marker ----
+def test_stop_handoff_clear_does_not_erase_newer_start_turn_marker(monkeypatch):
+  """A dying Stop-bumped run reaches `run_chat`'s finally to clear the marker
+  for the immediate successor generation it owns. But a FRESH StartTurn (a new
+  send) raced in first: it bumped the generation again and re-set the marker.
+  The dying run's clear is generation-conditional UNDER the queue lock, so it
+  observes that a newer generation now owns the chat and does NOT clear — the
+  new run's marker SURVIVES."""
+  _seed_owner_and_creds()
+  _seed_chat("t10", messages=[{"role": "user", "content": "hi", "ts": 1}],
+             pending=[], run_status="running")
+  _patch_claude_runner(monkeypatch)
+
+  # Set up the dying run as a Stop handoff: it owns `gen`, Stop bumped to the
+  # immediate successor (gen + 1) and registered the stopped-generation
+  # handoff exactly as stop_chat_for does for an active handle.
+  chat_mod.mark_starting("t10")
+  gen = chat_mod.current_run_generation("t10")
+  chat_mod._clear_after_terminal_generation["t10"] = gen
+  chat_mod.bump_run_generation("t10")  # Stop's immediate successor: gen + 1
+
+  # Race a FRESH StartTurn in: a new send bumps the generation again (gen + 2)
+  # and re-sets the durable marker. This happens BEFORE the dying run's
+  # finally runs its clear. We splice this into the terminal transition by
+  # latching it onto the drain (the dying run is STALE_NO_ACTION so its drain
+  # is a no-op return — we trigger the fresh StartTurn just before the finally
+  # by wrapping _clear_run_status_strict, which the Stop-handoff clear calls).
+  fresh_marker_set = {"done": False}
+  real_strict = chat_mod._clear_run_status_strict
+
+  async def racing_strict(chat_id_):
+    if not fresh_marker_set["done"] and chat_id_ == "t10":
+      # A fresh StartTurn lands: newer generation claims the chat and re-sets
+      # the durable marker under its own (newer) run token.
+      chat_mod.bump_run_generation("t10")  # newer run: gen + 2
+      from app.chat_writer import StartTurn, await_ack, get_writer
+      ack = get_writer().submit(StartTurn(
+        chat_id="t10", run_token="rt-10-fresh",
+        user_msg={"role": "user", "content": "fresh", "ts": 9},
+      ))
+      await await_ack(ack)
+      fresh_marker_set["done"] = True
+    return await real_strict(chat_id_)
+
+  monkeypatch.setattr(chat_mod, "_clear_run_status_strict", racing_strict)
+
+  published = []
+  _run_real_chat("t10", run_token="rt-10", run_gen=gen, published=published)
+  _drain_actor()
+
+  assert fresh_marker_set["done"], "the racing fresh StartTurn must have run"
+  state = _load("t10")
+  assert state["run_status"] == "running", (
+    "the dying Stop-bumped run must NOT clear the newer run's marker"
+  )
