@@ -325,7 +325,10 @@ else
   # docker build includes the WORKING TREE, not just HEAD — so if the tree is
   # dirty, mark the SHA `-dirty` rather than claim an exact commit it isn't.
   _sha="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
-  if [ "$_sha" != "unknown" ] && ! git -C "$REPO_ROOT" diff --quiet HEAD 2>/dev/null; then
+  # `git status --porcelain` (not `diff --quiet HEAD`) so UNTRACKED files count
+  # too — docker's build context includes them, so an untracked source file
+  # would otherwise let the stamp claim a clean commit the image isn't.
+  if [ "$_sha" != "unknown" ] && [ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]; then
     _sha="${_sha}-dirty"
   fi
   export BUILD_SHA="$_sha"
@@ -433,22 +436,26 @@ fi
 
 # Backend version stamp: confirm the SERVED backend is the commit we built —
 # the backend analogue of the bundle-hash check above (which only sees the
-# frontend). A mismatch after a successful build+recreate means the new image
-# isn't actually serving; worth investigating, but the health checks are the
-# hard gate, so this warns rather than aborts.
+# frontend).
 served=$(served_sha)
 if [ "$BUILT_THIS_RUN" = "1" ]; then
-  # We built the image this run, so the served SHA SHOULD equal the one we
-  # baked. Anything else — a mismatch, or an empty/"unknown" stamp the new
-  # image was supposed to carry — means the build-arg pipeline broke or the
-  # recreate didn't pick up the new image. Warn (the health checks are the
-  # hard gate; this is a provenance signal, not a liveness one).
   if [ -n "$served" ] && [ "$served" = "$BUILD_SHA" ]; then
     ok "backend sha: ${served:0:18}… (matches the commit just built)"
+  elif [ -z "$served" ] || [ "$served" = "unknown" ]; then
+    # The new image is healthy (checked above) but reports no/unknown SHA — the
+    # BUILD_SHA build-arg didn't populate the stamp. The CODE is deployed; only
+    # the provenance stamp is missing, so warn rather than fail.
+    warn "backend sha is '${served:-<none>}' after a build — the BUILD_SHA arg"
+    warn "didn't reach the image. Deploy is healthy; fix the arg pipeline so"
+    warn "/api/version reports provenance next time."
   else
-    warn "backend sha: served '${served:-<none>}' != built '${BUILD_SHA:0:18}…'"
-    warn "the new image's stamp didn't reach the served backend — investigate"
-    warn "(build-arg pipeline, or the recreate didn't pick up the new image)."
+    # A DIFFERENT real commit is serving than the one we built: the recreate is
+    # serving a stale/wrong image, so the deploy did NOT actually take. Fail so
+    # it isn't misreported as complete.
+    fail "backend sha MISMATCH: serving ${served:0:18}… but built ${BUILD_SHA:0:18}…"
+    fail "the recreate is serving a different image than the one just built —"
+    fail "the deploy did not take (stale tag / concurrent deploy). Investigate."
+    exit 1
   fi
 else
   # --skip-build: we didn't build, so don't compare against a possibly stale,
