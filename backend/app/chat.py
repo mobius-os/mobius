@@ -1215,16 +1215,44 @@ async def run_chat(
     # marker. This is the STOP_HANDOFF_CLEARED transition; bounded so a wedged
     # writer/lock can't hang teardown (a clear that times out leaves the
     # marker set, which reconciliation repairs).
-    stop_handoff = (
-      clear_stopped_run
-      and run_gen is not None
-      and current_run_generation(chat_id) == run_gen + 1
-    )
-    if chat_id and stop_handoff:
+    #
+    # FIX B — the eligibility check AND the clear run UNDER the bounded queue
+    # lock, mirroring _terminal_setup_error_cleanup's lock+ordering. The
+    # gen-only check above (computed outside the lock) is not enough: a fresh
+    # StartTurn (a new send) racing in after this run's discard_starting above
+    # re-claims the chat via mark_starting and re-sets the marker, but
+    # mark_starting does NOT bump the generation — so the dying run's
+    # `current == run_gen + 1` check still passes and the dying run would wipe
+    # the NEW run's marker. The localized close (chosen over bumping in
+    # mark_starting, which would change registry semantics that
+    # test_runner_registry locks in) is to RE-CHECK ownership atomically
+    # inside the lock and additionally require that no newer owner has
+    # reclaimed the chat. The signal is `registry.is_alive` (a `_starting`
+    # claim or a registered handle), NOT `is_chat_running`: a fresh send's
+    # mark_starting makes the registry alive again, whereas the dying run's
+    # OWN broadcast may still read `running` here, so is_chat_running would
+    # conflate the two and wrongly suppress a legitimate clear. stop_chat_for
+    # releases _starting at the end of a real Stop, so a legitimate
+    # Stop-handoff sees the registry NOT alive and clears; only a racing fresh
+    # claim leaves it alive, and then we leave the marker for that new owner
+    # (STALE_NO_ACTION-equivalent — no clear).
+    if chat_id and clear_stopped_run and run_gen is not None:
       try:
         async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
-          await _clear_run_status_strict(chat_id)
-        disposition = chat_queue.TerminalDisposition.STOP_HANDOFF_CLEARED
+          async with chat_queue.get_lock(chat_id):
+            still_immediate_successor = (
+              current_run_generation(chat_id) == run_gen + 1
+            )
+            newer_owner_claimed = registry.is_alive(chat_id)
+            if still_immediate_successor and not newer_owner_claimed:
+              await _clear_run_status_strict(chat_id)
+              disposition = (
+                chat_queue.TerminalDisposition.STOP_HANDOFF_CLEARED
+              )
+            else:
+              # A newer generation / a fresh StartTurn now owns the chat —
+              # leave its marker untouched.
+              disposition = chat_queue.TerminalDisposition.STALE_NO_ACTION
       except (Exception, asyncio.TimeoutError):
         _get_logger().warning(
           "Stop-handoff ClearRunStatus did not persist chat_id=%s "
