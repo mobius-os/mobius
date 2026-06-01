@@ -93,6 +93,19 @@ def fresh_db():
     except OSError:
       pass
 
+  # The DB is recreated per test, so app_id autoincrement restarts at 1
+  # every test — but DATA_DIR is a single module-level tempdir that
+  # persists across the whole run. Without wiping the storage trees, the
+  # directory for app N accumulates files from every earlier test that
+  # also got app_id N, so order-dependent listing assertions see a
+  # sibling test's files (this is what made test_list_pagination pass in
+  # isolation but fail in the full suite). Clear the per-app and shared
+  # file trees so the filesystem matches the freshly-recreated DB.
+  import shutil as _shutil
+  _data_dir = _os.environ.get("DATA_DIR", "/tmp")
+  for _sub in ("apps", "shared"):
+    _shutil.rmtree(_os.path.join(_data_dir, _sub), ignore_errors=True)
+
   yield
   from app import chat_writer as _cw
   _cw.stop_writer(timeout=5)
