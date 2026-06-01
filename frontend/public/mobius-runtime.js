@@ -61,6 +61,21 @@ export function overlayPending(ops, path, fallback) {
   return fallback
 }
 
+// Bound a fetch so a stalled offline request (Android: navigator.onLine reads a
+// stale `true`, so get() takes the online branch and the request hangs instead
+// of failing fast) can't make a read wait seconds before falling back to the
+// cache mirror. Aborts at READ_TIMEOUT_MS; the caller treats a throw as "use
+// the cache". Mirrors the bounded-fetch the service worker uses for frame/
+// module.
+const READ_TIMEOUT_MS = 2500
+function fetchBounded(url, init) {
+  const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null
+  const opts = ctrl ? { ...init, signal: ctrl.signal } : init
+  let timer
+  if (ctrl) timer = setTimeout(() => ctrl.abort(), READ_TIMEOUT_MS)
+  return fetch(url, opts).finally(() => { if (timer) clearTimeout(timer) })
+}
+
 function openDb() {
   return new Promise((resolve, reject) => {
     let settled = false
@@ -356,7 +371,7 @@ function makeStorage({ appId, getToken }) {
     if (navigator.onLine) {
       try {
         const token = await getToken()
-        const res = await fetch(`/api/storage/apps/${appId}/${path}`, {
+        const res = await fetchBounded(`/api/storage/apps/${appId}/${path}`, {
           headers: { Authorization: `Bearer ${token}` },
         })
         if (res.status === 404) {
