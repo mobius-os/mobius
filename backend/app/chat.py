@@ -41,8 +41,11 @@ from app.chat_writer import (
 from app.config import get_settings
 from app.events import (
   build_assistant_message,
+  capture_question_scrub,
+  commit_question_scrub,
   finalize_blocks,
   process_event,
+  undo_question_scrub,
 )
 from app.providers import effective_agent_settings, get_provider, get_skill_path
 from app.runner_registry import registry
@@ -340,8 +343,16 @@ class _ChatEventSink:
       "publish_question only accepts question events; ordinary events go "
       "through publish()"
     )
-    blocks_before = len(self.assistant_blocks)
+    # Capture EXACTLY what process_event will do to assistant_blocks BEFORE
+    # it runs, so a failed commit can be reverted by identity (not the old
+    # tail-slice, which was wrong when process_event COALESCED into an
+    # existing block or when a concurrent same-loop append landed after the
+    # slice point). The receipt records APPENDED (a new object to delete by
+    # identity) vs COALESCED (an existing block whose touched fields we
+    # restore, guarded by equality-still-holds).
+    receipt = capture_question_scrub(event, self.assistant_blocks)
     process_event(event, self.assistant_blocks)
+    commit_question_scrub(receipt, self.assistant_blocks)
     snapshot = copy.deepcopy(build_assistant_message(self.assistant_blocks))
     ack = get_writer().submit(
       QuestionCommit(
@@ -352,16 +363,17 @@ class _ChatEventSink:
       await _await_ack(ack)
     except Exception:
       # The commit did not land (missing row / empty transcript / dropped
-      # commit / wedged writer past the timeout). `process_event` already
-      # appended the question block to `assistant_blocks`; if it survives, a
-      # later `Finalize` would persist an UNANSWERABLE card (a question card
-      # with no live pending future — reload shows a card that can never be
-      # answered). Scrub the just-added block(s) before propagating so the
-      # terminal Finalize can't persist the orphan. The runner catches the
-      # re-raised error and ends the turn with a transport-only error
-      # (Claude → PermissionResultDeny, Codex → _BridgeError); the card is
-      # NOT broadcast — exactly the pre-FIX behavior, minus the orphan.
-      del self.assistant_blocks[blocks_before:]
+      # commit / wedged writer past the timeout). `process_event` either
+      # appended a new question block or coalesced into an existing one; if
+      # that survives, a later `Finalize` would persist an UNANSWERABLE card
+      # (a question card with no live pending future — reload shows a card
+      # that can never be answered). Revert by exact identity before
+      # propagating so the terminal Finalize can't persist the orphan and a
+      # concurrent same-loop block is never collaterally deleted. The runner
+      # catches the re-raised error and ends the turn with a transport-only
+      # error (Claude → PermissionResultDeny, Codex → _BridgeError); the
+      # card is NOT broadcast.
+      undo_question_scrub(receipt, self.assistant_blocks)
       raise
     # Committed durably — now (and only now) show the card.
     self.bc.publish(event)

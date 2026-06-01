@@ -9,6 +9,8 @@ optional tool_input, tool_output, tool_end, with no events for other
 tools interleaved between them.
 """
 
+import copy
+from dataclasses import dataclass, field
 from typing import Literal
 
 
@@ -171,6 +173,136 @@ def question_block_key(block: dict) -> tuple:
   if first.get("id"):
     return ("id", first["id"])
   return ("text", first.get("question") or first.get("text") or "")
+
+
+@dataclass
+class QuestionScrubReceipt:
+  """What a single `process_event(question)` did to `assistant_blocks`.
+
+  Captured by `capture_question_scrub` BEFORE the event is processed, so a
+  failed QuestionCommit can be reverted by EXACT IDENTITY rather than the
+  old tail-slice (`del blocks[blocks_before:]`). The slice was wrong on two
+  counts: `process_event` may COALESCE the question into a pre-existing
+  block (appending nothing, so the slice deletes the wrong thing or
+  nothing), and a concurrent same-loop append after `blocks_before` would
+  be deleted along with the orphan.
+
+  - `kind == "appended"`: the event will append a NEW question block.
+    `undo_question_scrub` removes ONLY that object by Python identity
+    (`target_ref`), so prior + later blocks survive.
+  - `kind == "coalesced"`: the event will mutate the pre-existing
+    `target_ref` block in place. `undo_question_scrub` restores ONLY the
+    fields this event touched (`questions`, and `question_id` when the
+    event carried one), and ONLY when the field's current value still
+    EQUALS what this event wrote — so a later same-loop event that mutated
+    the same block again is not clobbered by the revert.
+  """
+
+  kind: Literal["appended", "coalesced"]
+  target_ref: dict | None = None
+  # The exact values this event wrote (used to confirm equality-still-holds
+  # before restoring) — only meaningful for the coalesced kind.
+  wrote_questions: list | None = None
+  wrote_question_id: str | None = None
+  # The pre-event values to restore on the coalesced target, with presence
+  # flags so a field the block did NOT have before is removed (not set to
+  # None) on revert.
+  had_questions: bool = False
+  prev_questions: list | None = None
+  had_question_id: bool = False
+  prev_question_id: str | None = None
+
+
+def capture_question_scrub(
+  event: dict, assistant_blocks: list
+) -> QuestionScrubReceipt:
+  """Capture how `process_event` would handle this question event.
+
+  Replicates `process_event`'s question coalescing identity decision
+  WITHOUT mutating `assistant_blocks`: build the candidate block the same
+  way, compute its `question_block_key`, and scan for a pre-existing
+  question block with the same key.
+
+  - A match → COALESCED: capture the target block by identity plus a deep
+    copy of the fields the event will overwrite (`questions`, and
+    `question_id` when present) with presence flags.
+  - No match → APPENDED: the receipt's `target_ref` is filled in by
+    `commit_question_scrub` after `process_event` appends the new object.
+
+  This is the question-specific helper the design calls for — it does NOT
+  change `process_event`'s bool contract for ordinary callers.
+  """
+  questions = event.get("questions", [])
+  question_id = event.get("question_id")
+  candidate = {"type": "question", "questions": questions}
+  if question_id:
+    candidate["question_id"] = question_id
+  key = question_block_key(candidate)
+  for existing in assistant_blocks:
+    if (
+      existing.get("type") == "question"
+      and question_block_key(existing) == key
+    ):
+      return QuestionScrubReceipt(
+        kind="coalesced",
+        target_ref=existing,
+        wrote_questions=questions,
+        wrote_question_id=question_id if question_id else None,
+        had_questions="questions" in existing,
+        prev_questions=copy.deepcopy(existing.get("questions")),
+        had_question_id="question_id" in existing,
+        prev_question_id=existing.get("question_id"),
+      )
+  return QuestionScrubReceipt(kind="appended")
+
+
+def commit_question_scrub(
+  receipt: QuestionScrubReceipt, assistant_blocks: list
+) -> None:
+  """After `process_event`, bind an APPENDED receipt to the new object.
+
+  For the appended kind, the new question block is the one
+  `process_event` just appended — capture it by identity (the last block,
+  which is the freshly appended question object) so a later revert removes
+  exactly it. The coalesced kind already holds its `target_ref`.
+  """
+  if receipt.kind == "appended" and assistant_blocks:
+    receipt.target_ref = assistant_blocks[-1]
+
+
+def undo_question_scrub(
+  receipt: QuestionScrubReceipt, assistant_blocks: list
+) -> None:
+  """Revert what `process_event` did, by exact identity (failure path).
+
+  APPENDED → remove ONLY the appended object by Python identity (no slice,
+  no stale index) so prior + concurrently-appended later blocks survive.
+  COALESCED → restore ONLY the touched fields on the target block, and a
+  field ONLY when its current value still EQUALS what this event wrote
+  (guards a later same-loop mutation of the same block); a field the block
+  did not have before is removed rather than set to None.
+  """
+  target = receipt.target_ref
+  if target is None:
+    return
+  if receipt.kind == "appended":
+    for i, blk in enumerate(assistant_blocks):
+      if blk is target:
+        del assistant_blocks[i]
+        return
+    return
+  # Coalesced: restore each touched field iff equality still holds.
+  if target.get("questions") == receipt.wrote_questions:
+    if receipt.had_questions:
+      target["questions"] = receipt.prev_questions
+    else:
+      target.pop("questions", None)
+  if receipt.wrote_question_id is not None:
+    if target.get("question_id") == receipt.wrote_question_id:
+      if receipt.had_question_id:
+        target["question_id"] = receipt.prev_question_id
+      else:
+        target.pop("question_id", None)
 
 
 def build_assistant_message(
