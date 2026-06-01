@@ -312,6 +312,16 @@ contract-comment mismatch.
   looks broken offline. (The platform makes offline open instant by serving
   cached frame/module/storage when it's not known-online — you don't manage
   any of that; just use the wrapper.)
+- **To find what an app stored, enumerate — never brute-force-probe
+  filenames.** There is no `HEAD` on storage (it 405s), and GET-probing
+  guessed paths (e.g. `reports/<date>.html` for the last 30 days) is the
+  anti-pattern that shipped an app showing empty in prod. List a
+  directory's immediate children with
+  `await window.mobius.storage.list('prefix/')` (offline-capable apps;
+  returns `[{name,path,type,size,modified_at,mime_type}]`) or
+  `GET /api/storage/apps-list/{appId}/{prefix}` from a cron script /
+  agent shell (`?limit=` ≤500, opaque `?cursor=`,
+  `{"entries":[…],"next_cursor":…}`). `list()` has no offline mirror.
 - **Floating composer:** `.chat__foot` is `position:absolute` with
   transparent background. Do NOT add background to `.chat__foot` or
   wrap its controls in a shared opaque container — that breaks the

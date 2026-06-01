@@ -494,6 +494,13 @@ instead (API-compatible — it adds the offline write-queue + read-through
 cache so reads/writes keep working offline). See "Offline-capable apps"
 below; using bare `fetch` in an offline-capable app silently fails offline.
 
+To find which files an app has stored, **enumerate — don't
+brute-force-probe candidate filenames** (there is no `HEAD` verb; it
+405s). `GET /api/storage/apps-list/{appId}/{prefix}` returns the
+immediate children (`{"entries":[…],"next_cursor":…}`, `?limit=` ≤500,
+opaque `?cursor=`); offline-capable apps use
+`window.mobius.storage.list()` (see Offline-capable apps below).
+
 ### Offline-capable apps (opt-in)
 
 By DEFAULT an app is NOT offline-capable: it talks to the server and
@@ -543,7 +550,7 @@ discover what it stored instead of probing for filenames — but it has NO
 offline mirror (null offline), so apps that need offline enumeration keep their
 own snapshot. To list from outside an app (a cron script, or the agent itself):
 `GET /api/storage/apps-list/{appId}/{prefix}` — immediate children only,
-`?limit=` + `?cursor=` for pagination, `{"entries": [...], "next_cursor": null}`.
+`?limit=` (≤500) + opaque `?cursor=` for pagination, `{"entries": [...], "next_cursor": null}`.
 
 Conflict policy is last-write-wins per path; where a lost edit would matter,
 store one file per record (e.g. `items/<uuid>.json`) so concurrent offline
