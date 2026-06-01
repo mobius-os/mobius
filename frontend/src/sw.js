@@ -46,6 +46,7 @@ import {
   isStaleRuntimeCache,
   isKnownOnline,
   shouldServeCacheFirst,
+  shouldFallBackToCacheOnError,
   VERDICT_MAX_AGE_MS,
 } from './sw-cache-policy.js'
 
@@ -374,9 +375,14 @@ function offlineCapableHandler(cacheName) {
 
     // Known-online (or no cached copy yet): network-first. On success the
     // freshest body is served on THIS open + the cache is refreshed for the next
-    // offline open. On timeout/failure, fall back to the cached copy.
+    // offline open. A transient SERVER error (5xx) must not blank a cached app —
+    // fall back to the cached copy for those (but NOT 4xx, which are
+    // authoritative: a 404 means the app is gone, a 401/403 is real auth). On a
+    // network REJECTION (offline / abort / DNS) the catch serves cache too.
     try {
-      return await revalidate()
+      const resp = await revalidate()
+      if (resp && shouldFallBackToCacheOnError(resp.status, !!cached)) return cached
+      return resp
     } catch (err) {
       const late = await cache.match(cacheKey)
       if (late) return late
