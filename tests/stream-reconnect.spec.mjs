@@ -245,6 +245,185 @@ test.describe('Stream reconnection', () => {
     )
   })
 
+  test('7. Stop+immediate-resend: a stale continuation 204 must not clobber the resent turn', async ({ page }) => {
+    // Regression for the missing stale-connection guard in
+    // useStreamConnection.connectToStream. On Stop,
+    // disconnect({clearStreaming:true}) aborts the active controller AND
+    // zeroes justSentAtRef; ChatView then immediately resends the queued
+    // message as a fresh turn (new controller, fresh justSentAtRef). If
+    // the ORIGINAL turn's stream fetch RESOLVES (rather than rejecting)
+    // AFTER that resend with a 204 — which happens in production when the
+    // browser already received the 204 response before the Stop's abort,
+    // so the abort is a no-op and the awaited fetch resolves normally —
+    // the old code ran the 204 branch on a connection that no longer
+    // owns abortRef. With justSentAtRef freshly set by the resend it
+    // could schedule a spurious reconnect; once the resend's own window
+    // elapsed it took the terminal path: setStreamItems([]) +
+    // onNeedsRefresh({force:true}), forcing a DB refetch that clobbers
+    // the resent turn's live response. The guard
+    // `if (abortRef.current !== controller) return` makes the orphaned
+    // continuation bail before touching res.
+    //
+    // Why a fetch shim and not route.fulfill: an aborted route-mocked
+    // fetch REJECTS (AbortError) and never reaches the post-fetch line,
+    // so route mocking can't reproduce "resolves after abort". We shim
+    // window.fetch so exactly the FIRST /stream request resolves with a
+    // synthetic 204 on a test signal, IGNORING the abort signal — a
+    // faithful, deterministic model of the production "response already
+    // received before abort" race. Every other request (resent /stream,
+    // /messages, /stop, DB refetch) hits the real backend / Playwright
+    // routes untouched. The guard's behavior is identical whether the
+    // late resolution is a real network race or this simulation, because
+    // both deliver a resolved 204 Response to the same awaited fetch
+    // while abortRef points elsewhere.
+    let messagesPostCount = 0
+
+    // The bug's terminal-204 path calls onNeedsRefresh({force:true}) →
+    // fetchMessages → GET /chats/{id}?limit=20. We record the timing of
+    // every such refetch. A benign queue-reconcile refetch can fire
+    // BEFORE we release the stale 204 (it happens with or without the
+    // guard); the bug-specific refetch fires AFTER release. We answer
+    // all of them with DB state that does NOT contain the resent turn,
+    // so if the bug path clobbers, the live response visibly disappears.
+    const dbRefetchTimes = []
+    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=20$/, route => {
+      if (route.request().method() !== 'GET') { route.continue(); return }
+      dbRefetchTimes.push(Date.now())
+      route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [
+            { role: 'user', content: 'first turn', ts: Date.now() - 1000 },
+            { role: 'assistant', content: 'persisted-db-only response' },
+          ],
+          total: 2,
+          offset: 0,
+        }),
+      })
+    })
+
+    // The resent turn's /stream (request #2+) streams a real response
+    // that must survive the late stale 204. Request #1 is intercepted by
+    // the fetch shim below before it reaches this route.
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async route => {
+      await route.fulfill({
+        status: 200,
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+        },
+        body: sseBody([
+          { type: 'text', content: 'RESENT TURN RESPONSE' },
+          { type: 'done' },
+        ]),
+      })
+    })
+
+    // Install the fetch shim before any app code runs. It captures the
+    // FIRST /stream fetch and parks it (a held Response), exposing
+    // window.__releaseStaleStream() to resolve it with a 204 on demand —
+    // crucially WITHOUT honoring the AbortSignal, simulating a response
+    // already buffered by the browser before the abort. All later
+    // /stream fetches and every non-stream fetch pass through unchanged.
+    await page.addInitScript(() => {
+      const realFetch = window.fetch.bind(window)
+      let staleParked = false
+      let resolveStale
+      window.__staleStreamRequested = false
+      window.__releaseStaleStream = () => { if (resolveStale) resolveStale() }
+      window.fetch = (input, init) => {
+        const url = typeof input === 'string' ? input : (input && input.url) || ''
+        if (!staleParked && /\/api\/chats\/[0-9a-f-]+\/stream$/.test(url)) {
+          staleParked = true
+          window.__staleStreamRequested = true
+          // Park: resolve only when the test signals, then hand back a
+          // real 204 Response. Ignore init.signal entirely so the abort
+          // from Stop's disconnect() does NOT reject this — mirroring a
+          // 204 that landed before the abort.
+          return new Promise(resolve => {
+            resolveStale = () => resolve(new Response(null, { status: 204 }))
+          })
+        }
+        return realFetch(input, init)
+      }
+    })
+
+    await setupChat(page)
+
+    // POST /messages override — registered AFTER setupChat so it wins
+    // (Playwright matches most-recently-added first; setupChat's bare-{}
+    // mock would otherwise shadow this). First send starts the (stale)
+    // turn; the follow-up sent while streaming truly queues; Stop's
+    // collapsed resend starts again.
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
+      if (route.request().method() !== 'POST') { route.continue(); return }
+      messagesPostCount++
+      if (messagesPostCount === 2) {
+        route.fulfill({
+          status: 202,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'queued', ts: Date.now(), position: 0 }),
+        })
+        return
+      }
+      route.fulfill({
+        status: 202,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'started' }),
+      })
+    })
+
+    // Send the first message. Its /stream fetch is parked by the shim.
+    await send(page, 'first turn')
+    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(1)
+    await page.waitForFunction(() => window.__staleStreamRequested === true, {
+      timeout: 5000,
+    })
+
+    // Queue a second message behind the streaming turn so Stop has
+    // something to collapse + resend as a fresh turn.
+    const input = page.getByRole('textbox', { name: 'Message Möbius…' })
+    await input.fill('queued follow-up')
+    await expect(page.locator('button[aria-label="Send"]')).toBeVisible()
+    await page.locator('button[aria-label="Send"]').click()
+
+    // Stop: aborts the parked first stream's controller (a no-op for the
+    // shim), zeroes justSentAtRef, then resends 'queued follow-up' as a
+    // fresh turn whose /stream (request #2) hits the real route above.
+    await expect(page.locator('button[aria-label="Stop"]')).toBeVisible()
+    await page.locator('button[aria-label="Stop"]').click()
+
+    // The resent turn's response should stream in and stick.
+    await expect(page.locator('.chat__scroll')).toContainText(
+      'RESENT TURN RESPONSE', { timeout: 8000 },
+    )
+
+    // NOW release the parked first stream as a stale 204. With the guard
+    // it bails (abortRef no longer === its controller). Without the
+    // guard it runs the terminal-refresh path and clobbers.
+    const releaseAt = Date.now()
+    await page.evaluate(() => window.__releaseStaleStream())
+
+    // Give the stale 204 handler ample time to (wrongly) fire — past the
+    // 1.5s broadcast-registration window so the terminal path is taken.
+    await page.waitForTimeout(2500)
+
+    // The resent response must still be present — the stale 204 must not
+    // have cleared streamItems / forced a DB refetch over the live turn.
+    await expect(page.locator('.chat__scroll')).toContainText('RESENT TURN RESPONSE')
+
+    // The discriminating signal: a DB refetch triggered by the stale
+    // 204's terminal-refresh path fires AFTER we release it. (An earlier,
+    // benign queue-reconcile refetch can fire before release — that one
+    // happens with or without the guard and is not the bug.) With the
+    // guard, the stale connection bails before onNeedsRefresh, so NO
+    // refetch occurs after release. Without it, the terminal-204 path
+    // refetches and clobbers the live response with stale DB content.
+    const refetchAfterRelease = dbRefetchTimes.some(t => t >= releaseAt - 50)
+    expect(refetchAfterRelease).toBe(false)
+  })
+
   test('5. 204 shortly after send retries instead of refreshing', async ({ page }) => {
     let streamRequestCount = 0
 

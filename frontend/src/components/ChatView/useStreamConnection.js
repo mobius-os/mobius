@@ -323,6 +323,24 @@ export default function useStreamConnection(chatId, {
         signal: controller.signal,
       })
 
+      // Stale-connection guard. Between scheduling this fetch and its
+      // resolution, the connection we belong to may have been torn down
+      // and replaced — disconnect()/Stop aborts the controller and nulls
+      // abortRef, and a fresh send (or visibility/online reconnect)
+      // installs a NEW controller. The classic case: Stop calls
+      // disconnect({clearStreaming:true}) (zeroing justSentAtRef) and
+      // ChatView immediately resends via sendMessage → connectToStream
+      // with a new controller. If a now-orphaned continuation's fetch
+      // resolves here AFTER that, running the 204/terminal-refresh logic
+      // below would clobber the freshly-resent turn (e.g. Date.now() -
+      // justSentAtRef pushes past the broadcast-registration window and
+      // hits the DB-refresh path, wiping the new optimistic message).
+      // An aborted fetch normally rejects with AbortError and lands in
+      // catch, but the abort can land in the gap between resolution and
+      // this line — so bail explicitly whenever we're no longer the
+      // active controller.
+      if (abortRef.current !== controller) return
+
       if (res.status === 204) {
         // A 204 within ~1.5s of sendMessage means the broadcast hasn't
         // been registered yet (POST→GET race inside the same event
