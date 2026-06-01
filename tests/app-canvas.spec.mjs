@@ -139,6 +139,23 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     // 10s covers CI's cold-container first-app mount; it won't hide on us.
     await expect(page.locator('.canvas-loading')).toBeVisible({ timeout: 10000 })
 
+    // Wait for the iframe to be load-ready before posting the mount
+    // signal. Posting too early raced ~50% of runs: `contentWindow`
+    // could still be null, or the iframe's inline `message` listener
+    // wasn't attached yet so the signal was dropped, the overlay never
+    // hid, and the `toBeHidden` below timed out. Gate on the frame
+    // document reaching `readyState === 'complete'` (the inline script
+    // — and thus its listener — has run by then). The try/catch guards
+    // the brief window where cross-frame access throws during load.
+    await page.waitForFunction(() => {
+      const f = document.querySelector('iframe')
+      try {
+        return !!(f && f.contentWindow && f.contentWindow.document?.readyState === 'complete')
+      } catch {
+        return false
+      }
+    }, { timeout: 6000 })
+
     // Trigger mount from inside the iframe (correct source + origin, so it
     // passes the parent's source/origin checks like a real frame would).
     await page.evaluate(() => {
