@@ -58,8 +58,19 @@ export function isStaleRuntimeCache(name) {
 
 // How long a page connectivity verdict (posted to the SW from useOnlineStatus's
 // /api/health probe) is trusted before it's considered stale. After this, the
-// SW treats connectivity as unknown rather than trusting a possibly-stale
-// verdict across a long background gap or a reconnection.
+// SW treats connectivity as unknown (→ cache-first when cached) rather than
+// trusting a possibly-stale verdict across a long background gap or reconnect.
+//
+// This window is a deliberate two-sided knob. ACCEPTED BOUND: if connectivity
+// drops while no page is open, a recent positive verdict stays trusted for up
+// to this long, so a standalone PWA launch within the window goes network-first
+// and waits out NET_TIMEOUT_MS (~3s) before falling back to cache instead of
+// opening instantly. Shrinking it would reduce that edge but widen the opposite
+// risk (a stale-positive isn't the danger — a too-short window makes an
+// actively-online user's verdict expire between 20s probes and serve cache-first
+// → a possibly-stale open after an app edit). 60s ≈ 3× the probe poll interval:
+// long enough that an active session stays "known online" between polls, short
+// enough that the offline edge self-heals on the next probe.
 export const VERDICT_MAX_AGE_MS = 60000
 
 // PURE: is the device KNOWN to be online — i.e. is there a FRESH, POSITIVE page
@@ -91,4 +102,16 @@ export function isKnownOnline(pageOnline, verdictAt, now, maxAgeMs = VERDICT_MAX
 // Extracted + exported so the branch is unit-testable without a SW context.
 export function shouldServeCacheFirst(hasCached, online) {
   return hasCached && !online
+}
+
+// PURE: on the network-first path, should a network RESPONSE be replaced by the
+// cached copy? Yes for a SERVER error (>=500) when we have a cached app — a
+// transient backend 500/502/503 must not blank a known-good offline-capable app
+// that we have cached. NOT for 4xx (404 app-deleted / 401-403 auth are
+// authoritative — masking them with a stale cached app would hide a real state),
+// and NOT for 2xx/3xx (the real response). Network REJECTIONS (offline / DNS /
+// abort) are handled separately by the handler's catch; this is only for
+// resolved-but-failed HTTP responses. Exported pure so the rule is unit-tested.
+export function shouldFallBackToCacheOnError(status, hasCached) {
+  return hasCached && status >= 500
 }

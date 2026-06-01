@@ -17,6 +17,7 @@ import {
   isStaleRuntimeCache,
   isKnownOnline,
   shouldServeCacheFirst,
+  shouldFallBackToCacheOnError,
   VERDICT_MAX_AGE_MS,
 } from '../frontend/src/sw-cache-policy.js'
 
@@ -96,5 +97,25 @@ test.describe('sw cache policy — shouldServeCacheFirst (frame/module serve str
   })
   test('no cache + known-online → network', () => {
     expect(shouldServeCacheFirst(false, true)).toBe(false)
+  })
+})
+
+test.describe('sw cache policy — shouldFallBackToCacheOnError (5xx resilience)', () => {
+  test('5xx + cached → serve cache (transient server error must not blank a cached app)', () => {
+    expect(shouldFallBackToCacheOnError(500, true)).toBe(true)
+    expect(shouldFallBackToCacheOnError(502, true)).toBe(true)
+    expect(shouldFallBackToCacheOnError(503, true)).toBe(true)
+  })
+  test('5xx + NO cache → return the error (nothing to fall back to)', () => {
+    expect(shouldFallBackToCacheOnError(500, false)).toBe(false)
+  })
+  test('4xx → authoritative, never masked by cache (404 gone / 401 auth)', () => {
+    expect(shouldFallBackToCacheOnError(404, true)).toBe(false)
+    expect(shouldFallBackToCacheOnError(401, true)).toBe(false)
+    expect(shouldFallBackToCacheOnError(403, true)).toBe(false)
+  })
+  test('2xx/3xx → real response, never replaced', () => {
+    expect(shouldFallBackToCacheOnError(200, true)).toBe(false)
+    expect(shouldFallBackToCacheOnError(304, true)).toBe(false)
   })
 })
