@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api, getToken } from '../../api/client.js'
 import { appQueries, themeQueries } from '../../hooks/queries.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
+import { liveAppToken, latchedAppToken } from '../../lib/appToken.js'
 import { WifiOff } from 'lucide-react'
 import './AppCanvas.css'
 
@@ -128,8 +129,20 @@ export default function AppCanvas({
   //     exposure.
   // The old gate used navigator.onLine, which on a cold offline reopen left
   // `token` undefined → the `if (!token)` branch rendered blank below despite
-  // the app being fully cached.
-  const token = appToken || (online ? undefined : getToken())
+  // the app being fully cached. See lib/appToken.js for the full rationale and
+  // the on-device-confirmed flap bug the latch fixes.
+  const liveToken = liveAppToken(appToken, online, getToken())
+
+  // Latch the token so an `online` oscillation (stale navigator.onLine on
+  // Android PWAs) can't revoke a token we already resolved and unmount the live
+  // iframe. Reset on a real teardown (appId/version change) below.
+  const tokenRef = useRef(undefined)
+  if (liveToken) tokenRef.current = liveToken
+  const token = latchedAppToken(appToken, tokenRef.current)
+
+  useEffect(() => {
+    tokenRef.current = undefined
+  }, [appId, version])
 
   // AppCanvas was passive (enabled: false) — relied on Shell's
   // useTheme to write the cache. After ticket 047, AppCanvas owns
