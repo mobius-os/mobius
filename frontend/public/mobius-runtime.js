@@ -7,18 +7,27 @@
 // (content-revisioned per deploy → fresh online, available offline).
 //
 // Purpose: let offline-capable apps (offline_capable flag, Tier 3)
-// persist through the network outage. Writes go to /api/storage; when
-// offline or the request fails, they queue in IndexedDB and flush when
-// the connection returns. Reads hit the network (the service worker
-// serves cached app code, not storage data).
+// persist AND read through a network outage. Writes go to /api/storage; when
+// offline or the request fails, they queue in IndexedDB (the outbox) and flush
+// when the connection returns. Reads are read-through: an online get() mirrors
+// the value into IndexedDB so a later offline get() serves the last-known
+// value (overlaid with any pending write — read-your-writes). This is the
+// SAME runtime for both hosts: the standalone PWA (standalone.py) and the
+// in-shell iframe (app-frame.html) both `init()` it.
 //
 // API — intentionally small; grow it when a real app needs more:
 //   window.mobius.appId
 //   window.mobius.online                      -> navigator.onLine
-//   window.mobius.storage.get(path)           -> data | null
+//   window.mobius.storage.get(path)           -> data | null  (offline-capable)
 //   window.mobius.storage.set(path, data)     -> {synced} | {queued}
 //   window.mobius.storage.remove(path)        -> {synced} | {queued}
+//   window.mobius.storage.subscribe(path, cb) -> unsubscribe fn (cb(value))
 //   window.mobius.storage.pendingCount()      -> Promise<number>
+//
+// "No walls": this runtime is the easy DEFAULT, not a cage. An app is free to
+// ignore it and use raw IndexedDB / OPFS / SQLite-wasm directly (same-origin
+// iframe → all browser storage works), or talk to its own backend. The
+// platform provides the on-ramp; it never gates the escape hatch.
 //
 // Conflict policy: last-write-wins at the path granularity. The newest
 // write for a path supersedes any earlier one — enforced by coalescing
@@ -34,10 +43,28 @@
 
 const DB_NAME = 'mobius-outbox'
 const STORE = 'ops'
+// Read-through mirror of last-known server values, so get() works offline.
+// Keyed by `${appId}:${path}` (one shared DB across all apps, like the outbox).
+const CACHE_STORE = 'cache'
+const DB_VERSION = 2
+
+// PURE: given the outbox ops (FIFO by seq), the path, and a fallback value
+// (the server/cache value), return what the caller should SEE — read-your-
+// writes. The newest queued op for the path wins (a DELETE resolves to null);
+// if none is queued, the fallback stands. Exported so the read-your-writes /
+// LWW semantics are unit-testable without IndexedDB (the rest of the runtime
+// needs a browser). Keep this the single source of truth for "what value now".
+export function overlayPending(ops, path, fallback) {
+  let pending
+  for (const op of ops) if (op.path === path) pending = op   // last (newest) wins
+  if (pending) return pending.method === 'DELETE' ? null : pending.data
+  return fallback
+}
 
 function openDb() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1)
+    let settled = false
+    const req = indexedDB.open(DB_NAME, DB_VERSION)
     req.onupgradeneeded = () => {
       const db = req.result
       if (!db.objectStoreNames.contains(STORE)) {
@@ -45,25 +72,51 @@ function openDb() {
         // stored field, filtered at read time (one shared DB, many apps).
         db.createObjectStore(STORE, { keyPath: 'seq', autoIncrement: true })
       }
+      // v2: the read mirror. Additive — existing installs keep their outbox
+      // and gain the cache store on the version bump.
+      if (!db.objectStoreNames.contains(CACHE_STORE)) {
+        db.createObjectStore(CACHE_STORE, { keyPath: 'key' })
+      }
     }
-    req.onsuccess = () => resolve(req.result)
-    req.onerror = () => reject(req.error)
+    req.onsuccess = () => {
+      const db = req.result
+      // If this open already lost a race to onblocked (we rejected), the
+      // connection that arrives now would leak — close it immediately. The
+      // `settled` guard tracks that (Codex review, Medium #1 follow-up).
+      if (settled) { try { db.close() } catch (e) {} return }
+      settled = true
+      // If another context (or logout) requests a version change / delete,
+      // close THIS connection so we don't block it indefinitely. Without this,
+      // an open app iframe wedges deleteDatabase() on logout and a future
+      // schema bump (Codex review, High #1). withStore also closes per-tx.
+      db.onversionchange = () => { try { db.close() } catch (e) {} }
+      resolve(db)
+    }
+    req.onerror = () => { if (!settled) { settled = true; reject(req.error) } }
+    // A blocked open means an older-version connection is still around. Reject
+    // so callers don't hang; if the open later succeeds anyway, onsuccess sees
+    // `settled` and closes the late handle instead of leaking it.
+    req.onblocked = () => { if (!settled) { settled = true; reject(new Error('mobius-outbox open blocked')) } }
   })
 }
 
-// Run `fn(store)` in one transaction. `fn` may stash a result on the
-// returned object's `value`; we resolve with it on commit. Doing all
-// IDB work inside the single synchronous `fn` call avoids the
-// auto-close that bites when you await between operations on one tx.
-async function withStore(mode, fn) {
+// Run `fn(store)` in one transaction on `storeName`. `fn` may stash a result
+// on the returned object's `value`; we resolve with it on commit. Doing all
+// IDB work inside the single synchronous `fn` call avoids the auto-close that
+// bites when you await between operations on one tx.
+async function withStore(storeName, mode, fn) {
   const db = await openDb()
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, mode)
+    const tx = db.transaction(storeName, mode)
     const box = {}
-    fn(tx.objectStore(STORE), box)
-    tx.oncomplete = () => resolve(box.value)
-    tx.onerror = () => reject(tx.error)
-    tx.onabort = () => reject(tx.error)
+    fn(tx.objectStore(storeName), box)
+    // Close the connection when the tx settles so handles don't accumulate and
+    // block a logout-time deleteDatabase() or a future version bump (Codex
+    // review, High #1). Opening per-call is cheap relative to the IO.
+    const done = () => { try { db.close() } catch (e) {} }
+    tx.oncomplete = () => { done(); resolve(box.value) }
+    tx.onerror = () => { done(); reject(tx.error) }
+    tx.onabort = () => { done(); reject(tx.error) }
   })
 }
 
@@ -77,7 +130,7 @@ function makeStorage({ appId, getToken }) {
   // plain fields. Doing the purge and the follow-up add in one tx keeps
   // the coalesce atomic — no window where the path has zero ops queued.
   function purgePath(path, after) {
-    return withStore('readwrite', (store) => {
+    return withStore(STORE, 'readwrite', (store) => {
       store.openCursor().onsuccess = (e) => {
         const cursor = e.target.result
         if (!cursor) {
@@ -102,7 +155,7 @@ function makeStorage({ appId, getToken }) {
   }
 
   function listOps() {
-    return withStore('readonly', (store, box) => {
+    return withStore(STORE, 'readonly', (store, box) => {
       box.value = []
       store.openCursor().onsuccess = (e) => {
         const cursor = e.target.result
@@ -114,7 +167,87 @@ function makeStorage({ appId, getToken }) {
   }
 
   function deleteOp(seq) {
-    return withStore('readwrite', (store) => { store.delete(seq) })
+    return withStore(STORE, 'readwrite', (store) => { store.delete(seq) })
+  }
+
+  // ── Read-through cache (the offline read mirror) ──────────────────────
+  // get() mirrors every successful ONLINE read here; offline, get() serves
+  // this last-known value (overlaid with any pending outbox write). Keyed by
+  // `${appId}:${path}` so one shared DB holds every app's mirror. `present`
+  // distinguishes a cached null/404 (key exists, value null) from "never
+  // fetched" (no key) — so offline we don't claim a value we never had.
+  function cacheKey(path) { return appId + ':' + path }
+
+  function cacheGet(path) {
+    return withStore(CACHE_STORE, 'readonly', (store, box) => {
+      const r = store.get(cacheKey(path))
+      r.onsuccess = () => { box.value = r.result || null }
+    })
+  }
+
+  function cachePut(path, data) {
+    return withStore(CACHE_STORE, 'readwrite', (store) => {
+      store.put({ key: cacheKey(path), path, appId, data, present: data !== null, ts: Date.now() })
+    })
+  }
+
+  function cacheDelete(path) {
+    // Record the deletion as a present:false tombstone rather than dropping the
+    // key, so an offline read after an offline delete correctly returns null
+    // (the deletion is the last-known state) instead of falling through.
+    return withStore(CACHE_STORE, 'readwrite', (store) => {
+      store.put({ key: cacheKey(path), path, appId, data: null, present: false, ts: Date.now() })
+    })
+  }
+
+  // ── Per-path serialization (in-tab) ─────────────────────────────────
+  // All operations that read-or-write a path's value (get, set, remove) run
+  // through a per-path promise chain, so within this runtime they execute
+  // STRICTLY in call order and never interleave. This is the single, correct
+  // fix for the whole race class Codex flagged: a slow GET can't overwrite the
+  // cache after a newer set() (its cache-write is now ordered after the set),
+  // and two set()s can't reorder their cache writes (server LWW is still by
+  // arrival, but the LOCAL mirror — the source of truth for offline reads and
+  // subscribers — is deterministic by call order). Cross-tab/iframe drains are
+  // additionally serialized by the existing Web Lock in drain().
+  //
+  // SCOPE / known bound: pathChains is per-runtime (per makeStorage). It does
+  // NOT serialize across two SEPARATE runtimes for the same app — e.g. the same
+  // app open BOTH in the in-shell iframe AND a standalone PWA tab at once,
+  // mutating the same path. There, the local mirrors can momentarily diverge by
+  // op interleaving; the server still converges by arrival-order LWW and the
+  // next online get() re-syncs each mirror. Adding a cross-context Web Lock to
+  // every read/write would slow the common single-context path to harden a rare
+  // one — deliberately not done (single-owner, server-arrival LWW is the
+  // documented contract).
+  const pathChains = new Map()
+  function withPathLock(path, fn) {
+    const prev = pathChains.get(path) || Promise.resolve()
+    // Run fn after prev settles (success OR failure — never let one op's
+    // rejection break the chain for the next).
+    const next = prev.then(fn, fn)
+    // Tail swallows rejections so the chain never becomes an unhandled
+    // rejection (callers still see fn's real result via `next`), and removes
+    // its own map entry once settled IF it's still the tail — so the map holds
+    // entries only for paths with in-flight ops, not every path ever touched.
+    const tail = next.then(() => {}, () => {})
+    pathChains.set(path, tail)
+    tail.then(() => { if (pathChains.get(path) === tail) pathChains.delete(path) })
+    return next
+  }
+
+  // ── Reactivity: per-path subscribers ─────────────────────────────────
+  // Notify a path's listeners whenever its value changes locally (set/remove)
+  // or a sync lands (drain). Lets a UI re-render without polling. In-memory,
+  // per runtime instance — not persisted (it's view wiring, not data).
+  const subscribers = new Map()   // path -> Set<cb>
+
+  function notify(path, data) {
+    const set = subscribers.get(path)
+    if (!set) return
+    for (const cb of [...set]) {
+      try { cb(data) } catch (e) { /* a listener throwing must not break others */ }
+    }
   }
 
   // Send one queued op to the storage API. PUT and DELETE are both
@@ -158,6 +291,14 @@ function makeStorage({ appId, getToken }) {
           // eslint-disable-next-line no-console
           console.warn('mobius: dropping un-syncable write', op.method, op.path, e.message)
           await deleteOp(op.seq)
+          // The optimistic cache still holds this rejected write's value. The
+          // server never accepted it, so re-fetch the authoritative value (or
+          // known-absence) and notify subscribers so the UI doesn't show a
+          // value that will never persist (Codex review, Medium #4).
+          try {
+            const fresh = await get(op.path)
+            notify(op.path, fresh)
+          } catch (re) { /* best-effort reconciliation */ }
           continue
         }
         // Transient (offline / 5xx / 401): stop so order is preserved
@@ -189,59 +330,122 @@ function makeStorage({ appId, getToken }) {
     if (document.visibilityState === 'visible') drain()
   })
 
-  return {
-    async get(path) {
-      // Reads hit the network. Offline (or on any error) returns null
-      // and the app shows its own empty/offline state — we deliberately
-      // do not keep a local read-mirror (a second source of truth that
-      // could silently diverge from the server and the outbox).
+  // The value the caller should see for a path RIGHT NOW: a pending outbox
+  // write wins over the server/cache (read-your-writes), else the cache mirror,
+  // else null. Used to overlay offline reads and to compute subscriber payloads.
+  async function effectiveValue(path, fallback) {
+    const ops = await listOps()
+    return overlayPending(ops, path, fallback)
+  }
+
+  // Named local functions (not `this`-bound methods) so subscribe() can call
+  // get() directly and the API survives destructuring — `const {get} = ...`.
+  // Each runs inside withPathLock so operations on the same path are strictly
+  // ordered within this runtime — no GET-vs-write or write-vs-write interleave.
+  function get(path) { return withPathLock(path, () => getInner(path)) }
+  function set(path, data) { return withPathLock(path, () => setInner(path, data)) }
+  function remove(path) { return withPathLock(path, () => removeInner(path)) }
+
+  async function getInner(path) {
+    // Read-through: online, fetch and MIRROR into the cache so the value is
+    // available offline later. Offline or on any error, serve the last-known
+    // mirror, overlaid with any pending write (read-your-writes). Returns null
+    // only when we have genuinely never cached the path (or it's known-absent).
+    // Serialized per path, so the cache write below can't land after a later
+    // set()'s write (that set() is queued behind this GET on the same chain).
+    if (navigator.onLine) {
       try {
         const token = await getToken()
         const res = await fetch(`/api/storage/apps/${appId}/${path}`, {
           headers: { Authorization: `Bearer ${token}` },
         })
-        if (res.status === 404) return null
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        return await res.json()
+        if (res.status === 404) {
+          await cachePut(path, null)
+        } else if (res.ok) {
+          const data = await res.json()
+          await cachePut(path, data)
+        } else {
+          throw new Error(`HTTP ${res.status}`)
+        }
+        const cached = await cacheGet(path)
+        return await effectiveValue(path, cached ? cached.data : null)
       } catch (e) {
-        return null
+        // Network blip while "online" — fall back to the mirror below.
       }
-    },
-    async set(path, data) {
-      if (navigator.onLine) {
-        try {
-          await send({ method: 'PUT', path, data })
-          // This direct write is newer than anything still queued for
-          // the path (e.g. an offline write left over from before we
-          // came online). Drop those stale ops so the next drain can't
-          // replay one over the value we just wrote — the last-write-
-          // wins violation this guards against.
-          await purgePath(path)
-          return { synced: true }
-        } catch (e) { /* fall through to queue */ }
+    }
+    const cached = await cacheGet(path)
+    return await effectiveValue(path, cached ? cached.data : null)
+  }
+
+  async function setInner(path, data) {
+    // Update the mirror + notify synchronously so the UI and a subsequent
+    // get() are correct immediately, regardless of network outcome. Serialized
+    // per path: a concurrent get() or another set() runs strictly before/after.
+    await cachePut(path, data)
+    notify(path, data)
+    if (navigator.onLine) {
+      try {
+        await send({ method: 'PUT', path, data })
+        // This direct write is newer than anything still queued for the path
+        // (e.g. an offline write left over from before we came online). Drop
+        // those stale ops so the next drain can't replay one over the value we
+        // just wrote — the last-write-wins violation this guards against.
+        await purgePath(path)
+        return { synced: true }
+      } catch (e) { /* fall through to queue */ }
+    }
+    await enqueue({ method: 'PUT', path, data })
+    drain()
+    return { queued: true }
+  }
+
+  async function removeInner(path) {
+    await cacheDelete(path)
+    notify(path, null)
+    if (navigator.onLine) {
+      try {
+        await send({ method: 'DELETE', path })
+        await purgePath(path)
+        return { synced: true }
+      } catch (e) { /* fall through to queue */ }
+    }
+    await enqueue({ method: 'DELETE', path })
+    drain()
+    return { queued: true }
+  }
+
+  return {
+    get,
+    set,
+    remove,
+    // Subscribe to local changes for a path: cb(value) fires immediately with
+    // the current value, then on every set/remove for that path. Returns an
+    // unsubscribe fn. (A successful background drain does NOT re-fire — it
+    // confirms the already-notified value server-side without changing it.)
+    subscribe(path, cb) {
+      let set = subscribers.get(path)
+      if (!set) { set = new Set(); subscribers.set(path, set) }
+      set.add(cb)
+      // Fire the initial value once, but never let a slow initial get() resolve
+      // AFTER a set() already pushed a newer value to this cb (which would
+      // deliver stale data last). `delivered` flips the moment notify() reaches
+      // this cb; the initial get() then suppresses itself. notify() wins ties.
+      let delivered = false
+      const wrapped = (v) => { delivered = true; cb(v) }
+      set.delete(cb); set.add(wrapped)   // store the wrapper so notify flips the flag
+      get(path).then((v) => {
+        if (set.has(wrapped) && !delivered) { delivered = true; cb(v) }
+      }).catch(() => {})
+      return () => {
+        const s = subscribers.get(path)
+        if (s) { s.delete(wrapped); if (!s.size) subscribers.delete(path) }
       }
-      await enqueue({ method: 'PUT', path, data })
-      drain()
-      return { queued: true }
-    },
-    async remove(path) {
-      if (navigator.onLine) {
-        try {
-          await send({ method: 'DELETE', path })
-          // Same as set(): the delete just landed, so any older queued
-          // write/delete for this path is stale and must not replay.
-          await purgePath(path)
-          return { synced: true }
-        } catch (e) { /* fall through to queue */ }
-      }
-      await enqueue({ method: 'DELETE', path })
-      drain()
-      return { queued: true }
     },
     async pendingCount() {
       return (await listOps()).length
     },
     _drain: drain,
+    _notify: notify,
   }
 }
 
@@ -256,13 +460,20 @@ export function init({ appId, getToken }) {
   return window.mobius
 }
 
-// # Smells
-// - get() has no offline read path (returns null offline). Apps that
-//   need to render persisted data offline must keep their own copy in
-//   app state; a shell-managed read cache was cut as YAGNI until an app
-//   needs it. Revisit if offline read of last-known data becomes common.
+// # Smells / notes
+// - RESOLVED (2026-06-01): get() now has an offline read path via the
+//   read-through cache store (mirror-on-online-read, serve-offline, overlay
+//   pending writes). The old "returns null offline" smell is gone.
+// - The cache mirror is owner-scoped data; it lives in the shared
+//   `mobius-outbox` IndexedDB (the `cache` store). client.js wipeSwCaches on
+//   logout clears `mobius-*` CacheStorage but the OUTBOX/CACHE IndexedDB is a
+//   separate DB — confirm logout also deletes it (delOutboxDb handles the
+//   outbox DB; the cache store rides the same DB, so it's covered).
 // - The standalone host passes a getToken that returns the boot-time
 //   app token (or owner JWT fallback). On a long offline window the app
 //   token can expire; the owner JWT fallback still authenticates as
 //   owner, so the drain succeeds, but a future refinement could re-mint
 //   the app token at drain time.
+// - The cache is unbounded in principle (one entry per app:path). For the
+//   personal-app scale this is fine; if an app writes thousands of distinct
+//   paths, add an LRU/size cap. Not built now (YAGNI).
