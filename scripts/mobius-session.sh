@@ -54,28 +54,42 @@ fi
 port=$((8001 + $(echo "$slug" | cksum | cut -d' ' -f1) % 90))
 project="mobius-test-${slug}"
 
+# Export compose vars so a custom run is fully isolated.
+# container_name and image are GLOBAL (not project-scoped); -p alone is not
+# enough.  These exports pair with -p "$project" to avoid colliding with or
+# nuking the default mobius-test container or its image.
+export MOBIUS_CONTAINER="mobius-test-${slug}"
+export MOBIUS_IMAGE="mobius-test-${slug}:ci"
+
 cat <<EOF
 
-Worktree ready: $worktree
-Branch:        $branch
-Test port:     $port
-Compose proj:  $project
+Worktree ready:  $worktree
+Branch:          $branch
+Test port:       $port
+Compose proj:    $project
+Container name:  $MOBIUS_CONTAINER
+Image tag:       $MOBIUS_IMAGE
+
+MOBIUS_CONTAINER and MOBIUS_IMAGE are already exported; include them on every
+docker compose call so container_name + image (both global, not project-scoped)
+don't collide with the default mobius-test container.
 
 Next steps (run from the repo root or from inside the worktree):
 
   # Build + start your test container with worktree-relative bind-mounts:
-  TEST_PORT=$port docker compose -p $project -f docker-compose.test.yml \\
+  MOBIUS_CONTAINER=$MOBIUS_CONTAINER MOBIUS_IMAGE=$MOBIUS_IMAGE \\
+    TEST_PORT=$port docker compose -p $project -f docker-compose.test.yml \\
     --project-directory $worktree build
-  TEST_PORT=$port docker compose -p $project -f docker-compose.test.yml \\
+  MOBIUS_CONTAINER=$MOBIUS_CONTAINER MOBIUS_IMAGE=$MOBIUS_IMAGE \\
+    TEST_PORT=$port docker compose -p $project -f docker-compose.test.yml \\
     --project-directory $worktree up -d
 
   # Run pytest from the worktree (so compose mounts YOUR files):
-  cd $worktree && \\
+  cd $worktree && MOBIUS_IMAGE=$MOBIUS_IMAGE \\
     docker compose -p $project -f docker-compose.test.yml run --rm pytest
 
-  # When the branch is ready to ship:
-  cd $worktree && gh pr create --base main --head $branch \\
-    --title "<title>" --body "<body>"
+  # When the branch is ready to ship (direct-to-main, no PR needed):
+  cd $worktree && git fetch origin && git rebase origin/main && git push origin HEAD:main
 
   # Tear down when done:
   docker compose -p $project -f docker-compose.test.yml down -v
