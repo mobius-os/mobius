@@ -472,9 +472,12 @@ def test_complete_turn_awaits_slow_promote_and_does_not_strand():
     writer._promote_pending = orig_promote
     _chat._schedule_continuation = orig_sched
 
-  # The turn completed successfully (marker may clear) and the head was
-  # promoted exactly once, with a continuation scheduled — no strand.
-  assert result is True
+  # The turn completed successfully and the head was promoted exactly once,
+  # with a continuation scheduled — no strand. `_complete_turn` now returns
+  # the terminal disposition (CONTINUATION_PROMOTED) rather than a bool; the
+  # marker stays set for the scheduled continuation.
+  from app.chat_queue import TerminalDisposition
+  assert result is TerminalDisposition.CONTINUATION_PROMOTED
   assert "queued_turn_starting" in published
   assert len(scheduled) == 1
   assert scheduled[0]["next_user"]["content"] == "queued"

@@ -479,6 +479,27 @@ async def _clear_run_status(chat_id: str) -> None:
     )
 
 
+async def _clear_run_status_strict(chat_id: str) -> None:
+  """Strict terminal variant of `_clear_run_status`: surfaces a failed ack.
+
+  The best-effort `_clear_run_status` above swallows a failed ack because a
+  marker left set by a dropped clear is self-correcting (reconciliation
+  resolves a turn that actually finished). But the empty-queue terminal
+  transition (`drain_and_release`) must distinguish "marker durably
+  cleared" (`EMPTY_TERMINAL_CLEARED`) from "clear didn't land"
+  (`FAILED_LEAVE_MARKER`) so it can LEAVE the marker set on failure rather
+  than reporting a clean completion that wiped the marker reconciliation
+  needs. So this re-raises on a failed ack (or a lock/ack timeout the
+  bounded caller imposes).
+
+  No-op (no raise) when there's no chat_id — nothing to clear.
+  """
+  if not chat_id:
+    return
+  ack = get_writer().submit(ClearRunStatus(chat_id=chat_id, run_token=""))
+  await _await_ack(ack)
+
+
 def reconcile_interrupted_chats(db: Session) -> list[str]:
   """Resolve chats stranded "running" by a process that died mid-turn.
 
@@ -507,6 +528,22 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
   any POST /messages can land, so the serialization invariant that the
   per-chat queue lock documents has no concurrent writer to guard
   against here.
+
+  Mid-commit timeout contract (accept-and-document; see design §D). A
+  terminal `Finalize`/`PromotePending`/`ClearRunStatus` whose `await_ack`
+  timed out mid-commit may STILL land on the actor thread after the caller
+  gave up — there is no rollback (single-owner makes "leave the marker set"
+  sufficient). This recovery covers BOTH outcomes of such a timeout:
+    - the commit did NOT land → the queued message is still in
+      `pending_messages`; it is cleared here (with the dropped-count note),
+      and the user resends;
+    - the commit DID land after the timeout (a PromotePending that moved
+      the head into `messages` + set the marker, but whose continuation was
+      never scheduled because the caller had already returned
+      FAILED_LEAVE_MARKER) → the promoted user message is now the LAST
+      message, so the else-branch below appends a standalone interrupted-turn
+      assistant note rather than mutating it, and the marker is cleared.
+  Either way the chat converges to a resolved, non-spinning state.
 
   Intentional direct-write exception to the C2 single-writer rule: this
   mutates `chat.messages` / `chat.pending_messages` / the run marker
@@ -719,12 +756,23 @@ async def stop_chat_for(chat_id: str, db: Session = None) -> bool:
   # racing append/cancel/promote (the actor's ClearPending serializes the
   # DB write itself). Generation bump happens BEFORE the lock so the dying
   # runner sees the new gen as soon as it next checks (no need for the
-  # lock — generation is its own state).
-  async with chat_queue.get_lock(chat_id):
-    await _clear_pending(chat_id)
+  # lock — generation is its own state). The lock acquisition is bounded by
+  # TERMINAL_LOCK_TIMEOUT_SECS so a wedged lock holder can't hang Stop; on a
+  # timeout the queue is left for reconciliation (the clear is best-effort
+  # here by design — Stop's job is the interrupt, and a stranded queue
+  # self-heals on the next interaction).
+  log = _get_logger()
+  try:
+    async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
+      async with chat_queue.get_lock(chat_id):
+        await _clear_pending(chat_id)
+  except (Exception, asyncio.TimeoutError):
+    log.warning(
+      "stop_chat_for: queue-lock clear bound exceeded chat_id=%s — leaving "
+      "queue for reconciliation", chat_id, exc_info=True,
+    )
   questions.cancel(chat_id)
   all_stopped = True
-  log = _get_logger()
   for handle in handles:
     stopped = await handle.stop(timeout=2.0)
     if not stopped:
@@ -858,18 +906,24 @@ async def _drain_and_release(
   chat_id: str,
   we_own_gen: bool,
   run_token: str,
-) -> tuple[dict | None, list, str | None]:
+) -> tuple[dict | None, list, str | None, chat_queue.TerminalDisposition]:
   """Local helper around chat_queue.drain_and_release that binds the
-  chat.py-owned discard_starting + forget_chat callbacks.
+  chat.py-owned discard_starting + forget_chat + strict-clear callbacks.
 
   `run_token` is the CONTINUATION's token: the drain's `PromotePending`
   command sets the next turn's run marker under it, and the same token
   is handed to `_schedule_continuation` so the spawned runner reuses it.
+
+  Returns the 4-tuple `(next_user, next_messages, next_session_id,
+  disposition)`; the disposition tells `_complete_turn` whether a
+  continuation was promoted (marker stays set), the queue was empty +
+  cleared (marker cleared inside the lock), or the run was stale.
   """
   return await chat_queue.drain_and_release(
     db, chat_id, we_own_gen, run_token,
     discard_starting=discard_starting,
     forget_chat=forget_chat,
+    clear_run_status_strict=_clear_run_status_strict,
   )
 
 
@@ -900,6 +954,50 @@ async def _close_browser_session(chat_id: str) -> None:
     log.warning("agent-browser close failed for chat %s: %s", chat_id, exc)
 
 
+async def _terminal_setup_error_cleanup(
+  chat_id: str,
+) -> chat_queue.TerminalDisposition:
+  """Bounded terminal cleanup for a setup-time error before any runner ran.
+
+  Shared by the no-owner / auth-error / unsupported-provider early-return
+  paths. These never streamed a partial turn, so there is no continuation
+  to schedule and nothing to finalize; the terminal work is simply to drop
+  any queued sends and clear the durable run marker, in the
+  clear-before-forget order and under ONE bounded lock (so a racing new
+  StartTurn's marker can't be erased and a wedged writer/lock can't hang
+  teardown):
+
+    (1) await ClearPending (strict), (2) await ClearRunStatus (strict),
+    (3) discard_starting, (4) forget_chat, all inside
+    `asyncio.timeout(TERMINAL_LOCK_TIMEOUT_SECS)` around the queue lock.
+
+  Returns `EMPTY_TERMINAL_CLEARED` when both strict clears landed. On ANY
+  failure (a strict ack raised, or the lock acquisition exceeded the bound)
+  returns `FAILED_LEAVE_MARKER` so the marker is LEFT set for reconciliation
+  rather than reporting a clean completion that wiped it. `_starting` is
+  still released on the failure path (the run is over regardless), but the
+  forget is skipped so the generation counter survives for reconciliation
+  to key on.
+  """
+  if not chat_id:
+    return chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
+  try:
+    async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
+      async with chat_queue.get_lock(chat_id):
+        await _clear_pending_strict(chat_id)
+        await _clear_run_status_strict(chat_id)
+        discard_starting(chat_id)
+        forget_chat(chat_id)
+    return chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
+  except (Exception, asyncio.TimeoutError):
+    _get_logger().error(
+      "terminal setup-error cleanup did not persist chat_id=%s — leaving "
+      "run marker for reconciliation", chat_id, exc_info=True,
+    )
+    discard_starting(chat_id)
+    return chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
+
+
 async def _complete_turn(
   *,
   bc,
@@ -910,17 +1008,16 @@ async def _complete_turn(
   provider_id: str | None,
   cost_usd: float | int,
   close_browser: bool,
-) -> bool:
+) -> chat_queue.TerminalDisposition:
   """Terminal sequence shared by both providers' success + error exits.
 
-  Returns True when the turn completed durably (the caller's `finally` may
-  clear the run marker per the normal generation rules) and False on ANY
-  terminal persistence failure (Finalize or PromotePending ack raised /
-  timed out) — in which case the caller MUST leave the durable run marker
-  set so startup reconciliation recovers the incomplete turn + queued
-  messages. Returning the success/failure decision (rather than clearing
-  the marker unconditionally in `run_chat`'s `finally`) is what stops a
-  failed terminal write from wiping the very marker reconciliation needs.
+  Returns a `TerminalDisposition` describing how the locked terminal
+  transition resolved. The durable run marker is cleared (or left set)
+  INSIDE this transition per the disposition — `run_chat`'s `finally` no
+  longer independently decides to clear it. This is what stops a failed
+  terminal write from wiping the very marker reconciliation needs, and it
+  closes the clear-after-release race (the empty-queue clear now runs under
+  the same lock as the _starting release).
 
   One place owns the C2 failure semantics so the four call-sites (codex
   success/except, claude success/except) can't drift:
@@ -931,19 +1028,21 @@ async def _complete_turn(
        writer past the timeout): emit a transport-only error + `done`,
        do NOT drain the queue or schedule a continuation, leave the
        durable run marker SET (reconciliation repairs it on the next
-       boot), and return False. No fallback direct write — silent loss is
-       worse than a visible "couldn't save" error.
-    2. On success: allocate the CONTINUATION's run_token, drain the
-       queue through the actor's `PromotePending` (keyed on that token,
-       which sets the next turn's run marker), broadcast
-       `queued_turn_starting` + `done`, then schedule the continuation
-       with the same token so the spawned runner reuses it, and return
-       True.
+       boot), and return `FAILED_LEAVE_MARKER`. No fallback direct write —
+       silent loss is worse than a visible "couldn't save" error.
+    2. On success: allocate the CONTINUATION's run_token, drain the queue
+       under ONE bounded lock (`drain_and_release`). The drain returns the
+       disposition: `CONTINUATION_PROMOTED` (a head was promoted — marker
+       stays set, schedule the continuation), `EMPTY_TERMINAL_CLEARED` (the
+       drain already cleared the marker + forgot the chat under the lock),
+       or `STALE_NO_ACTION` (a newer gen owns the chat).
 
-  A drain that itself raises (the `PromotePending` ack failed or timed
-  out) is treated like a finalize failure: the queue is left intact, no
-  continuation is scheduled, the marker is left set, and False is returned
-  — so a lost promote can't strand or double-fire the queue.
+  A drain that RAISES — the `PromotePending` / `ClearRunStatus` ack failed
+  or timed out, OR the terminal lock acquisition exceeded
+  `TERMINAL_LOCK_TIMEOUT_SECS` — is treated like a finalize failure: the
+  queue is left intact, no continuation is scheduled, the marker is left
+  set, and `FAILED_LEAVE_MARKER` is returned — so a lost promote / wedged
+  lock can't strand or double-fire the queue.
   """
   try:
     await sink.finalize()
@@ -966,7 +1065,7 @@ async def _complete_turn(
     if close_browser:
       await _close_browser_session(chat_id)
     db.close()
-    return False
+    return chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
 
   set_active_broadcast(None)
   # The continuation is a fresh turn — give it its own run_token. The
@@ -976,20 +1075,21 @@ async def _complete_turn(
   next_run_token = alloc_run_token()
   we_own_gen = run_gen is None or current_run_generation(chat_id) == run_gen
   try:
-    next_user, next_messages, next_session_id = await _drain_and_release(
-      db, chat_id, we_own_gen, next_run_token
+    next_user, next_messages, next_session_id, disposition = (
+      await _drain_and_release(db, chat_id, we_own_gen, next_run_token)
     )
-  except Exception as exc:
-    # The PromotePending ack failed OR timed out: the promote write didn't
-    # land (and may never — the actor's await_ack is the single authority on
-    # whether the commit happened; there is NO separate outer timer that
-    # could fire while the command still sits in the queue and later commits,
-    # stranding the promoted turn). A timed-out ack means the writer is
-    # wedged, treated identically to a failure: surface a transport error,
-    # do NOT schedule a continuation, and leave the run marker set so
+  except (Exception, asyncio.TimeoutError) as exc:
+    # The PromotePending / ClearRunStatus ack failed OR timed out, OR the
+    # terminal lock acquisition exceeded TERMINAL_LOCK_TIMEOUT_SECS. The
+    # actor's await_ack is the single authority on whether a commit
+    # happened; there is NO separate outer timer that could fire while the
+    # command still sits in the queue and later commits, stranding a
+    # promoted turn. A timed-out ack/lock means the writer or a lock holder
+    # is wedged, treated identically to a failure: surface a transport
+    # error, do NOT schedule a continuation, and leave the run marker set so
     # reconciliation recovers the turn. The queued message stays intact for
-    # the user to retry. Never "abandon and continue" — that is what stranded
-    # a half-promoted turn.
+    # the user to retry. Never "abandon and continue" — that is what
+    # stranded a half-promoted turn.
     log = _get_logger()
     log.error(
       "queue drain failed chat_id=%s: %s — not scheduling continuation, "
@@ -1008,7 +1108,7 @@ async def _complete_turn(
     if close_browser:
       await _close_browser_session(chat_id)
     db.close()
-    return False
+    return chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
 
   if next_user:
     bc.publish({
@@ -1031,7 +1131,7 @@ async def _complete_turn(
   if close_browser:
     await _close_browser_session(chat_id)
   db.close()
-  return True
+  return disposition
 
 
 async def run_chat(
@@ -1063,14 +1163,22 @@ async def run_chat(
   reach the runner.  Without that, a crash during setup leaves the
   chat stuck 'starting' until process restart.
   """
-  # Whether this turn ended with the terminal state durably persisted.
-  # Default True so a setup-time exception (which never persisted a partial
-  # turn) clears the marker cleanly; `_run_chat_impl` flips it to False only
-  # when a terminal Finalize/PromotePending ack failed — then the marker is
-  # LEFT set so reconciliation recovers the incomplete turn.
-  terminal_persist_ok = True
+  # How the terminal transition resolved. `_run_chat_impl` returns a
+  # TerminalDisposition; the clear-the-marker decision now lives INSIDE the
+  # locked terminal transition (drain_and_release / the setup-error
+  # cleanups), so `run_chat`'s finally no longer independently clears it for
+  # a normal terminal. The only marker work left here is the Stop handoff —
+  # Stop deliberately bumps the generation before interrupting the SDK
+  # handle, so the dying run reaches `_complete_turn` with we_own_gen=False
+  # (STALE_NO_ACTION) and the clear must happen here, after the final sink
+  # save, IFF Stop still owns the immediate successor generation.
+  #
+  # Default to FAILED_LEAVE_MARKER so an UNEXPECTED setup-time exception
+  # (which `_run_chat_impl` doesn't catch) leaves the marker set for
+  # reconciliation rather than silently wiping it — the safe default.
+  disposition = chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
   try:
-    terminal_persist_ok = await _run_chat_impl(
+    disposition = await _run_chat_impl(
       messages, chat_id=chat_id, session_id=session_id,
       provider_id=provider_id, run_gen=run_gen,
       attachments=attachments, timezone=timezone, viewport=viewport,
@@ -1081,37 +1189,37 @@ async def run_chat(
     clear_stopped_run = run_gen is not None and stopped_gen == run_gen
     if clear_stopped_run:
       _clear_after_terminal_generation.pop(chat_id, None)
-    # Only clear _starting if we still own this generation.
-    # A newer stop_chat_for may have bumped the generation and
-    # taken ownership of _starting.
+    # Only clear _starting if we still own this generation. A newer
+    # stop_chat_for may have bumped the generation and taken ownership of
+    # _starting. (The EMPTY_TERMINAL_CLEARED path already released _starting
+    # under the lock; discard_starting is idempotent, so this is harmless.)
     if run_gen is None or current_run_generation(chat_id) == run_gen:
       discard_starting(chat_id)
-    # Clear the durable marker only while this run still owns the
-    # generation AND the terminal write actually persisted. A continuation
-    # handoff leaves it set for the next turn. A Stop handoff is handled
-    # separately below after the final sink save, because Stop deliberately
-    # bumps the generation first. Stop bumps the generation before
-    # interrupting the SDK handle, so the normal ownership branch above
-    # deliberately skips this run. Once _run_chat_impl returns, its final
-    # sink save is complete and the stopped generation may clear the marker
-    # unless a newer run has already claimed it.
-    #
-    # `terminal_persist_ok` is the FIX-2 gate: a failed terminal
-    # Finalize/PromotePending must NOT wipe the durable marker, or
-    # reconcile_interrupted_chats would skip the incomplete turn + queued
-    # messages. On such a failure the marker is left set so startup
-    # reconciliation recovers it. (`_run_chat_impl` setup-error returns,
-    # which never half-persisted a turn, return True so they still clear.)
-    should_clear_status = terminal_persist_ok and (
-      run_gen is None
-      or current_run_generation(chat_id) == run_gen
-      or (
-        clear_stopped_run
-        and current_run_generation(chat_id) == run_gen + 1
-      )
+    # Stop-handoff marker clear: the ONLY marker work `run_chat`'s finally
+    # still owns. Every other disposition handled its own marker INSIDE the
+    # locked terminal transition: EMPTY_TERMINAL_CLEARED + the setup-error
+    # cleanups already cleared it; CONTINUATION_PROMOTED leaves it set for
+    # the next turn; STALE_NO_ACTION leaves a newer run's marker untouched;
+    # FAILED_LEAVE_MARKER leaves it set for reconciliation. Here we clear ONLY
+    # when this run was Stop-bumped AND Stop still owns the immediate
+    # successor generation (current == run_gen + 1) — never a newer run's
+    # marker. This is the STOP_HANDOFF_CLEARED transition; bounded so a wedged
+    # writer/lock can't hang teardown (a clear that times out leaves the
+    # marker set, which reconciliation repairs).
+    stop_handoff = (
+      clear_stopped_run
+      and run_gen is not None
+      and current_run_generation(chat_id) == run_gen + 1
     )
-    if chat_id and should_clear_status:
-      await _clear_run_status(chat_id)
+    if chat_id and stop_handoff:
+      try:
+        async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
+          await _clear_run_status_strict(chat_id)
+      except (Exception, asyncio.TimeoutError):
+        _get_logger().warning(
+          "Stop-handoff ClearRunStatus did not persist chat_id=%s "
+          "(reconciliation will repair)", chat_id, exc_info=True,
+        )
 
 
 async def _run_chat_impl(
@@ -1124,22 +1232,26 @@ async def _run_chat_impl(
   timezone: str | None = None,
   viewport: dict | None = None,
   run_token: str | None = None,
-) -> bool:
+) -> chat_queue.TerminalDisposition:
   """Inner implementation of run_chat; see wrapper for lifecycle notes.
 
-  Returns True when the turn ended with its terminal state durably
-  persisted (so `run_chat`'s `finally` may clear the run marker) and False
-  on a terminal persistence failure (Finalize/PromotePending ack
-  raised/timed out) — in which case the caller leaves the marker set for
-  reconciliation. Setup-time early returns never half-persist a turn, so
-  they return True (clean termination, marker may clear).
+  Returns a `TerminalDisposition`. The normal terminal paths delegate to
+  `_complete_turn` (which clears the marker inside the locked transition
+  for an empty queue, leaves it for a continuation / failure). The
+  setup-error early returns each own their marker INSIDE a bounded lock:
+  no-owner / auth-error / unsupported-provider CLEAR the marker before
+  releasing _starting (EMPTY_TERMINAL_CLEARED), and a failed strict clear
+  there leaves it set (FAILED_LEAVE_MARKER); a generation mismatch touches
+  nothing (STALE_NO_ACTION). `run_chat`'s finally reads the disposition only
+  for the Stop-handoff case; every other clear/leave already happened here.
   """
   # Check if a newer send superseded this one while we were queued.
-  # Do NOT discard _starting here — the newer run owns it.
+  # Do NOT discard _starting here — the newer run owns it, and its marker
+  # must NOT be cleared (STALE_NO_ACTION).
   if run_gen is not None and current_run_generation(chat_id) != run_gen:
     log = _get_logger()
     log.info("run_chat aborted: generation mismatch chat_id=%s", chat_id)
-    return True
+    return chat_queue.TerminalDisposition.STALE_NO_ACTION
 
   from app.database import SessionLocal
   db = SessionLocal()
@@ -1230,8 +1342,7 @@ async def _run_chat_impl(
   owner = db.query(models.Owner).first()
   if not owner:
     bc.publish({"type": "error", "message": "No owner configured."})
-    async with chat_queue.get_lock(chat_id):
-      await _clear_pending(chat_id)
+    disposition = await _terminal_setup_error_cleanup(chat_id)
     bc.publish({"type": "done"})
     set_active_broadcast(None)
     bc.mark_completed()
@@ -1240,7 +1351,7 @@ async def _run_chat_impl(
     # this branch on every turn would otherwise leak a connection each
     # time.
     db.close()
-    return True
+    return disposition
 
   agent_token = auth.create_access_token(
     {"sub": owner.username},
@@ -1360,13 +1471,12 @@ async def _run_chat_impl(
   auth_error = provider.check_auth(settings.data_dir)
   if auth_error:
     bc.publish({"type": "error", "message": auth_error})
-    async with chat_queue.get_lock(chat_id):
-      await _clear_pending(chat_id)
+    disposition = await _terminal_setup_error_cleanup(chat_id)
     bc.publish({"type": "done"})
     set_active_broadcast(None)
     bc.mark_completed()
     db.close()
-    return True
+    return disposition
   data_dir = Path(settings.data_dir)
   cwd = str(data_dir) if data_dir.exists() else str(Path.cwd())
 
@@ -1506,9 +1616,10 @@ async def _run_chat_impl(
     "type": "error",
     "message": f"Provider {provider.name!r} has no supported runtime.",
   })
+  disposition = await _terminal_setup_error_cleanup(chat_id)
   set_active_broadcast(None)
   bc.publish({"type": "done"})
   bc.mark_completed()
   await _close_browser_session(chat_id)
   db.close()
-  return True
+  return disposition
