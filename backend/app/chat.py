@@ -278,18 +278,6 @@ class _ChatEventSink:
         )
     return True
 
-  async def flush(self) -> None:
-    """No-op shim retained for the runner's per-iteration call.
-
-    Pre-C2 the runner awaited `flush()` to run a deferred commit off the
-    loop. The actor now owns every transcript commit (submitted
-    fire-and-forget from `publish()`), so there is nothing to flush. The
-    shim stays because the runners still call it once per stream
-    iteration (`_maybe_flush`); removing that call is deferred to
-    milestone D.
-    """
-    return None
-
   async def finalize(self) -> None:
     """Submit the terminal assistant-message write and await its ack.
 
