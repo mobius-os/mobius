@@ -18,7 +18,7 @@ import time
 import pytest
 
 from app import chat as chat_mod
-from app import models, questions
+from app import chat_queue, models, questions, schemas
 from app.broadcast import ChatBroadcast
 from app.chat_writer import Barrier, PersistTranscript, get_writer
 from app.database import SessionLocal
@@ -297,36 +297,67 @@ def test_put_replace_transcript_broad_fences_stream_snapshot(client, auth, chat)
   assert chat_state["messages"][-1]["blocks"][0]["content"] == "replaced"
 
 
-# -- 6. finalize ack failure → no queue promote, marker left set ---------
-def test_finalize_failure_leaves_marker_and_does_not_promote(monkeypatch):
-  """If the terminal Finalize ack raises, _complete_turn must emit a
-  transport error + done, NOT drain the queue, and leave the run marker
-  set for reconciliation. No direct-write fallback."""
+# -- 6. finalize ack failure through the REAL run_chat wrapper -----------
+# FIX 2: the run marker must survive a failed terminal Finalize so startup
+# reconciliation recovers the incomplete turn + queued messages. This drives
+# the REAL `run_chat` wrapper (NOT `_complete_turn` directly) precisely so it
+# covers `run_chat`'s `finally`, which previously cleared the marker
+# UNCONDITIONALLY — wiping exactly what reconciliation needs. A test that
+# called `_complete_turn` directly could never have caught that, which is why
+# the original review missed it.
+def test_finalize_failure_via_run_chat_leaves_marker_for_reconciliation(
+  monkeypatch, tmp_path
+):
+  """Through the real `run_chat` wrapper, a forced `Finalize` ack failure
+  must leave the durable run marker SET after `run_chat` returns (so
+  reconciliation would recover it) and perform NO continuation/promotion —
+  no half-persisted, unexecuted turn."""
   _seed_chat(
     "c-fin",
-    messages=[
-      {"role": "user", "content": "hi", "ts": 1},
-      {"role": "assistant", "content": "", "ts": 2,
-       "blocks": [{"type": "text", "content": "partial"}]},
-    ],
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[{"role": "user", "content": "queued", "ts": 3}],
   )
-  # Mark the run (StartTurn would have done this in production).
+  # The StartTurn that the production initial-send route would have run set
+  # the durable marker. Replicate that precondition + seed an Owner (run_chat
+  # bails early with "No owner configured" otherwise, never reaching the SDK
+  # branch).
   db = SessionLocal()
   try:
-    c = db.query(models.Chat).filter(models.Chat.id == "c-fin").one()
     from datetime import UTC, datetime
+    from app import auth as auth_mod
+    db.add(models.Owner(
+      username="o", hashed_password=auth_mod.hash_password("x"),
+      provider="claude",
+    ))
+    c = db.query(models.Chat).filter(models.Chat.id == "c-fin").one()
     c.run_status = "running"
     c.run_started_at = datetime.now(UTC)
     db.commit()
   finally:
     db.close()
 
-  bc = ChatBroadcast("c-fin")
-  sink = chat_mod._ChatEventSink(bc, "c-fin", run_token="rt-fin")
-  sink.assistant_blocks = [{"type": "text", "content": "done"}]
+  # check_auth needs the creds file to exist; point DATA_DIR's claude creds
+  # at a real file so run_chat reaches the SDK branch instead of bailing.
+  import os
+  creds = (
+    __import__("pathlib").Path(os.environ["DATA_DIR"])
+    / "cli-auth" / "claude" / ".credentials.json"
+  )
+  creds.parent.mkdir(parents=True, exist_ok=True)
+  creds.write_text("{}", encoding="utf-8")
 
-  # Force Finalize to fail by making the actor's finalize seam raise.
+  # Fake the Claude SDK runner: stream one text block through the sink (so
+  # finalize() has accumulated blocks and actually submits a Finalize), then
+  # return a clean result so the turn reaches the success _complete_turn path.
+  async def fake_runner(*, bc, **kwargs):
+    bc.publish({"type": "text", "content": "partial answer"})
+    return {"session_id": "sess", "cost_usd": 0.0}
+
+  import app.claude_sdk_runner as csr
+  monkeypatch.setattr(csr, "run_claude_sdk_turn", fake_runner)
+
+  # Force the actor's Finalize seam to fail so the terminal write does not
+  # land — exactly the persistence-unavailable case.
   from app import chat_writer as cw
 
   def _boom(db_, chat_id, blocks):
@@ -335,41 +366,217 @@ def test_finalize_failure_leaves_marker_and_does_not_promote(monkeypatch):
 
   monkeypatch.setattr(cw, "finalize_response_outcome", _boom)
 
+  from app.broadcast import create_broadcast
+  bc = create_broadcast("c-fin")
   published = []
   orig_publish = bc.publish
   bc.publish = lambda e: (published.append(e.get("type")), orig_publish(e))[1]
 
+  chat_mod.mark_starting("c-fin")
+  gen = chat_mod.current_run_generation("c-fin")
   asyncio.run(
-    chat_mod._complete_turn(
-      bc=bc, sink=sink, db=SessionLocal(), chat_id="c-fin",
-      run_gen=None, provider_id="claude", cost_usd=0, close_browser=False,
+    chat_mod.run_chat(
+      [chat_mod.schemas.ChatMessage(role="user", content="hi")],
+      chat_id="c-fin", session_id="sess", provider_id="claude",
+      run_gen=gen, run_token="rt-fin",
     )
   )
+  _drain_actor()
 
-  # Transport error + done were emitted; queue NOT promoted; marker set.
+  # Transport error + done emitted; queue NOT promoted; marker LEFT SET.
   assert "error" in published
   assert "done" in published
   assert "queued_turn_starting" not in published
   chat_state = _load("c-fin")
   assert chat_state["run_status"] == "running"  # left for reconciliation
-  assert len(chat_state["pending_messages"]) == 1  # not promoted
+  assert len(chat_state["pending_messages"]) == 1  # not promoted/executed
 
 
-# -- 7. stop-races-answer: future not resolved when Stop wins the race ---
-def test_stop_races_answer_route_returns_410(client, auth, chat, monkeypatch):
-  """If a Stop removes the pending question WHILE the answer's
-  AnswerQuestion ack is in flight, the route's re-claim-by-identity finds
-  the entry gone and returns 410 WITHOUT resolving the (now cancelled)
-  future — even though the answer itself committed durably.
+# -- 6b. slow PromotePending: caller awaits the ack, never abandon-strands -
+# FIX 1: the old `_complete_turn` wrapped the turn-end promotion in a ~5.0s
+# outer `asyncio.wait_for`, shorter-than/equal-to SQLite's busy_timeout AND
+# the actor's await_ack bound. A legitimately-slow PromotePending commit
+# tripped that timer; the caller treated the TimeoutError as "abandon and
+# continue" (next_user=None) WHILE the PromotePending command was still in
+# the actor queue — it then committed AFTER the caller gave up, promoting a
+# queued turn into `messages` that was never executed or reconciled (a
+# stranded turn). The fix removes the outer timer: the actor's await_ack is
+# the SINGLE authority, so a slow-but-successful commit is awaited and the
+# continuation proceeds on the ACK RESULT — never on a separate clock.
+def test_complete_turn_awaits_slow_promote_and_does_not_strand():
+  """With PromotePending's commit latched slow, `_complete_turn` must AWAIT
+  the ack (not return early on a timer) and, once the commit lands, promote
+  the head + schedule the continuation. It must never abandon a turn that the
+  actor then commits behind its back."""
+  _seed_chat(
+    "c-slow",
+    messages=[
+      {"role": "user", "content": "hi", "ts": 1},
+      {"role": "assistant", "content": "ok", "ts": 2,
+       "blocks": [{"type": "text", "content": "ok"}]},
+    ],
+    pending=[{"role": "user", "content": "queued", "ts": 3}],
+  )
 
-  The race window is between the route's peek and its post-ack re-claim.
-  We make it deterministic by simulating the concurrent Stop inside
-  `questions.claim_if`: the first call (the route's re-claim) cancels the
-  future and reports the entry gone, exactly as a real Stop interleaving
-  the await would."""
-  db = SessionLocal()
+  bc = ChatBroadcast("c-slow")
+  sink = chat_mod._ChatEventSink(bc, "c-slow", run_token="rt-slow")
+  # No accumulated blocks → finalize() is a no-op, so the turn reaches the
+  # success path and the promote drain (what we're exercising).
+  sink.assistant_blocks = []
+
+  # Latch the actor's real `_promote_pending` so its commit blocks until we
+  # release it — simulating a legitimately slow (but successful) SQLite
+  # commit that would have tripped the old 5s outer timer.
+  writer = get_writer()
+  gate = threading.Event()
+  orig_promote = writer._promote_pending
+
+  def slow_promote(db, cmd):
+    gate.wait(timeout=10)
+    return orig_promote(db, cmd)
+
+  writer._promote_pending = slow_promote
+
+  scheduled = []
+  import app.chat as _chat
+  orig_sched = _chat._schedule_continuation
+  _chat._schedule_continuation = (
+    lambda **kw: scheduled.append(kw)
+  )
+
+  published = []
+  orig_publish = bc.publish
+  bc.publish = lambda e: (published.append(e.get("type")), orig_publish(e))[1]
+
+  async def go():
+    task = asyncio.create_task(
+      chat_mod._complete_turn(
+        bc=bc, sink=sink, db=SessionLocal(), chat_id="c-slow",
+        run_gen=None, provider_id="claude", cost_usd=0, close_browser=False,
+      )
+    )
+    # While the promote is latched, the caller must STILL be awaiting the
+    # ack — not have returned early on a timer. Give it room to (wrongly)
+    # bail, then assert it hasn't.
+    await asyncio.sleep(0.2)
+    assert not task.done(), (
+      "_complete_turn returned before the promote committed — it abandoned "
+      "the turn on a timer (the FIX-1 strand bug)"
+    )
+    gate.set()  # let the slow commit land
+    return await asyncio.wait_for(task, timeout=10)
+
   try:
-    c = db.query(models.Chat).filter(models.Chat.id == chat.id).one()
+    result = asyncio.run(go())
+  finally:
+    writer._promote_pending = orig_promote
+    _chat._schedule_continuation = orig_sched
+
+  # The turn completed successfully (marker may clear) and the head was
+  # promoted exactly once, with a continuation scheduled — no strand.
+  assert result is True
+  assert "queued_turn_starting" in published
+  assert len(scheduled) == 1
+  assert scheduled[0]["next_user"]["content"] == "queued"
+  _drain_actor()
+  chat_state = _load("c-slow")
+  # The queued message moved into the transcript (promoted) and the queue is
+  # now empty — committed once, by the awaited ack.
+  assert chat_state["pending_messages"] == []
+  assert any(
+    m.get("content") == "queued" for m in chat_state["messages"]
+  )
+
+
+# -- 6c. failed QuestionCommit scrubs the orphan block ------------------
+# FIX 3: `publish_question` runs `process_event` (appending the question
+# block to `assistant_blocks`) BEFORE awaiting the QuestionCommit ack. On a
+# failed commit the old code left that block in place, so a later `Finalize`
+# persisted an unanswerable card (reload shows a card with no live pending
+# future). The fix scrubs the just-added block on failure so a subsequent
+# Finalize cannot persist the orphan.
+def test_failed_question_commit_scrubs_orphan_block(monkeypatch):
+  """A failed QuestionCommit must remove the just-added question block from
+  `assistant_blocks` (so a later Finalize persists NO question card) and must
+  NOT broadcast the card."""
+  _seed_chat(
+    "c-q", messages=[{"role": "user", "content": "hi", "ts": 1}],
+  )
+  bc = ChatBroadcast("c-q")
+  sink = chat_mod._ChatEventSink(bc, "c-q", run_token="rt-q")
+  # A prior streamed text block — it must SURVIVE the scrub (only the failed
+  # question block is removed).
+  sink.publish({"type": "text", "content": "thinking"})
+
+  # Force ONLY the QuestionCommit seam to fail; the later Finalize (which
+  # shares the same module-level `_apply_last_assistant_message`) must run
+  # for real. A flag gates the boom so it fires once, for the commit only.
+  from app import chat_writer as cw
+
+  fail = {"on": True}
+  real_apply = cw._apply_last_assistant_message
+
+  def _maybe_boom(db_, chat_id, snapshot):
+    if fail["on"]:
+      from app.chat_writer import _PersistFailed
+      raise _PersistFailed("forced question-commit failure")
+    return real_apply(db_, chat_id, snapshot)
+
+  monkeypatch.setattr(cw, "_apply_last_assistant_message", _maybe_boom)
+
+  published = []
+  orig_publish = bc.publish
+  bc.publish = lambda e: (published.append(e.get("type")), orig_publish(e))[1]
+
+  async def go():
+    # publish_question must propagate the failure (the runner ends the turn
+    # with a transport-only error); the card must NOT be broadcast.
+    with pytest.raises(Exception):
+      await sink.publish_question(
+        {"type": "question", "question_id": "q1",
+         "questions": [{"id": "q1", "question": "Color?"}]}
+      )
+
+  asyncio.run(go())
+
+  # The orphan question block was scrubbed; the prior text block remains.
+  assert all(
+    b.get("type") != "question" for b in sink.assistant_blocks
+  ), sink.assistant_blocks
+  assert any(b.get("type") == "text" for b in sink.assistant_blocks)
+  # The card was NOT broadcast (no question event reached the wire).
+  assert "question" not in published
+
+  # A subsequent Finalize persists NO question card (the scrub held).
+  fail["on"] = False  # the commit seam works again for the terminal write
+  asyncio.run(sink.finalize())
+  _drain_actor()
+  chat_state = _load("c-q")
+  last_blocks = chat_state["messages"][-1].get("blocks") or []
+  assert all(b.get("type") != "question" for b in last_blocks), last_blocks
+
+
+# -- 7. stop-races-answer: REAL concurrent Stop vs answer on the queue lock
+# FIX 4: the prior version monkeypatched `questions.claim_if` to fake the
+# Stop. This version drives the REAL `send_message` answer route and the REAL
+# `stop_chat_for` as concurrent coroutines on ONE event loop, both genuinely
+# contending on `chat_queue.get_lock(chat_id)` (the same lock object, the
+# same loop — exactly the production interleaving). No `claim_if` stub; the
+# route's own re-claim-by-identity and Stop's own `questions.cancel` run for
+# real. Stop wins the lock race, so the answer route — when it takes the lock
+# — finds the question gone and 410s WITHOUT resolving the cancelled future.
+def test_stop_races_answer_real_lock_contention_returns_410(chat, owner_token):
+  """Real concurrent Stop vs answer, contending on the actual queue lock.
+  Stop cancels the pending question (popping it + cancelling the future)
+  while the answer route is parked acquiring the same lock; when the answer
+  route proceeds it returns 410 and the future is cancelled, never resolved
+  with answers."""
+  from fastapi import HTTPException
+  from app.routes.chats_stream import send_message
+
+  db_seed = SessionLocal()
+  try:
+    c = db_seed.query(models.Chat).filter(models.Chat.id == chat.id).one()
     c.messages = [
       {"role": "user", "content": "go", "ts": 1},
       {"role": "assistant", "content": "", "ts": 2, "blocks": [
@@ -377,44 +584,64 @@ def test_stop_races_answer_route_returns_410(client, auth, chat, monkeypatch):
          "questions": [{"id": "q1", "question": "Color?"}]},
       ]},
     ]
-    db.commit()
+    db_seed.commit()
   finally:
-    db.close()
+    db_seed.close()
 
-  fut = asyncio.new_event_loop().create_future()
-  pending = PendingQuestion(
-    question_id="qS",
-    questions=[{"id": "q1", "question": "Color?"}],
-    future=fut,
-    run_token="rt-S",
-  )
-  questions.register(chat.id, pending)
+  async def race():
+    # Pending future lives on THIS loop (the one both coroutines run on), so
+    # Stop's cancel and the answer route's resolve target the same future.
+    fut = asyncio.get_event_loop().create_future()
+    pending = PendingQuestion(
+      question_id="qS",
+      questions=[{"id": "q1", "question": "Color?"}],
+      future=fut,
+      run_token="rt-S",
+    )
+    questions.register(chat.id, pending)
 
-  # Simulate a concurrent Stop that cancelled this question while the
-  # AnswerQuestion ack was in flight: when the route re-claims by
-  # identity, the entry is gone (Stop popped it + cancelled the future).
-  import app.routes.chats_stream as cs
+    # Pre-acquire the REAL queue lock so the answer route genuinely blocks on
+    # it — the production block behind a Stop that holds the lock. We hold it,
+    # start the answer task (it parks on the lock), then run the REAL Stop
+    # cancel primitive and release, letting the answer route proceed into its
+    # no-pending → 410 branch.
+    lock = chat_queue.get_lock(chat.id)
+    await lock.acquire()
 
-  def stop_won(chat_id, expected):
-    questions.cancel(chat_id)  # Stop's path: pop + cancel the future
-    return False
+    body = schemas.SendMessage(
+      content="answer", hidden=True,
+      answers={"Color?": "Red"}, question_id="qS",
+    )
+    db_answer = SessionLocal()
+    answer_task = asyncio.create_task(
+      send_message(body=body, chat_id=chat.id, _=None, db=db_answer)
+    )
+    # Let the answer task reach + park on the held lock.
+    await asyncio.sleep(0.1)
+    assert not answer_task.done(), "answer route did not block on the lock"
 
-  monkeypatch.setattr(cs.questions, "claim_if", stop_won)
+    # The REAL Stop cancel (stop_chat_for runs this lock-free after its own
+    # lock block): pop the pending entry + cancel the future.
+    questions.cancel(chat.id)
+    lock.release()
 
-  res = client.post(
-    f"/api/chats/{chat.id}/messages",
-    json={"content": "answer", "hidden": True,
-          "answers": {"Color?": "Red"}, "question_id": "qS"},
-    headers=auth,
-  )
-  # Re-claim failed (Stop took the entry) → 410; the cancelled future was
-  # NEVER resolved with answers.
-  assert res.status_code == 410, res.text
+    status = None
+    try:
+      await asyncio.wait_for(answer_task, timeout=10)
+    except HTTPException as exc:
+      status = exc.status_code
+    finally:
+      db_answer.close()
+    return status, fut
+
+  status, fut = asyncio.run(race())
+
+  # Stop won the lock race → the answer route saw no pending question and
+  # raised 410; the cancelled future was NEVER resolved with answers.
+  assert status == 410, status
   assert fut.cancelled()
-  # The answer DID commit durably — the write is independent of the dead
-  # future (the actor applied it before the re-claim check).
+  assert not (fut.done() and not fut.cancelled())  # never set_result'd
+  # No answer was written (410'd before any AnswerQuestion submit).
   _drain_actor()
   chat_state = _load(chat.id)
-  assert chat_state["messages"][-1]["blocks"][0].get("answers") == {
-    "Color?": "Red"
-  }
+  assert chat_state["messages"][-1]["blocks"][0].get("answers") is None
