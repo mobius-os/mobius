@@ -625,6 +625,27 @@ async def _clear_pending(chat_id: str) -> None:
     )
 
 
+async def _clear_pending_strict(chat_id: str) -> None:
+  """Strict terminal variant of `_clear_pending`: surfaces a failed ack.
+
+  The best-effort `_clear_pending` above swallows a failed ack because a
+  stranded queue is self-correcting on the next interaction — fine for
+  Stop and a cancel-then-bail. But a TERMINAL cleanup path (no-owner /
+  auth-error / unsupported-provider) records its outcome as a
+  `TerminalDisposition`: if the queue clear didn't durably land, the path
+  must be able to OBSERVE that and leave the durable run marker set so
+  reconciliation recovers the incomplete turn — exactly what swallowing
+  would hide. So this re-raises on a failed ack (or a lock/ack timeout the
+  bounded caller imposes) rather than logging-and-continuing.
+
+  No-op (no raise) when there's no chat_id — nothing to clear.
+  """
+  if not chat_id:
+    return
+  ack = get_writer().submit(ClearPending(chat_id=chat_id, run_token=""))
+  await _await_ack(ack)
+
+
 def _finalize_broadcast_if_running(chat_id: str) -> None:
   """Publishes a terminal done event when the chat broadcast is live."""
   bc = get_broadcast(chat_id)

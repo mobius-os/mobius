@@ -45,11 +45,58 @@ releases.
 from __future__ import annotations
 
 import asyncio
+import enum
 import weakref
 
 from sqlalchemy.orm import Session
 
 from app import schemas
+
+
+# Bound on EVERY terminal lock acquisition (the turn-end drain, the
+# no-owner / auth-error / unsupported-provider cleanup, and Stop's queue
+# cleanup). = 2·ACK_TIMEOUT_SECS + busy_timeout: a terminal transition may
+# await two sequential strict acks (PromotePending → ClearRunStatus) plus
+# SQLite's 5s busy_timeout, so a healthy-but-contended terminal lock holder
+# completes well inside this bound. Exceeding it means the holder is wedged
+# — the timeout converts that hang into a FAILED_LEAVE_MARKER disposition
+# (transport error + done, marker LEFT set for reconciliation) rather than
+# stalling the turn forever. A patchable module constant so tests can
+# monkeypatch it small and trip the bound deterministically without waiting
+# 65 real seconds.
+TERMINAL_LOCK_TIMEOUT_SECS = 65.0
+
+
+class TerminalDisposition(enum.Enum):
+  """How a turn's locked terminal transition resolved.
+
+  The single decision shared by `run_chat` / `_complete_turn` /
+  `drain_and_release`, replacing the old loose bool + post-hoc generation
+  re-read. `run_chat` no longer independently decides whether to clear the
+  durable run marker after `_run_chat_impl` returns — the clear happens
+  INSIDE the locked terminal transition per the disposition and the single
+  marker invariant (clear IFF the current owner reached a durable terminal
+  state AND no continuation work remains; otherwise LEAVE it set for
+  startup reconciliation).
+  """
+
+  CONTINUATION_PROMOTED = "continuation_promoted"
+  # A queued message was promoted; the marker stays continuously set and
+  # ownership passes to the scheduled continuation. Do NOT clear/forget.
+  EMPTY_TERMINAL_CLEARED = "empty_terminal_cleared"
+  # Queue empty, terminal state durable; marker cleared + chat forgotten,
+  # all inside the one bounded lock (clear-before-forget ordering).
+  STOP_HANDOFF_CLEARED = "stop_handoff_cleared"
+  # A Stop-bumped generation reached terminal persistence and cleared the
+  # marker for the immediate successor generation it still owns.
+  STALE_NO_ACTION = "stale_no_action"
+  # A newer generation owns this chat (generation mismatch / Stop handed
+  # off to a newer run); this run touches nothing — no clear, no forget.
+  FAILED_LEAVE_MARKER = "failed_leave_marker"
+  # A terminal persistence failure (Finalize / PromotePending ack raised or
+  # timed out) OR a terminal lock-acquisition timeout. The marker is LEFT
+  # set so reconciliation recovers the incomplete turn + queued messages;
+  # no continuation is scheduled.
 
 
 _locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (
