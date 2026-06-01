@@ -31,9 +31,7 @@ from app.chat_writer import (
   PersistTranscript,
   QuestionCommit,
   alloc_run_token,
-  apply_answers_to_last_question as _apply_answers_to_last_question,
   await_ack as _await_ack,
-  finalize_response as _finalize_response,
   get_writer,
   next_message_ts as _next_message_ts,
   update_last_assistant_message as _update_last_assistant_message,
@@ -106,8 +104,7 @@ def _safe_commit(db: Session) -> bool:
 
 
 # Streaming-persistence helpers (`_next_message_ts`,
-# `_update_last_assistant_message`, `_finalize_response`,
-# `_apply_answers_to_last_question`) now live in `chat_writer.py` and are
+# `_update_last_assistant_message`) now live in `chat_writer.py` and are
 # imported back at the top of this module under their old underscore
 # names, so existing call-sites are unchanged. They moved so the writer
 # actor can run them on its own thread without importing `chat.py` (which
@@ -168,11 +165,12 @@ class _ChatEventSink:
 
   _SAVE_INTERVAL_SECS = 1.0
   # Subset of app.events.EventType that forces a save so the user does
-  # not reconnect into a stale transcript mid-turn. Every type here is a
-  # fire-and-forget PersistTranscript / PersistError except `question`,
-  # which publish() rejects (it must go through publish_question()).
+  # not reconnect into a stale transcript mid-turn. Each is a
+  # fire-and-forget PersistTranscript / PersistError. (`question` is not
+  # here: publish() rejects question events outright — they go through
+  # publish_question()'s save-before-broadcast barrier instead.)
   _IMMEDIATE_SAVE_TYPES = frozenset(
-    {"tool_start", "tool_end", "error", "question"}
+    {"tool_start", "tool_end", "error"}
   )
 
   def __init__(self, bc, chat_id: str, run_token: str | None = None):

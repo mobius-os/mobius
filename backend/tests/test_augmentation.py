@@ -251,7 +251,7 @@ def test_concurrent_queue_appends_dont_lose_messages(db, auth, chat):
   otherwise drop one of the messages."""
   import asyncio
   from app import models
-  from app.routes.chats_stream import _append_to_pending, _ensure_unique_ts
+  from app.routes.chats_stream import _append_to_pending
   from app.database import SessionLocal
   from app.schemas import SendMessage
   from unittest.mock import MagicMock

@@ -87,22 +87,6 @@ def _content_with_uploads(chat: models.Chat, body: schemas.SendMessage) -> str:
   return content
 
 
-def _ensure_unique_ts(new_msg: dict, pending: list[dict]) -> None:
-  """Bumps new_msg['ts'] so it's strictly greater than every ts in pending.
-
-  Two sends inside the same millisecond would otherwise collide,
-  producing duplicate React keys client-side and making DELETE-by-ts
-  ambiguous (it would remove all matching entries). The id only needs
-  to be unique within the queue, not globally — keeping it as an int
-  millisecond timestamp preserves human-readable ordering.
-  """
-  if not pending:
-    return
-  max_ts = max((m.get("ts", 0) for m in pending), default=0)
-  if new_msg.get("ts", 0) <= max_ts:
-    new_msg["ts"] = max_ts + 1
-
-
 async def _append_to_pending(
   chat: models.Chat, body: schemas.SendMessage, db: Session,
 ) -> dict:
