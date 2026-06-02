@@ -83,6 +83,7 @@ RUN pip install --no-cache-dir --no-deps \
 COPY backend/app ./app/
 COPY backend/scripts ./scripts/
 COPY skill/ ./skill/
+COPY core-apps/ ./core-apps/
 COPY protected-files.txt ./protected-files.txt
 
 # Recovery sources — immutable baked copies of the backend code and

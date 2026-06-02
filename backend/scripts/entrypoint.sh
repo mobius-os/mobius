@@ -239,6 +239,12 @@ fi
 # Initialize agent experience file (seeds from template on first boot).
 python3 /app/scripts/init_agent_context.py
 
+# Bootstrap the knowledge graph (/data/shared/memory/). CREATE-IF-ABSENT:
+# unlike the flat experience file above, the graph is the agent's persistent
+# memory and must never be reseeded over learned notes. Writes the `.ready`
+# sentinel LAST; until then memory injection uses the legacy flat-file path.
+python3 /app/scripts/init_memory_graph.py
+
 # Theme: no starter file written here. /api/theme reads
 # /data/shared/theme.css when present, otherwise falls through to
 # theme.py:DEFAULT_THEME — the single source of truth for the
@@ -446,5 +452,11 @@ fi
 # the mobius user at runtime, causing subprocess "permission denied"
 # failures that look like generic CLI crashes.
 umask 022
+
+# Install the core apps (memory-graph + dreaming) + the nightly dreaming
+# cron once the server is healthy. Backgrounded so it doesn't block boot;
+# polls /api/health itself; idempotent; non-fatal. Runs as mobius so the
+# registered app files are mobius-owned.
+su -s /bin/sh mobius -c "umask 022 && CLAUDE_CONFIG_DIR=/data/cli-auth/claude bash /app/scripts/install-core-apps.sh" &
 
 exec su -s /bin/sh mobius -c "umask 022 && cd /app && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"
