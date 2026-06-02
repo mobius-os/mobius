@@ -854,7 +854,10 @@ async def install_from_manifest(
     # the merge BEFORE the compile so `effective_source` (which the
     # compile + write below consume) reflects the merged bytes on a clean
     # update, and so a conflict can short-circuit both.
-    git_source_dir = Path(app.source_dir or "")
+    # Guard on the raw string, NOT the Path: Path("") is a truthy Path, so a
+    # row with an empty source_dir would otherwise initialize a git repo in
+    # the server's working directory. Only engage git when there's a real dir.
+    git_source_dir = Path(app.source_dir) if app.source_dir else None
     if git_on and git_source_dir:
       async with fs_locks.source_dir_lock(str(git_source_dir)):
         version = str(manifest.get("version", "unknown"))

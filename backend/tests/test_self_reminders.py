@@ -283,7 +283,7 @@ def test_dispatch_fires_due_and_marks_done(client, auth, chat, monkeypatch):
     posted.append((chat_id, body.content, body.hidden))
 
   monkeypatch.setattr(
-    "app.routes.chats_stream.send_message", _fake_send,
+    "app.routes.self_reminders._send_checkin", _fake_send,
   )
   r = client.post("/api/self-reminders/dispatch", headers=auth)
   assert r.status_code == 200
@@ -309,7 +309,7 @@ def test_dispatch_retires_reminder_for_deleted_chat(client, auth, monkeypatch):
     raise AssertionError("send_message called for a deleted chat")
 
   monkeypatch.setattr(
-    "app.routes.chats_stream.send_message", _fake_send,
+    "app.routes.self_reminders._send_checkin", _fake_send,
   )
   r = client.post("/api/self-reminders/dispatch", headers=auth)
   assert r.status_code == 200

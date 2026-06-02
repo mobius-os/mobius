@@ -134,6 +134,22 @@ def cancel_reminder(
   return _reminder_out(record)
 
 
+async def _send_checkin(*, body, chat_id, principal, db):
+  """Resume a chat with a reminder's hidden note via the normal send path.
+
+  A thin module-level seam over `chats_stream.send_message`: the import stays
+  lazy (no startup import cycle between the two route modules), and a function
+  this module owns is the stable thing the dispatch test patches — robust even
+  if a sibling test desyncs cross-module import identity, which patching
+  `chats_stream.send_message` by string would be sensitive to.
+  """
+  from app.routes.chats_stream import send_message
+
+  return await send_message(
+    body=body, chat_id=chat_id, principal=principal, db=db,
+  )
+
+
 @router.post("/dispatch")
 async def dispatch_due(
   _owner: models.Owner = Depends(get_current_owner),
@@ -156,8 +172,6 @@ async def dispatch_due(
   """
   if not self_reminders.is_dispatcher_enabled():
     return {"enabled": False, "fired": 0, "reminders": []}
-
-  from app.routes.chats_stream import send_message
 
   owner = db.query(models.Owner).first()
   if owner is None:
@@ -190,7 +204,7 @@ async def dispatch_due(
       # already running it queues, otherwise it starts a fresh turn. The
       # hidden flag keeps the wake-up prompt out of the visible transcript
       # while still feeding the agent the note.
-      await send_message(
+      await _send_checkin(
         body=body, chat_id=chat_id, principal=principal, db=db,
       )
     except Exception as exc:
