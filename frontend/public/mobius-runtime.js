@@ -272,28 +272,31 @@ function makeStorage({ appId, getToken }) {
     })
   }
 
-  // ── Per-path serialization (in-tab) ─────────────────────────────────
-  // All operations that read-or-write a path's value (get, set, remove) run
-  // through a per-path promise chain, so within this runtime they execute
-  // STRICTLY in call order and never interleave. This is the single, correct
-  // fix for the whole race class Codex flagged: a slow GET can't overwrite the
-  // cache after a newer set() (its cache-write is now ordered after the set),
-  // and two set()s can't reorder their cache writes (server LWW is still by
-  // arrival, but the LOCAL mirror — the source of truth for offline reads and
-  // subscribers — is deterministic by call order). Cross-tab/iframe drains are
-  // additionally serialized by the existing Web Lock in drain().
+  // ── Per-path serialization ───────────────────────────────────────────
+  // All operations that read-or-write a path's value (get, set, remove, and
+  // dead-letter reconcile) run through a per-path lock, so they execute in call
+  // order and never interleave: a slow GET can't overwrite the cache after a
+  // newer set(), two set()s can't reorder their cache writes, and a reconcile
+  // can't clobber a concurrent write's mirror.
   //
-  // SCOPE / known bound: pathChains is per-runtime (per makeStorage). It does
-  // NOT serialize across two SEPARATE runtimes for the same app — e.g. the same
-  // app open BOTH in the in-shell iframe AND a standalone PWA tab at once,
-  // mutating the same path. There, the local mirrors can momentarily diverge by
-  // op interleaving; the server still converges by arrival-order LWW and the
-  // next online get() re-syncs each mirror. Adding a cross-context Web Lock to
-  // every read/write would slow the common single-context path to harden a rare
-  // one — deliberately not done (single-owner, server-arrival LWW is the
-  // documented contract).
+  // When the Web Locks API is available (Baseline since 2022 — every browser
+  // that can run this PWA), we use a per-(app,path) Web Lock, which serializes
+  // across ALL contexts of the same app (in-shell iframe + standalone tab), not
+  // just within one runtime. That closes the cross-context cache-mirror
+  // divergence (Codex review round-6 #1). Web Locks are granted FIFO, so call
+  // order within a tab is still preserved. Global lock order is path→outbox
+  // (set/remove take this lock, then the outbox lock inside setInner; drain
+  // takes only the outbox lock and reconciles on this lock AFTER releasing it),
+  // so the two never deadlock.
+  //
+  // Without Web Locks (ancient browsers that can't run the app anyway) we fall
+  // back to a per-runtime promise chain — single-context ordering only, the
+  // long-documented single-owner bound.
   const pathChains = new Map()
   function withPathLock(path, fn) {
+    if (navigator.locks && navigator.locks.request) {
+      return navigator.locks.request(`mobius-path-${appId}-${path}`, fn)
+    }
     const prev = pathChains.get(path) || Promise.resolve()
     // Run fn after prev settles (success OR failure — never let one op's
     // rejection break the chain for the next).
@@ -449,13 +452,10 @@ function makeStorage({ appId, getToken }) {
           // cache untouched when a pending op exists; only when none remains is
           // the cached value the rejected one, safe to drop + restore from the
           // server.
-          // (The listOps guard is per-runtime. Across two SEPARATE contexts of
-          // the same app, the shared IndexedDB mirror can still momentarily
-          // diverge — the same documented single-owner cross-context bound the
-          // pathChains / withOutboxLock notes describe; the next online get()
-          // re-syncs each mirror from server truth. Closing it fully would mean
-          // a per-path cross-context Web Lock on every read, deliberately not
-          // taken.)
+          // This runs under withPathLock(d.path) — a cross-context Web Lock
+          // where available — so the listOps check + cache mutation can't
+          // interleave with a concurrent set()/remove() for this path in ANY
+          // context (Codex review round-6 #1).
           const ops = await listOps()
           if (ops.some((o) => o.path === d.path)) return
           await cacheDelete(d.path)
