@@ -29,12 +29,20 @@
   color: var(--text);
 }
 
+.qcard__hint {
+  font-size: 11px;
+  color: var(--muted, var(--text));
+  margin-bottom: 6px;
+}
 .qcard__opts {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
 }
 .qcard__opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   padding: 6px 12px;
   border-radius: 8px;
   border: 1px solid var(--border);
@@ -70,6 +78,29 @@
 .qcard__opt--dim {
   opacity: .35;
   border-color: transparent;
+}
+
+/* Pick-one vs pick-many glyph. Uses currentColor so it's an outline on the
+   transparent pill (currentColor = --text) and a filled mark on the selected
+   accent pill (currentColor = --bg) — a clear checked/unchecked read in both
+   states and both themes, no extra color tokens. Box = multi, circle = single. */
+.qcard__mark {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  border: 1.5px solid currentColor;
+  background: transparent;
+  opacity: .65;
+}
+.qcard__mark--box {
+  border-radius: 4px;
+}
+.qcard__mark--radio {
+  border-radius: 50%;
+}
+.qcard__opt--on .qcard__mark {
+  background: currentColor;
+  opacity: 1;
 }
 
 .qcard__input {

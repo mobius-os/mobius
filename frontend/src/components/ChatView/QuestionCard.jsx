@@ -103,6 +103,17 @@ export default function QuestionCard({ questions, answeredMap, onAnswer, disable
               <div className="qcard__header">{q.header}</div>
             )}
             <div className="qcard__text">{q.question}</div>
+            {/* Single- vs multi-select was indistinguishable until you tapped
+                and watched whether a prior pick cleared. Surface it up front:
+                a caption (with a live count for multi) plus a per-option glyph
+                (□ checkbox for multi, ○ radio for single). */}
+            {!answered && (
+              <div className="qcard__hint">
+                {isMulti
+                  ? `Select all that apply${selectedArr.length ? ` · ${selectedArr.length} selected` : ''}`
+                  : 'Choose one'}
+              </div>
+            )}
             {/* Selection state was conveyed only by a CSS class — silent to
                 screen readers. Expose it as a radiogroup (single) / group of
                 checkboxes (multi) with per-option aria-checked. */}
@@ -128,6 +139,10 @@ export default function QuestionCard({ questions, answeredMap, onAnswer, disable
                     disabled={inactive}
                     title={opt.description || ''}
                   >
+                    <span
+                      className={`qcard__mark qcard__mark--${isMulti ? 'box' : 'radio'}`}
+                      aria-hidden="true"
+                    />
                     {opt.label}
                   </button>
                 )
@@ -141,6 +156,10 @@ export default function QuestionCard({ questions, answeredMap, onAnswer, disable
                 onClick={() => selectOther(q.question)}
                 disabled={inactive}
               >
+                <span
+                  className={`qcard__mark qcard__mark--${isMulti ? 'box' : 'radio'}`}
+                  aria-hidden="true"
+                />
                 Other
               </button>
               )}
