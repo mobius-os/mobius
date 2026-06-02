@@ -49,7 +49,8 @@ from app.compiler import compile_jsx
 from app.config import get_settings
 from app.storage_io import atomic_write
 from app.routes.apps import (
-  _derive_source_dir, _slugify_for_source_dir, allocate_unique_slug,
+  _derive_source_dir, _reject_if_source_dir_taken, _slugify_for_source_dir,
+  allocate_unique_slug,
 )
 
 # Decompression-bomb defense. PIL's default MAX_IMAGE_PIXELS (~89M)
@@ -75,6 +76,12 @@ _ENTRY_MAX_BYTES = 1024 * 1024
 # Seed file cap (per file). Storage seeds are prompts, default
 # configs, sample images — never huge.
 _SEED_MAX_BYTES = 4 * 1024 * 1024
+# Aggregate caps across ALL seeds in one manifest. The per-file cap alone
+# leaves the total unbounded (a manifest can list many seeds), so a small
+# manifest could still force large memory growth holding them all (Codex
+# review round-10 #6). These bound the count and the summed bytes.
+_SEEDS_COUNT_MAX = 64
+_SEEDS_TOTAL_MAX = 32 * 1024 * 1024
 
 # Icon cap matches the icon-upload route's 12 MB ceiling.
 _ICON_MAX_BYTES = 12 * 1024 * 1024
@@ -657,13 +664,24 @@ async def install_from_manifest(
       )
 
     seeds_fetched: dict[str, bytes] = {}
+    seeds_total = 0
     for sub, value in (manifest.get("storage_seeds") or {}).items():
-      if _seed_value_is_inline(value):
-        seeds_fetched[sub] = json.dumps(value).encode("utf-8")
-      else:
-        seeds_fetched[sub] = await _http_get(
-          cli, raw_base + value, _SEED_MAX_BYTES,
+      if len(seeds_fetched) >= _SEEDS_COUNT_MAX:
+        raise HTTPException(
+          400,
+          f"Manifest has too many storage_seeds (max {_SEEDS_COUNT_MAX}).",
         )
+      if _seed_value_is_inline(value):
+        data = json.dumps(value).encode("utf-8")
+      else:
+        data = await _http_get(cli, raw_base + value, _SEED_MAX_BYTES)
+      seeds_total += len(data)
+      if seeds_total > _SEEDS_TOTAL_MAX:
+        raise HTTPException(
+          400,
+          f"Manifest storage_seeds exceed {_SEEDS_TOTAL_MAX} bytes total.",
+        )
+      seeds_fetched[sub] = data
 
   # --- Phase 3: decide install vs update -------------------------------
   # Match by manifest_url, NOT by slug. Slug is now a routing concern
@@ -818,6 +836,13 @@ async def install_from_manifest(
     source_dir_path = Path(app.source_dir or "")
     if source_dir_path:
       async with fs_locks.source_dir_lock(str(source_dir_path)):
+        # Refuse if a DIFFERENT app already claims this source dir (Codex
+        # review round-10 #1). The slug is freshly unique, so this only
+        # catches a manually-created app that explicitly supplied the same
+        # path; on the update path exclude_id is this very app.
+        _reject_if_source_dir_taken(
+          db, str(source_dir_path), exclude_id=app.id
+        )
         source_dir_path.mkdir(parents=True, exist_ok=True)
         jsx_file = source_dir_path / "index.jsx"
         if jsx_file.exists():
@@ -906,7 +931,11 @@ async def install_from_manifest(
   if sched and sched.get("default"):
     slug = app.slug
     job_name = sched.get("job", "fetch.sh")
-    app_data_dir = data_dir / "apps" / slug
+    # Use the app's ACTUAL source_dir (where the JSX + job script live), not a
+    # freshly re-derived /data/apps/<slug>. After a valid source-dir PATCH the
+    # two diverge, which would split the job file from the source tree (Codex
+    # review round-10 #7). `slug` stays the cron job identifier.
+    app_data_dir = Path(app.source_dir) if app.source_dir else data_dir / "apps" / slug
     try:
       # Under the per-source-dir lock so the job-file writes serialize vs a
       # concurrent create/patch claiming this directory, and recheck the app

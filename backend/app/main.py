@@ -11,7 +11,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -147,7 +147,7 @@ async def lifespan(app):
   # /recover/chat down with it (the exact failure mode the scaffold
   # was built to prevent).
   try:
-    from app.routes.apps import _derive_source_dir
+    from pathlib import Path as _Path
     from app.database import SessionLocal
     from app import models as _models
     _db = SessionLocal()
@@ -155,9 +155,22 @@ async def lifespan(app):
       legacy = _db.query(_models.App).filter(
         _models.App.source_dir.is_(None)
       ).all()
+      changed = False
       for _a in legacy:
-        _a.source_dir = _derive_source_dir(settings.data_dir, _a.name)
-      if legacy:
+        # Derive from the UNIQUE slug (the migration assigns one) — NOT the raw
+        # name, which would give two legacy rows named "News" the same
+        # /data/apps/news tree. Skip a dir another app already claims so the
+        # repair never creates a shared source tree (Codex review round-10 #2).
+        if not _a.slug:
+          continue
+        candidate = str(_Path(settings.data_dir) / "apps" / _a.slug)
+        if _db.query(_models.App).filter(
+          _models.App.id != _a.id, _models.App.source_dir == candidate
+        ).first():
+          continue
+        _a.source_dir = candidate
+        changed = True
+      if changed:
         _db.commit()
     finally:
       _db.close()
@@ -239,25 +252,69 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # themselves (storage PUT 50 MB, icon 12 MB via storage_io.read_capped_body),
 # but FastAPI buffers the WHOLE body for Pydantic-parsed endpoints (e.g. a
 # create with a huge jsx_source) before validation — an unbounded body there
-# could OOM the memory-tight host (Codex review round-9 #4). Reject up front on
-# a declared Content-Length over the cap. The cap sits ABOVE every legitimate
-# route limit (storage 50 MB, uploads 20 MB) so it only ever stops abuse.
+# could OOM the memory-tight host (Codex review round-9 #4, round-10 #5). The
+# cap sits ABOVE every legitimate route limit (storage 50 MB, uploads 20 MB) so
+# it only ever stops abuse.
 _MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024
 
 
-@app.middleware("http")
-async def _cap_request_body(request, call_next):
-  cl = request.headers.get("content-length")
-  if cl is not None:
-    try:
-      too_big = int(cl) > _MAX_REQUEST_BODY_BYTES
-    except ValueError:
-      too_big = False
-    if too_big:
-      return JSONResponse(
-        {"detail": "Request body too large."}, status_code=413
-      )
-  return await call_next(request)
+class _BodySizeLimitMiddleware:
+  """ASGI middleware that bounds the request body — including chunked bodies
+  with no Content-Length (Codex review round-10 #5).
+
+  A declared Content-Length over the cap is rejected with 413 before the app
+  runs. Otherwise the body stream is wrapped with a running byte counter; once
+  it crosses the cap we stop feeding the app and signal `http.disconnect`, so
+  the app aborts (a Pydantic endpoint sees a truncated body and 422s) rather
+  than buffering an unbounded body into memory. Pure ASGI (not
+  BaseHTTPMiddleware) so it never itself buffers the body.
+  """
+
+  def __init__(self, app, max_bytes: int):
+    self.app = app
+    self.max_bytes = max_bytes
+
+  async def __call__(self, scope, receive, send):
+    if scope["type"] != "http":
+      return await self.app(scope, receive, send)
+    for name, value in scope.get("headers") or []:
+      if name == b"content-length":
+        try:
+          if int(value) > self.max_bytes:
+            return await self._reject(send)
+        except ValueError:
+          pass
+        break
+    received = 0
+    disconnected = False
+
+    async def limited_receive():
+      nonlocal received, disconnected
+      if disconnected:
+        return {"type": "http.disconnect"}
+      message = await receive()
+      if message["type"] == "http.request":
+        received += len(message.get("body", b""))
+        if received > self.max_bytes:
+          disconnected = True
+          return {"type": "http.disconnect"}
+      return message
+
+    return await self.app(scope, limited_receive, send)
+
+  async def _reject(self, send):
+    await send({
+      "type": "http.response.start",
+      "status": 413,
+      "headers": [(b"content-type", b"application/json")],
+    })
+    await send({
+      "type": "http.response.body",
+      "body": b'{"detail":"Request body too large."}',
+    })
+
+
+app.add_middleware(_BodySizeLimitMiddleware, max_bytes=_MAX_REQUEST_BODY_BYTES)
 
 app.add_middleware(
   CORSMiddleware,
