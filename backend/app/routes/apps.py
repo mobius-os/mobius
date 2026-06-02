@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from app import activity, fs_locks, models, schemas
 from app.storage_io import read_capped_body
 from app.broadcast import get_system_broadcast
-from app.compiler import compile_jsx
+from app.compiler import compile_jsx, recompile_app_bundle
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
@@ -392,9 +392,10 @@ async def update_app(
   with the row loaded fresh under the lock, so a PATCH can't race a concurrent
   uninstall + SQLite id reuse and recompile into a REPLACEMENT app's bundle. ALL
   validation (source_dir shape + uniqueness) happens BEFORE the recompile, so a
-  conflicting field can't overwrite the live bundle and then fail; the recompile
-  snapshots the prior bundle so a commit failure restores it rather than leaving
-  the new (uncommitted) bundle live (Codex review round-12).
+  conflicting field can't overwrite the live bundle and then fail. The recompile
+  goes through ``recompile_app_bundle``, which compiles out-of-place and only
+  swaps the live bundle in after the commit succeeds — so a commit failure can
+  never leave the new (uncommitted) bundle live.
   """
   data_dir = get_settings().data_dir
   # Validate the source_dir SHAPE up front (cheap, no side effects). The
@@ -406,53 +407,16 @@ async def update_app(
   )
 
   async def _recompile_and_commit(app):
-    # Everything else is validated by now, so the only filesystem-touching
-    # mutation left is the recompile. Snapshot the prior bundle first so a
-    # commit failure can restore it.
-    bundle = (
-      Path(app.compiled_path)
-      if (body.jsx_source is not None and app.compiled_path) else None
-    )
-    bak = None
-    if bundle and bundle.exists():
-      bak = bundle.with_suffix(".js.bak")
-      try:
-        if bak.exists():
-          bak.unlink()
-        shutil.copy2(bundle, bak)
-      except OSError:
-        bak = None
-    if body.jsx_source is not None:
-      app.jsx_source = body.jsx_source
-      try:
-        app.compiled_path = await compile_jsx(app.id, body.jsx_source)
-      except RuntimeError as exc:
-        db.rollback()
-        # esbuild writes the bundle only on success, so a compile error left
-        # the live bundle untouched — just drop the snapshot.
-        if bak and bak.exists():
-          try:
-            bak.unlink()
-          except OSError:
-            pass
-        raise HTTPException(status_code=422, detail=str(exc))
-    try:
+    # Everything else is validated by now. With no source change there's
+    # nothing to compile, so just persist the field updates.
+    if body.jsx_source is None:
       db.commit()
-    except Exception:
+      return
+    try:
+      await recompile_app_bundle(db, app, body.jsx_source)
+    except RuntimeError as exc:
       db.rollback()
-      # Restore the prior bundle so a failed commit can't leave the new
-      # (uncommitted) bundle live for the old row.
-      if bak and bak.exists():
-        try:
-          bak.replace(bundle)
-        except OSError:
-          pass
-      raise
-    if bak and bak.exists():
-      try:
-        bak.unlink()
-      except OSError:
-        pass
+      raise HTTPException(status_code=422, detail=str(exc))
 
   async with (
     fs_locks.install_uninstall_lock(),

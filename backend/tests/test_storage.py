@@ -583,3 +583,127 @@ def test_uninstall_skips_nested_and_shared_source_dir(client, auth, owner_token,
   db.commit()
   assert client.delete(f"/api/apps/{a2}", headers=auth).status_code == 204
   assert os.path.isdir(shared)  # a3 still references it
+
+
+# Transactional bundle recompile — both PATCH and the file watcher route their
+# recompiles through compiler.recompile_app_bundle, which compiles out-of-place
+# and swaps the live bundle in only after the DB commit succeeds.
+
+
+@pytest.mark.asyncio
+async def test_recompile_app_bundle_promotes_after_commit(client, owner_token, db):
+  """The new bundle goes live only after a successful commit, and the staging
+  file is consumed by the atomic swap (not left behind)."""
+  import os
+  import app.models as models
+  from app.compiler import recompile_app_bundle
+  app_id = _make_app(client, owner_token)
+  data_dir = os.environ["DATA_DIR"]
+  live = os.path.join(data_dir, "compiled", f"app-{app_id}.js")
+  row = db.query(models.App).filter(models.App.id == app_id).first()
+  new_jsx = "export default function App(){ return <div>PROMOTED</div> }"
+  await recompile_app_bundle(db, row, new_jsx)
+  assert "PROMOTED" in open(live, encoding="utf-8").read()
+  assert not os.path.exists(live + ".staging")
+  assert row.jsx_source == new_jsx
+
+
+@pytest.mark.asyncio
+async def test_recompile_app_bundle_commit_failure_keeps_live_bundle(
+  client, owner_token, db,
+):
+  """A commit failure discards the staging file and leaves the live bundle
+  exactly as it was — never a half-applied / uncommitted bundle."""
+  import os
+  import app.models as models
+  from app.compiler import recompile_app_bundle
+  app_id = _make_app(client, owner_token)
+  data_dir = os.environ["DATA_DIR"]
+  live = os.path.join(data_dir, "compiled", f"app-{app_id}.js")
+  before = open(live, "rb").read()
+  row = db.query(models.App).filter(models.App.id == app_id).first()
+
+  class _FailCommit:
+    def commit(self):
+      raise RuntimeError("commit boom")
+
+    def rollback(self):
+      db.rollback()
+
+  new_jsx = "export default function App(){ return <div>CHANGED</div> }"
+  with pytest.raises(RuntimeError):
+    await recompile_app_bundle(_FailCommit(), row, new_jsx)
+  assert open(live, "rb").read() == before
+  assert not os.path.exists(live + ".staging")
+
+
+@pytest.mark.asyncio
+async def test_recompile_app_bundle_bad_jsx_keeps_live_bundle(
+  client, owner_token, db,
+):
+  """An esbuild failure leaves the live bundle untouched (esbuild writes its
+  outfile only on success) and raises so the caller can roll back."""
+  import os
+  import app.models as models
+  from app.compiler import recompile_app_bundle
+  app_id = _make_app(client, owner_token)
+  data_dir = os.environ["DATA_DIR"]
+  live = os.path.join(data_dir, "compiled", f"app-{app_id}.js")
+  before = open(live, "rb").read()
+  row = db.query(models.App).filter(models.App.id == app_id).first()
+  # Has `export default` (passes the cheap guard) but the JSX is unclosed, so
+  # esbuild itself fails.
+  with pytest.raises(RuntimeError):
+    await recompile_app_bundle(
+      db, row, "export default function App(){ return <div> }",
+    )
+  assert open(live, "rb").read() == before
+
+
+@pytest.mark.asyncio
+async def test_watcher_recompiles_registered_app(client, owner_token):
+  """An on-disk source edit, resolved to its app by source_dir, recompiles the
+  live bundle through the locked transactional path."""
+  import asyncio
+  import os
+  import app.models as models
+  from app.app_watcher import _JsxHandler
+  from app.database import SessionLocal
+  data_dir = os.environ["DATA_DIR"]
+  src = os.path.join(data_dir, "apps", "watch-me")
+  os.makedirs(src, exist_ok=True)
+  app_id = client.post("/api/apps/", json={
+    "name": "watchme", "description": "x",
+    "jsx_source": "export default function App(){ return <div>V0</div> }",
+    "source_dir": src,
+  }, headers={"Authorization": f"Bearer {owner_token}"}).json()["id"]
+  jsx_path = os.path.join(src, "index.jsx")
+  new_jsx = "export default function App(){ return <div>V1</div> }"
+  with open(jsx_path, "w", encoding="utf-8") as f:
+    f.write(new_jsx)
+  await _JsxHandler(asyncio.get_running_loop())._recompile(jsx_path)
+  s = SessionLocal()
+  try:
+    row = s.query(models.App).filter(models.App.id == app_id).first()
+    assert row.jsx_source == new_jsx
+  finally:
+    s.close()
+  live = os.path.join(data_dir, "compiled", f"app-{app_id}.js")
+  assert "V1" in open(live, encoding="utf-8").read()
+
+
+@pytest.mark.asyncio
+async def test_watcher_skips_unclaimed_source_dir():
+  """A source file in a directory no app row claims is a no-op (the create-then-
+  register gap) — the watcher must not crash or guess an owner."""
+  import asyncio
+  import os
+  from app.app_watcher import _JsxHandler
+  data_dir = os.environ["DATA_DIR"]
+  orphan = os.path.join(data_dir, "apps", "orphan-dir")
+  os.makedirs(orphan, exist_ok=True)
+  jsx_path = os.path.join(orphan, "index.jsx")
+  with open(jsx_path, "w", encoding="utf-8") as f:
+    f.write("export default function App(){ return <div/> }")
+  # Must return without raising (and without compiling anything).
+  await _JsxHandler(asyncio.get_running_loop())._recompile(jsx_path)
