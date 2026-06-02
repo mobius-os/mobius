@@ -46,6 +46,7 @@ def get_settings_view(
     "gemini_configured": owner.gemini_api_key_enc is not None,
     "codex_authenticated": codex_creds.exists(),
     "provider": owner.provider or "claude",
+    "skills_enabled": providers.skills_enabled(data_dir),
   }
 
 
@@ -64,6 +65,15 @@ def update_settings(
   if body.provider is not None:
     owner.provider = body.provider
   db.commit()
+  # `skills_enabled` lives in the shared agent-settings.json (the
+  # Owner model is frozen / chmod 444), so it's persisted outside the
+  # DB transaction. Merge into the existing file so we don't clobber
+  # model/effort defaults the picker wrote there.
+  if body.skills_enabled is not None:
+    data_dir = get_app_settings().data_dir
+    current = providers._load_agent_settings(data_dir)
+    current["skills_enabled"] = bool(body.skills_enabled)
+    providers.write_agent_settings(data_dir, current)
   return {"ok": True}
 
 

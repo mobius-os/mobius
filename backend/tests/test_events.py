@@ -42,6 +42,39 @@ def test_tool_end_marks_done():
   assert blocks[0]["status"] == "done"
 
 
+def test_skill_loaded_stamps_skill_onto_skill_tool_block():
+  """A skill_loaded event stamps the skill name onto the most recent
+  Skill tool block so the persisted transcript carries the chip data."""
+  blocks = [
+    {"type": "tool", "tool": "Skill", "input": "humanizer",
+     "output": "", "status": "running"},
+  ]
+  changed = process_event(
+    {"type": "skill_loaded", "skill": "humanizer"}, blocks,
+  )
+  assert changed
+  assert blocks[0]["skill"] == "humanizer"
+
+
+def test_skill_loaded_without_skill_block_is_noop():
+  """No Skill tool block to attach to → no change, no crash."""
+  blocks = [{"type": "tool", "tool": "Bash", "input": "ls",
+             "output": "", "status": "done"}]
+  changed = process_event(
+    {"type": "skill_loaded", "skill": "humanizer"}, blocks,
+  )
+  assert changed is False
+  assert "skill" not in blocks[0]
+
+
+def test_skill_loaded_empty_name_is_noop():
+  blocks = [{"type": "tool", "tool": "Skill", "input": "",
+             "output": "", "status": "running"}]
+  changed = process_event({"type": "skill_loaded", "skill": ""}, blocks)
+  assert changed is False
+  assert "skill" not in blocks[0]
+
+
 def test_tool_output_fills_last_running():
   blocks = [
     {"type": "tool", "tool": "Bash", "input": "ls",

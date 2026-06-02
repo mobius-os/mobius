@@ -267,6 +267,11 @@ class SettingsUpdate(BaseModel):
 
   gemini_api_key: str | None = None
   provider: str | None = None
+  # Opt-in to offering SDK skills to the Claude agent. Behavior-
+  # shifting and default-off (see providers.skills_enabled); persisted
+  # to the shared agent-settings.json rather than the frozen Owner
+  # model. None means "leave unchanged".
+  skills_enabled: bool | None = None
 
   @field_validator("provider")
   @classmethod

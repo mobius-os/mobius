@@ -75,6 +75,13 @@ def translate_item_started(item: dict) -> list[dict]:
   userMessage is just echo. Anything else returns an
   ``unknown_sdk_event`` (gated by MOBIUS_EMIT_UNKNOWN) so a new
   Codex item type lands in chat.log instead of disappearing.
+
+  TODO(skill-observability): the Codex app-server protocol has no
+  skill-load item today (feature 089 surfaces Claude's Skill tool via
+  a `skill_loaded` event in claude_sdk_runner). If a Codex
+  skill-equivalent ever appears as an item type, translate it here to
+  a `skill_loaded` event so the chip + activity-log path light up for
+  Codex too — the rest of the pipeline is provider-agnostic.
   """
   itype = _canonical_item_type(item.get("type"))
   if itype == "commandExecution":

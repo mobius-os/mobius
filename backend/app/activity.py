@@ -16,9 +16,14 @@ read both):
                          "size_delta":<int>}
   {"ev":"cron_outcome",  "ts":"<ISO8601>", "app_id":<int>, "job":"<str>",
                          "exit_code":<int>, "duration_ms":<int>}
+  {"ev":"skill_loaded",  "ts":"<ISO8601>", "chat_id":"<str>", "skill":"<str>"}
 
 `app_id` may be 0 / null for platform-level events (the bootstrap
 store install does not have a numeric id at the moment it fires, etc).
+
+`skill_loaded` is chat-scoped (carries `chat_id`, not `app_id`): it
+records each time the agent invokes the Skill tool, so "most-used
+skills" can be aggregated from the log. See `most_used_skills`.
 
 Rotation: weekly. On each write we check the active file's mtime; if
 older than 7 days we rename it to activity.YYYY-WW.jsonl and start a
@@ -289,6 +294,52 @@ def _yield_events_from(path: Path):
   except OSError as exc:
     log.warning("activity log read failed for %s: %s", path, exc)
     return
+
+
+def log_skill_load(chat_id: str | None, skill: str, ts: str | None = None) -> None:
+  """Records one Skill-tool invocation in the activity log.
+
+  Thin wrapper over `log_event` so the runner has a single, named call
+  site for the skill-observability path and doesn't repeat the event
+  vocabulary. A blank skill name is dropped — an empty chip carries no
+  signal and would only pollute the "most-used" aggregation.
+  """
+  skill = (skill or "").strip()
+  if not skill:
+    return
+  log_event("skill_loaded", ts=ts, chat_id=chat_id, skill=skill)
+
+
+def most_used_skills(
+  since: datetime,
+  until: datetime,
+) -> list[dict]:
+  """Aggregates skill_loaded events into a most-used ranking.
+
+  Scans the activity log over [since, until] and returns a list of
+  `{"skill": <name>, "count": <int>}` dicts sorted by count descending,
+  then by skill name for a stable tie-break. Reads through the same
+  cross-archive scanner `read_events` uses, so a window that straddles
+  a weekly rotation still sees every load.
+
+  Returns an empty list when no skills loaded in the window — the
+  caller renders an empty "no skills used yet" state rather than
+  special-casing None.
+  """
+  counts: dict[str, int] = {}
+  active = _activity_path()
+  for path in _candidate_files(active):
+    for ev, ts in _yield_events_from(path):
+      if ts < since or ts > until:
+        continue
+      if ev.get("ev") != "skill_loaded":
+        continue
+      skill = ev.get("skill")
+      if not isinstance(skill, str) or not skill:
+        continue
+      counts[skill] = counts.get(skill, 0) + 1
+  ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+  return [{"skill": skill, "count": count} for skill, count in ranked]
 
 
 def read_events(

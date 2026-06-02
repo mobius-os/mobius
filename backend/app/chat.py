@@ -1828,6 +1828,7 @@ async def _run_chat_impl(
     sink = _ChatEventSink(bc, chat_id, run_token=run_token)
     try:
       from app.claude_sdk_runner import run_claude_sdk_turn
+      from app.providers import skills_enabled as _skills_enabled
       runner_result = await run_claude_sdk_turn(
         user_message=user_message,
         session_id=session_id,
@@ -1839,6 +1840,7 @@ async def _run_chat_impl(
         pending_questions=questions._pending,
         db=db,
         agent_settings=agent_settings,
+        skills_enabled=_skills_enabled(settings.data_dir),
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
