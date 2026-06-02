@@ -1131,3 +1131,201 @@ def test_delete_publishes_app_updated(client, auth):
   fake_sb.publish.assert_called_once_with({
     "type": "app_updated", "appId": str(app_id),
   })
+
+
+# --- Per-app git model (feature 084) ---------------------------------
+# The flag is OFF by default, so every test above runs the legacy
+# overwrite path. These pin both halves of the contract: OFF is
+# byte-identical to today (no .git anywhere), ON engages the merge model.
+
+# A multi-line component with the two editable regions (title near the
+# top, footer near the bottom) separated by several unchanged lines.
+# git's line-based 3-way merge needs unchanged context BETWEEN two hunks
+# to interleave them cleanly — adjacent single-line edits conflict even
+# when "logically" disjoint, so the spacing here is deliberate.
+JSX_MULTI = (
+  "export default function App() {\n"
+  "  const title = 'ORIGINAL TITLE'\n"
+  "  const a = 1\n"
+  "  const b = 2\n"
+  "  const c = 3\n"
+  "  const d = 4\n"
+  "  const e = 5\n"
+  "  const footer = 'ORIGINAL FOOTER'\n"
+  "  return <div>{title}{footer}{a}{b}{c}{d}{e}</div>\n"
+  "}\n"
+)
+
+
+def _enable_per_app_git():
+  """Write agent-settings.json so per_app_git_enabled reads True. Returns
+  the path so a test can flip it back off if needed."""
+  from app.providers import write_agent_settings
+  data_dir = str(get_settings().data_dir)
+  write_agent_settings(data_dir, {"per_app_git_enabled": True})
+
+
+def _install_v1(client, auth, base, manifest, jsx):
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, jsx.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, PROMPT.encode()),
+    base + "fetch.sh": (200, b""),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    return client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+
+
+def _update_v2(client, auth, base, manifest, jsx):
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, jsx.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, b"v2 prompt"),
+    base + "fetch.sh": (200, b""),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    return client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+
+
+def test_flag_off_install_creates_no_git_repo(client, auth, bypass_url_validation):
+  """With the flag OFF (the default) a fresh install must behave exactly
+  as before: source written, but NO .git directory anywhere."""
+  base = "https://off.test/repo/"
+  r = _install_v1(client, auth, base, {**MANIFEST_NEWS, "id": "off-install"}, JSX)
+  assert r.status_code == 201, r.text
+  data_dir = Path(get_settings().data_dir)
+  assert not (data_dir / "apps" / "off-install" / ".git").exists()
+
+
+def test_flag_off_update_overwrites_local_edits_byte_identical(
+  client, auth, bypass_url_validation,
+):
+  """Flag OFF: the update blindly overwrites the on-disk source with
+  upstream, exactly as before this feature. No merge, no .git, no
+  conflict mode."""
+  base = "https://off2.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "off-update"}
+  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
+  assert r1.status_code == 201, r1.text
+  data_dir = Path(get_settings().data_dir)
+  jsx_file = data_dir / "apps" / "off-update" / "index.jsx"
+
+  # Agent edits the on-disk source locally.
+  jsx_file.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "AGENT EDIT"))
+
+  jsx_v2 = JSX_MULTI.replace("ORIGINAL FOOTER", "UPSTREAM FOOTER")
+  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["mode"] == "update"
+  # Legacy behavior: upstream wins outright, the agent edit is GONE.
+  assert jsx_file.read_text() == jsx_v2
+  assert "AGENT EDIT" not in jsx_file.read_text()
+  assert not (data_dir / "apps" / "off-update" / ".git").exists()
+
+
+def test_flag_on_install_creates_repo_and_records_upstream(
+  client, auth, bypass_url_validation,
+):
+  """Flag ON: a fresh install inits the per-app repo and stamps the
+  upstream commit + jsx sha on the App row."""
+  _enable_per_app_git()
+  base = "https://on.test/repo/"
+  r = _install_v1(client, auth, base, {**MANIFEST_NEWS, "id": "on-install"}, JSX)
+  assert r.status_code == 201, r.text
+  data_dir = Path(get_settings().data_dir)
+  assert (data_dir / "apps" / "on-install" / ".git").is_dir()
+  # The App row carries the upstream provenance.
+  from app.models import App
+  from app.database import SessionLocal
+  db = SessionLocal()
+  try:
+    app = db.query(App).filter(App.slug == "on-install").first()
+    assert app.upstream_commit
+    assert app.upstream_jsx_sha
+  finally:
+    db.close()
+
+
+def test_flag_on_clean_update_carries_local_edits_forward(
+  client, auth, bypass_url_validation,
+):
+  """Flag ON: a local edit to one region + an upstream edit to a DISJOINT
+  region merges cleanly — the served source contains BOTH changes."""
+  _enable_per_app_git()
+  base = "https://on2.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "on-clean"}
+  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
+  assert r1.status_code == 201, r1.text
+  data_dir = Path(get_settings().data_dir)
+  jsx_file = data_dir / "apps" / "on-clean" / "index.jsx"
+
+  # Agent edits the title locally.
+  jsx_file.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "AGENT TITLE"))
+
+  # Upstream v2 edits the footer — a disjoint region.
+  jsx_v2 = JSX_MULTI.replace("ORIGINAL FOOTER", "UPSTREAM FOOTER")
+  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["mode"] == "update"
+  merged = jsx_file.read_text()
+  assert "AGENT TITLE" in merged       # local edit carried forward
+  assert "UPSTREAM FOOTER" in merged   # upstream change applied
+
+
+def test_flag_on_conflicting_update_returns_conflict_and_preserves_local(
+  client, auth, bypass_url_validation,
+):
+  """Flag ON: a local edit + an upstream edit to the SAME region conflicts.
+  The endpoint returns mode='conflict' with the conflicting path, and the
+  served source keeps the local edit untouched (no clobber, no markers)."""
+  _enable_per_app_git()
+  base = "https://on3.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "on-conflict"}
+  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
+  assert r1.status_code == 201, r1.text
+  data_dir = Path(get_settings().data_dir)
+  jsx_file = data_dir / "apps" / "on-conflict" / "index.jsx"
+
+  local = JSX_MULTI.replace("ORIGINAL TITLE", "AGENT TITLE")
+  jsx_file.write_text(local)
+
+  # Upstream v2 edits the SAME title line differently → conflict.
+  jsx_v2 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
+  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
+  assert r2.status_code == 201, r2.text
+  payload = r2.json()
+  assert payload["mode"] == "conflict"
+  assert "index.jsx" in payload["conflict_paths"]
+  # Local edit preserved verbatim — no upstream bytes, no conflict markers.
+  served = jsx_file.read_text()
+  assert served == local
+  assert "<<<<<<<" not in served
+  assert "UPSTREAM TITLE" not in served
+  # The DB row's jsx_source is NOT overwritten with the upstream bytes —
+  # it stays whatever it was before the update (here the v1 install value,
+  # since the test wrote the local edit straight to disk without the
+  # watcher running). The point: a conflict never stamps upstream onto the
+  # row, so the served version stays local until an agent resolves it.
+  from app.models import App
+  from app.database import SessionLocal
+  db = SessionLocal()
+  try:
+    app = db.query(App).filter(App.slug == "on-conflict").first()
+    assert app.jsx_source != jsx_v2
+    assert "UPSTREAM TITLE" not in app.jsx_source
+    # The new upstream WAS recorded for the later resolution pass.
+    assert app.upstream_commit
+  finally:
+    db.close()
