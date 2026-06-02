@@ -507,6 +507,31 @@ def test_create_rejects_duplicate_source_dir(client, auth, owner_token):
   assert r.status_code == 409
 
 
+def test_patch_conflicting_source_dir_keeps_bundle(client, auth, owner_token):
+  """A PATCH with new JSX + a source_dir another app claims is rejected 409
+  WITHOUT overwriting the live bundle — validation precedes the recompile
+  (Codex review round-12)."""
+  import os
+  data_dir = os.environ["DATA_DIR"]
+  jsx = "export default function App(){ return <div>A</div> }"
+  da = os.path.join(data_dir, "apps", "patch-a")
+  client.post("/api/apps/", json={
+    "name": "pa", "description": "x", "jsx_source": jsx, "source_dir": da,
+  }, headers=auth)
+  db_dir = os.path.join(data_dir, "apps", "patch-b")
+  b = client.post("/api/apps/", json={
+    "name": "pb", "description": "x", "jsx_source": jsx, "source_dir": db_dir,
+  }, headers=auth).json()["id"]
+  bundle = os.path.join(data_dir, "compiled", f"app-{b}.js")
+  before = open(bundle, "rb").read()
+  r = client.patch(f"/api/apps/{b}", json={
+    "jsx_source": "export default function App(){ return <div>NEW</div> }",
+    "source_dir": da,   # already claimed by app pa -> 409 before compile
+  }, headers=auth)
+  assert r.status_code == 409
+  assert open(bundle, "rb").read() == before   # bundle untouched
+
+
 def test_uninstall_skips_numeric_source_dir(client, auth, owner_token, db):
   """Uninstall must NOT rmtree a /data/apps/<number> source_dir — that path is
   another app's STORAGE tree. Defends a legacy row created before source_dir
