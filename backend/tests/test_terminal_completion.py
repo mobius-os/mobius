@@ -25,6 +25,7 @@ from app import chat_queue, chat_writer, models
 from app.broadcast import ChatBroadcast, create_broadcast
 from app.chat_writer import Barrier, get_writer
 from app.database import SessionLocal
+from app.deps import Principal
 
 
 # -- shared harness ------------------------------------------------------
@@ -1168,7 +1169,8 @@ def _direct_send(cid):
   body = chat_mod.schemas.SendMessage(content="hello")
   db = SessionLocal()
   try:
-    return asyncio.run(chats_stream.send_message(body, cid, None, db))
+    principal = Principal(owner=db.query(models.Owner).one(), app_id=None)
+    return asyncio.run(chats_stream.send_message(body, cid, principal, db))
   finally:
     db.close()
 

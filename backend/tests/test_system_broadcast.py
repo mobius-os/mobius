@@ -37,6 +37,7 @@ from app.broadcast import (
   set_active_broadcast,
 )
 from app.chat_writer import Barrier, get_writer
+from app.deps import Principal
 from app.routes.notify import NotifyBody
 
 
@@ -368,7 +369,9 @@ class _NeverDisconnectedRequest:
 
 
 @pytest.mark.asyncio
-async def test_stream_subscribe_happens_inside_generator_not_at_endpoint():
+async def test_stream_subscribe_happens_inside_generator_not_at_endpoint(
+  db, chat,
+):
   """The leak fix: bc.subscribe() must run INSIDE the GET /stream
   generator (when iteration starts), NOT when the endpoint builds the
   StreamingResponse. Otherwise a client that disconnects before the
@@ -377,14 +380,16 @@ async def test_stream_subscribe_happens_inside_generator_not_at_endpoint():
   lingers until the broadcast completes."""
   from app.routes.chats_stream import stream_chat
 
-  bc = ChatBroadcast("leakchat")
+  bc = ChatBroadcast(chat.id)
   bc.publish({"type": "text", "content": "hello"})
   bc_mod._broadcasts[bc.chat_id] = bc
   try:
     baseline = len(bc.subscribers)
 
     resp = await stream_chat(
-      request=_NeverDisconnectedRequest(), chat_id=bc.chat_id, _=None,
+      request=_NeverDisconnectedRequest(), chat_id=bc.chat_id,
+      principal=Principal(owner=db.query(models.Owner).one(), app_id=None),
+      db=db,
     )
 
     # Building the response must NOT have subscribed yet — the generator
@@ -406,14 +411,14 @@ async def test_stream_subscribe_happens_inside_generator_not_at_endpoint():
 
 
 @pytest.mark.asyncio
-async def test_stream_generator_unsubscribes_after_finally_runs():
+async def test_stream_generator_unsubscribes_after_finally_runs(db, chat):
   """Driving the GET /stream generator to completion must leave
   bc.subscribers back at baseline: subscribe (inside the generator) and
   the unsubscribe in its finally are paired across the generator's whole
   lifecycle, so a finished/abandoned stream never leaks a subscriber."""
   from app.routes.chats_stream import stream_chat
 
-  bc = ChatBroadcast("donechat")
+  bc = ChatBroadcast(chat.id)
   bc.publish({"type": "text", "content": "hi"})
   # A completed broadcast WITHOUT a done event in the catch-up: the
   # generator synthesises a done and returns, exercising the early-return
@@ -424,7 +429,9 @@ async def test_stream_generator_unsubscribes_after_finally_runs():
     baseline = len(bc.subscribers)
 
     resp = await stream_chat(
-      request=_NeverDisconnectedRequest(), chat_id=bc.chat_id, _=None,
+      request=_NeverDisconnectedRequest(), chat_id=bc.chat_id,
+      principal=Principal(owner=db.query(models.Owner).one(), app_id=None),
+      db=db,
     )
 
     saw_subscriber_mid_stream = False
