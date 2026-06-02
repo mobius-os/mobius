@@ -30,6 +30,12 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
 const SYSTEM_EVENTS = new Set([
   'theme_updated',
   'app_updated',
+  // app_built is the chat-SCOPED CTA signal: the backend publishes it
+  // onto ONLY the building chat's broadcast (see routes/notify.py), so
+  // it arrives exclusively on the stream of the chat that built the app.
+  // Forwarded to onSystemEvent like the other system events; the handler
+  // sets the "Open app" CTA. (app_updated stays list-refresh-only.)
+  'app_built',
   'shell_rebuilding',
   'shell_rebuilt',
   'shell_rebuild_failed',

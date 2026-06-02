@@ -25,9 +25,25 @@ const shellReload = (() => {
   try { return JSON.parse(raw) } catch { return null }
 })()
 
-// Parse deep-link URL (push notification taps land on /app/:id or /chat/:id).
+// Parse deep-link URL. A COLD notification tap lands on the in-scope
+// shell form `/shell/?app=<id>` (or `?chat=<id>`) — this is what reopens
+// the installed standalone PWA instead of a browser tab, because it's
+// inside the manifest scope (`/shell/`). The legacy out-of-scope forms
+// `/app/:id` and `/chat/:id` are still parsed for back-compat (warm taps
+// on notifications already in the OS tray, or older senders).
 const deepLink = (() => {
   const path = window.location.pathname
+  // In-scope cold-start form: /shell/?app=<id> | /shell/?chat=<id>.
+  if (/^\/shell\/?$/.test(path)) {
+    try {
+      const params = new URLSearchParams(window.location.search)
+      const app = params.get('app')
+      const chat = params.get('chat')
+      if (app) return { view: 'canvas', appId: parseInt(app, 10) }
+      if (chat) return { view: 'chat', chatId: chat }
+    } catch { /* no query — fall through */ }
+    return null
+  }
   const appMatch = path.match(/^\/app\/([^/]+)$/)
   const chatMatch = path.match(/^\/chat\/([^/]+)$/)
   if (appMatch) return { view: 'canvas', appId: parseInt(appMatch[1], 10) }

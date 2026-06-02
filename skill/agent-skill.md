@@ -974,11 +974,19 @@ fall back to text) on the same turn.
 
 Title: "Möbius needs your answer". Body: the first ~80 chars of
 your question. Include `source_id: "$CHAT_ID"` and
-`target: "/chat/$CHAT_ID"` so the tap routes back here. If the
+`target: "/shell/?chat=$CHAT_ID"` so the tap routes back here. If the
 partner has the chat open, the notify endpoint suppresses the push
 itself — no extra guard needed on your side. Skip the notify only
 when you delivered something useful in the same turn AND that
 delivery already sent a notification.
+
+**Use the `/shell/?app=ID` / `/shell/?chat=ID` target form, NOT
+`/app/ID` / `/chat/ID`.** The PWA's manifest scope is `/shell/`. A
+target inside that scope reopens the installed standalone app when the
+partner taps a notification while the app is fully closed; an
+out-of-scope `/app/ID` opens a plain browser tab instead. (The old
+`/app/ID` form still works when the app is already open, so existing
+notifications keep routing — but new ones must use the in-scope form.)
 
 ### Testing scripts that send notifications (or push, email, SMS)
 
@@ -1018,10 +1026,10 @@ curl -s -X POST "$API_BASE_URL/api/notifications/send" \
     "title": "Task complete",
     "body": "Your expense tracker app is ready.",
     "source_id": "'"$CHAT_ID"'",
-    "target": "/app/APP_ID_HERE",
+    "target": "/shell/?app=APP_ID_HERE",
     "actions": [
-      {"action": "open_app", "title": "Open App", "target": "/app/APP_ID_HERE"},
-      {"action": "open_chat", "title": "View Chat", "target": "/chat/'"$CHAT_ID"'"}
+      {"action": "open_app", "title": "Open App", "target": "/shell/?app=APP_ID_HERE"},
+      {"action": "open_chat", "title": "View Chat", "target": "/shell/?chat='"$CHAT_ID"'"}
     ]
   }'
 ```
