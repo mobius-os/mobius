@@ -245,6 +245,13 @@ def run_migrations(eng) -> None:
       # deleted app leaving a stale id behind just reads as "no live
       # owner app," which the route tolerates). See models.Chat.
       _add.append("ALTER TABLE chats ADD COLUMN created_by_app_id INTEGER NULL")
+    if "agent_id" not in chats_cols:
+      # Named agent attached to this chat (providers.effective_agents).
+      # NULL = no agent → today's behavior exactly. Existing rows
+      # default to NULL with no backfill — a chat written before this
+      # column existed had no agent selected, which is the correct
+      # default. See models.Chat.agent_id.
+      _add.append("ALTER TABLE chats ADD COLUMN agent_id VARCHAR(64) NULL")
     if _add:
       with eng.connect() as conn:
         for stmt in _add:
