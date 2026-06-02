@@ -110,13 +110,13 @@ def notify_owner(
 ) -> str:
   """Saves a Notification row and fires Web Push to the owner.
 
-  Mirrors `routes/notifications.send_notification` but is callable
-  from non-request contexts (e.g. the chat subprocess loop when
-  AskUserQuestion ends a turn). Push delivery is suppressed when
-  the owner is currently subscribed to the SSE stream for
-  `source_id` — the in-tab UX already shows the question. The
-  notification row is saved either way so history is consistent.
-  Returns the notification id.
+  The shared implementation behind `POST /api/notifications/send`,
+  factored out so a non-request caller (e.g. a scheduled task) can
+  reuse it without a `Request`. Push delivery is suppressed when the
+  owner is currently subscribed to the SSE stream for `source_id` —
+  the in-tab UX already shows the event. The notification row is
+  saved either way so history is consistent. Returns the
+  notification id.
   """
   notification_id = str(uuid.uuid4())
   notif = models.Notification(

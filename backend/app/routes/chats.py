@@ -150,8 +150,8 @@ def list_chats(
     forget_chat(c.id)
     _purge_chat_dir(c.id)
     db.delete(c)
-  # Notification TTL: rows are written by every AskUserQuestion ack
-  # and every agent-driven push, and nothing else deletes them. Keep
+  # Notification TTL: rows are written by agent-driven push calls
+  # (POST /api/notifications/send), and nothing else deletes them. Keep
   # the table from growing unbounded by dropping anything older than
   # 90 days alongside the chat purge above — same cadence, same
   # transaction. Naive UTC matches `Notification.sent_at`'s storage

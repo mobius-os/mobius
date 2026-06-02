@@ -76,7 +76,7 @@ def test_notifications_older_than_90_days_purged(client, db, auth):
   """Notifications older than 90 days must be deleted by list_chats.
 
   The notification table had no TTL — rows accumulated indefinitely
-  from every AskUserQuestion ack and agent-driven push notification.
+  from agent-driven push notifications (POST /api/notifications/send).
   Ticket 052 caps growth by deleting >90-day rows alongside the
   existing soft-deleted-chat purge.
   """
