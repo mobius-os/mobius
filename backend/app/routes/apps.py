@@ -121,24 +121,22 @@ def _safe_to_rmtree_source(
   return True
 
 
-def _rmtree_source_if_safe(
-  resolved: Path, apps_root: Path, db: Session, exclude_id: int
-) -> None:
-  """Drop the cron entry + rmtree a resolved source tree IF it is safe.
+def _drop_cron_and_rmtree(resolved: Path) -> None:
+  """Drop the resolved source tree's cron entry + rmtree it (no DB access).
 
-  The caller MUST hold ``fs_locks.source_dir_lock(str(resolved))`` so the
-  ``_safe_to_rmtree_source`` shared-dir check and the rmtree are atomic
-  against a concurrent create/patch claiming the same directory (round-6 #4).
-  Drops the cron entry even when the tree is already gone — a live entry can
-  outlive a partial cleanup, and a cron firing a missing script is the exact
-  orphan we're killing. Swallows filesystem errors (best-effort cleanup).
+  Pure-filesystem so it can run via ``asyncio.to_thread`` off the sole event
+  loop — ``_unregister_cron`` shells out to crontab (can block seconds) and
+  ``rmtree`` is unbounded (Codex review round-7 #4). The caller has ALREADY
+  decided it's safe (``_safe_to_rmtree_source``, which needs the DB) while
+  holding ``source_dir_lock``, and keeps holding it across this call so the
+  check and the removal stay atomic. Drops the cron even when the tree is gone
+  — a live entry can outlive a partial cleanup. Swallows filesystem errors.
   """
   from app.install import _unregister_cron
   try:
-    if _safe_to_rmtree_source(resolved, apps_root, db, exclude_id):
-      _unregister_cron(resolved)
-      if resolved.is_dir():
-        shutil.rmtree(resolved, ignore_errors=True)
+    _unregister_cron(resolved)
+    if resolved.is_dir():
+      shutil.rmtree(resolved, ignore_errors=True)
   except OSError:
     pass
 
@@ -227,13 +225,18 @@ async def install_app(
   # Late import to avoid circular import — install.py reads from
   # routes/apps.py at module top.
   from app.install import install_from_manifest
-  app, mode, warnings, manifest = await install_from_manifest(
-    db,
-    manifest_url=body.manifest_url,
-    manifest=body.manifest,
-    raw_base=body.raw_base,
-    source="store",
-  )
+  # Serialize the whole install against any concurrent uninstall — both are
+  # app-lifecycle operations over the same /data/apps trees, and letting them
+  # overlap lets one delete what the other just wrote
+  # (fs_locks.install_uninstall_lock has the full rationale).
+  async with fs_locks.install_uninstall_lock():
+    app, mode, warnings, manifest = await install_from_manifest(
+      db,
+      manifest_url=body.manifest_url,
+      manifest=body.manifest,
+      raw_base=body.raw_base,
+      source="store",
+    )
   # Notify the Shell to refetch its app list so a new install (or an
   # in-place update) shows up in the drawer without a page reload.
   # Published only on the success path: install_from_manifest raises
@@ -487,78 +490,90 @@ async def delete_app(
   write takes, closing the uninstall-vs-create and uninstall-vs-write races
   (Codex review round-6 #3, #4) on the single uvicorn worker.
   """
-  app = (
-    db.query(models.App).filter(models.App.id == app_id).first()
-  )
-  if not app:
-    raise HTTPException(status_code=404, detail="App not found.")
+  # Take the lifecycle lock (vs a concurrent install) THEN the per-app storage
+  # lock (vs a concurrent write), in that order (see fs_locks LOCK ORDERING).
+  # The per-app lock is held across the ENTIRE uninstall — row delete THROUGH
+  # storage-tree removal. SQLite reuses a freed integer id, so if the lock were
+  # taken only around the rmtree, a replacement app could reuse this id, write
+  # valid storage, and then have its tree deleted by this cleanup (Codex review
+  # round-7 #1). Holding it from before the delete means any write for this id
+  # (which also takes this lock) serializes after us, and the rmtree only ever
+  # removes THIS app's (empty-or-stale) tree.
+  async with (
+    fs_locks.install_uninstall_lock(),
+    fs_locks.app_storage_lock(app_id),
+  ):
+    app = (
+      db.query(models.App).filter(models.App.id == app_id).first()
+    )
+    if not app:
+      raise HTTPException(status_code=404, detail="App not found.")
 
-  # Capture paths before dropping the DB row.  Delete the row first so
-  # a partial filesystem cleanup leaves the registry coherent — stale
-  # files are harmless orphans, a DB row pointing at missing files is
-  # a live 404.
-  compiled_path = app.compiled_path
-  app_name = app.name
-  app_source_dir = app.source_dir
-  deleted_app_id = app.id
+    # Capture paths before dropping the DB row.  Delete the row first so
+    # a partial filesystem cleanup leaves the registry coherent — stale
+    # files are harmless orphans, a DB row pointing at missing files is
+    # a live 404.
+    compiled_path = app.compiled_path
+    app_name = app.name
+    app_source_dir = app.source_dir
+    deleted_app_id = app.id
 
-  db.delete(app)
-  db.commit()
+    db.delete(app)
+    db.commit()
 
-  # Notify the Shell that the app registry changed. The handler in
-  # Shell.jsx refetches /api/apps/ and reconciles the drawer; an
-  # app_updated for an id that no longer exists simply causes that id
-  # to disappear from the next render. We could introduce a separate
-  # `app_removed` type, but app_updated already covers the refresh
-  # semantics and avoids growing SYSTEM_EVENT_TYPES for no behavioral
-  # difference. Published after the commit so an event never refers to
-  # an app the rollback would have kept alive.
-  get_system_broadcast().publish(
-    {"type": "app_updated", "appId": str(deleted_app_id)}
-  )
+    # Notify the Shell that the app registry changed. The handler in
+    # Shell.jsx refetches /api/apps/ and reconciles the drawer; an
+    # app_updated for an id that no longer exists simply causes that id
+    # to disappear from the next render. Published after the commit so an
+    # event never refers to an app the rollback would have kept alive.
+    get_system_broadcast().publish(
+      {"type": "app_updated", "appId": str(deleted_app_id)}
+    )
 
-  # Compiled bundle — one file under /data/compiled/.
-  if compiled_path:
-    try:
-      Path(compiled_path).unlink(missing_ok=True)
-    except OSError:
-      pass  # best effort — a stale compiled file is harmless
+    # Compiled bundle — one file under /data/compiled/.
+    if compiled_path:
+      try:
+        Path(compiled_path).unlink(missing_ok=True)
+      except OSError:
+        pass  # best effort — a stale compiled file is harmless
 
-  settings = get_settings()
-  apps_root = (Path(settings.data_dir) / "apps").resolve()
+    settings = get_settings()
+    apps_root = (Path(settings.data_dir) / "apps").resolve()
 
-  # Source tree under /data/apps/.  Newer apps store the exact source
-  # directory; legacy apps fall back to name-based cleanup. Resolve the
-  # candidate, then do the dedup-check + cron-drop + rmtree UNDER the
-  # per-source-dir lock so a concurrent create/patch can't claim the
-  # directory between the shared-dir check and the rmtree (round-6 #4).
-  resolved_source = None
-  if app_source_dir:
-    try:
-      resolved_source = Path(app_source_dir).resolve()
-    except OSError:
-      resolved_source = None
-  elif app_name and re.fullmatch(r"[a-zA-Z0-9_-]+", app_name):
-    try:
-      resolved_source = (Path(settings.data_dir) / "apps" / app_name).resolve()
-    except OSError:
-      resolved_source = None
-  if resolved_source is not None:
-    async with fs_locks.source_dir_lock(str(resolved_source)):
-      _rmtree_source_if_safe(resolved_source, apps_root, db, deleted_app_id)
+    # Source tree under /data/apps/.  Newer apps store the exact source
+    # directory; legacy apps fall back to name-based cleanup. Resolve the
+    # candidate, then dedup-check + cron-drop + rmtree UNDER the per-source-dir
+    # lock so a concurrent create/patch/install can't claim the directory
+    # between the shared-dir check and the rmtree (round-6 #4). The blocking
+    # cron-drop + rmtree run in a thread so they don't stall the loop while the
+    # lock is held (round-7 #4).
+    resolved_source = None
+    if app_source_dir:
+      try:
+        resolved_source = Path(app_source_dir).resolve()
+      except OSError:
+        resolved_source = None
+    elif app_name and re.fullmatch(r"[a-zA-Z0-9_-]+", app_name):
+      try:
+        resolved_source = (
+          Path(settings.data_dir) / "apps" / app_name
+        ).resolve()
+      except OSError:
+        resolved_source = None
+    if resolved_source is not None:
+      async with fs_locks.source_dir_lock(str(resolved_source)):
+        if _safe_to_rmtree_source(
+          resolved_source, apps_root, db, deleted_app_id
+        ):
+          await asyncio.to_thread(_drop_cron_and_rmtree, resolved_source)
 
-  # Per-app STORAGE tree under /data/apps/<numeric-id>/ — distinct from the
-  # slug-keyed SOURCE tree above. /api/storage/apps/{id}/... writes land here
-  # keyed by the integer id, so an uninstall that cleaned only the source dir
-  # left this tree orphaned (Codex review #1). Under the per-app lock so an
-  # in-flight write can't recreate it after this removal (round-6 #3).
-  async with fs_locks.app_storage_lock(deleted_app_id):
+    # Per-app STORAGE tree under /data/apps/<numeric-id>/ — distinct from the
+    # slug-keyed SOURCE tree above. /api/storage/apps/{id}/... writes land here
+    # keyed by the integer id (Codex review #1). rmtree in a thread (round-7
+    # #4); still under the outer per-app lock.
     storage_dir = apps_root / str(deleted_app_id)
     if storage_dir.is_dir():
-      try:
-        shutil.rmtree(storage_dir, ignore_errors=True)
-      except OSError:
-        pass
+      await asyncio.to_thread(shutil.rmtree, storage_dir, ignore_errors=True)
 
 
 @router.post(
