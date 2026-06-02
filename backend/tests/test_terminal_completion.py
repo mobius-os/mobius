@@ -495,7 +495,7 @@ def test_stop_handoff_clears_only_immediate_successor_marker(monkeypatch):
   # Simulate Stop exactly as stop_chat_for does for an active handle: register
   # the stopped-generation handoff, bump the generation, AND release _starting
   # (stop_chat_for calls registry.discard_starting at the end). Releasing
-  # _starting is load-bearing for FIX B's clear gate — a leftover claim would
+  # _starting is load-bearing for the Stop-handoff clear gate — a leftover claim would
   # read as "a newer owner reclaimed the chat" and (correctly) suppress the
   # clear, which is why a faithful Stop simulation must drop it here.
   chat_mod._clear_after_terminal_generation["t6"] = gen
@@ -636,7 +636,7 @@ def test_actor_fatal_leaves_marker_then_reconcile_repairs(monkeypatch):
   assert state["pending_messages"] == []
 
 
-# -- 9 (FIX A). post-promote continuation scheduling failure LEAVES marker -
+# -- 9. post-promote continuation scheduling failure LEAVES marker ---------
 def test_continuation_schedule_failure_after_promote_leaves_marker(monkeypatch):
   """The promote landed (the queued head moved into `messages` and the
   continuation's run marker was set by PromotePending), but spawning the
@@ -700,7 +700,7 @@ def test_continuation_schedule_failure_after_promote_leaves_marker(monkeypatch):
   assert any(b["type"] == "error" for b in state["messages"][-1]["blocks"])
 
 
-# -- 10 (FIX B). Stop-handoff clear must NOT erase a racing fresh marker ----
+# -- 10. Stop-handoff clear must NOT erase a racing fresh marker ------------
 def test_stop_handoff_clear_does_not_erase_racing_fresh_start_turn_marker(
   monkeypatch
 ):
@@ -766,7 +766,121 @@ def test_stop_handoff_clear_does_not_erase_racing_fresh_start_turn_marker(
   assert chat_mod.is_chat_running("t10")
 
 
-# -- 11 (FIX D). no-owner setup cleanup: marker cleared, pending dropped ----
+# -- 10b. stale finalize must NOT append after a fresh turn's user msg -------
+def test_stale_dying_run_does_not_finalize_after_fresh_turn_claimed(monkeypatch):
+  """The bug the corrected fix closes: a Stop-superseded dying run reaches
+  `_complete_turn` WITH accumulated assistant_blocks while a FRESH turn has
+  already claimed the chat (registry alive via `mark_starting`, a new user
+  message is the last persisted row). Without the stale-finalize guard, the
+  dying run's `finalize()` appends its stale assistant content AFTER the fresh
+  user message (`_apply_last_assistant_message`'s else-branch append), so the
+  transcript reads user-fresh / assistant-stale and the fresh turn's response
+  later lands out of order. The guard makes `_complete_turn` SKIP finalize and
+  return STALE_NO_ACTION, leaving the fresh user message as the last row.
+
+  This is the case-6 (legit Stop handoff finalizes) / case-10 (Stop-handoff
+  clear must not erase a racing marker) discriminator turned on the FINALIZE
+  decision: the dying run shares the Stopped generation `run_gen + 1` with a
+  clean Stop handoff, so generation alone can't tell them apart — the
+  `registry.is_alive` re-check (the fresh `mark_starting`) is what does."""
+  _seed_owner_and_creds()
+  _seed_chat("t10c", messages=[{"role": "user", "content": "hi", "ts": 1}],
+             pending=[], run_status="running")
+
+  chat_mod.mark_starting("t10c")
+  gen = chat_mod.current_run_generation("t10c")
+
+  from app.chat_writer import StartTurn, await_ack, get_writer
+
+  # The dying run's gen is CURRENT at `_run_chat_impl`'s entry guard (so it gets
+  # past it and into the runner). Stop + the fresh reclaim happen DURING the
+  # stream — modelled by doing them inside the fake runner, after it has
+  # accumulated assistant content into the sink but before `_complete_turn`.
+  # This is the real ordering: a turn already streaming when Stop+resend lands.
+  async def fake_runner(*, bc, **kwargs):
+    bc.publish({"type": "text", "content": "stale dying-run answer"})
+    # Stop the dying run exactly as stop_chat_for does for an active handle:
+    # register the stopped-generation handoff, bump to the immediate successor,
+    # and release _starting so a fresh send can claim the now-idle chat.
+    chat_mod._clear_after_terminal_generation["t10c"] = gen
+    chat_mod.bump_run_generation("t10c")  # Stop's immediate successor: gen + 1
+    chat_mod.discard_starting("t10c")
+    # A FRESH send claims the chat: a registry _starting claim (NO gen bump, by
+    # design) makes the registry alive again at gen + 1, and a StartTurn re-sets
+    # the marker AND appends the fresh user message — so the last persisted row
+    # is now a USER message, the exact precondition for the else-branch stale
+    # append. We use the registry primitive directly (not the chat_mod
+    # mark_starting wrapper) because the dying run's broadcast is still running
+    # mid-stream, so the wrapper's is_chat_running gate would refuse — but the
+    # discriminator deliberately keys on registry.is_alive, not is_chat_running,
+    # exactly so this fresh _starting claim is observed regardless of the dying
+    # broadcast's lifecycle.
+    assert chat_mod.registry.mark_starting("t10c") is True
+    assert chat_mod.current_run_generation("t10c") == gen + 1
+    assert chat_mod.registry.is_alive("t10c")
+    ack = get_writer().submit(StartTurn(
+      chat_id="t10c", run_token="rt-10c-fresh",
+      user_msg={"role": "user", "content": "fresh question", "ts": 9},
+    ))
+    await await_ack(ack)
+    return {"session_id": "sess", "cost_usd": 0.0}
+
+  import app.claude_sdk_runner as csr
+  monkeypatch.setattr(csr, "run_claude_sdk_turn", fake_runner)
+
+  # Capture the disposition the dying run's _complete_turn returns.
+  dispositions = []
+  real_complete_turn = chat_mod._complete_turn
+
+  async def _capturing_complete_turn(**kwargs):
+    result = await real_complete_turn(**kwargs)
+    dispositions.append(result)
+    return result
+
+  monkeypatch.setattr(chat_mod, "_complete_turn", _capturing_complete_turn)
+
+  # The dying Stop-bumped run reaches its terminal transition. It owns `gen`,
+  # the current generation is gen + 1 (so we_own_gen is False), and the fresh
+  # mark_starting makes the registry alive (so stop_handoff_successor is also
+  # False) — the guard must SKIP finalize.
+  published = []
+  _run_real_chat("t10c", run_token="rt-10c", run_gen=gen, published=published)
+  _drain_actor()
+
+  assert dispositions == [chat_queue.TerminalDisposition.STALE_NO_ACTION], (
+    "a dying run whose chat was reclaimed by a fresh turn must return "
+    "STALE_NO_ACTION (skip finalize), not finalize stale content"
+  )
+  state = _load("t10c")
+  # The bug: finalize would APPEND the dying run's stale assistant content
+  # after the fresh user message (the else-branch append, because msgs[-1] is
+  # now a user row). The fix skips finalize, so the fresh user message stays
+  # the last row.
+  assert state["messages"][-1] == {
+    "role": "user", "content": "fresh question", "ts": 9
+  }, (
+    "the dying run must NOT append its stale assistant content after the "
+    "fresh turn's user message"
+  )
+  # No assistant row may follow the fresh user message (the precise orphan the
+  # finalize append would create). A pre-race streaming partial — written while
+  # msgs[-1] was still the ORIGINAL user row — is a separate concern and lands
+  # before the fresh user message, so we check ordering, not mere presence.
+  fresh_idx = next(
+    i for i, m in enumerate(state["messages"])
+    if m.get("role") == "user" and m.get("content") == "fresh question"
+  )
+  assert not any(
+    m.get("role") == "assistant" for m in state["messages"][fresh_idx + 1:]
+  ), "no assistant row may follow the fresh turn's user message"
+  # The fresh turn's marker survives untouched.
+  assert state["run_status"] == "running", (
+    "the fresh turn's run marker must survive the dying run's bow-out"
+  )
+  assert "done" in published
+
+
+# -- 11. no-owner setup cleanup: marker cleared, pending dropped ------------
 def test_no_owner_cleanup_clears_marker_before_registry_release(monkeypatch):
   """The no-owner setup-error early return routes through the bounded
   terminal cleanup: the pending queue is cleared durably, the marker is
@@ -807,7 +921,7 @@ def test_no_owner_cleanup_clears_marker_before_registry_release(monkeypatch):
   assert not chat_mod.registry.is_alive("t11"), "registry released"
 
 
-# -- 12 (FIX D). auth-error setup cleanup: marker cleared, pending dropped --
+# -- 12. auth-error setup cleanup: marker cleared, pending dropped ----------
 def test_auth_error_cleanup_clears_marker_before_registry_release(monkeypatch):
   """The auth-error setup early return routes through the same bounded
   terminal cleanup: pending cleared, marker cleared, registry released, no
@@ -861,7 +975,7 @@ def test_auth_error_cleanup_clears_marker_before_registry_release(monkeypatch):
   assert not chat_mod.registry.is_alive("t12"), "registry released"
 
 
-# -- 13 (FIX D). strict marker-clear ACK timeout → FAILED_LEAVE_MARKER ------
+# -- 13. strict marker-clear ACK timeout → FAILED_LEAVE_MARKER --------------
 def test_empty_queue_marker_clear_ack_timeout_leaves_marker(monkeypatch):
   """The empty-queue terminal path issues a STRICT ClearRunStatus. Latch the
   actor inside `_clear_run_status` AFTER dispatch so its commit blocks past a
@@ -927,7 +1041,7 @@ def test_empty_queue_marker_clear_ack_timeout_leaves_marker(monkeypatch):
   assert _load("t13")["run_status"] is None
 
 
-# -- 14 (final-review Bug B). malformed queue head LEAVES the marker --------
+# -- 14. malformed queue head LEAVES the marker -----------------------------------------------
 def test_malformed_pending_head_leaves_marker_then_reconcile_repairs(monkeypatch):
   """A MALFORMED pending head (content that can't build a schemas.ChatMessage)
   makes `_promote_pending` RAISE rather than return promoted=None. The drain
@@ -1039,7 +1153,7 @@ def test_reconcile_scrubs_unanswered_question_card():
   ), "the interruption note must be appended"
 
 
-# -- 16 (final-review Bug A). Stop during the StartTurn commit: no spawn ----
+# -- 16. Stop during the StartTurn commit: no spawn -----------------------------------------------
 #
 # These two drive send_message DIRECTLY (no TestClient) for determinism: the
 # fix's observable is that the broadcast + the run_chat spawn are created
@@ -1120,7 +1234,7 @@ def test_stop_during_starting_does_not_spawn_superseded_turn(monkeypatch):
 
 
 def test_normal_send_spawns_turn(monkeypatch):
-  """Control for the Bug A guard: with NO racing Stop (generation unchanged
+  """Control for the Stop-during-StartTurn guard: with NO racing Stop (generation unchanged
   across the StartTurn await), send_message creates the broadcast and spawns
   the turn. Proves the guard gates only the raced case, not every send."""
   from app.routes import chats_stream
@@ -1148,3 +1262,227 @@ def test_normal_send_spawns_turn(monkeypatch):
   assert resp.status_code == 202
   assert len(spawned) == 1, "a normal send must spawn exactly one turn"
   assert get_broadcast(cid) is not None, "a normal send creates the broadcast"
+
+
+# -- 17. Stop during finalize → drain re-decides ownership UNDER its lock ----
+def test_stop_during_finalize_makes_drain_bow_out_under_lock(monkeypatch):
+  """The run OWNS its generation at the pre-finalize gate, but a Stop / fresh
+  StartTurn lands DURING `await sink.finalize()` and bumps the generation. The
+  drain no longer trusts a bool snapshotted before its lock — it re-decides
+  ownership UNDER the lock from `run_gen` via the injected current-generation
+  reader, so the in-finalize bump is observed and the superseded turn bows out
+  (STALE_NO_ACTION): it promotes nothing, clears nothing.
+
+  Regression: if the drain acted on the stale pre-finalize ownership (still
+  True), it would promote the queued head (queued_turn_starting + a scheduled
+  continuation) for a turn the in-finalize bump just superseded — double-firing
+  the queue. It would also clear a marker the newer owner still needs.
+
+  Seam: `finalize_response_outcome` is the actor-side handler the `Finalize`
+  command dispatches to, so monkeypatching it to bump the generation lands the
+  bump synchronously inside the `await sink.finalize()` ack window — exactly
+  the "Stop/StartTurn races the finalize" interleaving. The observable is the
+  OUTCOME (no promotion, no continuation, queue + marker left intact for the
+  newer owner), not the internal ownership arg the drain no longer takes.
+  """
+  _seed_owner_and_creds()
+  _seed_chat(
+    "t17",
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    # A pending head so a drain that WRONGLY acted as owner would promote it
+    # (queued_turn_starting + a continuation) — making the bug observable.
+    pending=[{"role": "user", "content": "queued", "ts": 3}],
+    run_status="running",
+  )
+  # Stream text so finalize() has blocks to commit and the Finalize command is
+  # actually submitted + awaited (the bump must land inside that await).
+  _patch_claude_runner(monkeypatch, text="partial answer")
+
+  chat_mod.mark_starting("t17")
+  gen = chat_mod.current_run_generation("t17")
+
+  # Bump the generation from INSIDE the finalize ack (the actor thread runs
+  # finalize_response_outcome while the caller awaits sink.finalize()), then
+  # delegate to the real handler so the terminal write still persists.
+  real_finalize = chat_writer.finalize_response_outcome
+
+  def bumping_finalize(db_, chat_id, blocks):
+    chat_mod.bump_run_generation(chat_id)
+    return real_finalize(db_, chat_id, blocks)
+
+  monkeypatch.setattr(chat_writer, "finalize_response_outcome", bumping_finalize)
+
+  scheduled = []
+  orig_sched = chat_mod._schedule_continuation
+  chat_mod._schedule_continuation = lambda **kw: scheduled.append(kw)
+
+  published = []
+  try:
+    _run_real_chat("t17", run_token="rt-17", run_gen=gen, published=published)
+  finally:
+    chat_mod._schedule_continuation = orig_sched
+  _drain_actor()
+
+  # The drain re-decided ownership under its lock and saw the in-finalize bump:
+  # it took STALE_NO_ACTION — no promotion, no continuation, queue left for the
+  # newer owner.
+  assert scheduled == [], (
+    "a turn superseded mid-finalize must NOT schedule a continuation"
+  )
+  assert "queued_turn_starting" not in published, (
+    "a turn superseded mid-finalize must NOT promote the queue"
+  )
+  assert _load("t17")["pending_messages"] == [
+    {"role": "user", "content": "queued", "ts": 3}
+  ], "the superseded turn must leave the queued message untouched"
+  # The superseded run must NOT clear the marker — the newer owner still needs
+  # it. The drain's STALE_NO_ACTION bow-out touches nothing durable.
+  assert _load("t17")["run_status"] == "running", (
+    "the superseded turn must NOT clear the marker the newer owner still holds"
+  )
+
+
+# -- 18. stale-reclaim bow-out: identity-keyed compare-and-clear -------------
+def _arrange_stale_reclaim(chat_id):
+  """Put `chat_id` in the pure stale-reclaim state and return its `gen`.
+
+  `mark_starting` leaves the registry alive (so stop_handoff_successor's
+  `not registry.is_alive` is False); bumping the generation without registering
+  a Stop handoff makes we_own_gen False at the gate. With NO
+  _clear_after_terminal_generation entry, stop_handoff_successor is False too —
+  a fresh turn owns the chat (the pure stale-reclaim case)."""
+  chat_mod.mark_starting(chat_id)
+  gen = chat_mod.current_run_generation(chat_id)
+  chat_mod.bump_run_generation(chat_id)  # a fresh StartTurn now owns the chat
+  assert chat_mod.registry.is_alive(chat_id)
+  return gen
+
+
+def test_stale_reclaim_bow_out_preserves_fresh_owners_broadcast_and_browser(
+  monkeypatch
+):
+  """FRESH OWNER PRESENT: a fresh turn already replaced the active-broadcast
+  pointer with its OWN broadcast before this superseded run reaches its
+  bow-out. The bow-out's identity-keyed `clear_active_broadcast_if(bc)` finds
+  the pointer no longer points at this dying run's `bc`, so it PRESERVES the
+  fresh owner's pointer (no clobber) and does NOT close the shared per-chat
+  browser the live turn still holds.
+
+  Regression: a blind `set_active_broadcast(None)` would erase the fresh
+  turn's pointer, and an unconditional `_close_browser_session` would yank the
+  shared browser out from under the live turn.
+
+  Drives `_complete_turn` directly so the disposition return value is the
+  observable, with the generation already bumped (we_own_gen False) and the
+  registry still alive (stop_handoff_successor False) — the stale-reclaim path.
+  """
+  from app import broadcast as bc_mod
+
+  _seed_owner_and_creds()
+  _seed_chat(
+    "t18a", messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[], run_status="running",
+  )
+  gen = _arrange_stale_reclaim("t18a")
+
+  browser_closed = []
+
+  async def spy_close(chat_id):
+    browser_closed.append(chat_id)
+
+  monkeypatch.setattr(chat_mod, "_close_browser_session", spy_close)
+
+  bc = create_broadcast("t18a")
+  published = []
+  orig = bc.publish
+  bc.publish = lambda e: (published.append(e.get("type")), orig(e))[1]
+  sink = chat_mod._ChatEventSink(bc, "t18a", run_token="rt-18a")
+
+  # The FRESH owner already holds the active-broadcast pointer with its OWN
+  # broadcast (a different object than this dying run's `bc`).
+  fresh_bc = ChatBroadcast("t18a")
+  bc_mod.set_active_broadcast(fresh_bc)
+
+  db = SessionLocal()
+  try:
+    disposition = asyncio.run(chat_mod._complete_turn(
+      bc=bc, sink=sink, db=db, chat_id="t18a", run_gen=gen,
+      provider_id="claude", cost_usd=0.0, close_browser=True,
+    ))
+    _drain_actor()
+
+    assert disposition is chat_queue.TerminalDisposition.STALE_NO_ACTION
+    assert "done" in published, "the bow-out still publishes its own done"
+    assert bc_mod.get_active_broadcast() is fresh_bc, (
+      "the bow-out must PRESERVE the fresh owner's broadcast pointer — its "
+      "identity-keyed clear must not touch a pointer that isn't ours"
+    )
+    assert browser_closed == [], (
+      "with a fresh owner present, the bow-out must NOT close the shared "
+      "per-chat browser the live turn still holds"
+    )
+  finally:
+    bc_mod.set_active_broadcast(None)
+
+
+def test_stale_reclaim_bow_out_clears_pointer_but_leaves_browser_when_no_successor(
+  monkeypatch
+):
+  """NO SUCCESSOR: the generation was bumped (e.g. by a Stop) AFTER the SDK
+  runner already unregistered, so no fresh turn took over the active-broadcast
+  pointer — it still points at THIS dying run's `bc`. The bow-out's
+  identity-keyed `clear_active_broadcast_if(bc)` matches and releases the
+  pointer (the durable, high-harm leak), rather than leaking it.
+
+  It deliberately does NOT close the shared per-chat browser: the bow-out can't
+  tell this no-successor case apart from a successor that is mid-handoff (has
+  claimed the generation but not yet installed its pointer), and yanking a live
+  browser is worse than a lingering Chrome in the rare no-successor case (the
+  next turn / reconciliation reclaims it). Pointer freed, browser left.
+  """
+  from app import broadcast as bc_mod
+
+  _seed_owner_and_creds()
+  _seed_chat(
+    "t18b", messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[], run_status="running",
+  )
+  gen = _arrange_stale_reclaim("t18b")
+
+  browser_closed = []
+
+  async def spy_close(chat_id):
+    browser_closed.append(chat_id)
+
+  monkeypatch.setattr(chat_mod, "_close_browser_session", spy_close)
+
+  bc = create_broadcast("t18b")
+  published = []
+  orig = bc.publish
+  bc.publish = lambda e: (published.append(e.get("type")), orig(e))[1]
+  sink = chat_mod._ChatEventSink(bc, "t18b", run_token="rt-18b")
+
+  # NO fresh owner took over: the active-broadcast pointer is still THIS run's.
+  bc_mod.set_active_broadcast(bc)
+
+  db = SessionLocal()
+  try:
+    disposition = asyncio.run(chat_mod._complete_turn(
+      bc=bc, sink=sink, db=db, chat_id="t18b", run_gen=gen,
+      provider_id="claude", cost_usd=0.0, close_browser=True,
+    ))
+    _drain_actor()
+
+    assert disposition is chat_queue.TerminalDisposition.STALE_NO_ACTION
+    assert "done" in published, "the bow-out still publishes its own done"
+    assert bc_mod.get_active_broadcast() is None, (
+      "with no successor, the bow-out's identity-keyed clear must release the "
+      "pointer that is still ours rather than leaking it"
+    )
+    assert browser_closed == [], (
+      "the bow-out must NOT close the shared browser even with no successor — it "
+      "can't distinguish that from a mid-handoff successor, and a lingering Chrome "
+      "is cheaper than yanking a live one"
+    )
+  finally:
+    bc_mod.set_active_broadcast(None)

@@ -33,8 +33,11 @@
 
 import {
   precacheAndRoute, cleanupOutdatedCaches, matchPrecache,
+  createHandlerBoundToURL,
 } from 'workbox-precaching'
-import { registerRoute, setCatchHandler } from 'workbox-routing'
+import {
+  registerRoute, setCatchHandler, NavigationRoute,
+} from 'workbox-routing'
 import {
   CacheFirst, StaleWhileRevalidate, NetworkFirst,
 } from 'workbox-strategies'
@@ -67,14 +70,6 @@ import {
 // when in use.
 self.skipWaiting()
 clientsClaim()
-
-// Identifies THIS service-worker generation. Bump on any meaningful SW
-// change so /diag.html can confirm which SW a device is actually running
-// (the whole class of "did my fix even reach the phone?" questions — a SW
-// only updates on an online visit, so an installed PWA can run an old SW
-// for a while). Served offline by the route below because the SW
-// synthesizes the response; no network needed.
-const SW_VERSION = '2026-06-02-sw-connectivity-channel'
 
 // ── Page → SW connectivity channel ───────────────────────────────────
 // The AUTHORITATIVE connectivity signal lives in the page: useOnlineStatus
@@ -117,18 +112,6 @@ self.addEventListener('message', (e) => {
 function knownOnline() {
   return isKnownOnline(_pageOnline, _pageOnlineAt, Date.now(), VERDICT_MAX_AGE_MS)
 }
-
-// /api/__sw_version — a synthetic, SW-generated response so /diag.html can
-// read the live SW generation even offline. Registered before the catch
-// handler; never hits the network.
-registerRoute(
-  ({ url }) => url.pathname === '/api/__sw_version',
-  async () =>
-    new Response(
-      JSON.stringify({ version: SW_VERSION, ts: Date.now() }),
-      { headers: { 'Content-Type': 'application/json' } },
-    ),
-)
 
 // Self-hosted React for the mini-app import map. These live in
 // /app/static/vendor (copied by the Dockerfile AFTER the Vite build, so
@@ -451,28 +434,31 @@ registerRoute(
   offlineCapableHandler('mobius-offline-apps'),
 )
 
-// Shell + bare-domain navigations: STALE-WHILE-REVALIDATE — the app-shell
-// pattern. Serve the cached shell HTML INSTANTLY (online AND offline; no
+// Shell + bare-domain navigations: serve the PRECACHED index.html — the
+// canonical Workbox app-shell pattern. Instant offline (a precache read, no
 // network race, no timeout — this is what removes the multi-second cold-open
-// wait), and refresh the cache in the background for the next launch.
+// wait), and ALWAYS consistent with the precached bundle.
 //
-// Why this is safe here (the two reasons the route used to be NetworkFirst are
-// both handled WITHOUT a network race):
-//   • Theme: index.html applies the owner's theme client-side from
-//     localStorage('mobius-theme-bg') before first paint, so the cached
-//     (non-theme-injected) HTML renders correctly — server-side theme injection
-//     is not needed on the navigation.
-//   • Asset freshness: asset URLs are content-hashed and precached by the SW;
-//     a shell deploy ships a new SW (SW_VERSION bump) whose activate swaps the
-//     precache, and index.html's updatefound watchdog soft-reloads once the new
-//     SW takes over. So a deployed shell update lands on the next launch (the
-//     standard PWA one-version-behind-then-auto-reload), not via blocking this
-//     request on the network.
-registerRoute(
-  ({ request, url }) =>
-    request.mode === 'navigate' && !url.pathname.startsWith('/apps/'),
-  new StaleWhileRevalidate({ cacheName: 'mobius-shell-nav' }),
-)
+// Why precache, NOT a separate StaleWhileRevalidate cache (the bug this fixes):
+// a SWR `mobius-shell-nav` cache stored the full index.html, INCLUDING its
+// content-hashed `<script src="/assets/index-<hash>.js">`, and that cache was
+// never purged on an SW update. After a deploy bumped the bundle hash, the new
+// SW's cleanupOutdatedCaches() deleted the OLD precache (old bundle gone), but
+// the stale index.html survived in mobius-shell-nav. Offline — where the
+// updatefound watchdog can't fire (it needs a network sw.js fetch) and the
+// background revalidate can't reach the network — the navigation served that
+// stale HTML, whose `<script>` pointed at a hash that no longer existed in the
+// precache OR on the server → the bundle never loaded → index.html's 8s
+// watchdog showed "Shell failed to load". createHandlerBoundToURL resolves the
+// precached index.html, which Workbox keeps in lockstep with the precached
+// bundle (shared revision manifest + cleanupOutdatedCaches), so HTML and bundle
+// can never disagree. Theme still applies client-side from
+// localStorage('mobius-theme-bg') before first paint, so the cached
+// (non-theme-injected) HTML renders correctly with no server round-trip.
+registerRoute(new NavigationRoute(
+  createHandlerBoundToURL('/index.html'),
+  { denylist: [/^\/apps\//] },
+))
 
 // Standalone mini-app navigations: stored for offline-capable apps via
 // the same reload-bypass handler — the standalone page carries the same

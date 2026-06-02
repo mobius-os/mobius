@@ -109,64 +109,7 @@
     var capturedError = ''
     var capturedErrorOnce = false  // only the first error is reported (root cause)
 
-    // TEMPORARY diagnostic ring-buffer. The mini-app iframe is same-origin
-    // (allow-same-origin), so this localStorage is THE SAME store the shell
-    // and /diag.html read — letting us capture what happens inside the frame
-    // (esp. the offline game-over blank) and read it from /diag.html without
-    // screenshots or a console. Capped so it can't grow unbounded. Remove
-    // once the offline mini-app issues are confirmed fixed.
-    // Redact the per-session auth token before anything is persisted. The
-    // module URL is `/api/apps/<id>/module?token=<JWT>`, and an import
-    // failure surfaces that URL inside the error string — which would
-    // otherwise land in this localStorage ring buffer in plaintext. Scrub at
-    // the single chokepoint so every caller is covered.
-    function redact(s) {
-      return String(s == null ? '' : s).replace(/([?&]token=)[^&\s"']+/gi, '$1[REDACTED]')
-    }
-    function mlog(tag, msg) {
-      try {
-        // SEPARATE key from the parent shell's 'mobius-diag-log'. The iframe
-        // and the shell are different documents (different JS realms) both
-        // doing read-modify-write on localStorage; sharing one key meant the
-        // parent's frame-mounted write clobbered the iframe's earlier
-        // sw-controller / module:import:* entries (cross-document
-        // last-writer-wins), erasing the exact boot-handshake boundary this
-        // log exists to show. diag.html reads + merges both keys by timestamp.
-        var key = 'mobius-diag-log-frame'
-        var arr = JSON.parse(localStorage.getItem(key) || '[]')
-        arr.push({
-          t: new Date().toISOString(),
-          src: 'frame:' + _FRAME_APP_ID,
-          online: (typeof navigator !== 'undefined') ? navigator.onLine : null,
-          tag: redact(tag),
-          msg: redact(msg).slice(0, 600),
-        })
-        if (arr.length > 100) arr = arr.slice(-100)
-        localStorage.setItem(key, JSON.stringify(arr))
-      } catch (e) {}
-    }
-    window.mlog = mlog
-
-    // Synchronous boot markers — emitted from THIS classic <script>, which has
-    // no imports, so they fire even if the module <script> below never runs
-    // (e.g. a static `import` of React from /vendor hangs offline because the
-    // sandboxed iframe isn't SW-controlled on this browser — the purest
-    // forever-spinner path, where no module-body mlog would ever execute).
-    // Reading /diag.html then distinguishes the failure boundary:
-    //   • frame:boot present, sw-controller present, but NO module:import:* →
-    //     React static import hung (iframe bypassed the SW for subresources).
-    //   • NO frame:* entries at all → the frame navigation itself hung (iframe
-    //     never even loaded this document offline).
-    //   • module:import:start but no module:import:ok → the /module dynamic
-    //     import hung.
-    mlog('frame:boot', 'doc loaded')
-    try {
-      mlog('sw-controller', (navigator.serviceWorker && navigator.serviceWorker.controller)
-        ? 'present' : 'NULL (iframe not SW-controlled — subresources bypass SW)')
-    } catch (e) { mlog('sw-controller', 'err ' + e.message) }
-
     function showErr(title, detail) {
-      mlog('showErr', title + ': ' + detail)
       if (!capturedErrorOnce) { capturedError = detail; capturedErrorOnce = true; }
       document.getElementById('error-title').textContent = title
       document.getElementById('error-detail').textContent = detail
@@ -202,12 +145,11 @@
     // useful is on screen yet) but wrong once the app is mounted and
     // interactive: a transient unhandled rejection — e.g. an offline
     // fetch/storage save failing at Snake's game-over — would otherwise
-    // destroy the whole app to a blank/error screen. So once mounted we LOG
-    // the error (visible in /diag.html) but leave the app on screen; only
-    // pre-mount errors still surface the panel. `window.__frameMounted` is
-    // set right after createRoot().render() below.
+    // destroy the whole app to a blank/error screen. So once mounted we
+    // SWALLOW the error and leave the app on screen; only pre-mount errors
+    // still surface the panel. `window.__frameMounted` is set right after
+    // createRoot().render() below.
     function handleFrameError(title, detail) {
-      mlog(title, detail)
       if (window.__frameMounted) return  // app is live — keep it on screen
       showErr(title, detail)
     }
@@ -276,16 +218,6 @@
         showErr('Configuration error', 'No token received from parent.');
         return;
       }
-      // DECISIVE diagnostic: is THIS iframe controlled by the service worker?
-      // A sandboxed iframe WITHOUT allow-same-origin is NOT SW-controlled, so
-      // its same-origin sub-resource imports (the module + /vendor React)
-      // bypass the SW and hit the network → hang/fail offline even though the
-      // top-level page (and /diag.html) show everything cached. We DO pass
-      // allow-same-origin, which should keep it controlled — this logs whether
-      // that's actually true on the device. (See whatwg/html#10585.)
-      try {
-        mlog('sw-controller', (navigator.serviceWorker && navigator.serviceWorker.controller) ? 'present' : 'NULL (iframe not SW-controlled)');
-      } catch (e) { mlog('sw-controller', 'err ' + e.message); }
       // Initialize window.mobius BEFORE importing the app module, so an app's
       // top-level code can call window.mobius.storage immediately. Previously
       // the runtime was wired ONLY in the standalone PWA path (standalone.py),
@@ -297,15 +229,13 @@
       try {
         const rt = await import('/mobius-runtime.js');
         rt.init({ appId: _FRAME_APP_ID, getToken: async () => token });
-        mlog('runtime', 'window.mobius ready');
       } catch (e) {
-        mlog('runtime', 'init failed: ' + (e && e.message));
+        // A runtime-load failure must not block the app from mounting; it
+        // just loses offline queueing.
       }
       try {
         const url = `/api/apps/${_FRAME_APP_ID}/module?token=${encodeURIComponent(token)}`;
-        mlog('module:import:start', url.split('?')[0]);
         const mod = await import(url);
-        mlog('module:import:ok', '');
         const Component = mod.default;
         if (!Component) {
           showErr('Module error', 'The app module has no default export.');
@@ -314,7 +244,6 @@
         createRoot(document.getElementById('root')).render(
           createElement(Component, { appId: _FRAME_APP_ID, token })
         );
-        mlog('module:mounted', '');
         // Tell the parent we've kicked off the React render so it
         // can hide the loading overlay. iframe.onLoad alone fires
         // BEFORE this point (it's the document's load event, not the
@@ -338,7 +267,6 @@
         return;
       }
       if (msg.type === 'moebius:frame-init' && !initialized) {
-        mlog('frame-init', 'received (token=' + (msg.token ? 'yes' : 'NO') + ' theme=' + (msg.themeCss ? 'yes' : 'no') + ')');
         initialized = true;
         applyTheme(msg.themeCss, msg.bg);
         loadModule(msg.token);
