@@ -18,4 +18,6 @@ showing empty in prod.
 **How to apply:** `await window.mobius.storage.list('prefix/')` (inside an app) or
 `GET /api/storage/apps-list/{appId}/{prefix}` / `GET /api/storage/shared-list/{prefix}`
 (cron/agent). Returns `{entries:[{name,path,type,size,modified_at,mime_type}], next_cursor}`.
-`list()` has no offline mirror, unlike `get()`.
+`list()` is offline-capable like `get()`: it falls back to the read-through cache
+when the server is unreachable, overlaid with the outbox (read-your-writes).
+Offline entries omit `size`/`modified_at` (server-only).

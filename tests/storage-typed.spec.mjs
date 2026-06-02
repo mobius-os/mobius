@@ -35,6 +35,35 @@ async function installStore(page, opts = {}) {
     if (!rec) return route.fulfill({ status: 404, body: '' })
     return route.fulfill({ status: 200, body: rec.body, headers: { 'content-type': rec.ct || 'application/octet-stream' } })
   })
+  // The list endpoint: derive the immediate children under the prefix from the
+  // in-memory store (so online list() has a real server source). `down` aborts
+  // (offline) so the runtime falls back to its cache+outbox overlay.
+  await page.route('**/api/storage/apps-list/**', async (route) => {
+    if (state.mode === 'down') return route.abort()
+    if (state.mode === 'fatal') return route.fulfill({ status: 422, body: 'nope' })
+    const url = new URL(route.request().url())
+    const mm = url.pathname.match(/\/api\/storage\/apps-list\/(\d+)\/(.*)$/)
+    const appId = mm ? mm[1] : ''
+    const prefix = mm ? mm[2] : ''
+    const base = prefix ? prefix.replace(/\/+$/, '') + '/' : ''
+    const appPrefix = `/api/storage/apps/${appId}/`
+    const seenDir = new Set()
+    const entries = []
+    for (const k of Object.keys(globalThis.__store || {})) {
+      if (!k.startsWith(appPrefix)) continue
+      const rel = k.slice(appPrefix.length)
+      if (base && !rel.startsWith(base)) continue
+      const rest = base ? rel.slice(base.length) : rel
+      const slash = rest.indexOf('/')
+      if (slash === -1) {
+        entries.push({ name: rest, path: base + rest, type: 'file', size: 1, modified_at: '2026-01-01T00:00:00Z', mime_type: 'application/json' })
+      } else {
+        const d = rest.slice(0, slash)
+        if (!seenDir.has(d)) { seenDir.add(d); entries.push({ name: d, path: base + d, type: 'directory', size: 0, modified_at: '2026-01-01T00:00:00Z' }) }
+      }
+    }
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ entries, next_cursor: null }) })
+  })
   return state
 }
 
@@ -153,4 +182,57 @@ test('FATAL write resolves (no deadlock) + leaves the path lock acquirable', asy
     ])
   })
   expect(after).toEqual({ synced: true })
+})
+
+// ── 078: offline-capable list() (cache + outbox overlay) ──────────────────
+
+test('list() online returns the server listing + entry shape', async ({ page }) => {
+  await installStore(page)
+  await initRuntime(page, 9108)
+  const out = await page.evaluate(async () => {
+    const s = window.mobius.storage
+    await s.set('items/a.json', { n: 1 })
+    await s.set('items/b.json', { n: 2 })
+    const entries = await s.list('items/')
+    return { entries }
+  })
+  expect(out.entries.map((e) => e.name).sort()).toEqual(['a.json', 'b.json'])
+  expect(out.entries[0]).toMatchObject({ type: 'file', path: expect.stringContaining('items/') })
+})
+
+test('list() enumerates from the cache after going offline (the Notes reload case)', async ({ page }) => {
+  const store = await installStore(page)
+  await initRuntime(page, 9109)
+  const out = await page.evaluate(async () => {
+    const s = window.mobius.storage
+    await s.set('items/x.json', { v: 1 })   // online → synced + mirrored to cache
+    await s.set('items/y.json', { v: 2 })
+    return { online: (await s.list('items/')).map((e) => e.name).sort() }
+  })
+  store.mode = 'down'  // offline — apps-list now aborts; list() falls to cache
+  const offline = await page.evaluate(async () => {
+    return (await window.mobius.storage.list('items/')).map((e) => e.name).sort()
+  })
+  expect(out.online).toEqual(['x.json', 'y.json'])
+  expect(offline).toEqual(['x.json', 'y.json'])  // enumerable offline, no index file
+})
+
+test('list() offline reflects pending creates + deletes (read-your-writes)', async ({ page }) => {
+  const store = await installStore(page)
+  await initRuntime(page, 9110)
+  await page.evaluate(async () => {
+    const s = window.mobius.storage
+    await s.set('items/keep.json', { v: 1 })
+    await s.set('items/gone.json', { v: 2 })
+  })
+  store.mode = 'down'  // go offline; the next writes queue + mirror to cache
+  const offline = await page.evaluate(async () => {
+    const s = window.mobius.storage
+    await s.set('items/fresh.json', { v: 3 })   // pending create
+    await s.remove('items/gone.json')           // pending delete
+    return (await s.list('items/')).map((e) => e.name).sort()
+  })
+  // fresh.json appears (pending PUT), gone.json is dropped (pending DELETE),
+  // keep.json stays — and a tombstoned delete never resurrects.
+  expect(offline).toEqual(['fresh.json', 'keep.json'])
 })
