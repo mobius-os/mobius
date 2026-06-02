@@ -302,8 +302,11 @@ contract-comment mismatch.
   cleanly with `await res.json()`); GET does not mirror PUT shape.
 - **Persist through `window.mobius.storage` — it's the DEFAULT for EVERY app,
   not just offline-capable ones.** The runtime is injected into every mini-app
-  before its module loads, so `get()/set()/remove()/subscribe()/list()` are
-  always available: instant read-through reads (last-known value offline; `get()`
+  before its module loads, so `get()/set()/remove()/subscribe()/list()` plus the
+  TYPED `getText()/setText()` (raw text: .md/.tex/.csv) and `getBlob()/setBlob()`
+  (binary, ≤25 MiB, offline-cached) are always available — pick the method
+  matching the data shape; a wrong-typed read throws (no corruption). Instant
+  read-through reads (last-known value offline; `get()`
   returns null when the path has no value — never written, removed, or absent —
   so don't treat null as a safe "overwrite me" signal), writes that queue +
   auto-sync when offline,

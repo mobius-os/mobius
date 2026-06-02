@@ -467,6 +467,13 @@ const notes = (await window.mobius.storage.get('notes.json')) || []
 // write: pass your data directly — do NOT JSON.stringify, the runtime does it.
 await window.mobius.storage.set('notes.json', notes)
 await window.mobius.storage.remove('items/abc.json')
+// TYPED variants for non-JSON data — pick the method matching the data shape;
+// reading a path with the WRONG method throws a clear error (never corrupts):
+await window.mobius.storage.setText('doc.md', '# notes')      // raw text (.md/.tex/.csv…)
+const md = await window.mobius.storage.getText('doc.md')      // string | null (SWR, offline)
+await window.mobius.storage.setBlob('photo.png', fileOrBlob)  // binary, ≤25 MiB, offline-cached
+const img = await window.mobius.storage.getBlob('photo.png')  // Blob | null (cache-first, offline)
+// subscribeText / subscribeBlob mirror subscribe() for those kinds.
 // reactive read: cb fires with the current value, then on every change/sync for
 // the path. Prefer this over re-reading so the UI updates when a sync lands.
 const unsub = window.mobius.storage.subscribe('notes.json', v => setNotes(v || []))
