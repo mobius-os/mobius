@@ -323,17 +323,14 @@ def test_write_is_atomic_no_temp_leftover(client, auth, owner_token):
 
 
 @pytest.mark.asyncio
-async def test_read_capped_body_rejects_oversize(monkeypatch):
-  """_read_capped_body refuses a body over the cap with 413 (round-8 #3) —
-  bound the host's memory against a runaway write. Exercised DIRECTLY (not
-  through a PUT) so the patched constant and the running function come from the
-  SAME module object: test_routes_init_resilience pops + re-imports
-  app.routes.*, which would otherwise leave the app router holding a different
-  storage module than the one this test patches."""
+async def test_read_capped_body_rejects_oversize():
+  """read_capped_body refuses a body over the cap with 413 (round-8 #3,
+  round-9 #4) — bound the host's memory against a runaway write/upload. Pass an
+  explicit small cap and call the helper directly (no PUT, no module-global
+  monkeypatch) so it's robust to suite import-order quirks."""
   from fastapi import HTTPException
   from starlette.requests import Request
-  import app.routes.storage as storage_mod
-  monkeypatch.setattr(storage_mod, "MAX_STORAGE_BYTES", 16)
+  from app.storage_io import read_capped_body
 
   async def receive():
     return {"type": "http.request", "body": b"x" * 100, "more_body": False}
@@ -342,7 +339,7 @@ async def test_read_capped_body_rejects_oversize(monkeypatch):
     {"type": "http", "headers": [(b"content-length", b"100")]}, receive
   )
   with pytest.raises(HTTPException) as exc:
-    await storage_mod._read_capped_body(req)
+    await read_capped_body(req, cap=16)
   assert exc.value.status_code == 413
 
 
@@ -491,6 +488,23 @@ def test_create_app_rejects_unsafe_source_dir(client, owner_token):
     "name": "fine", "description": "x", "jsx_source": jsx,
     "source_dir": os.path.join(data_dir, "apps", "fine"),
   }, headers=auth).status_code == 201
+
+
+def test_create_rejects_duplicate_source_dir(client, auth, owner_token):
+  """Two apps can't claim the same source_dir — sharing a source tree is
+  ambiguous for the watcher and forces conservative uninstall cleanup (Codex
+  review round-9 #3)."""
+  import os
+  data_dir = os.environ["DATA_DIR"]
+  jsx = "export default function App(){ return <div/> }"
+  d = os.path.join(data_dir, "apps", "dup-src")
+  assert client.post("/api/apps/", json={
+    "name": "dup-a", "description": "x", "jsx_source": jsx, "source_dir": d,
+  }, headers=auth).status_code == 201
+  r = client.post("/api/apps/", json={
+    "name": "dup-b", "description": "x", "jsx_source": jsx, "source_dir": d,
+  }, headers=auth)
+  assert r.status_code == 409
 
 
 def test_uninstall_skips_numeric_source_dir(client, auth, owner_token, db):

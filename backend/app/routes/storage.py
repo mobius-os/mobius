@@ -47,7 +47,7 @@ from sqlalchemy.orm import Session
 from app import activity, fs_locks, models
 from app.config import get_settings
 from app.database import get_db
-from app.storage_io import MAX_STORAGE_BYTES, atomic_write
+from app.storage_io import atomic_write, read_capped_body
 from app.deps import (
   Principal,
   get_current_owner,
@@ -67,7 +67,7 @@ _LEVELS = {"none": 0, "read": 1, "write": 2}
 
 def _check_cross_app(
   db: Session, principal: Principal, target_app_id: int, mode: str
-) -> None:
+) -> models.App:
   """Enforces declared cross-app access on /api/storage/apps/{id}/...
 
   Owner tokens always pass. App tokens accessing their OWN app always
@@ -92,9 +92,9 @@ def _check_cross_app(
   if not target:
     raise HTTPException(status_code=404, detail="App not found.")
   if principal.app_id is None:
-    return  # owner token
+    return target  # owner token
   if principal.app_id == target_app_id:
-    return  # app accessing its own data
+    return target  # app accessing its own data
   need = _LEVELS[mode]
   caller = (
     db.query(models.App).filter(models.App.id == principal.app_id).first()
@@ -122,6 +122,30 @@ def _check_cross_app(
         f"'{target.share_with_apps}' — insufficient for {mode}."
       ),
     )
+  return target
+
+
+def _recheck_app_identity(db: Session, app_id: int, expected_nonce) -> None:
+  """Re-verify, UNDER the per-app lock, that app_id is still the SAME app it
+  was at authorization time.
+
+  A plain existence check isn't enough: SQLite reuses a freed integer id, so
+  between a slow PUT/DELETE's authorization and its locked filesystem mutation,
+  the app can be uninstalled and a DIFFERENT app can reuse the id — the old
+  request would then write/delete inside the replacement's storage tree. The
+  per-app `token_nonce` rotates with the row, so a mismatch (or a missing row)
+  means the original app is gone and we must not touch the tree (Codex review
+  round-9 #1). `populate_existing()` forces a fresh DB read past the session's
+  identity map so a concurrent uninstall's committed delete/recreate is seen.
+  """
+  row = (
+    db.query(models.App)
+    .populate_existing()
+    .filter(models.App.id == app_id)
+    .first()
+  )
+  if row is None or row.token_nonce != expected_nonce:
+    raise HTTPException(status_code=404, detail="App not found.")
 
 
 def _resolve(base: Path, rel: str) -> Path:
@@ -341,32 +365,6 @@ def _is_envelope(body) -> bool:
   )
 
 
-async def _read_capped_body(request: Request) -> bytes:
-  """Reads the request body, refusing once it crosses MAX_STORAGE_BYTES.
-
-  A declared Content-Length over the cap is rejected before a byte is read;
-  then the body is streamed chunk-by-chunk and aborted the instant the running
-  total exceeds the cap — so a runaway (or lying-Content-Length) PUT can't
-  buffer an unbounded body into memory and OOM the tight host (round-8 #3).
-  """
-  cl = request.headers.get("content-length")
-  if cl is not None:
-    try:
-      declared = int(cl)
-    except ValueError:
-      declared = None
-    if declared is not None and declared > MAX_STORAGE_BYTES:
-      raise HTTPException(status_code=413, detail="Storage write too large.")
-  chunks: list[bytes] = []
-  total = 0
-  async for chunk in request.stream():
-    total += len(chunk)
-    if total > MAX_STORAGE_BYTES:
-      raise HTTPException(status_code=413, detail="Storage write too large.")
-    chunks.append(chunk)
-  return b"".join(chunks)
-
-
 async def _decode_write_body(request: Request, file_path: Path) -> str | bytes:
   """Decodes a PUT body into text or bytes to write to disk.
 
@@ -374,7 +372,7 @@ async def _decode_write_body(request: Request, file_path: Path) -> str | bytes:
   envelope for text files, raw text for non-JSON files, and raw bytes
   for any path.
   """
-  raw = await _read_capped_body(request)
+  raw = await read_capped_body(request)
   content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
   is_json_path = file_path.suffix.lower() == ".json"
 
@@ -450,18 +448,19 @@ async def write_app_file(
   principal: Principal = Depends(get_principal),
 ):
   """Writes content to a file in an app's data directory."""
-  _check_cross_app(db, principal, app_id, mode="write")
+  expected_nonce = _check_cross_app(db, principal, app_id, mode="write").token_nonce
   base = Path(get_settings().data_dir) / "apps" / str(app_id)
   file_path = _resolve(base, path)
   content = await _decode_write_body(request, file_path)
-  # Serialize the write against this app's uninstall AND re-verify the app still
-  # exists UNDER the lock. A write that paused to read its body could otherwise
-  # land after an interleaved uninstall and recreate /data/apps/<id> as an
-  # orphan tree (Codex review round-6 #3). Möbius runs one uvicorn worker, so
-  # this in-process lock fully serializes write vs uninstall.
+  # Serialize the write against this app's uninstall AND re-verify, under the
+  # lock, that this is still the SAME app (its token_nonce is unchanged). A
+  # write that paused to read its body could otherwise land after an
+  # interleaved uninstall — recreating /data/apps/<id> as an orphan tree, or
+  # worse, writing into a DIFFERENT app that reused the freed id (Codex review
+  # round-6 #3, round-9 #1). Möbius runs one uvicorn worker, so this in-process
+  # lock fully serializes write vs uninstall.
   async with fs_locks.app_storage_lock(app_id):
-    if not db.query(models.App.id).filter(models.App.id == app_id).first():
-      raise HTTPException(status_code=404, detail="App not found.")
+    _recheck_app_identity(db, app_id, expected_nonce)
     # A directory destination would make the write raise IsADirectory and
     # surface as an opaque 500; reject it explicitly (Codex review #11).
     if file_path.is_dir():
@@ -500,16 +499,16 @@ async def delete_app_file(
   principal: Principal = Depends(get_principal),
 ):
   """Deletes a file from an app's data directory. 404 if missing."""
-  _check_cross_app(db, principal, app_id, mode="write")
+  expected_nonce = _check_cross_app(db, principal, app_id, mode="write").token_nonce
   base = Path(get_settings().data_dir) / "apps" / str(app_id)
   file_path = _resolve(base, path)
-  # Serialize with this app's uninstall + re-verify the app still exists UNDER
-  # the per-app lock, exactly like write_app_file: a delayed DELETE for a
-  # reused SQLite id could otherwise unlink a file belonging to the REPLACEMENT
-  # app that recycled the id (Codex review round-8 #1).
+  # Serialize with this app's uninstall + re-verify, under the per-app lock,
+  # that this is still the SAME app (token_nonce unchanged), exactly like
+  # write_app_file: a delayed DELETE for a reused SQLite id could otherwise
+  # unlink a file belonging to the REPLACEMENT app that recycled the id (Codex
+  # review round-8 #1, round-9 #1).
   async with fs_locks.app_storage_lock(app_id):
-    if not db.query(models.App.id).filter(models.App.id == app_id).first():
-      raise HTTPException(status_code=404, detail="App not found.")
+    _recheck_app_identity(db, app_id, expected_nonce)
     if not file_path.exists():
       raise HTTPException(status_code=404, detail="File not found.")
     if not file_path.is_file():
