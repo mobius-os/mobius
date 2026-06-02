@@ -221,6 +221,28 @@ class App(Base):
   # apps. The flag is a declaration, not a firewall (design philosophy
   # §4 "code empowers the agent; it does not police it").
   offline_capable = Column(Boolean, nullable=False, default=False)
+  # Chat-log read tier this app's token may request against
+  # GET /api/chat-logs. Read at request time (not baked into the JWT)
+  # so flipping it revokes access on the very next request — the
+  # Settings "Data access" revoke is a column flip, not a token
+  # rotation.
+  #   'none'    (default) — GET /api/chat-logs returns 403 for this app
+  #   'summary' — whitelisted {role, text} per chat, server-side
+  #               structurally redacted (tool/thinking/question/error
+  #               blocks, attachments, fs-path augmentation, titles all
+  #               stripped; surviving text secret-scrubbed). "Reduced
+  #               exposure," not "safe" — regex can't catch pasted
+  #               documents or encoded secrets.
+  #   'full'    — DEFERRED. Reserved so the column's value space is
+  #               stable; the read API rejects it until a concrete
+  #               consumer + louder consent lands (design §2).
+  # This is consent/attribution/audit, NOT a sandbox: a same-origin app
+  # holds the owner JWT and can hit /api/chats directly. The enforceable
+  # control is that THIS gated surface returns redacted data; the owner-
+  # only routes stay closed (design §0b).
+  chat_log_access = Column(
+    String(16), nullable=False, default="none"
+  )
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
