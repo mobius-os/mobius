@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 
 def _make_app(client, owner_token):
   r = client.post("/api/apps/", json={
@@ -318,6 +320,44 @@ def test_write_is_atomic_no_temp_leftover(client, auth, owner_token):
   assert client.get(
     f"/api/storage/apps/{app_id}/notes.json", headers=auth
   ).json() == {"k": 1}
+
+
+@pytest.mark.asyncio
+async def test_read_capped_body_rejects_oversize(monkeypatch):
+  """_read_capped_body refuses a body over the cap with 413 (round-8 #3) —
+  bound the host's memory against a runaway write. Exercised DIRECTLY (not
+  through a PUT) so the patched constant and the running function come from the
+  SAME module object: test_routes_init_resilience pops + re-imports
+  app.routes.*, which would otherwise leave the app router holding a different
+  storage module than the one this test patches."""
+  from fastapi import HTTPException
+  from starlette.requests import Request
+  import app.routes.storage as storage_mod
+  monkeypatch.setattr(storage_mod, "MAX_STORAGE_BYTES", 16)
+
+  async def receive():
+    return {"type": "http.request", "body": b"x" * 100, "more_body": False}
+
+  req = Request(
+    {"type": "http", "headers": [(b"content-length", b"100")]}, receive
+  )
+  with pytest.raises(HTTPException) as exc:
+    await storage_mod._read_capped_body(req)
+  assert exc.value.status_code == 413
+
+
+def test_large_text_read_roundtrips(client, auth, owner_token):
+  """A text file above the inline threshold streams back intact via the
+  FileResponse path (round-8 #3)."""
+  app_id = _make_app(client, owner_token)
+  big = "a" * (300 * 1024)   # > _INLINE_READ_MAX (256 KB) -> streamed
+  assert client.put(
+    f"/api/storage/apps/{app_id}/big.txt",
+    json={"content": big}, headers=auth,
+  ).status_code == 204
+  got = client.get(f"/api/storage/apps/{app_id}/big.txt", headers=auth)
+  assert got.status_code == 200
+  assert got.text == big
 
 
 def test_read_directory_path_404(client, auth, owner_token):

@@ -72,7 +72,12 @@ def _validate_source_dir(source_dir: str, data_dir: str) -> str:
   before the containment check.
   """
   apps_root = (Path(data_dir) / "apps").resolve()
-  resolved = Path(source_dir).resolve()
+  # resolve() can raise on a pathological path (e.g. a symlink loop). Surface
+  # that as a clean 400, not a 500 (Codex review round-7 #3 robustness caveat).
+  try:
+    resolved = Path(source_dir).resolve()
+  except (OSError, RuntimeError):
+    raise HTTPException(status_code=400, detail="Invalid source_dir.")
   if resolved.parent != apps_root:
     raise HTTPException(
       status_code=400,

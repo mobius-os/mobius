@@ -44,9 +44,10 @@ from fastapi import HTTPException
 from PIL import Image as _PILImage
 from sqlalchemy.orm import Session
 
-from app import activity, models
+from app import activity, fs_locks, models
 from app.compiler import compile_jsx
 from app.config import get_settings
+from app.storage_io import atomic_write
 from app.routes.apps import (
   _derive_source_dir, _slugify_for_source_dir, allocate_unique_slug,
 )
@@ -817,15 +818,21 @@ async def install_from_manifest(
       if first_write:
         created_paths.append(jsx_file)
 
-    # Storage seeds — fresh installs always seed; updates only fill
-    # in keys that don't exist yet so user data isn't clobbered.
-    for sub, content in seeds_fetched.items():
-      target = _storage_path(app.id, sub)
-      if mode == "update" and target.exists():
-        continue
-      target.parent.mkdir(parents=True, exist_ok=True)
-      target.write_bytes(content)
-      created_paths.append(target)
+    # Storage seeds — fresh installs always seed; updates only fill in keys
+    # that don't exist yet so user data isn't clobbered. Under the per-app lock
+    # (the install endpoint already holds the lifecycle lock, so this is the
+    # documented lifecycle -> app order) so a REINSTALL's exists-check + write
+    # can't race a concurrent storage PUT to the same key, and written
+    # atomically so a reader never observes a torn seed (Codex review round-8
+    # #2). Bootstrap installs hold no lifecycle lock but run before serving, so
+    # taking app_storage_lock alone here is contention-free.
+    async with fs_locks.app_storage_lock(app.id):
+      for sub, content in seeds_fetched.items():
+        target = _storage_path(app.id, sub)
+        if mode == "update" and target.exists():
+          continue
+        atomic_write(target, content)
+        created_paths.append(target)
 
     # Icon — re-apply on update so a version bump's new icon lands.
     if icon_processed:

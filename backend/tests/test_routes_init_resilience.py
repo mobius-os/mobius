@@ -20,6 +20,34 @@ from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 
 
+@pytest.fixture(autouse=True)
+def _restore_app_routes_modules():
+  """Restore the canonical app.routes.* modules after each test here.
+
+  These tests pop app.routes.* from sys.modules and re-import them under a
+  monkeypatched importer (some as 503 stubs). Left in place, a later test that
+  does `import app.routes.<x>` would get a freshly re-imported — and now
+  DISTINCT — module object, while the app router built at conftest import still
+  holds the original. A monkeypatch on that fresh module then never reaches the
+  running handler. (This silently broke a storage size-cap test.) Snapshot the
+  originals up front and restore them on teardown so the rest of the suite sees
+  the same module objects the app router uses.
+  """
+  def _route_mod_names():
+    return [
+      k for k in sys.modules
+      if k == "app.routes" or k.startswith("app.routes.")
+    ]
+
+  saved = {k: sys.modules[k] for k in _route_mod_names()}
+  try:
+    yield
+  finally:
+    for k in _route_mod_names():
+      sys.modules.pop(k, None)
+    sys.modules.update(saved)
+
+
 def _mount(router: APIRouter, prefix: str = "/x") -> TestClient:
   """Mounts a router under `prefix` on a throwaway FastAPI app and
   returns a TestClient for it."""
