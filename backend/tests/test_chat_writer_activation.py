@@ -22,6 +22,7 @@ from app import chat_queue, models, questions, schemas
 from app.broadcast import ChatBroadcast
 from app.chat_writer import Barrier, PersistTranscript, get_writer
 from app.database import SessionLocal
+from app.deps import Principal
 from app.pending_questions import PendingQuestion
 
 
@@ -617,7 +618,13 @@ def test_stop_races_answer_real_lock_contention_returns_410(chat, owner_token):
     )
     db_answer = SessionLocal()
     answer_task = asyncio.create_task(
-      send_message(body=body, chat_id=chat.id, _=None, db=db_answer)
+      send_message(
+        body=body, chat_id=chat.id,
+        principal=Principal(
+          owner=db_answer.query(models.Owner).one(), app_id=None,
+        ),
+        db=db_answer,
+      )
     )
     # Let the answer task reach + park on the held lock.
     await asyncio.sleep(0.1)
