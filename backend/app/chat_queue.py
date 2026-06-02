@@ -40,6 +40,15 @@ empty release the `_starting` claim and forget the chat — all under one
 lock acquisition. It does NOT call back into `run_chat`; the caller
 (chat.py:_run_chat_impl) schedules the continuation AFTER the lock
 releases.
+
+Markerless pending queues are a tolerated steady state. A Stop's
+`ClearPending` committing just before a racing POST's `AppendPending`
+leaves `run_status=None` with a non-empty queue. Boot reconciliation
+(which only scans `run_status="running"`) deliberately does NOT consume
+these — auto-promoting at startup would spawn a turn after a crash. The
+repair path is the NEXT POST's stale-pending drain: it claims
+`mark_starting` and promotes the head. Reconciliation only logs a warning
+so an accumulating queue is visible (see `reconcile_interrupted_chats`).
 """
 
 from __future__ import annotations
@@ -219,6 +228,7 @@ async def drain_and_release(
   forget_chat,
   clear_run_status_strict,
   current_generation,
+  ending_run_token: str = "",
 ) -> tuple[dict | None, list, str | None, "TerminalDisposition"]:
   """End-of-turn queue drain. Returns (next_user, next_messages,
   next_session_id, disposition) for the caller to publish + schedule.
@@ -231,11 +241,12 @@ async def drain_and_release(
       continuously set (PromotePending re-set it for the next turn) and
       ownership passes to the scheduled continuation; do NOT clear/forget.
     - If nothing to promote AND we_own_gen, clears the durable run marker
-      (strict `ClearRunStatus`), then releases _starting, then forgets the
-      chat — the clear-before-forget ordering, ALL inside this lock. This
-      also closes the race where clearing AFTER releasing _starting would
-      erase a racing new `StartTurn` marker (ClearRunStatus is NOT
-      generation-conditional). Returns `EMPTY_TERMINAL_CLEARED`.
+      (strict `ClearRunStatus`, identity-keyed on `ending_run_token`), then
+      releases _starting, then forgets the chat — the clear-before-forget
+      ordering, ALL inside this lock. The clear naming the finishing run's
+      token means a fresh `StartTurn` that set a new marker mid-drain isn't
+      wiped: the actor sees the new owner and no-ops our clear. Returns
+      `EMPTY_TERMINAL_CLEARED`.
 
   Doing this in a single locked critical section closes the race
   between the run_chat finally and a POST that arrives in the window
@@ -289,8 +300,11 @@ async def drain_and_release(
         # marker for reconciliation), THEN release _starting, THEN forget.
         # Clearing before releasing _starting closes the race where a racing
         # new StartTurn's marker (set after we released _starting) would be
-        # erased by a clear running outside the lock.
-        await clear_run_status_strict(chat_id)
+        # erased by a clear running outside the lock. The clear is identity-
+        # keyed on the finishing run's token, so even a StartTurn that lands
+        # mid-drain (no generation bump → we_own_gen still true) keeps its
+        # marker — the actor no-ops a clear that names the old owner.
+        await clear_run_status_strict(chat_id, ending_run_token)
         discard_starting(chat_id)
         forget_chat(chat_id)
         return (

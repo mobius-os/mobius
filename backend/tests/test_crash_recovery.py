@@ -228,3 +228,31 @@ def test_reconcile_assigns_ts_to_interrupted_messages(db):
   assert b.messages[-1]["role"] == "assistant"
   assert b.messages[-1].get("ts") is not None, "standalone reconciled msg needs a ts"
   assert b.messages[-1]["ts"] > 5, "fresh ts must follow existing messages"
+
+
+def test_reconcile_warns_on_markerless_pending_queue_but_leaves_it(db, caplog):
+  """A Stop's ClearPending committing just before a racing AppendPending leaves
+  a chat run_status=None with a non-empty pending queue. Reconciliation must
+  NOT consume it — auto-promoting at startup would spawn a post-crash turn, and
+  the next POST's stale-pending drain is the repair path — but it WARNS so a
+  never-drained accumulating queue is visible rather than silent.
+  """
+  _make_chat(
+    db, "markerless",
+    run_status=None,
+    pending_messages=[{"role": "user", "content": "queued", "ts": 1}],
+  )
+
+  with caplog.at_level("WARNING"):
+    reconciled = chat_mod.reconcile_interrupted_chats(db)
+
+  assert "markerless" not in reconciled, "a markerless queue must not be consumed"
+  db.expire_all()
+  row = db.query(models.Chat).filter(models.Chat.id == "markerless").first()
+  assert row.run_status is None
+  assert len(row.pending_messages) == 1, (
+    "the queue is left intact for the next-POST stale-pending drain"
+  )
+  assert any(
+    "markerless pending queue" in r.getMessage() for r in caplog.records
+  ), "an accumulating markerless queue must be surfaced as a warning"

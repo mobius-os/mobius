@@ -418,8 +418,8 @@ def _read_skill_text() -> str:
   return ""
 
 
-def current_run_generation(chat_id: str) -> int:
-  """Returns the current generation for a chat (0 if none)."""
+def current_run_generation(chat_id: str) -> int | float:
+  """Returns the current generation for a chat (0 if none, +inf if deleted)."""
   return registry.current_generation(chat_id)
 
 
@@ -448,6 +448,27 @@ def forget_chat(chat_id: str) -> None:
   registry.forget(chat_id)
 
 
+def mark_chat_deleted(chat_id: str) -> None:
+  """Soft-delete cleanup: kill the in-flight run and deny generation ownership.
+
+  Unlike `forget_chat` (turn-end, which resets the counter to a reusable 0),
+  this PRESERVES the finite counter and flags the chat deleted so
+  `current_run_generation` returns +inf — a run holding a pre-delete run_gen
+  (incl. run_gen=0 on a brand-new chat) then reads `we_own_gen=False` and skips
+  finalizing onto the soft-deleted row. Paired with `recover_chat_generation`.
+  """
+  registry.mark_deleted(chat_id)
+
+
+def recover_chat_generation(chat_id: str) -> int:
+  """Clears the deleted flag and bumps to a generation newer than any run.
+
+  Called when a soft-deleted chat is recovered, so its next run starts at a
+  generation that no resurrected pre-delete run can match.
+  """
+  return registry.recover_generation(chat_id)
+
+
 # Durable run marker. The runner registry holds the live "is this chat
 # running" truth in memory; the row's run_status mirrors it so it
 # survives a process death. The pair (set on turn start, clear on turn
@@ -462,7 +483,7 @@ def forget_chat(chat_id: str) -> None:
 # self-correcting and never strands the chat.
 
 
-async def _clear_run_status(chat_id: str) -> None:
+async def _clear_run_status(chat_id: str, run_token: str = "") -> None:
   """Clears the chat's durable run marker once the turn has ended.
 
   Routes through the actor's `ClearRunStatus` (the sole runtime mutator
@@ -470,11 +491,17 @@ async def _clear_run_status(chat_id: str) -> None:
   in-flight transcript snapshot for the same chat. Best-effort: a failed
   ack is logged and swallowed — reconciliation resolves a marker left set
   by a dropped clear, so this never strands the turn or the caller.
+
+  `run_token` (when given) is the ending run's token: the actor clears
+  identity-keyed, only if that token still owns the marker, so a dying run
+  can't wipe a fresh turn's marker. Tokenless clears stay unconditional.
   """
   if not chat_id:
     return
   try:
-    ack = get_writer().submit(ClearRunStatus(chat_id=chat_id, run_token=""))
+    ack = get_writer().submit(
+      ClearRunStatus(chat_id=chat_id, run_token=run_token)
+    )
     await _await_ack(ack)
   except Exception:
     _get_logger().warning(
@@ -483,7 +510,7 @@ async def _clear_run_status(chat_id: str) -> None:
     )
 
 
-async def _clear_run_status_strict(chat_id: str) -> None:
+async def _clear_run_status_strict(chat_id: str, run_token: str = "") -> None:
   """Strict terminal variant of `_clear_run_status`: surfaces a failed ack.
 
   The best-effort `_clear_run_status` above swallows a failed ack because a
@@ -497,10 +524,17 @@ async def _clear_run_status_strict(chat_id: str) -> None:
   bounded caller imposes).
 
   No-op (no raise) when there's no chat_id — nothing to clear.
+
+  `run_token` (when given) is the ending run's token: the actor clears the
+  marker only if that token still owns it (identity-keyed compare-and-clear),
+  so a dying run's clear can't wipe the marker a fresh turn just set (the
+  markerless-run race). Tokenless clears stay unconditional.
   """
   if not chat_id:
     return
-  ack = get_writer().submit(ClearRunStatus(chat_id=chat_id, run_token=""))
+  ack = get_writer().submit(
+    ClearRunStatus(chat_id=chat_id, run_token=run_token)
+  )
   await _await_ack(ack)
 
 
@@ -665,6 +699,33 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
       "reconciled %d interrupted chat(s) on startup: %s",
       len(reconciled), ", ".join(reconciled),
     )
+
+  # Markerless pending queues: a Stop's ClearPending committing BEFORE a
+  # racing POST's AppendPending leaves run_status=None with a non-empty queue.
+  # The stale scan above only matches run_status="running", so these are NOT
+  # recovered here — and must not be: auto-promoting at startup would spawn a
+  # turn after a crash, which startup deliberately avoids. The repair path is
+  # the next POST's stale-pending drain (it claims mark_starting and promotes
+  # the head). Surface them as a warning so an accumulating, never-drained
+  # queue is visible rather than silent. (The set is bounded — single-owner —
+  # and this runs once at boot, so the broad idle-chat scan is acceptable.)
+  try:
+    markerless = (
+      db.query(models.Chat)
+      .filter(models.Chat.run_status.is_(None))
+      .filter(models.Chat.deleted_at.is_(None))
+      .all()
+    )
+    for chat in markerless:
+      if chat.pending_messages:
+        log.warning(
+          "reconcile_interrupted_chats: markerless pending queue chat_id=%s "
+          "count=%d; left intact for the next-POST stale-pending drain",
+          chat.id, len(chat.pending_messages),
+        )
+  except Exception:
+    log.exception("reconcile_interrupted_chats: markerless-queue scan failed")
+
   return reconciled
 
 
@@ -935,6 +996,7 @@ async def _drain_and_release(
   chat_id: str,
   run_gen: int | None,
   run_token: str,
+  ending_run_token: str = "",
 ) -> tuple[dict | None, list, str | None, chat_queue.TerminalDisposition]:
   """Local helper around chat_queue.drain_and_release that binds the
   chat.py-owned discard_starting + forget_chat + strict-clear callbacks.
@@ -942,6 +1004,10 @@ async def _drain_and_release(
   `run_token` is the CONTINUATION's token: the drain's `PromotePending`
   command sets the next turn's run marker under it, and the same token
   is handed to `_schedule_continuation` so the spawned runner reuses it.
+
+  `ending_run_token` is the FINISHING run's token (distinct from the
+  continuation's `run_token` above). The empty-queue clear is identity-keyed
+  on it so a fresh StartTurn that set a new marker mid-drain isn't wiped.
 
   Ownership is decided UNDER the drain's lock from `run_gen` (via the
   injected `current_run_generation`), not from a bool snapshotted before
@@ -959,6 +1025,7 @@ async def _drain_and_release(
     forget_chat=forget_chat,
     clear_run_status_strict=_clear_run_status_strict,
     current_generation=current_run_generation,
+    ending_run_token=ending_run_token,
   )
 
 
@@ -1000,6 +1067,7 @@ async def _close_browser_session(chat_id: str) -> None:
 
 async def _terminal_setup_error_cleanup(
   chat_id: str,
+  run_token: str = "",
 ) -> chat_queue.TerminalDisposition:
   """Bounded terminal cleanup for a setup-time error before any runner ran.
 
@@ -1029,7 +1097,7 @@ async def _terminal_setup_error_cleanup(
     async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
       async with chat_queue.get_lock(chat_id):
         await _clear_pending_strict(chat_id)
-        await _clear_run_status_strict(chat_id)
+        await _clear_run_status_strict(chat_id, run_token)
         discard_starting(chat_id)
         forget_chat(chat_id)
     return chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
@@ -1179,7 +1247,10 @@ async def _complete_turn(
   next_run_token = alloc_run_token()
   try:
     next_user, next_messages, next_session_id, disposition = (
-      await _drain_and_release(db, chat_id, run_gen, next_run_token)
+      await _drain_and_release(
+        db, chat_id, run_gen, next_run_token,
+        ending_run_token=sink.run_token or "",
+      )
     )
   except (Exception, asyncio.TimeoutError) as exc:
     # The PromotePending / ClearRunStatus ack failed OR timed out, OR the
@@ -1347,7 +1418,10 @@ async def run_chat(
             )
             newer_owner_claimed = registry.is_alive(chat_id)
             if still_immediate_successor and not newer_owner_claimed:
-              await _clear_run_status_strict(chat_id)
+              # Identity-keyed on this dying run's token: if a fresh turn
+              # raced in and set a new marker (the is_alive window above),
+              # the actor no-ops this clear instead of wiping it.
+              await _clear_run_status_strict(chat_id, run_token or "")
               disposition = (
                 chat_queue.TerminalDisposition.STOP_HANDOFF_CLEARED
               )
@@ -1490,7 +1564,7 @@ async def _run_chat_impl(
   owner = db.query(models.Owner).first()
   if not owner:
     bc.publish({"type": "error", "message": "No owner configured."})
-    disposition = await _terminal_setup_error_cleanup(chat_id)
+    disposition = await _terminal_setup_error_cleanup(chat_id, run_token or "")
     bc.publish({"type": "done"})
     clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
     bc.mark_completed()
@@ -1619,7 +1693,7 @@ async def _run_chat_impl(
   auth_error = provider.check_auth(settings.data_dir)
   if auth_error:
     bc.publish({"type": "error", "message": auth_error})
-    disposition = await _terminal_setup_error_cleanup(chat_id)
+    disposition = await _terminal_setup_error_cleanup(chat_id, run_token or "")
     bc.publish({"type": "done"})
     clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
     bc.mark_completed()
@@ -1764,7 +1838,7 @@ async def _run_chat_impl(
     "type": "error",
     "message": f"Provider {provider.name!r} has no supported runtime.",
   })
-  disposition = await _terminal_setup_error_cleanup(chat_id)
+  disposition = await _terminal_setup_error_cleanup(chat_id, run_token or "")
   clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
   bc.publish({"type": "done"})
   bc.mark_completed()

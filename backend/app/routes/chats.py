@@ -16,6 +16,8 @@ from app.chat import (
   bump_run_generation,
   forget_chat,
   is_chat_running,
+  mark_chat_deleted,
+  recover_chat_generation,
   stop_chat_for,
 )
 from app.database import get_db
@@ -519,10 +521,14 @@ async def delete_chat(
   if chat:
     chat.deleted_at = datetime.now(UTC)
     db.commit()
-  # Drop in-memory per-chat state so a deleted chat doesn't leave a
-  # stale `_run_generation` entry on long-running containers.
+  # Flag the chat soft-deleted in the registry (NOT forget_chat, which resets
+  # the generation counter to a reusable 0). mark_chat_deleted preserves the
+  # finite counter and makes `current_run_generation` return +inf, so a run
+  # holding a pre-delete generation — including run_gen=0 on a brand-new chat,
+  # the delete-ABA case — reads `we_own_gen=False` and skips finalizing onto
+  # the soft-deleted row. recover_chat restores it with a strictly-newer gen.
   questions.cancel(chat_id)
-  forget_chat(chat_id)
+  mark_chat_deleted(chat_id)
 
 
 @router.post("/{chat_id}/recover")
@@ -542,6 +548,9 @@ def recover_chat(
     raise HTTPException(status_code=410, detail="Recovery window has expired.")
   chat.deleted_at = None
   db.commit()
+  # Clear the registry's deleted flag and bump to a generation newer than every
+  # pre-delete run, so a resurrected stale run can't reclaim the recovered chat.
+  recover_chat_generation(chat_id)
   return {"ok": True}
 
 

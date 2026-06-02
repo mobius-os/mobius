@@ -1486,3 +1486,157 @@ def test_stale_reclaim_bow_out_clears_pointer_but_leaves_browser_when_no_success
     )
   finally:
     bc_mod.set_active_broadcast(None)
+
+
+# -- 19. ClearRunStatus is identity-keyed: a stale token can't wipe a marker --
+def test_clear_run_status_is_identity_keyed_to_the_owning_run_token():
+  """The markerless-run race. A fresh turn's StartTurn sets the marker and
+  records itself (run_token) as the marker's owner. A dying run that races in
+  during the window where the fresh turn has marked-starting but its handle
+  isn't registered yet (so is_alive is briefly false) would otherwise clear
+  the marker by chat_id, leaving the fresh turn markerless. ClearRunStatus is
+  identity-keyed: a clear naming a DIFFERENT run_token is a no-op, so the fresh
+  marker survives; the owning token still clears it.
+  """
+  from app.chat_writer import ClearRunStatus, StartTurn, await_ack, get_writer
+
+  _seed_chat("t19", messages=[], pending=[])
+
+  async def _fresh_then_stale_clear():
+    a = get_writer().submit(StartTurn(
+      chat_id="t19", run_token="rt-fresh",
+      user_msg={"role": "user", "content": "hi", "ts": 1},
+    ))
+    await await_ack(a)
+    # The dying run's clear names its OWN (older) token, not the fresh owner.
+    a = get_writer().submit(
+      ClearRunStatus(chat_id="t19", run_token="rt-dying")
+    )
+    await await_ack(a)
+
+  asyncio.run(_fresh_then_stale_clear())
+  assert _load("t19")["run_status"] == "running", (
+    "a clear naming a non-owning run_token must NOT wipe the fresh marker"
+  )
+
+  async def _clear_matching():
+    a = get_writer().submit(
+      ClearRunStatus(chat_id="t19", run_token="rt-fresh")
+    )
+    await await_ack(a)
+
+  asyncio.run(_clear_matching())
+  assert _load("t19")["run_status"] is None, (
+    "the run_token that owns the marker still clears it"
+  )
+
+
+# -- 20. a tokenless ClearRunStatus stays unconditional (reconcile/no-handoff)-
+def test_tokenless_clear_run_status_is_unconditional():
+  """A clear with run_token="" clears regardless of the recorded owner — the
+  reconciliation and no-handoff paths that already know they own the marker
+  must not be gated by the identity check.
+  """
+  from app.chat_writer import ClearRunStatus, StartTurn, await_ack, get_writer
+
+  _seed_chat("t20", messages=[], pending=[])
+
+  async def _start_then_tokenless_clear():
+    a = get_writer().submit(StartTurn(
+      chat_id="t20", run_token="rt-owner",
+      user_msg={"role": "user", "content": "hi", "ts": 1},
+    ))
+    await await_ack(a)
+    a = get_writer().submit(ClearRunStatus(chat_id="t20", run_token=""))
+    await await_ack(a)
+
+  asyncio.run(_start_then_tokenless_clear())
+  assert _load("t20")["run_status"] is None, (
+    "a tokenless clear clears unconditionally even with a recorded owner"
+  )
+
+
+# -- 21. finalize NOOP on a still-existing chat is benign (no spurious error) -
+def test_finalize_noop_on_existing_chat_is_benign():
+  """A concurrent ReplaceTranscript can wipe a chat's transcript mid-turn, so
+  the terminal Finalize finds nothing to write and `_apply` returns NOOP — but
+  the chat still EXISTS, so this is benign (nothing to save), not a persistence
+  failure. The Finalize ack must resolve, not raise a spurious "could not be
+  saved".
+  """
+  from app.chat_writer import Finalize, await_ack, get_writer
+
+  _seed_chat("t21", messages=[], pending=[])  # exists, empty transcript
+
+  async def _finalize():
+    a = get_writer().submit(Finalize(
+      chat_id="t21", run_token="rt-21",
+      snapshot={"blocks": [{"type": "text", "content": "hi"}]},
+    ))
+    await await_ack(a)  # benign NOOP → APPLIED, so this must not raise
+
+  asyncio.run(_finalize())
+
+
+# -- 22. finalize NOOP on a missing/deleted chat stays a hard failure --------
+def test_finalize_noop_on_missing_chat_raises():
+  """A Finalize for a chat row that is gone (deleted mid-turn) must stay a hard
+  NOOP: the dispatch raises so the turn maps to FAILED_LEAVE_MARKER and
+  reconciliation handles the orphaned marker. A stray finalize must not
+  silently succeed against a chat that delete already removed.
+  """
+  from app.chat_writer import (
+    Finalize, _PersistFailed, await_ack, get_writer,
+  )
+
+  async def _finalize_missing():
+    a = get_writer().submit(Finalize(
+      chat_id="t22-missing", run_token="rt-22",
+      snapshot={"blocks": [{"type": "text", "content": "hi"}]},
+    ))
+    await await_ack(a)
+
+  with pytest.raises(_PersistFailed):
+    asyncio.run(_finalize_missing())
+
+
+# -- 23. finalize must NOT resurrect a soft-deleted chat ---------------------
+def test_finalize_does_not_resurrect_soft_deleted_chat():
+  """A Finalize enqueued just before a delete (and processed by the actor
+  after deleted_at is set) must NOT append to the soft-deleted row — that would
+  resurrect the deleted chat's transcript on recovery. The single core write
+  helper filters deleted_at, so the finalize is a NOOP (→ hard, raises) and the
+  row's transcript is left exactly as it was.
+  """
+  from datetime import UTC, datetime
+
+  from app.chat_writer import (
+    Finalize, _PersistFailed, await_ack, get_writer,
+  )
+
+  _seed_chat(
+    "t23", messages=[{"role": "user", "content": "hi", "ts": 1}], pending=[],
+  )
+  # Soft-delete it (deleted_at set) while it still has a transcript — the
+  # window where a pre-enqueued finalize would otherwise write to the dead row.
+  db = SessionLocal()
+  try:
+    row = db.query(models.Chat).filter(models.Chat.id == "t23").first()
+    row.deleted_at = datetime.now(UTC)
+    db.commit()
+  finally:
+    db.close()
+
+  async def _finalize_deleted():
+    a = get_writer().submit(Finalize(
+      chat_id="t23", run_token="rt-23",
+      snapshot={"blocks": [{"type": "text", "content": "leaked"}]},
+    ))
+    await await_ack(a)
+
+  with pytest.raises(_PersistFailed):
+    asyncio.run(_finalize_deleted())
+
+  state = _load("t23")  # _load reads by id, no deleted_at filter
+  assert len(state["messages"]) == 1, "finalize must not append to a deleted chat"
+  assert state["messages"][-1]["role"] == "user", "no assistant content resurrected"

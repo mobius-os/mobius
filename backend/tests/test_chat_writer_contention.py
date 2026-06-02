@@ -305,9 +305,13 @@ def test_finalize_missing_chat_raises(actor):
     _await(fut)
 
 
-def test_finalize_empty_transcript_raises(actor):
-  """Finalize against a chat with no messages must RAISE — there is no
-  assistant message to finalize, so a True ack would be a silent loss."""
+def test_finalize_empty_transcript_on_existing_chat_is_benign(actor):
+  """Finalize against an EXISTING chat whose transcript is empty (a concurrent
+  ReplaceTranscript wiped it mid-turn) is BENIGN: there is nothing to finalize
+  onto, but the chat still exists, so this is a no-op rather than a persistence
+  failure. The ack resolves (NOOP promoted to APPLIED) instead of raising a
+  spurious "could not be saved". A finalize against a MISSING/soft-deleted chat
+  still raises — covered in test_terminal_completion."""
   _seed_chat(messages=[])
   fut = actor.submit(
     Finalize(
@@ -316,8 +320,8 @@ def test_finalize_empty_transcript_raises(actor):
       snapshot=_assistant_msg([{"type": "text", "content": "done"}]),
     )
   )
-  with pytest.raises(Exception):
-    _await(fut)
+  _await(fut)  # must not raise
+  assert _load_chat()["messages"] == [], "a benign NOOP writes nothing"
 
 
 def test_question_commit_happy_path_acks_and_persists(actor):

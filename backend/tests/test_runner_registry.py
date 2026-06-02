@@ -143,3 +143,35 @@ def test_concurrent_mark_starting_only_one_true():
   results = asyncio.run(_run())
 
   assert sum(1 for result in results if result) == 1
+
+
+def test_forget_resets_generation_to_reusable_zero():
+  # forget is normal turn-end cleanup: the chat lives on, so the next turn
+  # legitimately reuses generation 0.
+  registry = RunnerRegistry()
+  registry.bump_generation("c")
+  registry.forget("c")
+  assert registry.current_generation("c") == 0
+
+
+def test_mark_deleted_denies_ownership_via_infinity():
+  # The delete-ABA guard: a soft-deleted chat reads +inf, so a run holding
+  # ANY finite pre-delete generation (including 0 on a brand-new chat) reads
+  # we_own_gen=False and skips finalizing onto the dead row.
+  registry = RunnerRegistry()
+  registry.mark_deleted("fresh")  # never bumped → would default to 0
+  assert registry.current_generation("fresh") == float("inf")
+  run_gen = 0
+  we_own_gen = registry.current_generation("fresh") == run_gen
+  assert we_own_gen is False
+
+
+def test_recover_generation_resumes_strictly_newer_and_finite():
+  registry = RunnerRegistry()
+  registry.bump_generation("c")  # → 1, a pre-delete run holds this
+  registry.mark_deleted("c")
+  assert registry.current_generation("c") == float("inf")
+  recovered = registry.recover_generation("c")
+  assert recovered > 1, "recovery must resume strictly newer than any run"
+  assert registry.current_generation("c") == recovered  # finite again
+  assert registry.current_generation("c") != float("inf")
