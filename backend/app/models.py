@@ -243,6 +243,18 @@ class App(Base):
   chat_log_access = Column(
     String(16), nullable=False, default="none"
   )
+  # Per-app git model (feature 084), only populated when
+  # providers.per_app_git_enabled is on. `upstream_commit` is the sha of
+  # the last pristine-manifest commit on the app's `upstream` branch —
+  # the merge base an update diverges from. Null for user-built apps and
+  # for every app while the flag is off.
+  upstream_commit = Column(String(64), nullable=True, default=None)
+  # Stopgap divergence marker (old finding #2): the sha256 of the
+  # upstream entry JSX as last installed/updated. Lets the update path
+  # cheaply tell "did the on-disk index.jsx diverge from what upstream
+  # shipped" without a full repo, and survives even when the git model
+  # is off. Null until the first flagged install/update sets it.
+  upstream_jsx_sha = Column(String(64), nullable=True, default=None)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)

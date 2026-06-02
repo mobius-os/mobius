@@ -640,7 +640,7 @@ async def test_bootstrap_install_emits_with_source_bootstrap(db, monkeypatch):
     activity.log_event(
       "app_install", app_id=fake.id, slug=fake.slug, source=source,
     )
-    return fake, "install", [], {}
+    return fake, "install", [], {}, []
 
   with patch("app.bootstrap.install_from_manifest", _fake_install):
     await ensure_store_installed(db)

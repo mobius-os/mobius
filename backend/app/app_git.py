@@ -1,0 +1,329 @@
+"""Per-app git repo: pristine `upstream` history + a local working branch.
+
+Each installed app gets its own git repo at `/data/apps/<slug>/.git` with
+two branches:
+
+  - `upstream` holds the exact bytes of each installed manifest version.
+    Only the installer commits here, via `record_upstream`. It is the
+    merge base that lets an update tell "did the user diverge from what
+    upstream shipped" without guessing from a sha.
+  - `main` is the local working branch. The file watcher and the agent
+    commit their edits here (via `commit_local`); it is the branch the
+    working tree actually checks out.
+
+Update is `record_upstream` (commit the new upstream bytes) then
+`merge_upstream`, which computes a clean-vs-conflict verdict with
+`git merge-tree --write-tree` WITHOUT touching the live working tree —
+so a conflict never leaves the app served in a half-merged state. The
+caller (install.py) applies a clean merge by writing the merged bytes
+and recompiling; on conflict it surfaces the conflicting paths and
+leaves the local edits intact for an agent to resolve later.
+
+Only SOURCE is tracked — `index.jsx`, job scripts (`*.sh`), prompts,
+seed templates. The compiled bundle (`/data/compiled/app-<id>.js`) is a
+gitignored build artifact, and the integer-id storage tree
+(`/data/apps/<id>/`) is a SEPARATE directory the mini-app writes at
+runtime, not under this source dir at all. A committed `.gitignore`
+keeps both out even if a future caller drops them here.
+
+Why shell out to the container's `git` rather than pygit2: `git` 2.x is
+already in the image, the operations are coarse-grained (one subprocess
+per install/update, not a hot loop), and `merge-tree --write-tree` — the
+primitive that makes the no-clobber verdict possible — is a porcelain we
+get for free without a libgit2 binding to pin and maintain.
+
+CONCURRENCY: callers MUST hold `fs_locks.source_dir_lock(<source_dir>)`
+around every entry point here, so the watcher's commit-on-save can't race
+the installer's merge on the same repo. This module does not take the
+lock itself — the lock is keyed on the source dir, which only the caller
+knows, and nesting lock acquisition inside would hide the ordering the
+rest of install.py reasons about.
+
+This module is gated OFF by `providers.per_app_git_enabled`: when the
+flag is off, install.py never calls in here and apps have no `.git` at
+all. See feature 084.
+"""
+
+from __future__ import annotations
+
+import subprocess
+from dataclasses import dataclass, field
+from pathlib import Path
+
+# Branch names. `upstream` is installer-only pristine history; `main` is
+# the local working branch the watcher/agent commit to and the working
+# tree checks out.
+UPSTREAM_BRANCH = "upstream"
+LOCAL_BRANCH = "main"
+
+# Files we never want in app source history regardless of who drops them
+# in the source dir. The integer-id storage tree lives at
+# /data/apps/<id>/ (a sibling of the slug dir, not nested here), so it
+# never appears — but a numeric subdir is gitignored defensively. The
+# compiled bundle is gitignored for the same reason. `.bak` snapshots are
+# install.py's rollback artifacts, not source.
+_GITIGNORE = "\n".join([
+  "# Compiled bundle is a build artifact, rebuilt from index.jsx.",
+  "*.js",
+  "# Install/rollback snapshots are not source.",
+  "*.bak",
+  "# Defensive: the integer-id storage tree is a sibling dir, but if a",
+  "# numeric data dir ever lands here it is runtime data, not source.",
+  "[0-9]*/",
+  "",
+])
+
+# A fixed identity so commits don't depend on the container's global git
+# config (which the mobius user may not have set). The installer commits
+# under the upstream identity; local commits keep the same identity since
+# the agent is the de-facto author of every local edit.
+_GIT_NAME = "Mobius"
+_GIT_EMAIL = "mobius@localhost"
+
+# Subprocess timeout. App repos are tiny (one source file plus a couple
+# of scripts), so any git op that runs longer than this is wedged, not
+# slow.
+_GIT_TIMEOUT = 30
+
+
+@dataclass
+class MergeResult:
+  """Verdict of merging `upstream` into the local `main` branch.
+
+  `status` is 'clean' when the three-way merge produced no conflicts and
+  `merged_bytes` holds the merged `index.jsx` the caller should write and
+  recompile. `status` is 'conflict' when at least one tracked file
+  conflicted; `conflict_paths` names them and `merged_bytes` is None —
+  the caller must NOT write anything, leaving the local edits intact for
+  an agent to resolve.
+  """
+  status: str
+  conflict_paths: list[str] = field(default_factory=list)
+  merged_bytes: bytes | None = None
+
+
+def _run(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+  """Runs `git -C <repo> <args>` with the fixed Mobius identity.
+
+  The identity is injected per-invocation via `-c` rather than written
+  into the repo config so the repo carries no state the next reader has
+  to know about. `check=False` lets callers inspect a non-zero return
+  (e.g. merge-tree signalling a conflict) instead of raising.
+  """
+  cmd = [
+    "git",
+    "-c", f"user.name={_GIT_NAME}",
+    "-c", f"user.email={_GIT_EMAIL}",
+    "-C", str(repo),
+    *args,
+  ]
+  return subprocess.run(
+    cmd, capture_output=True, text=True, timeout=_GIT_TIMEOUT, check=check,
+  )
+
+
+def _tracked_source(source_dir: Path) -> list[str]:
+  """The source files to stage: everything in the dir minus what
+  `.gitignore` excludes. We add by directory (`git add -A`) and let the
+  committed `.gitignore` do the filtering, so a new job script the agent
+  drops in is picked up without this module enumerating extensions."""
+  return ["-A"]
+
+
+def is_repo(source_dir: str | Path) -> bool:
+  """Whether `source_dir` already holds a git repo."""
+  return (Path(source_dir) / ".git").is_dir()
+
+
+def head_sha(source_dir: str | Path, branch: str) -> str:
+  """The commit sha at the tip of `branch` (e.g. the merge base an
+  update will diverge from). Assumes the repo + branch exist."""
+  return _run(Path(source_dir), "rev-parse", branch).stdout.strip()
+
+
+def ensure_repo(source_dir: str | Path) -> None:
+  """Initializes the per-app repo if absent; a no-op once it exists.
+
+  Creates the repo, writes the `.gitignore`, and makes an empty root
+  commit on `upstream`. `main` is branched from that same root and
+  checked out as the working branch.
+
+  The empty root is deliberate: a meaningful merge needs `main` to
+  descend from the SAME `upstream` commit that recorded the version it
+  was installed at, so that a later update's merge base is the
+  previously-installed version (not an unrelated root). The install path
+  establishes that by `record_upstream` + `align_local_to_upstream`; the
+  empty root is just the shared seed both branches grow from. Idempotent:
+  re-running on an existing repo does nothing.
+  """
+  repo = Path(source_dir)
+  if is_repo(repo):
+    return
+  repo.mkdir(parents=True, exist_ok=True)
+  _run(repo, "init", "-q", "-b", UPSTREAM_BRANCH)
+  (repo / ".gitignore").write_text(_GITIGNORE, encoding="utf-8")
+  _run(repo, "add", ".gitignore")
+  _run(repo, "commit", "-q", "-m", "Initialize app repo", "--allow-empty")
+  _run(repo, "branch", LOCAL_BRANCH, UPSTREAM_BRANCH)
+  _run(repo, "checkout", "-q", LOCAL_BRANCH)
+
+
+def align_local_to_upstream(source_dir: str | Path) -> None:
+  """Resets the local `main` branch to the current `upstream` tip.
+
+  Called at INSTALL so the working branch starts at exactly the
+  installed version: `main` then descends from that upstream commit, and
+  the next update's three-way merge has it as the shared base. Must NOT
+  be called on update — that would discard the local edits this whole
+  model exists to preserve.
+
+  Updates the branch ref and checks the working tree out to it so the
+  on-disk `index.jsx` matches what was just installed.
+  """
+  repo = Path(source_dir)
+  up = head_sha(repo, UPSTREAM_BRANCH)
+  _run(repo, "checkout", "-q", LOCAL_BRANCH)
+  _run(repo, "reset", "-q", "--hard", up)
+
+
+def record_upstream(
+  source_dir: str | Path,
+  entry_bytes: bytes,
+  manifest_url: str,
+  version: str,
+) -> str:
+  """Commits the pristine installed `index.jsx` bytes onto `upstream`.
+
+  Writes `entry_bytes` to the upstream branch's `index.jsx` and commits
+  it as the canonical "this is what version <version> shipped" snapshot,
+  WITHOUT disturbing the checked-out `main` working tree. Returns the new
+  upstream commit sha (the merge base a later update will diverge from).
+
+  Implemented by staging the bytes into the index against the `upstream`
+  tip and committing with an explicit parent, so the working tree (on
+  `main`) is never checked out to `upstream` and back — the live
+  `index.jsx` the watcher might be compiling stays put.
+  """
+  repo = Path(source_dir)
+  ensure_repo(repo)
+  parent = _run(repo, "rev-parse", UPSTREAM_BRANCH).stdout.strip()
+  # Hash the pristine bytes into a blob. This needs bytes on stdin, which
+  # `_run` (text-mode, no stdin) can't carry, so it's a direct subprocess
+  # call. `--path index.jsx` lets git apply any path-based attributes.
+  blob = subprocess.run(
+    [
+      "git", "-C", str(repo), "hash-object", "-w", "--stdin",
+      "--path", "index.jsx",
+    ],
+    input=entry_bytes, capture_output=True, timeout=_GIT_TIMEOUT, check=True,
+  ).stdout.decode().strip()
+  # Build a tree that is the upstream tip's tree with index.jsx replaced
+  # by the new blob, via a temporary index keyed to the upstream commit.
+  _run(repo, "read-tree", UPSTREAM_BRANCH)
+  subprocess.run(
+    [
+      "git", "-C", str(repo), "update-index", "--add", "--cacheinfo",
+      f"100644,{blob},index.jsx",
+    ],
+    capture_output=True, text=True, timeout=_GIT_TIMEOUT, check=True,
+  )
+  tree = _run(repo, "write-tree").stdout.strip()
+  msg = f"install v{version} from {manifest_url}"
+  sha = _run(
+    repo, "commit-tree", tree, "-p", parent, "-m", msg,
+  ).stdout.strip()
+  _run(repo, "update-ref", f"refs/heads/{UPSTREAM_BRANCH}", sha)
+  # Restore the index to match the checked-out working branch so a later
+  # `git status`/commit on `main` isn't confused by the upstream tree we
+  # just staged into the shared index.
+  _run(repo, "read-tree", LOCAL_BRANCH)
+  return sha
+
+
+def commit_local(source_dir: str | Path, msg: str) -> str | None:
+  """Commits the current working-tree source onto `main`.
+
+  Stages the source files (filtered by `.gitignore`) and commits them as
+  a local edit. Returns the new commit sha, or None when there was
+  nothing to commit (the tree already matches `main`'s tip) — a no-op
+  rather than an empty commit so the history stays meaningful.
+  """
+  repo = Path(source_dir)
+  ensure_repo(repo)
+  _run(repo, "add", *_tracked_source(repo))
+  status = _run(repo, "status", "--porcelain").stdout.strip()
+  if not status:
+    return None
+  _run(repo, "commit", "-q", "-m", msg)
+  return _run(repo, "rev-parse", LOCAL_BRANCH).stdout.strip()
+
+
+def merge_upstream(source_dir: str | Path) -> MergeResult:
+  """Merges `upstream` into `main` and returns the verdict.
+
+  Uses `git merge-tree --write-tree` to perform the three-way merge in
+  memory: it neither moves `main` nor touches the working tree, so a
+  conflict cannot leave the app served in a half-merged state. On a clean
+  merge the merged `index.jsx` bytes are read out of the resulting tree
+  and returned for the caller to write + recompile. On conflict the
+  conflicting paths are returned and `merged_bytes` is None — the caller
+  leaves the local edits untouched.
+
+  The caller is responsible for advancing `main` to the merged tree (by
+  writing `merged_bytes` and letting the watcher/`commit_local` commit
+  it). We deliberately do NOT fast-forward `main` here: the merged source
+  has to be recompiled and committed as one transactional unit on the
+  caller's side, and moving the branch before that would briefly point
+  `main` at a tree the compiled bundle doesn't match.
+  """
+  repo = Path(source_dir)
+  ensure_repo(repo)
+  proc = _run(
+    repo, "merge-tree", "--write-tree", "--name-only",
+    LOCAL_BRANCH, UPSTREAM_BRANCH,
+    check=False,
+  )
+  # merge-tree exits 0 on a clean merge, 1 on conflicts, >1 on real
+  # errors. stdout's first line is always the merged tree oid. On a
+  # conflict the `--name-only` section follows: the conflicting file
+  # paths are the lines AFTER the oid up to the first blank line; the
+  # lines after that blank are human-readable "CONFLICT (...)" messages,
+  # not paths.
+  if proc.returncode > 1:
+    raise RuntimeError(
+      f"git merge-tree failed (rc={proc.returncode}): {proc.stderr.strip()}"
+    )
+  lines = proc.stdout.splitlines()
+  tree_oid = lines[0].strip() if lines else ""
+  if proc.returncode == 1:
+    conflict_paths: list[str] = []
+    for ln in lines[1:]:
+      if not ln.strip():
+        break  # blank line ends the path section
+      conflict_paths.append(ln.strip())
+    return MergeResult(status="conflict", conflict_paths=conflict_paths)
+  # Read the merged blob in BINARY mode (not via `_run`, which is text)
+  # so the bytes the caller compiles + writes are byte-faithful — no
+  # encode round-trip or line-ending normalization.
+  merged = subprocess.run(
+    ["git", "-C", str(repo), "cat-file", "-p", f"{tree_oid}:index.jsx"],
+    capture_output=True, timeout=_GIT_TIMEOUT, check=False,
+  )
+  merged_bytes = merged.stdout if merged.returncode == 0 else None
+  return MergeResult(status="clean", merged_bytes=merged_bytes)
+
+
+# Smells
+# - record_upstream stages the new blob into the SHARED index (read-tree
+#   upstream -> update-index -> write-tree) then read-tree's it back to
+#   `main`. That borrows the working index for a write-tree, which is safe
+#   only because the caller holds source_dir_lock so the watcher can't be
+#   committing on `main` concurrently. The lock contract is documented at
+#   the module top; flagged here because the index-borrow is the spot that
+#   relies on it. A conflict-free alternative is a bare temp index
+#   (GIT_INDEX_FILE), deferred until a non-locked caller needs it.
+# - merge_upstream reads ONLY index.jsx out of the merged tree. Job
+#   scripts are tracked but a clean merge to a `.sh` is not carried back
+#   yet — install.py rewrites scripts from the manifest on update anyway,
+#   so source-of-truth for scripts stays the manifest. Revisit if local
+#   script edits need to survive an update.

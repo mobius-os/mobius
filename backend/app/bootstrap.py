@@ -78,7 +78,7 @@ async def ensure_store_installed(db: Session) -> None:
     return
   log.info("bootstrap: installing store from %s", BOOTSTRAP_STORE_MANIFEST_URL)
   try:
-    app, mode, warnings, _manifest = await install_from_manifest(
+    app, mode, warnings, _manifest, _conflicts = await install_from_manifest(
       db,
       manifest_url=BOOTSTRAP_STORE_MANIFEST_URL,
       manifest=None,

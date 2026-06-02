@@ -25,6 +25,7 @@ See feature ticket 062 for the design rationale.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import ipaddress
 import json
@@ -44,9 +45,10 @@ from fastapi import HTTPException
 from PIL import Image as _PILImage
 from sqlalchemy.orm import Session
 
-from app import activity, fs_locks, models
+from app import activity, app_git, fs_locks, models
 from app.compiler import compile_jsx
 from app.config import get_settings
+from app.providers import per_app_git_enabled
 from app.storage_io import atomic_write
 from app.routes.apps import (
   _derive_source_dir, _reject_if_source_dir_taken, _slugify_for_source_dir,
@@ -600,18 +602,33 @@ async def install_from_manifest(
   manifest: dict | None,
   raw_base: str | None,
   source: str = "url",
-) -> tuple[models.App, str, list[str], dict]:
-  """Returns `(app, mode, warnings, manifest)`.
+) -> tuple[models.App, str, list[str], dict, list[str]]:
+  """Returns `(app, mode, warnings, manifest, conflict_paths)`.
 
   The parsed manifest dict comes back so callers can read fields the
   App row doesn't store (notably `version`) without re-fetching.
+  `conflict_paths` is empty except on the 'conflict' mode below.
 
   Modes:
     - 'install' — created a new App row.
-    - 'update' — manifest's id matched an existing app's slug; that
-      row's jsx_source + (missing) storage seeds + source_dir got
+    - 'update' — manifest's id matched an existing app's manifest_url;
+      that row's jsx_source + (missing) storage seeds + source_dir got
       refreshed in place. Icon + cron are re-applied to keep the
       end state coherent with the new manifest.
+    - 'conflict' — ONLY when the per-app git model is enabled
+      (providers.per_app_git_enabled) AND a three-way merge of the new
+      upstream into the app's local edits conflicted. Nothing is
+      clobbered: the on-disk source, the compiled bundle, and the DB
+      row's jsx_source all keep the local edits; the new upstream bytes
+      are recorded on the `upstream` branch for a later agent-resolution
+      pass. `conflict_paths` names the files that need resolving. The
+      App row is committed (so the recorded upstream sha persists) but
+      the served app is unchanged.
+
+  The per-app git model is OFF by default. When off, install + update
+  behave exactly as before this feature: a blind jsx_source overwrite
+  with no `.git` repo created. 'conflict' never occurs while the flag
+  is off.
 
   Failure modes:
     - Pre-commit failures (manifest fetch, validation, JSX compile,
@@ -723,8 +740,23 @@ async def install_from_manifest(
   mode = "update" if existing else "install"
 
   warnings: list[str] = []
+  conflict_paths: list[str] = []
   if icon_warning:
     warnings.append(icon_warning)
+
+  # The per-app git model is OFF by default (feature 084). When off,
+  # everything below behaves exactly as before: a blind jsx_source
+  # overwrite with no .git repo. When on, an update merges the new
+  # upstream into the app's local edits instead of clobbering them, and
+  # `effective_source` may end up being the MERGED bytes rather than the
+  # upstream bytes we just fetched. We read the flag once so a mid-flight
+  # settings change can't split the decision across this one install.
+  git_on = per_app_git_enabled(str(get_settings().data_dir))
+  upstream_jsx_sha = hashlib.sha256(entry_bytes).hexdigest()
+  # The source that actually gets compiled + written to disk. Defaults
+  # to the upstream bytes; the git merge step below may replace it with
+  # the merged bytes on a clean update.
+  effective_source = jsx_source
 
   # --- Phase 4: materialize. Wrapped so cleanup runs on any failure. --
   # `created_paths`: files/dirs to delete on failure (and leave on
@@ -744,7 +776,9 @@ async def install_from_manifest(
       app = existing
       app.name = manifest["name"]
       app.description = manifest.get("description", "")
-      app.jsx_source = jsx_source
+      # jsx_source is assigned from `effective_source` AFTER the git
+      # merge decision below — on a conflict we keep the local edits, so
+      # we must not blindly stamp the upstream bytes here.
       # Rewrite the manifest_url column to the canonical shape so
       # rows installed before the canonicaliser landed migrate
       # forward on their next update. New installs already write
@@ -812,6 +846,120 @@ async def install_from_manifest(
       db.add(app)
       db.flush()  # assign app.id without committing yet
 
+    # --- Per-app git: record upstream + (on update) merge into local ---
+    # Gated on the flag. The git ops run under source_dir_lock — the same
+    # lock the source write below takes — acquired here as a SEPARATE,
+    # non-nested critical section (acquire/release, then re-acquire for
+    # the write), which is safe for a non-reentrant asyncio.Lock. We do
+    # the merge BEFORE the compile so `effective_source` (which the
+    # compile + write below consume) reflects the merged bytes on a clean
+    # update, and so a conflict can short-circuit both.
+    git_source_dir = Path(app.source_dir or "")
+    if git_on and git_source_dir:
+      async with fs_locks.source_dir_lock(str(git_source_dir)):
+        version = str(manifest.get("version", "unknown"))
+        had_repo = app_git.is_repo(git_source_dir)
+        if existing and had_repo:
+          # Update of an app already on the git model. First capture any
+          # uncommitted on-disk local edits onto `main` (the watcher may
+          # not have committed the agent's latest save yet) so the merge
+          # diffs against the real local source. Then record the new
+          # pristine bytes on `upstream` (parent = the previously-recorded
+          # upstream, giving a shared merge base) and ask for a clean-vs-
+          # conflict verdict WITHOUT touching the working tree.
+          await asyncio.to_thread(
+            app_git.commit_local, git_source_dir,
+            "local edits before update",
+          )
+          await asyncio.to_thread(
+            app_git.record_upstream,
+            git_source_dir, entry_bytes, canonical_manifest_url, version,
+          )
+          merge = await asyncio.to_thread(
+            app_git.merge_upstream, git_source_dir,
+          )
+          if merge.status == "conflict":
+            # Do NOT clobber the local edits. The app stays served with
+            # its current bundle + source; the new upstream is recorded
+            # for a later agent-resolution pass. Skip compile + source
+            # overwrite by switching to conflict mode below.
+            mode = "conflict"
+            conflict_paths = merge.conflict_paths
+          elif merge.merged_bytes is not None:
+            # Clean merge: the merged source is what we compile + write.
+            effective_source = merge.merged_bytes.decode("utf-8")
+        elif existing and not had_repo:
+          # Lazy migration: an app installed before the flag was on has
+          # no repo. Seed it with its CURRENT on-disk source as the base
+          # upstream version, then record the new upstream on top. The
+          # base IS the local source, so there is no historical divergence
+          # to conflict on — the addendum's accepted "no historical
+          # conflicts" migration. The first post-migration update takes
+          # upstream for any line it changed; subsequent updates merge
+          # normally against the recorded base.
+          jsx_path = git_source_dir / "index.jsx"
+          base_bytes = (
+            jsx_path.read_bytes() if jsx_path.exists() else entry_bytes
+          )
+          await asyncio.to_thread(
+            app_git.record_upstream,
+            git_source_dir, base_bytes, canonical_manifest_url,
+            "migrated-base",
+          )
+          await asyncio.to_thread(
+            app_git.align_local_to_upstream, git_source_dir,
+          )
+          await asyncio.to_thread(
+            app_git.record_upstream,
+            git_source_dir, entry_bytes, canonical_manifest_url, version,
+          )
+          merge = await asyncio.to_thread(
+            app_git.merge_upstream, git_source_dir,
+          )
+          if merge.status == "conflict":
+            mode = "conflict"
+            conflict_paths = merge.conflict_paths
+          elif merge.merged_bytes is not None:
+            effective_source = merge.merged_bytes.decode("utf-8")
+        else:
+          # Install: record the pristine bytes on `upstream`, then align
+          # the local `main` branch to that commit so the working branch
+          # starts exactly at the installed version — a shared base for
+          # the next update's merge.
+          await asyncio.to_thread(
+            app_git.record_upstream,
+            git_source_dir, entry_bytes, canonical_manifest_url, version,
+          )
+          await asyncio.to_thread(
+            app_git.align_local_to_upstream, git_source_dir,
+          )
+        app.upstream_jsx_sha = upstream_jsx_sha
+        app.upstream_commit = await asyncio.to_thread(
+          app_git.head_sha, git_source_dir, app_git.UPSTREAM_BRANCH,
+        )
+
+    if mode == "conflict":
+      # Conflict short-circuit: persist the recorded upstream provenance
+      # (upstream_commit + upstream_jsx_sha, set above) but leave the
+      # served app entirely as-is. We deliberately do NOT touch
+      # `app.jsx_source` — it still holds the LOCAL source, and the
+      # on-disk file + compiled bundle keep the local edits — so the row,
+      # the disk, and the bundle stay consistent on the local version
+      # until an agent resolves the conflict and saves. Skip the compile,
+      # source-write, seeds, icon, and cron blocks below; the served
+      # version is unchanged so its seeds/cron are unchanged too.
+      db.commit()
+      db.refresh(app)
+      activity.log_event(
+        "app_install", app_id=app.id, slug=app.slug, source=source,
+      )
+      return app, mode, warnings, manifest, conflict_paths
+
+    if existing:
+      # Apply the (possibly merged) source to the row now that the merge
+      # decision is made. On the flag-off path this is just `jsx_source`.
+      app.jsx_source = effective_source
+
     # Compile the JSX OUT OF PLACE to a staging file and promote it into the
     # live bundle only AFTER the DB commit (commit_actions run post-commit). So
     # a concurrent module read never observes a missing or half-written live
@@ -822,7 +970,7 @@ async def install_from_manifest(
     # watcher use (compiler.recompile_app_bundle).
     live_bundle = data_dir / "compiled" / f"app-{app.id}.js"
     staged_bundle = data_dir / "compiled" / f"app-{app.id}.js.staging"
-    await compile_jsx(app.id, jsx_source, out_path=staged_bundle)
+    await compile_jsx(app.id, effective_source, out_path=staged_bundle)
     app.compiled_path = str(live_bundle)
     rollback_actions.append(
       lambda s=staged_bundle: s.unlink() if s.exists() else None
@@ -868,7 +1016,18 @@ async def install_from_manifest(
           )
         else:
           created_paths.append(jsx_file)
-        atomic_write(jsx_file, jsx_source)
+        atomic_write(jsx_file, effective_source)
+        # On the git path, commit the working-tree source onto the local
+        # `main` branch so the watcher's future commits build on a known
+        # base and the merge base for the NEXT update is the source we
+        # just wrote, not a stale tree. No-op when the source is
+        # unchanged.
+        if git_on:
+          await asyncio.to_thread(
+            app_git.commit_local, source_dir_path,
+            f"install: {manifest.get('name', app.slug)} "
+            f"v{manifest.get('version', 'unknown')}",
+          )
 
     # Storage seeds — fresh installs always seed; updates only fill in keys
     # that don't exist yet so user data isn't clobbered. Under the per-app lock
@@ -981,7 +1140,7 @@ async def install_from_manifest(
       log.exception("install: cron registration failed post-commit")
       warnings.append(f"cron: registration failed — {exc!r}")
 
-  return app, mode, warnings, manifest
+  return app, mode, warnings, manifest, conflict_paths
 
 
 def _cleanup(paths: list[Path]) -> None:
