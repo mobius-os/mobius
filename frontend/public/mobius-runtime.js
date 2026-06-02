@@ -15,15 +15,23 @@
 // SAME runtime for both hosts: the standalone PWA (standalone.py) and the
 // in-shell iframe (app-frame.html) both `init()` it.
 //
-// API — intentionally small; grow it when a real app needs more:
+// API — intentionally small; grow it when a real app needs more. Reads/writes
+// are TYPED: pick the method for your data shape (json is the default). A read
+// of the wrong type for a path throws a clear error rather than corrupting:
 //   window.mobius.appId
-//   window.mobius.online                      -> navigator.onLine
-//   window.mobius.storage.get(path)           -> data | null  (offline-capable)
-//   window.mobius.storage.set(path, data)     -> {synced} | {queued}
-//   window.mobius.storage.remove(path)        -> {synced} | {queued}
-//   window.mobius.storage.list(prefix)        -> entries[] | null
-//   window.mobius.storage.subscribe(path, cb) -> unsubscribe fn (cb(value))
-//   window.mobius.storage.pendingCount()      -> Promise<number>
+//   window.mobius.online                          -> navigator.onLine
+//   window.mobius.storage.get(path)               -> JSON value | null  (offline-capable, SWR)
+//   window.mobius.storage.set(path, data)         -> {synced} | {queued}
+//   window.mobius.storage.getText(path)           -> string | null      (offline-capable, SWR)
+//   window.mobius.storage.setText(path, str, opts?)-> {synced} | {queued}   opts.contentType
+//   window.mobius.storage.getBlob(path)           -> Blob | null        (offline, cache-first)
+//   window.mobius.storage.setBlob(path, blob, opts?)-> {synced} | {queued}  opts.contentType; <=25 MiB
+//   window.mobius.storage.remove(path)            -> {synced} | {queued}
+//   window.mobius.storage.list(prefix)            -> entries[] | null
+//   window.mobius.storage.subscribe(path, cb)     -> unsubscribe fn (cb(json value))
+//   window.mobius.storage.subscribeText(path, cb) -> unsubscribe fn (cb(string))
+//   window.mobius.storage.subscribeBlob(path, cb) -> unsubscribe fn (cb(Blob); app revokes object URLs)
+//   window.mobius.storage.pendingCount()          -> Promise<number>
 //
 // "No walls": this runtime is the easy DEFAULT, not a cage. An app is free to
 // ignore it and use raw IndexedDB / OPFS / SQLite-wasm directly (same-origin
@@ -32,10 +40,10 @@
 //
 // Conflict policy: last-write-wins at the path granularity. The newest
 // write for a path supersedes any earlier one — enforced by coalescing
-// the outbox on every write (a queued op for a path is dropped when a
-// newer write for that path is enqueued OR sent directly online), so a
-// stale queued op can never replay over a newer value on drain. An app
-// that needs per-record LWW stores one file per record
+// the outbox on every write (enqueueing a newer write for a path purges the
+// older queued op for it) and by routing ALL server writes through the single
+// outbox-lock-serialized drain, so a stale queued op can never replay over a
+// newer value. An app that needs per-record LWW stores one file per record
 // (…/items/<uuid>.json) so concurrent edits to different records don't
 // clobber each other. CRDTs are out of scope (overkill for single-owner
 // personal apps).
@@ -48,6 +56,13 @@ const STORE = 'ops'
 // Keyed by `${appId}:${path}` (one shared DB across all apps, like the outbox).
 const CACHE_STORE = 'cache'
 const DB_VERSION = 2
+
+// Per-blob ceiling for setBlob: rejected BEFORE any IDB/outbox/network write, so
+// neither the local mirror nor the offline outbox ever holds an over-cap binary
+// (a 40 MB offline blob write would otherwise sit in IndexedDB until drain). This
+// is a LOCAL-mirror guard, deliberately below the backend's 50 MiB write cap —
+// large media belongs in OPFS / a direct upload, not the offline outbox.
+const MAX_BLOB_BYTES = 25 * 1024 * 1024
 
 // PURE: given the outbox ops (FIFO by seq), the path, and a fallback value
 // (the server/cache value), return what the caller should SEE — read-your-
@@ -201,19 +216,157 @@ function makeStorage({ appId, getToken }) {
     })
   }
 
-  function cachePut(path, data) {
+  // Every write stamps a unique `ver` write-nonce. The poison reconcile CAS
+  // matches on `ver`, NOT on value, so it never overwrites a newer write that
+  // happens to carry identical bytes (the ABA gap) and never has to compare
+  // Blobs or null. Browser-only runtime → crypto.randomUUID is available.
+  let _verSeq = 0
+  function nextVer() {
+    const rnd = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID() : Math.random().toString(36).slice(2)
+    return (++_verSeq) + '-' + rnd
+  }
+
+  // The record carries `kind` ('json'|'text'|'blob') + `contentType` so a read
+  // SELF-DESCRIBES from storage (one server path = one typed value), plus a `ver`
+  // write-nonce for the reconcile CAS. `data` holds the JSON value, the string,
+  // or a native Blob (IndexedDB stores Blobs via structured clone).
+  function cachePut(path, data, kind = 'json', contentType = null, ver = nextVer()) {
     return withStore(CACHE_STORE, 'readwrite', (store) => {
-      store.put({ key: cacheKey(path), path, appId, data, present: data !== null, ts: Date.now() })
+      store.put({ key: cacheKey(path), path, appId, data, kind, contentType, present: data !== null, ver, ts: Date.now() })
     })
   }
 
-  function cacheDelete(path) {
-    // Record the deletion as a present:false tombstone rather than dropping the
-    // key, so an offline read after an offline delete correctly returns null
-    // (the deletion is the last-known state) instead of falling through.
+  // Tombstone the deletion (present:false, key kept) so an offline read after an
+  // offline delete returns null. Preserve `kind` (so a fatal-DELETE reconcile /
+  // re-delete re-reads with the right type) + stamp a `ver` for the CAS.
+  function cacheDelete(path, kind = null, ver = nextVer()) {
     return withStore(CACHE_STORE, 'readwrite', (store) => {
-      store.put({ key: cacheKey(path), path, appId, data: null, present: false, ts: Date.now() })
+      store.put({ key: cacheKey(path), path, appId, data: null, kind, contentType: null, present: false, ver, ts: Date.now() })
     })
+  }
+
+  // Restore the cache record to a prior snapshot (or remove the key if there was
+  // none) — undoes an optimistic write whose outbox enqueue failed, WITHOUT the
+  // data loss a blanket tombstone would cause.
+  function restoreCache(path, prev) {
+    return withStore(CACHE_STORE, 'readwrite', (store) => {
+      if (prev) store.put(prev)
+      else store.delete(cacheKey(path))
+    })
+  }
+
+  // ATOMIC compare-and-set on the write-nonce: replace the record ONLY if it
+  // still carries `expectedVer` (the version the rejected op wrote), in ONE
+  // transaction. Lets the poison reconcile re-sync the mirror without clobbering
+  // any write that landed since — ver-based, so no ABA gap and no Blob/null
+  // value comparison. Returns true iff it wrote.
+  function cacheCompareSet(path, expectedVer, fresh, kind, contentType) {
+    return withStore(CACHE_STORE, 'readwrite', (store, box) => {
+      box.value = false
+      const g = store.get(cacheKey(path))
+      g.onsuccess = () => {
+        const cur = g.result
+        if (cur && expectedVer != null && cur.ver === expectedVer) {
+          store.put({ key: cacheKey(path), path, appId, data: fresh, kind, contentType, present: fresh !== null, ver: nextVer(), ts: Date.now() })
+          box.value = true
+        }
+      }
+    })
+  }
+
+  // Atomic repair for a LEGACY (pre-ver) rejected op: overwrite ONLY if the
+  // mirror is absent or STILL ver-less — so a newer VERSIONED write that landed
+  // during the reconcile fetch is never clobbered. One transaction (no TOCTOU).
+  function cacheRepairLegacy(path, fresh, kind, contentType) {
+    return withStore(CACHE_STORE, 'readwrite', (store, box) => {
+      box.value = false
+      const g = store.get(cacheKey(path))
+      g.onsuccess = () => {
+        const cur = g.result
+        if (!cur || cur.ver == null) {
+          store.put({ key: cacheKey(path), path, appId, data: fresh, kind, contentType, present: fresh !== null, ver: nextVer(), ts: Date.now() })
+          box.value = true
+        }
+      }
+    })
+  }
+
+  // A typed read of the WRONG kind is an app bug — fail loud rather than hand a
+  // string back to getBlob (→ URL.createObjectURL throws) or a Blob to get().
+  // Records written before 083 (and JSON writes) have no `kind` field; treat
+  // missing as 'json' so existing mirrors + every get()/set() app keep working.
+  function assertReadKind(path, storedKind, wantKind) {
+    const stored = storedKind || 'json'
+    if (stored !== wantKind) {
+      throw new Error(
+        `mobius.storage: ${path} holds ${stored}; read it with ` +
+        (stored === 'json' ? 'get()' : stored === 'text' ? 'getText()' : 'getBlob()')
+      )
+    }
+  }
+
+  // The backend serves a Blob's Content-Type from the FILE EXTENSION
+  // (mimetypes.guess_type), not from what we PUT, so res.blob().type can diverge
+  // from the contentType the app set. Re-stamp it from the stored contentType so
+  // getBlob() always returns the intended type (for <img>/<embed>/object URLs).
+  function normalizeBlob(value, contentType) {
+    if (value instanceof Blob && contentType && value.type !== contentType) {
+      return new Blob([value], { type: contentType })
+    }
+    return value
+  }
+
+  // Guard the FINAL returned value's JS type against the requested kind, and (for
+  // blobs) re-stamp the MIME. assertReadKind only inspects the LOCAL mirror's
+  // kind; this also catches the cross-runtime MIXED-KIND case where a pending op
+  // of a DIFFERENT kind in the SHARED outbox overlays via effectiveValue (e.g. a
+  // pending text write making a getBlob return a string). A type mismatch is an
+  // app bug — fail loud rather than hand back the wrong JS type.
+  function finalizeRead(value, kind, contentType, path) {
+    if (value == null) return value
+    if (kind === 'blob') {
+      if (!(value instanceof Blob)) {
+        throw new Error(`mobius.storage: ${path} does not hold a blob; read it with get()/getText()`)
+      }
+      return normalizeBlob(value, contentType)
+    }
+    if (kind === 'text' && typeof value !== 'string') {
+      throw new Error(`mobius.storage: ${path} does not hold text; read it with get()/getBlob()`)
+    }
+    // json accepts any JSON value (object/array/string/number/bool/null) but NOT
+    // a Blob — catches a cross-runtime pending blob op overlaid onto a get().
+    if (kind === 'json' && value instanceof Blob) {
+      throw new Error(`mobius.storage: ${path} holds a blob; read it with getBlob()`)
+    }
+    return value
+  }
+
+  // Lazy, memoized IndexedDB-Blob support probe. Some old WebKit builds throw
+  // DataCloneError when storing a Blob in IDB; we must NOT silently base64-expand
+  // (that would blow the size cap + corrupt the round-trip). Run it on the FIRST
+  // setBlob (never at init — JSON-only apps pay nothing) and cache the verdict;
+  // setBlob rejects up front on an unsupported browser.
+  let _blobStorable
+  function blobStorable() {
+    if (_blobStorable === undefined) {
+      _blobStorable = (async () => {
+        const k = ' mobius-blob-probe:' + appId   //   prefix can't collide with cacheKey()
+        try {
+          const probe = new Blob([new Uint8Array([1])], { type: 'application/octet-stream' })
+          await withStore(CACHE_STORE, 'readwrite', (store) => { store.put({ key: k, data: probe }) })
+          const r = await withStore(CACHE_STORE, 'readonly', (store, box) => {
+            const g = store.get(k); g.onsuccess = () => { box.value = g.result }
+          })
+          await withStore(CACHE_STORE, 'readwrite', (store) => { store.delete(k) })
+          return !!(r && r.data instanceof Blob)
+        } catch (e) {
+          try { await withStore(CACHE_STORE, 'readwrite', (store) => { store.delete(k) }) } catch (_) {}
+          return false
+        }
+      })()
+    }
+    return _blobStorable
   }
 
   // ── Per-path serialization (in-tab) ─────────────────────────────────
@@ -277,8 +430,17 @@ function makeStorage({ appId, getToken }) {
     const url = `/api/storage/apps/${appId}/${op.path}`
     const init = { method: op.method, headers: { Authorization: `Bearer ${token}` } }
     if (op.method === 'PUT') {
-      init.headers['Content-Type'] = 'application/json'
-      init.body = JSON.stringify(op.data)
+      // Branch by kind: blob/text send raw bytes/text with their real
+      // Content-Type (the backend stores raw bytes for non-JSON types and raw
+      // UTF-8 for text/*); json keeps the exact old wire shape.
+      if (op.kind === 'blob' || op.kind === 'text') {
+        init.headers['Content-Type'] = op.contentType ||
+          (op.kind === 'blob' ? 'application/octet-stream' : 'text/plain;charset=utf-8')
+        init.body = op.data
+      } else {
+        init.headers['Content-Type'] = 'application/json'
+        init.body = JSON.stringify(op.data)
+      }
     }
     const res = await fetch(url, init)   // network failure throws -> transient
     if (op.method === 'DELETE' && res.status === 404) return  // already absent
@@ -307,14 +469,36 @@ function makeStorage({ appId, getToken }) {
           // eslint-disable-next-line no-console
           console.warn('mobius: dropping un-syncable write', op.method, op.path, e.message)
           await deleteOp(op.seq)
-          // The optimistic cache still holds this rejected write's value. The
-          // server never accepted it, so re-fetch the authoritative value (or
-          // known-absence) and notify subscribers so the UI doesn't show a
-          // value that will never persist (Codex review, Medium #4).
-          try {
-            const fresh = await get(op.path)
-            notify(op.path, fresh)
-          } catch (re) { /* best-effort reconciliation */ }
+          // The optimistic mirror still holds the value the server REFUSED.
+          // Re-sync it to the authoritative value — KIND-AWARE (fetchValue with
+          // op.kind so a rejected blob/text path is re-read correctly, not via
+          // JSON get() which would throw assertReadKind on the mirror), and
+          // LOCK-FREE (a path-locked get() here would re-enter the lock a writer
+          // may hold across this drain → the deadlock this whole restructure
+          // avoids). Best-effort; offline → skip, the next online read re-syncs.
+          if (navigator.onLine) {
+            try {
+              const fresh = await fetchValue(op.path, op.kind || 'json')
+              const ct = fresh instanceof Blob ? fresh.type : null
+              if (op.ver != null) {
+                // ATOMIC compare-and-set on the write-nonce: re-sync the mirror to
+                // the authoritative value ONLY if it still carries the rejected
+                // op's ver. A newer same-path write does its cachePut BEFORE its
+                // enqueue and OUTSIDE the path lock, so a non-atomic check could
+                // clobber it; the one-tx ver-CAS can't (its own send later just
+                // deletes its op — never re-cachePuts — so clobbering loses it).
+                const wrote = await cacheCompareSet(op.path, op.ver, fresh, op.kind || 'json', ct)
+                if (wrote) notify(op.path, fresh)
+              } else {
+                // LEGACY op (queued by a pre-ver runtime, drained once after the
+                // upgrade) — no nonce to CAS on. Repair atomically ONLY if the
+                // mirror is absent or still ver-less, so a newer VERSIONED write
+                // that landed during the fetch isn't clobbered.
+                const wrote = await cacheRepairLegacy(op.path, fresh, op.kind || 'json', ct)
+                if (wrote) notify(op.path, fresh)
+              }
+            } catch (re) { /* best-effort reconciliation */ }
+          }
           continue
         }
         // Transient (offline / 5xx / 401): stop so order is preserved
@@ -335,8 +519,30 @@ function makeStorage({ appId, getToken }) {
         async (lock) => { if (lock) await drainInner() },
       ).catch(() => {})
     } else {
-      drainInner().catch(() => {})
+      // Route through drainNow so this event-triggered drain shares the in-tab
+      // _drainChain with set()/remove()'s drainNow — otherwise an event drain and
+      // a write's drain could run drainInner concurrently in a no-Web-Locks
+      // browser and send a stale snapshot. (Cross-tab in that fallback stays
+      // unprotected, bounded by idempotent PUT/DELETE + server-arrival LWW.)
+      drainNow().catch(() => {})
     }
+  }
+
+  // Awaiting drain for set()/remove(). ALWAYS-ENQUEUE routes every server write
+  // through the outbox + this drain, so the drain is the SOLE server-write path.
+  // Acquiring the SAME `mobius-outbox-${appId}` lock WITHOUT ifAvailable (wait,
+  // don't skip) serializes it across ALL contexts (iframe + standalone) AND
+  // against the background drain — so there is no longer a direct-send path to
+  // race a drain, and the 081 drain-vs-direct-write data-loss class is closed by
+  // construction. Fallback (no Web Locks): an in-tab promise chain serializes
+  // drains within the tab so concurrent set()s can't double-drain.
+  let _drainChain = Promise.resolve()
+  function drainNow() {
+    if (navigator.locks && navigator.locks.request) {
+      return navigator.locks.request(`mobius-outbox-${appId}`, drainInner)
+    }
+    _drainChain = _drainChain.then(drainInner, drainInner)
+    return _drainChain
   }
 
   for (const ev of ['online', 'focus', 'pageshow']) {
@@ -358,9 +564,45 @@ function makeStorage({ appId, getToken }) {
   // get() directly and the API survives destructuring — `const {get} = ...`.
   // Each runs inside withPathLock so operations on the same path are strictly
   // ordered within this runtime — no GET-vs-write or write-vs-write interleave.
-  function get(path) { return withPathLock(path, () => getInner(path)) }
-  function set(path, data) { return withPathLock(path, () => setInner(path, data)) }
-  function remove(path) { return withPathLock(path, () => removeInner(path)) }
+  function get(path) { return withPathLock(path, () => getInner(path, 'json')) }
+  function getText(path) { return withPathLock(path, () => getInner(path, 'text')) }
+  function getBlob(path) { return withPathLock(path, () => getInner(path, 'blob')) }
+  // Writers: the LOCAL mutation runs under the path lock (ordered vs reads + other
+  // writes); the server drain runs in settle() OUTSIDE that lock (deadlock-safe).
+  function set(path, data) {
+    return withPathLock(path, () => writeLocal(path, data, 'json', null)).then(() => settle(path))
+  }
+  async function setText(path, text, opts) {
+    if (typeof text !== 'string') {
+      throw new Error('mobius.storage.setText: value must be a string')
+    }
+    const ct = (opts && opts.contentType) || 'text/plain;charset=utf-8'
+    await withPathLock(path, () => writeLocal(path, text, 'text', ct))
+    return settle(path)
+  }
+  // setBlob guards BEFORE any lock/IDB/network: reject a non-Blob, an over-cap
+  // blob, or a browser that can't store Blobs in IDB — so neither the mirror nor
+  // the outbox ever holds an unstorable or over-cap binary.
+  async function setBlob(path, blob, opts) {
+    if (!(blob instanceof Blob)) {
+      throw new Error('mobius.storage.setBlob: value must be a Blob or File')
+    }
+    if (blob.size > MAX_BLOB_BYTES) {
+      throw new Error(
+        `mobius.storage.setBlob: ${path} is ${blob.size} bytes, over the ` +
+        `${MAX_BLOB_BYTES}-byte limit (use OPFS or a direct upload for large media)`
+      )
+    }
+    if (!(await blobStorable())) {
+      throw new Error('mobius.storage.setBlob: this browser cannot store Blobs offline')
+    }
+    const ct = (opts && opts.contentType) || blob.type || 'application/octet-stream'
+    await withPathLock(path, () => writeLocal(path, blob, 'blob', ct))
+    return settle(path)
+  }
+  function remove(path) {
+    return withPathLock(path, () => removeLocal(path)).then(() => settle(path))
+  }
 
   // Enumerate the immediate children of a stored directory (the platform
   // alternative to brute-force-probing filenames). Returns the entries ARRAY
@@ -403,148 +645,175 @@ function makeStorage({ appId, getToken }) {
   // Fetch the authoritative server value for a path. 404 → null (known-absent);
   // any other non-OK → throw (transient/auth — the caller keeps the mirror).
   // Bounded so a stale-`true` navigator.onLine (Android offline) can't hang it.
-  async function fetchValue(path) {
+  async function fetchValue(path, kind = 'json') {
     const token = await getToken()
     const res = await fetchBounded(`/api/storage/apps/${appId}/${path}`, {
       headers: { Authorization: `Bearer ${token}` },
     })
     if (res.status === 404) return null
-    if (res.ok) return await res.json()
-    throw new Error(`HTTP ${res.status}`)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    if (kind === 'blob') return await res.blob()
+    if (kind === 'text') return await res.text()
+    return await res.json()
   }
 
-  // Background refresh after a cache-first get(): re-fetch the path and, if the
-  // server value changed, update the mirror and notify subscribers. Re-takes
-  // the path lock so its mirror write stays ordered against concurrent set()s.
-  // Skips entirely when a local write for the path is still queued — that write
-  // owns the value until the outbox drains (read-your-writes), so the mirror
-  // must NOT be clobbered with the not-yet-overwritten server value (the bug the
-  // pending guard closes; the old always-mirror read had it too). Fire-and-
-  // forget; a transient failure leaves the last-known mirror untouched.
-  function scheduleRevalidate(path) {
+  // Background refresh after a cache-first json/text get() (blobs never
+  // revalidate — getInner skips this for kind 'blob'). Re-fetch and, if the
+  // server value changed, update the mirror + notify. Runs under the per-path
+  // chain so its write stays ordered against a concurrent set(). Skips when a
+  // local write for the path is queued — that write owns the value until the
+  // outbox drains (read-your-writes).
+  //
+  // ACCEPTED BOUND (cross-runtime, self-healing): if the SAME app is open in two
+  // runtimes, R1's fetch can read the pre-write server value in the instant
+  // before R2 enqueues+drains a newer write, and R1's later cachePut then briefly
+  // shows the stale value to R1's subscribers. It costs one stale read, self-
+  // heals on R1's next revalidate, and the server is always correct. ALWAYS-
+  // ENQUEUE narrows it (a cross-runtime write is observable in the shared outbox
+  // for the whole enqueue→drain window, so the pending-op guards below catch most
+  // of it). Fully closing it would need a per-path cross-context READ lock — not
+  // worth slowing every read for single-owner, server-arrival-LWW data.
+  function scheduleRevalidate(path, kind = 'json') {
     withPathLock(path, async () => {
-      // A queued local write owns the value until the outbox drains (read-your-
-      // writes), so the mirror must NOT be clobbered with the server value.
-      // Check BEFORE the fetch: if an op is queued when we start, a later "no
-      // op" can't be trusted — a concurrent drain (drainInner runs under the
-      // outbox Web Lock, NOT this path lock) could sync+delete it mid-fetch,
-      // after our GET already read the pre-sync value. No queued op ⟺ every
-      // write for this path is already on the server, so the GET sees the
-      // latest write.
       if ((await listOps()).some((op) => op.path === path)) return
       let data
-      try { data = await fetchValue(path) } catch (e) { return }
-      // Re-check after the fetch: THIS runtime can't have enqueued during it (we
-      // hold the path lock), but ANOTHER runtime sharing this app's outbox (a
-      // standalone page + the in-shell iframe open at once) can QUEUE one — don't
-      // clobber its queued write with our now-stale read.
-      // ACCEPTED BOUND (pre-existing, not from the SWR change): a concurrent
-      // runtime's ONLINE setInner() writes the mirror + sends directly without
-      // entering the outbox, so these IDB checks can't see it; if it lands in the
-      // tiny window before our cachePut, our read can briefly win. It costs one
-      // stale read and self-heals on the next op. Closing it fully needs a
-      // per-app/per-path Web Lock around setInner/removeInner/scheduleRevalidate
-      // (the drain already uses navigator.locks); filed as a follow-up rather
-      // than widening this read-path fix into the write path.
+      try { data = await fetchValue(path, kind) } catch (e) { return }
       if ((await listOps()).some((op) => op.path === path)) return
       const prev = await cacheGet(path)
       if (prev && sameJson(prev.data, data)) return
-      await cachePut(path, data)
+      await cachePut(path, data, kind, prev ? prev.contentType : null)
       notify(path, data)   // no pending op → effective value === server value
     }).catch(() => {})
   }
 
-  async function getInner(path) {
-    // STALE-WHILE-REVALIDATE read. With a cached mirror, serve it INSTANTLY
-    // (overlaid with any pending write — read-your-writes) and refresh from the
-    // network in the background, notifying subscribers if the value changed — so
-    // a high score / note paints immediately instead of waiting on a round-trip;
-    // an app that wants the refreshed value subscribe()s the path. A first-ever
-    // read (no mirror) has nothing to paint, so it awaits the network online, or
-    // resolves null offline. Serialized per path so cache writes can't reorder
-    // against a concurrent set() (the background revalidate re-takes the lock).
+  async function getInner(path, kind = 'json') {
+    // STALE-WHILE-REVALIDATE read for json/text: with a cached mirror, serve it
+    // INSTANTLY (overlaid with any pending write — read-your-writes) and refresh
+    // in the background, notifying subscribers if the value changed. BLOBS are
+    // CACHE-FIRST with NO revalidate (re-fetching a large binary every read is
+    // wasteful + the change-detector can't diff a Blob). A first-ever read awaits
+    // the network online, or resolves null offline.
     const cached = await cacheGet(path)
     if (cached) {
-      if (navigator.onLine) scheduleRevalidate(path)
-      return await effectiveValue(path, cached.data)
+      // Present value: the stored kind is authoritative — a wrong-typed read
+      // throws (loud) instead of handing back a string-as-Blob. A tombstone
+      // (present:false) has no value to type-check; it resolves null below.
+      if (cached.present !== false) assertReadKind(path, cached.kind, kind)
+      if (kind !== 'blob' && navigator.onLine) scheduleRevalidate(path, kind)
+      return finalizeRead(await effectiveValue(path, cached.data), kind, cached.contentType, path)
     }
     if (navigator.onLine) {
       try {
-        const data = await fetchValue(path)
-        await cachePut(path, data)
-        return await effectiveValue(path, data)
+        const data = await fetchValue(path, kind)
+        const ct = kind === 'blob'
+          ? (data instanceof Blob ? data.type : null)
+          : (kind === 'text' ? 'text/plain;charset=utf-8' : null)
+        await cachePut(path, data, kind, ct)
+        return finalizeRead(await effectiveValue(path, data), kind, ct, path)
       } catch (e) {
         // Network blip with nothing cached — fall through to the empty mirror.
       }
     }
-    return await effectiveValue(path, null)
+    return finalizeRead(await effectiveValue(path, null), kind, null, path)
   }
 
-  async function setInner(path, data) {
-    // Update the mirror + notify synchronously so the UI and a subsequent
-    // get() are correct immediately, regardless of network outcome. Serialized
-    // per path: a concurrent get() or another set() runs strictly before/after.
-    await cachePut(path, data)
+  // ALWAYS-ENQUEUE write path (081). Update the mirror + notify synchronously so
+  // the UI + a subsequent get() are correct immediately, then route the server
+  // write through the outbox + the awaiting drainNow() — the SOLE server-write
+  // path. There is deliberately NO direct-send fast path: the old design sent
+  // directly under the per-path promise chain while the drain sent under the
+  // outbox Web Lock (two locks), so a queued op could be drained AFTER a fresh
+  // direct write landed → the newer write was lost. With one outbox-lock-
+  // serialized path, a superseded op (enqueue coalesces via purgePath) can only
+  // ever be sent BEFORE its successor in a strictly-ordered later pass, so the
+  // latest write always wins. {synced} vs {queued} is computed from whether the
+  // op survived the drain (offline/transient → still queued, auto-syncs later).
+  // Local mutation ONLY (mirror + notify + enqueue), run under the path lock so
+  // it is ordered against reads + other writes. The server write is the DRAIN,
+  // run by settle() OUTSIDE this lock. Keeping the drain off the path lock is
+  // what avoids the reentrant-lock DEADLOCK: the drain's dead-letter reconcile,
+  // and any concurrent get(), must be able to take the path lock while a write's
+  // drain is in flight.
+  // Both writers: snapshot the prior record, do the optimistic local mutation,
+  // enqueue the outbox op, and ONLY notify after a durable enqueue. If enqueue
+  // fails (IDB error) restore the EXACT prior record (not a lossy tombstone) so
+  // the mirror never shows a value with no outbox op + no server write (a
+  // "ghost") and never loses the previously-stored value.
+  async function writeLocal(path, data, kind, contentType) {
+    const prev = await cacheGet(path)
+    const ver = nextVer()                 // same nonce on the mirror + the op, for the reconcile CAS
+    await cachePut(path, data, kind, contentType, ver)
+    try {
+      await enqueue({ method: 'PUT', path, data, kind, contentType, ver })
+    } catch (e) {
+      try { await restoreCache(path, prev) } catch (_) {}
+      throw e
+    }
     notify(path, data)
-    if (navigator.onLine) {
-      try {
-        await send({ method: 'PUT', path, data })
-        // This direct write is newer than anything still queued for the path
-        // (e.g. an offline write left over from before we came online). Drop
-        // those stale ops so the next drain can't replay one over the value we
-        // just wrote — the last-write-wins violation this guards against.
-        await purgePath(path)
-        return { synced: true }
-      } catch (e) { /* fall through to queue */ }
-    }
-    await enqueue({ method: 'PUT', path, data })
-    drain()
-    return { queued: true }
   }
 
-  async function removeInner(path) {
-    await cacheDelete(path)
-    notify(path, null)
-    if (navigator.onLine) {
-      try {
-        await send({ method: 'DELETE', path })
-        await purgePath(path)
-        return { synced: true }
-      } catch (e) { /* fall through to queue */ }
+  async function removeLocal(path) {
+    // Carry the existing record's kind onto the tombstone + DELETE op so a
+    // fatal-DELETE reconcile (or a re-delete) re-reads the server value with the
+    // right type — a blob/text path re-fetched as json would throw.
+    const prev = await cacheGet(path)
+    const kind = prev ? prev.kind : null
+    const ver = nextVer()
+    await cacheDelete(path, kind, ver)
+    try {
+      await enqueue({ method: 'DELETE', path, kind: kind || 'json', ver })
+    } catch (e) {
+      try { await restoreCache(path, prev) } catch (_) {}
+      throw e
     }
-    await enqueue({ method: 'DELETE', path })
-    drain()
-    return { queued: true }
+    notify(path, null)
+  }
+
+  // Drain OUTSIDE the path lock, then report whether the path's op survived
+  // (offline/transient → still queued, auto-syncs on the next online/focus
+  // drain; sent → synced). NOTE: a fatal-rejected write is dead-lettered (op
+  // removed), so it reports {synced} though the server refused it — no consumer
+  // reads this flag, and the dead-letter reconcile re-syncs the mirror.
+  async function settle(path) {
+    await drainNow()
+    const stillQueued = (await listOps()).some((op) => op.path === path)
+    return stillQueued ? { queued: true } : { synced: true }
+  }
+
+  // Subscribe to local changes for a path: cb(value) fires immediately with the
+  // current value (read via the kind-appropriate getter), then on every
+  // set/remove for that path. Returns an unsubscribe fn. (A successful background
+  // drain does NOT re-fire — it confirms the already-notified value server-side
+  // without changing it.) NOTE for subscribeBlob: each fire delivers a fresh
+  // Blob; the APP owns object-URL lifetime (revoke the previous URL on the next
+  // fire / on unmount).
+  function subscribeWith(path, cb, getter) {
+    let set = subscribers.get(path)
+    if (!set) { set = new Set(); subscribers.set(path, set) }
+    // Fire the initial value once, but never let a slow initial get() resolve
+    // AFTER a set() already pushed a newer value to this cb (stale-last).
+    // `delivered` flips the moment notify() reaches this cb; the initial get()
+    // then suppresses itself. notify() wins ties.
+    let delivered = false
+    const wrapped = (v) => { delivered = true; cb(v) }
+    set.add(wrapped)
+    getter(path).then((v) => {
+      if (set.has(wrapped) && !delivered) { delivered = true; cb(v) }
+    }).catch(() => {})
+    return () => {
+      const s = subscribers.get(path)
+      if (s) { s.delete(wrapped); if (!s.size) subscribers.delete(path) }
+    }
   }
 
   return {
-    get,
-    set,
+    get, getText, getBlob,
+    set, setText, setBlob,
     remove,
     list: listInner,
-    // Subscribe to local changes for a path: cb(value) fires immediately with
-    // the current value, then on every set/remove for that path. Returns an
-    // unsubscribe fn. (A successful background drain does NOT re-fire — it
-    // confirms the already-notified value server-side without changing it.)
-    subscribe(path, cb) {
-      let set = subscribers.get(path)
-      if (!set) { set = new Set(); subscribers.set(path, set) }
-      set.add(cb)
-      // Fire the initial value once, but never let a slow initial get() resolve
-      // AFTER a set() already pushed a newer value to this cb (which would
-      // deliver stale data last). `delivered` flips the moment notify() reaches
-      // this cb; the initial get() then suppresses itself. notify() wins ties.
-      let delivered = false
-      const wrapped = (v) => { delivered = true; cb(v) }
-      set.delete(cb); set.add(wrapped)   // store the wrapper so notify flips the flag
-      get(path).then((v) => {
-        if (set.has(wrapped) && !delivered) { delivered = true; cb(v) }
-      }).catch(() => {})
-      return () => {
-        const s = subscribers.get(path)
-        if (s) { s.delete(wrapped); if (!s.size) subscribers.delete(path) }
-      }
-    },
+    subscribe(path, cb) { return subscribeWith(path, cb, get) },
+    subscribeText(path, cb) { return subscribeWith(path, cb, getText) },
+    subscribeBlob(path, cb) { return subscribeWith(path, cb, getBlob) },
     async pendingCount() {
       return (await listOps()).length
     },
@@ -561,6 +830,14 @@ export function init({ appId, getToken }) {
     storage,
   }
   storage._drain()    // flush anything left from a previous offline session
+  // Ask for durable storage so the offline mirror + queued blob writes survive
+  // storage pressure. Fired here (not only in the shell's index.html) so a
+  // standalone mini-app PWA opened WITHOUT the shell still gets it. Best-effort.
+  try {
+    if (navigator.storage && navigator.storage.persist) {
+      navigator.storage.persisted().then((p) => p || navigator.storage.persist()).catch(() => {})
+    }
+  } catch (e) {}
   return window.mobius
 }
 
@@ -578,9 +855,12 @@ export function init({ appId, getToken }) {
 //   token can expire; the owner JWT fallback still authenticates as
 //   owner, so the drain succeeds, but a future refinement could re-mint
 //   the app token at drain time.
-// - The cache is unbounded in principle (one entry per app:path). For the
-//   personal-app scale this is fine; if an app writes thousands of distinct
-//   paths, add an LRU/size cap. Not built now (YAGNI).
+// - setBlob enforces a per-blob size cap (MAX_BLOB_BYTES) BEFORE any IDB/outbox
+//   write, but the read-through cache has NO total-size eviction yet. A true LRU
+//   needs a lastAccessed field + index the cache store lacks (cacheGet never
+//   writes on read), and write-time eviction would drop hot entries — so the
+//   eviction policy is deliberately deferred (filed under .pm/083). Fine at
+//   personal-app scale; revisit if a blob-heavy app pressures the origin quota.
 // - list() has NO offline mirror (returns null offline), unlike get(). A
 //   cached listing would resurrect deleted children once a sibling delete
 //   synced, so an app that needs offline enumeration keeps its own snapshot of

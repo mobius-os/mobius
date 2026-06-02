@@ -31,12 +31,11 @@ services:
       - AGENT_BROWSER_STREAM_PORT=9225
     volumes:
       - test_data:/data
-    # To use a custom port without merge-appending the default, you MUST use
-    # the !override tag — a plain second `ports:` entry adds to this list and
-    # leaves the default 8001:8000 binding colliding with the original run:
-    #   ports: !override ["${TEST_PORT:-8001}:8000"]
-    ports:
-      - "8001:8000"
+    # Port is TEST_PORT (default 8001). Uses the !override tag so a custom
+    # TEST_PORT REPLACES the default rather than merge-appending it (a plain
+    # second `ports:` entry would keep 8001:8000 AND add the new one, colliding
+    # with a concurrent default run).
+    ports: !override ["${TEST_PORT:-8001}:8000"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 10s
