@@ -1752,6 +1752,7 @@ def test_factory_reset_terminates_active_recovery_run(monkeypatch):
     # terminate-active-run call.
     monkeypatch.setattr(rec_routes, "_db_delete_all_apps", lambda: None)
     monkeypatch.setattr(rec_routes, "_db_delete_all_owners", lambda: None)
+    monkeypatch.setattr(rec_routes, "_db_delete_all_user_content", lambda: None)
     monkeypatch.setattr(rec_routes, "_rm_tree", lambda _p: None)
 
     from pathlib import Path as _Path
@@ -1761,6 +1762,26 @@ def test_factory_reset_terminates_active_recovery_run(monkeypatch):
     assert rcr._current_run is None, "claim slot must be cleared post-reset"
   finally:
     rcr._current_run = None
+
+
+def test_factory_reset_clears_user_content(monkeypatch):
+  """Factory reset must wipe chats, notifications, and push subscriptions (chats
+  are NOT owner-scoped, so a leftover would show the prior owner's history to the
+  next one) and the /data/chats attachments dir — not just apps + owners."""
+  from app.routes import recover as rec_routes
+  from pathlib import Path as _Path
+  called = {"user_content": False}
+  monkeypatch.setattr(rec_routes, "_db_delete_all_apps", lambda: None)
+  monkeypatch.setattr(rec_routes, "_db_delete_all_owners", lambda: None)
+  monkeypatch.setattr(
+    rec_routes, "_db_delete_all_user_content",
+    lambda: called.__setitem__("user_content", True),
+  )
+  removed: list[str] = []
+  monkeypatch.setattr(rec_routes, "_rm_tree", lambda p: removed.append(p.name))
+  rec_routes._action_factory_reset(_Path("/tmp/nonexistent-test-data"))
+  assert called["user_content"], "reset must delete chats/notifications/push rows"
+  assert "chats" in removed, "reset must wipe the /data/chats attachments dir"
 
 
 # ---------------------------------------------------------------------

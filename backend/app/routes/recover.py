@@ -82,6 +82,24 @@ def _db_delete_all_owners() -> None:
   except sqlite3.Error:
     pass
 
+
+def _db_delete_all_user_content() -> None:
+  """Deletes chats, notifications, and push subscriptions. Raw sqlite3 — no ORM.
+
+  Chats are NOT owner-scoped (the chat-list query has no owner filter), so a
+  factory reset that left them behind would show the previous owner's
+  conversation history to whoever sets the instance up next. A reset is a clean
+  slate, so wipe them alongside apps + owners; their on-disk attachments go with
+  the `/data/chats` rmtree.
+  """
+  try:
+    with sqlite3.connect(RECOVERY_DB_PATH) as con:
+      for table in ("chats", "notifications", "push_subscriptions"):
+        con.execute(f"DELETE FROM {table}")
+      con.commit()
+  except sqlite3.Error:
+    pass  # best-effort; factory_reset also wipes /data/chats on disk
+
 # Session tokens come from `recover_auth` (HMAC-signed, no JWT
 # library) so recovery works even if `app/auth.py` is broken or
 # corrupted by the agent. The cookie name + TTL match what the
@@ -207,7 +225,8 @@ def _action_factory_reset(data_dir: Path) -> None:
     pass
   _db_delete_all_apps()
   _db_delete_all_owners()
-  for subdir in ["compiled", "apps", "shared", "logs", "cli-auth"]:
+  _db_delete_all_user_content()
+  for subdir in ["compiled", "apps", "shared", "logs", "cli-auth", "chats"]:
     _rm_tree(data_dir / subdir)
     (data_dir / subdir).mkdir(parents=True, exist_ok=True)
 

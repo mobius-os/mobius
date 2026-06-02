@@ -140,19 +140,23 @@ class _JsxHandler(FileSystemEventHandler):
           fs_locks.app_storage_lock(app_id),
           fs_locks.source_dir_lock(source_dir),
         ):
-          # Re-read fresh under the lock and re-verify identity: a PATCH may
-          # have compiled this source already, and (defensively, if the
-          # lifecycle lock above were ever relaxed) the id could have been
-          # reused by a different app whose bundle we must not clobber.
+          # Re-read the row AND the source file fresh under the lock. The row
+          # re-read re-verifies identity (the app still exists and still owns
+          # this dir, so an id reused mid-recompile is caught). The file re-read
+          # means we compile the CURRENT bytes, not the pre-lock snapshot — a
+          # concurrent PATCH may have already superseded it, and compiling the
+          # stale snapshot would overwrite the newer result.
           app = (
             db.query(models.App).populate_existing()
             .filter(models.App.id == app_id).first()
           )
-          if (
-            app is None
-            or app.source_dir != source_dir
-            or app.jsx_source == jsx_source
-          ):
+          if app is None or app.source_dir != source_dir:
+            return
+          try:
+            jsx_source = p.read_text(encoding="utf-8")
+          except FileNotFoundError:
+            return
+          if not jsx_source.strip() or app.jsx_source == jsx_source:
             return
           try:
             await recompile_app_bundle(db, app, jsx_source)

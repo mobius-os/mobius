@@ -96,6 +96,16 @@ async def compile_jsx(
       raise RuntimeError(
         f"esbuild timed out after {_ESBUILD_TIMEOUT_SECS} seconds"
       )
+    except asyncio.CancelledError:
+      # The awaiting task was cancelled (a superseded debounced watcher
+      # recompile, or shutdown). Kill the child so it can't keep running and
+      # writing out_path after we've returned and released our locks.
+      proc.kill()
+      try:
+        await proc.communicate()
+      except Exception:
+        pass
+      raise
     if proc.returncode != 0:
       raise RuntimeError(
         f"Compilation failed:\n{stderr.decode()}"
@@ -144,3 +154,21 @@ async def recompile_app_bundle(db, app, jsx_source: str) -> None:
     staged.unlink(missing_ok=True)
     raise
   os.replace(staged, live)
+
+
+def reap_staging_bundles() -> None:
+  """Removes leftover ``*.js.staging`` files at startup.
+
+  ``recompile_app_bundle`` (and the installer) compile to a staging file and
+  promote it with an atomic rename only after the DB commit. A process death in
+  the tiny window between commit and rename would leave a staging file behind.
+  Discarding it is always safe: it was either never committed, or
+  committed-but-not-promoted — in which case the live bundle keeps the prior
+  code and the next edit recompiles. A staging file is never served, so a leak
+  is at worst a stale bundle that self-heals, never wrong code being served.
+  """
+  for f in _compiled_dir().glob("*.js.staging"):
+    try:
+      f.unlink()
+    except OSError:
+      pass
