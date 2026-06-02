@@ -313,6 +313,28 @@ class ClearPending(_Command):
 
 
 @dataclass
+class PersistCompaction(_Command):
+  """Append a compaction-summary block to the transcript as its own message.
+
+  Used by `POST /api/chats/{id}/compact` (feature 091's provider-switch
+  groundwork): a cross-provider switch loses the session, so a one-shot
+  summarize turn produces a portable plain-text briefing. That briefing is
+  stored here as a NEW assistant message — distinct from the streaming
+  snapshot path, which REPLACES the in-progress assistant message — so it
+  never clobbers a live turn's transcript and renders as its own block.
+
+  The stored message carries `kind="compaction"` (so the frontend can render
+  a recognizable, collapsible "compacted chat" block) and `content` set to
+  the briefing text (so any plain renderer still shows it). Returns
+  `{"stored"}` — the message as appended, with its final ts.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  summary: str = ""
+
+
+@dataclass
 class ReplaceTranscript(_Command):
   """Replace the whole `messages` blob (PUT /api/chats/{id}).
 
@@ -400,6 +422,7 @@ _FENCE_COMMANDS = (
   StartTurn,
   AppendPending,
   AppendSteeredUserMessage,
+  PersistCompaction,
   PromotePending,
   CancelPending,
   ClearPending,
@@ -1065,6 +1088,8 @@ class ChatWriterActor:
       return self._append_pending(db, cmd)
     if isinstance(cmd, AppendSteeredUserMessage):
       return self._append_steered_user_message(db, cmd)
+    if isinstance(cmd, PersistCompaction):
+      return self._persist_compaction(db, cmd)
     if isinstance(cmd, PromotePending):
       return self._promote_pending(db, cmd)
     if isinstance(cmd, CancelPending):
@@ -1268,6 +1293,37 @@ class ChatWriterActor:
     chat.updated_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
       raise _PersistFailed("AppendSteeredUserMessage did not persist")
+    return {"stored": new_msg}
+
+  def _persist_compaction(self, db, cmd: PersistCompaction) -> dict:
+    """Append the compaction briefing as a new assistant message; commit.
+
+    The block is its OWN message (appended, not a replace) so it can't
+    clobber a streaming snapshot, and it carries `kind="compaction"` plus
+    a single text block so both the dedicated frontend renderer and any
+    plain renderer surface the briefing. The `ts` is set strictly past
+    every message in the transcript and the pending queue (via
+    `next_message_ts`, so even an empty transcript gets a wall-clock ts)
+    so it can't collide with a sibling's React key.
+    """
+    from datetime import UTC, datetime
+
+    chat = _active_chat(db, cmd.chat_id)
+    if chat is None:
+      raise _PersistFailed("PersistCompaction: chat not found or deleted")
+    msgs = list(chat.messages or [])
+    new_msg = {
+      "role": "assistant",
+      "kind": "compaction",
+      "content": cmd.summary,
+      "blocks": [{"type": "text", "content": cmd.summary}],
+      "ts": next_message_ts(msgs + list(chat.pending_messages or [])),
+    }
+    msgs.append(new_msg)
+    chat.messages = msgs
+    chat.updated_at = datetime.now(UTC)
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("PersistCompaction did not persist")
     return {"stored": new_msg}
 
   def _promote_pending(self, db, cmd: PromotePending) -> dict:
