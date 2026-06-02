@@ -89,16 +89,36 @@ def _validate_source_dir(source_dir: str, data_dir: str) -> str:
   return str(resolved)
 
 
-def _is_reserved_storage_dir(resolved: Path, apps_root: Path) -> bool:
-  """True if `resolved` is a bare-integer immediate child of /data/apps.
+def _safe_to_rmtree_source(
+  resolved: Path, apps_root: Path, db: Session, exclude_id: int
+) -> bool:
+  """Whether uninstall may recursively delete this resolved source dir.
 
-  That shape is a per-app STORAGE tree (/data/apps/<id>), never a legitimate
-  source tree (those are slug-named). Uninstall uses this to REFUSE to
-  rmtree such a path: a legacy app row whose source_dir is /data/apps/<number>
-  (created before _validate_source_dir existed) must not let uninstall delete
-  the storage of the app that owns that integer id (Codex review #4).
+  Only an IMMEDIATE, non-numeric child of /data/apps that NO OTHER app row
+  still resolves to. Refuses to delete (Codex review #4):
+    - a nested descendant (parent != apps_root) — a legacy/invalid row whose
+      source_dir points deep into /data/apps could otherwise rmtree a path
+      inside another app's tree,
+    - a /data/apps/<integer> per-app storage tree, and
+    - a directory a SIBLING app row shares — removing it when one app is
+      uninstalled would break the other.
+  Production source dirs are always a unique /data/apps/<slug>, so this only
+  ever stops cleanup for pathological legacy rows.
   """
-  return resolved.parent == apps_root and resolved.name.isdigit()
+  if resolved.parent != apps_root or resolved.name.isdigit():
+    return False
+  others = (
+    db.query(models.App)
+    .filter(models.App.id != exclude_id, models.App.source_dir.isnot(None))
+    .all()
+  )
+  for other in others:
+    try:
+      if Path(other.source_dir).resolve() == resolved:
+        return False
+    except OSError:
+      continue
+  return True
 
 
 def allocate_unique_slug(db: Session, name: str, exclude_id: int | None = None) -> str:
@@ -479,8 +499,7 @@ def delete_app(
     source_dir = Path(app_source_dir)
     try:
       resolved = source_dir.resolve()
-      if (str(resolved).startswith(str(apps_root) + "/")
-          and not _is_reserved_storage_dir(resolved, apps_root)):
+      if _safe_to_rmtree_source(resolved, apps_root, db, deleted_app_id):
         # Drop the cron entry even if the tree is already gone — a live
         # entry can outlive a partial cleanup, and a cron firing a
         # missing script is the exact orphan we're killing. Only rmtree
@@ -494,8 +513,7 @@ def delete_app(
     source_dir = Path(settings.data_dir) / "apps" / app_name
     try:
       resolved = source_dir.resolve()
-      if (str(resolved).startswith(str(apps_root) + "/")
-          and not _is_reserved_storage_dir(resolved, apps_root)):
+      if _safe_to_rmtree_source(resolved, apps_root, db, deleted_app_id):
         _unregister_cron(resolved)
         if resolved.is_dir():
           shutil.rmtree(resolved, ignore_errors=True)
