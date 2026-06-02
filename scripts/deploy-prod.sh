@@ -165,6 +165,17 @@ served_sha() {
     | head -n1 || true
 }
 
+# The HTTP status of the writer-aware readiness probe. /api/health is
+# liveness only — it returns 200 even when the single-writer chat-persistence
+# actor failed to start, went fatal, or is stopping, so a deploy could green
+# while every chat write fails. /api/ready returns 200 only when the writer
+# can actually persist; "000" if the container is down / curl couldn't reach
+# it. The deploy gate fails on anything but 200, so a process that can't
+# persist a chat does not pass as deployed.
+ready_code() {
+  docker exec "$CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/ready'" 2>/dev/null || echo "000"
+}
+
 # ── --check shortcut: verification-only, no deploy ─────────────────────
 if [ "$CHECK_ONLY" = "1" ]; then
   step "[check] verifying ${CONTAINER}"
@@ -174,6 +185,8 @@ if [ "$CHECK_ONLY" = "1" ]; then
   info "backend sha: ${sha:-<none>}"
   code=$(docker exec "$CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/health'" 2>/dev/null || echo "000")
   info "internal /api/health: ${code}"
+  rcode=$(ready_code)
+  info "internal /api/ready:  ${rcode}"
   if [ -n "$PUBLIC_URL" ]; then
     pcode=$(curl -sk -o /dev/null -w '%{http_code}\n' "$PUBLIC_URL" || echo "000")
     info "public  /api/health: ${pcode}  (${PUBLIC_URL})"
@@ -362,6 +375,26 @@ for i in $(seq 1 30); do
   fi
 done
 
+# Liveness alone is not enough: the chat-persistence writer must be ready
+# (started, alive, not fatal, not stopping) or every chat write fails on a
+# process that still answers /api/health 200. Give it the same 30s budget —
+# start_writer runs in the lifespan before serving, so this is normally
+# already 200 by the time /api/health was.
+info "waiting up to 30s for ${INTERNAL_BASE}/api/ready"
+for i in $(seq 1 30); do
+  rcode=$(ready_code)
+  if [ "$rcode" = "200" ]; then
+    ok "writer ready after ${i}s"
+    break
+  fi
+  sleep 1
+  if [ "$i" = "30" ]; then
+    fail "readiness check never returned 200 (last: ${rcode}) — the chat-persistence writer is not serving."
+    attempt_rollback || true
+    exit 1
+  fi
+done
+
 # ── step 3: refresh /data/shell/{src,dist} so new bundle isn't masked ──
 # The data volume survives the container recreation. /data/shell/dist/
 # is whatever the agent last built, NOT the new image's /app/static/.
@@ -403,6 +436,20 @@ for i in $(seq 1 30); do
   sleep 1
   if [ "$i" = "30" ]; then
     fail "post-restart health check never returned 200 (last: ${code})"
+    attempt_rollback || true
+    exit 1
+  fi
+done
+info "waiting up to 30s for ${INTERNAL_BASE}/api/ready after restart"
+for i in $(seq 1 30); do
+  rcode=$(ready_code)
+  if [ "$rcode" = "200" ]; then
+    ok "writer ready after ${i}s"
+    break
+  fi
+  sleep 1
+  if [ "$i" = "30" ]; then
+    fail "post-restart readiness check never returned 200 (last: ${rcode}) — the chat-persistence writer is not serving."
     attempt_rollback || true
     exit 1
   fi
@@ -470,6 +517,18 @@ if [ "$code" = "200" ]; then
   ok "internal /api/health: ${code}"
 else
   fail "internal /api/health: ${code}"
+  exit 1
+fi
+
+# Writer-aware readiness: liveness 200 isn't enough — fail the deploy if the
+# chat-persistence writer can't actually serve (so we never report a deploy
+# as complete on a process where every chat write fails).
+rcode=$(ready_code)
+if [ "$rcode" = "200" ]; then
+  ok "internal /api/ready:  ${rcode}"
+else
+  fail "internal /api/ready:  ${rcode}"
+  fail "the process is live but the chat-persistence writer is not ready — chat writes would fail."
   exit 1
 fi
 

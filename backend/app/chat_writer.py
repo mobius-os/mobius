@@ -1730,3 +1730,56 @@ def stop_writer(timeout: float = 10.0) -> None:
     _writer = None
   if writer is not None:
     writer.stop(timeout=timeout)
+
+
+def writer_readiness() -> tuple[bool, str | None]:
+  """Report whether the process writer can serve chat persistence right now.
+
+  Returns `(ready, reason)`: `ready` is True only when the writer can
+  actually accept and commit a command, and `reason` is a short
+  human-readable explanation of the FIRST failed condition (None when
+  ready) so a readiness probe can log WHY it failed without poking the
+  actor's privates itself.
+
+  Liveness (`/api/health`) is not the same as readiness. A writer can be
+  the published singleton yet unable to persist a single chat write, in
+  four distinct ways — all four matter, and "alive + not fatal" alone is
+  incomplete (a stopping writer would wrongly report ready):
+
+  - no singleton: `start_writer` hasn't run (or `stop_writer` cleared it),
+    so there is nothing to write through;
+  - dead thread: the worker thread never spawned, or exited (its `_run`
+    loop returned at a `DrainAndStop` or crashed out), so the FIFO queue
+    has no consumer;
+  - fatal: the worker hit a thread-fatal error (e.g. the session factory
+    raised at first use) and now fails every ack rather than committing;
+  - stopping: `stop()` flipped `_stopping`, so `submit()` rejects every
+    new command — the writer is draining toward exit and cannot accept work.
+
+  Centralizing the predicate here keeps the readiness route (and the
+  deploy gate it backs) from reaching into the actor's internals, and
+  keeps all four conditions in one place where the actor's own contract
+  lives.
+  """
+  writer = _writer
+  if writer is None:
+    return False, "writer not started"
+  thread = writer._thread
+  if thread is None or not thread.is_alive():
+    return False, "writer thread not alive"
+  if writer._fatal:
+    return False, "writer is fatal"
+  if writer._stopping:
+    return False, "writer is stopping"
+  return True, None
+
+
+def is_writer_ready() -> bool:
+  """True when the process writer can accept and commit a command.
+
+  Thin boolean wrapper over `writer_readiness` for callers that only need
+  the verdict (see `writer_readiness` for the four conditions and why each
+  matters).
+  """
+  ready, _ = writer_readiness()
+  return ready

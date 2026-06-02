@@ -299,6 +299,33 @@ def health(response: Response):
   return {"status": "ok"}
 
 
+@app.get("/api/ready")
+def ready(response: Response):
+  """Readiness probe: 200 only when chat persistence can actually serve.
+
+  Distinct from `/api/health` (liveness — the process is up and answering
+  HTTP). The single-writer chat-persistence actor can fail to start, go
+  fatal, or be stopping while the process still answers `/api/health` 200;
+  in that window every chat write fails. A deploy (and `deploy-prod.sh`'s
+  health gate) must NOT green on a process that can't persist a chat, so
+  this route returns 503 until the writer is genuinely ready.
+
+  `is_writer_ready()` (via `writer_readiness`) owns the predicate: the
+  writer singleton exists, its worker thread is alive, and the actor is
+  neither fatal nor stopping. The route only maps the verdict to a status
+  code and surfaces the reason. Startup ordering is fine — the lifespan
+  runs `start_writer()` before uvicorn serves, so there is no cold-start
+  window where this false-fails.
+  """
+  response.headers["Cache-Control"] = "no-store"
+  from app.chat_writer import writer_readiness
+  is_ready, reason = writer_readiness()
+  if is_ready:
+    return {"ready": True}
+  response.status_code = 503
+  return {"ready": False, "reason": reason}
+
+
 @app.get("/api/version")
 def version():
   """Returns the git commit the running image was built from.
