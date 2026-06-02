@@ -226,7 +226,13 @@ def _action_factory_reset(data_dir: Path) -> None:
   _db_delete_all_apps()
   _db_delete_all_owners()
   _db_delete_all_user_content()
-  for subdir in ["compiled", "apps", "shared", "logs", "cli-auth", "chats"]:
+  # agent-browser-profiles holds per-chat Chromium profiles (IndexedDB,
+  # localStorage, cookies) written during agent-browser runs — prior-owner
+  # session data that must not survive a reset into the next owner's instance.
+  for subdir in [
+    "compiled", "apps", "shared", "logs", "cli-auth", "chats",
+    "agent-browser-profiles",
+  ]:
     _rm_tree(data_dir / subdir)
     (data_dir / subdir).mkdir(parents=True, exist_ok=True)
 

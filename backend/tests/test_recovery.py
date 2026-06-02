@@ -1782,6 +1782,9 @@ def test_factory_reset_clears_user_content(monkeypatch):
   rec_routes._action_factory_reset(_Path("/tmp/nonexistent-test-data"))
   assert called["user_content"], "reset must delete chats/notifications/push rows"
   assert "chats" in removed, "reset must wipe the /data/chats attachments dir"
+  assert "agent-browser-profiles" in removed, (
+    "reset must wipe per-chat Chromium profiles (browser session data)"
+  )
 
 
 # ---------------------------------------------------------------------

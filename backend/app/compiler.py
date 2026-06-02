@@ -132,10 +132,12 @@ async def recompile_app_bundle(db, app, jsx_source: str) -> None:
   the session (e.g. a PATCH's name/description), so the whole update lands
   or rolls back together.
 
-  The caller MUST hold the app's lifecycle + per-app lock and have loaded
-  ``app`` fresh under it. The bundle path is keyed by app id, so without
-  the lock a concurrent uninstall + SQLite id reuse could make this swap
-  clobber a different app's bundle.
+  The caller MUST ensure the app's bundle path (keyed by app id) can't be
+  concurrently reused while this runs, or the post-commit swap could clobber a
+  different app's bundle. PATCH and the watcher satisfy this by holding the
+  lifecycle + per-app lock with ``app`` loaded fresh under it; ``create_app``
+  satisfies it trivially because the id is brand-new and uncommitted, so no
+  other operation can reference it yet.
 
   Raises:
     RuntimeError: from ``compile_jsx`` on invalid JSX (live bundle untouched).

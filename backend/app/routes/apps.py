@@ -350,16 +350,21 @@ async def create_app(
     )
     db.add(app)
     db.flush()  # assigns app.id without committing
+    # Compile transactionally like every other recompile path: out-of-place to a
+    # staging file, swapped into the live bundle only after the commit succeeds,
+    # so a commit failure can't leave an orphan live bundle. The app id is
+    # brand-new and uncommitted, so no concurrent op can reference it — the
+    # lifecycle+app lock recompile_app_bundle normally relies on (to stop an id
+    # being reused mid-swap) is moot here, and taking app_storage_lock under the
+    # source lock we already hold would invert the documented lock order.
     try:
-      compiled = await compile_jsx(app.id, body.jsx_source)
+      await recompile_app_bundle(db, app, body.jsx_source)
     except RuntimeError as exc:
       # Roll back explicitly to avoid leaving the SQLite WAL connection in a
       # dirty transaction state, which can cause "database is locked" errors
       # on subsequent writes.
       db.rollback()
       raise HTTPException(status_code=422, detail=str(exc))
-    app.compiled_path = compiled
-    db.commit()
     db.refresh(app)
   return app
 

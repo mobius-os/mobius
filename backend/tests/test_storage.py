@@ -707,3 +707,13 @@ async def test_watcher_skips_unclaimed_source_dir():
     f.write("export default function App(){ return <div/> }")
   # Must return without raising (and without compiling anything).
   await _JsxHandler(asyncio.get_running_loop())._recompile(jsx_path)
+
+
+def test_create_app_leaves_no_staging_bundle(client, owner_token):
+  """create_app compiles through the same staging swap — the live bundle exists
+  and no .staging artifact is left behind once the swap completes."""
+  import os
+  app_id = _make_app(client, owner_token)
+  live = os.path.join(os.environ["DATA_DIR"], "compiled", f"app-{app_id}.js")
+  assert os.path.exists(live)
+  assert not os.path.exists(live + ".staging")
