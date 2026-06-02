@@ -24,12 +24,16 @@ from app import chat_queue
 from app.chat_writer import (
   AnswerQuestion,
   AppendPending,
+  AppendSteeredUserMessage,
   CancelPending,
   StartTurn,
   alloc_run_token,
   await_ack,
   get_writer,
 )
+from app import codex_sdk_runner
+from app.providers import effective_agent_settings
+from app.runner_registry import RunnerKind, registry
 from app.config import get_settings
 from app.database import get_db
 from app.deps import Principal, get_current_owner, get_principal
@@ -176,6 +180,59 @@ def _user_message_from_body(
 # so it can't lost-update against a concurrent streaming snapshot.
 
 
+def _codex_steer_enabled(chat: models.Chat) -> bool:
+  """Whether mid-turn Codex steering is opted in for this chat.
+
+  Read through `effective_agent_settings`, the same merge other per-chat
+  / per-owner flags use: hard-coded defaults, then the owner-wide
+  `/data/shared/agent-settings.json`, then this chat's
+  `agent_settings_json` overrides (later wins). The flag DEFAULTS OFF —
+  it appears in none of those layers out of the box — so deploying this
+  code changes nothing until the owner sets `codex_steer_enabled: true`
+  globally or on a chat. The mid-turn-injection semantics need a live
+  Codex turn to verify end-to-end, which is why it ships behind the flag.
+  """
+  settings = get_settings()
+  raw = chat.agent_settings_json
+  if isinstance(raw, str):
+    try:
+      raw = json.loads(raw)
+    except (ValueError, TypeError):
+      raw = None
+  overrides = raw if isinstance(raw, dict) else None
+  merged = effective_agent_settings(
+    settings.data_dir, chat_overrides=overrides, provider=chat.provider,
+  )
+  return bool(merged.get("codex_steer_enabled"))
+
+
+def _has_live_codex_turn(chat_id: str) -> bool:
+  """True when a steerable `ActiveCodexTurn` is registered for this chat.
+
+  Mirrors the guard inside `steer_into_active_turn` (isinstance
+  ActiveCodexTurn + a non-None turn) so the route only attempts a steer
+  when there is a live turn to steer into; anything else falls through
+  to the queue.
+  """
+  handle = registry.get_handle(chat_id, RunnerKind.CODEX_SDK)
+  return (
+    isinstance(handle, codex_sdk_runner.ActiveCodexTurn)
+    and handle.turn is not None
+  )
+
+
+def _steered_response(chat_id: str) -> JSONResponse:
+  """202 for a message injected mid-turn into a live Codex turn.
+
+  The message is in the TRANSCRIPT (not the pending queue) and the live
+  turn already saw it via `steer()`, so the client renders it inline as
+  content growth rather than a queued-tray entry."""
+  return JSONResponse(
+    status_code=202,
+    content={"status": "steered", "chat_id": chat_id},
+  )
+
+
 @router.post("/{chat_id}/messages", status_code=202)
 async def send_message(
   body: schemas.SendMessage,
@@ -300,6 +357,65 @@ async def send_message(
   # queue from the head, so the queued messages actually get answered
   # rather than sitting forever.
   if is_chat_running(chat_id) or chat.pending_messages:
+    # Mid-turn steering (Codex only, opt-in): when a turn is live and the
+    # chat is a flag-enabled Codex chat with a steerable ActiveCodexTurn,
+    # inject the send INTO the running turn via the SDK's `steer()` rather
+    # than queuing it for turn-end drain. On success the user message goes
+    # into the TRANSCRIPT (the live turn already saw the text) and a
+    # `steered_into_turn` event tells the client to render it inline. On
+    # False (no live turn / closed-turn race) OR any exception, fall
+    # through to the existing queue — steering must NEVER break a send.
+    # Claude is deliberately excluded: its SDK doesn't contractually expose
+    # mid-tool-boundary injection (see codex_sdk_runner's module docstring),
+    # so Claude keeps the turn-end drain.
+    if (
+      is_chat_running(chat_id)
+      and (chat.provider or "claude") == "codex"
+      and _codex_steer_enabled(chat)
+      and _has_live_codex_turn(chat_id)
+    ):
+      user_msg = _user_message_from_body(chat, body)
+      try:
+        steered = await codex_sdk_runner.steer_into_active_turn(
+          chat_id, user_msg["content"],
+        )
+      except Exception:
+        # Any steer failure is non-fatal: log nothing louder than the
+        # runner already does and queue the message instead.
+        steered = False
+      if steered:
+        # Persist into the transcript via the actor (NOT pending), keeping
+        # the single-writer invariant. The empty run_token broad-fences by
+        # chat; the command inserts the row before the trailing assistant
+        # partial so the streaming snapshot still targets the assistant.
+        ack = get_writer().submit(
+          AppendSteeredUserMessage(
+            chat_id=chat_id, run_token="", user_msg=user_msg,
+          )
+        )
+        try:
+          await await_ack(ack)
+        except Exception:
+          # The transcript write didn't land, but the live turn already
+          # absorbed the steer — we can't un-steer. Surface the failure so
+          # the client refetches authoritative state rather than silently
+          # dropping the message.
+          log.warning(
+            "AppendSteeredUserMessage did not persist chat_id=%s", chat_id,
+          )
+          raise HTTPException(
+            status_code=503,
+            detail="Could not save your message; please refresh.",
+          )
+        bc = get_broadcast(chat_id)
+        if bc is not None:
+          bc.publish({
+            "type": "steered_into_turn",
+            "ts": user_msg["ts"],
+            "content": user_msg["content"],
+          })
+        return _steered_response(chat_id)
+
     new_msg = await _append_to_pending(chat, body, db)
 
     if not is_chat_running(chat_id):
