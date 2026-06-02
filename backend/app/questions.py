@@ -26,13 +26,7 @@ dataclass.
 
 from __future__ import annotations
 
-import logging
-
-from sqlalchemy.orm import Session
-
-from app import models
 from app.pending_questions import PendingQuestion
-from app.push import notify_owner
 
 
 # Module-level singleton registry. Runners receive this dict (or an
@@ -40,11 +34,6 @@ from app.push import notify_owner
 # write the PendingQuestion in directly under the chat_id key. Routes
 # import `app.questions` and call `claim` / `cancel` / etc.
 _pending: dict[str, PendingQuestion] = {}
-
-
-def _get_logger() -> logging.Logger:
-  """Returns the chat-log logger so notify failures land in chat.log."""
-  return logging.getLogger("moebius.chat")
 
 
 def register(chat_id: str, pending: PendingQuestion) -> None:
@@ -126,34 +115,3 @@ def cancel(chat_id: str) -> None:
   pending = _pending.pop(chat_id, None)
   if pending is not None and not pending.future.done():
     pending.future.cancel()
-
-
-def notify(db: Session, chat_id: str, event: dict) -> None:
-  """Fires a push notification when AskUserQuestion ends a turn.
-
-  Suppressed automatically by `notify_owner` when the owner is
-  currently subscribed to this chat's SSE stream. Failures are
-  swallowed — a missed notification must not crash the turn.
-  """
-  if not chat_id:
-    return
-  try:
-    questions = event.get("questions") or []
-    first = questions[0].get("question", "") if questions else ""
-    body = first[:120] if first else "Möbius is waiting for your answer."
-    owner = db.query(models.Owner).order_by(models.Owner.id).first()
-    if owner is None:
-      return
-    notify_owner(
-      db,
-      owner.id,
-      title="Möbius needs your answer",
-      body=body,
-      source_type="chat",
-      source_id=chat_id,
-      target=f"/chat/{chat_id}",
-    )
-  except Exception:
-    _get_logger().exception(
-      "notify_pending_question failed chat_id=%s", chat_id,
-    )

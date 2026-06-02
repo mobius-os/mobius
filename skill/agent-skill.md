@@ -522,8 +522,12 @@ const img = await window.mobius.storage.getBlob('photo.png')  // Blob | null (ca
 // the path. Prefer this over re-reading so the UI updates when a sync lands.
 const unsub = window.mobius.storage.subscribe('notes.json', v => setNotes(v || []))
 // enumerate a directory's immediate children instead of probing filenames:
-// [{name,path,type,size,modified_at,mime_type}], [] when empty, null on network
-// failure (list() has NO offline mirror, unlike get()).
+// [{name,path,type,size,modified_at,mime_type}], [] when empty. Offline-capable
+// like get(): online the server is authoritative, offline it lists from the
+// read-through cache; either way overlaid with your pending writes (so a record
+// you just created/deleted shows/hides immediately). Offline entries omit
+// size/modified_at. So a sharded list (items/<uuid>.json) enumerates after an
+// offline reload without a hand-rolled index file.
 const entries = await window.mobius.storage.list('items/')
 window.mobius.online                        // boolean
 await window.mobius.storage.pendingCount()  // unsynced writes
