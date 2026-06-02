@@ -398,35 +398,86 @@ function makeStorage({ appId, getToken }) {
     }
   }
 
+  const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b)
+
+  // Fetch the authoritative server value for a path. 404 → null (known-absent);
+  // any other non-OK → throw (transient/auth — the caller keeps the mirror).
+  // Bounded so a stale-`true` navigator.onLine (Android offline) can't hang it.
+  async function fetchValue(path) {
+    const token = await getToken()
+    const res = await fetchBounded(`/api/storage/apps/${appId}/${path}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    if (res.status === 404) return null
+    if (res.ok) return await res.json()
+    throw new Error(`HTTP ${res.status}`)
+  }
+
+  // Background refresh after a cache-first get(): re-fetch the path and, if the
+  // server value changed, update the mirror and notify subscribers. Re-takes
+  // the path lock so its mirror write stays ordered against concurrent set()s.
+  // Skips entirely when a local write for the path is still queued — that write
+  // owns the value until the outbox drains (read-your-writes), so the mirror
+  // must NOT be clobbered with the not-yet-overwritten server value (the bug the
+  // pending guard closes; the old always-mirror read had it too). Fire-and-
+  // forget; a transient failure leaves the last-known mirror untouched.
+  function scheduleRevalidate(path) {
+    withPathLock(path, async () => {
+      // A queued local write owns the value until the outbox drains (read-your-
+      // writes), so the mirror must NOT be clobbered with the server value.
+      // Check BEFORE the fetch: if an op is queued when we start, a later "no
+      // op" can't be trusted — a concurrent drain (drainInner runs under the
+      // outbox Web Lock, NOT this path lock) could sync+delete it mid-fetch,
+      // after our GET already read the pre-sync value. No queued op ⟺ every
+      // write for this path is already on the server, so the GET sees the
+      // latest write.
+      if ((await listOps()).some((op) => op.path === path)) return
+      let data
+      try { data = await fetchValue(path) } catch (e) { return }
+      // Re-check after the fetch: THIS runtime can't have enqueued during it (we
+      // hold the path lock), but ANOTHER runtime sharing this app's outbox (a
+      // standalone page + the in-shell iframe open at once) can QUEUE one — don't
+      // clobber its queued write with our now-stale read.
+      // ACCEPTED BOUND (pre-existing, not from the SWR change): a concurrent
+      // runtime's ONLINE setInner() writes the mirror + sends directly without
+      // entering the outbox, so these IDB checks can't see it; if it lands in the
+      // tiny window before our cachePut, our read can briefly win. It costs one
+      // stale read and self-heals on the next op. Closing it fully needs a
+      // per-app/per-path Web Lock around setInner/removeInner/scheduleRevalidate
+      // (the drain already uses navigator.locks); filed as a follow-up rather
+      // than widening this read-path fix into the write path.
+      if ((await listOps()).some((op) => op.path === path)) return
+      const prev = await cacheGet(path)
+      if (prev && sameJson(prev.data, data)) return
+      await cachePut(path, data)
+      notify(path, data)   // no pending op → effective value === server value
+    }).catch(() => {})
+  }
+
   async function getInner(path) {
-    // Read-through: online, fetch and MIRROR into the cache so the value is
-    // available offline later. Offline or on any error, serve the last-known
-    // mirror, overlaid with any pending write (read-your-writes). Returns null
-    // only when we have genuinely never cached the path (or it's known-absent).
-    // Serialized per path, so the cache write below can't land after a later
-    // set()'s write (that set() is queued behind this GET on the same chain).
+    // STALE-WHILE-REVALIDATE read. With a cached mirror, serve it INSTANTLY
+    // (overlaid with any pending write — read-your-writes) and refresh from the
+    // network in the background, notifying subscribers if the value changed — so
+    // a high score / note paints immediately instead of waiting on a round-trip;
+    // an app that wants the refreshed value subscribe()s the path. A first-ever
+    // read (no mirror) has nothing to paint, so it awaits the network online, or
+    // resolves null offline. Serialized per path so cache writes can't reorder
+    // against a concurrent set() (the background revalidate re-takes the lock).
+    const cached = await cacheGet(path)
+    if (cached) {
+      if (navigator.onLine) scheduleRevalidate(path)
+      return await effectiveValue(path, cached.data)
+    }
     if (navigator.onLine) {
       try {
-        const token = await getToken()
-        const res = await fetchBounded(`/api/storage/apps/${appId}/${path}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        })
-        if (res.status === 404) {
-          await cachePut(path, null)
-        } else if (res.ok) {
-          const data = await res.json()
-          await cachePut(path, data)
-        } else {
-          throw new Error(`HTTP ${res.status}`)
-        }
-        const cached = await cacheGet(path)
-        return await effectiveValue(path, cached ? cached.data : null)
+        const data = await fetchValue(path)
+        await cachePut(path, data)
+        return await effectiveValue(path, data)
       } catch (e) {
-        // Network blip while "online" — fall back to the mirror below.
+        // Network blip with nothing cached — fall through to the empty mirror.
       }
     }
-    const cached = await cacheGet(path)
-    return await effectiveValue(path, cached ? cached.data : null)
+    return await effectiveValue(path, null)
   }
 
   async function setInner(path, data) {
