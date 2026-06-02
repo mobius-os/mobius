@@ -473,42 +473,30 @@ async def update_icon(
   # running-total abort) rather than buffering an unbounded body first, so a
   # giant direct-API upload can't OOM the host (Codex review round-9 #4).
   body = await read_capped_body(request, cap=12 * 1024 * 1024)
-  app = (
-    db.query(models.App).filter(models.App.id == app_id).first()
-  )
-  if not app:
+  # Capture the app's identity at authorization; recheck the nonce under the
+  # per-app lock so a slow icon upload can't alter a DIFFERENT app that reused
+  # this id between authorization and commit — the same id-reuse race fixed for
+  # storage PUT/DELETE (Codex review round-10 #3).
+  app0 = db.query(models.App).filter(models.App.id == app_id).first()
+  if not app0:
     raise HTTPException(404, "App not found.")
-  if not body:
-    app.icon_png = None
+  expected_nonce = app0.token_nonce
+  # Decode/normalize via the SHARED installer pipeline, which inspects the
+  # image header dimensions BEFORE img.load() so a decompression bomb is
+  # rejected before it can allocate (Codex review round-10 #4). Done outside
+  # the lock — only the DB mutation needs serializing. Lazy import avoids the
+  # install.py <-> routes.apps circular import.
+  from app.install import _process_icon
+  processed = _process_icon(body) if body else None
+  async with fs_locks.app_storage_lock(app_id):
+    app = (
+      db.query(models.App).populate_existing()
+      .filter(models.App.id == app_id).first()
+    )
+    if app is None or app.token_nonce != expected_nonce:
+      raise HTTPException(404, "App not found.")
+    app.icon_png = processed
     db.commit()
-    return Response(status_code=204)
-  from PIL import Image
-  try:
-    img = Image.open(io.BytesIO(body))
-    img.load()
-  except Exception:
-    raise HTTPException(415, "Not a valid image.")
-  # Preserve alpha for PNG / WebP uploads — transparent icons are
-  # common (logos with no background) and flattening to RGB renders
-  # a hard black square on most home screens.
-  if img.mode not in ("RGB", "RGBA"):
-    has_alpha = "A" in img.mode or "transparency" in img.info
-    img = img.convert("RGBA" if has_alpha else "RGB")
-  # Center-square-crop before resize. Non-square inputs would
-  # otherwise stretch when the standalone icon route resizes to
-  # the requested manifest size (192/512), producing distorted
-  # icons. Cropping preserves the most likely subject.
-  w, h = img.size
-  if w != h:
-    side = min(w, h)
-    left = (w - side) // 2
-    top = (h - side) // 2
-    img = img.crop((left, top, left + side, top + side))
-  img.thumbnail((1024, 1024), Image.LANCZOS)
-  buf = io.BytesIO()
-  img.save(buf, format="PNG", optimize=True)
-  app.icon_png = buf.getvalue()
-  db.commit()
   return Response(status_code=204)
 
 
