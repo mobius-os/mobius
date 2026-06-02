@@ -34,6 +34,7 @@ from app.deps import get_current_owner, reject_cross_site
 # survive a future schema bump.
 _KNOWN_EVENTS = {
   "app_open", "app_install", "storage_write", "cron_outcome",
+  "memory_load",
 }
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
