@@ -70,6 +70,12 @@ if [[ -z "$mg_id" ]]; then
 else
   log "memory-graph already installed (id=$mg_id)"
 fi
+# Set the app icon (kg-t1: glossy infinity-as-graph, the owner's pick). Raw PNG
+# bytes; the route downscales + stores. Idempotent — fine to re-PUT each boot.
+if [[ -n "$mg_id" && -f "$CORE_SRC/memory-graph/icon.png" ]]; then
+  curl -s -X PUT -H "Authorization: Bearer $TOKEN" --data-binary @"$CORE_SRC/memory-graph/icon.png" \
+    "$API_BASE_URL/api/apps/$mg_id/icon" -o /dev/null -w 'memory-graph icon: HTTP %{http_code}\n' >>"$LOG" 2>&1 || true
+fi
 
 # --- dreaming ---------------------------------------------------------
 dr_id="$(echo "$apps_json" | has_app dreaming)"
