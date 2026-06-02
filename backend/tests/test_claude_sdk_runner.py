@@ -115,6 +115,71 @@ def test_dispatch_assistant_tool_use_emits_tool_start():
   assert "tool_start" in types
 
 
+def test_dispatch_skill_tool_emits_skill_loaded_and_logs(monkeypatch):
+  """A Skill tool_use emits a skill_loaded event AFTER its tool_start
+  and appends one skill_loaded record to the activity log."""
+  from app import activity
+
+  logged: list[tuple] = []
+  monkeypatch.setattr(
+    activity, "log_skill_load",
+    lambda chat_id, skill, ts=None: logged.append((chat_id, skill)),
+  )
+
+  class _ChatBus(_Bus):
+    chat_id = "chat-42"
+
+  bus = _ChatBus()
+  msg = AssistantMessage(
+    content=[ToolUseBlock(id="s1", name="Skill", input={"skill": "humanizer"})],
+    model="claude-opus",
+  )
+  dispatch_sdk_message(msg, bus, None)
+  types = [e["type"] for e in bus.events]
+  # tool_start fires first, then the skill_loaded chip event.
+  assert types == ["tool_start", "tool_input", "skill_loaded"]
+  loaded = [e for e in bus.events if e["type"] == "skill_loaded"]
+  assert loaded == [{"type": "skill_loaded", "skill": "humanizer"}]
+  assert logged == [("chat-42", "humanizer")]
+
+
+def test_dispatch_skill_tool_without_name_does_not_emit(monkeypatch):
+  """A Skill tool_use with no resolvable skill name emits no chip and
+  logs nothing — an empty chip carries no signal."""
+  from app import activity
+
+  logged: list[tuple] = []
+  monkeypatch.setattr(
+    activity, "log_skill_load",
+    lambda chat_id, skill, ts=None: logged.append((chat_id, skill)),
+  )
+  bus = _Bus()
+  msg = AssistantMessage(
+    content=[ToolUseBlock(id="s2", name="Skill", input={})],
+    model="claude-opus",
+  )
+  dispatch_sdk_message(msg, bus, None)
+  assert [e["type"] for e in bus.events if e["type"] == "skill_loaded"] == []
+  assert logged == []
+
+
+def test_dispatch_non_skill_tool_emits_no_skill_loaded(monkeypatch):
+  """A non-Skill tool never produces a skill_loaded event."""
+  from app import activity
+
+  monkeypatch.setattr(
+    activity, "log_skill_load",
+    lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not log")),
+  )
+  bus = _Bus()
+  msg = AssistantMessage(
+    content=[ToolUseBlock(id="t1", name="Bash", input={"command": "ls"})],
+    model="claude-opus",
+  )
+  dispatch_sdk_message(msg, bus, None)
+  assert [e for e in bus.events if e["type"] == "skill_loaded"] == []
+
+
 def test_dispatch_assistant_text_block_is_silent():
   """TextBlock is a snapshot duplicate of streamed text_delta — must
   not re-emit as text to avoid doubling the content."""
