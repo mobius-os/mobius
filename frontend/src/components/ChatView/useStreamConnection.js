@@ -61,6 +61,11 @@ const SYSTEM_EVENTS = new Set([
  *                         { questions: [...] }. Renders a card.
  *   queued_turn_starting  Backend about to promote a queued message
  *                         { ts }. Notifies caller via callback.
+ *   steered_into_turn     A send was injected mid-turn into a live
+ *                         Codex turn via the SDK's steer() instead of
+ *                         queued { ts, content }. Notifies caller so it
+ *                         drops the optimistic queued-tray entry and
+ *                         renders the message inline as content growth.
  *   catch_up_done         Replay burst finished; live events follow.
  *   error                 { message }. Surfaced inline.
  *   done                  Turn complete; SSE closes.
@@ -83,6 +88,10 @@ const SYSTEM_EVENTS = new Set([
  * @param {(ts: number|null) => void} [callbacks.onQueuedTurnStarting]
  *   Fired when the backend is about to promote a queued message; `ts`
  *   identifies which pending entry was promoted.
+ * @param {(info: {ts: number|null, content: string}) => void} [callbacks.onSteeredIntoTurn]
+ *   Fired when a send was injected mid-turn into a live Codex turn (the
+ *   backend steered it instead of queuing). The caller drops the
+ *   optimistic queued-tray entry and renders the message inline.
  *
  * @returns {{
  *   streamItems: Array<
@@ -118,6 +127,7 @@ export default function useStreamConnection(chatId, {
   onSystemEvent,
   onNeedsRefresh,
   onQueuedTurnStarting,
+  onSteeredIntoTurn,
 }) {
   const [streamItems, _setStreamItems] = useState([])
   const latestItemsRef = useRef([])
@@ -300,6 +310,8 @@ export default function useStreamConnection(chatId, {
   onNeedsRefreshRef.current = onNeedsRefresh
   const onQueuedTurnStartingRef = useRef(onQueuedTurnStarting)
   onQueuedTurnStartingRef.current = onQueuedTurnStarting
+  const onSteeredIntoTurnRef = useRef(onSteeredIntoTurn)
+  onSteeredIntoTurnRef.current = onSteeredIntoTurn
   const queuedContinuationRef = useRef(false)
   // Carries the ts of the message the backend just promoted so the
   // frontend can remove the matching pending entry, even if the user
@@ -524,6 +536,17 @@ export default function useStreamConnection(chatId, {
             queuedContinuationRef.current = true
             queuedContinuationTsRef.current = event.ts ?? null
             onQueuedTurnStartingRef.current?.(event.ts)
+          } else if (event.type === 'steered_into_turn') {
+            // A send was injected mid-turn into a live Codex turn. The
+            // backend already put the user message in the transcript; the
+            // caller drops the optimistic queued-tray entry and renders it
+            // inline as content growth (no send-time spacer/scroll-pin).
+            // The steered text flows back as normal `text` deltas through
+            // this same stream, so nothing else is needed here.
+            onSteeredIntoTurnRef.current?.({
+              ts: event.ts ?? null,
+              content: event.content || '',
+            })
           } else if (event.type === 'done') {
             flushBuffer()
             setIsStreaming(false)
