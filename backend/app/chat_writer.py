@@ -430,6 +430,15 @@ class ChatWriterActor:
     # `_session_factory()` hasn't returned yet (or hangs) must not report ready.
     # Stays clear if session-open fails (the thread goes fatal instead).
     self._session_ready = threading.Event()
+    # Per-chat owner of the durable run marker: the run_token whose StartTurn /
+    # PromotePending most recently set `run_status='running'`. `ClearRunStatus`
+    # is an identity-keyed compare-and-clear against this — a clear that names a
+    # run_token clears ONLY if that token still owns the marker, so a dying
+    # run's stale clear can't wipe the marker a fresh turn just set (the
+    # markerless-run race). Touched only on the consumer thread, so no lock; a
+    # tokenless clear (run_token="") stays unconditional for paths that already
+    # know they own the marker.
+    self._run_token_owner: dict[str, str] = {}
     # Serializes the check-and-set in `start()` so two concurrent callers
     # can't both pass the `_thread is None` check and each spawn a consumer
     # thread (which would violate the single-consumer invariant and corrupt
@@ -750,13 +759,15 @@ class ChatWriterActor:
     """
     drain = DrainAndStop(ack=Future())
     enqueued = False
+    fatal_exc = None
     with self._fatal_lock:
       if self._fatal:
-        # Already dead: every queued ack was failed by `_go_fatal`; just
-        # fail the marker's ack inline and fall through to join.
-        _safe_set_exception(
-          drain.ack, RuntimeError("chat writer is in a fatal state")
-        )
+        # Already dead: every queued ack was failed by `_go_fatal`. Capture
+        # the failure and resolve the ack OUTSIDE the lock below — the module
+        # invariant forbids resolving an ack while holding a producer lock (a
+        # synchronous done-callback could re-enter `submit`/`stop` and
+        # deadlock on the lock), and `_go_fatal` follows the same discipline.
+        fatal_exc = RuntimeError("chat writer is in a fatal state")
       elif self._stopping:
         # A prior stop() already enqueued the one DrainAndStop; don't add a
         # second the consumer will never reach.  Just join below.
@@ -765,6 +776,8 @@ class ChatWriterActor:
         self._stopping = True
         self._q.put(drain)
         enqueued = True
+    if fatal_exc is not None:
+      _safe_set_exception(drain.ack, fatal_exc)
     if enqueued:
       try:
         drain.ack.result(timeout=timeout)
@@ -1078,7 +1091,26 @@ class ChatWriterActor:
     if hasattr(db, "record_commit"):
       self._commit_snapshot(db, snapshot)
       return _WriteOutcome.APPLIED
-    return finalize_response_outcome(db, chat_id, snapshot.get("blocks") or [])
+    outcome = finalize_response_outcome(
+      db, chat_id, snapshot.get("blocks") or []
+    )
+    if outcome is _WriteOutcome.NOOP:
+      # The sink only submits Finalize with non-empty blocks, so a NOOP here
+      # means the row had nothing to finalize onto. Distinguish two causes: a
+      # STILL-EXISTING chat whose transcript was wiped by a concurrent
+      # ReplaceTranscript is benign (nothing to save, not a failure) — promote
+      # to APPLIED so the dispatch doesn't raise a spurious "could not be
+      # saved". A missing / soft-deleted row stays a hard NOOP (dispatch
+      # raises → FAILED_LEAVE_MARKER → reconciliation), because delete owns the
+      # row's removal and a stray finalize must not resurrect it.
+      from app.models import Chat
+      still_exists = db.query(Chat).filter(
+        Chat.id == chat_id,
+        Chat.deleted_at.is_(None),
+      ).first()
+      if still_exists is not None:
+        return _WriteOutcome.APPLIED
+    return outcome
 
   def _answer_question(self, db, cmd: AnswerQuestion) -> bool:
     """Re-read the chat fresh, merge answers into the question block, commit.
@@ -1147,6 +1179,9 @@ class ChatWriterActor:
     chat.updated_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
       raise _PersistFailed("StartTurn did not persist")
+    # This run_token now owns the marker — a later ClearRunStatus naming a
+    # different token (a dying run) must not clear it.
+    self._run_token_owner[cmd.chat_id] = cmd.run_token
     return {
       "history": history,
       "session_id": chat.session_id,
@@ -1245,6 +1280,8 @@ class ChatWriterActor:
     chat.updated_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
       raise _PersistFailed("PromotePending did not persist")
+    # The promoted continuation now owns the marker under its run_token.
+    self._run_token_owner[cmd.chat_id] = cmd.run_token
     return {
       "history": history,
       "promoted": first_pending,
@@ -1316,10 +1353,19 @@ class ChatWriterActor:
   def _clear_run_status(self, db, cmd: ClearRunStatus):
     """Clear the durable run marker when set; commit.
 
-    Replicates `chat._clear_run_status`.
+    Identity-keyed compare-and-clear: when `cmd.run_token` is set, clear ONLY
+    if that token still owns the marker (`_run_token_owner`). A dying run's
+    stale clear thus can't wipe the marker a fresh turn just set — the
+    fresh turn's StartTurn recorded itself as the owner, so the dying token
+    no longer matches and this is a no-op (the markerless-run race). A
+    tokenless clear (run_token="") is unconditional, for paths that already
+    know they own the marker (reconciliation, no-handoff cleanup).
     """
     from app.models import Chat
 
+    owner = self._run_token_owner.get(cmd.chat_id)
+    if cmd.run_token and owner is not None and owner != cmd.run_token:
+      return None
     chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
     if chat is not None and (
       chat.run_status is not None or chat.run_started_at is not None
@@ -1328,6 +1374,7 @@ class ChatWriterActor:
       chat.run_started_at = None
       if not _commit_or_rollback(db):
         raise _PersistFailed("ClearRunStatus did not persist")
+    self._run_token_owner.pop(cmd.chat_id, None)
     return None
 
   @staticmethod
@@ -1545,7 +1592,16 @@ def _apply_last_assistant_message(db, chat_id: str, message: dict):
     return _WriteOutcome.NOOP
   from app.models import Chat
 
-  chat = db.query(Chat).filter(Chat.id == chat_id).first()
+  # Filter deleted_at: never write to a soft-deleted chat. A finalize (or a
+  # streaming snapshot) that was enqueued before a delete and processed after
+  # would otherwise append to the dead row and resurrect its transcript on
+  # recovery. As the single write helper behind every path, this one filter
+  # closes resurrection everywhere: the streaming wrapper maps the resulting
+  # NOOP to a benign success, and the must-persist Finalize maps it to a hard
+  # NOOP (delete owns the row's removal; reconciliation skips deleted chats).
+  chat = db.query(Chat).filter(
+    Chat.id == chat_id, Chat.deleted_at.is_(None)
+  ).first()
   if not chat or not chat.messages:
     return _WriteOutcome.NOOP
   msgs = list(chat.messages)
