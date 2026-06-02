@@ -386,53 +386,114 @@ async def update_app(
   db: Session = Depends(get_db),
   _: models.Owner = Depends(get_current_owner),
 ):
-  """Partially updates a mini-app, recompiling if source changed."""
-  app = (
-    db.query(models.App).filter(models.App.id == app_id).first()
+  """Partially updates a mini-app, recompiling if source changed.
+
+  Runs under the lifecycle + per-app lock (documented lifecycle -> app order)
+  with the row loaded fresh under the lock, so a PATCH can't race a concurrent
+  uninstall + SQLite id reuse and recompile into a REPLACEMENT app's bundle. ALL
+  validation (source_dir shape + uniqueness) happens BEFORE the recompile, so a
+  conflicting field can't overwrite the live bundle and then fail; the recompile
+  snapshots the prior bundle so a commit failure restores it rather than leaving
+  the new (uncommitted) bundle live (Codex review round-12).
+  """
+  data_dir = get_settings().data_dir
+  # Validate the source_dir SHAPE up front (cheap, no side effects). The
+  # uniqueness check needs the lock + DB and happens below, still before the
+  # compile.
+  new_source_dir = (
+    _validate_source_dir(body.source_dir, data_dir)
+    if body.source_dir is not None else None
   )
-  if not app:
-    raise HTTPException(status_code=404, detail="App not found.")
-  if body.name is not None:
-    app.name = body.name
-  if body.description is not None:
-    app.description = body.description
-  if body.jsx_source is not None:
-    app.jsx_source = body.jsx_source
+
+  async def _recompile_and_commit(app):
+    # Everything else is validated by now, so the only filesystem-touching
+    # mutation left is the recompile. Snapshot the prior bundle first so a
+    # commit failure can restore it.
+    bundle = (
+      Path(app.compiled_path)
+      if (body.jsx_source is not None and app.compiled_path) else None
+    )
+    bak = None
+    if bundle and bundle.exists():
+      bak = bundle.with_suffix(".js.bak")
+      try:
+        if bak.exists():
+          bak.unlink()
+        shutil.copy2(bundle, bak)
+      except OSError:
+        bak = None
+    if body.jsx_source is not None:
+      app.jsx_source = body.jsx_source
+      try:
+        app.compiled_path = await compile_jsx(app.id, body.jsx_source)
+      except RuntimeError as exc:
+        db.rollback()
+        # esbuild writes the bundle only on success, so a compile error left
+        # the live bundle untouched — just drop the snapshot.
+        if bak and bak.exists():
+          try:
+            bak.unlink()
+          except OSError:
+            pass
+        raise HTTPException(status_code=422, detail=str(exc))
     try:
-      compiled = await compile_jsx(app.id, body.jsx_source)
-    except RuntimeError as exc:
-      db.rollback()
-      raise HTTPException(status_code=422, detail=str(exc))
-    app.compiled_path = compiled
-  if body.chat_id is not None:
-    app.chat_id = body.chat_id
-  new_source_dir = None
-  if body.source_dir is not None:
-    new_source_dir = _validate_source_dir(
-      body.source_dir, get_settings().data_dir
-    )
-    app.source_dir = new_source_dir
-  if body.pinned is not None:
-    from datetime import UTC, datetime
-    app.pinned_at = (
-      datetime.now(UTC).replace(tzinfo=None) if body.pinned else None
-    )
-  if body.share_with_apps is not None:
-    app.share_with_apps = body.share_with_apps
-  if body.cross_app_access is not None:
-    app.cross_app_access = body.cross_app_access
-  if body.offline_capable is not None:
-    app.offline_capable = body.offline_capable
-  # When source_dir changed, commit under the per-source-dir lock so the new
-  # value is visible to a concurrent uninstall's dedup check before it could
-  # rmtree the directory (Codex review round-6 #4).
-  if new_source_dir is not None:
-    async with fs_locks.source_dir_lock(new_source_dir):
-      _reject_if_source_dir_taken(db, new_source_dir, exclude_id=app_id)
       db.commit()
-  else:
-    db.commit()
-  db.refresh(app)
+    except Exception:
+      db.rollback()
+      # Restore the prior bundle so a failed commit can't leave the new
+      # (uncommitted) bundle live for the old row.
+      if bak and bak.exists():
+        try:
+          bak.replace(bundle)
+        except OSError:
+          pass
+      raise
+    if bak and bak.exists():
+      try:
+        bak.unlink()
+      except OSError:
+        pass
+
+  async with (
+    fs_locks.install_uninstall_lock(),
+    fs_locks.app_storage_lock(app_id),
+  ):
+    app = (
+      db.query(models.App).populate_existing()
+      .filter(models.App.id == app_id).first()
+    )
+    if not app:
+      raise HTTPException(status_code=404, detail="App not found.")
+    if body.name is not None:
+      app.name = body.name
+    if body.description is not None:
+      app.description = body.description
+    if body.chat_id is not None:
+      app.chat_id = body.chat_id
+    if new_source_dir is not None:
+      app.source_dir = new_source_dir
+    if body.pinned is not None:
+      from datetime import UTC, datetime
+      app.pinned_at = (
+        datetime.now(UTC).replace(tzinfo=None) if body.pinned else None
+      )
+    if body.share_with_apps is not None:
+      app.share_with_apps = body.share_with_apps
+    if body.cross_app_access is not None:
+      app.cross_app_access = body.cross_app_access
+    if body.offline_capable is not None:
+      app.offline_capable = body.offline_capable
+    # source_dir uniqueness + the recompile/commit run under the per-source-dir
+    # lock (when it changed) so the new value is visible to a concurrent
+    # uninstall's dedup check, and a conflicting dir is rejected BEFORE the
+    # compile touches the live bundle (Codex review round-6 #4, round-12).
+    if new_source_dir is not None:
+      async with fs_locks.source_dir_lock(new_source_dir):
+        _reject_if_source_dir_taken(db, new_source_dir, exclude_id=app_id)
+        await _recompile_and_commit(app)
+    else:
+      await _recompile_and_commit(app)
+    db.refresh(app)
   return app
 
 
