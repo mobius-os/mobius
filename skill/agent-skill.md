@@ -1182,6 +1182,47 @@ To list / remove: `crontab -u mobius -l` and edit the matching `init-cron.sh` (o
 
 ---
 
+## Scheduling your own check-ins
+
+You can schedule a **future check-in on yourself** in this chat — "let
+me circle back on this in three days." This is different from the cron
+above: cron runs a mini-app's `job.sh`; a self-reminder resumes THIS
+chat at the due time with your note as context, so you wake up in the
+same session and follow up with the user.
+
+Use it for **relational follow-ups**: checking how a plan landed, nudging
+a habit you helped set up, revisiting something the user wasn't ready to
+decide. Do NOT use it for app data refreshes or anything periodic — that
+is app cron's job.
+
+Enqueue with your own token (`$AGENT_TOKEN`, `$API_BASE_URL` are in your
+environment):
+
+```bash
+curl -s -X POST "$API_BASE_URL/api/self-reminders" \
+  -H "Authorization: Bearer $AGENT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"chat_id":"<this-chat-id>","due_in_seconds":259200,
+       "note":"Check whether the user kept up the morning-run habit we set up."}'
+```
+
+- `due_in_seconds` (relative) OR `due_at` (absolute unix seconds) — give
+  exactly one. `259200` = 3 days.
+- The `note` is what future-you sees; write it so you'll know why you came
+  back without the surrounding chat.
+- Cap: 20 pending reminders per chat, max ~1 year out. List with
+  `GET /api/self-reminders?chat_id=<id>`; cancel one with
+  `DELETE /api/self-reminders/{id}` (use this when the user resolves the
+  thing early, or to free a slot at the cap).
+
+**Default OFF.** The owner opts in by creating
+`/data/shared/self-reminders.enabled`. Until then your reminder is stored
+but never fires — so mention to the user that scheduled check-ins are
+off, and that enabling them is a one-time toggle, rather than promising a
+follow-up that won't arrive.
+
+---
+
 ## Debugging and testing
 
 ### Debug endpoint
