@@ -451,3 +451,26 @@ def test_create_app_rejects_unsafe_source_dir(client, owner_token):
     "name": "fine", "description": "x", "jsx_source": jsx,
     "source_dir": os.path.join(data_dir, "apps", "fine"),
   }, headers=auth).status_code == 201
+
+
+def test_uninstall_skips_numeric_source_dir(client, auth, owner_token, db):
+  """Uninstall must NOT rmtree a /data/apps/<number> source_dir — that path is
+  another app's STORAGE tree. Defends a legacy row created before source_dir
+  validation existed (Codex review #4)."""
+  import os
+  import app.models as models
+  data_dir = os.environ["DATA_DIR"]
+  victim = os.path.join(data_dir, "apps", "777")
+  os.makedirs(victim, exist_ok=True)
+  with open(os.path.join(victim, "keep.json"), "w") as f:
+    f.write("{}")
+  # Force a legacy-shaped source_dir directly in the DB (the API would now
+  # reject it on create/patch).
+  app_id = _make_app(client, owner_token)
+  row = db.query(models.App).filter(models.App.id == app_id).first()
+  row.source_dir = victim
+  db.commit()
+  assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
+  # The numeric dir (another app's storage) and its contents survive.
+  assert os.path.isdir(victim)
+  assert os.path.isfile(os.path.join(victim, "keep.json"))

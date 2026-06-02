@@ -333,20 +333,31 @@ function makeStorage({ appId, getToken }) {
       init.headers['Content-Type'] = 'application/json'
       init.body = JSON.stringify(op.data)
     }
-    // BOUND the write. The outbox lock is held across this send (so a
-    // direct write and the drain can't interleave); an unbounded fetch
-    // that stalls — Android's `navigator.onLine` reads a stale `true` so
-    // we take the online path and the request hangs — would pin the
-    // app-wide lock indefinitely and block every other context from even
-    // enqueueing (Codex review #2). Aborting after WRITE_TIMEOUT_MS makes
-    // the lock-hold bounded: the abort throws (transient), the lock
-    // releases, and the caller re-queues for the next drain.
+    // BOUND the write. The outbox lock is held across this send (so a direct
+    // write and the drain can't interleave); an unbounded fetch that stalls —
+    // Android's `navigator.onLine` reads a stale `true`, so we take the online
+    // path and the request hangs — would pin the app-wide lock indefinitely
+    // and block every other context from even enqueueing (Codex review #2).
+    // RACE the fetch against a timeout so the await ALWAYS settles within
+    // WRITE_TIMEOUT_MS and the lock ALWAYS releases, regardless of whether
+    // AbortController exists. When it does, the timeout also aborts the
+    // request so no stale write lands late; when it doesn't (only ancient
+    // browsers, which also lack Web Locks and so never hold the cross-context
+    // lock — they use the in-context fallback), the request may complete late
+    // but the lock is already freed. Either way the timeout throws (transient)
+    // and the caller re-queues for the next drain.
     const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null
+    if (ctrl) init.signal = ctrl.signal
     let timer
-    if (ctrl) { init.signal = ctrl.signal; timer = setTimeout(() => ctrl.abort(), WRITE_TIMEOUT_MS) }
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        if (ctrl) ctrl.abort()
+        reject(new Error('mobius: storage write timed out'))
+      }, WRITE_TIMEOUT_MS)
+    })
     let res
     try {
-      res = await fetch(url, init)   // network failure / abort throws -> transient
+      res = await Promise.race([fetch(url, init), timeout])
     } finally {
       if (timer) clearTimeout(timer)
     }
@@ -361,9 +372,19 @@ function makeStorage({ appId, getToken }) {
     throw err
   }
 
+  // Drains the outbox under the outbox lock. Returns the list of
+  // dead-lettered ops {path, method, message} for the caller to RECONCILE
+  // AFTER the lock is released — see drain(). We deliberately do NOT touch
+  // the cache or call get()/notify here: that work belongs on the per-path
+  // chain (so it serializes with a concurrent set/remove and can't clobber a
+  // newer same-tab write), but taking the path chain WHILE holding the outbox
+  // lock would invert the global path→outbox order and could deadlock against
+  // a set() that holds the path chain waiting for the outbox lock (Codex
+  // review #1, #3). So: collect here under the outbox lock, reconcile after.
   async function drainInner() {
-    if (!navigator.onLine) return
+    if (!navigator.onLine) return []
     const ops = await listOps()           // FIFO by seq
+    const deadLettered = []
     for (const op of ops) {
       try {
         await send(op)
@@ -371,32 +392,13 @@ function makeStorage({ appId, getToken }) {
       } catch (e) {
         if (e && e.fatal) {
           // Poison op — a malformed/forbidden request that will never
-          // succeed on replay. Drop it (dead-letter) and keep draining
-          // so it can't head-of-line-block every later write forever.
+          // succeed on replay. Drop it (dead-letter) and keep draining so it
+          // can't head-of-line-block every later write forever. Reconciling
+          // the cache + notifying happens after the lock releases.
           // eslint-disable-next-line no-console
           console.warn('mobius: dropping un-syncable write', op.method, op.path, e.message)
           await deleteOp(op.seq)
-          // The optimistic cache still holds this rejected write's value, and
-          // for an un-GETtable path (e.g. an invalid name that 400s on read
-          // too) the reconciling get() would fall straight back to that very
-          // value. INVALIDATE the mirror first so the reconcile reads server
-          // truth (or genuine absence), never the rejected optimistic value
-          // (Codex review #8). Then notify subscribers and surface a
-          // sync-error so the app can tell the user the write was lost.
-          try { await cacheDelete(op.path) } catch (ce) { /* best effort */ }
-          // Reconcile via getInner, NOT the public get(): drainInner runs
-          // while HOLDING the outbox lock, and the public get() takes the
-          // per-path chain. A concurrent set() holds the path chain while
-          // waiting for the outbox lock (path → outbox order), so a drain
-          // that took the path chain here (outbox → path order) could
-          // deadlock against it. getInner skips the path chain, so the
-          // outbox lock is the only lock a drain ever holds — no inversion
-          // (Codex review #3). The reconcile read is best-effort, so it
-          // doesn't need the per-path ordering guarantee.
-          let fresh = null
-          try { fresh = await getInner(op.path) } catch (re) { /* best-effort */ }
-          notify(op.path, fresh)
-          emitSyncError({ path: op.path, method: op.method, message: e.message })
+          deadLettered.push({ path: op.path, method: op.method, message: e.message })
           continue
         }
         // Transient (offline / 5xx / 401): stop so order is preserved
@@ -404,6 +406,27 @@ function makeStorage({ appId, getToken }) {
         // next trigger. The op is NOT discarded.
         break
       }
+    }
+    return deadLettered
+  }
+
+  // Reconcile a dead-lettered write AFTER the outbox lock has been released,
+  // on the per-path chain so it serializes with any concurrent set/remove for
+  // that path (no clobber of a newer write) and never holds two locks at once
+  // (Codex review #1). The optimistic cache still holds the rejected value, so
+  // invalidate it first, then re-read authoritative server state (or genuine
+  // absence) via getInner — already inside the path chain — and notify.
+  async function reconcileDeadLetters(deadLettered) {
+    for (const d of deadLettered || []) {
+      try {
+        await withPathLock(d.path, async () => {
+          await cacheDelete(d.path)
+          let fresh = null
+          try { fresh = await getInner(d.path) } catch (re) { /* best-effort */ }
+          notify(d.path, fresh)
+        })
+      } catch (e) { /* best-effort reconciliation */ }
+      emitSyncError(d)
     }
   }
 
@@ -414,14 +437,17 @@ function makeStorage({ appId, getToken }) {
   // sent its op); the next event re-fires it. Without Web Locks it routes
   // through withOutboxLock's in-context fallback chain so a drain still
   // can't interleave with a same-context enqueue/send (Codex review #1).
+  // drainInner returns the dead-lettered ops; we reconcile them via the
+  // per-path chain ONLY AFTER the outbox lock is released (the .then runs
+  // post-release), so reconciliation respects LWW and never holds two locks.
   function drain() {
     if (navigator.locks && navigator.locks.request) {
       navigator.locks.request(
         `mobius-outbox-${appId}`, { ifAvailable: true },
-        async (lock) => { if (lock) await drainInner() },
-      ).catch(() => {})
+        async (lock) => (lock ? await drainInner() : []),
+      ).then(reconcileDeadLetters).catch(() => {})
     } else {
-      withOutboxLock(drainInner).catch(() => {})
+      withOutboxLock(drainInner).then(reconcileDeadLetters).catch(() => {})
     }
   }
 
