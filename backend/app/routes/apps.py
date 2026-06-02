@@ -267,7 +267,7 @@ async def install_app(
   # overlap lets one delete what the other just wrote
   # (fs_locks.install_uninstall_lock has the full rationale).
   async with fs_locks.install_uninstall_lock():
-    app, mode, warnings, manifest = await install_from_manifest(
+    app, mode, warnings, manifest, conflict_paths = await install_from_manifest(
       db,
       manifest_url=body.manifest_url,
       manifest=body.manifest,
@@ -303,6 +303,7 @@ async def install_app(
     mode=mode,
     version=manifest.get("version", "unknown"),
     warnings=warnings,
+    conflict_paths=conflict_paths,
   )
 
 
