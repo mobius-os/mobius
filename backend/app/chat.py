@@ -1075,7 +1075,51 @@ async def _complete_turn(
   queue is left intact, no continuation is scheduled, the marker is left
   set, and `FAILED_LEAVE_MARKER` is returned — so a lost promote / wedged
   lock can't strand or double-fire the queue.
+
+  Stale-finalize guard: finalize the terminal assistant write ONLY when
+  this run still legitimately owns the terminal write. Two ownership shapes
+  qualify:
+
+    - `we_own_gen` — this run's generation is still current (the normal
+      success / continuation / error exits all land here).
+    - `stop_handoff_successor` — this run was Stop-bumped (Stop registered
+      `_clear_after_terminal_generation[chat_id] == run_gen` and bumped the
+      generation to `run_gen + 1`) and NO newer owner has reclaimed the
+      chat (`not registry.is_alive`). A Stopped-with-no-resend turn MUST
+      still finalize its interrupted output before `run_chat`'s finally
+      clears the marker — this is the case-6 Stop handoff.
+
+  When NEITHER holds, a FRESH turn has already claimed the chat (its
+  `mark_starting` left the registry alive at `run_gen + 1`, and its
+  StartTurn re-added a user message as the last row). Finalizing now would
+  append this dying run's stale assistant content AFTER the fresh turn's
+  user message (`_apply_last_assistant_message`'s else-branch append). So we
+  SKIP finalize and bow out with STALE_NO_ACTION cleanup, leaving the fresh
+  run's marker + transcript untouched. Generation alone can't make this
+  call: `mark_starting` does NOT bump the generation, so a Stop-bumped run
+  and a Stop-bumped-then-freshly-reclaimed run share `run_gen + 1` — the
+  `registry.is_alive` re-check is the discriminator (mirrors the lock-gated
+  re-check in `run_chat`'s Stop-handoff finally).
   """
+  we_own_gen = run_gen is None or current_run_generation(chat_id) == run_gen
+  stop_handoff_successor = (
+    run_gen is not None
+    and _clear_after_terminal_generation.get(chat_id) == run_gen
+    and current_run_generation(chat_id) == run_gen + 1
+    and not registry.is_alive(chat_id)
+  )
+  if not (we_own_gen or stop_handoff_successor):
+    # A fresh turn now owns the chat. Do not finalize (the stale-append
+    # guard above); release the broadcast and bow out without touching the
+    # new owner's marker or transcript.
+    set_active_broadcast(None)
+    bc.publish({"type": "done"})
+    bc.mark_completed()
+    if close_browser:
+      await _close_browser_session(chat_id)
+    db.close()
+    return chat_queue.TerminalDisposition.STALE_NO_ACTION
+
   try:
     await sink.finalize()
   except Exception as exc:
@@ -1105,7 +1149,6 @@ async def _complete_turn(
   # this token, and _schedule_continuation hands the SAME token to the
   # spawned runner so its sink keys on it.
   next_run_token = alloc_run_token()
-  we_own_gen = run_gen is None or current_run_generation(chat_id) == run_gen
   try:
     next_user, next_messages, next_session_id, disposition = (
       await _drain_and_release(db, chat_id, we_own_gen, next_run_token)
