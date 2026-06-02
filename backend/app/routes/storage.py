@@ -38,7 +38,6 @@ import logging
 import mimetypes
 import os
 import re
-import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -48,6 +47,7 @@ from sqlalchemy.orm import Session
 from app import activity, fs_locks, models
 from app.config import get_settings
 from app.database import get_db
+from app.storage_io import MAX_STORAGE_BYTES, atomic_write
 from app.deps import (
   Principal,
   get_current_owner,
@@ -162,6 +162,11 @@ def _resolve(base: Path, rel: str) -> Path:
 # Text MIME types that are safe to read as UTF-8.
 _TEXT_PREFIXES = ("text/", "application/json", "application/xml")
 
+# Text/JSON files at or below this size are read into memory and served inline
+# (PlainTextResponse) for low latency; larger ones (and all binaries) stream
+# from disk via FileResponse so a big read never buffers whole (round-8 #3).
+_INLINE_READ_MAX = 256 * 1024
+
 # Listing page size: the default when the caller omits `?limit`, and
 # the hard cap so a single request can't be made to walk an unbounded
 # directory in one shot.
@@ -250,42 +255,6 @@ def _encode_cursor(name: str) -> str:
   return base64.urlsafe_b64encode(name.encode("utf-8")).decode("ascii")
 
 
-def _atomic_write(file_path: Path, content: str | bytes) -> None:
-  """Writes content to file_path atomically — no torn or interleaved reads.
-
-  A reader (or the listing-based completion poll a mini-app runs after a
-  job) must never observe a half-written file, and two concurrent writers
-  to the same path must not interleave bytes into one corrupt file. Write
-  the full body to a uniquely-named temp file in the SAME directory, fsync
-  it, then os.replace() onto the target — a same-filesystem rename is
-  atomic on POSIX, so a reader sees either the old file or the new one,
-  never a truncation (Codex review #3). A crash mid-write leaves only the
-  temp file; the target is never partial.
-  """
-  file_path.parent.mkdir(parents=True, exist_ok=True)
-  data = content.encode("utf-8") if isinstance(content, str) else content
-  # Unique temp name (mkstemp) so concurrent writers to the same path don't
-  # collide on the temp file itself. mkstemp creates 0600; chmod to 0644 to
-  # match the prior write_text/write_bytes default (umask 022) so the file
-  # is readable the same way it was before.
-  fd, tmp = tempfile.mkstemp(
-    dir=file_path.parent, prefix=f".{file_path.name}.", suffix=".tmp"
-  )
-  try:
-    with os.fdopen(fd, "wb") as f:
-      f.write(data)
-      f.flush()
-      os.fsync(f.fileno())
-    os.chmod(tmp, 0o644)
-    os.replace(tmp, file_path)
-  except BaseException:
-    try:
-      os.unlink(tmp)
-    except OSError:
-      pass
-    raise
-
-
 def _list_directory_page(
   dir_path: Path, prefix: str, limit: int, cursor: str | None
 ) -> tuple[list[dict], str | None]:
@@ -335,23 +304,32 @@ def _list_directory_page(
 
 
 def _serve_file(file_path: Path):
-  """Serve a file with the right content type — binary or text."""
+  """Serve a file with the right content type, STREAMING large reads.
+
+  Binary types and any file past the inline threshold are served via
+  FileResponse, which streams from disk (no in-process buffer). Only small
+  text/JSON is read into memory (PlainTextResponse) so the common small-doc
+  read stays inline + low-latency. This bounds the per-read memory to the
+  threshold rather than the full file size — a 50 MB doc no longer buffers
+  whole on the memory-tight host (Codex review round-8 #3).
+  """
   mime, _ = mimetypes.guess_type(file_path.name)
-  if mime and not mime.startswith(tuple(_TEXT_PREFIXES)):
-    return FileResponse(file_path, media_type=mime)
-  if mime == "application/json":
-    try:
-      return PlainTextResponse(
-        file_path.read_text(encoding="utf-8"),
-        media_type="application/json",
-      )
-    except UnicodeDecodeError:
-      return FileResponse(file_path)
-  # Fall back to text for unknown or text types.
+  is_text = mime is None or mime.startswith(tuple(_TEXT_PREFIXES))
   try:
-    return PlainTextResponse(file_path.read_text(encoding="utf-8"))
+    too_big = file_path.stat().st_size > _INLINE_READ_MAX
+  except OSError:
+    raise HTTPException(status_code=404, detail="File not found.")
+  if not is_text or too_big:
+    return FileResponse(
+      file_path, media_type=(mime or "application/octet-stream")
+    )
+  try:
+    text = file_path.read_text(encoding="utf-8")
   except UnicodeDecodeError:
-    return FileResponse(file_path)
+    return FileResponse(
+      file_path, media_type=(mime or "application/octet-stream")
+    )
+  return PlainTextResponse(text, media_type=(mime or "text/plain"))
 
 
 def _is_envelope(body) -> bool:
@@ -363,6 +341,32 @@ def _is_envelope(body) -> bool:
   )
 
 
+async def _read_capped_body(request: Request) -> bytes:
+  """Reads the request body, refusing once it crosses MAX_STORAGE_BYTES.
+
+  A declared Content-Length over the cap is rejected before a byte is read;
+  then the body is streamed chunk-by-chunk and aborted the instant the running
+  total exceeds the cap — so a runaway (or lying-Content-Length) PUT can't
+  buffer an unbounded body into memory and OOM the tight host (round-8 #3).
+  """
+  cl = request.headers.get("content-length")
+  if cl is not None:
+    try:
+      declared = int(cl)
+    except ValueError:
+      declared = None
+    if declared is not None and declared > MAX_STORAGE_BYTES:
+      raise HTTPException(status_code=413, detail="Storage write too large.")
+  chunks: list[bytes] = []
+  total = 0
+  async for chunk in request.stream():
+    total += len(chunk)
+    if total > MAX_STORAGE_BYTES:
+      raise HTTPException(status_code=413, detail="Storage write too large.")
+    chunks.append(chunk)
+  return b"".join(chunks)
+
+
 async def _decode_write_body(request: Request, file_path: Path) -> str | bytes:
   """Decodes a PUT body into text or bytes to write to disk.
 
@@ -370,7 +374,7 @@ async def _decode_write_body(request: Request, file_path: Path) -> str | bytes:
   envelope for text files, raw text for non-JSON files, and raw bytes
   for any path.
   """
-  raw = await request.body()
+  raw = await _read_capped_body(request)
   content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
   is_json_path = file_path.suffix.lower() == ".json"
 
@@ -469,7 +473,7 @@ async def write_app_file(
       before_size = file_path.stat().st_size if file_path.is_file() else 0
     except OSError:
       before_size = 0
-    _atomic_write(file_path, content)
+    atomic_write(file_path, content)
   # storage_write: debounced per (app_id, path) to ≤1 event per
   # minute. Agents writing many small files in a single chat shouldn't
   # flood the log. size_delta uses post-write size minus pre-write
@@ -489,7 +493,7 @@ async def write_app_file(
 
 
 @router.delete("/apps/{app_id}/{path:path}", status_code=204)
-def delete_app_file(
+async def delete_app_file(
   app_id: int,
   path: str,
   db: Session = Depends(get_db),
@@ -499,17 +503,24 @@ def delete_app_file(
   _check_cross_app(db, principal, app_id, mode="write")
   base = Path(get_settings().data_dir) / "apps" / str(app_id)
   file_path = _resolve(base, path)
-  if not file_path.exists():
-    raise HTTPException(status_code=404, detail="File not found.")
-  if not file_path.is_file():
-    raise HTTPException(status_code=400, detail="Path is not a file.")
-  # Capture size before unlink so size_delta reflects the full
-  # removal (negative number = freed bytes).
-  try:
-    deleted_size = file_path.stat().st_size
-  except OSError:
-    deleted_size = 0
-  file_path.unlink()
+  # Serialize with this app's uninstall + re-verify the app still exists UNDER
+  # the per-app lock, exactly like write_app_file: a delayed DELETE for a
+  # reused SQLite id could otherwise unlink a file belonging to the REPLACEMENT
+  # app that recycled the id (Codex review round-8 #1).
+  async with fs_locks.app_storage_lock(app_id):
+    if not db.query(models.App.id).filter(models.App.id == app_id).first():
+      raise HTTPException(status_code=404, detail="App not found.")
+    if not file_path.exists():
+      raise HTTPException(status_code=404, detail="File not found.")
+    if not file_path.is_file():
+      raise HTTPException(status_code=400, detail="Path is not a file.")
+    # Capture size before unlink so size_delta reflects the full removal
+    # (negative number = freed bytes).
+    try:
+      deleted_size = file_path.stat().st_size
+    except OSError:
+      deleted_size = 0
+    file_path.unlink()
   if activity.should_emit_storage_write(app_id, path):
     activity.log_event(
       "storage_write",
@@ -577,7 +588,7 @@ async def write_shared_file(
       snapshot_theme_if_present(settings.data_dir)
     except Exception as exc:
       _log.warning("theme.css snapshot failed: %s", exc)
-  _atomic_write(file_path, content)
+  atomic_write(file_path, content)
   # storage_write for shared/* — debounced per (0, path) to match the
   # per-app rate-limit. app_id=0 is the documented platform-level
   # sentinel (see activity.py docstring); scope="shared" disambiguates
