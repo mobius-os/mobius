@@ -174,15 +174,16 @@ Three findings worth flagging from running this loop on ourselves:
 
 ## Where it's going
 
-Today, Möbius remembers through the experience file and the apps + data on your server. That's already enough to make instances diverge — yours will look and feel nothing like mine after a few months.
+Today, Möbius remembers through the experience file, a structured knowledge graph, and the apps + data on your server. That's already enough to make instances diverge — yours will look and feel nothing like mine after a few months.
 
-The next steps:
+Two pieces of the memory story have moved from roadmap to shipped:
 
-- **Knowledge graph.** A structured memory layer that grows from every interaction, separate from the chat transcript. Lets the agent reason about your taste, your tools, and your recurring patterns without re-reading every conversation.
-- **Dreaming.** A scheduled background process that reorganizes the knowledge graph while you're away — consolidating, deduplicating, and surfacing patterns the agent couldn't see live. Inspired by recent work on offline memory consolidation for long-running agents.
+- **Knowledge graph.** A structured memory layer that grows from every interaction, separate from the chat transcript. It lets the agent reason about your taste, your tools, and your recurring patterns without re-reading every conversation. It's seeded on first boot and folded into each new session.
+- **Dreaming.** A scheduled background process that reorganizes the knowledge graph while you're away — consolidating, deduplicating, and surfacing patterns the agent couldn't see live. It runs as a nightly job. Inspired by recent work on offline memory consolidation for long-running agents.
+
+Still ahead:
+
 - **Proactive behavior under user control.** The agent should be able to notice stale apps, suggest things worth learning, and ask before interrupting — discretion rather than chattiness.
-
-None of these ship yet.
 
 ---
 

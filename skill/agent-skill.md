@@ -824,7 +824,15 @@ window.parent.postMessage({ type: 'moebius:new-chat', draft: 'Hello!' }, window.
 
 Mini-apps receive a scoped token (not the owner's full JWT). It can
 access: storage, proxy, AI, notifications, push, uploads, app endpoints.
-It CANNOT access: auth, settings, or chat endpoints.
+It CANNOT access: auth or settings.
+
+For chat, an app can create and drive its OWN conversation: `POST
+/api/app-chats` returns a chat stamped to this app, and the app then
+sends to it and streams it (`POST /api/chats/{id}/messages` + `GET
+/api/chats/{id}/stream`) with the same scoped token. This is how an app
+embeds the agent chat the shell uses — a mini-app running its own
+conversation. The token still cannot touch the owner's other chats (any
+it didn't create); access is scoped to the app's own chats.
 
 ---
 
