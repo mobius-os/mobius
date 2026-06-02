@@ -59,3 +59,97 @@ def test_ready_returns_503_when_writer_fatal_then_recovers(client):
   chat_writer.start_writer(SessionLocal)
 
   assert client.get("/api/ready").status_code == 200
+
+
+def test_readiness_reports_not_ready_when_session_not_yet_open(client):
+  """A live worker thread is NOT enough to be ready — the DB session must
+  also have opened.
+
+  `start()` publishes the actor (and spawns the worker thread) BEFORE that
+  thread's `_run` opens its DB session, so there is a window in which the
+  writer is the published singleton with a genuinely-alive thread yet still
+  cannot persist a single command. `_session_ready` (set in `_run` right
+  after `self._db = self._session_factory()` succeeds) closes that window:
+  readiness must report not-ready, AFTER the thread-alive check but BEFORE
+  the fatal check, whenever the thread is alive but the session hasn't opened.
+
+  We simulate that window by clearing `_session_ready` on a started/published
+  writer whose thread is alive, then assert `writer_readiness()` returns
+  `(False, "writer session not ready")`. Restoring the event afterwards keeps
+  the process singleton healthy for sibling tests.
+  """
+  writer = get_writer()
+  # The fixture's writer is already serving, so its thread is alive and the
+  # session opened — `_session_ready` is set. Clear it to reproduce the
+  # publish-before-session-open window without racing a real start().
+  assert writer._thread is not None and writer._thread.is_alive()
+  writer._session_ready.clear()
+  try:
+    ready, reason = chat_writer.writer_readiness()
+    assert ready is False
+    assert reason == "writer session not ready"
+
+    # The same state must surface at the HTTP probe: thread alive but session
+    # not open is still not-ready, so /api/ready answers 503.
+    r = client.get("/api/ready")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["ready"] is False
+    assert body["reason"] == "writer session not ready"
+  finally:
+    # Restore so the shared singleton is ready again for sibling tests.
+    writer._session_ready.set()
+
+  assert client.get("/api/ready").status_code == 200
+
+
+def test_recreate_session_drops_readiness_for_the_whole_window(client):
+  """`_recreate_session` must hold readiness not-ready for the WHOLE recreate.
+
+  Recreate is the mid-loop DB-error recovery path: it tears down the poisoned
+  session and opens a fresh one. While `_db` is gone the writer cannot persist,
+  so `_session_ready` must be CLEAR for that window and only re-set once the
+  replacement session actually opens. If the replacement factory raises (or
+  hangs), the event must stay clear so the writer keeps reporting not-ready
+  instead of advertising a session it doesn't have — a raise propagates to the
+  outer handler's `_go_fatal`.
+
+  Happy path: after a recreate that opens a fresh session, `_session_ready` is
+  SET again. Failure path: a factory that raises during recreate leaves the
+  event CLEAR and `writer_readiness()` reporting `(False, ...)`. We restore the
+  real factory and re-set the event in `finally` so the shared singleton stays
+  healthy for sibling tests.
+  """
+  writer = get_writer()
+  assert writer._thread is not None and writer._thread.is_alive()
+  real_factory = writer._session_factory
+  try:
+    # Happy path: a real recreate opens a fresh session and leaves readiness set.
+    writer._recreate_session()
+    assert writer._session_ready.is_set()
+    assert chat_writer.writer_readiness() == (True, None)
+
+    # Failure path: a raising factory leaves the event clear (and `_db` None),
+    # so the writer keeps looking not-ready. `_recreate_session` re-raises so
+    # the actor's outer handler can `_go_fatal`.
+    def _boom():
+      raise RuntimeError("session factory unavailable during recreate")
+
+    writer._session_factory = _boom
+    try:
+      writer._recreate_session()
+      raise AssertionError("expected _recreate_session to re-raise")
+    except RuntimeError:
+      pass
+    assert not writer._session_ready.is_set()
+    ready, reason = chat_writer.writer_readiness()
+    assert ready is False
+    assert reason  # a short explanation, not empty
+  finally:
+    # Restore the real factory + a healthy open session so sibling tests that
+    # share the process singleton aren't poisoned by the simulated failure.
+    writer._session_factory = real_factory
+    writer._recreate_session()
+    assert writer._session_ready.is_set()
+
+  assert client.get("/api/ready").status_code == 200

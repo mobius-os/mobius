@@ -424,6 +424,12 @@ class ChatWriterActor:
     # swap in a fresh session via `_recreate_session` mid-loop.  None
     # before startup and after a recreate-failure escalates to fatal.
     self._db = None
+    # Set by `_run` once the DB session is open, so readiness can tell "thread
+    # alive" apart from "thread alive AND able to persist". `start()` publishes
+    # the actor BEFORE `_run` opens the session, so a live thread whose
+    # `_session_factory()` hasn't returned yet (or hangs) must not report ready.
+    # Stays clear if session-open fails (the thread goes fatal instead).
+    self._session_ready = threading.Event()
     # Serializes the check-and-set in `start()` so two concurrent callers
     # can't both pass the `_thread is None` check and each spawn a consumer
     # thread (which would violate the single-consumer invariant and corrupt
@@ -788,6 +794,10 @@ class ChatWriterActor:
   def _run(self) -> None:
     try:
       self._db = self._session_factory()
+      # Session is open — readiness can now flip True. If the factory raised,
+      # this is skipped and the except below marks the writer fatal, so it
+      # never reports ready on a writer that can't persist.
+      self._session_ready.set()
     except BaseException:
       # The session factory raising at first use is thread-fatal: there
       # is no session to write through.  Mark fatal and fail every queued
@@ -852,6 +862,12 @@ class ChatWriterActor:
           # keeps serving.  If recreation itself fails there is no session
           # to write through — escalate to the thread-fatal path so callers
           # see a raised ack rather than a hang.
+          # Drop readiness the instant the session is known-poisoned — before
+          # the ack/recreate work below — so a concurrent `/api/ready` in this
+          # window can't read the still-set event and report ready against a
+          # dead session. `_recreate_session` re-sets it once a fresh session
+          # opens (or leaves it clear and goes fatal if the factory fails).
+          self._session_ready.clear()
           log.exception(
             "chat writer DB error on %s; recreating session",
             type(cmd).__name__,
@@ -883,7 +899,7 @@ class ChatWriterActor:
           # the key's fence epoch whether the commit succeeded or raised (the
           # run_token won't be reused).  GC is a no-op unless the key is fully
           # quiescent, so a post-fence snapshot enqueued for the same key
-          # keeps its epoch (FIX C).
+          # keeps its epoch.
           if isinstance(cmd, _FENCE_COMMANDS):
             self._gc_generation(cmd.chat_id, cmd.run_token)
     except BaseException:
@@ -916,6 +932,12 @@ class ChatWriterActor:
     usable session must fail callers' acks, not silently spin.
     """
     old = self._db
+    # The session is going away — readiness must report not-ready for the WHOLE
+    # recreate window. Cleared before we drop `_db` and re-set only once the
+    # replacement actually opens, so a hung/raising factory below keeps the
+    # writer looking not-ready (a raise propagates to `_go_fatal`) instead of
+    # advertising a session it doesn't have.
+    self._session_ready.clear()
     self._db = None
     try:
       old.rollback()
@@ -926,6 +948,7 @@ class ChatWriterActor:
     except Exception:
       log.exception("chat writer close failed during session recreate")
     self._db = self._session_factory()
+    self._session_ready.set()
 
   def _dispatch(self, db, cmd: _Command):
     """Apply one command's persistence effect against the actor's session.
@@ -961,7 +984,7 @@ class ChatWriterActor:
       self._inflight_ack = None
       # The committed snapshot was popped from `_pending`/`_outstanding`; if no
       # newer snapshot re-added the key it is now dead — reclaim its generation
-      # epoch so the map can't grow unbounded (FIX C).
+      # epoch so the map can't grow unbounded.
       self._gc_generation(cmd.chat_id, cmd.run_token)
       return None
     if isinstance(cmd, _TestPersist):
@@ -1675,7 +1698,7 @@ _writer: ChatWriterActor | None = None
 # Serializes the singleton check+create in `start_writer` (and the
 # clear in `stop_writer`) so two concurrent callers can't both pass the
 # "already started" check and each construct + start a writer, orphaning one
-# daemon thread that keeps consuming a stranded queue (FIX F).
+# daemon thread that keeps consuming a stranded queue.
 _writer_lock = threading.Lock()
 
 
@@ -1743,14 +1766,18 @@ def writer_readiness() -> tuple[bool, str | None]:
 
   Liveness (`/api/health`) is not the same as readiness. A writer can be
   the published singleton yet unable to persist a single chat write, in
-  four distinct ways — all four matter, and "alive + not fatal" alone is
-  incomplete (a stopping writer would wrongly report ready):
+  five distinct ways — all of them matter, and "alive + not fatal" alone is
+  incomplete (a stopping writer, or one whose session hasn't opened, would
+  wrongly report ready):
 
   - no singleton: `start_writer` hasn't run (or `stop_writer` cleared it),
     so there is nothing to write through;
   - dead thread: the worker thread never spawned, or exited (its `_run`
     loop returned at a `DrainAndStop` or crashed out), so the FIFO queue
     has no consumer;
+  - session not open: the thread is alive but its DB session hasn't opened
+    yet — `start()` publishes the actor BEFORE `_run` opens the session, so a
+    live (or session-hung) thread can't persist until `_session_ready` fires;
   - fatal: the worker hit a thread-fatal error (e.g. the session factory
     raised at first use) and now fails every ack rather than committing;
   - stopping: `stop()` flipped `_stopping`, so `submit()` rejects every
@@ -1758,7 +1785,7 @@ def writer_readiness() -> tuple[bool, str | None]:
 
   Centralizing the predicate here keeps the readiness route (and the
   deploy gate it backs) from reaching into the actor's internals, and
-  keeps all four conditions in one place where the actor's own contract
+  keeps all five conditions in one place where the actor's own contract
   lives.
   """
   writer = _writer
@@ -1767,6 +1794,10 @@ def writer_readiness() -> tuple[bool, str | None]:
   thread = writer._thread
   if thread is None or not thread.is_alive():
     return False, "writer thread not alive"
+  if not writer._session_ready.is_set():
+    # Thread is alive but its DB session hasn't opened yet (`start()` publishes
+    # the actor before `_run` opens the session) — not yet able to persist.
+    return False, "writer session not ready"
   if writer._fatal:
     return False, "writer is fatal"
   if writer._stopping:
@@ -1778,7 +1809,7 @@ def is_writer_ready() -> bool:
   """True when the process writer can accept and commit a command.
 
   Thin boolean wrapper over `writer_readiness` for callers that only need
-  the verdict (see `writer_readiness` for the four conditions and why each
+  the verdict (see `writer_readiness` for the five conditions and why each
   matters).
   """
   ready, _ = writer_readiness()

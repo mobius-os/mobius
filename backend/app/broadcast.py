@@ -29,6 +29,25 @@ def set_active_broadcast(bc: "ChatBroadcast | None") -> None:
   _active_broadcast = bc
 
 
+def clear_active_broadcast_if(bc: "ChatBroadcast") -> bool:
+  """Clear the process active-broadcast pointer ONLY if it still points at
+  `bc`; return whether it did.
+
+  The pointer is a single global tracking the one currently-streaming turn.
+  A superseded run must not blindly clear it: a fresh turn that already called
+  `set_active_broadcast` with its own broadcast owns the pointer now, and
+  `set_active_broadcast(None)` would erase the live turn's pointer. But if NO
+  fresh turn took over, the pointer is still this run's and must be cleared or
+  it leaks. This identity-keyed compare-and-clear settles both: it clears (and
+  returns True) only when `bc` is still the active broadcast.
+  """
+  global _active_broadcast
+  if _active_broadcast is bc:
+    _active_broadcast = None
+    return True
+  return False
+
+
 def get_active_broadcast() -> "ChatBroadcast | None":
   """Return the active broadcast, or None if no agent is running."""
   return _active_broadcast

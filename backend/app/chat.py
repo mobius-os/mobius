@@ -22,7 +22,13 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app import auth, chat_queue, models, questions, schemas
-from app.broadcast import ChatBroadcast, create_broadcast, get_broadcast, set_active_broadcast
+from app.broadcast import (
+  ChatBroadcast,
+  clear_active_broadcast_if,
+  create_broadcast,
+  get_broadcast,
+  set_active_broadcast,
+)
 from app.chat_writer import (
   ClearPending,
   ClearRunStatus,
@@ -303,7 +309,7 @@ class _ChatEventSink:
     await _await_ack(ack)
 
   async def publish_question(self, event: ChatEvent) -> None:
-    """Save-before-broadcast for an AskUserQuestion card (Candidate B).
+    """Save-before-broadcast for an AskUserQuestion card.
 
     A question is a protocol barrier: its `question_id` MUST be durably
     persisted before the SSE card is shown, or a fast user Submit races
@@ -554,7 +560,7 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
   recovered live: the marker stays set and reconciliation only sees it on the
   next boot. Under the single-owner restart-recovery contract this is
   acceptable: the turn is durable, the marker is the recovery handle, and a
-  restart resolves it. FIX A's continuation-scheduling-failure path is the
+  restart resolves it. `_schedule_continuation`'s scheduling-failure path is the
   same shape (marker left, recovered on restart). A future live-recovery would
   gate the marker on an in-process watcher that reschedules a late promote
   without a restart; deliberately deferred.
@@ -852,7 +858,7 @@ def _schedule_continuation(
   set. If scheduling then fails, this function releases the _starting claim
   (so the chat isn't stuck 'starting') but LEAVES the durable run marker set:
   the turn is promoted-but-unscheduled, so reconciliation must recover it
-  (FIX A — clearing the marker here would strand the promoted turn).
+  (clearing the marker here would strand the promoted turn).
   """
   log = _get_logger()
   bc = None
@@ -890,7 +896,7 @@ def _schedule_continuation(
     if coro is not None:
       coro.close()
     discard_starting(chat_id)
-    # FIX A — LEAVE the durable run marker SET. Both call-sites (the turn-end
+    # LEAVE the durable run marker SET. Both call-sites (the turn-end
     # drain in _complete_turn, the stale-pending drain in chats_stream)
     # reach here ONLY after a successful PromotePending: the queued head was
     # already moved into the transcript and the next turn's run marker was
@@ -927,7 +933,7 @@ def _schedule_continuation(
 async def _drain_and_release(
   db: Session,
   chat_id: str,
-  we_own_gen: bool,
+  run_gen: int | None,
   run_token: str,
 ) -> tuple[dict | None, list, str | None, chat_queue.TerminalDisposition]:
   """Local helper around chat_queue.drain_and_release that binds the
@@ -937,16 +943,22 @@ async def _drain_and_release(
   command sets the next turn's run marker under it, and the same token
   is handed to `_schedule_continuation` so the spawned runner reuses it.
 
+  Ownership is decided UNDER the drain's lock from `run_gen` (via the
+  injected `current_run_generation`), not from a bool snapshotted before
+  the lock-acquisition await — so a Stop / fresh StartTurn landing during
+  lock acquisition is observed.
+
   Returns the 4-tuple `(next_user, next_messages, next_session_id,
   disposition)`; the disposition tells `_complete_turn` whether a
   continuation was promoted (marker stays set), the queue was empty +
   cleared (marker cleared inside the lock), or the run was stale.
   """
   return await chat_queue.drain_and_release(
-    db, chat_id, we_own_gen, run_token,
+    db, chat_id, run_gen, run_token,
     discard_starting=discard_starting,
     forget_chat=forget_chat,
     clear_run_status_strict=_clear_run_status_strict,
+    current_generation=current_run_generation,
   )
 
 
@@ -962,7 +974,7 @@ async def _close_browser_session(chat_id: str) -> None:
     return
   log = _get_logger()
   try:
-    # FIX C — bound the subprocess CREATION too, not just the wait below.
+    # Bound the subprocess CREATION too, not just the wait below.
     # This runs on the terminal/cleanup path; an unbounded create_subprocess
     # (e.g. a wedged event-loop child watcher or fork) would hang the whole
     # turn's teardown. The wait() is already bounded at 5s; cap creation at
@@ -1101,6 +1113,11 @@ async def _complete_turn(
   `registry.is_alive` re-check is the discriminator (mirrors the lock-gated
   re-check in `run_chat`'s Stop-handoff finally).
   """
+  # GATE (pre-finalize): may this run write its terminal assistant message at
+  # all? This is the PRE-finalize ownership snapshot, used ONLY for the
+  # finalize/skip decision below. The end-of-turn drain re-decides ownership
+  # under its own lock from `run_gen` (see `drain_and_release`), so it is
+  # immune to a Stop / fresh StartTurn landing during the finalize await.
   we_own_gen = run_gen is None or current_run_generation(chat_id) == run_gen
   stop_handoff_successor = (
     run_gen is not None
@@ -1109,14 +1126,20 @@ async def _complete_turn(
     and not registry.is_alive(chat_id)
   )
   if not (we_own_gen or stop_handoff_successor):
-    # A fresh turn now owns the chat. Do not finalize (the stale-append
-    # guard above); release the broadcast and bow out without touching the
-    # new owner's marker or transcript.
-    set_active_broadcast(None)
+    # Another owner (a fresh turn, or a Stop) now holds this chat's generation.
+    # Do not finalize — it would append this dying run's stale assistant content
+    # after the fresh turn's user message. Clear the active-broadcast pointer
+    # ONLY if it's still ours: `clear_active_broadcast_if` is identity-keyed, so
+    # a successor that already installed its own pointer is left intact (no
+    # clobber), while a Stop-with-no-successor still releases ours (no leak).
+    # We deliberately do NOT close the shared per-chat browser here: a successor
+    # may be mid-handoff (claimed the generation but not yet installed its
+    # pointer), and yanking its browser is worse than the alternative — in the
+    # rare Stop-with-no-successor case a lingering Chrome is cheaper than a yank,
+    # and the next turn / reconciliation reclaims it.
+    clear_active_broadcast_if(bc)
     bc.publish({"type": "done"})
     bc.mark_completed()
-    if close_browser:
-      await _close_browser_session(chat_id)
     db.close()
     return chat_queue.TerminalDisposition.STALE_NO_ACTION
 
@@ -1135,7 +1158,9 @@ async def _complete_turn(
         "unavailable). It will be recovered automatically."
       ),
     })
-    set_active_broadcast(None)
+    # Identity-keyed: a Stop + fresh send racing in during the finalize await
+    # may already hold the active pointer; clear only if it's still ours.
+    clear_active_broadcast_if(bc)
     bc.publish({"type": "done"})
     bc.mark_completed()
     if close_browser:
@@ -1143,7 +1168,10 @@ async def _complete_turn(
     db.close()
     return chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
 
-  set_active_broadcast(None)
+  # Identity-keyed: a Stop + fresh send racing in during the finalize await
+  # above may already hold the active pointer; clear only if it's still ours
+  # (an unconditional clear would erase the successor's pointer).
+  clear_active_broadcast_if(bc)
   # The continuation is a fresh turn — give it its own run_token. The
   # turn-end drain's PromotePending sets the next turn's run marker under
   # this token, and _schedule_continuation hands the SAME token to the
@@ -1151,7 +1179,7 @@ async def _complete_turn(
   next_run_token = alloc_run_token()
   try:
     next_user, next_messages, next_session_id, disposition = (
-      await _drain_and_release(db, chat_id, we_own_gen, next_run_token)
+      await _drain_and_release(db, chat_id, run_gen, next_run_token)
     )
   except (Exception, asyncio.TimeoutError) as exc:
     # The PromotePending / ClearRunStatus ack failed OR timed out, OR the
@@ -1290,7 +1318,7 @@ async def run_chat(
     # writer/lock can't hang teardown (a clear that times out leaves the
     # marker set, which reconciliation repairs).
     #
-    # FIX B — the eligibility check AND the clear run UNDER the bounded queue
+    # Both the eligibility check AND the clear run UNDER the bounded queue
     # lock, mirroring _terminal_setup_error_cleanup's lock+ordering. The
     # gen-only check above (computed outside the lock) is not enough: a fresh
     # StartTurn (a new send) racing in after this run's discard_starting above
@@ -1464,7 +1492,7 @@ async def _run_chat_impl(
     bc.publish({"type": "error", "message": "No owner configured."})
     disposition = await _terminal_setup_error_cleanup(chat_id)
     bc.publish({"type": "done"})
-    set_active_broadcast(None)
+    clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
     bc.mark_completed()
     # Close the session before bailing — every other terminal path in
     # run_chat closes explicitly, and a misconfigured instance hitting
@@ -1593,7 +1621,7 @@ async def _run_chat_impl(
     bc.publish({"type": "error", "message": auth_error})
     disposition = await _terminal_setup_error_cleanup(chat_id)
     bc.publish({"type": "done"})
-    set_active_broadcast(None)
+    clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
     bc.mark_completed()
     db.close()
     return disposition
@@ -1656,7 +1684,7 @@ async def _run_chat_impl(
       )
     err = runner_result.get("error")
     if err:
-      # Same R2-5 rationale: publish through sink before finalize so
+      # Same save-before-broadcast rationale: publish through sink before finalize so
       # the error is persisted alongside any partial response that
       # streamed before the failure.
       sink.publish({"type": "error", "message": err})
@@ -1717,7 +1745,7 @@ async def _run_chat_impl(
         provider_id=provider_id, cost_usd=0, close_browser=False,
       )
     if err:
-      # Same R2-5 rationale: persist the error alongside any partial
+      # Same save-before-broadcast rationale: persist the error alongside any partial
       # response that streamed before the failure.
       sink.publish({"type": "error", "message": err})
     return await _complete_turn(
@@ -1737,7 +1765,7 @@ async def _run_chat_impl(
     "message": f"Provider {provider.name!r} has no supported runtime.",
   })
   disposition = await _terminal_setup_error_cleanup(chat_id)
-  set_active_broadcast(None)
+  clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
   bc.publish({"type": "done"})
   bc.mark_completed()
   await _close_browser_session(chat_id)
