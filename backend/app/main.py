@@ -5,6 +5,7 @@ static files.  API routes are registered first; the frontend SPA is
 mounted last as a catch-all so that client-side routing works.
 """
 
+import logging
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -26,7 +27,7 @@ from app import models
 # wrapped imports in lifespan() below.
 from app.routes import (
   admin_router, ai_router, apps_router, auth_router,
-  chat_router, chats_router, chats_stream_router,
+  chat_logs_router, chat_router, chats_router, chats_stream_router,
   debug_router, generate_router,
   notifications_router, notify_router, proxy_router, push_router,
   recover_router, settings_router, standalone_router, storage_router,
@@ -341,6 +342,19 @@ app.include_router(storage_router)
 app.include_router(chat_router)
 app.include_router(chats_router)
 app.include_router(chats_stream_router)
+app.include_router(chat_logs_router)
+# App-attributed chat contract (design §1) — a SECOND router defined in
+# routes/chats.py under /api/app-chats, so it's imported directly rather
+# than via routes/__init__'s `_load` (which only returns `.router`).
+# Guarded: a broken chats.py already degraded chats_router to a stub
+# above, and shouldn't take the whole app down here either.
+try:
+  from app.routes.chats import app_chat_router  # noqa: E402
+  app.include_router(app_chat_router)
+except Exception as _exc:  # pragma: no cover - defensive boot guard
+  logging.getLogger(__name__).error(
+    "app_chat_router not mounted: %s", _exc, exc_info=True,
+  )
 app.include_router(ai_router)
 app.include_router(notify_router)
 app.include_router(proxy_router)

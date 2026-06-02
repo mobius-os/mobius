@@ -230,6 +230,64 @@ def get_principal(
   return Principal(owner=owner, app_id=app_id)
 
 
+# Ordered tiers for permission keys whose values form a ladder. Each
+# request asks for a minimum level; the app passes iff its granted
+# level is at or above it. `chat_log_access` is the first such ladder
+# routed through require_app_permission; `cross_app_access` /
+# `share_with_apps` keep their own bespoke min(A,B) check in
+# routes/storage.py (two-sided, not a single-principal gate) and are
+# deliberately NOT folded in here.
+_PERMISSION_LADDERS: dict[str, dict[str, int]] = {
+  "chat_log_access": {"none": 0, "summary": 1, "full": 2},
+}
+
+
+def require_app_permission(
+  principal: Principal,
+  key: str,
+  level: str,
+  db: Session,
+) -> None:
+  """Asserts the caller may use capability `key` at `level`, else 403.
+
+  Owner tokens always pass — the permission map governs APPS, not the
+  owner. For an app token, the granted level is read from the App row
+  at request time (`getattr(app, key)`), so flipping the column revokes
+  access on the very next call without rotating the 8h app JWT. This is
+  the single gate every app-capability route should call; don't scatter
+  inline `getattr(app, ...)` checks.
+
+  Honest scope (design §0b): a same-origin app holds the owner JWT and
+  could call owner routes directly. This gate is consent/attribution/
+  audit for honest apps plus the enforceable half — the gated surface
+  itself returns redacted/scoped data and refuses the un-consented app.
+  It is not a sandbox.
+
+  Raises:
+    HTTPException: 403 if the app's granted level is below `level`, or
+      if `app_id` no longer resolves to a live App row.
+    KeyError: if `key`/`level` aren't a known ladder — a programming
+      error at the call site, surfaced loudly rather than silently
+      passing.
+  """
+  if principal.app_id is None:
+    return  # owner token — the map governs apps, not the owner
+  ladder = _PERMISSION_LADDERS[key]
+  need = ladder[level]
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if app is None:
+    raise HTTPException(status_code=401, detail="App not found.")
+  granted = ladder.get((getattr(app, key, None) or "none").lower(), 0)
+  if granted < need:
+    raise HTTPException(
+      status_code=403,
+      detail=(
+        f"This app's {key} is '{getattr(app, key, 'none')}' — "
+        f"'{level}' is required for this request."
+      ),
+    )
+
+
 def get_owner_or_app_with_manage_apps(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),

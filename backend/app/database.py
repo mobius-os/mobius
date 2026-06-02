@@ -187,6 +187,17 @@ def run_migrations(eng) -> None:
       )
     if null_nonce:
       conn.commit()
+  if "chat_log_access" not in apps_cols:
+    # Chat-log read tier (none/summary/full) gating GET /api/chat-logs.
+    # Defaults to 'none'; an app gains read access by declaring
+    # permissions.chat_log_access in its manifest (validated in
+    # install.py) and the owner consenting at install. See models.App.
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN chat_log_access VARCHAR(16) "
+        "NOT NULL DEFAULT 'none'"
+      ))
+      conn.commit()
   if "chats" in tables:
     chats_cols = {c["name"] for c in inspector.get_columns("chats")}
     _add = []

@@ -57,6 +57,7 @@ auth_router = _load("auth")
 chat_router = _load("chat")
 chats_router = _load("chats")
 chats_stream_router = _load("chats_stream")
+chat_logs_router = _load("chat_logs")
 proxy_router = _load("proxy")
 notify_router = _load("notify")
 # `recover.py` is also wrapped for symmetry / defense in depth, even
@@ -80,6 +81,7 @@ __all__ = [
   "chat_router",
   "chats_router",
   "chats_stream_router",
+  "chat_logs_router",
   "ai_router",
   "proxy_router",
   "recover_router",
