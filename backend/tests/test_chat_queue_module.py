@@ -145,10 +145,11 @@ def test_drain_and_release_promotes_then_holds_starting(db):
 
   async def go():
     return await chat_queue.drain_and_release(
-      db, "cq-drain-with-head", we_own_gen=True, run_token="rt-cq",
+      db, "cq-drain-with-head", run_gen=7, run_token="rt-cq",
       discard_starting=discarded.append,
       forget_chat=forgotten.append,
       clear_run_status_strict=_record_clear(cleared),
+      current_generation=lambda _cid: 7,  # still ours → owns the turn
     )
 
   head, next_messages, sid, disposition = asyncio.run(go())
@@ -182,10 +183,11 @@ def test_drain_and_release_releases_when_queue_empty(db):
 
   async def go():
     return await chat_queue.drain_and_release(
-      db, "cq-drain-empty", we_own_gen=True, run_token="rt-cq",
+      db, "cq-drain-empty", run_gen=7, run_token="rt-cq",
       discard_starting=discarded.append,
       forget_chat=forgotten.append,
       clear_run_status_strict=_record_clear(cleared),
+      current_generation=lambda _cid: 7,  # still ours → owns the turn
     )
 
   head, _, _, disposition = asyncio.run(go())
@@ -199,8 +201,9 @@ def test_drain_and_release_releases_when_queue_empty(db):
 
 
 def test_drain_and_release_no_op_when_not_owning_generation(db):
-  """When we_own_gen is False (Stop bumped gen), drain_and_release
-  must NOT promote, discard, or forget. The newer owner of the
+  """When a Stop has bumped the generation, drain_and_release reads the
+  current generation UNDER its lock, finds it no longer matches run_gen,
+  and must NOT promote, discard, or forget. The newer owner of the
   generation is responsible for those."""
   chat = models.Chat(
     id="cq-not-owner",
@@ -218,10 +221,11 @@ def test_drain_and_release_no_op_when_not_owning_generation(db):
 
   async def go():
     return await chat_queue.drain_and_release(
-      db, "cq-not-owner", we_own_gen=False, run_token="rt-cq",
+      db, "cq-not-owner", run_gen=7, run_token="rt-cq",
       discard_starting=discarded.append,
       forget_chat=forgotten.append,
       clear_run_status_strict=_record_clear(cleared),
+      current_generation=lambda _cid: 8,  # Stop bumped past run_gen → stale
     )
 
   head, msgs, sid, disposition = asyncio.run(go())
@@ -264,10 +268,11 @@ def test_drain_serializes_with_concurrent_lock_holder(db):
 
   async def drain_run():
     head, _, _, _ = await chat_queue.drain_and_release(
-      db, "cq-serialize", we_own_gen=True, run_token="rt-cq",
+      db, "cq-serialize", run_gen=7, run_token="rt-cq",
       discard_starting=lambda _cid: None,
       forget_chat=lambda _cid: None,
       clear_run_status_strict=_noop_clear,
+      current_generation=lambda _cid: 7,  # still ours → owns the turn
     )
     observed_order.append("drain-finished")
     return head

@@ -31,7 +31,10 @@ from app import models
 from app.broadcast import (
   ChatBroadcast,
   SystemBroadcast,
+  clear_active_broadcast_if,
+  get_active_broadcast,
   get_system_broadcast,
+  set_active_broadcast,
 )
 from app.chat_writer import Barrier, get_writer
 from app.routes.notify import NotifyBody
@@ -306,6 +309,47 @@ def test_notify_body_type_validator_rejects_unknown():
     pass
   else:
     raise AssertionError("Expected ValidationError for bogus event type")
+
+
+# --- clear_active_broadcast_if: identity-keyed compare-and-clear -------
+
+
+def test_clear_active_broadcast_if_clears_when_pointer_matches():
+  """When the active-broadcast pointer still points at `bc`, the
+  identity-keyed clear releases it and returns True — the no-successor case
+  where the dying run must release the pointer rather than leak it."""
+  bc = ChatBroadcast("c-match")
+  set_active_broadcast(bc)
+  try:
+    assert clear_active_broadcast_if(bc) is True
+    assert get_active_broadcast() is None, "the matching pointer must be cleared"
+  finally:
+    set_active_broadcast(None)
+
+
+def test_clear_active_broadcast_if_leaves_when_different_active():
+  """When a DIFFERENT broadcast is active (a fresh owner replaced the pointer),
+  the clear must NOT touch it: it returns False and leaves the live owner's
+  pointer intact — never clobbering a turn that isn't `bc`."""
+  fresh = ChatBroadcast("c-fresh")
+  superseded = ChatBroadcast("c-superseded")
+  set_active_broadcast(fresh)
+  try:
+    assert clear_active_broadcast_if(superseded) is False
+    assert get_active_broadcast() is fresh, (
+      "a non-matching clear must leave the fresh owner's pointer untouched"
+    )
+  finally:
+    set_active_broadcast(None)
+
+
+def test_clear_active_broadcast_if_returns_false_when_already_none():
+  """When the pointer is already None, the clear is a no-op: returns False and
+  leaves it None."""
+  set_active_broadcast(None)
+  bc = ChatBroadcast("c-none")
+  assert clear_active_broadcast_if(bc) is False
+  assert get_active_broadcast() is None
 
 
 # --- SSE subscription-leak: subscribe pairs with unsubscribe inside ----

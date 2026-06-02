@@ -851,7 +851,7 @@ def test_concurrent_submits_with_a_barrier_all_resolve():
     actor.stop(timeout=10)
 
 
-# -- FIX C: the per-key generation map must not leak across finalized turns ----
+# -- the per-key generation map must not leak across finalized turns -----------
 def test_generation_dict_does_not_leak_across_finalized_turns():
   # Each turn (snapshot... -> Finalize) bumps _generation[key] via the fence
   # but the entry was never deleted, so every finalized turn permanently leaked
@@ -939,7 +939,7 @@ def test_recycled_key_after_generation_gc_commits_without_stale_double_commit():
     actor.stop(timeout=5)
 
 
-# -- FIX F: concurrent start() / start_writer() must not spawn two consumers ---
+# -- concurrent start() / start_writer() must not spawn two consumers ----------
 #
 # The race window is between the `_thread is None` check and the assignment;
 # the GIL makes it tiny, so a naive thread-burst almost never reproduces it.
@@ -1046,7 +1046,7 @@ def test_concurrent_start_writer_single_writer_no_orphan_threads():
     chat_writer.stop_writer(timeout=5)
 
 
-# -- FIX E: acks must resolve OUTSIDE producer locks (no re-entrancy deadlock) --
+# -- acks must resolve OUTSIDE producer locks (no re-entrancy deadlock) --------
 def test_synchronous_done_callback_reentering_submit_does_not_deadlock():
   # A synchronous add_done_callback on a submitted command's future that itself
   # re-enters submit() must NOT deadlock: the producer paths that resolve acks
