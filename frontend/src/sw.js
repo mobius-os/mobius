@@ -71,14 +71,6 @@ import {
 self.skipWaiting()
 clientsClaim()
 
-// Identifies THIS service-worker generation. Bump on any meaningful SW
-// change so /diag.html can confirm which SW a device is actually running
-// (the whole class of "did my fix even reach the phone?" questions — a SW
-// only updates on an online visit, so an installed PWA can run an old SW
-// for a while). Served offline by the route below because the SW
-// synthesizes the response; no network needed.
-const SW_VERSION = '2026-06-02-shell-nav-precache'
-
 // ── Page → SW connectivity channel ───────────────────────────────────
 // The AUTHORITATIVE connectivity signal lives in the page: useOnlineStatus
 // probes /api/health (a real network round-trip), which is trustworthy where
@@ -120,18 +112,6 @@ self.addEventListener('message', (e) => {
 function knownOnline() {
   return isKnownOnline(_pageOnline, _pageOnlineAt, Date.now(), VERDICT_MAX_AGE_MS)
 }
-
-// /api/__sw_version — a synthetic, SW-generated response so /diag.html can
-// read the live SW generation even offline. Registered before the catch
-// handler; never hits the network.
-registerRoute(
-  ({ url }) => url.pathname === '/api/__sw_version',
-  async () =>
-    new Response(
-      JSON.stringify({ version: SW_VERSION, ts: Date.now() }),
-      { headers: { 'Content-Type': 'application/json' } },
-    ),
-)
 
 // Self-hosted React for the mini-app import map. These live in
 // /app/static/vendor (copied by the Dockerfile AFTER the Vite build, so
