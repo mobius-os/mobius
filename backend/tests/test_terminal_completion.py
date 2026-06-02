@@ -1640,3 +1640,60 @@ def test_finalize_does_not_resurrect_soft_deleted_chat():
   state = _load("t23")  # _load reads by id, no deleted_at filter
   assert len(state["messages"]) == 1, "finalize must not append to a deleted chat"
   assert state["messages"][-1]["role"] == "user", "no assistant content resurrected"
+
+
+# -- 24. NO chat-mutating command resurrects a soft-deleted chat -------------
+def test_mutating_commands_do_not_resurrect_soft_deleted_chat():
+  """A command queued before a delete and processed by the actor AFTER the
+  soft-delete commits must NOT write to the dead row — it would resurrect the
+  chat's transcript / set a run marker on a deleted chat (a wedged runner on a
+  dead row). Every command that adds content or sets the marker now loads
+  through `_active_chat` (filters deleted_at), so each raises (ack fails)
+  instead. Covers the StartTurn / PromotePending / ReplaceTranscript class.
+  """
+  from datetime import UTC, datetime
+
+  from app.chat_writer import (
+    PromotePending, ReplaceTranscript, StartTurn, _PersistFailed,
+    await_ack, get_writer,
+  )
+
+  _seed_chat(
+    "t24",
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[{"role": "user", "content": "queued", "ts": 2}],
+    run_status=None,
+  )
+  # Soft-delete while it still holds a transcript + a queued message.
+  db = SessionLocal()
+  try:
+    row = db.query(models.Chat).filter(models.Chat.id == "t24").first()
+    row.deleted_at = datetime.now(UTC)
+    db.commit()
+  finally:
+    db.close()
+
+  async def _submit(cmd):
+    await await_ack(get_writer().submit(cmd))
+
+  for cmd in (
+    StartTurn(
+      chat_id="t24", run_token="rt-24",
+      user_msg={"role": "user", "content": "x", "ts": 3},
+    ),
+    PromotePending(chat_id="t24", run_token="rt-24"),
+    ReplaceTranscript(
+      chat_id="t24", messages=[{"role": "user", "content": "replaced", "ts": 9}],
+    ),
+  ):
+    with pytest.raises(_PersistFailed):
+      asyncio.run(_submit(cmd))
+
+  # The soft-deleted row is untouched: original transcript + queue intact, no
+  # marker set — nothing was resurrected.
+  state = _load("t24")
+  assert state["messages"] == [{"role": "user", "content": "hi", "ts": 1}], (
+    "no command may mutate the transcript of a soft-deleted chat"
+  )
+  assert len(state["pending_messages"]) == 1, "the queue must not be promoted"
+  assert state["run_status"] is None, "no run marker on a soft-deleted chat"

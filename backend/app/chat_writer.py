@@ -1119,11 +1119,9 @@ class ChatWriterActor:
     dropped, so the answer route returns 503 and the pending question stays
     registered for retry instead of the future resolving on a lost write.
     """
-    from app.models import Chat
-
-    chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
+    chat = _active_chat(db, cmd.chat_id)
     if chat is None:
-      raise _PersistFailed("AnswerQuestion: chat not found")
+      raise _PersistFailed("AnswerQuestion: chat not found or deleted")
     applied = apply_answers_to_last_question(
       chat, cmd.answers, cmd.question_id
     )
@@ -1143,11 +1141,9 @@ class ChatWriterActor:
     """
     from datetime import UTC, datetime
 
-    from app.models import Chat
-
-    chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
+    chat = _active_chat(db, cmd.chat_id)
     if chat is None:
-      raise _PersistFailed("StartTurn: chat not found")
+      raise _PersistFailed("StartTurn: chat not found or deleted")
     existing = list(chat.messages or [])
     if not existing:
       chat.provider = cmd.default_provider or "claude"
@@ -1198,11 +1194,9 @@ class ChatWriterActor:
     """
     from datetime import UTC, datetime
 
-    from app.models import Chat
-
-    chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
+    chat = _active_chat(db, cmd.chat_id)
     if chat is None:
-      raise _PersistFailed("AppendPending: chat not found")
+      raise _PersistFailed("AppendPending: chat not found or deleted")
     apply_answers_to_last_question(chat, cmd.answers, cmd.question_id)
     pending = list(chat.pending_messages or [])
     new_msg = dict(cmd.user_msg)
@@ -1227,11 +1221,9 @@ class ChatWriterActor:
     """
     from datetime import UTC, datetime
 
-    from app.models import Chat
-
-    chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
+    chat = _active_chat(db, cmd.chat_id)
     if chat is None:
-      raise _PersistFailed("PromotePending: chat not found")
+      raise _PersistFailed("PromotePending: chat not found or deleted")
     pending = list(chat.pending_messages or [])
     if not pending:
       return {"history": [], "promoted": None, "session_id": chat.session_id}
@@ -1336,11 +1328,9 @@ class ChatWriterActor:
     """
     from datetime import UTC, datetime
 
-    from app.models import Chat
-
-    chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
+    chat = _active_chat(db, cmd.chat_id)
     if chat is None:
-      raise _PersistFailed("ReplaceTranscript: chat not found")
+      raise _PersistFailed("ReplaceTranscript: chat not found or deleted")
     if cmd.title is not None:
       chat.title = cmd.title
     if cmd.messages is not None:
@@ -1579,6 +1569,29 @@ class _WriteOutcome(enum.Enum):
   DROPPED = "dropped"  # write attempted but the commit dropped (lock)
 
 
+def _active_chat(db, chat_id: str):
+  """The chat row for `chat_id`, or None if it is missing OR soft-deleted.
+
+  The single gate for "may an actor command write to this chat." Every command
+  that ADDS content or SETS the run marker — StartTurn, PromotePending,
+  AppendPending, AnswerQuestion, ReplaceTranscript, and the assistant-message
+  write below — loads the row through this, so a command queued before a
+  concurrent delete and processed after the soft-delete commits cannot write to
+  (and thereby resurrect) the dead row. The route handlers check `deleted_at`
+  at request time; this closes the TOCTOU against the asynchronous actor.
+  Treating deleted like missing means each command's existing `chat is None`
+  branch already does the right thing (raise → the ack fails, so no marker or
+  continuation lands on the dead row; reconciliation skips deleted chats).
+  Clear/cancel commands deliberately do NOT gate on `deleted_at` — removing
+  state from a deleted chat cannot resurrect it.
+  """
+  from app.models import Chat
+
+  return db.query(Chat).filter(
+    Chat.id == chat_id, Chat.deleted_at.is_(None)
+  ).first()
+
+
 def _apply_last_assistant_message(db, chat_id: str, message: dict):
   """Core assistant-message write, returning a `_WriteOutcome`.
 
@@ -1590,18 +1603,9 @@ def _apply_last_assistant_message(db, chat_id: str, message: dict):
   """
   if not chat_id:
     return _WriteOutcome.NOOP
-  from app.models import Chat
-
-  # Filter deleted_at: never write to a soft-deleted chat. A finalize (or a
-  # streaming snapshot) that was enqueued before a delete and processed after
-  # would otherwise append to the dead row and resurrect its transcript on
-  # recovery. As the single write helper behind every path, this one filter
-  # closes resurrection everywhere: the streaming wrapper maps the resulting
-  # NOOP to a benign success, and the must-persist Finalize maps it to a hard
-  # NOOP (delete owns the row's removal; reconciliation skips deleted chats).
-  chat = db.query(Chat).filter(
-    Chat.id == chat_id, Chat.deleted_at.is_(None)
-  ).first()
+  # `_active_chat` filters soft-deleted rows, so a finalize/snapshot enqueued
+  # before a delete maps to NOOP here instead of resurrecting the dead row.
+  chat = _active_chat(db, chat_id)
   if not chat or not chat.messages:
     return _WriteOutcome.NOOP
   msgs = list(chat.messages)
