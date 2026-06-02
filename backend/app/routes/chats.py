@@ -562,6 +562,66 @@ def recover_chat(
   return {"ok": True}
 
 
+@router.post(
+  "/{chat_id}/compact", dependencies=[Depends(reject_cross_site)],
+)
+async def compact_chat(
+  chat_id: str,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Compacts the chat into a portable plain-text briefing block.
+
+  Feature 091's provider-switch groundwork: switching the chat's PROVIDER
+  loses the session (sessions aren't cross-provider portable), so this runs
+  a one-shot summarize turn over the current transcript and stores the
+  result as a recognizable `kind="compaction"` assistant message via the
+  writer actor. It does NOT switch provider here — the provider-switch
+  wiring and the warn dialog are frontend follow-ups; this endpoint only
+  produces + stores + returns the summary so the client can display it.
+
+  A failed summarize (empty chat, disconnected provider, no text produced)
+  returns a non-2xx and stores NOTHING — a failed compaction must never
+  silently drop the user's context. The route through the actor (rather
+  than a direct `chat.messages` write) keeps the single-writer invariant:
+  the compaction block can't clobber, or be clobbered by, a streaming
+  snapshot for the same chat.
+  """
+  from app.chat_writer import (
+    PersistCompaction, alloc_run_token, await_ack, get_writer,
+  )
+  from app.compaction import CompactionError, summarize_chat
+
+  chat = get_active_chat_or_404(db, chat_id)
+  messages = list(chat.messages or [])
+  data_dir = get_settings().data_dir
+  try:
+    summary = await summarize_chat(messages, data_dir=data_dir)
+  except CompactionError as exc:
+    # The summarize step is the one allowed-to-fail step. Surface it as a
+    # 422 so the client can show the reason and keep the chat unchanged
+    # (no block stored, no provider switched).
+    raise HTTPException(status_code=422, detail=str(exc))
+  except Exception as exc:
+    log.warning("compaction summarize failed for chat %s: %s", chat_id, exc)
+    raise HTTPException(
+      status_code=502, detail="The summarize turn failed; not compacting."
+    )
+
+  ack = get_writer().submit(
+    PersistCompaction(
+      chat_id=chat_id, run_token=alloc_run_token(), summary=summary
+    )
+  )
+  try:
+    result = await await_ack(ack)
+  except Exception:
+    raise HTTPException(
+      status_code=503, detail="Could not store the compaction; try again."
+    )
+  return {"ok": True, "summary": summary, "stored": result.get("stored")}
+
+
 class AppChatCreate(BaseModel):
   title: str | None = None
 
