@@ -1361,7 +1361,9 @@ def _last_user_message_elapsed(db, chat_id: str) -> str | None:
     msgs = (chat.messages if chat else None) or []
     now_ms = _time.time() * 1000.0
     for m in reversed(msgs[:-1]):  # skip the current (just-committed) message
-      if not isinstance(m, dict):
+      # Only USER messages count — the label is "user's last message", and
+      # assistant rows would otherwise report the gap since the agent spoke.
+      if not isinstance(m, dict) or m.get("role") != "user":
         continue
       ts = m.get("ts")
       if not isinstance(ts, (int, float)) or ts <= 0:

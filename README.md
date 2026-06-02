@@ -54,7 +54,7 @@ Some things we've built:
 
 Your health data, your finances, your habits, all private by default.
 
-When you ask for something, the agent builds it as a small app right inside the chat, without reloading the page. Each app can store data, run on a schedule, fetch from the web, and use AI on its own.
+When you ask for something, the agent builds it as a small app right inside the chat, without reloading the page. Each app can store data, run on a schedule, fetch from the web, and use AI on its own. There's also a small curated **app store** (the open [mobius-os](https://github.com/mobius-os) apps) you can install from without writing a prompt — and an app can even embed the same agent chat the shell uses, so a mini-app can drive its own conversation with the agent.
 
 <p align="center">
   <img src="assets/screenshots/apps-cycle.gif" width="280" alt="A few of the apps Möbius has built — ISS tracker, habit log, HN dashboard, earthquake map, flashcards deck" />

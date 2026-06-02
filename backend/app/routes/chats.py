@@ -282,7 +282,7 @@ async def update_chat(
   return {"ok": True}
 
 
-@router.patch("/{chat_id}")
+@router.patch("/{chat_id}", dependencies=[Depends(reject_cross_site)])
 async def patch_chat(
   body: ChatPatch,
   chat_id: str,
@@ -615,6 +615,16 @@ async def compact_chat(
   from app.compaction import CompactionError, summarize_chat
 
   chat = get_active_chat_or_404(db, chat_id)
+  if is_chat_running(chat_id):
+    # A live turn's streaming snapshots target the trailing assistant row;
+    # appending a compaction block mid-turn would race/clobber it. Compaction
+    # is a between-turns operation (e.g. before a provider switch) — refuse
+    # while a turn is active rather than risk the lost-update the docstring
+    # promises against.
+    raise HTTPException(
+      status_code=409,
+      detail="Chat is busy — finish or stop the current turn before compacting.",
+    )
   messages = list(chat.messages or [])
   data_dir = get_settings().data_dir
   try:
