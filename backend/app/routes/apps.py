@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy.orm import Session
 
-from app import activity, models, schemas
+from app import activity, fs_locks, models, schemas
 from app.broadcast import get_system_broadcast
 from app.compiler import compile_jsx
 from app.config import get_settings
@@ -119,6 +119,28 @@ def _safe_to_rmtree_source(
     except OSError:
       continue
   return True
+
+
+def _rmtree_source_if_safe(
+  resolved: Path, apps_root: Path, db: Session, exclude_id: int
+) -> None:
+  """Drop the cron entry + rmtree a resolved source tree IF it is safe.
+
+  The caller MUST hold ``fs_locks.source_dir_lock(str(resolved))`` so the
+  ``_safe_to_rmtree_source`` shared-dir check and the rmtree are atomic
+  against a concurrent create/patch claiming the same directory (round-6 #4).
+  Drops the cron entry even when the tree is already gone — a live entry can
+  outlive a partial cleanup, and a cron firing a missing script is the exact
+  orphan we're killing. Swallows filesystem errors (best-effort cleanup).
+  """
+  from app.install import _unregister_cron
+  try:
+    if _safe_to_rmtree_source(resolved, apps_root, db, exclude_id):
+      _unregister_cron(resolved)
+      if resolved.is_dir():
+        shutil.rmtree(resolved, ignore_errors=True)
+  except OSError:
+    pass
 
 
 def allocate_unique_slug(db: Session, name: str, exclude_id: int | None = None) -> str:
@@ -262,33 +284,38 @@ async def create_app(
     if body.source_dir
     else _derive_source_dir(data_dir, body.name)
   )
-  app = models.App(
-    name=body.name,
-    description=body.description,
-    jsx_source=body.jsx_source,
-    chat_id=body.chat_id,
-    source_dir=source_dir,
-    cross_app_access=body.cross_app_access,
-    share_with_apps=body.share_with_apps,
-    offline_capable=body.offline_capable,
-    slug=allocate_unique_slug(db, body.name),
-    # manifest_url stays NULL on this route. Only the install endpoint
-    # may set it — it's the identity key for install-vs-update
-    # discrimination. See AppCreate's docstring for the threat model.
-  )
-  db.add(app)
-  db.flush()  # assigns app.id without committing
-  try:
-    compiled = await compile_jsx(app.id, body.jsx_source)
-  except RuntimeError as exc:
-    # Roll back explicitly to avoid leaving the SQLite WAL connection in a
-    # dirty transaction state, which can cause "database is locked" errors
-    # on subsequent writes.
-    db.rollback()
-    raise HTTPException(status_code=422, detail=str(exc))
-  app.compiled_path = compiled
-  db.commit()
-  db.refresh(app)
+  # Hold the per-source-dir lock across the row commit so this app's source_dir
+  # becomes visible to a concurrent uninstall's shared-dir dedup check before
+  # that uninstall could rmtree the directory (Codex review round-6 #4). One
+  # uvicorn worker => this in-process lock fully serializes the two.
+  async with fs_locks.source_dir_lock(source_dir):
+    app = models.App(
+      name=body.name,
+      description=body.description,
+      jsx_source=body.jsx_source,
+      chat_id=body.chat_id,
+      source_dir=source_dir,
+      cross_app_access=body.cross_app_access,
+      share_with_apps=body.share_with_apps,
+      offline_capable=body.offline_capable,
+      slug=allocate_unique_slug(db, body.name),
+      # manifest_url stays NULL on this route. Only the install endpoint
+      # may set it — it's the identity key for install-vs-update
+      # discrimination. See AppCreate's docstring for the threat model.
+    )
+    db.add(app)
+    db.flush()  # assigns app.id without committing
+    try:
+      compiled = await compile_jsx(app.id, body.jsx_source)
+    except RuntimeError as exc:
+      # Roll back explicitly to avoid leaving the SQLite WAL connection in a
+      # dirty transaction state, which can cause "database is locked" errors
+      # on subsequent writes.
+      db.rollback()
+      raise HTTPException(status_code=422, detail=str(exc))
+    app.compiled_path = compiled
+    db.commit()
+    db.refresh(app)
   return app
 
 
@@ -334,10 +361,12 @@ async def update_app(
     app.compiled_path = compiled
   if body.chat_id is not None:
     app.chat_id = body.chat_id
+  new_source_dir = None
   if body.source_dir is not None:
-    app.source_dir = _validate_source_dir(
+    new_source_dir = _validate_source_dir(
       body.source_dir, get_settings().data_dir
     )
+    app.source_dir = new_source_dir
   if body.pinned is not None:
     from datetime import UTC, datetime
     app.pinned_at = (
@@ -349,7 +378,14 @@ async def update_app(
     app.cross_app_access = body.cross_app_access
   if body.offline_capable is not None:
     app.offline_capable = body.offline_capable
-  db.commit()
+  # When source_dir changed, commit under the per-source-dir lock so the new
+  # value is visible to a concurrent uninstall's dedup check before it could
+  # rmtree the directory (Codex review round-6 #4).
+  if new_source_dir is not None:
+    async with fs_locks.source_dir_lock(new_source_dir):
+      db.commit()
+  else:
+    db.commit()
   db.refresh(app)
   return app
 
@@ -436,7 +472,7 @@ async def update_icon(
   status_code=204,
   dependencies=[Depends(reject_cross_site)],
 )
-def delete_app(
+async def delete_app(
   app_id: int,
   db: Session = Depends(get_db),
   _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
@@ -445,6 +481,11 @@ def delete_app(
 
   This is irreversible.  The caller is expected to confirm with the
   partner before invoking (the agent skill spells this out).
+
+  Async so the source-tree and storage-tree cleanup can run under the same
+  per-source-dir / per-app fs_locks a concurrent create / patch / storage
+  write takes, closing the uninstall-vs-create and uninstall-vs-write races
+  (Codex review round-6 #3, #4) on the single uvicorn worker.
   """
   app = (
     db.query(models.App).filter(models.App.id == app_id).first()
@@ -483,56 +524,41 @@ def delete_app(
     except OSError:
       pass  # best effort — a stale compiled file is harmless
 
-  # Source tree under /data/apps/.  Newer apps store the exact source
-  # directory; legacy apps fall back to name-based cleanup.
-  #
-  # Before removing the tree, drop any crontab entry that invokes a
-  # script under it — delete_app never did this, so an uninstalled app
-  # kept firing its (now-missing) job until the next container restart,
-  # and reinstalls left orphan lines accumulating. Lazy import to avoid
-  # a circular import at module load (mirrors install_from_manifest).
-  from app.install import _unregister_cron
-
   settings = get_settings()
   apps_root = (Path(settings.data_dir) / "apps").resolve()
+
+  # Source tree under /data/apps/.  Newer apps store the exact source
+  # directory; legacy apps fall back to name-based cleanup. Resolve the
+  # candidate, then do the dedup-check + cron-drop + rmtree UNDER the
+  # per-source-dir lock so a concurrent create/patch can't claim the
+  # directory between the shared-dir check and the rmtree (round-6 #4).
+  resolved_source = None
   if app_source_dir:
-    source_dir = Path(app_source_dir)
     try:
-      resolved = source_dir.resolve()
-      if _safe_to_rmtree_source(resolved, apps_root, db, deleted_app_id):
-        # Drop the cron entry even if the tree is already gone — a live
-        # entry can outlive a partial cleanup, and a cron firing a
-        # missing script is the exact orphan we're killing. Only rmtree
-        # when the tree still exists.
-        _unregister_cron(resolved)
-        if resolved.is_dir():
-          shutil.rmtree(resolved, ignore_errors=True)
+      resolved_source = Path(app_source_dir).resolve()
     except OSError:
-      pass
+      resolved_source = None
   elif app_name and re.fullmatch(r"[a-zA-Z0-9_-]+", app_name):
-    source_dir = Path(settings.data_dir) / "apps" / app_name
     try:
-      resolved = source_dir.resolve()
-      if _safe_to_rmtree_source(resolved, apps_root, db, deleted_app_id):
-        _unregister_cron(resolved)
-        if resolved.is_dir():
-          shutil.rmtree(resolved, ignore_errors=True)
+      resolved_source = (Path(settings.data_dir) / "apps" / app_name).resolve()
     except OSError:
-      pass
+      resolved_source = None
+  if resolved_source is not None:
+    async with fs_locks.source_dir_lock(str(resolved_source)):
+      _rmtree_source_if_safe(resolved_source, apps_root, db, deleted_app_id)
 
   # Per-app STORAGE tree under /data/apps/<numeric-id>/ — distinct from the
   # slug-keyed SOURCE tree above. /api/storage/apps/{id}/... writes land here
   # keyed by the integer id, so an uninstall that cleaned only the source dir
-  # left this tree orphaned — stale data a freshly-minted token for a recycled
-  # id (or a not-yet-expired token for the deleted app) could still read
-  # (Codex review #1). deleted_app_id is an int from the path, so the join
-  # can't traverse out of apps_root.
-  storage_dir = apps_root / str(deleted_app_id)
-  if storage_dir.is_dir():
-    try:
-      shutil.rmtree(storage_dir, ignore_errors=True)
-    except OSError:
-      pass
+  # left this tree orphaned (Codex review #1). Under the per-app lock so an
+  # in-flight write can't recreate it after this removal (round-6 #3).
+  async with fs_locks.app_storage_lock(deleted_app_id):
+    storage_dir = apps_root / str(deleted_app_id)
+    if storage_dir.is_dir():
+      try:
+        shutil.rmtree(storage_dir, ignore_errors=True)
+      except OSError:
+        pass
 
 
 @router.post(

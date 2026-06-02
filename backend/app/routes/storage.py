@@ -45,7 +45,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy.orm import Session
 
-from app import activity, models
+from app import activity, fs_locks, models
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
@@ -449,19 +449,27 @@ async def write_app_file(
   _check_cross_app(db, principal, app_id, mode="write")
   base = Path(get_settings().data_dir) / "apps" / str(app_id)
   file_path = _resolve(base, path)
-  # A directory destination would make the write below raise IsADirectory
-  # and surface as an opaque 500; reject it explicitly (Codex review #11).
-  if file_path.is_dir():
-    raise HTTPException(status_code=400, detail="Destination is a directory.")
-  # Snapshot the pre-write size for size_delta. A missing file is
-  # zero; a stat failure (race with delete) is also zero — best-
-  # effort signal, not load-bearing.
-  try:
-    before_size = file_path.stat().st_size if file_path.is_file() else 0
-  except OSError:
-    before_size = 0
   content = await _decode_write_body(request, file_path)
-  _atomic_write(file_path, content)
+  # Serialize the write against this app's uninstall AND re-verify the app still
+  # exists UNDER the lock. A write that paused to read its body could otherwise
+  # land after an interleaved uninstall and recreate /data/apps/<id> as an
+  # orphan tree (Codex review round-6 #3). Möbius runs one uvicorn worker, so
+  # this in-process lock fully serializes write vs uninstall.
+  async with fs_locks.app_storage_lock(app_id):
+    if not db.query(models.App.id).filter(models.App.id == app_id).first():
+      raise HTTPException(status_code=404, detail="App not found.")
+    # A directory destination would make the write raise IsADirectory and
+    # surface as an opaque 500; reject it explicitly (Codex review #11).
+    if file_path.is_dir():
+      raise HTTPException(status_code=400, detail="Destination is a directory.")
+    # Snapshot the pre-write size for size_delta. A missing file is zero; a
+    # stat failure (race with delete) is also zero — best-effort, not
+    # load-bearing.
+    try:
+      before_size = file_path.stat().st_size if file_path.is_file() else 0
+    except OSError:
+      before_size = 0
+    _atomic_write(file_path, content)
   # storage_write: debounced per (app_id, path) to ≤1 event per
   # minute. Agents writing many small files in a single chat shouldn't
   # flood the log. size_delta uses post-write size minus pre-write
