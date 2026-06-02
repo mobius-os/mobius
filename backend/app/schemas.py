@@ -117,9 +117,14 @@ class AppInstall(BaseModel):
 
 class AppInstallOut(AppOut):
   """Install endpoint response — AppOut plus install-only fields."""
-  # 'install' for a fresh row, 'update' if a same-slug app already
-  # existed and got its jsx_source / seeds / cron refreshed in place.
-  mode: Literal["install", "update"]
+  # 'install' for a fresh row, 'update' if a same-manifest app already
+  # existed and got its jsx_source / seeds / cron refreshed in place,
+  # 'conflict' if the per-app git model is enabled and merging the new
+  # upstream into local edits conflicted (feature 084). On 'conflict'
+  # the served app is UNCHANGED — local edits are preserved and the
+  # conflicting files are named in `conflict_paths` for an agent to
+  # resolve. 'conflict' never occurs while the flag is off (the default).
+  mode: Literal["install", "update", "conflict"]
   # The manifest's declared version that ended up applied. Lets the
   # store mini-app refresh its installed-versions map without round-
   # tripping the manifest itself.
@@ -128,6 +133,10 @@ class AppInstallOut(AppOut):
   # take them so far — e.g. "icon: 404 in source repo", "schedule:
   # no shell access (manual agent step)". Empty list = full success.
   warnings: list[str] = Field(default_factory=list)
+  # Files that conflicted when merging the new upstream into local
+  # edits. Non-empty only when `mode == "conflict"`. The store surfaces
+  # these so the owner can ask the agent to resolve them.
+  conflict_paths: list[str] = Field(default_factory=list)
 
 
 class ProviderCodeRequest(BaseModel):
