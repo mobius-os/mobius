@@ -63,32 +63,39 @@ export function overlayPending(ops, path, fallback) {
   return fallback
 }
 
-// Bound a fetch so a stalled offline request (Android: navigator.onLine reads a
+// Read timeout: a stalled offline request (Android: navigator.onLine reads a
 // stale `true`, so get() takes the online branch and the request hangs instead
-// of failing fast) can't make a read wait seconds before falling back to the
-// cache mirror. Aborts at READ_TIMEOUT_MS; the caller treats a throw as "use
-// the cache". Mirrors the bounded-fetch the service worker uses for frame/
-// module.
+// of failing fast) must not make a read wait before falling back to the cache
+// mirror. Used by fetchBoundedJson below.
 const READ_TIMEOUT_MS = 2500
 // Writes are held under the outbox lock, so a stalled send must not pin it
 // forever (Codex review #2). Longer than the read bound — a write that takes
 // a few seconds on a slow link is normal; only a genuine hang is aborted.
 const WRITE_TIMEOUT_MS = 10000
-function fetchBounded(url, init) {
+
+// Bound the FULL read — connection AND body parse — under one timeout. A bare
+// fetch resolves when the response HEADERS arrive; `res.json()` then streams
+// the body, which can stall indefinitely and pin the per-path chain that
+// get()/list() hold while awaiting it (Codex review round-6 #2). So the abort
+// timer must stay armed through `.json()`. Returns {ok, status, data}: `data`
+// is the parsed JSON for a 2xx, omitted otherwise so callers branch on
+// `status` (e.g. 404). Aborting (or, without AbortController, the timeout
+// race) cancels a stalled body read too.
+async function fetchBoundedJson(url, init) {
   const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null
   const opts = ctrl ? { ...init, signal: ctrl.signal } : init
   let timer
+  const work = (async () => {
+    const res = await fetch(url, opts)
+    if (!res.ok) return { ok: false, status: res.status }
+    return { ok: true, status: res.status, data: await res.json() }
+  })()
   if (ctrl) {
     timer = setTimeout(() => ctrl.abort(), READ_TIMEOUT_MS)
-    return fetch(url, opts).finally(() => { if (timer) clearTimeout(timer) })
+    return work.finally(() => { if (timer) clearTimeout(timer) })
   }
-  // No AbortController: still RACE a timeout so a hung read can't pin the
-  // per-path chain that get()/reconcile hold while awaiting it (Codex review
-  // round-5 #2). The underlying request may complete late, but its result is
-  // discarded — a read is idempotent and the caller already fell back to the
-  // cache mirror, so a late read is harmless (unlike a late write).
   return Promise.race([
-    fetch(url, opts),
+    work,
     new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error('mobius: read timed out')), READ_TIMEOUT_MS)
     }),
@@ -442,6 +449,13 @@ function makeStorage({ appId, getToken }) {
           // cache untouched when a pending op exists; only when none remains is
           // the cached value the rejected one, safe to drop + restore from the
           // server.
+          // (The listOps guard is per-runtime. Across two SEPARATE contexts of
+          // the same app, the shared IndexedDB mirror can still momentarily
+          // diverge — the same documented single-owner cross-context bound the
+          // pathChains / withOutboxLock notes describe; the next online get()
+          // re-syncs each mirror from server truth. Closing it fully would mean
+          // a per-path cross-context Web Lock on every read, deliberately not
+          // taken.)
           const ops = await listOps()
           if (ops.some((o) => o.path === d.path)) return
           await cacheDelete(d.path)
@@ -527,12 +541,12 @@ function makeStorage({ appId, getToken }) {
           throw new Error(`mobius: listing exceeded ${MAX_LIST_PAGES * 500} entries`)
         }
         const q = `?limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
-        const res = await fetchBounded(
+        const r = await fetchBoundedJson(
           `/api/storage/apps-list/${appId}/${prefix || ''}${q}`,
           { headers: { Authorization: `Bearer ${token}` } },
         )
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        const body = await res.json()
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        const body = r.data
         for (const e of body.entries || []) entries.push(e)
         cursor = body.next_cursor
         if (!cursor) break
@@ -559,16 +573,15 @@ function makeStorage({ appId, getToken }) {
     if (navigator.onLine) {
       try {
         const token = await getToken()
-        const res = await fetchBounded(`/api/storage/apps/${appId}/${path}`, {
+        const r = await fetchBoundedJson(`/api/storage/apps/${appId}/${path}`, {
           headers: { Authorization: `Bearer ${token}` },
         })
-        if (res.status === 404) {
+        if (r.status === 404) {
           await cachePut(path, null)
-        } else if (res.ok) {
-          const data = await res.json()
-          await cachePut(path, data)
+        } else if (r.ok) {
+          await cachePut(path, r.data)
         } else {
-          throw new Error(`HTTP ${res.status}`)
+          throw new Error(`HTTP ${r.status}`)
         }
         const cached = await cacheGet(path)
         return await effectiveValue(path, cached ? cached.data : null)
