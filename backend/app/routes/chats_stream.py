@@ -476,9 +476,17 @@ async def stream_chat(
     )
     return Response(status_code=204)
 
-  catch_up, queue = bc.subscribe()
-
   async def generate():
+    # Subscribe INSIDE the generator, before the try, so it pairs with
+    # the `finally: bc.unsubscribe(queue)` below across the generator's
+    # whole lifecycle. If we subscribed at the endpoint (before building
+    # the StreamingResponse) and the client disconnected before the
+    # generator's body ever ran, the finally would never fire and the
+    # queue would leak in bc.subscribers until the broadcast completed.
+    # subscribe() is synchronous (snapshots the event_log and registers
+    # the queue with no await in between), so the catch-up burst still
+    # captures exactly the events present when this subscriber attaches.
+    catch_up, queue = bc.subscribe()
     try:
       # Send all events buffered before this client connected.
       has_done = False
