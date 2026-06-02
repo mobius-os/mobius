@@ -180,9 +180,19 @@ class _JsxHandler(FileSystemEventHandler):
         # same callback) — so an extra fan-out to every active
         # ChatBroadcast (the v1 design preserved this as "intentional")
         # was redundant, not load-bearing. Ticket 033 removed it.
-        from app.broadcast import get_system_broadcast
+        from app.broadcast import get_broadcast, get_system_broadcast
         event = {"type": "app_updated", "appId": str(app.id)}
         get_system_broadcast().publish(event)
+        # Chat-scoped CTA: if this edit landed during the building chat's
+        # turn, fire `app_built` onto only that chat's stream so the
+        # "Open app" CTA shows in the right chat (and nowhere else). The
+        # global `app_updated` above stays list-refresh-only. No-op when
+        # the app has no owning chat or that chat isn't streaming. See
+        # routes/notify.publish_app_built_to_owning_chat for the rationale.
+        if app.chat_id:
+          bc = get_broadcast(str(app.chat_id))
+          if bc is not None and bc.running:
+            bc.publish({"type": "app_built", "appId": str(app.id)})
       except Exception:
         # Watcher must keep running across any single-event failure.
         log.exception("auto-recompile unexpected error for %s", path)

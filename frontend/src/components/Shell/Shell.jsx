@@ -252,26 +252,30 @@ export default function Shell() {
       // down running apps for a CSS swap and lose their state.
       loadTheme()
     } else if (ev.type === 'app_updated') {
-      // Refetch the apps list so the affected app's `updated_at`
-      // reflects the server's new state. versionForApp reads from
-      // that field, so the iframe URL automatically picks up the
-      // new cache-buster on the next render — no separate version
-      // counter to keep in sync.
+      // LIST-REFRESH ONLY. Refetch the apps list so the affected app's
+      // `updated_at` reflects the server's new state. versionForApp reads
+      // from that field, so the iframe URL automatically picks up the new
+      // cache-buster on the next render — no separate version counter to
+      // keep in sync. This event reaches every view (it's on the global
+      // SystemBroadcast), so it must NOT plant the "Open app" CTA — that's
+      // the chat-scoped `app_built` event's job (below). Doing the CTA here
+      // is what leaked it into unrelated chats.
+      refreshApps()
+    } else if (ev.type === 'app_built') {
+      // CHAT-SCOPED CTA. The backend publishes `app_built` onto ONLY the
+      // broadcast of the chat that built the app (routes/notify.py), so it
+      // arrives exclusively via that chat's own SSE stream — ChatView
+      // forwards it here through onSystemEvent. Because the event never
+      // touches the global SystemBroadcast or any other chat's stream, the
+      // CTA is naturally scoped to the building chat and cannot leak. Still
+      // refresh the apps list so the name lookup below resolves the fresh
+      // row (app_built and app_updated arrive close together but order
+      // isn't guaranteed).
       if (ev.appId) {
         refreshApps().then(updatedApps => {
-          // Only surface the "Open app" CTA when the user is actually in a
-          // chat. An app_updated fired while viewing a canvas — e.g. installing
-          // from the App Store, which is itself a mini-app, or the watcher
-          // recompiling that install's index.jsx — must NOT plant a CTA that
-          // then shows up in an unrelated (new) chat. The fully robust fix is a
-          // chat-scoped `app_built` event on the chat's own stream (see the
-          // open-app-cta design note); this gate removes the reported case.
-          if (activeViewRef.current !== 'chat') return
           const name = updatedApps.find(a => String(a.id) === String(ev.appId))?.name || null
           setBuiltApp({ id: Number(ev.appId), name })
         })
-      } else {
-        refreshApps()
       }
     } else if (ev.type === 'shell_rebuilt') {
       // Deduplicate against the SSE catch-up burst to avoid reload loops.
@@ -374,9 +378,32 @@ export default function Shell() {
       const target = e.data.target
       if (typeof target !== 'string' || !target) return
       let path = target
+      let search = ''
       try {
-        if (/^https?:\/\//.test(target)) path = new URL(target).pathname
+        if (/^https?:\/\//.test(target)) {
+          const u = new URL(target)
+          path = u.pathname
+          search = u.search
+        } else {
+          const q = target.indexOf('?')
+          if (q !== -1) { path = target.slice(0, q); search = target.slice(q) }
+        }
       } catch { /* keep target as-is */ }
+      // In-scope shell deep-link `/shell/?app=<id>` (cold-start-safe form,
+      // _safeTarget normalizes to this). Parse the query so a warm tap on
+      // the new target lands on the right view, same as the legacy paths.
+      if (/^\/shell\/?$/.test(path)) {
+        let app = null, chat = null
+        try {
+          const params = new URLSearchParams(search)
+          app = params.get('app')
+          chat = params.get('chat')
+        } catch { /* no query */ }
+        if (app) navTo('canvas', { appId: parseInt(app, 10) })
+        else if (chat) navTo('chat', { chatId: chat })
+        return
+      }
+      // Legacy out-of-scope forms, still accepted.
       const appMatch = path.match(/^\/app\/([^/]+)$/)
       const chatMatch = path.match(/^\/chat\/([^/]+)$/)
       if (appMatch) {

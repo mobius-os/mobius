@@ -312,6 +312,120 @@ def test_notify_body_type_validator_rejects_unknown():
     raise AssertionError("Expected ValidationError for bogus event type")
 
 
+# --- Chat-scoped app_built CTA (feature 094) --------------------------
+
+
+@pytest.mark.asyncio
+async def test_notify_app_updated_fires_app_built_on_owning_chat(
+  client, auth, db
+):
+  """POST /api/notify {app_updated, appId} ALSO publishes a chat-scoped
+  `app_built` onto the broadcast of the chat that built the app — and ONLY
+  that chat's broadcast. This is what scopes the "Open app" CTA to the
+  building chat instead of leaking it globally via app_updated."""
+  app = models.App(
+    name="builttoy", description="t", jsx_source="export default () => null",
+    chat_id="builder-chat",
+  )
+  db.add(app)
+  db.commit()
+  db.refresh(app)
+
+  building = bc_mod.create_broadcast("builder-chat")
+  other = bc_mod.create_broadcast("bystander-chat")
+  q_build = building.subscribe()[1]
+  try:
+    r = client.post(
+      "/api/notify",
+      headers=auth,
+      json={"type": "app_updated", "appId": str(app.id)},
+    )
+    assert r.status_code == 204, r.text
+
+    # The building chat sees BOTH the (catch-up) app_updated and the
+    # chat-scoped app_built. Drain until we observe app_built.
+    seen = []
+    for _ in range(4):
+      ev = await asyncio.wait_for(q_build.get(), timeout=1.0)
+      seen.append(ev["type"])
+      if ev["type"] == "app_built":
+        assert ev["appId"] == str(app.id)
+        break
+    assert "app_built" in seen, seen
+    # The bystander chat must NOT have received app_built.
+    assert all(
+      e.get("type") != "app_built" for e in other.event_log
+    ), other.event_log
+  finally:
+    bc_mod.remove_broadcast("builder-chat")
+    bc_mod.remove_broadcast("bystander-chat")
+
+
+@pytest.mark.asyncio
+async def test_notify_app_updated_no_app_built_without_owning_chat(
+  client, auth, db
+):
+  """An app with no chat_id (App Store install, manual create) produces NO
+  app_built — there is no building chat to scope a CTA to. The global
+  app_updated still fires on the SystemBroadcast as before."""
+  app = models.App(
+    name="orphantoy", description="t", jsx_source="export default () => null",
+    chat_id=None,
+  )
+  db.add(app)
+  db.commit()
+  db.refresh(app)
+
+  sb = get_system_broadcast()
+  sq = sb.subscribe()
+  try:
+    r = client.post(
+      "/api/notify",
+      headers=auth,
+      json={"type": "app_updated", "appId": str(app.id)},
+    )
+    assert r.status_code == 204, r.text
+    ev = await asyncio.wait_for(sq.get(), timeout=1.0)
+    assert ev["type"] == "app_updated"
+    assert ev["appId"] == str(app.id)
+  finally:
+    sb.unsubscribe(sq)
+
+
+@pytest.mark.asyncio
+async def test_notify_app_built_only_when_owning_chat_streaming(
+  client, auth, db
+):
+  """If the building chat's turn already ended (no live broadcast), no
+  app_built is emitted — the CTA only makes sense while the chat is the
+  active streaming turn."""
+  app = models.App(
+    name="finishedtoy", description="t",
+    jsx_source="export default () => null",
+    chat_id="finished-chat",
+  )
+  db.add(app)
+  db.commit()
+  db.refresh(app)
+
+  # No broadcast registered for "finished-chat" → the turn ended.
+  sb = get_system_broadcast()
+  sq = sb.subscribe()
+  try:
+    r = client.post(
+      "/api/notify",
+      headers=auth,
+      json={"type": "app_updated", "appId": str(app.id)},
+    )
+    assert r.status_code == 204, r.text
+    # Only the global app_updated lands; nothing raises trying to publish
+    # app_built to a missing broadcast.
+    ev = await asyncio.wait_for(sq.get(), timeout=1.0)
+    assert ev["type"] == "app_updated"
+  finally:
+    sb.unsubscribe(sq)
+
+
 # --- clear_active_broadcast_if: identity-keyed compare-and-clear -------
 
 
