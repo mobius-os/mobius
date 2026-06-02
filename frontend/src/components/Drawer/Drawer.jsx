@@ -316,7 +316,7 @@ export default function Drawer({
                   streaming={streamingSet.has(chat.id)}
                   active={activeView === 'chat' && activeChatId === chat.id}
                   onSelect={() => onChat(chat.id)}
-                  menuOpen={openMenu && openMenu.kind === 'chat' && openMenu.id === chat.id}
+                  menuOpen={!!(openMenu && openMenu.kind === 'chat' && openMenu.id === chat.id)}
                   onMenuToggle={(next) => setOpenMenu(next ? { kind: 'chat', id: chat.id } : null)}
                   renaming={renaming && renaming.kind === 'chat' && renaming.id === chat.id}
                   onRenameStart={() => setRenaming({ kind: 'chat', id: chat.id })}
@@ -359,7 +359,7 @@ export default function Drawer({
                     pinned={!!app.pinned_at}
                     active={activeView === 'canvas' && Number(activeAppId) === Number(app.id)}
                     onSelect={() => onApp(app.id)}
-                    menuOpen={openMenu && openMenu.kind === 'app' && openMenu.id === app.id}
+                    menuOpen={!!(openMenu && openMenu.kind === 'app' && openMenu.id === app.id)}
                     onMenuToggle={(next) => setOpenMenu(next ? { kind: 'app', id: app.id } : null)}
                     renaming={renaming && renaming.kind === 'app' && renaming.id === app.id}
                     onRenameStart={() => setRenaming({ kind: 'app', id: app.id })}
