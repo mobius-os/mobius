@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy.orm import Session
 
 from app import activity, fs_locks, models, schemas
+from app.storage_io import read_capped_body
 from app.broadcast import get_system_broadcast
 from app.compiler import compile_jsx
 from app.config import get_settings
@@ -92,6 +93,37 @@ def _validate_source_dir(source_dir: str, data_dir: str) -> str:
       ),
     )
   return str(resolved)
+
+
+def _reject_if_source_dir_taken(
+  db: Session, source_dir: str, exclude_id: int | None
+) -> None:
+  """Reject (409) if another app already claims this source dir.
+
+  The caller holds ``fs_locks.source_dir_lock(source_dir)``, so the check +
+  the subsequent assignment are atomic against a concurrent create/patch.
+  Two apps sharing one source tree is ambiguous for the file watcher and makes
+  uninstall cleanup conservative (it must refuse to rmtree a shared dir), so
+  forbid the duplicate at assignment time (Codex review round-9 #3). Compared
+  on RESOLVED paths so a symlinked/relative spelling can't smuggle a duplicate.
+  """
+  try:
+    resolved = Path(source_dir).resolve()
+  except (OSError, RuntimeError):
+    return  # a pathological path is rejected by _validate_source_dir already
+  query = db.query(models.App).filter(models.App.source_dir.isnot(None))
+  if exclude_id is not None:
+    query = query.filter(models.App.id != exclude_id)
+  for other in query.all():
+    try:
+      other_resolved = Path(other.source_dir).resolve()
+    except (OSError, RuntimeError):
+      continue
+    if other_resolved == resolved:
+      raise HTTPException(
+        status_code=409,
+        detail="source_dir is already used by another app.",
+      )
 
 
 def _safe_to_rmtree_source(
@@ -281,22 +313,27 @@ async def create_app(
   _: models.Owner = Depends(get_current_owner),
 ):
   """Creates and compiles a new mini-app from JSX source."""
-  # Always set source_dir. The file watcher resolves edits via exact
-  # source_dir match — apps with NULL source_dir are invisible to
-  # auto-recompile and the partner gets the silent "save doesn't
-  # land" failure mode. Derive from the name slug (same convention
-  # register_app.py uses) when the caller didn't provide one.
+  # Always set source_dir. The file watcher resolves edits via exact source_dir
+  # match — apps with NULL source_dir are invisible to auto-recompile and the
+  # partner gets the silent "save doesn't land" failure mode. Derive it from the
+  # UNIQUE slug (not the raw name) so two apps with the SAME name get DISTINCT
+  # source trees (foo, foo-2) instead of silently sharing /data/apps/foo — the
+  # shared-source-dir hazard the uniqueness check below guards (Codex review
+  # round-9 #3). A caller-supplied source_dir is validated as-is.
   data_dir = get_settings().data_dir
+  slug = allocate_unique_slug(db, body.name)
   source_dir = (
     _validate_source_dir(body.source_dir, data_dir)
     if body.source_dir
-    else _derive_source_dir(data_dir, body.name)
+    else str(Path(data_dir) / "apps" / slug)
   )
   # Hold the per-source-dir lock across the row commit so this app's source_dir
   # becomes visible to a concurrent uninstall's shared-dir dedup check before
-  # that uninstall could rmtree the directory (Codex review round-6 #4). One
-  # uvicorn worker => this in-process lock fully serializes the two.
+  # that uninstall could rmtree the directory (Codex review round-6 #4), and so
+  # the uniqueness check + assignment are atomic vs another create. One uvicorn
+  # worker => this in-process lock fully serializes the two.
   async with fs_locks.source_dir_lock(source_dir):
+    _reject_if_source_dir_taken(db, source_dir, exclude_id=None)
     app = models.App(
       name=body.name,
       description=body.description,
@@ -306,7 +343,7 @@ async def create_app(
       cross_app_access=body.cross_app_access,
       share_with_apps=body.share_with_apps,
       offline_capable=body.offline_capable,
-      slug=allocate_unique_slug(db, body.name),
+      slug=slug,
       # manifest_url stays NULL on this route. Only the install endpoint
       # may set it — it's the identity key for install-vs-update
       # discrimination. See AppCreate's docstring for the threat model.
@@ -391,6 +428,7 @@ async def update_app(
   # rmtree the directory (Codex review round-6 #4).
   if new_source_dir is not None:
     async with fs_locks.source_dir_lock(new_source_dir):
+      _reject_if_source_dir_taken(db, new_source_dir, exclude_id=app_id)
       db.commit()
   else:
     db.commit()
@@ -429,13 +467,12 @@ async def update_icon(
       status_code=403,
       detail="App token can only modify its own icon.",
     )
-  body = await request.body()
-  # 12 MB cap on the wire — phone camera photos routinely run 5-8 MB.
-  # The standalone shell downscales client-side before upload, so
-  # well-behaved clients never approach this; the cap is the safety
-  # net for direct-API uploads of giant originals.
-  if len(body) > 12 * 1024 * 1024:
-    raise HTTPException(413, "Icon too large (max 12 MB).")
+  # 12 MB cap on the wire — phone camera photos routinely run 5-8 MB. The
+  # standalone shell downscales client-side before upload, so well-behaved
+  # clients never approach this. Stream-cap the read (Content-Length precheck +
+  # running-total abort) rather than buffering an unbounded body first, so a
+  # giant direct-API upload can't OOM the host (Codex review round-9 #4).
+  body = await read_capped_body(request, cap=12 * 1024 * 1024)
   app = (
     db.query(models.App).filter(models.App.id == app_id).first()
   )

@@ -807,16 +807,37 @@ async def install_from_manifest(
     # which our outer except catches + rolls everything back.
     app.compiled_path = await compile_jsx(app.id, jsx_source)
 
-    # Write source_dir/index.jsx so the file watcher sees the app.
-    # Without this, agent edits to the app's JSX don't recompile.
+    # Write source_dir/index.jsx so the file watcher sees the app. Under the
+    # per-source-dir lock (the endpoint already holds the lifecycle lock, and
+    # the seeds' app_storage_lock below is acquired SEPARATELY, never nested
+    # with this — so no lock-order violation) a concurrent create/patch can't
+    # claim this directory mid-write (Codex review round-9 #3). Written
+    # atomically, and on an UPDATE the prior JSX is snapshotted to a .bak so a
+    # later rollback restores it — otherwise the watcher would compile the
+    # rolled-back (broken) update (round-9 #2).
     source_dir_path = Path(app.source_dir or "")
     if source_dir_path:
-      source_dir_path.mkdir(parents=True, exist_ok=True)
-      jsx_file = source_dir_path / "index.jsx"
-      first_write = not jsx_file.exists()
-      jsx_file.write_text(jsx_source, encoding="utf-8")
-      if first_write:
-        created_paths.append(jsx_file)
+      async with fs_locks.source_dir_lock(str(source_dir_path)):
+        source_dir_path.mkdir(parents=True, exist_ok=True)
+        jsx_file = source_dir_path / "index.jsx"
+        if jsx_file.exists():
+          jsx_backup = jsx_file.with_suffix(".jsx.bak")
+          if jsx_backup.exists():
+            try:
+              jsx_backup.unlink()
+            except OSError:
+              pass
+          shutil.copy2(jsx_file, jsx_backup)
+          rollback_actions.append(
+            lambda b=jsx_backup, o=jsx_file:
+              os.replace(b, o) if b.exists() else None
+          )
+          commit_actions.append(
+            lambda b=jsx_backup: b.unlink() if b.exists() else None
+          )
+        else:
+          created_paths.append(jsx_file)
+        atomic_write(jsx_file, jsx_source)
 
     # Storage seeds — fresh installs always seed; updates only fill in keys
     # that don't exist yet so user data isn't clobbered. Under the per-app lock
@@ -887,27 +908,35 @@ async def install_from_manifest(
     job_name = sched.get("job", "fetch.sh")
     app_data_dir = data_dir / "apps" / slug
     try:
-      app_data_dir.mkdir(parents=True, exist_ok=True)
-      job_path = app_data_dir / job_name
-      if CRON_SCAFFOLD.exists():
-        await asyncio.to_thread(
-          _register_cron,
-          slug, sched["default"], job_path, bundled_job, app.id,
-        )
-      else:
-        # In tests we mock the scaffold; persist a sentinel so the
-        # contract is still observable + warn the caller.
-        if bundled_job:
-          job_path.write_bytes(bundled_job)
-          job_path.chmod(0o755)
-        sentinel = app_data_dir / ".cron-pending.json"
-        sentinel.write_text(json.dumps({
-          "expr": sched["default"], "job": job_name,
-          "status": "pending — init-cron-scaffold.sh not on PATH",
-        }), encoding="utf-8")
-        warnings.append(
-          "cron: scaffold script not available — registration pending"
-        )
+      # Under the per-source-dir lock so the job-file writes serialize vs a
+      # concurrent create/patch claiming this directory, and recheck the app
+      # row still exists first (the endpoint's lifecycle lock already excludes a
+      # concurrent uninstall, but the recheck makes the cron never write for a
+      # vanished row) — Codex review round-9 #3.
+      async with fs_locks.source_dir_lock(str(app_data_dir)):
+        if not db.query(models.App.id).filter(models.App.id == app.id).first():
+          raise HTTPException(404, "App removed before cron registration.")
+        app_data_dir.mkdir(parents=True, exist_ok=True)
+        job_path = app_data_dir / job_name
+        if CRON_SCAFFOLD.exists():
+          await asyncio.to_thread(
+            _register_cron,
+            slug, sched["default"], job_path, bundled_job, app.id,
+          )
+        else:
+          # In tests we mock the scaffold; persist a sentinel so the
+          # contract is still observable + warn the caller.
+          if bundled_job:
+            job_path.write_bytes(bundled_job)
+            job_path.chmod(0o755)
+          sentinel = app_data_dir / ".cron-pending.json"
+          sentinel.write_text(json.dumps({
+            "expr": sched["default"], "job": job_name,
+            "status": "pending — init-cron-scaffold.sh not on PATH",
+          }), encoding="utf-8")
+          warnings.append(
+            "cron: scaffold script not available — registration pending"
+          )
     except HTTPException as exc:
       # Cron failed but the app is installed. Surface as a warning.
       log.warning("install: cron registration failed post-commit — %s",

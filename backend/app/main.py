@@ -11,7 +11,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -234,6 +234,30 @@ app = FastAPI(
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Global request-body backstop. Endpoints that read raw bodies stream-cap
+# themselves (storage PUT 50 MB, icon 12 MB via storage_io.read_capped_body),
+# but FastAPI buffers the WHOLE body for Pydantic-parsed endpoints (e.g. a
+# create with a huge jsx_source) before validation — an unbounded body there
+# could OOM the memory-tight host (Codex review round-9 #4). Reject up front on
+# a declared Content-Length over the cap. The cap sits ABOVE every legitimate
+# route limit (storage 50 MB, uploads 20 MB) so it only ever stops abuse.
+_MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024
+
+
+@app.middleware("http")
+async def _cap_request_body(request, call_next):
+  cl = request.headers.get("content-length")
+  if cl is not None:
+    try:
+      too_big = int(cl) > _MAX_REQUEST_BODY_BYTES
+    except ValueError:
+      too_big = False
+    if too_big:
+      return JSONResponse(
+        {"detail": "Request body too large."}, status_code=413
+      )
+  return await call_next(request)
 
 app.add_middleware(
   CORSMiddleware,

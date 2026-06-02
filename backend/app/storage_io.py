@@ -10,6 +10,8 @@ import os
 import tempfile
 from pathlib import Path
 
+from fastapi import HTTPException, Request
+
 # Hard cap on a single storage object — enforced on BOTH the PUT request body
 # and the file served back. Möbius runs on a memory-tight host (recurring OOM),
 # so an app writing or reading an unbounded blob would threaten the whole
@@ -51,3 +53,31 @@ def atomic_write(file_path: Path, content: str | bytes) -> None:
     except OSError:
       pass
     raise
+
+
+async def read_capped_body(request: Request, cap: int = MAX_STORAGE_BYTES) -> bytes:
+  """Reads a request body, refusing once it crosses `cap` bytes.
+
+  A declared Content-Length over the cap is rejected before a byte is read;
+  then the body is streamed chunk-by-chunk and aborted the instant the running
+  total exceeds the cap. So a runaway (or lying-Content-Length) upload can't
+  buffer an unbounded body into memory and OOM the tight host (Codex review
+  round-8 #3, round-9 #4). Shared by the storage PUT and the icon upload — any
+  route that reads a raw body should use this instead of `request.body()`.
+  """
+  cl = request.headers.get("content-length")
+  if cl is not None:
+    try:
+      declared = int(cl)
+    except ValueError:
+      declared = None
+    if declared is not None and declared > cap:
+      raise HTTPException(status_code=413, detail="Request body too large.")
+  chunks: list[bytes] = []
+  total = 0
+  async for chunk in request.stream():
+    total += len(chunk)
+    if total > cap:
+      raise HTTPException(status_code=413, detail="Request body too large.")
+    chunks.append(chunk)
+  return b"".join(chunks)
