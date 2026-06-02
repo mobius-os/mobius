@@ -212,9 +212,16 @@ def get_skill_path() -> Path | None:
   local development. Returns None if neither exists (callers handle
   skill-less startup gracefully).
   """
+  # Prefer the split CONSTITUTION (core.md) once it exists; fall back to the
+  # monolithic agent-skill.md so nothing breaks mid-migration. The detailed
+  # how-to skills the core points to live agent-editable under
+  # /data/shared/skills/ (seeded by init_skills.py).
+  repo = Path(__file__).parent.parent.parent / "skill"
   candidates = [
+    Path("/app/skill/core.md"),
     Path("/app/skill/agent-skill.md"),
-    Path(__file__).parent.parent.parent / "skill" / "agent-skill.md",
+    repo / "core.md",
+    repo / "agent-skill.md",
   ]
   return next((p for p in candidates if p.exists()), None)
 

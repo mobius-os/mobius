@@ -63,18 +63,18 @@ except Exception: print("")'
 }
 
 # --- memory-graph -----------------------------------------------------
-mg_id="$(echo "$apps_json" | has_app memory-graph)"
+mg_id="$(echo "$apps_json" | has_app mind)"
 if [[ -z "$mg_id" ]]; then
-  mg_id="$(register memory-graph "Memory Graph" "Visualize what Möbius knows about you — an Obsidian-style graph of its memory.")"
-  log "registered memory-graph (id=$mg_id)"
+  mg_id="$(register mind "Mind" "What Möbius knows about you — an Obsidian-style graph of its memory it grows over time.")"
+  log "registered mind (id=$mg_id)"
 else
-  log "memory-graph already installed (id=$mg_id)"
+  log "mind already installed (id=$mg_id)"
 fi
 # Set the app icon (kg-t1: glossy infinity-as-graph, the owner's pick). Raw PNG
 # bytes; the route downscales + stores. Idempotent — fine to re-PUT each boot.
-if [[ -n "$mg_id" && -f "$CORE_SRC/memory-graph/icon.png" ]]; then
-  curl -s -X PUT -H "Authorization: Bearer $TOKEN" --data-binary @"$CORE_SRC/memory-graph/icon.png" \
-    "$API_BASE_URL/api/apps/$mg_id/icon" -o /dev/null -w 'memory-graph icon: HTTP %{http_code}\n' >>"$LOG" 2>&1 || true
+if [[ -n "$mg_id" && -f "$CORE_SRC/mind/icon.png" ]]; then
+  curl -s -X PUT -H "Authorization: Bearer $TOKEN" --data-binary @"$CORE_SRC/mind/icon.png" \
+    "$API_BASE_URL/api/apps/$mg_id/icon" -o /dev/null -w 'mind icon: HTTP %{http_code}\n' >>"$LOG" 2>&1 || true
 fi
 
 # --- dreaming ---------------------------------------------------------
@@ -90,8 +90,13 @@ fi
 if [[ -n "$dr_id" ]]; then
   mkdir -p "$DATA_DIR/apps/dreaming"
   cp "$CORE_SRC/dreaming/fetch.sh" "$DATA_DIR/apps/dreaming/fetch.sh"
-  cp "$CORE_SRC/dreaming/prompt.md" "$DATA_DIR/apps/dreaming/prompt.md"
-  chmod +x "$DATA_DIR/apps/dreaming/fetch.sh"
+  cp "$CORE_SRC/dreaming/prompt.md" "$DATA_DIR/apps/dreaming/prompt.md" 2>/dev/null || true
+  # Introspection helpers the Dreaming agent calls to fork + interview chats
+  # and app subagent runs (the heart of the nightly loop).
+  cp /app/scripts/fork-chat.sh "$DATA_DIR/apps/dreaming/fork-chat.sh" 2>/dev/null || true
+  cp /app/scripts/fork-session.sh "$DATA_DIR/apps/dreaming/fork-session.sh" 2>/dev/null || true
+  chmod +x "$DATA_DIR/apps/dreaming/fetch.sh" \
+    "$DATA_DIR/apps/dreaming/fork-chat.sh" "$DATA_DIR/apps/dreaming/fork-session.sh" 2>/dev/null || true
   # offline_capable: the report viewer just reads cached HTML.
   curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
     -d '{"offline_capable": true}' "$API_BASE_URL/api/apps/$dr_id" >>"$LOG" 2>&1 || true

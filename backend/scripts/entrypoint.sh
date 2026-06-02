@@ -245,6 +245,12 @@ python3 /app/scripts/init_agent_context.py
 # sentinel LAST; until then memory injection uses the legacy flat-file path.
 python3 /app/scripts/init_memory_graph.py
 
+# Bootstrap the agent-editable skills layer (/data/shared/skills/). CREATE-IF-
+# ABSENT like the graph — the agent (and the nightly Dreaming agent) improve
+# these skills, so a reseed must not clobber their edits. The system prompt
+# (skill/core.md) points at these.
+python3 /app/scripts/init_skills.py
+
 # Theme: no starter file written here. /api/theme reads
 # /data/shared/theme.css when present, otherwise falls through to
 # theme.py:DEFAULT_THEME — the single source of truth for the

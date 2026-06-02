@@ -5,22 +5,18 @@ tags: [apps]
 ---
 # Building Möbius apps
 
-Hard-won contracts for building mini-apps. Each note below prevented a real
-bug or a wasted tool-call loop. Read the relevant one before building.
+A map for what you learn building mini-apps **for this user, on this instance**
+— a recurring app idea they keep coming back to, a constraint specific to their
+data, a bug you hit and root-caused here.
 
-## Storage
+**Reusable app-building technique does NOT live here.** The general contracts
+(storage with `window.mobius`, no native dialogs, theme-aware CSS, the `'three'`
+bare specifier, register-on-create, offline-capable semantics) are now **skills**
+under `/data/shared/skills/` — that's where procedure that helps *any* instance
+belongs. Improve a skill when you learn a technique; add a note here only when
+the fact is specific to *this* partner or *this* deployment.
 
-- [[window-mobius-storage-is-default]] — the default persistence layer.
-- [[storage-json-no-envelope]] — the `.json` envelope trap (silent data loss).
-- [[storage-enumerate-dont-probe]] — list children; never brute-force filenames.
+## Notes
 
-## UI & rendering
-
-- [[theme-aware-css-vars]] — use `var(--…)`, never hardcode colors.
-- [[mini-apps-no-native-dialogs]] — no `confirm/alert/prompt`; build in-app modals.
-- [[three-bare-specifier]] — import `'three'`, never a versioned vendor URL.
-
-## Lifecycle
-
-- [[register-app-only-on-create]] — re-running `register_app.py` makes duplicates.
-- [[offline-capable-is-for-code-not-data]] — what the flag actually does.
+*(none recorded yet — add a note when you learn something app-related that's
+specific to this user/instance, not a general technique)*

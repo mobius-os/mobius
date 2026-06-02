@@ -1,0 +1,566 @@
+<!doctype html>
+<!--
+  Möbius — Dreaming morning-brief template.
+
+  This is the page the nightly Dreaming agent fills and the Dreaming app renders.
+  It is INTENTIONALLY self-contained and offline-safe: a single inline <style>,
+  ZERO external URLs (no fonts, no CDN, no images-by-URL), a system-font stack,
+  design-token CSS variables, a real type scale, prefers-color-scheme dark+light,
+  and @media print. No JavaScript — this page renders inside a sandboxed iframe
+  with no script, so it must NOT host the morning chat or any interactive card.
+
+  The chat lives BELOW this brief: the Dreaming app renders this static page, then
+  mounts the morning-chat thread underneath it. Keep this page a clean READ; the
+  chat is the action surface (the AskUserQuestion cards live there).
+
+  HOW TO FILL: replace every {{TOKEN}} and the <!-- repeatable --> blocks. Every
+  item in "What needs your input" and most items elsewhere carry the anti-noise
+  triad — trigger / why / next-action — via the .meta rows. Delete sections or
+  items that are empty for a given night rather than shipping a hollow heading.
+  Keep the exec-summary to the 3-5 things that matter; push detail into §5.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Morning brief — {{DATE}}</title>
+<style>
+  /* ----------------------------------------------------------------------
+     Design tokens. Light is the base; dark overrides under the media query.
+     Möbius mini-apps theme off these same var names, so the brief sits
+     comfortably next to the rest of the platform.
+     ---------------------------------------------------------------------- */
+  :root {
+    color-scheme: light dark;
+
+    /* Type — system stack only, no web fonts (offline-safe). */
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+            Arial, "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Code",
+            "Roboto Mono", Menlo, Consolas, monospace;
+
+    /* Modular type scale (1.20 minor-third), rem-based. */
+    --step--1: 0.833rem;
+    --step-0:  1rem;
+    --step-1:  1.20rem;
+    --step-2:  1.44rem;
+    --step-3:  1.728rem;
+    --step-4:  2.074rem;
+
+    /* Spacing scale. */
+    --sp-1: 0.25rem;
+    --sp-2: 0.5rem;
+    --sp-3: 0.75rem;
+    --sp-4: 1rem;
+    --sp-5: 1.5rem;
+    --sp-6: 2rem;
+    --sp-7: 3rem;
+
+    --radius:   14px;
+    --radius-sm: 9px;
+    --maxw:     46rem;
+
+    /* Light palette. */
+    --bg:       #f6f5f3;
+    --bg-2:     #efedea;
+    --surface:  #ffffff;
+    --surface-2:#faf9f7;
+    --text:     #1c1b19;
+    --muted:    #6b6862;
+    --faint:    #94908a;
+    --border:   #e4e1dc;
+    --border-2: #d6d2cc;
+
+    /* Committed accent — a deep aurora indigo→violet, the Dreaming hue. */
+    --accent:        #6d5ef0;
+    --accent-press:  #5a4cd6;
+    --accent-tint:   #ece9fd;
+    --accent-on:     #ffffff;
+
+    /* Status hues, tuned for legibility on light surfaces. */
+    --green:   #2f9e6f;
+    --green-tint:#e3f5ec;
+    --amber:   #c08a2a;
+    --amber-tint:#fbf0d8;
+    --danger:  #d4504a;
+    --danger-tint:#fbe6e4;
+
+    --shadow:  0 1px 2px rgba(28,27,25,.05), 0 6px 20px rgba(28,27,25,.06);
+    --ring:    0 0 0 3px var(--accent-tint);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:       #15161a;
+      --bg-2:     #1b1d22;
+      --surface:  #1f2127;
+      --surface-2:#24262d;
+      --text:     #ecebe8;
+      --muted:    #a6a39c;
+      --faint:    #74716b;
+      --border:   #2c2f37;
+      --border-2: #383b44;
+
+      --accent:        #8b7dff;
+      --accent-press:  #a194ff;
+      --accent-tint:   #262450;
+      --accent-on:     #14131f;
+
+      --green:   #4cc794;
+      --green-tint:#16302a;
+      --amber:   #e0b057;
+      --amber-tint:#332a16;
+      --danger:  #f0766f;
+      --danger-tint:#361f1e;
+
+      --shadow:  0 1px 2px rgba(0,0,0,.4), 0 8px 28px rgba(0,0,0,.45);
+    }
+  }
+
+  /* ----------------------------------------------------------------------
+     Base
+     ---------------------------------------------------------------------- */
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    font-family: var(--font);
+    font-size: var(--step-0);
+    line-height: 1.6;
+    color: var(--text);
+    background:
+      radial-gradient(120% 60% at 100% 0%, var(--accent-tint) 0%, transparent 55%),
+      var(--bg);
+    background-attachment: fixed;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  .wrap {
+    max-width: var(--maxw);
+    margin: 0 auto;
+    padding: clamp(var(--sp-4), 4vw, var(--sp-7)) var(--sp-4) var(--sp-7);
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  a:focus-visible { outline: none; border-radius: 4px; box-shadow: var(--ring); }
+  code, kbd { font-family: var(--mono); font-size: 0.9em; }
+  hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-6) 0; }
+
+  /* ----------------------------------------------------------------------
+     Masthead
+     ---------------------------------------------------------------------- */
+  .masthead {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--sp-3);
+    flex-wrap: wrap;
+    padding-bottom: var(--sp-4);
+    margin-bottom: var(--sp-5);
+    border-bottom: 1px solid var(--border);
+  }
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-2);
+    font-size: var(--step--1);
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  /* Inline SVG mark — a möbius loop, no external asset. */
+  .mark { width: 18px; height: 18px; display: block; color: var(--accent); }
+  .masthead h1 {
+    width: 100%;
+    margin: var(--sp-3) 0 var(--sp-1);
+    font-size: var(--step-4);
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+    font-weight: 680;
+  }
+  .dateline { font-size: var(--step--1); color: var(--faint); }
+
+  /* ----------------------------------------------------------------------
+     Sections
+     ---------------------------------------------------------------------- */
+  section { margin: var(--sp-6) 0; }
+  .sec-head {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    margin-bottom: var(--sp-4);
+  }
+  .sec-num {
+    flex: none;
+    width: 1.6em; height: 1.6em;
+    display: grid; place-items: center;
+    font-size: var(--step--1);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--accent);
+    background: var(--accent-tint);
+    border-radius: 50%;
+  }
+  .sec-head h2 {
+    margin: 0;
+    font-size: var(--step-2);
+    letter-spacing: -0.01em;
+    font-weight: 640;
+  }
+  .sec-sub {
+    margin: calc(-1 * var(--sp-2)) 0 var(--sp-4);
+    color: var(--muted);
+    font-size: var(--step--1);
+  }
+
+  /* ----------------------------------------------------------------------
+     Exec summary — the lede card
+     ---------------------------------------------------------------------- */
+  .lede {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: var(--sp-5);
+  }
+  .lede .headline {
+    margin: 0 0 var(--sp-3);
+    font-size: var(--step-1);
+    line-height: 1.4;
+  }
+  .keypoints { list-style: none; margin: var(--sp-3) 0 0; padding: 0; }
+  .keypoints li {
+    position: relative;
+    padding: var(--sp-2) 0 var(--sp-2) var(--sp-5);
+    border-top: 1px solid var(--border);
+  }
+  .keypoints li:first-child { border-top: none; }
+  .keypoints li::before {
+    content: "";
+    position: absolute;
+    left: var(--sp-1); top: 1.15em;
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+
+  /* ----------------------------------------------------------------------
+     Item lists (used in §2–§5)
+     ---------------------------------------------------------------------- */
+  .items { display: grid; gap: var(--sp-4); }
+  .item {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--sp-4) var(--sp-5);
+  }
+  .item > h3 {
+    margin: 0 0 var(--sp-2);
+    font-size: var(--step-0);
+    font-weight: 620;
+    display: flex; align-items: center; gap: var(--sp-3);
+  }
+  .item p { margin: var(--sp-2) 0; color: var(--text); }
+  .item p.lead { margin-top: 0; }
+
+  /* The anti-noise triad — trigger / why / next-action. */
+  .meta { display: grid; gap: var(--sp-1); margin: var(--sp-3) 0 0; padding: 0; }
+  .meta > div {
+    display: grid;
+    grid-template-columns: 5.5rem 1fr;
+    gap: var(--sp-3);
+    align-items: baseline;
+    font-size: var(--step--1);
+  }
+  .meta dt, .meta .k {
+    color: var(--faint);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding-top: 0.15em;
+  }
+  .meta .v { color: var(--text); }
+  .meta .v.action { color: var(--accent); font-weight: 560; }
+
+  /* ----------------------------------------------------------------------
+     Badges + chips
+     ---------------------------------------------------------------------- */
+  .badge {
+    flex: none;
+    font-size: 0.7rem;
+    font-weight: 650;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 0.18em 0.6em;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    white-space: nowrap;
+  }
+  .badge.done   { color: var(--green);  background: var(--green-tint);  }
+  .badge.fixed  { color: var(--green);  background: var(--green-tint);  }
+  .badge.learn  { color: var(--accent); background: var(--accent-tint); }
+  .badge.hold   { color: var(--amber);  background: var(--amber-tint);  }
+  .badge.review { color: var(--amber);  background: var(--amber-tint);  }
+  .badge.risk   { color: var(--danger); background: var(--danger-tint); }
+  .badge.rank   { color: var(--muted);  background: var(--bg-2);
+                  font-variant-numeric: tabular-nums; }
+
+  /* Decision items in §4 carry a left accent rail + tint. */
+  .decision {
+    border-left: 3px solid var(--accent);
+    background:
+      linear-gradient(90deg, var(--accent-tint) 0%, transparent 22%),
+      var(--surface);
+  }
+  .decision.urgent {
+    border-left-color: var(--danger);
+    background:
+      linear-gradient(90deg, var(--danger-tint) 0%, transparent 22%),
+      var(--surface);
+  }
+  .answer-hint {
+    margin-top: var(--sp-3);
+    font-size: var(--step--1);
+    color: var(--muted);
+    display: flex; align-items: center; gap: var(--sp-2);
+  }
+  .answer-hint .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--accent); flex: none;
+  }
+
+  /* ----------------------------------------------------------------------
+     Details (§5) — compact, scannable
+     ---------------------------------------------------------------------- */
+  .detail-group { margin-top: var(--sp-4); }
+  .detail-group > h3 {
+    font-size: var(--step--1);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin: 0 0 var(--sp-2);
+  }
+  .ledger {
+    list-style: none; margin: 0; padding: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    background: var(--surface);
+  }
+  .ledger li {
+    display: flex; gap: var(--sp-3);
+    padding: var(--sp-3) var(--sp-4);
+    border-top: 1px solid var(--border);
+    font-size: var(--step--1);
+  }
+  .ledger li:first-child { border-top: none; }
+  .ledger .label { color: var(--text); flex: 1; }
+  .ledger .val   { color: var(--muted); font-variant-numeric: tabular-nums;
+                   font-family: var(--mono); }
+
+  .commits {
+    margin: var(--sp-3) 0 0;
+    padding: var(--sp-3) var(--sp-4);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    color: var(--muted);
+    overflow-x: auto;
+    white-space: pre;
+  }
+
+  .empty {
+    color: var(--faint);
+    font-style: italic;
+    font-size: var(--step--1);
+  }
+
+  /* ----------------------------------------------------------------------
+     Foot — hand-off to the chat (which the app mounts below this page)
+     ---------------------------------------------------------------------- */
+  .handoff {
+    margin-top: var(--sp-7);
+    padding: var(--sp-5);
+    text-align: center;
+    border: 1px dashed var(--border-2);
+    border-radius: var(--radius);
+    background: var(--surface-2);
+    color: var(--muted);
+  }
+  .handoff strong { color: var(--text); }
+  .arrow { display: block; margin: var(--sp-2) auto 0; color: var(--accent); }
+
+  footer {
+    margin-top: var(--sp-6);
+    padding-top: var(--sp-4);
+    border-top: 1px solid var(--border);
+    color: var(--faint);
+    font-size: var(--step--1);
+    display: flex; justify-content: space-between; gap: var(--sp-3);
+    flex-wrap: wrap;
+  }
+
+  /* ----------------------------------------------------------------------
+     Print — flatten chrome, drop the chat-handoff, keep it legible on paper
+     ---------------------------------------------------------------------- */
+  @media print {
+    :root {
+      --bg: #fff; --surface: #fff; --surface-2: #fff;
+      --text: #000; --muted: #333; --faint: #555;
+      --border: #ccc; --shadow: none;
+    }
+    body { background: #fff; }
+    .wrap { max-width: none; padding: 0; }
+    .lede, .item, .ledger, .commits { box-shadow: none; }
+    section { break-inside: avoid; }
+    .item, .lede { break-inside: avoid; }
+    .handoff { display: none; }
+    a { color: #000; text-decoration: underline; }
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    a, .item { transition: color .15s ease, border-color .15s ease; }
+  }
+</style>
+</head>
+<body>
+<main class="wrap">
+
+  <!-- ===================== Masthead ===================== -->
+  <header class="masthead">
+    <span class="brand">
+      <svg class="mark" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M4 12c0-3.2 3-5 6.2-3.4C13 10 11 14 13.8 15.4 17 17 20 15.2 20 12s-3-5-6.2-3.4C11 10 13 14 10.2 15.4 7 17 4 15.2 4 12Z"
+              stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+      Möbius · Dreaming
+    </span>
+    <span class="dateline">{{DATE_LONG}} · while you slept</span>
+    <h1>{{TITLE}}</h1>
+  </header>
+
+  <!-- ===================== §1 Exec summary ===================== -->
+  <section id="summary" aria-labelledby="summary-h">
+    <div class="lede">
+      <p class="headline" id="summary-h">{{SUMMARY_HEADLINE}}</p>
+      <ul class="keypoints">
+        <!-- repeatable: 3-5 things that actually matter tonight -->
+        <li>{{KEYPOINT_1}}</li>
+        <li>{{KEYPOINT_2}}</li>
+        <li>{{KEYPOINT_3}}</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ===================== §2 What I did ===================== -->
+  <section id="did" aria-labelledby="did-h">
+    <div class="sec-head"><span class="sec-num">2</span><h2 id="did-h">What I did</h2></div>
+    <p class="sec-sub">Changes already applied — conservative, reversible, each committed.</p>
+    <div class="items">
+      <!-- repeatable .item; badge: done | fixed -->
+      <div class="item">
+        <h3><span class="badge fixed">Fixed</span> {{DID_TITLE_1}}</h3>
+        <p class="lead">{{DID_DESC_1}}</p>
+        <dl class="meta">
+          <div><dt>Trigger</dt><span class="v">{{DID_TRIGGER_1}}</span></div>
+          <div><dt>Why</dt><span class="v">{{DID_WHY_1}}</span></div>
+          <div><dt>Done</dt><span class="v action">{{DID_RESULT_1}}</span></div>
+        </dl>
+      </div>
+      <!-- /repeatable -->
+    </div>
+  </section>
+
+  <!-- ===================== §3 What I learned ===================== -->
+  <section id="learned" aria-labelledby="learned-h">
+    <div class="sec-head"><span class="sec-num">3</span><h2 id="learned-h">What I learned</h2></div>
+    <p class="sec-sub">From interviewing the agents that worked, from your usage, and from a little research on what you follow.</p>
+    <div class="items">
+      <!-- repeatable .item; badge: learn -->
+      <div class="item">
+        <h3><span class="badge learn">Learned</span> {{LEARN_TITLE_1}}</h3>
+        <p class="lead">{{LEARN_DESC_1}}</p>
+        <dl class="meta">
+          <div><dt>Trigger</dt><span class="v">{{LEARN_TRIGGER_1}}</span></div>
+          <div><dt>Why</dt><span class="v">{{LEARN_WHY_1}}</span></div>
+          <div><dt>Next</dt><span class="v action">{{LEARN_NEXT_1}}</span></div>
+        </dl>
+      </div>
+      <!-- /repeatable. Use this section too for research findings, one .item
+           each, tied to a known interest. Delete if nothing cleared the bar. -->
+    </div>
+  </section>
+
+  <!-- ===================== §4 What needs your input ===================== -->
+  <section id="input" aria-labelledby="input-h">
+    <div class="sec-head"><span class="sec-num">4</span><h2 id="input-h">What needs your input</h2></div>
+    <p class="sec-sub">Decisions I didn’t make for you. Answer these as cards in the chat below — one tap each.</p>
+    <div class="items">
+      <!-- repeatable .item.decision; add .urgent for a security/data call.
+           badge: review | risk | hold | rank.  Every one carries the triad. -->
+      <div class="item decision">
+        <h3><span class="badge review">Decide</span> {{INPUT_TITLE_1}}</h3>
+        <p class="lead">{{INPUT_DESC_1}}</p>
+        <dl class="meta">
+          <div><dt>Trigger</dt><span class="v">{{INPUT_TRIGGER_1}}</span></div>
+          <div><dt>Why</dt><span class="v">{{INPUT_WHY_1}}</span></div>
+          <div><dt>Options</dt><span class="v action">{{INPUT_OPTIONS_1}}</span></div>
+        </dl>
+        <p class="answer-hint"><span class="dot"></span>Answer in the morning chat below — it’s waiting as a tappable card.</p>
+      </div>
+      <!-- /repeatable -->
+    </div>
+  </section>
+
+  <!-- ===================== §5 Details ===================== -->
+  <section id="details" aria-labelledby="details-h">
+    <div class="sec-head"><span class="sec-num">5</span><h2 id="details-h">Details</h2></div>
+    <p class="sec-sub">The receipts — for when you want them. Safe to skip.</p>
+
+    <div class="detail-group">
+      <h3>Run ledger</h3>
+      <ul class="ledger">
+        <!-- repeatable -->
+        <li><span class="label">{{LEDGER_LABEL_1}}</span><span class="val">{{LEDGER_VAL_1}}</span></li>
+        <li><span class="label">Chats &amp; subagent runs interviewed</span><span class="val">{{N_INTERVIEWED}}</span></li>
+        <li><span class="label">Skills improved</span><span class="val">{{N_SKILLS}}</span></li>
+        <li><span class="label">Mind: notes merged / pruned / added</span><span class="val">{{N_MIND}}</span></li>
+        <li><span class="label">App fixes applied</span><span class="val">{{N_APPFIX}}</span></li>
+        <li><span class="label">Security findings (surfaced)</span><span class="val">{{N_SEC}}</span></li>
+        <!-- /repeatable -->
+      </ul>
+    </div>
+
+    <div class="detail-group">
+      <h3>Commits</h3>
+      <pre class="commits">{{COMMIT_LOG}}</pre>
+    </div>
+
+    <div class="detail-group">
+      <h3>Skipped / deferred</h3>
+      <p class="empty">{{SKIPPED_NOTE}}</p>
+    </div>
+  </section>
+
+  <!-- ===================== Hand-off to chat ===================== -->
+  <div class="handoff">
+    <strong>The conversation continues below.</strong><br>
+    Your answers there steer tonight’s dream — pick the features, approve or hold the fixes.
+    <svg class="arrow" width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M12 5v14M6 13l6 6 6-6" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  </div>
+
+  <footer>
+    <span>Möbius · Dreaming run {{RUN_ID}}</span>
+    <span>{{DATE}}</span>
+  </footer>
+
+</main>
+</body>
+</html>

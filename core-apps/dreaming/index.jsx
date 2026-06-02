@@ -1,4 +1,29 @@
-/* Dreaming — the nightly morning-brief viewer. Lists dated reports the dreaming agent leaves overnight, opens each as a sandboxed iframe, tracks a streak, and lets the owner pick the run hour + verbosity. */
+/* Dreaming — the nightly morning-brief viewer.
+ *
+ * Lists the dated reports the dreaming agent leaves overnight, tracks a
+ * streak, and lets the owner set the run hour + verbosity. Opening a brief
+ * shows TWO things stacked: the brief HTML up top (a sandboxed, script-free
+ * iframe — the agent's static page) and, beneath it, the MORNING CHAT the
+ * nightly run opened — the conversation about that brief, live, with a real
+ * composer and tappable AskUserQuestion cards. The brief is the read; the
+ * chat is where the partner steers the next night.
+ *
+ * Data contract (unchanged, load-bearing):
+ *  - List reports:  GET /api/storage/apps-list/{appId}/reports/   (cursor-paged)
+ *  - Read a brief:  GET /api/storage/apps/{appId}/reports/<date>.html  (TEXT)
+ *  - settings.json / state.json: JSON via the same storage base.
+ *  - Reports render in a SANDBOXED srcDoc iframe with NO allow-scripts.
+ *
+ * Brief↔chat link: the cron creates the morning chat (`POST /api/chats`,
+ * title "Morning brief — <date>") and SHOULD write a sibling
+ * `reports/<date>.meta.json` = { "chat_id": "<id>" } so the date maps to a
+ * chat without guessing. The app reads that meta with its app token; when a
+ * chat_id resolves it mounts the real ChatView via `window.mobius.chat({
+ * mount, chatId })` (the embed runs in the shell origin with the owner JWT —
+ * the only path that can read/post an owner-created chat; the app token alone
+ * is 403'd on /api/chats). No chat_id (or no `window.mobius.chat`) → the
+ * brief stands alone, gracefully.
+ */
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 
 // ---------------------------------------------------------------------------
@@ -44,6 +69,14 @@ function buildCron(hour) {
 // "0 6 * * *" -> "06:00" for the <input type="time"> value.
 function hourToTimeValue(hour) {
   return `${String(hour).padStart(2, '0')}:00`
+}
+
+// A friendly clock label for the schedule summary — "6:00 AM" in the
+// user's locale, so the settings header reads as plain language.
+function hourClockLabel(hour) {
+  const d = new Date()
+  d.setHours(hour, 0, 0, 0)
+  return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
 }
 
 // ---------------------------------------------------------------------------
@@ -92,185 +125,354 @@ function subLabel(dateStr) {
   return d.toLocaleDateString(undefined, { year: 'numeric' })
 }
 
+// Weekday initial for the card's date glyph — a small calendar-ish tile that
+// gives the list a visual rhythm without a heavy date component.
+function weekdayInitial(dateStr) {
+  const d = new Date(dateStr + 'T12:00:00')
+  if (Number.isNaN(d.getTime())) return '·'
+  return d.toLocaleDateString(undefined, { weekday: 'short' }).slice(0, 1)
+}
+
+function dayOfMonth(dateStr) {
+  const d = new Date(dateStr + 'T12:00:00')
+  if (Number.isNaN(d.getTime())) return ''
+  return String(d.getDate())
+}
+
 // ---------------------------------------------------------------------------
-// Styles. All structural colors are CSS variables so light + dark both work;
-// the app-specific accent (the dream-purple) is the one committed hardcode.
+// Theme + motion. Structural colors are CSS variables so light + dark both
+// work; the dream-violet accent is the one committed hardcode. A handful of
+// keyframes (drift, shimmer, rise) are injected once so loading + entrance
+// states feel alive rather than static.
 // ---------------------------------------------------------------------------
 
-const ACCENT = '#7c6cf0'        // dreaming's own violet, used for moon/flame glyphs
-const ACCENT_DIM = 'rgba(124,108,240,0.14)'
+const ACCENT = '#7c6cf0'        // dreaming's own violet
+const ACCENT_2 = '#a78bfa'      // lighter companion for gradients/glows
+const ACCENT_DIM = 'rgba(124,108,240,0.13)'
+const ACCENT_DIM_2 = 'rgba(167,139,250,0.10)'
+
+const KEYFRAMES = `
+@keyframes dreaming-drift {
+  0%   { transform: translateY(0) rotate(0deg); opacity: .85; }
+  50%  { transform: translateY(-6px) rotate(4deg); opacity: 1; }
+  100% { transform: translateY(0) rotate(0deg); opacity: .85; }
+}
+@keyframes dreaming-shimmer {
+  0%   { background-position: -180% 0; }
+  100% { background-position: 180% 0; }
+}
+@keyframes dreaming-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes dreaming-pulse {
+  0%, 100% { opacity: .55; }
+  50%      { opacity: 1; }
+}
+@keyframes dreaming-spin {
+  to { transform: rotate(360deg); }
+}
+`
+
+// Inject the keyframes + a couple of structural rules once. CSS-in-JS can't
+// express @keyframes or :hover/:focus inline, so a single scoped <style> tag
+// carries them. Idempotent — keyed by id so a remount doesn't duplicate it.
+function useDreamingStyles() {
+  useEffect(() => {
+    const id = 'dreaming-keyframes'
+    if (document.getElementById(id)) return
+    const el = document.createElement('style')
+    el.id = id
+    el.textContent = KEYFRAMES + `
+      .dreaming-card { transition: border-color .16s ease, transform .12s ease, box-shadow .16s ease, background .16s ease; }
+      .dreaming-card:hover { border-color: ${ACCENT}; box-shadow: 0 6px 22px -12px ${ACCENT}; }
+      .dreaming-card:active { transform: scale(.992); }
+      .dreaming-card:focus-visible { outline: 2px solid ${ACCENT}; outline-offset: 2px; }
+      .dreaming-pressable { transition: background .14s ease, border-color .14s ease, transform .1s ease, color .14s ease; }
+      .dreaming-pressable:active { transform: scale(.97); }
+      .dreaming-pressable:focus-visible { outline: 2px solid ${ACCENT}; outline-offset: 2px; }
+      .dreaming-rise { animation: dreaming-rise .32s cubic-bezier(.22,.61,.36,1) both; }
+      .dreaming-scroll::-webkit-scrollbar { width: 9px; height: 9px; }
+      .dreaming-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; border: 2px solid transparent; background-clip: padding-box; }
+      .dreaming-scroll::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: padding-box; }
+      @media (prefers-reduced-motion: reduce) {
+        .dreaming-rise, [class^="dreaming-"] { animation: none !important; }
+      }
+    `
+    document.head.appendChild(el)
+    // Leave it mounted for the life of the document — other mounts reuse it.
+  }, [])
+}
 
 const S = {
   root: {
     height: '100%', display: 'flex', flexDirection: 'column',
     background: 'var(--bg)', color: 'var(--text)',
     fontFamily: 'var(--font)', maxWidth: '100%', overflowX: 'hidden',
+    position: 'relative',
+  },
+  // A faint aurora wash behind the header — pure decoration, pointer-none, so
+  // the top of the app reads as a sky rather than a flat bar.
+  aurora: {
+    position: 'absolute', top: 0, left: 0, right: 0, height: '220px',
+    background: `radial-gradient(120% 90% at 18% -10%, ${ACCENT_DIM} 0%, transparent 55%), radial-gradient(110% 80% at 92% -20%, ${ACCENT_DIM_2} 0%, transparent 60%)`,
+    pointerEvents: 'none', zIndex: 0,
   },
   header: {
-    padding: '20px 20px 0', display: 'flex', alignItems: 'center',
+    padding: '22px 20px 0', display: 'flex', alignItems: 'center',
     justifyContent: 'space-between', flexShrink: 0, gap: '12px',
-    flexWrap: 'wrap',
+    flexWrap: 'wrap', position: 'relative', zIndex: 1,
   },
-  titleRow: { display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 },
-  moon: {
-    fontSize: '22px', lineHeight: 1, filter: 'saturate(1.1)',
+  titleRow: { display: 'flex', alignItems: 'center', gap: '11px', minWidth: 0 },
+  moonWrap: {
+    width: '34px', height: '34px', borderRadius: '11px', flexShrink: 0,
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    background: `linear-gradient(135deg, ${ACCENT} 0%, ${ACCENT_2} 100%)`,
+    boxShadow: `0 4px 16px -6px ${ACCENT}`,
   },
+  moon: { fontSize: '18px', lineHeight: 1, animation: 'dreaming-drift 6s ease-in-out infinite' },
+  titleStack: { display: 'flex', flexDirection: 'column', minWidth: 0, lineHeight: 1.15 },
   title: {
-    fontSize: '23px', fontWeight: 700, letterSpacing: '-0.4px', margin: 0,
+    fontSize: '21px', fontWeight: 750, letterSpacing: '-0.5px', margin: 0,
   },
+  subtitle: { fontSize: '11.5px', color: 'var(--muted)', fontWeight: 500, marginTop: '1px' },
+  headerRight: { display: 'flex', alignItems: 'center', gap: '9px', flexWrap: 'wrap', position: 'relative', zIndex: 1 },
   streakBadge: (quiet) => ({
     display: 'inline-flex', alignItems: 'center', gap: '5px',
-    padding: '4px 11px', borderRadius: '999px',
+    padding: '5px 11px', borderRadius: '999px',
     background: quiet ? 'var(--surface)' : ACCENT_DIM,
     color: quiet ? 'var(--muted)' : ACCENT,
     border: `1px solid ${quiet ? 'var(--border)' : 'transparent'}`,
-    fontSize: '12.5px', fontWeight: 600, lineHeight: 1.2, whiteSpace: 'nowrap',
+    fontSize: '12.5px', fontWeight: 650, lineHeight: 1.2, whiteSpace: 'nowrap',
   }),
   tabs: {
     display: 'flex', gap: '2px', background: 'var(--surface)',
-    borderRadius: '9px', padding: '3px', border: '1px solid var(--border)',
+    borderRadius: '10px', padding: '3px', border: '1px solid var(--border)',
   },
   tab: (active) => ({
-    padding: '6px 15px', borderRadius: '6px', border: 'none', cursor: 'pointer',
-    fontSize: '13px', fontWeight: 600,
+    padding: '6px 15px', borderRadius: '7px', border: 'none', cursor: 'pointer',
+    fontSize: '13px', fontWeight: 650,
     background: active ? ACCENT : 'transparent',
     color: active ? '#fff' : 'var(--muted)',
     transition: 'background 0.15s, color 0.15s',
     fontFamily: 'var(--font)',
   }),
-  divider: { height: '1px', background: 'var(--border)', margin: '16px 20px 0' },
+  divider: { height: '1px', background: 'var(--border)', margin: '16px 20px 0', position: 'relative', zIndex: 1 },
   scroll: {
     flex: 1, overflowY: 'auto', overflowX: 'hidden',
-    padding: '16px 20px 36px',
-    wordBreak: 'break-word', overflowWrap: 'anywhere',
+    padding: '16px 20px 40px',
+    wordBreak: 'break-word', overflowWrap: 'anywhere', position: 'relative', zIndex: 1,
   },
 
   // Reports list
-  list: { display: 'flex', flexDirection: 'column', gap: '11px', maxWidth: '640px', margin: '0 auto' },
+  list: { display: 'flex', flexDirection: 'column', gap: '11px', maxWidth: '660px', margin: '0 auto' },
   card: (latest) => ({
     display: 'flex', alignItems: 'stretch', gap: '14px',
     width: '100%', textAlign: 'left',
-    border: '1px solid var(--border)', borderRadius: '14px',
-    background: 'var(--surface)', padding: '15px 17px',
+    border: '1px solid var(--border)', borderRadius: '16px',
+    background: 'var(--surface)', padding: '15px 16px',
     cursor: 'pointer', color: 'var(--text)', fontFamily: 'var(--font)',
-    transition: 'border-color 0.15s, transform 0.08s',
     position: 'relative', overflow: 'hidden',
     borderLeft: latest ? `3px solid ${ACCENT}` : '1px solid var(--border)',
   }),
-  cardMain: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '3px' },
-  cardLabel: { fontSize: '16px', fontWeight: 700, letterSpacing: '-0.2px', lineHeight: 1.25 },
+  dateTile: (latest) => ({
+    width: '46px', flexShrink: 0, borderRadius: '12px',
+    display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+    gap: '0px', alignSelf: 'center',
+    background: latest ? `linear-gradient(160deg, ${ACCENT} 0%, ${ACCENT_2} 100%)` : ACCENT_DIM,
+    color: latest ? '#fff' : ACCENT,
+    padding: '8px 0', lineHeight: 1,
+  }),
+  dateTileDay: { fontSize: '10px', fontWeight: 700, letterSpacing: '0.5px', textTransform: 'uppercase', opacity: 0.92 },
+  dateTileNum: { fontSize: '19px', fontWeight: 750, letterSpacing: '-0.5px' },
+  cardMain: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '3px', justifyContent: 'center' },
+  cardLabelRow: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
+  cardLabel: { fontSize: '16px', fontWeight: 700, letterSpacing: '-0.2px', lineHeight: 1.2 },
   cardSub: { fontSize: '12px', color: 'var(--muted)', fontWeight: 500 },
   cardTldr: {
-    fontSize: '13px', color: 'var(--muted)', lineHeight: 1.5, marginTop: '6px',
-    display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical',
+    fontSize: '13px', color: 'var(--muted)', lineHeight: 1.5, marginTop: '5px',
+    display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
     overflow: 'hidden',
   },
   cardChevron: {
-    alignSelf: 'center', fontSize: '18px', color: 'var(--muted)',
-    flexShrink: 0, lineHeight: 1,
+    alignSelf: 'center', fontSize: '20px', color: 'var(--muted)',
+    flexShrink: 0, lineHeight: 1, opacity: 0.7,
   },
   latestPill: {
-    alignSelf: 'flex-start', marginTop: '8px',
-    fontSize: '10.5px', fontWeight: 700, letterSpacing: '0.6px',
-    textTransform: 'uppercase', color: ACCENT,
+    fontSize: '10px', fontWeight: 750, letterSpacing: '0.7px',
+    textTransform: 'uppercase', color: '#fff',
+    background: ACCENT, padding: '2px 8px', borderRadius: '999px',
+  },
+  chatPill: {
+    display: 'inline-flex', alignItems: 'center', gap: '4px',
+    fontSize: '11px', fontWeight: 600, color: ACCENT,
     background: ACCENT_DIM, padding: '2px 8px', borderRadius: '999px',
   },
 
   empty: {
-    textAlign: 'center', padding: '64px 24px', color: 'var(--muted)',
-    fontSize: '14px', lineHeight: 1.65, maxWidth: '420px', margin: '0 auto',
+    textAlign: 'center', padding: '60px 24px 40px', color: 'var(--muted)',
+    fontSize: '14px', lineHeight: 1.65, maxWidth: '440px', margin: '0 auto',
   },
-  emptyMoon: { fontSize: '40px', display: 'block', marginBottom: '14px', opacity: 0.85 },
-  loading: { textAlign: 'center', padding: '64px 24px', color: 'var(--muted)', fontSize: '13px' },
-  errorBox: {
-    maxWidth: '640px', margin: '0 auto', padding: '14px 16px',
-    borderRadius: '12px', border: '1px solid var(--border)',
-    background: 'var(--surface)', color: 'var(--text)', fontSize: '13px',
-    lineHeight: 1.55, display: 'flex', flexDirection: 'column', gap: '10px',
+  emptyMoonWrap: {
+    width: '74px', height: '74px', borderRadius: '22px', margin: '0 auto 18px',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    background: `linear-gradient(160deg, ${ACCENT_DIM} 0%, ${ACCENT_DIM_2} 100%)`,
+    border: '1px solid var(--border)',
   },
-  retryBtn: {
-    alignSelf: 'flex-start', padding: '6px 13px', borderRadius: '8px',
-    border: `1px solid ${ACCENT}`, background: 'transparent', color: ACCENT,
-    fontSize: '12.5px', fontWeight: 600, cursor: 'pointer', fontFamily: 'var(--font)',
-  },
-  offlineBanner: {
-    maxWidth: '640px', margin: '0 auto 14px', padding: '9px 13px',
-    borderRadius: '10px', background: ACCENT_DIM, border: '1px solid var(--border)',
-    color: 'var(--text)', fontSize: '12.5px', lineHeight: 1.45,
+  emptyMoon: { fontSize: '34px', animation: 'dreaming-drift 6s ease-in-out infinite' },
+  emptyTitle: { fontSize: '17px', fontWeight: 700, color: 'var(--text)', letterSpacing: '-0.2px', marginBottom: '8px' },
+
+  loadingWrap: { textAlign: 'center', padding: '64px 24px', color: 'var(--muted)', fontSize: '13px' },
+  spinner: {
+    width: '26px', height: '26px', borderRadius: '50%', margin: '0 auto 14px',
+    border: `2.5px solid ${ACCENT_DIM}`, borderTopColor: ACCENT,
+    animation: 'dreaming-spin 0.8s linear infinite',
   },
 
-  // Report detail
-  detail: { position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', background: 'var(--bg)' },
+  errorBox: {
+    maxWidth: '660px', margin: '0 auto', padding: '16px', borderRadius: '14px',
+    border: '1px solid var(--border)', background: 'var(--surface)',
+    color: 'var(--text)', fontSize: '13px', lineHeight: 1.55,
+    display: 'flex', flexDirection: 'column', gap: '10px',
+  },
+  retryBtn: {
+    alignSelf: 'flex-start', padding: '7px 14px', borderRadius: '9px',
+    border: `1px solid ${ACCENT}`, background: 'transparent', color: ACCENT,
+    fontSize: '12.5px', fontWeight: 650, cursor: 'pointer', fontFamily: 'var(--font)',
+  },
+  offlineBanner: {
+    maxWidth: '660px', margin: '0 auto 14px', padding: '10px 14px',
+    borderRadius: '12px', background: ACCENT_DIM, border: '1px solid var(--border)',
+    color: 'var(--text)', fontSize: '12.5px', lineHeight: 1.45,
+    display: 'flex', alignItems: 'center', gap: '8px',
+  },
+
+  // Report detail (brief + chat split view)
+  detail: {
+    position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
+    background: 'var(--bg)', zIndex: 5,
+  },
   detailBar: {
     display: 'flex', alignItems: 'center', gap: '12px',
-    padding: '12px 16px', borderBottom: '1px solid var(--border)',
+    padding: '11px 14px', borderBottom: '1px solid var(--border)',
     flexShrink: 0, background: 'var(--surface)',
   },
   backBtn: {
-    display: 'inline-flex', alignItems: 'center', gap: '6px',
-    padding: '7px 13px 7px 10px', borderRadius: '9px',
+    display: 'inline-flex', alignItems: 'center', gap: '5px',
+    padding: '7px 13px 7px 9px', borderRadius: '10px',
     border: '1px solid var(--border)', background: 'var(--bg)',
-    color: 'var(--text)', fontSize: '13px', fontWeight: 600,
+    color: 'var(--text)', fontSize: '13px', fontWeight: 650,
     cursor: 'pointer', fontFamily: 'var(--font)', flexShrink: 0,
   },
-  detailTitle: { display: 'flex', flexDirection: 'column', minWidth: 0, lineHeight: 1.25 },
-  detailTitleMain: { fontSize: '15px', fontWeight: 700, letterSpacing: '-0.2px' },
+  detailTitle: { display: 'flex', flexDirection: 'column', minWidth: 0, lineHeight: 1.25, flex: 1 },
+  detailTitleMain: { fontSize: '15px', fontWeight: 700, letterSpacing: '-0.2px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   detailTitleSub: { fontSize: '11.5px', color: 'var(--muted)', fontWeight: 500 },
-  iframe: { flex: 1, width: '100%', border: 'none', background: 'var(--bg)' },
-  detailLoading: {
-    position: 'absolute', inset: 0, top: '53px',
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-    color: 'var(--muted)', fontSize: '13px', background: 'var(--bg)',
+
+  // The split body: brief panel (top) + chat panel (bottom). On a tall
+  // screen they stack and the body scrolls; the chat panel keeps a sensible
+  // minimum so ChatView always has room to breathe.
+  splitBody: {
+    flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden',
+    display: 'flex', flexDirection: 'column',
+  },
+  briefPanel: {
+    flexShrink: 0, display: 'flex', flexDirection: 'column',
+    borderBottom: '1px solid var(--border)',
+  },
+  briefIframe: {
+    width: '100%', border: 'none', background: 'var(--bg)', display: 'block',
+  },
+  briefLoading: {
+    minHeight: '320px', display: 'flex', flexDirection: 'column',
+    alignItems: 'center', justifyContent: 'center', gap: '12px',
+    color: 'var(--muted)', fontSize: '13px',
+  },
+  chatPanel: {
+    flexShrink: 0, display: 'flex', flexDirection: 'column',
+    background: 'var(--bg)',
+  },
+  chatHeader: {
+    display: 'flex', alignItems: 'center', gap: '8px',
+    padding: '13px 16px 9px', flexShrink: 0,
+  },
+  chatHeaderDot: {
+    width: '7px', height: '7px', borderRadius: '50%', background: ACCENT,
+    boxShadow: `0 0 0 4px ${ACCENT_DIM}`, flexShrink: 0,
+  },
+  chatHeaderText: { fontSize: '13px', fontWeight: 700, letterSpacing: '-0.1px' },
+  chatHeaderHint: { fontSize: '11.5px', color: 'var(--muted)', fontWeight: 500, marginLeft: 'auto' },
+  chatMount: { width: '100%', flex: 1, minHeight: '420px' },
+  chatResolving: {
+    padding: '20px 16px 28px', display: 'flex', alignItems: 'center', gap: '10px',
+    color: 'var(--muted)', fontSize: '12.5px',
+  },
+  noChatNote: {
+    margin: '14px 16px 22px', padding: '14px 16px', borderRadius: '13px',
+    background: 'var(--surface)', border: '1px dashed var(--border)',
+    color: 'var(--muted)', fontSize: '12.5px', lineHeight: 1.55,
+    display: 'flex', alignItems: 'flex-start', gap: '10px',
   },
 
   // Settings
-  settingsWrap: { maxWidth: '560px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '26px' },
-  section: { display: 'flex', flexDirection: 'column', gap: '8px' },
-  sectionLabel: { fontSize: '14px', fontWeight: 700, letterSpacing: '-0.1px', margin: 0 },
+  settingsWrap: { maxWidth: '580px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '22px' },
+  settingsCard: {
+    background: 'var(--surface)', border: '1px solid var(--border)',
+    borderRadius: '16px', padding: '18px', display: 'flex', flexDirection: 'column', gap: '10px',
+  },
+  sectionHead: { display: 'flex', alignItems: 'center', gap: '10px' },
+  sectionIcon: {
+    width: '30px', height: '30px', borderRadius: '9px', flexShrink: 0,
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    background: ACCENT_DIM, fontSize: '15px',
+  },
+  sectionLabel: { fontSize: '14.5px', fontWeight: 700, letterSpacing: '-0.1px', margin: 0 },
   note: { fontSize: '12.5px', color: 'var(--muted)', margin: 0, lineHeight: 1.55 },
   timeRow: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginTop: '2px' },
   timeInput: {
-    padding: '8px 11px', fontSize: '15px', fontFamily: 'var(--font)',
-    background: 'var(--surface)', color: 'var(--text)',
-    border: '1px solid var(--border)', borderRadius: '9px',
-    outline: 'none', width: '128px',
+    padding: '9px 12px', fontSize: '16px', fontFamily: 'var(--font)', fontWeight: 600,
+    background: 'var(--bg)', color: 'var(--text)',
+    border: '1px solid var(--border)', borderRadius: '10px',
+    outline: 'none', width: '132px',
   },
   customCronNote: {
     fontSize: '12px', color: 'var(--muted)', lineHeight: 1.5,
-    padding: '8px 11px', borderRadius: '9px',
-    background: 'var(--surface)', border: '1px solid var(--border)', marginTop: '2px',
+    padding: '10px 12px', borderRadius: '11px',
+    background: 'var(--bg)', border: '1px solid var(--border)', marginTop: '2px',
   },
   verbList: { display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '2px' },
   verbRow: (on) => ({
     display: 'flex', alignItems: 'flex-start', gap: '11px',
-    padding: '11px 13px', borderRadius: '11px', cursor: 'pointer',
-    background: on ? ACCENT_DIM : 'var(--surface)',
+    padding: '12px 13px', borderRadius: '12px', cursor: 'pointer',
+    background: on ? ACCENT_DIM : 'var(--bg)',
     border: `1px solid ${on ? ACCENT : 'var(--border)'}`,
-    userSelect: 'none', transition: 'background 0.12s, border-color 0.12s',
+    userSelect: 'none', transition: 'background 0.14s, border-color 0.14s',
   }),
   verbRadio: (on) => ({
-    width: '16px', height: '16px', borderRadius: '999px', marginTop: '2px',
+    width: '17px', height: '17px', borderRadius: '999px', marginTop: '1px',
     border: `2px solid ${on ? ACCENT : 'var(--muted)'}`,
     background: 'transparent', flexShrink: 0, position: 'relative',
-    boxShadow: on ? `inset 0 0 0 3px ${ACCENT}` : 'none',
+    boxShadow: on ? `inset 0 0 0 3.5px ${ACCENT}` : 'none',
+    transition: 'box-shadow .14s, border-color .14s',
   }),
   verbMain: { display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0 },
-  verbTitle: { fontSize: '13.5px', fontWeight: 600 },
+  verbTitle: { fontSize: '13.5px', fontWeight: 650 },
   verbHint: { fontSize: '12px', color: 'var(--muted)', lineHeight: 1.45 },
-  saveRow: { display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap', marginTop: '4px' },
+  saveRow: { display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap', marginTop: '2px' },
   saveBtn: (busy) => ({
-    padding: '9px 20px', borderRadius: '11px', border: 'none',
+    padding: '10px 22px', borderRadius: '12px', border: 'none',
     background: busy ? 'var(--surface)' : ACCENT,
     color: busy ? 'var(--muted)' : '#fff',
     fontSize: '13.5px', fontWeight: 700, cursor: busy ? 'default' : 'pointer',
-    fontFamily: 'var(--font)', transition: 'background 0.15s',
+    fontFamily: 'var(--font)', transition: 'background 0.15s, opacity .15s',
+    boxShadow: busy ? 'none' : `0 6px 18px -8px ${ACCENT}`,
   }),
-  toast: { fontSize: '12.5px', color: 'var(--green, #3fb950)', fontWeight: 600 },
-  errorToast: { fontSize: '12.5px', color: 'var(--danger, #f85149)', fontWeight: 600 },
+  toast: { fontSize: '12.5px', color: 'var(--green, #3fb950)', fontWeight: 650 },
+  errorToast: { fontSize: '12.5px', color: 'var(--danger, #f85149)', fontWeight: 650 },
   scheduleHint: {
     fontSize: '12px', color: 'var(--muted)', lineHeight: 1.55,
-    padding: '10px 13px', borderRadius: '10px',
+    padding: '11px 13px', borderRadius: '12px',
     background: ACCENT_DIM, border: '1px solid var(--border)',
+    display: 'flex', alignItems: 'flex-start', gap: '8px',
   },
 }
 
@@ -319,6 +521,24 @@ function makeStorage(appId, token) {
     }
   }
 
+  // Resolve the morning chat for a report date. The cron SHOULD write a
+  // sibling `reports/<date>.meta.json` = { "chat_id": "<id>" } when it opens
+  // the morning chat; this reads it (with the app token, same as every other
+  // read). Returns the chat_id string, or null when there's no meta yet (the
+  // brief then stands alone). A network error is swallowed to null too — the
+  // brief is still readable; the chat just doesn't mount this open.
+  async function getReportChatId(dateStr) {
+    try {
+      const r = await fetch(`${base}/reports/${dateStr}.meta.json`, { headers })
+      if (!r.ok) return null
+      const data = await r.json()
+      const id = data && (data.chat_id ?? data.chatId ?? data.morning_chat)
+      return typeof id === 'string' && id.trim() ? id.trim() : null
+    } catch {
+      return null
+    }
+  }
+
   // Enumerate reports via the listing endpoint (newest-first), walking the
   // cursor. A non-advancing cursor is treated as a server fault rather than
   // spinning forever. Returns { dates: [...] } on success, or { error } /
@@ -353,7 +573,7 @@ function makeStorage(appId, token) {
     return { dates: out }
   }
 
-  return { getJSON, putJSON, getReportHtml, listReportDates }
+  return { getJSON, putJSON, getReportHtml, getReportChatId, listReportDates }
 }
 
 // ---------------------------------------------------------------------------
@@ -427,19 +647,104 @@ function useOnline() {
 }
 
 // ---------------------------------------------------------------------------
-// Report detail — full HTML in a sandboxed iframe (srcDoc, no allow-scripts).
-// The report is a complete static document with its own <style>; keeping
-// scripts off is the containment. Back is wired through history.pushState +
-// popstate so the phone's back gesture returns to the list (the app falls
-// back to the in-bar back button when history is unavailable).
+// Morning chat embed. `window.mobius.chat({ mount, chatId })` mounts the real
+// ChatView (composer + live SSE + tappable AskUserQuestion cards) inside a
+// nested same-origin iframe that runs in the SHELL origin — so it carries the
+// owner JWT and can read/post the owner-created morning chat the cron opened.
+// (The app token alone is 403'd on /api/chats; this is the supported path.)
+//
+// We MUST pass an existing chatId. The runtime can lazy-create a chat when
+// none is given, but that would make a brand-new empty chat, not find the
+// morning one — so a null chatId here renders nothing (the caller shows its
+// own "no chat" note). The handle is torn down on unmount / date change so we
+// never leak the nested iframe.
+// ---------------------------------------------------------------------------
+
+function MorningChat({ chatId }) {
+  const mountRef = useRef(null)
+  const [phase, setPhase] = useState('mounting') // mounting | live | unavailable
+
+  useEffect(() => {
+    const mount = mountRef.current
+    if (!mount || !chatId) { setPhase('unavailable'); return undefined }
+    if (!window.mobius || typeof window.mobius.chat !== 'function') {
+      // Running outside the shell embed (e.g. standalone) — no chat bridge.
+      setPhase('unavailable')
+      return undefined
+    }
+    let handle = null
+    let cancelled = false
+    setPhase('mounting')
+    Promise.resolve(window.mobius.chat({ mount, chatId }))
+      .then((h) => {
+        if (cancelled) { try { h && h.destroy && h.destroy() } catch {} return }
+        handle = h
+        setPhase('live')
+      })
+      .catch(() => { if (!cancelled) setPhase('unavailable') })
+    return () => {
+      cancelled = true
+      try { handle && handle.destroy && handle.destroy() } catch {}
+      // Belt-and-suspenders: the runtime appends one iframe to `mount`; clear
+      // any leftover node so a fast date switch can't stack two embeds.
+      if (mount) { try { mount.replaceChildren() } catch {} }
+    }
+  }, [chatId])
+
+  if (phase === 'unavailable') {
+    return (
+      <div style={S.noChatNote}>
+        <span aria-hidden="true" style={{ fontSize: '15px', lineHeight: 1.2 }}>💬</span>
+        <span>
+          The conversation about this brief isn’t available here. Open it from
+          your chat list to reply.
+        </span>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ position: 'relative' }}>
+      {phase === 'mounting' && (
+        <div style={S.chatResolving}>
+          <span style={{ ...S.spinner, width: '16px', height: '16px', margin: 0, borderWidth: '2px' }} aria-hidden="true" />
+          Opening the conversation…
+        </div>
+      )}
+      <div ref={mountRef} style={{ ...S.chatMount, display: phase === 'live' ? 'block' : 'none' }} />
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Report detail — the brief + chat split view.
+//
+// The brief is the static, script-free HTML the agent authored: rendered in a
+// SANDBOXED srcDoc iframe with NO allow-scripts (containment). Beneath it, the
+// morning chat. We resolve the chat_id from `reports/<date>.meta.json` (the
+// cron's sibling), then mount the embed. Back is wired through
+// history.pushState + popstate so the phone's back gesture returns to the
+// list (falls back to the in-bar button when history is unavailable).
+//
+// The brief iframe auto-sizes to its content (the document is short — a
+// morning read), measured via the iframe's own scrollHeight after load, so
+// the page scrolls as one column (brief, then chat) instead of nesting two
+// scroll regions. Same-origin sandbox lets us read contentDocument for that
+// measurement; no scripts run inside.
 // ---------------------------------------------------------------------------
 
 function ReportDetail({ dateStr, storage, online, onBack }) {
   const [state, setState] = useState({ phase: 'loading', html: '' })
+  const [chatId, setChatId] = useState(undefined) // undefined=resolving, null=none, string=id
+  const [briefHeight, setBriefHeight] = useState(360)
+  const iframeRef = useRef(null)
 
+  // Load the brief body + resolve its chat in parallel.
   useEffect(() => {
     let cancelled = false
     setState({ phase: 'loading', html: '' })
+    setChatId(undefined)
+    setBriefHeight(360)
     ;(async () => {
       const res = await storage.getReportHtml(`${dateStr}.html`)
       if (cancelled) return
@@ -447,8 +752,47 @@ function ReportDetail({ dateStr, storage, online, onBack }) {
       else if (res.notFound) setState({ phase: 'missing', html: '' })
       else setState({ phase: 'error', html: '' })
     })()
+    ;(async () => {
+      const id = await storage.getReportChatId(dateStr)
+      if (!cancelled) setChatId(id)
+    })()
     return () => { cancelled = true }
   }, [dateStr, storage])
+
+  // Size the brief iframe to its content so the column scrolls as one. The
+  // sandbox is same-origin (no scripts), so contentDocument is readable. We
+  // re-measure on a ResizeObserver of the inner body for late layout (web
+  // fonts, images) and clamp to a sane range.
+  const measure = useCallback(() => {
+    const el = iframeRef.current
+    if (!el) return
+    try {
+      const doc = el.contentDocument
+      if (!doc || !doc.body) return
+      const h = Math.max(doc.body.scrollHeight, doc.documentElement.scrollHeight)
+      if (h > 0) setBriefHeight(Math.min(Math.max(h, 200), 100000))
+    } catch {
+      // Cross-origin guard (shouldn't happen with allow-same-origin) — leave
+      // the default height; the inner doc keeps its own scroll as a fallback.
+    }
+  }, [])
+
+  const onIframeLoad = useCallback(() => {
+    measure()
+    try {
+      const doc = iframeRef.current?.contentDocument
+      if (doc && doc.body && typeof ResizeObserver !== 'undefined') {
+        const ro = new ResizeObserver(() => measure())
+        ro.observe(doc.body)
+        // Stash so we can disconnect on unmount via the iframe element.
+        iframeRef.current.__ro = ro
+      }
+    } catch {}
+  }, [measure])
+
+  useEffect(() => () => {
+    try { iframeRef.current?.__ro?.disconnect() } catch {}
+  }, [])
 
   // Push a history entry on mount so a back gesture pops it; intercept the
   // pop to return to the list instead of leaving the app. If the user backs
@@ -470,8 +814,6 @@ function ReportDetail({ dateStr, storage, online, onBack }) {
     window.addEventListener('popstate', onPop)
     return () => {
       window.removeEventListener('popstate', onPop)
-      // Unmounting because the user tapped the in-app back button (not a
-      // browser pop): consume the entry we pushed so history stays clean.
       if (pushed && !poppedRef.current) {
         try { window.history.back() } catch { /* ignore */ }
       }
@@ -479,40 +821,82 @@ function ReportDetail({ dateStr, storage, online, onBack }) {
   }, [dateStr, onBack])
 
   return (
-    <div style={S.detail}>
+    <div style={S.detail} className="dreaming-rise">
       <div style={S.detailBar}>
-        <button style={S.backBtn} onClick={onBack} aria-label="Back to reports">
-          <span aria-hidden="true" style={{ fontSize: '15px' }}>‹</span> Back
+        <button
+          style={S.backBtn} className="dreaming-pressable"
+          onClick={onBack} aria-label="Back to reports"
+        >
+          <span aria-hidden="true" style={{ fontSize: '16px' }}>‹</span> Briefs
         </button>
         <div style={S.detailTitle}>
-          <span style={S.detailTitleMain}>{relativeLabel(dateStr)}'s brief</span>
+          <span style={S.detailTitleMain}>{relativeLabel(dateStr)}’s brief</span>
           <span style={S.detailTitleSub}>{subLabel(dateStr)}</span>
         </div>
       </div>
+
       {state.phase === 'loading' && (
-        <div style={{ ...S.detailLoading, position: 'relative', top: 0 }}>Opening your brief…</div>
+        <div style={S.briefLoading}>
+          <span style={S.spinner} aria-hidden="true" />
+          <span>Opening your brief…</span>
+        </div>
       )}
-      {state.phase === 'ready' && (
-        <iframe
-          style={S.iframe}
-          title={`Morning brief for ${dateStr}`}
-          srcDoc={state.html}
-          // The report is static HTML/CSS authored by the agent. sandbox
-          // WITHOUT allow-scripts is the containment: same-origin so its
-          // own <style> + relative anchors resolve, but no script execution.
-          sandbox="allow-same-origin"
-        />
-      )}
+
       {state.phase === 'missing' && (
-        <div style={{ ...S.empty, paddingTop: '48px' }}>
+        <div style={{ ...S.empty, paddingTop: '56px' }}>
           This brief is no longer available.
         </div>
       )}
+
       {state.phase === 'error' && (
-        <div style={{ ...S.empty, paddingTop: '48px' }}>
+        <div style={{ ...S.empty, paddingTop: '56px' }}>
           {online
             ? 'This brief could not be loaded. Try opening it again in a moment.'
             : 'You’re offline — open this brief again once you’re back online.'}
+        </div>
+      )}
+
+      {state.phase === 'ready' && (
+        <div style={S.splitBody} className="dreaming-scroll">
+          <div style={S.briefPanel}>
+            <iframe
+              ref={iframeRef}
+              style={{ ...S.briefIframe, height: `${briefHeight}px` }}
+              title={`Morning brief for ${dateStr}`}
+              srcDoc={state.html}
+              onLoad={onIframeLoad}
+              // The report is static HTML/CSS authored by the agent. sandbox
+              // WITHOUT allow-scripts is the containment: same-origin so its
+              // own <style> + relative anchors resolve (and we can measure its
+              // height), but no script execution.
+              sandbox="allow-same-origin"
+            />
+          </div>
+
+          <div style={S.chatPanel}>
+            <div style={S.chatHeader}>
+              <span style={S.chatHeaderDot} aria-hidden="true" />
+              <span style={S.chatHeaderText}>Morning conversation</span>
+              {chatId && <span style={S.chatHeaderHint}>tap a card or reply below</span>}
+            </div>
+            {chatId === undefined ? (
+              <div style={S.chatResolving}>
+                <span style={{ ...S.spinner, width: '16px', height: '16px', margin: 0, borderWidth: '2px' }} aria-hidden="true" />
+                Finding the conversation…
+              </div>
+            ) : chatId === null ? (
+              <div style={S.noChatNote}>
+                <span aria-hidden="true" style={{ fontSize: '15px', lineHeight: 1.2 }}>🌙</span>
+                <span>
+                  No conversation was opened for this brief — it’s a read-only
+                  morning note. When a brief has questions for you, the chat
+                  appears here so you can answer with a tap.
+                </span>
+              </div>
+            ) : (
+              <MorningChat chatId={chatId} />
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -581,7 +965,12 @@ function ReportsList({ appId, storage, online, onOpen }) {
   }, [appId, storage, reloadKey])
 
   if (phase === 'loading' && dates.length === 0) {
-    return <div style={S.loading}>Gathering last night’s dream…</div>
+    return (
+      <div style={S.loadingWrap}>
+        <span style={S.spinner} aria-hidden="true" />
+        <div>Gathering last night’s dream…</div>
+      </div>
+    )
   }
 
   if (phase === 'error' && dates.length === 0) {
@@ -593,7 +982,7 @@ function ReportsList({ appId, storage, online, onOpen }) {
             : 'You’re offline and there’s nothing cached yet.'}
         </span>
         {online && (
-          <button style={S.retryBtn} onClick={() => setReloadKey((k) => k + 1)}>
+          <button style={S.retryBtn} className="dreaming-pressable" onClick={() => setReloadKey((k) => k + 1)}>
             Try again
           </button>
         )}
@@ -604,20 +993,25 @@ function ReportsList({ appId, storage, online, onOpen }) {
   if (dates.length === 0) {
     return (
       <div style={S.empty}>
-        <span style={S.emptyMoon} aria-hidden="true">🌙</span>
-        No reports yet — Dreaming runs overnight and leaves your first
-        morning brief here.
+        <div style={S.emptyMoonWrap}>
+          <span style={S.emptyMoon} aria-hidden="true">🌙</span>
+        </div>
+        <div style={S.emptyTitle}>No briefs yet</div>
+        Dreaming runs overnight — consolidating what the day’s agents learned,
+        tidying your Mind, and tending your apps. Your first morning brief will
+        be waiting right here.
       </div>
     )
   }
 
   return (
-    <div>
+    <div className="dreaming-rise">
       <StreakBar streak={streak} />
       {!online && (
         <div style={S.offlineBanner}>
-          Offline — showing your last cached briefs. Tonight’s dream will
-          appear once you’re back online.
+          <span aria-hidden="true">🌙</span>
+          Offline — showing your last cached briefs. Tonight’s dream appears
+          once you’re back online.
         </div>
       )}
       <div style={S.list}>
@@ -625,18 +1019,22 @@ function ReportsList({ appId, storage, online, onOpen }) {
           <button
             key={d}
             style={S.card(i === 0)}
+            className="dreaming-card"
             onClick={() => onOpen(d)}
-            onMouseDown={(e) => { e.currentTarget.style.transform = 'scale(0.995)' }}
-            onMouseUp={(e) => { e.currentTarget.style.transform = 'none' }}
-            onMouseLeave={(e) => { e.currentTarget.style.transform = 'none' }}
           >
+            <div style={S.dateTile(i === 0)} aria-hidden="true">
+              <span style={S.dateTileDay}>{weekdayInitial(d)}</span>
+              <span style={S.dateTileNum}>{dayOfMonth(d)}</span>
+            </div>
             <div style={S.cardMain}>
-              <span style={S.cardLabel}>{relativeLabel(d)}</span>
+              <div style={S.cardLabelRow}>
+                <span style={S.cardLabel}>{relativeLabel(d)}</span>
+                {i === 0 && <span style={S.latestPill}>Latest</span>}
+              </div>
               <span style={S.cardSub}>{subLabel(d)}</span>
               {i === 0 && lastSummary && (
                 <span style={S.cardTldr}>{lastSummary}</span>
               )}
-              {i === 0 && <span style={S.latestPill}>Latest</span>}
             </div>
             <span style={S.cardChevron} aria-hidden="true">›</span>
           </button>
@@ -648,11 +1046,18 @@ function ReportsList({ appId, storage, online, onOpen }) {
 
 function StreakBar({ streak }) {
   if (!streak || streak < 1) return null
+  const flames = Math.min(streak, 5)
   return (
-    <div style={{ maxWidth: '640px', margin: '0 auto 14px', display: 'flex' }}>
-      <span style={S.streakBadge(false)}>
-        <span aria-hidden="true">🔥</span>
-        {streak}-day streak
+    <div style={{ maxWidth: '660px', margin: '0 auto 16px', display: 'flex' }}>
+      <span style={{ ...S.streakBadge(false), padding: '7px 13px', fontSize: '13px' }}>
+        <span aria-hidden="true" style={{ animation: 'dreaming-drift 4s ease-in-out infinite' }}>🔥</span>
+        <strong style={{ fontWeight: 750 }}>{streak}</strong>
+        <span style={{ fontWeight: 550 }}>
+          {streak === 1 ? 'morning in a row' : 'mornings in a row'}
+        </span>
+        <span aria-hidden="true" style={{ marginLeft: '4px', letterSpacing: '1px', opacity: 0.55, fontSize: '9px' }}>
+          {'•'.repeat(flames)}
+        </span>
       </span>
     </div>
   )
@@ -737,15 +1142,25 @@ function SettingsTab({ appId, storage, online }) {
     }
   }, [saving, cronIsCustom, rawCron, hour, verbosity, excludeApps, storage, online])
 
-  if (loading) return <div style={S.loading}>Loading settings…</div>
+  if (loading) {
+    return (
+      <div style={S.loadingWrap}>
+        <span style={S.spinner} aria-hidden="true" />
+        <div>Loading settings…</div>
+      </div>
+    )
+  }
 
   return (
-    <div style={S.settingsWrap}>
-      <div style={S.section}>
-        <h2 style={S.sectionLabel}>When to dream</h2>
+    <div style={S.settingsWrap} className="dreaming-rise">
+      <div style={S.settingsCard}>
+        <div style={S.sectionHead}>
+          <span style={S.sectionIcon} aria-hidden="true">⏰</span>
+          <h2 style={S.sectionLabel}>When to dream</h2>
+        </div>
         <p style={S.note}>
-          Pick the hour your morning brief should be ready. Dreaming writes
-          it overnight so it’s waiting when you wake up.
+          Pick the hour your morning brief should be ready. Dreaming writes it
+          overnight so it’s waiting when you wake.
         </p>
         {cronIsCustom ? (
           <div style={S.customCronNote}>
@@ -773,21 +1188,27 @@ function SettingsTab({ appId, storage, online }) {
               onChange={onTimeChange}
               aria-label="Daily brief time"
             />
-            <span style={S.note}>on the hour, every day</span>
+            <span style={S.note}>
+              ready around <strong style={{ color: 'var(--text)', fontWeight: 650 }}>{hourClockLabel(hour)}</strong>, every day
+            </span>
           </div>
         )}
         <div style={S.scheduleHint}>
-          Schedule changes take effect after the dreaming agent re-installs
-          its overnight job — usually by the next run. The app saves your
-          preference; the agent picks it up from there.
+          <span aria-hidden="true">💡</span>
+          <span>
+            Schedule changes take effect after the dreaming agent re-installs
+            its overnight job — usually by the next run. The app saves your
+            preference; the agent picks it up from there.
+          </span>
         </div>
       </div>
 
-      <div style={S.section}>
-        <h2 style={S.sectionLabel}>How much detail</h2>
-        <p style={S.note}>
-          How long and discursive each brief should be.
-        </p>
+      <div style={S.settingsCard}>
+        <div style={S.sectionHead}>
+          <span style={S.sectionIcon} aria-hidden="true">✍️</span>
+          <h2 style={S.sectionLabel}>How much detail</h2>
+        </div>
+        <p style={S.note}>How long and discursive each brief should be.</p>
         <div style={S.verbList} role="radiogroup" aria-label="Verbosity">
           {VERBOSITY_OPTIONS.map((opt) => {
             const on = verbosity === opt.id
@@ -795,6 +1216,7 @@ function SettingsTab({ appId, storage, online }) {
               <div
                 key={opt.id}
                 style={S.verbRow(on)}
+                className="dreaming-pressable"
                 onClick={() => setVerbosity(opt.id)}
                 role="radio"
                 aria-checked={on}
@@ -818,7 +1240,7 @@ function SettingsTab({ appId, storage, online }) {
       </div>
 
       <div style={S.saveRow}>
-        <button style={S.saveBtn(saving)} onClick={save} disabled={saving}>
+        <button style={S.saveBtn(saving)} className="dreaming-pressable" onClick={save} disabled={saving}>
           {saving ? 'Saving…' : 'Save settings'}
         </button>
         {toast && <span style={S.toast}>{toast}</span>}
@@ -833,6 +1255,7 @@ function SettingsTab({ appId, storage, online }) {
 // ---------------------------------------------------------------------------
 
 export default function App({ appId, token }) {
+  useDreamingStyles()
   const [tab, setTab] = useState('reports')
   const [openDate, setOpenDate] = useState(null)
   const online = useOnline()
@@ -858,16 +1281,22 @@ export default function App({ appId, token }) {
 
   return (
     <div style={S.root}>
+      <div style={S.aurora} aria-hidden="true" />
       <div style={S.header}>
         <div style={S.titleRow}>
-          <span style={S.moon} aria-hidden="true">🌙</span>
-          <h1 style={S.title}>Dreaming</h1>
+          <span style={S.moonWrap} aria-hidden="true">
+            <span style={S.moon}>🌙</span>
+          </span>
+          <div style={S.titleStack}>
+            <h1 style={S.title}>Dreaming</h1>
+            <span style={S.subtitle}>your overnight brief</span>
+          </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+        <div style={S.headerRight}>
           {headerStreak >= 1 && (
             <span style={S.streakBadge(false)} title={`${headerStreak} mornings in a row`}>
               <span aria-hidden="true">🔥</span>
-              {headerStreak}-day streak
+              {headerStreak}
             </span>
           )}
           <div style={S.tabs}>
@@ -881,7 +1310,7 @@ export default function App({ appId, token }) {
         </div>
       </div>
       <div style={S.divider} />
-      <div style={{ ...S.scroll, position: 'relative' }}>
+      <div style={{ ...S.scroll }} className="dreaming-scroll">
         {tab === 'reports' ? (
           <>
             <ReportsList
