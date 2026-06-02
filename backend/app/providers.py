@@ -103,6 +103,174 @@ DEFAULT_MODELS = {
 DEFAULT_EFFORT = "medium"
 
 
+# ─── Named-agent registry ───────────────────────────────────────────
+#
+# An "agent" is a named persona the owner can attach to a chat: a
+# provider + model + effort + a system-prompt override (or a reference
+# to the deployed skill file). Chats carry a nullable `agent_id`; when
+# set, the Claude runner maps it to system_prompt + model + effort,
+# overriding the per-chat model/effort picker. When NULL the chat runs
+# with today's behavior exactly — the default Builder persona uses the
+# deployed skill and the picker-chosen model/effort, so a NULL agent_id
+# is byte-identical to the pre-agent path.
+#
+# BUILT_IN_AGENTS is FROZEN: it ships with the deployment and never
+# changes per-instance. The owner can ADD agents (or override a
+# built-in's fields) via /data/shared/agents.json, mirroring the
+# file-over-defaults pattern of `effective_agent_settings`. The
+# built-ins are the floor; the file is the override layer.
+#
+# `system_prompt: None` + `skill_ref: "default"` means "use the
+# deployed agent skill" — the runner resolves this to the same
+# skill_text the non-agent path uses, so the default Builder agent is
+# indistinguishable from no agent at all. A non-null `system_prompt`
+# replaces the skill text for that agent's turns.
+#
+# Agent dict shape (keep in sync with schemas.AgentOut):
+#   id            stable identifier, used as Chat.agent_id
+#   label         human-readable name for the picker
+#   provider      "claude" | "codex"
+#   model         a model ID for that provider (or None → provider default)
+#   effort        an effort level (or None → keep the chat's picked effort)
+#   system_prompt full system-prompt override, or None to use skill_ref
+#   skill_ref     "default" → deployed skill; None when system_prompt is set
+#   icon          optional emoji / glyph for the picker
+BUILT_IN_AGENTS: tuple[dict, ...] = (
+  {
+    "id": "builder",
+    "label": "Builder",
+    "provider": "claude",
+    "model": None,
+    "effort": None,
+    "system_prompt": None,
+    "skill_ref": "default",
+    "icon": "🛠️",
+  },
+  {
+    "id": "reviewer",
+    "label": "Reviewer",
+    "provider": "claude",
+    "model": None,
+    "effort": "high",
+    "system_prompt": (
+      "You are a senior code reviewer working inside Mobius. Review the "
+      "changes and the surrounding code with fresh, skeptical eyes. "
+      "Surface correctness bugs, security issues, and design smells; "
+      "prefer concrete, actionable findings over praise. Do not make "
+      "edits unless the owner explicitly asks — your job is to report "
+      "what you found and recommend fixes."
+    ),
+    "skill_ref": None,
+    "icon": "🔍",
+  },
+  {
+    "id": "recovery",
+    "label": "Recovery",
+    "provider": "claude",
+    "model": None,
+    "effort": None,
+    "system_prompt": (
+      "You are the Mobius recovery agent. Something in the platform is "
+      "broken and the owner needs it fixed. Diagnose from the logs and "
+      "the diff against the baked sources, make the smallest correct "
+      "fix, and tell the owner exactly how to apply it (e.g. restart "
+      "the server). Be direct and conservative — reversibility over "
+      "cleverness."
+    ),
+    "skill_ref": None,
+    "icon": "🚑",
+  },
+)
+
+# The default agent's id. A chat with this agent_id behaves exactly
+# like a chat with agent_id=None (skill + picker-chosen model/effort).
+DEFAULT_AGENT_ID = "builder"
+
+
+def _load_agents_file(data_dir: str) -> list[dict]:
+  """Loads the owner's agent overrides from /data/shared/agents.json.
+
+  Returns a list of agent dicts (possibly empty). Malformed / missing
+  file reads as an empty list — the built-ins are always the floor, so
+  a broken override file degrades to the default registry rather than
+  taking the picker down.
+  """
+  path = Path(data_dir) / "shared" / "agents.json"
+  if not path.exists():
+    return []
+  try:
+    raw = json.loads(path.read_text())
+  except (json.JSONDecodeError, OSError):
+    return []
+  # Accept either a bare list or a {"agents": [...]} envelope so the
+  # file is forgiving to hand-edit.
+  if isinstance(raw, dict):
+    raw = raw.get("agents")
+  if not isinstance(raw, list):
+    return []
+  return [a for a in raw if isinstance(a, dict) and a.get("id")]
+
+
+def effective_agents(data_dir: str) -> list[dict]:
+  """Returns the named-agent registry: built-ins overlaid by the file.
+
+  Layering (mirrors `effective_agent_settings` — file over built-ins):
+    1. BUILT_IN_AGENTS, in declaration order, are the floor.
+    2. /data/shared/agents.json entries override a built-in field-by-
+       field when their `id` matches a built-in, and are appended as
+       NEW agents when their `id` is novel.
+
+  Field-level merge (not whole-record replace) so the owner can tweak
+  just one field of a built-in (e.g. pin Reviewer to a specific model)
+  without re-specifying the whole record. Built-in ordering is
+  preserved; net-new file agents follow in file order.
+
+  Every returned dict carries the full agent shape (see BUILT_IN_AGENTS)
+  so the runner and the API never have to special-case missing keys.
+  """
+  by_id: dict[str, dict] = {a["id"]: dict(a) for a in BUILT_IN_AGENTS}
+  order: list[str] = [a["id"] for a in BUILT_IN_AGENTS]
+  for entry in _load_agents_file(data_dir):
+    aid = entry["id"]
+    if aid in by_id:
+      # Field-level override: only keys actually present in the file
+      # entry win, so an owner can pin one field without restating the
+      # rest of the built-in.
+      by_id[aid].update({k: v for k, v in entry.items() if k != "id"})
+    else:
+      merged = {
+        "id": aid,
+        "label": entry.get("label") or aid,
+        "provider": entry.get("provider") or DEFAULT_PROVIDER,
+        "model": entry.get("model"),
+        "effort": entry.get("effort"),
+        "system_prompt": entry.get("system_prompt"),
+        "skill_ref": entry.get("skill_ref"),
+        "icon": entry.get("icon"),
+      }
+      by_id[aid] = merged
+      order.append(aid)
+  return [by_id[aid] for aid in order]
+
+
+def resolve_agent(data_dir: str, agent_id: str | None) -> dict | None:
+  """Returns the agent dict for `agent_id`, or None.
+
+  None for a NULL agent_id (the default path) OR for an id that isn't
+  in the effective registry. Callers treat both the same way: run the
+  chat with today's behavior. The PATCH endpoint validates against the
+  registry up front (409 on unknown), so a None here at turn time means
+  the agent was deleted from agents.json after the chat picked it — a
+  graceful degradation rather than a hard failure.
+  """
+  if not agent_id:
+    return None
+  for agent in effective_agents(data_dir):
+    if agent.get("id") == agent_id:
+      return agent
+  return None
+
+
 def _model_belongs_to_other_provider(model: str, provider: str) -> bool:
   """True when `model` is a KNOWN model for some OTHER provider.
   Use this to reject cross-provider mismatches without blocking
