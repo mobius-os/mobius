@@ -1316,19 +1316,79 @@ async def _complete_turn(
   return disposition
 
 
-def _build_time_context(timezone: str | None) -> str:
+def _human_elapsed(seconds: float | None) -> str | None:
+  """Human 'N ago' for the gap since the user's previous message.
+
+  Returns None for gaps under ~2 minutes (same sitting — not worth noting)
+  or unknown gaps, so the time-context line stays clean for back-to-back
+  turns and only surfaces a recency cue when the conversation actually
+  resumed after a pause.
+  """
+  if seconds is None or seconds < 120:
+    return None
+  minutes = seconds / 60
+  if minutes < 60:
+    return f"{int(round(minutes))} minutes ago"
+  hours = minutes / 60
+  if hours < 24:
+    return f"{int(round(hours))} hours ago"
+  days = hours / 24
+  if days < 14:
+    return f"{int(round(days))} days ago"
+  weeks = days / 7
+  if weeks < 9:
+    return f"{int(round(weeks))} weeks ago"
+  return f"{int(round(days / 30))} months ago"
+
+
+def _last_user_message_elapsed(db, chat_id: str) -> str | None:
+  """Human 'N ago' for the previous message in this chat, or None.
+
+  Reads the persisted transcript (read-only) and scans back from the
+  current turn's user message (messages[-1]) for the most recent message
+  carrying a usable wall-clock `ts`. User messages carry a millisecond ts
+  from the client; assistant messages historically persisted ts=None, so
+  we skip to the last message with a sane ts. This gives the agent a sense
+  of how long since the user last engaged ("you last spoke 3 days ago"),
+  which the bare clock can't convey. Best-effort: any failure → None.
+  """
+  try:
+    import time as _time
+    from app import models
+    chat = (
+      db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    )
+    msgs = (chat.messages if chat else None) or []
+    now_ms = _time.time() * 1000.0
+    for m in reversed(msgs[:-1]):  # skip the current (just-committed) message
+      if not isinstance(m, dict):
+        continue
+      ts = m.get("ts")
+      if not isinstance(ts, (int, float)) or ts <= 0:
+        continue
+      # Tolerate ts stored in seconds or milliseconds (magnitude split).
+      ts_ms = ts if ts > 1e11 else ts * 1000.0
+      gap_s = (now_ms - ts_ms) / 1000.0
+      if gap_s < 0:
+        return None
+      return _human_elapsed(gap_s)
+  except Exception:
+    return None
+  return None
+
+
+def _build_time_context(timezone: str | None, elapsed: str | None = None) -> str:
   """A one-line, per-turn time stamp injected into the user message.
 
   The agent otherwise has no clock — only an IANA timezone NAME was
   injected, and only on the first turn. Giving it the current local
-  date and time on every turn lets it reason about time of day and
-  recency (greet differently late at night, notice the conversation
-  resumed after a long gap). It is marked as context so it is never
-  read as the user's own words, and is invisible to the user (only the
-  agent's copy of the message is modified, exactly like the
-  <agent_experience> block). Falls back to UTC if the timezone is
-  missing or unparseable. Elapsed-since-last-turn is a deliberate
-  follow-up — ChatMessage carries no ts, so it needs extra plumbing.
+  date and time on every turn (plus, when the conversation resumed after
+  a pause, how long since the user's last message) lets it reason about
+  time of day and recency (greet differently late at night, acknowledge a
+  multi-day gap). It is marked as context so it is never read as the
+  user's own words, and is invisible to the user (only the agent's copy of
+  the message is modified, exactly like the <agent_experience> block).
+  Falls back to UTC if the timezone is missing or unparseable.
   """
   from datetime import datetime, timezone as _dttz
   tz = None
@@ -1340,7 +1400,8 @@ def _build_time_context(timezone: str | None) -> str:
       tz = None
   now = datetime.now(tz) if tz else datetime.now(_dttz.utc)
   stamp = now.strftime("%a %Y-%m-%d %H:%M")
-  return f"[Context — current time: {stamp} ({timezone or 'UTC'})]"
+  gap = f"; user's last message was {elapsed}" if elapsed else ""
+  return f"[Context — current time: {stamp} ({timezone or 'UTC'}){gap}]"
 
 
 async def run_chat(
@@ -1592,9 +1653,13 @@ async def _run_chat_impl(
       )
 
   # Per-turn time context (EVERY turn, not just the first) so the agent has a
-  # clock. Prepended last so it leads the message the agent sees; only the
-  # agent's copy is touched here, never the persisted/displayed user text.
-  user_message = f"{_build_time_context(timezone)}\n\n{user_message}"
+  # clock + a sense of recency (how long since the user last wrote). Prepended
+  # last so it leads the message the agent sees; only the agent's copy is
+  # touched here, never the persisted/displayed user text.
+  user_message = (
+    f"{_build_time_context(timezone, _last_user_message_elapsed(db, chat_id))}"
+    f"\n\n{user_message}"
+  )
 
   bc = get_broadcast(chat_id)
   if bc is None:
