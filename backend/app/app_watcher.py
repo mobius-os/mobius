@@ -28,8 +28,8 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from app import models
-from app.compiler import compile_jsx
+from app import fs_locks, models
+from app.compiler import recompile_app_bundle
 from app.config import get_settings
 from app.database import SessionLocal
 
@@ -101,7 +101,7 @@ class _JsxHandler(FileSystemEventHandler):
   async def _recompile(self, path: str) -> None:
     self._pending.pop(path, None)
     p = Path(path)
-    app_dir_name = p.parent.name
+    source_dir = str(p.parent)
     try:
       jsx_source = p.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -110,62 +110,84 @@ class _JsxHandler(FileSystemEventHandler):
       # Empty or whitespace-only — likely a mid-save sentinel. Skip.
       return
 
-    db = SessionLocal()
-    try:
-      # Resolve dir → app via the source_dir column set by
-      # register_app.py.  Exact path match; no string normalization.
-      # Apps with source_dir=NULL (legacy or created without going
-      # through register_app.py) silently won't auto-recompile —
-      # that's documented in the seed under "If your edit didn't
-      # recompile" so the agent knows to re-register. We deliberately
-      # don't slug-match the dir name to a candidate app here;
-      # guessing is exactly the kind of code-policing the design
-      # philosophy says belongs in the seed, not the server.
-      app = (
-        db.query(models.App)
-        .filter(models.App.source_dir == str(p.parent))
-        .first()
-      )
-      if app is None:
-        return
-      if app.jsx_source == jsx_source:
-        return  # Already compiled; nothing to do.
+    # Recompile under the same lifecycle -> app -> source locks that PATCH and
+    # uninstall hold, so this awaited compile can't race a concurrent uninstall
+    # + SQLite id reuse and overwrite a replacement app's bundle, and the bundle
+    # stays transactional (compile out-of-place, swap only after commit). The
+    # lifecycle lock blocks delete/install for the whole sequence; the app +
+    # source locks serialize against a concurrent PATCH recompiling the same app.
+    async with fs_locks.install_uninstall_lock():
+      db = SessionLocal()
       try:
-        compiled = await compile_jsx(app.id, jsx_source)
-      except RuntimeError as exc:
-        log.warning(
-          "auto-recompile: compile failed for %s: %s", path, exc,
+        # Resolve dir → app via the source_dir column set by
+        # register_app.py.  Exact path match; no string normalization.
+        # Apps with source_dir=NULL (legacy or created without going
+        # through register_app.py) silently won't auto-recompile —
+        # that's documented in the seed under "If your edit didn't
+        # recompile" so the agent knows to re-register. We deliberately
+        # don't slug-match the dir name to a candidate app here;
+        # guessing is exactly the kind of code-policing the design
+        # philosophy says belongs in the seed, not the server.
+        app = (
+          db.query(models.App)
+          .filter(models.App.source_dir == source_dir)
+          .first()
         )
-        return
-      app.jsx_source = jsx_source
-      app.compiled_path = compiled
-      db.commit()
-      log.info(
-        "auto-recompiled app id=%s name=%s", app.id, app.name,
-      )
-      # Publish to the SystemBroadcast only. That channel reaches
-      # the Shell regardless of which view the user is on (chat /
-      # canvas / settings) via the persistent
-      # /api/events/system subscription installed by
-      # frontend/src/hooks/useSystemEventStream.js. Shell.jsx wires
-      # the same `app_updated` handler into both that hook and the
-      # per-chat stream (frontend/src/components/ChatView/useStreamConnection.js
-      # treats `app_updated` as a SYSTEM_EVENT and forwards to the
-      # same callback) — so an extra fan-out to every active
-      # ChatBroadcast (the v1 design preserved this as "intentional")
-      # was redundant, not load-bearing. Ticket 033 removed it.
-      from app.broadcast import get_system_broadcast
-      event = {"type": "app_updated", "appId": str(app.id)}
-      get_system_broadcast().publish(event)
-    except Exception:
-      # Watcher must keep running across any single-event failure.
-      log.exception("auto-recompile unexpected error for %s", path)
-      try:
-        db.rollback()
+        if app is None or app.jsx_source == jsx_source:
+          return  # No such app, or already compiled — nothing to do.
+        app_id = app.id
+        async with (
+          fs_locks.app_storage_lock(app_id),
+          fs_locks.source_dir_lock(source_dir),
+        ):
+          # Re-read fresh under the lock and re-verify identity: a PATCH may
+          # have compiled this source already, and (defensively, if the
+          # lifecycle lock above were ever relaxed) the id could have been
+          # reused by a different app whose bundle we must not clobber.
+          app = (
+            db.query(models.App).populate_existing()
+            .filter(models.App.id == app_id).first()
+          )
+          if (
+            app is None
+            or app.source_dir != source_dir
+            or app.jsx_source == jsx_source
+          ):
+            return
+          try:
+            await recompile_app_bundle(db, app, jsx_source)
+          except RuntimeError as exc:
+            log.warning(
+              "auto-recompile: compile failed for %s: %s", path, exc,
+            )
+            db.rollback()
+            return
+        log.info(
+          "auto-recompiled app id=%s name=%s", app.id, app.name,
+        )
+        # Publish to the SystemBroadcast only. That channel reaches
+        # the Shell regardless of which view the user is on (chat /
+        # canvas / settings) via the persistent
+        # /api/events/system subscription installed by
+        # frontend/src/hooks/useSystemEventStream.js. Shell.jsx wires
+        # the same `app_updated` handler into both that hook and the
+        # per-chat stream (frontend/src/components/ChatView/useStreamConnection.js
+        # treats `app_updated` as a SYSTEM_EVENT and forwards to the
+        # same callback) — so an extra fan-out to every active
+        # ChatBroadcast (the v1 design preserved this as "intentional")
+        # was redundant, not load-bearing. Ticket 033 removed it.
+        from app.broadcast import get_system_broadcast
+        event = {"type": "app_updated", "appId": str(app.id)}
+        get_system_broadcast().publish(event)
       except Exception:
-        pass
-    finally:
-      db.close()
+        # Watcher must keep running across any single-event failure.
+        log.exception("auto-recompile unexpected error for %s", path)
+        try:
+          db.rollback()
+        except Exception:
+          pass
+      finally:
+        db.close()
 
 
 def start_watcher(

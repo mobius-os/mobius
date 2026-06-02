@@ -24,12 +24,18 @@ def _compiled_dir() -> Path:
   return path
 
 
-async def compile_jsx(app_id: int, jsx_source: str) -> str:
+async def compile_jsx(
+  app_id: int, jsx_source: str, *, out_path: str | Path | None = None,
+) -> str:
   """Compiles JSX source to an ES module and returns the output path.
 
   Args:
     app_id: The numeric ID of the mini-app being compiled.
     jsx_source: The JSX source code string.
+    out_path: Where esbuild writes the bundle. Defaults to the live
+      bundle path ``app-<id>.js``. Pass a staging path to compile
+      out-of-place so the live bundle is only swapped in after the
+      DB commit succeeds (see ``recompile_app_bundle``).
 
   Returns:
     The absolute path of the compiled JS file.
@@ -52,7 +58,7 @@ async def compile_jsx(app_id: int, jsx_source: str) -> str:
       "or `export default ComponentName`."
     )
 
-  out_path = _compiled_dir() / f"app-{app_id}.js"
+  out = Path(out_path) if out_path is not None else _compiled_dir() / f"app-{app_id}.js"
 
   with tempfile.NamedTemporaryFile(
     suffix=".jsx", mode="w", delete=False, encoding="utf-8"
@@ -70,7 +76,7 @@ async def compile_jsx(app_id: int, jsx_source: str) -> str:
         "--jsx=automatic",
         "--platform=browser",
         *[f"--external:{lib}" for lib in RUNTIME_LIBS],
-        f"--outfile={out_path}",
+        f"--outfile={out}",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
       )
@@ -97,4 +103,44 @@ async def compile_jsx(app_id: int, jsx_source: str) -> str:
   finally:
     os.unlink(tmp_path)
 
-  return str(out_path)
+  return str(out)
+
+
+async def recompile_app_bundle(db, app, jsx_source: str) -> None:
+  """Recompiles ``app``'s JSX into its live bundle as one transaction.
+
+  The live bundle ``app-<id>.js`` is never left half-written or orphaned:
+  the new code compiles to a ``.staging`` sibling, the DB transaction
+  commits, and only a durable commit promotes the staging file into the
+  live path via an atomic rename. A compile error leaves the live bundle
+  untouched (esbuild writes its outfile only on success); a commit failure
+  discards the staging file and rolls back, so the live bundle keeps the
+  prior code. There is no snapshot to restore, and no window where the
+  live bundle is the new code while the DB still holds the old.
+
+  ``db.commit()`` here also flushes any other changes the caller staged on
+  the session (e.g. a PATCH's name/description), so the whole update lands
+  or rolls back together.
+
+  The caller MUST hold the app's lifecycle + per-app lock and have loaded
+  ``app`` fresh under it. The bundle path is keyed by app id, so without
+  the lock a concurrent uninstall + SQLite id reuse could make this swap
+  clobber a different app's bundle.
+
+  Raises:
+    RuntimeError: from ``compile_jsx`` on invalid JSX (live bundle untouched).
+    Exception: re-raised after rollback if the commit fails (staging
+      discarded, live bundle untouched).
+  """
+  live = _compiled_dir() / f"app-{app.id}.js"
+  staged = _compiled_dir() / f"app-{app.id}.js.staging"
+  await compile_jsx(app.id, jsx_source, out_path=staged)
+  app.jsx_source = jsx_source
+  app.compiled_path = str(live)
+  try:
+    db.commit()
+  except Exception:
+    db.rollback()
+    staged.unlink(missing_ok=True)
+    raise
+  os.replace(staged, live)

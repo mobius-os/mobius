@@ -35,9 +35,18 @@ acquires in reverse, so there is no cycle:
 
     install_uninstall_lock  ->  app_storage_lock(id)  ->  source_dir_lock(dir)
 
-Only ``delete_app`` holds more than one at a time (all three, in that order).
-``write_app_file`` takes only ``app_storage_lock``; ``create_app`` / patch take
-only ``source_dir_lock``; the install endpoint takes only the lifecycle lock.
+Multi-lock holders, all acquiring left-to-right:
+
+  - ``delete_app`` holds all three.
+  - ``update_app`` (PATCH) and the app watcher's auto-recompile hold
+    lifecycle -> app -> source (PATCH takes the source lock only when the
+    source_dir actually changes). Both recompile a bundle, so they take the
+    app lock to serialize against each other and the lifecycle lock to block
+    a concurrent uninstall + SQLite id reuse.
+
+Single-lock holders: ``write_app_file`` / ``delete_app_file`` take only the
+app lock; ``create_app`` takes only the source lock; the install endpoint
+takes only the lifecycle lock.
 """
 
 import asyncio
