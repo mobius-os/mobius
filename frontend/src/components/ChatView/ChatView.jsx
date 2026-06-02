@@ -398,6 +398,22 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     onSystemEvent,
     onNeedsRefresh: fetchMessages,
     onQueuedTurnStarting: () => {},
+    onSteeredIntoTurn: ({ ts, content }) => {
+      // A send was injected mid-turn into a live Codex turn (Codex
+      // steering). The backend persisted the user message in the
+      // transcript, so render it inline as a user message ABOVE the
+      // still-streaming assistant block (the streaming <li> renders
+      // after `messages`). This is content growth — do NOT re-arm the
+      // send-time spacer or pin the message to the viewport top; the
+      // ChatView scroll contract treats a mid-stream insertion as
+      // auto-follow growth (only snaps if the user is near the bottom),
+      // not a fresh send. Dedup by ts so a reconnect's catch-up replay
+      // of the same event can't double-insert.
+      commitMessages(prev => {
+        if (ts != null && prev.some(m => m.ts === ts)) return prev
+        return [...prev, { role: 'user', content, ts: ts ?? Date.now() }]
+      })
+    },
   })
 
   const { files: pendingFiles, addFiles, removeFile, clearFiles } = useFileUpload({ chatId })
@@ -803,6 +819,14 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           pendingQueue.swapOptimisticTs(
             queuedMsg.cid, result.ts ?? queuedMsg.ts, result.position,
           )
+        }
+        // Mid-turn Codex steer: the backend injected the send into the
+        // live turn and persisted it in the transcript. The
+        // `steered_into_turn` SSE event (handled in useStreamConnection's
+        // onSteeredIntoTurn) renders the message inline, so drop the
+        // optimistic queued-tray entry here — it never queued.
+        if (result?.status === 'steered') {
+          pendingQueue.cancelByCid(queuedMsg.cid)
         }
         // Race: server said "started" though we expected queued.
         if (result?.status === 'started') {
