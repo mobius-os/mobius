@@ -161,9 +161,9 @@ def effective_agent_settings(
   chats created before the snapshot-on-create change have no
   override; the fallback bridges them without a migration.
 
-  Known keys today: `model`, `effort`, `codex_model`. Future picker
-  fields (thinking budget, sandbox mode) follow the same path — add
-  the key here without a migration.
+  Known keys today: `model`, `effort`. Future picker fields (thinking
+  budget, sandbox mode) follow the same path — add the key here
+  without a migration.
   """
   prov = provider or "claude"
   if chat_overrides is None:
@@ -335,10 +335,8 @@ class CodexProvider(BaseProvider):
       if agent_settings is not None
       else _load_agent_settings(data_dir)
     )
-    # Codex accepts the picker's `model` key OR a Codex-specific
-    # `codex_model` for backwards compatibility. The per-chat picker
-    # writes `model`; the legacy file uses `codex_model`.
-    model = merged.get("model") or merged.get("codex_model")
+    # Codex reads the picker's `model` key.
+    model = merged.get("model")
 
     # Use the app-server runner. `codex exec --json` only emits one
     # final agent_message event (no per-token deltas), so it can't
