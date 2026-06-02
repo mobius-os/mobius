@@ -1800,6 +1800,36 @@ async def _run_chat_impl(
         )
         db.rollback()
 
+  # Named-agent override. When the chat has an `agent_id` in the
+  # effective registry, the agent's model/effort override the picker
+  # choices for THIS turn and its system_prompt (or skill_ref) selects
+  # the prompt. A NULL agent_id — or an id no longer in the registry —
+  # resolves to None, and `selected_agent is None` is the byte-
+  # identical default path (deployed skill + picker model/effort).
+  #
+  # The override is computed AFTER the snapshot block above so the
+  # picker's choice is what gets persisted on first send; the agent
+  # only shapes THIS turn's runtime, keeping "what the user picked" and
+  # "what the agent runs" as independent concerns. `runner_agent_settings`
+  # is a copy so the snapshot's `agent_settings` stays untouched.
+  selected_agent = None
+  if chat_row is not None and getattr(chat_row, "agent_id", None):
+    from app.providers import resolve_agent
+    selected_agent = resolve_agent(settings.data_dir, chat_row.agent_id)
+  runner_agent_settings = agent_settings
+  agent_system_prompt: str | None = None
+  if selected_agent is not None:
+    runner_agent_settings = dict(agent_settings)
+    if selected_agent.get("model"):
+      runner_agent_settings["model"] = selected_agent["model"]
+    if selected_agent.get("effort"):
+      runner_agent_settings["effort"] = selected_agent["effort"]
+    # A non-null system_prompt replaces the deployed skill for this
+    # agent's turns; skill_ref="default" (or None) falls through to the
+    # skill text the non-agent path uses.
+    if selected_agent.get("system_prompt"):
+      agent_system_prompt = selected_agent["system_prompt"]
+
   # Pre-flight: check that provider credentials exist before invoking
   # the SDK runner. Without this, the SDK fails with a cryptic error.
   auth_error = provider.check_auth(settings.data_dir)
@@ -1841,7 +1871,7 @@ async def _run_chat_impl(
         bc=sink,
         pending_questions=questions._pending,
         db=db,
-        agent_settings=agent_settings,
+        agent_settings=runner_agent_settings,
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
@@ -1900,11 +1930,11 @@ async def _run_chat_impl(
         base_env=sdk_env,
         cwd=cwd,
         chat_id=chat_id,
-        skill_text=_read_skill_text(),
+        skill_text=agent_system_prompt or _read_skill_text(),
         bc=sink,
         pending_questions=questions._pending,
         db=db,
-        agent_settings=agent_settings,
+        agent_settings=runner_agent_settings,
         skills_enabled=_skills_enabled(settings.data_dir),
       )
       new_session_id = runner_result.get("session_id")

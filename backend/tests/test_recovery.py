@@ -508,7 +508,7 @@ def test_turn_id_replay_returns_409(client, auth_cookie, chat_id, monkeypatch):
   # Stub stream_turn so the test doesn't actually spawn a CLI.
   from app import recover_chat_runner as rcr
 
-  async def _empty_stream(_message, _provider=None, chat_id=None):
+  async def _empty_stream(_message, _provider=None, chat_id=None, model=None, agent_id=None):
     if False:
       yield ""
 
@@ -952,7 +952,7 @@ def test_reset_clears_streamed_turn_ids(
   # End-to-end: after reset, a fresh send + stream cycle must work.
   from app import recover_chat_runner as rcr
 
-  async def _empty_stream(_message, _provider=None, chat_id=None):
+  async def _empty_stream(_message, _provider=None, chat_id=None, model=None, agent_id=None):
     if False:
       yield ""
 
@@ -1115,7 +1115,7 @@ def test_provider_picker_flows_to_runner(
 
   seen_provider: list = []
 
-  async def _capturing_stream(_message, provider=None, chat_id=None):
+  async def _capturing_stream(_message, provider=None, chat_id=None, model=None, agent_id=None):
     seen_provider.append(provider)
     if False:
       yield ""
@@ -1154,7 +1154,7 @@ def test_provider_picker_unknown_falls_back_to_default(
 
   seen_provider: list = []
 
-  async def _capturing_stream(_message, provider=None, chat_id=None):
+  async def _capturing_stream(_message, provider=None, chat_id=None, model=None, agent_id=None):
     seen_provider.append(provider)
     if False:
       yield ""
@@ -1179,6 +1179,256 @@ def test_provider_picker_unknown_falls_back_to_default(
   assert seen_provider == ["claude"], (
     f"unknown provider should fall back to chat's stored provider, saw {seen_provider}"
   )
+
+
+# ─── Recovery agent + model selection ─────────────────────────────
+
+
+def _capture_spawn(monkeypatch):
+  """Patches create_subprocess_exec + which() so a spawn records its
+  argv into the returned dict and exits immediately. Shared scaffold
+  for the model-on-argv tests."""
+  from app import recover_chat_runner as rcr
+
+  captured = {"argv": None, "stdin": []}
+
+  class _StubStream:
+    async def readline(self):
+      return b""
+    async def read(self):
+      return b""
+
+  class _StubStdin:
+    def write(self, data):
+      captured["stdin"].append(data)
+    async def drain(self):
+      pass
+    def close(self):
+      pass
+
+  class _StubProc:
+    def __init__(self):
+      self.stdout = _StubStream()
+      self.stderr = _StubStream()
+      self.stdin = _StubStdin()
+      self.returncode = 0
+    def terminate(self): pass
+    def kill(self): pass
+    async def wait(self):
+      return 0
+
+  async def fake_spawn(*cmd, **kwargs):
+    captured["argv"] = list(cmd)
+    return _StubProc()
+
+  monkeypatch.setattr(
+    "app.recover_chat_runner.asyncio.create_subprocess_exec", fake_spawn,
+  )
+  monkeypatch.setattr(
+    "app.recover_chat_runner.shutil.which", lambda name: f"/fake/{name}",
+  )
+  return captured
+
+
+@pytest.mark.asyncio
+async def test_recovery_claude_argv_carries_model(monkeypatch):
+  """A chosen model lands on the Claude spawn argv as `--model <id>`."""
+  from app import recover_chat_runner as rcr
+  captured = _capture_spawn(monkeypatch)
+
+  async for _ in rcr.stream_turn(
+    "fix it", provider="claude", model="claude-opus-4-8",
+  ):
+    pass
+
+  argv = captured["argv"]
+  assert argv is not None
+  assert "--model" in argv
+  assert argv[argv.index("--model") + 1] == "claude-opus-4-8"
+
+
+@pytest.mark.asyncio
+async def test_recovery_codex_argv_carries_model(monkeypatch):
+  """A chosen model lands on the Codex spawn argv as `-m <id>`, before
+  the trailing `-` stdin marker."""
+  from app import recover_chat_runner as rcr
+  captured = _capture_spawn(monkeypatch)
+
+  async for _ in rcr.stream_turn(
+    "fix it", provider="codex", model="gpt-5.5",
+  ):
+    pass
+
+  argv = captured["argv"]
+  assert argv is not None
+  assert "-m" in argv
+  assert argv[argv.index("-m") + 1] == "gpt-5.5"
+  assert argv[-1] == "-"  # stdin marker stays last
+
+
+@pytest.mark.asyncio
+async def test_recovery_no_model_omits_model_flag(monkeypatch):
+  """No model selected → no --model on argv (CLI default, the
+  pre-model-selection behavior preserved exactly)."""
+  from app import recover_chat_runner as rcr
+  captured = _capture_spawn(monkeypatch)
+
+  async for _ in rcr.stream_turn("fix it", provider="claude"):
+    pass
+
+  assert "--model" not in captured["argv"]
+
+
+@pytest.mark.asyncio
+async def test_recovery_cross_provider_model_ignored(monkeypatch):
+  """A Codex model on a Claude turn is dropped (not passed to the CLI)
+  — the runner falls back to the CLI default rather than spawning a
+  bogus --model."""
+  from app import recover_chat_runner as rcr
+  captured = _capture_spawn(monkeypatch)
+
+  async for _ in rcr.stream_turn(
+    "fix it", provider="claude", model="gpt-5.5",
+  ):
+    pass
+
+  assert "--model" not in captured["argv"]
+
+
+def test_recovery_system_prompt_persona_swaps():
+  """Builder/Reviewer agents prepend a persona; the default Recovery
+  agent yields the unchanged prompt (byte-identical to before)."""
+  from app import recover_chat_runner as rcr
+
+  default = rcr._system_prompt("abc123")
+  recovery = rcr._system_prompt("abc123", "recovery")
+  builder = rcr._system_prompt("abc123", "builder")
+  reviewer = rcr._system_prompt("abc123", "reviewer")
+
+  # Default == explicit "recovery" == None: no persona prefix.
+  assert default == recovery
+  assert default.startswith("You are running inside the Mobius recovery")
+  # Builder / Reviewer prepend a persona but keep the recovery surface.
+  assert builder.startswith("Adopt the Builder posture")
+  assert reviewer.startswith("Adopt the Reviewer posture")
+  assert "frozen island" in builder.lower() or "frozen-island" in builder.lower()
+  assert "recovery chat" in reviewer.lower()
+
+
+def test_recovery_validation_helpers():
+  """is_valid_recovery_model / is_valid_recovery_agent gate the literals."""
+  from app import recover_chat_runner as rcr
+
+  assert rcr.is_valid_recovery_model("claude", None) is True
+  assert rcr.is_valid_recovery_model("claude", "") is True
+  assert rcr.is_valid_recovery_model("claude", "claude-opus-4-8") is True
+  assert rcr.is_valid_recovery_model("claude", "gpt-5.5") is False
+  assert rcr.is_valid_recovery_model("codex", "gpt-5.5") is True
+
+  assert rcr.is_valid_recovery_agent(None) is True
+  assert rcr.is_valid_recovery_agent("recovery") is True
+  assert rcr.is_valid_recovery_agent("builder") is True
+  assert rcr.is_valid_recovery_agent("nope") is False
+
+
+def test_recovery_stream_passes_model_and_agent_to_runner(
+  client, auth_cookie, chat_id, monkeypatch,
+):
+  """The /stream endpoint forwards a valid model + agent_id into
+  stream_turn; an unknown model 400s before the runner is touched."""
+  from app import recover_chat as rc
+  from app import recover_chat_runner as rcr
+  rc._streamed_turn_ids.clear()
+
+  seen = {}
+
+  async def _capturing_stream(
+    _message, provider=None, chat_id=None, model=None, agent_id=None,
+  ):
+    seen["model"] = model
+    seen["agent_id"] = agent_id
+    if False:
+      yield ""
+
+  monkeypatch.setattr(rcr, "stream_turn", _capturing_stream)
+
+  send = client.post(
+    "/recover/chat/send",
+    json={"chat_id": chat_id, "message": "rescue"},
+    cookies=auth_cookie,
+  )
+  turn_id = send.json()["turn_id"]
+
+  r = client.post(
+    "/recover/chat/stream",
+    json={
+      "chat_id": chat_id, "turn_id": turn_id,
+      "model": "claude-opus-4-8", "agent_id": "reviewer",
+    },
+    cookies=auth_cookie,
+  )
+  assert r.status_code == 200, r.text
+  assert seen == {"model": "claude-opus-4-8", "agent_id": "reviewer"}
+
+
+def test_recovery_stream_rejects_unknown_model(
+  client, auth_cookie, chat_id,
+):
+  """An unknown model on /stream 400s (chat is claude per fixture, so
+  a Codex model is cross-provider-invalid)."""
+  send = client.post(
+    "/recover/chat/send",
+    json={"chat_id": chat_id, "message": "rescue"},
+    cookies=auth_cookie,
+  )
+  turn_id = send.json()["turn_id"]
+  r = client.post(
+    "/recover/chat/stream",
+    json={"chat_id": chat_id, "turn_id": turn_id, "model": "bogus-model"},
+    cookies=auth_cookie,
+  )
+  assert r.status_code == 400
+  assert "model" in r.json()["detail"].lower()
+
+
+def test_recovery_new_chat_validates_model_and_agent(
+  client, auth_cookie,
+):
+  """/recover/chat/new 400s on an unknown model or agent; accepts
+  valid ones (without persisting them — they're per-turn)."""
+  ok = client.post(
+    "/recover/chat/new",
+    json={"provider": "claude", "model": "claude-opus-4-8",
+          "agent_id": "builder"},
+    cookies=auth_cookie,
+  )
+  assert ok.status_code == 200
+
+  bad_model = client.post(
+    "/recover/chat/new",
+    json={"provider": "claude", "model": "nope"},
+    cookies=auth_cookie,
+  )
+  assert bad_model.status_code == 400
+
+  bad_agent = client.post(
+    "/recover/chat/new",
+    json={"provider": "claude", "agent_id": "nope"},
+    cookies=auth_cookie,
+  )
+  assert bad_agent.status_code == 400
+
+
+def test_recovery_page_renders_agent_and_model_selects(
+  client, auth_cookie,
+):
+  """The recovery HTML exposes agent + model selects beside the
+  provider radios."""
+  r = client.get("/recover/chat", cookies=auth_cookie)
+  assert r.status_code == 200
+  assert "rc-agent-sel" in r.text
+  assert "rc-model-sel" in r.text
+  assert "CLI default" in r.text
 
 
 def test_provider_status_helpers(monkeypatch, tmp_path):

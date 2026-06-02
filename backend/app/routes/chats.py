@@ -398,6 +398,26 @@ async def patch_chat(
         chat.session_id = None
       chat.provider = target_provider
 
+    # Named-agent selection. `agent_id` in model_fields_set means the
+    # client explicitly sent the key (omitting it leaves the chat's
+    # agent unchanged). A null/empty value clears the agent back to the
+    # default path; a non-empty value is validated against the
+    # effective registry — unknown ids 409 like the disconnected-
+    # provider check, rejecting the whole PATCH before commit so the
+    # row never half-updates. The registry is per-instance
+    # (/data/shared/agents.json over the built-ins), which is why this
+    # validation lives here and not in a Pydantic field validator.
+    if "agent_id" in body.model_fields_set:
+      new_agent_id = (body.agent_id or "").strip() or None
+      if new_agent_id is not None:
+        from app.providers import resolve_agent
+        if resolve_agent(get_app_settings().data_dir, new_agent_id) is None:
+          raise HTTPException(
+            status_code=409,
+            detail=f"unknown agent: {new_agent_id}",
+          )
+      chat.agent_id = new_agent_id
+
     db.commit()
     db.refresh(chat)
     data_dir = get_app_settings().data_dir
@@ -428,6 +448,7 @@ async def patch_chat(
       "ok": True,
       "agent_settings_json": _coerce_agent_settings(chat.agent_settings_json) or None,
       "provider": chat.provider or "claude",
+      "agent_id": chat.agent_id,
       "effective": effective_agent_settings(
         data_dir,
         _coerce_agent_settings(chat.agent_settings_json) or None,
@@ -484,6 +505,7 @@ def get_chat(
     "running": is_chat_running(chat_id),
     "session_id": chat.session_id,
     "provider": provider,
+    "agent_id": chat.agent_id,
     "agent_settings_json": _coerce_agent_settings(chat.agent_settings_json) or None,
     "effective_agent_settings": effective_agent_settings(
       data_dir,
