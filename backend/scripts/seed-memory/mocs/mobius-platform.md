@@ -5,20 +5,18 @@ tags: [platform]
 ---
 # The Möbius platform
 
-How the platform itself behaves — the operational facts that bite you when you
-edit the shell, backend, cron, or storage.
+A map for operational facts about **this instance** — quirks of this
+deployment, a recurring failure mode you hit here, an environment detail worth
+remembering between sessions.
 
-## Deploy & lifecycle
+**Generic platform how-to does NOT live here.** The reusable operational
+knowledge (shell rebuild needs a restart, backend edits need a host patch, cron
+survives a rebuild via init-cron, SQLite needs a manual ALTER, `/data` is a git
+repo, list dirs live with describe-tree) is now a **skill** under
+`/data/shared/skills/` — that's where procedure that helps *any* instance
+belongs. Add a note here only when the fact is specific to *this* deployment.
 
-- [[shell-rebuild-needs-restart]] — `rebuild_shell.sh` doesn't live-reload.
-- [[backend-edits-need-restart-and-host-patch]] — writable-layer + boot risk.
-- [[cron-survives-rebuild-via-init-cron]] — crontab is wiped on rebuild.
+## Notes
 
-## Data
-
-- [[sqlite-needs-manual-alter]] — `create_all` never ALTERs an existing table.
-- [[data-is-a-git-repo]] — commit agent-owned state with `pm-commit`.
-
-## Conventions
-
-- [[describe-tree-over-hardcoded-lists]] — list dirs live; docstring new files.
+*(none recorded yet — add a note when you learn something about this particular
+instance that isn't a general platform technique)*
