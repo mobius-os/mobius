@@ -60,12 +60,17 @@ async def ensure_store_installed(db: Session) -> None:
   if os.environ.get(_SKIP_ENV) == "1":
     log.info("bootstrap: %s=1, skipping store install", _SKIP_ENV)
     return
-  # Installs store the CANONICAL identity key (`<raw-url>#manifest-id=<id>`),
-  # not the bare URL — match by prefix, else this lookup misses every restart
-  # and needlessly re-fetches + updates the store (Codex review round-10 #8).
+  # Installs store the CANONICAL identity key (`<base>#manifest-id=<id>`, with a
+  # trailing `/mobius.json` stripped from the base), NOT the bare URL — so match
+  # on that canonical prefix, else this lookup misses every restart and
+  # needlessly re-fetches + updates the store (Codex review round-10 #8,
+  # round-11 #1).
+  from app.install import _canonical_base
   existing = (
     db.query(models.App)
-    .filter(models.App.manifest_url.like(BOOTSTRAP_STORE_MANIFEST_URL + "%"))
+    .filter(models.App.manifest_url.like(
+      _canonical_base(BOOTSTRAP_STORE_MANIFEST_URL) + "#manifest-id=%"
+    ))
     .first()
   )
   if existing is not None:

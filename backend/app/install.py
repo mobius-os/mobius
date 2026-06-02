@@ -292,6 +292,22 @@ def _canonical_for_inline(raw_base: str, manifest_id: str) -> str:
   return f"{base}#manifest-id={manifest_id}"
 
 
+def _canonical_base(url_or_base: str) -> str:
+  """The canonical base of a manifest URL: fragment, query string, a trailing
+  `/mobius.json`, and a trailing slash all stripped.
+
+  Strip BOTH fragment and query string. Without ?-strip, two paste-a-URL flows
+  for the same app (with vs without `?utm_source=…`) would canonicalise to
+  different keys and split the app into two App rows on the second install.
+  The identity key is `<base>#manifest-id=<id>`, so this base is ALSO the prefix
+  to match installed rows on regardless of the manifest id — callers that need
+  to ask "is this URL's app installed?" LIKE `<base>#manifest-id=%`."""
+  base = url_or_base.split("#", 1)[0].split("?", 1)[0]
+  if base.endswith("/mobius.json"):
+    base = base[: -len("/mobius.json")]
+  return base.rstrip("/")
+
+
 def _canonical_identity_key(url_or_base: str, manifest_id: str) -> str:
   """Single canonical shape for the `manifest_url` column.
 
@@ -299,21 +315,9 @@ def _canonical_identity_key(url_or_base: str, manifest_id: str) -> str:
   URL install with `manifest_url=.../mobius.json`) used to write
   visibly different strings into `App.manifest_url` for the same
   underlying app. Re-installing via the other path then missed the
-  update branch and created a duplicate row.
-
-  Strip the fragment, strip a trailing `/mobius.json`, strip a
-  trailing slash, then append `#manifest-id=<id>` so both paths
-  produce identical strings. The fragment is purely a marker — it's
-  never dereferenced over the wire."""
-  # Strip BOTH fragment and query string. Without ?-strip, two paste-
-  # a-URL flows for the same app (with vs without `?utm_source=…` etc.)
-  # would canonicalise to different keys and split the app into two
-  # App rows on the second install.
-  base = url_or_base.split("#", 1)[0].split("?", 1)[0]
-  if base.endswith("/mobius.json"):
-    base = base[: -len("/mobius.json")]
-  base = base.rstrip("/")
-  return f"{base}#manifest-id={manifest_id}"
+  update branch and created a duplicate row. The fragment is purely a
+  marker — it's never dereferenced over the wire."""
+  return f"{_canonical_base(url_or_base)}#manifest-id={manifest_id}"
 
 
 async def _http_get(
