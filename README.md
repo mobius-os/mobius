@@ -18,9 +18,16 @@
   <a href="#what-is-möbius">What is it?</a> &middot;
   <a href="#what-can-you-build">What can you build?</a> &middot;
   <a href="#what-can-you-change">What can you change?</a> &middot;
+  <a href="#an-app-store-and-an-operating-system">App store + OS</a> &middot;
   <a href="#built-by-the-agent">Built by the agent</a> &middot;
   <a href="#how-it-improves-itself">How it improves itself</a> &middot;
   <a href="#get-started">Get started</a>
+</p>
+
+<p align="center">
+  <a href="https://hamzamerzic.info/blog/2026/mobius-an-app-that-builds-itself/">An agent that adapts to you</a> &middot;
+  <a href="https://hamzamerzic.info/blog/2026/the-self-improvement-harness/">The self-improvement harness</a> &middot;
+  <a href="https://hamzamerzic.info/blog/2026/the-agent-is-the-kernel/">The agent is the kernel</a>
 </p>
 
 ---
@@ -86,6 +93,22 @@ Apps are the most obvious thing the agent builds, but the platform itself is als
 - **Data flows.** Add a webhook, a scheduled job, a new storage shape. The platform exposes these as ordinary primitives the agent can compose.
 
 If the UI ever breaks, every instance ships with `/recover` — it resets the shell and leaves your chats, apps, and data untouched.
+
+---
+
+## An app store, and an operating system
+
+Möbius now has a small curated app store. It is a starter pack, not a registry: each public app lives in a repo under [github.com/mobius-os](https://github.com/mobius-os), with a manifest, an `index.jsx` entry point, and an icon. Installing one means pasting a URL. There is no submission queue or central registry to be blessed by.
+
+Updates are keyed by that URL. If the upstream manifest bumps its version, the store can show an update; reinstalling from the same URL patches the app code and keeps your data.
+
+Recovery follows the same philosophy as the rest of the platform: breaking should be cheap to undo. Installs are atomic, so a failed install cannot half-land. `/recover` resets the shell while keeping your chats, apps, and data. Your instance is also a git repo, so the agent can read the history and restore a bad change. What does not exist today is a per-app rollback button in the store. Recovery is atomic installs, `/recover`, and git history, not a one-click versioned rollback.
+
+Apps are also standalone PWAs. You can save one to your phone's home screen, open it like a native app, and use offline-capable apps with no network; writes queue locally and sync back to your server when you reconnect.
+
+The honest edge is composition. The substrate exists: apps have scoped storage and the platform has a permission model for one app reading another's data. The feature does not. There is no built-in flow today where you ask Möbius to combine your workout tracker, calorie log, and journal into a new app that reads across all three.
+
+Read more in [The Agent is the Kernel](https://hamzamerzic.info/blog/2026/the-agent-is-the-kernel/).
 
 ---
 
