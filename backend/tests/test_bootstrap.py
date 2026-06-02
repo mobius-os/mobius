@@ -61,12 +61,15 @@ async def test_bootstrap_skips_when_store_already_installed(db, monkeypatch):
   be guessed.
   """
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  from app.install import _canonical_identity_key
   existing = models.App(
     name="Store",
     description="already here",
     jsx_source="export default function App() {}",
     slug="app-store",
-    manifest_url=BOOTSTRAP_STORE_MANIFEST_URL,
+    # Install stores the CANONICAL key, not the bare URL — seed that so the
+    # bootstrap's canonical-prefix lookup matches (Codex review round-11 #1).
+    manifest_url=_canonical_identity_key(BOOTSTRAP_STORE_MANIFEST_URL, "store"),
   )
   db.add(existing)
   db.commit()

@@ -88,16 +88,27 @@ async def upload_files(
 
   for file in files:
     mime = (file.content_type or "application/octet-stream").split(";")[0].strip().lower()
-    content = await file.read()
-    if len(content) > _MAX_UPLOAD_BYTES:
-      raise HTTPException(
-        status_code=413,
-        detail=(
-          f"{file.filename} exceeds the "
-          f"{_MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit."
-        ),
-      )
-    total = len(content)
+    # Stream-read in chunks with the per-file cap, aborting the instant it's
+    # exceeded, rather than buffering the whole upload before the size check —
+    # so a giant file can't balloon memory on the tight host before being
+    # rejected (Codex review round-11 tangential).
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+      chunk = await file.read(1024 * 1024)
+      if not chunk:
+        break
+      total += len(chunk)
+      if total > _MAX_UPLOAD_BYTES:
+        raise HTTPException(
+          status_code=413,
+          detail=(
+            f"{file.filename} exceeds the "
+            f"{_MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit."
+          ),
+        )
+      chunks.append(chunk)
+    content = b"".join(chunks)
     name = _unique_name(upload_dir, _safe_filename(file.filename or "upload"))
     (upload_dir / name).write_bytes(content)
     saved.append({
