@@ -355,7 +355,7 @@ their register; otherwise the mechanism stays out of the chat.
 ## Mini-apps
 
 Mini-apps are JSX components in sandboxed iframes. Each gets `appId` and
-`token` props and uses the storage API for persistence.
+`token` props and persists through `window.mobius.storage` (see Storage).
 
 ### Before building: check existing apps
 
@@ -452,119 +452,80 @@ load with no shell rebuild required. Add an entry like:
 "@dnd-kit/core": "https://esm.sh/@dnd-kit/core@6",
 ```
 
-### Storage API
+### Storage
+
+Persist app data through `window.mobius.storage` — it's injected into EVERY
+mini-app before your module loads, so make it your DEFAULT (not raw `fetch`).
+It's a read-through wrapper over the storage API: reads are instant (served from
+a local cache, revalidated in the background) and keep working offline
+(last-known value overlaid with any pending writes — read-your-writes); writes
+made offline queue and auto-sync on reconnect.
 
 ```jsx
-// Read JSON file (returns null if not found)
-async function load(appId, token, path) {
-  const res = await fetch(`/api/storage/apps/${appId}/${path}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  })
-  if (res.status === 404) return null
-  return res.json()
-}
-
-// Write a JSON file — body IS your data, server stringifies + persists.
-async function save(appId, token, path, data) {
-  await fetch(`/api/storage/apps/${appId}/${path}`, {
-    method: 'PUT',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  })
-}
-```
-
-The path's extension picks the form: `.json` paths accept your data
-directly; non-JSON paths require the `{content: "..."}` envelope.
-
-I've learned the hard way to never double-wrap a `.json` save with
-`{content: JSON.stringify(data)}`. The server stores that exact
-envelope to disk for `.json` paths; subsequent loads return the
-envelope shape, not the data, the app's load logic silently falls
-back to empty state, and the next save overwrites real data with
-empty state. When in doubt, write `body: JSON.stringify(data)` and
-read with `await res.json()`. The envelope form is only for text
-files (markdown, CSS) on non-`.json` paths.
-
-Use `/api/storage/shared/{path}` for files shared across apps.
-
-This raw-`fetch` pattern is the online default. If you mark an app
-`offline_capable`, route the SAME calls through `window.mobius.storage`
-instead (API-compatible — it adds the offline write-queue + read-through
-cache so reads/writes keep working offline). See "Offline-capable apps"
-below; using bare `fetch` in an offline-capable app silently fails offline.
-
-To find which files an app has stored, **enumerate — don't
-brute-force-probe candidate filenames** (there is no `HEAD` verb; it
-405s). `GET /api/storage/apps-list/{appId}/{prefix}` returns the
-immediate children (`{"entries":[…],"next_cursor":…}`, `?limit=` ≤500,
-opaque `?cursor=`); offline-capable apps use
-`window.mobius.storage.list()` (see Offline-capable apps below).
-
-### Offline-capable apps (opt-in)
-
-By DEFAULT an app is NOT offline-capable: it talks to the server and
-needs a connection. Separately — and automatically for EVERY app — the
-shell's service worker shields apps from the browser's native "no
-internet" page: offline, it serves a branded offline screen, so an
-installed PWA never drops out of standalone mode into raw browser
-chrome. You get that for free; do nothing for it.
-
-What is opt-in is making an app actually RUN offline. Set
-`offline_capable: true` in the create or PATCH body when you register or
-update the app. That does two things: the service worker caches the
-app's code so it loads with no network, and the host exposes
-`window.mobius.storage` — an offline-aware wrapper over the storage API
-that queues writes made offline and auto-syncs them on reconnect.
-
-An offline-capable app MUST persist through `window.mobius.storage`
-instead of raw `fetch` to `/api/storage`:
-
-```jsx
-// read-through: online reads hit the network AND mirror to a local cache;
-// offline (or on error) they return the last-known value overlaid with any
-// pending writes (read-your-writes). null only for a path never cached.
+// read: your data, or null if the path is absent (never written/removed/404).
 const notes = (await window.mobius.storage.get('notes.json')) || []
-// writes go through when online; queue + auto-sync when offline
+// write: pass your data directly — do NOT JSON.stringify, the runtime does it.
 await window.mobius.storage.set('notes.json', notes)
 await window.mobius.storage.remove('items/abc.json')
-// reactive read: cb fires with the current value, then on every set/remove
-// for the path — prefer this over re-reading so the UI updates when a sync
-// lands. Returns an unsubscribe fn.
+// reactive read: cb fires with the current value, then on every change/sync for
+// the path. Prefer this over re-reading so the UI updates when a sync lands.
 const unsub = window.mobius.storage.subscribe('notes.json', v => setNotes(v || []))
-// enumerate a directory instead of brute-force-probing filenames:
-// returns [{name, path, type, size, modified_at, mime_type}], [] when
-// empty/not-yet-created, null on network failure (list() has no
-// offline cache, unlike get()).
+// enumerate a directory's immediate children instead of probing filenames:
+// [{name,path,type,size,modified_at,mime_type}], [] when empty, null on network
+// failure (list() has NO offline mirror, unlike get()).
 const entries = await window.mobius.storage.list('items/')
 window.mobius.online                        // boolean
 await window.mobius.storage.pendingCount()  // unsynced writes
 ```
 
-`get()` works OFFLINE: it serves the last-known cached value (overlaid with
-your pending offline writes), so you can re-read freely; it returns null only
-for a path that was never cached while online. Prefer `subscribe(path, cb)`
-for reads that should update reactively when a value changes or a sync lands.
-`list(prefix)` enumerates a directory's immediate children so an app can
-discover what it stored instead of probing for filenames — but it has NO
-offline mirror (null offline), so apps that need offline enumeration keep their
-own snapshot. To list from outside an app (a cron script, or the agent itself):
-`GET /api/storage/apps-list/{appId}/{prefix}` — immediate children only,
-`?limit=` (≤500) + opaque `?cursor=` for pagination, `{"entries": [...], "next_cursor": null}`.
-
 Conflict policy is last-write-wins per path; where a lost edit would matter,
-store one file per record (e.g. `items/<uuid>.json`) so concurrent offline
-edits to different records don't clobber each other.
+store one file per record (e.g. `items/<uuid>.json`) so concurrent edits to
+different records don't clobber each other. `window.mobius.storage` is the easy
+default, not a cage — an app may use raw IndexedDB / OPFS / its own backend
+instead (the iframe is same-origin, so all browser storage works); the platform
+never blocks the escape hatch.
 
-`window.mobius.storage` is the easy DEFAULT, not a cage: an app is free to
-ignore it and use raw IndexedDB / OPFS / its own backend directly (the iframe
-is same-origin, so all browser storage works). The platform provides the
-on-ramp; it never blocks the escape hatch.
+**Raw storage API — for cron scripts, the agent, cross-app `shared/` files, or
+non-`.json` blobs (NOT the in-app default).** `window.mobius.storage` only exists
+inside a running app and is scoped to it; outside an app, or for `shared/` files,
+hit the endpoint directly:
 
-Only set `offline_capable` when the app genuinely works without the
-server (notes, a tracker, a game). A network-dependent app marked
-offline-capable will cache stale/empty state and look broken offline —
-leave those at the default.
+```jsx
+// GET /api/storage/apps/{appId}/{path} -> 404 if missing, else your data;
+// PUT same path, body = your data. /api/storage/shared/{path} for shared files.
+const res = await fetch(`/api/storage/apps/${appId}/${path}`, {
+  headers: { Authorization: `Bearer ${token}` },
+})
+```
+
+The extension picks the form: `.json` paths take your data directly; non-`.json`
+paths (markdown, CSS) require the `{content: "..."}` envelope. NEVER double-wrap
+a `.json` save with `{content: JSON.stringify(data)}` — the server stores that
+exact envelope, later loads return the envelope shape not your data, the app
+silently falls back to empty state, and the next save overwrites real data. For
+`.json`: write `body: JSON.stringify(data)`, read `await res.json()`. To list
+from outside an app: `GET /api/storage/apps-list/{appId}/{prefix}` — immediate
+children only (`{"entries":[…],"next_cursor":…}`, `?limit=` ≤500, opaque
+`?cursor=`; there is no `HEAD` verb — it 405s, so enumerate, don't probe).
+
+### Offline-capable apps (opt-in)
+
+Storage already works offline via `window.mobius.storage` (above) for every
+app. What `offline_capable: true` ADDS is making the app's own CODE run with no
+network: the service worker caches the app's frame + module so the actual app
+loads and renders offline. Set it in the create or PATCH body for any app that
+genuinely works without the server (notes, a tracker, a game).
+
+Separately — and automatically for EVERY app, no flag needed — the shell's
+service worker keeps an installed PWA out of the browser's native "no internet"
+page: an app that ISN'T offline-capable shows a branded offline screen when
+opened offline (never browser chrome). So `offline_capable` is the difference
+between "the real app runs offline" (set it) and "a branded "you're offline"
+screen" (the automatic default) — neither ever drops to the browser error page.
+
+Only set `offline_capable` when the app genuinely works offline. A
+network-dependent app marked offline-capable caches stale/empty state and looks
+broken offline — leave those at the default.
 
 ### Styling — theme-aware colors
 
