@@ -444,6 +444,27 @@ export default function MyApp({ appId, token }) {
 }
 ```
 
+### Design conventions
+
+Mini-apps should look like they belong to the shell. Several real bugs came
+from drifting off these — follow them by default:
+
+- **Status colors:** the app frame defines exactly two status tokens —
+  `var(--danger)` for errors and `var(--green)` for success. There is **no
+  `--red`** (using it silently falls back to a hardcoded hex and never picks
+  up the theme). Everything else uses `--accent`, `--text`, `--muted`,
+  `--bg`, `--surface`, `--border`.
+- **Touch targets:** mobile is the primary target — every interactive control
+  gets `min-height: 44px` (the iOS/Android floor) and every icon-only button
+  gets an `aria-label`. Larger targets don't hurt desktop.
+- **One inline-style object named `S`** (`const S = { ... }`), consistently,
+  so apps read alike.
+- **Scheduled apps — never a dead time-picker.** If the cron cadence is NOT
+  user-editable, show it in words ("Updates daily") plus "ask the Möbius agent
+  to reschedule" — do not render a picker that writes a file nothing reads. If
+  it IS editable, ship a `sync-cron.sh` that actually rewrites the crontab.
+  Lead with the cadence either way.
+
 ### Available libraries
 
 The canonical bare-specifier runtime-lib manifest lives at

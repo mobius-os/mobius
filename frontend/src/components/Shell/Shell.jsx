@@ -259,6 +259,14 @@ export default function Shell() {
       // counter to keep in sync.
       if (ev.appId) {
         refreshApps().then(updatedApps => {
+          // Only surface the "Open app" CTA when the user is actually in a
+          // chat. An app_updated fired while viewing a canvas — e.g. installing
+          // from the App Store, which is itself a mini-app, or the watcher
+          // recompiling that install's index.jsx — must NOT plant a CTA that
+          // then shows up in an unrelated (new) chat. The fully robust fix is a
+          // chat-scoped `app_built` event on the chat's own stream (see the
+          // open-app-cta design note); this gate removes the reported case.
+          if (activeViewRef.current !== 'chat') return
           const name = updatedApps.find(a => String(a.id) === String(ev.appId))?.name || null
           setBuiltApp({ id: Number(ev.appId), name })
         })

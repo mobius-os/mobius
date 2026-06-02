@@ -1316,6 +1316,33 @@ async def _complete_turn(
   return disposition
 
 
+def _build_time_context(timezone: str | None) -> str:
+  """A one-line, per-turn time stamp injected into the user message.
+
+  The agent otherwise has no clock — only an IANA timezone NAME was
+  injected, and only on the first turn. Giving it the current local
+  date and time on every turn lets it reason about time of day and
+  recency (greet differently late at night, notice the conversation
+  resumed after a long gap). It is marked as context so it is never
+  read as the user's own words, and is invisible to the user (only the
+  agent's copy of the message is modified, exactly like the
+  <agent_experience> block). Falls back to UTC if the timezone is
+  missing or unparseable. Elapsed-since-last-turn is a deliberate
+  follow-up — ChatMessage carries no ts, so it needs extra plumbing.
+  """
+  from datetime import datetime, timezone as _dttz
+  tz = None
+  if timezone:
+    try:
+      from zoneinfo import ZoneInfo
+      tz = ZoneInfo(timezone)
+    except Exception:
+      tz = None
+  now = datetime.now(tz) if tz else datetime.now(_dttz.utc)
+  stamp = now.strftime("%a %Y-%m-%d %H:%M")
+  return f"[Context — current time: {stamp} ({timezone or 'UTC'})]"
+
+
 async def run_chat(
   messages: list[schemas.ChatMessage],
   chat_id: str = "",
@@ -1563,6 +1590,11 @@ async def _run_chat_impl(
         f"{provider_line}{tz_line}{vp_line}\n</agent_experience>"
         f"\n\n{user_message}"
       )
+
+  # Per-turn time context (EVERY turn, not just the first) so the agent has a
+  # clock. Prepended last so it leads the message the agent sees; only the
+  # agent's copy is touched here, never the persisted/displayed user text.
+  user_message = f"{_build_time_context(timezone)}\n\n{user_message}"
 
   bc = get_broadcast(chat_id)
   if bc is None:
