@@ -99,6 +99,14 @@ async def lifespan(app):
       _rc_db.close()
   except Exception as exc:
     _log.error("startup chat reconciliation failed: %s", exc, exc_info=True)
+  # Discard any `*.js.staging` bundle left by a crash between a recompile's
+  # commit and its atomic promote (see compiler.recompile_app_bundle). A leaked
+  # staging file is never served; reaping it just keeps the compiled dir clean.
+  try:
+    from app.compiler import reap_staging_bundles
+    reap_staging_bundles()
+  except Exception as exc:
+    _log.error("staging-bundle reap failed: %s", exc, exc_info=True)
   # Start the single-writer chat-persistence actor AFTER db init and
   # crash reconciliation. Order is load-bearing: reconcile_interrupted_chats
   # must run BEFORE the actor exists — recovery has to work even when

@@ -146,3 +146,45 @@ def test_delete_upload_missing_file_still_cleans_db(client, db, auth, chat):
   assert res.status_code == 204
   db.refresh(chat)
   assert len(chat.uploads) == 0
+
+
+def test_upload_multi_file_over_cap_cleans_partial(client, db, auth, chat, monkeypatch):
+  """If a later file in a multi-file upload exceeds the cap, the files already
+  written this request are removed — no orphan on disk without a metadata row."""
+  import os
+  import pathlib
+  import sys
+  from app.config import get_settings
+  # Patch the cap everywhere it could be read: the live route's own module
+  # globals AND every `app.routes.uploads` object in sys.modules — a sibling
+  # test may have reloaded the module into a second instance, so a plain
+  # `monkeypatch.setattr(uploads, ...)` could patch the wrong one.
+  for mod in list(sys.modules.values()):
+    if getattr(mod, "__name__", "") == "app.routes.uploads":
+      monkeypatch.setattr(mod, "_MAX_UPLOAD_BYTES", 10, raising=False)
+  ep = next(
+    (r.endpoint for r in client.app.routes
+     if getattr(r, "path", None) == "/api/chats/{chat_id}/uploads"
+     and "POST" in getattr(r, "methods", set())),
+    None,
+  )
+  if ep is not None:
+    monkeypatch.setitem(ep.__globals__, "_MAX_UPLOAD_BYTES", 10)
+  res = client.post(
+    f"/api/chats/{chat.id}/uploads",
+    files=[
+      ("files", ("small.txt", io.BytesIO(b"ok"), "text/plain")),      # fits
+      ("files", ("big.txt", io.BytesIO(b"x" * 50), "text/plain")),    # over cap
+    ],
+    headers=auth,
+  )
+  assert res.status_code == 413
+  # The file written before the cap was hit was cleaned up — assert the specific
+  # name is gone (robust to any unrelated files a shared fixture left here).
+  upload_dir = pathlib.Path(get_settings().data_dir) / "chats" / chat.id / "uploads"
+  leftover = os.listdir(upload_dir) if upload_dir.is_dir() else []
+  assert not any(n.startswith("small") for n in leftover), (
+    f"partial upload left an orphan: {leftover}"
+  )
+  db.refresh(chat)
+  assert (chat.uploads or []) == []

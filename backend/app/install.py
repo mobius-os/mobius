@@ -798,36 +798,24 @@ async def install_from_manifest(
       db.add(app)
       db.flush()  # assign app.id without committing yet
 
-    # On the update path, snapshot the existing compiled bundle to
-    # `.bak` BEFORE compile overwrites it. If anything downstream
-    # fails and the DB rolls back to the old compiled_path string,
-    # we restore the file at that path from the snapshot — otherwise
-    # the row points at a path holding the new (possibly broken)
-    # bundle. Fresh installs don't need this: rollback drops the row
-    # entirely and `_cleanup` removes the file we just created.
-    if mode == "update":
-      old_compiled = data_dir / "compiled" / f"app-{app.id}.js"
-      backup = old_compiled.with_suffix(".js.bak")
-      if old_compiled.exists():
-        # Best-effort: a stale .bak from a prior crashed install
-        # would block the rename. Clear it first.
-        if backup.exists():
-          try:
-            backup.unlink()
-          except OSError:
-            pass
-        os.rename(old_compiled, backup)
-        rollback_actions.append(
-          lambda b=backup, o=old_compiled: os.rename(b, o)
-            if b.exists() else None
-        )
-        commit_actions.append(
-          lambda b=backup: b.unlink() if b.exists() else None
-        )
-
-    # Compile JSX → /data/compiled/app-<id>.js. Raises on syntax error
-    # which our outer except catches + rolls everything back.
-    app.compiled_path = await compile_jsx(app.id, jsx_source)
+    # Compile the JSX OUT OF PLACE to a staging file and promote it into the
+    # live bundle only AFTER the DB commit (commit_actions run post-commit). So
+    # a concurrent module read never observes a missing or half-written live
+    # bundle mid-update, and a rollback or crash discards the staging file,
+    # leaving the prior bundle intact (a leaked staging file is reaped at
+    # startup and is never served). Raises on syntax error -> the outer except
+    # rolls everything back. Same transactional recompile PATCH and the file
+    # watcher use (compiler.recompile_app_bundle).
+    live_bundle = data_dir / "compiled" / f"app-{app.id}.js"
+    staged_bundle = data_dir / "compiled" / f"app-{app.id}.js.staging"
+    await compile_jsx(app.id, jsx_source, out_path=staged_bundle)
+    app.compiled_path = str(live_bundle)
+    rollback_actions.append(
+      lambda s=staged_bundle: s.unlink() if s.exists() else None
+    )
+    commit_actions.append(
+      lambda s=staged_bundle, l=live_bundle: os.replace(s, l)
+    )
 
     # Write source_dir/index.jsx so the file watcher sees the app. Under the
     # per-source-dir lock (the endpoint already holds the lifecycle lock, and

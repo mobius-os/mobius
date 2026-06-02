@@ -18,6 +18,7 @@ from app.database import get_db
 from app.deps import get_current_owner, resolve_owner_only
 from app.path_utils import validate_path_within_base
 from app.resource_access import get_active_chat_or_404
+from app.storage_io import atomic_write
 
 router = APIRouter(prefix="/api/chats", tags=["uploads"])
 
@@ -85,42 +86,56 @@ async def upload_files(
   settings = get_settings()
   upload_dir = _resolve_upload_dir(settings.data_dir, chat_id)
   saved = []
+  written: list[pathlib.Path] = []
 
-  for file in files:
-    mime = (file.content_type or "application/octet-stream").split(";")[0].strip().lower()
-    # Stream-read in chunks with the per-file cap, aborting the instant it's
-    # exceeded, rather than buffering the whole upload before the size check —
-    # so a giant file can't balloon memory on the tight host before being
-    # rejected (Codex review round-11 tangential).
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-      chunk = await file.read(1024 * 1024)
-      if not chunk:
-        break
-      total += len(chunk)
-      if total > _MAX_UPLOAD_BYTES:
-        raise HTTPException(
-          status_code=413,
-          detail=(
-            f"{file.filename} exceeds the "
-            f"{_MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit."
-          ),
-        )
-      chunks.append(chunk)
-    content = b"".join(chunks)
-    name = _unique_name(upload_dir, _safe_filename(file.filename or "upload"))
-    (upload_dir / name).write_bytes(content)
-    saved.append({
-      "name": name,
-      "path": str(upload_dir / name),
-      "size": total,
-      "mime_type": mime,
-      "uploaded_at": datetime.now(UTC).isoformat(),
-    })
+  try:
+    for file in files:
+      mime = (file.content_type or "application/octet-stream").split(";")[0].strip().lower()
+      # Stream-read in chunks with the per-file cap, aborting the instant it's
+      # exceeded, rather than buffering the whole upload before the size check —
+      # so a giant file can't balloon memory on the tight host before being
+      # rejected.
+      chunks: list[bytes] = []
+      total = 0
+      while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+          break
+        total += len(chunk)
+        if total > _MAX_UPLOAD_BYTES:
+          raise HTTPException(
+            status_code=413,
+            detail=(
+              f"{file.filename} exceeds the "
+              f"{_MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit."
+            ),
+          )
+        chunks.append(chunk)
+      content = b"".join(chunks)
+      name = _unique_name(upload_dir, _safe_filename(file.filename or "upload"))
+      dest = upload_dir / name
+      atomic_write(dest, content)
+      written.append(dest)
+      saved.append({
+        "name": name,
+        "path": str(dest),
+        "size": total,
+        "mime_type": mime,
+        "uploaded_at": datetime.now(UTC).isoformat(),
+      })
 
-  chat.uploads = list(chat.uploads or []) + saved
-  db.commit()
+    chat.uploads = list(chat.uploads or []) + saved
+    db.commit()
+  except BaseException:
+    # A later file over the cap, or a commit failure, must not leave the files
+    # already written this request orphaned on disk with no metadata row. Unlink
+    # them; the metadata change rolls back when the request's session closes.
+    for p in written:
+      try:
+        p.unlink()
+      except OSError:
+        pass
+    raise
   return saved
 
 
