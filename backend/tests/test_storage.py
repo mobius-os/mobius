@@ -474,3 +474,33 @@ def test_uninstall_skips_numeric_source_dir(client, auth, owner_token, db):
   # The numeric dir (another app's storage) and its contents survive.
   assert os.path.isdir(victim)
   assert os.path.isfile(os.path.join(victim, "keep.json"))
+
+
+def test_uninstall_skips_nested_and_shared_source_dir(client, auth, owner_token, db):
+  """Uninstall won't rmtree a NESTED descendant of /data/apps (could be inside
+  another app's tree) or a dir SHARED by another app row (Codex review #4)."""
+  import os
+  import app.models as models
+  data_dir = os.environ["DATA_DIR"]
+
+  # A nested descendant (not an immediate child) must not be removed.
+  nested = os.path.join(data_dir, "apps", "keepme", "inner")
+  os.makedirs(nested, exist_ok=True)
+  open(os.path.join(nested, "x.json"), "w").close()
+  a1 = _make_app(client, owner_token)
+  db.query(models.App).filter(models.App.id == a1).first().source_dir = nested
+  db.commit()
+  assert client.delete(f"/api/apps/{a1}", headers=auth).status_code == 204
+  assert os.path.isdir(nested)
+
+  # An immediate-child dir referenced by TWO app rows must survive deleting one.
+  shared = os.path.join(data_dir, "apps", "shared-src")
+  os.makedirs(shared, exist_ok=True)
+  open(os.path.join(shared, "y.json"), "w").close()
+  a2 = _make_app(client, owner_token)
+  a3 = _make_app(client, owner_token)
+  for aid in (a2, a3):
+    db.query(models.App).filter(models.App.id == aid).first().source_dir = shared
+  db.commit()
+  assert client.delete(f"/api/apps/{a2}", headers=auth).status_code == 204
+  assert os.path.isdir(shared)  # a3 still references it

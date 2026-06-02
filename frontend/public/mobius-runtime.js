@@ -78,8 +78,21 @@ function fetchBounded(url, init) {
   const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null
   const opts = ctrl ? { ...init, signal: ctrl.signal } : init
   let timer
-  if (ctrl) timer = setTimeout(() => ctrl.abort(), READ_TIMEOUT_MS)
-  return fetch(url, opts).finally(() => { if (timer) clearTimeout(timer) })
+  if (ctrl) {
+    timer = setTimeout(() => ctrl.abort(), READ_TIMEOUT_MS)
+    return fetch(url, opts).finally(() => { if (timer) clearTimeout(timer) })
+  }
+  // No AbortController: still RACE a timeout so a hung read can't pin the
+  // per-path chain that get()/reconcile hold while awaiting it (Codex review
+  // round-5 #2). The underlying request may complete late, but its result is
+  // discarded — a read is idempotent and the caller already fell back to the
+  // cache mirror, so a late read is harmless (unlike a late write).
+  return Promise.race([
+    fetch(url, opts),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('mobius: read timed out')), READ_TIMEOUT_MS)
+    }),
+  ]).finally(() => { if (timer) clearTimeout(timer) })
 }
 
 function openDb() {
@@ -420,6 +433,17 @@ function makeStorage({ appId, getToken }) {
     for (const d of deadLettered || []) {
       try {
         await withPathLock(d.path, async () => {
+          // If a NEWER write for this path is still queued, it supersedes the
+          // dead-lettered one: its value is already the optimistic cache (set()
+          // wrote it) and was already notified. Invalidating the cache + caching
+          // server state here would DESTROY that value — the read overlay masks
+          // it only until the newer op drains, after which an offline read would
+          // return stale server state (Codex review round-5 #1). So leave the
+          // cache untouched when a pending op exists; only when none remains is
+          // the cached value the rejected one, safe to drop + restore from the
+          // server.
+          const ops = await listOps()
+          if (ops.some((o) => o.path === d.path)) return
           await cacheDelete(d.path)
           let fresh = null
           try { fresh = await getInner(d.path) } catch (re) { /* best-effort */ }
