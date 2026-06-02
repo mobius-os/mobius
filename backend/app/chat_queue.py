@@ -194,7 +194,7 @@ async def promote_pending_messages(
   promotion (mark_starting before call in the stale-pending path, or by
   being the only finally block for a given run in the turn-end path).
 
-  FIX C — the lock acquisition is bounded by `TERMINAL_LOCK_TIMEOUT_SECS`,
+  The lock acquisition is bounded by `TERMINAL_LOCK_TIMEOUT_SECS`,
   matching every other terminal lock (the turn-end drain, the setup-error
   cleanups, Stop's queue cleanup). This is the stale-pending promotion path
   (chats_stream.send_message): a wedged lock holder would otherwise hang the
@@ -212,12 +212,13 @@ async def promote_pending_messages(
 async def drain_and_release(
   db: Session,
   chat_id: str,
-  we_own_gen: bool,
+  run_gen: int | None,
   run_token: str,
   *,
   discard_starting,
   forget_chat,
   clear_run_status_strict,
+  current_generation,
 ) -> tuple[dict | None, list, str | None, "TerminalDisposition"]:
   """End-of-turn queue drain. Returns (next_user, next_messages,
   next_session_id, disposition) for the caller to publish + schedule.
@@ -243,9 +244,14 @@ async def drain_and_release(
   the actor. Whichever side wins the lock, the message is either
   promoted here or POST takes the start path.
 
-  When we_own_gen is False (Stop bumped the gen), we must not
-  promote / clear / release _starting — the newer owner (Stop, or the
-  continuation it scheduled) is responsible. Returns `STALE_NO_ACTION`.
+  Ownership is re-decided UNDER the lock from `run_gen` via the injected
+  `current_generation` — never from a bool the caller snapshotted before the
+  lock-acquisition await. A Stop bumps the run generation synchronously, so
+  reading it the instant we hold the lock observes a Stop that landed during
+  lock acquisition (not a stale snapshot). When the current generation no
+  longer matches `run_gen` (Stop bumped the gen), we must not promote / clear
+  / release _starting — the newer owner (Stop, or the continuation it
+  scheduled) is responsible. Returns `STALE_NO_ACTION`.
 
   Bounding: the lock acquisition is wrapped in
   `asyncio.timeout(TERMINAL_LOCK_TIMEOUT_SECS)`. A lock-acquisition timeout
@@ -261,10 +267,19 @@ async def drain_and_release(
   the post-lock `_schedule_continuation` call — this function does NOT
   schedule continuations or call back into `run_chat`.
   """
-  if not we_own_gen:
-    return None, [], None, TerminalDisposition.STALE_NO_ACTION
   async with asyncio.timeout(TERMINAL_LOCK_TIMEOUT_SECS):
     async with get_lock(chat_id):
+      # Ownership is decided HERE, under the lock, as the first statement after
+      # acquiring it — never from a bool computed before the await. A Stop bumps
+      # the run generation synchronously, so reading it the instant we hold the
+      # lock makes "do we still own this turn?" atomic with the promote/clear
+      # below, closing the window where a Stop landing between the caller's
+      # check and this lock would let us promote or clear a superseded turn.
+      # (The caller's pre-finalize gate is a separate, earlier decision: whether
+      # to finalize the assistant message at all.)
+      we_own_gen = run_gen is None or current_generation(chat_id) == run_gen
+      if not we_own_gen:
+        return None, [], None, TerminalDisposition.STALE_NO_ACTION
       next_messages, first_pending, next_session_id = (
         await promote_pending_messages_locked(db, chat_id, run_token)
       )

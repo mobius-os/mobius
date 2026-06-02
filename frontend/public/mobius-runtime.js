@@ -23,7 +23,6 @@
 //   window.mobius.storage.remove(path)        -> {synced} | {queued}
 //   window.mobius.storage.list(prefix)        -> entries[] | null
 //   window.mobius.storage.subscribe(path, cb) -> unsubscribe fn (cb(value))
-//   window.mobius.storage.onSyncError(cb)     -> unsubscribe fn (cb({path,method,message}))
 //   window.mobius.storage.pendingCount()      -> Promise<number>
 //
 // "No walls": this runtime is the easy DEFAULT, not a cage. An app is free to
@@ -63,43 +62,19 @@ export function overlayPending(ops, path, fallback) {
   return fallback
 }
 
-// Read timeout: a stalled offline request (Android: navigator.onLine reads a
+// Bound a fetch so a stalled offline request (Android: navigator.onLine reads a
 // stale `true`, so get() takes the online branch and the request hangs instead
-// of failing fast) must not make a read wait before falling back to the cache
-// mirror. Used by fetchBoundedJson below.
+// of failing fast) can't make a read wait seconds before falling back to the
+// cache mirror. Aborts at READ_TIMEOUT_MS; the caller treats a throw as "use
+// the cache". Mirrors the bounded-fetch the service worker uses for frame/
+// module.
 const READ_TIMEOUT_MS = 2500
-// Writes are held under the outbox lock, so a stalled send must not pin it
-// forever (Codex review #2). Longer than the read bound — a write that takes
-// a few seconds on a slow link is normal; only a genuine hang is aborted.
-const WRITE_TIMEOUT_MS = 10000
-
-// Bound the FULL read — connection AND body parse — under one timeout. A bare
-// fetch resolves when the response HEADERS arrive; `res.json()` then streams
-// the body, which can stall indefinitely and pin the per-path chain that
-// get()/list() hold while awaiting it (Codex review round-6 #2). So the abort
-// timer must stay armed through `.json()`. Returns {ok, status, data}: `data`
-// is the parsed JSON for a 2xx, omitted otherwise so callers branch on
-// `status` (e.g. 404). Aborting (or, without AbortController, the timeout
-// race) cancels a stalled body read too.
-async function fetchBoundedJson(url, init) {
+function fetchBounded(url, init) {
   const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null
   const opts = ctrl ? { ...init, signal: ctrl.signal } : init
   let timer
-  const work = (async () => {
-    const res = await fetch(url, opts)
-    if (!res.ok) return { ok: false, status: res.status }
-    return { ok: true, status: res.status, data: await res.json() }
-  })()
-  if (ctrl) {
-    timer = setTimeout(() => ctrl.abort(), READ_TIMEOUT_MS)
-    return work.finally(() => { if (timer) clearTimeout(timer) })
-  }
-  return Promise.race([
-    work,
-    new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error('mobius: read timed out')), READ_TIMEOUT_MS)
-    }),
-  ]).finally(() => { if (timer) clearTimeout(timer) })
+  if (ctrl) timer = setTimeout(() => ctrl.abort(), READ_TIMEOUT_MS)
+  return fetch(url, opts).finally(() => { if (timer) clearTimeout(timer) })
 }
 
 function openDb() {
@@ -185,45 +160,14 @@ function makeStorage({ appId, getToken }) {
     })
   }
 
-  // Run `fn` holding the per-app outbox Web Lock — the SAME lock drain()
-  // takes. Every outbox mutation (offline enqueue, online direct-send +
-  // coalesce, and drain) runs under it, so across ALL contexts (in-shell
-  // iframe + standalone tab for the same app) they are strictly serialized
-  // and never interleave. This is what makes the post-send unbounded
-  // purgePath correct: inside the lock no other context can enqueue, so
-  // every queued op for the path is genuinely older than the write we just
-  // sent and is safe to drop; a newer write can only enqueue AFTER we
-  // release (later in the lock order), so it survives and wins — closing the
-  // cross-context last-write-wins race (Codex review #7).
-  //
-  // Fallback when Web Locks is unavailable: serialize within THIS context via
-  // a promise chain so same-context outbox ops still never interleave (a plain
-  // pass-through would let an enqueue and a direct-send+purge interleave even
-  // in one tab — Codex review #1). FULL cross-context serialization requires
-  // the Web Locks API (Baseline across browsers since 2022); without it we
-  // fall back to the historical per-context guarantee — two SEPARATE contexts
-  // of the same app writing the same path at the same instant can still race,
-  // the long-documented single-owner accepted bound (see the pathChains note).
-  let outboxFallbackChain = Promise.resolve()
-  function withOutboxLock(fn) {
-    if (navigator.locks && navigator.locks.request) {
-      return navigator.locks.request(`mobius-outbox-${appId}`, fn)
-    }
-    const run = outboxFallbackChain.then(fn, fn)
-    outboxFallbackChain = run.then(() => {}, () => {})
-    return run
-  }
-
   // Enqueue coalesces: the newest write for a path replaces any older
   // queued writes for it, so a stale op can never clobber a newer one
   // when the queue drains. (FIFO ordering across DIFFERENT paths is
   // still preserved — drainInner walks `seq` in order.)
   function enqueue(op) {
-    // Under the outbox lock so an enqueue can't interleave with a concurrent
-    // context's direct-send+purge (which would otherwise drop this op).
-    return withOutboxLock(() => purgePath(op.path, (store) => {
+    return purgePath(op.path, (store) => {
       store.add({ ...op, appId, ts: Date.now() })
-    }))
+    })
   }
 
   function listOps() {
@@ -272,31 +216,28 @@ function makeStorage({ appId, getToken }) {
     })
   }
 
-  // ── Per-path serialization ───────────────────────────────────────────
-  // All operations that read-or-write a path's value (get, set, remove, and
-  // dead-letter reconcile) run through a per-path lock, so they execute in call
-  // order and never interleave: a slow GET can't overwrite the cache after a
-  // newer set(), two set()s can't reorder their cache writes, and a reconcile
-  // can't clobber a concurrent write's mirror.
+  // ── Per-path serialization (in-tab) ─────────────────────────────────
+  // All operations that read-or-write a path's value (get, set, remove) run
+  // through a per-path promise chain, so within this runtime they execute
+  // STRICTLY in call order and never interleave. This is the single, correct
+  // fix for the whole race class Codex flagged: a slow GET can't overwrite the
+  // cache after a newer set() (its cache-write is now ordered after the set),
+  // and two set()s can't reorder their cache writes (server LWW is still by
+  // arrival, but the LOCAL mirror — the source of truth for offline reads and
+  // subscribers — is deterministic by call order). Cross-tab/iframe drains are
+  // additionally serialized by the existing Web Lock in drain().
   //
-  // When the Web Locks API is available (Baseline since 2022 — every browser
-  // that can run this PWA), we use a per-(app,path) Web Lock, which serializes
-  // across ALL contexts of the same app (in-shell iframe + standalone tab), not
-  // just within one runtime. That closes the cross-context cache-mirror
-  // divergence (Codex review round-6 #1). Web Locks are granted FIFO, so call
-  // order within a tab is still preserved. Global lock order is path→outbox
-  // (set/remove take this lock, then the outbox lock inside setInner; drain
-  // takes only the outbox lock and reconciles on this lock AFTER releasing it),
-  // so the two never deadlock.
-  //
-  // Without Web Locks (ancient browsers that can't run the app anyway) we fall
-  // back to a per-runtime promise chain — single-context ordering only, the
-  // long-documented single-owner bound.
+  // SCOPE / known bound: pathChains is per-runtime (per makeStorage). It does
+  // NOT serialize across two SEPARATE runtimes for the same app — e.g. the same
+  // app open BOTH in the in-shell iframe AND a standalone PWA tab at once,
+  // mutating the same path. There, the local mirrors can momentarily diverge by
+  // op interleaving; the server still converges by arrival-order LWW and the
+  // next online get() re-syncs each mirror. Adding a cross-context Web Lock to
+  // every read/write would slow the common single-context path to harden a rare
+  // one — deliberately not done (single-owner, server-arrival LWW is the
+  // documented contract).
   const pathChains = new Map()
   function withPathLock(path, fn) {
-    if (navigator.locks && navigator.locks.request) {
-      return navigator.locks.request(`mobius-path-${appId}-${path}`, fn)
-    }
     const prev = pathChains.get(path) || Promise.resolve()
     // Run fn after prev settles (success OR failure — never let one op's
     // rejection break the chain for the next).
@@ -313,10 +254,8 @@ function makeStorage({ appId, getToken }) {
 
   // ── Reactivity: per-path subscribers ─────────────────────────────────
   // Notify a path's listeners whenever its value changes locally (set/remove)
-  // or a dead-lettered write is reconciled to server truth. A SUCCESSFUL
-  // background drain does NOT notify — it confirms the already-notified value
-  // server-side without changing it. In-memory, per runtime instance — not
-  // persisted (it's view wiring, not data).
+  // or a sync lands (drain). Lets a UI re-render without polling. In-memory,
+  // per runtime instance — not persisted (it's view wiring, not data).
   const subscribers = new Map()   // path -> Set<cb>
 
   function notify(path, data) {
@@ -324,21 +263,6 @@ function makeStorage({ appId, getToken }) {
     if (!set) return
     for (const cb of [...set]) {
       try { cb(data) } catch (e) { /* a listener throwing must not break others */ }
-    }
-  }
-
-  // ── Sync-error listeners ──────────────────────────────────────────────
-  // A write can be permanently rejected by the server (a "poison op": an
-  // invalid path, a malformed body — any non-retryable 4xx). The outbox
-  // dead-letters it so it can't block the queue forever, but the app needs to
-  // KNOW its write was lost rather than silently believing it persisted.
-  // onSyncError(cb) registers a listener; emitSyncError fires it with
-  // {path, method, message}. In-memory, per runtime instance.
-  const errorListeners = new Set()
-
-  function emitSyncError(info) {
-    for (const cb of [...errorListeners]) {
-      try { cb(info) } catch (e) { /* one bad listener can't break the rest */ }
     }
   }
 
@@ -356,34 +280,7 @@ function makeStorage({ appId, getToken }) {
       init.headers['Content-Type'] = 'application/json'
       init.body = JSON.stringify(op.data)
     }
-    // BOUND the write. The outbox lock is held across this send (so a direct
-    // write and the drain can't interleave); an unbounded fetch that stalls —
-    // Android's `navigator.onLine` reads a stale `true`, so we take the online
-    // path and the request hangs — would pin the app-wide lock indefinitely
-    // and block every other context from even enqueueing (Codex review #2).
-    // RACE the fetch against a timeout so the await ALWAYS settles within
-    // WRITE_TIMEOUT_MS and the lock ALWAYS releases, regardless of whether
-    // AbortController exists. When it does, the timeout also aborts the
-    // request so no stale write lands late; when it doesn't (only ancient
-    // browsers, which also lack Web Locks and so never hold the cross-context
-    // lock — they use the in-context fallback), the request may complete late
-    // but the lock is already freed. Either way the timeout throws (transient)
-    // and the caller re-queues for the next drain.
-    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null
-    if (ctrl) init.signal = ctrl.signal
-    let timer
-    const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => {
-        if (ctrl) ctrl.abort()
-        reject(new Error('mobius: storage write timed out'))
-      }, WRITE_TIMEOUT_MS)
-    })
-    let res
-    try {
-      res = await Promise.race([fetch(url, init), timeout])
-    } finally {
-      if (timer) clearTimeout(timer)
-    }
+    const res = await fetch(url, init)   // network failure throws -> transient
     if (op.method === 'DELETE' && res.status === 404) return  // already absent
     if (res.ok) return
     // Classify so one bad op can't wedge the queue (drainInner reads
@@ -395,19 +292,9 @@ function makeStorage({ appId, getToken }) {
     throw err
   }
 
-  // Drains the outbox under the outbox lock. Returns the list of
-  // dead-lettered ops {path, method, message} for the caller to RECONCILE
-  // AFTER the lock is released — see drain(). We deliberately do NOT touch
-  // the cache or call get()/notify here: that work belongs on the per-path
-  // chain (so it serializes with a concurrent set/remove and can't clobber a
-  // newer same-tab write), but taking the path chain WHILE holding the outbox
-  // lock would invert the global path→outbox order and could deadlock against
-  // a set() that holds the path chain waiting for the outbox lock (Codex
-  // review #1, #3). So: collect here under the outbox lock, reconcile after.
   async function drainInner() {
-    if (!navigator.onLine) return []
+    if (!navigator.onLine) return
     const ops = await listOps()           // FIFO by seq
-    const deadLettered = []
     for (const op of ops) {
       try {
         await send(op)
@@ -415,13 +302,19 @@ function makeStorage({ appId, getToken }) {
       } catch (e) {
         if (e && e.fatal) {
           // Poison op — a malformed/forbidden request that will never
-          // succeed on replay. Drop it (dead-letter) and keep draining so it
-          // can't head-of-line-block every later write forever. Reconciling
-          // the cache + notifying happens after the lock releases.
+          // succeed on replay. Drop it (dead-letter) and keep draining
+          // so it can't head-of-line-block every later write forever.
           // eslint-disable-next-line no-console
           console.warn('mobius: dropping un-syncable write', op.method, op.path, e.message)
           await deleteOp(op.seq)
-          deadLettered.push({ path: op.path, method: op.method, message: e.message })
+          // The optimistic cache still holds this rejected write's value. The
+          // server never accepted it, so re-fetch the authoritative value (or
+          // known-absence) and notify subscribers so the UI doesn't show a
+          // value that will never persist (Codex review, Medium #4).
+          try {
+            const fresh = await get(op.path)
+            notify(op.path, fresh)
+          } catch (re) { /* best-effort reconciliation */ }
           continue
         }
         // Transient (offline / 5xx / 401): stop so order is preserved
@@ -430,62 +323,19 @@ function makeStorage({ appId, getToken }) {
         break
       }
     }
-    return deadLettered
   }
 
-  // Reconcile a dead-lettered write AFTER the outbox lock has been released,
-  // on the per-path chain so it serializes with any concurrent set/remove for
-  // that path (no clobber of a newer write) and never holds two locks at once
-  // (Codex review #1). The optimistic cache still holds the rejected value, so
-  // invalidate it first, then re-read authoritative server state (or genuine
-  // absence) via getInner — already inside the path chain — and notify.
-  async function reconcileDeadLetters(deadLettered) {
-    for (const d of deadLettered || []) {
-      try {
-        await withPathLock(d.path, async () => {
-          // If a NEWER write for this path is still queued, it supersedes the
-          // dead-lettered one: its value is already the optimistic cache (set()
-          // wrote it) and was already notified. Invalidating the cache + caching
-          // server state here would DESTROY that value — the read overlay masks
-          // it only until the newer op drains, after which an offline read would
-          // return stale server state (Codex review round-5 #1). So leave the
-          // cache untouched when a pending op exists; only when none remains is
-          // the cached value the rejected one, safe to drop + restore from the
-          // server.
-          // This runs under withPathLock(d.path) — a cross-context Web Lock
-          // where available — so the listOps check + cache mutation can't
-          // interleave with a concurrent set()/remove() for this path in ANY
-          // context (Codex review round-6 #1).
-          const ops = await listOps()
-          if (ops.some((o) => o.path === d.path)) return
-          await cacheDelete(d.path)
-          let fresh = null
-          try { fresh = await getInner(d.path) } catch (re) { /* best-effort */ }
-          notify(d.path, fresh)
-        })
-      } catch (e) { /* best-effort reconciliation */ }
-      emitSyncError(d)
-    }
-  }
-
-  // Drain under the outbox lock so it can't interleave with a direct
-  // send+purge or an enqueue (same lock as withOutboxLock). Uses
-  // `ifAvailable` when Web Locks is present — an event-driven flush should
-  // SKIP rather than queue behind an in-flight write (that write already
-  // sent its op); the next event re-fires it. Without Web Locks it routes
-  // through withOutboxLock's in-context fallback chain so a drain still
-  // can't interleave with a same-context enqueue/send (Codex review #1).
-  // drainInner returns the dead-lettered ops; we reconcile them via the
-  // per-path chain ONLY AFTER the outbox lock is released (the .then runs
-  // post-release), so reconciliation respects LWW and never holds two locks.
+  // Web Locks serializes draining across contexts (an in-shell iframe
+  // and a standalone page for the same app can both be open). Falls
+  // back to a plain drain where Web Locks is unavailable.
   function drain() {
     if (navigator.locks && navigator.locks.request) {
       navigator.locks.request(
         `mobius-outbox-${appId}`, { ifAvailable: true },
-        async (lock) => (lock ? await drainInner() : []),
-      ).then(reconcileDeadLetters).catch(() => {})
+        async (lock) => { if (lock) await drainInner() },
+      ).catch(() => {})
     } else {
-      withOutboxLock(drainInner).then(reconcileDeadLetters).catch(() => {})
+      drainInner().catch(() => {})
     }
   }
 
@@ -524,38 +374,23 @@ function makeStorage({ appId, getToken }) {
   async function listInner(prefix) {
     try {
       const token = await getToken()
-      // Page through the whole listing so list() is true enumeration, not
-      // just the server's first page (it caps a page at 500). Two guards keep
-      // this bounded and HONEST rather than silently truncating (Codex review
-      // #9): a page cap (MAX_LIST_PAGES × 500 entries) and a non-advancing
-      // cursor check. Hitting either THROWS — which surfaces as null, the same
-      // contract a network error uses — so the app falls back to its own
-      // snapshot instead of acting on half a directory. Any HTTP error
-      // likewise surfaces as null (offline/transient).
-      const MAX_LIST_PAGES = 200   // ×500/page = 100k entries, far past single-owner scale
+      // Page through the whole listing so list() is true enumeration,
+      // not just the server's first page (it caps a page at 500). The
+      // guard bounds a pathological/looping cursor; any HTTP error
+      // surfaces as null (offline/transient) like the single-fetch case.
       const entries = []
       let cursor = null
-      let prevCursor = null
-      for (let page = 0; ; page++) {
-        if (page >= MAX_LIST_PAGES) {
-          throw new Error(`mobius: listing exceeded ${MAX_LIST_PAGES * 500} entries`)
-        }
+      for (let guard = 0; guard < 10000; guard++) {
         const q = `?limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
-        const r = await fetchBoundedJson(
+        const res = await fetchBounded(
           `/api/storage/apps-list/${appId}/${prefix || ''}${q}`,
           { headers: { Authorization: `Bearer ${token}` } },
         )
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        const body = r.data
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const body = await res.json()
         for (const e of body.entries || []) entries.push(e)
         cursor = body.next_cursor
         if (!cursor) break
-        // A server that returns the same cursor twice would loop forever; fail
-        // fast rather than spin.
-        if (cursor === prevCursor) {
-          throw new Error('mobius: listing cursor did not advance')
-        }
-        prevCursor = cursor
       }
       return entries
     } catch (e) {
@@ -563,34 +398,86 @@ function makeStorage({ appId, getToken }) {
     }
   }
 
+  const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b)
+
+  // Fetch the authoritative server value for a path. 404 → null (known-absent);
+  // any other non-OK → throw (transient/auth — the caller keeps the mirror).
+  // Bounded so a stale-`true` navigator.onLine (Android offline) can't hang it.
+  async function fetchValue(path) {
+    const token = await getToken()
+    const res = await fetchBounded(`/api/storage/apps/${appId}/${path}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    if (res.status === 404) return null
+    if (res.ok) return await res.json()
+    throw new Error(`HTTP ${res.status}`)
+  }
+
+  // Background refresh after a cache-first get(): re-fetch the path and, if the
+  // server value changed, update the mirror and notify subscribers. Re-takes
+  // the path lock so its mirror write stays ordered against concurrent set()s.
+  // Skips entirely when a local write for the path is still queued — that write
+  // owns the value until the outbox drains (read-your-writes), so the mirror
+  // must NOT be clobbered with the not-yet-overwritten server value (the bug the
+  // pending guard closes; the old always-mirror read had it too). Fire-and-
+  // forget; a transient failure leaves the last-known mirror untouched.
+  function scheduleRevalidate(path) {
+    withPathLock(path, async () => {
+      // A queued local write owns the value until the outbox drains (read-your-
+      // writes), so the mirror must NOT be clobbered with the server value.
+      // Check BEFORE the fetch: if an op is queued when we start, a later "no
+      // op" can't be trusted — a concurrent drain (drainInner runs under the
+      // outbox Web Lock, NOT this path lock) could sync+delete it mid-fetch,
+      // after our GET already read the pre-sync value. No queued op ⟺ every
+      // write for this path is already on the server, so the GET sees the
+      // latest write.
+      if ((await listOps()).some((op) => op.path === path)) return
+      let data
+      try { data = await fetchValue(path) } catch (e) { return }
+      // Re-check after the fetch: THIS runtime can't have enqueued during it (we
+      // hold the path lock), but ANOTHER runtime sharing this app's outbox (a
+      // standalone page + the in-shell iframe open at once) can QUEUE one — don't
+      // clobber its queued write with our now-stale read.
+      // ACCEPTED BOUND (pre-existing, not from the SWR change): a concurrent
+      // runtime's ONLINE setInner() writes the mirror + sends directly without
+      // entering the outbox, so these IDB checks can't see it; if it lands in the
+      // tiny window before our cachePut, our read can briefly win. It costs one
+      // stale read and self-heals on the next op. Closing it fully needs a
+      // per-app/per-path Web Lock around setInner/removeInner/scheduleRevalidate
+      // (the drain already uses navigator.locks); filed as a follow-up rather
+      // than widening this read-path fix into the write path.
+      if ((await listOps()).some((op) => op.path === path)) return
+      const prev = await cacheGet(path)
+      if (prev && sameJson(prev.data, data)) return
+      await cachePut(path, data)
+      notify(path, data)   // no pending op → effective value === server value
+    }).catch(() => {})
+  }
+
   async function getInner(path) {
-    // Read-through: online, fetch and MIRROR into the cache so the value is
-    // available offline later. Offline or on any error, serve the last-known
-    // mirror, overlaid with any pending write (read-your-writes). Returns null
-    // only when we have genuinely never cached the path (or it's known-absent).
-    // Serialized per path, so the cache write below can't land after a later
-    // set()'s write (that set() is queued behind this GET on the same chain).
+    // STALE-WHILE-REVALIDATE read. With a cached mirror, serve it INSTANTLY
+    // (overlaid with any pending write — read-your-writes) and refresh from the
+    // network in the background, notifying subscribers if the value changed — so
+    // a high score / note paints immediately instead of waiting on a round-trip;
+    // an app that wants the refreshed value subscribe()s the path. A first-ever
+    // read (no mirror) has nothing to paint, so it awaits the network online, or
+    // resolves null offline. Serialized per path so cache writes can't reorder
+    // against a concurrent set() (the background revalidate re-takes the lock).
+    const cached = await cacheGet(path)
+    if (cached) {
+      if (navigator.onLine) scheduleRevalidate(path)
+      return await effectiveValue(path, cached.data)
+    }
     if (navigator.onLine) {
       try {
-        const token = await getToken()
-        const r = await fetchBoundedJson(`/api/storage/apps/${appId}/${path}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        })
-        if (r.status === 404) {
-          await cachePut(path, null)
-        } else if (r.ok) {
-          await cachePut(path, r.data)
-        } else {
-          throw new Error(`HTTP ${r.status}`)
-        }
-        const cached = await cacheGet(path)
-        return await effectiveValue(path, cached ? cached.data : null)
+        const data = await fetchValue(path)
+        await cachePut(path, data)
+        return await effectiveValue(path, data)
       } catch (e) {
-        // Network blip while "online" — fall back to the mirror below.
+        // Network blip with nothing cached — fall through to the empty mirror.
       }
     }
-    const cached = await cacheGet(path)
-    return await effectiveValue(path, cached ? cached.data : null)
+    return await effectiveValue(path, null)
   }
 
   async function setInner(path, data) {
@@ -601,14 +488,13 @@ function makeStorage({ appId, getToken }) {
     notify(path, data)
     if (navigator.onLine) {
       try {
-        // Hold the outbox lock across send + coalesce so a concurrent
-        // context can't enqueue a newer write that this purge would drop, and
-        // a drain can't replay a stale op mid-send (Codex review #7).
-        return await withOutboxLock(async () => {
-          await send({ method: 'PUT', path, data })
-          await purgePath(path)
-          return { synced: true }
-        })
+        await send({ method: 'PUT', path, data })
+        // This direct write is newer than anything still queued for the path
+        // (e.g. an offline write left over from before we came online). Drop
+        // those stale ops so the next drain can't replay one over the value we
+        // just wrote — the last-write-wins violation this guards against.
+        await purgePath(path)
+        return { synced: true }
       } catch (e) { /* fall through to queue */ }
     }
     await enqueue({ method: 'PUT', path, data })
@@ -621,12 +507,9 @@ function makeStorage({ appId, getToken }) {
     notify(path, null)
     if (navigator.onLine) {
       try {
-        // Same lock-held send + coalesce as setInner (Codex review #7).
-        return await withOutboxLock(async () => {
-          await send({ method: 'DELETE', path })
-          await purgePath(path)
-          return { synced: true }
-        })
+        await send({ method: 'DELETE', path })
+        await purgePath(path)
+        return { synced: true }
       } catch (e) { /* fall through to queue */ }
     }
     await enqueue({ method: 'DELETE', path })
@@ -661,14 +544,6 @@ function makeStorage({ appId, getToken }) {
         const s = subscribers.get(path)
         if (s) { s.delete(wrapped); if (!s.size) subscribers.delete(path) }
       }
-    },
-    // Register a listener for permanently-failed writes (poison ops the outbox
-    // had to dead-letter). Fires cb({path, method, message}) so the app can
-    // tell the user a write was lost instead of silently assuming it synced.
-    // Returns an unsubscribe fn.
-    onSyncError(cb) {
-      errorListeners.add(cb)
-      return () => errorListeners.delete(cb)
     },
     async pendingCount() {
       return (await listOps()).length

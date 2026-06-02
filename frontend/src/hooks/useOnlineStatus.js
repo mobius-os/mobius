@@ -97,34 +97,11 @@ export default function useOnlineStatus() {
   useEffect(() => {
     let cancelled = false
     let inflight = false
-    let lastLogged = null
     // Consecutive successful probes — held across check() calls so resolveOnline
     // can require a STREAK before promoting to online when navigator.onLine is
     // stale-false. A one-shot Android offline false-positive (streak 1) stays
     // offline; a genuine reconnect (repeated successes) promotes on the 2nd.
     let successStreak = 0
-
-    // TEMPORARY: log connectivity transitions to the same-origin ring buffer
-    // the mini-app frame uses, so /diag.html shows shell + app events
-    // together (confirms the offline-pill behaviour). Transition-only, so the
-    // 20s poll doesn't spam it. Remove with the rest of the diag scaffolding.
-    function logTransition(reachable, reason) {
-      if (reachable === lastLogged) return
-      lastLogged = reachable
-      try {
-        const key = 'mobius-diag-log'
-        const arr = JSON.parse(localStorage.getItem(key) || '[]')
-        arr.push({
-          t: new Date().toISOString(),
-          src: 'shell',
-          online: typeof navigator !== 'undefined' ? navigator.onLine : null,
-          tag: 'online=' + reachable,
-          msg: reason + ' (navigator.onLine=' +
-            (typeof navigator !== 'undefined' ? navigator.onLine : '?') + ')',
-        })
-        localStorage.setItem(key, JSON.stringify(arr.slice(-100)))
-      } catch (e) { /* ignore */ }
-    }
 
     // Tell the service worker our connectivity verdict so its offline-capable
     // frame/module handler can serve cache-first instantly when we're offline
@@ -150,8 +127,7 @@ export default function useOnlineStatus() {
         next verdict. */ }
     }
 
-    function publish(next, reason) {
-      logTransition(next, reason)
+    function publish(next) {
       setOnline(next)
       postToSW(next)
     }
@@ -166,7 +142,7 @@ export default function useOnlineStatus() {
         const navOnLine = typeof navigator !== 'undefined' ? navigator.onLine : true
         const res = resolveOnline(reachable, navOnLine, successStreak)
         successStreak = res.successStreak
-        publish(res.online, reachable === res.online ? 'probe' : 'probe (flag-offline streak=' + successStreak + ')')
+        publish(res.online)
       } finally {
         inflight = false
       }
@@ -175,7 +151,7 @@ export default function useOnlineStatus() {
     // A definite offline event is trustworthy — reflect it immediately
     // without waiting for a probe to time out.
     const onOffline = () => {
-      if (!cancelled) { successStreak = 0; publish(false, 'offline-event') }
+      if (!cancelled) { successStreak = 0; publish(false) }
     }
     const onOnline = () => { check() }
     const onVisible = () => {

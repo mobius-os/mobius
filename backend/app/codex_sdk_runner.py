@@ -676,9 +676,8 @@ async def run_codex_sdk_turn(
   # re-reading the file here. Standalone callers (tests) pass `{}`.
   if agent_settings is None:
     agent_settings = {}
-  # Per-chat picker writes the `model` key; the legacy file format
-  # uses `codex_model`. Honor both so existing setups don't regress.
-  model = agent_settings.get("model") or agent_settings.get("codex_model")
+  # The per-chat picker writes the `model` key.
+  model = agent_settings.get("model")
   # Cross-provider mismatch defense. Chats persisted before the
   # snapshot logic learned to provider-validate (see chat.py
   # snapshot-on-first-send and effective_agent_settings) can end up
@@ -695,10 +694,6 @@ async def run_codex_sdk_turn(
       model, DEFAULT_MODELS["codex"],
     )
     model = DEFAULT_MODELS["codex"]
-  # `gpt-5.4-codex` requires API-key auth (not ChatGPT). Picker no
-  # longer surfaces it, but legacy chats may still carry it.
-  if model == "gpt-5.4-codex":
-    model = "gpt-5.4"
 
   # Reasoning effort — Codex's `ReasoningEffort` enum accepts
   # none/minimal/low/medium/high/xhigh; the Möbius picker exposes the

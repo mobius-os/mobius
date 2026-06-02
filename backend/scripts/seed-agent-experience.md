@@ -300,24 +300,27 @@ contract-comment mismatch.
   JSON.stringify(data)`; everything else → `body:
   JSON.stringify({content: text})`. GET returns the raw file (parses
   cleanly with `await res.json()`); GET does not mirror PUT shape.
-- **Offline-capable apps persist via `window.mobius.storage`, not bare
-  `fetch`.** Setting `offline_capable` caches the app's code AND exposes
-  `window.mobius.storage` (an offline write-queue + read-through cache).
-  An offline_capable app that persists with raw `fetch('/api/storage/...')`
-  silently drops writes while offline. With the wrapper, `get()` serves the
-  last-known value offline (null only if never fetched online) and
-  `subscribe(path, cb)` gives reactive reads — see the skill's
-  "Offline-capable apps" for the full contract. Don't mark a
-  network-dependent app offline_capable: it caches empty/stale state and
-  looks broken offline. (The platform makes offline open instant by serving
-  cached frame/module/storage when it's not known-online — you don't manage
-  any of that; just use the wrapper.)
+- **Persist through `window.mobius.storage` — it's the DEFAULT for EVERY app,
+  not just offline-capable ones.** The runtime is injected into every mini-app
+  before its module loads, so `get()/set()/remove()/subscribe()/list()` are
+  always available: instant read-through reads (last-known value offline; `get()`
+  returns null when the path has no value — never written, removed, or absent —
+  so don't treat null as a safe "overwrite me" signal), writes that queue +
+  auto-sync when offline,
+  and `subscribe(path, cb)` for reactive reads. Use bare
+  `fetch('/api/storage/...')` only OUTSIDE an app (cron, agent) or for cross-app
+  `shared/` files — inside an app it has no offline queue/cache and silently
+  drops offline writes. `offline_capable: true` is a SEPARATE flag: it caches
+  the app's CODE so it RUNS offline (don't set it on a network-dependent app —
+  it caches empty/stale state and looks broken). The platform makes offline
+  open instant by serving the cached frame/module when not known-online — you
+  don't manage any of that; just use the wrapper.
 - **To find what an app stored, enumerate — never brute-force-probe
   filenames.** There is no `HEAD` on storage (it 405s), and GET-probing
   guessed paths (e.g. `reports/<date>.html` for the last 30 days) is the
   anti-pattern that shipped an app showing empty in prod. List a
   directory's immediate children with
-  `await window.mobius.storage.list('prefix/')` (offline-capable apps;
+  `await window.mobius.storage.list('prefix/')` (any app;
   returns `[{name,path,type,size,modified_at,mime_type}]`) or
   `GET /api/storage/apps-list/{appId}/{prefix}` from a cron script /
   agent shell (`?limit=` ≤500, opaque `?cursor=`,

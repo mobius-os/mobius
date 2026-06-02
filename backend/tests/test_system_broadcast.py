@@ -31,7 +31,10 @@ from app import models
 from app.broadcast import (
   ChatBroadcast,
   SystemBroadcast,
+  clear_active_broadcast_if,
+  get_active_broadcast,
   get_system_broadcast,
+  set_active_broadcast,
 )
 from app.chat_writer import Barrier, get_writer
 from app.routes.notify import NotifyBody
@@ -306,3 +309,138 @@ def test_notify_body_type_validator_rejects_unknown():
     pass
   else:
     raise AssertionError("Expected ValidationError for bogus event type")
+
+
+# --- clear_active_broadcast_if: identity-keyed compare-and-clear -------
+
+
+def test_clear_active_broadcast_if_clears_when_pointer_matches():
+  """When the active-broadcast pointer still points at `bc`, the
+  identity-keyed clear releases it and returns True — the no-successor case
+  where the dying run must release the pointer rather than leak it."""
+  bc = ChatBroadcast("c-match")
+  set_active_broadcast(bc)
+  try:
+    assert clear_active_broadcast_if(bc) is True
+    assert get_active_broadcast() is None, "the matching pointer must be cleared"
+  finally:
+    set_active_broadcast(None)
+
+
+def test_clear_active_broadcast_if_leaves_when_different_active():
+  """When a DIFFERENT broadcast is active (a fresh owner replaced the pointer),
+  the clear must NOT touch it: it returns False and leaves the live owner's
+  pointer intact — never clobbering a turn that isn't `bc`."""
+  fresh = ChatBroadcast("c-fresh")
+  superseded = ChatBroadcast("c-superseded")
+  set_active_broadcast(fresh)
+  try:
+    assert clear_active_broadcast_if(superseded) is False
+    assert get_active_broadcast() is fresh, (
+      "a non-matching clear must leave the fresh owner's pointer untouched"
+    )
+  finally:
+    set_active_broadcast(None)
+
+
+def test_clear_active_broadcast_if_returns_false_when_already_none():
+  """When the pointer is already None, the clear is a no-op: returns False and
+  leaves it None."""
+  set_active_broadcast(None)
+  bc = ChatBroadcast("c-none")
+  assert clear_active_broadcast_if(bc) is False
+  assert get_active_broadcast() is None
+
+
+# --- SSE subscription-leak: subscribe pairs with unsubscribe inside ----
+# --- the GET /stream generator's lifecycle -----------------------------
+
+
+class _NeverDisconnectedRequest:
+  """Minimal stand-in for the Starlette Request the stream handler reads.
+
+  The generator only calls `request.is_disconnected()`; a completed
+  broadcast returns before that loop, so this is never invoked there,
+  but the abandon-early case may, so it answers honestly (connected)."""
+
+  async def is_disconnected(self):
+    return False
+
+
+@pytest.mark.asyncio
+async def test_stream_subscribe_happens_inside_generator_not_at_endpoint():
+  """The leak fix: bc.subscribe() must run INSIDE the GET /stream
+  generator (when iteration starts), NOT when the endpoint builds the
+  StreamingResponse. Otherwise a client that disconnects before the
+  generator's body ever runs leaves a queue in bc.subscribers whose
+  pairing `finally: unsubscribe` never fires — a leaked subscriber that
+  lingers until the broadcast completes."""
+  from app.routes.chats_stream import stream_chat
+
+  bc = ChatBroadcast("leakchat")
+  bc.publish({"type": "text", "content": "hello"})
+  bc_mod._broadcasts[bc.chat_id] = bc
+  try:
+    baseline = len(bc.subscribers)
+
+    resp = await stream_chat(
+      request=_NeverDisconnectedRequest(), chat_id=bc.chat_id, _=None,
+    )
+
+    # Building the response must NOT have subscribed yet — the generator
+    # body has not run. A subscriber here is exactly the leak.
+    assert len(bc.subscribers) == baseline, (
+      "subscribe ran at the endpoint, before the generator's try/finally — "
+      "a pre-iteration client disconnect would leak this queue"
+    )
+
+    # Abandon the stream WITHOUT iterating (the client disconnected before
+    # the first iteration), then close the generator. No subscriber must
+    # have leaked.
+    await resp.body_iterator.aclose()
+    assert len(bc.subscribers) == baseline, (
+      "abandoning the stream before iterating leaked a subscriber"
+    )
+  finally:
+    bc_mod._broadcasts.pop(bc.chat_id, None)
+
+
+@pytest.mark.asyncio
+async def test_stream_generator_unsubscribes_after_finally_runs():
+  """Driving the GET /stream generator to completion must leave
+  bc.subscribers back at baseline: subscribe (inside the generator) and
+  the unsubscribe in its finally are paired across the generator's whole
+  lifecycle, so a finished/abandoned stream never leaks a subscriber."""
+  from app.routes.chats_stream import stream_chat
+
+  bc = ChatBroadcast("donechat")
+  bc.publish({"type": "text", "content": "hi"})
+  # A completed broadcast WITHOUT a done event in the catch-up: the
+  # generator synthesises a done and returns, exercising the early-return
+  # path that still must run its finally.
+  bc.running = False
+  bc_mod._broadcasts[bc.chat_id] = bc
+  try:
+    baseline = len(bc.subscribers)
+
+    resp = await stream_chat(
+      request=_NeverDisconnectedRequest(), chat_id=bc.chat_id, _=None,
+    )
+
+    saw_subscriber_mid_stream = False
+    async for _chunk in resp.body_iterator:
+      # While the generator is live (mid-iteration), the subscriber IS
+      # registered — proof subscribe happened inside generate().
+      if len(bc.subscribers) > baseline:
+        saw_subscriber_mid_stream = True
+
+    assert saw_subscriber_mid_stream, (
+      "subscribe never ran inside the generator — the catch-up burst was "
+      "served without ever registering a live subscriber"
+    )
+    # The finally ran on generator exhaustion → back to baseline.
+    assert len(bc.subscribers) == baseline, (
+      "the generator finished but its finally never unsubscribed — leak"
+    )
+  finally:
+    bc_mod._broadcasts.pop(bc.chat_id, None)

@@ -5,9 +5,8 @@
 # WHY THIS EXISTS: the cold-reopen-offline "Snake spinner forever" bug only
 # manifests in a real browser with a real service worker going offline, and we
 # were relying on the user to airplane-test by hand each iteration. This drives
-# a headless browser through the exact sequence and reads back the in-app
-# diagnostic ring buffer (localStorage 'mobius-diag-log') + the iframe DOM, so
-# we can iterate without the user.
+# a headless browser through the exact sequence and reads back the iframe DOM
+# + screenshots, so we can iterate without the user.
 #
 # It targets the mobius-test container (port 8001) per the repo rule that live
 # UI tests never hit prod. It expects an owner account + at least one
@@ -18,7 +17,7 @@
 #   APPID=22 bash scripts/offline-repro.sh   # probe a specific app id
 #
 # Output: writes step-by-step results to /tmp/offline-repro/out.txt and
-# screenshots to /tmp/offline-repro/*.png; prints the diag log at the end.
+# screenshots to /tmp/offline-repro/*.png.
 set -u
 BASE="${BASE:-http://localhost:8001}"
 USER="${USER_NAME:-admin}"
@@ -72,9 +71,6 @@ sleep 5
 agent-browser screenshot "$OUT/02-app-online.png" >/dev/null 2>&1
 agent-browser eval "(()=>{const f=document.querySelector('iframe.canvas');return JSON.stringify({hasIframe:!!f, src:f&&f.getAttribute('src'), spinner:!!document.querySelector('.canvas-loading')});})()" 2>&1 | tail -1 | tee -a "$OUT/out.txt"
 
-# clear diag log so the offline run is clean
-agent-browser eval "localStorage.removeItem('mobius-diag-log'); 'cleared'" >/dev/null 2>&1
-
 # 4. GO OFFLINE and cold-reopen (reload while offline = cold boot from SW).
 agent-browser set offline on >/dev/null 2>&1
 log "set offline on"
@@ -84,13 +80,9 @@ agent-browser eval "location.href='/app/$APPID'; 'reopen-app'" >/dev/null 2>&1
 sleep 8
 agent-browser screenshot "$OUT/03-app-offline.png" >/dev/null 2>&1
 
-# 5. observe iframe + diag log.
+# 5. observe iframe state.
 log "--- iframe state offline ---"
 agent-browser eval "(()=>{const f=document.querySelector('iframe.canvas');const spin=document.querySelector('.canvas-loading');let inner='';try{inner=f&&f.contentDocument?f.contentDocument.getElementById('root')?.innerHTML?.slice(0,80):'(no root)';}catch(e){inner='(cross?)'+e.message;}return JSON.stringify({hasIframe:!!f,spinnerVisible:!!spin,iframeRoot:inner});})()" 2>&1 | tail -1 | tee -a "$OUT/out.txt"
 
-log "--- diag log (mobius-diag-log) ---"
-agent-browser eval "JSON.parse(localStorage.getItem('mobius-diag-log')||'[]').map(e=>e.t+' ['+(e.online===true?'on':e.online===false?'OFF':'?')+'] '+(e.src||'')+' '+e.tag+(e.msg?': '+e.msg:'')).join('\n')" 2>&1 | tail -40 | tee -a "$OUT/out.txt"
-
 agent-browser set offline off >/dev/null 2>&1
 agent-browser close --all >/dev/null 2>&1
-log "=== done; screenshots in $OUT ==="
