@@ -299,6 +299,62 @@ def test_read_events_skips_malformed_lines():
   assert [e["app_id"] for e in events] == [1, 2]
 
 
+# --- Skill observability: log_skill_load + most_used_skills -----------
+
+
+def test_log_skill_load_writes_skill_loaded_line():
+  activity.log_skill_load("chat-1", "humanizer")
+  lines = _read_lines()
+  assert len(lines) == 1
+  assert lines[0]["ev"] == "skill_loaded"
+  assert lines[0]["chat_id"] == "chat-1"
+  assert lines[0]["skill"] == "humanizer"
+  assert "ts" in lines[0]
+
+
+def test_log_skill_load_drops_blank_skill():
+  """A blank/whitespace skill name carries no signal — dropped."""
+  activity.log_skill_load("chat-1", "")
+  activity.log_skill_load("chat-1", "   ")
+  assert _read_lines() == []
+
+
+def test_most_used_skills_counts_and_ranks():
+  base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+  for skill in ["humanizer", "humanizer", "verify", "humanizer", "verify"]:
+    activity.log_skill_load(
+      "chat-1", skill, ts=base.isoformat(),
+    )
+  ranked = activity.most_used_skills(
+    since=base - timedelta(hours=1),
+    until=base + timedelta(hours=1),
+  )
+  assert ranked == [
+    {"skill": "humanizer", "count": 3},
+    {"skill": "verify", "count": 2},
+  ]
+
+
+def test_most_used_skills_respects_window():
+  base = datetime(2026, 2, 1, 0, 0, 0, tzinfo=timezone.utc)
+  activity.log_skill_load("c", "old", ts=base.isoformat())
+  activity.log_skill_load(
+    "c", "new", ts=(base + timedelta(hours=5)).isoformat(),
+  )
+  ranked = activity.most_used_skills(
+    since=base + timedelta(hours=1),
+    until=base + timedelta(hours=6),
+  )
+  assert ranked == [{"skill": "new", "count": 1}]
+
+
+def test_most_used_skills_empty_window_returns_empty_list():
+  now = datetime.now(timezone.utc)
+  assert activity.most_used_skills(
+    since=now - timedelta(hours=1), until=now,
+  ) == []
+
+
 # --- Read endpoint -----------------------------------------------------
 
 
@@ -391,6 +447,46 @@ def test_emit_endpoint_appends_event(client, auth):
   assert lines[0]["ev"] == "cron_outcome"
   assert lines[0]["exit_code"] == 0
   assert lines[0]["duration_ms"] == 1500
+
+
+def test_emit_endpoint_accepts_skill_loaded(client, auth):
+  """skill_loaded is a known event the emit endpoint accepts."""
+  r = client.post(
+    "/api/admin/activity/emit",
+    json={"ev": "skill_loaded", "chat_id": "c1", "skill": "humanizer"},
+    headers=auth,
+  )
+  assert r.status_code == 204, r.text
+  lines = _read_lines()
+  assert lines[0]["ev"] == "skill_loaded"
+  assert lines[0]["skill"] == "humanizer"
+
+
+def test_skills_endpoint_returns_ranked_most_used(client, auth):
+  """GET /api/admin/activity/skills aggregates skill_loaded events."""
+  base = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+  for skill in ["humanizer", "verify", "humanizer"]:
+    activity.log_skill_load("c1", skill, ts=base.isoformat())
+  r = client.get(
+    "/api/admin/activity/skills",
+    params={"since": base.isoformat()},
+    headers=auth,
+  )
+  assert r.status_code == 200, r.text
+  assert r.json() == {
+    "skills": [
+      {"skill": "humanizer", "count": 2},
+      {"skill": "verify", "count": 1},
+    ]
+  }
+
+
+def test_skills_endpoint_requires_auth(client):
+  r = client.get(
+    "/api/admin/activity/skills",
+    params={"since": datetime.now(timezone.utc).isoformat()},
+  )
+  assert r.status_code == 401
 
 
 def test_emit_endpoint_rejects_unknown_event(client, auth):

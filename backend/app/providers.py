@@ -126,6 +126,24 @@ def _load_agent_settings(data_dir: str) -> dict:
   return {}
 
 
+def skills_enabled(data_dir: str) -> bool:
+  """Whether SDK skills are offered to the Claude agent (default OFF).
+
+  Reads the `skills_enabled` flag from /data/shared/agent-settings.json.
+  This is the gate for the BEHAVIOR-SHIFTING half of skill
+  observability: when off (the default), `claude_sdk_runner` keeps
+  `setting_sources=None` and passes no `skills=`, so the Skill tool is
+  never offered and nothing loads — deploying skill-observability
+  changes nothing about the agent's behavior. When the owner opts in,
+  the runner enables user+project setting sources and `skills="all"`,
+  at which point the agent can load skills and the observability path
+  (chip + activity log) starts seeing real loads.
+
+  Absent / malformed flag reads as off — opt-in is explicit.
+  """
+  return bool(_load_agent_settings(data_dir).get("skills_enabled") is True)
+
+
 def write_agent_settings(data_dir: str, settings: dict) -> bool:
   """Persists `settings` to /data/shared/agent-settings.json.
 

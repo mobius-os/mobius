@@ -34,7 +34,7 @@ from app.deps import get_current_owner, reject_cross_site
 # survive a future schema bump.
 _KNOWN_EVENTS = {
   "app_open", "app_install", "storage_write", "cron_outcome",
-  "memory_load",
+  "memory_load", "skill_loaded",
 }
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -86,6 +86,28 @@ def read_activity(
       yield json.dumps(ev, ensure_ascii=False, separators=(",", ":")) + "\n"
 
   return StreamingResponse(_iter(), media_type="application/x-ndjson")
+
+
+@router.get("/activity/skills")
+def read_most_used_skills(
+  since: str = Query(..., description="ISO8601 lower bound (inclusive)"),
+  until: str | None = Query(None, description="ISO8601 upper bound; defaults to now"),
+  _owner: models.Owner = Depends(get_current_owner),
+):
+  """Returns the most-used skills over [since, until] as a ranked list.
+
+  Aggregates the `skill_loaded` events the runner logs each time the
+  agent invokes the Skill tool. The result is a small JSON object
+  (`{"skills": [{"skill": ..., "count": ...}, ...]}`) sorted by count
+  descending — unlike the raw `/activity` feed this is bounded by the
+  number of distinct skills, so it's returned as one JSON document
+  rather than a stream.
+  """
+  since_dt = _parse_iso(since, "since")
+  until_dt = _parse_iso(until, "until") if until else datetime.now(timezone.utc)
+  if until_dt < since_dt:
+    raise HTTPException(400, "until must be >= since")
+  return {"skills": activity.most_used_skills(since_dt, until_dt)}
 
 
 class ActivityEmit(BaseModel):
