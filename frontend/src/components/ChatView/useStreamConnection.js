@@ -57,6 +57,9 @@ const SYSTEM_EVENTS = new Set([
  *   tool_output           Tool finished, here's its result
  *                         { content }. Attaches to running block.
  *   tool_end              Marks the running tool done (status flip).
+ *   skill_loaded          Agent loaded a skill { skill }. Stamps the
+ *                         name onto the matching Skill tool block so
+ *                         ToolBlock renders a chip.
  *   question              AskUserQuestion fired
  *                         { questions: [...] }. Renders a card.
  *   queued_turn_starting  Backend about to promote a queued message
@@ -474,6 +477,21 @@ export default function useStreamConnection(chatId, {
               const ri = rev.findIndex(b => b.type === 'tool' && b.status === 'running')
               const i = ri === -1 ? -1 : updated.length - 1 - ri
               if (i !== -1) updated[i] = { ...updated[i], status: 'done' }
+              return updated
+            })
+          } else if (event.type === 'skill_loaded') {
+            // Skill observability: stamp the loaded skill's name onto
+            // the most recent Skill tool block so ToolBlock renders a
+            // chip. Mirrors backend/app/events.py:process_event so the
+            // live stream and the persisted transcript agree.
+            setStreamItems(prev => {
+              const updated = [...prev]
+              for (let i = updated.length - 1; i >= 0; i--) {
+                if (updated[i].type === 'tool' && updated[i].tool === 'Skill') {
+                  updated[i] = { ...updated[i], skill: event.skill }
+                  break
+                }
+              }
               return updated
             })
           } else if (event.type === 'question') {
