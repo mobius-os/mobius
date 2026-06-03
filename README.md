@@ -25,9 +25,9 @@
 </p>
 
 <p align="center">
-  <a href="https://hamzamerzic.info/blog/2026/mobius-an-app-that-builds-itself/">An agent that adapts to you</a> &middot;
-  <a href="https://hamzamerzic.info/blog/2026/the-self-improvement-harness/">The self-improvement harness</a> &middot;
-  <a href="https://hamzamerzic.info/blog/2026/the-agent-is-the-kernel/">The agent is the kernel</a>
+  <a href="#you-grow-it">An agent that adapts to you</a> &middot;
+  <a href="#how-the-agent-itself-gets-better">The self-improvement harness</a> &middot;
+  <a href="#apps-that-work-together">The agent is the kernel</a>
 </p>
 
 ---
@@ -49,10 +49,10 @@ It runs on Codex (free or paid ChatGPT plan) or Claude Code (any paid plan), bot
 Möbius comes with a curated app store, so you have a suite of genuinely useful personal apps from the first day, no prompt required. Tap to install, and each one is yours to use, edit, or rebuild.
 
 <p align="center">
-  <img src="assets/screenshots/store-catalog.png" width="720" alt="The Möbius app store: News, Workout, Visited, Mind, LaTeX, and Dreaming, each with its own icon and a one-line description." />
+  <img src="assets/screenshots/store-catalog.png" width="720" alt="The Möbius app store: News, Workout, Atlas, Mind, LaTeX, and Dreaming, each with its own icon and a one-line description." />
 </p>
 
-<sub>A few of the starter-pack apps. <strong>News</strong> writes you a morning digest on a schedule. <strong>Workout</strong> logs training in plain language, on-device. <strong>Visited</strong> is a 3D globe of where you have been. <strong>Mind</strong> is a browsable graph of everything the agent has learned, every interaction and every lesson. <strong>LaTeX</strong> is an Overleaf-style editor with a real engine. <strong>Dreaming</strong> is the agent improving itself overnight.</sub>
+<sub>A few of the starter-pack apps. <strong>News</strong> writes you a morning digest on a schedule. <strong>Workout</strong> logs training in plain language, on-device. <strong>Atlas</strong> is a 3D globe of where you have been. <strong>Mind</strong> is a browsable graph of everything the agent has learned, every interaction and every lesson. <strong>LaTeX</strong> is an Overleaf-style editor with a real engine. <strong>Dreaming</strong> is the agent improving itself overnight.</sub>
 
 Every app is just a public repo with a `mobius.json` and an `index.jsx`, open under [github.com/mobius-os](https://github.com/mobius-os). Installing one means pasting a URL; updating one means pasting the same URL again, which patches the code and keeps your data. There is no submission queue and nothing to be blessed by.
 
@@ -96,7 +96,7 @@ You can reshape the platform the same way. "Make it warmer." "Restyle the whole 
 
 Möbius apps are not sealed boxes. They share a common storage layer and a permission model, so with your say-so one app can read another's data. That turns the app store into something closer to a personal data platform. Ask for a dashboard that pulls your **Workout** log and your habit tracker into one view, and the agent can build an app that reads across both. Apps adapt and grow together, recombining the data you already own into whatever shape is useful next.
 
-Read the full design in [The agent is the kernel](https://hamzamerzic.info/blog/2026/the-agent-is-the-kernel/).
+Read more in [Apps that work together](#apps-that-work-together).
 
 ---
 
@@ -118,7 +118,7 @@ Möbius the product improves through a self-improvement **harness** we run durin
 2. The worry that asking the model directly just yields sycophancy turned out to be too simple. Confrontational prompts get binary compliance or defiance; warm, curious framings get the model to push back on bad premises and cooperate on good ones.
 3. Once the loop works, the limit stops being the model and becomes the meta-goals you optimize for, which come from real users hitting real friction on real apps.
 
-All of it is backed by a run of controlled experiments, not anecdotes. The full write-up, including the coaching and ensemble methods that let two agents solve more together than either does alone, is in [the harness post](https://hamzamerzic.info/blog/2026/the-self-improvement-harness/). Those are the lessons the Dreaming agent above now runs on your behalf.
+All of it is backed by a run of controlled experiments, not anecdotes. The coaching and ensemble methods let two agents solve more together than either does alone, and those are the lessons the Dreaming agent above now runs on your behalf.
 
 ---
 
@@ -145,7 +145,7 @@ To update, go to the same deployment's **Settings → Source → Check for updat
 **Requirements:** a Linux server with Docker, a domain name pointing to it, and a coding provider, either Codex (free or paid plan) or Claude Code (paid plan).
 
 ```bash
-git clone https://github.com/hamzamerzic/mobius.git
+git clone https://github.com/mobius-os/mobius.git
 cd mobius
 cp .env.example .env
 sed -i 's/^DOMAIN=.*/DOMAIN=your-domain.com/' .env
