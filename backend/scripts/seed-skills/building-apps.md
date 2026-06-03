@@ -142,7 +142,19 @@ const S = {
 }
 ```
 
-Variables: `--bg`, `--surface`, `--surface2`, `--text`, `--muted`, `--accent`, `--accent-hover`, `--accent-dim`, `--border`, `--border-light`, `--danger`, `--green`, `--font`, `--mono`. They adapt automatically when the partner toggles light/dark. Don't invent fallbacks like `var(--fg, #111)` — there is no `--fg` and a near-black fallback is invisible in dark mode.
+Variables: `--bg`, `--surface`, `--surface2`, `--text`, `--muted`, `--accent`, `--accent-hover`, `--accent-dim`, `--border`, `--border-light`, `--danger`, `--green`, `--font`, `--mono`. They adapt automatically when the partner toggles light/dark. Don't invent fallbacks like `var(--fg, #111)` — there is no `--fg` and a near-black fallback is invisible in dark mode. If you must read a token in JS, resolve it live (`getComputedStyle(document.documentElement).getPropertyValue('--accent')`) rather than hardcoding a hex twin that won't follow the theme.
+
+### Modals, scrims & radii
+
+In-app modals are the only option (no native dialogs). Standardize the overlay so every app reads the same — the App Store app is the reference:
+
+- **Placement: a bottom sheet.** Backdrop `position: fixed; inset: 0; display: flex; align-items: flex-end; justify-content: center`; panel `width: 100%; max-width: 480px; border-radius: 16px 16px 0 0; padding: 24px`. Bottom sheets are thumb-reachable on a phone; a centered dialog or a left/right slide-in is NOT the house style for confirmations. (A persistent full-height side panel is fine only for a detail inspector — e.g. a graph node — never for a confirm/input.)
+- **Scrim:** `rgba(0,0,0,0.6)`. Tapping the scrim cancels, unless a write is in flight.
+- **Radius scale:** `8px` inputs + small buttons, `10–12px` cards + primary buttons, `16px` sheet top. Don't invent per-app radii.
+
+### Empty states
+
+Every list / feed / graph gets a real empty state, never a bare muted string. Three parts, centered in the scroll area: a small icon or letter mark, a one-line **title** ("No briefs yet"), and a one-line **subtitle** that says what will fill it ("Möbius writes one each morning"). A blank panel or a lone "Nothing here." reads as broken.
 
 ---
 
