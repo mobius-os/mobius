@@ -79,13 +79,13 @@ Apps are the most obvious thing the agent builds, but the platform itself is als
   <img src="assets/screenshots/theme-cycle.gif" width="280" alt="Möbius theme cycle, baseline, cozy reading nook, drifting ambient, medieval manuscript" />
 </p>
 
-<sub>Same instance, four prompts: baseline, cozy reading nook, drifting ambient, medieval manuscript. The colors, fonts, and layout are CSS the agent wrote in response to a single sentence.</sub>
+<sub>Different variations of the same instance, each from a single prompt to the agent. The colors, fonts, and layout are CSS the agent wrote in response to a single sentence.</sub>
 
 <p align="center">
-  <img src="assets/screenshots/theme-07-dynamic.gif" width="280" alt="Möbius with a 'playful room' theme: drifting bubbles, parallax silhouettes, warm-cool gradient cycling" />
+  <img src="assets/screenshots/theme-meme.gif" width="280" alt="Möbius restyled into a meme theme: rainbow canvas, floating unicorns, bouncing emoji" />
 </p>
 
-<sub>Or you can ask for motion. Five seconds of the gradient cycling and a particle layer doing its thing.</sub>
+<sub>Or go fully meme-worthy. One prompt, and the same shell becomes a rainbow canvas with floating unicorns and bouncing emoji. The agent does not judge your taste.</sub>
 
 - **Visual identity.** "Make it feel warmer." "Restyle the whole shell as a 1970s synthesizer panel." "Tighten the mobile spacing and bump the contrast." The agent edits the CSS, rebuilds, and the new look is live within seconds.
 - **Shell features.** Missing an attachment button? File preview pane? Chat search? Describe what you want; the agent adds it.
@@ -114,20 +114,13 @@ Read more in [The Agent is the Kernel](https://hamzamerzic.info/blog/2026/the-ag
 
 ## Built by the agent
 
-Möbius ships with a deliberately minimal chat: no file upload, no scheduled jobs panel, no notifications button. To check the demo wasn't stage-managed, I tore the file-upload pipeline out (the FastAPI route, the React component, the works) and asked the agent for it back in one ordinary message: *"I'd like to send files and images along with my messages. Can you add file upload to the chat?"*
+Möbius starts as a deliberately minimal chat: no file upload, no scheduled jobs panel, no notifications button. So you grow it. I asked the agent for file upload in one ordinary message: *"I'd like to send files and images along with my messages. Can you add file upload to the chat?"*
 
-<table align="center">
-  <tr>
-    <td align="center" width="50%"><img src="assets/screenshots/upload-02a-pristine.png" alt="Top of the chat: the typed prompt asking for file upload, the agent's initial check, and a composer at the bottom with no paperclip." /></td>
-    <td align="center" width="50%"><img src="assets/screenshots/upload-04-in-use.png" alt="Composer with the paperclip restored, a file attached inline in the sent message, and the agent's reply describing what it sees." /></td>
-  </tr>
-  <tr>
-    <td align="center"><sub>Instructing the agent to add file upload to chat</sub></td>
-    <td align="center"><sub>Chat upload added</sub></td>
-  </tr>
-</table>
+<p align="center">
+  <img src="assets/screenshots/upload-flow.png" width="820" alt="Three phone screenshots in sequence with arrows between them: ask for file upload, answer a few questions, file upload working." />
+</p>
 
-<sub>One chat. The endpoint, the schema, the drag-and-drop overlay, the paste handler, the chip row, the image thumbnails, all written by the agent in the same session. The frontend was serving the new components by the end of the conversation.</sub>
+<sub>One chat, from empty composer to working feature. The endpoint, the schema, the drag-and-drop overlay, the paste handler, the chip row, the image thumbnails, all written by the agent in the same session.</sub>
 
 The same loop handles every general capability: notifications, scheduled jobs, web-search buttons, voice mode, richer settings. You describe what you want; the agent builds it. [Full story →](https://hamzamerzic.info/blog/2026/mobius-an-app-that-builds-itself/)
 
