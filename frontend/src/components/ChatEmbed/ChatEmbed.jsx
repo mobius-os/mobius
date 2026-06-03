@@ -160,6 +160,7 @@ export default function ChatEmbed() {
       <div className="chat-embed">
         <ChatView
           chatId={chatId}
+          embedded
           showPicker={picker}
           onMessageStart={() => postToParent(MESSAGE_SENT)}
           onStreamEnd={() => postToParent(TURN_DONE)}
