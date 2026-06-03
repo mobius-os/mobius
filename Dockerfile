@@ -30,7 +30,6 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 # agent-browser looks by default).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cron curl ca-certificates git \
-    poppler-utils \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
     libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
@@ -163,6 +162,23 @@ RUN mkdir -p /tmp/react-install && cd /tmp/react-install \
     && node /tmp/build-react-vendor.mjs /tmp/react-install \
          /app/static/vendor/react@19.2.6 "$(command -v esbuild)" \
     && cd / && rm -rf /tmp/react-install /tmp/build-react-vendor.mjs
+
+# pdf.js (Mozilla's engine — what Firefox's built-in PDF viewer uses),
+# vendored same-origin so the LaTeX app renders a compiled PDF as a real
+# scroll/zoom viewer rather than the "open externally" button mobile
+# browsers show for an <iframe> blob PDF. It MUST be same-origin: a
+# cross-origin worker (from esm.sh) is blocked by the same-origin policy
+# regardless of CSP, and same-origin also makes the viewer work offline.
+# pdfjs-dist ships prebuilt ESM — copy the lib + its matching worker; the
+# app sets GlobalWorkerOptions.workerSrc to the /vendor worker URL.
+RUN mkdir -p /tmp/pdfjs-install && cd /tmp/pdfjs-install \
+    && npm init -y >/dev/null \
+    && npm install --no-audit --no-fund --silent pdfjs-dist@4.10.38 \
+    && mkdir -p /app/static/vendor/pdfjs@4.10.38 \
+    && cp node_modules/pdfjs-dist/build/pdf.mjs /app/static/vendor/pdfjs@4.10.38/pdf.mjs \
+    && cp node_modules/pdfjs-dist/build/pdf.worker.mjs /app/static/vendor/pdfjs@4.10.38/pdf.worker.mjs \
+    && ln -s pdfjs@4.10.38 /app/static/vendor/pdfjs \
+    && cd / && rm -rf /tmp/pdfjs-install
 
 # Full frontend source so the agent can edit and rebuild the shell.
 # /app/shell-src/ is the read-only reference (originals for recovery).
