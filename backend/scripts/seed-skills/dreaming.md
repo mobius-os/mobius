@@ -112,9 +112,9 @@ Use Mind's model of the partner (their recurring interests, projects they care a
 
 Two artifacts: the static **brief** (an HTML page) and a **morning chat** (where the questions live as tappable cards).
 
-**Fill the brief template.** Copy `/app/scripts/dreaming-brief-template.html` (or its on-disk twin) to tonight's run dir and fill the five sections — exec-summary → what-I-did → what-I-learned → what-needs-your-input → details. Every item carries trigger/why/next-action. Keep the exec-summary to the 3–5 things that matter; push everything else down into details. Save it where the Dreaming app can render it (e.g. `/data/apps/dreaming/briefs/<date>.html` — confirm the path the Dreaming app reads). If a brief item benefits from one illustration, follow `images.md`; don't decorate for its own sake.
+**Fill the brief template.** Copy `/app/scripts/dreaming-brief-template.html` (or its on-disk twin) to tonight's run dir and fill the five sections — exec-summary → what-I-did → what-I-learned → what-needs-your-input → details. Every item carries trigger/why/next-action. Keep the exec-summary to the 3–5 things that matter; push everything else down into details. **Save the finished brief to `/data/apps/dreaming/reports/<date>.html`** (the exact path the Dreaming app lists + renders — `<date>` is `YYYY-MM-DD`). If a brief item benefits from one illustration, follow `images.md`; don't decorate for its own sake.
 
-> The brief is a **static, sandboxed page with no JS** — it can't host the chat or interactive cards. The questions live in the morning chat (below), and the **Dreaming app renders the brief with the morning chat shown below it.** Design the brief to stand alone as a read; the chat is the action surface. (Note for the Dreaming-UI agent: render `briefs/<date>.html` in the app, then mount the morning chat thread underneath it.)
+> The brief is a **static, sandboxed page with no JS** — it can't host the chat or interactive cards. The questions live in the morning chat (below), and the **Dreaming app renders the brief with the morning chat shown below it.** Design the brief to stand alone as a read; the chat is the action surface. (Note for the Dreaming-UI agent: render `reports/<date>.html` in the app, then mount the morning chat thread underneath it.)
 
 **Open the morning chat and post the summary + questions as cards.**
 
@@ -124,7 +124,11 @@ Two artifacts: the static **brief** (an HTML page) and a **morning chat** (where
      -H "Authorization: Bearer $AGENT_TOKEN" -H "Content-Type: application/json" \
      -d "{\"title\": \"Morning brief — $(date +%Y-%m-%d)\"}"
    ```
-   Capture the returned `id` as `$MORNING_CHAT`.
+   Capture the returned `id` as `$MORNING_CHAT`, then **write the brief↔chat link** the app needs to wire the date to its conversation — a sibling file next to the brief:
+   ```bash
+   printf '{"chat_id": "%s"}' "$MORNING_CHAT" > /data/apps/dreaming/reports/$(date +%Y-%m-%d).meta.json
+   ```
+   (Bare JSON object, no envelope — the app reads it as-is. Without it the brief renders but the morning chat stays unlinked.)
 2. Seed the chat by sending it a message that becomes the partner-facing opener — a **short** summary (3–5 lines, partner-facing register: what you did and what's new, no file paths or IDs), a link to the brief, and an instruction to render your questions as `AskUserQuestion` cards so the partner answers with a tap:
    ```bash
    curl -s -X POST "$API_BASE_URL/api/chats/$MORNING_CHAT/messages" \
