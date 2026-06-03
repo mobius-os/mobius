@@ -612,6 +612,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         setChatInfo({
           provider: data.provider || 'claude',
           agent_settings_json: data.agent_settings_json || null,
+          agent_id: data.agent_id || null,
           effective: data.effective_agent_settings || {},
           has_assistant_turns: !!data.has_assistant_turns,
         })
@@ -1349,17 +1350,18 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                 (chatInfo?.has_assistant_turns ?? false)
                 || messages.some(m => m.role === 'assistant')
               }
-              onChangeChatInfo={({ agent_settings_json, provider, effective }) => {
+              onChangeChatInfo={({ agent_settings_json, provider, agent_id, effective }) => {
                 // Merge into chatInfo so the next render reflects the
                 // PATCH without a roundtrip. effective is authoritative
                 // (backend re-merged on top of the current global file).
-                // `provider` only changes when the user flipped the
-                // provider radio — preserve the existing value
-                // otherwise so a model-only PATCH doesn't wipe it.
+                // `provider`/`agent_id` only change when the user picked a
+                // new one — preserve the existing value otherwise so an
+                // unrelated PATCH doesn't wipe it.
                 setChatInfo(prev => prev ? ({
                   ...prev,
                   agent_settings_json: agent_settings_json,
                   provider: provider || prev.provider,
+                  agent_id: agent_id !== undefined ? agent_id : prev.agent_id,
                   effective: effective || prev.effective,
                 }) : prev)
               }}

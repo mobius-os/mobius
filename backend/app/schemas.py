@@ -123,7 +123,7 @@ class AppInstallOut(AppOut):
   # upstream into local edits conflicted (feature 084). On 'conflict'
   # the served app is UNCHANGED — local edits are preserved and the
   # conflicting files are named in `conflict_paths` for an agent to
-  # resolve. 'conflict' never occurs while the flag is off (the default).
+  # resolve. 'conflict' never occurs while the flag is explicitly off.
   mode: Literal["install", "update", "conflict"]
   # The manifest's declared version that ended up applied. Lets the
   # store mini-app refresh its installed-versions map without round-
@@ -137,6 +137,25 @@ class AppInstallOut(AppOut):
   # edits. Non-empty only when `mode == "conflict"`. The store surfaces
   # these so the owner can ask the agent to resolve them.
   conflict_paths: list[str] = Field(default_factory=list)
+  # How the local working branch related to the upstream this update
+  # carried. Meaningful only when per-app git is enabled; conflicts are
+  # carried by `mode == "conflict"`, not this field.
+  divergence: Literal["none", "fast_forward", "clean_merge"] = "none"
+
+
+class ConflictFile(BaseModel):
+  path: str
+  merged_with_markers: str
+
+
+class UpdatePreviewOut(BaseModel):
+  app_id: int
+  status: Literal["clean", "conflict"]
+  upstream_version: str | None = None
+  upstream_commit: str | None = None
+  conflict_paths: list[str] = Field(default_factory=list)
+  conflicts: list[ConflictFile] = Field(default_factory=list)
+  upstream_diff: str | None = None
 
 
 class ProviderCodeRequest(BaseModel):

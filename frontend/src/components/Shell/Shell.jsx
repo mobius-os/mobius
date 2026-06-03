@@ -353,6 +353,9 @@ export default function Shell() {
         handleAppError(e)
       } else if (e.data?.type === 'moebius:new-chat') {
         newChat({ draft: e.data.draft, forceNew: true })
+      } else if (e.data?.type === 'moebius:open-chat') {
+        if (typeof e.data.chatId !== 'string' || !e.data.chatId) return
+        navTo('chat', { chatId: e.data.chatId })
       } else if (e.data?.type === 'moebius:open-app') {
         // Match against installed apps by numeric id OR slug, so the
         // sender can use whichever it has on hand. String() coercion

@@ -313,22 +313,21 @@ def skills_enabled(data_dir: str) -> bool:
 
 
 def per_app_git_enabled(data_dir: str) -> bool:
-  """Whether install/update engages the per-app git model (default OFF).
+  """Whether install/update engages the per-app git model (default ON).
 
   Reads the `per_app_git_enabled` flag from
   /data/shared/agent-settings.json. This is the master switch for
-  feature 084: when off (the default), install + update behave exactly
-  as before — a blind `jsx_source` overwrite with no `.git` anywhere —
-  so deploying this code changes nothing until the owner opts in. When
-  on, install records the pristine bytes on the app's `upstream` branch
-  and update merges upstream into the local working branch, surfacing a
-  conflict instead of clobbering local edits.
+  feature 084: when off, install + update behave exactly
+  as before — a blind `jsx_source` overwrite with no `.git` anywhere.
+  When on, install records the pristine bytes on the app's `upstream`
+  branch and update merges upstream into the local working branch,
+  surfacing a conflict instead of clobbering local edits.
 
-  Absent / malformed flag reads as off — opt-in is explicit, mirroring
-  `skills_enabled`.
+  Absent reads as on; an explicit false keeps the old blind-overwrite
+  path available.
   """
-  return bool(
-    _load_agent_settings(data_dir).get("per_app_git_enabled") is True
+  return (
+    _load_agent_settings(data_dir).get("per_app_git_enabled", True) is True
   )
 
 

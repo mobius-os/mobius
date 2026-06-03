@@ -69,6 +69,27 @@ function norm(v, min, max) {
   return Math.max(0, Math.min(1, (v - min) / (max - min)));
 }
 
+export function nodeRadius(node = {}) {
+  const importance = Number(node.importance);
+  const accessCount = Number(node.access_count);
+  const safeImportance = Number.isFinite(importance) && importance > 0 ? importance : 1;
+  const safeAccessCount = Number.isFinite(accessCount) && accessCount > 0 ? accessCount : 0;
+  const base = Math.max(safeImportance, 1 + Math.log2(1 + safeAccessCount));
+  const radius = 3 + base * 1.55;
+  return node.type === 'moc' ? radius * 1.4 : radius;
+}
+
+export function shouldShowNodeLabel(globalScale, node = {}, hoverId = null) {
+  const scale = Number(globalScale);
+  if (!Number.isFinite(scale)) return false;
+  const isHover = hoverId === node.id;
+  const hasMocList = Array.isArray(node.mocs) && node.mocs.length > 0;
+  const isImportant = (Number(node.importance) || 0) >= 7;
+  return scale >= 1.4
+    || (scale >= 0.8 && (hasMocList || isImportant || isHover))
+    || (scale >= 0.4 && (hasMocList || isHover));
+}
+
 // A short, human relative-time from an ISO-ish frontmatter date string.
 function relDate(s) {
   if (!s || s === 'null') return null;
@@ -188,11 +209,7 @@ export default function App({ appId, token }) {
   }, [mocColors]);
 
   // --- Node radius from importance + usage. ---
-  const radiusForNode = useCallback((n) => {
-    const base = Math.max(n.importance || 1, 1 + Math.log2(1 + (n.access_count || 0)));
-    const r = 3 + base * 1.55;
-    return n.type === 'moc' ? r * 1.4 : r;
-  }, []);
+  const radiusForNode = useCallback((n) => nodeRadius(n), []);
 
   // --- Neighbor sets for hover dimming. ---
   const neighbors = useMemo(() => {
@@ -423,11 +440,7 @@ export default function App({ appId, token }) {
 
     // Label — zoom-based LOD, drawn in CSS px (font size / zoom) with a
     // rounded pill underlay so text stays legible over links and halos.
-    const hasMocList = Array.isArray(node.mocs) && node.mocs.length > 0;
-    const isImportant = (node.importance || 0) >= 7;
-    const showLabel = globalScale >= 1.4
-      || (globalScale >= 0.8 && (hasMocList || isImportant || isHover))
-      || (globalScale >= 0.4 && (hasMocList || isHover));
+    const showLabel = shouldShowNodeLabel(globalScale, node, hoverId);
     if (showLabel) {
       const label = node.title || node.id;
       const labelPx = clamp((isMoc ? 11.5 : 10.5) * Math.sqrt(globalScale), 9, 15);

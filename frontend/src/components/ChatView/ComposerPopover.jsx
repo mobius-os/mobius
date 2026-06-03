@@ -197,6 +197,7 @@ export default function ComposerPopover({
             <div className="composer-popover__section composer-popover__section--picker">
               <ChatSettingsPanel
                 chatId={chatId}
+                chat={chatInfo}
                 provider={chatInfo.provider}
                 effective={chatInfo.effective}
                 hasAssistantTurns={hasAssistantTurns}

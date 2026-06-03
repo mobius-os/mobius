@@ -7,13 +7,14 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy.orm import Session
 
-from app import activity, fs_locks, models, schemas
+from app import activity, app_git, fs_locks, models, schemas
 from app.storage_io import read_capped_body
 from app.broadcast import get_system_broadcast
 from app.compiler import compile_jsx, recompile_app_bundle
@@ -267,12 +268,14 @@ async def install_app(
   # overlap lets one delete what the other just wrote
   # (fs_locks.install_uninstall_lock has the full rationale).
   async with fs_locks.install_uninstall_lock():
-    app, mode, warnings, manifest, conflict_paths = await install_from_manifest(
-      db,
-      manifest_url=body.manifest_url,
-      manifest=body.manifest,
-      raw_base=body.raw_base,
-      source="store",
+    app, mode, warnings, manifest, conflict_paths, divergence = (
+      await install_from_manifest(
+        db,
+        manifest_url=body.manifest_url,
+        manifest=body.manifest,
+        raw_base=body.raw_base,
+        source="store",
+      )
     )
   # Notify the Shell to refetch its app list so a new install (or an
   # in-place update) shows up in the drawer without a page reload.
@@ -304,6 +307,138 @@ async def install_app(
     version=manifest.get("version", "unknown"),
     warnings=warnings,
     conflict_paths=conflict_paths,
+    divergence=divergence,
+  )
+
+
+def _upstream_parent(repo: Path, upstream_commit: str | None) -> str | None:
+  """The previous pristine upstream commit, when the recorded tip has one."""
+  if not upstream_commit:
+    return None
+  proc = app_git._run(repo, "rev-parse", f"{upstream_commit}^", check=False)
+  if proc.returncode != 0:
+    return None
+  return proc.stdout.strip() or None
+
+
+def _upstream_diff(repo: Path, upstream_commit: str | None) -> str | None:
+  """Unified diff introduced by the recorded upstream tip.
+
+  Degrades to None (not a 500) when the recorded commit no longer exists
+  in the repo — a DB/git desync from a wiped + re-seeded repo shouldn't
+  break the read-only preview.
+  """
+  if not upstream_commit:
+    return None
+  parent = _upstream_parent(repo, upstream_commit)
+  if not parent:
+    proc = app_git._run(
+      repo, "show", "--format=", "--no-ext-diff", upstream_commit,
+      "--", ".", check=False,
+    )
+  else:
+    proc = app_git._run(
+      repo, "diff", "--no-ext-diff", f"{parent}..{upstream_commit}",
+      "--", ".", check=False,
+    )
+  return proc.stdout if proc.returncode == 0 else None
+
+
+def _upstream_version(repo: Path, upstream_commit: str | None) -> str | None:
+  """Version recorded by app_git.record_upstream's commit subject.
+
+  None (not a 500) when the commit is missing — see `_upstream_diff`.
+  """
+  if not upstream_commit:
+    return None
+  proc = app_git._run(
+    repo, "log", "-1", "--format=%s", upstream_commit, check=False,
+  )
+  if proc.returncode != 0:
+    return None
+  match = re.match(r"install v(.+) from .+", proc.stdout.strip())
+  return match.group(1) if match else None
+
+
+def _materialize_conflict_files(
+  repo: Path, conflict_paths: list[str],
+) -> list[schemas.ConflictFile]:
+  """Reads real conflict-marker text from a throwaway worktree."""
+  if not conflict_paths:
+    return []
+  tmp_parent = Path(tempfile.mkdtemp(prefix="mobius-update-preview-"))
+  tmp = tmp_parent / "worktree"
+  try:
+    app_git._run(
+      repo, "worktree", "add", "--detach", str(tmp), app_git.LOCAL_BRANCH,
+    )
+    app_git._run(
+      tmp, "merge", "--no-commit", "--no-ff", app_git.UPSTREAM_BRANCH,
+      check=False,
+    )
+    conflicts: list[schemas.ConflictFile] = []
+    for rel in conflict_paths:
+      path = tmp / rel
+      if not path.is_file():
+        continue
+      conflicts.append(schemas.ConflictFile(
+        path=rel,
+        merged_with_markers=path.read_text(
+          encoding="utf-8", errors="replace",
+        ),
+      ))
+    return conflicts
+  finally:
+    app_git._run(
+      repo, "worktree", "remove", "--force", str(tmp), check=False,
+    )
+    shutil.rmtree(tmp_parent, ignore_errors=True)
+
+
+@router.get(
+  "/{app_id}/update-preview",
+  response_model=schemas.UpdatePreviewOut,
+)
+async def update_preview(
+  app_id: int,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Read-only preview of the recorded upstream update vs local edits."""
+  # The preview embeds full conflict-marker source text, so an app token
+  # must only read its OWN app's preview — never another app's. The owner
+  # (app_id is None) may read any. Mirrors run-job's scope guard.
+  if principal.app_id is not None and principal.app_id != app_id:
+    raise HTTPException(status_code=403, detail="Not your app.")
+  app = db.query(models.App).filter(models.App.id == app_id).first()
+  if not app:
+    raise HTTPException(status_code=404, detail="App not found.")
+  if not app.source_dir:
+    raise HTTPException(status_code=400, detail="App has no source_dir.")
+  repo = Path(app.source_dir)
+  if not app_git.is_repo(repo):
+    raise HTTPException(status_code=400, detail="App is not a git repo.")
+
+  async with fs_locks.source_dir_lock(str(repo)):
+    merge = await asyncio.to_thread(app_git.merge_upstream, repo)
+    conflict_paths = merge.conflict_paths if merge.status == "conflict" else []
+    conflicts = await asyncio.to_thread(
+      _materialize_conflict_files, repo, conflict_paths,
+    )
+    upstream_diff = await asyncio.to_thread(
+      _upstream_diff, repo, app.upstream_commit,
+    )
+    upstream_version = await asyncio.to_thread(
+      _upstream_version, repo, app.upstream_commit,
+    )
+  return schemas.UpdatePreviewOut(
+    app_id=app.id,
+    status=merge.status,
+    upstream_version=upstream_version,
+    upstream_commit=app.upstream_commit,
+    conflict_paths=conflict_paths,
+    conflicts=conflicts,
+    upstream_diff=upstream_diff,
   )
 
 

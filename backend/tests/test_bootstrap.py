@@ -39,7 +39,7 @@ async def test_bootstrap_installs_store_when_absent(db, monkeypatch):
     .first()
   ) is None
   mock_app = models.App(id=1, name="Store", slug="store")
-  install_mock = AsyncMock(return_value=(mock_app, "install", [], {}, []))
+  install_mock = AsyncMock(return_value=(mock_app, "install", [], {}, [], "none"))
   with patch("app.bootstrap.install_from_manifest", install_mock):
     await ensure_store_installed(db)
   assert install_mock.await_count == 1
@@ -99,7 +99,7 @@ async def test_bootstrap_ignores_unrelated_store_slug(db, monkeypatch):
   db.commit()
 
   mock_app = models.App(id=2, name="Store", slug="app-store")
-  install_mock = AsyncMock(return_value=(mock_app, "install", [], {}, []))
+  install_mock = AsyncMock(return_value=(mock_app, "install", [], {}, [], "none"))
   with patch("app.bootstrap.install_from_manifest", install_mock):
     await ensure_store_installed(db)
   assert install_mock.await_count == 1
