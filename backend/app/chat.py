@@ -32,10 +32,12 @@ from app.broadcast import (
 from app.chat_writer import (
   ClearPending,
   ClearRunStatus,
+  ClearGoal,
   Finalize,
   PersistError,
   PersistTranscript,
   QuestionCommit,
+  SetGoal,
   alloc_run_token,
   await_ack as _await_ack,
   get_writer,
@@ -1498,16 +1500,62 @@ def _build_time_context(timezone: str | None, elapsed: str | None = None) -> str
 
 
 def _is_cli_slash_command(text: str) -> bool:
-  """True when `text` starts with a supported Claude CLI slash command.
+  """True when `text` starts with a provider CLI slash command.
 
-  The Claude CLI only dispatches slash commands when the message starts
-  with the command at position 0. Möbius appends its own hidden context
-  below known commands so `/goal` can activate the native goal loop
-  without turning path-like prose such as `/data/apps/x is broken` into
-  a command-shaped prompt.
+  `/goal` is deliberately excluded: Möbius owns it as an app command and
+  must never pass it through to the provider CLI slash-command parser.
   """
-  first = (text or "").lstrip("\n").split(None, 1)[0].strip()
-  return first in {"/goal"}
+  del text
+  return False
+
+
+_GOAL_CLEAR_ALIASES = {"clear", "stop", "off", "reset", "none", "cancel"}
+
+
+def _parse_goal_command(text: str) -> tuple[str, str] | None:
+  """Parse a leading `/goal` app command.
+
+  Returns `(action, arg)` where action is `set`, `clear`, or `status`.
+  A non-leading `/goal` is ordinary prose and returns None.
+  """
+  stripped = (text or "").lstrip("\n")
+  if stripped != "/goal" and not stripped.startswith("/goal "):
+    return None
+  arg = stripped[5:].strip()
+  if not arg:
+    return ("status", "")
+  first = arg.split(None, 1)[0].lower()
+  if first in _GOAL_CLEAR_ALIASES:
+    return ("clear", "")
+  return ("set", arg)
+
+
+def _goal_status_message(goal: dict | None) -> str:
+  """Build a compact visible status response for `/goal`."""
+  if not isinstance(goal, dict):
+    return "No active goal."
+  condition = str(goal.get("condition") or "").strip() or "(empty)"
+  turns = int(goal.get("turns") or 0)
+  reason = goal.get("last_reason") or "none yet"
+  return f"Goal: {condition}\nTurns: {turns}\nLast reason: {reason}"
+
+
+async def _set_goal_state_strict(
+  chat_id: str, run_token: str, goal: dict,
+) -> dict:
+  """Persist goal state through the writer actor before provider dispatch."""
+  return await _await_ack(
+    get_writer().submit(SetGoal(
+      chat_id=chat_id, run_token=run_token, goal=goal,
+    ))
+  )
+
+
+async def _clear_goal_state_strict(chat_id: str, run_token: str) -> dict:
+  """Clear goal state through the writer actor."""
+  return await _await_ack(
+    get_writer().submit(ClearGoal(chat_id=chat_id, run_token=run_token))
+  )
 
 
 async def run_chat(
@@ -1674,6 +1722,18 @@ async def _run_chat_impl(
   log = _get_logger()
   settings = get_settings()
   user_message = messages[-1].content
+  goal_command = _parse_goal_command(user_message)
+  goal_mode = False
+  active_goal: dict | None = None
+  if goal_command and goal_command[0] == "set":
+    goal_mode = True
+    user_message = goal_command[1]
+    active_goal = {
+      "condition": goal_command[1],
+      "turns": 0,
+      "started_at": datetime.now(UTC).isoformat(),
+      "last_reason": None,
+    }
   is_slash_command = _is_cli_slash_command(user_message)
   if is_slash_command:
     # The CLI dispatches a slash command only when it sits at position 0, so the
@@ -1796,6 +1856,8 @@ async def _run_chat_impl(
     bc = create_broadcast(chat_id)
   set_active_broadcast(bc)
 
+  control_sink = _ChatEventSink(bc, chat_id, run_token=run_token)
+
   owner = db.query(models.Owner).first()
   if not owner:
     bc.publish({"type": "error", "message": "No owner configured."})
@@ -1890,6 +1952,41 @@ async def _run_chat_impl(
       log.exception(
         "failed to load per-chat agent_settings chat_id=%s", chat_id,
       )
+
+  if goal_command and goal_command[0] in {"clear", "status"}:
+    goal = (chat_overrides or {}).get("goal")
+    try:
+      if goal_command[0] == "clear":
+        await _clear_goal_state_strict(chat_id, run_token or "")
+        control_sink.publish({"type": "text", "content": "Goal cleared."})
+      else:
+        control_sink.publish({
+          "type": "text",
+          "content": _goal_status_message(goal),
+        })
+    except Exception as exc:
+      log.exception("goal command failed chat_id=%s: %s", chat_id, exc)
+      control_sink.publish({"type": "error", "message": str(exc)})
+    return await _complete_turn(
+      bc=bc, sink=control_sink, db=db, chat_id=chat_id, run_gen=run_gen,
+      provider_id=provider_id, cost_usd=0, close_browser=False,
+    )
+
+  if active_goal is not None:
+    try:
+      await _set_goal_state_strict(chat_id, run_token or "", active_goal)
+      db.expire_all()
+      chat_overrides = dict(chat_overrides or {})
+      chat_overrides["goal"] = active_goal
+      control_sink.publish({"type": "goal_started", **active_goal})
+    except Exception as exc:
+      log.exception("goal set failed chat_id=%s: %s", chat_id, exc)
+      control_sink.publish({"type": "error", "message": str(exc)})
+      return await _complete_turn(
+        bc=bc, sink=control_sink, db=db, chat_id=chat_id, run_gen=run_gen,
+        provider_id=provider_id, cost_usd=0, close_browser=False,
+      )
+
   agent_settings = effective_agent_settings(
     settings.data_dir, chat_overrides, provider=provider_id,
   )
@@ -1995,6 +2092,8 @@ async def _run_chat_impl(
         pending_questions=questions._pending,
         db=db,
         agent_settings=runner_agent_settings,
+        goal_mode=goal_mode,
+        goal=active_goal,
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
@@ -2059,6 +2158,8 @@ async def _run_chat_impl(
         db=db,
         agent_settings=runner_agent_settings,
         skills_enabled=_skills_enabled(settings.data_dir),
+        goal_mode=goal_mode,
+        goal=active_goal,
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")

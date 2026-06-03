@@ -50,8 +50,8 @@ def test_elapsed_clause_only_when_present():
 
 
 def test_goal_slash_command_is_detected_without_matching_paths():
-  assert _is_cli_slash_command("/goal say PONG")
-  assert _is_cli_slash_command("\n/goal clear")
+  assert not _is_cli_slash_command("/goal say PONG")
+  assert not _is_cli_slash_command("\n/goal clear")
   assert not _is_cli_slash_command("/")
   assert not _is_cli_slash_command("/data/apps/x is broken")
   assert not _is_cli_slash_command("please run /goal later")

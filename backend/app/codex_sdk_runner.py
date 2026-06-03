@@ -64,9 +64,18 @@ import concurrent.futures as _cf
 import json
 import logging
 import shutil
+from collections.abc import Callable
 from typing import Any
 
 from app.codex_appserver import _extract_bash_command
+from app.goal_loop import (
+  _clear_goal,
+  _default_goal_evaluator,
+  _goal_continue_message,
+  _goal_turn_cap,
+  _increment_goal_turn,
+  _maybe_await,
+)
 from app.providers import get_skill_path
 from app.runtime_types import RunnerResult
 from app.runner_registry import RunnerKind, registry
@@ -86,17 +95,21 @@ class ActiveCodexTurn:
   Same shape as Claude's `ActiveClaudeClient`.
   """
 
-  def __init__(self, thread: Any, turn: Any, chat_id: str):
+  def __init__(self, thread: Any, turn: Any | None, chat_id: str):
     self.chat_id = chat_id
     self.kind = RunnerKind.CODEX_SDK
     self.thread = thread
     self.turn = turn
+    self.cancelled = False
     self._finished: asyncio.Future[None] = (
       asyncio.get_running_loop().create_future()
     )
 
   async def interrupt(self) -> None:
     """Signals the live turn and waits for runner-side drain."""
+    self.cancelled = True
+    if self.turn is None:
+      return
     try:
       await self.turn.interrupt()
     except Exception as exc:
@@ -652,6 +665,9 @@ async def run_codex_sdk_turn(
   pending_questions: dict,
   db,
   agent_settings: dict | None = None,
+  goal_mode: bool = False,
+  goal: dict | None = None,
+  goal_evaluator: Callable[..., Any] = _default_goal_evaluator,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
@@ -745,7 +761,10 @@ async def run_codex_sdk_turn(
   thread = None
   turn = None
   current_session_id = session_id
-  completed_turn: Any | None = None
+  goal_state = (
+    dict(goal or {}) if goal_mode and isinstance(goal, dict) else None
+  )
+  goal_turns = int((goal_state or {}).get("turns") or 0)
 
   try:
     async with sdk["AsyncCodex"](config=config) as codex:
@@ -845,101 +864,190 @@ async def run_codex_sdk_turn(
         "session_id": current_session_id,
       })
 
-      turn = await thread.turn(
-        user_message,
-        cwd=cwd,
-        model=model,
-        effort=effort,
-      )
-      active_turn = ActiveCodexTurn(thread, turn, chat_id=chat_id)
+      active_turn = ActiveCodexTurn(thread, None, chat_id=chat_id)
       registry.register(active_turn)
 
-      async for notification in turn.stream():
-        payload = notification.payload
+      async def _run_turn_once(message: str) -> tuple[Any | None, str]:
+        """Run one Codex turn and return its terminal payload plus text."""
+        nonlocal turn
+        completed_turn: Any | None = None
+        text_parts: list[str] = []
+        turn = await thread.turn(
+          message,
+          cwd=cwd,
+          model=model,
+          effort=effort,
+        )
+        active_turn.turn = turn
+        try:
+          async for notification in turn.stream():
+            payload = notification.payload
 
-        if isinstance(payload, sdk["AgentMessageDeltaNotification"]):
-          if payload.delta:
-            bc.publish({"type": "text", "content": payload.delta})
-          continue
+            if isinstance(payload, sdk["AgentMessageDeltaNotification"]):
+              if payload.delta:
+                text_parts.append(payload.delta)
+                bc.publish({"type": "text", "content": payload.delta})
+              continue
 
-        if isinstance(
-          payload,
-          sdk["CommandExecutionOutputDeltaNotification"],
-        ):
-          if payload.delta:
-            bc.publish({"type": "tool_output", "content": payload.delta})
-          continue
+            if isinstance(
+              payload,
+              sdk["CommandExecutionOutputDeltaNotification"],
+            ):
+              if payload.delta:
+                bc.publish({"type": "tool_output", "content": payload.delta})
+              continue
 
-        if isinstance(payload, sdk["ItemStartedNotification"]):
-          item = payload.item.root if hasattr(payload.item, "root") else payload.item
-          event = _tool_start_event(item, sdk)
-          if event is not None:
-            bc.publish(event)
-          continue
+            if isinstance(payload, sdk["ItemStartedNotification"]):
+              item = (
+                payload.item.root
+                if hasattr(payload.item, "root")
+                else payload.item
+              )
+              event = _tool_start_event(item, sdk)
+              if event is not None:
+                bc.publish(event)
+              continue
 
-        if isinstance(payload, sdk["FileChangePatchUpdatedNotification"]):
-          summary = _file_change_patch_summary(payload.changes)
-          if summary:
-            bc.publish({"type": "tool_output", "content": summary})
-          continue
+            if isinstance(payload, sdk["FileChangePatchUpdatedNotification"]):
+              summary = _file_change_patch_summary(payload.changes)
+              if summary:
+                bc.publish({"type": "tool_output", "content": summary})
+              continue
 
-        if isinstance(payload, sdk["ItemCompletedNotification"]):
-          item = payload.item.root if hasattr(payload.item, "root") else payload.item
-          for event in _tool_completed_events(item, sdk):
-            bc.publish(event)
-          continue
+            if isinstance(payload, sdk["ItemCompletedNotification"]):
+              item = (
+                payload.item.root
+                if hasattr(payload.item, "root")
+                else payload.item
+              )
+              for event in _tool_completed_events(item, sdk):
+                bc.publish(event)
+              continue
 
-        if isinstance(payload, sdk["ThreadTokenUsageUpdatedNotification"]):
-          # Token usage is reported but currently not surfaced; the
-          # SDK already exposes it via the thread handle for any
-          # consumer that needs it.
-          continue
+            if isinstance(payload, sdk["ThreadTokenUsageUpdatedNotification"]):
+              continue
 
-        if isinstance(
-          payload,
-          sdk["ItemGuardianApprovalReviewStartedNotification"],
-        ):
-          continue
+            if isinstance(
+              payload,
+              sdk["ItemGuardianApprovalReviewStartedNotification"],
+            ):
+              continue
 
-        if isinstance(
-          payload,
-          sdk["ItemGuardianApprovalReviewCompletedNotification"],
-        ):
-          continue
+            if isinstance(
+              payload,
+              sdk["ItemGuardianApprovalReviewCompletedNotification"],
+            ):
+              continue
 
-        if isinstance(payload, sdk["ContextCompactedNotification"]):
-          log.info("Codex context compacted for chat %s", chat_id)
-          continue
+            if isinstance(payload, sdk["ContextCompactedNotification"]):
+              log.info("Codex context compacted for chat %s", chat_id)
+              continue
 
-        if isinstance(payload, sdk["TurnCompletedNotification"]):
-          completed_turn = payload.turn
-          break
+            if isinstance(payload, sdk["TurnCompletedNotification"]):
+              completed_turn = payload.turn
+              break
 
-        if (
-          notification.method == "error"
-          and isinstance(payload, sdk["ErrorNotification"])
-        ):
-          message = getattr(payload.error, "message", None)
-          if getattr(payload, "will_retry", False):
-            log.warning(
-              "Codex turn error will retry for chat %s: %s",
-              chat_id,
-              message or "Codex error",
-            )
-            continue
-          raise RuntimeError(str(message or "Codex error"))
+            if (
+              notification.method == "error"
+              and isinstance(payload, sdk["ErrorNotification"])
+            ):
+              message_text = getattr(payload.error, "message", None)
+              if getattr(payload, "will_retry", False):
+                log.warning(
+                  "Codex turn error will retry for chat %s: %s",
+                  chat_id,
+                  message_text or "Codex error",
+                )
+                continue
+              raise RuntimeError(str(message_text or "Codex error"))
+          return completed_turn, "".join(text_parts).strip()
+        finally:
+          if active_turn.turn is turn:
+            active_turn.turn = None
 
-      error_text = None
-      # The installed SDK routes notifications by `turnId` and drops late
-      # `turn/completed` events once the queue is unregistered, so normal
-      # turn streams are expected to terminate with TurnCompleted.
-      if completed_turn is not None and completed_turn.error is not None:
-        error_text = getattr(completed_turn.error, "message", None)
-      return {
-        "session_id": current_session_id,
-        "cost_usd": None,
-        "error": error_text,
-      }
+      next_message = user_message
+      while True:
+        if active_turn.cancelled:
+          return {
+            "session_id": current_session_id,
+            "cost_usd": None,
+            "error": None,
+          }
+        completed_turn, assistant_text = await _run_turn_once(next_message)
+        error_text = None
+        if completed_turn is not None and completed_turn.error is not None:
+          error_text = getattr(completed_turn.error, "message", None)
+        status = str(getattr(completed_turn, "status", "") or "").lower()
+        stopped = status in {"interrupted", "cancelled", "canceled"}
+        if error_text or stopped or goal_state is None:
+          return {
+            "session_id": current_session_id,
+            "cost_usd": None,
+            "error": error_text,
+          }
+        if active_turn.cancelled:
+          return {
+            "session_id": current_session_id,
+            "cost_usd": None,
+            "error": None,
+          }
+        condition = str(goal_state.get("condition") or "").strip()
+        recent = (
+          f"User message:\n{next_message}\n\n"
+          f"Assistant:\n{assistant_text}"
+        )
+        evaluation = await _maybe_await(goal_evaluator(
+          condition, assistant_text, recent,
+        ))
+        if active_turn.cancelled:
+          return {
+            "session_id": current_session_id,
+            "cost_usd": None,
+            "error": None,
+          }
+        reason = str((evaluation or {}).get("reason") or "").strip()
+        if not reason:
+          reason = "goal evaluator returned no reason"
+        if bool((evaluation or {}).get("met")):
+          await _clear_goal(chat_id, getattr(bc, "run_token", None))
+          bc.publish({
+            "type": "goal_met",
+            "condition": condition,
+            "turns": goal_turns,
+            "reason": reason,
+          })
+          return {
+            "session_id": current_session_id,
+            "cost_usd": None,
+            "error": None,
+          }
+        cap = _goal_turn_cap(condition)
+        if goal_turns + 1 > cap:
+          bc.publish({
+            "type": "goal_paused",
+            "turn": goal_turns,
+            "condition": condition,
+            "reason": (
+              f"paused after {goal_turns} turns — /goal to check, "
+              "/goal clear to cancel"
+            ),
+          })
+          return {
+            "session_id": current_session_id,
+            "cost_usd": None,
+            "error": None,
+          }
+        goal_turns = await _increment_goal_turn(
+          chat_id, getattr(bc, "run_token", None), reason,
+        )
+        bc.publish({
+          "type": "goal_continue",
+          "turn": goal_turns,
+          "reason": reason,
+          "condition": condition,
+        })
+        # Codex opens each continuation as a new turn on the same thread.
+        next_message = _goal_continue_message(condition, reason)
   except Exception as exc:
     return {
       "session_id": current_session_id,
@@ -948,9 +1056,10 @@ async def run_codex_sdk_turn(
     }
   finally:
     current = registry.get_handle(chat_id, RunnerKind.CODEX_SDK)
-    if isinstance(current, ActiveCodexTurn) and current.turn is turn:
+    if "active_turn" in locals() and current is active_turn:
       registry.unregister(chat_id, RunnerKind.CODEX_SDK)
-      current.mark_finished()
+    if "active_turn" in locals():
+      active_turn.mark_finished()
 
 
 async def steer_into_active_turn(

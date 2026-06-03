@@ -55,9 +55,9 @@ Design choices:
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import logging
+from collections.abc import Callable
 from typing import Any
 from uuid import uuid4
 
@@ -83,6 +83,14 @@ from claude_agent_sdk.types import (
 )
 
 from app import activity
+from app.goal_loop import (
+  _clear_goal,
+  _default_goal_evaluator,
+  _goal_continue_message,
+  _goal_turn_cap,
+  _increment_goal_turn,
+  _maybe_await,
+)
 from app.pending_questions import PendingQuestion
 from app.runner_registry import RunnerKind, registry
 from app.runtime_types import RunnerResult
@@ -180,6 +188,24 @@ def _steer_redirect_message(text: str) -> str:
   )
 
 
+class _GoalCapture:
+  """Capture assistant text while forwarding events to the real bus."""
+
+  def __init__(self, wrapped):
+    self._wrapped = wrapped
+    self.text_parts: list[str] = []
+    self.events: list[dict] = []
+
+  def publish(self, event: dict) -> bool:
+    self.events.append(event)
+    if event.get("type") == "text":
+      self.text_parts.append(str(event.get("content") or ""))
+    return self._wrapped.publish(event)
+
+  def __getattr__(self, name: str):
+    return getattr(self._wrapped, name)
+
+
 async def steer_into_active_turn(chat_id: str, text: str) -> bool:
   """Interrupts a live Claude SDK turn so it can resume with `text`."""
   handle = registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK)
@@ -245,13 +271,6 @@ def _format_tool_output(content: Any) -> str:
       parts.append(json.dumps(item, ensure_ascii=True))
     return "\n".join(part for part in parts if part).strip()
   return json.dumps(content, ensure_ascii=True)
-
-
-async def _maybe_await(value: Any) -> Any:
-  """Awaits a value only when the callback returned an awaitable."""
-  if inspect.isawaitable(value):
-    return await value
-  return value
 
 
 def _emit_unknown(bc, kind: str, raw: Any) -> None:
@@ -469,6 +488,9 @@ async def run_claude_sdk_turn(
   db,
   agent_settings: dict | None = None,
   skills_enabled: bool = False,
+  goal_mode: bool = False,
+  goal: dict | None = None,
+  goal_evaluator: Callable[..., Any] = _default_goal_evaluator,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
@@ -494,6 +516,9 @@ async def run_claude_sdk_turn(
   """
   current_session_id = session_id
   cost_usd: float | None = None
+  goal_state = (
+    dict(goal or {}) if goal_mode and isinstance(goal, dict) else None
+  )
 
   # Canonical AskUserQuestion handling via can_use_tool, per
   # https://code.claude.com/docs/en/agent-sdk/user-input
@@ -635,6 +660,7 @@ async def run_claude_sdk_turn(
     _model = DEFAULT_MODELS["claude"]
   async def _run_once(model_override: str | None) -> RunnerResult:
     nonlocal current_session_id, cost_usd
+    goal_turns = int((goal_state or {}).get("turns") or 0)
     # Skills are gated behind the per-owner `skills_enabled` flag. OFF
     # (the default) keeps the historical posture: `setting_sources=None`
     # means the SDK loads NO user/project settings, so the Skill tool is
@@ -686,12 +712,13 @@ async def run_claude_sdk_turn(
           "cost_usd": None,
           "error": "connect timeout",
         }
+      run_bc = _GoalCapture(bc)
       await client.query(user_message)
 
       while True:
         async for sdk_msg in client.receive_response():
           current_session_id, terminal = dispatch_sdk_message(
-            sdk_msg, bc, current_session_id,
+            sdk_msg, run_bc, current_session_id,
           )
           if terminal is None:
             continue
@@ -703,6 +730,53 @@ async def run_claude_sdk_turn(
             )
             break
           cost_usd = terminal.get("cost_usd")
+          natural = (
+            not terminal.get("error")
+            and terminal.get("stop_reason") != "interrupt"
+          )
+          if goal_state is not None and natural:
+            condition = str(goal_state.get("condition") or "").strip()
+            latest = "".join(run_bc.text_parts).strip()
+            recent = f"User message:\n{user_message}\n\nAssistant:\n{latest}"
+            evaluation = await _maybe_await(goal_evaluator(
+              condition, latest, recent,
+            ))
+            reason = str((evaluation or {}).get("reason") or "").strip()
+            if not reason:
+              reason = "goal evaluator returned no reason"
+            if bool((evaluation or {}).get("met")):
+              await _clear_goal(chat_id, getattr(bc, "run_token", None))
+              bc.publish({
+                "type": "goal_met",
+                "condition": condition,
+                "turns": goal_turns,
+                "reason": reason,
+              })
+              return terminal
+            cap = _goal_turn_cap(condition)
+            if goal_turns + 1 > cap:
+              bc.publish({
+                "type": "goal_paused",
+                "turn": goal_turns,
+                "condition": condition,
+                "reason": (
+                  f"paused after {goal_turns} turns — /goal to check, "
+                  "/goal clear to cancel"
+                ),
+              })
+              return terminal
+            goal_turns = await _increment_goal_turn(
+              chat_id, getattr(bc, "run_token", None), reason,
+            )
+            bc.publish({
+              "type": "goal_continue",
+              "turn": goal_turns,
+              "reason": reason,
+              "condition": condition,
+            })
+            run_bc = _GoalCapture(bc)
+            await client.query(_goal_continue_message(condition, reason))
+            break
           return terminal
         else:
           steer_texts = active_client.pending_steer
