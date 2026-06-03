@@ -1103,12 +1103,22 @@ async def install_from_manifest(
     _cleanup(created_paths)
     raise HTTPException(500, f"Install failed: {exc!r}")
 
-  # --- Phase 5: post-commit cron registration -------------------------
-  # The app is fully installed at this point. Cron failures become
-  # warnings, not 500s — the user just needs to re-set the schedule.
-  if sched and sched.get("default"):
+  # --- Phase 5: post-commit job-script write + cron registration ------
+  # The app is fully installed at this point. Job-write / cron failures
+  # become warnings, not 500s — the user just needs to re-set the schedule.
+  #
+  # A bundled job script (manifest `schedule.job`) is written to source_dir
+  # whenever one was fetched, INDEPENDENT of whether the manifest also
+  # declares a recurring `schedule.default`. An app may ship an on-demand
+  # job invoked only through the run-job endpoint (e.g. the LaTeX app's
+  # build.sh, compiled on a Build click) with no recurring schedule —
+  # coupling the write to cron registration would fetch the script but never
+  # land it on disk, and run-job would 400 with "no job script". A recurring
+  # crontab entry is installed only when `schedule.default` is present.
+  has_cron = bool(sched and sched.get("default"))
+  if bundled_job or has_cron:
     slug = app.slug
-    job_name = sched.get("job", "fetch.sh")
+    job_name = sched.get("job", "fetch.sh") if sched else "fetch.sh"
     # Use the app's ACTUAL source_dir (where the JSX + job script live), not a
     # freshly re-derived /data/apps/<slug>. After a valid source-dir PATCH the
     # two diverge, which would split the job file from the source tree (Codex
@@ -1118,39 +1128,45 @@ async def install_from_manifest(
       # Under the per-source-dir lock so the job-file writes serialize vs a
       # concurrent create/patch claiming this directory, and recheck the app
       # row still exists first (the endpoint's lifecycle lock already excludes a
-      # concurrent uninstall, but the recheck makes the cron never write for a
+      # concurrent uninstall, but the recheck makes the write never happen for a
       # vanished row) — Codex review round-9 #3.
       async with fs_locks.source_dir_lock(str(app_data_dir)):
         if not db.query(models.App.id).filter(models.App.id == app.id).first():
-          raise HTTPException(404, "App removed before cron registration.")
+          raise HTTPException(404, "App removed before job-script write.")
         app_data_dir.mkdir(parents=True, exist_ok=True)
         job_path = app_data_dir / job_name
-        if CRON_SCAFFOLD.exists():
+        if has_cron and CRON_SCAFFOLD.exists():
+          # _register_cron writes the bundled job first, then installs the
+          # crontab entry pointing at it.
           await asyncio.to_thread(
             _register_cron,
             slug, sched["default"], job_path, bundled_job, app.id,
           )
         else:
-          # In tests we mock the scaffold; persist a sentinel so the
-          # contract is still observable + warn the caller.
+          # Either an on-demand-only job (no recurring schedule) or, when a
+          # schedule IS declared, a test env that mocks the scaffold away.
+          # Land the script on disk so run-job can find it either way.
           if bundled_job:
             job_path.write_bytes(bundled_job)
             job_path.chmod(0o755)
-          sentinel = app_data_dir / ".cron-pending.json"
-          sentinel.write_text(json.dumps({
-            "expr": sched["default"], "job": job_name,
-            "status": "pending — init-cron-scaffold.sh not on PATH",
-          }), encoding="utf-8")
-          warnings.append(
-            "cron: scaffold script not available — registration pending"
-          )
+          if has_cron:
+            # Schedule declared but the scaffold isn't on PATH (tests):
+            # persist a sentinel so the contract is observable + warn.
+            sentinel = app_data_dir / ".cron-pending.json"
+            sentinel.write_text(json.dumps({
+              "expr": sched["default"], "job": job_name,
+              "status": "pending — init-cron-scaffold.sh not on PATH",
+            }), encoding="utf-8")
+            warnings.append(
+              "cron: scaffold script not available — registration pending"
+            )
     except HTTPException as exc:
-      # Cron failed but the app is installed. Surface as a warning.
-      log.warning("install: cron registration failed post-commit — %s",
+      # The write/cron failed but the app is installed. Surface as a warning.
+      log.warning("install: job-script/cron step failed post-commit — %s",
                   exc.detail)
       warnings.append(f"cron: registration failed — {exc.detail}")
     except Exception as exc:
-      log.exception("install: cron registration failed post-commit")
+      log.exception("install: job-script/cron step failed post-commit")
       warnings.append(f"cron: registration failed — {exc!r}")
 
   return app, mode, warnings, manifest, conflict_paths, divergence
