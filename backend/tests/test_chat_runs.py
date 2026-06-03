@@ -13,7 +13,8 @@ they cover the wired dual-write + reconciliation maintenance, not a mock.
 from app import chat as chat_mod
 from app import models
 from app.chat_writer import (
-  AppendPending, Barrier, ClearRunStatus, PromotePending, StartTurn, get_writer,
+  AppendPending, Barrier, ClearRunStatus, PromotePending, StartTurn,
+  alloc_run_token, get_writer,
 )
 from app.database import SessionLocal
 
@@ -211,3 +212,57 @@ def test_reconcile_orphan_sweep_closes_record_without_run_status():
     assert chat.messages[0]["role"] == "user"
   finally:
     db.close()
+
+
+# -- restart-stable run-token identity (PK-reuse regression) --------------
+def test_run_token_is_restart_stable_and_unique():
+  """The run_token IS the chat_runs PK, so it must never be reissued — a
+  process-local counter resets to rt-1 on restart and collides with surviving
+  terminal rows. Random hex tokens are unique and not a small reusable int."""
+  tokens = {alloc_run_token() for _ in range(2000)}
+  assert len(tokens) == 2000, "tokens must be unique (no reuse)"
+  sample = next(iter(tokens))
+  assert sample.startswith("rt-")
+  assert sample not in {"rt-1", "rt-2", "rt-3"}, "must not be a small counter"
+
+
+def test_start_turn_coexists_with_surviving_terminal_run_records():
+  """Post-restart realism: a chat carries terminal run records from a prior
+  process incarnation. A fresh turn's restart-stable token lets StartTurn open
+  a NEW running record alongside them with no chat_runs PK collision — the
+  regression a per-process counter caused (reissued rt-1 → IntegrityError →
+  the turn silently failed to start)."""
+  _seed_chat("rr")
+  _seed_run("rt-1", "rr", status="completed")    # a surviving prior-process PK
+  _seed_run("rt-2", "rr", status="interrupted")
+  token = alloc_run_token()
+  get_writer().submit(StartTurn(
+    chat_id="rr", run_token=token,
+    user_msg={"role": "user", "content": "hi", "ts": 1},
+    title_source="hi", default_provider="claude",
+  )).result(timeout=5)
+  _drain()
+  runs = _runs("rr")
+  assert runs[token] == ("running", False), "fresh turn opened, no PK collision"
+  assert _run_status("rr") == "running"
+
+
+# -- orphan sweep must not touch a live chat ------------------------------
+def test_orphan_sweep_skips_a_live_chat():
+  """The boot orphan sweep closes a dead chat's lingering running record but
+  must NOT touch a chat the registry reports alive (the is_alive `continue`)."""
+  _seed_chat("dead", run_status=None)
+  _seed_run("rt-dead", "dead", status="running")
+  _seed_chat("live", run_status=None)
+  _seed_run("rt-live", "live", status="running")
+  chat_mod.registry.mark_starting("live")  # live chat is mid-spawn
+  db = SessionLocal()
+  try:
+    chat_mod.reconcile_interrupted_chats(db)
+  finally:
+    db.close()
+  try:
+    assert _runs("dead")["rt-dead"][0] == "interrupted"
+    assert _runs("live")["rt-live"][0] == "running", "live chat untouched"
+  finally:
+    chat_mod.registry.discard_starting("live")
