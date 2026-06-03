@@ -2,9 +2,7 @@
 
 import json
 import logging
-import shutil
-from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -12,10 +10,10 @@ from sqlalchemy.orm import Session
 
 from app import models, questions
 from app.config import get_settings
+from app.chat_sweeper import EMPTY_CHAT_GRACE, SOFT_DELETE_TTL
 from app.chat import (
   _clear_run_status,
   bump_run_generation,
-  forget_chat,
   is_chat_running,
   mark_chat_deleted,
   recover_chat_generation,
@@ -37,43 +35,6 @@ router = APIRouter(prefix="/api/chats", tags=["chats"])
 # surface stays unambiguously owner-only — the app path is additive and
 # greppable, not a flag threaded through the owner routes.
 app_chat_router = APIRouter(prefix="/api/app-chats", tags=["app-chats"])
-
-SOFT_DELETE_TTL = timedelta(days=7)
-
-# How long an untouched empty chat (no session, no messages, no pending
-# queue) survives before the list_chats sweeper hard-deletes it. Long
-# enough that a user who opened a chat, started a draft in the browser,
-# and walked away for the afternoon doesn't lose it; short enough that
-# abandoned empties don't pile up across weeks. Hard-delete (not soft)
-# because there's nothing to recover — content lived only in the
-# browser's sessionStorage, which is the user's problem to preserve.
-EMPTY_CHAT_GRACE = timedelta(hours=24)
-
-
-def _purge_chat_dir(chat_id: str) -> None:
-  """Removes per-chat scratch dirs left on disk after a chat is gone.
-
-  Two locations get cleaned: the chat's data dir
-  (`/data/chats/{chat_id}/` — uploads, generated images, scratch)
-  and its agent-browser Chromium profile
-  (`/data/agent-browser-profiles/chat-{chat_id}/` — IndexedDB,
-  cache, cookies; typically 50-200 MB per profile that's seen any
-  use). Without the second rmtree, profiles accumulated across
-  every chat that ever invoked agent-browser and were never
-  reclaimed by chat-delete or the 7-day soft-delete purge — a slow
-  disk leak proportional to chat count, not time.
-
-  Both rmtrees use `ignore_errors=True` so chats that never wrote
-  to a given location don't raise.
-  """
-  data_dir = Path(get_settings().data_dir)
-  shutil.rmtree(data_dir / "chats" / chat_id, ignore_errors=True)
-  shutil.rmtree(
-    data_dir / "agent-browser-profiles" / f"chat-{chat_id}",
-    ignore_errors=True,
-  )
-
-
 
 class ChatUpdate(BaseModel):
   title: str | None = None
@@ -112,73 +73,6 @@ def list_chats(
   db: Session = Depends(get_db),
 ):
   """Returns all active chats ordered by most recently updated."""
-  # Purge chats soft-deleted more than TTL ago.
-  # Use naive datetime to match SQLite's naive UTC storage — comparing an
-  # aware datetime against a naive DB value throws TypeError in Python 3.11+.
-  cutoff = datetime.now(UTC).replace(tzinfo=None) - SOFT_DELETE_TTL
-  stale = db.query(models.Chat).filter(
-    models.Chat.deleted_at.isnot(None),
-    models.Chat.deleted_at < cutoff,
-  ).all()
-  for c in stale:
-    questions.cancel(c.id)
-    forget_chat(c.id)
-    _purge_chat_dir(c.id)
-    # Drop the chat's durable run records (077 Step 3) with it. chat_runs has
-    # no ON DELETE CASCADE and SQLite leaves FK enforcement off, so a hard
-    # chat delete would otherwise orphan its run rows and grow the table
-    # unbounded over the instance's life.
-    db.query(models.ChatRun).filter(
-      models.ChatRun.chat_id == c.id
-    ).delete(synchronize_session=False)
-    db.delete(c)
-  # Hard-delete abandoned empties — chats that were created, never had
-  # a message sent (no session_id, no messages, no pending queue), and
-  # have been sitting that way for over EMPTY_GRACE. The soft-delete
-  # TTL above is for chats the user EXPLICITLY deleted — those have
-  # content worth a 7-day recovery window. An untouched empty has
-  # nothing to recover; the soft-delete dance just defers reclaim.
-  # The grace protects a chat opened minutes ago with a draft in the
-  # browser's sessionStorage from being nuked out from under the user
-  # between draft autosaves. JSON-column emptiness is checked in Python
-  # rather than SQL because cross-dialect `JSON = '[]'` is fragile;
-  # the SQL prefilter (NULL session, NULL deleted_at, older than the
-  # grace) keeps the candidate set small.
-  empty_cutoff = (
-    datetime.now(UTC).replace(tzinfo=None) - EMPTY_CHAT_GRACE
-  )
-  candidates = db.query(models.Chat).filter(
-    models.Chat.deleted_at.is_(None),
-    models.Chat.session_id.is_(None),
-    models.Chat.created_at < empty_cutoff,
-  ).all()
-  for c in candidates:
-    if c.messages or c.pending_messages:
-      continue
-    questions.cancel(c.id)
-    forget_chat(c.id)
-    _purge_chat_dir(c.id)
-    # Drop the chat's run records with it (see the stale-purge note above —
-    # no FK cascade on SQLite, so these would orphan otherwise).
-    db.query(models.ChatRun).filter(
-      models.ChatRun.chat_id == c.id
-    ).delete(synchronize_session=False)
-    db.delete(c)
-  # Notification TTL: rows are written by agent-driven push calls
-  # (POST /api/notifications/send), and nothing else deletes them. Keep
-  # the table from growing unbounded by dropping anything older than
-  # 90 days alongside the chat purge above — same cadence, same
-  # transaction. Naive UTC matches `Notification.sent_at`'s storage
-  # format (see the chat cutoff above for the same TypeError-avoidance
-  # rationale).
-  notification_cutoff = (
-    datetime.now(UTC).replace(tzinfo=None) - timedelta(days=90)
-  )
-  db.query(models.Notification).filter(
-    models.Notification.sent_at < notification_cutoff,
-  ).delete(synchronize_session=False)
-  db.commit()
-
   # Pinned chats sort first (newest pin at top of the pinned group),
   # then unpinned by recency. `pinned_at IS NOT NULL` is the primary
   # key on SQLite's order_by — a `desc()` on a nullable column would

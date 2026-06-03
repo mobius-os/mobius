@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 
 from app import chat as chat_mod
 from app import models
+from app.chat_sweeper import sweep_chat_lifecycle
 from app.chat_writer import Barrier, get_writer
 from app.database import SessionLocal
 from app.routes.chats import SOFT_DELETE_TTL
@@ -98,11 +99,29 @@ def test_hard_purge_deletes_orphaned_run_records(client, auth):
   _seed_chat("purge-me", deleted_at=old)
   _seed_run("rt-p1", "purge-me", status="completed")
   _seed_run("rt-p2", "purge-me", status="interrupted")
-  # Listing chats runs the purge sweep.
-  r = client.get("/api/chats", headers=auth)
-  assert r.status_code == 200
+  db = SessionLocal()
+  try:
+    sweep_chat_lifecycle(db)
+  finally:
+    db.close()
   assert _chat_state("purge-me") is None, "chat row hard-deleted"
-  assert _runs("purge-me") == {}, "run records purged with the chat, not orphaned"
+  assert _runs("purge-me") == {}, (
+    "run records purged with the chat, not orphaned"
+  )
+
+
+def test_sweep_deletes_chat_run_rows_without_a_chat():
+  """The lifecycle sweep removes durable run rows whose chat is already gone."""
+  _seed_run("rt-orphan", "missing-chat", status="completed")
+
+  db = SessionLocal()
+  try:
+    stats = sweep_chat_lifecycle(db)
+  finally:
+    db.close()
+
+  assert stats["orphaned_runs_purged"] == 1
+  assert _runs("missing-chat") == {}
 
 
 def test_orphan_sweep_does_not_mask_a_failed_destructive_reconcile(monkeypatch):

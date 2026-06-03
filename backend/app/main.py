@@ -101,6 +101,18 @@ async def lifespan(app):
       _rc_db.close()
   except Exception as exc:
     _log.error("startup chat reconciliation failed: %s", exc, exc_info=True)
+  _chat_sweep_task = None
+  try:
+    from app.chat_sweeper import periodic_chat_sweep, sweep_chat_lifecycle
+    from app.database import SessionLocal as _SweepSession
+    _sweep_db = _SweepSession()
+    try:
+      sweep_chat_lifecycle(_sweep_db)
+    finally:
+      _sweep_db.close()
+    _chat_sweep_task = _asyncio.create_task(periodic_chat_sweep())
+  except Exception as exc:
+    _log.error("startup chat lifecycle sweep failed: %s", exc, exc_info=True)
   # Discard any `*.js.staging` bundle left by a crash between a recompile's
   # commit and its atomic promote (see compiler.recompile_app_bundle). A leaked
   # staging file is never served; reaping it just keeps the compiled dir clean.
@@ -201,6 +213,16 @@ async def lifespan(app):
   try:
     yield
   finally:
+    if _chat_sweep_task is not None:
+      _chat_sweep_task.cancel()
+      try:
+        await _chat_sweep_task
+      except _asyncio.CancelledError:
+        pass
+      except Exception as exc:
+        _log.error(
+          "chat lifecycle sweep task stop failed: %s", exc, exc_info=True,
+        )
     # Drain + join the chat-writer actor so any in-flight persistence
     # completes before the process exits. Wrapped: a stop failure must
     # not mask the rest of shutdown.

@@ -1,7 +1,10 @@
 # backend/tests/test_lifecycle.py
 from datetime import datetime, timedelta
 from pathlib import Path
+from sqlalchemy import event
 from app import models
+from app.chat_sweeper import sweep_chat_lifecycle
+from app.database import engine
 
 
 def test_ttl_is_seven_days(client, db, auth, chat):
@@ -9,7 +12,7 @@ def test_ttl_is_seven_days(client, db, auth, chat):
   chat.deleted_at = datetime.utcnow() - timedelta(days=6)
   db.commit()
 
-  client.get("/api/chats", headers=auth)
+  sweep_chat_lifecycle(db)
 
   still_there = db.query(models.Chat).filter(
     models.Chat.id == "testchat"
@@ -22,7 +25,7 @@ def test_purge_after_seven_days(client, db, auth, chat):
   chat.deleted_at = datetime.utcnow() - timedelta(days=8)
   db.commit()
 
-  client.get("/api/chats", headers=auth)
+  sweep_chat_lifecycle(db)
 
   gone = db.query(models.Chat).filter(
     models.Chat.id == "testchat"
@@ -42,7 +45,7 @@ def test_purge_removes_data_dir(client, db, auth, chat):
   (chat_dir / "uploads").mkdir()
   (chat_dir / "uploads" / "file.txt").write_text("hello")
 
-  client.get("/api/chats", headers=auth)
+  sweep_chat_lifecycle(db)
 
   assert not chat_dir.exists(), "Chat directory must be deleted with chat"
 
@@ -65,7 +68,7 @@ def test_purge_removes_agent_browser_profile(client, db, auth, chat):
   (profile_dir / "Cache").mkdir()
   (profile_dir / "Cache" / "blob.bin").write_text("fake-cache")
 
-  client.get("/api/chats", headers=auth)
+  sweep_chat_lifecycle(db)
 
   assert not profile_dir.exists(), (
     "agent-browser profile dir must be deleted with chat"
@@ -73,7 +76,7 @@ def test_purge_removes_agent_browser_profile(client, db, auth, chat):
 
 
 def test_notifications_older_than_90_days_purged(client, db, auth):
-  """Notifications older than 90 days must be deleted by list_chats.
+  """Notifications older than 90 days must be deleted by the sweep.
 
   The notification table had no TTL — rows accumulated indefinitely
   from agent-driven push notifications (POST /api/notifications/send).
@@ -103,7 +106,7 @@ def test_notifications_older_than_90_days_purged(client, db, auth):
   db.add(recent)
   db.commit()
 
-  client.get("/api/chats", headers=auth)
+  sweep_chat_lifecycle(db)
   db.expire_all()
 
   assert db.query(models.Notification).filter(
@@ -112,6 +115,46 @@ def test_notifications_older_than_90_days_purged(client, db, auth):
   assert db.query(models.Notification).filter(
     models.Notification.id == "recent-notif"
   ).first() is not None, "Notification newer than 90 days must survive"
+
+
+def test_list_chats_is_pure_read(client, db, auth, chat):
+  """GET /api/chats must not issue INSERT/UPDATE/DELETE statements."""
+  chat.deleted_at = datetime.utcnow() - timedelta(days=8)
+  db.commit()
+  writes = []
+
+  def _track_writes(_conn, _cursor, statement, _params, _context, _many):
+    verb = statement.lstrip().split(None, 1)[0].upper()
+    if verb in {"INSERT", "UPDATE", "DELETE"}:
+      writes.append(statement)
+
+  event.listen(engine, "before_cursor_execute", _track_writes)
+  try:
+    r = client.get("/api/chats", headers=auth)
+  finally:
+    event.remove(engine, "before_cursor_execute", _track_writes)
+
+  assert r.status_code == 200
+  assert writes == []
+  assert db.query(models.Chat).filter(
+    models.Chat.id == "testchat",
+  ).first() is not None, "stale cleanup must not happen on the read path"
+
+
+def test_sweep_purges_abandoned_empty_chats(db, chat):
+  """The sweep hard-deletes untouched empty chats past the grace period."""
+  chat.created_at = datetime.utcnow() - timedelta(days=2)
+  chat.session_id = None
+  chat.messages = []
+  chat.pending_messages = []
+  db.commit()
+
+  stats = sweep_chat_lifecycle(db)
+
+  assert stats["empty_chats_purged"] == 1
+  assert db.query(models.Chat).filter(
+    models.Chat.id == "testchat",
+  ).first() is None
 
 
 def test_chat_has_uploads_column(db, chat):
