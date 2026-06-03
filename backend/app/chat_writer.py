@@ -1246,6 +1246,18 @@ class ChatWriterActor:
     chat.run_status = "running"
     chat.run_started_at = datetime.now(UTC)
     chat.updated_at = datetime.now(UTC)
+    # Durable per-run record (077 Step 3), inserted in the SAME commit as the
+    # run_status marker so the two can never diverge. Keyed on this turn's
+    # run_token — the one identity the sink and ClearRunStatus also carry.
+    # A fresh start claims an idle chat (mark_starting guarantees no live run),
+    # so any still-running row is a prior run whose clear was dropped — mark it
+    # interrupted before opening this one (at most one run is ever live).
+    from app.models import ChatRun
+    self._close_running_runs(db, cmd.chat_id, "interrupted")
+    db.add(ChatRun(
+      id=cmd.run_token, chat_id=cmd.chat_id, status="running",
+      provider=chat.provider, started_at=chat.run_started_at,
+    ))
     if not _commit_or_rollback(db):
       raise _PersistFailed("StartTurn did not persist")
     # This run_token now owns the marker — a later ClearRunStatus naming a
@@ -1407,6 +1419,19 @@ class ChatWriterActor:
     chat.run_status = "running"
     chat.run_started_at = datetime.now(UTC)
     chat.updated_at = datetime.now(UTC)
+    # The prior turn finished (the queue had more) and hands off to this
+    # continuation. Close its run record completed and open the continuation's,
+    # all in the SAME commit as the marker (077 Step 3). A continuation never
+    # gets a ClearRunStatus of its own — the marker stays set across the
+    # handoff — so this is where the prior run's record is closed.
+    from app.models import ChatRun
+    self._close_running_runs(
+      db, cmd.chat_id, "completed", except_token=cmd.run_token
+    )
+    db.add(ChatRun(
+      id=cmd.run_token, chat_id=cmd.chat_id, status="running",
+      provider=chat.provider, started_at=chat.run_started_at,
+    ))
     if not _commit_or_rollback(db):
       raise _PersistFailed("PromotePending did not persist")
     # The promoted continuation now owns the marker under its run_token.
@@ -1477,6 +1502,34 @@ class ChatWriterActor:
       raise _PersistFailed("ReplaceTranscript did not persist")
     return True
 
+  @staticmethod
+  def _close_running_runs(db, chat_id, status, except_token=None):
+    """Mark every still-running `chat_runs` row for a chat terminal.
+
+    At most one run is ever live per chat (the run marker is per-chat and
+    single-owner), so when a new run takes over or the chat goes idle, any
+    OTHER row still ``status == "running"`` is by definition stale and is
+    moved to `status` ("completed" / "interrupted"). `except_token` keeps the
+    incoming run's own row untouched. Keyed off the per-chat single-run
+    invariant, so it needs no run-token side bookkeeping. Returns True when it
+    changed a row (the caller folds the commit in).
+    """
+    from datetime import UTC, datetime
+
+    from app.models import ChatRun
+
+    q = db.query(ChatRun).filter(
+      ChatRun.chat_id == chat_id, ChatRun.status == "running"
+    )
+    if except_token is not None:
+      q = q.filter(ChatRun.id != except_token)
+    changed = False
+    for run in q.all():
+      run.status = status
+      run.ended_at = datetime.now(UTC)
+      changed = True
+    return changed
+
   def _clear_run_status(self, db, cmd: ClearRunStatus):
     """Clear the durable run marker when set; commit.
 
@@ -1487,11 +1540,40 @@ class ChatWriterActor:
     no longer matches and this is a no-op (the markerless-run race). A
     tokenless clear (run_token="") is unconditional, for paths that already
     know they own the marker (reconciliation, no-handoff cleanup).
+
+    The per-run `chat_runs` record (077 Step 3) is closed in the SAME commit:
+    a tokened clear marks its own run's row completed (even a dying run's
+    no-op-on-the-marker clear still closes its OWN run record — the run ended
+    regardless); a tokenless clear closes every still-running row for the chat
+    (the chat is going idle, so any lingering record is stale).
     """
-    from app.models import Chat
+    from datetime import UTC, datetime
+
+    from app.models import Chat, ChatRun
 
     owner = self._run_token_owner.get(cmd.chat_id)
-    if cmd.run_token and owner is not None and owner != cmd.run_token:
+    marker_is_ours = not (
+      cmd.run_token and owner is not None and owner != cmd.run_token
+    )
+    changed = False
+    if cmd.run_token:
+      run = (
+        db.query(ChatRun).filter(ChatRun.id == cmd.run_token).first()
+      )
+      if run is not None and run.status == "running":
+        run.status = "completed"
+        run.ended_at = datetime.now(UTC)
+        changed = True
+    elif marker_is_ours:
+      changed = self._close_running_runs(
+        db, cmd.chat_id, "completed"
+      ) or changed
+    if not marker_is_ours:
+      # A dying run's stale clear: its own run record is closed above, but the
+      # per-chat marker belongs to the fresh turn — don't touch it or the
+      # owner map.
+      if changed and not _commit_or_rollback(db):
+        raise _PersistFailed("ClearRunStatus did not persist")
       return None
     chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
     if chat is not None and (
@@ -1499,8 +1581,9 @@ class ChatWriterActor:
     ):
       chat.run_status = None
       chat.run_started_at = None
-      if not _commit_or_rollback(db):
-        raise _PersistFailed("ClearRunStatus did not persist")
+      changed = True
+    if changed and not _commit_or_rollback(db):
+      raise _PersistFailed("ClearRunStatus did not persist")
     self._run_token_owner.pop(cmd.chat_id, None)
     return None
 

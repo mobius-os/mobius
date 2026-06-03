@@ -696,6 +696,21 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
       chat.pending_messages = []
       chat.run_status = None
       chat.run_started_at = None
+      # Close this chat's durable per-run record(s) in the SAME commit (077
+      # Step 3): a row still "running" at boot is the interrupted turn we just
+      # finalized. run_status stays the AUTHORITATIVE recovery trigger for the
+      # destructive transcript repair above; chat_runs is maintained alongside
+      # so the run record matches reality. (Flipping the destructive read onto
+      # chat_runs + retiring run_status is the Step-3b follow-up, once the
+      # record is proven in prod.)
+      for run in (
+        db.query(models.ChatRun)
+        .filter(models.ChatRun.chat_id == chat.id)
+        .filter(models.ChatRun.status == "running")
+        .all()
+      ):
+        run.status = "interrupted"
+        run.ended_at = datetime.now(UTC)
       db.commit()
       reconciled.append(chat.id)
     except Exception:
@@ -710,6 +725,33 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
       "reconciled %d interrupted chat(s) on startup: %s",
       len(reconciled), ", ".join(reconciled),
     )
+
+  # Orphaned run records (077 Step 3): a chat_runs row left "running" whose
+  # chat is NOT alive and was NOT caught above (its run_status already cleared
+  # — a dropped close, not a normal interruption). Non-destructive: mark the
+  # record interrupted so it doesn't linger as a false "running", but touch no
+  # transcript (run_status, the authoritative trigger, said the chat was idle).
+  # Dual-write keeps the two signals in lockstep, so this normally finds
+  # nothing; it is belt-and-suspenders against a close that didn't land.
+  try:
+    orphans = (
+      db.query(models.ChatRun)
+      .filter(models.ChatRun.status == "running")
+      .all()
+    )
+    closed = 0
+    for run in orphans:
+      if registry.is_alive(run.chat_id):
+        continue
+      run.status = "interrupted"
+      run.ended_at = datetime.now(UTC)
+      closed += 1
+    if closed:
+      db.commit()
+      log.info("closed %d orphaned running run record(s) on startup", closed)
+  except Exception:
+    db.rollback()
+    log.exception("reconcile_interrupted_chats: orphan run sweep failed")
 
   # Markerless pending queues: a Stop's ClearPending committing BEFORE a
   # racing POST's AppendPending leaves run_status=None with a non-empty queue.

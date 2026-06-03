@@ -16,8 +16,8 @@ import secrets
 from datetime import UTC, datetime
 
 from sqlalchemy import (
-  Boolean, Column, DateTime, ForeignKey, Integer, JSON, LargeBinary, String,
-  Text,
+  Boolean, Column, DateTime, Float, ForeignKey, Integer, JSON, LargeBinary,
+  String, Text,
 )
 
 from app.database import Base
@@ -139,6 +139,54 @@ class Chat(Base):
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
   )
+
+
+class ChatRun(Base):
+  """Durable per-turn run record (persistence redesign 077 Step 3).
+
+  One row per turn, keyed by the in-memory run_token (which IS this row's
+  `id` — the same identity the actor commands and the sink already carry, not
+  a second one). This is the per-run successor to the single `Chat.run_status`
+  column: a row left ``status == "running"`` by a process that died is an
+  interrupted turn that boot reconciliation resolves. It also carries the
+  per-run attribution one shared column never could (provider, cost, the
+  initiating app), which the app-attributed-chat contract (077 §1) and the
+  redacted chat-log read API (Capability B) build on.
+
+  Transitional dual-write: `Chat.run_status` is still set/cleared in lockstep
+  with this row (in the same actor commit) for one deploy cycle, so a rollback
+  to pre-Step-3 code keeps recovering, and so reconciliation still catches a
+  turn that was in flight ACROSS the deploy (started under old code, with no
+  `chat_runs` row). Reconciliation reads the UNION of both signals during the
+  transition; retiring the `run_status` column is the Step-3b follow-up (along
+  with collapsing the in-memory generation onto this same run identity, which
+  is what finally closes 080 item 4's split source of truth).
+
+  `create_all` builds this table on the next boot (a new table, so no ALTER
+  migration is needed — see `run_migrations`, which only ALTERs existing
+  tables); existing rows are untouched.
+  """
+
+  __tablename__ = "chat_runs"
+
+  # The run_token, verbatim — one durable identity for the turn.
+  id = Column(String(64), primary_key=True)
+  chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=False, index=True
+  )
+  # "running" while in flight, "completed" on a clean turn end, "interrupted"
+  # when boot reconciliation resolves a turn whose process died mid-flight.
+  status = Column(String(16), nullable=False, default="running", index=True)
+  provider = Column(String(32), nullable=True, default=None)
+  # App that initiated this turn under the app-attributed-chat contract
+  # (077 §1). NULL = an ordinary owner-driven turn. Reserved now so the
+  # attribution lands on the run row, not retrofitted later.
+  initiated_by_app_id = Column(
+    Integer, ForeignKey("apps.id"), nullable=True, default=None
+  )
+  cost_usd = Column(Float, nullable=True, default=None)
+  started_at = Column(DateTime, default=lambda: datetime.now(UTC))
+  ended_at = Column(DateTime, nullable=True, default=None)
 
 
 class App(Base):
