@@ -278,13 +278,21 @@ def _validate_url_safe(url: str) -> None:
       ip = ipaddress.ip_address(ip_str)
     except ValueError:
       continue
-    for net in _BLOCKED_NETS:
-      if ip in net:
-        raise HTTPException(
-          400,
-          f"URL {host!r} resolves to blocked address {ip} "
-          f"(network {net}).",
-        )
+    # An IPv4-mapped IPv6 address (::ffff:a.b.c.d) reaches the SAME host as
+    # a.b.c.d but would not match the IPv4 entries in _BLOCKED_NETS — so
+    # ::ffff:169.254.169.254 would slip past the cloud-metadata block. Check
+    # the embedded IPv4 against every blocked net too.
+    candidates = [ip]
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+      candidates.append(ip.ipv4_mapped)
+    for cand in candidates:
+      for net in _BLOCKED_NETS:
+        if cand in net:
+          raise HTTPException(
+            400,
+            f"URL {host!r} resolves to blocked address {ip} "
+            f"(network {net}).",
+          )
 
 
 def _derive_raw_base(manifest_url: str) -> str:

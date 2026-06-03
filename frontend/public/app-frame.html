@@ -238,21 +238,6 @@
         showErr('Configuration error', 'No token received from parent.');
         return;
       }
-      // Initialize window.mobius BEFORE importing the app module, so an app's
-      // top-level code can call window.mobius.storage immediately. Previously
-      // the runtime was wired ONLY in the standalone PWA path (standalone.py),
-      // so in-shell apps (opened from the drawer) had no window.mobius at all —
-      // their storage calls fell back to bare fetch with NO offline outbox or
-      // cache. This is the in-shell half of the offline-storage story; it
-      // mirrors standalone.py's rt.init. Best-effort: a runtime-load failure
-      // must not block the app from mounting (it just loses offline queueing).
-      try {
-        const rt = await import('/mobius-runtime.js');
-        rt.init({ appId: _FRAME_APP_ID, getToken: async () => token });
-      } catch (e) {
-        // A runtime-load failure must not block the app from mounting; it
-        // just loses offline queueing.
-      }
       try {
         // Expose window.mobius BEFORE importing/rendering the app, so the
         // component sees it on mount — mirrors the standalone host

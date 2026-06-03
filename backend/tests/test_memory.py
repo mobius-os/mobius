@@ -97,6 +97,61 @@ def test_budget_skips_hot_notes_when_index_fills_it(tmp_path):
   assert "notes/n.md" not in block.loaded
 
 
+def test_budget_skips_inbox_when_index_fills_it(tmp_path):
+  # A large index can leave no room for the inbox tail. The inbox chunk's
+  # header+marker+separator are NOT covered by INBOX_TAIL_BYTES, so without
+  # an explicit budget check the chunk would push the block past
+  # budget_bytes. Assert it is dropped, keeping the block within budget.
+  root = _graph(tmp_path)
+  # Index nearly fills the 4000-byte budget (but isn't itself truncated),
+  # leaving no room for even a tiny inbox chunk + its marker + separator.
+  big_index = "# Home\n" + ("x" * 3990)
+  (root / "index.md").write_text(big_index)
+  (root / "inbox.md").write_text("- a fresh observation worth keeping")
+  (root / ".ready").write_text("")
+
+  block = memory.build_memory_block(tmp_path, budget_bytes=4000)
+  assert block.mode == "graph"
+  assert "[index truncated" not in block.text  # index itself fits
+  assert "fresh observation" not in block.text  # no room left for inbox
+  assert "inbox.md" not in block.loaded
+  assert len(block.text.encode("utf-8")) <= 4000
+
+
+def test_truncated_index_stays_within_budget(tmp_path):
+  # A too-big index gets truncated + a marker appended. The marker must fit
+  # WITHIN budget_bytes, not overrun it by its own length.
+  root = _graph(tmp_path)
+  (root / "index.md").write_text("# Home\n" + ("x" * 8000))
+  (root / ".ready").write_text("")
+  block = memory.build_memory_block(tmp_path, budget_bytes=4000)
+  assert block.mode == "graph"
+  assert "[index truncated" in block.text
+  assert len(block.text.encode("utf-8")) <= 4000
+
+
+def test_empty_published_graph_falls_back_to_legacy(tmp_path):
+  # .ready present but the graph has no index/notes/inbox — must NOT inject an
+  # empty block; fall back to the legacy file so memory isn't silently wiped.
+  shared = tmp_path / "shared"
+  (shared / "memory" / "notes").mkdir(parents=True)
+  (shared / "memory" / ".ready").write_text("")
+  (shared / "agent-experience.md").write_text("legacy memory survives")
+  block = memory.build_memory_block(tmp_path)
+  assert block.mode == "legacy"
+  assert "legacy memory survives" in block.text
+
+
+def test_empty_published_graph_and_no_legacy_is_empty(tmp_path):
+  # Same empty graph but with no legacy file either — genuinely empty.
+  shared = tmp_path / "shared"
+  (shared / "memory" / "notes").mkdir(parents=True)
+  (shared / "memory" / ".ready").write_text("")
+  block = memory.build_memory_block(tmp_path)
+  assert block.mode == "empty"
+  assert block.text == ""
+
+
 # --- frontmatter parsing ----------------------------------------------
 
 

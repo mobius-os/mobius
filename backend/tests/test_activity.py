@@ -116,13 +116,16 @@ def _force_mtime(path: Path, days_ago: int) -> None:
 
 
 def test_rotation_moves_old_file_aside():
-  """Active file older than ROTATION_DAYS gets renamed to
-  activity.YYYY-WW.jsonl; the next write lands in a fresh
-  activity.jsonl."""
-  activity.log_event("app_open", app_id=1, slug="old")
+  """Active file whose FIRST event is older than ROTATION_DAYS gets
+  renamed to activity.YYYY-WW.jsonl; the next write lands in a fresh
+  activity.jsonl. (Age is keyed to the first event's ts, not mtime —
+  mtime is reset by every append and so never trips rotation.)"""
+  old_ts = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat(
+    timespec="seconds"
+  )
+  activity.log_event("app_open", app_id=1, slug="old", ts=old_ts)
   active = _activity_path()
   assert active.exists()
-  _force_mtime(active, days_ago=10)
 
   activity.log_event("app_open", app_id=2, slug="new")
   # After the rotation, the active file holds only the new event.
@@ -168,10 +171,11 @@ def test_rotation_does_not_clobber_existing_archive():
   active.write_text('{"ev":"app_open","ts":"2026-04-01T00:00:00+00:00","app_id":1}\n')
   _force_mtime(active, days_ago=10)
 
-  # Pre-create the archive at the name rotation would pick. Use the
-  # same suffix shape rotation produces.
-  expected_suffix = datetime.fromtimestamp(
-    active.stat().st_mtime, tz=timezone.utc
+  # Pre-create the archive at the name rotation would pick. The suffix is
+  # derived from the file's FIRST event ts (what rotation now keys on),
+  # not mtime.
+  expected_suffix = datetime.fromisoformat(
+    "2026-04-01T00:00:00+00:00"
   ).strftime("%G-W%V")
   collision = active.parent / f"activity.{expected_suffix}.jsonl"
   collision.write_text('PRE-EXISTING\n')
