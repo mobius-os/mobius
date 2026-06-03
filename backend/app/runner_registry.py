@@ -156,6 +156,26 @@ class RunnerRegistry:
       self._handles.pop((chat_id, kind), None)
     self._starting.discard(chat_id)
 
+  def forget_if_current(self, chat_id: str, run_gen: int | None) -> bool:
+    """Forgets a chat only while `run_gen` is still the live generation.
+
+    A late terminal cleanup (e.g. the setup-error path) must not reset the
+    counter a successor already advanced: a Stop bumps the generation and a
+    fresh run claims the starting slot at the new value, so an unconditional
+    `forget` here would strand the successor's fresh marker `running`. This
+    no-ops (returns False) when a newer run owns the chat. It also no-ops for a
+    soft-deleted chat — `mark_deleted` preserves the finite counter on purpose
+    and owns that lifecycle, so the raw `_generation` value is compared (not
+    `current_generation`, which reports +inf while deleted). `run_gen is None`
+    (a legacy/test caller with no generation identity) forgets unconditionally.
+    """
+    if chat_id in self._deleted:
+      return False
+    if run_gen is not None and self._generation.get(chat_id, 0) != run_gen:
+      return False
+    self.forget(chat_id)
+    return True
+
   def reset_for_tests(self) -> None:
     """Clears all registry state between tests."""
     self._starting.clear()

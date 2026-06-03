@@ -153,3 +153,47 @@ def test_recreate_session_drops_readiness_for_the_whole_window(client):
     assert writer._session_ready.is_set()
 
   assert client.get("/api/ready").status_code == 200
+
+
+def test_recreate_does_not_report_ready_on_a_session_that_cannot_execute(client):
+  """A factory that RETURNS a broken-but-non-raising session must not be ready.
+
+  Readiness means "provably usable", not "the factory returned an object". The
+  recreate path probes the fresh session with `SELECT 1` before re-advertising
+  ready; a session whose `execute` raises (a connection that opens lazily and
+  fails on first use) leaves the event CLEAR and `_recreate_session` re-raises
+  so the actor's outer handler can `_go_fatal`. We restore the real factory in
+  `finally` so the shared singleton stays healthy for sibling tests.
+  """
+  writer = get_writer()
+  real_factory = writer._session_factory
+
+  class _UnusableSession:
+    """Looks like a session, but cannot run a single statement."""
+
+    def execute(self, *_a, **_k):
+      raise RuntimeError("connection refused on first use")
+
+    def rollback(self):
+      pass
+
+    def close(self):
+      pass
+
+  try:
+    writer._session_factory = lambda: _UnusableSession()
+    try:
+      writer._recreate_session()
+      raise AssertionError("expected the SELECT 1 probe to re-raise")
+    except RuntimeError:
+      pass
+    assert not writer._session_ready.is_set()
+    ready, reason = chat_writer.writer_readiness()
+    assert ready is False
+    assert reason
+  finally:
+    writer._session_factory = real_factory
+    writer._recreate_session()
+    assert writer._session_ready.is_set()
+
+  assert client.get("/api/ready").status_code == 200

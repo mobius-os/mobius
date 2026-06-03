@@ -976,6 +976,72 @@ def test_auth_error_cleanup_clears_marker_before_registry_release(monkeypatch):
   assert not chat_mod.registry.is_alive("t12"), "registry released"
 
 
+# -- 12b. setup-error cleanup ownership gate (the forget-wedge guard) -------
+def test_setup_error_cleanup_stale_gen_does_not_clobber_successor():
+  """The setup-error forget-wedge guard.
+
+  A setup-erroring run can be superseded between `_run_chat_impl` entry and
+  the cleanup by a Stop (bumps the generation) plus a fresh POST (claims the
+  chat at the new generation). The cleanup keyed on the OLD run_gen must then
+  touch NOTHING: clearing pending would wipe the successor's queued send and
+  the unconditional forget would reset the successor's generation, stranding
+  its fresh marker `running` until restart reconciliation. The gate returns
+  STALE_NO_ACTION instead."""
+  # Seed the SUCCESSOR's durable state: a fresh turn that set the marker, with
+  # a send queued behind it.
+  _seed_chat(
+    "se-stale",
+    messages=[{"role": "user", "content": "fresh", "ts": 1}],
+    pending=[{"role": "user", "content": "queued-behind-fresh", "ts": 2}],
+    run_status="running",
+  )
+  chat_mod.registry.bump_generation("se-stale")  # → 1, the setup-erroring run
+  chat_mod.registry.bump_generation("se-stale")  # → 2, a Stop bumped it
+  chat_mod.registry.mark_starting("se-stale")    # successor holds the slot
+
+  disposition = asyncio.run(
+    chat_mod._terminal_setup_error_cleanup("se-stale", "rt-stale", 1)
+  )
+  _drain_actor()
+
+  assert disposition is chat_queue.TerminalDisposition.STALE_NO_ACTION
+  state = _load("se-stale")
+  assert state["run_status"] == "running", "successor's marker must survive"
+  assert state["pending_messages"] == [
+    {"role": "user", "content": "queued-behind-fresh", "ts": 2}
+  ], "successor's queued send must survive"
+  assert chat_mod.registry.current_generation("se-stale") == 2, (
+    "successor's generation must survive (not reset to reusable 0)"
+  )
+  assert chat_mod.registry.is_alive("se-stale"), "successor's slot kept"
+
+
+def test_setup_error_cleanup_owned_gen_clears_and_forgets():
+  """When this run still owns the generation, the cleanup clears the pending
+  queue + the marker and forgets the chat (EMPTY_TERMINAL_CLEARED) — the gate
+  is transparent on the common, uncontended path."""
+  _seed_chat(
+    "se-own",
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[{"role": "user", "content": "queued", "ts": 2}],
+    run_status="running",
+  )
+  gen = chat_mod.registry.bump_generation("se-own")  # → 1, this run owns it
+  chat_mod.registry.mark_starting("se-own")
+
+  disposition = asyncio.run(
+    chat_mod._terminal_setup_error_cleanup("se-own", "rt-own", gen)
+  )
+  _drain_actor()
+
+  assert disposition is chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
+  state = _load("se-own")
+  assert state["run_status"] is None, "owned cleanup clears the marker"
+  assert state["pending_messages"] == [], "owned cleanup clears pending"
+  assert chat_mod.registry.current_generation("se-own") == 0, "forgotten"
+  assert not chat_mod.registry.is_alive("se-own"), "starting slot released"
+
+
 # -- 13. strict marker-clear ACK timeout → FAILED_LEAVE_MARKER --------------
 def test_empty_queue_marker_clear_ack_timeout_leaves_marker(monkeypatch):
   """The empty-queue terminal path issues a STRICT ClearRunStatus. Latch the

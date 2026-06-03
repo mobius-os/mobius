@@ -45,6 +45,7 @@ import time
 from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass, field
 
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from app import schemas
@@ -865,9 +866,14 @@ class ChatWriterActor:
   def _run(self) -> None:
     try:
       self._db = self._session_factory()
-      # Session is open — readiness can now flip True. If the factory raised,
-      # this is skipped and the except below marks the writer fatal, so it
-      # never reports ready on a writer that can't persist.
+      # Prove the session can actually execute before advertising ready, so
+      # "ready" means "provably usable" rather than "the factory returned an
+      # object". A bare SELECT 1 forces the lazy connection to open and reads
+      # nothing, so it raises on a broken session (missing/locked DB, corrupt
+      # WAL) but has no side effect on a healthy one. If the factory raised, or
+      # this probe raises, `.set()` is skipped and the except below marks the
+      # writer fatal — it never reports ready on a writer that can't persist.
+      self._db.execute(text("SELECT 1"))
       self._session_ready.set()
     except BaseException:
       # The session factory raising at first use is thread-fatal: there
@@ -1019,6 +1025,11 @@ class ChatWriterActor:
     except Exception:
       log.exception("chat writer close failed during session recreate")
     self._db = self._session_factory()
+    # Same readiness contract as `_run`: prove the replacement session executes
+    # before re-advertising ready. A raising probe propagates to the consumer's
+    # outer `except BaseException` → `_go_fatal`, leaving readiness clear rather
+    # than advertising a session that can't persist.
+    self._db.execute(text("SELECT 1"))
     self._session_ready.set()
 
   def _dispatch(self, db, cmd: _Command):

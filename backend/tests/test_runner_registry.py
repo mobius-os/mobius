@@ -175,3 +175,42 @@ def test_recover_generation_resumes_strictly_newer_and_finite():
   assert recovered > 1, "recovery must resume strictly newer than any run"
   assert registry.current_generation("c") == recovered  # finite again
   assert registry.current_generation("c") != float("inf")
+
+
+def test_forget_if_current_forgets_when_generation_still_owned():
+  # The live owner's own turn-end cleanup: the generation it holds is still
+  # current, so forget proceeds and resets to a reusable 0.
+  registry = RunnerRegistry()
+  run_gen = registry.bump_generation("c")  # → 1
+  assert registry.forget_if_current("c", run_gen) is True
+  assert registry.current_generation("c") == 0
+
+
+def test_forget_if_current_noops_when_a_newer_run_owns_the_chat():
+  # The setup-error wedge: a Stop bumped the generation and a fresh run claimed
+  # the chat at the new value. A late cleanup keyed on the OLD run_gen must not
+  # reset the successor's generation — forget_if_current no-ops and leaves it.
+  registry = RunnerRegistry()
+  stale_gen = registry.bump_generation("c")  # → 1, the setup-erroring run
+  registry.bump_generation("c")  # → 2, a Stop superseded it
+  assert registry.forget_if_current("c", stale_gen) is False
+  assert registry.current_generation("c") == 2  # successor's gen survives
+
+
+def test_forget_if_current_noops_for_a_soft_deleted_chat():
+  # A soft-deleted chat's lifecycle is owned by mark_deleted (which preserves
+  # the finite counter on purpose); a stale cleanup must not forget it back to
+  # reusable-0, which would drop the +inf delete guard.
+  registry = RunnerRegistry()
+  run_gen = registry.bump_generation("c")  # → 1
+  registry.mark_deleted("c")
+  assert registry.forget_if_current("c", run_gen) is False
+  assert registry.current_generation("c") == float("inf")  # guard intact
+
+
+def test_forget_if_current_forgets_unconditionally_when_run_gen_is_none():
+  # A legacy/test caller with no generation identity keeps the old contract.
+  registry = RunnerRegistry()
+  registry.bump_generation("c")
+  assert registry.forget_if_current("c", None) is True
+  assert registry.current_generation("c") == 0
