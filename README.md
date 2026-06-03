@@ -76,16 +76,16 @@ When you ask for something, the agent builds it as a small app right inside the 
 Apps are the most obvious thing the agent builds, but the platform itself is also yours to reshape. Two layers, treated differently: **capabilities** (general features like file upload or notifications, candidates for upstreaming so the next Möbius install inherits them) and **presentation** (your theme, layout, and fonts, which live only on your volume and stay yours).
 
 <p align="center">
-  <img src="assets/screenshots/newchat-default.png" width="240" alt="The Möbius new-chat screen in its default charcoal theme" />
+  <img src="assets/screenshots/theme-switch.gif" width="240" alt="The Möbius new-chat screen switching between its default charcoal theme and a meme theme" />
 </p>
 
-<sub>The default look. Ask the agent to restyle the shell, the colors, fonts, and layout are CSS it rewrites, and the change is live immediately, no rebuild.</sub>
+<sub>The same new-chat screen, default and fully meme-worthy. Ask the agent to restyle the shell, the colors, fonts, and layout are CSS it rewrites, and the change is live immediately, no rebuild.</sub>
 
 <p align="center">
   <img src="assets/screenshots/theme-meme.gif" width="280" alt="Möbius restyled into a meme theme: rainbow canvas, floating unicorns, bouncing emoji" />
 </p>
 
-<sub>Or go fully meme-worthy. One prompt, and the same shell becomes a rainbow canvas with floating unicorns and bouncing emoji. The agent does not judge your taste.</sub>
+<sub>And it animates. The meme theme is a live rainbow canvas with floating unicorns and bouncing emoji. The agent does not judge your taste.</sub>
 
 - **Visual identity.** "Make it feel warmer." "Restyle the whole shell as a 1970s synthesizer panel." "Tighten the mobile spacing and bump the contrast." The agent edits the CSS, rebuilds, and the new look is live within seconds.
 - **Shell features.** Missing an attachment button? File preview pane? Chat search? Describe what you want; the agent adds it.
