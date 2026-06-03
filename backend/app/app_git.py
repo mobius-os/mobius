@@ -46,6 +46,7 @@ all. See feature 084.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -109,6 +110,15 @@ def _run(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
   into the repo config so the repo carries no state the next reader has
   to know about. `check=False` lets callers inspect a non-zero return
   (e.g. merge-tree signalling a conflict) instead of raising.
+
+  The env is ISOLATED so a per-app repo can never bleed into an enclosing
+  one. `/data` is itself a git repo (the agent's pm-commit history), so a
+  source_dir with no dedicated `.git` would otherwise let `git -C` walk up
+  to `/data` — making every per-app op (init, record, merge) operate on the
+  wrong repo and report spurious conflicts. We pin GIT_CEILING_DIRECTORIES
+  to the app-dir's parent (git won't search above it → it finds the app's
+  OWN repo or none, never /data) and scrub inherited GIT_* pointers that
+  would override `-C`. Mirrors the test conftest's `_isolate_git_env`.
   """
   cmd = [
     "git",
@@ -117,8 +127,16 @@ def _run(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
     "-C", str(repo),
     *args,
   ]
+  env = dict(os.environ)
+  for var in (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+  ):
+    env.pop(var, None)
+  env["GIT_CEILING_DIRECTORIES"] = str(Path(repo).resolve().parent)
   return subprocess.run(
-    cmd, capture_output=True, text=True, timeout=_GIT_TIMEOUT, check=check,
+    cmd, capture_output=True, text=True, timeout=_GIT_TIMEOUT,
+    check=check, env=env,
   )
 
 
@@ -132,7 +150,7 @@ def _tracked_source(source_dir: Path) -> list[str]:
 
 def is_repo(source_dir: str | Path) -> bool:
   """Whether `source_dir` already holds a git repo."""
-  return (Path(source_dir) / ".git").is_dir()
+  return (Path(source_dir) / ".git").exists()
 
 
 def head_sha(source_dir: str | Path, branch: str) -> str:
