@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import urlparse
 
 import pytest
 
@@ -590,7 +591,7 @@ def test_install_endpoint_emits_app_install(client, auth, monkeypatch):
   class _Client:
     async def __aenter__(self): return self
     async def __aexit__(self, *exc): return False
-    def stream(self, method, url):
+    def stream(self, method, url, **kwargs):
       manifest = {
         "id": "tinytest", "name": "Tiny", "version": "1.0.0",
         "description": "test", "entry": "index.jsx", "icon": "icon.png",
@@ -603,7 +604,8 @@ def test_install_endpoint_emits_app_install(client, auth, monkeypatch):
         return _Ctx(200, _png())
       return _Ctx(404, b"")
 
-  with patch("app.install._validate_url_safe", lambda u: None), \
+  with patch("app.install._validate_url_safe",
+             lambda u: (u, urlparse(u).netloc, urlparse(u).hostname)), \
        patch("app.install.httpx.AsyncClient", lambda *a, **k: _Client()):
     r = client.post(
       "/api/apps/install", headers=auth,
