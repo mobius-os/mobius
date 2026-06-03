@@ -84,6 +84,64 @@ def test_set_invalid_provider_rejected(client, auth):
   assert r.json()["provider"] == "claude"
 
 
+def test_skills_enabled_defaults_off(client, auth):
+  """GET /api/settings reports skills_enabled False until opted in."""
+  r = client.get("/api/settings", headers=auth)
+  assert r.json()["skills_enabled"] is False
+
+
+def test_set_skills_enabled_persists_to_shared_settings(client, auth):
+  """POST /api/settings with skills_enabled writes the shared file and
+  the provider gate reads it back."""
+  from app.config import get_settings as _gs
+  from app import providers
+
+  r = client.post(
+    "/api/settings", json={"skills_enabled": True}, headers=auth,
+  )
+  assert r.status_code == 200
+  assert client.get("/api/settings", headers=auth).json()["skills_enabled"] is True
+  assert providers.skills_enabled(_gs().data_dir) is True
+
+  # Opting back out flips the gate.
+  client.post("/api/settings", json={"skills_enabled": False}, headers=auth)
+  assert providers.skills_enabled(_gs().data_dir) is False
+
+
+def test_set_skills_enabled_preserves_other_agent_settings(client, auth):
+  """Toggling skills_enabled must not clobber model/effort defaults the
+  picker wrote into the same shared agent-settings.json file."""
+  from app.config import get_settings as _gs
+  from app import providers
+
+  data_dir = _gs().data_dir
+  providers.write_agent_settings(
+    data_dir, {"model": "claude-x", "effort": "high"},
+  )
+  client.post("/api/settings", json={"skills_enabled": True}, headers=auth)
+  merged = providers._load_agent_settings(data_dir)
+  assert merged["model"] == "claude-x"
+  assert merged["effort"] == "high"
+  assert merged["skills_enabled"] is True
+
+
+def test_skills_enabled_gate_treats_absent_and_malformed_as_off(tmp_path):
+  """providers.skills_enabled reads False for an absent file and a
+  non-bool / non-true value — opt-in is explicit."""
+  from app import providers
+
+  # Absent file → off.
+  assert providers.skills_enabled(str(tmp_path)) is False
+  # Present but flag missing → off.
+  providers.write_agent_settings(str(tmp_path), {"model": "x"})
+  assert providers.skills_enabled(str(tmp_path)) is False
+  # Truthy-but-not-True (string) → off; only the literal True opts in.
+  providers.write_agent_settings(str(tmp_path), {"skills_enabled": "yes"})
+  assert providers.skills_enabled(str(tmp_path)) is False
+  providers.write_agent_settings(str(tmp_path), {"skills_enabled": True})
+  assert providers.skills_enabled(str(tmp_path)) is True
+
+
 def test_settings_update_provider_validator_rejects_unknown():
   """SettingsUpdate rejects unknown provider IDs."""
   try:

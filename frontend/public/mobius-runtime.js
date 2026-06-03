@@ -27,7 +27,7 @@
 //   window.mobius.storage.getBlob(path)           -> Blob | null        (offline, cache-first)
 //   window.mobius.storage.setBlob(path, blob, opts?)-> {synced} | {queued}  opts.contentType; <=25 MiB
 //   window.mobius.storage.remove(path)            -> {synced} | {queued}
-//   window.mobius.storage.list(prefix)            -> entries[] | null
+//   window.mobius.storage.list(prefix)            -> entries[]  (offline-capable: cache+outbox overlay)
 //   window.mobius.storage.subscribe(path, cb)     -> unsubscribe fn (cb(json value))
 //   window.mobius.storage.subscribeText(path, cb) -> unsubscribe fn (cb(string))
 //   window.mobius.storage.subscribeBlob(path, cb) -> unsubscribe fn (cb(Blob); app revokes object URLs)
@@ -608,22 +608,15 @@ function makeStorage({ appId, getToken }) {
     return withPathLock(path, () => removeLocal(path)).then(() => settle(path))
   }
 
-  // Enumerate the immediate children of a stored directory (the platform
-  // alternative to brute-force-probing filenames). Returns the entries ARRAY
-  // (each {name, path, type, size, modified_at, mime_type?}), `[]` for an empty
-  // or not-yet-created directory, and `null` on network failure — the same
-  // online→data / offline→null contract get() exposes, so an app falls back to
-  // its own snapshot on null but treats `[]` as a real (empty) result. No read
-  // mirror: listings aren't a per-path value, and a stale cached listing would
-  // resurrect deleted children; an app that wants offline listing keeps its own
-  // snapshot keyed off the last successful call.
-  async function listInner(prefix) {
+  // Page the server's authoritative listing of the immediate children under
+  // `prefix`. Returns the entries ARRAY (each {name, path, type, size,
+  // modified_at, mime_type?}), `[]` for an empty/unknown dir, and `null` on
+  // network failure (offline/transient). Walks every page so list() is true
+  // enumeration, not just the server's first page (capped at 500); the guard
+  // bounds a pathological/looping cursor.
+  async function listServer(prefix) {
     try {
       const token = await getToken()
-      // Page through the whole listing so list() is true enumeration,
-      // not just the server's first page (it caps a page at 500). The
-      // guard bounds a pathological/looping cursor; any HTTP error
-      // surfaces as null (offline/transient) like the single-fetch case.
       const entries = []
       let cursor = null
       for (let guard = 0; guard < 10000; guard++) {
@@ -642,6 +635,89 @@ function makeStorage({ appId, getToken }) {
     } catch (e) {
       return null
     }
+  }
+
+  // The offline listing source: every PRESENT (non-tombstone) path this app has
+  // mirrored into the read-through cache. Mirrors listOps' cursor pattern over
+  // the cache store. We derive offline listings from these per-PATH entries —
+  // each carrying a present=false tombstone once removed/404'd — NOT from a
+  // cached listing blob, which is the design that WOULD resurrect deleted
+  // children (see list() below).
+  function listCachePresent() {
+    return withStore(CACHE_STORE, 'readonly', (store, box) => {
+      box.value = []
+      store.openCursor().onsuccess = (e) => {
+        const cursor = e.target.result
+        if (!cursor) return
+        const v = cursor.value
+        if (v.appId === appId && v.present) {
+          box.value.push({ path: v.path, kind: v.kind, contentType: v.contentType })
+        }
+        cursor.continue()
+      }
+    })
+  }
+
+  // Enumerate the immediate children of a stored directory (the platform
+  // alternative to brute-force-probing filenames). Offline-capable: when the
+  // server is reachable its listing is authoritative; otherwise the listing is
+  // derived from the per-path read-through cache (tombstones excluded, so
+  // deletes don't resurrect). EITHER source is then overlaid with the outbox —
+  // a pending write shows, a pending delete drops — so list() is
+  // read-your-writes, the same contract get() exposes. Always returns an ARRAY
+  // (`[]` when empty/unknown), never null, since offline now has a real source.
+  // Offline-derived entries carry name/path/type (+ mime_type when known) but
+  // not size/modified_at, which only the server stat provides.
+  async function listInner(prefix) {
+    const norm = (prefix || '').replace(/^\/+|\/+$/g, '')
+    const base = norm ? norm + '/' : ''
+    // The child name of `path` directly under `base`, or null if not under it.
+    const restUnder = (path) => {
+      if (base) return path.startsWith(base) ? path.slice(base.length) : null
+      return path
+    }
+    // Direct-children map keyed by child name. A server entry (rich metadata)
+    // is never downgraded by a derived entry of the same name.
+    const byName = new Map()
+    const addDerived = (path, meta) => {
+      const rest = restUnder(path)
+      if (!rest) return
+      const slash = rest.indexOf('/')
+      if (slash === -1) {
+        if (byName.has(rest)) return  // never downgrade an existing (server) entry
+        const mime = (meta && meta.contentType)
+          || (meta && meta.kind === 'json' ? 'application/json' : null)
+        byName.set(rest, { name: rest, path: base + rest, type: 'file', mime_type: mime })
+      } else {
+        const dname = rest.slice(0, slash)
+        if (!byName.has(dname)) {
+          byName.set(dname, { name: dname, path: base + dname, type: 'directory' })
+        }
+      }
+    }
+
+    const server = await listServer(norm)
+    if (server) {
+      for (const e of server) byName.set(e.name, e)
+    } else {
+      for (const c of await listCachePresent()) addDerived(c.path, c)
+    }
+
+    // Overlay the outbox (the queue coalesces to <=1 op per path, so the last
+    // intent for a path is the only one): a PUT ensures its child shows even
+    // before the drain reaches the server; a DELETE drops a direct-file child
+    // the server/cache still lists.
+    for (const op of await listOps()) {
+      if (op.method === 'DELETE') {
+        const rest = restUnder(op.path)
+        if (rest && rest.indexOf('/') === -1) byName.delete(rest)
+      } else {
+        addDerived(op.path, op)
+      }
+    }
+
+    return [...byName.values()].sort((a, b) =>
+      a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
   }
 
   const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b)
@@ -1015,8 +1091,9 @@ export function init({ appId, getToken }) {
 //   writes on read), and write-time eviction would drop hot entries — so the
 //   eviction policy is deliberately deferred (filed under .pm/083). Fine at
 //   personal-app scale; revisit if a blob-heavy app pressures the origin quota.
-// - list() has NO offline mirror (returns null offline), unlike get(). A
-//   cached listing would resurrect deleted children once a sibling delete
-//   synced, so an app that needs offline enumeration keeps its own snapshot of
-//   the last successful list() and falls back to it on null. Revisit only if
-//   offline directory enumeration becomes a common need.
+// - list() is offline-capable (078): when the server is unreachable it derives
+//   direct children from the per-path read-through cache (present=false
+//   tombstones excluded, so a synced delete does NOT resurrect — the hazard a
+//   cached listing blob would have had), then overlays the outbox. Same
+//   online/offline contract get() has. Offline entries omit size/modified_at,
+//   which only the server stat provides.

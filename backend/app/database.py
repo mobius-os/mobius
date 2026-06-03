@@ -198,6 +198,21 @@ def run_migrations(eng) -> None:
         "NOT NULL DEFAULT 'none'"
       ))
       conn.commit()
+  # Per-app git model (feature 084). Both columns are nullable with no
+  # backfill: NULL means "no upstream recorded," which is correct for
+  # every app installed before the flag was turned on. See models.App.
+  if "upstream_commit" not in apps_cols:
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN upstream_commit VARCHAR(64) NULL"
+      ))
+      conn.commit()
+  if "upstream_jsx_sha" not in apps_cols:
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN upstream_jsx_sha VARCHAR(64) NULL"
+      ))
+      conn.commit()
   if "chats" in tables:
     chats_cols = {c["name"] for c in inspector.get_columns("chats")}
     _add = []
@@ -245,6 +260,13 @@ def run_migrations(eng) -> None:
       # deleted app leaving a stale id behind just reads as "no live
       # owner app," which the route tolerates). See models.Chat.
       _add.append("ALTER TABLE chats ADD COLUMN created_by_app_id INTEGER NULL")
+    if "agent_id" not in chats_cols:
+      # Named agent attached to this chat (providers.effective_agents).
+      # NULL = no agent → today's behavior exactly. Existing rows
+      # default to NULL with no backfill — a chat written before this
+      # column existed had no agent selected, which is the correct
+      # default. See models.Chat.agent_id.
+      _add.append("ALTER TABLE chats ADD COLUMN agent_id VARCHAR(64) NULL")
     if _add:
       with eng.connect() as conn:
         for stmt in _add:

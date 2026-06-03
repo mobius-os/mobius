@@ -327,7 +327,9 @@ contract-comment mismatch.
   returns `[{name,path,type,size,modified_at,mime_type}]`) or
   `GET /api/storage/apps-list/{appId}/{prefix}` from a cron script /
   agent shell (`?limit=` ≤500, opaque `?cursor=`,
-  `{"entries":[…],"next_cursor":…}`). `list()` has no offline mirror.
+  `{"entries":[…],"next_cursor":…}`). `list()` is offline-capable like
+  `get()`: server when reachable, else the read-through cache, overlaid
+  with your pending writes (read-your-writes).
 - **Floating composer:** `.chat__foot` is `position:absolute` with
   transparent background. Do NOT add background to `.chat__foot` or
   wrap its controls in a shared opaque container — that breaks the

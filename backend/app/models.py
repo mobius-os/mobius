@@ -89,6 +89,16 @@ class Chat(Base):
   # file-loaded defaults; written by `PATCH /api/chats/{id}` from the
   # `/` slash picker (see `frontend/.../SlashPicker.jsx`).
   agent_settings_json = Column(JSON, nullable=True, default=None)
+  # Named agent attached to this chat (providers.BUILT_IN_AGENTS over
+  # /data/shared/agents.json). NULL = no agent selected → today's
+  # behavior exactly: the deployed skill + the picker-chosen
+  # model/effort. When set, the runner maps the agent to
+  # system_prompt + model + effort, overriding the defaults. PATCH
+  # /api/chats/{id} accepts `agent_id` and validates it against
+  # providers.effective_agents (409 on unknown, like the provider
+  # check). Nullable + default None so existing rows and new chats
+  # stay on the byte-identical default path without a backfill.
+  agent_id = Column(String(64), nullable=True, default=None)
   # Drawer pinning: NOT NULL = pinned, NULL = unpinned. Sort key for
   # the chats list — pinned rows render first, ordered by this
   # column DESC (newest pin at top of pinned group). PATCH
@@ -243,6 +253,18 @@ class App(Base):
   chat_log_access = Column(
     String(16), nullable=False, default="none"
   )
+  # Per-app git model (feature 084), only populated when
+  # providers.per_app_git_enabled is on. `upstream_commit` is the sha of
+  # the last pristine-manifest commit on the app's `upstream` branch —
+  # the merge base an update diverges from. Null for user-built apps and
+  # for every app while the flag is off.
+  upstream_commit = Column(String(64), nullable=True, default=None)
+  # Stopgap divergence marker (old finding #2): the sha256 of the
+  # upstream entry JSX as last installed/updated. Lets the update path
+  # cheaply tell "did the on-disk index.jsx diverge from what upstream
+  # shipped" without a full repo, and survives even when the git model
+  # is off. Null until the first flagged install/update sets it.
+  upstream_jsx_sha = Column(String(64), nullable=True, default=None)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)

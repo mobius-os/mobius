@@ -71,6 +71,7 @@ push_router = _load("push")
 notifications_router = _load("notifications")
 debug_router = _load("debug")
 theme_router = _load("theme")
+self_reminders_router = _load("self_reminders")
 standalone_router = _load("standalone")
 
 __all__ = [
@@ -93,5 +94,6 @@ __all__ = [
   "notifications_router",
   "debug_router",
   "theme_router",
+  "self_reminders_router",
   "standalone_router",
 ]

@@ -422,6 +422,18 @@
 .chat__tool--done .chat__tool-name { color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */ }
 .chat__tool-toggle { color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */ font-size: 10px; flex-shrink: 0; }
 
+.chat__tool-chip {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 9px;
+  font-size: 9.5px;
+  font-family: var(--mono); /* CONTRACT: monospace font stack, matches tool output */
+  color: var(--accent); /* CONTRACT: vivid accent text — marks the skill load */
+  background: color-mix(in srgb, var(--accent) 12%, transparent); /* CONTRACT: faint accent tint on the opaque tool fill */
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border-light)); /* CONTRACT: accent-tinted hairline */
+  white-space: nowrap;
+}
+
 .chat__tool-detail {
   padding: 0 10px 8px;
   font-size: 10.5px;

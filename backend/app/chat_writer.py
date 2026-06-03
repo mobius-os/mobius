@@ -239,6 +239,32 @@ class AppendPending(_Command):
 
 
 @dataclass
+class AppendSteeredUserMessage(_Command):
+  """Insert a mid-turn steered user message into the live transcript.
+
+  Used by the Codex steer path (routes/chats_stream.py): when a send
+  lands while a Codex turn is streaming and `steer_into_active_turn`
+  accepts it, the user message belongs in the TRANSCRIPT, not the
+  pending queue — the live turn already saw the text, so it is part of
+  this turn rather than a queued follow-up.
+
+  Placement keeps the streaming invariant intact: the message is
+  inserted just BEFORE the trailing assistant partial (when one exists)
+  so `chat.messages[-1]` stays the in-progress assistant message that
+  the runner's `update_last_assistant_message` / `Finalize` snapshots
+  target. Visually that renders the steered user row above the still-
+  streaming assistant block, which is the frontend contract. The `ts`
+  is made unique against both the transcript and the pending queue so
+  it can't collide with a sibling message's React key. Returns
+  `{"stored"}` — the stored message with its final ts.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  user_msg: dict = field(default_factory=dict)
+
+
+@dataclass
 class PromotePending(_Command):
   """Move the pending-queue head into the transcript and mark the run.
 
@@ -284,6 +310,28 @@ class ClearPending(_Command):
 
   chat_id: str = ""
   run_token: str = ""
+
+
+@dataclass
+class PersistCompaction(_Command):
+  """Append a compaction-summary block to the transcript as its own message.
+
+  Used by `POST /api/chats/{id}/compact` (feature 091's provider-switch
+  groundwork): a cross-provider switch loses the session, so a one-shot
+  summarize turn produces a portable plain-text briefing. That briefing is
+  stored here as a NEW assistant message — distinct from the streaming
+  snapshot path, which REPLACES the in-progress assistant message — so it
+  never clobbers a live turn's transcript and renders as its own block.
+
+  The stored message carries `kind="compaction"` (so the frontend can render
+  a recognizable, collapsible "compacted chat" block) and `content` set to
+  the briefing text (so any plain renderer still shows it). Returns
+  `{"stored"}` — the message as appended, with its final ts.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  summary: str = ""
 
 
 @dataclass
@@ -373,6 +421,8 @@ _FENCE_COMMANDS = (
   AnswerQuestion,
   StartTurn,
   AppendPending,
+  AppendSteeredUserMessage,
+  PersistCompaction,
   PromotePending,
   CancelPending,
   ClearPending,
@@ -1036,6 +1086,10 @@ class ChatWriterActor:
       return self._start_turn(db, cmd)
     if isinstance(cmd, AppendPending):
       return self._append_pending(db, cmd)
+    if isinstance(cmd, AppendSteeredUserMessage):
+      return self._append_steered_user_message(db, cmd)
+    if isinstance(cmd, PersistCompaction):
+      return self._persist_compaction(db, cmd)
     if isinstance(cmd, PromotePending):
       return self._promote_pending(db, cmd)
     if isinstance(cmd, CancelPending):
@@ -1207,6 +1261,70 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed("AppendPending did not persist")
     return {"stored": new_msg, "pending": pending}
+
+  def _append_steered_user_message(
+    self, db, cmd: AppendSteeredUserMessage
+  ) -> dict:
+    """Insert the steered user message into the live transcript; commit.
+
+    The message lands just before the trailing assistant partial (when
+    one exists) so the in-progress assistant message stays last and the
+    runner's snapshot / finalize writes keep targeting it. When there is
+    no assistant message yet (the turn hasn't streamed any text), the
+    message is simply appended. The `ts` is bumped past every message in
+    the transcript and the pending queue so it can't collide with a
+    sibling's React key.
+    """
+    from datetime import UTC, datetime
+
+    chat = _active_chat(db, cmd.chat_id)
+    if chat is None:
+      raise _PersistFailed(
+        "AppendSteeredUserMessage: chat not found or deleted"
+      )
+    msgs = list(chat.messages or [])
+    new_msg = dict(cmd.user_msg)
+    _ensure_unique_ts(new_msg, msgs + list(chat.pending_messages or []))
+    if msgs and msgs[-1].get("role") == "assistant":
+      msgs.insert(len(msgs) - 1, new_msg)
+    else:
+      msgs.append(new_msg)
+    chat.messages = msgs
+    chat.updated_at = datetime.now(UTC)
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("AppendSteeredUserMessage did not persist")
+    return {"stored": new_msg}
+
+  def _persist_compaction(self, db, cmd: PersistCompaction) -> dict:
+    """Append the compaction briefing as a new assistant message; commit.
+
+    The block is its OWN message (appended, not a replace) so it can't
+    clobber a streaming snapshot, and it carries `kind="compaction"` plus
+    a single text block so both the dedicated frontend renderer and any
+    plain renderer surface the briefing. The `ts` is set strictly past
+    every message in the transcript and the pending queue (via
+    `next_message_ts`, so even an empty transcript gets a wall-clock ts)
+    so it can't collide with a sibling's React key.
+    """
+    from datetime import UTC, datetime
+
+    chat = _active_chat(db, cmd.chat_id)
+    if chat is None:
+      raise _PersistFailed("PersistCompaction: chat not found or deleted")
+    msgs = list(chat.messages or [])
+    new_msg = {
+      "role": "assistant",
+      "kind": "compaction",
+      "content": cmd.summary,
+      "blocks": [{"type": "text", "content": cmd.summary}],
+      "ts": next_message_ts(msgs + list(chat.pending_messages or [])),
+    }
+    msgs.append(new_msg)
+    chat.messages = msgs
+    chat.updated_at = datetime.now(UTC)
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("PersistCompaction did not persist")
+    return {"stored": new_msg}
 
   def _promote_pending(self, db, cmd: PromotePending) -> dict:
     """Move the pending-queue head into the transcript and mark the run.

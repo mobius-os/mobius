@@ -20,6 +20,7 @@ EventType = Literal[
   "tool_input",
   "tool_output",
   "tool_end",
+  "skill_loaded",
   "question",
   "queued_turn_starting",
   "catch_up_done",
@@ -94,6 +95,22 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
         blk["status"] = "done"
         break
     return True
+
+  if event_type == "skill_loaded":
+    # Skill observability: the runner emits this alongside the Skill
+    # tool's tool_start. Stamp the skill name onto the most recent
+    # Skill tool block so the persisted transcript carries the chip
+    # data (the frontend reads `block.skill`); the same event drives
+    # the activity-log append on the runner side. No skill name is a
+    # no-op — an empty chip carries no signal.
+    skill = event.get("skill") or ""
+    if not skill:
+      return False
+    for blk in reversed(assistant_blocks):
+      if blk.get("type") == "tool" and blk.get("tool") == "Skill":
+        blk["skill"] = skill
+        return True
+    return False
 
   if event_type == "error":
     # Persist the error into the assistant transcript so users see

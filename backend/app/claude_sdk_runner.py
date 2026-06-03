@@ -82,6 +82,7 @@ from claude_agent_sdk.types import (
   UserMessage,
 )
 
+from app import activity
 from app.pending_questions import PendingQuestion
 from app.runner_registry import RunnerKind, registry
 from app.runtime_types import RunnerResult
@@ -149,6 +150,21 @@ class ActiveClaudeClient:
     """Resolves the stop waiter once the runner is fully drained."""
     if not self._finished.done():
       self._finished.set_result(None)
+
+
+def _skill_name_from_input(input_data: Any) -> str:
+  """Extracts the loaded skill's name from a Skill tool_use input.
+
+  The Skill tool's input is `{"skill": "<name>", "args": "..."}` — the
+  skill name lives under the `skill` key. Older / plugin-namespaced
+  forms can carry it as `command` (the slash-command name), so fall
+  back to that. Returns an empty string when neither is present so the
+  caller can decide not to emit an empty chip.
+  """
+  if not isinstance(input_data, dict):
+    return ""
+  name = input_data.get("skill") or input_data.get("command") or ""
+  return name.strip() if isinstance(name, str) else ""
 
 
 def _result_error_message(result: ResultMessage) -> str:
@@ -320,6 +336,18 @@ def dispatch_sdk_message(
             "tool": block.name,
             "input": summary,
           })
+        # Skill observability: when the agent loads a skill, surface it
+        # as its own `skill_loaded` event (the frontend stamps a chip
+        # onto the Skill tool block) and append a record to the activity
+        # log so "most-used skills" can be aggregated. This fires
+        # whenever the Skill tool runs at all; whether skills are even
+        # OFFERED to the agent is the separate, gated `skills_enabled`
+        # decision below — observability is correct either way.
+        if block.name == "Skill":
+          skill = _skill_name_from_input(block.input)
+          if skill:
+            bc.publish({"type": "skill_loaded", "skill": skill})
+            activity.log_skill_load(getattr(bc, "chat_id", None), skill)
         continue
       if isinstance(block, ThinkingBlock):
         bc.publish({"type": "thinking", "content": block.thinking})
@@ -404,6 +432,7 @@ async def run_claude_sdk_turn(
   pending_questions: dict,
   db,
   agent_settings: dict | None = None,
+  skills_enabled: bool = False,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
@@ -417,6 +446,12 @@ async def run_claude_sdk_turn(
     bc: Chat broadcast object with a publish(event) method.
     pending_questions: Shared AskUserQuestion registry owned by chat.py.
     db: SQLAlchemy session used by runner-side persistence.
+    skills_enabled: When True, offer SDK skills to the agent
+      (`setting_sources` including user+project + `skills="all"`). This
+      is behavior-shifting and defaults OFF so the skill-observability
+      path can ship without changing what the agent does — skill loads
+      are still observed (chip + activity log) whenever a skill does
+      load, regardless of this flag.
 
   Returns:
     A dict containing the resulting session ID, final cost, and error.
@@ -564,12 +599,23 @@ async def run_claude_sdk_turn(
     _model = DEFAULT_MODELS["claude"]
   async def _run_once(model_override: str | None) -> RunnerResult:
     nonlocal current_session_id, cost_usd
+    # Skills are gated behind the per-owner `skills_enabled` flag. OFF
+    # (the default) keeps the historical posture: `setting_sources=None`
+    # means the SDK loads NO user/project settings, so the Skill tool is
+    # never offered and no skill can load. ON enables user+project
+    # setting sources and `skills="all"` so the agent may load any
+    # installed skill — a behavior-shifting change the owner opts into.
+    # Observability (the skill_loaded event + activity log) lives in the
+    # tool-use dispatch and works whenever a skill loads, independent of
+    # this flag.
     options_kwargs = {
       "system_prompt": skill_text,
       "resume": session_id if session_id is not None else None,
       "cwd": cwd,
       "env": base_env,
-      "setting_sources": None,
+      "setting_sources": (
+        ["user", "project"] if skills_enabled else None
+      ),
       "include_partial_messages": True,
       "can_use_tool": can_use_tool,
       "cli_path": "/usr/local/bin/claude",
@@ -579,6 +625,8 @@ async def run_claude_sdk_turn(
         ],
       },
     }
+    if skills_enabled:
+      options_kwargs["skills"] = "all"
     if model_override:
       options_kwargs["model"] = model_override
     if _effort:

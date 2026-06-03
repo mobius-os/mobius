@@ -207,6 +207,30 @@ if [ -f /data/shell/.origin-hash ]; then
   fi
 fi
 
+# Install the agent self-reminders cron dispatcher (feature 088). This
+# is platform-level, not a mini-app, so it lives under a reserved
+# _self-reminders/ slug and runs a tiny job.sh that execs the baked
+# /app/scripts/self-reminders-dispatch.sh. The scaffold writes job.sh +
+# init-cron.sh and installs the entry; the replay loop below re-adds it
+# on every boot like any other app cron. Create-if-absent so we never
+# clobber an operator edit to the schedule. DEFAULT OFF: the dispatcher
+# itself fires nothing until /data/shared/self-reminders.enabled exists,
+# so this installs the plumbing without firing any check-in.
+SR_DIR=/data/apps/_self-reminders
+if [ ! -f "$SR_DIR/init-cron.sh" ]; then
+  su -s /bin/sh mobius -c "mkdir -p $SR_DIR" 2>/dev/null || true
+  cat > "$SR_DIR/job.sh" <<'SRJOB'
+#!/bin/bash
+# Thin wrapper: cron runs this; the real logic is the baked dispatcher.
+exec /app/scripts/self-reminders-dispatch.sh
+SRJOB
+  chmod +x "$SR_DIR/job.sh" 2>/dev/null || true
+  chown -R mobius:mobius "$SR_DIR" 2>/dev/null || true
+  su -s /bin/sh mobius -c \
+    "bash /app/scripts/init-cron-scaffold.sh _self-reminders '*/5 * * * *'" \
+    2>/dev/null || true
+fi
+
 # Run per-app init scripts to restore cron entries lost on container
 # restart. Don't pre-clear the crontab — agents (and the operator) may
 # have installed cron entries directly via `crontab -u`, and a blanket

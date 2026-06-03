@@ -38,10 +38,12 @@ import logging
 import mimetypes
 import os
 import re
+import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import activity, fs_locks, models
@@ -53,6 +55,7 @@ from app.deps import (
   get_current_owner,
   get_current_owner_or_app,
   get_principal,
+  reject_cross_site,
 )
 from app.path_utils import validate_path_within_base
 
@@ -437,6 +440,120 @@ def read_app_file(
   if not file_path.is_file():
     raise HTTPException(status_code=404, detail="File not found.")
   return _serve_file(file_path)
+
+
+class _MoveBody(BaseModel):
+  """Source + destination relative paths for a storage move/rename."""
+
+  # `from` is a Python keyword, so the field is `from_path` with the wire
+  # alias `from` (the FileExplorer sends `{from, to}`).
+  from_path: str
+  to: str
+
+  model_config = {"populate_by_name": True}
+
+  def __init__(self, **data):
+    if "from" in data and "from_path" not in data:
+      data["from_path"] = data.pop("from")
+    super().__init__(**data)
+
+
+@router.post(
+  "/apps/{app_id}/move",
+  status_code=204,
+  dependencies=[Depends(reject_cross_site)],
+)
+async def move_app_file(
+  app_id: int,
+  body: _MoveBody,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Moves (renames) a file or directory within an app's storage tree.
+
+  Both `from` and `to` go through the same hardened `_resolve` every other
+  storage path does — the character whitelist, the `..` traversal reject,
+  the absolute-path / out-of-tree containment check, and the no-symlink-
+  component rule — so a move can neither read nor write outside the app's
+  own `/data/apps/<id>` dir. Serialized under the per-app storage lock and
+  re-verified against the app's `token_nonce` (the same uninstall / freed-
+  id-reuse defense `write_app_file` uses), since a move that paused could
+  otherwise land in a replacement app's tree.
+
+  Parent directories of the destination are created as needed (a move INTO
+  a new folder is a normal FileExplorer action). An existing destination is
+  rejected with 409 rather than silently overwritten — the FileExplorer
+  asks before clobbering.
+  """
+  expected_nonce = _check_cross_app(db, principal, app_id, mode="write").token_nonce
+  base = Path(get_settings().data_dir) / "apps" / str(app_id)
+  src = _resolve(base, body.from_path)
+  dst = _resolve(base, body.to)
+  async with fs_locks.app_storage_lock(app_id):
+    _recheck_app_identity(db, app_id, expected_nonce)
+    if not src.exists():
+      raise HTTPException(status_code=404, detail="Source not found.")
+    if dst.exists():
+      raise HTTPException(status_code=409, detail="Destination already exists.")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dst))
+  if activity.should_emit_storage_write(app_id, body.to):
+    activity.log_event(
+      "storage_write", app_id=app_id, path=body.to, size_delta=0
+    )
+  return Response(status_code=204)
+
+
+# Registered BEFORE the catch-all `delete_app_file` so a `DELETE
+# /apps/{id}/folder/<path>` matches this recursive-folder route rather than
+# being swallowed by the single-file `{path:path}` catch-all (FastAPI
+# resolves DELETE routes in registration order, and both share the method).
+@router.delete(
+  "/apps/{app_id}/folder/{path:path}",
+  status_code=204,
+  dependencies=[Depends(reject_cross_site)],
+)
+async def delete_app_folder(
+  app_id: int,
+  path: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Recursively deletes a directory (and its contents) from an app's tree.
+
+  The per-file `DELETE /apps/{id}/{path}` route only removes a single file;
+  the FileExplorer also needs to drop a whole folder. The path goes through
+  the same `_resolve` hardening (whitelist, `..` reject, containment, no
+  symlink component) so the recursive removal can never escape the app's
+  own storage dir. Serialized + nonce-rechecked under the per-app lock like
+  every other mutating storage route.
+
+  Deleting the app's storage ROOT (an empty path) is rejected — the root is
+  the app's own directory, owned by install/uninstall, not a folder the
+  FileExplorer may blow away. A missing path 404s; a path that is a FILE
+  rather than a directory 400s (use the per-file DELETE for that).
+  """
+  expected_nonce = _check_cross_app(db, principal, app_id, mode="write").token_nonce
+  base = Path(get_settings().data_dir) / "apps" / str(app_id)
+  target = _resolve(base, path)
+  async with fs_locks.app_storage_lock(app_id):
+    _recheck_app_identity(db, app_id, expected_nonce)
+    if target.resolve() == base.resolve():
+      raise HTTPException(
+        status_code=400, detail="Cannot delete the app storage root."
+      )
+    if not target.exists():
+      raise HTTPException(status_code=404, detail="Folder not found.")
+    if not target.is_dir():
+      raise HTTPException(
+        status_code=400, detail="Path is not a directory."
+      )
+    shutil.rmtree(target)
+  if activity.should_emit_storage_write(app_id, path):
+    activity.log_event(
+      "storage_write", app_id=app_id, path=path, size_delta=0
+    )
+  return Response(status_code=204)
 
 
 @router.put("/apps/{app_id}/{path:path}", status_code=204)
