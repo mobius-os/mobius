@@ -117,7 +117,7 @@ Read more in [The Agent is the Kernel](https://hamzamerzic.info/blog/2026/the-ag
 Möbius starts as a deliberately minimal chat: no file upload, no scheduled jobs panel, no notifications button. So you grow it. I asked the agent for file upload in one ordinary message: *"I'd like to send files and images along with my messages. Can you add file upload to the chat?"*
 
 <p align="center">
-  <img src="assets/screenshots/upload-flow.png" width="820" alt="Three phone screenshots in sequence with arrows between them: ask for file upload, answer a few questions, file upload working." />
+  <img src="assets/screenshots/upload-flow.gif" width="280" alt="The file-upload build animated in three steps: ask the agent, answer a few clarifying questions, then attach an image inline in the chat." />
 </p>
 
 <sub>One chat, from empty composer to working feature. The endpoint, the schema, the drag-and-drop overlay, the paste handler, the chip row, the image thumbnails, all written by the agent in the same session.</sub>
