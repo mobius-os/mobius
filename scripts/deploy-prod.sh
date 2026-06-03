@@ -121,6 +121,48 @@ confirm_yes() {
   esac
 }
 
+source_env_file() {
+  local file="$1"
+  if [ ! -f "$file" ]; then return 1; fi
+  set -a
+  # shellcheck disable=SC1090
+  . "$file"
+  set +a
+  return 0
+}
+
+ensure_prod_env() {
+  if [ "$TARGET" != "prod" ]; then return 0; fi
+  if [ -n "${DOMAIN:-}" ]; then return 0; fi
+
+  if source_env_file "$REPO_ROOT/.env"; then
+    info "loaded prod env from $REPO_ROOT/.env"
+  fi
+  if [ -n "${DOMAIN:-}" ]; then return 0; fi
+
+  # Worktrees normally do not carry the canonical checkout's .env, but docker
+  # compose still interpolates DOMAIN before it touches the live container.
+  # Resolve the shared git dir back to the canonical checkout and source its
+  # .env when available so a worktree deploy cannot recreate prod with
+  # FRONTEND_ORIGIN=https://.
+  local git_common canonical_root
+  git_common=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  if [ -n "$git_common" ]; then
+    canonical_root="$(dirname "$git_common")"
+    if [ "$canonical_root" != "$REPO_ROOT" ] &&
+       source_env_file "$canonical_root/.env"; then
+      info "loaded prod env from canonical checkout $canonical_root/.env"
+    fi
+  fi
+  if [ -z "${DOMAIN:-}" ]; then
+    fail "DOMAIN is empty; refusing to deploy prod because FRONTEND_ORIGIN would be invalid."
+    fail "Set DOMAIN in the environment, $REPO_ROOT/.env, or the canonical checkout .env."
+    exit 1
+  fi
+}
+
+ensure_prod_env
+
 # Parse the build-cache size out of `docker system df` and return GB as
 # an integer (rounded down). Returns 0 on parse failure so we don't
 # accidentally prune on a malformed line.
