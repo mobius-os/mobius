@@ -105,9 +105,27 @@ class ActiveClaudeClient:
     self.chat_id = chat_id
     self.kind = RunnerKind.CLAUDE_SDK
     self._client = client
+    # FIFO of mid-turn steer texts: two rapid sends must both reach Claude
+    # (both are already persisted to the transcript), so a single slot would
+    # silently drop the first. The runner drains the whole list on interrupt.
+    self.pending_steer: list[str] = []
     self._finished: asyncio.Future[None] = (
       asyncio.get_running_loop().create_future()
     )
+
+  async def steer(self, text: str) -> bool:
+    """Interrupts the live response so the runner can re-prompt.
+
+    Claude's SDK cannot append to an in-flight tool loop. The closest
+    faithful behavior is to record the redirect text, interrupt the
+    current response, drain the interrupt result, then query the same
+    connected client again so session context is preserved.
+    """
+    if self._finished.done():
+      return False
+    self.pending_steer.append(text)
+    await self._client.interrupt()
+    return True
 
   async def interrupt(self) -> None:
     """Interrupts the live run and waits for runner-side drain.
@@ -118,6 +136,7 @@ class ActiveClaudeClient:
     bound at the call site; this inner timeout protects any other
     direct caller.
     """
+    self.pending_steer = []
     await self._client.interrupt()
     try:
       await asyncio.wait_for(self._finished, timeout=5.0)
@@ -150,6 +169,23 @@ class ActiveClaudeClient:
     """Resolves the stop waiter once the runner is fully drained."""
     if not self._finished.done():
       self._finished.set_result(None)
+
+
+def _steer_redirect_message(text: str) -> str:
+  """Frames a Claude steer as a redirect on the still-connected client."""
+  return (
+    "The user added this while you were working. Incorporate it and "
+    "continue the same task:\n\n"
+    f"{text}"
+  )
+
+
+async def steer_into_active_turn(chat_id: str, text: str) -> bool:
+  """Interrupts a live Claude SDK turn so it can resume with `text`."""
+  handle = registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK)
+  if not isinstance(handle, ActiveClaudeClient):
+    return False
+  return await handle.steer(text)
 
 
 def _skill_name_from_input(input_data: Any) -> str:
@@ -652,13 +688,31 @@ async def run_claude_sdk_turn(
         }
       await client.query(user_message)
 
-      async for sdk_msg in client.receive_response():
-        current_session_id, terminal = dispatch_sdk_message(
-          sdk_msg, bc, current_session_id,
-        )
-        if terminal is not None:
+      while True:
+        async for sdk_msg in client.receive_response():
+          current_session_id, terminal = dispatch_sdk_message(
+            sdk_msg, bc, current_session_id,
+          )
+          if terminal is None:
+            continue
+          steer_texts = active_client.pending_steer
+          if steer_texts:
+            active_client.pending_steer = []
+            await client.query(
+              _steer_redirect_message("\n\n".join(steer_texts))
+            )
+            break
           cost_usd = terminal.get("cost_usd")
           return terminal
+        else:
+          steer_texts = active_client.pending_steer
+          if steer_texts:
+            active_client.pending_steer = []
+            await client.query(
+              _steer_redirect_message("\n\n".join(steer_texts))
+            )
+            continue
+          break
 
       return {
         "session_id": current_session_id,

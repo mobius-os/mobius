@@ -111,6 +111,15 @@ order is implicit.
   URL. The earlier "Hello World" seed-on-first-boot was retired
   on 2026-05-30 in favor of the store as the more useful starting
   point.
+- A message that starts with `/goal <condition>` on a Claude-provider
+  chat reaches Claude Code's native goal loop. `/goal clear` stops it.
+  Codex has no equivalent native goal setter; treat `/goal` there as
+  an ordinary instruction unless the platform grows a real Codex goal
+  control.
+- Mid-turn steering is controlled by `steer_enabled` (legacy
+  `codex_steer_enabled` still works). Codex uses true turn/steer;
+  Claude approximates it by interrupting the live response and
+  re-prompting on the same connected SDK client.
 
 ## Querying the file structure
 

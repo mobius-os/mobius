@@ -43,6 +43,8 @@ for cid, title, prov in con.execute(
 PY
 ```
 
+This query intentionally includes app-attributed chats (`created_by_app_id` set): those are hidden from the owner's drawer but are real conversations an app's agent had, and they often hold the most interview-worthy context. Do not filter them out.
+
 App subagent runs — cron jobs (news, gym, etc.) whose sessions are NOT chat rows. Find recently-modified session jsonls under the CLI projects dir:
 
 ```bash
@@ -63,6 +65,8 @@ The directory name is the cwd with `/` → `-` (e.g. `-data-apps-news-2` == `/da
 3. **What was hard** — where did you get stuck, retry, or work around something? What cost you turns?
 4. **Skills** — which skill did you lean on, did it hold up, and what one edit would have saved you time? (This feeds phase 2.)
 5. **Mind** — what did you wish you'd remembered, or what would have been worth recording? Any note that misled you? (This feeds phase 3.)
+
+**Cross-check skill usage against the log.** Beyond what each agent says it used, read the objective record: `skill_loaded` lines in `inputs/activity.jsonl` (or query `GET $API_BASE_URL/api/admin/activity/skills?since=<24h-ago-ISO>` with `$AGENT_TOKEN` for a ready-ranked `{"skills":[{"skill","count"}]}`). Fold the most-used Claude-loaded skills into the brief's "what I learned": which skills the platform actually leaned on, whether a heavily-used skill is the one agents complained about (a fix-priority signal), and which skills never load (dead weight). If `skills_enabled` is off, or the night was Codex-only, no skill loads are recorded and this section is correctly empty.
 
 Capture each answer to a working file (e.g. `/data/apps/dreaming/runs/<date>/interviews.md`) so phases 2–6 can mine it. The interviews are your primary signal for everything that follows — treat their answers as evidence, not chatter.
 

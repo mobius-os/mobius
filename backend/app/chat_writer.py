@@ -445,9 +445,17 @@ def _needs_broad_chat_fence(cmd: _Command) -> bool:
     tokenless path), so its exact-key fence reaches nothing — a snapshot under
     the live streaming token would survive and clobber the answer.
 
+  - An `AppendSteeredUserMessage` inserts the steered user turn mid-run with no
+    run_token; the interrupted run's still-pending snapshot (its own run_token)
+    would otherwise commit afterward and overwrite the insert. It must fence the
+    chat broadly so the pre-steer snapshot can't clobber it; the run's
+    post-steer snapshots get the new generation and still land.
+
   A token-bearing `AnswerQuestion` (the live path) keeps the precise key fence.
   """
   if isinstance(cmd, ReplaceTranscript):
+    return True
+  if isinstance(cmd, AppendSteeredUserMessage):
     return True
   if isinstance(cmd, AnswerQuestion):
     return not cmd.run_token

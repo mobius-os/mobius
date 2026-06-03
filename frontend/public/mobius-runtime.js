@@ -32,7 +32,7 @@
 //   window.mobius.storage.subscribeText(path, cb) -> unsubscribe fn (cb(string))
 //   window.mobius.storage.subscribeBlob(path, cb) -> unsubscribe fn (cb(Blob); app revokes object URLs)
 //   window.mobius.storage.pendingCount()          -> Promise<number>
-//   window.mobius.chat({mount, chatId?, ...})     -> Promise<handle>
+//   window.mobius.chat({mount, chatId?, picker?, ...}) -> Promise<handle>
 //     Embeds the real agent chat (ChatView) in a nested iframe inside
 //     `mount`. handle.on('ready'|'message-sent'|'turn-done'|'error', cb)
 //     and handle.destroy(). See the "Agent-chat embed" block below.
@@ -909,6 +909,8 @@ function makeStorage({ appId, getToken }) {
 // app gets a live agent conversation WITHOUT reimplementing chat. The
 // embed is a RENDERER, never the trust boundary (§0b): a same-origin app
 // already holds the owner JWT, so enforcement is server-side.
+// `picker` defaults true; set picker:false for a model-locked chat with
+// no model/effort/provider picker while keeping attach files + send.
 //
 // This is the PARENT side of the embed postMessage protocol. The CHILD
 // side is frontend/src/components/ChatEmbed/ChatEmbed.jsx, and the shapes
@@ -971,6 +973,7 @@ function makeChat({ appId, getToken }) {
       throw new Error('window.mobius.chat: opts.mount must be a DOM element')
     }
     let chatId = opts.chatId ? String(opts.chatId) : await createChat(opts)
+    const pickerOn = opts.picker !== false
     const instanceId = `${appId}:${++_embedSeq}:${Date.now()}`
     const listeners = { ready: [], 'message-sent': [], 'turn-done': [], error: [] }
     const emit = (name, detail) => { for (const cb of listeners[name] || []) { try { cb(detail) } catch (e) {} } }
@@ -987,15 +990,17 @@ function makeChat({ appId, getToken }) {
       'sandbox',
       'allow-scripts allow-same-origin allow-forms allow-popups allow-top-navigation-by-user-activation',
     )
-    iframe.src = chatId
-      ? `/shell/embed/chat?chatId=${encodeURIComponent(chatId)}`
-      : '/shell/embed/chat'
+    const params = new URLSearchParams()
+    if (chatId) params.set('chatId', chatId)
+    if (!pickerOn) params.set('picker', '0')
+    const qs = params.toString()
+    iframe.src = qs ? `/shell/embed/chat?${qs}` : '/shell/embed/chat'
 
     function sendInit() {
       const w = iframe.contentWindow
       if (!w) return
       w.postMessage(
-        { type: EMBED_INIT, instanceId, chatId: chatId || undefined },
+        { type: EMBED_INIT, instanceId, chatId: chatId || undefined, picker: pickerOn },
         window.location.origin,
       )
     }

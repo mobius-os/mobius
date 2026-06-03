@@ -86,6 +86,19 @@ export default function Drawer({
   // rather than in Shell so this stays drawer-local.
   const [installingApp, setInstallingApp] = useState(null)
 
+  // The install sheet navigates the whole document away to the standalone
+  // install surface (/apps/<slug>/?install=1). When the user comes back via the
+  // OS back button the browser can restore THIS document from BFCache with the
+  // sheet still mounted in its mid-submit ("Saving…") state — effects don't
+  // re-run on a BFCache restore, so without this the full-screen modal masks the
+  // drawer undismissably and reappears on every back press. Returning means the
+  // install interaction is over, so close the sheet on any page re-show.
+  useEffect(() => {
+    function closeOnReshow() { setInstallingApp(null) }
+    window.addEventListener('pageshow', closeOnReshow)
+    return () => window.removeEventListener('pageshow', closeOnReshow)
+  }, [])
+
   // Mirrors `renaming` synchronously (not via useEffect — that's
   // one render behind). The overlay's pointerdown handler must see
   // the latest value the same task the user starts renaming, so we

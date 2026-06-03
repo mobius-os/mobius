@@ -125,6 +125,40 @@ def test_owner_can_still_send_to_app_owned_chat(client, owner_token, db):
   assert r.status_code == 202, r.text
 
 
+def test_app_chat_excluded_from_history_list(client, owner_token, db):
+  """App-created chats stay out of default history but remain readable."""
+  app_id, app_token = _make_app(client, owner_token, "drawer-hidden")
+  app_chat_id = client.post(
+    "/api/app-chats", json={"title": "app panel chat"},
+    headers={"Authorization": f"Bearer {app_token}"},
+  ).json()["id"]
+  owner_chat_id = client.post(
+    "/api/chats", json={"title": "owner chat"},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  ).json()["id"]
+
+  listed = client.get(
+    "/api/chats", headers={"Authorization": f"Bearer {owner_token}"},
+  ).json()
+  ids = {c["id"] for c in listed}
+  assert owner_chat_id in ids
+  assert app_chat_id not in ids
+
+  with_app = client.get(
+    "/api/chats?include_app_chats=1",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  ).json()
+  with_app_by_id = {c["id"]: c for c in with_app}
+  assert app_chat_id in with_app_by_id
+  assert with_app_by_id[app_chat_id]["created_by_app_id"] == app_id
+
+  r = client.get(
+    f"/api/chats/{app_chat_id}",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert r.status_code == 200, r.text
+
+
 def test_app_chats_create_requires_auth(client):
   r = client.post("/api/app-chats", json={"title": "x"})
   assert r.status_code == 401

@@ -71,7 +71,11 @@ export function isEmbedMessage(event, { origin, expectedSource, instanceId }) {
 
 // Build the embed route URL. Stable, query-only (chatId may be absent on
 // lazy-create). Kept here so the helper and any test agree on the shape.
-export function embedUrl({ base = '', chatId } = {}) {
+export function embedUrl({ base = '', chatId, picker } = {}) {
   const root = `${base}/shell/embed/chat`
-  return chatId ? `${root}?chatId=${encodeURIComponent(chatId)}` : root
+  const params = new URLSearchParams()
+  if (chatId) params.set('chatId', chatId)
+  if (picker === false) params.set('picker', '0')
+  const qs = params.toString()
+  return qs ? `${root}?${qs}` : root
 }

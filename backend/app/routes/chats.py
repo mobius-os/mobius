@@ -106,6 +106,7 @@ def _coerce_agent_settings(raw) -> dict:
 
 @router.get("")
 def list_chats(
+  include_app_chats: bool = False,
   _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
@@ -170,10 +171,15 @@ def list_chats(
   # key on SQLite's order_by — a `desc()` on a nullable column would
   # put NULL last under our SQLite collation, but making the boolean
   # explicit is clearer and portable.
+  q = db.query(models.Chat).filter(models.Chat.deleted_at.is_(None))
+  if not include_app_chats:
+    # Drawer history is the owner's browse list. App-attributed chats are
+    # still real chats the owner can open directly and the dreaming agent
+    # can interview, but the drawer should not mix embedded app panels into
+    # the owner's own conversation history.
+    q = q.filter(models.Chat.created_by_app_id.is_(None))
   chats = (
-    db.query(models.Chat)
-    .filter(models.Chat.deleted_at.is_(None))
-    .order_by(
+    q.order_by(
       models.Chat.pinned_at.is_(None),
       models.Chat.pinned_at.desc(),
       models.Chat.updated_at.desc(),
@@ -187,6 +193,7 @@ def list_chats(
       "updated_at": c.updated_at.isoformat(),
       "pinned_at": c.pinned_at.isoformat() if c.pinned_at else None,
       "has_messages": bool(c.messages and len(c.messages) > 0),
+      "created_by_app_id": c.created_by_app_id,
     }
     for c in chats
   ]
@@ -671,10 +678,12 @@ def create_app_chat(
   App-token-only: the new chat is stamped with `created_by_app_id =
   principal.app_id`, so only that app's token (and the owner) may send
   to it or stream it (see `get_active_chat_for_principal`). The chat is
-  otherwise an ordinary Chat row — it shows in the owner's drawer and
-  the owner can drive it. This is the surface that unblocks an in-iframe
-  app's chat panel, which `/api/chats` rejects because that route is
-  owner-only.
+  hidden from the owner's drawer history (`GET /api/chats` excludes
+  `created_by_app_id` rows unless `include_app_chats=1`), so an app's own
+  conversations don't clutter the chat list; the owner can still open one
+  directly by id, and the dreaming agent reads them via the opt-in. This is
+  the surface that unblocks an in-iframe app's chat panel, which the default
+  `/api/chats` list intentionally omits.
 
   Owner tokens are rejected here on purpose: the owner's create path is
   `POST /api/chats`, which leaves `created_by_app_id` NULL. Allowing the

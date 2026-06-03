@@ -103,48 +103,6 @@
   box-shadow: 0 0 0 3px var(--accent-dim);
 }
 
-/* Show/hide affix lives inside .settings__input-wrap, absolutely
-   positioned on the right. The input gets extra right-padding so
-   the value text never collides with the eye icon. */
-.settings__input-wrap {
-  position: relative;
-  width: 100%;
-}
-
-.settings__input--with-affix {
-  padding-right: 44px;
-}
-
-.settings__input-affix {
-  position: absolute;
-  right: 6px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 32px;
-  height: 32px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: none;
-  padding: 0;
-  color: var(--muted);
-  cursor: pointer;
-  border-radius: 8px;
-  transition: color 0.15s, background 0.15s;
-}
-
-.settings__input-affix:hover {
-  color: var(--text);
-  background: var(--surface2);
-}
-
-.settings__input-affix:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-  color: var(--text);
-}
-
 .settings__success {
   font-size: 13px;
   color: var(--accent);
