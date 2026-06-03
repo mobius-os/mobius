@@ -76,10 +76,10 @@ When you ask for something, the agent builds it as a small app right inside the 
 Apps are the most obvious thing the agent builds, but the platform itself is also yours to reshape. Two layers, treated differently: **capabilities** (general features like file upload or notifications, candidates for upstreaming so the next Möbius install inherits them) and **presentation** (your theme, layout, and fonts, which live only on your volume and stay yours).
 
 <p align="center">
-  <img src="assets/screenshots/theme-cycle.gif" width="280" alt="Möbius theme cycle, baseline, cozy reading nook, drifting ambient, medieval manuscript" />
+  <img src="assets/screenshots/newchat-default.png" width="240" alt="The Möbius new-chat screen in its default charcoal theme" />
 </p>
 
-<sub>Different variations of the same instance, each from a single prompt to the agent. The colors, fonts, and layout are CSS the agent wrote in response to a single sentence.</sub>
+<sub>The default look. Ask the agent to restyle the shell, the colors, fonts, and layout are CSS it rewrites, and the change is live immediately, no rebuild.</sub>
 
 <p align="center">
   <img src="assets/screenshots/theme-meme.gif" width="280" alt="Möbius restyled into a meme theme: rainbow canvas, floating unicorns, bouncing emoji" />
