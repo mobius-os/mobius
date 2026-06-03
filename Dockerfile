@@ -43,6 +43,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
+# tectonic is a server-side subprocess; CSP connect-src 'self' applies only to
+# browser fetches from the mini-app iframe, not OS-level subprocesses — tectonic's
+# package fetches (from Tectonic's bundle server) are unrestricted at the OS level.
+# Placed after the apt-get layer so a tectonic version bump doesn't bust the apt cache.
+ARG TECTONIC_VERSION=0.16.9
+RUN curl -fsSL "https://github.com/tectonic-typesetting/tectonic/releases/download/tectonic%40${TECTONIC_VERSION}/tectonic-${TECTONIC_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+    | tar xz -C /usr/local/bin/ tectonic && chmod +x /usr/local/bin/tectonic && tectonic --version
+
 # Share the agent-browser install between root and mobius via symlinks.
 # The mobius user is created further down; we chown the shared dir to
 # mobius:mobius after that, so mobius can write session sockets/locks
