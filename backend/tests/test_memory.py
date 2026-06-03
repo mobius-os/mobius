@@ -141,6 +141,47 @@ def test_build_graph_healthy(tmp_path):
   assert ("index", "topic", "link") in kinds
 
 
+def test_usage_counter_accrues_and_merges_into_graph(tmp_path):
+  """The Mind 'Used' column read access_count, which nothing incremented —
+  so it was always 0. record_usage now accrues loads into usage.json, and
+  build_graph merges them onto the frontmatter baseline. Also exercises the
+  new children_count breadth metadata on a MOC."""
+  root = _g(tmp_path)
+  (root / "index.md").write_text("# Home\n[[topic]]")
+  (root / "mocs" / "topic.md").write_text("---\ntitle: Topic\ntype: moc\n---\n")
+  (root / "notes" / "a.md").write_text(_note(mocs=["topic"], title="A"))
+  (root / "notes" / "b.md").write_text(_note(mocs=["topic"], title="B"))
+  # Nothing loaded yet → the old uniformly-zero state.
+  res0 = memory_graph.build_graph(tmp_path)
+  assert all(n["access_count"] == 0 for n in res0.nodes)
+  # Two loads of 'a', one of 'b' + the index. inbox/unknown are ignored.
+  memory.record_usage(tmp_path, ["notes/a.md", "index.md"])
+  memory.record_usage(tmp_path, ["notes/a.md", "notes/b.md", "inbox.md"])
+  assert memory.load_usage(tmp_path) == {"a": 2, "b": 1, "index": 1}
+  res1 = memory_graph.build_graph(tmp_path)
+  by_id = {n["id"]: n for n in res1.nodes}
+  assert by_id["a"]["access_count"] == 2
+  assert by_id["b"]["access_count"] == 1
+  assert by_id["index"]["access_count"] == 1
+  # The MOC exposes its breadth: 2 member notes.
+  assert by_id["topic"]["children_count"] == 2
+  assert set(by_id["topic"]["children"]) == {"a", "b"}
+
+
+def test_hot_note_selection_reflects_live_usage(tmp_path):
+  """Live usage breaks the tie between equal-importance notes, so a note the
+  agent keeps loading rises into the injected hot set even with a 0 baseline."""
+  root = _g(tmp_path)
+  (root / ".ready").write_text("")
+  (root / "index.md").write_text("# Home")
+  (root / "notes" / "low.md").write_text(_note(importance=1, title="Low", mocs=[]))
+  (root / "notes" / "high.md").write_text(_note(importance=1, title="High", mocs=[]))
+  memory.record_usage(tmp_path, ["notes/high.md"] * 3)
+  block = memory.build_memory_block(tmp_path, max_notes=1)
+  assert "notes/high.md" in block.loaded
+  assert "notes/low.md" not in block.loaded
+
+
 def test_build_graph_flags_dangling_link_and_orphan(tmp_path):
   root = _g(tmp_path)
   (root / "index.md").write_text("# Home")

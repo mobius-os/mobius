@@ -478,70 +478,63 @@ def _render_page(
     )
   history_html = "\n".join(history_html_parts)
 
-  # Provider picker. One radio per supported provider; the badge
-  # tells the user whether credentials are configured. Disconnected
-  # providers get a Connect button right inline.
+  # Connection status per provider (badge + inline Connect for any that
+  # isn't authed). This is ONLY auth/status now — it no longer doubles as
+  # the chat's provider selector. The single model dropdown below picks
+  # both provider and model (the model implies its provider), so the owner
+  # makes one choice, not two.
   prov_status = recover_chat_runner.provider_status()
   prov_default = active_provider or recover_chat_runner.default_provider()
-  prov_radio_html_parts = []
+  prov_status_html_parts = []
   for name in recover_chat_runner.SUPPORTED_PROVIDERS:
     configured = bool(prov_status.get(name))
-    checked = "checked" if name == prov_default else ""
     badge = (
       '<span class="rc-prov-ok" title="configured">●</span>'
       if configured
       else '<span class="rc-prov-missing" title="not connected">○</span>'
     )
-    disabled_attr = "" if configured else " disabled"
     connect_html = (
       f'<button type="button" class="rc-connect-btn"'
       f' data-provider="{name}">Connect</button>'
       if not configured else ""
     )
-    prov_radio_html_parts.append(
-      f'<label class="rc-prov">'
-      f'<input type="radio" name="rc-prov" value="{name}"'
-      f' {checked}{disabled_attr}>'
-      f'{badge} {name}'
-      f'</label>{connect_html}'
+    prov_status_html_parts.append(
+      f'<span class="rc-prov">{badge} {name}</span>{connect_html}'
     )
-  provider_picker_html = "\n".join(prov_radio_html_parts)
+  provider_picker_html = "\n".join(prov_status_html_parts)
 
-  # Agent + model selects, beside the provider radios. Both are
-  # OPTIONAL: the agent defaults to Recovery and the model to "CLI
-  # default", so leaving them untouched preserves the pre-selection
-  # behavior exactly. The frozen literals live on recover_chat_runner
-  # (no SDK / providers import). The model <option> values are tagged
-  # with their provider via data-provider so the client JS can filter
-  # the list when the provider radio changes; the backend re-validates
-  # against the effective provider regardless.
-  agent_opts = "\n".join(
-    f'<option value="{_escape(a["id"])}"'
-    f'{" selected" if a["id"] == recover_chat_runner.DEFAULT_RECOVERY_AGENT_ID else ""}'
-    f'>{_escape(a["label"])}</option>'
-    for a in recover_chat_runner.RECOVERY_AGENTS
-  )
-  # Class (not id) selectors so the same markup can appear in BOTH the
-  # picker view and the chat-view override row without duplicate ids;
-  # the JS scopes its query to the visible view (mirroring how the
-  # provider radios are scoped by `#rc-picker-view` / `#rc-chat-view`).
-  agent_select_html = (
-    '<label class="rc-pick">Agent: '
-    f'<select class="rc-select rc-agent-sel">{agent_opts}</select>'
-    '</label>'
-  )
-  model_opt_parts = ['<option value="" data-provider="">CLI default</option>']
-  for prov_name, model_ids in recover_chat_runner.RECOVERY_MODELS.items():
-    for mid in model_ids:
-      model_opt_parts.append(
-        f'<option value="{_escape(mid)}" data-provider="{_escape(prov_name)}">'
-        f'{_escape(mid)}</option>'
+  # Single unified model dropdown. Every option encodes BOTH the provider
+  # and the model as `provider:model` (model empty = that provider's CLI
+  # default), so selecting one option sets both — no separate provider
+  # control. Grouped under per-provider <optgroup>s with a "CLI default"
+  # row at the top of each group. Class (not id) selector so the same
+  # markup appears in both the picker and chat-override views; the JS
+  # scopes its query to the visible view. The backend still validates the
+  # model against the derived provider.
+  model_group_parts = []
+  for prov_name in recover_chat_runner.SUPPORTED_PROVIDERS:
+    opts = [
+      f'<option value="{_escape(prov_name)}:"'
+      f'{" selected" if prov_name == prov_default else ""}>'
+      f'{_escape(prov_name)} — CLI default</option>'
+    ]
+    for mid in recover_chat_runner.RECOVERY_MODELS.get(prov_name, ()):  # noqa: E501
+      opts.append(
+        f'<option value="{_escape(prov_name)}:{_escape(mid)}">{_escape(mid)}</option>'
       )
+    model_group_parts.append(
+      f'<optgroup label="{_escape(prov_name)}">{"".join(opts)}</optgroup>'
+    )
   model_select_html = (
     '<label class="rc-pick">Model: '
-    f'<select class="rc-select rc-model-sel">{"".join(model_opt_parts)}</select>'
+    f'<select class="rc-select rc-model-sel">{"".join(model_group_parts)}</select>'
     '</label>'
   )
+  # The agent (builder/reviewer/recovery) picker was removed — recovery
+  # always runs the recovery agent; exposing the choice added a decision
+  # with no payoff. Kept as an empty string so the existing view templates
+  # that interpolate it render nothing.
+  agent_select_html = ""
 
   # Chat list — newest first, each row shows provider + relative
   # mtime + open + delete buttons. Used by both picker view and
@@ -942,22 +935,19 @@ async function handleSend(e) {{
     // than the chat's stored one, send it as `provider` so the
     // backend overrides for this turn. Skip when picker is empty
     // (chat-view radios are inside #rc-chat-view).
-    const selectedProv = document.querySelector(
-      '#rc-chat-view input[name="rc-prov"]:checked'
-    );
-    const provName = selectedProv ? selectedProv.value : undefined;
-    // Agent + model overrides scoped to the chat view. Empty model →
-    // CLI default; default agent → Recovery. Both per-turn (recovery
-    // doesn't persist them on the chat).
-    const agentSel = document.querySelector('#rc-chat-view .rc-agent-sel');
+    // Per-turn override: the model dropdown encodes "provider:model"
+    // (empty model = that provider's CLI default), so one choice sets both.
     const modelSel = document.querySelector('#rc-chat-view .rc-model-sel');
+    const ovrParts = (modelSel ? modelSel.value : ':').split(':');
+    const ovrProvider = ovrParts.shift() || undefined;
+    const ovrModel = ovrParts.join(':') || undefined;
     const resp = await fetch('/recover/chat/stream', {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
       body: JSON.stringify({{
-        chat_id: CHAT_ID, turn_id: turnId, provider: provName,
-        agent_id: agentSel ? agentSel.value : undefined,
-        model: modelSel ? (modelSel.value || undefined) : undefined,
+        chat_id: CHAT_ID, turn_id: turnId,
+        provider: ovrProvider,
+        model: ovrModel,
       }}),
     }});
     if (!resp.ok || !resp.body) {{
@@ -1054,23 +1044,21 @@ async function handleReset() {{
 async function handleStartChat() {{
   // Pick the provider radio inside the picker view ONLY (chat-view
   // radios are per-turn overrides, not for new-chat creation).
-  const sel = document.querySelector(
-    '#rc-picker-view input[name="rc-prov"]:checked'
-  );
-  if (!sel) {{ alert('Pick a provider first.'); return; }}
-  // Agent + model selects scoped to the picker view. Both optional —
-  // empty model means "CLI default", default agent is Recovery.
-  const agentSel = document.querySelector('#rc-picker-view .rc-agent-sel');
+  // The model dropdown encodes provider+model as "provider:model"
+  // (empty model = that provider's CLI default), so one choice sets both.
   const modelSel = document.querySelector('#rc-picker-view .rc-model-sel');
+  const pickParts = (modelSel ? modelSel.value : 'claude:').split(':');
+  const pickProvider = pickParts.shift();
+  const pickModel = pickParts.join(':') || undefined;
+  if (!pickProvider) {{ alert('Pick a model first.'); return; }}
   startBtn.disabled = true;
   try {{
     const r = await fetch('/recover/chat/new', {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
       body: JSON.stringify({{
-        provider: sel.value,
-        agent_id: agentSel ? agentSel.value : undefined,
-        model: modelSel ? (modelSel.value || undefined) : undefined,
+        provider: pickProvider,
+        model: pickModel,
       }}),
     }});
     if (!r.ok) {{ throw new Error(await r.text() || ('status ' + r.status)); }}

@@ -1419,16 +1419,24 @@ def test_recovery_new_chat_validates_model_and_agent(
   assert bad_agent.status_code == 400
 
 
-def test_recovery_page_renders_agent_and_model_selects(
+def test_recovery_page_renders_unified_model_select(
   client, auth_cookie,
 ):
-  """The recovery HTML exposes agent + model selects beside the
-  provider radios."""
+  """The recovery HTML exposes ONE unified model dropdown (model implies
+  provider) — no separate provider radio, no agent picker. Options encode
+  provider+model as `provider:model`, with a CLI-default row per provider."""
   r = client.get("/recover/chat", cookies=auth_cookie)
   assert r.status_code == 200
-  assert "rc-agent-sel" in r.text
   assert "rc-model-sel" in r.text
+  # CLI-default entries per provider, encoded as `provider:` (empty model).
+  assert 'value="claude:"' in r.text
+  assert 'value="codex:"' in r.text
   assert "CLI default" in r.text
+  # A specific model is encoded provider-qualified, not bare.
+  assert 'value="claude:claude-opus-4-8"' in r.text
+  # The redundant provider radio and the agent picker are gone.
+  assert 'name="rc-prov"' not in r.text
+  assert "rc-agent-sel" not in r.text
 
 
 def test_provider_status_helpers(monkeypatch, tmp_path):

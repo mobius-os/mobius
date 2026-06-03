@@ -20,7 +20,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from app.memory import memory_dir, parse_frontmatter
+from app.memory import _read_usage_file, memory_dir, parse_frontmatter
 
 # `[[slug]]` or `[[slug|display text]]` — capture the slug (left of any pipe).
 _WIKILINK = re.compile(r"\[\[\s*([^\]|#]+?)\s*(?:[|#][^\]]*)?\]\]")
@@ -190,6 +190,26 @@ def build_graph(
       res.problems.append(
         {"severity": "warn", "kind": "unreachable", "detail": sid}
       )
+
+  # Breadth metadata + live usage. children_count lets the agent (and the
+  # Mind app) see a map's breadth at a glance — "this MOC has N members, fan
+  # out and read them" — without parsing the body. A MOC's children are the
+  # notes that declare it (membership edges); the root index's children are
+  # the MOCs it links to (body links). access_count merges the live usage
+  # counter onto the frontmatter baseline so "Used" reflects real load counts.
+  children: dict[str, set[str]] = {sid: set() for sid in nodes_by_id}
+  for e in res.edges:
+    if e["kind"] == "moc" and e["target"] in children:
+      children[e["target"]].add(e["source"])
+    elif e["kind"] == "link" and e["source"] in children:
+      children[e["source"]].add(e["target"])
+  usage = _read_usage_file(root / "usage.json")
+  for sid, node in nodes_by_id.items():
+    if node["type"] == "moc":
+      kids = sorted(children.get(sid, ()))
+      node["children"] = kids
+      node["children_count"] = len(kids)
+    node["access_count"] = node.get("access_count", 0) + usage.get(sid, 0)
 
   res.nodes = list(nodes_by_id.values())
   return res

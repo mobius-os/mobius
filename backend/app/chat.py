@@ -1702,6 +1702,10 @@ async def _run_chat_impl(
       activity.log_event(
         "memory_load", source="injected", paths=block.loaded, mode=block.mode
       )
+      # Persist the load into the usage counter so access_count actually
+      # accrues (it was always 0 before — the Mind app's "Used" column read
+      # a counter nothing incremented). Feeds hot-note selection + graph.json.
+      memory.record_usage(settings.data_dir, block.loaded)
     # Dynamic fields go at the end for cache efficiency.  Use safe
     # dict access on viewport so a malformed payload (missing keys,
     # wrong types) doesn't crash the agent spawn — skip the line
