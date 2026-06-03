@@ -1542,9 +1542,12 @@ class ChatWriterActor:
     know they own the marker (reconciliation, no-handoff cleanup).
 
     The per-run `chat_runs` record (077 Step 3) is closed in the SAME commit:
-    a tokened clear marks its own run's row completed (even a dying run's
-    no-op-on-the-marker clear still closes its OWN run record — the run ended
-    regardless); a tokenless clear closes every still-running row for the chat
+    a tokened clear marks its own run's row "completed" IF it is still running.
+    A run superseded by a fresh StartTurn is already terminal ("interrupted",
+    set by that StartTurn's `_close_running_runs`), so its dying
+    no-op-on-the-marker clear correctly leaves the row terminal rather than
+    re-stamping it — either way the run's record is closed, never left
+    "running". A tokenless clear closes every still-running row for the chat
     (the chat is going idle, so any lingering record is stale).
     """
     from datetime import UTC, datetime

@@ -727,12 +727,20 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
     )
 
   # Orphaned run records (077 Step 3): a chat_runs row left "running" whose
-  # chat is NOT alive and was NOT caught above (its run_status already cleared
-  # — a dropped close, not a normal interruption). Non-destructive: mark the
-  # record interrupted so it doesn't linger as a false "running", but touch no
-  # transcript (run_status, the authoritative trigger, said the chat was idle).
-  # Dual-write keeps the two signals in lockstep, so this normally finds
-  # nothing; it is belt-and-suspenders against a close that didn't land.
+  # chat is NOT alive and was NOT closed above (its run_status already cleared
+  # — a dropped close, or the chat soft-deleted mid-run). Non-destructive: mark
+  # the record interrupted so it doesn't linger as a false "running", but touch
+  # no transcript. Dual-write keeps the two signals in lockstep, so this
+  # normally finds nothing; it is belt-and-suspenders against a close that
+  # didn't land.
+  #
+  # Crucially it must NOT mask a destructive reconcile that FAILED above: that
+  # chat is left with run_status=="running" AND its record "running", and the
+  # next boot's destructive pass must retry it. So skip any record whose chat
+  # still authoritatively reads run_status=="running" and isn't deleted —
+  # flipping only its record would diverge the two signals (record says
+  # interrupted, the authoritative marker still says running). Only close a
+  # record whose chat is gone, soft-deleted, or already run_status-cleared.
   try:
     orphans = (
       db.query(models.ChatRun)
@@ -742,6 +750,17 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
     closed = 0
     for run in orphans:
       if registry.is_alive(run.chat_id):
+        continue
+      chat = (
+        db.query(models.Chat).filter(models.Chat.id == run.chat_id).first()
+      )
+      if (
+        chat is not None
+        and chat.deleted_at is None
+        and chat.run_status == "running"
+      ):
+        # The destructive pass owns this chat (and failed/rolled back, since it
+        # clears run_status on success). Leave the record running to match.
         continue
       run.status = "interrupted"
       run.ended_at = datetime.now(UTC)
