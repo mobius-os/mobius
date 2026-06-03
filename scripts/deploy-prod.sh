@@ -163,6 +163,29 @@ ensure_prod_env() {
 
 ensure_prod_env
 
+external_prod_caddy_running() {
+  [ "$TARGET" = "prod" ] &&
+    docker inspect -f '{{.State.Running}}' deploy-caddy-1 2>/dev/null | grep -q true
+}
+
+ensure_external_caddy_route() {
+  if ! external_prod_caddy_running; then return 0; fi
+  if ! docker network inspect deploy_default >/dev/null 2>&1; then
+    warn "deploy-caddy-1 is running, but deploy_default network is missing; public proxy may not reach ${CONTAINER}."
+    return 0
+  fi
+  # The public Caddy in this host's outer deploy project proxies to
+  # http://mobius:8000 on deploy_default. Recreating the app from this repo's
+  # compose project puts it on mobius_default, so reconnect it to the proxy
+  # network after every cutover. `network connect` is idempotent for our
+  # purposes: "already exists" means the route is already present.
+  if docker network connect --alias mobius --alias app deploy_default "$CONTAINER" 2>/dev/null; then
+    ok "connected ${CONTAINER} to deploy_default for external Caddy"
+  else
+    info "${CONTAINER} already connected to deploy_default, or Docker reported no-op"
+  fi
+}
+
 # Parse the build-cache size out of `docker system df` and return GB as
 # an integer (rounded down). Returns 0 on parse failure so we don't
 # accidentally prune on a malformed line.
@@ -479,8 +502,16 @@ fi
 
 # ── step 2: recreate container with the new image ──────────────────────
 step "[2/4] docker compose up -d (recreates ${CONTAINER})"
-intent "docker compose ${COMPOSE_ARGS[*]} up -d"
-docker compose "${COMPOSE_ARGS[@]}" up -d
+if external_prod_caddy_running; then
+  info "external deploy-caddy-1 owns ports 80/443; updating app service only"
+  docker rm -f "${CONTAINER}-caddy-1" >/dev/null 2>&1 || true
+  intent "docker compose ${COMPOSE_ARGS[*]} up -d app"
+  docker compose "${COMPOSE_ARGS[@]}" up -d app
+  ensure_external_caddy_route
+else
+  intent "docker compose ${COMPOSE_ARGS[*]} up -d"
+  docker compose "${COMPOSE_ARGS[@]}" up -d
+fi
 info "waiting up to 30s for ${INTERNAL_BASE}/api/health"
 for i in $(seq 1 30); do
   code=$(docker exec "$CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/health'" 2>/dev/null || echo "000")
