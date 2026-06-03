@@ -84,12 +84,15 @@ from claude_agent_sdk.types import (
 
 from app import activity
 from app.goal_loop import (
-  _clear_goal,
+  _complete_goal,
   _default_goal_evaluator,
   _goal_continue_message,
+  _goal_token_count,
   _goal_turn_cap,
   _increment_goal_turn,
   _maybe_await,
+  _pause_goal,
+  _record_goal_tokens,
 )
 from app.pending_questions import PendingQuestion
 from app.runner_registry import RunnerKind, registry
@@ -738,6 +741,14 @@ async def run_claude_sdk_turn(
             condition = str(goal_state.get("condition") or "").strip()
             latest = "".join(run_bc.text_parts).strip()
             recent = f"User message:\n{user_message}\n\nAssistant:\n{latest}"
+            turns_used = goal_turns + 1
+            token_delta = _goal_token_count(terminal.get("usage"))
+            token_spend = int(goal_state.get("token_spend") or 0)
+            if token_delta:
+              token_spend = await _record_goal_tokens(
+                chat_id, getattr(bc, "run_token", None), token_delta,
+              )
+              goal_state["token_spend"] = token_spend
             evaluation = await _maybe_await(goal_evaluator(
               condition, latest, recent,
             ))
@@ -745,29 +756,38 @@ async def run_claude_sdk_turn(
             if not reason:
               reason = "goal evaluator returned no reason"
             if bool((evaluation or {}).get("met")):
-              await _clear_goal(chat_id, getattr(bc, "run_token", None))
+              await _complete_goal(
+                chat_id,
+                getattr(bc, "run_token", None),
+                turns=turns_used,
+                reason=reason,
+                token_spend=token_spend,
+              )
               bc.publish({
                 "type": "goal_met",
                 "condition": condition,
-                "turns": goal_turns,
+                "turns": turns_used,
                 "reason": reason,
-              })
-              return terminal
-            cap = _goal_turn_cap(condition)
-            if goal_turns + 1 > cap:
-              bc.publish({
-                "type": "goal_paused",
-                "turn": goal_turns,
-                "condition": condition,
-                "reason": (
-                  f"paused after {goal_turns} turns — /goal to check, "
-                  "/goal clear to cancel"
-                ),
+                "token_spend": token_spend,
               })
               return terminal
             goal_turns = await _increment_goal_turn(
               chat_id, getattr(bc, "run_token", None), reason,
             )
+            goal_state["turns"] = goal_turns
+            cap = _goal_turn_cap(condition, agent_settings)
+            if goal_turns >= cap:
+              await _pause_goal(chat_id, getattr(bc, "run_token", None))
+              bc.publish({
+                "type": "goal_paused",
+                "turn": goal_turns,
+                "condition": condition,
+                "reason": (
+                  f"paused after {goal_turns} turns - /goal to check, "
+                  "/goal clear to cancel"
+                ),
+              })
+              return terminal
             bc.publish({
               "type": "goal_continue",
               "turn": goal_turns,

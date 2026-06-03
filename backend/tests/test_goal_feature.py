@@ -270,8 +270,17 @@ async def test_goal_met_clears_goal_and_ends(db, monkeypatch):
   )
   assert result["error"] is None
   assert clients[0].queries == ["finish it"]
-  assert refreshed.agent_settings_json is None
-  assert any(e["type"] == "goal_met" for e in bus.events)
+  settings = refreshed.agent_settings_json
+  assert "goal" not in settings
+  achieved = settings["achieved_goals"][-1]
+  assert achieved["condition"] == "finish it"
+  assert achieved["turns"] == 1
+  assert achieved["reason"] == "done"
+  assert achieved["token_spend"] == 2
+  assert any(
+    e["type"] == "goal_met" and e["turns"] == 1 and e["token_spend"] == 2
+    for e in bus.events
+  )
 
 
 @pytest.mark.asyncio
