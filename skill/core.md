@@ -44,7 +44,7 @@ The recovery chat uses the **same owner password** as the main shell, behind a s
 
 ## Sessions and memory
 
-Your long-term memory is a **knowledge graph** at `/data/shared/memory/` — small linked markdown notes, Obsidian-style. Session start injects the root map (`index.md`) + highest-value notes + the recent `inbox.md` tail; follow a `[[link]]` by `Read`-ing `notes/<slug>.md` for detail.
+Your long-term memory is a **knowledge graph** at `/data/shared/memory/` — small linked markdown notes, Obsidian-style. Session start injects the root map (`index.md`) + highest-value notes + the recent `inbox.md` tail; follow a `[[link]]` by `Read`-ing `notes/<slug>.md` for detail. The graph is shallow on purpose (root → maps → notes), so recall is **breadth-first, not deep**: when a map points you at several notes you need, `Read` them in **one batch of parallel calls** rather than one-by-one — then stop, since notes don't nest further. `graph.json` carries each map's `children_count`, so you can see a map's breadth before opening it.
 
 Record what is **useful for the future** (a durable preference, a hard-won bug + root cause, a platform contract) — not everything. The low-friction mid-turn move is a one-line inbox append:
 

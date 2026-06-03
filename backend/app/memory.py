@@ -78,6 +78,75 @@ def is_graph_ready(data_dir: str | Path) -> bool:
   return (memory_dir(data_dir) / ".ready").is_file()
 
 
+# ─── Usage tracking (the "access_count" / Mind "Used" signal) ───────────
+#
+# access_count is meant to be "how often a note was loaded" (the hotness
+# signal _note_score reads), but nothing ever incremented it — so every
+# note read 0 and the Mind app's "Used" column was uniformly zero. We track
+# it in a sidecar counter (`usage.json`) rather than rewriting note
+# frontmatter on the hot path: a counter bump is cheap and churns no git
+# history. `build_memory_block` returns `loaded`; the injection site calls
+# `record_usage(loaded)`. `load_usage` feeds both hot-note selection and the
+# graph builder, so the effective access_count = frontmatter baseline + live
+# usage. Keyed by node id (a note's slug), matching graph.json.
+def _usage_path(data_dir: str | Path) -> Path:
+  return memory_dir(data_dir) / "usage.json"
+
+
+def _loaded_path_to_id(rel: str) -> str | None:
+  """Maps a `loaded` entry (e.g. 'notes/foo.md', 'index.md') to its graph
+  node id. inbox.md and anything unrecognised return None (not counted)."""
+  import os
+  name = os.path.basename(rel)
+  if name == "inbox.md":
+    return None
+  if name == "index.md":
+    return "index"
+  if name.endswith(".md"):
+    return name[:-3]
+  return None
+
+
+def _read_usage_file(path: Path) -> dict[str, int]:
+  """Reads a usage.json by absolute path, tolerating absence/corruption."""
+  import json
+  try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+  except (OSError, ValueError):
+    return {}
+  if not isinstance(data, dict):
+    return {}
+  return {k: v for k, v in data.items() if isinstance(v, int)}
+
+
+def load_usage(data_dir: str | Path) -> dict[str, int]:
+  """Reads the usage counter for an instance, tolerating absence (→ {})."""
+  return _read_usage_file(_usage_path(data_dir))
+
+
+def record_usage(data_dir: str | Path, loaded: list[str]) -> None:
+  """Increments the usage counter for every loaded note id. Best-effort and
+  side-effecting — call it from the injection site, NOT from
+  `build_memory_block` (which stays pure). Atomic temp-write + rename so a
+  concurrent chat start can't read a half-written counter."""
+  import json
+  import os
+  ids = [i for i in (_loaded_path_to_id(p) for p in loaded) if i]
+  if not ids:
+    return
+  counts = load_usage(data_dir)
+  for nid in ids:
+    counts[nid] = counts.get(nid, 0) + 1
+  path = _usage_path(data_dir)
+  try:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(counts), encoding="utf-8")
+    os.replace(tmp, path)
+  except OSError as exc:
+    log.warning("memory.record_usage: could not persist usage.json: %r", exc)
+
+
 def parse_frontmatter(text: str) -> dict[str, object]:
   """Minimal YAML-frontmatter reader for the handful of scalar/list fields a
   note carries (`importance`, `access_count`, `title`, `tags`, `mocs`).
@@ -151,11 +220,17 @@ def _select_hot_notes(
     files = sorted(notes_dir.glob("*.md"))
   except OSError:
     return []
+  # Live usage (notes_dir is <memory>/notes, so the sidecar is one level up).
+  # Effective hotness = frontmatter access_count baseline + live load count,
+  # so a note the agent keeps loading rises even if its seed baseline is 0.
+  usage = _read_usage_file(notes_dir.parent / "usage.json")
   for fp in files:
     text = _read(fp)
     if not text.strip():
       continue
-    candidates.append((_note_score(parse_frontmatter(text)), fp, text))
+    imp, base_acc = _note_score(parse_frontmatter(text))
+    score = (imp, base_acc + usage.get(fp.stem, 0))
+    candidates.append((score, fp, text))
   # Select the top-N by score (descending), then re-sort the winners by path.
   candidates.sort(key=lambda c: c[0], reverse=True)
   winners = candidates[:max_notes]

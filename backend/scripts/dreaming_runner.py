@@ -79,6 +79,14 @@ CLAUDE_CONFIG_DIR = DATA_DIR / "cli-auth" / "claude"
 CODEX_HOME = DATA_DIR / "cli-auth" / "codex"
 CLI_PATH = "/usr/local/bin/claude"
 
+# The brief template is baked into the image at /app/scripts; the agent runs
+# with cwd=/data and the SDK Read tool is scoped to that subtree, so a Read of
+# the /app path fails ("result error: error") even though the file is
+# world-readable — which is exactly what stranded the 2026-06-03 run in phase 6.
+# Seed a copy into the agent's own domain each run and point the skill there.
+BAKED_BRIEF_TEMPLATE = Path("/app/scripts/dreaming-brief-template.html")
+BRIEF_TEMPLATE_DEST = DATA_DIR / "apps" / "dreaming" / "dreaming-brief-template.html"
+
 # Multi-turn budget for the whole nightly goal loop. High because one
 # Dreaming run spans many phases (interviews, skill edits, graph
 # consolidation, app fixes, research, brief + morning chat), each
@@ -142,6 +150,28 @@ def load_skill() -> str:
   raise FileNotFoundError(
     f"dreaming skill not found at {SKILL_PATH} or any baked fallback"
   )
+
+
+def seed_brief_template() -> None:
+  """Copies the baked brief template into the agent's /data domain.
+
+  The SDK Read tool can't reach /app under cwd=/data, so the agent must
+  read the template from a /data path. Refresh it every run (best-effort)
+  so template improvements in the image propagate; a missing baked source
+  or a copy failure is non-fatal — the skill's phase-6 fallback writes a
+  plain brief if the template isn't readable.
+  """
+  src = BAKED_BRIEF_TEMPLATE
+  if not src.is_file():
+    src = Path(__file__).resolve().parent / "dreaming-brief-template.html"
+  if not src.is_file():
+    _log("brief template not found in image — phase 6 will use the fallback")
+    return
+  try:
+    BRIEF_TEMPLATE_DEST.parent.mkdir(parents=True, exist_ok=True)
+    BRIEF_TEMPLATE_DEST.write_bytes(src.read_bytes())
+  except OSError as exc:
+    _log(f"could not seed brief template to {BRIEF_TEMPLATE_DEST}: {exc!r}")
 
 
 def load_settings() -> dict:
@@ -327,6 +357,7 @@ async def run() -> int:
   settings = load_settings()
   provider, model, effort = _resolve_model(settings)
   skill_text = load_skill()
+  seed_brief_template()
   goal = build_goal(settings)
   env = build_env()
   max_turns = int(settings.get("max_turns") or DEFAULT_MAX_TURNS)
