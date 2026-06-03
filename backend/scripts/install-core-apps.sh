@@ -1,7 +1,9 @@
 #!/bin/bash
-# install-core-apps.sh — first-boot install of Möbius's two CORE apps
-# (memory-graph viewer + dreaming) from baked source, plus the nightly
-# dreaming cron. Idempotent: skips an app that's already registered.
+# install-core-apps.sh — installs Möbius's two CORE apps (Mind, the
+# memory-graph viewer; and Dreaming, the nightly brief) from baked source,
+# plus the nightly dreaming cron. Idempotent + deploy-aware: registers a
+# missing app, and re-syncs an existing app's UI from baked source only when
+# the baked jsx changed since the last sync (see sync_core_app).
 #
 # Runs AFTER the server is up (the entrypoint backgrounds it post-launch and
 # it polls /api/health first) because registration goes through the API — the
@@ -36,9 +38,14 @@ export AGENT_TOKEN="$TOKEN" API_BASE_URL
 
 apps_json="$(curl -s -H "Authorization: Bearer $TOKEN" "$API_BASE_URL/api/apps/" 2>>"$LOG")"
 
-# has_app <slug> -> echoes the numeric id if registered, else empty.
+# has_app <slug> -> echoes the numeric id of the registered app (matched
+# on slug or slugified name) from the global apps_json, else empty. The
+# program is passed via -c (argv), NOT a
+# stdin heredoc: `python3 - <<'PY'` would consume stdin as the program
+# text, leaving json.load(sys.stdin) at EOF — so the piped apps_json
+# would never be read and every lookup would (silently) return empty.
 has_app() {
-  python3 - "$1" <<'PY' 2>/dev/null
+  echo "$apps_json" | python3 -c '
 import json, sys
 slug = sys.argv[1]
 try:
@@ -49,27 +56,48 @@ try:
             print(a.get("id")); break
 except Exception:
     pass
-PY
+' "$1" 2>/dev/null
 }
 
-register() {  # <slug> <Name> <description> ; echoes new id
+# sync_core_app <slug> <Name> <description> ; echoes the app id.
+#
+# register_app.py is create-OR-update (it PATCHes jsx_source when an app of
+# the same name exists), so calling it always re-syncs the baked UI. But we
+# gate that on the baked source actually having CHANGED since the last sync:
+# core apps are platform-owned, yet the agent may still improve a core app's
+# UI (e.g. the Dreaming brief renderer), and Möbius treats agent edits as
+# first-class. The hash sentinel means a platform DEPLOY (new baked jsx)
+# propagates on the next boot, while an ordinary restart leaves any
+# post-deploy agent edits untouched. First boot after this mechanism ships
+# has no sentinel → treated as changed → installs/updates once.
+sync_core_app() {
   local slug="$1" name="$2" desc="$3"
-  mkdir -p "$DATA_DIR/apps/$slug"
-  cp "$CORE_SRC/$slug/index.jsx" "$DATA_DIR/apps/$slug/index.jsx"
-  python3 /app/scripts/register_app.py "$name" "$desc" "$DATA_DIR/apps/$slug/index.jsx" 2>>"$LOG" \
+  local src="$CORE_SRC/$slug/index.jsx"
+  local dst_dir="$DATA_DIR/apps/$slug"
+  local hashfile="$dst_dir/.baked-jsx.sha256"
+  mkdir -p "$dst_dir"
+  local baked_hash live_hash existing_id
+  baked_hash="$(sha256sum "$src" 2>/dev/null | cut -d' ' -f1)"
+  live_hash="$(cat "$hashfile" 2>/dev/null || echo none)"
+  existing_id="$(has_app "$slug")"
+  if [[ -n "$existing_id" && "$baked_hash" == "$live_hash" ]]; then
+    log "$slug unchanged since last sync (id=$existing_id)"
+    echo "$existing_id"
+    return
+  fi
+  cp "$src" "$dst_dir/index.jsx"
+  local id
+  id="$(python3 /app/scripts/register_app.py "$name" "$desc" "$dst_dir/index.jsx" 2>>"$LOG" \
     | python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("id",""))
-except Exception: print("")'
+except Exception: print("")')"
+  [[ -n "$baked_hash" ]] && echo "$baked_hash" > "$hashfile"
+  log "synced $slug from baked source (id=$id)"
+  echo "$id"
 }
 
-# --- memory-graph -----------------------------------------------------
-mg_id="$(echo "$apps_json" | has_app mind)"
-if [[ -z "$mg_id" ]]; then
-  mg_id="$(register mind "Mind" "What Möbius knows about you — an Obsidian-style graph of its memory it grows over time.")"
-  log "registered mind (id=$mg_id)"
-else
-  log "mind already installed (id=$mg_id)"
-fi
+# --- Mind -------------------------------------------------------------
+mg_id="$(sync_core_app mind "Mind" "What Möbius knows about you — an Obsidian-style graph of its memory it grows over time.")"
 # Set the app icon (kg-t1: glossy infinity-as-graph, the owner's pick). Raw PNG
 # bytes; the route downscales + stores. Idempotent — fine to re-PUT each boot.
 if [[ -n "$mg_id" && -f "$CORE_SRC/mind/icon.png" ]]; then
@@ -78,19 +106,15 @@ if [[ -n "$mg_id" && -f "$CORE_SRC/mind/icon.png" ]]; then
 fi
 
 # --- dreaming ---------------------------------------------------------
-dr_id="$(echo "$apps_json" | has_app dreaming)"
-if [[ -z "$dr_id" ]]; then
-  dr_id="$(register dreaming "Dreaming" "Your nightly morning brief — Möbius works while you sleep and reports back.")"
-  log "registered dreaming (id=$dr_id)"
-else
-  log "dreaming already installed (id=$dr_id)"
-fi
+dr_id="$(sync_core_app dreaming "Dreaming" "Your nightly morning brief — Möbius works while you sleep and reports back.")"
 
 # Ship the dreaming cron machinery + install the schedule (idempotent).
+# fetch.sh + the fork helpers are platform machinery (a thin runner wrapper
+# and the introspection utilities) — always re-copied from baked source, no
+# version gate: the agent edits the dreaming SKILL, not these.
 if [[ -n "$dr_id" ]]; then
   mkdir -p "$DATA_DIR/apps/dreaming"
   cp "$CORE_SRC/dreaming/fetch.sh" "$DATA_DIR/apps/dreaming/fetch.sh"
-  cp "$CORE_SRC/dreaming/prompt.md" "$DATA_DIR/apps/dreaming/prompt.md" 2>/dev/null || true
   # Introspection helpers the Dreaming agent calls to fork + interview chats
   # and app subagent runs (the heart of the nightly loop).
   cp /app/scripts/fork-chat.sh "$DATA_DIR/apps/dreaming/fork-chat.sh" 2>/dev/null || true
@@ -106,4 +130,4 @@ if [[ -n "$dr_id" ]]; then
     || log "WARN dreaming cron install failed (see log)"
 fi
 
-log "done (memory-graph=$mg_id dreaming=$dr_id)"
+log "done (mind=$mg_id dreaming=$dr_id)"
