@@ -1,55 +1,7 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.venv/
-venv/
-*.db
-
-# Environment — never commit secrets
-.env
-
-# Node
-node_modules/
-dist/
-.vite/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# IDE
-.vscode/
-.idea/
-
-# Docker runtime data
-caddy_data/
-caddy_config/
-docker-compose.override.yml
-
-# Local app data (created by the agent during development)
-apps/
-
-# Runtime data volume — database, compiled apps, logs
-# These are created at runtime and should not be in the repo.
-backend/data/
-
-# Log files
-*.log
-.worktrees/
-.superpowers/
-
-# Playwright
-tests/.auth/
-test-results/
-playwright-report/
-
-# Internal planning docs — not for public release
-docs/
-
-# Internal dev artifacts — not for public release
-demo-logs/
-.claude/
-.pm/
-AGENTS.md
-CLAUDE.md
+# Compiled bundle is a build artifact, rebuilt from index.jsx.
+*.js
+# Install/rollback snapshots are not source.
+*.bak
+# Defensive: the integer-id storage tree is a sibling dir, but if a
+# numeric data dir ever lands here it is runtime data, not source.
+[0-9]*/
