@@ -1,4 +1,5 @@
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
+import { ChatIdContext } from './markdown/ChatIdContext.js'
 import ToolBlock from './ToolBlock.jsx'
 import QuestionCard from './QuestionCard.jsx'
 import Attachments from './Attachments.jsx'
@@ -14,7 +15,7 @@ function stripAugmentation(text) {
 export default function MsgContent({ msg, chatId, onQuestionAnswer, questionAnswers }) {
   if (msg.blocks && msg.blocks.length > 0) {
     return (
-      <>
+      <ChatIdContext.Provider value={chatId}>
         {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
         {msg.blocks.map((block, i) => {
           if (block.type === 'text') {
@@ -75,7 +76,7 @@ export default function MsgContent({ msg, chatId, onQuestionAnswer, questionAnsw
           }
           return null
         })}
-      </>
+      </ChatIdContext.Provider>
     )
   }
 
@@ -83,7 +84,7 @@ export default function MsgContent({ msg, chatId, onQuestionAnswer, questionAnsw
     ? stripAugmentation(msg.content) : msg.content
 
   return (
-    <>
+    <ChatIdContext.Provider value={chatId}>
       {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
       {text ? (
         <div className={`chat__text chat__text--${msg.role}`}>
@@ -92,6 +93,6 @@ export default function MsgContent({ msg, chatId, onQuestionAnswer, questionAnsw
             : text}
         </div>
       ) : null}
-    </>
+    </ChatIdContext.Provider>
   )
 }

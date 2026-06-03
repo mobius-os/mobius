@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import DOMPurify from 'dompurify'
 import { getToken, BASE } from '../../../api/client.js'
 import { renderInlineMath, renderBlockMath, renderMathToString } from './math.js'
+import { useChatId } from './ChatIdContext.js'
 import ImageLightbox from './ImageLightbox.jsx'
 import '../lightbox.css'
 
@@ -99,11 +100,28 @@ function safeLinkHref(href) {
   return safeUrl(href, SAFE_LINK_PROTOCOLS)
 }
 
-function resolveImageSrc(href) {
+function normalizeChatImagePath(url, chatId) {
+  if (!chatId) return
+  const parts = url.pathname.split('/')
+  const apiIndex = parts.findIndex((part, i) => (
+    part === 'api' && parts[i + 1] === 'chats'
+  ))
+  if (
+    apiIndex >= 0
+    && parts.length > apiIndex + 4
+    && (parts[apiIndex + 3] === 'generated' || parts[apiIndex + 3] === 'uploads')
+  ) {
+    parts[apiIndex + 2] = chatId
+    url.pathname = parts.join('/')
+  }
+}
+
+function resolveImageSrc(href, chatId) {
   let src = safeUrl(href, SAFE_IMAGE_PROTOCOLS)
   if (!src) return null
   if (src.startsWith('/api/') || src.startsWith(BASE + '/api/')) {
     const url = new URL(src, location.origin)
+    normalizeChatImagePath(url, chatId)
     url.searchParams.set('token', getToken())
     src = url.pathname + url.search
   }
@@ -112,7 +130,8 @@ function resolveImageSrc(href) {
 
 function ExpandableImage({ href, alt }) {
   const [open, setOpen] = useState(false)
-  const src = resolveImageSrc(href)
+  const chatId = useChatId()
+  const src = resolveImageSrc(href, chatId)
   if (!src) return null
   return (
     <>
