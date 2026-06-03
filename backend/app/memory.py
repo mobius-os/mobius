@@ -131,6 +131,7 @@ def record_usage(data_dir: str | Path, loaded: list[str]) -> None:
   concurrent chat start can't read a half-written counter."""
   import json
   import os
+  import tempfile
   ids = [i for i in (_loaded_path_to_id(p) for p in loaded) if i]
   if not ids:
     return
@@ -140,9 +141,23 @@ def record_usage(data_dir: str | Path, loaded: list[str]) -> None:
   path = _usage_path(data_dir)
   try:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(counts), encoding="utf-8")
-    os.replace(tmp, path)
+    # Write to a UNIQUE temp file (not a shared "usage.json.tmp"): two
+    # concurrent chat starts would otherwise both write the same temp path and
+    # one could os.replace a file the other is still writing — corrupting it.
+    # mkstemp gives each writer its own temp; os.replace is atomic. (Increments
+    # can still race across processes, but Mobius runs a single worker where
+    # this sync write is atomic, and the counter is best-effort regardless.)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".usage-", suffix=".tmp")
+    try:
+      with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(counts, fh)
+      os.replace(tmp, path)
+    except BaseException:
+      try:
+        os.unlink(tmp)
+      except OSError:
+        pass
+      raise
   except OSError as exc:
     log.warning("memory.record_usage: could not persist usage.json: %r", exc)
 
