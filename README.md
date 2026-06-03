@@ -34,9 +34,9 @@
 
 ## What is Möbius?
 
-Most software asks you to adapt to it. AI assistants tend to make this worse with time: context drifts, preferences leak between tasks, memory accumulates in the wrong places, sessions feel less coherent the more you use them. Möbius is built around the opposite idea: it improves the more you interact with it.
+Most software asks you to adapt to it. AI assistants tend to make this worse with time: context drifts, preferences leak between tasks, memory accumulates in the wrong places, sessions feel less coherent the more you use them. Möbius is built around the opposite idea. It improves the more you interact with it.
 
-Möbius is a personalized AI agent you self-host. A chat on one side, a canvas on the other. You describe what you want, and the coding agent inside builds it: a small piece of software that lands next to the chat, runs in your browser, and is yours to keep.
+Möbius is a personalized AI agent you self-host. A chat on one side, a canvas on the other. You describe what you want, and the coding agent inside builds it, a small piece of software that lands next to the chat, runs in your browser, and is yours to keep.
 
 The agent isn't limited to apps. It can change the interface itself: the theme, the layout, the features in the shell. It edits the source and rebuilds live. Some changes appear instantly, others take a few seconds. The agent runs on Codex (free or paid ChatGPT plan) or Claude Code (any paid plan), both via OAuth, no API key needed. Codex includes image generation out of the box; on Claude Code you can plug in a Gemini API key for image generation if you want it, but it's optional.
 
@@ -98,15 +98,15 @@ If the UI ever breaks, every instance ships with `/recover`. It resets the shell
 
 ## An app store, and an operating system
 
-Möbius now has a small curated app store. It is a starter pack, not a registry: each public app lives in a repo under [github.com/mobius-os](https://github.com/mobius-os), with a manifest, an `index.jsx` entry point, and an icon. Installing one means pasting a URL. There is no submission queue or central registry to be blessed by.
+Möbius now has a small curated app store. It is a starter pack, not a registry. Each public app lives in a repo under [github.com/mobius-os](https://github.com/mobius-os), with a manifest, an `index.jsx` entry point, and an icon. Installing one means pasting a URL. There is no submission queue or central registry to be blessed by.
 
 Updates are keyed by that URL. If the upstream manifest bumps its version, the store can show an update; reinstalling from the same URL patches the app code and keeps your data.
 
-Recovery follows the same philosophy as the rest of the platform: breaking should be cheap to undo. Installs are atomic, so a failed install cannot half-land. `/recover` resets the shell while keeping your chats, apps, and data. Your instance is also a git repo, so the agent can read the history and restore a bad change. What does not exist today is a per-app rollback button in the store. Recovery is atomic installs, `/recover`, and git history, not a one-click versioned rollback.
+Recovery follows the same philosophy as the rest of the platform, where breaking should be cheap to undo. Installs are atomic, so a failed install cannot half-land. `/recover` resets the shell while keeping your chats, apps, and data. Your instance is also a git repo, so the agent can read the history and restore a bad change. What does not exist today is a per-app rollback button in the store. Recovery is atomic installs, `/recover`, and git history, not a one-click versioned rollback.
 
 Apps are also standalone PWAs. You can save one to your phone's home screen, open it like a native app, and use offline-capable apps with no network; writes queue locally and sync back to your server when you reconnect.
 
-The honest edge is composition. The substrate exists: apps have scoped storage and the platform has a permission model for one app reading another's data. The feature does not. There is no built-in flow today where you ask Möbius to combine your workout tracker, calorie log, and journal into a new app that reads across all three.
+The honest edge is composition. The substrate exists. Apps have scoped storage and the platform has a permission model for one app reading another's data. The feature does not. There is no built-in flow today where you ask Möbius to combine your workout tracker, calorie log, and journal into a new app that reads across all three.
 
 Read more in [The Agent is the Kernel](https://hamzamerzic.info/blog/2026/the-agent-is-the-kernel/).
 
@@ -143,7 +143,7 @@ A second loop, off to the side, watches the inner agent build and rewrites the s
 
 Douglas Hofstadter described strange loops as systems that, by moving through levels, unexpectedly arrive back where they started. Gödel found one in arithmetic. Escher drew one in hands that draw each other. Bach wove them into canons that modulate through every key and come home.
 
-Möbius has its own version: the agent builds the interface it runs inside, accumulates experience about the system it inhabits, and uses that experience to build better things within it. Like the strip it's named after, there's no clear inside or outside, just one continuous surface.
+Möbius has its own version. The agent builds the interface it runs inside, accumulates experience about the system it inhabits, and uses that experience to build better things within it. Like the strip it's named after, there's no clear inside or outside, just one continuous surface.
 
 The strange loop is the shape. The lever is shorter than that: closing the iteration cycle. Requests become software. Software becomes context. The next request starts from a richer place. Generic assistants stall there; Möbius is an experiment in pushing that loop until the assistant becomes specific to *you* instead of generic to a market segment.
 
@@ -155,11 +155,11 @@ The agent that builds your apps is the inner loop. There is also an outer loop, 
 
 Three findings worth flagging from running this loop on ourselves:
 
-1. The natural debugging move is to read the inner agent's transcripts and patch the prompt. That stalls quickly: every rule you add seems to surface a regression somewhere else. Asking the inner agent *why* it did what it did, with the transcript still in its context, produced more durable revisions in fewer iterations than third-party theory-of-mind ever did.
+1. The natural debugging move is to read the inner agent's transcripts and patch the prompt. That stalls quickly, because every rule you add seems to surface a regression somewhere else. Asking the inner agent *why* it did what it did, with the transcript still in its context, produced more durable revisions in fewer iterations than third-party theory-of-mind ever did.
 
 2. The naive worry about asking the model directly is that you will get sycophancy back. The actual finding is more nuanced. Confrontational prompts produce binary compliance-or-defiance; warm, curious framings get the model to push back on bad premises and cooperate on good ones, the productive middle.
 
-3. Once the loop is working, what limits the inner agent's improvement stops being the model itself. It is whatever you decide is worth measuring and optimizing for, and that set of meta-goals is upstream of the harness: it comes from real users hitting real friction on real apps.
+3. Once the loop is working, what limits the inner agent's improvement stops being the model itself. It is whatever you decide is worth measuring and optimizing for, and that set of meta-goals is upstream of the harness, coming from real users hitting real friction on real apps.
 
 [Full notes from the harness experiments →](https://hamzamerzic.info/blog/2026/the-self-improvement-harness/)
 
@@ -176,7 +176,7 @@ Two pieces of the memory story have moved from roadmap to shipped:
 
 Still ahead:
 
-- **Proactive behavior under user control.** The agent should be able to notice stale apps, suggest things worth learning, and ask before interrupting: discretion rather than chattiness.
+- **Proactive behavior under user control.** The agent should be able to notice stale apps, suggest things worth learning, and ask before interrupting, with discretion rather than chattiness.
 
 ---
 
