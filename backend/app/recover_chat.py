@@ -186,11 +186,23 @@ def recover_chat_new(
   Client redirects to /recover/chat?id=<chat_id> after this returns.
   The chat is created with a `_meta` line carrying the provider so
   later opens render the picker with the original provider preset.
+
+  Optional `model` and `agent_id` are validated against the frozen
+  recovery literals (400 on unknown) but are NOT persisted on the chat
+  — they're per-turn selections the /stream POST carries. Validating
+  here gives the client a clean early error rather than a silent
+  fall-through to the CLI default.
   """
   _require_session(moebius_recover)
   provider = (payload or {}).get("provider")
   if provider not in recover_chat_runner.SUPPORTED_PROVIDERS:
     raise HTTPException(status_code=400, detail="invalid provider")
+  model = (payload or {}).get("model")
+  if not recover_chat_runner.is_valid_recovery_model(provider, model):
+    raise HTTPException(status_code=400, detail="invalid model")
+  agent_id = (payload or {}).get("agent_id")
+  if not recover_chat_runner.is_valid_recovery_agent(agent_id):
+    raise HTTPException(status_code=400, detail="invalid agent")
   try:
     chat_id = recover_chat_runner.create_chat(provider)
   except (ValueError, RuntimeError) as exc:
@@ -274,13 +286,19 @@ async def recover_chat_stream(
   user message. POST (not GET) so the message body never appears in
   uvicorn access logs, Caddy access logs, or browser history.
 
-  Body: {chat_id: str, turn_id: int, provider?: str}.
+  Body: {chat_id: str, turn_id: int, provider?: str, model?: str,
+  agent_id?: str}.
 
   Provider defaults to the chat's stored `_meta.provider`, but the
   client can override (e.g. a chat was created with Codex but the
   user wants to ask Claude for a follow-up via a quick override).
   Unknown provider names normalize to None so the runner picks the
   chat's default.
+
+  `model` and `agent_id` are validated against the frozen recovery
+  literals — an unknown value 400s rather than silently falling back,
+  so the user knows their selection didn't take. They scope this turn
+  only (recovery doesn't persist per-turn model/agent on the chat).
 
   Replay guard: each (chat_id, turn_id) can only be streamed once.
   A duplicate POST gets 409 instead of spawning a second CLI.
@@ -298,6 +316,19 @@ async def recover_chat_stream(
     or recover_chat_runner.get_chat_provider(chat_id)
     or None
   )
+  # Validate the model against the EFFECTIVE provider (the one the
+  # turn will actually spawn) so a Claude-only model can't slip through
+  # on a Codex turn. `default_provider()` mirrors the runner's own
+  # fallback so the validation provider matches what runs.
+  model = (payload or {}).get("model") if payload else None
+  validate_provider = (
+    effective_provider or recover_chat_runner.default_provider()
+  )
+  if not recover_chat_runner.is_valid_recovery_model(validate_provider, model):
+    raise HTTPException(status_code=400, detail="invalid model")
+  agent_id = (payload or {}).get("agent_id") if payload else None
+  if not recover_chat_runner.is_valid_recovery_agent(agent_id):
+    raise HTTPException(status_code=400, detail="invalid agent")
   if isinstance(turn_id, int):
     if (chat_id, turn_id) in _streamed_turn_ids:
       raise HTTPException(
@@ -318,6 +349,7 @@ async def recover_chat_stream(
   async def gen():
     async for chunk in recover_chat_runner.stream_turn(
       message, effective_provider, chat_id=chat_id,
+      model=model, agent_id=agent_id,
     ):
       yield chunk
 
@@ -475,6 +507,42 @@ def _render_page(
     )
   provider_picker_html = "\n".join(prov_radio_html_parts)
 
+  # Agent + model selects, beside the provider radios. Both are
+  # OPTIONAL: the agent defaults to Recovery and the model to "CLI
+  # default", so leaving them untouched preserves the pre-selection
+  # behavior exactly. The frozen literals live on recover_chat_runner
+  # (no SDK / providers import). The model <option> values are tagged
+  # with their provider via data-provider so the client JS can filter
+  # the list when the provider radio changes; the backend re-validates
+  # against the effective provider regardless.
+  agent_opts = "\n".join(
+    f'<option value="{_escape(a["id"])}"'
+    f'{" selected" if a["id"] == recover_chat_runner.DEFAULT_RECOVERY_AGENT_ID else ""}'
+    f'>{_escape(a["label"])}</option>'
+    for a in recover_chat_runner.RECOVERY_AGENTS
+  )
+  # Class (not id) selectors so the same markup can appear in BOTH the
+  # picker view and the chat-view override row without duplicate ids;
+  # the JS scopes its query to the visible view (mirroring how the
+  # provider radios are scoped by `#rc-picker-view` / `#rc-chat-view`).
+  agent_select_html = (
+    '<label class="rc-pick">Agent: '
+    f'<select class="rc-select rc-agent-sel">{agent_opts}</select>'
+    '</label>'
+  )
+  model_opt_parts = ['<option value="" data-provider="">CLI default</option>']
+  for prov_name, model_ids in recover_chat_runner.RECOVERY_MODELS.items():
+    for mid in model_ids:
+      model_opt_parts.append(
+        f'<option value="{_escape(mid)}" data-provider="{_escape(prov_name)}">'
+        f'{_escape(mid)}</option>'
+      )
+  model_select_html = (
+    '<label class="rc-pick">Model: '
+    f'<select class="rc-select rc-model-sel">{"".join(model_opt_parts)}</select>'
+    '</label>'
+  )
+
   # Chat list — newest first, each row shows provider + relative
   # mtime + open + delete buttons. Used by both picker view and
   # chat view (in the latter it's collapsed/scrollable).
@@ -576,6 +644,14 @@ def _render_page(
   .rc-prov input[type="radio"] {{ margin: 0 4px 0 0; }}
   .rc-prov-ok {{ color: #2a5; }}
   .rc-prov-missing {{ color: #c66; }}
+  .rc-pick {{
+    display: inline-flex; align-items: center; gap: 4px;
+    color: #888; font-size: 13px;
+  }}
+  .rc-select {{
+    background: #222; color: #ddd; border: 1px solid #444;
+    border-radius: 3px; padding: 3px 6px; font-size: 13px;
+  }}
   .rc-connect-btn {{
     background: #2a4; color: white; border: 1px solid #3a5;
     padding: 2px 8px; border-radius: 3px; cursor: pointer;
@@ -748,6 +824,8 @@ def _render_page(
     <div class="rc-newchat-row">
       <span class="rc-prov-label">Provider:</span>
       {provider_picker_html}
+      {agent_select_html}
+      {model_select_html}
       <button type="button" id="rc-start-btn" class="rc-start-btn">Start chat</button>
     </div>
   </div>
@@ -765,6 +843,8 @@ def _render_page(
   <div class="rc-prov-row">
     <span class="rc-prov-label">Rescue agent (override):</span>
     {provider_picker_html}
+    {agent_select_html}
+    {model_select_html}
   </div>
   <div id="rc-log" class="rc-log">{history_html}</div>
   <form class="rc-form" id="rc-form">
@@ -866,11 +946,18 @@ async function handleSend(e) {{
       '#rc-chat-view input[name="rc-prov"]:checked'
     );
     const provName = selectedProv ? selectedProv.value : undefined;
+    // Agent + model overrides scoped to the chat view. Empty model →
+    // CLI default; default agent → Recovery. Both per-turn (recovery
+    // doesn't persist them on the chat).
+    const agentSel = document.querySelector('#rc-chat-view .rc-agent-sel');
+    const modelSel = document.querySelector('#rc-chat-view .rc-model-sel');
     const resp = await fetch('/recover/chat/stream', {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
       body: JSON.stringify({{
         chat_id: CHAT_ID, turn_id: turnId, provider: provName,
+        agent_id: agentSel ? agentSel.value : undefined,
+        model: modelSel ? (modelSel.value || undefined) : undefined,
       }}),
     }});
     if (!resp.ok || !resp.body) {{
@@ -971,12 +1058,20 @@ async function handleStartChat() {{
     '#rc-picker-view input[name="rc-prov"]:checked'
   );
   if (!sel) {{ alert('Pick a provider first.'); return; }}
+  // Agent + model selects scoped to the picker view. Both optional —
+  // empty model means "CLI default", default agent is Recovery.
+  const agentSel = document.querySelector('#rc-picker-view .rc-agent-sel');
+  const modelSel = document.querySelector('#rc-picker-view .rc-model-sel');
   startBtn.disabled = true;
   try {{
     const r = await fetch('/recover/chat/new', {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{provider: sel.value}}),
+      body: JSON.stringify({{
+        provider: sel.value,
+        agent_id: agentSel ? agentSel.value : undefined,
+        model: modelSel ? (modelSel.value || undefined) : undefined,
+      }}),
     }});
     if (!r.ok) {{ throw new Error(await r.text() || ('status ' + r.status)); }}
     const body = await r.json();

@@ -356,6 +356,85 @@ else
   ok "image rebuilt"
 fi
 
+# ── preflight: boot the new image in a scratch container before cutover ──
+# A green `docker build` does NOT mean the image RUNS: a SyntaxError fails at
+# Python import, a missing dep at uvicorn start, a bad migration at lifespan —
+# none of which `build` catches (this is exactly the 2026-05-30 conflict-marker
+# outage: the build succeeded, the container crash-looped). Step [2/4] below
+# replaces the LIVE container before we learn that, leaving the rollback as the
+# only net and prod blinking 502 for its duration. So first boot the freshly-
+# built image in an ISOLATED scratch container: if it can't serve /api/health
+# AND /api/ready, abort with the live container UNTOUCHED — no blink, no
+# rollback needed. Only runs when we built an image this run; --skip-build
+# reuses the already-live (already-proven) image, which needs no pre-check.
+if [ "$BUILT_THIS_RUN" = "1" ] && [ -n "$IMAGE_TAG" ]; then
+  step "[preflight] boot the new image in a scratch container"
+  PREFLIGHT_CONTAINER="${CONTAINER}-preflight-$$"
+  # Remove the scratch box on ANY exit from here on (idempotent: rm -f on a
+  # missing container no-ops). Left set for the rest of the run — it only ever
+  # targets this run's uniquely-$$-named box, so it can't touch prod.
+  _cleanup_preflight() { docker rm -f "$PREFLIGHT_CONTAINER" >/dev/null 2>&1 || true; }
+  trap _cleanup_preflight EXIT
+  # Sweep any scratch box a previously-killed run left behind (best-effort).
+  docker ps -aq --filter "name=^${CONTAINER}-preflight-" \
+    | xargs -r docker rm -f >/dev/null 2>&1 || true
+  # Any 32+ char key satisfies the settings validator; the scratch box has a
+  # fresh tmpfs DB and serves no authenticated request, so a throwaway key is
+  # correct here — we are testing "does the image boot", not prod auth.
+  _pf_sk=$(python3 -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null \
+    || echo "preflight-throwaway-key-at-least-32-chars-not-for-real-use")
+  # tmpfs /data → never reads or writes the prod volume; no published port →
+  # no host collision; MOEBIUS_SKIP_BOOTSTRAP skips the first-boot GitHub fetch
+  # (irrelevant to "does it boot"). IMAGE_TAG is the tag compose just rebuilt
+  # in place, so this runs the about-to-be-deployed image.
+  intent "docker run -d --name ${PREFLIGHT_CONTAINER} (tmpfs /data, no port) ${IMAGE_TAG}"
+  docker run -d \
+    --name "$PREFLIGHT_CONTAINER" \
+    --init \
+    --restart no \
+    --tmpfs /data:mode=0755 \
+    -e "SECRET_KEY=${_pf_sk}" \
+    -e "DATABASE_URL=sqlite:////data/db/preflight.db" \
+    -e "DATA_DIR=/data" \
+    -e "DOMAIN=localhost" \
+    -e "FRONTEND_ORIGIN=http://localhost" \
+    -e "MOEBIUS_SKIP_BOOTSTRAP=1" \
+    "$IMAGE_TAG" >/dev/null
+  # Poll liveness then writer-readiness via `docker exec` (same probe as the
+  # live waits below). 45s, slightly longer than the live 30s: the scratch box
+  # cold-starts (tmpfs, no warm page cache) on a memory-tight host.
+  _pf_live=0
+  info "waiting up to 45s for preflight ${INTERNAL_BASE}/api/health"
+  for i in $(seq 1 45); do
+    code=$(docker exec "$PREFLIGHT_CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/health'" 2>/dev/null || echo "000")
+    if [ "$code" = "200" ]; then ok "preflight /api/health: 200 after ${i}s"; _pf_live=1; break; fi
+    sleep 1
+  done
+  if [ "$_pf_live" != "1" ]; then
+    fail "preflight: the new image never served /api/health 200 in 45s (last: ${code})."
+    fail "it crash-loops at boot — the LIVE ${CONTAINER} was NOT touched. Last 40 log lines:"
+    docker logs "$PREFLIGHT_CONTAINER" --tail 40 2>&1 | sed 's/^/    /' >&2 || true
+    exit 1
+  fi
+  _pf_ready=0
+  info "waiting up to 45s for preflight ${INTERNAL_BASE}/api/ready"
+  for i in $(seq 1 45); do
+    rcode=$(docker exec "$PREFLIGHT_CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/ready'" 2>/dev/null || echo "000")
+    if [ "$rcode" = "200" ]; then ok "preflight /api/ready: 200 after ${i}s"; _pf_ready=1; break; fi
+    sleep 1
+  done
+  if [ "$_pf_ready" != "1" ]; then
+    fail "preflight: the new image's /api/ready never returned 200 in 45s (last: ${rcode})."
+    fail "the chat-persistence writer fails to start — the LIVE ${CONTAINER} was NOT touched. Last 40 log lines:"
+    docker logs "$PREFLIGHT_CONTAINER" --tail 40 2>&1 | sed 's/^/    /' >&2 || true
+    exit 1
+  fi
+  _cleanup_preflight
+  ok "preflight passed — the new image boots and the writer is ready; cutting over"
+elif [ "$SKIP_BUILD" = "1" ]; then
+  info "preflight skipped (--skip-build): reusing the already-live image; nothing new to pre-check"
+fi
+
 # ── step 2: recreate container with the new image ──────────────────────
 step "[2/4] docker compose up -d (recreates ${CONTAINER})"
 intent "docker compose ${COMPOSE_ARGS[*]} up -d"

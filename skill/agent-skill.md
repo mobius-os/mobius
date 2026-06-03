@@ -522,8 +522,12 @@ const img = await window.mobius.storage.getBlob('photo.png')  // Blob | null (ca
 // the path. Prefer this over re-reading so the UI updates when a sync lands.
 const unsub = window.mobius.storage.subscribe('notes.json', v => setNotes(v || []))
 // enumerate a directory's immediate children instead of probing filenames:
-// [{name,path,type,size,modified_at,mime_type}], [] when empty, null on network
-// failure (list() has NO offline mirror, unlike get()).
+// [{name,path,type,size,modified_at,mime_type}], [] when empty. Offline-capable
+// like get(): online the server is authoritative, offline it lists from the
+// read-through cache; either way overlaid with your pending writes (so a record
+// you just created/deleted shows/hides immediately). Offline entries omit
+// size/modified_at. So a sharded list (items/<uuid>.json) enumerates after an
+// offline reload without a hand-rolled index file.
 const entries = await window.mobius.storage.list('items/')
 window.mobius.online                        // boolean
 await window.mobius.storage.pendingCount()  // unsynced writes
@@ -820,7 +824,15 @@ window.parent.postMessage({ type: 'moebius:new-chat', draft: 'Hello!' }, window.
 
 Mini-apps receive a scoped token (not the owner's full JWT). It can
 access: storage, proxy, AI, notifications, push, uploads, app endpoints.
-It CANNOT access: auth, settings, or chat endpoints.
+It CANNOT access: auth or settings.
+
+For chat, an app can create and drive its OWN conversation: `POST
+/api/app-chats` returns a chat stamped to this app, and the app then
+sends to it and streams it (`POST /api/chats/{id}/messages` + `GET
+/api/chats/{id}/stream`) with the same scoped token. This is how an app
+embeds the agent chat the shell uses — a mini-app running its own
+conversation. The token still cannot touch the owner's other chats (any
+it didn't create); access is scoped to the app's own chats.
 
 ---
 
@@ -974,11 +986,19 @@ fall back to text) on the same turn.
 
 Title: "Möbius needs your answer". Body: the first ~80 chars of
 your question. Include `source_id: "$CHAT_ID"` and
-`target: "/chat/$CHAT_ID"` so the tap routes back here. If the
+`target: "/shell/?chat=$CHAT_ID"` so the tap routes back here. If the
 partner has the chat open, the notify endpoint suppresses the push
 itself — no extra guard needed on your side. Skip the notify only
 when you delivered something useful in the same turn AND that
 delivery already sent a notification.
+
+**Use the `/shell/?app=ID` / `/shell/?chat=ID` target form, NOT
+`/app/ID` / `/chat/ID`.** The PWA's manifest scope is `/shell/`. A
+target inside that scope reopens the installed standalone app when the
+partner taps a notification while the app is fully closed; an
+out-of-scope `/app/ID` opens a plain browser tab instead. (The old
+`/app/ID` form still works when the app is already open, so existing
+notifications keep routing — but new ones must use the in-scope form.)
 
 ### Testing scripts that send notifications (or push, email, SMS)
 
@@ -1018,10 +1038,10 @@ curl -s -X POST "$API_BASE_URL/api/notifications/send" \
     "title": "Task complete",
     "body": "Your expense tracker app is ready.",
     "source_id": "'"$CHAT_ID"'",
-    "target": "/app/APP_ID_HERE",
+    "target": "/shell/?app=APP_ID_HERE",
     "actions": [
-      {"action": "open_app", "title": "Open App", "target": "/app/APP_ID_HERE"},
-      {"action": "open_chat", "title": "View Chat", "target": "/chat/'"$CHAT_ID"'"}
+      {"action": "open_app", "title": "Open App", "target": "/shell/?app=APP_ID_HERE"},
+      {"action": "open_chat", "title": "View Chat", "target": "/shell/?chat='"$CHAT_ID"'"}
     ]
   }'
 ```
@@ -1171,6 +1191,47 @@ To list / remove: `crontab -u mobius -l` and edit the matching `init-cron.sh` (o
 - Logs: write stderr to `/data/cron-logs/`
 - Sub-agents start with no context — the system prompt file is all they get
 - Append to the **Experience log** when setting up scheduled tasks
+
+---
+
+## Scheduling your own check-ins
+
+You can schedule a **future check-in on yourself** in this chat — "let
+me circle back on this in three days." This is different from the cron
+above: cron runs a mini-app's `job.sh`; a self-reminder resumes THIS
+chat at the due time with your note as context, so you wake up in the
+same session and follow up with the user.
+
+Use it for **relational follow-ups**: checking how a plan landed, nudging
+a habit you helped set up, revisiting something the user wasn't ready to
+decide. Do NOT use it for app data refreshes or anything periodic — that
+is app cron's job.
+
+Enqueue with your own token (`$AGENT_TOKEN`, `$API_BASE_URL` are in your
+environment):
+
+```bash
+curl -s -X POST "$API_BASE_URL/api/self-reminders" \
+  -H "Authorization: Bearer $AGENT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"chat_id":"<this-chat-id>","due_in_seconds":259200,
+       "note":"Check whether the user kept up the morning-run habit we set up."}'
+```
+
+- `due_in_seconds` (relative) OR `due_at` (absolute unix seconds) — give
+  exactly one. `259200` = 3 days.
+- The `note` is what future-you sees; write it so you'll know why you came
+  back without the surrounding chat.
+- Cap: 20 pending reminders per chat, max ~1 year out. List with
+  `GET /api/self-reminders?chat_id=<id>`; cancel one with
+  `DELETE /api/self-reminders/{id}` (use this when the user resolves the
+  thing early, or to free a slot at the cap).
+
+**Default OFF.** The owner opts in by creating
+`/data/shared/self-reminders.enabled`. Until then your reminder is stored
+but never fires — so mention to the user that scheduled check-ins are
+off, and that enabling them is a one-time toggle, rather than promising a
+follow-up that won't arrive.
 
 ---
 

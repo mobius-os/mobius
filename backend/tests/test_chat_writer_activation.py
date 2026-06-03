@@ -655,3 +655,61 @@ def test_stop_races_answer_real_lock_contention_returns_410(chat, owner_token):
   _drain_actor()
   chat_state = _load(chat.id)
   assert chat_state["messages"][-1]["blocks"][0].get("answers") is None
+
+
+# -- AppendSteeredUserMessage — mid-turn Codex steer transcript write ----
+def test_append_steered_user_message_lands_before_assistant_partial():
+  """A steered user message is inserted just before the trailing
+  assistant partial, so the assistant stays `messages[-1]` and the
+  runner's streaming snapshot / finalize writes keep targeting it. The
+  ts is bumped past every transcript + queued ts."""
+  from app.chat_writer import AppendSteeredUserMessage
+
+  _seed_chat(
+    "c-steer",
+    messages=[
+      {"role": "user", "content": "start", "ts": 1},
+      {"role": "assistant", "content": "partial", "ts": 5, "blocks": []},
+    ],
+    pending=[{"role": "user", "content": "queued", "ts": 9}],
+  )
+
+  ack = get_writer().submit(
+    AppendSteeredUserMessage(
+      chat_id="c-steer",
+      run_token="",
+      user_msg={"role": "user", "content": "steered", "ts": 2},
+    )
+  )
+  stored = ack.result(timeout=5)["stored"]
+
+  chat = _load("c-steer")
+  roles = [m["role"] for m in chat["messages"]]
+  assert roles == ["user", "user", "assistant"]
+  assert chat["messages"][1]["content"] == "steered"
+  # ts bumped past every transcript + pending ts (max was the queued 9).
+  assert stored["ts"] > 9
+  # The pending queue was untouched — a steer is NOT a queue append.
+  assert [m["content"] for m in chat["pending_messages"]] == ["queued"]
+
+
+def test_append_steered_user_message_appends_when_no_assistant_yet():
+  """When the turn hasn't streamed any assistant text yet (no trailing
+  assistant message), the steered message is simply appended."""
+  from app.chat_writer import AppendSteeredUserMessage
+
+  _seed_chat(
+    "c-steer2",
+    messages=[{"role": "user", "content": "start", "ts": 1}],
+  )
+
+  get_writer().submit(
+    AppendSteeredUserMessage(
+      chat_id="c-steer2",
+      run_token="",
+      user_msg={"role": "user", "content": "steered", "ts": 2},
+    )
+  ).result(timeout=5)
+
+  chat = _load("c-steer2")
+  assert [m["content"] for m in chat["messages"]] == ["start", "steered"]

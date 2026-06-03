@@ -150,8 +150,8 @@ def list_chats(
     forget_chat(c.id)
     _purge_chat_dir(c.id)
     db.delete(c)
-  # Notification TTL: rows are written by every AskUserQuestion ack
-  # and every agent-driven push, and nothing else deletes them. Keep
+  # Notification TTL: rows are written by agent-driven push calls
+  # (POST /api/notifications/send), and nothing else deletes them. Keep
   # the table from growing unbounded by dropping anything older than
   # 90 days alongside the chat purge above — same cadence, same
   # transaction. Naive UTC matches `Notification.sent_at`'s storage
@@ -282,7 +282,7 @@ async def update_chat(
   return {"ok": True}
 
 
-@router.patch("/{chat_id}")
+@router.patch("/{chat_id}", dependencies=[Depends(reject_cross_site)])
 async def patch_chat(
   body: ChatPatch,
   chat_id: str,
@@ -398,6 +398,26 @@ async def patch_chat(
         chat.session_id = None
       chat.provider = target_provider
 
+    # Named-agent selection. `agent_id` in model_fields_set means the
+    # client explicitly sent the key (omitting it leaves the chat's
+    # agent unchanged). A null/empty value clears the agent back to the
+    # default path; a non-empty value is validated against the
+    # effective registry — unknown ids 409 like the disconnected-
+    # provider check, rejecting the whole PATCH before commit so the
+    # row never half-updates. The registry is per-instance
+    # (/data/shared/agents.json over the built-ins), which is why this
+    # validation lives here and not in a Pydantic field validator.
+    if "agent_id" in body.model_fields_set:
+      new_agent_id = (body.agent_id or "").strip() or None
+      if new_agent_id is not None:
+        from app.providers import resolve_agent
+        if resolve_agent(get_app_settings().data_dir, new_agent_id) is None:
+          raise HTTPException(
+            status_code=409,
+            detail=f"unknown agent: {new_agent_id}",
+          )
+      chat.agent_id = new_agent_id
+
     db.commit()
     db.refresh(chat)
     data_dir = get_app_settings().data_dir
@@ -428,6 +448,7 @@ async def patch_chat(
       "ok": True,
       "agent_settings_json": _coerce_agent_settings(chat.agent_settings_json) or None,
       "provider": chat.provider or "claude",
+      "agent_id": chat.agent_id,
       "effective": effective_agent_settings(
         data_dir,
         _coerce_agent_settings(chat.agent_settings_json) or None,
@@ -484,6 +505,7 @@ def get_chat(
     "running": is_chat_running(chat_id),
     "session_id": chat.session_id,
     "provider": provider,
+    "agent_id": chat.agent_id,
     "agent_settings_json": _coerce_agent_settings(chat.agent_settings_json) or None,
     "effective_agent_settings": effective_agent_settings(
       data_dir,
@@ -560,6 +582,76 @@ def recover_chat(
   # pre-delete run, so a resurrected stale run can't reclaim the recovered chat.
   recover_chat_generation(chat_id)
   return {"ok": True}
+
+
+@router.post(
+  "/{chat_id}/compact", dependencies=[Depends(reject_cross_site)],
+)
+async def compact_chat(
+  chat_id: str,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Compacts the chat into a portable plain-text briefing block.
+
+  Feature 091's provider-switch groundwork: switching the chat's PROVIDER
+  loses the session (sessions aren't cross-provider portable), so this runs
+  a one-shot summarize turn over the current transcript and stores the
+  result as a recognizable `kind="compaction"` assistant message via the
+  writer actor. It does NOT switch provider here — the provider-switch
+  wiring and the warn dialog are frontend follow-ups; this endpoint only
+  produces + stores + returns the summary so the client can display it.
+
+  A failed summarize (empty chat, disconnected provider, no text produced)
+  returns a non-2xx and stores NOTHING — a failed compaction must never
+  silently drop the user's context. The route through the actor (rather
+  than a direct `chat.messages` write) keeps the single-writer invariant:
+  the compaction block can't clobber, or be clobbered by, a streaming
+  snapshot for the same chat.
+  """
+  from app.chat_writer import (
+    PersistCompaction, alloc_run_token, await_ack, get_writer,
+  )
+  from app.compaction import CompactionError, summarize_chat
+
+  chat = get_active_chat_or_404(db, chat_id)
+  if is_chat_running(chat_id):
+    # A live turn's streaming snapshots target the trailing assistant row;
+    # appending a compaction block mid-turn would race/clobber it. Compaction
+    # is a between-turns operation (e.g. before a provider switch) — refuse
+    # while a turn is active rather than risk the lost-update the docstring
+    # promises against.
+    raise HTTPException(
+      status_code=409,
+      detail="Chat is busy — finish or stop the current turn before compacting.",
+    )
+  messages = list(chat.messages or [])
+  data_dir = get_settings().data_dir
+  try:
+    summary = await summarize_chat(messages, data_dir=data_dir)
+  except CompactionError as exc:
+    # The summarize step is the one allowed-to-fail step. Surface it as a
+    # 422 so the client can show the reason and keep the chat unchanged
+    # (no block stored, no provider switched).
+    raise HTTPException(status_code=422, detail=str(exc))
+  except Exception as exc:
+    log.warning("compaction summarize failed for chat %s: %s", chat_id, exc)
+    raise HTTPException(
+      status_code=502, detail="The summarize turn failed; not compacting."
+    )
+
+  ack = get_writer().submit(
+    PersistCompaction(
+      chat_id=chat_id, run_token=alloc_run_token(), summary=summary
+    )
+  )
+  try:
+    result = await await_ack(ack)
+  except Exception:
+    raise HTTPException(
+      status_code=503, detail="Could not store the compaction; try again."
+    )
+  return {"ok": True, "summary": summary, "stored": result.get("stored")}
 
 
 class AppChatCreate(BaseModel):

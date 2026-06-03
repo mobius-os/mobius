@@ -117,9 +117,14 @@ class AppInstall(BaseModel):
 
 class AppInstallOut(AppOut):
   """Install endpoint response — AppOut plus install-only fields."""
-  # 'install' for a fresh row, 'update' if a same-slug app already
-  # existed and got its jsx_source / seeds / cron refreshed in place.
-  mode: Literal["install", "update"]
+  # 'install' for a fresh row, 'update' if a same-manifest app already
+  # existed and got its jsx_source / seeds / cron refreshed in place,
+  # 'conflict' if the per-app git model is enabled and merging the new
+  # upstream into local edits conflicted (feature 084). On 'conflict'
+  # the served app is UNCHANGED — local edits are preserved and the
+  # conflicting files are named in `conflict_paths` for an agent to
+  # resolve. 'conflict' never occurs while the flag is off (the default).
+  mode: Literal["install", "update", "conflict"]
   # The manifest's declared version that ended up applied. Lets the
   # store mini-app refresh its installed-versions map without round-
   # tripping the manifest itself.
@@ -128,6 +133,10 @@ class AppInstallOut(AppOut):
   # take them so far — e.g. "icon: 404 in source repo", "schedule:
   # no shell access (manual agent step)". Empty list = full success.
   warnings: list[str] = Field(default_factory=list)
+  # Files that conflicted when merging the new upstream into local
+  # edits. Non-empty only when `mode == "conflict"`. The store surfaces
+  # these so the owner can ask the agent to resolve them.
+  conflict_paths: list[str] = Field(default_factory=list)
 
 
 class ProviderCodeRequest(BaseModel):
@@ -190,6 +199,15 @@ class ChatPatch(BaseModel):
   agent_settings_json: AgentSettingsOverride | None = None
   clear_agent_settings: bool = False
   provider: str | None = None
+  # Named agent to attach to this chat. Omitted → leave unchanged.
+  # null or empty string → clear the agent (back to the default path).
+  # A non-empty value is validated against the effective registry in
+  # the handler (409 on unknown), not here — the registry is
+  # per-instance (/data/shared/agents.json over the built-ins), so a
+  # Pydantic field validator can't see it. The handler reads
+  # `model_fields_set` to tell "omitted" from "explicitly cleared",
+  # the same way `agent_settings_json` uses `exclude_unset`.
+  agent_id: str | None = None
   # Drawer rename uses this. Empty string is rejected so a misfired
   # blur on an empty input can't blank the title in the sidebar.
   # 500-char cap defends against runaway-agent megabyte payloads
@@ -267,6 +285,11 @@ class SettingsUpdate(BaseModel):
 
   gemini_api_key: str | None = None
   provider: str | None = None
+  # Opt-in to offering SDK skills to the Claude agent. Behavior-
+  # shifting and default-off (see providers.skills_enabled); persisted
+  # to the shared agent-settings.json rather than the frozen Owner
+  # model. None means "leave unchanged".
+  skills_enabled: bool | None = None
 
   @field_validator("provider")
   @classmethod
@@ -296,6 +319,32 @@ class ModelRegistryResponse(BaseModel):
 
   # Map provider id → ordered list of models.
   providers: dict[str, list[ModelEntry]]
+
+
+class AgentOut(BaseModel):
+  """One named agent in the `GET /api/agents` response.
+
+  Mirrors the dict shape produced by `providers.effective_agents`.
+  `system_prompt` is intentionally omitted from this DTO — the picker
+  only needs identity + provider/model/effort + display fields, and
+  the (potentially long) prompt text would bloat every list response.
+  The runner reads the prompt server-side via `providers.resolve_agent`.
+  """
+
+  id: str
+  label: str
+  provider: str
+  model: str | None = None
+  effort: str | None = None
+  skill_ref: str | None = None
+  icon: str | None = None
+
+
+class AgentRegistryResponse(BaseModel):
+  """`GET /api/agents` response shape."""
+
+  agents: list[AgentOut]
+  default_id: str
 
 
 class ModelPrefsUpdate(BaseModel):

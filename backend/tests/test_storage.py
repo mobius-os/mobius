@@ -717,3 +717,168 @@ def test_create_app_leaves_no_staging_bundle(client, owner_token):
   live = os.path.join(os.environ["DATA_DIR"], "compiled", f"app-{app_id}.js")
   assert os.path.exists(live)
   assert not os.path.exists(live + ".staging")
+
+
+# -- move (rename) route -------------------------------------------------
+
+
+def test_move_renames_file(client, auth, owner_token):
+  """A move relocates a file; the source is gone and the dest has the body."""
+  app_id = _make_app(client, owner_token)
+  client.put(
+    f"/api/storage/apps/{app_id}/old.json", json={"k": 1}, headers=auth,
+  )
+  r = client.post(
+    f"/api/storage/apps/{app_id}/move",
+    json={"from": "old.json", "to": "renamed.json"},
+    headers=auth,
+  )
+  assert r.status_code == 204
+  assert client.get(
+    f"/api/storage/apps/{app_id}/old.json", headers=auth
+  ).status_code == 404
+  assert client.get(
+    f"/api/storage/apps/{app_id}/renamed.json", headers=auth
+  ).json() == {"k": 1}
+
+
+def test_move_into_new_folder_creates_parents(client, auth, owner_token):
+  """Moving into a not-yet-existing folder creates the parent dirs."""
+  app_id = _make_app(client, owner_token)
+  client.put(
+    f"/api/storage/apps/{app_id}/note.json", json={"k": 1}, headers=auth,
+  )
+  r = client.post(
+    f"/api/storage/apps/{app_id}/move",
+    json={"from": "note.json", "to": "archive/2026/note.json"},
+    headers=auth,
+  )
+  assert r.status_code == 204
+  assert client.get(
+    f"/api/storage/apps/{app_id}/archive/2026/note.json", headers=auth
+  ).json() == {"k": 1}
+
+
+def test_move_missing_source_404(client, auth, owner_token):
+  """A move whose source doesn't exist is a clean 404."""
+  app_id = _make_app(client, owner_token)
+  r = client.post(
+    f"/api/storage/apps/{app_id}/move",
+    json={"from": "nope.json", "to": "x.json"},
+    headers=auth,
+  )
+  assert r.status_code == 404
+
+
+def test_move_existing_destination_409(client, auth, owner_token):
+  """A move onto an existing destination is rejected, not a silent clobber."""
+  app_id = _make_app(client, owner_token)
+  client.put(f"/api/storage/apps/{app_id}/a.json", json={"k": 1}, headers=auth)
+  client.put(f"/api/storage/apps/{app_id}/b.json", json={"k": 2}, headers=auth)
+  r = client.post(
+    f"/api/storage/apps/{app_id}/move",
+    json={"from": "a.json", "to": "b.json"},
+    headers=auth,
+  )
+  assert r.status_code == 409
+  # Both files survive untouched.
+  assert client.get(
+    f"/api/storage/apps/{app_id}/a.json", headers=auth
+  ).json() == {"k": 1}
+  assert client.get(
+    f"/api/storage/apps/{app_id}/b.json", headers=auth
+  ).json() == {"k": 2}
+
+
+def test_move_rejects_traversal(client, auth, owner_token):
+  """A move whose `to` escapes the app tree via `..` is rejected with 400.
+
+  The destination would resolve outside /data/apps/<id>; `_resolve`'s
+  traversal + containment check rejects it before any file is touched, so
+  the move can't be used to write into a sibling app or the host fs.
+  """
+  app_id = _make_app(client, owner_token)
+  client.put(f"/api/storage/apps/{app_id}/x.json", json={"k": 1}, headers=auth)
+  r = client.post(
+    f"/api/storage/apps/{app_id}/move",
+    json={"from": "x.json", "to": "../../escape.json"},
+    headers=auth,
+  )
+  assert r.status_code == 400
+  # The source is untouched by the rejected move.
+  assert client.get(
+    f"/api/storage/apps/{app_id}/x.json", headers=auth
+  ).json() == {"k": 1}
+
+
+def test_move_rejects_traversal_in_source(client, auth, owner_token):
+  """A move whose `from` escapes the app tree via `..` is rejected with 400."""
+  app_id = _make_app(client, owner_token)
+  r = client.post(
+    f"/api/storage/apps/{app_id}/move",
+    json={"from": "../../etc/hostname", "to": "stolen.txt"},
+    headers=auth,
+  )
+  assert r.status_code == 400
+
+
+# -- recursive folder delete --------------------------------------------
+
+
+def test_delete_folder_removes_contents(client, auth, owner_token):
+  """Deleting a folder removes it and every file beneath it."""
+  app_id = _make_app(client, owner_token)
+  client.put(
+    f"/api/storage/apps/{app_id}/docs/a.json", json={"k": 1}, headers=auth,
+  )
+  client.put(
+    f"/api/storage/apps/{app_id}/docs/sub/b.json", json={"k": 2}, headers=auth,
+  )
+  r = client.delete(f"/api/storage/apps/{app_id}/folder/docs", headers=auth)
+  assert r.status_code == 204
+  # Everything under docs/ is gone.
+  assert client.get(
+    f"/api/storage/apps/{app_id}/docs/a.json", headers=auth
+  ).status_code == 404
+  assert client.get(
+    f"/api/storage/apps/{app_id}/docs/sub/b.json", headers=auth
+  ).status_code == 404
+  # The folder itself no longer lists.
+  listing = client.get(
+    f"/api/storage/apps-list/{app_id}/", headers=auth
+  ).json()
+  assert all(e["name"] != "docs" for e in listing["entries"])
+
+
+def test_delete_folder_missing_404(client, auth, owner_token):
+  """Deleting a folder that doesn't exist is a clean 404."""
+  app_id = _make_app(client, owner_token)
+  r = client.delete(f"/api/storage/apps/{app_id}/folder/nope", headers=auth)
+  assert r.status_code == 404
+
+
+def test_delete_folder_rejects_file_path(client, auth, owner_token):
+  """The recursive route refuses a FILE path (use the per-file DELETE)."""
+  app_id = _make_app(client, owner_token)
+  client.put(f"/api/storage/apps/{app_id}/file.json", json={"k": 1}, headers=auth)
+  r = client.delete(f"/api/storage/apps/{app_id}/folder/file.json", headers=auth)
+  assert r.status_code == 400
+  # The file survives the rejected folder-delete.
+  assert client.get(
+    f"/api/storage/apps/{app_id}/file.json", headers=auth
+  ).json() == {"k": 1}
+
+
+def test_delete_folder_rejects_traversal(client, auth, owner_token):
+  """A recursive delete with a `..` path is rejected with 400 — no rmtree
+  outside the app's own storage tree.
+
+  The `..` segments are percent-encoded so the HTTP client doesn't
+  normalize them away before the request leaves; the server decodes them
+  back to literal `..` parts, which `_resolve` rejects.
+  """
+  app_id = _make_app(client, owner_token)
+  r = client.delete(
+    f"/api/storage/apps/{app_id}/folder/%2e%2e/%2e%2e/etc", headers=auth,
+  )
+  assert r.status_code == 400

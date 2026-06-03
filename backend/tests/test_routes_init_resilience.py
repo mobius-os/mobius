@@ -46,6 +46,21 @@ def _restore_app_routes_modules():
     for k in _route_mod_names():
       sys.modules.pop(k, None)
     sys.modules.update(saved)
+    # Restoring sys.modules entries is not enough: the re-import also rebinds
+    # the `app.routes` attribute on the `app` package and each `<sub>`
+    # attribute on the `app.routes` package to the freshly imported objects.
+    # pytest's `monkeypatch.setattr("app.routes.<sub>.<attr>", ...)` resolves
+    # its target via the parent getattr chain (__import__ + getattr), NOT via
+    # sys.modules[name] — so a left-over rebind makes a string-target patch
+    # land on a different module object than the one the app's bound route
+    # handler closed over, and the patch silently misses. Re-point the chain at
+    # the canonical (restored) objects so getattr and sys.modules agree again.
+    routes_pkg = saved.get("app.routes")
+    if routes_pkg is not None:
+      sys.modules["app"].routes = routes_pkg
+      for k, mod in saved.items():
+        if k.startswith("app.routes."):
+          setattr(routes_pkg, k.rsplit(".", 1)[1], mod)
 
 
 def _mount(router: APIRouter, prefix: str = "/x") -> TestClient:

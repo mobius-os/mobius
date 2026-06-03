@@ -30,6 +30,12 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
 const SYSTEM_EVENTS = new Set([
   'theme_updated',
   'app_updated',
+  // app_built is the chat-SCOPED CTA signal: the backend publishes it
+  // onto ONLY the building chat's broadcast (see routes/notify.py), so
+  // it arrives exclusively on the stream of the chat that built the app.
+  // Forwarded to onSystemEvent like the other system events; the handler
+  // sets the "Open app" CTA. (app_updated stays list-refresh-only.)
+  'app_built',
   'shell_rebuilding',
   'shell_rebuilt',
   'shell_rebuild_failed',
@@ -57,10 +63,18 @@ const SYSTEM_EVENTS = new Set([
  *   tool_output           Tool finished, here's its result
  *                         { content }. Attaches to running block.
  *   tool_end              Marks the running tool done (status flip).
+ *   skill_loaded          Agent loaded a skill { skill }. Stamps the
+ *                         name onto the matching Skill tool block so
+ *                         ToolBlock renders a chip.
  *   question              AskUserQuestion fired
  *                         { questions: [...] }. Renders a card.
  *   queued_turn_starting  Backend about to promote a queued message
  *                         { ts }. Notifies caller via callback.
+ *   steered_into_turn     A send was injected mid-turn into a live
+ *                         Codex turn via the SDK's steer() instead of
+ *                         queued { ts, content }. Notifies caller so it
+ *                         drops the optimistic queued-tray entry and
+ *                         renders the message inline as content growth.
  *   catch_up_done         Replay burst finished; live events follow.
  *   error                 { message }. Surfaced inline.
  *   done                  Turn complete; SSE closes.
@@ -83,6 +97,10 @@ const SYSTEM_EVENTS = new Set([
  * @param {(ts: number|null) => void} [callbacks.onQueuedTurnStarting]
  *   Fired when the backend is about to promote a queued message; `ts`
  *   identifies which pending entry was promoted.
+ * @param {(info: {ts: number|null, content: string}) => void} [callbacks.onSteeredIntoTurn]
+ *   Fired when a send was injected mid-turn into a live Codex turn (the
+ *   backend steered it instead of queuing). The caller drops the
+ *   optimistic queued-tray entry and renders the message inline.
  *
  * @returns {{
  *   streamItems: Array<
@@ -118,6 +136,7 @@ export default function useStreamConnection(chatId, {
   onSystemEvent,
   onNeedsRefresh,
   onQueuedTurnStarting,
+  onSteeredIntoTurn,
 }) {
   const [streamItems, _setStreamItems] = useState([])
   const latestItemsRef = useRef([])
@@ -300,6 +319,8 @@ export default function useStreamConnection(chatId, {
   onNeedsRefreshRef.current = onNeedsRefresh
   const onQueuedTurnStartingRef = useRef(onQueuedTurnStarting)
   onQueuedTurnStartingRef.current = onQueuedTurnStarting
+  const onSteeredIntoTurnRef = useRef(onSteeredIntoTurn)
+  onSteeredIntoTurnRef.current = onSteeredIntoTurn
   const queuedContinuationRef = useRef(false)
   // Carries the ts of the message the backend just promoted so the
   // frontend can remove the matching pending entry, even if the user
@@ -476,6 +497,21 @@ export default function useStreamConnection(chatId, {
               if (i !== -1) updated[i] = { ...updated[i], status: 'done' }
               return updated
             })
+          } else if (event.type === 'skill_loaded') {
+            // Skill observability: stamp the loaded skill's name onto
+            // the most recent Skill tool block so ToolBlock renders a
+            // chip. Mirrors backend/app/events.py:process_event so the
+            // live stream and the persisted transcript agree.
+            setStreamItems(prev => {
+              const updated = [...prev]
+              for (let i = updated.length - 1; i >= 0; i--) {
+                if (updated[i].type === 'tool' && updated[i].tool === 'Skill') {
+                  updated[i] = { ...updated[i], skill: event.skill }
+                  break
+                }
+              }
+              return updated
+            })
           } else if (event.type === 'question') {
             const questions = event.questions || []
             if (questions.length > 0 && questions[0]?.question) {
@@ -524,6 +560,17 @@ export default function useStreamConnection(chatId, {
             queuedContinuationRef.current = true
             queuedContinuationTsRef.current = event.ts ?? null
             onQueuedTurnStartingRef.current?.(event.ts)
+          } else if (event.type === 'steered_into_turn') {
+            // A send was injected mid-turn into a live Codex turn. The
+            // backend already put the user message in the transcript; the
+            // caller drops the optimistic queued-tray entry and renders it
+            // inline as content growth (no send-time spacer/scroll-pin).
+            // The steered text flows back as normal `text` deltas through
+            // this same stream, so nothing else is needed here.
+            onSteeredIntoTurnRef.current?.({
+              ts: event.ts ?? null,
+              content: event.content || '',
+            })
           } else if (event.type === 'done') {
             flushBuffer()
             setIsStreaming(false)
