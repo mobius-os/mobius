@@ -197,3 +197,44 @@ def test_recreate_does_not_report_ready_on_a_session_that_cannot_execute(client)
     assert writer._session_ready.is_set()
 
   assert client.get("/api/ready").status_code == 200
+
+
+def test_run_boot_probe_does_not_report_ready_on_unusable_session(client):
+  """The COLD-START (`_run`) probe, distinct from `_recreate_session`'s.
+
+  `_run` opens the session at boot and probes SELECT 1 before advertising
+  ready; a session that RETURNS but raises on first execute must drive the
+  writer fatal at boot (its own `except BaseException` + return path, separate
+  control flow from recreate). We start a fresh writer on such a factory, wait
+  for the boot thread to probe + go fatal, and assert it never reports ready.
+  Restore a healthy writer in `finally` so the shared singleton survives.
+  """
+  import time as _time
+
+  class _UnusableSession:
+    def execute(self, *_a, **_k):
+      raise RuntimeError("connection refused on first use")
+
+    def rollback(self):
+      pass
+
+    def close(self):
+      pass
+
+  chat_writer.stop_writer(timeout=5)
+  try:
+    chat_writer.start_writer(lambda: _UnusableSession())
+    # The boot thread runs _run → probe raises → _go_fatal, asynchronously.
+    for _ in range(100):
+      if not chat_writer.is_writer_ready():
+        break
+      _time.sleep(0.02)
+    ready, reason = chat_writer.writer_readiness()
+    assert ready is False
+    assert reason
+    assert client.get("/api/ready").status_code == 503
+  finally:
+    chat_writer.stop_writer(timeout=5)
+    chat_writer.start_writer(SessionLocal)
+
+  assert client.get("/api/ready").status_code == 200

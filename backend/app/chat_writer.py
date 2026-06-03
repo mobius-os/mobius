@@ -36,9 +36,9 @@ from __future__ import annotations
 
 import asyncio
 import enum
-import itertools
 import logging
 import queue
+import secrets
 import sys
 import threading
 import time
@@ -1673,29 +1673,32 @@ def _safe_set_exception(ack: Future | None, exc: BaseException | None) -> None:
 
 
 # -- per-turn run identity ------------------------------------------------
-# Process-scoped, unique, monotonic run-token allocation.  One token is
-# allocated per TURN (initial send and each continuation get their own),
-# centrally — outside the per-turn sink — so run identity has a single
-# source rather than being derived from sink/chat state.  The token is an
-# OPAQUE string with no semantics callers may lean on; at a later milestone
-# it BECOMES the durable `chat_runs.id`, so keeping it opaque now avoids a
-# second identity to migrate.  `itertools.count` under a lock makes the
-# sequence both unique and monotonic even when turns start concurrently on
-# different threads.
-_token_counter = itertools.count(1)
-_token_lock = threading.Lock()
+# One token is allocated per TURN (initial send and each continuation get
+# their own), centrally — outside the per-turn sink — so run identity has a
+# single source rather than being derived from sink/chat state. The token is
+# an OPAQUE string with no semantics callers may lean on; it IS the durable
+# `chat_runs.id` (077 Step 3).
+#
+# It MUST be unique across process RESTARTS, not merely within one process.
+# A process-local monotonic counter resets to 1 on every boot, and terminal
+# `chat_runs` rows live forever (reconciliation only flips them, never
+# deletes), so the first post-restart turn would reissue `rt-1` and collide
+# with a surviving row on the `chat_runs.id` PRIMARY KEY — a UNIQUE-constraint
+# IntegrityError that fails the turn. A random 128-bit token can't collide
+# (within a process or across restarts), needs no DB-seeded high-water mark,
+# and `secrets.token_hex` is itself thread-safe, so no lock is required.
 
 
 def alloc_run_token() -> str:
-  """Allocate the next process-unique, monotonic run token.
+  """Allocate a process-unique, restart-stable run token.
 
-  Thread-safe: `itertools.count.__next__` is not guaranteed atomic across
-  arbitrary producers, so the increment runs under `_token_lock`.  Returns
-  an opaque `"rt-<n>"` string — callers must treat it as an identity tag,
-  not a number.
+  Returns an opaque `"rt-<random hex>"` string — callers must treat it as an
+  identity tag, not a number (nothing relies on ordering or the integer form).
+  It is the durable `chat_runs.id`, so it is random rather than a per-process
+  counter that would reissue PKs after a restart and collide with surviving
+  terminal rows.
   """
-  with _token_lock:
-    return f"rt-{next(_token_counter)}"
+  return f"rt-{secrets.token_hex(16)}"
 
 
 class _PersistFailed(Exception):
