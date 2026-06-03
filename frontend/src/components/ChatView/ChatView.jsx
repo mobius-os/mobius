@@ -68,7 +68,7 @@ function sameMessageList(a, b) {
 }
 
 
-export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystemEvent, builtApp, onOpenApp, onMessageStart, showPicker = true }) {
+export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystemEvent, builtApp, onOpenApp, onMessageStart, showPicker = true, embedded = false }) {
   const queryClient = useQueryClient()
   // Chat is online-only (it spawns a server-side agent). When offline
   // the composer disables send and says so, rather than failing into a
@@ -1182,11 +1182,20 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     >
       {showEmpty && (
         <div className="chat__empty-wrap">
-          <div className="chat__empty">
-            <img className="chat__empty-glyph" src={`${BASE}/moebius.png`} alt="" width="120" height="120" />
-            <p className="chat__empty-title">What's on your mind?</p>
-            <p className="chat__empty-sub">Ask questions, build and modify apps, schedule tasks.<br />Möbius improves the more you use it.</p>
-          </div>
+          {embedded ? (
+            // App-embedded chats are scoped to one app — the shell-branded
+            // "What's on your mind? / Möbius improves…" splash is out of
+            // place there. Show a quiet, contextual prompt instead.
+            <div className="chat__empty chat__empty--embed">
+              <p className="chat__empty-sub">Ask the agent to get started.</p>
+            </div>
+          ) : (
+            <div className="chat__empty">
+              <img className="chat__empty-glyph" src={`${BASE}/moebius.png`} alt="" width="120" height="120" />
+              <p className="chat__empty-title">What's on your mind?</p>
+              <p className="chat__empty-sub">Ask questions, build and modify apps, schedule tasks.<br />Möbius improves the more you use it.</p>
+            </div>
+          )}
         </div>
       )}
       {showLoadError && (
