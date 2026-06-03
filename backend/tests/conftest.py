@@ -24,6 +24,29 @@ auth_limiter.enabled = False
 
 
 @pytest.fixture(autouse=True)
+def _isolate_git_env(monkeypatch):
+  """Keep the per-app-git tests' `git` subprocesses hermetic.
+
+  app_git tests run `git init/commit/merge` against a repo in tmp_path via
+  `git -C <tmp>`. But git EXPORTS `GIT_DIR` (and friends) into a hook's
+  environment, and those env vars OVERRIDE `-C` — so when the suite runs
+  inside the pre-push hook, the tests' git ops silently operate on the
+  enclosing mobius repo instead, flipping `core.bare` and committing stray
+  "Initialize app repo" commits (and failing). Scrub the inherited git env
+  and pin global/system config to /dev/null + a ceiling so every test git
+  op is fully isolated, whether the suite runs from a shell or a git hook.
+  """
+  for var in (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+  ):
+    monkeypatch.delenv(var, raising=False)
+  monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+  monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+  monkeypatch.setenv("GIT_CEILING_DIRECTORIES", tempfile.gettempdir())
+
+
+@pytest.fixture(autouse=True)
 def fresh_db():
   """Recreates all tables before each test and clears shared in-memory
   state (broadcasts, starting guards, active procs) so tests don't
