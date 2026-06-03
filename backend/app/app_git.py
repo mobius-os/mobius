@@ -103,22 +103,36 @@ class MergeResult:
   merged_bytes: bytes | None = None
 
 
+def _git_env(repo: Path | str) -> dict:
+  """Isolated env for a per-app git op so it can never bleed into an
+  enclosing repo. `/data` is itself a git repo (the agent's pm-commit
+  history), so a source_dir with no dedicated `.git` would otherwise let
+  git walk up to `/data` — making every per-app op operate on the wrong
+  repo and report spurious conflicts. Pin GIT_CEILING_DIRECTORIES to the
+  app-dir's parent (git won't search above it → it finds the app's OWN
+  repo or none, never /data) and scrub inherited GIT_* pointers that would
+  override `-C`. Used by EVERY git subprocess here (`_run` + the few direct
+  bytes-on-stdin calls). Mirrors the test conftest's `_isolate_git_env`.
+  """
+  env = dict(os.environ)
+  for var in (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+  ):
+    env.pop(var, None)
+  env["GIT_CEILING_DIRECTORIES"] = str(Path(repo).resolve().parent)
+  return env
+
+
 def _run(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
   """Runs `git -C <repo> <args>` with the fixed Mobius identity.
 
   The identity is injected per-invocation via `-c` rather than written
   into the repo config so the repo carries no state the next reader has
   to know about. `check=False` lets callers inspect a non-zero return
-  (e.g. merge-tree signalling a conflict) instead of raising.
-
-  The env is ISOLATED so a per-app repo can never bleed into an enclosing
-  one. `/data` is itself a git repo (the agent's pm-commit history), so a
-  source_dir with no dedicated `.git` would otherwise let `git -C` walk up
-  to `/data` — making every per-app op (init, record, merge) operate on the
-  wrong repo and report spurious conflicts. We pin GIT_CEILING_DIRECTORIES
-  to the app-dir's parent (git won't search above it → it finds the app's
-  OWN repo or none, never /data) and scrub inherited GIT_* pointers that
-  would override `-C`. Mirrors the test conftest's `_isolate_git_env`.
+  (e.g. merge-tree signalling a conflict) instead of raising. Runs under
+  the isolated `_git_env` so it can never bleed into the enclosing /data
+  repo.
   """
   cmd = [
     "git",
@@ -127,16 +141,9 @@ def _run(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
     "-C", str(repo),
     *args,
   ]
-  env = dict(os.environ)
-  for var in (
-    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE",
-  ):
-    env.pop(var, None)
-  env["GIT_CEILING_DIRECTORIES"] = str(Path(repo).resolve().parent)
   return subprocess.run(
     cmd, capture_output=True, text=True, timeout=_GIT_TIMEOUT,
-    check=check, env=env,
+    check=check, env=_git_env(repo),
   )
 
 
@@ -234,6 +241,7 @@ def record_upstream(
       "--path", "index.jsx",
     ],
     input=entry_bytes, capture_output=True, timeout=_GIT_TIMEOUT, check=True,
+    env=_git_env(repo),
   ).stdout.decode().strip()
   # Build a tree that is the upstream tip's tree with index.jsx replaced
   # by the new blob, via a temporary index keyed to the upstream commit.
@@ -244,6 +252,7 @@ def record_upstream(
       f"100644,{blob},index.jsx",
     ],
     capture_output=True, text=True, timeout=_GIT_TIMEOUT, check=True,
+    env=_git_env(repo),
   )
   tree = _run(repo, "write-tree").stdout.strip()
   msg = f"install v{version} from {manifest_url}"
@@ -340,6 +349,7 @@ def merge_upstream(source_dir: str | Path) -> MergeResult:
   merged = subprocess.run(
     ["git", "-C", str(repo), "cat-file", "-p", f"{tree_oid}:index.jsx"],
     capture_output=True, timeout=_GIT_TIMEOUT, check=False,
+    env=_git_env(repo),
   )
   merged_bytes = merged.stdout if merged.returncode == 0 else None
   return MergeResult(status="clean", merged_bytes=merged_bytes)
