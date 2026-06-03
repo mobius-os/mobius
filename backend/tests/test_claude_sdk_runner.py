@@ -31,7 +31,13 @@ from claude_agent_sdk.types import (
   UserMessage,
 )
 
-from app.claude_sdk_runner import dispatch_sdk_message
+from app.claude_sdk_runner import (
+  ActiveClaudeClient,
+  dispatch_sdk_message,
+  run_claude_sdk_turn,
+  steer_into_active_turn,
+)
+from app.runner_registry import registry
 
 
 class _Bus:
@@ -48,6 +54,11 @@ class _Bus:
     self.events.append(event)
 
 
+class _ChatBus(_Bus):
+  chat_id = "chat-42"
+  run_token = "run-1"
+
+
 def _stream_delta(delta_type: str, **fields: Any) -> StreamEvent:
   """Build a StreamEvent carrying a single content_block_delta."""
   return StreamEvent(
@@ -58,6 +69,142 @@ def _stream_delta(delta_type: str, **fields: Any) -> StreamEvent:
       "delta": {"type": delta_type, **fields},
     },
   )
+
+
+@pytest.mark.asyncio
+async def test_steer_into_active_turn_sets_mailbox_and_interrupts():
+  """A registered Claude handle records steer text and interrupts live IO."""
+  calls = []
+
+  class _Client:
+    async def interrupt(self):
+      calls.append("interrupt")
+
+  handle = ActiveClaudeClient(_Client(), chat_id="claude-steer")
+  registry.register(handle)
+  try:
+    assert await steer_into_active_turn("claude-steer", "use blue") is True
+    assert handle.pending_steer == ["use blue"]
+    assert calls == ["interrupt"]
+    # A second rapid steer must QUEUE behind the first (FIFO), not overwrite it
+    # — both texts are already persisted to the transcript, so both must reach
+    # Claude when the runner drains the mailbox.
+    assert await steer_into_active_turn("claude-steer", "and bold") is True
+    assert handle.pending_steer == ["use blue", "and bold"]
+    assert calls == ["interrupt", "interrupt"]
+  finally:
+    registry.unregister("claude-steer", handle.kind)
+
+
+@pytest.mark.asyncio
+async def test_steer_into_active_turn_missing_or_finished_is_false():
+  """Missing or already-finished Claude handles are not steerable."""
+  assert await steer_into_active_turn("missing-claude", "x") is False
+
+  class _Client:
+    async def interrupt(self):
+      raise AssertionError("finished handle must not interrupt")
+
+  handle = ActiveClaudeClient(_Client(), chat_id="finished-claude")
+  handle.mark_finished()
+  registry.register(handle)
+  try:
+    assert await steer_into_active_turn("finished-claude", "x") is False
+  finally:
+    registry.unregister("finished-claude", handle.kind)
+
+
+@pytest.mark.asyncio
+async def test_interrupt_and_resteer_loop_requeries_same_client(monkeypatch):
+  """A steer-triggered interrupt result is drained, then re-queried."""
+  from app import claude_sdk_runner
+
+  class _FakeClient:
+    def __init__(self, options):
+      del options
+      self.queries = []
+      self.interrupts = 0
+      self.disconnected = False
+
+    async def connect(self):
+      return None
+
+    async def query(self, message):
+      self.queries.append(message)
+
+    async def interrupt(self):
+      self.interrupts += 1
+
+    async def disconnect(self):
+      self.disconnected = True
+
+    async def receive_response(self):
+      if len(self.queries) == 1:
+        yield _stream_delta("text_delta", text="working")
+        assert await steer_into_active_turn("loop-chat", "use blue") is True
+        yield ResultMessage(
+          subtype="error_during_execution",
+          duration_ms=10,
+          duration_api_ms=5,
+          is_error=True,
+          num_turns=1,
+          session_id="sess-1",
+          stop_reason="interrupt",
+          total_cost_usd=0.01,
+          usage={"input_tokens": 1, "output_tokens": 2},
+        )
+        return
+      yield _stream_delta("text_delta", text="blue done")
+      yield ResultMessage(
+        subtype="success",
+        duration_ms=20,
+        duration_api_ms=15,
+        is_error=False,
+        num_turns=1,
+        session_id="sess-1",
+        stop_reason="end_turn",
+        total_cost_usd=0.02,
+        usage={"input_tokens": 3, "output_tokens": 4},
+      )
+
+  clients = []
+
+  def _client_factory(options):
+    client = _FakeClient(options)
+    clients.append(client)
+    return client
+
+  monkeypatch.setattr(
+    claude_sdk_runner, "ClaudeSDKClient", _client_factory,
+  )
+
+  bus = _ChatBus()
+  result = await run_claude_sdk_turn(
+    "start task",
+    session_id=None,
+    base_env={},
+    cwd="/tmp",
+    chat_id="loop-chat",
+    skill_text="system",
+    bc=bus,
+    pending_questions={},
+    db=None,
+  )
+
+  client = clients[0]
+  assert client.interrupts == 1
+  assert client.disconnected is True
+  assert client.queries[0] == "start task"
+  assert client.queries[1].startswith(
+    "The user added this while you were working."
+  )
+  assert "use blue" in client.queries[1]
+  assert result["error"] is None
+  assert result["cost_usd"] == 0.02
+  assert [e for e in bus.events if e["type"] == "text"] == [
+    {"type": "text", "content": "working"},
+    {"type": "text", "content": "blue done"},
+  ]
 
 
 def test_dispatch_text_delta_emits_text():

@@ -124,15 +124,21 @@ def get(path):
     with urllib.request.urlopen(req, timeout=20) as r:
         return json.load(r)
 print("# Recent chats (fork + interview the ones with activity)\n")
+print("# `[app]` rows are app-driven chats (created_by_app_id set): hidden from")
+print("# the user's drawer but yours to read for the Mind graph. `updated` is the")
+print("# cadence signal — interview the most recently/often active first.\n")
 try:
-    chats = get("/api/chats")
+    # include_app_chats=1 surfaces app-created chats too — they're excluded from
+    # the owner's drawer history but are relevant to memory consolidation.
+    chats = get("/api/chats?include_app_chats=1")
     chats = chats if isinstance(chats, list) else chats.get("chats", [])
-    chats = sorted(chats, key=lambda c: c.get("updated_at",""), reverse=True)[:12]
+    chats = sorted(chats, key=lambda c: c.get("updated_at",""), reverse=True)[:20]
     for c in chats:
         cid = c.get("id"); title = c.get("title") or "(untitled)"
         prov = c.get("provider") or "claude"
         updated = c.get("updated_at","")
-        print(f"- `{cid}`  [{prov}]  {title}  (updated {updated})")
+        tag = "  [app]" if c.get("created_by_app_id") else ""
+        print(f"- `{cid}`  [{prov}]{tag}  {title}  (updated {updated})")
     if not chats:
         print("(no chats)")
 except Exception as e:

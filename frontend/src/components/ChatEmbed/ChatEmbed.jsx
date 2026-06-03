@@ -53,12 +53,21 @@ function readChatIdFromUrl() {
   }
 }
 
+function readPickerFromUrl() {
+  try {
+    return new URLSearchParams(window.location.search).get('picker') !== '0'
+  } catch {
+    return true
+  }
+}
+
 export default function ChatEmbed() {
   // chatId is normally fixed for the life of this document (the runtime
   // helper navigates the iframe to change it, which remounts us). INIT
   // may still supply one if the helper opened us before lazy-create
   // resolved, so keep it in state.
   const [chatId, setChatId] = useState(() => readChatIdFromUrl())
+  const [picker, setPicker] = useState(() => readPickerFromUrl())
 
   // The correlation token the parent (app frame) minted in INIT. Until
   // it arrives our outbound messages omit instanceId; the parent's
@@ -109,6 +118,7 @@ export default function ChatEmbed() {
       // it when we don't already have one so ChatView mounts the real
       // chat instead of the no-chat notice.
       if (msg.chatId && !chatIdRef.current) setChatId(String(msg.chatId))
+      if (typeof msg.picker === 'boolean') setPicker(msg.picker)
       // Re-announce, now correlated, so the parent learns the resolved
       // chatId under the right instanceId.
       postToParent(READY)
@@ -150,6 +160,7 @@ export default function ChatEmbed() {
       <div className="chat-embed">
         <ChatView
           chatId={chatId}
+          showPicker={picker}
           onMessageStart={() => postToParent(MESSAGE_SENT)}
           onStreamEnd={() => postToParent(TURN_DONE)}
           // System events (theme_updated, app_created, …) are Shell-level

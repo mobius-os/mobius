@@ -1,22 +1,20 @@
-"""Mid-turn Codex steering on the send path (feature 087).
+"""Mid-turn steering on the send path (feature 087).
 
 Möbius normally appends every send-while-running to `pending_messages`
-and drains it at turn-end. For Codex chats with `codex_steer_enabled`
-set (DEFAULT OFF), a send that arrives while a turn is streaming is
-instead injected INTO the live turn via the SDK's `steer()` — the user
-message lands in the transcript (not the queue) and a
-`steered_into_turn` event tells the client to render it inline.
+and drains it at turn-end. For chats with `steer_enabled` set (DEFAULT
+OFF), a send that arrives while a turn is streaming is steered into the
+live provider handle. Codex uses true SDK injection; Claude interrupts
+and re-prompts on the same connected SDK client.
 
 These tests pin the provider-gated branch in
 `routes/chats_stream.send_message`:
 
-  1. codex + running + flag-on + live turn → steer is called, the
+  1. provider + running + flag-on + live turn → steer is called, the
      message is appended to the TRANSCRIPT (not pending), a
      `steered_into_turn` event is broadcast, and the response is
      `{"status": "steered"}`.
   2. flag OFF → falls back to the queue (the default; deploy-safe).
-  3. provider != codex → falls back to the queue (Claude keeps
-     turn-end drain even with the flag on).
+  3. Claude with the flag on uses its live-client fallback.
   4. steer returns False (no live turn / closed-turn race) → queue.
   5. steer raises → queue (a steer failure must never break a send).
 
@@ -48,13 +46,33 @@ def _make_active_codex_turn(chat_id: str):
   return asyncio.run(_build())
 
 
-def _make_codex_chat(chat_id: str, *, steer_enabled: bool) -> None:
+def _make_active_claude_client(chat_id: str):
+  """Builds a real `ActiveClaudeClient` so the route gate passes."""
+  from app.claude_sdk_runner import ActiveClaudeClient
+
+  class _Client:
+    async def interrupt(self):
+      return None
+
+  async def _build():
+    return ActiveClaudeClient(_Client(), chat_id=chat_id)
+
+  return asyncio.run(_build())
+
+
+def _make_codex_chat(
+  chat_id: str, *, steer_enabled: bool, legacy_flag: bool = False,
+) -> None:
   """Persist a Codex chat with one assistant partial mid-turn.
 
   The assistant message is the in-progress turn's partial; a steered
   user message must land just before it so the runner's snapshot /
   finalize writes keep targeting the assistant as `messages[-1]`.
   """
+  settings = {}
+  if steer_enabled:
+    key = "codex_steer_enabled" if legacy_flag else "steer_enabled"
+    settings = {key: True}
   db = SessionLocal()
   try:
     chat = models.Chat(
@@ -65,8 +83,28 @@ def _make_codex_chat(chat_id: str, *, steer_enabled: bool) -> None:
         {"role": "user", "content": "start", "ts": 1},
         {"role": "assistant", "content": "working", "ts": 2, "blocks": []},
       ],
+      agent_settings_json=settings,
+    )
+    db.add(chat)
+    db.commit()
+  finally:
+    db.close()
+
+
+def _make_claude_chat(chat_id: str, *, steer_enabled: bool) -> None:
+  """Persist a Claude chat with one assistant partial mid-turn."""
+  db = SessionLocal()
+  try:
+    chat = models.Chat(
+      id=chat_id,
+      title="Claude chat",
+      provider="claude",
+      messages=[
+        {"role": "user", "content": "start", "ts": 1},
+        {"role": "assistant", "content": "working", "ts": 2, "blocks": []},
+      ],
       agent_settings_json=(
-        {"codex_steer_enabled": True} if steer_enabled else {}
+        {"steer_enabled": True} if steer_enabled else {}
       ),
     )
     db.add(chat)
@@ -162,30 +200,89 @@ def test_falls_back_to_queue_when_flag_off(client, auth, monkeypatch):
   assert [m["content"] for m in chat.pending_messages] == ["queued please"]
 
 
-def test_falls_back_to_queue_for_non_codex(client, auth, db, monkeypatch):
-  """provider != codex: Claude keeps turn-end drain even with the flag
-  on and a (notionally) live turn — steer is Codex-only."""
-  chat_id = "claudechat"
-  chat = models.Chat(
-    id=chat_id,
-    title="Claude chat",
-    provider="claude",
-    messages=[
-      {"role": "user", "content": "start", "ts": 1},
-      {"role": "assistant", "content": "working", "ts": 2, "blocks": []},
-    ],
-    agent_settings_json={"codex_steer_enabled": True},
+def test_legacy_codex_steer_flag_still_enables_steering(
+  client, auth, monkeypatch,
+):
+  """Existing `codex_steer_enabled` opt-ins keep working after rename."""
+  chat_id = "codexlegacy"
+  _make_codex_chat(chat_id, steer_enabled=True, legacy_flag=True)
+  registry.register(_make_active_codex_turn(chat_id))
+  create_broadcast(chat_id)
+
+  async def _fake_steer(cid, message):
+    return cid == chat_id and message == "legacy flag"
+
+  monkeypatch.setattr(
+    "app.codex_sdk_runner.steer_into_active_turn", _fake_steer,
   )
-  db.add(chat)
-  db.commit()
-  registry.mark_starting(chat_id)  # makes is_chat_running True
+
+  res = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={"content": "legacy flag"},
+    headers=auth,
+  )
+
+  assert res.status_code == 202, res.text
+  assert res.json()["status"] == "steered"
+
+
+def test_steers_into_live_claude_turn_when_flag_on(
+  client, auth, monkeypatch,
+):
+  """claude + running + flag-on + live client: steer called, transcript
+  append, `steered_into_turn` broadcast, response status `steered`."""
+  chat_id = "claudechat"
+  _make_claude_chat(chat_id, steer_enabled=True)
+  registry.register(_make_active_claude_client(chat_id))
+  create_broadcast(chat_id)
+
+  steered_calls = []
+
+  async def _fake_steer(cid, message):
+    steered_calls.append((cid, message))
+    return True
+
+  monkeypatch.setattr(
+    "app.claude_sdk_runner.steer_into_active_turn", _fake_steer,
+  )
+
+  res = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={"content": "actually use blue"},
+    headers=auth,
+  )
+
+  assert res.status_code == 202, res.text
+  assert res.json()["status"] == "steered"
+  assert steered_calls == [(chat_id, "actually use blue")]
+  chat = _read_chat(chat_id)
+  assert chat.pending_messages in (None, [])
+  assert [m["role"] for m in chat.messages] == [
+    "user", "user", "assistant",
+  ]
+  assert chat.messages[-2]["content"] == "actually use blue"
+  bc = get_broadcast(chat_id)
+  steered_events = [
+    e for e in bc.event_log if e.get("type") == "steered_into_turn"
+  ]
+  assert len(steered_events) == 1
+  assert steered_events[0]["content"] == "actually use blue"
+
+
+def test_claude_falls_back_to_queue_when_flag_off(
+  client, auth, monkeypatch,
+):
+  """Claude steering is deploy-safe: no flag means normal queueing."""
+  chat_id = "claudenoflag"
+  _make_claude_chat(chat_id, steer_enabled=False)
+  registry.register(_make_active_claude_client(chat_id))
   create_broadcast(chat_id)
 
   async def _fail_if_called(cid, message):
-    raise AssertionError("steer must not be called for a Claude chat")
+    raise AssertionError("steer must not be called when the flag is off")
 
   monkeypatch.setattr(
-    "app.codex_sdk_runner.steer_into_active_turn", _fail_if_called,
+    "app.claude_sdk_runner.steer_into_active_turn", _fail_if_called,
   )
 
   res = client.post(
@@ -199,6 +296,34 @@ def test_falls_back_to_queue_for_non_codex(client, auth, db, monkeypatch):
   assert [m["content"] for m in _read_chat(chat_id).pending_messages] == [
     "queued please"
   ]
+
+
+def test_claude_falls_back_to_queue_when_steer_raises(
+  client, auth, monkeypatch,
+):
+  """Claude steer failure is best-effort and falls back to the queue."""
+  chat_id = "clauderaise"
+  _make_claude_chat(chat_id, steer_enabled=True)
+  registry.register(_make_active_claude_client(chat_id))
+  create_broadcast(chat_id)
+
+  async def _steer_raises(cid, message):
+    raise RuntimeError("SDK blew up")
+
+  monkeypatch.setattr(
+    "app.claude_sdk_runner.steer_into_active_turn", _steer_raises,
+  )
+
+  res = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={"content": "queued please"},
+    headers=auth,
+  )
+
+  assert res.status_code == 202, res.text
+  assert res.json()["status"] == "queued"
+  chat = _read_chat(chat_id)
+  assert [m["content"] for m in chat.pending_messages] == ["queued please"]
 
 
 def test_falls_back_to_queue_when_steer_returns_false(

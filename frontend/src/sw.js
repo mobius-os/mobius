@@ -380,8 +380,7 @@ function offlineCapableHandler(cacheName) {
 registerRoute(
   ({ url }) =>
     url.origin === self.location.origin &&
-    (url.pathname === '/api/theme' ||
-      url.pathname === '/api/apps/'),
+    url.pathname === '/api/theme',
   new StaleWhileRevalidate({ cacheName: 'mobius-shell-data' }),
 )
 
@@ -407,10 +406,15 @@ registerRoute(
 // SW cache outlives TanStack Query's 24h persister maxAge so it's
 // the durable layer for cold-offline launches. See Shell.jsx's
 // isFetchedAfterMount comment for the consumer-side of this fix.
+// `/api/apps/` is here too (not SWR): the drawer must show an install or
+// delete immediately. Under SWR the list was always one fetch behind, so a
+// just-installed app was missing and a just-deleted app lingered until the
+// next refetch. NetworkFirst returns the live list when online and still
+// falls back to the cached list offline (cold-drawer render preserved).
 registerRoute(
   ({ url }) =>
     url.origin === self.location.origin &&
-    url.pathname === '/api/chats',
+    (url.pathname === '/api/chats' || url.pathname === '/api/apps/'),
   new NetworkFirst({
     cacheName: 'mobius-shell-data',
     // KEPT at 5s deliberately. Workbox returns a cache fallback as a
@@ -455,9 +459,14 @@ registerRoute(
 // can never disagree. Theme still applies client-side from
 // localStorage('mobius-theme-bg') before first paint, so the cached
 // (non-theme-injected) HTML renders correctly with no server round-trip.
+// `/recover*` is server-rendered (routes/recover.py) and is the safety net
+// when the shell itself is broken — it MUST reach the network/server, never the
+// precached shell. Without this denylist entry the installed PWA served the
+// cached index.html for /recover, so the user landed on the shell instead of the
+// recovery page (and recovery was unreachable exactly when it's needed most).
 registerRoute(new NavigationRoute(
   createHandlerBoundToURL('/index.html'),
-  { denylist: [/^\/apps\//] },
+  { denylist: [/^\/apps\//, /^\/recover(\/|$)/] },
 ))
 
 // Standalone mini-app navigations: stored for offline-capable apps via

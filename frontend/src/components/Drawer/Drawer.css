@@ -178,6 +178,12 @@
     black calc(100% - 16px),
     transparent
   );
+  /* Bottom overscroll room equal to the 16px fade-mask, so the last row
+     (e.g. the selected app) can scroll clear of the dimmed band instead of
+     reading as pinned under the Settings divider. scroll-padding-bottom keeps
+     scroll-into-view from re-tucking it under the mask. */
+  padding-bottom: 16px;
+  scroll-padding-bottom: 16px;
 }
 
 /* ── Items ─────────────────────────────────────────── */
@@ -199,6 +205,9 @@
   cursor: pointer;
   transition: color 0.12s, background 0.12s;
   -webkit-tap-highlight-color: transparent;
+  /* Pairs with .drawer__scroll's scroll-padding-bottom so a row revealed via
+     scroll-into-view never lands inside the bottom fade / against the divider. */
+  scroll-margin-bottom: 16px;
 }
 
 /* Hover gated to real pointers (mouse / trackpad). On touch
@@ -299,8 +308,26 @@
   color: var(--muted);
   cursor: pointer;
   opacity: 0;
-  transition: opacity 0.12s, color 0.12s, background 0.12s;
+  transition: opacity 0.12s, color 0.12s, background 0.12s, transform 0.08s;
   -webkit-tap-highlight-color: transparent;
+}
+
+/* Pressed — the load-bearing feedback fix. tap-highlight is transparent
+   above, so without an explicit :active the kebab reads as dead on touch
+   until the menu portal paints. Scale + tint acknowledges the tap instantly. */
+.drawer__more:active {
+  color: var(--text);
+  background: var(--surface);
+  transform: scale(0.92);
+}
+
+/* Open trigger — Radix stamps data-state="open" on the trigger; keep it lit
+   and accent-tinted (and fully opaque, overriding the touch opacity:0 reveal)
+   so the open menu visibly belongs to this row's kebab. */
+.drawer__more[data-state="open"] {
+  opacity: 1;
+  color: var(--accent);
+  background: var(--accent-dim);
 }
 
 .drawer__row:focus-within .drawer__more { opacity: 1; }
@@ -494,6 +521,7 @@
    information ("streaming") still surfaces via aria-label + presence. */
 @media (prefers-reduced-motion: reduce) {
   .drawer__streaming-dot { animation: none; }
+  .drawer__more:active { transform: none; }
 }
 
 /* ── Settings warning dot ──────────────────────────── */

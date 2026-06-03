@@ -4,7 +4,7 @@ Locks in the contract that the agent gets a clock every turn (issue: the
 agent only ever saw an IANA timezone NAME, and only on turn 1).
 """
 
-from app.chat import _build_time_context, _human_elapsed
+from app.chat import _build_time_context, _human_elapsed, _is_cli_slash_command
 
 
 def test_includes_timezone_label_and_clock():
@@ -47,3 +47,11 @@ def test_elapsed_clause_only_when_present():
   assert "user's last message was" not in _build_time_context("UTC", None)
   out = _build_time_context("UTC", "3 days ago")
   assert "user's last message was 3 days ago" in out
+
+
+def test_goal_slash_command_is_detected_without_matching_paths():
+  assert _is_cli_slash_command("/goal say PONG")
+  assert _is_cli_slash_command("\n/goal clear")
+  assert not _is_cli_slash_command("/")
+  assert not _is_cli_slash_command("/data/apps/x is broken")
+  assert not _is_cli_slash_command("please run /goal later")

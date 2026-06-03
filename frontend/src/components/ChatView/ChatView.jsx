@@ -68,7 +68,7 @@ function sameMessageList(a, b) {
 }
 
 
-export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystemEvent, builtApp, onOpenApp, onMessageStart }) {
+export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystemEvent, builtApp, onOpenApp, onMessageStart, showPicker = true }) {
   const queryClient = useQueryClient()
   // Chat is online-only (it spawns a server-side agent). When offline
   // the composer disables send and says so, rather than failing into a
@@ -1335,7 +1335,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           attachTriggerRef={attachTriggerRef}
           leftButtons={
             <ComposerPopover
-              chatInfo={chatInfo}
+              chatInfo={showPicker ? chatInfo : null}
               chatId={chatId}
               onAttachClick={() => attachTriggerRef.current?.()}
               /* Derive live — `chatInfo.has_assistant_turns` is set

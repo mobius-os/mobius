@@ -63,6 +63,21 @@ export default function InstallSheet({ appId, appName, appSlug, appUpdatedAt, on
     return () => document.removeEventListener('keydown', onKey)
   }, [submitting, onClose])
 
+  // onContinue navigates the whole document away and intentionally leaves
+  // `submitting` true (the page is leaving). BFCache can restore this page
+  // mid-submit, stranding the button on "Saving…"; clear it when the page is
+  // hidden (entering BFCache) or restored so the spinner never freezes. (The
+  // Drawer also unmounts the sheet on pageshow; this is defense-in-depth.)
+  useEffect(() => {
+    function reset() { setSubmitting(false) }
+    window.addEventListener('pagehide', reset)
+    window.addEventListener('pageshow', reset)
+    return () => {
+      window.removeEventListener('pagehide', reset)
+      window.removeEventListener('pageshow', reset)
+    }
+  }, [])
+
   async function onPickFile(e) {
     const file = e.target.files?.[0]
     e.target.value = '' // allow re-picking the same file
