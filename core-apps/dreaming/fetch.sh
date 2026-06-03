@@ -60,26 +60,38 @@ emit_outcome() {
   ts="$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")"
   payload="$(printf '{"ev":"cron_outcome","ts":"%s","app_id":%s,"job":"dreaming","exit_code":%s}' \
     "$ts" "${APP_ID:-0}" "$exit_code")"
-  curl -fsS -X POST \
-    -H "Authorization: Bearer $token" \
-    -H "Content-Type: application/json" \
-    -d "$payload" \
-    "$API_BASE_URL/api/admin/activity/emit" >/dev/null 2>>"$LOG" || \
-    log "WARN cron_outcome emit failed (rc=$exit_code)"
+  # The activity log is the PRIMARY liveness signal the next night's run
+  # reads, so a dropped emit is invisible there (only this .log file keeps
+  # it). Retry a transient API blip (restart/overload) with backoff before
+  # giving up.
+  local attempt=0
+  while (( attempt < 3 )); do
+    if curl -fsS -X POST \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json" \
+        -d "$payload" \
+        "$API_BASE_URL/api/admin/activity/emit" >/dev/null 2>>"$LOG"; then
+      return 0
+    fi
+    attempt=$(( attempt + 1 ))
+    (( attempt < 3 )) && { log "WARN cron_outcome emit attempt $attempt failed; retrying"; sleep $(( 2 ** attempt )); }
+  done
+  log "WARN cron_outcome emit failed after 3 attempts (rc=$exit_code); NOT recorded in activity log"
+  return 1
 }
 
 # --- no-overlap lock (flock) ------------------------------------------
 # fd 9 holds the lock for the life of this process; flock -n fails fast
 # if a prior night is still running (a long run that overran its window).
+# Exit-code legend (recorded as the cron_outcome exit_code, so the next
+# run + the Dreaming app can tell a real success from a no-op):
+#   0  success           3  service token missing
+#   2  app id missing    5  skipped (a prior run still holds the lock)
+#   124 wall-clock timeout    other  agent run error
 exec 9>"$LOCK"
 if ! flock -n 9; then
-  log "another dreaming run holds the lock; exiting"
-  exit 0
-fi
-
-if [[ -z "$APP_ID" ]]; then
-  log "ERROR no app id passed as \$1; exiting"
-  exit 2
+  log "another dreaming run holds the lock; skipping this night (exit 5)"
+  exit 5
 fi
 
 # --- token: export for the agent's shell (NOT a boundary) -------------
@@ -98,6 +110,16 @@ SERVICE_TOKEN="$(cat "$TOKEN_FILE")"
 # wrapper-era scripts read SERVICE_TOKEN. Export both so either works.
 export SERVICE_TOKEN AGENT_TOKEN="$SERVICE_TOKEN"
 auth=(-H "Authorization: Bearer $SERVICE_TOKEN")
+
+# App id ($1) scopes storage + the cron_outcome. Checked AFTER the token
+# block (not before, as it was) so a missing id is still recorded in the
+# activity log — emit_outcome needs the token, so an earlier exit was
+# invisible there, asymmetric with the token-missing path above.
+if [[ -z "$APP_ID" ]]; then
+  log "ERROR no app id passed as \$1; exiting"
+  emit_outcome 2
+  exit 2
+fi
 
 log "start (app_id=$APP_ID date=$DATE dry=${DREAMING_DRY:-0} timeout=${RUN_TIMEOUT}s)"
 

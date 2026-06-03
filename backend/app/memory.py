@@ -231,8 +231,16 @@ def _build_graph_block(
         "utf-8", errors="ignore"
       )
       tail = "[older inbox entries omitted]\n" + tail
-    parts.append(f"<<< inbox.md (recent, unconsolidated) >>>\n{tail}")
-    loaded.append("inbox.md")
+    inbox_chunk = f"<<< inbox.md (recent, unconsolidated) >>>\n{tail}"
+    # Budget the inbox like the hot notes above (+2 is the "\n\n"
+    # separator). INBOX_TAIL_BYTES caps only the tail body, not the
+    # header+marker+separator, so the chunk could still push the block
+    # past budget_bytes when a large index leaves little room — this
+    # check keeps build_memory_block within its ~budget_bytes contract.
+    if used + len(inbox_chunk.encode("utf-8")) + 2 <= budget_bytes:
+      parts.append(inbox_chunk)
+      loaded.append("inbox.md")
+      used += len(inbox_chunk.encode("utf-8")) + 2
 
   if not parts:
     return MemoryBlock(text="", loaded=[], mode="empty")

@@ -97,6 +97,27 @@ def test_budget_skips_hot_notes_when_index_fills_it(tmp_path):
   assert "notes/n.md" not in block.loaded
 
 
+def test_budget_skips_inbox_when_index_fills_it(tmp_path):
+  # A large index can leave no room for the inbox tail. The inbox chunk's
+  # header+marker+separator are NOT covered by INBOX_TAIL_BYTES, so without
+  # an explicit budget check the chunk would push the block past
+  # budget_bytes. Assert it is dropped, keeping the block within budget.
+  root = _graph(tmp_path)
+  # Index nearly fills the 4000-byte budget (but isn't itself truncated),
+  # leaving no room for even a tiny inbox chunk + its marker + separator.
+  big_index = "# Home\n" + ("x" * 3990)
+  (root / "index.md").write_text(big_index)
+  (root / "inbox.md").write_text("- a fresh observation worth keeping")
+  (root / ".ready").write_text("")
+
+  block = memory.build_memory_block(tmp_path, budget_bytes=4000)
+  assert block.mode == "graph"
+  assert "[index truncated" not in block.text  # index itself fits
+  assert "fresh observation" not in block.text  # no room left for inbox
+  assert "inbox.md" not in block.loaded
+  assert len(block.text.encode("utf-8")) <= 4000
+
+
 # --- frontmatter parsing ----------------------------------------------
 
 
