@@ -37,7 +37,7 @@ mkdirSync(dirname(outFile), { recursive: true })
 // needs more — keep it curated so the bundle stays ~React-sized.
 const entry = join(installDir, '_cm-entry.js')
 writeFileSync(entry, [
-  "export {EditorState, StateField, StateEffect, RangeSet, RangeSetBuilder, Compartment, Prec, Text, Facet} from '@codemirror/state'",
+  "export {EditorState, EditorSelection, StateField, StateEffect, RangeSet, RangeSetBuilder, Compartment, Prec, Text, Facet, Transaction, Annotation} from '@codemirror/state'",
   "export {EditorView, Decoration, WidgetType, ViewPlugin, keymap, drawSelection, dropCursor, rectangularSelection, crosshairCursor, highlightActiveLine, highlightActiveLineGutter, highlightSpecialChars, placeholder, lineNumbers, gutter} from '@codemirror/view'",
   "export {history, historyKeymap, defaultKeymap, indentWithTab, standardKeymap} from '@codemirror/commands'",
   "export {syntaxTree, HighlightStyle, syntaxHighlighting, defaultHighlightStyle, indentOnInput, bracketMatching, foldGutter, foldKeymap, LanguageSupport, Language} from '@codemirror/language'",
