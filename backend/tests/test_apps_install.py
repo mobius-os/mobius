@@ -129,6 +129,27 @@ MANIFEST_NEWS = {
 }
 
 
+def test_validate_url_safe_blocks_ipv6_embedded_ipv4():
+  # SSRF: an IPv6 that embeds a blocked IPv4 must be rejected — IPv4-compatible
+  # (::127.0.0.1), IPv4-mapped (::ffff:169.254.169.254), and well-known NAT64
+  # (64:ff9b::a9fe:a9fe == 169.254.169.254) all reach an internal v4 host.
+  import socket as _socket
+  from app.install import _validate_url_safe
+
+  def _gai(ip_str):
+    return [(_socket.AF_INET6, _socket.SOCK_STREAM, 0, "", (ip_str, 0, 0, 0))]
+
+  for ip_str in ("::127.0.0.1", "::ffff:169.254.169.254", "64:ff9b::a9fe:a9fe"):
+    with patch("app.install.socket.getaddrinfo", return_value=_gai(ip_str)):
+      with pytest.raises(Exception):  # HTTPException(400)
+        _validate_url_safe("https://evil.example/mobius.json")
+
+  # A genuine public IPv6 is allowed through.
+  with patch("app.install.socket.getaddrinfo",
+             return_value=_gai("2606:4700:4700::1111")):
+    _validate_url_safe("https://cloudflare.example/mobius.json")
+
+
 def test_install_fresh_app_writes_everything(client, auth, tmp_path, bypass_url_validation):
   """Happy path: install creates DB row, compiles JSX, populates
   source_dir, seeds storage, processes icon, returns mode=install."""
