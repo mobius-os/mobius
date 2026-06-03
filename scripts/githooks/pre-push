@@ -18,7 +18,21 @@
 
 set -uo pipefail
 
-ROOT="$(git rev-parse --show-toplevel)"
+# Resolve the repo root, self-healing the core.bare=true corruption that
+# app-git test escapes leak into the shared .git/config (.pm/096): it makes
+# --show-toplevel fail with "must be run in a work tree" and silently breaks
+# every worktree (they share .git/config). Detect, repair to false, retry.
+# Plain echo here, not warn() — the helpers aren't defined until below.
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
+if [ -z "$ROOT" ]; then
+  if git config --local core.bare 2>/dev/null | grep -q '^true$'; then
+    echo "[pre-push] core.bare=true in shared config — repairing to false" >&2
+    git config --local core.bare false
+    ROOT="$(git rev-parse --show-toplevel)" || exit 1
+  else
+    exit 1
+  fi
+fi
 cd "$ROOT" || exit 1
 
 # Main checkout (parent of the shared .git dir). Worktrees don't get their
@@ -55,6 +69,21 @@ if git grep -nIE '^(<<<<<<<|>>>>>>>) ' HEAD -- \
   FAIL=1
 else
   ok "no conflict markers"
+fi
+
+# 1b. Test-pollution detector. The app-git feature's `ensure_repo` writes
+#     "Initialize app repo" commits authored `Mobius <mobius@localhost>`.
+#     Those belong only in per-app tmp repos; if they're among the commits
+#     being pushed, an app-git test escaped its tmpdir and polluted HEAD
+#     (.pm/096 — it pushed 18 such commits + a clobbered .gitignore to main
+#     once already). Block them before they reach origin/main.
+POLLUTION="$(git log --format='%an <%ae>' "$BASE"..HEAD 2>/dev/null \
+  | grep -c 'Mobius <mobius@localhost>' || true)"
+if [ "${POLLUTION:-0}" -gt 0 ]; then
+  err "detected $POLLUTION Mobius-authored commit(s) on this branch — likely app-git test pollution:"
+  git log --format='%h %an %s' "$BASE"..HEAD | grep 'Mobius' | sed 's/^/    /' >&2
+  err "recover: git reset --hard origin/main  (drops the pollution); see scripts/git-doctor.sh"
+  FAIL=1
 fi
 
 # 2. Python syntax on changed .py files (instant; no deps beyond python3).
@@ -112,8 +141,14 @@ if changed_match '^backend/'; then
     # esbuild on PATH (compile tests shell out to it) + a throwaway
     # SECRET_KEY so Settings validates. The shared venv supplies deps; cwd
     # ($ROOT/backend) supplies the code under test.
+    # GIT_CEILING_DIRECTORIES="$ROOT" stops git's upward repo discovery at the
+    # repo root, so an app-git test (.pm/096) can't walk out of its tmpdir and
+    # mutate THIS repo's .git (flip core.bare / append "Initialize app repo"
+    # commits). Verified: it blocks enclosing-repo discovery from backend/ and
+    # no backend test relies on implicit discovery of the enclosing repo.
     if (cd backend \
-        && PATH="$MAIN/frontend/node_modules/.bin:$PATH" \
+        && GIT_CEILING_DIRECTORIES="$ROOT" \
+           PATH="$MAIN/frontend/node_modules/.bin:$PATH" \
            SECRET_KEY="${SECRET_KEY:-$(python3 -c 'import secrets;print(secrets.token_hex(32))')}" \
            "$VENV" -m pytest -q -p no:cacheprovider >"$PP_TMP/be" 2>&1); then
       ok "backend pytest passed"

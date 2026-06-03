@@ -85,24 +85,56 @@ sync_core_app() {
     echo "$existing_id"
     return
   fi
+  if [[ ! -r "$src" ]]; then
+    log "ERROR baked source unreadable for $slug ($src) — skipping sync"
+    echo "$existing_id"
+    return
+  fi
   cp "$src" "$dst_dir/index.jsx"
   local id
   id="$(python3 /app/scripts/register_app.py "$name" "$desc" "$dst_dir/index.jsx" 2>>"$LOG" \
     | python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("id",""))
 except Exception: print("")')"
-  [[ -n "$baked_hash" ]] && echo "$baked_hash" > "$hashfile"
+  # Record the sentinel ONLY when registration returned an id. A failed
+  # register (empty id) that still wrote the sentinel would poison it: the
+  # next boot sees hash-match, takes the skip path, and the app is never
+  # installed (the cron + icon blocks below are gated on a non-empty id).
+  [[ -n "$baked_hash" && -n "$id" ]] && echo "$baked_hash" > "$hashfile"
   log "synced $slug from baked source (id=$id)"
-  echo "$id"
+  echo "${id:-$existing_id}"
 }
 
 # --- Mind -------------------------------------------------------------
+# offline_capable stays FALSE (the app default; not PATCHed here). Mind reads
+# the live shared graph at /data/shared/memory/graph.json + per-note markdown;
+# offline support would need those cached/synced, not just the JSX. The store
+# manifest (app-mind/mobius.json) declares false to match — keep all three
+# (manifest, schema default, this script) in agreement if that ever changes.
 mg_id="$(sync_core_app mind "Mind" "What Möbius knows about you — an Obsidian-style graph of its memory it grows over time.")"
 # Set the app icon (kg-t1: glossy infinity-as-graph, the owner's pick). Raw PNG
 # bytes; the route downscales + stores. Idempotent — fine to re-PUT each boot.
 if [[ -n "$mg_id" && -f "$CORE_SRC/mind/icon.png" ]]; then
   curl -s -X PUT -H "Authorization: Bearer $TOKEN" --data-binary @"$CORE_SRC/mind/icon.png" \
     "$API_BASE_URL/api/apps/$mg_id/icon" -o /dev/null -w 'mind icon: HTTP %{http_code}\n' >>"$LOG" 2>&1 || true
+fi
+
+# Migration (kg-t1 rename): Mind supersedes the old "Memory Graph" viewer. On
+# instances that had the predecessor, install-core-apps registers Mind as a NEW
+# app and would otherwise leave both in the drawer. Soft-archive the old one by
+# renaming (it owns no unique data — it read the shared graph — so we keep the
+# row for audit/recovery rather than hard-deleting). Idempotent + a no-op on
+# fresh instances and on prod (where the orphan was already removed).
+if [[ -n "$mg_id" ]]; then
+  old_mg_id="$(has_app memory-graph)"
+  if [[ -n "$old_mg_id" && "$old_mg_id" != "$mg_id" ]]; then
+    if curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+      -d '{"name":"Memory Graph (archived)"}' "$API_BASE_URL/api/apps/$old_mg_id" >>"$LOG" 2>&1; then
+      log "archived predecessor Memory Graph app (id=$old_mg_id; superseded by Mind id=$mg_id)"
+    else
+      log "WARN failed to archive old Memory Graph app (id=$old_mg_id) — drawer may show both"
+    fi
+  fi
 fi
 
 # --- dreaming ---------------------------------------------------------

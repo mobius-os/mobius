@@ -27,6 +27,14 @@ ROOT="$(git rev-parse --show-toplevel)" || {
 MAIN="$(cd "$(dirname "$(git rev-parse --git-common-dir)")" && pwd 2>/dev/null)" \
   || MAIN="$ROOT"
 
+# Make it obvious WHICH tree is under test — running from the main checkout
+# silently tests `main`, not your worktree (a real this-session footgun).
+if [ "$ROOT" = "$MAIN" ]; then
+  echo "wt-pytest: testing the MAIN checkout (not a worktree)" >&2
+else
+  echo "wt-pytest: testing worktree '$(basename "$ROOT")'" >&2
+fi
+
 VENV="$MAIN/backend/.venv/bin/python"
 ESB_DIR="$MAIN/frontend/node_modules/.bin"
 
@@ -45,7 +53,13 @@ fi
 cd "$ROOT/backend" || exit 1
 # The worktree's backend/ is on sys.path (cwd); the venv supplies deps; the
 # generated SECRET_KEY satisfies pydantic Settings for tests that build it.
+# GIT_CEILING_DIRECTORIES="$ROOT" stops git's upward repo discovery at this
+# checkout's root, so an app-git test (.pm/096) can't walk out of its tmpdir
+# and mutate this checkout's .git (flip core.bare / append "Initialize app
+# repo" commits). Verified safe: no backend test relies on implicit discovery
+# of the enclosing repo, and the app-git tests use explicit -C <tmp_path>.
 exec env \
+  GIT_CEILING_DIRECTORIES="$ROOT" \
   PATH="$ESB_DIR:${PATH:-}" \
   SECRET_KEY="${SECRET_KEY:-$(python3 -c 'import secrets;print(secrets.token_hex(32))')}" \
   "$VENV" -m pytest -p no:cacheprovider "$@"
