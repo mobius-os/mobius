@@ -52,7 +52,7 @@ Möbius comes with a curated app store, so you have a suite of genuinely useful 
   <img src="assets/screenshots/store-catalog.png" width="720" alt="The Möbius app store: News, Workout, Visited, Mind, LaTeX, and Dreaming, each with its own icon and a one-line description." />
 </p>
 
-<sub>A few of the starter-pack apps. <strong>News</strong> writes you a morning digest on a schedule. <strong>Workout</strong> logs training in plain language, on-device. <strong>Visited</strong> is a 3D globe of where you have been. <strong>Mind</strong> is a browsable graph of what Möbius has learned about you. <strong>LaTeX</strong> is an Overleaf-style editor with a real engine. <strong>Dreaming</strong> is the agent improving itself overnight.</sub>
+<sub>A few of the starter-pack apps. <strong>News</strong> writes you a morning digest on a schedule. <strong>Workout</strong> logs training in plain language, on-device. <strong>Visited</strong> is a 3D globe of where you have been. <strong>Mind</strong> is a browsable graph of everything the agent has learned, every interaction and every lesson. <strong>LaTeX</strong> is an Overleaf-style editor with a real engine. <strong>Dreaming</strong> is the agent improving itself overnight.</sub>
 
 Every app is just a public repo with a `mobius.json` and an `index.jsx`, open under [github.com/mobius-os](https://github.com/mobius-os). Installing one means pasting a URL; updating one means pasting the same URL again, which patches the code and keeps your data. There is no submission queue and nothing to be blessed by.
 
@@ -102,7 +102,7 @@ Read the full design in [The agent is the kernel](https://hamzamerzic.info/blog/
 
 ## It improves itself for you
 
-Möbius does not just keep your chat history. It builds a structured memory _of you_, the **Mind**, a knowledge graph of your preferences, your tools, and your recurring patterns, kept separate from any transcript so the agent can reason about you without re-reading every conversation. The Mind is browsable; it is one of the starter apps.
+Möbius does not just keep your chat history. It builds a lasting memory of everything it learns, the **Mind**, a knowledge graph of every interaction and every lesson the agent picks up along the way, kept separate from any transcript so it can reason from accumulated experience instead of re-reading conversations. The Mind is browsable; it is one of the starter apps.
 
 And every night, while you sleep, it dreams. The **Dreaming** agent reviews the day and looks for ways to be more useful to you tomorrow. It tidies and reorganizes the Mind, anticipates what you are likely to need next, suggests new apps and features worth building, and audits your instance for improvements and weak spots. You wake up to an agent that is a little sharper and a little more yours than the day before.
 
