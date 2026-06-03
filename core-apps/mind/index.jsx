@@ -421,24 +421,43 @@ export default function App({ appId, token }) {
         : withAlpha(col, 0.5 * alpha);
     ctx.stroke();
 
-    // Label — drawn in CSS px (font size / zoom). Show on MOC nodes, the
-    // hovered node, and (when zoomed in enough) everything that's still lit.
-    const showLabel = isHover || isMoc || (globalScale > 0.85 && f > 0.5);
+    // Label — zoom-based LOD, drawn in CSS px (font size / zoom) with a
+    // rounded pill underlay so text stays legible over links and halos.
+    const hasMocList = Array.isArray(node.mocs) && node.mocs.length > 0;
+    const isImportant = (node.importance || 0) >= 7;
+    const showLabel = globalScale >= 1.4
+      || (globalScale >= 0.8 && (hasMocList || isImportant || isHover))
+      || (globalScale >= 0.4 && (hasMocList || isHover));
     if (showLabel) {
       const label = node.title || node.id;
-      const fontSize = Math.max(3, (isMoc ? 11.5 : 10.5) / globalScale);
+      const labelPx = clamp((isMoc ? 11.5 : 10.5) * Math.sqrt(globalScale), 9, 15);
+      const fontSize = labelPx / globalScale;
+      const padX = 5.5 / globalScale;
+      const padY = 2.5 / globalScale;
+      const gap = 3 / globalScale;
+      const labelY = node.y + r + gap;
+      const pillAlpha = (isHover ? 0.88 : 0.62) * (0.35 + 0.65 * f);
+
+      ctx.save();
       ctx.font = `${isMoc ? 600 : 500} ${fontSize}px var(--font, sans-serif)`;
       ctx.textAlign = 'center';
-      ctx.textBaseline = 'top';
-      const labelY = node.y + r + 2.5 / globalScale;
-      // Halo behind the text for legibility over edges/glow.
-      ctx.lineJoin = 'round';
-      ctx.lineWidth = 3 / globalScale;
-      ctx.strokeStyle = withAlpha(cssVar('--bg', '#0d0d0d'), 0.85 * (isHover ? 1 : f));
+      ctx.textBaseline = 'middle';
       ctx.globalAlpha = isHover ? 1 : 0.4 + 0.6 * f;
-      ctx.strokeText(label, node.x, labelY);
+
+      const width = ctx.measureText(label).width + padX * 2;
+      const height = fontSize + padY * 2;
+      const x = node.x - width / 2;
+      const y = labelY;
+      ctx.fillStyle = withAlpha(cssVar('--bg', '#0d0d0d'), pillAlpha);
+      roundedRect(ctx, x, y, width, height, 5 / globalScale);
+      ctx.fill();
+      ctx.lineWidth = 0.75 / globalScale;
+      ctx.strokeStyle = withAlpha(cssVar('--text', '#e5e5e5'), 0.12 * (isHover ? 1 : f));
+      ctx.stroke();
+
       ctx.fillStyle = cssVar('--text', '#e5e5e5');
-      ctx.fillText(label, node.x, labelY);
+      ctx.fillText(label, node.x, y + height / 2);
+      ctx.restore();
     }
     ctx.globalAlpha = 1;
   }, [colorForNode, radiusForNode, hoverId, focusOf]);
@@ -614,17 +633,23 @@ export default function App({ appId, token }) {
                 nodeVal={(n) => radiusForNode(n)}
                 nodeLabel={() => ''}
                 nodeCanvasObject={paintNode}
+                nodeCanvasObjectMode="replace"
                 nodePointerAreaPaint={paintPointer}
                 linkColor={linkColor}
                 linkWidth={linkWidth}
                 linkCurvature={0.08}
-                linkDirectionalParticles={0}
-                cooldownTicks={140}
+                linkDirectionalParticles={(link) => (link.kind === 'moc' ? 1 : 0)}
+                linkDirectionalParticleSpeed={0.0025}
+                linkDirectionalParticleWidth={(link) => (link.kind === 'moc' ? 1.35 : 0.9)}
+                linkDirectionalParticleColor={(link) => linkColor(link)}
+                autoPauseRedraw={false}
+                cooldownTicks={260}
+                cooldownTime={30000}
                 onNodeClick={(n) => { setSelected(n); setHoverId(null); }}
                 onNodeHover={(n) => setHoverId(n ? n.id : null)}
                 onBackgroundClick={() => setSelected(null)}
-                d3VelocityDecay={0.28}
-                warmupTicks={20}
+                d3VelocityDecay={0.24}
+                warmupTicks={28}
               />
             ) : (
               <div style={S.center}>
@@ -884,6 +909,25 @@ function ChatGlyph() {
 function escapeHtml(s) {
   return String(s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
+}
+
+function roundedRect(ctx, x, y, w, h, r) {
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.lineTo(x + w - rr, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+  ctx.lineTo(x + w, y + h - rr);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+  ctx.lineTo(x + rr, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+  ctx.lineTo(x, y + rr);
+  ctx.quadraticCurveTo(x, y, x + rr, y);
+  ctx.closePath();
 }
 
 // Read a CSS custom property off :root (computed) with a fallback.
