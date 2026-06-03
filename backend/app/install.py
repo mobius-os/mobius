@@ -284,13 +284,19 @@ def _validate_url_safe(url: str) -> None:
       ip = ipaddress.ip_address(ip_str)
     except ValueError:
       continue
-    # An IPv4-mapped IPv6 address (::ffff:a.b.c.d) reaches the SAME host as
-    # a.b.c.d but would not match the IPv4 entries in _BLOCKED_NETS — so
-    # ::ffff:169.254.169.254 would slip past the cloud-metadata block. Check
-    # the embedded IPv4 against every blocked net too.
+    # An IPv6 that EMBEDS an IPv4 reaches that v4 host but won't match the
+    # IPv4 entries in _BLOCKED_NETS: ::ffff:a.b.c.d (mapped, e.g.
+    # ::ffff:169.254.169.254) and ::a.b.c.d (IPv4-compatible / ::/96, e.g. a
+    # literal [::127.0.0.1] URL). Pull the embedded v4 and check it too.
+    # (Well-known NAT64 64:ff9b::/96 is blocked as a whole prefix above;
+    # operator-custom NAT64 prefixes + DNS rebinding at fetch time need IP
+    # pinning, tracked as a separate hardening task.)
     candidates = [ip]
-    if ip.version == 6 and ip.ipv4_mapped is not None:
-      candidates.append(ip.ipv4_mapped)
+    if ip.version == 6:
+      if ip.ipv4_mapped is not None:
+        candidates.append(ip.ipv4_mapped)
+      elif ip in ipaddress.ip_network("::/96"):
+        candidates.append(ipaddress.ip_address(int(ip) & 0xFFFFFFFF))
     for cand in candidates:
       for net in _BLOCKED_NETS:
         if cand in net:

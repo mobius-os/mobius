@@ -272,6 +272,9 @@ def build_memory_block(
 
   Pure: never writes, never raises on a missing/garbled file.
   """
+  # Clamp at 0 so a stray negative budget can't reach the byte-slicing below,
+  # where a negative limit returns a SUFFIX of the text instead of empty.
+  budget_bytes = max(0, budget_bytes)
   root = memory_dir(data_dir)
   if is_graph_ready(data_dir):
     block = _build_graph_block(root, budget_bytes, max_notes)
