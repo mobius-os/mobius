@@ -5,8 +5,19 @@ The system prompt (skill/core.md, baked + owner-curated) is the stable
 "constitution"; the detailed how-to skills live here, under /data, so the agent
 (and the nightly Dreaming agent) can IMPROVE them and write new ones. Like the
 knowledge graph, this is CREATE-IF-ABSENT — reseeding would clobber the agent's
-own skill edits. Owner skill updates reach existing instances via a versioned
-migration (the `.seed-version` sentinel), not a blind overwrite.
+own skill edits.
+
+Propagation policy, precisely (the code below is the contract): on first boot
+the whole seed tree is copied and `.seed-version` is stamped. On every later
+boot we ONLY add seed skills the instance is missing — an already-present skill
+is NEVER overwritten, so the agent's edits survive. There is deliberately no
+automatic content migration of existing skills: an updated baked seed (e.g. a
+fix to dreaming.md) does NOT reach an instance that already has that file. Such
+an update must be propagated explicitly (copy the new seed over the live
+/data/shared/skills/<name>.md), because a blind overwrite can't tell an owner
+improvement from an agent edit. `.seed-version`/`SEED_VERSION` are kept as a
+record of the baked seed generation for that future, merge-aware migration; the
+sentinel is written but not yet read.
 
 Seed source: /app/scripts/seed-skills/ (baked), falling back to the in-repo
 backend/scripts/seed-skills/ for dev. Run from entrypoint after

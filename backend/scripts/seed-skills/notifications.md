@@ -18,7 +18,7 @@ Send push notifications for meaningful events — not routine confirmations. If 
 
 The platform does NOT auto-notify when you call `AskUserQuestion` or end a turn with a prose clarifying question. You own this explicitly: same `curl POST /api/notifications/send` pattern you use after building an app, with a question-shaped title and body. Firing it from bash means the HTTP response lands in your tool output, so you see success/failure and can react (re-try, fall back to text) on the same turn.
 
-Title: "Möbius needs your answer". Body: the first ~80 chars of your question. Include `source_id: "$CHAT_ID"` and `target: "/chat/$CHAT_ID"` so the tap routes back here. Skip the notify only when you delivered something useful in the same turn AND that delivery already sent a notification.
+Title: "Möbius needs your answer". Body: the first ~80 chars of your question. Include `source_id: "$CHAT_ID"` and `target: "/shell/?chat=$CHAT_ID"` so the tap routes back here **inside the PWA** — the bare `/chat/<id>` form escapes the service-worker scope and a cold tap opens a browser tab instead. Skip the notify only when you delivered something useful in the same turn AND that delivery already sent a notification.
 
 ---
 
@@ -43,10 +43,10 @@ curl -s -X POST "$API_BASE_URL/api/notifications/send" \
     "title": "Task complete",
     "body": "Your expense tracker app is ready.",
     "source_id": "'"$CHAT_ID"'",
-    "target": "/app/APP_ID_HERE",
+    "target": "/shell/?app=APP_ID_HERE",
     "actions": [
-      {"action": "open_app", "title": "Open App", "target": "/app/APP_ID_HERE"},
-      {"action": "open_chat", "title": "View Chat", "target": "/chat/'"$CHAT_ID"'"}
+      {"action": "open_app", "title": "Open App", "target": "/shell/?app=APP_ID_HERE"},
+      {"action": "open_chat", "title": "View Chat", "target": "/shell/?chat='"$CHAT_ID"'"}
     ]
   }'
 ```

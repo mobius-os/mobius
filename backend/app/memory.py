@@ -259,7 +259,13 @@ def build_memory_block(
   """
   root = memory_dir(data_dir)
   if is_graph_ready(data_dir):
-    return _build_graph_block(root, budget_bytes, max_notes)
+    block = _build_graph_block(root, budget_bytes, max_notes)
+    if block.mode != "empty":
+      return block
+    # .ready is present but the graph yielded nothing (index/notes/inbox all
+    # empty or deleted) — don't hand the agent an empty memory block; fall
+    # through to the legacy file so an emptied-but-published graph never
+    # silently wipes the agent's memory.
 
   legacy = Path(data_dir) / "shared" / "agent-experience.md"
   ctx = _read(legacy).strip()
@@ -278,8 +284,12 @@ def _build_graph_block(
   index = _read(root / "index.md").strip()
   if index:
     if len(index.encode("utf-8")) > budget_bytes:
-      index = _truncate_bytes(index, budget_bytes)
-      index += "\n\n[index truncated to fit the memory budget]"
+      # Reserve room for the marker so index + marker stays within budget —
+      # truncating to the full budget and THEN appending overran it by the
+      # marker's length.
+      marker = "\n\n[index truncated to fit the memory budget]"
+      index = _truncate_bytes(index, budget_bytes - len(marker.encode("utf-8")))
+      index += marker
     parts.append(index)
     loaded.append("index.md")
     used += len(index.encode("utf-8"))
@@ -306,8 +316,16 @@ def _build_graph_block(
         "utf-8", errors="ignore"
       )
       tail = "[older inbox entries omitted]\n" + tail
-    parts.append(f"<<< inbox.md (recent, unconsolidated) >>>\n{tail}")
-    loaded.append("inbox.md")
+    inbox_chunk = f"<<< inbox.md (recent, unconsolidated) >>>\n{tail}"
+    # Budget the inbox like the hot notes above (+2 is the "\n\n"
+    # separator). INBOX_TAIL_BYTES caps only the tail body, not the
+    # header+marker+separator, so the chunk could still push the block
+    # past budget_bytes when a large index leaves little room — this
+    # check keeps build_memory_block within its ~budget_bytes contract.
+    if used + len(inbox_chunk.encode("utf-8")) + 2 <= budget_bytes:
+      parts.append(inbox_chunk)
+      loaded.append("inbox.md")
+      used += len(inbox_chunk.encode("utf-8")) + 2
 
   if not parts:
     return MemoryBlock(text="", loaded=[], mode="empty")

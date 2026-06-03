@@ -411,6 +411,7 @@ async def run() -> int:
     await client.query(goal)
 
     saw_result = False
+    result_error = False
     async for sdk_msg in client.receive_response():
       if log_fh is not None:
         _drain_message(sdk_msg, log_fh)
@@ -419,9 +420,19 @@ async def run() -> int:
       # imported the real types for formatting.
       if type(sdk_msg).__name__ == "ResultMessage":
         saw_result = True
+        # is_error covers a hard failure AND the max_turns cap (subtype
+        # error_max_turns). A night that ended in error must NOT report
+        # success — otherwise cron_outcome records exit 0 and both the next
+        # run and the Dreaming app believe a brief was produced when none was.
+        if getattr(sdk_msg, "is_error", False):
+          result_error = True
+          _log(f"WARN run ended in error (subtype={getattr(sdk_msg, 'subtype', '?')})")
 
     if not saw_result:
       _log("WARN stream ended without a terminal ResultMessage")
+      return 2
+    if result_error:
+      return 2
     _log("done")
     return 0
   except Exception as exc:  # noqa: BLE001 — top-level guard for cron

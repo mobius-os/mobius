@@ -556,7 +556,11 @@ async def delete_app_folder(
   return Response(status_code=204)
 
 
-@router.put("/apps/{app_id}/{path:path}", status_code=204)
+@router.put(
+  "/apps/{app_id}/{path:path}",
+  status_code=204,
+  dependencies=[Depends(reject_cross_site)],
+)
 async def write_app_file(
   app_id: int,
   path: str,
@@ -608,7 +612,11 @@ async def write_app_file(
   return Response(status_code=204)
 
 
-@router.delete("/apps/{app_id}/{path:path}", status_code=204)
+@router.delete(
+  "/apps/{app_id}/{path:path}",
+  status_code=204,
+  dependencies=[Depends(reject_cross_site)],
+)
 async def delete_app_file(
   app_id: int,
   path: str,
@@ -662,7 +670,11 @@ def read_shared_file(
   return _serve_file(file_path)
 
 
-@router.put("/shared/{path:path}", status_code=204)
+@router.put(
+  "/shared/{path:path}",
+  status_code=204,
+  dependencies=[Depends(reject_cross_site)],
+)
 async def write_shared_file(
   path: str,
   request: Request,
@@ -725,7 +737,11 @@ async def write_shared_file(
   return Response(status_code=204)
 
 
-@router.delete("/shared/{path:path}", status_code=204)
+@router.delete(
+  "/shared/{path:path}",
+  status_code=204,
+  dependencies=[Depends(reject_cross_site)],
+)
 def delete_shared_file(
   path: str,
   _: models.Owner = Depends(get_current_owner),

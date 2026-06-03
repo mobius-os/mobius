@@ -96,26 +96,60 @@ def _now_iso() -> str:
   return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _active_file_started(path: Path) -> datetime | None:
+  """When the active log BEGAN — the `ts` of its first parseable line.
+
+  Rotation must NOT key on mtime: the append on every write keeps mtime
+  ~now, so `now - mtime` never reaches ROTATION_DAYS and the file grows
+  unbounded. The first line's ts is the file's true start and is stable
+  across writes. Returns None if the file is empty/unreadable/header-less,
+  in which case the caller skips rotation (nothing to rotate yet)."""
+  try:
+    with path.open("r", encoding="utf-8") as f:
+      for line in f:
+        line = line.strip()
+        if not line:
+          continue
+        try:
+          ev = json.loads(line)
+        except json.JSONDecodeError:
+          continue
+        ts = ev.get("ts")
+        if not isinstance(ts, str):
+          continue
+        try:
+          dt = datetime.fromisoformat(ts)
+        except ValueError:
+          continue
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+  except OSError:
+    return None
+  return None
+
+
 def _rotate_if_due(path: Path, now: datetime) -> None:
-  """Renames the active file to activity.YYYY-WW.jsonl if its mtime
-  is older than ROTATION_DAYS, then sweeps any activity.*.jsonl
-  older than RETENTION_DAYS. Both checks happen on every write —
-  cheap enough (one stat per write) and side-steps the need for a
-  background scheduler.
+  """Renames the active file to activity.YYYY-WW.jsonl if it has been
+  collecting for more than ROTATION_DAYS, then sweeps any activity.*.jsonl
+  older than RETENTION_DAYS. Both checks happen on every write — cheap
+  enough (one short read per write) and side-steps a background scheduler.
+
+  Age is measured from the file's FIRST event ts, not mtime: the append on
+  every write resets mtime, so an mtime check would never trip (the bug
+  this replaces — the active file grew unbounded).
 
   Called with `_write_lock` held."""
   if not path.exists():
     return
-  try:
-    mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
-  except OSError:
+  started = _active_file_started(path)
+  if started is None:
     return
-  if now - mtime < timedelta(days=ROTATION_DAYS):
+  if now - started < timedelta(days=ROTATION_DAYS):
     return
   # ISO week number gives us a stable rotation suffix that sorts
   # naturally and survives DST boundaries — strftime("%G-W%V") is
-  # the ISO-week-numbering-year + ISO week.
-  suffix = mtime.strftime("%G-W%V")
+  # the ISO-week-numbering-year + ISO week. Keyed to when the data
+  # STARTED (first event) so the archive name reflects its contents.
+  suffix = started.strftime("%G-W%V")
   rotated = path.with_name(f"activity.{suffix}.jsonl")
   # If the rotated name already exists (rare — would mean two
   # rotations landed in the same ISO week, e.g. clock jumped),

@@ -13,7 +13,7 @@ This skill is itself agent-editable (it lives under `/data/shared/skills/`). Whe
 - **Be conservative and reversible.** You are operating on the partner's live platform while they sleep. Everything you change is in `/data`'s git history — but prefer changes you'd be comfortable explaining in the morning. **Never auto-apply anything risky** (security fixes with behavior change, destructive data ops, dependency major-bumps, anything that hits paid external APIs or notifies other people). Surface those in the brief as a proposal with a one-tap question, don't do them.
 - **Commit as you go.** After each discrete chunk — a skill edit, a graph consolidation, an app fix — `pm-commit '<area>: <what and why>'`. One green-on-green sweep is hard to undo; small commits are easy.
 - **Anti-noise is the whole game.** Every item that reaches the brief MUST carry **trigger** (what you observed), **why** (why it matters to the partner), and **next-action** (the one concrete thing — ideally a tap). An item without all three is noise; drop it or keep digging until it has them. A short brief the partner reads fully beats a long one they skim.
-- **Leverage the other skills — don't reinvent them.** `Read /data/shared/skills/<name>.md` and follow it for the work it owns: `building-apps.md` for any app fix/feature, `theming.md` for shell/visual work, `cron.md` for scheduled jobs, `notifications.md` for the morning push, `images.md` for any brief illustration, and `/app/skill/knowledge-graph-skill.md` for the Mind heavy-lift. This skill orchestrates; those skills hold the per-task contracts.
+- **Leverage the other skills — don't reinvent them.** `Read /data/shared/skills/<name>.md` and follow it for the work it owns: `building-apps.md` for any app fix/feature, `theming.md` for shell/visual work, `cron.md` for scheduled jobs, `notifications.md` for the morning push, `images.md` for any brief illustration, and `/data/shared/skills/mind.md` for the Mind heavy-lift. This skill orchestrates; those skills hold the per-task contracts.
 - **Time-box and bail safely.** If you're running long, finish the current chunk, commit it, skip ahead to "Write the brief + open the morning chat" — a partial-but-shipped brief beats a perfect one that never posts. Note in the brief what you skipped.
 
 ---
@@ -32,13 +32,18 @@ User chats — query the DB directly (no auth needed; the container has no `sqli
 
 ```bash
 python3 - <<'PY'
-import sqlite3, datetime
+import sqlite3
 con = sqlite3.connect("/data/db/ultimate.db")
-cut = (datetime.datetime.utcnow() - datetime.timedelta(hours=24)).isoformat()
+# updated_at is stored space-separated UTC (naive); SQLite's datetime('now',
+# '-24 hours') returns that exact shape, so the comparison is exact. Do NOT
+# build the cutoff with Python utcnow().isoformat() — its 'T' separator sorts
+# AFTER the stored ' ', silently dropping rows whose timestamp lands on the
+# cutoff's date boundary.
 for cid, title, prov in con.execute(
     "select id, title, coalesce(provider,'claude') from chats "
-    "where deleted_at is null and session_id is not null and updated_at >= ? "
-    "order by updated_at desc", (cut,)):
+    "where deleted_at is null and session_id is not null "
+    "and updated_at >= datetime('now','-24 hours') "
+    "order by updated_at desc"):
   print(cid, "|", prov, "|", title)
 PY
 ```
@@ -66,7 +71,7 @@ The directory name is the cwd with `/` → `-` (e.g. `-data-apps-news-2` == `/da
 4. **Skills** — which skill did you lean on, did it hold up, and what one edit would have saved you time? (This feeds phase 2.)
 5. **Mind** — what did you wish you'd remembered, or what would have been worth recording? Any note that misled you? (This feeds phase 3.)
 
-**Cross-check skill usage against the log.** Beyond what each agent says it used, read the objective record: `skill_loaded` lines in `inputs/activity.jsonl` (or query `GET $API_BASE_URL/api/admin/activity/skills?since=<24h-ago-ISO>` with `$AGENT_TOKEN` for a ready-ranked `{"skills":[{"skill","count"}]}`). Fold the most-used Claude-loaded skills into the brief's "what I learned": which skills the platform actually leaned on, whether a heavily-used skill is the one agents complained about (a fix-priority signal), and which skills never load (dead weight). If `skills_enabled` is off, or the night was Codex-only, no skill loads are recorded and this section is correctly empty.
+**Cross-check skill usage against the log.** Beyond what each agent says it used, read the objective record: query `GET $API_BASE_URL/api/admin/activity/skills?since=<24h-ago-ISO>` with `$AGENT_TOKEN` for a ready-ranked `{"skills":[{"skill","count"}]}` (or read the raw `skill_loaded` lines from the absolute path `/data/apps/dreaming/inputs/activity.jsonl`). Fold the most-used Claude-loaded skills into the brief's "what I learned": which skills the platform actually leaned on, whether a heavily-used skill is the one agents complained about (a fix-priority signal), and which skills never load (dead weight). If `skills_enabled` is off, or the night was Codex-only, no skill loads are recorded and this section is correctly empty.
 
 Capture each answer to a working file (e.g. `/data/apps/dreaming/runs/<date>/interviews.md`) so phases 2–6 can mine it. The interviews are your primary signal for everything that follows — treat their answers as evidence, not chatter.
 
@@ -81,7 +86,7 @@ The interviews just told you where the skills failed today's agents. Act on it.
 
 ### 3. CONSOLIDATE + CLEAN the Mind graph — the heavy work the daytime defers
 
-The daytime agent does only light, obvious upkeep and drops raw lines into `inbox.md`. The reorg is explicitly yours. `Read /app/skill/knowledge-graph-skill.md` first — it owns the inclusion bar, atomicity, anti-orphan, and MDL rules; this section is just the dreaming-specific *order of operations*.
+The daytime agent does only light, obvious upkeep and drops raw lines into `inbox.md`. The reorg is explicitly yours. `Read /data/shared/skills/mind.md` first — it owns the inclusion bar, atomicity, anti-orphan, and MDL rules; this section is just the dreaming-specific *order of operations*.
 
 1. **Drain the inbox.** Turn each `inbox.md` line into a proper note (frontmatter, ≥1 map link, lateral `[[links]]` with reasons) or fold it into an existing note. Drop lines that don't clear the inclusion bar. Empty the inbox when done.
 2. **Merge + supersede.** Collapse near-duplicates the daytime agent left for you (the *judgment* merges it wasn't allowed to make). When two notes disagree, newer wins — edit/replace, don't leave a contradiction.
@@ -116,9 +121,9 @@ Use Mind's model of the partner (their recurring interests, projects they care a
 
 Two artifacts: the static **brief** (an HTML page) and a **morning chat** (where the questions live as tappable cards).
 
-**Fill the brief template.** Read `/data/apps/dreaming/dreaming-brief-template.html` (the runner seeds it there before every run — it lives under `/data` because your Read tool is scoped to that tree and can't reach `/app/scripts`), copy it to tonight's run dir, and fill the five sections — exec-summary → what-I-did → what-I-learned → what-needs-your-input → details. Every item carries trigger/why/next-action. Keep the exec-summary to the 3–5 things that matter; push everything else down into details. **Save the finished brief to `/data/apps/dreaming/reports/<date>.html`** (the exact path the Dreaming app lists + renders — `<date>` is `YYYY-MM-DD`). If a brief item benefits from one illustration, follow `images.md`; don't decorate for its own sake.
+**Fill the brief template.** Read `/data/apps/dreaming/dreaming-brief-template.html` (the runner seeds it there before every run — it lives under `/data` because your Read tool is scoped to that tree and can't reach `/app/scripts`), copy it to tonight's run dir, and fill the five sections — exec-summary → what-I-did → what-I-learned → what-needs-your-input → details. Every item carries trigger/why/next-action. Keep the exec-summary to the 3–5 things that matter; push everything else down into details. **Save the finished brief to `/data/apps/$APP_ID/reports/<date>.html`** — first `APP_ID="$(cat /data/apps/dreaming/inputs/app_id)"` and `mkdir -p /data/apps/$APP_ID/reports`. `$APP_ID` is the Dreaming app's **numeric** id: the app lists + renders its briefs from its numeric storage dir (`/api/storage/apps/<id>/...` → `/data/apps/<id>/reports/`), **NOT** the `dreaming` slug dir (which holds the app's *source*, not its *storage*) — write to the slug dir and the app shows "No briefs yet" forever. `<date>` is `YYYY-MM-DD`. If a brief item benefits from one illustration, follow `images.md`; don't decorate for its own sake.
 
-> **Always ship a brief — never end the night with nothing.** If the template can't be read for any reason, do NOT abandon phase 6: hand-write a minimal self-contained HTML brief (a heading + the five sections as `<h2>`/`<p>`) straight to `/data/apps/dreaming/reports/<date>.html`. A plain brief the partner can read beats a perfect one that never posts. The morning chat (below) is the action surface either way, so even a bare brief plus the chat is a complete deliverable.
+> **Always ship a brief — never end the night with nothing.** If the template can't be read for any reason, do NOT abandon phase 6: hand-write a minimal self-contained HTML brief (a heading + the five sections as `<h2>`/`<p>`) straight to `/data/apps/$APP_ID/reports/<date>.html` (the numeric storage dir above, NOT the slug dir). A plain brief the partner can read beats a perfect one that never posts. The morning chat (below) is the action surface either way, so even a bare brief plus the chat is a complete deliverable.
 
 > The brief is a **static, sandboxed page with no JS** — it can't host the chat or interactive cards. The questions live in the morning chat (below), and the **Dreaming app renders the brief with the morning chat shown below it.** Design the brief to stand alone as a read; the chat is the action surface. (Note for the Dreaming-UI agent: render `reports/<date>.html` in the app, then mount the morning chat thread underneath it.)
 
@@ -130,9 +135,9 @@ Two artifacts: the static **brief** (an HTML page) and a **morning chat** (where
      -H "Authorization: Bearer $AGENT_TOKEN" -H "Content-Type: application/json" \
      -d "{\"title\": \"Morning brief — $(date +%Y-%m-%d)\"}"
    ```
-   Capture the returned `id` as `$MORNING_CHAT`, then **write the brief↔chat link** the app needs to wire the date to its conversation — a sibling file next to the brief:
+   Capture the returned `id` as `$MORNING_CHAT`, then **write the brief↔chat link** the app needs to wire the date to its conversation — a sibling file next to the brief (same numeric `$APP_ID` storage dir as the brief above, NOT the slug dir):
    ```bash
-   printf '{"chat_id": "%s"}' "$MORNING_CHAT" > /data/apps/dreaming/reports/$(date +%Y-%m-%d).meta.json
+   printf '{"chat_id": "%s"}' "$MORNING_CHAT" > /data/apps/$APP_ID/reports/$(date +%Y-%m-%d).meta.json
    ```
    (Bare JSON object, no envelope — the app reads it as-is. Without it the brief renders but the morning chat stays unlinked.)
 2. Seed the chat by sending it a message that becomes the partner-facing opener — a **short** summary (3–5 lines, partner-facing register: what you did and what's new, no file paths or IDs), a link to the brief, and an instruction to render your questions as `AskUserQuestion` cards so the partner answers with a tap:
@@ -143,7 +148,23 @@ Two artifacts: the static **brief** (an HTML page) and a **morning chat** (where
        'Good morning. Overnight I <2-3 line summary>. Full brief: /app/dreaming (today'\''s brief). I have a few decisions for you — render them as AskUserQuestion cards so I can tap-answer: <each question + its options, one Recommended each>.')"
    ```
    That spawns the morning-chat agent, which renders the questions as tappable cards (a static brief can't). Keep it to **2–4 questions** — the ranked-feature picks, any security fix awaiting approval, any "should I build X" from the interviews. Each question gets enumerable options with one marked Recommended (per the clarifying-question rules in `core.md`). Open-ended asks stay as prose; only enumerable decisions become cards.
-3. Fire the morning push so the partner sees it (follow `notifications.md`): title like "Your morning brief is ready", body the one-line headline, `target: "/chat/$MORNING_CHAT"` so the tap lands on the questions.
+3. Fire the morning push so the partner sees it (follow `notifications.md`): title like "Your morning brief is ready", body the one-line headline, `target: "/shell/?chat=$MORNING_CHAT"` so the tap lands on the questions **inside the PWA** (the bare `/chat/<id>` form opens a browser tab on a cold tap — see `notifications.md`).
+4. **Write the app's header state** — the streak count + one-line summary the Dreaming app shows up top. Without this, `state.json` never exists and the streak/summary stay permanently blank. Same numeric `$APP_ID` storage dir as the brief:
+   ```bash
+   python3 - "$APP_ID" "<one-line headline>" <<'PY'
+   import json, os, sys, datetime
+   app_id, headline = sys.argv[1], sys.argv[2]
+   reports = f"/data/apps/{app_id}/reports"
+   # streak = consecutive days ending today that have a brief
+   streak, d = 0, datetime.date.today()
+   while os.path.exists(f"{reports}/{d.isoformat()}.html"):
+       streak += 1; d -= datetime.timedelta(days=1)
+   state = {"streak": streak, "last_summary": headline[:200],
+            "last_run": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+   open(f"/data/apps/{app_id}/state.json", "w").write(json.dumps(state))
+   PY
+   ```
+   (Bare JSON object, no envelope. `<one-line headline>` is the exec-summary's single most important line.)
 
 Commit the brief + run artifacts: `pm-commit 'dreaming: brief + morning chat for <date>'`.
 

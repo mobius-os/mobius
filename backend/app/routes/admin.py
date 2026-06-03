@@ -131,6 +131,7 @@ class ActivityEmit(BaseModel):
 @router.post("/activity/emit", status_code=204)
 def emit_activity_event(
   body: ActivityEmit,
+  _csrf: None = Depends(reject_cross_site),
   _owner: models.Owner = Depends(get_current_owner),
 ):
   """Lets cron scripts (and the rare server-external caller) record an
