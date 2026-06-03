@@ -136,15 +136,29 @@
   position: relative;  /* makes this the offsetParent for children */
 }
 
-/* Chat scroll inherits the global auto-hide (see index.css .is-scrolling).
-   Hidden at rest; thin bar while scrolling. ALL chat-scroll invariants in
-   CLAUDE.md ("Chat UX — non-negotiable constraints") are preserved: this
-   only paints the scrollbar gutter, it does not change overflow, spacer
-   math, scrollTop, overflow-anchor, or the useScrollMode listeners. */
-.chat__scroll { scrollbar-width: none; }
-.chat__scroll::-webkit-scrollbar { width: 0; height: 0; }
-:root.is-scrolling .chat__scroll { scrollbar-width: thin; }
-:root.is-scrolling .chat__scroll::-webkit-scrollbar { width: 8px; }
+/* Chat scroll autohide WITHOUT layout shift. The global pattern (index.css)
+   toggles scrollbar WIDTH 0->8px on scroll; on desktop a classic scrollbar
+   takes layout width, so each pop-in shrank the content box and reflowed the
+   centered list sideways, then snapped back when it hid — a jitter on every
+   scroll. Here we reserve the gutter at a CONSTANT width and fade only the
+   THUMB (transparent at rest, coloured while :root.is-scrolling) — the
+   macOS-style autohide UX, minus the shift. The reserved 8px is stable, so
+   ALL chat-scroll invariants in CLAUDE.md ("Chat UX — non-negotiable
+   constraints") still hold: no change to overflow, spacer math (height-based,
+   width-independent), scrollTop, overflow-anchor, or the useScrollMode
+   listeners. */
+.chat__scroll { scrollbar-width: thin; scrollbar-color: transparent transparent; }
+.chat__scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+.chat__scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+:root.is-scrolling .chat__scroll { scrollbar-color: color-mix(in srgb, var(--muted) 55%, transparent) transparent; }
+:root.is-scrolling .chat__scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--muted) 55%, transparent);
+}
 
 /* ── Message list ──────────────────────────────────── */
 
