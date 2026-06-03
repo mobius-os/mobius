@@ -345,6 +345,50 @@ class IncrementGoalTurn(_Command):
 
 
 @dataclass
+class RecordGoalTokens(_Command):
+  """Persist token usage for the active goal."""
+
+  chat_id: str = ""
+  run_token: str = ""
+  token_delta: int = 0
+
+
+@dataclass
+class ResetGoalProgress(_Command):
+  """Reset per-run goal counters when a stored goal resumes."""
+
+  chat_id: str = ""
+  run_token: str = ""
+
+
+@dataclass
+class PauseGoal(_Command):
+  """Mark the active goal paused without clearing it."""
+
+  chat_id: str = ""
+  run_token: str = ""
+
+
+@dataclass
+class ResumeGoal(_Command):
+  """Mark the active goal active and reset per-run counters."""
+
+  chat_id: str = ""
+  run_token: str = ""
+
+
+@dataclass
+class CompleteGoal(_Command):
+  """Record the achieved goal, then clear active goal state."""
+
+  chat_id: str = ""
+  run_token: str = ""
+  turns: int = 0
+  reason: str = ""
+  token_spend: int = 0
+
+
+@dataclass
 class PersistCompaction(_Command):
   """Append a compaction-summary block to the transcript as its own message.
 
@@ -461,6 +505,11 @@ _FENCE_COMMANDS = (
   SetGoal,
   ClearGoal,
   IncrementGoalTurn,
+  RecordGoalTokens,
+  ResetGoalProgress,
+  PauseGoal,
+  ResumeGoal,
+  CompleteGoal,
   ReplaceTranscript,
   ClearRunStatus,
 )
@@ -1155,6 +1204,16 @@ class ChatWriterActor:
       return self._clear_goal(db, cmd)
     if isinstance(cmd, IncrementGoalTurn):
       return self._increment_goal_turn(db, cmd)
+    if isinstance(cmd, RecordGoalTokens):
+      return self._record_goal_tokens(db, cmd)
+    if isinstance(cmd, ResetGoalProgress):
+      return self._reset_goal_progress(db, cmd)
+    if isinstance(cmd, PauseGoal):
+      return self._pause_goal(db, cmd)
+    if isinstance(cmd, ResumeGoal):
+      return self._resume_goal(db, cmd)
+    if isinstance(cmd, CompleteGoal):
+      return self._complete_goal(db, cmd)
     if isinstance(cmd, ReplaceTranscript):
       return self._replace_transcript(db, cmd)
     if isinstance(cmd, ClearRunStatus):
@@ -1536,7 +1595,12 @@ class ChatWriterActor:
     if chat is None:
       raise _PersistFailed("SetGoal: chat not found or deleted")
     settings = self._settings_dict(chat.agent_settings_json)
-    settings["goal"] = dict(cmd.goal)
+    goal = dict(cmd.goal)
+    goal.setdefault("state", "active")
+    goal.setdefault("turns", 0)
+    goal.setdefault("token_spend", 0)
+    goal["run_started_at"] = datetime.now(UTC).isoformat()
+    settings["goal"] = goal
     chat.agent_settings_json = settings
     chat.updated_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
@@ -1574,12 +1638,126 @@ class ChatWriterActor:
     goal = dict(goal)
     goal["turns"] = turns
     goal["last_reason"] = cmd.reason
+    goal["elapsed_time_s"] = _goal_elapsed_time_s(goal)
     settings["goal"] = goal
     chat.agent_settings_json = settings
     chat.updated_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
       raise _PersistFailed("IncrementGoalTurn did not persist")
     return {"turns": turns, "goal": goal}
+
+  def _record_goal_tokens(self, db, cmd: RecordGoalTokens) -> dict:
+    """Add token usage to the stored active goal."""
+    from datetime import UTC, datetime
+
+    chat = _active_chat(db, cmd.chat_id)
+    if chat is None:
+      raise _PersistFailed("RecordGoalTokens: chat not found or deleted")
+    settings = self._settings_dict(chat.agent_settings_json)
+    goal = settings.get("goal")
+    if not isinstance(goal, dict):
+      return {"token_spend": 0, "goal": None}
+    goal = dict(goal)
+    token_spend = int(goal.get("token_spend") or 0) + max(
+      0, int(cmd.token_delta or 0)
+    )
+    goal["token_spend"] = token_spend
+    goal["elapsed_time_s"] = _goal_elapsed_time_s(goal)
+    settings["goal"] = goal
+    chat.agent_settings_json = settings
+    chat.updated_at = datetime.now(UTC)
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("RecordGoalTokens did not persist")
+    return {"token_spend": token_spend, "goal": goal}
+
+  def _reset_goal_progress(self, db, cmd: ResetGoalProgress) -> dict:
+    """Reset per-run counters while keeping the same active goal."""
+    from datetime import UTC, datetime
+
+    chat = _active_chat(db, cmd.chat_id)
+    if chat is None:
+      raise _PersistFailed("ResetGoalProgress: chat not found or deleted")
+    settings = self._settings_dict(chat.agent_settings_json)
+    goal = settings.get("goal")
+    if not isinstance(goal, dict):
+      return {"goal": None}
+    goal = dict(goal)
+    goal["turns"] = 0
+    goal["last_reason"] = None
+    goal["elapsed_time_s"] = 0
+    goal["token_spend"] = 0
+    goal["state"] = "active"
+    goal["run_started_at"] = datetime.now(UTC).isoformat()
+    settings["goal"] = goal
+    chat.agent_settings_json = settings
+    chat.updated_at = datetime.now(UTC)
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("ResetGoalProgress did not persist")
+    return {"goal": goal}
+
+  def _pause_goal(self, db, cmd: PauseGoal) -> dict:
+    """Mark the goal paused while preserving progress."""
+    from datetime import UTC, datetime
+
+    chat = _active_chat(db, cmd.chat_id)
+    if chat is None:
+      raise _PersistFailed("PauseGoal: chat not found or deleted")
+    settings = self._settings_dict(chat.agent_settings_json)
+    goal = settings.get("goal")
+    if not isinstance(goal, dict):
+      return {"goal": None}
+    goal = dict(goal)
+    goal["state"] = "paused"
+    goal["elapsed_time_s"] = _goal_elapsed_time_s(goal)
+    settings["goal"] = goal
+    chat.agent_settings_json = settings
+    chat.updated_at = datetime.now(UTC)
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("PauseGoal did not persist")
+    return {"goal": goal}
+
+  def _resume_goal(self, db, cmd: ResumeGoal) -> dict:
+    """Mark the goal active and reset counters for a fresh run."""
+    return self._reset_goal_progress(
+      db,
+      ResetGoalProgress(chat_id=cmd.chat_id, run_token=cmd.run_token),
+    )
+
+  def _complete_goal(self, db, cmd: CompleteGoal) -> dict:
+    """Append an achieved record and clear the active goal."""
+    from datetime import UTC, datetime
+
+    chat = _active_chat(db, cmd.chat_id)
+    if chat is None:
+      raise _PersistFailed("CompleteGoal: chat not found or deleted")
+    settings = self._settings_dict(chat.agent_settings_json)
+    goal = settings.get("goal")
+    if not isinstance(goal, dict):
+      return {"completed": False, "achieved": None}
+    elapsed = _goal_elapsed_time_s(goal)
+    token_spend = max(
+      int(goal.get("token_spend") or 0),
+      int(cmd.token_spend or 0),
+    )
+    achieved = {
+      "condition": str(goal.get("condition") or ""),
+      "turns": max(0, int(cmd.turns or 0)),
+      "reason": str(cmd.reason or goal.get("last_reason") or ""),
+      "elapsed_time_s": elapsed,
+      "token_spend": token_spend,
+      "completed_at": datetime.now(UTC).isoformat(),
+    }
+    history = settings.get("achieved_goals")
+    if not isinstance(history, list):
+      history = []
+    history = [*history, achieved][-20:]
+    settings["achieved_goals"] = history
+    settings.pop("goal", None)
+    chat.agent_settings_json = settings or None
+    chat.updated_at = datetime.now(UTC)
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("CompleteGoal did not persist")
+    return {"completed": True, "achieved": achieved}
 
   def _replace_transcript(self, db, cmd: ReplaceTranscript) -> bool:
     """Replace the whole `messages` blob (and optional title); commit.
@@ -1915,6 +2093,22 @@ def _active_chat(db, chat_id: str):
   return db.query(Chat).filter(
     Chat.id == chat_id, Chat.deleted_at.is_(None)
   ).first()
+
+
+def _goal_elapsed_time_s(goal: dict) -> float:
+  """Return elapsed seconds since the active goal run began."""
+  from datetime import UTC, datetime
+
+  started_at = goal.get("run_started_at") or goal.get("started_at")
+  if not started_at:
+    return float(goal.get("elapsed_time_s") or 0)
+  try:
+    parsed = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+  except ValueError:
+    return float(goal.get("elapsed_time_s") or 0)
+  if parsed.tzinfo is None:
+    parsed = parsed.replace(tzinfo=UTC)
+  return max(0.0, datetime.now(UTC).timestamp() - parsed.timestamp())
 
 
 def _apply_last_assistant_message(db, chat_id: str, message: dict):
