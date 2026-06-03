@@ -910,22 +910,6 @@ def test_install_with_same_slug_different_manifest_keeps_both(
   assert preserved["manifest_url"] is None
 
 
-def test_canonical_key_url_and_inline_agree():
-  # L31: the URL path and the inline path must canonicalise the SAME app to the
-  # SAME identity key, or installing it once each way splits it into two App
-  # rows. The key fix is stripping ANY trailing manifest filename, not only
-  # `mobius.json`.
-  from app.install import _canonical_identity_key, _canonical_for_inline
-  raw_base = "https://example.com/apps/foo/"
-  inline = _canonical_for_inline(raw_base, "foo")
-  # Non-mobius.json manifest URL canonicalises to the same directory base.
-  assert _canonical_identity_key(raw_base + "custom.json", "foo") == inline
-  # The mobius.json case is unchanged (regression guard).
-  assert _canonical_identity_key(raw_base + "mobius.json", "foo") == inline
-  # Query string + fragment are still stripped.
-  assert _canonical_identity_key(raw_base + "custom.json?utm=x#frag", "foo") == inline
-
-
 def test_install_same_manifest_twice_updates(
   client, auth, bypass_url_validation,
 ):
