@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, useLayoutEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { apiFetch, getToken, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
@@ -557,7 +557,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // the last message always clears the absolutely-positioned pill
   // — chips, queue tray, multi-line growth all push the clearance
   // in lockstep.
-  useEffect(() => {
+  useLayoutEffect(() => {
     const chatEl = chatRef.current
     const footEl = footRef.current
     if (!chatEl || !footEl || typeof ResizeObserver === 'undefined') return
