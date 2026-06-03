@@ -532,6 +532,78 @@ def test_install_inline_manifest_requires_raw_base(client, auth):
   assert "raw_base" in r.json()["detail"].lower()
 
 
+def test_install_inline_raw_base_may_omit_trailing_slash(
+  client, auth, bypass_url_validation,
+):
+  """Inline callers may pass either .../main or .../main/ as raw_base.
+
+  The store passes the slash today, but this endpoint is public platform
+  surface; normalizing here prevents a future caller from fetching
+  `mainindex.jsx` by accident.
+  """
+  base = "https://raw.githubusercontent.com/x/app-inline-main"
+  manifest = {**MANIFEST_NEWS, "id": "inline-noslash"}
+  responses = {
+    base + "/index.jsx": (200, JSX.encode()),
+    base + "/icon.png": (200, _png_bytes()),
+    base + "/prompt.md": (200, PROMPT.encode()),
+    base + "/fetch.sh": (200, b""),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest": manifest,
+      "raw_base": base,
+    })
+  assert r.status_code == 201, r.text
+  assert r.json()["manifest_url"] == (
+    base + "#manifest-id=inline-noslash"
+  )
+
+
+@pytest.mark.parametrize("raw_base", [
+  "not-a-url",
+  "ftp://example.com/app/",
+  "https://example.com/app/?branch=main",
+  "https://example.com/app/#main",
+])
+def test_install_inline_rejects_malformed_raw_base(client, auth, raw_base):
+  r = client.post("/api/apps/install", headers=auth, json={
+    "manifest": {**MANIFEST_NEWS, "id": "bad-raw-base"},
+    "raw_base": raw_base,
+  })
+  assert r.status_code == 400
+  assert "raw_base" in r.json()["detail"]
+
+
+@pytest.mark.parametrize("field_patch, expected_field", [
+  ({"entry": "../index.jsx"}, "entry"),
+  ({"entry": "index.jsx?ref=main"}, "entry"),
+  ({"entry": "%2e%2e/index.jsx"}, "entry"),
+  ({"entry": "src%2findex.jsx"}, "entry"),
+  ({"icon": "/icon.png"}, "icon"),
+  ({"storage_seeds": {"prompt.md": "https://example.com/prompt.md"}}, "storage_seeds.prompt.md"),
+  ({"storage_seeds": []}, "storage_seeds"),
+])
+def test_install_rejects_non_repo_relative_manifest_asset_paths(
+  client, auth, field_patch, expected_field,
+):
+  """External manifests must point asset references inside their repo.
+
+  This mirrors the public schema and keeps mistakes/hostile manifests as
+  precise 400s rather than odd URL concatenations or late install 500s.
+  """
+  manifest = {**MANIFEST_NEWS, "id": "bad-asset-path", **field_patch}
+  r = client.post("/api/apps/install", headers=auth, json={
+    "manifest": manifest,
+    "raw_base": "https://raw.githubusercontent.com/x/app/main/",
+  })
+  assert r.status_code == 400
+  assert expected_field in r.json()["detail"]
+
+
 def test_install_rejects_both_manifest_and_url(client, auth):
   r = client.post("/api/apps/install", headers=auth, json={
     "manifest_url": "https://x/m.json",

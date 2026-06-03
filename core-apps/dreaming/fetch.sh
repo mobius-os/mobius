@@ -30,6 +30,7 @@ DATA_DIR="${DATA_DIR:-/data}"
 LOG="$DATA_DIR/cron-logs/dreaming.log"
 LOCK="$DATA_DIR/cron-logs/dreaming.lock"
 HEARTBEAT="$DATA_DIR/cron-logs/dreaming.heartbeat"
+TOKEN_FILE="$DATA_DIR/service-token.txt"
 DATE="$(date +%F)"
 INPUTS="$DATA_DIR/apps/dreaming/inputs"
 RUNNER="${DREAMING_RUNNER:-/app/scripts/dreaming_runner.py}"
@@ -91,6 +92,7 @@ emit_outcome() {
 exec 9>"$LOCK"
 if ! flock -n 9; then
   log "another dreaming run holds the lock; skipping this night (exit 5)"
+  emit_outcome 5
   exit 5
 fi
 
@@ -99,7 +101,6 @@ fi
 # notifications, git) using this token. We export it; we do NOT mediate
 # the agent's use of it. A missing token means the agent can't reach the
 # API, so fail loud rather than run a crippled night.
-TOKEN_FILE="$DATA_DIR/service-token.txt"
 if [[ ! -r "$TOKEN_FILE" ]]; then
   log "ERROR service token unreadable ($TOKEN_FILE) — is the instance signed out? exiting"
   emit_outcome 3
@@ -168,13 +169,41 @@ except Exception as e:
 PY
 
 # prev-report.html — yesterday's brief, so the agent doesn't repeat
-# itself. Enumerate via the listing endpoint, fetch the newest report.
-PREV="$(curl -s "${auth[@]}" "$API_BASE_URL/api/storage/apps-list/$APP_ID/reports/" 2>>"$LOG" \
-  | python3 -c 'import json,sys
+# itself. Enumerate every cursor page and fetch the newest report.
+PREV="$(API_BASE_URL="$API_BASE_URL" APP_ID="$APP_ID" SERVICE_TOKEN="$SERVICE_TOKEN" python3 - <<'PY' 2>>"$LOG"
+import json, os, sys, urllib.parse, urllib.request
+
+base = os.environ["API_BASE_URL"].rstrip("/")
+app_id = os.environ["APP_ID"]
+token = os.environ["SERVICE_TOKEN"]
+headers = {"Authorization": f"Bearer {token}"}
+cursor = None
+seen = set()
+reports = []
+
 try:
-  d=json.load(sys.stdin); es=[e["name"] for e in d.get("entries",[]) if e.get("name","").endswith(".html")]
-  print(sorted(es)[-1] if es else "")
-except Exception: print("")' 2>>"$LOG")"
+    for _ in range(50):
+        url = f"{base}/api/storage/apps-list/{app_id}/reports/"
+        if cursor:
+            url += "?" + urllib.parse.urlencode({"cursor": cursor})
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        for entry in data.get("entries", []):
+            name = entry.get("name")
+            if entry.get("type") == "file" and isinstance(name, str) and name.endswith(".html"):
+                reports.append(name)
+        nxt = data.get("next_cursor")
+        if not nxt or nxt in seen:
+            break
+        seen.add(nxt)
+        cursor = nxt
+    print(sorted(reports)[-1] if reports else "")
+except Exception as exc:
+    print(f"could not enumerate previous reports: {exc}", file=sys.stderr)
+    print("")
+PY
+)"
 if [[ -n "$PREV" ]]; then
   curl -s "${auth[@]}" "$API_BASE_URL/api/storage/apps/$APP_ID/reports/$PREV" \
     >"$INPUTS/prev-report.html" 2>>"$LOG" || true
