@@ -8,4 +8,5 @@ RUNTIME_LIBS: tuple[str, ...] = (
   "date-fns",
   "three",
   "three/addons/*",
+  "pdfjs-dist",
 )

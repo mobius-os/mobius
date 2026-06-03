@@ -347,7 +347,8 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       "recharts": "https://esm.sh/recharts@2.15.4?exports=LineChart,BarChart,PieChart,AreaChart,Line,Bar,Pie,Area,XAxis,YAxis,ZAxis,Tooltip,CartesianGrid,Legend,ResponsiveContainer,Cell,LabelList,Brush,ComposedChart,ScatterChart,Scatter,RadarChart,Radar,PolarGrid,PolarAngleAxis,PolarRadiusAxis,RadialBarChart,RadialBar&external=react,react-dom",
       "date-fns": "https://esm.sh/date-fns@4.3.0",
       "three": "/vendor/three@0.184.0/three.module.js",
-      "three/addons/": "/vendor/three@0.184.0/addons/"
+      "three/addons/": "/vendor/three@0.184.0/addons/",
+      "pdfjs-dist": "/vendor/pdfjs/pdf.mjs"
     }}
   }}
   </script>
