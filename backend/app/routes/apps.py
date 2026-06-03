@@ -821,10 +821,11 @@ def run_app_job(
       status_code=400, detail="App has no source_dir; cannot locate job.",
     )
   source_dir = Path(app.source_dir)
-  # Try the conventional names: fetch.sh (current app-news convention)
-  # and job.sh (the install-from-manifest default). First hit wins.
+  # Try the conventional names: fetch.sh (app-news convention),
+  # job.sh (install-from-manifest default), build.sh (LaTeX/pipeline apps).
+  # First hit wins; order is the priority order.
   job_path = None
-  for candidate in ("fetch.sh", "job.sh"):
+  for candidate in ("fetch.sh", "job.sh", "build.sh"):
     p = source_dir / candidate
     if p.is_file():
       job_path = p
@@ -832,7 +833,7 @@ def run_app_job(
   if job_path is None:
     raise HTTPException(
       status_code=400,
-      detail="No job script found (looked for fetch.sh, job.sh).",
+      detail="No job script found (looked for fetch.sh, job.sh, build.sh).",
     )
   # Non-blocking. stdout/stderr go to /dev/null so the subprocess
   # doesn't inherit the FastAPI worker's pipes; the job script itself
