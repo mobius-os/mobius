@@ -7,6 +7,7 @@ merge must hand back the merged bytes and a conflict must name the file
 WITHOUT touching the working tree.
 """
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,87 @@ def test_ensure_repo_is_idempotent_and_creates_branches(tmp_path):
   # Second call must not error or rewrite history.
   app_git.ensure_repo(repo)
   assert app_git.head_sha(repo, app_git.LOCAL_BRANCH) == main
+
+
+def test_ensure_repo_creates_nested_repo_inside_parent_worktree(tmp_path):
+  """A source dir inside a larger git worktree still gets its own .git.
+
+  Regression: `git rev-parse --is-inside-work-tree` is true in this
+  shape via the parent repo, but per-app git needs a dedicated nested
+  repo at source_dir/.git.
+  """
+  parent = tmp_path / "data"
+  repo = parent / "apps" / "news"
+  repo.mkdir(parents=True)
+  subprocess.run(["git", "-C", str(parent), "init", "-q"], check=True)
+
+  assert not (repo / ".git").exists()
+  assert subprocess.run(
+    ["git", "-C", str(repo), "rev-parse", "--is-inside-work-tree"],
+    capture_output=True,
+    text=True,
+    check=True,
+  ).stdout.strip() == "true"
+
+  app_git.ensure_repo(repo)
+
+  assert app_git.is_repo(repo)
+  assert subprocess.run(
+    ["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
+    capture_output=True,
+    text=True,
+    check=True,
+  ).stdout.strip() == str(repo)
+  assert app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  assert app_git.head_sha(repo, app_git.LOCAL_BRANCH)
+
+
+def test_run_does_not_leak_to_enclosing_repo(tmp_path):
+  """A per-app op must never resolve to an ENCLOSING repo (the /data-is-a-git-
+  repo trap). A source dir inside a parent worktree but with no dedicated .git
+  must not let `git -C` walk up — the GIT_CEILING_DIRECTORIES pin in _run stops
+  the search at the app-dir's parent, so the op fails cleanly instead of
+  silently operating on the wrong (parent) repo. This is what made the prod
+  News app's updates spuriously conflict against /data."""
+  parent = tmp_path / "data"
+  sub = parent / "apps" / "news"
+  sub.mkdir(parents=True)
+  subprocess.run(["git", "-C", str(parent), "init", "-q"], check=True)
+  res = app_git._run(sub, "rev-parse", "--show-toplevel", check=False)
+  assert res.returncode != 0, f"leaked to enclosing repo: {res.stdout!r}"
+  assert str(parent) not in res.stdout
+
+
+def test_ensure_repo_does_not_reinit_existing_per_app_repo(tmp_path):
+  """An existing per-app repo with main + upstream history is untouched."""
+  repo = tmp_path / "app"
+  app_git.ensure_repo(repo)
+  app_git.record_upstream(
+    repo, b"INSTALLED V1\n", "https://x/mobius.json", "1.0.0",
+  )
+  app_git.align_local_to_upstream(repo)
+  _write(repo, "LOCAL V1\n")
+  local_commit = app_git.commit_local(repo, "local edit")
+  assert local_commit is not None
+  upstream_commit = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  branch_list = subprocess.run(
+    ["git", "-C", str(repo), "branch", "--format=%(refname:short)"],
+    capture_output=True,
+    text=True,
+    check=True,
+  ).stdout.splitlines()
+
+  app_git.ensure_repo(repo)
+
+  assert app_git.head_sha(repo, app_git.LOCAL_BRANCH) == local_commit
+  assert app_git.head_sha(repo, app_git.UPSTREAM_BRANCH) == upstream_commit
+  assert subprocess.run(
+    ["git", "-C", str(repo), "branch", "--format=%(refname:short)"],
+    capture_output=True,
+    text=True,
+    check=True,
+  ).stdout.splitlines() == branch_list
+  assert (repo / "index.jsx").read_text() == "LOCAL V1\n"
 
 
 def test_record_upstream_commits_pristine_bytes_without_touching_worktree(
