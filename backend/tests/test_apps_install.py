@@ -169,6 +169,54 @@ def test_install_fresh_app_writes_everything(client, auth, tmp_path, bypass_url_
   assert not [e for e in _read_activity() if e["ev"] == "slug_collision"]
 
 
+MANIFEST_ONDEMAND = {
+  "id": "test-build",
+  "name": "Test Build",
+  "version": "2.0.0",
+  "description": "On-demand build job, no recurring schedule.",
+  "entry": "index.jsx",
+  "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
+  # schedule.job ships build.sh but there is NO recurring `default` — the
+  # script is invoked only via POST /api/apps/{id}/run-job (a Build click).
+  "schedule": {"job": "build.sh"},
+  "runtime": {"imports": ["react"], "esm_deps": []},
+}
+
+
+def test_install_on_demand_job_writes_script_without_cron(
+    client, auth, tmp_path, bypass_url_validation):
+  """A manifest with `schedule.job` but no `schedule.default` ships its job
+  script to source_dir (so run-job can find it) WITHOUT registering a cron
+  or emitting a cron-pending sentinel/warning. Regression: the write used to
+  be gated on `schedule.default`, so an on-demand-only job (the LaTeX app's
+  build.sh) was fetched but never landed and run-job 400'd."""
+  base = "https://raw.githubusercontent.com/x/app-test-build/main/"
+  script = b"#!/bin/bash\necho build\n"
+  responses = {
+    base + "mobius.json": (200, json.dumps(MANIFEST_ONDEMAND).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "build.sh": (200, script),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r.status_code == 201, r.text
+  payload = r.json()
+  data_dir = Path(get_settings().data_dir)
+  src = data_dir / "apps" / "test-build"
+  # the on-demand job script landed in source_dir, executable
+  build_sh = src / "build.sh"
+  assert build_sh.read_bytes() == script
+  assert build_sh.stat().st_mode & 0o111  # executable bit set
+  # no recurring schedule → no cron sentinel and no cron warning
+  assert not (src / ".cron-pending.json").exists()
+  assert not any("cron" in w for w in payload["warnings"])
+
+
 def _read_activity() -> list[dict]:
   """Parse /data/logs/activity.jsonl into a list of event dicts (empty
   if the file doesn't exist). Mirrors test_activity.py's reader so the
