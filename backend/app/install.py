@@ -120,6 +120,12 @@ _BLOCKED_NETS = [
   ipaddress.ip_network("::1/128"),
   ipaddress.ip_network("fc00::/7"),          # ULA
   ipaddress.ip_network("fe80::/10"),         # link-local IPv6
+  # NAT64 well-known prefix — a resolver can hand back 64:ff9b::<v4> for a
+  # blocked IPv4 (e.g. 64:ff9b::a9fe:a9fe == 169.254.169.254), which the
+  # ipv4_mapped check below does NOT catch (that only handles ::ffff:). The
+  # install fetcher has no legitimate need to reach a host only via NAT64, so
+  # block the whole prefix.
+  ipaddress.ip_network("64:ff9b::/96"),
 ]
 
 # Cron field grammar: minute hour dom month dow, allowing the

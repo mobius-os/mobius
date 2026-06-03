@@ -286,10 +286,16 @@ def _build_graph_block(
     if len(index.encode("utf-8")) > budget_bytes:
       # Reserve room for the marker so index + marker stays within budget —
       # truncating to the full budget and THEN appending overran it by the
-      # marker's length.
+      # marker's length. If the budget is smaller than the marker itself
+      # (pathological/tiny), drop the marker and hard-truncate to the budget
+      # rather than passing a NEGATIVE limit to _truncate_bytes (which would
+      # slice from the END and still overflow).
       marker = "\n\n[index truncated to fit the memory budget]"
-      index = _truncate_bytes(index, budget_bytes - len(marker.encode("utf-8")))
-      index += marker
+      marker_len = len(marker.encode("utf-8"))
+      if budget_bytes <= marker_len:
+        index = _truncate_bytes(index, budget_bytes)
+      else:
+        index = _truncate_bytes(index, budget_bytes - marker_len) + marker
     parts.append(index)
     loaded.append("index.md")
     used += len(index.encode("utf-8"))
