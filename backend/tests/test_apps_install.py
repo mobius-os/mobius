@@ -11,6 +11,7 @@ import io
 import json
 from pathlib import Path
 from unittest.mock import patch, AsyncMock, MagicMock
+from urllib.parse import urlparse
 
 import pytest
 
@@ -32,7 +33,11 @@ def bypass_url_validation():
   hostnames that don't resolve via DNS (`x.test`, etc.) still work.
   Tests that DO want to exercise URL validation request this fixture
   by NOT including it — see test_install_rejects_*."""
-  with patch("app.install._validate_url_safe", lambda url: None):
+  # Return (url, host_header, sni_host) — the validate-and-pin shape — WITHOUT
+  # pinning, so the mocked httpx still sees the ORIGINAL url (the response map
+  # is keyed by it).
+  with patch("app.install._validate_url_safe",
+             lambda url: (url, urlparse(url).netloc, urlparse(url).hostname)):
     yield
 
 
@@ -87,7 +92,7 @@ def _fake_async_client(responses: dict):
     async def __aexit__(self, *exc):
       return False
 
-    def stream(self, method, url):
+    def stream(self, method, url, **kwargs):
       if url not in responses:
         return _StreamCtx(404, b"")
       tup = responses[url]
@@ -144,10 +149,22 @@ def test_validate_url_safe_blocks_ipv6_embedded_ipv4():
       with pytest.raises(Exception):  # HTTPException(400)
         _validate_url_safe("https://evil.example/mobius.json")
 
-  # A genuine public IPv6 is allowed through.
+  # A genuine public IPv6 is allowed through AND pins to that exact IP, with the
+  # authority preserved for the Host header and the bare hostname for TLS SNI.
   with patch("app.install.socket.getaddrinfo",
              return_value=_gai("2606:4700:4700::1111")):
-    _validate_url_safe("https://cloudflare.example/mobius.json")
+    pinned, host_header, sni = _validate_url_safe(
+      "https://cloudflare.example/mobius.json")
+    assert sni == "cloudflare.example"
+    assert host_header == "cloudflare.example"
+    assert "[2606:4700:4700::1111]" in pinned
+    # A non-default port survives in the Host header (RFC 7230 §5.4).
+    _, host_header2, _ = _validate_url_safe("https://cloudflare.example:8443/m")
+    assert host_header2 == "cloudflare.example:8443"
+
+  # Credentialed manifest URLs are rejected outright (before any resolution).
+  with pytest.raises(Exception):
+    _validate_url_safe("https://user:pass@cloudflare.example/m")
 
 
 def test_install_fresh_app_writes_everything(client, auth, tmp_path, bypass_url_validation):
@@ -703,7 +720,7 @@ def test_install_rejects_redirect_to_private_ip(client, auth, bypass_url_validat
     async def __aexit__(self, *exc):
       return False
 
-    def stream(self, method, url):
+    def stream(self, method, url, **kwargs):
       if url == base + "mobius.json":
         return _StreamCtx(302, b"", headers={"Location": evil})
       return _StreamCtx(404, b"")
@@ -716,6 +733,7 @@ def test_install_rejects_redirect_to_private_ip(client, auth, bypass_url_validat
     if url == evil:
       from fastapi import HTTPException
       raise HTTPException(400, f"URL {url} resolves to blocked address")
+    return url, urlparse(url).netloc, urlparse(url).hostname
   with patch(
     "app.install.httpx.AsyncClient", lambda *a, **kw: _FakeClient(),
   ), patch(
@@ -849,7 +867,7 @@ def test_install_aborts_when_stream_exceeds_cap(client, auth, bypass_url_validat
       return self
     async def __aexit__(self, *exc):
       return False
-    def stream(self, method, url):
+    def stream(self, method, url, **kwargs):
       if url == base + "mobius.json":
         return _StreamCtx(200, b"".join(big_chunks), chunks=big_chunks)
       return _StreamCtx(404, b"")

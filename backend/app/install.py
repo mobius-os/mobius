@@ -292,28 +292,35 @@ def _validate_cron_expr(expr: str) -> None:
     )
 
 
-def _validate_url_safe(url: str) -> None:
-  """Rejects URLs whose hostname resolves to a private / loopback /
-  link-local / cloud-metadata range.
+def _validate_url_safe(url: str) -> tuple[str, str]:
+  """Validates a URL against the SSRF blocklist and returns `(pinned_url, host)`.
 
-  The install endpoint is the SSRF surface: we fetch arbitrary URLs
-  on behalf of an authenticated owner. From inside the container we
-  can reach our own loopback (the Möbius API itself), the Docker
-  bridge (sibling containers), and cloud metadata services (IAM
-  credential exfiltration on AWS/GCP/Azure). Reject those targets
-  before the connect.
+  The install endpoint is the SSRF surface: we fetch arbitrary URLs on behalf
+  of an authenticated owner. From inside the container we can reach our own
+  loopback (the Möbius API itself), the Docker bridge (sibling containers),
+  and cloud metadata services (IAM credential exfiltration on AWS/GCP/Azure).
+  We reject those targets, then PIN the fetch to the exact IP we validated:
+  `pinned_url` has the validated IP substituted into the netloc, and the caller
+  connects to it with `host` as the TLS SNI + Host header (see `_http_get`).
 
-  TOCTOU caveat: DNS can change between this validation and the
-  actual TCP connect. The mitigation is acceptable for single-owner
-  Möbius — exploiting it requires racing a DNS flip against the
-  install handler, which is loud and slow. For multi-tenant or
-  reduced-trust deployments, switch to an httpx transport that
-  validates the *actual* connect IP. Tracked alongside ticket 062.
+  Pinning closes the DNS-rebinding / TOCTOU gap: httpx would otherwise
+  re-resolve the hostname at connect time, so a TTL-0 flip could aim the
+  connection at an internal IP this validation never saw. Connecting to the
+  already-validated IP makes the checked address and the fetched address the
+  same one.
   """
   parsed = urlparse(url)
   if parsed.scheme not in ("http", "https"):
     raise HTTPException(
       400, f"URL scheme must be http or https, got {parsed.scheme!r}",
+    )
+  # Reject embedded credentials: manifest URLs are public, and userinfo would
+  # be silently dropped when we rebuild the netloc around the pinned IP (httpx
+  # otherwise turns it into a Basic-auth header), so a credentialed URL is both
+  # a red flag and a footgun. Block it outright.
+  if parsed.username or parsed.password:
+    raise HTTPException(
+      400, "URL must not contain credentials (user:pass@) — manifests are public.",
     )
   host = parsed.hostname
   if not host:
@@ -322,6 +329,7 @@ def _validate_url_safe(url: str) -> None:
     infos = socket.getaddrinfo(host, None)
   except socket.gaierror as exc:
     raise HTTPException(400, f"Cannot resolve host {host!r}: {exc}")
+  pinned_ip = None
   for info in infos:
     ip_str = info[4][0]
     try:
@@ -332,9 +340,7 @@ def _validate_url_safe(url: str) -> None:
     # IPv4 entries in _BLOCKED_NETS: ::ffff:a.b.c.d (mapped, e.g.
     # ::ffff:169.254.169.254) and ::a.b.c.d (IPv4-compatible / ::/96, e.g. a
     # literal [::127.0.0.1] URL). Pull the embedded v4 and check it too.
-    # (Well-known NAT64 64:ff9b::/96 is blocked as a whole prefix above;
-    # operator-custom NAT64 prefixes + DNS rebinding at fetch time need IP
-    # pinning, tracked as a separate hardening task.)
+    # (Well-known NAT64 64:ff9b::/96 is blocked as a whole prefix above.)
     candidates = [ip]
     if ip.version == 6:
       if ip.ipv4_mapped is not None:
@@ -349,6 +355,20 @@ def _validate_url_safe(url: str) -> None:
             f"URL {host!r} resolves to blocked address {ip} "
             f"(network {net}).",
           )
+    # Every resolved address is validated (we raise on the first blocked one),
+    # so pinning to the first is safe — the fetched IP can't be an unvalidated
+    # one.
+    if pinned_ip is None:
+      pinned_ip = ip_str
+  if pinned_ip is None:
+    raise HTTPException(400, f"Cannot resolve host {host!r} to any address.")
+  ip_host = f"[{pinned_ip}]" if ":" in pinned_ip else pinned_ip
+  netloc = f"{ip_host}:{parsed.port}" if parsed.port else ip_host
+  pinned_url = parsed._replace(netloc=netloc).geturl()
+  # Host header carries the ORIGINAL authority (host + non-default port, IPv6
+  # brackets preserved) per RFC 7230 §5.4; the SNI/cert name is the bare DNS
+  # host. userinfo was rejected above, so parsed.netloc is exactly host[:port].
+  return pinned_url, parsed.netloc, host
 
 
 def _derive_raw_base(manifest_url: str) -> str:
@@ -416,9 +436,13 @@ async def _http_get(
   """GETs a URL with SSRF validation + manual redirect handling.
 
   Each hop is re-validated through `_validate_url_safe` so a 302 to
-  a private IP gets rejected just like a direct request to one.
-  `follow_redirects` is False on the client; we walk the chain
-  ourselves with a hop count cap.
+  a private IP gets rejected just like a direct request to one — and the
+  connection is PINNED to the validated IP (we fetch `pinned_url`, an
+  IP-in-netloc URL, with the real hostname carried as the Host header + TLS
+  SNI). That makes the address we checked the address we actually connect to,
+  closing the DNS-rebinding gap where httpx would re-resolve at connect time.
+  `follow_redirects` is False on the client; we walk the chain ourselves with a
+  hop count cap, resolving each Location against the original (hostname) URL.
 
   Reads the body as a stream and aborts as soon as the running byte
   total crosses `max_bytes` — `r.content` would buffer the full
@@ -429,9 +453,13 @@ async def _http_get(
     raise HTTPException(
       502, f"Too many redirects (>{_MAX_REDIRECTS}) starting from {url}",
     )
-  _validate_url_safe(url)
+  pinned_url, host_header, sni_host = _validate_url_safe(url)
   try:
-    async with client.stream("GET", url) as r:
+    async with client.stream(
+      "GET", pinned_url,
+      headers={"Host": host_header},
+      extensions={"sni_hostname": sni_host.encode("ascii")},
+    ) as r:
       # Handle redirects + error statuses with the stream closed
       # quickly so we don't hold a connection while recursing.
       if r.status_code in (301, 302, 303, 307, 308):
