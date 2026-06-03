@@ -155,6 +155,44 @@ RUN mkdir -p /tmp/react-install && cd /tmp/react-install \
          /app/static/vendor/react@19.2.6 "$(command -v esbuild)" \
     && cd / && rm -rf /tmp/react-install /tmp/build-react-vendor.mjs
 
+# Self-hosted CodeMirror 6 for the mini-app import map — the live-inline
+# markdown editor foundation (the Notes app and any future code/wiki app).
+# Same offline rationale as React above: CM6 is a multi-module ESM graph whose
+# @codemirror/state MUST be a singleton (it does `instanceof` checks across the
+# view/language/commands boundary), so we bundle exactly the pieces the editor
+# uses into ONE codemirror.mjs (state included once) and serve it same-origin
+# under /vendor. One bundled URL is one warm-cache fetch via the /vendor
+# CacheFirst route, so offline is deterministic. Bumping CM6 means bumping these
+# pins AND the /vendor/codemirror@6 path in app-frame.html + standalone.py in
+# lockstep (see backend/scripts/build-codemirror-vendor.mjs for the full why).
+COPY backend/scripts/build-codemirror-vendor.mjs /tmp/build-codemirror-vendor.mjs
+RUN mkdir -p /tmp/cm-install && cd /tmp/cm-install \
+    && npm init -y >/dev/null \
+    && npm install --no-audit --no-fund --silent \
+         @codemirror/state@6.6.0 @codemirror/view@6.43.0 \
+         @codemirror/commands@6.10.3 @codemirror/language@6.12.3 \
+         @codemirror/lang-markdown@6.5.0 @lezer/highlight@1.2.3 \
+    && mkdir -p /app/static/vendor/codemirror@6 \
+    && node /tmp/build-codemirror-vendor.mjs /tmp/cm-install \
+         /app/static/vendor/codemirror@6/codemirror.mjs "$(command -v esbuild)" \
+    && ln -s codemirror@6 /app/static/vendor/codemirror \
+    && cd / && rm -rf /tmp/cm-install /tmp/build-codemirror-vendor.mjs
+
+# Self-hosted KaTeX for the mini-app import map — LaTeX rendering for the Notes
+# editor + note previews. katex.mjs maps to the bare `katex` specifier; the CSS
+# + fonts are served alongside so offline math renders (katex.min.css references
+# fonts/ relatively). Apps inject the stylesheet at runtime from
+# /vendor/katex/katex.min.css. Bump in lockstep with the import maps.
+RUN mkdir -p /tmp/katex-install && cd /tmp/katex-install \
+    && npm init -y >/dev/null \
+    && npm install --no-audit --no-fund --silent katex@0.17.0 \
+    && mkdir -p /app/static/vendor/katex@0.17.0/fonts \
+    && cp node_modules/katex/dist/katex.mjs /app/static/vendor/katex@0.17.0/ \
+    && cp node_modules/katex/dist/katex.min.css /app/static/vendor/katex@0.17.0/ \
+    && cp -r node_modules/katex/dist/fonts/. /app/static/vendor/katex@0.17.0/fonts/ \
+    && ln -s katex@0.17.0 /app/static/vendor/katex \
+    && cd / && rm -rf /tmp/katex-install
+
 # Full frontend source so the agent can edit and rebuild the shell.
 # /app/shell-src/ is the read-only reference (originals for recovery).
 # On first boot, entrypoint copies to /data/shell/ if it doesn't exist.
