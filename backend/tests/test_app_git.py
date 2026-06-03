@@ -125,6 +125,27 @@ def test_commit_local_is_noop_when_unchanged(tmp_path):
   assert again is None
 
 
+def test_local_diverged_from_false_when_main_matches_base(tmp_path):
+  """local_diverged_from is false when main still matches the upstream
+  base commit."""
+  repo = tmp_path / "app"
+  _install(repo, b"stable\n")
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+
+  assert app_git.local_diverged_from(repo, base) is False
+
+
+def test_local_diverged_from_true_when_main_has_local_edit(tmp_path):
+  """local_diverged_from is true when main has committed local edits."""
+  repo = tmp_path / "app"
+  _install(repo, b"stable\n")
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  _write(repo, "local\n")
+  app_git.commit_local(repo, "local edit")
+
+  assert app_git.local_diverged_from(repo, base) is True
+
+
 def test_align_local_to_upstream_resets_main_to_upstream_tip(tmp_path):
   """align_local_to_upstream (the install-time step) points `main` at the
   upstream tip so the working branch starts at the installed version."""

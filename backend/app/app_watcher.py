@@ -23,15 +23,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 from pathlib import Path
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from app import fs_locks, models
+from app import app_git, fs_locks, models
 from app.compiler import recompile_app_bundle
 from app.config import get_settings
 from app.database import SessionLocal
+from app.providers import per_app_git_enabled
 
 log = logging.getLogger(__name__)
 
@@ -160,6 +162,19 @@ class _JsxHandler(FileSystemEventHandler):
             return
           try:
             await recompile_app_bundle(db, app, jsx_source)
+            if (
+              per_app_git_enabled(str(get_settings().data_dir))
+              and app_git.is_repo(source_dir)
+            ):
+              try:
+                await asyncio.to_thread(
+                  app_git.commit_local, source_dir, "agent edit",
+                )
+              except subprocess.CalledProcessError as exc:
+                log.info(
+                  "auto-recompile: git commit skipped for %s: %s",
+                  path, exc,
+                )
           except RuntimeError as exc:
             log.warning(
               "auto-recompile: compile failed for %s: %s", path, exc,

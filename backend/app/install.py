@@ -602,8 +602,8 @@ async def install_from_manifest(
   manifest: dict | None,
   raw_base: str | None,
   source: str = "url",
-) -> tuple[models.App, str, list[str], dict, list[str]]:
-  """Returns `(app, mode, warnings, manifest, conflict_paths)`.
+) -> tuple[models.App, str, list[str], dict, list[str], str]:
+  """Returns `(app, mode, warnings, manifest, conflict_paths, divergence)`.
 
   The parsed manifest dict comes back so callers can read fields the
   App row doesn't store (notably `version`) without re-fetching.
@@ -625,10 +625,10 @@ async def install_from_manifest(
       App row is committed (so the recorded upstream sha persists) but
       the served app is unchanged.
 
-  The per-app git model is OFF by default. When off, install + update
-  behave exactly as before this feature: a blind jsx_source overwrite
-  with no `.git` repo created. 'conflict' never occurs while the flag
-  is off.
+  The per-app git model is ON by default. When explicitly off, install
+  + update behave exactly as before this feature: a blind jsx_source
+  overwrite with no `.git` repo created. 'conflict' never occurs while
+  the flag is off.
 
   Failure modes:
     - Pre-commit failures (manifest fetch, validation, JSX compile,
@@ -741,11 +741,12 @@ async def install_from_manifest(
 
   warnings: list[str] = []
   conflict_paths: list[str] = []
+  divergence: str = "none"
   if icon_warning:
     warnings.append(icon_warning)
 
-  # The per-app git model is OFF by default (feature 084). When off,
-  # everything below behaves exactly as before: a blind jsx_source
+  # The per-app git model is ON by default (feature 084). When explicitly
+  # off, everything below behaves exactly as before: a blind jsx_source
   # overwrite with no .git repo. When on, an update merges the new
   # upstream into the app's local edits instead of clobbering them, and
   # `effective_source` may end up being the MERGED bytes rather than the
@@ -824,6 +825,7 @@ async def install_from_manifest(
           source=source,
         )
       source_dir = str(data_dir / "apps" / slug)
+      created_paths.append(Path(source_dir))
       app = models.App(
         name=manifest["name"],
         description=manifest.get("description", ""),
@@ -863,6 +865,7 @@ async def install_from_manifest(
         version = str(manifest.get("version", "unknown"))
         had_repo = app_git.is_repo(git_source_dir)
         if existing and had_repo:
+          prev_upstream_commit = app.upstream_commit
           # Update of an app already on the git model. First capture any
           # uncommitted on-disk local edits onto `main` (the watcher may
           # not have committed the agent's latest save yet) so the merge
@@ -882,7 +885,7 @@ async def install_from_manifest(
             app_git.merge_upstream, git_source_dir,
           )
           if merge.status == "conflict":
-            # Do NOT clobber the local edits. The app stays served with
+            # Never rebase local. The app stays served with
             # its current bundle + source; the new upstream is recorded
             # for a later agent-resolution pass. Skip compile + source
             # overwrite by switching to conflict mode below.
@@ -891,6 +894,13 @@ async def install_from_manifest(
           elif merge.merged_bytes is not None:
             # Clean merge: the merged source is what we compile + write.
             effective_source = merge.merged_bytes.decode("utf-8")
+            diverged = False
+            if prev_upstream_commit:
+              diverged = await asyncio.to_thread(
+                app_git.local_diverged_from,
+                git_source_dir, prev_upstream_commit,
+              )
+            divergence = "clean_merge" if diverged else "fast_forward"
         elif existing and not had_repo:
           # Lazy migration: an app installed before the flag was on has
           # no repo. Seed it with its CURRENT on-disk source as the base
@@ -956,7 +966,7 @@ async def install_from_manifest(
       activity.log_event(
         "app_install", app_id=app.id, slug=app.slug, source=source,
       )
-      return app, mode, warnings, manifest, conflict_paths
+      return app, mode, warnings, manifest, conflict_paths, divergence
 
     if existing:
       # Apply the (possibly merged) source to the row now that the merge
@@ -1143,7 +1153,7 @@ async def install_from_manifest(
       log.exception("install: cron registration failed post-commit")
       warnings.append(f"cron: registration failed — {exc!r}")
 
-  return app, mode, warnings, manifest, conflict_paths
+  return app, mode, warnings, manifest, conflict_paths, divergence
 
 
 def _cleanup(paths: list[Path]) -> None:

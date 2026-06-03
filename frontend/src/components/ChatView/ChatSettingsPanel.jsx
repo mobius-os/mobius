@@ -248,6 +248,7 @@ function EffortSlider({ efforts, value, onChange }) {
 
 export default function ChatSettingsPanel({
   chatId,
+  chat,
   provider,
   effective,
   hasAssistantTurns,
@@ -264,6 +265,7 @@ export default function ChatSettingsPanel({
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [connectedProviders, setConnectedProviders] = useState(null)
+  const [agents, setAgents] = useState([])
   // True while the manage-models modal is mounted. When the modal
   // opens we still want the popover-anchored picker to live in the
   // background so the user can return to it; the modal is fully
@@ -286,6 +288,7 @@ export default function ChatSettingsPanel({
   const [draftModel, setDraftModel] = useState(effective?.model || '')
   const [draftEffort, setDraftEffort] = useState(effective?.effort || '')
   const [draftProvider, setDraftProvider] = useState(provider || 'claude')
+  const [draftAgent, setDraftAgent] = useState(chat?.agent_id || 'builder')
   // Per-provider effort memory. The two SDKs' effort enums don't
   // map across providers (Codex `medium` ≈ Claude `low`), so each
   // provider remembers its OWN last-picked effort and we swap
@@ -314,6 +317,10 @@ export default function ChatSettingsPanel({
   }, [provider, chatId])
 
   useEffect(() => {
+    setDraftAgent(chat?.agent_id || 'builder')
+  }, [chat?.agent_id, chatId])
+
+  useEffect(() => {
     let cancelled = false
     apiFetch('/auth/providers/status')
       .then(r => r.ok ? r.json() : null)
@@ -325,6 +332,20 @@ export default function ChatSettingsPanel({
         setConnectedProviders(ids)
       })
       .catch(() => { /* silent — picker falls back to "show all" */ })
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    apiFetch('/agents')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (cancelled || !data) return
+        setAgents(Array.isArray(data.agents) ? data.agents : [])
+      })
+      .catch(() => {
+        if (!cancelled) setAgents([])
+      })
     return () => { cancelled = true }
   }, [])
 
@@ -347,6 +368,7 @@ export default function ChatSettingsPanel({
       onChange?.({
         agent_settings_json: data.agent_settings_json,
         provider: data.provider,
+        agent_id: data.agent_id,
         effective: data.effective,
       })
       return 'ok'
@@ -385,6 +407,14 @@ export default function ChatSettingsPanel({
     })
     refocusChatInput()
   }, [draftProvider, draftEffortByProvider, patchChat, refocusChatInput])
+
+  const handlePickAgent = useCallback(async (value) => {
+    refocusChatInput()
+    const prevAgent = draftAgent
+    setDraftAgent(value)
+    const outcome = await patchChat({ agent_id: value })
+    if (outcome === 'fail') setDraftAgent(prevAgent)
+  }, [draftAgent, patchChat, refocusChatInput])
 
   const handlePickModel = useCallback(async (value, providerValue) => {
     refocusChatInput()
@@ -468,6 +498,33 @@ export default function ChatSettingsPanel({
 
   return (
     <div className="csp">
+      {agents.length > 0 && (
+        <>
+          <div className="csp__label">Agent</div>
+          {agents.map(agent => {
+            const isSelected = draftAgent === agent.id
+            const description = agent.description || agent.summary || agent.skill_ref || agent.provider || ''
+            return (
+              <button
+                key={agent.id}
+                type="button"
+                className={`csp-row${isSelected ? ' csp-row--selected' : ''}`}
+                // Keep textarea focused so the keyboard stays open.
+                onPointerDown={(ev) => ev.preventDefault()}
+                onClick={() => handlePickAgent(agent.id)}
+              >
+                <span className="csp-row__main">
+                  <span className="csp-row__title">{agent.label || agent.name || agent.id}</span>
+                  {description && (
+                    <span className="csp-row__sub">{description}</span>
+                  )}
+                </span>
+                <span className="csp-row__dot" />
+              </button>
+            )
+          })}
+        </>
+      )}
       <div className="csp__label">Model</div>
       {!dataReady && (
         // Skeleton placeholder while registry + prefs resolve. Two

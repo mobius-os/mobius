@@ -1165,6 +1165,13 @@ def _enable_per_app_git():
   write_agent_settings(data_dir, {"per_app_git_enabled": True})
 
 
+def _disable_per_app_git():
+  """Write agent-settings.json so per_app_git_enabled reads False."""
+  from app.providers import write_agent_settings
+  data_dir = str(get_settings().data_dir)
+  write_agent_settings(data_dir, {"per_app_git_enabled": False})
+
+
 def _install_v1(client, auth, base, manifest, jsx):
   responses = {
     base + "mobius.json": (200, json.dumps(manifest).encode()),
@@ -1200,11 +1207,13 @@ def _update_v2(client, auth, base, manifest, jsx):
 
 
 def test_flag_off_install_creates_no_git_repo(client, auth, bypass_url_validation):
-  """With the flag OFF (the default) a fresh install must behave exactly
-  as before: source written, but NO .git directory anywhere."""
+  """With the flag explicitly OFF, fresh install keeps legacy behavior:
+  source written, but NO .git directory anywhere."""
+  _disable_per_app_git()
   base = "https://off.test/repo/"
   r = _install_v1(client, auth, base, {**MANIFEST_NEWS, "id": "off-install"}, JSX)
   assert r.status_code == 201, r.text
+  assert r.json()["divergence"] == "none"
   data_dir = Path(get_settings().data_dir)
   assert not (data_dir / "apps" / "off-install" / ".git").exists()
 
@@ -1215,6 +1224,7 @@ def test_flag_off_update_overwrites_local_edits_byte_identical(
   """Flag OFF: the update blindly overwrites the on-disk source with
   upstream, exactly as before this feature. No merge, no .git, no
   conflict mode."""
+  _disable_per_app_git()
   base = "https://off2.test/repo/"
   m = {**MANIFEST_NEWS, "id": "off-update"}
   r1 = _install_v1(client, auth, base, m, JSX_MULTI)
@@ -1229,6 +1239,7 @@ def test_flag_off_update_overwrites_local_edits_byte_identical(
   r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
   assert r2.status_code == 201, r2.text
   assert r2.json()["mode"] == "update"
+  assert r2.json()["divergence"] == "none"
   # Legacy behavior: upstream wins outright, the agent edit is GONE.
   assert jsx_file.read_text() == jsx_v2
   assert "AGENT EDIT" not in jsx_file.read_text()
@@ -1244,6 +1255,7 @@ def test_flag_on_install_creates_repo_and_records_upstream(
   base = "https://on.test/repo/"
   r = _install_v1(client, auth, base, {**MANIFEST_NEWS, "id": "on-install"}, JSX)
   assert r.status_code == 201, r.text
+  assert r.json()["divergence"] == "none"
   data_dir = Path(get_settings().data_dir)
   assert (data_dir / "apps" / "on-install" / ".git").is_dir()
   # The App row carries the upstream provenance.
@@ -1279,9 +1291,35 @@ def test_flag_on_clean_update_carries_local_edits_forward(
   r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
   assert r2.status_code == 201, r2.text
   assert r2.json()["mode"] == "update"
+  assert r2.json()["divergence"] == "clean_merge"
   merged = jsx_file.read_text()
   assert "AGENT TITLE" in merged       # local edit carried forward
   assert "UPSTREAM FOOTER" in merged   # upstream change applied
+
+
+def test_flag_on_clean_update_without_local_edits_is_fast_forward(
+  client, auth, bypass_url_validation,
+):
+  """Flag ON: when local main still matches the previous upstream, a
+  clean update reports fast_forward for the seamless store path."""
+  _enable_per_app_git()
+  base = "https://on-fast.test/repo/"
+  m = {
+    **MANIFEST_NEWS,
+    "id": "on-fast-forward",
+    "icon": None,
+    "storage_seeds": {},
+    "schedule": None,
+  }
+  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
+  assert r1.status_code == 201, r1.text
+
+  jsx_v2 = JSX_MULTI.replace("ORIGINAL FOOTER", "UPSTREAM FOOTER")
+  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
+  assert r2.status_code == 201, r2.text
+  payload = r2.json()
+  assert payload["mode"] == "update"
+  assert payload["divergence"] == "fast_forward"
 
 
 def test_flag_on_conflicting_update_returns_conflict_and_preserves_local(
@@ -1307,6 +1345,7 @@ def test_flag_on_conflicting_update_returns_conflict_and_preserves_local(
   assert r2.status_code == 201, r2.text
   payload = r2.json()
   assert payload["mode"] == "conflict"
+  assert payload["divergence"] == "none"
   assert "index.jsx" in payload["conflict_paths"]
   # Local edit preserved verbatim — no upstream bytes, no conflict markers.
   served = jsx_file.read_text()
@@ -1329,3 +1368,67 @@ def test_flag_on_conflicting_update_returns_conflict_and_preserves_local(
     assert app.upstream_commit
   finally:
     db.close()
+
+
+def test_update_preview_clean_returns_upstream_diff(
+  client, auth, bypass_url_validation,
+):
+  """Preview on a clean update reports clean status and the upstream diff."""
+  _enable_per_app_git()
+  base = "https://preview-clean.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "preview-clean"}
+  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
+  assert r1.status_code == 201, r1.text
+  app_id = r1.json()["id"]
+
+  jsx_v2 = JSX_MULTI.replace("ORIGINAL FOOTER", "UPSTREAM FOOTER")
+  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
+  assert r2.status_code == 201, r2.text
+
+  preview = client.get(f"/api/apps/{app_id}/update-preview", headers=auth)
+  assert preview.status_code == 200, preview.text
+  payload = preview.json()
+  assert payload["status"] == "clean"
+  assert payload["upstream_version"] == "2.0.0"
+  assert payload["upstream_commit"]
+  assert payload["conflict_paths"] == []
+  assert payload["conflicts"] == []
+  assert "UPSTREAM FOOTER" in payload["upstream_diff"]
+
+
+def test_update_preview_conflict_returns_real_markers_without_live_mutation(
+  client, auth, bypass_url_validation,
+):
+  """Preview materializes conflict markers in a throwaway worktree only."""
+  _enable_per_app_git()
+  base = "https://preview-conflict.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "preview-conflict"}
+  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
+  assert r1.status_code == 201, r1.text
+  app_id = r1.json()["id"]
+  data_dir = Path(get_settings().data_dir)
+  jsx_file = data_dir / "apps" / "preview-conflict" / "index.jsx"
+
+  local = JSX_MULTI.replace("ORIGINAL TITLE", "AGENT TITLE")
+  jsx_file.write_text(local)
+  jsx_v2 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
+  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["mode"] == "conflict"
+
+  preview = client.get(f"/api/apps/{app_id}/update-preview", headers=auth)
+  assert preview.status_code == 200, preview.text
+  payload = preview.json()
+  assert payload["status"] == "conflict"
+  assert payload["upstream_version"] == "2.0.0"
+  assert payload["conflict_paths"] == ["index.jsx"]
+  assert payload["upstream_commit"]
+  assert "UPSTREAM TITLE" in payload["upstream_diff"]
+  assert payload["conflicts"][0]["path"] == "index.jsx"
+  markers = payload["conflicts"][0]["merged_with_markers"]
+  assert "<<<<<<<" in markers
+  assert "=======" in markers
+  assert ">>>>>>>" in markers
+  assert "AGENT TITLE" in markers
+  assert "UPSTREAM TITLE" in markers
+  assert jsx_file.read_text() == local

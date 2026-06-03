@@ -78,12 +78,14 @@ async def ensure_store_installed(db: Session) -> None:
     return
   log.info("bootstrap: installing store from %s", BOOTSTRAP_STORE_MANIFEST_URL)
   try:
-    app, mode, warnings, _manifest, _conflicts = await install_from_manifest(
-      db,
-      manifest_url=BOOTSTRAP_STORE_MANIFEST_URL,
-      manifest=None,
-      raw_base=None,
-      source="bootstrap",
+    app, mode, warnings, _manifest, _conflicts, _divergence = (
+      await install_from_manifest(
+        db,
+        manifest_url=BOOTSTRAP_STORE_MANIFEST_URL,
+        manifest=None,
+        raw_base=None,
+        source="bootstrap",
+      )
     )
   except Exception as exc:
     # Catch-all on purpose: HTTPException, network errors, JSON parse

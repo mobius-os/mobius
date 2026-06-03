@@ -258,6 +258,20 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
   return _run(repo, "rev-parse", LOCAL_BRANCH).stdout.strip()
 
 
+def local_diverged_from(source_dir: str | Path, base_commit: str) -> bool:
+  """Whether local `main` differs from `base_commit`.
+
+  The caller uses the previous upstream commit as `base_commit`, before
+  recording a new upstream version. Exit 0 means no local tree delta;
+  non-zero means local edits exist or git could not prove equality.
+  """
+  proc = _run(
+    Path(source_dir), "diff", "--quiet", base_commit, LOCAL_BRANCH,
+    check=False,
+  )
+  return proc.returncode != 0
+
+
 def merge_upstream(source_dir: str | Path) -> MergeResult:
   """Merges `upstream` into `main` and returns the verdict.
 
