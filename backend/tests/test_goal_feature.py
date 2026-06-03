@@ -195,9 +195,12 @@ def test_goal_status_reports_without_sdk(db, owner_token):
   refreshed = db.query(models.Chat).filter(models.Chat.id == chat.id).first()
   assert called is False
   assert refreshed.agent_settings_json["goal"]["turns"] == 3
+  assert "State: active" in refreshed.messages[-1]["content"]
   assert "Goal: finish it" in refreshed.messages[-1]["content"]
-  assert "Turns: 3" in refreshed.messages[-1]["content"]
+  assert "Turns used: 3" in refreshed.messages[-1]["content"]
   assert "Last reason: still missing" in refreshed.messages[-1]["content"]
+  assert "Elapsed:" in refreshed.messages[-1]["content"]
+  assert "Token spend: 0" in refreshed.messages[-1]["content"]
 
 
 @pytest.mark.asyncio

@@ -309,6 +309,13 @@ class SettingsUpdate(BaseModel):
   # to the shared agent-settings.json rather than the frozen Owner
   # model. None means "leave unchanged".
   skills_enabled: bool | None = None
+  # Safety backstop for Claude autonomous goal continuations. The
+  # condition can request a lower cap with "stop after N turns"; this
+  # owner setting is the upper bound. None means "leave unchanged".
+  goal_turn_backstop: int | None = Field(default=None, ge=0, le=100)
+  # Token budget for Codex autonomous goal loops. Codex is bounded by
+  # accumulated model-reported tokens instead of turn count.
+  goal_token_budget: int | None = Field(default=None, ge=1, le=2000000)
 
   @field_validator("provider")
   @classmethod

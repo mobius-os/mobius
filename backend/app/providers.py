@@ -392,6 +392,9 @@ def effective_agent_settings(
     merged["effort"] = file_layer["effort"]
   if file_layer.get("effort_by_provider") is not None:
     merged["effort_by_provider"] = file_layer["effort_by_provider"]
+  for key in ("goal_turn_backstop", "goal_token_budget"):
+    if file_layer.get(key) is not None:
+      merged[key] = file_layer[key]
   fm = file_layer.get("model")
   if fm and not _model_belongs_to_other_provider(fm, prov):
     merged["model"] = fm

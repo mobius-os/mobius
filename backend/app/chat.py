@@ -53,6 +53,12 @@ from app.events import (
   process_event,
   undo_question_scrub,
 )
+from app.goal_loop import (
+  _goal_elapsed_time_s,
+  _pause_goal,
+  _reset_goal_progress,
+  _resume_goal,
+)
 from app.providers import effective_agent_settings, get_provider, get_skill_path
 from app.runner_registry import registry
 from app.runtime_types import ChatEvent
@@ -1510,12 +1516,15 @@ def _is_cli_slash_command(text: str) -> bool:
 
 
 _GOAL_CLEAR_ALIASES = {"clear", "stop", "off", "reset", "none", "cancel"}
+_GOAL_PAUSE_ALIASES = {"pause", "paused", "hold"}
+_GOAL_RESUME_ALIASES = {"resume", "continue", "unpause"}
 
 
 def _parse_goal_command(text: str) -> tuple[str, str] | None:
   """Parse a leading `/goal` app command.
 
-  Returns `(action, arg)` where action is `set`, `clear`, or `status`.
+  Returns `(action, arg)` where action is one of `set`, `clear`,
+  `pause`, `resume`, or `status`.
   A non-leading `/goal` is ordinary prose and returns None.
   """
   stripped = (text or "").lstrip("\n")
@@ -1527,17 +1536,69 @@ def _parse_goal_command(text: str) -> tuple[str, str] | None:
   first = arg.split(None, 1)[0].lower()
   if first in _GOAL_CLEAR_ALIASES:
     return ("clear", "")
+  if first in _GOAL_PAUSE_ALIASES:
+    return ("pause", "")
+  if first in _GOAL_RESUME_ALIASES:
+    return ("resume", "")
   return ("set", arg)
 
 
-def _goal_status_message(goal: dict | None) -> str:
+def _format_duration(seconds: float | int | None) -> str:
+  """Format elapsed seconds for visible goal status."""
+  try:
+    total = max(0, int(float(seconds or 0)))
+  except (TypeError, ValueError):
+    total = 0
+  minutes, secs = divmod(total, 60)
+  hours, minutes = divmod(minutes, 60)
+  if hours:
+    return f"{hours}h {minutes}m {secs}s"
+  if minutes:
+    return f"{minutes}m {secs}s"
+  return f"{secs}s"
+
+
+def _goal_status_message(
+  goal: dict | None, achieved_goals: list | None = None,
+) -> str:
   """Build a compact visible status response for `/goal`."""
-  if not isinstance(goal, dict):
-    return "No active goal."
-  condition = str(goal.get("condition") or "").strip() or "(empty)"
-  turns = int(goal.get("turns") or 0)
-  reason = goal.get("last_reason") or "none yet"
-  return f"Goal: {condition}\nTurns: {turns}\nLast reason: {reason}"
+  lines: list[str] = []
+  if isinstance(goal, dict):
+    condition = str(goal.get("condition") or "").strip() or "(empty)"
+    turns = int(goal.get("turns") or 0)
+    reason = goal.get("last_reason") or "none yet"
+    state = str(goal.get("state") or "active")
+    elapsed = goal.get("elapsed_time_s")
+    if elapsed is None:
+      elapsed = _goal_elapsed_time_s(goal)
+    token_spend = int(goal.get("token_spend") or 0)
+    lines.extend([
+      f"State: {state}",
+      f"Goal: {condition}",
+      f"Turns used: {turns}",
+      f"Last reason: {reason}",
+      f"Elapsed: {_format_duration(elapsed)}",
+      f"Token spend: {token_spend}",
+    ])
+  else:
+    lines.append("State: met" if achieved_goals else "No active goal.")
+  history = achieved_goals if isinstance(achieved_goals, list) else []
+  if history:
+    lines.append("")
+    lines.append("Achieved goals:")
+    for item in history[-5:]:
+      if not isinstance(item, dict):
+        continue
+      condition = str(item.get("condition") or "(empty)")
+      turns = int(item.get("turns") or 0)
+      reason = str(item.get("reason") or "done")
+      elapsed = _format_duration(item.get("elapsed_time_s"))
+      tokens = int(item.get("token_spend") or 0)
+      lines.append(
+        f"- {condition} ({turns} turns, {elapsed}, {tokens} tokens): "
+        f"{reason}"
+      )
+  return "\n".join(lines)
 
 
 async def _set_goal_state_strict(
@@ -1953,16 +2014,43 @@ async def _run_chat_impl(
         "failed to load per-chat agent_settings chat_id=%s", chat_id,
       )
 
-  if goal_command and goal_command[0] in {"clear", "status"}:
+  if goal_command and goal_command[0] in {
+    "clear", "status", "pause", "resume",
+  }:
     goal = (chat_overrides or {}).get("goal")
+    achieved = (chat_overrides or {}).get("achieved_goals")
     try:
       if goal_command[0] == "clear":
         await _clear_goal_state_strict(chat_id, run_token or "")
         control_sink.publish({"type": "text", "content": "Goal cleared."})
+      elif goal_command[0] == "pause":
+        result = await _pause_goal(chat_id, run_token or "")
+        if result.get("goal") is None:
+          control_sink.publish({
+            "type": "text",
+            "content": "No active goal to pause.",
+          })
+        else:
+          control_sink.publish({
+            "type": "text",
+            "content": "Goal paused.",
+          })
+      elif goal_command[0] == "resume":
+        result = await _resume_goal(chat_id, run_token or "")
+        if result.get("goal") is None:
+          control_sink.publish({
+            "type": "text",
+            "content": "No active goal to resume.",
+          })
+        else:
+          control_sink.publish({
+            "type": "text",
+            "content": "Goal resumed.",
+          })
       else:
         control_sink.publish({
           "type": "text",
-          "content": _goal_status_message(goal),
+          "content": _goal_status_message(goal, achieved),
         })
     except Exception as exc:
       log.exception("goal command failed chat_id=%s: %s", chat_id, exc)
@@ -1986,6 +2074,27 @@ async def _run_chat_impl(
         bc=bc, sink=control_sink, db=db, chat_id=chat_id, run_gen=run_gen,
         provider_id=provider_id, cost_usd=0, close_browser=False,
       )
+
+  if active_goal is None and goal_command is None:
+    stored_goal = (chat_overrides or {}).get("goal")
+    if (
+      isinstance(stored_goal, dict)
+      and str(stored_goal.get("state") or "active") == "active"
+    ):
+      try:
+        result = await _reset_goal_progress(chat_id, run_token or "")
+        active_goal = (result or {}).get("goal") or dict(stored_goal)
+        db.expire_all()
+        chat_overrides = dict(chat_overrides or {})
+        chat_overrides["goal"] = active_goal
+        goal_mode = True
+      except Exception as exc:
+        log.exception("goal resume failed chat_id=%s: %s", chat_id, exc)
+        control_sink.publish({"type": "error", "message": str(exc)})
+        return await _complete_turn(
+          bc=bc, sink=control_sink, db=db, chat_id=chat_id, run_gen=run_gen,
+          provider_id=provider_id, cost_usd=0, close_browser=False,
+        )
 
   agent_settings = effective_agent_settings(
     settings.data_dir, chat_overrides, provider=provider_id,

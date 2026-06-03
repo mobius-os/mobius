@@ -37,6 +37,14 @@ router = APIRouter()
 settings_router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
+def _int_setting(settings: dict, key: str, default: int) -> int:
+  """Read an integer setting, falling back when the file is malformed."""
+  try:
+    return int(settings.get(key) or default)
+  except (TypeError, ValueError):
+    return default
+
+
 @settings_router.get("")
 def get_settings_view(
   owner: models.Owner = Depends(get_current_owner),
@@ -44,11 +52,18 @@ def get_settings_view(
   """Returns which optional integrations are configured."""
   data_dir = get_app_settings().data_dir
   codex_creds = Path(data_dir) / "cli-auth" / "codex" / "auth.json"
+  agent_settings = providers._load_agent_settings(data_dir)
   return {
     "gemini_configured": owner.gemini_api_key_enc is not None,
     "codex_authenticated": codex_creds.exists(),
     "provider": owner.provider or "claude",
     "skills_enabled": providers.skills_enabled(data_dir),
+    "goal_turn_backstop": _int_setting(
+      agent_settings, "goal_turn_backstop", 25,
+    ),
+    "goal_token_budget": _int_setting(
+      agent_settings, "goal_token_budget", 200000,
+    ),
   }
 
 
@@ -67,14 +82,23 @@ def update_settings(
   if body.provider is not None:
     owner.provider = body.provider
   db.commit()
-  # `skills_enabled` lives in the shared agent-settings.json (the
-  # Owner model is frozen / chmod 444), so it's persisted outside the
-  # DB transaction. Merge into the existing file so we don't clobber
-  # model/effort defaults the picker wrote there.
-  if body.skills_enabled is not None:
+  # Runtime agent preferences live in the shared agent-settings.json
+  # (the Owner model is frozen / chmod 444), so they are persisted
+  # outside the DB transaction. Merge into the existing file so model,
+  # effort, skill, and goal safety settings do not clobber each other.
+  if (
+    body.skills_enabled is not None
+    or body.goal_turn_backstop is not None
+    or body.goal_token_budget is not None
+  ):
     data_dir = get_app_settings().data_dir
     current = providers._load_agent_settings(data_dir)
-    current["skills_enabled"] = bool(body.skills_enabled)
+    if body.skills_enabled is not None:
+      current["skills_enabled"] = bool(body.skills_enabled)
+    if body.goal_turn_backstop is not None:
+      current["goal_turn_backstop"] = int(body.goal_turn_backstop)
+    if body.goal_token_budget is not None:
+      current["goal_token_budget"] = int(body.goal_token_budget)
     providers.write_agent_settings(data_dir, current)
   return {"ok": True}
 
