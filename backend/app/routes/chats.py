@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app import models, questions
 from app.config import get_settings
 from app.chat import (
+  _clear_run_status,
   bump_run_generation,
   forget_chat,
   is_chat_running,
@@ -123,6 +124,13 @@ def list_chats(
     questions.cancel(c.id)
     forget_chat(c.id)
     _purge_chat_dir(c.id)
+    # Drop the chat's durable run records (077 Step 3) with it. chat_runs has
+    # no ON DELETE CASCADE and SQLite leaves FK enforcement off, so a hard
+    # chat delete would otherwise orphan its run rows and grow the table
+    # unbounded over the instance's life.
+    db.query(models.ChatRun).filter(
+      models.ChatRun.chat_id == c.id
+    ).delete(synchronize_session=False)
     db.delete(c)
   # Hard-delete abandoned empties — chats that were created, never had
   # a message sent (no session_id, no messages, no pending queue), and
@@ -150,6 +158,11 @@ def list_chats(
     questions.cancel(c.id)
     forget_chat(c.id)
     _purge_chat_dir(c.id)
+    # Drop the chat's run records with it (see the stale-purge note above —
+    # no FK cascade on SQLite, so these would orphan otherwise).
+    db.query(models.ChatRun).filter(
+      models.ChatRun.chat_id == c.id
+    ).delete(synchronize_session=False)
     db.delete(c)
   # Notification TTL: rows are written by agent-driven push calls
   # (POST /api/notifications/send), and nothing else deletes them. Keep
@@ -566,6 +579,16 @@ async def delete_chat(
   # the soft-deleted row. recover_chat restores it with a strictly-newer gen.
   questions.cancel(chat_id)
   mark_chat_deleted(chat_id)
+  # Close the chat's durable run state as part of the delete. A delete with a
+  # LIVE handle stops the runner but does NOT clear the marker (that is handed
+  # to run_chat's finally), and the dying run then bows out STALE_NO_ACTION on
+  # the +inf generation — so without this the soft-deleted chat keeps a stale
+  # run_status=="running" AND a "running" chat_runs record until the next boot
+  # sweep. A tokenless ClearRunStatus closes every running run record + clears
+  # run_status + drops the actor's _run_token_owner entry; it is best-effort
+  # and safe on a soft-deleted row (clear commands don't resurrect), and
+  # idempotent when the run state is already clean (the common idle delete).
+  await _clear_run_status(chat_id)
 
 
 @router.post("/{chat_id}/recover")
