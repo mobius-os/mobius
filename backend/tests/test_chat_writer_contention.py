@@ -197,6 +197,8 @@ def test_question_commit_failure_raises_so_card_is_not_broadcast():
     def expire_all(self):
       self._db.expire_all()
 
+    def execute(self, *a, **k):
+      return self._db.execute(*a, **k)
     def query(self, *a, **k):
       return self._db.query(*a, **k)
 
@@ -598,6 +600,8 @@ def test_db_error_recreates_session_and_keeps_serving():
     def expire_all(self):
       self._db.expire_all()
 
+    def execute(self, *a, **k):
+      return self._db.execute(*a, **k)
     def query(self, *a, **k):
       return self._db.query(*a, **k)
 
@@ -665,6 +669,8 @@ def test_fatal_actor_fails_callers():
     def expire_all(self):
       self._db.expire_all()
 
+    def execute(self, *a, **k):
+      return self._db.execute(*a, **k)
     def query(self, *a, **k):
       return self._db.query(*a, **k)
 

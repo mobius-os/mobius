@@ -59,6 +59,8 @@ class _RecordingSession:
     pass
 
 
+  def execute(self, *a, **k):
+    return None
 def test_actor_processes_commands_in_fifo_order():
   seen: list = []
   actor = ChatWriterActor(session_factory=lambda: _RecordingSession(seen))
@@ -138,6 +140,8 @@ def test_failed_command_acks_with_exception_but_actor_survives():
     def expire_all(self):
       pass
 
+    def execute(self, *a, **k):
+      return None
   committed: list = []
   actor = ChatWriterActor(session_factory=lambda: _BoomOnFirst(committed))
   actor.start()
@@ -195,6 +199,8 @@ def test_actor_dispatch_failure_is_operator_visible_in_chat_log():
     def expire_all(self):
       pass
 
+    def execute(self, *a, **k):
+      return None
   # Build the production chat.log handler on `moebius.chat` the same way the
   # running server does (lazy, memoized), then point the debug endpoint's path
   # computation at the same file. Truncate so we assert only on this turn.
@@ -261,6 +267,8 @@ def test_stop_warns_when_writer_thread_outlasts_join_timeout(caplog):
     def expire_all(self):
       pass
 
+    def execute(self, *a, **k):
+      return None
   actor = ChatWriterActor(session_factory=lambda: _BlockingFinalize())
   actor.start()
   try:
@@ -308,6 +316,8 @@ def test_thread_death_fails_pending_acks():
     def expire_all(self):
       pass
 
+    def execute(self, *a, **k):
+      return None
   actor = ChatWriterActor(session_factory=lambda: _DeadlySession())
   actor.start()
   try:
@@ -381,6 +391,8 @@ class _BoomOnNthCommit:
   def expire_all(self):
     pass
 
+  def execute(self, *a, **k):
+    return None
   def close(self):
     pass
 
@@ -1112,6 +1124,8 @@ def test_fatal_drain_resolving_ack_can_reenter_stop_without_deadlock():
     def expire_all(self):
       pass
 
+    def execute(self, *a, **k):
+      return None
   actor = ChatWriterActor(session_factory=lambda: _DeadlySession())
   actor.start()
   reentered = Future()

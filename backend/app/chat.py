@@ -448,6 +448,17 @@ def forget_chat(chat_id: str) -> None:
   registry.forget(chat_id)
 
 
+def forget_chat_if_current(chat_id: str, run_gen: int | None) -> bool:
+  """`forget_chat`, but only while this run still owns the chat's generation.
+
+  See `registry.forget_if_current`: no-ops (returns False) when a Stop or a
+  fresh run has advanced the generation past `run_gen`, or the chat was
+  soft-deleted, so a late terminal cleanup can't reset a successor's
+  generation / starting slot and strand its fresh run marker.
+  """
+  return registry.forget_if_current(chat_id, run_gen)
+
+
 def mark_chat_deleted(chat_id: str) -> None:
   """Soft-delete cleanup: kill the in-flight run and deny generation ownership.
 
@@ -1068,6 +1079,7 @@ async def _close_browser_session(chat_id: str) -> None:
 async def _terminal_setup_error_cleanup(
   chat_id: str,
   run_token: str = "",
+  run_gen: int | None = None,
 ) -> chat_queue.TerminalDisposition:
   """Bounded terminal cleanup for a setup-time error before any runner ran.
 
@@ -1079,9 +1091,25 @@ async def _terminal_setup_error_cleanup(
   StartTurn's marker can't be erased and a wedged writer/lock can't hang
   teardown):
 
-    (1) await ClearPending (strict), (2) await ClearRunStatus (strict),
-    (3) discard_starting, (4) forget_chat, all inside
+    (0) ownership gate, (1) await ClearPending (strict),
+    (2) await ClearRunStatus (strict), (3) discard_starting,
+    (4) forget (if-current), all inside
     `asyncio.timeout(TERMINAL_LOCK_TIMEOUT_SECS)` around the queue lock.
+
+  The ownership gate (step 0) mirrors `_complete_turn`'s `we_own_gen` check:
+  this run owned the generation at `_run_chat_impl` entry, but a Stop (bumps
+  the generation) plus a fresh POST (claims the starting slot at the new
+  generation) can supersede it between entry and here. When a newer run owns
+  the chat, this cleanup touches NOTHING — clearing the pending queue would
+  wipe the successor's queued sends and forgetting would reset its generation
+  — and returns STALE_NO_ACTION; the marker is the successor's and the
+  identity-keyed clear already no-ops on a token it no longer owns. Holding the
+  queue lock makes the gate sufficient for the common case: the only paths that
+  free this run's starting slot (Stop's post-lock `discard_starting`, delete's
+  `mark_deleted`) are serialized behind the lock or behind the +inf delete
+  gate, so no successor can claim `mark_starting` while we hold it. The forget
+  uses `forget_chat_if_current` rather than the gate alone to also cover a Stop
+  that bumps the generation during the in-lock strict-clear awaits.
 
   Returns `EMPTY_TERMINAL_CLEARED` when both strict clears landed. On ANY
   failure (a strict ack raised, or the lock acquisition exceeded the bound)
@@ -1096,10 +1124,12 @@ async def _terminal_setup_error_cleanup(
   try:
     async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
       async with chat_queue.get_lock(chat_id):
+        if run_gen is not None and current_run_generation(chat_id) != run_gen:
+          return chat_queue.TerminalDisposition.STALE_NO_ACTION
         await _clear_pending_strict(chat_id)
         await _clear_run_status_strict(chat_id, run_token)
         discard_starting(chat_id)
-        forget_chat(chat_id)
+        forget_chat_if_current(chat_id, run_gen)
     return chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
   except (Exception, asyncio.TimeoutError):
     _get_logger().error(
@@ -1704,7 +1734,7 @@ async def _run_chat_impl(
   owner = db.query(models.Owner).first()
   if not owner:
     bc.publish({"type": "error", "message": "No owner configured."})
-    disposition = await _terminal_setup_error_cleanup(chat_id, run_token or "")
+    disposition = await _terminal_setup_error_cleanup(chat_id, run_token or "", run_gen)
     bc.publish({"type": "done"})
     clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
     bc.mark_completed()
@@ -1863,7 +1893,7 @@ async def _run_chat_impl(
   auth_error = provider.check_auth(settings.data_dir)
   if auth_error:
     bc.publish({"type": "error", "message": auth_error})
-    disposition = await _terminal_setup_error_cleanup(chat_id, run_token or "")
+    disposition = await _terminal_setup_error_cleanup(chat_id, run_token or "", run_gen)
     bc.publish({"type": "done"})
     clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
     bc.mark_completed()
@@ -2010,7 +2040,7 @@ async def _run_chat_impl(
     "type": "error",
     "message": f"Provider {provider.name!r} has no supported runtime.",
   })
-  disposition = await _terminal_setup_error_cleanup(chat_id, run_token or "")
+  disposition = await _terminal_setup_error_cleanup(chat_id, run_token or "", run_gen)
   clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
   bc.publish({"type": "done"})
   bc.mark_completed()
