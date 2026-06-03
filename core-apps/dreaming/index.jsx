@@ -66,6 +66,23 @@ function buildCron(hour) {
   return `0 ${hour} * * *`
 }
 
+const REPORT_CSP = [
+  "default-src 'none'",
+  "style-src 'unsafe-inline'",
+  'img-src data: blob:',
+  'font-src data:',
+  "base-uri 'none'",
+  "form-action 'none'",
+].join('; ')
+
+export function hardenReportHtml(html) {
+  const body = typeof html === 'string' ? html : ''
+  const meta = `<meta http-equiv="Content-Security-Policy" content="${REPORT_CSP}">`
+  if (/<head[\s>]/i.test(body)) return body.replace(/<head([^>]*)>/i, `<head$1>${meta}`)
+  if (/<html[\s>]/i.test(body)) return body.replace(/<html([^>]*)>/i, `<html$1><head>${meta}</head>`)
+  return `<!doctype html><html><head>${meta}</head><body>${body}</body></html>`
+}
+
 // "0 6 * * *" -> "06:00" for the <input type="time"> value.
 function hourToTimeValue(hour) {
   return `${String(hour).padStart(2, '0')}:00`
@@ -484,12 +501,17 @@ const S = {
 // ---------------------------------------------------------------------------
 
 function makeStorage(appId, token) {
+  const ms = (typeof window !== 'undefined' && window.mobius && window.mobius.storage) || null
   const headers = { Authorization: `Bearer ${token}` }
   const base = `/api/storage/apps/${appId}`
   const listBase = `/api/storage/apps-list/${appId}`
 
   async function getJSON(path) {
     try {
+      if (ms && typeof ms.get === 'function') {
+        const data = await ms.get(path)
+        return data == null ? { notFound: true } : { data }
+      }
       const r = await fetch(`${base}/${path}`, { headers })
       if (r.status === 404) return { notFound: true }
       if (!r.ok) return { error: r.status }
@@ -500,6 +522,10 @@ function makeStorage(appId, token) {
   }
 
   async function putJSON(path, obj) {
+    if (ms && typeof ms.set === 'function') {
+      await ms.set(path, obj)
+      return true
+    }
     const r = await fetch(`${base}/${path}`, {
       method: 'PUT',
       headers: { ...headers, 'Content-Type': 'application/json' },
@@ -748,7 +774,7 @@ function ReportDetail({ dateStr, storage, online, onBack }) {
     ;(async () => {
       const res = await storage.getReportHtml(`${dateStr}.html`)
       if (cancelled) return
-      if (res.data != null) setState({ phase: 'ready', html: res.data })
+      if (res.data != null) setState({ phase: 'ready', html: hardenReportHtml(res.data) })
       else if (res.notFound) setState({ phase: 'missing', html: '' })
       else setState({ phase: 'error', html: '' })
     })()
@@ -1071,6 +1097,7 @@ function SettingsTab({ appId, storage, online }) {
   const [hour, setHour] = useState(DEFAULT_HOUR)
   const [verbosity, setVerbosity] = useState(DEFAULT_VERBOSITY)
   const [excludeApps, setExcludeApps] = useState([])
+  const [settingsExtra, setSettingsExtra] = useState({})
   // The raw cron we loaded — when it's a custom shape parseCronHour can't
   // represent (a non-zero minute, multiple hours), we surface it read-only
   // rather than silently rewriting it to "0 <h> * * *" on the next save.
@@ -1088,6 +1115,7 @@ function SettingsTab({ appId, storage, online }) {
       if (cancelled) return
       const s = res.data && typeof res.data === 'object' ? res.data : null
       if (s) {
+        setSettingsExtra(s)
         const parsedHour = parseCronHour(s.cron)
         if (parsedHour != null) {
           setHour(parsedHour)
@@ -1096,6 +1124,11 @@ function SettingsTab({ appId, storage, online }) {
           // Hand-edited / multi-hour cron — keep it, show it read-only.
           setRawCron(s.cron)
           setCronIsCustom(true)
+        } else if (Number.isFinite(s.hour) && s.hour >= 0 && s.hour <= 23) {
+          // Legacy seed shape used hour/minute/timezone. Preserve it as a
+          // readable default, then save in the cron shape the runner expects.
+          setHour(s.hour)
+          setCronIsCustom(false)
         }
         if (VERBOSITY_OPTIONS.some((v) => v.id === s.verbosity)) {
           setVerbosity(s.verbosity)
@@ -1129,9 +1162,15 @@ function SettingsTab({ appId, storage, online }) {
     const cron = cronIsCustom ? rawCron : buildCron(hour)
     try {
       await storage.putJSON('settings.json', {
+        ...settingsExtra,
         cron,
+        hour,
+        minute: 0,
+        timezone: settingsExtra.timezone ?? null,
         verbosity,
         exclude_apps: excludeApps,
+        provider: settingsExtra.provider || 'claude',
+        model: settingsExtra.model ?? null,
       })
       setToast('Saved ✓')
       setTimeout(() => setToast(''), 2600)
@@ -1140,7 +1179,7 @@ function SettingsTab({ appId, storage, online }) {
     } finally {
       setSaving(false)
     }
-  }, [saving, cronIsCustom, rawCron, hour, verbosity, excludeApps, storage, online])
+  }, [saving, cronIsCustom, rawCron, hour, verbosity, excludeApps, settingsExtra, storage, online])
 
   if (loading) {
     return (

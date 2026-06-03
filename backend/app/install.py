@@ -38,7 +38,7 @@ import subprocess
 import warnings as _warnings_mod
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 from fastapi import HTTPException
@@ -179,6 +179,9 @@ def _validate_manifest(m: dict) -> None:
     raise HTTPException(400, "Manifest `name` must be a string.")
   if not isinstance(m.get("entry"), str):
     raise HTTPException(400, "Manifest `entry` must be a string.")
+  _validate_repo_relative_path(m["entry"], "entry")
+  if m.get("icon") is not None:
+    _validate_repo_relative_path(m["icon"], "icon")
   perms = m.get("permissions", {})
   if not isinstance(perms, dict):
     raise HTTPException(400, "Manifest `permissions` must be an object.")
@@ -205,6 +208,14 @@ def _validate_manifest(m: dict) -> None:
     raise HTTPException(
       400, "Manifest `permissions.manage_apps` must be a boolean.",
     )
+  seeds = m.get("storage_seeds", {})
+  if seeds is not None and not isinstance(seeds, dict):
+    raise HTTPException(400, "Manifest `storage_seeds` must be an object.")
+  for sub, value in (seeds or {}).items():
+    if not isinstance(sub, str) or not sub:
+      raise HTTPException(400, "Manifest `storage_seeds` keys must be paths.")
+    if isinstance(value, str):
+      _validate_repo_relative_path(value, f"storage_seeds.{sub}")
   sched = m.get("schedule")
   if sched is not None:
     if not isinstance(sched, dict):
@@ -223,6 +234,39 @@ def _validate_manifest(m: dict) -> None:
         "only the basename, so a nested path would silently register/run a "
         "different file than the manifest names.",
       )
+    if job is not None:
+      _validate_repo_relative_path(job, "schedule.job")
+
+
+def _validate_repo_relative_path(path: str, field: str) -> None:
+  """Reject manifest asset paths that are not repo-relative.
+
+  The public schema says entry/icon/job/string storage seeds are paths within
+  the manifest repo. Enforcing that here keeps community-manifest mistakes as
+  clean 400s instead of fetching odd concatenated URLs or surfacing later 500s.
+  """
+  if not isinstance(path, str) or not path:
+    raise HTTPException(400, f"Manifest `{field}` must be a non-empty string.")
+  parsed = urlparse(path)
+  if (
+    parsed.scheme or parsed.netloc or parsed.query or parsed.fragment or
+    path.startswith("/") or "\\" in path
+  ):
+    raise HTTPException(
+      400,
+      f"Manifest `{field}` must be a relative path inside the app repo.",
+    )
+  parts = [unquote(part) for part in path.split("/")]
+  if any(part in ("", ".", "..") for part in parts):
+    raise HTTPException(
+      400,
+      f"Manifest `{field}` must not contain empty, '.', or '..' segments.",
+    )
+  if any("/" in part or "\\" in part for part in parts):
+    raise HTTPException(
+      400,
+      f"Manifest `{field}` must not contain encoded path separators.",
+    )
 
 
 def _validate_cron_expr(expr: str) -> None:
@@ -322,8 +366,20 @@ def _canonical_for_inline(raw_base: str, manifest_id: str) -> str:
   manifest_url. We need SOMETHING to key update-vs-install
   discrimination on; the raw_base + manifest_id is unique-enough for
   that purpose."""
-  base = raw_base.rstrip("/")
-  return f"{base}#manifest-id={manifest_id}"
+  return _canonical_identity_key(raw_base, manifest_id)
+
+
+def _normalize_raw_base(raw_base: str) -> str:
+  """Return a fetch base suitable for joining manifest-relative paths."""
+  if not isinstance(raw_base, str) or not raw_base.strip():
+    raise HTTPException(400, "`raw_base` must be a non-empty URL.")
+  base = raw_base.strip()
+  parsed = urlparse(base)
+  if parsed.scheme not in ("http", "https") or not parsed.hostname:
+    raise HTTPException(400, "`raw_base` must be an http(s) URL.")
+  if parsed.query or parsed.fragment:
+    raise HTTPException(400, "`raw_base` must not include query or fragment.")
+  return base if base.endswith("/") else base + "/"
 
 
 def _canonical_base(url_or_base: str) -> str:
@@ -688,6 +744,7 @@ async def install_from_manifest(
       )
 
     _validate_manifest(manifest)
+    raw_base = _normalize_raw_base(raw_base)
 
     # --- Phase 2: fetch entry JSX + bundled assets --------------------
     entry_bytes = await _http_get(
