@@ -331,13 +331,8 @@ def _canonical_base(url_or_base: str) -> str:
   to match installed rows on regardless of the manifest id — callers that need
   to ask "is this URL's app installed?" LIKE `<base>#manifest-id=%`."""
   base = url_or_base.split("#", 1)[0].split("?", 1)[0]
-  # Strip the trailing manifest FILENAME — `mobius.json` or any other `*.json`
-  # a paste-a-URL install pointed at — so the URL path canonicalises to the same
-  # directory base the inline path keys on (its `raw_base` is that directory).
-  # Stripping only `/mobius.json` split a non-mobius.json app into two App rows
-  # when installed once via URL and once inline.
-  if base.endswith(".json") and "/" in base:
-    base = base.rsplit("/", 1)[0]
+  if base.endswith("/mobius.json"):
+    base = base[: -len("/mobius.json")]
   return base.rstrip("/")
 
 
