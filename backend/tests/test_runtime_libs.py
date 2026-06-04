@@ -20,6 +20,16 @@ from app.config import get_settings
 from app.runtime_libs import RUNTIME_LIBS
 
 
+CODEMIRROR_DIRECT_IMPORTS = {
+  "@codemirror/state",
+  "@codemirror/view",
+  "@codemirror/commands",
+  "@codemirror/language",
+  "@codemirror/lang-markdown",
+  "@lezer/highlight",
+}
+
+
 def _find_app_frame() -> Path | None:
   """Resolve app-frame.html the same way the frame route does, plus the
   repo-relative path so the local (non-Docker) test run finds it too."""
@@ -105,6 +115,26 @@ def test_externalized_libs_all_have_importmap_entries():
     "RUNTIME_LIBS entries with no importmap mapping — apps importing "
     f"these compile but fail to resolve at runtime: {missing}. Add them "
     "to the importmap in frontend/public/app-frame.html."
+  )
+
+
+def test_codemirror_subpackages_are_supported_as_direct_imports():
+  """Notes and other editor apps can import the CodeMirror 6 packages they use
+  directly instead of going through the umbrella `codemirror` re-export."""
+  frame = _find_app_frame()
+  if frame is None:
+    pytest.skip("app-frame.html not resolvable in this environment")
+  keys = _importmap_keys(frame.read_text())
+  runtime_libs = set(RUNTIME_LIBS)
+  missing_importmap = sorted(CODEMIRROR_DIRECT_IMPORTS - keys)
+  missing_external = sorted(CODEMIRROR_DIRECT_IMPORTS - runtime_libs)
+  assert not missing_importmap, (
+    "CodeMirror direct imports missing from app-frame importmap: "
+    f"{missing_importmap}"
+  )
+  assert not missing_external, (
+    "CodeMirror direct imports missing from RUNTIME_LIBS externals: "
+    f"{missing_external}"
   )
 
 
