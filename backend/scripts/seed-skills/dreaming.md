@@ -123,13 +123,21 @@ Use Mind's model of the partner (their recurring interests, projects they care a
 
 Two artifacts: the static **brief** (an HTML page) and a **morning chat** (where the questions live as tappable cards).
 
-**Fill the brief template.** Read `/data/apps/dreaming/dreaming-brief-template.html` (the runner seeds it there before every run — it lives under `/data` because your Read tool is scoped to that tree and can't reach `/app/scripts`), copy it to tonight's run dir, and fill the five sections — exec-summary → what-I-did → what-I-learned → what-needs-your-input → details. Every item carries trigger/why/next-action. Keep the exec-summary to the 3–5 things that matter; push everything else down into details. **Save the finished brief to `/data/apps/$APP_ID/reports/<date>.html`** — first `APP_ID="$(cat /data/apps/dreaming/inputs/app_id)"` and `mkdir -p /data/apps/$APP_ID/reports`. `$APP_ID` is the Dreaming app's **numeric** id: the app lists + renders its briefs from its numeric storage dir (`/api/storage/apps/<id>/...` → `/data/apps/<id>/reports/`), **NOT** the `dreaming` slug dir (which holds the app's *source*, not its *storage*) — write to the slug dir and the app shows "No briefs yet" forever. `<date>` is `YYYY-MM-DD`. If a brief item benefits from one illustration, follow `images.md`; don't decorate for its own sake.
+**Fill the brief template.** Read `/data/apps/dreaming/dreaming-brief-template.html` (the runner seeds it there before every run — it lives under `/data` because your Read tool is scoped to that tree and can't reach `/app/scripts`), copy it to tonight's run dir, and fill the five sections — exec-summary → what-I-did → what-I-learned → what-needs-your-input → details. Every item carries trigger/why/next-action. Keep the exec-summary to the 3–5 things that matter; push everything else down into details. **Do not summarize the partner's own Mobius interactions back to them.** Use chat/interview facts only as evidence for what *you* did, what *you* learned, what changed in the platform, and what needs a decision. If a sentence reads like a recap of the partner's day ("you discussed X, then Y"), delete it or turn it into an outcome ("I fixed/propose/learned X because today's agents hit Y"). **Save the finished brief to `/data/apps/$APP_ID/reports/<date>.html`** — first `APP_ID="$(cat /data/apps/dreaming/inputs/app_id)"` and `mkdir -p /data/apps/$APP_ID/reports`. `$APP_ID` is the Dreaming app's **numeric** id: the app lists + renders its briefs from its numeric storage dir (`/api/storage/apps/<id>/...` → `/data/apps/<id>/reports/`), **NOT** the `dreaming` slug dir (which holds the app's *source*, not its *storage*) — write to the slug dir and the app shows "No briefs yet" forever. `<date>` is `YYYY-MM-DD`. If a brief item benefits from one illustration, follow `images.md`; don't decorate for its own sake.
 
 > **Always ship a brief — never end the night with nothing.** If the template can't be read for any reason, do NOT abandon phase 6: hand-write a minimal self-contained HTML brief (a heading + the five sections as `<h2>`/`<p>`) straight to `/data/apps/$APP_ID/reports/<date>.html` (the numeric storage dir above, NOT the slug dir). A plain brief the partner can read beats a perfect one that never posts. The morning chat (below) is the action surface either way, so even a bare brief plus the chat is a complete deliverable.
 
 > The brief is a **static, sandboxed page with no JS** — it can't host the chat or interactive cards. The questions live in the morning chat (below), and the **Dreaming app renders the brief with the morning chat shown below it.** Design the brief to stand alone as a read; the chat is the action surface. (Note for the Dreaming-UI agent: render `reports/<date>.html` in the app, then mount the morning chat thread underneath it.)
 
 **Open the morning chat and post the summary + questions as cards.**
+
+This is a hard deliverable, not decorative copy. A brief may contain a
+"questions for you" section, but those questions count as **asked** only
+after the chat exists, the opener message is sent, and the `.meta.json`
+link is written. If any of those steps fails, state that plainly in the
+brief ("I prepared questions but could not open the morning chat") and
+do not write "I asked" or "answer below." Static HTML cannot collect
+answers.
 
 1. Create the chat:
    ```bash
