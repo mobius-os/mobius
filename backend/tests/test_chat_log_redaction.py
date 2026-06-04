@@ -24,6 +24,21 @@ def test_redact_keeps_only_role_and_text_dropping_all_block_types():
   assert out == {"role": "assistant", "text": "visible answer"}
 
 
+def test_redact_separates_distinct_assistant_text_blocks():
+  msg = {
+    "role": "assistant",
+    "content": "fallback",
+    "blocks": [
+      {"type": "text", "content": "First sentence."},
+      {"type": "text", "content": "Second sentence."},
+    ],
+  }
+  assert r.redact_message(msg) == {
+    "role": "assistant",
+    "text": "First sentence.\n\nSecond sentence.",
+  }
+
+
 def test_hidden_user_message_is_dropped_entirely():
   assert r.redact_message(
     {"role": "user", "content": "internal answer", "hidden": True}
