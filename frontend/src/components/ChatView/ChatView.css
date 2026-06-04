@@ -485,6 +485,7 @@
 }
 
 .chat__foot .queued,
+.chat__foot .connection-status,
 .chat__foot .chat__attach-tray,
 .chat__foot .chat__pill,
 .chat__foot .composer-plus { pointer-events: auto; }

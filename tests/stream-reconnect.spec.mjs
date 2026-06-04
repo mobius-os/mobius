@@ -43,6 +43,72 @@ async function send(page, text) {
   await page.keyboard.press('Enter')
 }
 
+async function setVisibility(page, state) {
+  await page.evaluate((nextState) => {
+    Object.defineProperty(document, 'visibilityState', {
+      value: nextState, writable: true, configurable: true,
+    })
+    document.dispatchEvent(new Event('visibilitychange'))
+  }, state)
+}
+
+async function pillOverlapDiagnostics(page) {
+  return page.evaluate(() => {
+    const pill = document.querySelector('.chat__pill')
+    if (!pill) return { missing: 'pill' }
+    const pillRect = pill.getBoundingClientRect()
+    const retry = document.querySelector('.connection-status__retry')
+    const status = document.querySelector('.connection-status')
+
+    const describe = (el) => {
+      if (!el) return null
+      const cls = el.className && typeof el.className === 'string'
+        ? `.${el.className.trim().split(/\s+/).join('.')}`
+        : ''
+      const label = el.getAttribute?.('aria-label') || el.textContent?.trim() || ''
+      return `${el.tagName.toLowerCase()}${cls}${label ? ` "${label}"` : ''}`
+    }
+
+    const samples = []
+    const xs = [0.25, 0.5, 0.75].map(p => pillRect.left + pillRect.width * p)
+    const ys = [
+      pillRect.top + pillRect.height * 0.6,
+      pillRect.bottom - 2,
+    ]
+    for (const x of xs) {
+      for (const y of ys) {
+        samples.push({
+          x, y,
+          stack: document.elementsFromPoint(x, y).slice(0, 8).map(describe),
+        })
+      }
+    }
+
+    const overlapsPill = (el) => {
+      if (!el) return false
+      const r = el.getBoundingClientRect()
+      return r.left < pillRect.right
+        && r.right > pillRect.left
+        && r.top < pillRect.bottom
+        && r.bottom > pillRect.top
+    }
+
+    return {
+      pill: {
+        top: pillRect.top,
+        bottom: pillRect.bottom,
+        left: pillRect.left,
+        right: pillRect.right,
+      },
+      status: status ? status.getBoundingClientRect().toJSON() : null,
+      retry: retry ? retry.getBoundingClientRect().toJSON() : null,
+      retryOverlapsPill: overlapsPill(retry),
+      statusOverlapsPill: overlapsPill(status),
+      samples,
+    }
+  })
+}
+
 test.describe('Stream reconnection', () => {
   test('1. Completed stream stays idle after visibility change', async ({ page }) => {
     let streamRequestCount = 0
@@ -180,6 +246,123 @@ test.describe('Stream reconnection', () => {
     await page.waitForTimeout(500)
 
     expect(streamRequestCount).toBe(1)
+  })
+
+  test('8. Wake after hidden EOF before first event reattaches and renders in-progress message', async ({ page }) => {
+    await page.addInitScript(() => {
+      const realFetch = window.fetch.bind(window)
+      let streamCount = 0
+      let releaseDropped
+      let finishReattached
+      window.__streamFetchCount = 0
+      window.__droppedStreamParked = false
+      window.__releaseDroppedStream = () => releaseDropped?.()
+      window.__finishReattachedStream = () => finishReattached?.()
+
+      window.fetch = (input, init) => {
+        const url = typeof input === 'string' ? input : (input && input.url) || ''
+        if (!/\/api\/chats\/[0-9a-f-]+\/stream$/.test(url)) {
+          return realFetch(input, init)
+        }
+
+        streamCount++
+        window.__streamFetchCount = streamCount
+
+        if (streamCount === 1) {
+          window.__droppedStreamParked = true
+          return new Promise(resolve => {
+            releaseDropped = () => resolve(new Response('', {
+              status: 200,
+              headers: { 'Content-Type': 'text/event-stream' },
+            }))
+          })
+        }
+
+        if (streamCount === 2) {
+          const encoder = new TextEncoder()
+          let controllerRef
+          const body = new ReadableStream({
+            start(controller) {
+              controllerRef = controller
+              controller.enqueue(encoder.encode(
+                'data: {"type":"text","content":"reattached in-progress"}\n\n',
+              ))
+              controller.enqueue(encoder.encode(
+                'data: {"type":"catch_up_done"}\n\n',
+              ))
+              finishReattached = () => {
+                controllerRef.enqueue(encoder.encode('data: {"type":"done"}\n\n'))
+                controllerRef.close()
+              }
+            },
+            cancel() {},
+          })
+          return Promise.resolve(new Response(body, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          }))
+        }
+
+        return new Promise(() => {})
+      }
+    })
+
+    await setupChat(page)
+    await send(page, 'sleep before first event')
+    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(1)
+    await page.waitForFunction(() => window.__droppedStreamParked === true)
+
+    await setVisibility(page, 'hidden')
+    await page.evaluate(() => window.__releaseDroppedStream())
+    await page.waitForFunction(() => window.__streamFetchCount === 1)
+
+    await setVisibility(page, 'visible')
+
+    await page.waitForFunction(() => window.__streamFetchCount === 2)
+    await expect(page.locator('.chat__scroll')).toContainText(
+      'reattached in-progress', { timeout: 5000 },
+    )
+    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(1)
+
+    await page.evaluate(() => window.__finishReattachedStream())
+    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(0)
+  })
+
+  test('9. ConnectionStatus retry button stays above the composer pill on wake failure', async ({ page }) => {
+    await page.addInitScript(() => {
+      const realFetch = window.fetch.bind(window)
+      let streamCount = 0
+      window.__failedStreamFetches = 0
+      window.fetch = (input, init) => {
+        const url = typeof input === 'string' ? input : (input && input.url) || ''
+        if (/\/api\/chats\/[0-9a-f-]+\/stream$/.test(url)) {
+          streamCount++
+          window.__failedStreamFetches = streamCount
+          return Promise.reject(new TypeError('simulated mobile radio drop'))
+        }
+        return realFetch(input, init)
+      }
+    })
+
+    await setupChat(page)
+    await send(page, 'retry button layout')
+
+    await expect(page.locator('.connection-status__retry')).toBeVisible({
+      timeout: 10000,
+    })
+    await page.waitForFunction(() => {
+      const chat = document.querySelector('.chat')
+      const foot = document.querySelector('.chat__foot')
+      return chat && foot
+        && getComputedStyle(chat).getPropertyValue('--composer-h').trim()
+          === `${foot.offsetHeight}px`
+    })
+
+    const diagnostics = await pillOverlapDiagnostics(page)
+    expect(diagnostics.retryOverlapsPill, JSON.stringify(diagnostics, null, 2))
+      .toBe(false)
+    expect(diagnostics.statusOverlapsPill, JSON.stringify(diagnostics, null, 2))
+      .toBe(false)
   })
 
   test('6. Typing while streaming shows Send instead of Stop', async ({ page }) => {

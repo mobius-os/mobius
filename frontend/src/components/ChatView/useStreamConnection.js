@@ -154,6 +154,12 @@ export default function useStreamConnection(chatId, {
   const [isStreaming, _setIsStreaming] = useState(false)
   const isStreamingRef = useRef(false)
   function setIsStreaming(v) { isStreamingRef.current = v; _setIsStreaming(v) }
+  // Reconnect intent is deliberately separate from `isStreaming`.
+  // `isStreaming` drives UI state and can be disturbed by browser
+  // sleep/wake network EOFs. This ref tracks whether the current turn
+  // has seen a terminal signal yet. Idle chats only reconnect when
+  // this is true; `done`, terminal 204, and Stop retire it.
+  const wantsReconnectRef = useRef(false)
   const [connectionError, _setConnectionError] = useState(null)
   const connectionErrorRef = useRef(null)
   function setConnectionError(v) { connectionErrorRef.current = v; _setConnectionError(v) }
@@ -288,6 +294,7 @@ export default function useStreamConnection(chatId, {
     drainingRef.current = false
     cancelReconnectTimers()
     if (clearStreaming) {
+      wantsReconnectRef.current = false
       setIsStreaming(false)
       setConnectionError(null)
       retryCount.current = 0
@@ -387,6 +394,7 @@ export default function useStreamConnection(chatId, {
         abortRef.current = null
         setConnectionError(null)
         retryCount.current = 0
+        wantsReconnectRef.current = false
         setIsStreaming(false)
         setStreamItems([])
         textBufferRef.current = ''
@@ -405,6 +413,7 @@ export default function useStreamConnection(chatId, {
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
 
       setIsStreaming(true)
+      wantsReconnectRef.current = true
       setConnectionError(null)
       retryCount.current = 0
 
@@ -587,6 +596,7 @@ export default function useStreamConnection(chatId, {
             justSentAtRef.current = 0
             const continues = queuedContinuationRef.current
             const promotedTs = queuedContinuationTsRef.current
+            wantsReconnectRef.current = !!continues
             queuedContinuationRef.current = false
             queuedContinuationTsRef.current = null
             // Delay onStreamEnd by one frame so the React render
@@ -613,10 +623,25 @@ export default function useStreamConnection(chatId, {
       }
 
       // Stream closed without done event.
+      if (abortRef.current !== controller) return
       abortRef.current = null
       flushBuffer()
-      setIsStreaming(false)
-      requestAnimationFrame(() => onStreamEndRef.current?.())
+      if (!wantsReconnectRef.current) {
+        setIsStreaming(false)
+        requestAnimationFrame(() => onStreamEndRef.current?.())
+        return
+      }
+
+      // A bare EOF is not a terminal chat event. Mobile PWAs can see
+      // this when the OS freezes or drops the SSE fetch in the
+      // background, including before the first event arrives. Keep the
+      // turn live so the foreground handler can reattach and replay
+      // catch-up instead of hiding the in-progress assistant message.
+      setIsStreaming(true)
+      if (document.visibilityState === 'visible') {
+        setConnectionError('retrying')
+        scheduleReconnect(() => connectRef.current?.(true), 300)
+      }
     } catch (err) {
       if (err.name === 'AbortError') return
       flushBuffer()
@@ -652,6 +677,7 @@ export default function useStreamConnection(chatId, {
     retryCount.current = 0
     setConnectionError(null)
     setIsStreaming(true)
+    wantsReconnectRef.current = true
     // Reset state — same reason as the automatic retry above.
     connectRef.current?.(true)
   }, [])
@@ -669,6 +695,7 @@ export default function useStreamConnection(chatId, {
     // is replying to). Keep streamItems intact for the answer path.
     const isAnswerSubmission = !!answers
     if (!queueOnly && !isAnswerSubmission) {
+      wantsReconnectRef.current = true
       justSentAtRef.current = Date.now()
       setStreamItems([])
       textBufferRef.current = ''
@@ -733,6 +760,7 @@ export default function useStreamConnection(chatId, {
       // Started: ensure streaming state is set even if the caller
       // passed queueOnly:true expecting it would be queued.
       if (queueOnly) {
+        wantsReconnectRef.current = true
         justSentAtRef.current = Date.now()
         setStreamItems([])
         textBufferRef.current = ''
@@ -744,6 +772,7 @@ export default function useStreamConnection(chatId, {
       // `if (!queueOnly)` guard left the UI stuck on "thinking" dots
       // when a queueOnly send raced the server's `status: 'started'`
       // branch and then the POST itself failed mid-flight.
+      wantsReconnectRef.current = false
       setIsStreaming(false)
       throw err
     }
@@ -777,7 +806,7 @@ export default function useStreamConnection(chatId, {
   useEffect(() => {
     function onVisible() {
       if (document.visibilityState !== 'visible') return
-      if (!isStreamingRef.current) return
+      if (!wantsReconnectRef.current && !isStreamingRef.current) return
       if (abortRef.current) {
         abortRef.current.abort()
         abortRef.current = null
@@ -786,7 +815,7 @@ export default function useStreamConnection(chatId, {
     }
 
     function onOnline() {
-      if (!isStreamingRef.current && !connectionErrorRef.current) return
+      if (!wantsReconnectRef.current && !isStreamingRef.current && !connectionErrorRef.current) return
       if (abortRef.current) {
         abortRef.current.abort()
         abortRef.current = null
