@@ -48,14 +48,14 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
 async function newChat(page) {
   // Worker-tagged title so cleanupWorkerChats can find + delete this
   // chat at the end of the spec. See tests/_chatTracker.mjs.
-  await createTaggedChat(page)
-  await page.evaluate(() => {
-    document.querySelector('.drawer__item--new')?.click()
-  })
-  const hasEmpty = await page.evaluate(
-    () => !!document.querySelector('.chat__empty-wrap')
-  )
-  if (!hasEmpty) await page.goto(BASE)
+  const chat = await createTaggedChat(page)
+  if (chat?.id) {
+    await page.goto(`${BASE}/shell/chat/${chat.id}`, { waitUntil: 'domcontentloaded' })
+  } else {
+    await page.evaluate(() => {
+      document.querySelector('.drawer__item--new')?.click()
+    })
+  }
   await expect(page.locator('.chat__empty-wrap')).toBeVisible({ timeout: 8000 })
 }
 
@@ -63,7 +63,7 @@ async function sendMessage(page, text) {
   const input = page.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
   await page.keyboard.press('Enter')
-  await expect(page.locator('.chat__scroll')).toBeVisible({ timeout: 3000 })
+  await expect(page.locator('.chat__msg--user').first()).toBeVisible({ timeout: 8000 })
   await page.evaluate(() => new Promise(r =>
     requestAnimationFrame(() => requestAnimationFrame(r))
   ))
