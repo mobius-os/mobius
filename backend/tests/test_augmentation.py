@@ -244,6 +244,91 @@ def test_stale_pending_drains_on_fresh_send(client, db, auth, chat):
     registry.forget(chat.id)
 
 
+def test_hidden_stale_pending_starts_hidden_turn_and_queues_visible_send(
+  client, db, auth, chat,
+):
+  """A hidden stale head must not swallow a visible fresh send."""
+  from app.runner_registry import registry
+
+  chat.pending_messages = [
+    {"role": "user", "content": "secret reminder", "ts": 100, "hidden": True},
+  ]
+  db.commit()
+
+  async def fake_run_chat(*args, **kwargs):
+    pass
+
+  with patch("app.chat.run_chat", new=fake_run_chat):
+    resp = client.post(
+      f"/api/chats/{chat.id}/messages",
+      json={"content": "new visible send"},
+      headers=auth,
+    )
+
+  try:
+    assert resp.status_code == 202
+    data = resp.json()
+    assert data["status"] == "queued"
+    assert data["started"] is True
+    assert data["position"] == 1
+    assert data["message"]["content"] == "secret reminder"
+    assert data["message"]["hidden"] is True
+    assert data["message"]["_consumed_ts"] == [100]
+
+    db.refresh(chat)
+    assert chat.messages[-1]["content"] == "secret reminder"
+    assert chat.messages[-1]["hidden"] is True
+    assert [m["content"] for m in chat.pending_messages] == [
+      "new visible send",
+    ]
+    assert chat.id in registry.all_alive_chat_ids()
+  finally:
+    registry.discard_starting(chat.id)
+    registry.forget(chat.id)
+
+
+def test_stale_pending_started_response_when_new_send_remains_queued(
+  client, db, auth, chat,
+):
+  """If a stale drain starts an older group but the new send remains queued,
+  the response must still tell the active client to connect to the stream."""
+  from app.runner_registry import registry
+
+  chat.pending_messages = [
+    {"role": "user", "content": "visible first", "ts": 100},
+    {"role": "user", "content": "hidden next", "ts": 200, "hidden": True},
+  ]
+  db.commit()
+
+  async def fake_run_chat(*args, **kwargs):
+    pass
+
+  with patch("app.chat.run_chat", new=fake_run_chat):
+    resp = client.post(
+      f"/api/chats/{chat.id}/messages",
+      json={"content": "new visible"},
+      headers=auth,
+    )
+
+  try:
+    assert resp.status_code == 202
+    data = resp.json()
+    assert data["status"] == "queued"
+    assert data["started"] is True
+    assert data["position"] == 2
+    assert data["message"]["content"] == "visible first"
+    db.refresh(chat)
+    assert chat.messages[-1]["content"] == "visible first"
+    assert [m["content"] for m in chat.pending_messages] == [
+      "hidden next",
+      "new visible",
+    ]
+    assert chat.id in registry.all_alive_chat_ids()
+  finally:
+    registry.discard_starting(chat.id)
+    registry.forget(chat.id)
+
+
 def test_concurrent_queue_appends_dont_lose_messages(db, auth, chat):
   """Concurrent POSTs to /messages while running must serialize and
   preserve every queued message. The per-chat asyncio lock in
