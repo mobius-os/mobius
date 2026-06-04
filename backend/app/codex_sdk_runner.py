@@ -64,17 +64,19 @@ import concurrent.futures as _cf
 import json
 import logging
 import shutil
-from collections.abc import Callable
 from typing import Any
 
 from app.codex_appserver import _extract_bash_command
 from app.goal_loop import (
-  _clear_goal,
-  _default_goal_evaluator,
+  _codex_goal_turn_message,
+  _complete_goal,
   _goal_continue_message,
-  _goal_turn_cap,
+  _goal_token_budget,
+  _goal_token_count,
   _increment_goal_turn,
-  _maybe_await,
+  _parse_codex_goal_update,
+  _pause_goal,
+  _record_goal_tokens,
 )
 from app.providers import get_skill_path
 from app.runtime_types import RunnerResult
@@ -667,7 +669,6 @@ async def run_codex_sdk_turn(
   agent_settings: dict | None = None,
   goal_mode: bool = False,
   goal: dict | None = None,
-  goal_evaluator: Callable[..., Any] = _default_goal_evaluator,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
@@ -765,6 +766,8 @@ async def run_codex_sdk_turn(
     dict(goal or {}) if goal_mode and isinstance(goal, dict) else None
   )
   goal_turns = int((goal_state or {}).get("turns") or 0)
+  goal_token_spend = int((goal_state or {}).get("token_spend") or 0)
+  goal_token_budget = _goal_token_budget(goal_state, agent_settings)
 
   try:
     async with sdk["AsyncCodex"](config=config) as codex:
@@ -867,11 +870,14 @@ async def run_codex_sdk_turn(
       active_turn = ActiveCodexTurn(thread, None, chat_id=chat_id)
       registry.register(active_turn)
 
-      async def _run_turn_once(message: str) -> tuple[Any | None, str]:
-        """Run one Codex turn and return its terminal payload plus text."""
+      async def _run_turn_once(
+        message: str,
+      ) -> tuple[Any | None, str, int]:
+        """Run one Codex turn and return terminal payload, text, tokens."""
         nonlocal turn
         completed_turn: Any | None = None
         text_parts: list[str] = []
+        token_count = 0
         turn = await thread.turn(
           message,
           cwd=cwd,
@@ -925,6 +931,8 @@ async def run_codex_sdk_turn(
               continue
 
             if isinstance(payload, sdk["ThreadTokenUsageUpdatedNotification"]):
+              usage = _model_dump(payload)
+              token_count = max(token_count, _goal_token_count(usage))
               continue
 
             if isinstance(
@@ -945,6 +953,11 @@ async def run_codex_sdk_turn(
 
             if isinstance(payload, sdk["TurnCompletedNotification"]):
               completed_turn = payload.turn
+              for key in ("usage", "token_usage", "tokenUsage"):
+                usage = getattr(completed_turn, key, None)
+                token_count = max(
+                  token_count, _goal_token_count(_model_dump(usage))
+                )
               break
 
             if (
@@ -960,7 +973,7 @@ async def run_codex_sdk_turn(
                 )
                 continue
               raise RuntimeError(str(message_text or "Codex error"))
-          return completed_turn, "".join(text_parts).strip()
+          return completed_turn, "".join(text_parts).strip(), token_count
         finally:
           if active_turn.turn is turn:
             active_turn.turn = None
@@ -973,7 +986,15 @@ async def run_codex_sdk_turn(
             "cost_usd": None,
             "error": None,
           }
-        completed_turn, assistant_text = await _run_turn_once(next_message)
+        turn_message = (
+          _codex_goal_turn_message(
+            next_message, goal_state, goal_token_budget,
+          )
+          if goal_state is not None else next_message
+        )
+        completed_turn, assistant_text, token_delta = await _run_turn_once(
+          turn_message
+        )
         error_text = None
         if completed_turn is not None and completed_turn.error is not None:
           error_text = getattr(completed_turn.error, "message", None)
@@ -992,45 +1013,53 @@ async def run_codex_sdk_turn(
             "error": None,
           }
         condition = str(goal_state.get("condition") or "").strip()
-        recent = (
-          f"User message:\n{next_message}\n\n"
-          f"Assistant:\n{assistant_text}"
-        )
-        evaluation = await _maybe_await(goal_evaluator(
-          condition, assistant_text, recent,
-        ))
-        if active_turn.cancelled:
-          return {
-            "session_id": current_session_id,
-            "cost_usd": None,
-            "error": None,
-          }
-        reason = str((evaluation or {}).get("reason") or "").strip()
-        if not reason:
-          reason = "goal evaluator returned no reason"
-        if bool((evaluation or {}).get("met")):
-          await _clear_goal(chat_id, getattr(bc, "run_token", None))
+        turns_used = goal_turns + 1
+        if token_delta <= 0:
+          await _pause_goal(chat_id, getattr(bc, "run_token", None))
           bc.publish({
-            "type": "goal_met",
+            "type": "goal_paused",
+            "turn": goal_turns,
             "condition": condition,
-            "turns": goal_turns,
-            "reason": reason,
+            "reason": (
+              "paused because Codex did not report token usage; "
+              "/goal resume after checking the SDK"
+            ),
           })
           return {
             "session_id": current_session_id,
             "cost_usd": None,
             "error": None,
           }
-        cap = _goal_turn_cap(condition)
-        if goal_turns + 1 > cap:
+        goal_token_spend = await _record_goal_tokens(
+          chat_id, getattr(bc, "run_token", None), token_delta,
+        )
+        goal_state["token_spend"] = goal_token_spend
+        update = _parse_codex_goal_update(assistant_text)
+        if active_turn.cancelled:
+          return {
+            "session_id": current_session_id,
+            "cost_usd": None,
+            "error": None,
+          }
+        reason = ""
+        if update is not None:
+          reason = str(update.get("reason") or "").strip()
+        if not reason:
+          reason = "Codex did not self-report goal completion"
+        if update is not None and update.get("status") == "complete":
+          await _complete_goal(
+            chat_id,
+            getattr(bc, "run_token", None),
+            turns=turns_used,
+            reason=reason,
+            token_spend=goal_token_spend,
+          )
           bc.publish({
-            "type": "goal_paused",
-            "turn": goal_turns,
+            "type": "goal_met",
             "condition": condition,
-            "reason": (
-              f"paused after {goal_turns} turns — /goal to check, "
-              "/goal clear to cancel"
-            ),
+            "turns": turns_used,
+            "reason": reason,
+            "token_spend": goal_token_spend,
           })
           return {
             "session_id": current_session_id,
@@ -1040,11 +1069,31 @@ async def run_codex_sdk_turn(
         goal_turns = await _increment_goal_turn(
           chat_id, getattr(bc, "run_token", None), reason,
         )
+        goal_state["turns"] = goal_turns
+        if goal_token_spend >= goal_token_budget:
+          await _pause_goal(chat_id, getattr(bc, "run_token", None))
+          bc.publish({
+            "type": "goal_paused",
+            "turn": goal_turns,
+            "condition": condition,
+            "reason": (
+              f"paused after spending {goal_token_spend} of "
+              f"{goal_token_budget} tokens - /goal to check, "
+              "/goal resume to continue"
+            ),
+          })
+          return {
+            "session_id": current_session_id,
+            "cost_usd": None,
+            "error": None,
+          }
         bc.publish({
           "type": "goal_continue",
           "turn": goal_turns,
           "reason": reason,
           "condition": condition,
+          "token_spend": goal_token_spend,
+          "token_budget": goal_token_budget,
         })
         # Codex opens each continuation as a new turn on the same thread.
         next_message = _goal_continue_message(condition, reason)

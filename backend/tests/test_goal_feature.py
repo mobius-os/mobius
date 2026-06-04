@@ -15,6 +15,8 @@ from app.chat import (
   run_chat,
 )
 from app.claude_sdk_runner import run_claude_sdk_turn
+from app.codex_sdk_runner import run_codex_sdk_turn
+from app.goal_loop import CODEX_GOAL_SENTINEL_PREFIX
 
 
 class _Bus:
@@ -52,6 +54,126 @@ def _result():
     total_cost_usd=0.0,
     usage={"input_tokens": 1, "output_tokens": 1},
   )
+
+
+class _CodexAgentDelta:
+  def __init__(self, delta):
+    self.delta = delta
+
+
+class _CodexUsage:
+  def __init__(self, **usage):
+    self.usage = usage
+
+  def model_dump(self, **_kwargs):
+    return dict(self.usage)
+
+
+class _CodexCompletedPayload:
+  def __init__(self, turn):
+    self.turn = turn
+
+
+class _CodexTurnState:
+  status = "completed"
+  error = None
+
+
+class _CodexNotification:
+  method = "notification"
+
+  def __init__(self, payload):
+    self.payload = payload
+
+
+class _CodexTurn:
+  def __init__(self, notifications):
+    self._notifications = notifications
+
+  async def stream(self):
+    for notification in self._notifications:
+      yield notification
+
+  async def interrupt(self):
+    return None
+
+  async def steer(self, _message):
+    return None
+
+
+class _CodexThread:
+  id = "codex-session"
+
+  def __init__(self, turns):
+    self.turns = turns
+    self.messages = []
+
+  async def turn(self, message, **_kwargs):
+    self.messages.append(message)
+    return _CodexTurn(self.turns[len(self.messages) - 1])
+
+
+class _FakeCodex:
+  def __init__(self, *, thread):
+    self.thread = thread
+
+  async def __aenter__(self):
+    return self
+
+  async def __aexit__(self, *_args):
+    return None
+
+  async def thread_start(self, **_kwargs):
+    return self.thread
+
+  async def thread_resume(self, _session_id, **_kwargs):
+    return self.thread
+
+
+def _empty_codex_class(name):
+  return type(name, (), {})
+
+
+def _install_codex_sdk(monkeypatch, thread):
+  """Install a narrow Codex SDK fake for goal-loop tests."""
+  sdk = {
+    "AgentMessageDeltaNotification": _CodexAgentDelta,
+    "ApprovalMode": SimpleNamespace(auto_review="auto_review"),
+    "AppServerConfig": lambda **kwargs: kwargs,
+    "AsyncCodex": lambda config: _FakeCodex(thread=thread),
+    "AppServerRpcError": _empty_codex_class("AppServerRpcError"),
+    "CommandExecutionOutputDeltaNotification": _empty_codex_class(
+      "CommandExecutionOutputDeltaNotification"
+    ),
+    "CommandExecutionThreadItem": _empty_codex_class(
+      "CommandExecutionThreadItem"
+    ),
+    "ContextCompactedNotification": _empty_codex_class(
+      "ContextCompactedNotification"
+    ),
+    "DynamicToolCallThreadItem": _empty_codex_class("DynamicToolCallThreadItem"),
+    "ErrorNotification": _empty_codex_class("ErrorNotification"),
+    "FileChangePatchUpdatedNotification": _empty_codex_class(
+      "FileChangePatchUpdatedNotification"
+    ),
+    "FileChangeThreadItem": _empty_codex_class("FileChangeThreadItem"),
+    "InvalidParamsError": _empty_codex_class("InvalidParamsError"),
+    "ReasoningEffort": lambda value: value,
+    "SandboxMode": SimpleNamespace(danger_full_access="danger"),
+    "ItemCompletedNotification": _empty_codex_class("ItemCompletedNotification"),
+    "ItemGuardianApprovalReviewCompletedNotification": _empty_codex_class(
+      "ItemGuardianApprovalReviewCompletedNotification"
+    ),
+    "ItemGuardianApprovalReviewStartedNotification": _empty_codex_class(
+      "ItemGuardianApprovalReviewStartedNotification"
+    ),
+    "ItemStartedNotification": _empty_codex_class("ItemStartedNotification"),
+    "McpToolCallThreadItem": _empty_codex_class("McpToolCallThreadItem"),
+    "ThreadTokenUsageUpdatedNotification": _CodexUsage,
+    "TurnCompletedNotification": _CodexCompletedPayload,
+    "WebSearchThreadItem": _empty_codex_class("WebSearchThreadItem"),
+  }
+  monkeypatch.setattr("app.codex_sdk_runner._sdk_imports", lambda: sdk)
 
 
 def test_goal_parser_never_marks_goal_as_sdk_slash_command():
