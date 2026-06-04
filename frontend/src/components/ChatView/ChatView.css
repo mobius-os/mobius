@@ -136,15 +136,13 @@
   position: relative;  /* makes this the offsetParent for children */
 }
 
-/* Chat scroll inherits the global auto-hide (see index.css .is-scrolling).
-   Hidden at rest; thin bar while scrolling. ALL chat-scroll invariants in
-   CLAUDE.md ("Chat UX — non-negotiable constraints") are preserved: this
-   only paints the scrollbar gutter, it does not change overflow, spacer
-   math, scrollTop, overflow-anchor, or the useScrollMode listeners. */
+/* Chat scroll: always hidden, never reveals on scroll. Mirrors the
+   global default in index.css after the on-scroll reveal mechanism
+   was retired. ALL chat-scroll invariants in CLAUDE.md ("Chat UX —
+   non-negotiable constraints") still hold: overflow, spacer math,
+   scrollTop, overflow-anchor, useScrollMode listeners are untouched. */
 .chat__scroll { scrollbar-width: none; }
 .chat__scroll::-webkit-scrollbar { width: 0; height: 0; }
-:root.is-scrolling .chat__scroll { scrollbar-width: thin; }
-:root.is-scrolling .chat__scroll::-webkit-scrollbar { width: 8px; }
 
 /* ── Message list ──────────────────────────────────── */
 

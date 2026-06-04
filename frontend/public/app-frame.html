@@ -15,7 +15,9 @@
       "date-fns": "https://esm.sh/date-fns@4.3.0",
       "three": "/vendor/three@0.184.0/three.module.js",
       "three/addons/": "/vendor/three@0.184.0/addons/",
-      "pdfjs-dist": "/vendor/pdfjs/pdf.mjs"
+      "pdfjs-dist": "/vendor/pdfjs/pdf.mjs",
+      "codemirror": "https://esm.sh/codemirror@6.0.2",
+      "katex": "https://esm.sh/katex@0.16.22"
     }
   }
   </script>
@@ -32,19 +34,11 @@
       --mono: 'JetBrains Mono', ui-monospace, monospace;
     }
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    /* Auto-hide scrollbars in mini-app frames: hidden at rest, thin bar
-       WHILE scrolling. The inline script below toggles :root.is-scrolling
-       on a passive capture-phase scroll listener. Theme vars (--muted) come
-       from the server-injected theme; fall back to the :root defaults above. */
+    /* Always-hidden scrollbars in mini-app frames — matches the shell's
+       global default after the on-scroll reveal mechanism was retired
+       (owner preference: scrollbars never show, in any surface). */
     html, body, * { scrollbar-width: none; -ms-overflow-style: none; }
     *::-webkit-scrollbar { width: 0; height: 0; }
-    :root.is-scrolling, :root.is-scrolling * { scrollbar-width: thin;
-      scrollbar-color: color-mix(in srgb, var(--muted, #52525b) 55%, transparent) transparent; }
-    :root.is-scrolling *::-webkit-scrollbar { width: 8px; height: 8px; }
-    :root.is-scrolling *::-webkit-scrollbar-thumb {
-      background: color-mix(in srgb, var(--muted, #52525b) 55%, transparent);
-      border-radius: 8px; border: 2px solid transparent; background-clip: padding-box; }
-    :root.is-scrolling *::-webkit-scrollbar-track { background: transparent; }
     html, body, #root { height: 100%; }
     body {
       background: var(--bg);
@@ -111,17 +105,6 @@
   </div>
 
   <script>
-    (function () {
-      var t;
-      window.addEventListener('scroll', function () {
-        document.documentElement.classList.add('is-scrolling');
-        clearTimeout(t);
-        t = setTimeout(function () {
-          document.documentElement.classList.remove('is-scrolling');
-        }, 900);
-      }, { capture: true, passive: true });
-    })();
-
     // Populated by server-side injection in get_frame() — do not rename.
     var _FRAME_APP_ID = 'unknown'
     var _FRAME_CHAT_ID = ''

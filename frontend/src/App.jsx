@@ -9,7 +9,6 @@ import ErrorBoundary from './components/ErrorBoundary/ErrorBoundary.jsx'
 import { getToken, BASE } from './api/client.js'
 import * as setupSession from './lib/setupSession.js'
 import { setupQueries } from './hooks/queries.js'
-import useScrollbarAutohide from './hooks/useScrollbarAutohide.js'
 import { queryClient, persistOptions } from './queryClient.js'
 
 // True when this SPA load is the stripped-chrome chat embed
@@ -30,8 +29,6 @@ function isEmbedRoute() {
 }
 
 export default function App() {
-  useScrollbarAutohide()
-
   return (
     <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
       <ErrorBoundary label="app">
