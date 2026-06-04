@@ -10,8 +10,32 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 from dataclasses import dataclass
 from pathlib import Path
+
+
+def _seed_secret_key_from_data() -> None:
+  """Mirror entrypoint.sh for ad-hoc `docker exec` script runs.
+
+  Docker Compose leaves SECRET_KEY blank in the container environment; the
+  entrypoint exports the persisted /data/.secret-key only for the server
+  process. A later `docker exec python -m scripts...` starts fresh and would
+  fail Settings validation before this script can do anything useful.
+  """
+  if os.environ.get("SECRET_KEY"):
+    return
+  data_dir = Path(os.environ.get("DATA_DIR") or "/data")
+  secret_file = data_dir / ".secret-key"
+  try:
+    secret = secret_file.read_text(encoding="utf-8").strip()
+  except OSError:
+    return
+  if secret:
+    os.environ["SECRET_KEY"] = secret
+
+
+_seed_secret_key_from_data()
 
 from app import app_git, models
 from app.config import get_settings
