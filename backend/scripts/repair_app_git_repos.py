@@ -107,10 +107,10 @@ def _audit_or_repair_app(
       "repo exists but DB upstream_commit is empty; not rewriting existing repo",
     )
 
-  if app.upstream_commit:
+  if app.upstream_commit and not apply:
     return AuditRow(
-      app.id, slug, str(source_dir), "manual",
-      "DB has upstream_commit but source_dir has no .git; not overwriting provenance",
+      app.id, slug, str(source_dir), "would-repair",
+      "missing nested .git despite DB upstream_commit; would reseed current index.jsx",
     )
 
   if not apply:
@@ -137,7 +137,7 @@ def _audit_or_repair_app(
   db.commit()
   return AuditRow(
     app.id, slug, str(source_dir), "repaired",
-    f"seeded upstream {app.upstream_commit}",
+    f"seeded current index.jsx as upstream {app.upstream_commit}",
   )
 
 

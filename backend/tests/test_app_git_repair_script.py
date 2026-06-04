@@ -85,3 +85,37 @@ def test_repair_app_git_repos_apply_seeds_nested_repo_and_preserves_files(db):
     source_dir, app_git.UPSTREAM_BRANCH,
   )
   assert app.upstream_jsx_sha
+
+
+def test_repair_app_git_repos_reseeds_when_db_has_commit_but_repo_missing(db):
+  data_dir = Path(get_settings().data_dir)
+  subprocess.run(["git", "-C", str(data_dir), "init", "-q"], check=True)
+  source_dir = data_dir / "apps" / "news"
+  _write_source(source_dir)
+  app = _seed_installed_app(db, source_dir)
+  app.upstream_commit = "deadbeef"
+  db.add(app)
+  db.commit()
+
+  dry_run = repair_app_git_repos.run(
+    data_dir=data_dir,
+    source_dirs={str(source_dir)},
+    apply=False,
+  )
+  assert dry_run[0].status == "would-repair"
+  assert "despite DB upstream_commit" in dry_run[0].detail
+
+  repaired = repair_app_git_repos.run(
+    data_dir=data_dir,
+    source_dirs={str(source_dir)},
+    apply=True,
+  )
+
+  assert repaired[0].status == "repaired"
+  assert app_git.is_repo(source_dir)
+  db.expire_all()
+  app = db.query(models.App).filter(models.App.slug == "news").one()
+  assert app.upstream_commit != "deadbeef"
+  assert app.upstream_commit == app_git.head_sha(
+    source_dir, app_git.UPSTREAM_BRANCH,
+  )
