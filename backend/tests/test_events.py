@@ -100,6 +100,27 @@ def test_build_assistant_message():
   assert msg["blocks"] == blocks
 
 
+def test_build_assistant_message_separates_distinct_text_blocks():
+  blocks = [
+    {"type": "text", "content": "I reverted the setting."},
+    {"type": "text", "content": "Yes, the app is back."},
+  ]
+  msg = build_assistant_message(blocks)
+  assert msg["content"] == "I reverted the setting.\n\nYes, the app is back."
+
+
+def test_text_delta_separates_sentence_boundary_without_touching_chunks():
+  blocks = []
+  process_event({"type": "text", "content": "I reverted it."}, blocks)
+  process_event({"type": "text", "content": "Yes, it works."}, blocks)
+  assert blocks[0]["content"] == "I reverted it.\n\nYes, it works."
+
+  blocks = []
+  process_event({"type": "text", "content": "stream"}, blocks)
+  process_event({"type": "text", "content": "ing"}, blocks)
+  assert blocks[0]["content"] == "streaming"
+
+
 def test_finalize_blocks_completes_running_tools():
   blocks = [
     {"type": "tool", "tool": "Bash", "input": "ls",

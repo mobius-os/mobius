@@ -466,7 +466,7 @@ registerRoute(
 // recovery page (and recovery was unreachable exactly when it's needed most).
 registerRoute(new NavigationRoute(
   createHandlerBoundToURL('/index.html'),
-  { denylist: [/^\/apps\//, /^\/recover(\/|$)/] },
+  { denylist: [/^\/apps\//, /^\/cuberun\//, /^\/recover(\/|$)/] },
 ))
 
 // Standalone mini-app navigations: stored for offline-capable apps via

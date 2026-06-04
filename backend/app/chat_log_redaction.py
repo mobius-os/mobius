@@ -52,6 +52,21 @@ MESSAGE_CHARS = 2000
 # so a 5000-turn chat returns a bounded page, not the whole transcript.
 MAX_MESSAGES_PER_CHAT = 200
 
+
+def _join_text_parts(parts: list[str]) -> str:
+  out = ""
+  for content in parts:
+    if not content:
+      continue
+    if not out:
+      out = content
+    elif out[-1].isspace() or content[0].isspace():
+      out += content
+    else:
+      out += "\n\n" + content
+  return out
+
+
 # Secret-scrub patterns. These catch SHAPES, not a fixed key list, so a
 # new provider's token format is covered as long as it rhymes with one
 # of these. Ordered longest/most-specific first so e.g. a JWT isn't
@@ -129,7 +144,7 @@ def _assistant_text(blocks: list, content: str) -> str:
       for b in blocks
       if isinstance(b, dict) and b.get("type") == "text"
     ]
-    return "".join(parts)
+    return _join_text_parts(parts)
   return content or ""
 
 

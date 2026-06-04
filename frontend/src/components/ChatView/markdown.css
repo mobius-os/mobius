@@ -154,8 +154,22 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
   margin: 4px 8px;
 }
 
-.md-image {
+.md-image-frame {
+  display: block;
+  width: min(100%, 520px);
   max-width: 100%;
+  aspect-ratio: var(--md-image-ratio, 9 / 16);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 88%, var(--text) 12%);
+  overflow: hidden;
+}
+
+.md-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  object-fit: contain;
   border-radius: 8px;
   cursor: pointer;
   transition: opacity 0.15s;

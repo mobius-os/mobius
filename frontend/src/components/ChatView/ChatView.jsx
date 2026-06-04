@@ -404,19 +404,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           } = promoted
           commitMessages(prev => [...prev, msg])
           promotedRef.current = false
-          // Queued continuation is backend-initiated — the user may
-          // be reading something else in the chat. Don't yank them
-          // by re-pinning OR resizing the spacer to 0 (which causes
-          // a visible jump when the spacer was previously sized for
-          // the just-finished turn and then has to regrow as the
-          // continuation streams). Keep whatever mode they were in
-          // (FOLLOW_BOTTOM, ANCHOR_AT, or a previous PIN); the
-          // existing spacer stays put until the user's next explicit
-          // send re-arms it. Stop with queued messages does NOT hit
-          // this path on the live UI — `handleStop` collapses the
-          // queue client-side via doSend(combined, {pin: false}) and
-          // clears the queue before /chat/stop fires, so no
-          // queued_turn_starting event reaches us here.
+          // A queued continuation is still a user send becoming the
+          // active turn. Treat it like the normal send path so the
+          // consumed queued message lands at the top of the viewport
+          // instead of appearing wherever the previous turn left the
+          // spacer/scroll mode.
+          if (msg.ts) modeRef.current = { kind: 'PIN_USER_MSG', ts: msg.ts }
         } else {
           // Server's promoted ts isn't in our local queue (cancel raced
           // with promote). Refetch authoritative state.
@@ -509,7 +502,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     const content = items
       .filter(i => i.type === 'text')
       .map(i => i.content)
-      .join('')
+      .filter(Boolean)
+      // Text runs separated by tools/status updates are distinct assistant
+      // blocks. Joining with '' collapses progress messages into
+      // "done.next"; preserve a paragraph break in the legacy content
+      // string while keeping structured blocks unchanged.
+      .join('\n\n')
     // Decide REPLACE-vs-APPEND on the live last message and retire
     // the bridge gate (one-shot — next turn always appends, even if
     // it streams through the same chat without remount).

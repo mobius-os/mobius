@@ -112,16 +112,28 @@ function resolveImageSrc(href) {
 
 function ExpandableImage({ href, alt }) {
   const [open, setOpen] = useState(false)
+  const [ratio, setRatio] = useState(null)
   const src = resolveImageSrc(href)
   if (!src) return null
   return (
     <>
-      <img
-        src={src}
-        alt={alt}
-        className="md-image"
-        onClick={() => setOpen(true)}
-      />
+      <span
+        className="md-image-frame"
+        style={ratio ? { '--md-image-ratio': ratio } : undefined}
+      >
+        <img
+          src={src}
+          alt={alt}
+          className="md-image"
+          onLoad={(e) => {
+            const img = e.currentTarget
+            if (img.naturalWidth && img.naturalHeight) {
+              setRatio(`${img.naturalWidth} / ${img.naturalHeight}`)
+            }
+          }}
+          onClick={() => setOpen(true)}
+        />
+      </span>
       {open && createPortal(
         <ImageLightbox src={src} alt={alt} onClose={() => setOpen(false)} />,
         document.body,

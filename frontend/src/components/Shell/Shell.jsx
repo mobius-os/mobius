@@ -122,15 +122,19 @@ export default function Shell() {
     })
   }, [])
 
-  useEffect(() => {
-    if (!activeChatId) return
+  const clearChatAttention = useCallback((chatId) => {
+    if (!chatId) return
     setAttentionChatIds(prev => {
-      if (!prev.has(activeChatId)) return prev
+      if (!prev.has(chatId)) return prev
       const next = new Set(prev)
-      next.delete(activeChatId)
+      next.delete(chatId)
       return next
     })
-  }, [activeChatId])
+  }, [])
+
+  useEffect(() => {
+    if (activeView === 'chat') clearChatAttention(activeChatId)
+  }, [activeChatId, activeView, clearChatAttention])
 
   // Passive auth-status check. Reads /api/auth/providers/status with
   // a 5-minute TanStack cache + a visibilitychange-driven invalidation.
@@ -586,6 +590,7 @@ export default function Shell() {
   }
 
   function selectChat(id) {
+    clearChatAttention(id)
     navTo('chat', { chatId: id })
     setBuiltApp(null)
     refreshChats()

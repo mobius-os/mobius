@@ -393,6 +393,7 @@
 .chat__text + .chat__tools { margin-top: 10px; }
 .chat__tools + .chat__text { margin-top: 10px; }
 .chat__tools + .chat__tools { margin-top: 2px; }
+.chat__text--assistant + .chat__text--assistant { margin-top: 0.75rem; }
 
 .chat__tool {
   border-radius: 10px;
