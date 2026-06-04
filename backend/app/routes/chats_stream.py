@@ -143,15 +143,26 @@ def _answer_delivered_response(chat_id: str) -> JSONResponse:
   )
 
 
-def _queued_response(new_msg: dict, position: int) -> JSONResponse:
+def _queued_response(
+  new_msg: dict,
+  position: int,
+  *,
+  started: bool = False,
+  message: dict | None = None,
+) -> JSONResponse:
   """Standard 202 response for a queued message."""
+  payload = {
+    "status": "queued",
+    "position": position,
+    "ts": new_msg["ts"],
+  }
+  if started:
+    payload["started"] = True
+  if message is not None:
+    payload["message"] = message
   return JSONResponse(
     status_code=202,
-    content={
-      "status": "queued",
-      "position": position,
-      "ts": new_msg["ts"],
-    },
+    content=payload,
   )
 
 
@@ -439,6 +450,7 @@ async def send_message(
     new_msg = await _append_to_pending(
       chat, body, db, initiated_by_app_id=principal.app_id,
     )
+    started_message = None
 
     if not is_chat_running(chat_id):
       # Stale pending — try to claim and drain. mark_starting prevents
@@ -455,6 +467,7 @@ async def send_message(
             )
           )
           if next_user:
+            started_message = next_user
             get_system_broadcast().publish({
               "type": "chat_run_started",
               "chatId": chat_id,
@@ -490,8 +503,16 @@ async def send_message(
       # stream instead of keeping a queued chip that no longer exists.
       position = 0
     if position == 0:
-      return JSONResponse(status_code=202, content={"status": "started"})
-    return _queued_response(new_msg, position)
+      payload = {"status": "started"}
+      if started_message is not None:
+        payload["message"] = started_message
+      return JSONResponse(status_code=202, content=payload)
+    return _queued_response(
+      new_msg,
+      position,
+      started=started_message is not None,
+      message=started_message,
+    )
 
   if not mark_starting(chat_id):
     new_msg = await _append_to_pending(

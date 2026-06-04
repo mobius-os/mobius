@@ -725,6 +725,7 @@ export default function useStreamConnection(chatId, {
       setConnectionError(null)
     }
 
+    let responseData = null
     try {
       const body = { content: text }
       if (hidden) body.hidden = true
@@ -767,12 +768,13 @@ export default function useStreamConnection(chatId, {
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
+      responseData = data
       // Trust the backend's actual status, not the frontend's queueOnly
       // hint. The frontend's `sending` flag can be stale (turn finished
       // between the doSend check and the POST landing), so a request
       // sent with queueOnly:true can come back as "started". Always
       // connect to the stream when the backend says it started.
-      if (data.status === 'queued') return data
+      if (data.status === 'queued' && !data.started) return data
       // AskUserQuestion answer was delivered in-process to the parked
       // future — the runner resumes the EXISTING turn with the answer.
       // No new stream connection needed; the existing SSE keeps
@@ -782,7 +784,7 @@ export default function useStreamConnection(chatId, {
       if (data.status === 'answer_delivered') return data
       // Started: ensure streaming state is set even if the caller
       // passed queueOnly:true expecting it would be queued.
-      if (queueOnly) {
+      if (queueOnly || data.status === 'queued') {
         wantsReconnectRef.current = true
         justSentAtRef.current = Date.now()
         setStreamItems([])
@@ -808,7 +810,7 @@ export default function useStreamConnection(chatId, {
     // a misdiagnosed race; verified deterministic by inspecting
     // backend/app/routes/chats_stream.py:121-131.)
     connectRef.current?.(true)
-    return { status: 'started' }
+    return responseData || { status: 'started' }
   }, [])
 
   // Reconnect on visibility change or network recovery, but ONLY
