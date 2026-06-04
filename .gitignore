@@ -41,6 +41,7 @@ backend/data/
 
 # Playwright
 tests/.auth/
+tests/artifacts/
 test-results/
 playwright-report/
 
