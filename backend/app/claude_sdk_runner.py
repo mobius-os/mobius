@@ -90,6 +90,25 @@ from app.sdk_emit import emit_unknown_enabled, unknown_event
 from app.tool_summaries import summarize_tool_input
 
 
+async def _persist_session_id(db, chat_id: str, session_id: str | None) -> None:
+  """Best-effort early persistence for provider resume continuity."""
+  if db is None or not chat_id or not session_id:
+    return
+  try:
+    from app.chat_writer import PersistSessionId, await_ack, get_writer
+    ack = get_writer().submit(
+      PersistSessionId(chat_id=chat_id, session_id=session_id)
+    )
+    await await_ack(ack)
+  except Exception:
+    log.warning(
+      "Claude session id persistence failed chat_id=%s session_id=%s",
+      chat_id,
+      session_id,
+      exc_info=True,
+    )
+
+
 class ActiveClaudeClient:
   """Stop handle stored in `chat._active_clients` for SDK-backed turns.
 
@@ -690,6 +709,9 @@ async def run_claude_sdk_turn(
 
       while True:
         async for sdk_msg in client.receive_response():
+          incoming_session_id = getattr(sdk_msg, "session_id", None)
+          if incoming_session_id and incoming_session_id != current_session_id:
+            await _persist_session_id(db, chat_id, incoming_session_id)
           current_session_id, terminal = dispatch_sdk_message(
             sdk_msg, bc, current_session_id,
           )
