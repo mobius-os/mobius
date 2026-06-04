@@ -173,6 +173,96 @@ def test_steers_into_live_codex_turn_when_flag_on(
   assert steered_events[0]["content"] == "actually use blue"
 
 
+def test_force_steer_consumes_existing_queued_messages(
+  client, auth, monkeypatch,
+):
+  """Stop can collapse queued rows into a steer even when the normal
+  steer flag is off, and only the named queued rows are consumed."""
+  chat_id = "codexforcesteer"
+  _make_codex_chat(chat_id, steer_enabled=False)
+  db = SessionLocal()
+  try:
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    chat.pending_messages = [
+      {"role": "user", "content": "use blue", "ts": 10},
+      {"role": "user", "content": "also square", "ts": 11},
+      {"role": "user", "content": "later", "ts": 12},
+    ]
+    db.commit()
+  finally:
+    db.close()
+  registry.register(_make_active_codex_turn(chat_id))
+  create_broadcast(chat_id)
+
+  steered_calls = []
+
+  async def _fake_steer(cid, message):
+    steered_calls.append((cid, message))
+    return True
+
+  monkeypatch.setattr(
+    "app.codex_sdk_runner.steer_into_active_turn", _fake_steer,
+  )
+
+  res = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={
+      "content": "use blue\nalso square",
+      "force_steer": True,
+      "consume_pending_ts": [10, 11],
+    },
+    headers=auth,
+  )
+
+  assert res.status_code == 202, res.text
+  assert res.json()["status"] == "steered"
+  assert steered_calls == [(chat_id, "use blue\nalso square")]
+  chat = _read_chat(chat_id)
+  assert [m["content"] for m in chat.pending_messages] == ["later"]
+  assert chat.messages[-2]["content"] == "use blue\nalso square"
+
+
+def test_force_steer_failure_does_not_append_duplicate_queue(
+  client, auth, monkeypatch,
+):
+  """A forced steer attempt is a conversion attempt, not a new queue send."""
+  chat_id = "codexforcenope"
+  _make_codex_chat(chat_id, steer_enabled=False)
+  db = SessionLocal()
+  try:
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    chat.pending_messages = [
+      {"role": "user", "content": "use blue", "ts": 10},
+    ]
+    db.commit()
+  finally:
+    db.close()
+  registry.register(_make_active_codex_turn(chat_id))
+  create_broadcast(chat_id)
+
+  async def _fake_steer(_cid, _message):
+    return False
+
+  monkeypatch.setattr(
+    "app.codex_sdk_runner.steer_into_active_turn", _fake_steer,
+  )
+
+  res = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={
+      "content": "use blue",
+      "force_steer": True,
+      "consume_pending_ts": [10],
+    },
+    headers=auth,
+  )
+
+  assert res.status_code == 202, res.text
+  assert res.json()["status"] == "not_steered"
+  chat = _read_chat(chat_id)
+  assert [m["content"] for m in chat.pending_messages] == ["use blue"]
+
+
 def test_falls_back_to_queue_when_flag_off(client, auth, monkeypatch):
   """Flag OFF (the default): a steerable Codex turn still queues —
   deploying the feature changes nothing until the owner opts in."""

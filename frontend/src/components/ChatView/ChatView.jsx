@@ -928,8 +928,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             setSending(true)
           }
         }
-        // Mid-turn Codex steer: the backend injected the send into the
-        // live turn and persisted it in the transcript. The
+        // Mid-turn steer: the backend delivered the send into the live
+        // provider turn and persisted it in the transcript. The
         // `steered_into_turn` SSE event (handled in useStreamConnection's
         // onSteeredIntoTurn) renders the message inline, so drop the
         // optimistic queued-tray entry here — it never queued.
@@ -1182,14 +1182,15 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     if (handlingStopRef.current) return
     handlingStopRef.current = true
     try {
-      // Snapshot the queue BEFORE stopping (the backend's stop
-      // clears chat.pending_messages). If queued messages exist,
-      // the first Stop press collapses them into a single combined
-      // message and submits it as the next turn — matches Claude.ai /
-      // Codex UX where Stop is "cancel current, send what I queued"
-      // rather than "discard everything". A second Stop with no
-      // queue actually halts. Users can still remove individual
-      // queued messages via the X button while they're queued.
+      // Snapshot the queue before doing anything destructive. If
+      // queued messages exist, the first Stop press tries to collapse
+      // them into a live steer: Codex gets true turn steering; Claude
+      // gets the backend's interrupt-and-reprompt approximation. If no
+      // steerable turn is available, we fall back to the old behavior:
+      // interrupt current work, clear the queue, and submit the
+      // collapsed text as the next turn. A second Stop with no queue
+      // actually halts. Users can still remove individual queued
+      // messages via the X button while they're queued.
       //
       // Collapse queued messages into one combined turn. Attachments
       // are preserved by merging each queued item's `.attachments`
@@ -1201,6 +1202,9 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         .map(m => (m.content || '').trim())
         .filter(Boolean)
       const combined = queuedTexts.join('\n')
+      const queuedTs = queuedSnapshot
+        .map(m => m.ts)
+        .filter(ts => ts != null)
       const seenNames = new Set()
       const combinedAttachments = []
       for (const m of queuedSnapshot) {
@@ -1209,6 +1213,30 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             seenNames.add(a.name)
             combinedAttachments.push(a)
           }
+        }
+      }
+
+      if (combined && isStreamingRef.current) {
+        try {
+          const steerResult = await streamSend(
+            combined,
+            combinedAttachments.length > 0 ? combinedAttachments : undefined,
+            {
+              queueOnly: true,
+              forceSteer: true,
+              consumePendingTs: queuedTs,
+            },
+          )
+          if (steerResult?.status === 'steered') {
+            if (Array.isArray(steerResult.pending_messages)) {
+              pendingQueue.hydrate(steerResult.pending_messages)
+            } else {
+              for (const ts of queuedTs) pendingQueue.cancelByTs(ts)
+            }
+            return
+          }
+        } catch {
+          // Fall back to the existing Stop path below.
         }
       }
 

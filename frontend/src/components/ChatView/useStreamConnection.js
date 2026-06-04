@@ -72,11 +72,12 @@ const SYSTEM_EVENTS = new Set([
  *                         { question_id, questions: [...] }. Renders a card.
  *   queued_turn_starting  Backend about to promote a queued message
  *                         { ts }. Notifies caller via callback.
- *   steered_into_turn     A send was injected mid-turn into a live
- *                         Codex turn via the SDK's steer() instead of
- *                         queued { ts, content }. Notifies caller so it
- *                         drops the optimistic queued-tray entry and
- *                         renders the message inline as content growth.
+ *   steered_into_turn     A send was steered into a live provider turn
+ *                         instead of queued { ts, content }. Codex uses
+ *                         true SDK steer; Claude interrupts and
+ *                         re-prompts. Notifies caller so it drops the
+ *                         optimistic queued-tray entry and renders the
+ *                         message inline as content growth.
  *   catch_up_done         Replay burst finished; live events follow.
  *   error                 { message }. Surfaced inline.
  *   done                  Turn complete; SSE closes.
@@ -101,9 +102,8 @@ const SYSTEM_EVENTS = new Set([
  *   identifies the first pending entry in the promoted group and `message`
  *   is the backend-authoritative combined user message when available.
  * @param {(info: {ts: number|null, content: string}) => void} [callbacks.onSteeredIntoTurn]
- *   Fired when a send was injected mid-turn into a live Codex turn (the
- *   backend steered it instead of queuing). The caller drops the
- *   optimistic queued-tray entry and renders the message inline.
+ *   Fired when a send was steered into a live provider turn. The caller
+ *   drops the optimistic queued-tray entry and renders the message inline.
  * @param {(questionId: string|null) => void} [callbacks.onLiveQuestion]
  *   Fired when the stream shows the currently-live AskUserQuestion card.
  *
@@ -121,6 +121,7 @@ const SYSTEM_EVENTS = new Set([
  *   connectionError: string | null,
  *   sendMessage: (text: string, attachments?: Array<object>,
  *                 opts?: {hidden?: boolean, queueOnly?: boolean,
+ *                         forceSteer?: boolean, consumePendingTs?: number[],
  *                         answers?: object}) => Promise<object>,
  *   connectToStream: () => void,
  *   retry: () => void,
@@ -585,10 +586,9 @@ export default function useStreamConnection(chatId, {
               message: event.message || null,
             })
           } else if (event.type === 'steered_into_turn') {
-            // A send was injected mid-turn into a live Codex turn. The
-            // backend already put the user message in the transcript; the
-            // caller drops the optimistic queued-tray entry and renders it
-            // inline as content growth (no send-time spacer/scroll-pin).
+            // The backend already put the user message in the transcript;
+            // the caller drops the optimistic queued-tray entry and renders
+            // it inline as content growth (no send-time spacer/scroll-pin).
             // The steered text flows back as normal `text` deltas through
             // this same stream, so nothing else is needed here.
             onSteeredIntoTurnRef.current?.({
@@ -705,6 +705,8 @@ export default function useStreamConnection(chatId, {
     {
       hidden = false,
       queueOnly = false,
+      forceSteer = false,
+      consumePendingTs = undefined,
       answers = undefined,
       question_id = undefined,
     } = {},
@@ -729,6 +731,10 @@ export default function useStreamConnection(chatId, {
     try {
       const body = { content: text }
       if (hidden) body.hidden = true
+      if (forceSteer) body.force_steer = true
+      if (consumePendingTs && consumePendingTs.length > 0) {
+        body.consume_pending_ts = consumePendingTs
+      }
       // AskUserQuestion answers persist atomically with the hidden
       // user message — backend writes them into the question block
       // in the same transaction (see chats_stream.py).
@@ -775,6 +781,8 @@ export default function useStreamConnection(chatId, {
       // sent with queueOnly:true can come back as "started". Always
       // connect to the stream when the backend says it started.
       if (data.status === 'queued' && !data.started) return data
+      if (data.status === 'steered') return data
+      if (data.status === 'not_steered') return data
       // AskUserQuestion answer was delivered in-process to the parked
       // future — the runner resumes the EXISTING turn with the answer.
       // No new stream connection needed; the existing SSE keeps

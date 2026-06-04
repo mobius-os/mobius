@@ -249,16 +249,18 @@ async def _steer_into_active_turn(
   return await codex_sdk_runner.steer_into_active_turn(chat_id, content)
 
 
-def _steered_response(chat_id: str) -> JSONResponse:
+def _steered_response(
+  chat_id: str, pending_messages: list[dict] | None = None,
+) -> JSONResponse:
   """202 for a message steered into the live turn.
 
   The message is in the TRANSCRIPT (not the pending queue) and the live
   turn already saw it via `steer()`, so the client renders it inline as
   content growth rather than a queued-tray entry."""
-  return JSONResponse(
-    status_code=202,
-    content={"status": "steered", "chat_id": chat_id},
-  )
+  payload = {"status": "steered", "chat_id": chat_id}
+  if pending_messages is not None:
+    payload["pending_messages"] = pending_messages
+  return JSONResponse(status_code=202, content=payload)
 
 
 @router.post("/{chat_id}/messages", status_code=202)
@@ -393,16 +395,17 @@ async def send_message(
   # queue from the head, so the queued messages actually get answered
   # rather than sitting forever.
   if is_chat_running(chat_id) or chat.pending_messages:
-    # Mid-turn steering (opt-in): Codex injects into the running SDK turn;
-    # Claude has no wire-level inject, so it interrupts the live response
-    # and re-prompts on the same client. On success the user message goes
-    # into the transcript and a `steered_into_turn` event tells the client
-    # to render it inline. On False (closed-turn race) or any exception,
-    # fall through to the queue — steering must never break a send.
+    # Mid-turn steering: ordinary sends require the opt-in flag, while
+    # Stop's queue-collapse path may pass force_steer to turn already
+    # queued messages into a live steer. Codex injects into the running
+    # SDK turn; Claude interrupts and re-prompts on the same client. On
+    # success the user message goes into the transcript and a
+    # `steered_into_turn` event tells the client to render it inline. On
+    # False (closed-turn race) or any exception, fall through to the queue.
     provider = chat.provider or "claude"
     if (
       is_chat_running(chat_id)
-      and _steer_enabled(chat)
+      and (body.force_steer or _steer_enabled(chat))
       and _has_live_steerable_turn(chat_id, provider)
     ):
       user_msg = _user_message_from_body(chat, body)
@@ -421,11 +424,14 @@ async def send_message(
         # partial so the streaming snapshot still targets the assistant.
         ack = get_writer().submit(
           AppendSteeredUserMessage(
-            chat_id=chat_id, run_token="", user_msg=user_msg,
+            chat_id=chat_id,
+            run_token="",
+            user_msg=user_msg,
+            consume_pending_ts=body.consume_pending_ts or [],
           )
         )
         try:
-          await await_ack(ack)
+          stored_result = await await_ack(ack)
         except Exception:
           # The transcript write didn't land, but the live turn already
           # absorbed the steer — we can't un-steer. Surface the failure so
@@ -445,7 +451,14 @@ async def send_message(
             "ts": user_msg["ts"],
             "content": user_msg["content"],
           })
-        return _steered_response(chat_id)
+        return _steered_response(
+          chat_id, stored_result.get("pending"),
+        )
+    if body.force_steer:
+      return JSONResponse(
+        status_code=202,
+        content={"status": "not_steered", "chat_id": chat_id},
+      )
 
     new_msg = await _append_to_pending(
       chat, body, db, initiated_by_app_id=principal.app_id,
