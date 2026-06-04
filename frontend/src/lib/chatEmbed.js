@@ -73,9 +73,9 @@ export function isEmbedMessage(event, { origin, expectedSource, instanceId }) {
 // lazy-create). Kept here so the helper and any test agree on the shape.
 export function embedUrl({ base = '', chatId, picker } = {}) {
   const root = `${base}/shell/embed/chat`
-  const params = new URLSearchParams()
-  if (chatId) params.set('chatId', chatId)
-  if (picker === false) params.set('picker', '0')
-  const qs = params.toString()
+  const params = []
+  if (chatId) params.push(`chatId=${encodeURIComponent(String(chatId))}`)
+  if (picker === false) params.push('picker=0')
+  const qs = params.join('&')
   return qs ? `${root}?${qs}` : root
 }
