@@ -17,5 +17,11 @@ RUNTIME_LIBS: tuple[str, ...] = (
   # here, which made Notes uninstallable. tests/test_runtime_libs.py locks
   # the two lists together so the next addition can't desync.
   "codemirror",
+  "@codemirror/state",
+  "@codemirror/view",
+  "@codemirror/commands",
+  "@codemirror/language",
+  "@codemirror/lang-markdown",
+  "@lezer/highlight",
   "katex",
 )
