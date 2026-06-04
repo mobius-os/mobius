@@ -63,15 +63,141 @@ import asyncio
 import concurrent.futures as _cf
 import json
 import logging
+import os
+import re
 import shutil
+from collections.abc import Callable
 from typing import Any
 
 from app.codex_appserver import _extract_bash_command
+from app.chat_writer import (
+  ClearGoal,
+  IncrementGoalTurn,
+  await_ack as _await_ack,
+  get_writer,
+)
 from app.providers import get_skill_path
 from app.runtime_types import RunnerResult
 from app.runner_registry import RunnerKind, registry
 
 log = logging.getLogger("moebius.chat")
+
+
+def _goal_continue_message(condition: str, reason: str) -> str:
+  """Frames an autonomous continuation as same-thread feedback."""
+  return f"[goal] Not met: {reason}. Keep working toward: {condition}"
+
+
+def _goal_turn_cap(condition: str) -> int:
+  """Return the smaller of a user stop clause and the hard safety cap."""
+  match = re.search(r"\bstop\s+after\s+(\d+)\b", condition, re.I)
+  requested = int(match.group(1)) if match else 25
+  return max(0, min(requested, 25))
+
+
+async def _maybe_await(value: Any) -> Any:
+  """Awaits a value only when the callback returned an awaitable."""
+  if hasattr(value, "__await__"):
+    return await value
+  return value
+
+
+async def _default_goal_evaluator(
+  condition: str,
+  latest_assistant_output: str,
+  recent_context: str,
+) -> dict:
+  """Evaluate goal completion with a cheap Anthropic one-shot call."""
+  prompt = (
+    "Return only JSON with keys met and reason.\n"
+    f"Goal condition:\n{condition}\n\n"
+    f"Recent context:\n{recent_context[-6000:]}\n\n"
+    f"Latest assistant output:\n{latest_assistant_output[-6000:]}"
+  )
+  try:
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+      raise ModuleNotFoundError
+    from anthropic import AsyncAnthropic
+    client = AsyncAnthropic()
+    resp = await client.messages.create(
+      model="claude-haiku-4-5-20251001",
+      max_tokens=256,
+      temperature=0,
+      messages=[{"role": "user", "content": prompt}],
+    )
+    text = "".join(
+      block.text for block in resp.content if getattr(block, "text", None)
+    )
+  except ModuleNotFoundError:
+    text = await _default_goal_evaluator_http(prompt)
+  try:
+    parsed = json.loads(text)
+  except json.JSONDecodeError:
+    parsed = {"met": False, "reason": text.strip() or "invalid JSON"}
+  return {
+    "met": bool(parsed.get("met")),
+    "reason": str(parsed.get("reason") or "").strip()[:500],
+  }
+
+
+async def _default_goal_evaluator_http(prompt: str) -> str:
+  """Fallback evaluator transport using existing backend dependencies."""
+  import httpx
+  from app.config import get_settings
+
+  headers = {"anthropic-version": "2023-06-01"}
+  api_key = os.environ.get("ANTHROPIC_API_KEY")
+  if api_key:
+    headers["x-api-key"] = api_key
+  else:
+    data_dir = get_settings().data_dir
+    creds_path = os.path.join(
+      data_dir, "cli-auth", "claude", ".credentials.json",
+    )
+    if not os.path.exists(creds_path):
+      raise RuntimeError("Anthropic credentials missing for goal evaluator")
+    with open(creds_path, encoding="utf-8") as fh:
+      oauth = (json.load(fh).get("claudeAiOauth") or {})
+    token = oauth.get("accessToken")
+    if not token:
+      raise RuntimeError("Anthropic credentials malformed for goal evaluator")
+    headers["Authorization"] = f"Bearer {token}"
+    headers["anthropic-beta"] = "oauth-2025-04-20"
+  async with httpx.AsyncClient(timeout=30.0) as client:
+    resp = await client.post(
+      "https://api.anthropic.com/v1/messages",
+      headers=headers,
+      json={
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": 256,
+        "temperature": 0,
+        "messages": [{"role": "user", "content": prompt}],
+      },
+    )
+    resp.raise_for_status()
+  payload = resp.json()
+  return "".join(
+    part.get("text", "")
+    for part in payload.get("content", [])
+    if isinstance(part, dict) and part.get("type") == "text"
+  )
+
+
+async def _clear_goal(chat_id: str, run_token: str | None) -> None:
+  """Clear stored goal state through the writer actor."""
+  await _await_ack(get_writer().submit(ClearGoal(
+    chat_id=chat_id, run_token=run_token or "",
+  )))
+
+
+async def _increment_goal_turn(
+  chat_id: str, run_token: str | None, reason: str,
+) -> int:
+  """Increment stored goal turns through the writer actor."""
+  result = await _await_ack(get_writer().submit(IncrementGoalTurn(
+    chat_id=chat_id, run_token=run_token or "", reason=reason,
+  )))
+  return int((result or {}).get("turns") or 0)
 
 
 class ActiveCodexTurn:
@@ -652,6 +778,9 @@ async def run_codex_sdk_turn(
   pending_questions: dict,
   db,
   agent_settings: dict | None = None,
+  goal_mode: bool = False,
+  goal: dict | None = None,
+  goal_evaluator: Callable[..., Any] = _default_goal_evaluator,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
@@ -745,7 +874,10 @@ async def run_codex_sdk_turn(
   thread = None
   turn = None
   current_session_id = session_id
-  completed_turn: Any | None = None
+  goal_state = (
+    dict(goal or {}) if goal_mode and isinstance(goal, dict) else None
+  )
+  goal_turns = int((goal_state or {}).get("turns") or 0)
 
   try:
     async with sdk["AsyncCodex"](config=config) as codex:
@@ -845,101 +977,171 @@ async def run_codex_sdk_turn(
         "session_id": current_session_id,
       })
 
-      turn = await thread.turn(
-        user_message,
-        cwd=cwd,
-        model=model,
-        effort=effort,
-      )
-      active_turn = ActiveCodexTurn(thread, turn, chat_id=chat_id)
-      registry.register(active_turn)
+      async def _run_turn_once(message: str) -> tuple[Any | None, str]:
+        """Run one Codex turn and return its terminal payload plus text."""
+        nonlocal turn
+        completed_turn: Any | None = None
+        text_parts: list[str] = []
+        turn = await thread.turn(
+          message,
+          cwd=cwd,
+          model=model,
+          effort=effort,
+        )
+        active_turn = ActiveCodexTurn(thread, turn, chat_id=chat_id)
+        registry.register(active_turn)
+        try:
+          async for notification in turn.stream():
+            payload = notification.payload
 
-      async for notification in turn.stream():
-        payload = notification.payload
+            if isinstance(payload, sdk["AgentMessageDeltaNotification"]):
+              if payload.delta:
+                text_parts.append(payload.delta)
+                bc.publish({"type": "text", "content": payload.delta})
+              continue
 
-        if isinstance(payload, sdk["AgentMessageDeltaNotification"]):
-          if payload.delta:
-            bc.publish({"type": "text", "content": payload.delta})
-          continue
+            if isinstance(
+              payload,
+              sdk["CommandExecutionOutputDeltaNotification"],
+            ):
+              if payload.delta:
+                bc.publish({"type": "tool_output", "content": payload.delta})
+              continue
 
-        if isinstance(
-          payload,
-          sdk["CommandExecutionOutputDeltaNotification"],
-        ):
-          if payload.delta:
-            bc.publish({"type": "tool_output", "content": payload.delta})
-          continue
+            if isinstance(payload, sdk["ItemStartedNotification"]):
+              item = (
+                payload.item.root
+                if hasattr(payload.item, "root")
+                else payload.item
+              )
+              event = _tool_start_event(item, sdk)
+              if event is not None:
+                bc.publish(event)
+              continue
 
-        if isinstance(payload, sdk["ItemStartedNotification"]):
-          item = payload.item.root if hasattr(payload.item, "root") else payload.item
-          event = _tool_start_event(item, sdk)
-          if event is not None:
-            bc.publish(event)
-          continue
+            if isinstance(payload, sdk["FileChangePatchUpdatedNotification"]):
+              summary = _file_change_patch_summary(payload.changes)
+              if summary:
+                bc.publish({"type": "tool_output", "content": summary})
+              continue
 
-        if isinstance(payload, sdk["FileChangePatchUpdatedNotification"]):
-          summary = _file_change_patch_summary(payload.changes)
-          if summary:
-            bc.publish({"type": "tool_output", "content": summary})
-          continue
+            if isinstance(payload, sdk["ItemCompletedNotification"]):
+              item = (
+                payload.item.root
+                if hasattr(payload.item, "root")
+                else payload.item
+              )
+              for event in _tool_completed_events(item, sdk):
+                bc.publish(event)
+              continue
 
-        if isinstance(payload, sdk["ItemCompletedNotification"]):
-          item = payload.item.root if hasattr(payload.item, "root") else payload.item
-          for event in _tool_completed_events(item, sdk):
-            bc.publish(event)
-          continue
+            if isinstance(payload, sdk["ThreadTokenUsageUpdatedNotification"]):
+              continue
 
-        if isinstance(payload, sdk["ThreadTokenUsageUpdatedNotification"]):
-          # Token usage is reported but currently not surfaced; the
-          # SDK already exposes it via the thread handle for any
-          # consumer that needs it.
-          continue
+            if isinstance(
+              payload,
+              sdk["ItemGuardianApprovalReviewStartedNotification"],
+            ):
+              continue
 
-        if isinstance(
-          payload,
-          sdk["ItemGuardianApprovalReviewStartedNotification"],
-        ):
-          continue
+            if isinstance(
+              payload,
+              sdk["ItemGuardianApprovalReviewCompletedNotification"],
+            ):
+              continue
 
-        if isinstance(
-          payload,
-          sdk["ItemGuardianApprovalReviewCompletedNotification"],
-        ):
-          continue
+            if isinstance(payload, sdk["ContextCompactedNotification"]):
+              log.info("Codex context compacted for chat %s", chat_id)
+              continue
 
-        if isinstance(payload, sdk["ContextCompactedNotification"]):
-          log.info("Codex context compacted for chat %s", chat_id)
-          continue
+            if isinstance(payload, sdk["TurnCompletedNotification"]):
+              completed_turn = payload.turn
+              break
 
-        if isinstance(payload, sdk["TurnCompletedNotification"]):
-          completed_turn = payload.turn
-          break
+            if (
+              notification.method == "error"
+              and isinstance(payload, sdk["ErrorNotification"])
+            ):
+              message_text = getattr(payload.error, "message", None)
+              if getattr(payload, "will_retry", False):
+                log.warning(
+                  "Codex turn error will retry for chat %s: %s",
+                  chat_id,
+                  message_text or "Codex error",
+                )
+                continue
+              raise RuntimeError(str(message_text or "Codex error"))
+          return completed_turn, "".join(text_parts).strip()
+        finally:
+          current = registry.get_handle(chat_id, RunnerKind.CODEX_SDK)
+          if isinstance(current, ActiveCodexTurn) and current.turn is turn:
+            registry.unregister(chat_id, RunnerKind.CODEX_SDK)
+            current.mark_finished()
 
-        if (
-          notification.method == "error"
-          and isinstance(payload, sdk["ErrorNotification"])
-        ):
-          message = getattr(payload.error, "message", None)
-          if getattr(payload, "will_retry", False):
-            log.warning(
-              "Codex turn error will retry for chat %s: %s",
-              chat_id,
-              message or "Codex error",
-            )
-            continue
-          raise RuntimeError(str(message or "Codex error"))
-
-      error_text = None
-      # The installed SDK routes notifications by `turnId` and drops late
-      # `turn/completed` events once the queue is unregistered, so normal
-      # turn streams are expected to terminate with TurnCompleted.
-      if completed_turn is not None and completed_turn.error is not None:
-        error_text = getattr(completed_turn.error, "message", None)
-      return {
-        "session_id": current_session_id,
-        "cost_usd": None,
-        "error": error_text,
-      }
+      next_message = user_message
+      while True:
+        completed_turn, assistant_text = await _run_turn_once(next_message)
+        error_text = None
+        if completed_turn is not None and completed_turn.error is not None:
+          error_text = getattr(completed_turn.error, "message", None)
+        status = str(getattr(completed_turn, "status", "") or "").lower()
+        stopped = status in {"interrupted", "cancelled", "canceled"}
+        if error_text or stopped or goal_state is None:
+          return {
+            "session_id": current_session_id,
+            "cost_usd": None,
+            "error": error_text,
+          }
+        condition = str(goal_state.get("condition") or "").strip()
+        recent = (
+          f"User message:\n{next_message}\n\n"
+          f"Assistant:\n{assistant_text}"
+        )
+        evaluation = await _maybe_await(goal_evaluator(
+          condition, assistant_text, recent,
+        ))
+        reason = str((evaluation or {}).get("reason") or "").strip()
+        if not reason:
+          reason = "goal evaluator returned no reason"
+        if bool((evaluation or {}).get("met")):
+          await _clear_goal(chat_id, getattr(bc, "run_token", None))
+          bc.publish({
+            "type": "goal_met",
+            "condition": condition,
+            "turns": goal_turns,
+            "reason": reason,
+          })
+          return {
+            "session_id": current_session_id,
+            "cost_usd": None,
+            "error": None,
+          }
+        cap = _goal_turn_cap(condition)
+        if goal_turns + 1 > cap:
+          bc.publish({
+            "type": "goal_paused",
+            "turn": goal_turns,
+            "condition": condition,
+            "reason": (
+              f"paused after {goal_turns} turns — /goal to check, "
+              "/goal clear to cancel"
+            ),
+          })
+          return {
+            "session_id": current_session_id,
+            "cost_usd": None,
+            "error": None,
+          }
+        goal_turns = await _increment_goal_turn(
+          chat_id, getattr(bc, "run_token", None), reason,
+        )
+        bc.publish({
+          "type": "goal_continue",
+          "turn": goal_turns,
+          "reason": reason,
+          "condition": condition,
+        })
+        next_message = _goal_continue_message(condition, reason)
   except Exception as exc:
     return {
       "session_id": current_session_id,

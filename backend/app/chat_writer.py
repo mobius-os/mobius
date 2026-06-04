@@ -314,6 +314,37 @@ class ClearPending(_Command):
 
 
 @dataclass
+class SetGoal(_Command):
+  """Store the active autonomous goal in Chat.agent_settings_json.
+
+  The goal rides inside the existing JSON settings escape hatch so the
+  feature needs no schema migration. This command owns the read-modify-write
+  because runtime chat state must stay serialized through the writer actor.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  goal: dict = field(default_factory=dict)
+
+
+@dataclass
+class ClearGoal(_Command):
+  """Remove the active autonomous goal from Chat.agent_settings_json."""
+
+  chat_id: str = ""
+  run_token: str = ""
+
+
+@dataclass
+class IncrementGoalTurn(_Command):
+  """Persist one autonomous continuation attempt for the active goal."""
+
+  chat_id: str = ""
+  run_token: str = ""
+  reason: str | None = None
+
+
+@dataclass
 class PersistCompaction(_Command):
   """Append a compaction-summary block to the transcript as its own message.
 
@@ -427,6 +458,9 @@ _FENCE_COMMANDS = (
   PromotePending,
   CancelPending,
   ClearPending,
+  SetGoal,
+  ClearGoal,
+  IncrementGoalTurn,
   ReplaceTranscript,
   ClearRunStatus,
 )
@@ -1115,6 +1149,12 @@ class ChatWriterActor:
       return self._cancel_pending(db, cmd)
     if isinstance(cmd, ClearPending):
       return self._clear_pending(db, cmd)
+    if isinstance(cmd, SetGoal):
+      return self._set_goal(db, cmd)
+    if isinstance(cmd, ClearGoal):
+      return self._clear_goal(db, cmd)
+    if isinstance(cmd, IncrementGoalTurn):
+      return self._increment_goal_turn(db, cmd)
     if isinstance(cmd, ReplaceTranscript):
       return self._replace_transcript(db, cmd)
     if isinstance(cmd, ClearRunStatus):
@@ -1481,6 +1521,65 @@ class ChatWriterActor:
       if not _commit_or_rollback(db):
         raise _PersistFailed("ClearPending did not persist")
     return {"cleared": cleared}
+
+  def _settings_dict(self, raw) -> dict:
+    """Return a mutable settings dict from a JSON column value."""
+    if isinstance(raw, dict):
+      return dict(raw)
+    return {}
+
+  def _set_goal(self, db, cmd: SetGoal) -> dict:
+    """Set the active goal and preserve unrelated agent settings."""
+    from datetime import UTC, datetime
+
+    chat = _active_chat(db, cmd.chat_id)
+    if chat is None:
+      raise _PersistFailed("SetGoal: chat not found or deleted")
+    settings = self._settings_dict(chat.agent_settings_json)
+    settings["goal"] = dict(cmd.goal)
+    chat.agent_settings_json = settings
+    chat.updated_at = datetime.now(UTC)
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("SetGoal did not persist")
+    return {"goal": settings["goal"]}
+
+  def _clear_goal(self, db, cmd: ClearGoal) -> dict:
+    """Clear the active goal while preserving unrelated agent settings."""
+    from datetime import UTC, datetime
+
+    chat = _active_chat(db, cmd.chat_id)
+    if chat is None:
+      raise _PersistFailed("ClearGoal: chat not found or deleted")
+    settings = self._settings_dict(chat.agent_settings_json)
+    had_goal = "goal" in settings
+    settings.pop("goal", None)
+    chat.agent_settings_json = settings or None
+    chat.updated_at = datetime.now(UTC)
+    if had_goal and not _commit_or_rollback(db):
+      raise _PersistFailed("ClearGoal did not persist")
+    return {"cleared": had_goal}
+
+  def _increment_goal_turn(self, db, cmd: IncrementGoalTurn) -> dict:
+    """Increment the stored goal turn counter after a failed evaluation."""
+    from datetime import UTC, datetime
+
+    chat = _active_chat(db, cmd.chat_id)
+    if chat is None:
+      raise _PersistFailed("IncrementGoalTurn: chat not found or deleted")
+    settings = self._settings_dict(chat.agent_settings_json)
+    goal = settings.get("goal")
+    if not isinstance(goal, dict):
+      return {"turns": 0, "goal": None}
+    turns = int(goal.get("turns") or 0) + 1
+    goal = dict(goal)
+    goal["turns"] = turns
+    goal["last_reason"] = cmd.reason
+    settings["goal"] = goal
+    chat.agent_settings_json = settings
+    chat.updated_at = datetime.now(UTC)
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("IncrementGoalTurn did not persist")
+    return {"turns": turns, "goal": goal}
 
   def _replace_transcript(self, db, cmd: ReplaceTranscript) -> bool:
     """Replace the whole `messages` blob (and optional title); commit.

@@ -58,6 +58,9 @@ import asyncio
 import inspect
 import json
 import logging
+import os
+import re
+from collections.abc import Callable
 from typing import Any
 from uuid import uuid4
 
@@ -83,6 +86,12 @@ from claude_agent_sdk.types import (
 )
 
 from app import activity
+from app.chat_writer import (
+  ClearGoal,
+  IncrementGoalTurn,
+  await_ack as _await_ack,
+  get_writer,
+)
 from app.pending_questions import PendingQuestion
 from app.runner_registry import RunnerKind, registry
 from app.runtime_types import RunnerResult
@@ -178,6 +187,139 @@ def _steer_redirect_message(text: str) -> str:
     "continue the same task:\n\n"
     f"{text}"
   )
+
+
+def _goal_continue_message(condition: str, reason: str) -> str:
+  """Frames an autonomous continuation as same-session feedback."""
+  return f"[goal] Not met: {reason}. Keep working toward: {condition}"
+
+
+def _goal_turn_cap(condition: str) -> int:
+  """Return the smaller of a user stop clause and the hard safety cap."""
+  match = re.search(r"\bstop\s+after\s+(\d+)\b", condition, re.I)
+  requested = int(match.group(1)) if match else 25
+  return max(0, min(requested, 25))
+
+
+async def _default_goal_evaluator(
+  condition: str,
+  latest_assistant_output: str,
+  recent_context: str,
+) -> dict:
+  """Evaluate goal completion with a cheap Anthropic one-shot call."""
+  prompt = (
+    "Return only JSON with keys met and reason.\n"
+    f"Goal condition:\n{condition}\n\n"
+    f"Recent context:\n{recent_context[-6000:]}\n\n"
+    f"Latest assistant output:\n{latest_assistant_output[-6000:]}"
+  )
+  try:
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+      raise ModuleNotFoundError
+    from anthropic import AsyncAnthropic
+    client = AsyncAnthropic()
+    resp = await client.messages.create(
+      model="claude-haiku-4-5-20251001",
+      max_tokens=256,
+      temperature=0,
+      messages=[{"role": "user", "content": prompt}],
+    )
+    text = "".join(
+      block.text for block in resp.content if getattr(block, "text", None)
+    )
+  except ModuleNotFoundError:
+    text = await _default_goal_evaluator_http(prompt)
+  try:
+    parsed = json.loads(text)
+  except json.JSONDecodeError:
+    parsed = {"met": False, "reason": text.strip() or "invalid JSON"}
+  return {
+    "met": bool(parsed.get("met")),
+    "reason": str(parsed.get("reason") or "").strip()[:500],
+  }
+
+
+async def _default_goal_evaluator_http(prompt: str) -> str:
+  """Fallback evaluator transport using existing backend dependencies."""
+  import httpx
+  from app.config import get_settings
+
+  headers = {"anthropic-version": "2023-06-01"}
+  api_key = os.environ.get("ANTHROPIC_API_KEY")
+  if api_key:
+    headers["x-api-key"] = api_key
+  else:
+    creds_path = (
+      get_settings().data_dir
+      and os.path.join(
+        get_settings().data_dir,
+        "cli-auth",
+        "claude",
+        ".credentials.json",
+      )
+    )
+    if not creds_path or not os.path.exists(creds_path):
+      raise RuntimeError("Anthropic credentials missing for goal evaluator")
+    with open(creds_path, encoding="utf-8") as fh:
+      oauth = (json.load(fh).get("claudeAiOauth") or {})
+    token = oauth.get("accessToken")
+    if not token:
+      raise RuntimeError("Anthropic credentials malformed for goal evaluator")
+    headers["Authorization"] = f"Bearer {token}"
+    headers["anthropic-beta"] = "oauth-2025-04-20"
+  async with httpx.AsyncClient(timeout=30.0) as client:
+    resp = await client.post(
+      "https://api.anthropic.com/v1/messages",
+      headers=headers,
+      json={
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": 256,
+        "temperature": 0,
+        "messages": [{"role": "user", "content": prompt}],
+      },
+    )
+    resp.raise_for_status()
+  payload = resp.json()
+  return "".join(
+    part.get("text", "")
+    for part in payload.get("content", [])
+    if isinstance(part, dict) and part.get("type") == "text"
+  )
+
+
+async def _clear_goal(chat_id: str, run_token: str | None) -> None:
+  """Clear stored goal state through the writer actor."""
+  await _await_ack(get_writer().submit(ClearGoal(
+    chat_id=chat_id, run_token=run_token or "",
+  )))
+
+
+async def _increment_goal_turn(
+  chat_id: str, run_token: str | None, reason: str,
+) -> int:
+  """Increment stored goal turns through the writer actor."""
+  result = await _await_ack(get_writer().submit(IncrementGoalTurn(
+    chat_id=chat_id, run_token=run_token or "", reason=reason,
+  )))
+  return int((result or {}).get("turns") or 0)
+
+
+class _GoalCapture:
+  """Capture assistant text while forwarding events to the real bus."""
+
+  def __init__(self, wrapped):
+    self._wrapped = wrapped
+    self.text_parts: list[str] = []
+    self.events: list[dict] = []
+
+  def publish(self, event: dict) -> bool:
+    self.events.append(event)
+    if event.get("type") == "text":
+      self.text_parts.append(str(event.get("content") or ""))
+    return self._wrapped.publish(event)
+
+  def __getattr__(self, name: str):
+    return getattr(self._wrapped, name)
 
 
 async def steer_into_active_turn(chat_id: str, text: str) -> bool:
@@ -469,6 +611,9 @@ async def run_claude_sdk_turn(
   db,
   agent_settings: dict | None = None,
   skills_enabled: bool = False,
+  goal_mode: bool = False,
+  goal: dict | None = None,
+  goal_evaluator: Callable[..., Any] = _default_goal_evaluator,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
@@ -494,6 +639,9 @@ async def run_claude_sdk_turn(
   """
   current_session_id = session_id
   cost_usd: float | None = None
+  goal_state = (
+    dict(goal or {}) if goal_mode and isinstance(goal, dict) else None
+  )
 
   # Canonical AskUserQuestion handling via can_use_tool, per
   # https://code.claude.com/docs/en/agent-sdk/user-input
@@ -635,6 +783,7 @@ async def run_claude_sdk_turn(
     _model = DEFAULT_MODELS["claude"]
   async def _run_once(model_override: str | None) -> RunnerResult:
     nonlocal current_session_id, cost_usd
+    goal_turns = int((goal_state or {}).get("turns") or 0)
     # Skills are gated behind the per-owner `skills_enabled` flag. OFF
     # (the default) keeps the historical posture: `setting_sources=None`
     # means the SDK loads NO user/project settings, so the Skill tool is
@@ -686,12 +835,13 @@ async def run_claude_sdk_turn(
           "cost_usd": None,
           "error": "connect timeout",
         }
+      run_bc = _GoalCapture(bc)
       await client.query(user_message)
 
       while True:
         async for sdk_msg in client.receive_response():
           current_session_id, terminal = dispatch_sdk_message(
-            sdk_msg, bc, current_session_id,
+            sdk_msg, run_bc, current_session_id,
           )
           if terminal is None:
             continue
@@ -703,6 +853,53 @@ async def run_claude_sdk_turn(
             )
             break
           cost_usd = terminal.get("cost_usd")
+          natural = (
+            not terminal.get("error")
+            and terminal.get("stop_reason") != "interrupt"
+          )
+          if goal_state is not None and natural:
+            condition = str(goal_state.get("condition") or "").strip()
+            latest = "".join(run_bc.text_parts).strip()
+            recent = f"User message:\n{user_message}\n\nAssistant:\n{latest}"
+            evaluation = await _maybe_await(goal_evaluator(
+              condition, latest, recent,
+            ))
+            reason = str((evaluation or {}).get("reason") or "").strip()
+            if not reason:
+              reason = "goal evaluator returned no reason"
+            if bool((evaluation or {}).get("met")):
+              await _clear_goal(chat_id, getattr(bc, "run_token", None))
+              bc.publish({
+                "type": "goal_met",
+                "condition": condition,
+                "turns": goal_turns,
+                "reason": reason,
+              })
+              return terminal
+            cap = _goal_turn_cap(condition)
+            if goal_turns + 1 > cap:
+              bc.publish({
+                "type": "goal_paused",
+                "turn": goal_turns,
+                "condition": condition,
+                "reason": (
+                  f"paused after {goal_turns} turns — /goal to check, "
+                  "/goal clear to cancel"
+                ),
+              })
+              return terminal
+            goal_turns = await _increment_goal_turn(
+              chat_id, getattr(bc, "run_token", None), reason,
+            )
+            bc.publish({
+              "type": "goal_continue",
+              "turn": goal_turns,
+              "reason": reason,
+              "condition": condition,
+            })
+            run_bc = _GoalCapture(bc)
+            await client.query(_goal_continue_message(condition, reason))
+            break
           return terminal
         else:
           steer_texts = active_client.pending_steer
