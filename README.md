@@ -27,7 +27,7 @@
 <p align="center">
   <a href="#you-grow-it">An agent that adapts to you</a> &middot;
   <a href="#how-the-agent-itself-gets-better">The self-improvement harness</a> &middot;
-  <a href="#apps-that-work-together">The agent is the kernel</a>
+  <a href="#apps-that-work-together">An app store that adapts to you</a>
 </p>
 
 ---
