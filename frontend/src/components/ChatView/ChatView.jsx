@@ -1201,7 +1201,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       const queuedTexts = queuedSnapshot
         .map(m => (m.content || '').trim())
         .filter(Boolean)
-      const combined = queuedTexts.join('\n')
+      const combined = queuedTexts.join('\n\n')
       const queuedTs = queuedSnapshot
         .map(m => m.ts)
         .filter(ts => ts != null)

@@ -207,7 +207,7 @@ def test_force_steer_consumes_existing_queued_messages(
   res = client.post(
     f"/api/chats/{chat_id}/messages",
     json={
-      "content": "use blue\nalso square",
+      "content": "use blue\n\nalso square",
       "force_steer": True,
       "consume_pending_ts": [10, 11],
     },
@@ -216,10 +216,10 @@ def test_force_steer_consumes_existing_queued_messages(
 
   assert res.status_code == 202, res.text
   assert res.json()["status"] == "steered"
-  assert steered_calls == [(chat_id, "use blue\nalso square")]
+  assert steered_calls == [(chat_id, "use blue\n\nalso square")]
   chat = _read_chat(chat_id)
   assert [m["content"] for m in chat.pending_messages] == ["later"]
-  assert chat.messages[-2]["content"] == "use blue\nalso square"
+  assert chat.messages[-2]["content"] == "use blue\n\nalso square"
 
 
 def test_force_steer_failure_does_not_append_duplicate_queue(
@@ -261,6 +261,87 @@ def test_force_steer_failure_does_not_append_duplicate_queue(
   assert res.json()["status"] == "not_steered"
   chat = _read_chat(chat_id)
   assert [m["content"] for m in chat.pending_messages] == ["use blue"]
+
+
+def test_force_steer_requires_matching_queued_messages(
+  client, auth, monkeypatch,
+):
+  """Forced steer is the Stop conversion path, not a public steer bypass."""
+  chat_id = "codexforceguard"
+  _make_codex_chat(chat_id, steer_enabled=False)
+  db = SessionLocal()
+  try:
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    chat.pending_messages = [
+      {"role": "user", "content": "use blue", "ts": 10},
+    ]
+    db.commit()
+  finally:
+    db.close()
+  registry.register(_make_active_codex_turn(chat_id))
+  create_broadcast(chat_id)
+
+  async def _fail_if_called(_cid, _message):
+    raise AssertionError("forced steer should require matching queue rows")
+
+  monkeypatch.setattr(
+    "app.codex_sdk_runner.steer_into_active_turn", _fail_if_called,
+  )
+
+  res = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={
+      "content": "different text",
+      "force_steer": True,
+      "consume_pending_ts": [10],
+    },
+    headers=auth,
+  )
+
+  assert res.status_code == 202, res.text
+  assert res.json()["status"] == "not_steered"
+  chat = _read_chat(chat_id)
+  assert [m["content"] for m in chat.pending_messages] == ["use blue"]
+
+
+def test_ordinary_steer_does_not_jump_existing_queue(
+  client, auth, monkeypatch,
+):
+  """A new send cannot steer ahead of older queued user intent."""
+  chat_id = "codexsteerqueued"
+  _make_codex_chat(chat_id, steer_enabled=True)
+  db = SessionLocal()
+  try:
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    chat.pending_messages = [
+      {"role": "user", "content": "older queued", "ts": 10},
+    ]
+    db.commit()
+  finally:
+    db.close()
+  registry.register(_make_active_codex_turn(chat_id))
+  create_broadcast(chat_id)
+
+  async def _fail_if_called(_cid, _message):
+    raise AssertionError("ordinary steer must not skip older pending messages")
+
+  monkeypatch.setattr(
+    "app.codex_sdk_runner.steer_into_active_turn", _fail_if_called,
+  )
+
+  res = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={"content": "newer send"},
+    headers=auth,
+  )
+
+  assert res.status_code == 202, res.text
+  assert res.json()["status"] == "queued"
+  chat = _read_chat(chat_id)
+  assert [m["content"] for m in chat.pending_messages] == [
+    "older queued",
+    "newer send",
+  ]
 
 
 def test_falls_back_to_queue_when_flag_off(client, auth, monkeypatch):
