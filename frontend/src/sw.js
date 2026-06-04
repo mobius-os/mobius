@@ -45,6 +45,8 @@ import { clientsClaim } from 'workbox-core'
 import {
   VENDOR_CACHE,
   ESM_CACHE,
+  OFFLINE_APPS_CACHE,
+  STANDALONE_APPS_CACHE,
   isCacheableAssetResponse,
   isStaleRuntimeCache,
   isKnownOnline,
@@ -435,7 +437,7 @@ registerRoute(
 // once left the module uncached and blanked the in-shell iframe offline.
 registerRoute(
   ({ url }) => /^\/api\/apps\/\d+\/(frame|module)$/.test(url.pathname),
-  offlineCapableHandler('mobius-offline-apps'),
+  offlineCapableHandler(OFFLINE_APPS_CACHE),
 )
 
 // Shell + bare-domain navigations: serve the PRECACHED index.html — the
@@ -478,7 +480,7 @@ registerRoute(new NavigationRoute(
 registerRoute(
   ({ request, url }) =>
     request.mode === 'navigate' && url.pathname.startsWith('/apps/'),
-  offlineCapableHandler('mobius-standalone'),
+  offlineCapableHandler(STANDALONE_APPS_CACHE),
 )
 
 // Last resort for any document we still couldn't serve: the cached

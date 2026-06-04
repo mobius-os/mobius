@@ -323,7 +323,7 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   # every app update (same microsecond version the manifest uses), so a
   # just-changed name/icon doesn't show a stale preview here while the
   # 5-minute icon cache is warm.
-  icon_v = int(app.updated_at.timestamp() * 1_000_000) if app.updated_at else 0
+  app_v = int(app.updated_at.timestamp() * 1_000_000) if app.updated_at else 0
   # Escape user-controlled strings before interpolating into HTML.
   # The agent generates app names so they're nominally trusted, but
   # belt-and-suspenders: a stray `<script>` in a name would otherwise
@@ -349,8 +349,8 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   <meta name="apple-mobile-web-app-title" content="{app_name_html}">
   <title>{app_name_html}</title>
   <link rel="manifest" href="/apps/{slug}/manifest.json">
-  <link rel="icon" type="image/png" sizes="192x192" href="/apps/{slug}/icon-192.png?v={icon_v}">
-  <link rel="apple-touch-icon" href="/apps/{slug}/icon-192.png?v={icon_v}">
+  <link rel="icon" type="image/png" sizes="192x192" href="/apps/{slug}/icon-192.png?v={app_v}">
+  <link rel="apple-touch-icon" href="/apps/{slug}/icon-192.png?v={app_v}">
   <script type="importmap">
   {{
     "imports": {{
@@ -619,7 +619,7 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
     <div id="ic-body">
       <div class="ic-row">
         <button id="ic-icon-btn" class="ic-icon-wrap" type="button" aria-label="Change icon">
-          <img id="ic-icon-img" class="ic-icon" alt="" src="/apps/{slug}/icon-192.png?v={icon_v}">
+          <img id="ic-icon-img" class="ic-icon" alt="" src="/apps/{slug}/icon-192.png?v={app_v}">
           <span class="ic-icon-edit" aria-hidden="true">✎</span>
         </button>
         <div class="ic-text">
@@ -648,6 +648,7 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
     const APP_ID = {app_id};
     const APP_SLUG = {json.dumps(slug)};
     const APP_NAME = {app_name_js_literal};
+    const APP_VERSION = {app_v};
 
     // Auth: read the owner JWT from localStorage (same origin so it's
     // visible). If missing, redirect to login with a return URL.
@@ -699,7 +700,7 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         const bust = cacheBust ? '&_=' + Date.now() : '';
         const module = await import(
           '/api/apps/' + APP_ID + '/module?token=' +
-          encodeURIComponent(appToken) + bust
+          encodeURIComponent(appToken) + '&v=' + encodeURIComponent(APP_VERSION) + bust
         );
         const Component = module.default;
         if (!Component) throw new Error('App module has no default export');

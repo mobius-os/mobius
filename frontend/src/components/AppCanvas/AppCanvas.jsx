@@ -62,10 +62,10 @@ import './AppCanvas.css'
 //     from `nav-push` which is intra-app routing within one iframe.
 //
 // Why token-free frame URL: `GET /api/apps/{id}/frame?v={version}` is
-// unauthenticated and served `Cache-Control: immutable`. Token arrives
-// via postMessage so the SW + browser cache can keep the HTML across
-// sessions. See `mobius/CLAUDE.md` "App iframe LRU cache + postMessage
-// protocol" for the broader context.
+// unauthenticated. Token arrives via postMessage so the long-lived JWT
+// never appears in frame history; `v` is the app.updated_at cache buster
+// that prevents the offline-app service-worker cache from serving an old
+// frame/module after an app update.
 // =================================================================
 
 // `version` is bumped by Shell when an `app_updated` event arrives
@@ -323,14 +323,11 @@ export default function AppCanvas({
     )
   }
 
-  // Token NOT in URL anymore — sent via postMessage above. Frame URL
-  // is stable per appId (no `?v=` query). Cache freshness is handled
-  // by the server's ETag + the browser's HTTP cache: every iframe
-  // mount sends If-None-Match and the server returns 304 (use cache)
-  // or 200 (fresh). The `version` prop still drives the iframe `key`
-  // below so an `app_updated` event triggers a real React remount,
-  // which forces the browser to re-validate the fresh-fetched URL.
-  const src = api.apps.frameUrl(appId)
+  // Token NOT in URL anymore — sent via postMessage above. `v` is in the
+  // URL because offline-capable apps are also cached by the service worker:
+  // without a versioned cache key, a cold/unknown-connectivity SW can serve
+  // a stale frame/module even after the backend updated the app.
+  const src = `${api.apps.frameUrl(appId)}?v=${encodeURIComponent(version)}`
 
   // The iframe key intentionally OMITS `token` — the token may
   // refresh (after staleTime) but the iframe should keep its in-app

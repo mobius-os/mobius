@@ -14,8 +14,15 @@
 // names are stable so vendor/esm aren't re-fetched every release.
 export const VENDOR_CACHE = 'mobius-vendor-v2'
 export const ESM_CACHE = 'mobius-esm-v2'
+export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v2'
+export const STANDALONE_APPS_CACHE = 'mobius-standalone-v2'
 
-const KEEP_RUNTIME_CACHES = new Set([VENDOR_CACHE, ESM_CACHE])
+const KEEP_RUNTIME_CACHES = new Set([
+  VENDOR_CACHE,
+  ESM_CACHE,
+  OFFLINE_APPS_CACHE,
+  STANDALONE_APPS_CACHE,
+])
 
 // Content types we're willing to store in a cache-first asset cache.
 // An SPA-fallback HTML body or an esm.sh `text/plain` error page is NOT
@@ -53,6 +60,7 @@ export function isStaleRuntimeCache(name) {
   if (KEEP_RUNTIME_CACHES.has(name)) return false
   if (/^mobius-(vendor|assets|apps|proxy|esm)-v\d+$/.test(name)) return true
   if (/^mobius-(vendor|esm)/.test(name)) return true
+  if (/^mobius-(offline-apps|standalone)(?:-v\d+)?$/.test(name)) return true
   return false
 }
 
