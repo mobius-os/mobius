@@ -301,6 +301,7 @@ chats/
 backups/
 *.bak-*
 apps/*/data/
+apps/*/.git/
 recovery_chat.jsonl
 .recover-pending
 agent-browser-profiles/
@@ -310,17 +311,14 @@ cron-logs/
 EOF
 chown mobius:mobius /data/.gitignore 2>/dev/null || true
 
-# Drop nested git repos under /data so the outer /data/.git is the
-# ONE repo that covers everything sensible. If we leave inner .git
-# directories in place (the shell came in as a clone; the agent may
-# have run `git init` in /data/apps/<slug>/...), `git add` from
-# /data root treats them as submodules and warns with "adding
-# embedded git repository". An agent in chat 380581a8 surfaced
-# this gotcha. Removing the inner .git makes shell + apps just
-# tracked files in the outer repo — agent has one git history that
-# captures every edit it makes.
-find /data -mindepth 2 -maxdepth 4 -type d -name '.git' -prune \
-  -exec rm -rf {} + 2>/dev/null || true
+# Drop accidental nested git repos under /data, but preserve the intentional
+# per-app repos at /data/apps/<slug>/.git. The outer /data repo ignores those
+# app repos so `git add -A` does not try to treat them as submodules, while
+# the installer/update path can still keep each manifest-installed app's
+# upstream/main history across container restarts.
+find /data -regextype posix-extended -mindepth 2 -maxdepth 4 \
+  -type d -name '.git' ! -regex '/data/apps/[^/]+/\.git' \
+  -prune -exec rm -rf {} + 2>/dev/null || true
 
 # Idempotent re-chown of /data/.git BEFORE the if/else below — git
 # refuses cross-owner operations with "dubious ownership", so any git
