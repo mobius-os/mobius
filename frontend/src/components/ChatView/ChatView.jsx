@@ -210,6 +210,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // above the pill.
   const chatRef = useRef(null)
   const footRef = useRef(null)
+  const measureComposerHeight = useCallback(() => {
+    const chatEl = chatRef.current
+    const footEl = footRef.current
+    if (!chatEl || !footEl) return
+    chatEl.style.setProperty('--composer-h', `${footEl.offsetHeight}px`)
+  }, [])
 
   // Lifecycle guards. `hadMessagesRef` reflects the cached length so
   // doSend's "first message" branch doesn't fire spuriously.
@@ -558,17 +564,52 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // — chips, queue tray, multi-line growth all push the clearance
   // in lockstep.
   useEffect(() => {
-    const chatEl = chatRef.current
     const footEl = footRef.current
-    if (!chatEl || !footEl || typeof ResizeObserver === 'undefined') return
-    const apply = () => {
-      chatEl.style.setProperty('--composer-h', `${footEl.offsetHeight}px`)
+    if (!footEl) return
+
+    let raf1 = 0
+    let raf2 = 0
+    const applySoon = () => {
+      measureComposerHeight()
+      if (raf1) cancelAnimationFrame(raf1)
+      if (raf2) cancelAnimationFrame(raf2)
+      raf1 = requestAnimationFrame(() => {
+        measureComposerHeight()
+        raf2 = requestAnimationFrame(measureComposerHeight)
+      })
     }
-    apply()
-    const ro = new ResizeObserver(apply)
-    ro.observe(footEl)
-    return () => ro.disconnect()
-  }, [])
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') applySoon()
+    }
+
+    applySoon()
+    const ro = typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver(applySoon)
+      : null
+    ro?.observe(footEl)
+    window.addEventListener('resize', applySoon)
+    window.addEventListener('pageshow', applySoon)
+    window.visualViewport?.addEventListener('resize', applySoon)
+    window.visualViewport?.addEventListener('scroll', applySoon)
+    document.addEventListener('visibilitychange', onVisible)
+
+    return () => {
+      if (raf1) cancelAnimationFrame(raf1)
+      if (raf2) cancelAnimationFrame(raf2)
+      ro?.disconnect()
+      window.removeEventListener('resize', applySoon)
+      window.removeEventListener('pageshow', applySoon)
+      window.visualViewport?.removeEventListener('resize', applySoon)
+      window.visualViewport?.removeEventListener('scroll', applySoon)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [measureComposerHeight])
+
+  useEffect(() => {
+    measureComposerHeight()
+    const raf = requestAnimationFrame(measureComposerHeight)
+    return () => cancelAnimationFrame(raf)
+  }, [builtApp, sending, measureComposerHeight])
 
   // Fetch messages and connect to an in-progress stream if the agent is running.
   useEffect(() => {
@@ -1324,9 +1365,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         </div>
       )}
 
-      <ConnectionStatus error={connectionError} onRetry={retry} />
-
       <div ref={footRef} className="chat__foot">
+        <ConnectionStatus error={connectionError} onRetry={retry} />
         <QueuedMessages items={pendingQueue.pendingMessages} onCancel={handleCancelPending} />
         <ChatInputBar
           input={input}
