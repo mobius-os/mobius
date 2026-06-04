@@ -119,3 +119,28 @@ def test_repair_app_git_repos_reseeds_when_db_has_commit_but_repo_missing(db):
   assert app.upstream_commit == app_git.head_sha(
     source_dir, app_git.UPSTREAM_BRANCH,
   )
+
+
+def test_repair_app_git_repos_apply_refuses_root_owned_partial_repair(
+  db, monkeypatch,
+):
+  data_dir = Path(get_settings().data_dir)
+  subprocess.run(["git", "-C", str(data_dir), "init", "-q"], check=True)
+  source_dir = data_dir / "apps" / "news"
+  _write_source(source_dir)
+  _seed_installed_app(db, source_dir)
+  monkeypatch.setattr(
+    repair_app_git_repos,
+    "_root_apply_warning",
+    lambda path: "refusing to initialize repo as root",
+  )
+
+  rows = repair_app_git_repos.run(
+    data_dir=data_dir,
+    source_dirs={str(source_dir)},
+    apply=True,
+  )
+
+  assert rows[0].status == "manual"
+  assert "root" in rows[0].detail
+  assert not (source_dir / ".git").exists()
