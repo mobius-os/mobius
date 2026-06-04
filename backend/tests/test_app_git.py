@@ -68,6 +68,36 @@ def test_ensure_repo_creates_nested_repo_inside_parent_worktree(tmp_path):
   assert app_git.head_sha(repo, app_git.LOCAL_BRANCH)
 
 
+def test_ensure_repo_preserves_existing_app_files_in_parent_worktree(tmp_path):
+  """First-time init around an existing app source tree must be non-destructive.
+
+  Production repair may run `ensure_repo` for installed apps that already have
+  source files under /data/apps/<slug>, while /data itself is a git worktree.
+  The per-app init must create source_dir/.git without deleting or rewriting
+  the app's existing files.
+  """
+  parent = tmp_path / "data"
+  repo = parent / "apps" / "news"
+  repo.mkdir(parents=True)
+  subprocess.run(["git", "-C", str(parent), "init", "-q"], check=True)
+  index = repo / "index.jsx"
+  job = repo / "fetch.sh"
+  index.write_text("export default function News() { return <h1>News</h1>; }\n")
+  job.write_text("#!/usr/bin/env bash\nprintf 'ok\\n'\n")
+
+  app_git.ensure_repo(repo)
+
+  assert app_git.is_repo(repo)
+  assert index.read_text() == (
+    "export default function News() { return <h1>News</h1>; }\n"
+  )
+  assert job.read_text() == "#!/usr/bin/env bash\nprintf 'ok\\n'\n"
+  assert app_git._run(repo, "status", "--porcelain").stdout.splitlines() == [
+    "?? fetch.sh",
+    "?? index.jsx",
+  ]
+
+
 def test_run_does_not_leak_to_enclosing_repo(tmp_path):
   """A per-app op must never resolve to an ENCLOSING repo (the /data-is-a-git-
   repo trap). A source dir inside a parent worktree but with no dedicated .git
