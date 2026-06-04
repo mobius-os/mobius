@@ -510,6 +510,15 @@
   animation: drawer-streaming-pulse 1.5s ease-in-out infinite;
 }
 
+.drawer__attention-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  margin-right: 2px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
 @keyframes drawer-streaming-pulse {
   0%   { opacity: 1; }
   50%  { opacity: 0.4; }

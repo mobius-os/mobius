@@ -66,6 +66,62 @@ test('promoteByTs returns null when no match', () => {
   assert.equal(result.current.pendingMessagesRef.current.length, 1)
 })
 
+test('promoteAll collapses the matching entry and everything after it', () => {
+  const { result } = renderHook(usePendingQueue)
+  result.current.add(fixtureMsg({ cid: 'a', ts: 1, content: 'first' }))
+  result.current.add(fixtureMsg({ cid: 'b', ts: 2, content: 'second' }))
+  result.current.add(fixtureMsg({ cid: 'c', ts: 3, content: 'third' }))
+  const got = result.current.promoteAll(2)
+  assert.equal(got.cid, 'b')
+  assert.equal(got.ts, 2)
+  assert.equal(got.content, 'second\nthird')
+  assert.deepEqual(
+    result.current.pendingMessagesRef.current.map(m => m.cid),
+    ['a'],
+  )
+})
+
+test('promoteAll only consumes the queue present at promotion time', () => {
+  const { result } = renderHook(usePendingQueue)
+  result.current.add(fixtureMsg({ cid: 'a', ts: 1, content: 'first' }))
+  result.current.add(fixtureMsg({ cid: 'b', ts: 2, content: 'second' }))
+  const got = result.current.promoteAll(1)
+  result.current.add(fixtureMsg({ cid: 'c', ts: 3, content: 'third' }))
+  assert.equal(got.content, 'first\nsecond')
+  assert.deepEqual(
+    result.current.pendingMessagesRef.current.map(m => m.cid),
+    ['c'],
+  )
+})
+
+test('promoteManyByTs preserves later entries not consumed by the backend', () => {
+  const { result } = renderHook(usePendingQueue)
+  result.current.add(fixtureMsg({ cid: 'a', ts: 1, content: 'first' }))
+  result.current.add(fixtureMsg({ cid: 'b', ts: 2, content: 'second' }))
+  result.current.add(fixtureMsg({ cid: 'c', ts: 3, content: 'third' }))
+  const got = result.current.promoteManyByTs([1, 2])
+  assert.equal(got.content, 'first\nsecond')
+  assert.deepEqual(
+    result.current.pendingMessagesRef.current.map(m => m.cid),
+    ['c'],
+  )
+})
+
+test('swapOptimisticTs removes a chip whose server ts was already consumed', () => {
+  const { result } = renderHook(usePendingQueue)
+  result.current.add(fixtureMsg({ cid: 'optimistic-a', ts: 999, content: 'first' }))
+  assert.equal(result.current.promoteManyByTs([10]), null)
+  result.current.swapOptimisticTs('optimistic-a', 10, 1)
+  assert.deepEqual(result.current.pendingMessagesRef.current, [])
+})
+
+test('promoteAll returns null when no matching anchor exists', () => {
+  const { result } = renderHook(usePendingQueue)
+  result.current.add(fixtureMsg({ ts: 1 }))
+  assert.equal(result.current.promoteAll(99), null)
+  assert.equal(result.current.pendingMessagesRef.current.length, 1)
+})
+
 test('cancelByTs removes by ts', () => {
   const { result } = renderHook(usePendingQueue)
   result.current.add(fixtureMsg({ cid: 'a', ts: 1 }))

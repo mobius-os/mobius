@@ -39,6 +39,8 @@ const SYSTEM_EVENTS = new Set([
   'shell_rebuilding',
   'shell_rebuilt',
   'shell_rebuild_failed',
+  'chat_run_started',
+  'chat_run_finished',
 ])
 
 /**
@@ -67,7 +69,7 @@ const SYSTEM_EVENTS = new Set([
  *                         name onto the matching Skill tool block so
  *                         ToolBlock renders a chip.
  *   question              AskUserQuestion fired
- *                         { questions: [...] }. Renders a card.
+ *                         { question_id, questions: [...] }. Renders a card.
  *   queued_turn_starting  Backend about to promote a queued message
  *                         { ts }. Notifies caller via callback.
  *   steered_into_turn     A send was injected mid-turn into a live
@@ -94,13 +96,16 @@ const SYSTEM_EVENTS = new Set([
  * @param {(opts?: {force?: boolean}) => void} [callbacks.onNeedsRefresh]
  *   Fired when the stream returns 204 outside the post-send race
  *   window — caller should refetch persisted DB state.
- * @param {(ts: number|null) => void} [callbacks.onQueuedTurnStarting]
- *   Fired when the backend is about to promote a queued message; `ts`
- *   identifies which pending entry was promoted.
+ * @param {(info: {ts: number|null, message: object|null}) => void} [callbacks.onQueuedTurnStarting]
+ *   Fired when the backend is about to promote queued follow-ups; `ts`
+ *   identifies the first pending entry in the promoted group and `message`
+ *   is the backend-authoritative combined user message when available.
  * @param {(info: {ts: number|null, content: string}) => void} [callbacks.onSteeredIntoTurn]
  *   Fired when a send was injected mid-turn into a live Codex turn (the
  *   backend steered it instead of queuing). The caller drops the
  *   optimistic queued-tray entry and renders the message inline.
+ * @param {(questionId: string|null) => void} [callbacks.onLiveQuestion]
+ *   Fired when the stream shows the currently-live AskUserQuestion card.
  *
  * @returns {{
  *   streamItems: Array<
@@ -137,6 +142,7 @@ export default function useStreamConnection(chatId, {
   onNeedsRefresh,
   onQueuedTurnStarting,
   onSteeredIntoTurn,
+  onLiveQuestion,
 }) {
   const [streamItems, _setStreamItems] = useState([])
   const latestItemsRef = useRef([])
@@ -328,11 +334,14 @@ export default function useStreamConnection(chatId, {
   onQueuedTurnStartingRef.current = onQueuedTurnStarting
   const onSteeredIntoTurnRef = useRef(onSteeredIntoTurn)
   onSteeredIntoTurnRef.current = onSteeredIntoTurn
+  const onLiveQuestionRef = useRef(onLiveQuestion)
+  onLiveQuestionRef.current = onLiveQuestion
   const queuedContinuationRef = useRef(false)
   // Carries the ts of the message the backend just promoted so the
   // frontend can remove the matching pending entry, even if the user
   // canceled or reordered items locally in the meantime.
   const queuedContinuationTsRef = useRef(null)
+  const queuedContinuationMessageRef = useRef(null)
 
   const connectToStream = useCallback(async (resetState = false) => {
     disconnect()
@@ -533,6 +542,8 @@ export default function useStreamConnection(chatId, {
               // backend/app/events.py:process_event so the SSE stream
               // and the persisted message agree on identity.
               const incoming = { type: 'question', questions }
+              if (event.question_id) incoming.question_id = event.question_id
+              onLiveQuestionRef.current?.(event.question_id || null)
               const key = questionKey(incoming)
               setStreamItems(prev => {
                 const idx = prev.findIndex(
@@ -568,7 +579,11 @@ export default function useStreamConnection(chatId, {
           } else if (event.type === 'queued_turn_starting') {
             queuedContinuationRef.current = true
             queuedContinuationTsRef.current = event.ts ?? null
-            onQueuedTurnStartingRef.current?.(event.ts)
+            queuedContinuationMessageRef.current = event.message || null
+            onQueuedTurnStartingRef.current?.({
+              ts: event.ts ?? null,
+              message: event.message || null,
+            })
           } else if (event.type === 'steered_into_turn') {
             // A send was injected mid-turn into a live Codex turn. The
             // backend already put the user message in the transcript; the
@@ -597,15 +612,17 @@ export default function useStreamConnection(chatId, {
             const continues = queuedContinuationRef.current
             const promotedTs = queuedContinuationTsRef.current
             wantsReconnectRef.current = !!continues
+            const promotedMessage = queuedContinuationMessageRef.current
             queuedContinuationRef.current = false
             queuedContinuationTsRef.current = null
+            queuedContinuationMessageRef.current = null
             // Delay onStreamEnd by one frame so the React render
             // triggered by setIsStreaming(false) above completes before
             // ChatView promotes streamItems to messages.  latestItemsRef
             // is already up-to-date (synchronous), so this is purely for
             // render consistency (e.g. streaming UI teardown).
             requestAnimationFrame(() => {
-              onStreamEndRef.current?.({ continues, promotedTs })
+              onStreamEndRef.current?.({ continues, promotedTs, promotedMessage })
               if (continues) {
                 scheduleReconnect(() => connectRef.current?.(true), 150)
               }
@@ -685,7 +702,12 @@ export default function useStreamConnection(chatId, {
   const sendMessage = useCallback(async (
     text,
     attachments,
-    { hidden = false, queueOnly = false, answers = undefined } = {},
+    {
+      hidden = false,
+      queueOnly = false,
+      answers = undefined,
+      question_id = undefined,
+    } = {},
   ) => {
     // Answer submissions (hidden+answers) ride the EXISTING turn —
     // the runner is paused on the AskUserQuestion future and resumes
@@ -710,6 +732,7 @@ export default function useStreamConnection(chatId, {
       // user message — backend writes them into the question block
       // in the same transaction (see chats_stream.py).
       if (answers) body.answers = answers
+      if (question_id) body.question_id = question_id
       if (attachments && attachments.length > 0) {
         body.attachments = attachments
       }

@@ -101,6 +101,7 @@
   height: 100%;
   background: var(--bg); /* CONTRACT: opaque app-wide fill — must hide content beneath */
   position: relative;
+  overflow: hidden;
 }
 
 /* Empty state: centered in the available chat area, with a FIXED
@@ -127,6 +128,9 @@
 
 .chat__scroll {
   flex: 1;
+  width: calc(100% + 32px);
+  padding-right: 32px;
+  box-sizing: border-box;
   overflow-y: auto;
   overflow-x: hidden;
   -webkit-overflow-scrolling: touch;

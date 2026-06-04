@@ -35,6 +35,8 @@ SYSTEM_EVENT_TYPES: frozenset[str] = frozenset({
   "shell_rebuilding",
   "shell_rebuilt",
   "shell_rebuild_failed",
+  "chat_run_started",
+  "chat_run_finished",
 })
 
 

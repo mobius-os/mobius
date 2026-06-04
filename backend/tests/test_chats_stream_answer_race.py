@@ -78,6 +78,46 @@ def _seed_question_block(chat_id: str, question_id: str) -> None:
     db.close()
 
 
+def _seed_question_blocks(chat_id: str, question_ids: list[str]) -> None:
+  db = SessionLocal()
+  try:
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    chat.messages = [
+      {"role": "user", "content": "go", "ts": 1},
+      {
+        "role": "assistant",
+        "content": "",
+        "ts": 2,
+        "blocks": [
+          {
+            "type": "question",
+            "question_id": qid,
+            "questions": [
+              {"id": qid, "question": f"Question {qid}", "options": ["a", "b"]}
+            ],
+          }
+          for qid in question_ids
+        ],
+      },
+    ]
+    db.commit()
+  finally:
+    db.close()
+
+
+def _question_blocks(chat_id: str) -> list[dict]:
+  db = SessionLocal()
+  try:
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    return [
+      block
+      for block in (chat.messages[-1].get("blocks") or [])
+      if block.get("type") == "question"
+    ]
+  finally:
+    db.close()
+
+
 def test_answer_delivers_immediately_when_pending_registered(
   client, auth, chat,
 ):
@@ -117,6 +157,45 @@ def test_answer_delivers_immediately_when_pending_registered(
     assert elapsed < 0.25, (
       f"happy path waited unexpectedly long: {elapsed:.3f}s"
     )
+
+  asyncio.run(go())
+
+
+def test_answer_with_stale_question_id_returns_410_without_resolving_live(
+  client, auth, chat,
+):
+  """A stale card must not resolve whichever question is currently pending."""
+  async def go():
+    loop = asyncio.get_event_loop()
+    fut = loop.create_future()
+    pending = PendingQuestion(
+      question_id="q2",
+      questions=[
+        {"id": "q2", "question": "Question q2", "options": ["a", "b"]}
+      ],
+      future=fut,
+    )
+    questions.register(chat.id, pending)
+    _seed_question_blocks(chat.id, ["q1", "q2"])
+
+    res = client.post(
+      f"/api/chats/{chat.id}/messages",
+      json={
+        "content": "answer",
+        "hidden": True,
+        "answers": {"Question q1": "a"},
+        "question_id": "q1",
+      },
+      headers=auth,
+    )
+
+    assert res.status_code == 410, res.text
+    assert questions.get(chat.id) is pending
+    assert not fut.done()
+    blocks = _question_blocks(chat.id)
+    assert [b["question_id"] for b in blocks] == ["q1", "q2"]
+    assert all("answers" not in b for b in blocks)
+    questions.cancel(chat.id)
 
   asyncio.run(go())
 
