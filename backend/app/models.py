@@ -226,6 +226,16 @@ class App(Base):
   # between user-built apps and store-installed apps are tolerated
   # because allocate_unique_slug just picks the next free suffix.
   manifest_url = Column(String(1024), nullable=True, index=True)
+  # The manifest's declared version that is currently installed (e.g.
+  # "1.7.0"). Stamped on every clean install/update from the manifest;
+  # left unchanged on a per-app-git conflict (the served code stays at
+  # the old version). Null for user-built apps that never came through
+  # the install endpoint, and for rows installed before this column
+  # existed (they backfill on their next update). Exposed in AppOut so
+  # the store reads the installed version authoritatively rather than
+  # from a private side-map it can only populate for its own installs —
+  # which is what made out-of-band installs read as "version unknown".
+  version = Column(String(32), nullable=True, default=None)
   # User-uploaded icon for the standalone PWA install (PNG bytes).
   # Null means fall back to the auto-generated default (first letter
   # of `name` on a deterministic color). Stored inline because icons

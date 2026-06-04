@@ -93,6 +93,12 @@ class AppOut(BaseModel):
   # POST /api/apps/install). Null for user-built apps. The install
   # endpoint matches by this for update-vs-install discrimination.
   manifest_url: str | None = None
+  # The manifest version currently installed (e.g. "1.7.0"). Null for
+  # user-built apps and for rows installed before the column existed
+  # (they backfill on their next update). The store reads this to show
+  # "Installed · vX.Y.Z" and to detect when the catalog ships a newer
+  # version — see models.App.version.
+  version: str | None = None
   created_at: datetime
   updated_at: datetime
 
