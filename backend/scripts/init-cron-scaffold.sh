@@ -148,7 +148,7 @@ cat > "$INIT_PATH" <<INIT
 # delete path (_crontab_without_app) anchors on the command precisely.
 #
 # Capture the existing crontab ONCE and check rc. Piping a second live
-# `crontab -l` into the rewrite risks a transient empty read collapsing
+# crontab listing into the rewrite risks a transient empty read collapsing
 # the whole crontab to just this one line. On rc 0 the listing is
 # authoritative — keep every other line. On rc != 0 (no crontab yet, or
 # unreadable) install only this entry; the entrypoint replays every
@@ -169,7 +169,7 @@ echo "wrote $INIT_PATH"
 #    restart. Reuses the same script so install + replay logic match.
 bash "$INIT_PATH"
 
-mkdir -p /data/cron-logs
+mkdir -p "${DATA_DIR:-/data}/cron-logs"
 
 echo
 echo "Done. Verify with: crontab -u mobius -l"

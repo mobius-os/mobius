@@ -1,3 +1,7 @@
+import asyncio
+import sys
+from types import SimpleNamespace
+
 from pydantic import ValidationError
 
 from app.auth import encrypt_api_key, decrypt_api_key
@@ -193,6 +197,57 @@ def test_model_registry_returns_known_models_on_missing_creds(client, auth):
       f"got {entry!r}"
     )
   assert all(m["available"] for m in body["providers"]["claude"])
+
+
+def test_fetch_codex_models_uses_codex_home_env(tmp_path, monkeypatch):
+  """The installed Codex SDK no longer accepts AppServerConfig(codex_home=).
+
+  The chat path sets CODEX_HOME in the app-server env; the model registry
+  should do the same.
+  """
+  from app import providers
+
+  codex_home = tmp_path / "cli-auth" / "codex"
+  codex_home.mkdir(parents=True)
+  (codex_home / "auth.json").write_text("{}")
+
+  captured = {}
+
+  class FakeAppServerConfig:
+    def __init__(self, **kwargs):
+      captured.update(kwargs)
+
+  class FakeModel:
+    slug = "gpt-test"
+
+  class FakeCodex:
+    def __init__(self, config):
+      self.config = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *args):
+      return None
+
+    async def models(self):
+      return SimpleNamespace(models=[FakeModel()])
+
+  monkeypatch.setitem(
+    sys.modules, "openai_codex", SimpleNamespace(AsyncCodex=FakeCodex),
+  )
+  monkeypatch.setitem(
+    sys.modules, "openai_codex.client",
+    SimpleNamespace(AppServerConfig=FakeAppServerConfig),
+  )
+  monkeypatch.setattr(providers.shutil, "which", lambda _name: "/usr/bin/codex")
+
+  ids = asyncio.run(providers._fetch_codex_models(str(tmp_path)))
+
+  assert ids == ["gpt-test"]
+  assert "codex_home" not in captured
+  assert captured["codex_bin"] == "/usr/bin/codex"
+  assert captured["env"]["CODEX_HOME"] == str(codex_home)
 
 
 def test_model_prefs_default_empty(client, auth):
