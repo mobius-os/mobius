@@ -43,6 +43,8 @@ import { useState, useRef, useCallback } from 'react'
  *   add: (msg: PendingMsg) => void,
  *   swapOptimisticTs: (cid: string, serverTs: number, position?: number) => void,
  *   promoteByTs: (ts: number) => PendingMsg | null,
+ *   promoteAll: (ts: number) => PendingMsg | null,
+ *   promoteManyByTs: (tsList: number[]) => PendingMsg | null,
  *   cancelByTs: (ts: number) => void,
  *   cancelByCid: (cid: string) => void,
  *   hydrate: (serverList: Array<{ts: number, content: string, role?: string, attachments?: Array, position?: number}>) => void,
@@ -61,6 +63,7 @@ import { useState, useRef, useCallback } from 'react'
 export default function usePendingQueue() {
   const [pendingMessages, setPendingMessages] = useState([])
   const pendingMessagesRef = useRef([])
+  const consumedServerTsRef = useRef(new Set())
 
   // Internal helper: synchronously update both the ref and React
   // state. Every public operation funnels through this so the
@@ -81,6 +84,11 @@ export default function usePendingQueue() {
   }, [apply])
 
   const swapOptimisticTs = useCallback((cid, serverTs, position) => {
+    if (serverTs != null && consumedServerTsRef.current.has(serverTs)) {
+      consumedServerTsRef.current.delete(serverTs)
+      apply(prev => prev.filter(m => m.cid !== cid))
+      return
+    }
     apply(prev => prev.map(m => {
       if (m.cid !== cid) return m
       const next = { ...m, ts: serverTs ?? m.ts }
@@ -99,6 +107,79 @@ export default function usePendingQueue() {
     const rest = current.filter((_, i) => i !== idx)
     pendingMessagesRef.current = rest
     setPendingMessages(rest)
+    return promoted
+  }, [])
+
+  const promoteAll = useCallback((ts) => {
+    const current = pendingMessagesRef.current
+    if (current.length === 0) return null
+    const idx = ts != null
+      ? current.findIndex(m => m.ts === ts)
+      : 0
+    if (idx < 0) return null
+    const promotedGroup = current.slice(idx)
+    const kept = current.slice(0, idx)
+    const first = promotedGroup[0]
+    const attachments = []
+    const seenAttachments = new Set()
+    for (const msg of promotedGroup) {
+      for (const att of msg.attachments || []) {
+        const key = JSON.stringify([
+          att.name || att.filename || '',
+          att.url || att.path || '',
+          att.size || 0,
+          att.mime_type || att.type || '',
+        ])
+        if (seenAttachments.has(key)) continue
+        seenAttachments.add(key)
+        attachments.push(att)
+      }
+    }
+    const promoted = {
+      ...first,
+      content: promotedGroup.map(m => m.content || '').filter(Boolean).join('\n'),
+      ts: first.ts,
+    }
+    if (attachments.length > 0) promoted.attachments = attachments
+    else delete promoted.attachments
+    pendingMessagesRef.current = kept
+    setPendingMessages(kept)
+    return promoted
+  }, [])
+
+  const promoteManyByTs = useCallback((tsList) => {
+    const wanted = new Set((tsList || []).filter(ts => ts != null))
+    if (wanted.size === 0) return null
+    for (const ts of wanted) consumedServerTsRef.current.add(ts)
+    const current = pendingMessagesRef.current
+    const promotedGroup = current.filter(m => wanted.has(m.ts))
+    if (promotedGroup.length === 0) return null
+    const kept = current.filter(m => !wanted.has(m.ts))
+    const first = promotedGroup[0]
+    const attachments = []
+    const seenAttachments = new Set()
+    for (const msg of promotedGroup) {
+      for (const att of msg.attachments || []) {
+        const key = JSON.stringify([
+          att.name || att.filename || '',
+          att.url || att.path || '',
+          att.size || 0,
+          att.mime_type || att.type || '',
+        ])
+        if (seenAttachments.has(key)) continue
+        seenAttachments.add(key)
+        attachments.push(att)
+      }
+    }
+    const promoted = {
+      ...first,
+      content: promotedGroup.map(m => m.content || '').filter(Boolean).join('\n'),
+      ts: first.ts,
+    }
+    if (attachments.length > 0) promoted.attachments = attachments
+    else delete promoted.attachments
+    pendingMessagesRef.current = kept
+    setPendingMessages(kept)
     return promoted
   }, [])
 
@@ -132,6 +213,7 @@ export default function usePendingQueue() {
   }, [])
 
   const clear = useCallback(() => {
+    consumedServerTsRef.current.clear()
     pendingMessagesRef.current = []
     setPendingMessages([])
   }, [])
@@ -142,6 +224,8 @@ export default function usePendingQueue() {
     add,
     swapOptimisticTs,
     promoteByTs,
+    promoteAll,
+    promoteManyByTs,
     cancelByTs,
     cancelByCid,
     hydrate,

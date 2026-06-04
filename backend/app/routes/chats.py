@@ -207,6 +207,8 @@ def list_chats(
       "pinned_at": c.pinned_at.isoformat() if c.pinned_at else None,
       "has_messages": bool(c.messages and len(c.messages) > 0),
       "created_by_app_id": c.created_by_app_id,
+      "run_status": c.run_status,
+      "running": c.run_status == "running" or is_chat_running(c.id),
     }
     for c in chats
   ]
@@ -515,6 +517,7 @@ def get_chat(
     m.get("role") == "assistant" for m in all_msgs
   )
   provider = chat.provider or "claude"
+  pending_question = questions.get(chat_id)
   return {
     "id": chat.id,
     "title": chat.title,
@@ -523,6 +526,9 @@ def get_chat(
     "total": total,
     "offset": start,
     "running": is_chat_running(chat_id),
+    "pending_question_id": (
+      pending_question.question_id if pending_question is not None else None
+    ),
     "session_id": chat.session_id,
     "provider": provider,
     "agent_id": chat.agent_id,

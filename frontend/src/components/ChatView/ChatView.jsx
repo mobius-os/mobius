@@ -44,6 +44,7 @@ function sameBlock(a, b) {
       && a.content === b.content && a.tool === b.tool
       && a.input === b.input && a.output === b.output
       && a.questions === b.questions && a.answers === b.answers
+      && a.question_id === b.question_id
 }
 
 function sameMessageList(a, b) {
@@ -116,6 +117,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // (the model + effort picker inside the `+` popover). Stays null
   // until the fetch lands; the picker simply hides until then.
   const [chatInfo, setChatInfo] = useState(null)
+  const [liveQuestionId, setLiveQuestionId] = useState(() => cached?.pending_question_id ?? null)
 
   // Mirror `messages` in a ref so commitMessages can compute the next
   // value without putting a side-effect (setQueryData) inside a
@@ -132,6 +134,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // synchronous access (handleStop's pre-await clear, fetchMessages'
   // cid preservation).
   const pendingQueue = usePendingQueue()
+  const queuedContinuationLocalPromotedRef = useRef(null)
 
   // Single setter that updates local state AND the query cache.
   //
@@ -335,6 +338,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         }
       }
       commitMessages(msgs, data.offset || 0)
+      setLiveQuestionId(data.pending_question_id || null)
+      queryClient.setQueryData(chatMessagesQueryKey(chatId), (existing) => ({
+        ...(existing || {}),
+        pending_question_id: data.pending_question_id || null,
+      }))
       // Sync pending queue from server. usePendingQueue.hydrate
       // preserves the client-side cid for any entry whose ts already
       // exists locally (so QueuedMessages's expanded state doesn't
@@ -342,7 +350,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       // s-prefixed cid on previously-unseen server entries.
       pendingQueue.hydrate(data.pending_messages || [])
     } catch { /* network error — silent, user can retry */ }
-  }, [chatId, commitMessages, pendingQueue])
+  }, [chatId, commitMessages, pendingQueue, queryClient])
 
   const {
     streamItems,
@@ -356,18 +364,24 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     disconnect,
     clearStreamItems,
   } = useStreamConnection(chatId, {
-    onStreamEnd: ({ continues, promotedTs } = {}) => {
+    onStreamEnd: ({ continues, promotedMessage } = {}) => {
       promoteStreamToMessages()
       if (continues) {
-        // Backend auto-promoted the head of the pending queue into a
-        // new turn. Mirror that locally: the hook removes the entry
-        // matching the backend-authoritative ts (from
-        // queued_turn_starting) and returns it; we strip the queue-
-        // only fields and append it to messages so the user msg is
-        // visible alongside the incoming response.
-        const promoted = pendingQueue.promoteByTs(promotedTs)
+        // Backend auto-promoted the queued follow-ups into one combined
+        // new turn. The local queue was already trimmed when the
+        // queued_turn_starting event arrived, so a message queued after
+        // that event cannot be accidentally folded into this turn here.
+        const localPromoted = queuedContinuationLocalPromotedRef.current
+        queuedContinuationLocalPromotedRef.current = null
+        const promoted = promotedMessage || localPromoted
         if (promoted) {
-          const { queued: _q, cid: _c, position: _p, ...msg } = promoted
+          const {
+            queued: _q,
+            cid: _c,
+            position: _p,
+            _consumed_ts: _cts,
+            ...msg
+          } = promoted
           commitMessages(prev => [...prev, msg])
           promotedRef.current = false
           // Queued continuation is backend-initiated — the user may
@@ -391,6 +405,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         }
         setSending(true)
       } else {
+        queuedContinuationLocalPromotedRef.current = null
         setSending(false)
         // Stream ended without continuation. If we have local pending
         // entries, server may have cleared them (auth fail, error) —
@@ -399,11 +414,17 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           fetchMessages({ force: true })
         }
       }
-      onStreamEnd?.()
+      onStreamEnd?.({ continues })
     },
     onSystemEvent,
     onNeedsRefresh: fetchMessages,
-    onQueuedTurnStarting: () => {},
+    onQueuedTurnStarting: ({ ts, message } = {}) => {
+      const consumedTs = message?._consumed_ts
+      queuedContinuationLocalPromotedRef.current = Array.isArray(consumedTs)
+        ? pendingQueue.promoteManyByTs(consumedTs)
+        : pendingQueue.promoteAll(ts)
+    },
+    onLiveQuestion: setLiveQuestionId,
     onSteeredIntoTurn: ({ ts, content }) => {
       // A send was injected mid-turn into a live Codex turn (Codex
       // steering). The backend persisted the user message in the
@@ -454,7 +475,13 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     promotedRef.current = true
     const blocks = items.map(item => {
       if (item.type === 'text') return { type: 'text', content: item.content }
-      if (item.type === 'question') return { type: 'question', questions: item.questions }
+      if (item.type === 'question') {
+        return {
+          type: 'question',
+          questions: item.questions,
+          ...(item.question_id ? { question_id: item.question_id } : {}),
+        }
+      }
       if (item.type === 'error') return { type: 'error', message: item.message }
       const status = item.status === 'running' ? 'done' : item.status
       return { type: 'tool', ...item, status }
@@ -645,6 +672,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
         commitMessages(msgs, data.offset || 0)
         hadMessagesRef.current = msgs.length > 0
+        setLiveQuestionId(data.pending_question_id || null)
+        queryClient.setQueryData(chatMessagesQueryKey(chatId), (existing) => ({
+          ...(existing || {}),
+          pending_question_id: data.pending_question_id || null,
+        }))
         // Snapshot the per-chat runtime config so ChatSettingsPanel
         // (the model + effort picker in the `+` popover) renders
         // with the current effective model/effort. The initial
@@ -963,7 +995,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // POST /question-answers that could race with the GET on a mid-
   // stream remount, causing answers to disappear on first return
   // and reappear on the second.
-  const doSendSilent = useCallback(async (text, resolvedAnswers) => {
+  const doSendSilent = useCallback(async (text, resolvedAnswers, questionId) => {
     // Guard on refs, not render-time `sending`. A fast double-click
     // fires two handlers in the same tick before React commits the
     // setSending(true) below — both closures see `sending === false`
@@ -994,9 +1026,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         const lastIdx = updated.length - 1
         if (lastIdx >= 0 && updated[lastIdx].role === 'assistant') {
           const msg = { ...updated[lastIdx] }
-          msg.blocks = (msg.blocks || []).map(b =>
-            b.type === 'question' ? { ...b, answers: resolvedAnswers } : b
-          )
+          msg.blocks = (msg.blocks || []).map(b => {
+            if (b.type !== 'question') return b
+            if (questionId && b.question_id !== questionId) return b
+            return { ...b, answers: resolvedAnswers }
+          })
           updated[lastIdx] = msg
         }
         return updated
@@ -1021,15 +1055,22 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       await streamSend(text, undefined, {
         hidden: true,
         answers: resolvedAnswers,
+        question_id: questionId,
       })
+      if (questionId) setLiveQuestionId(prev => prev === questionId ? null : prev)
     } catch (err) {
       setSending(false)
+      if (err.message === 'HTTP 410') {
+        setLiveQuestionId(null)
+        fetchMessages({ force: true })
+        return
+      }
       commitMessages(prev => [
         ...prev,
         { role: 'assistant', content: `Error: ${err.message}`, blocks: [] },
       ])
     }
-  }, [streamSend, commitMessages])
+  }, [streamSend, commitMessages, fetchMessages])
 
   function handleSubmit(e) {
     e.preventDefault()
@@ -1165,7 +1206,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       // synchronously already.)
       sendingRef.current = false
       // pending + fetchGen were cleared/bumped BEFORE the await above.
-      onStreamEnd?.()
+      onStreamEnd?.({ continues: false })
 
       if (combined) {
         // doSend's guard reads sendingRef/isStreamingRef (just synced
@@ -1291,12 +1332,15 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                 && sending && streamItems.length > 0) {
               return null
             }
-            const hasQuestion = msg.role === 'assistant'
-              && msg.blocks?.some(b => b.type === 'question')
-            const questionBlock = hasQuestion
-              ? msg.blocks.find(b => b.type === 'question') : null
-            const questionAnswerable = hasQuestion && isLastMsg && !sending
-              && !questionBlock?.answers
+            const isQuestionAnswerable = (block) => (
+              msg.role === 'assistant'
+              && block?.type === 'question'
+              && isLastMsg
+              && !sending
+              && !block.answers
+              && !!liveQuestionId
+              && block.question_id === liveQuestionId
+            )
             // Stable per-message DOM key for the scroll state machine.
             // data-key is queried by applyMode when restoring an
             // ANCHOR_AT mode. msg.id (server-assigned UUID) is ideal;
@@ -1316,8 +1360,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
               <MsgContent
                 msg={msg}
                 chatId={chatId}
-                onQuestionAnswer={questionAnswerable ? doSendSilent : undefined}
-                questionAnswers={questionBlock?.answers}
+                onQuestionAnswer={doSendSilent}
+                isQuestionAnswerable={isQuestionAnswerable}
               />
               {msg.ts && msg.role === 'user' && (
                 <time className="chat__ts">

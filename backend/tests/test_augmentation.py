@@ -204,9 +204,9 @@ def test_multiple_queued_messages_ordered(client, db, auth, chat):
 
 def test_stale_pending_drains_on_fresh_send(client, db, auth, chat):
   """If pending exists but no run is active (e.g. server crashed
-  mid-turn), a fresh send must queue at the end AND kick off a run
-  that drains the queue from the head — not replace the queue with
-  the new message."""
+  mid-turn), a fresh send must append at the end AND kick off a run
+  that drains the queue into one combined turn — not replace the queue
+  with the new message."""
   from app.runner_registry import registry
 
   # Seed stale pending (simulating crash recovery).
@@ -228,15 +228,11 @@ def test_stale_pending_drains_on_fresh_send(client, db, auth, chat):
 
   try:
     assert resp.status_code == 202
-    assert resp.json()["status"] == "queued"
-    # New send is at the end of the queue.
-    assert resp.json()["position"] == 2  # 2 stale, one promoted, new + remaining
+    assert resp.json()["status"] == "started"
     db.refresh(chat)
-    # First stale was promoted to messages.
-    assert chat.messages[-1]["content"] == "stale 1"
-    # Remaining stale + new are in pending.
-    contents = [m["content"] for m in chat.pending_messages]
-    assert contents == ["stale 2", "new send"]
+    # Stale pending plus the new send were promoted into one ordered turn.
+    assert chat.messages[-1]["content"] == "stale 1\nstale 2\nnew send"
+    assert chat.pending_messages == []
     # Run was scheduled (gen bumped + starting marker set).
     assert chat.id in registry.all_alive_chat_ids()
   finally:
@@ -389,7 +385,7 @@ def test_pending_ts_strictly_unique_under_collision(client, db, auth, chat):
 
 
 def test_promote_pending_messages(db):
-  """_promote_pending_messages moves only the first pending into transcript."""
+  """_promote_pending_messages collapses pending sends into one turn."""
   import asyncio
   from app import models
   from app.chat_queue import promote_pending_messages as _promote_pending_messages
@@ -412,14 +408,12 @@ def test_promote_pending_messages(db):
   )
 
   db.refresh(chat)
-  # Only first pending promoted, second remains.
-  assert len(chat.pending_messages) == 1
-  assert chat.pending_messages[0]["content"] == "queued msg 2"
-  # First promoted to transcript.
+  assert chat.pending_messages == []
   assert len(chat.messages) == 2
-  assert chat.messages[1]["content"] == "queued msg 1"
+  assert chat.messages[1]["content"] == "queued msg 1\nqueued msg 2"
   # Returned values for next run.
-  assert next_user["content"] == "queued msg 1"
+  assert next_user["content"] == "queued msg 1\nqueued msg 2"
+  assert next_user["ts"] == 123
   assert session_id == "sess-1"
   assert len(next_msgs) == 2  # full history + new user msg
   # Promote does NOT claim _starting any more — caller manages it.
@@ -429,8 +423,8 @@ def test_promote_pending_messages(db):
   # messages were silently never promoted in production.
 
 
-def test_promote_drains_all_sequentially(db):
-  """Calling _promote_pending_messages repeatedly drains the queue one by one."""
+def test_promote_drains_all_at_once(db):
+  """Calling _promote_pending_messages drains the queue in one combined turn."""
   import asyncio
   from app import models
   from app.chat_queue import promote_pending_messages as _promote_pending_messages
@@ -450,21 +444,11 @@ def test_promote_drains_all_sequentially(db):
   db.commit()
 
   _, first, _ = asyncio.run(_promote_pending_messages(db, "drain-test", "rt-d1"))
-  assert first["content"] == "a"
-  db.refresh(chat)
-  assert len(chat.pending_messages) == 2
-
-  _, second, _ = asyncio.run(_promote_pending_messages(db, "drain-test", "rt-d2"))
-  assert second["content"] == "b"
-  db.refresh(chat)
-  assert len(chat.pending_messages) == 1
-
-  _, third, _ = asyncio.run(_promote_pending_messages(db, "drain-test", "rt-d3"))
-  assert third["content"] == "c"
+  assert first["content"] == "a\nb\nc"
   db.refresh(chat)
   assert len(chat.pending_messages) == 0
 
-  _, none_user, _ = asyncio.run(_promote_pending_messages(db, "drain-test", "rt-d4"))
+  _, none_user, _ = asyncio.run(_promote_pending_messages(db, "drain-test", "rt-d2"))
   assert none_user is None
 
 
@@ -632,15 +616,11 @@ def test_promote_and_append_dont_lose_messages(db):
     db.refresh(chat)
     transcript_contents = [m["content"] for m in chat.messages]
     pending_contents = [m["content"] for m in chat.pending_messages]
-    # Either ordering is OK as long as nothing is lost:
-    #   - promote first: messages=[head], pending=[late]
-    #   - append first: messages=[head], pending=[late]
-    # ("head" is always promoted because it was the first in pending,
-    # regardless of when "late" was appended.)
-    assert "head" in transcript_contents
-    assert "late" in pending_contents or "late" in transcript_contents
-    # Total entries must equal what we put in (1 seeded + 1 appended).
-    assert len(transcript_contents) + len(pending_contents) == 2
+    all_contents = "\n".join(transcript_contents + pending_contents)
+    assert "head" in all_contents
+    assert "late" in all_contents
+    assert all_contents.count("head") == 1
+    assert all_contents.count("late") == 1
   finally:
     registry.discard_starting("race-test")
     registry.forget("race-test")

@@ -62,6 +62,23 @@ def _seed_chat(chat_id="c1", messages=None, pending=None, session_id="sess-1"):
   return chat_id
 
 
+def _seed_app(app_id=42):
+  db = SessionLocal()
+  try:
+    app = models.App(
+      id=app_id,
+      name=f"App {app_id}",
+      description="",
+      jsx_source="export default function App() { return null }",
+      compiled_path="",
+    )
+    db.add(app)
+    db.commit()
+  finally:
+    db.close()
+  return app_id
+
+
 def _load_chat(chat_id="c1"):
   """Read a fresh copy of the Chat row through a separate session.
 
@@ -83,6 +100,22 @@ def _load_chat(chat_id="c1"):
       "title": chat.title,
       "run_status": chat.run_status,
       "run_started_at": chat.run_started_at,
+    }
+  finally:
+    db.close()
+
+
+def _load_run(run_token):
+  db = SessionLocal()
+  try:
+    run = db.query(models.ChatRun).filter(models.ChatRun.id == run_token).first()
+    if run is None:
+      return None
+    return {
+      "id": run.id,
+      "chat_id": run.chat_id,
+      "status": run.status,
+      "initiated_by_app_id": run.initiated_by_app_id,
     }
   finally:
     db.close()
@@ -433,7 +466,8 @@ def test_concurrent_append_cancel_promote_preserve_order(actor):
   assert len(set(stored_ts)) == len(stored_ts)
   chat = _load_chat()
   assert len(chat["pending_messages"]) == 6
-  # Cancel one and promote the head concurrently — neither loses the other.
+  # Cancel one and promote the queued follow-ups concurrently — neither loses
+  # the cancellation nor a queued send.
   cancel_ts = stored_ts[3]
   cf = actor.submit(CancelPending(chat_id="c1", run_token="rt1", ts=cancel_ts))
   pf = actor.submit(PromotePending(chat_id="c1", run_token="rt1"))
@@ -442,10 +476,10 @@ def test_concurrent_append_cancel_promote_preserve_order(actor):
   assert promoted["promoted"] is not None
   chat = _load_chat()
   remaining_ts = [m["ts"] for m in chat["pending_messages"]]
-  # The cancelled ts is gone, the promoted head is gone, the rest survive.
   assert cancel_ts not in remaining_ts
-  assert promoted["promoted"]["ts"] not in remaining_ts
-  assert len(chat["pending_messages"]) == 4
+  assert chat["pending_messages"] == []
+  assert "m0" in promoted["promoted"]["content"]
+  assert "m3" not in promoted["promoted"]["content"]
 
 
 # -- 7. StartTurn atomic --------------------------------------------------
@@ -494,10 +528,9 @@ def test_persist_session_id_updates_chat_without_touching_transcript(actor):
   assert chat["run_status"] is None
 
 
-# -- 8. PromotePending moves one head -------------------------------------
-def test_promote_pending_moves_exactly_one_head(actor):
-  """PromotePending moves only the queue head into the transcript and marks
-  the run; the rest of the queue stays put."""
+# -- 8. PromotePending collapses queued follow-ups ------------------------
+def test_promote_pending_collapses_all_followups(actor):
+  """PromotePending combines queued follow-ups into one transcript turn."""
   _seed_chat(
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[
@@ -506,11 +539,43 @@ def test_promote_pending_moves_exactly_one_head(actor):
     ],
   )
   result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
-  assert result["promoted"]["content"] == "first"
+  assert result["promoted"]["content"] == "first\nsecond"
+  assert result["promoted"]["ts"] == 10
   chat = _load_chat()
-  assert chat["messages"][-1]["content"] == "first"
-  assert [m["content"] for m in chat["pending_messages"]] == ["second"]
+  assert chat["messages"][-1]["content"] == "first\nsecond"
+  assert chat["pending_messages"] == []
   assert chat["run_status"] == "running"
+
+
+def test_promote_pending_uses_first_queued_actor_for_run_attribution(actor):
+  """Collapsed queued turns inherit the first queued message's actor.
+
+  An owner follow-up in an app-owned chat carries no app id; an app follow-up
+  carries its app id.  The metadata is consumed into ChatRun and must not leak
+  into the promoted transcript message.
+  """
+  app_id = _seed_app()
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[
+      {
+        "role": "user",
+        "content": "from app",
+        "ts": 10,
+        "_initiated_by_app_id": app_id,
+      },
+      {"role": "user", "content": "also queued", "ts": 11},
+    ],
+  )
+  result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
+  assert result["promoted"]["content"] == "from app\nalso queued"
+  assert result["promoted"]["_consumed_ts"] == [10, 11]
+  assert "_initiated_by_app_id" not in result["promoted"]
+  chat = _load_chat()
+  assert "_initiated_by_app_id" not in chat["messages"][-1]
+  assert "_consumed_ts" not in chat["messages"][-1]
+  run = _load_run("rt1")
+  assert run["initiated_by_app_id"] == app_id
 
 
 def test_promote_pending_empty_queue_is_noop(actor):

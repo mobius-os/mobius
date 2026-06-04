@@ -929,18 +929,15 @@ let _embedSeq = 0
 
 function makeChat({ appId, getToken }) {
   // Lazily create a chat the agent turn can be attributed to, via the
-  // app-attributed backend contract (design §1.1: POST /api/chats gated
-  // by get_principal so an app token is accepted and the row is stamped
-  // created_by_app_id). DEPENDENCY: that gating is built by the backend
-  // capability-A work; until it lands, app tokens are rejected by
-  // /api/chats and this returns null (the embed then shows its no-chat
-  // notice). Owner-token callers already work today.
+  // app-attributed backend contract (design §1.1: POST /api/app-chats).
+  // The ordinary /api/chats create route is owner-only and intentionally
+  // leaves created_by_app_id NULL.
   async function createChat(opts) {
     const token = await getToken()
     // Root-relative, same as storage above — the app frame is same-origin
-    // with the shell, so /api/chats resolves regardless of the deploy
+    // with the shell, so /api/app-chats resolves regardless of the deploy
     // prefix the browser uses for the embed iframe src.
-    const res = await fetch('/api/chats', {
+    const res = await fetch('/api/app-chats', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -958,9 +955,14 @@ function makeChat({ appId, getToken }) {
         ...(opts && opts.provider ? { provider: opts.provider } : {}),
       }),
     })
-    if (!res.ok) return null
+    if (!res.ok) {
+      throw new Error(`window.mobius.chat: create failed (${res.status})`)
+    }
     const data = await res.json()
-    return data && data.id ? String(data.id) : null
+    if (!data || !data.id) {
+      throw new Error('window.mobius.chat: create failed (missing chat id)')
+    }
+    return String(data.id)
   }
 
   // Open the embed in a nested iframe inside `mount` (an element the app

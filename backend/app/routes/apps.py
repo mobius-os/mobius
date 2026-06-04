@@ -507,6 +507,9 @@ async def create_app(
       db.rollback()
       raise HTTPException(status_code=422, detail=str(exc))
     db.refresh(app)
+    get_system_broadcast().publish(
+      {"type": "app_updated", "appId": str(app.id)}
+    )
   return app
 
 
@@ -608,6 +611,9 @@ async def update_app(
     else:
       await _recompile_and_commit(app)
     db.refresh(app)
+    get_system_broadcast().publish(
+      {"type": "app_updated", "appId": str(app.id)}
+    )
   return app
 
 

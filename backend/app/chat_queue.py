@@ -12,7 +12,7 @@ lock used to guard is closed at the source — the actor is the sole
 runtime mutator of the blob.
 
 What `get_lock` still guards is the asyncio-side COMPOUND decision the
-turn-end drain makes: "promote the head AND, if nothing was promoted,
+turn-end drain makes: "promote queued follow-ups AND, if nothing was promoted,
 release the `_starting` claim + forget the chat" must be one atomic
 critical section against a racing POST that checks `is_chat_running` and
 takes the start path. That handoff is loop-state bookkeeping, not the DB
@@ -35,7 +35,7 @@ Lock-storage correctness invariants:
     chat — silently re-racing the _starting handoff.
 
 `drain_and_release` is a composite primitive: take the lock,
-promote the head of the queue (via the actor), and if the queue was
+promote queued follow-ups (via the actor), and if the queue was
 empty release the `_starting` claim and forget the chat — all under one
 lock acquisition. It does NOT call back into `run_chat`; the caller
 (chat.py:_run_chat_impl) schedules the continuation AFTER the lock
@@ -47,7 +47,7 @@ leaves `run_status=None` with a non-empty queue. Boot reconciliation
 (which only scans `run_status="running"`) deliberately does NOT consume
 these — auto-promoting at startup would spawn a turn after a crash. The
 repair path is the NEXT POST's stale-pending drain: it claims
-`mark_starting` and promotes the head. Reconciliation only logs a warning
+`mark_starting` and promotes queued follow-ups. Reconciliation only logs a warning
 so an accumulating queue is visible (see `reconcile_interrupted_chats`).
 """
 
@@ -145,7 +145,7 @@ async def promote_pending_messages_locked(
 
   Routes the promote through the single-writer actor's `PromotePending`
   command (C2): the actor — the SOLE runtime mutator of the JSON blobs —
-  builds the next-turn history, moves the queue head into the transcript,
+  builds the next-turn history, moves queued follow-ups into the transcript,
   sets the run marker, and commits, all under `(chat_id, run_token)`. The
   ack is awaited (commit-before-ack) so the caller sees the promote land
   before it schedules the continuation. The asyncio queue lock still
@@ -156,10 +156,10 @@ async def promote_pending_messages_locked(
   `db` is unused now (the actor owns the write through its own session)
   but kept in the signature so the two callers' shape is unchanged.
 
-  Returns (next_messages, first_pending, session_id) on success.
+  Returns (next_messages, promoted_message, session_id) on success.
   Returns ([], None, session_id) when the pending queue is empty. Raises
   if the actor ack fails — missing row / dropped commit / a MALFORMED
-  queue head (the actor leaves the queue intact and fails the ack rather
+  pending entry (the actor leaves the queue intact and fails the ack rather
   than returning promoted=None, which would be indistinguishable from an
   empty queue and let the caller clear the marker on stranded work) — so
   the turn-end caller surfaces a transport error / leaves the marker
@@ -188,7 +188,7 @@ async def promote_pending_messages(
   chat_id: str,
   run_token: str,
 ) -> tuple[list[schemas.ChatMessage], dict | None, str | None]:
-  """Atomically promotes the head of the pending queue into the
+  """Atomically promotes queued follow-ups into the
   transcript via the writer actor.
 
   Held under the per-chat queue lock so the _starting handoff doesn't
@@ -235,9 +235,9 @@ async def drain_and_release(
 
   Under ONE bounded per-chat queue lock acquisition
   (`asyncio.timeout(TERMINAL_LOCK_TIMEOUT_SECS)` around `get_lock`):
-    - Promotes the head of pending_messages (if any) via the actor's
+    - Promotes pending_messages (if any) via the actor's
       `PromotePending` (keyed on `run_token`, the continuation's token).
-      A promoted head → `CONTINUATION_PROMOTED`: the marker stays
+      Promoted follow-ups → `CONTINUATION_PROMOTED`: the marker stays
       continuously set (PromotePending re-set it for the next turn) and
       ownership passes to the scheduled continuation; do NOT clear/forget.
     - If nothing to promote AND we_own_gen, clears the durable run marker
@@ -268,7 +268,7 @@ async def drain_and_release(
   `asyncio.timeout(TERMINAL_LOCK_TIMEOUT_SECS)`. A lock-acquisition timeout
   (another task holds the lock past the bound) OR a failed strict ack
   (PromotePending / ClearRunStatus didn't land, timed out, or hit a
-  malformed queue head) raises out of this function; the caller maps that
+  malformed pending entry) raises out of this function; the caller maps that
   to `FAILED_LEAVE_MARKER`, leaving the marker set for reconciliation
   rather than scheduling a continuation / clearing on a lost write.
 
