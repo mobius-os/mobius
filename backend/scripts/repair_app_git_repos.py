@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -65,6 +66,37 @@ def _is_safe_source_dir(source_dir: Path, data_dir: Path) -> tuple[bool, str]:
   return True, str(resolved)
 
 
+def _root_apply_warning(source_dir: Path) -> str | None:
+  """Warn before root creates a .git dir in a mobius-owned app source tree."""
+  if not hasattr(os, "geteuid") or os.geteuid() != 0:
+    return None
+  try:
+    owner_uid = source_dir.stat().st_uid
+  except OSError as exc:
+    return f"cannot stat source_dir owner: {exc}"
+  if owner_uid == 0:
+    return None
+  return (
+    "refusing to initialize repo as root in non-root-owned source_dir; "
+    "run with `docker exec -u mobius mobius python -m "
+    "scripts.repair_app_git_repos --data-dir /data --apply --yes`"
+  )
+
+
+def _repo_health(source_dir: Path) -> tuple[bool, str]:
+  """Return whether an existing .git dir is usable from this process."""
+  try:
+    top = app_git._run(
+      source_dir, "rev-parse", "--show-toplevel",
+    ).stdout.strip()
+  except subprocess.CalledProcessError as exc:
+    detail = (exc.stderr or exc.stdout or str(exc)).strip()
+    return False, detail
+  if top != str(source_dir.resolve()):
+    return False, f"repo toplevel {top!r} does not match source_dir"
+  return True, "repo exists"
+
+
 def _app_rows(db, source_dirs: set[str] | None) -> list[models.App]:
   query = (
     db.query(models.App)
@@ -100,8 +132,14 @@ def _audit_or_repair_app(
 
   has_repo = app_git.is_repo(source_dir)
   if has_repo:
+    repo_ok, repo_detail = _repo_health(source_dir)
+    if not repo_ok:
+      return AuditRow(
+        app.id, slug, str(source_dir), "manual",
+        f"repo exists but is not usable: {repo_detail}",
+      )
     if app.upstream_commit:
-      return AuditRow(app.id, slug, str(source_dir), "ok", "repo exists")
+      return AuditRow(app.id, slug, str(source_dir), "ok", repo_detail)
     return AuditRow(
       app.id, slug, str(source_dir), "manual",
       "repo exists but DB upstream_commit is empty; not rewriting existing repo",
@@ -118,6 +156,10 @@ def _audit_or_repair_app(
       app.id, slug, str(source_dir), "would-repair",
       "missing nested .git; would seed current index.jsx as migrated-base",
     )
+
+  root_warning = _root_apply_warning(source_dir)
+  if root_warning:
+    return AuditRow(app.id, slug, str(source_dir), "manual", root_warning)
 
   base_bytes = index.read_bytes()
   app_git.record_upstream(
