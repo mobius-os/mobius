@@ -32,6 +32,7 @@ from app.chat_writer import (
   ClearRunStatus,
   Finalize,
   PersistError,
+  PersistSessionId,
   PersistTranscript,
   PromotePending,
   QuestionCommit,
@@ -475,6 +476,22 @@ def test_start_turn_is_atomic(actor):
   assert chat["provider"] == "codex"
   assert chat["run_status"] == "running"
   assert chat["run_started_at"] is not None
+
+
+def test_persist_session_id_updates_chat_without_touching_transcript(actor):
+  """Provider session ids are persisted before terminal turn completion."""
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    session_id=None,
+  )
+  result = _await(actor.submit(
+    PersistSessionId(chat_id="c1", session_id="thread-early")
+  ))
+  assert result is True
+  chat = _load_chat()
+  assert chat["session_id"] == "thread-early"
+  assert chat["messages"] == [{"role": "user", "content": "hi", "ts": 1}]
+  assert chat["run_status"] is None
 
 
 # -- 8. PromotePending moves one head -------------------------------------

@@ -3,7 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import codex_sdk_runner
+from app import codex_sdk_runner, models
+from app.database import SessionLocal
 from app.runner_registry import RunnerKind, registry
 
 
@@ -522,6 +523,68 @@ def test_run_codex_sdk_turn_error_notification_will_retry_continues(monkeypatch)
     {"type": "text", "content": "still running"},
   ]
   assert registry.get_handle("chat-1", RunnerKind.CODEX_SDK) is None
+
+
+def test_run_codex_sdk_turn_persists_thread_id_before_terminal_result(
+  monkeypatch,
+):
+  sdk = _fake_sdk(object)
+  completed_turn = SimpleNamespace(id="turn-1", usage=None, error=None)
+  turn_handle = _FakeTurnHandle([
+    SimpleNamespace(
+      method="turn/completed",
+      payload=_FakeTurnCompletedNotification(completed_turn),
+    ),
+  ])
+  thread = _FakeThread("thread-early", turn_handle)
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_start(self, *_args, **_kwargs):
+      return thread
+
+  sdk["AsyncCodex"] = FakeAsyncCodex
+  monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
+
+  db = SessionLocal()
+  try:
+    db.add(models.Chat(
+      id="chat-early",
+      title="t",
+      messages=[],
+      pending_messages=[],
+      provider="codex",
+      session_id=None,
+    ))
+    db.commit()
+
+    result = asyncio.run(
+      codex_sdk_runner.run_codex_sdk_turn(
+        user_message="hello",
+        session_id=None,
+        base_env={},
+        cwd="/tmp",
+        chat_id="chat-early",
+        bc=_FakeBroadcast(),
+        pending_questions={},
+        db=db,
+      )
+    )
+
+    assert result["session_id"] == "thread-early"
+    db.expire_all()
+    chat = db.query(models.Chat).filter(models.Chat.id == "chat-early").first()
+    assert chat.session_id == "thread-early"
+  finally:
+    db.close()
 
 
 def test_run_codex_sdk_turn_error_notification_fatal_raises(monkeypatch):

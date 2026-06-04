@@ -74,6 +74,25 @@ from app.runner_registry import RunnerKind, registry
 log = logging.getLogger("moebius.chat")
 
 
+async def _persist_session_id(db, chat_id: str, session_id: str | None) -> None:
+  """Best-effort early persistence for provider resume continuity."""
+  if db is None or not chat_id or not session_id:
+    return
+  try:
+    from app.chat_writer import PersistSessionId, await_ack, get_writer
+    ack = get_writer().submit(
+      PersistSessionId(chat_id=chat_id, session_id=session_id)
+    )
+    await await_ack(ack)
+  except Exception:
+    log.warning(
+      "Codex session id persistence failed chat_id=%s session_id=%s",
+      chat_id,
+      session_id,
+      exc_info=True,
+    )
+
+
 class ActiveCodexTurn:
   """Stop + steer handle stored in `chat._active_sessions` for Codex turns.
 
@@ -822,6 +841,7 @@ async def run_codex_sdk_turn(
         )
 
       current_session_id = thread.id
+      await _persist_session_id(db, chat_id, current_session_id)
       if session_id is not None and current_session_id != session_id:
         error_text = (
           "Codex resume returned a different session id "

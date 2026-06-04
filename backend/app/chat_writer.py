@@ -189,6 +189,20 @@ class AnswerQuestion(_Command):
   answers: dict = field(default_factory=dict)
 
 
+@dataclass
+class PersistSessionId(_Command):
+  """Persist the provider session/thread id as soon as it is known.
+
+  A turn can be interrupted by a process restart before it reaches the normal
+  terminal-result path in `chat.py` that saves `Chat.session_id`. Persisting
+  the id during SDK initialization lets the next user send resume the provider
+  session after startup reconciliation appends the "server restarted" error.
+  """
+
+  chat_id: str = ""
+  session_id: str = ""
+
+
 # -- queue + turn commands (the JSON-blob RMW the actor owns) ------------
 # These own the read-modify-write of the chat's `messages` /
 # `pending_messages` blobs: initial-send (`StartTurn`, from
@@ -1101,6 +1115,8 @@ class ChatWriterActor:
       return True
     if isinstance(cmd, AnswerQuestion):
       return self._answer_question(db, cmd)
+    if isinstance(cmd, PersistSessionId):
+      return self._persist_session_id(db, cmd)
     if isinstance(cmd, StartTurn):
       return self._start_turn(db, cmd)
     if isinstance(cmd, AppendPending):
@@ -1202,6 +1218,30 @@ class ChatWriterActor:
       raise _PersistFailed("AnswerQuestion: no matching question block")
     if not _commit_or_rollback(db):
       raise _PersistFailed("AnswerQuestion did not persist")
+    return True
+
+  def _persist_session_id(self, db, cmd: PersistSessionId) -> bool:
+    """Save the chat's provider session/thread id without touching transcript.
+
+    This is intentionally not a broad fence: it updates only the scalar
+    `session_id` column, and the actor expires its identity map before each
+    command so later JSON-blob writes see the fresh scalar value.
+    """
+    if not cmd.chat_id or not cmd.session_id:
+      return False
+    from app.models import Chat
+
+    chat = db.query(Chat).filter(
+      Chat.id == cmd.chat_id,
+      Chat.deleted_at.is_(None),
+    ).first()
+    if chat is None:
+      raise _PersistFailed("PersistSessionId: chat not found or deleted")
+    if chat.session_id == cmd.session_id:
+      return True
+    chat.session_id = cmd.session_id
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("PersistSessionId did not persist")
     return True
 
   def _start_turn(self, db, cmd: StartTurn) -> dict:
