@@ -11,6 +11,9 @@ second still bust the icon cache).
 
 import re
 
+from app import models
+from app.database import SessionLocal
+
 
 def _create_app(client, owner_token, name):
   r = client.post(
@@ -59,3 +62,23 @@ def test_icon_version_is_microsecond_resolution(client, owner_token):
   # be ~1.7e9. This locks in the resolution bump that prevents
   # same-second collisions between a name PATCH and an icon PUT.
   assert int(m.group(1)) > 10**15, src
+
+
+def test_manifest_and_loading_shell_use_app_declared_colors(client, owner_token):
+  app = _create_app(client, owner_token, "Atlas")
+  db = SessionLocal()
+  try:
+    row = db.query(models.App).filter(models.App.id == app["id"]).one()
+    row.theme_color = "#223344"
+    row.background_color = "#101820"
+    db.commit()
+  finally:
+    db.close()
+
+  manifest = client.get(f"/apps/{app['slug']}/manifest.json").json()
+  assert manifest["theme_color"] == "#223344"
+  assert manifest["background_color"] == "#101820"
+
+  shell = client.get(f"/apps/{app['slug']}/")
+  assert shell.status_code == 200
+  assert "--bg: #101820;" in shell.text
