@@ -28,7 +28,7 @@ import QuestionCard from './QuestionCard.jsx'
  *   (latestItemsRef's render mirror): text/tool/question/error.
  * @param {string|undefined} props.dataKey  ChatView's
  *   `streamingDataKey` (BRIDGE-only; undefined for multi-turn).
- * @param {(text: string, resolvedAnswers: object) => void} props.onAnswer
+ * @param {(text: string, resolvedAnswers: object, questionId?: string) => void} props.onAnswer
  *   doSendSilent — submits an AskUserQuestion answer as a hidden
  *   user message. The card is clickable even mid-stream because the
  *   runner is paused on the AskUserQuestion future.
@@ -58,6 +58,7 @@ export default function StreamingMessage({ streamItems, dataKey, onAnswer }) {
             <div key={`s-${i}`}>
               <QuestionCard
                 questions={item.questions}
+                questionId={item.question_id}
                 onAnswer={onAnswer}
               />
             </div>

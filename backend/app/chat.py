@@ -27,6 +27,7 @@ from app.broadcast import (
   clear_active_broadcast_if,
   create_broadcast,
   get_broadcast,
+  get_system_broadcast,
   set_active_broadcast,
 )
 from app.chat_writer import (
@@ -856,6 +857,14 @@ def _finalize_broadcast_if_running(chat_id: str) -> None:
     bc.mark_completed()
 
 
+def _publish_chat_run_finished(chat_id: str) -> None:
+  if chat_id:
+    get_system_broadcast().publish({
+      "type": "chat_run_finished",
+      "chatId": chat_id,
+    })
+
+
 def is_chat_running(chat_id: str) -> bool:
   """Returns True if an agent subprocess is running or starting for this chat."""
   if registry.is_alive(chat_id):
@@ -1322,6 +1331,7 @@ async def _complete_turn(
     clear_active_broadcast_if(bc)
     bc.publish({"type": "done"})
     bc.mark_completed()
+    _publish_chat_run_finished(chat_id)
     if close_browser:
       await _close_browser_session(chat_id)
     db.close()
@@ -1378,20 +1388,28 @@ async def _complete_turn(
     })
     bc.publish({"type": "done"})
     bc.mark_completed()
+    _publish_chat_run_finished(chat_id)
     if close_browser:
       await _close_browser_session(chat_id)
     db.close()
     return chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
 
   if next_user:
+    get_system_broadcast().publish({
+      "type": "chat_run_started",
+      "chatId": chat_id,
+    })
     bc.publish({
       "type": "queued_turn_starting",
       "ts": next_user.get("ts"),
+      "message": next_user,
     })
   # Any error event was already broadcast via sink.publish before
   # finalize; don't re-emit it here (it would double-deliver).
   bc.publish({"type": "done", "cost_usd": cost_usd})
   bc.mark_completed()
+  if not next_user:
+    _publish_chat_run_finished(chat_id)
   if next_user:
     _schedule_continuation(
       chat_id=chat_id,
@@ -1495,6 +1513,68 @@ def _build_time_context(timezone: str | None, elapsed: str | None = None) -> str
   stamp = now.strftime("%a %Y-%m-%d %H:%M")
   gap = f"; user's last message was {elapsed}" if elapsed else ""
   return f"[Context — current time: {stamp} ({timezone or 'UTC'}){gap}]"
+
+
+def _build_app_context(
+  db: Session,
+  chat_id: str,
+  data_dir: str,
+) -> tuple[str | None, dict[str, str]]:
+  """Return per-app chat context and environment for app-attributed chats.
+
+  Embedded app chats need the agent to know which app invoked it and where
+  that app's editable source lives. The chat row already carries
+  `created_by_app_id`; this turns that attribution into prompt context.
+  """
+  if not chat_id:
+    return None, {}
+  chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+  if chat is None or chat.created_by_app_id is None:
+    return None, {}
+  app = db.query(models.App).filter(
+    models.App.id == chat.created_by_app_id
+  ).first()
+  if app is None:
+    return None, {}
+
+  data_root = Path(data_dir)
+  source_dir = Path(app.source_dir) if app.source_dir else (
+    data_root / "apps" / (app.slug or str(app.id))
+  )
+  storage_dir = data_root / "apps" / str(app.id)
+  primary_file = source_dir / "index.jsx"
+  scripts = [
+    name for name in ("fetch.sh", "build.sh", "job.sh")
+    if (source_dir / name).exists()
+  ]
+  description = (app.description or "").strip()
+  lines = [
+    "The <app_context> block below is private context for this embedded app chat.",
+    "The user is asking from inside this app. Prefer fixing or inspecting this app before unrelated files.",
+    "",
+    "<app_context>",
+    f"App id: {app.id}",
+    f"App name: {app.name}",
+  ]
+  if description:
+    lines.append(f"Description: {description[:1000]}")
+  lines.extend([
+    f"Source directory: {source_dir}",
+    f"Primary JSX file: {primary_file}",
+    f"App storage directory: {storage_dir}",
+    f"Registered chat id: {app.chat_id or ''}",
+    f"Available app scripts: {', '.join(scripts) if scripts else 'none detected'}",
+    "When changing this app, edit files under the source directory and use the existing register/build workflow.",
+    "</app_context>",
+  ])
+  env = {
+    "APP_ID": str(app.id),
+    "APP_NAME": app.name or "",
+    "APP_SOURCE_DIR": str(source_dir),
+    "APP_PRIMARY_FILE": str(primary_file),
+    "APP_STORAGE_DIR": str(storage_dir),
+  }
+  return "\n".join(lines), env
 
 
 def _is_cli_slash_command(text: str) -> bool:
@@ -1691,6 +1771,10 @@ async def _run_chat_impl(
   if run_token is None:
     run_token = alloc_run_token()
 
+  app_context_block, app_context_env = _build_app_context(
+    db, chat_id, settings.data_dir,
+  )
+
   # Durable run marker: the turn's StartTurn (initial send) or
   # PromotePending (continuation / stale-pending drain) writer-actor
   # command ALREADY set run_status="running" atomically with the
@@ -1772,6 +1856,12 @@ async def _run_chat_impl(
       else:
         user_message = f"{experience_block}\n\n{user_message}"
 
+  if app_context_block:
+    if is_slash_command:
+      user_message = f"{user_message}\n\n{app_context_block}"
+    else:
+      user_message = f"{app_context_block}\n\n{user_message}"
+
   # Per-turn time context (EVERY turn, not just the first) so the agent has a
   # clock + a sense of recency (how long since the user last wrote). Prepended
   # last so it leads the message the agent sees; only the agent's copy is
@@ -1803,6 +1893,8 @@ async def _run_chat_impl(
     bc.publish({"type": "done"})
     clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
     bc.mark_completed()
+    if disposition is not chat_queue.TerminalDisposition.STALE_NO_ACTION:
+      _publish_chat_run_finished(chat_id)
     # Close the session before bailing — every other terminal path in
     # run_chat closes explicitly, and a misconfigured instance hitting
     # this branch on every turn would otherwise leak a connection each
@@ -1831,6 +1923,7 @@ async def _run_chat_impl(
     "SCRIPTS_DIR": str(scripts_dir),
     "CHAT_ID": chat_id,
   })
+  base_env.update(app_context_env)
   # Partner viewport (sent by the React shell on each turn). The agent
   # uses these when taking screenshots so the framing matches what the
   # partner actually sees — preview_shell.sh reads them, mini-app
@@ -1962,6 +2055,8 @@ async def _run_chat_impl(
     bc.publish({"type": "done"})
     clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
     bc.mark_completed()
+    if disposition is not chat_queue.TerminalDisposition.STALE_NO_ACTION:
+      _publish_chat_run_finished(chat_id)
     db.close()
     return disposition
   data_dir = Path(settings.data_dir)
@@ -2109,6 +2204,8 @@ async def _run_chat_impl(
   clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
   bc.publish({"type": "done"})
   bc.mark_completed()
+  if disposition is not chat_queue.TerminalDisposition.STALE_NO_ACTION:
+    _publish_chat_run_finished(chat_id)
   await _close_browser_session(chat_id)
   db.close()
   return disposition

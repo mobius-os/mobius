@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import Drawer from '../Drawer/Drawer.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
@@ -78,39 +78,59 @@ export default function Shell() {
     && walkthroughQuery.data
     && !walkthroughQuery.data.completed
 
-  // Set of chat ids whose agent is currently streaming. Used to drive
-  // the pulsing dot next to the row in the drawer. ChatView's
-  // onStreamStart / onStreamEnd callbacks add and remove entries.
-  // Only the active chat's ChatView is mounted at a time, so this is
-  // a 0-or-1-element set in practice; switching chats while a turn is
-  // in flight removes the previous chat's id (ChatView unmount) — an
-  // honest limitation of single-mount ChatView. Surfacing background
-  // streaming for chats with no mounted ChatView would require a
-  // shell-level SSE on chat lifecycle events, which is out of scope
-  // here (the directive: "no new SSE subscriptions or polling").
-  const [streamingChatIds, setStreamingChatIds] = useState(() => new Set())
+  // Local streaming ids come from the mounted ChatView immediately at send
+  // time. The computed streamingChatIds below merges those with durable
+  // `running` flags from /api/chats, so drawer dots survive navigation,
+  // reloads, and PWA reopen even when the streaming ChatView is unmounted.
+  // attentionChatIds is separate: it marks a background-finished chat until
+  // the user opens it, without pretending the turn is still streaming.
+  const [localStreamingChatIds, setLocalStreamingChatIds] = useState(() => new Set())
+  const [attentionChatIds, setAttentionChatIds] = useState(() => new Set())
+  const streamingChatIds = useMemo(() => {
+    const next = new Set(localStreamingChatIds)
+    for (const chat of chats) {
+      if (chat.running || chat.run_status === 'running') next.add(chat.id)
+    }
+    return next
+  }, [localStreamingChatIds, chats])
 
   // Stable callbacks for ChatView — identity must not change across
   // renders or ChatView's onStreamEnd-handler memoization breaks. The
   // setter form lets us avoid depending on the previous state.
   const markStreamingStart = useCallback((chatId) => {
     if (!chatId) return
-    setStreamingChatIds(prev => {
+    setLocalStreamingChatIds(prev => {
       if (prev.has(chatId)) return prev
       const next = new Set(prev)
       next.add(chatId)
       return next
     })
-  }, [])
-  const markStreamingEnd = useCallback((chatId) => {
-    if (!chatId) return
-    setStreamingChatIds(prev => {
+    setAttentionChatIds(prev => {
       if (!prev.has(chatId)) return prev
       const next = new Set(prev)
       next.delete(chatId)
       return next
     })
   }, [])
+  const markStreamingEnd = useCallback((chatId) => {
+    if (!chatId) return
+    setLocalStreamingChatIds(prev => {
+      if (!prev.has(chatId)) return prev
+      const next = new Set(prev)
+      next.delete(chatId)
+      return next
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!activeChatId) return
+    setAttentionChatIds(prev => {
+      if (!prev.has(activeChatId)) return prev
+      const next = new Set(prev)
+      next.delete(activeChatId)
+      return next
+    })
+  }, [activeChatId])
 
   // Passive auth-status check. Reads /api/auth/providers/status with
   // a 5-minute TanStack cache + a visibilitychange-driven invalidation.
@@ -277,6 +297,23 @@ export default function Shell() {
           setBuiltApp({ id: Number(ev.appId), name })
         })
       }
+    } else if (ev.type === 'chat_run_started') {
+      if (ev.chatId) markStreamingStart(ev.chatId)
+      refreshChats()
+    } else if (ev.type === 'chat_run_finished') {
+      const chatId = ev.chatId
+      if (chatId) {
+        markStreamingEnd(chatId)
+        if (String(chatId) !== String(activeChatIdRef.current || '')) {
+          setAttentionChatIds(prev => {
+            if (prev.has(chatId)) return prev
+            const next = new Set(prev)
+            next.add(chatId)
+            return next
+          })
+        }
+      }
+      refreshChats()
     } else if (ev.type === 'shell_rebuilt') {
       // Deduplicate against the SSE catch-up burst to avoid reload loops.
       const now = Date.now()
@@ -301,7 +338,11 @@ export default function Shell() {
       setToast('Shell rebuild failed.')
       setTimeout(() => setToast(null), 8000)
     }
-  }, [activeAppId, activeView, drawerOpen, activeChatId, loadTheme, refreshApps])
+  }, [
+    activeAppId, activeView, drawerOpen, activeChatId,
+    activeChatIdRef, loadTheme, markStreamingEnd, markStreamingStart,
+    refreshApps, refreshChats,
+  ])
 
   // Shell-level SSE subscription for system events. Stays open for
   // the lifetime of the Shell so theme/app/shell-rebuild updates
@@ -670,6 +711,7 @@ export default function Shell() {
         onDeleteChat={deleteChat}
         onSettings={() => navTo('settings')}
         streamingChatIds={streamingChatIds}
+        attentionChatIds={attentionChatIds}
         settingsWarning={providerAuth.anyDisconnected}
       />
 
@@ -702,10 +744,11 @@ export default function Shell() {
           <ChatView
             key={activeChatId}
             chatId={activeChatId}
-            onStreamEnd={() => {
+            onStreamEnd={({ continues } = {}) => {
               // ChatView calls this when the agent turn finishes
-              // streaming. Clear the drawer dot for this chat.
-              markStreamingEnd(activeChatId)
+              // streaming. Keep the running marker across queued
+              // continuations; the successor turn owns the next finish.
+              if (!continues) markStreamingEnd(activeChatId)
               refreshApps()
               loadTheme()
               refreshChats()

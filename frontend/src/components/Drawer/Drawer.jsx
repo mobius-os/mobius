@@ -8,9 +8,9 @@ import { appQueries, chatQueries } from '../../hooks/queries.js'
 import InstallSheet from './InstallSheet.jsx'
 import './Drawer.css'
 
-// Module-level constant so the default for `streamingChatIds` is
-// stable across renders. A fresh `new Set()` per call would break the
-// `streamingSet.has(id)` identity-based memoization downstream.
+// Module-level constant so default Set props are stable across renders.
+// A fresh `new Set()` per call would break identity-based memoization
+// downstream.
 const EMPTY_SET = new Set()
 
 export default function Drawer({
@@ -33,12 +33,17 @@ export default function Drawer({
   // active across the whole app). Defaults to an empty Set so the
   // drawer renders cleanly if no parent supplies the prop.
   streamingChatIds,
+  // Set of chat ids whose latest background run finished while the
+  // user was elsewhere. Rendered as a steady attention dot, distinct
+  // from the animated streaming dot above.
+  attentionChatIds,
   // Truthy when any registered provider's refresh token is no longer
   // valid. Drives a small warning dot on the Settings row — passive
   // nudge toward Reconnect, no modal, no banner.
   settingsWarning,
 }) {
   const streamingSet = streamingChatIds || EMPTY_SET
+  const attentionSet = attentionChatIds || EMPTY_SET
   // Pinned-first sort: pinned rows by pinned_at desc, then unpinned
   // by updated_at desc. Server returns this order already (see
   // routes/chats.py list_chats), but we re-sort defensively so the
@@ -327,6 +332,7 @@ export default function Drawer({
                   label={chat.title}
                   pinned={!!chat.pinned_at}
                   streaming={streamingSet.has(chat.id)}
+                  attention={attentionSet.has(chat.id)}
                   active={activeView === 'chat' && activeChatId === chat.id}
                   onSelect={() => onChat(chat.id)}
                   menuOpen={!!(openMenu && openMenu.kind === 'chat' && openMenu.id === chat.id)}
@@ -443,6 +449,7 @@ function DrawerRow({
   active,
   slug,
   streaming,
+  attention,
   onSelect,
   menuOpen,
   onMenuToggle,
@@ -550,17 +557,22 @@ function DrawerRow({
         className={`drawer__item ${active ? 'drawer__item--active' : ''}`}
         onClick={onSelect}
       >
-        {/* Streaming pulse dot. Sits before the text so the user's eye
+        {/* Status dot. Sits before the text so the user's eye
             picks it up alongside the label rather than at the row's
-            edge (where the pin lives). aria-label exposes the state to
-            assistive tech; the dot itself is presentational. */}
-        {streaming && (
+            edge (where the pin lives). aria-label exposes the state. */}
+        {streaming ? (
           <span
             className="drawer__streaming-dot"
             aria-label="Currently streaming"
             title="Currently streaming"
           />
-        )}
+        ) : attention ? (
+          <span
+            className="drawer__attention-dot"
+            aria-label="New activity"
+            title="New activity"
+          />
+        ) : null}
         <span className="drawer__item-text">{label}</span>
         {pinned && (
           <span className="drawer__item-pin" aria-label="Pinned" title="Pinned">

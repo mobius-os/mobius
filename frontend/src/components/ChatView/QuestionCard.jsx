@@ -12,7 +12,7 @@ function resolveAnswer(answer, otherText) {
 }
 
 
-export default function QuestionCard({ questions, answeredMap, onAnswer, disabled }) {
+export default function QuestionCard({ questions, questionId, answeredMap, onAnswer, disabled }) {
   const [answers, setAnswers] = useState({})
   const [otherTexts, setOtherTexts] = useState({})
   const [submitted, setSubmitted] = useState(false)
@@ -78,7 +78,7 @@ export default function QuestionCard({ questions, answeredMap, onAnswer, disable
       return `- ${q.question}: ${val}`
     })
     setSubmitted(true)
-    onAnswer?.(lines.join('\n'), resolved)
+    onAnswer?.(lines.join('\n'), resolved, questionId)
   }
 
   return (
