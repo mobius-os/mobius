@@ -917,6 +917,18 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           pendingQueue.swapOptimisticTs(
             queuedMsg.cid, result.ts ?? queuedMsg.ts, result.position,
           )
+          if (result.started) {
+            if (Array.isArray(result.message?._consumed_ts)) {
+              pendingQueue.promoteManyByTs(result.message._consumed_ts)
+            }
+            const startedMessage = startedMessageFromResponse(result)
+            if (startedMessage) {
+              commitMessages(prev => [...prev, startedMessage])
+            }
+            onMessageStartRef.current?.()
+            promotedRef.current = false
+            setSending(true)
+          }
         }
         // Mid-turn Codex steer: the backend injected the send into the
         // live turn and persisted it in the transcript. The
@@ -993,6 +1005,33 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
     try {
       const result = await streamSend(text, attachments.length > 0 ? attachments : undefined)
+      if (result?.status === 'queued') {
+        commitMessages(prev => {
+          const next = [...prev]
+          const idx = findOptimisticUserIndex(next, userMsg.ts)
+          if (idx >= 0) next.splice(idx, 1)
+          return next
+        })
+        pendingQueue.add({
+          ...userMsg,
+          ts: result.ts ?? userMsg.ts,
+          cid: `s-${result.ts ?? userMsg.ts}`,
+          queued: true,
+          position: result.position,
+        })
+        if (result.started) {
+          if (Array.isArray(result.message?._consumed_ts)) {
+            pendingQueue.promoteManyByTs(result.message._consumed_ts)
+          }
+          const startedMessage = startedMessageFromResponse(result)
+          if (startedMessage) {
+            commitMessages(prev => [...prev, startedMessage])
+          }
+          return
+        }
+        if (!result.started) setSending(false)
+        return
+      }
       const startedMessage = startedMessageFromResponse(result)
       if (startedMessage) {
         commitMessages(prev => {
