@@ -301,6 +301,8 @@ async def install_app(
     manage_apps=app.manage_apps,
     slug=app.slug,
     manifest_url=app.manifest_url,
+    theme_color=app.theme_color,
+    background_color=app.background_color,
     created_at=app.created_at,
     updated_at=app.updated_at,
     mode=mode,

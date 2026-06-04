@@ -99,6 +99,9 @@ class AppOut(BaseModel):
   # "Installed · vX.Y.Z" and to detect when the catalog ships a newer
   # version — see models.App.version.
   version: str | None = None
+  # Optional standalone PWA colors persisted from installed app manifests.
+  theme_color: str | None = None
+  background_color: str | None = None
   created_at: datetime
   updated_at: datetime
 

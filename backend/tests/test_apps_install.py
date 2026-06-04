@@ -171,8 +171,13 @@ def test_install_fresh_app_writes_everything(client, auth, tmp_path, bypass_url_
   """Happy path: install creates DB row, compiles JSX, populates
   source_dir, seeds storage, processes icon, returns mode=install."""
   base = "https://raw.githubusercontent.com/x/app-test-news/main/"
+  manifest = {
+    **MANIFEST_NEWS,
+    "theme_color": "#223344",
+    "background_color": "#101820",
+  }
   responses = {
-    base + "mobius.json": (200, json.dumps(MANIFEST_NEWS).encode()),
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
     base + "index.jsx": (200, JSX.encode()),
     base + "icon.png": (200, _png_bytes()),
     base + "prompt.md": (200, PROMPT.encode()),
@@ -189,6 +194,8 @@ def test_install_fresh_app_writes_everything(client, auth, tmp_path, bypass_url_
   payload = r.json()
   assert payload["mode"] == "install"
   assert payload["version"] == "1.0.0"
+  assert payload["theme_color"] == "#223344"
+  assert payload["background_color"] == "#101820"
   assert payload["slug"] == "test-news"
   app_id = payload["id"]
 
@@ -205,6 +212,11 @@ def test_install_fresh_app_writes_everything(client, auth, tmp_path, bypass_url_
   # A clean install (no pre-existing app owns "test-news") must NOT emit
   # a slug_collision telemetry event.
   assert not [e for e in _read_activity() if e["ev"] == "slug_collision"]
+
+  listed = client.get("/api/apps/", headers=auth).json()
+  row = next(a for a in listed if a["id"] == app_id)
+  assert row["theme_color"] == "#223344"
+  assert row["background_color"] == "#101820"
 
 
 MANIFEST_ONDEMAND = {

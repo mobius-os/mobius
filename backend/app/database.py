@@ -120,6 +120,14 @@ def run_migrations(eng) -> None:
     with eng.connect() as conn:
       conn.execute(text("ALTER TABLE apps ADD COLUMN version VARCHAR(32) NULL"))
       conn.commit()
+  if "theme_color" not in apps_cols:
+    with eng.connect() as conn:
+      conn.execute(text("ALTER TABLE apps ADD COLUMN theme_color VARCHAR(16) NULL"))
+      conn.commit()
+  if "background_color" not in apps_cols:
+    with eng.connect() as conn:
+      conn.execute(text("ALTER TABLE apps ADD COLUMN background_color VARCHAR(16) NULL"))
+      conn.commit()
   # Slug column: split into three independent idempotent gates so a
   # crash anywhere in the sequence leaves a recoverable state. The
   # previous shape gated the backfill on "column missing", which

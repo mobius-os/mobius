@@ -111,6 +111,23 @@ def _dominant_opaque_color(icon_png: bytes | None, fallback: str = "#0c0f14") ->
     return fallback
 
 
+def _app_background_color(app: models.App) -> str:
+  """Color shared by manifest splash, icon compositing, and loading shell."""
+  for value in (app.background_color, app.theme_color):
+    if isinstance(value, str) and re.match(r"^#[0-9a-fA-F]{6}$", value.strip()):
+      return value.strip().lower()
+  return _dominant_opaque_color(app.icon_png)
+
+
+def _app_theme_color(app: models.App) -> str:
+  if (
+    isinstance(app.theme_color, str)
+    and re.match(r"^#[0-9a-fA-F]{6}$", app.theme_color.strip())
+  ):
+    return app.theme_color.strip().lower()
+  return _app_background_color(app)
+
+
 def _generate_icon_png(name: str, slug: str, size: int = 512) -> bytes:
   """Default icon: a single letter centered on a colored background.
 
@@ -182,12 +199,8 @@ def standalone_manifest(slug: str, db: Session = Depends(get_db)):
   # resolution (matching the apps-module ETag) so a name PATCH + icon
   # PUT landing in the same second still produce distinct `?v=`.
   v = int(app.updated_at.timestamp() * 1_000_000) if app.updated_at else 0
-  # Background + theme color sampled from the icon's dominant opaque
-  # pixel — see _dominant_opaque_color. Both manifest fields take the
-  # SAME value so the OS splash (background_color) blends with the
-  # status-bar tint (theme_color) and the icon (which we composite
-  # onto the same color server-side, see /icon-NNN.png).
-  bg = _dominant_opaque_color(app.icon_png)
+  bg = _app_background_color(app)
+  theme = _app_theme_color(app)
   return JSONResponse(
     {
       "id": base,
@@ -198,7 +211,7 @@ def standalone_manifest(slug: str, db: Session = Depends(get_db)):
       "scope": base,
       "display": "standalone",
       "background_color": bg,
-      "theme_color": bg,
+      "theme_color": theme,
       "icons": [
         {
           "src": f"{base}icon-192.png?v={v}",
@@ -261,7 +274,7 @@ def standalone_icon(
     # background_color CSS frequently shows a halo around the icon
     # edges on iOS. Server-side composite eliminates the variability.
     if img.mode == "RGBA":
-      bg_hex = _dominant_opaque_color(app.icon_png)
+      bg_hex = _app_background_color(app)
       r = int(bg_hex[1:3], 16)
       g = int(bg_hex[3:5], 16)
       b = int(bg_hex[5:7], 16)
@@ -324,6 +337,7 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   # inside <script>. json.dumps already wraps the result in double
   # quotes, so callers interpolate it bare.
   app_name_js_literal = json.dumps(app_name).replace("</", "<\\/")
+  app_bg = _app_background_color(app)
   html = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -356,7 +370,7 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   </script>
   <style>
     :root {{
-      --bg: #0c0f14; --surface: #14181f; --surface2: #1a1f28;
+      --bg: {app_bg}; --surface: #14181f; --surface2: #1a1f28;
       --border: #252b36; --text: #d4d4d8; --muted: #52525b;
       --accent: #a78bfa; --accent-hover: #c4b5fd;
       --danger: #f87171;

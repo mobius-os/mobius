@@ -236,6 +236,12 @@ class App(Base):
   # from a private side-map it can only populate for its own installs —
   # which is what made out-of-band installs read as "version unknown".
   version = Column(String(32), nullable=True, default=None)
+  # Optional manifest-declared standalone PWA colors. Installed apps can
+  # declare these in mobius.json so the OS splash/status bar and the
+  # standalone loading shell match the app body instead of guessing from the
+  # icon. Null falls back to the legacy icon-derived color.
+  theme_color = Column(String(16), nullable=True, default=None)
+  background_color = Column(String(16), nullable=True, default=None)
   # User-uploaded icon for the standalone PWA install (PNG bytes).
   # Null means fall back to the auto-generated default (first letter
   # of `name` on a deterministic color). Stored inline because icons

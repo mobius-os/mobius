@@ -78,6 +78,18 @@ _ENTRY_MAX_BYTES = 1024 * 1024
 # Seed file cap (per file). Storage seeds are prompts, default
 # configs, sample images — never huge.
 _SEED_MAX_BYTES = 4 * 1024 * 1024
+
+_HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def _manifest_color(value) -> str | None:
+  """Return a safe #RRGGBB color from mobius.json, or None."""
+  if not isinstance(value, str):
+    return None
+  value = value.strip()
+  if not _HEX_COLOR_RE.match(value):
+    return None
+  return value.lower()
 # Aggregate caps across ALL seeds in one manifest. The per-file cap alone
 # leaves the total unbounded (a manifest can list many seeds), so a small
 # manifest could still force large memory growth holding them all (Codex
@@ -1078,6 +1090,8 @@ async def install_from_manifest(
     # version intact). This is what GET /api/apps/ exposes, so the store and
     # any out-of-band caller read the installed version without a side-map.
     app.version = str(manifest.get("version", "")).strip() or None
+    app.theme_color = _manifest_color(manifest.get("theme_color"))
+    app.background_color = _manifest_color(manifest.get("background_color")) or app.theme_color
 
     if existing:
       # Apply the (possibly merged) source to the row now that the merge
