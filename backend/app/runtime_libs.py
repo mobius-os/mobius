@@ -9,4 +9,6 @@ RUNTIME_LIBS: tuple[str, ...] = (
   "three",
   "three/addons/*",
   "pdfjs-dist",
+  "codemirror",
+  "katex",
 )
