@@ -279,6 +279,7 @@ class AppendSteeredUserMessage(_Command):
   chat_id: str = ""
   run_token: str = ""
   user_msg: dict = field(default_factory=dict)
+  consume_pending_ts: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -1366,10 +1367,16 @@ class ChatWriterActor:
     else:
       msgs.append(new_msg)
     chat.messages = msgs
+    pending = list(chat.pending_messages or [])
+    if cmd.consume_pending_ts:
+      consumed = set(cmd.consume_pending_ts)
+      chat.pending_messages = [
+        m for m in pending if m.get("ts") not in consumed
+      ]
     chat.updated_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
       raise _PersistFailed("AppendSteeredUserMessage did not persist")
-    return {"stored": new_msg}
+    return {"stored": new_msg, "pending": list(chat.pending_messages or [])}
 
   def _persist_compaction(self, db, cmd: PersistCompaction) -> dict:
     """Append the compaction briefing as a new assistant message; commit.

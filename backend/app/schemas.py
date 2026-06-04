@@ -259,6 +259,11 @@ class SendMessage(BaseModel):
   timezone: str | None = None
   viewport: dict | None = None
   hidden: bool = False
+  # Internal UI hint: Stop can collapse already-queued messages and ask
+  # the backend to steer them into the live turn even when the chat's
+  # normal send-while-running behavior is queueing.
+  force_steer: bool = False
+  consume_pending_ts: list[int] | None = None
   # When `hidden=True` and the user is answering an AskUserQuestion,
   # frontend includes the resolved answers here. Backend writes them
   # into the question block in the same transaction that appends the
