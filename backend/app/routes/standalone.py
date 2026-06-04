@@ -348,7 +348,9 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       "date-fns": "https://esm.sh/date-fns@4.3.0",
       "three": "/vendor/three@0.184.0/three.module.js",
       "three/addons/": "/vendor/three@0.184.0/addons/",
-      "pdfjs-dist": "/vendor/pdfjs/pdf.mjs"
+      "pdfjs-dist": "/vendor/pdfjs/pdf.mjs",
+      "codemirror": "https://esm.sh/codemirror@6.0.2",
+      "katex": "https://esm.sh/katex@0.16.22"
     }}
   }}
   </script>
