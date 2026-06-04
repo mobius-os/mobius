@@ -35,6 +35,15 @@ def test_generate_image_no_key(client, db, auth, chat):
   assert res.status_code == 503
 
 
+def test_generate_image_rejects_cross_site_request(client, auth, chat):
+  cross = client.post(
+    f"/api/chats/{chat.id}/generate-image",
+    json={"prompt": "a cat"},
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert cross.status_code == 403
+
+
 def test_generate_image_returns_url(client, db, auth, chat):
   """With a valid key and mocked Gemini response, must return an image URL."""
   _set_gemini_key(client, auth)

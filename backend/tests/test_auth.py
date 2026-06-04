@@ -47,6 +47,31 @@ def test_login_wrong_password(client):
   assert r.status_code == 401
 
 
+def test_provider_login_rejects_cross_site_request(client, auth):
+  cross = client.post(
+    "/api/auth/provider/login",
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert cross.status_code == 403
+
+
+def test_provider_code_rejects_cross_site_request(client, auth):
+  cross = client.post(
+    "/api/auth/provider/code",
+    json={"code": "abc123"},
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert cross.status_code == 403
+
+
+def test_codex_provider_login_rejects_cross_site_request(client, auth):
+  cross = client.post(
+    "/api/auth/provider/codex/login",
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert cross.status_code == 403
+
+
 def test_protected_route_requires_token(client):
   r = client.get("/api/apps/")
   assert r.status_code in (401, 403)

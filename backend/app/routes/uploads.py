@@ -15,7 +15,7 @@ from app import models
 from app.auth_helpers import get_auth_token
 from app.config import get_settings
 from app.database import get_db
-from app.deps import get_current_owner, resolve_owner_only
+from app.deps import get_current_owner, reject_cross_site, resolve_owner_only
 from app.path_utils import validate_path_within_base
 from app.resource_access import get_active_chat_or_404
 from app.storage_io import atomic_write
@@ -73,7 +73,7 @@ def _unique_name(directory: Path, filename: str) -> str:
 # the only way to authenticate browser-initiated resource fetches.
 
 
-@router.post("/{chat_id}/uploads")
+@router.post("/{chat_id}/uploads", dependencies=[Depends(reject_cross_site)])
 async def upload_files(
   chat_id: str,
   files: List[UploadFile],
@@ -156,7 +156,11 @@ def list_uploads(
   return chat.uploads or []
 
 
-@router.delete("/{chat_id}/uploads/{filename}", status_code=204)
+@router.delete(
+  "/{chat_id}/uploads/{filename}",
+  status_code=204,
+  dependencies=[Depends(reject_cross_site)],
+)
 def delete_upload(
   chat_id: str,
   filename: str = Path(...),

@@ -392,6 +392,14 @@ def test_api_theme_reset_endpoint_idempotent(client, auth):
   assert "reason" in body
 
 
+def test_theme_reset_rejects_cross_site_request(client, auth):
+  cross = client.post(
+    "/api/theme/reset",
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert cross.status_code == 403
+
+
 def test_api_theme_reset_endpoint_creates_backup(client, auth):
   """POST /api/theme/reset moves the override to a reset-bak file
   and subsequent GET /api/theme returns DEFAULT_THEME."""
@@ -472,5 +480,4 @@ def test_storage_write_theme_css_auto_snapshots(client, auth):
     for entry in list(os.listdir(shared)):
       if entry.startswith("theme.css"):
         os.remove(os.path.join(shared, entry))
-
 

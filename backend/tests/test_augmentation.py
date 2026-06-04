@@ -737,6 +737,26 @@ def test_cancel_pending_message_by_ts(client, db, auth):
   assert [m["ts"] for m in c.pending_messages] == [100, 300]
 
 
+def test_cancel_pending_message_rejects_cross_site_request(client, db, auth):
+  """DELETE /chats/{id}/pending/{ts} rejects cross-site requests."""
+  from app import models
+
+  c = models.Chat(
+    id="cancel-cross-site",
+    title="t",
+    messages=[],
+    pending_messages=[{"role": "user", "content": "cancel me", "ts": 200}],
+  )
+  db.add(c)
+  db.commit()
+
+  cross = client.delete(
+    "/api/chats/cancel-cross-site/pending/200",
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert cross.status_code == 403
+
+
 def test_cancel_pending_missing_ts_noop(client, db, auth):
   """DELETE with a ts not in the queue returns the unchanged queue."""
   from app import models

@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends
 
 from app import models
 from app.config import Settings, get_settings
-from app.deps import get_current_owner
+from app.deps import get_current_owner, reject_cross_site
 from app.theme import get_theme_css, get_bg_color, reset_theme_override
 
 
@@ -36,7 +36,7 @@ def get_theme(
   }
 
 
-@router.post("/reset")
+@router.post("/reset", dependencies=[Depends(reject_cross_site)])
 def reset_theme(
   _: models.Owner = Depends(get_current_owner),
   settings: Settings = Depends(get_settings),

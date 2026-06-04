@@ -33,3 +33,12 @@ def test_global_stop_stops_all_registered_kinds():
     "chat-codex": 1,
   }
   assert registry.all_alive_chat_ids() == set()
+
+
+def test_chat_stop_rejects_cross_site_request(client, auth, chat):
+  cross = client.post(
+    "/api/chat/stop",
+    json={"chat_id": chat.id},
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert cross.status_code == 403

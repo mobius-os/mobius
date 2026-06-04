@@ -5,6 +5,28 @@ from pathlib import Path
 from app.config import get_settings
 
 
+def test_create_app_rejects_cross_site_request(client, auth):
+  cross = client.post(
+    "/api/apps/",
+    json={
+      "name": "blocked-app",
+      "description": "test",
+      "jsx_source": "export default function App() { return <div/> }",
+    },
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert cross.status_code == 403
+
+
+def test_update_app_rejects_cross_site_request(client, auth):
+  cross = client.patch(
+    "/api/apps/1",
+    json={"name": "blocked-app"},
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert cross.status_code == 403
+
+
 def test_delete_app_removes_non_slug_source_dir(client, auth):
   """Delete uses source_dir rather than the display-name slug."""
   source_dir = Path(get_settings().data_dir) / "apps" / "My App (draft)"

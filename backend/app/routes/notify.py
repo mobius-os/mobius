@@ -27,7 +27,7 @@ from app.broadcast import (
   get_system_broadcast,
 )
 from app.database import get_db
-from app.deps import get_current_owner
+from app.deps import get_current_owner, reject_cross_site
 from app.events import SYSTEM_EVENT_TYPES
 
 router = APIRouter(tags=["notify"])
@@ -83,7 +83,9 @@ def publish_app_built_to_owning_chat(db: Session, app_id_str: str) -> None:
   bc.publish({"type": "app_built", "appId": app_id_str})
 
 
-@router.post("/api/notify", status_code=204)
+@router.post(
+  "/api/notify", status_code=204, dependencies=[Depends(reject_cross_site)],
+)
 def notify(
   body: NotifyBody,
   _owner: models.Owner = Depends(get_current_owner),

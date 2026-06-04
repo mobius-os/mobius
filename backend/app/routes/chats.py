@@ -212,7 +212,7 @@ def list_chats(
   ]
 
 
-@router.post("")
+@router.post("", dependencies=[Depends(reject_cross_site)])
 def create_chat(
   body: ChatUpdate,
   _: models.Owner = Depends(get_current_owner),
@@ -254,7 +254,7 @@ def create_chat(
   return {"id": chat.id, "title": chat.title, "messages": chat.messages}
 
 
-@router.put("/{chat_id}")
+@router.put("/{chat_id}", dependencies=[Depends(reject_cross_site)])
 async def update_chat(
   body: ChatUpdate,
   chat_id: str,
@@ -536,7 +536,9 @@ def get_chat(
   }
 
 
-@router.delete("/{chat_id}", status_code=204)
+@router.delete(
+  "/{chat_id}", status_code=204, dependencies=[Depends(reject_cross_site)],
+)
 async def delete_chat(
   chat_id: str,
   _: models.Owner = Depends(get_current_owner),
@@ -591,7 +593,7 @@ async def delete_chat(
   await _clear_run_status(chat_id)
 
 
-@router.post("/{chat_id}/recover")
+@router.post("/{chat_id}/recover", dependencies=[Depends(reject_cross_site)])
 def recover_chat(
   chat_id: str,
   _: models.Owner = Depends(get_current_owner),
@@ -751,7 +753,10 @@ class QuestionAnswers(BaseModel):
   question_id: str | None = None
 
 
-@router.post("/{chat_id}/question-answers")
+@router.post(
+  "/{chat_id}/question-answers",
+  dependencies=[Depends(reject_cross_site)],
+)
 async def save_question_answers(
   chat_id: str,
   body: QuestionAnswers,

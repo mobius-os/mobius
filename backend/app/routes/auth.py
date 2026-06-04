@@ -21,7 +21,9 @@ from sqlalchemy.orm import Session
 from app import auth, models, schemas
 from app.config import get_settings
 from app.database import get_db
-from app.deps import get_current_owner, get_current_owner_or_app
+from app.deps import (
+  get_current_owner, get_current_owner_or_app, reject_cross_site,
+)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 _limiter = Limiter(key_func=get_remote_address)
@@ -189,7 +191,7 @@ def login(
   return schemas.TokenResponse(access_token=token)
 
 
-@router.post("/app-token")
+@router.post("/app-token", dependencies=[Depends(reject_cross_site)])
 def create_app_token_endpoint(
   body: schemas.AppTokenRequest,
   owner: models.Owner = Depends(get_current_owner),
@@ -289,7 +291,7 @@ def _write_credentials(token_data: dict) -> None:
   log.info("Credentials written for %s", email or "(unknown)")
 
 
-@router.post("/provider/login")
+@router.post("/provider/login", dependencies=[Depends(reject_cross_site)])
 @_limiter.limit("3/minute")
 async def provider_login(
   request: Request,
@@ -314,7 +316,7 @@ async def provider_login(
   return {"auth_url": auth_url}
 
 
-@router.post("/provider/code")
+@router.post("/provider/code", dependencies=[Depends(reject_cross_site)])
 @_limiter.limit("5/minute")
 async def provider_code(
   request: Request,
@@ -516,7 +518,9 @@ async def _watch_codex_login(proc):
     _codex_login_procs.pop("active", None)
 
 
-@router.post("/provider/codex/login")
+@router.post(
+  "/provider/codex/login", dependencies=[Depends(reject_cross_site)],
+)
 async def codex_login_start(
   _: models.Owner = Depends(get_current_owner),
 ):
