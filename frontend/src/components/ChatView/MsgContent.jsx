@@ -10,11 +10,6 @@ function stripAugmentation(text) {
   return cleaned.trim()
 }
 
-function normalizeAssistantText(text) {
-  return (text || '').replace(/([.!?:])(?=[A-Z`#*-])/g, '$1\n\n')
-}
-
-
 export default function MsgContent({
   msg,
   chatId,
@@ -28,7 +23,7 @@ export default function MsgContent({
         {msg.blocks.map((block, i) => {
           if (block.type === 'text') {
             const text = msg.role === 'user'
-              ? stripAugmentation(block.content) : normalizeAssistantText(block.content)
+              ? stripAugmentation(block.content) : block.content
             if (!text) return null
             return (
               <div key={i} className={`chat__text chat__text--${msg.role}`}>
@@ -93,7 +88,7 @@ export default function MsgContent({
   }
 
   const text = msg.role === 'user' && msg.content
-    ? stripAugmentation(msg.content) : normalizeAssistantText(msg.content)
+    ? stripAugmentation(msg.content) : msg.content
 
   return (
     <>

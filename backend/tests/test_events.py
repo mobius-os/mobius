@@ -109,16 +109,17 @@ def test_build_assistant_message_separates_distinct_text_blocks():
   assert msg["content"] == "I reverted the setting.\n\nYes, the app is back."
 
 
-def test_text_delta_separates_sentence_boundary_without_touching_chunks():
+def test_text_deltas_are_concatenated_exactly():
   blocks = []
   process_event({"type": "text", "content": "I reverted it."}, blocks)
   process_event({"type": "text", "content": "Yes, it works."}, blocks)
-  assert blocks[0]["content"] == "I reverted it.\n\nYes, it works."
+  assert blocks[0]["content"] == "I reverted it.Yes, it works."
 
   blocks = []
-  process_event({"type": "text", "content": "stream"}, blocks)
-  process_event({"type": "text", "content": "ing"}, blocks)
-  assert blocks[0]["content"] == "streaming"
+  process_event({"type": "text", "content": "Use `Foo."}, blocks)
+  process_event({"type": "text", "content": "Bar`, U.S."}, blocks)
+  process_event({"type": "text", "content": "A., or API:GET /v1."}, blocks)
+  assert blocks[0]["content"] == "Use `Foo.Bar`, U.S.A., or API:GET /v1."
 
 
 def test_finalize_blocks_completes_running_tools():
