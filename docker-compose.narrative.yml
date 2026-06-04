@@ -1,0 +1,27 @@
+services:
+  app:
+    image: mobius-narrative:demo
+    build: .
+    container_name: mobius-narrative
+    init: true
+    restart: "no"
+    environment:
+      - SECRET_KEY=${SECRET_KEY:-narrative-secret-key-at-least-32-characters-long}
+      - DOMAIN=localhost
+      - FRONTEND_ORIGIN=http://localhost:8002
+      - DATABASE_URL=sqlite:////data/db/ultimate.db
+      - DATA_DIR=/data
+      - AGENT_BROWSER_STREAM_PORT=9226
+    volumes:
+      - narrative_data:/data
+    ports:
+      - "8002:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  narrative_data:

@@ -4,8 +4,6 @@ import { apiFetch, getToken, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import { ProgressiveMarkdown } from './markdown/BlockRenderer.jsx'
 import useStreamConnection from './useStreamConnection.js'
-import useVoiceInput from './useVoiceInput.js'
-import useFileUpload from './useFileUpload.js'
 import ConnectionStatus from './ConnectionStatus.jsx'
 import ToolBlock from './ToolBlock.jsx'
 import QuestionCard from './QuestionCard.jsx'
@@ -140,7 +138,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   const scrollRef = useRef(null)
   const inputRef = useRef(null)
   const spacerRef = useRef(null)
-  const fileInputRef = useRef(null)
   const lastUserMsgRef = useRef(null)
 
   // Lifecycle guards. With a cache hit, messages are populated on the
@@ -236,12 +233,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   const isStreamingRef = useRef(false)
   isStreamingRef.current = isStreaming
 
-  const { files: pendingFiles, addFiles, removeFile, clearFiles } = useFileUpload({ chatId })
-
-  const { listening, listeningRef, toggleVoice } = useVoiceInput({
-    onTranscript: (text) => setInput(text),
-    inputRef,
-  })
 
   // Snapshot stream into a permanent message. Idempotent — both handleStop
   // and onStreamEnd may call this.
@@ -587,28 +578,14 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   }
 
 
-  function handleFileSelect(e) {
-    const fileList = Array.from(e.target.files || [])
-    if (!fileList.length) return
-    e.target.value = ''
-    addFiles(fileList)
-  }
-
   const doSend = useCallback(async (text) => {
     if (!text.trim() || sending) return
-    if (pendingFiles.some(c => c.status === 'uploading')) return
     onMessageStart?.()
     promotedRef.current = false
 
-    const attachments = pendingFiles
-      .filter(f => f.status === 'done')
-      .map(f => ({ name: f.name, size: f.size, mime_type: f.mime_type }))
-
     const userMsg = { role: 'user', content: text, ts: Date.now() }
-    if (attachments.length > 0) userMsg.attachments = attachments
     commitMessages(prev => [...prev, userMsg])
     setInput('')
-    clearFiles()
     if (inputRef.current) inputRef.current.style.height = 'auto'
     setSending(true)
     setSpacerActive(true)
@@ -616,7 +593,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     needsSpacerRef.current = true
 
     try {
-      await streamSend(text, attachments.length > 0 ? attachments : undefined)
+      await streamSend(text)
       if (!hadMessagesRef.current) {
         hadMessagesRef.current = true
         onFirstMessage?.()
@@ -628,7 +605,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         { role: 'assistant', content: `Error: ${err.message}`, blocks: [] },
       ])
     }
-  }, [sending, streamSend, pendingFiles, commitMessages])
+  }, [sending, streamSend, commitMessages])
 
   // Sends the answer without a visible user message bubble.
   // TODO: when migrating to Claude Agent SDK, replace this with the
@@ -824,55 +801,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
       <div className="chat__foot">
         <form className="chat__form" onSubmit={handleSubmit}>
-          {pendingFiles.length > 0 && (
-            <div className="chat__chips">
-              {pendingFiles.map(chip => (
-                <div
-                  key={chip.id}
-                  className={`chat__chip${chip.status === 'error' ? ' chat__chip--error' : ''}${chip.objectUrl ? ' chat__chip--image' : ''}`}
-                  title={chip.status === 'error' ? chip.error : chip.name}
-                >
-                  {chip.objectUrl && (
-                    <img className="chat__chip-thumb" src={chip.objectUrl} alt="" />
-                  )}
-                  <span className="chat__chip-name">{chip.name}</span>
-                  <span className="chat__chip-status">
-                    {chip.status === 'uploading' ? 'uploading…' : chip.status === 'error' ? 'error' : `${Math.round(chip.size / 1024)}KB`}
-                  </span>
-                  <button
-                    type="button"
-                    className="chat__chip-remove"
-                    onClick={() => removeFile(chip.id)}
-                    aria-label={`Remove ${chip.name}`}
-                  >×</button>
-                </div>
-              ))}
-            </div>
-          )}
           <div className="chat__input-row">
-            <input
-              type="file"
-              multiple
-              ref={fileInputRef}
-              onChange={handleFileSelect}
-              style={{ display: 'none' }}
-            />
-            <button
-              type="button"
-              className="chat__attach"
-              onClick={() => fileInputRef.current?.click()}
-              aria-label="Attach files"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
-              </svg>
-            </button>
             <textarea
               ref={inputRef}
               className="chat__input"
               value={input}
               onChange={(e) => {
-                if (listeningRef.current) return
                 setInput(e.target.value)
                 e.target.style.height = 'auto'
                 e.target.style.height = Math.min(e.target.scrollHeight, 160) + 'px'
@@ -895,14 +829,14 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                   <rect width="12" height="12" rx="2" />
                 </svg>
               </button>
-            ) : input.trim() && !listening ? (
+            ) : input.trim() ? (
               <button
                 className="chat__send"
                 type="button"
                 onTouchEnd={(e) => { e.preventDefault(); handleSubmit(e) }}
                 onClick={handleSubmit}
                 aria-label="Send"
-                disabled={sending || pendingFiles.some(c => c.status === 'uploading')}
+                disabled={sending}
               >
                 <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
                   <path d="M6.5 11V2M2 6.5l4.5-4.5 4.5 4.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
@@ -910,16 +844,13 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
               </button>
             ) : (
               <button
-                className={`chat__mic ${listening ? 'chat__mic--active' : ''}`}
+                className="chat__send chat__send--idle"
                 type="button"
-                onTouchEnd={(e) => { e.preventDefault(); toggleVoice() }}
-                onClick={toggleVoice}
-                aria-label={listening ? 'Stop recording' : 'Voice input'}
+                aria-label="Send"
+                disabled
               >
-                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                  <rect x="4.5" y="1" width="5" height="8" rx="2.5" stroke="currentColor" strokeWidth="1.3"/>
-                  <path d="M3 7a4 4 0 008 0" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
-                  <path d="M7 11v2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+                <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+                  <path d="M6.5 11V2M2 6.5l4.5-4.5 4.5 4.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
                 </svg>
               </button>
             )}

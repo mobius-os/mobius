@@ -1,7 +1,6 @@
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ToolBlock from './ToolBlock.jsx'
 import QuestionCard from './QuestionCard.jsx'
-import Attachments from './Attachments.jsx'
 
 
 function stripAugmentation(text) {
@@ -15,7 +14,7 @@ export default function MsgContent({ msg, chatId, onQuestionAnswer, questionAnsw
   if (msg.blocks && msg.blocks.length > 0) {
     return (
       <>
-        {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
+        
         {msg.blocks.map((block, i) => {
           if (block.type === 'text') {
             const text = msg.role === 'user'
@@ -60,7 +59,7 @@ export default function MsgContent({ msg, chatId, onQuestionAnswer, questionAnsw
 
   return (
     <>
-      {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
+      
       {text ? (
         <div className={`chat__text chat__text--${msg.role}`}>
           {msg.role === 'assistant'

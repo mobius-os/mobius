@@ -1,0 +1,8 @@
+8:import useFileUpload from './useFileUpload.js'
+239:  const { files: pendingFiles, addFiles, removeFile, clearFiles } = useFileUpload({ chatId })
+594:    addFiles(fileList)
+603:    const attachments = pendingFiles
+608:    if (attachments.length > 0) userMsg.attachments = attachments
+611:    clearFiles()
+619:      await streamSend(text, attachments.length > 0 ? attachments : undefined)
+845:                    onClick={() => removeFile(chip.id)}
