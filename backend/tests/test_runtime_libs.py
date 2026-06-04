@@ -40,6 +40,23 @@ def _importmap_keys(html: str) -> set[str]:
   return set(json.loads(match.group(1))["imports"].keys())
 
 
+def _standalone_importmap_keys() -> set[str]:
+  """The standalone PWA route (routes/standalone.py) ships its OWN importmap
+  embedded in a Python f-string, so its braces are doubled. It must carry the
+  same specifiers as app-frame.html, or an app resolves a bare import in the
+  shell but 404s the module on its standalone home-screen surface (the Notes
+  /codemirror runtime regression)."""
+  src = (
+    Path(__file__).resolve().parents[1] / "app" / "routes" / "standalone.py"
+  ).read_text()
+  match = re.search(
+    r'<script type="importmap">(.*?)</script>', src, re.DOTALL
+  )
+  assert match, "no importmap block found in standalone.py"
+  block = match.group(1).strip().replace("{{", "{").replace("}}", "}")
+  return set(json.loads(block)["imports"].keys())
+
+
 def _externalized(key: str) -> bool:
   """True if `key` is marked external by RUNTIME_LIBS. A wildcard entry
   like "three/addons/*" externalizes every subpath, which also covers the
@@ -88,4 +105,25 @@ def test_externalized_libs_all_have_importmap_entries():
     "RUNTIME_LIBS entries with no importmap mapping — apps importing "
     f"these compile but fail to resolve at runtime: {missing}. Add them "
     "to the importmap in frontend/public/app-frame.html."
+  )
+
+
+def test_standalone_importmap_matches_app_frame():
+  """The standalone PWA route and the in-shell frame must offer the SAME
+  bare specifiers. They drifted once: codemirror/katex were added to
+  app-frame.html (Notes worked in-shell) but not to standalone.py (Notes
+  404'd the module on its home-screen surface). Keep them identical so an
+  app resolves the same imports on both surfaces."""
+  frame = _find_app_frame()
+  if frame is None:
+    pytest.skip("app-frame.html not resolvable in this environment")
+  shell_keys = _importmap_keys(frame.read_text())
+  standalone_keys = _standalone_importmap_keys()
+  only_in_shell = sorted(shell_keys - standalone_keys)
+  only_in_standalone = sorted(standalone_keys - shell_keys)
+  assert shell_keys == standalone_keys, (
+    "in-shell (app-frame.html) and standalone (standalone.py) importmaps "
+    f"have drifted. Only in app-frame: {only_in_shell}. Only in "
+    f"standalone: {only_in_standalone}. An app's bare imports must resolve "
+    "the same on both surfaces."
   )
