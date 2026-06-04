@@ -308,7 +308,10 @@ export default function Shell() {
       const chatId = ev.chatId
       if (chatId) {
         markStreamingEnd(chatId)
-        if (String(chatId) !== String(activeChatIdRef.current || '')) {
+        if (
+          activeViewRef.current !== 'chat'
+          || String(chatId) !== String(activeChatIdRef.current || '')
+        ) {
           setAttentionChatIds(prev => {
             if (prev.has(chatId)) return prev
             const next = new Set(prev)

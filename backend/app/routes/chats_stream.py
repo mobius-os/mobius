@@ -263,6 +263,32 @@ def _steered_response(
   return JSONResponse(status_code=202, content=payload)
 
 
+def _not_steered_response(chat_id: str) -> JSONResponse:
+  return JSONResponse(
+    status_code=202,
+    content={"status": "not_steered", "chat_id": chat_id},
+  )
+
+
+def _force_steer_matches_pending(chat: models.Chat, body: schemas.SendMessage) -> bool:
+  """Force-steer is only for converting already-queued UI messages."""
+  requested_ts = set(body.consume_pending_ts or [])
+  if not requested_ts:
+    return False
+  selected = [
+    m for m in list(chat.pending_messages or [])
+    if m.get("ts") in requested_ts
+  ]
+  if len(selected) != len(requested_ts):
+    return False
+  expected = "\n\n".join(
+    (m.get("content") or "").strip()
+    for m in selected
+    if (m.get("content") or "").strip()
+  )
+  return bool(expected) and body.content == expected
+
+
 @router.post("/{chat_id}/messages", status_code=202)
 async def send_message(
   body: schemas.SendMessage,
@@ -395,6 +421,9 @@ async def send_message(
   # queue from the head, so the queued messages actually get answered
   # rather than sitting forever.
   if is_chat_running(chat_id) or chat.pending_messages:
+    if body.force_steer and not _force_steer_matches_pending(chat, body):
+      return _not_steered_response(chat_id)
+
     # Mid-turn steering: ordinary sends require the opt-in flag, while
     # Stop's queue-collapse path may pass force_steer to turn already
     # queued messages into a live steer. Codex injects into the running
@@ -406,6 +435,7 @@ async def send_message(
     if (
       is_chat_running(chat_id)
       and (body.force_steer or _steer_enabled(chat))
+      and (body.force_steer or not chat.pending_messages)
       and _has_live_steerable_turn(chat_id, provider)
     ):
       user_msg = _user_message_from_body(chat, body)
@@ -455,10 +485,7 @@ async def send_message(
           chat_id, stored_result.get("pending"),
         )
     if body.force_steer:
-      return JSONResponse(
-        status_code=202,
-        content={"status": "not_steered", "chat_id": chat_id},
-      )
+      return _not_steered_response(chat_id)
 
     new_msg = await _append_to_pending(
       chat, body, db, initiated_by_app_id=principal.app_id,

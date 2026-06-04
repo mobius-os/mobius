@@ -273,7 +273,8 @@ class AppendSteeredUserMessage(_Command):
   streaming assistant block, which is the frontend contract. The `ts`
   is made unique against both the transcript and the pending queue so
   it can't collide with a sibling message's React key. Returns
-  `{"stored"}` — the stored message with its final ts.
+  `{"stored", "pending"}` — the stored message with its final ts and the
+  remaining pending queue after any consumed queued messages are removed.
   """
 
   chat_id: str = ""
