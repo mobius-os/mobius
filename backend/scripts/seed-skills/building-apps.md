@@ -108,6 +108,15 @@ const res = await fetch(`/api/storage/apps/${appId}/${path}`, {
 
 The extension picks the form (same `.json`-no-envelope rule as above).
 
+### Cross-app feedback
+
+When an app asks the partner for feedback that another agent should notice, write it twice:
+
+- Local app storage: `feedback/<id>.json` via `window.mobius.storage`, so the app owns its audit trail and offline/read-your-writes behavior.
+- Shared storage: `app-feedback/<app-slug>/<id>.json` via `PUT /api/storage/shared/...`, best-effort and honestly surfaced if it fails, so Dreaming and future cross-app agents can enumerate it without knowing the app's numeric id.
+
+Use a small structured object: `app`, `kind`, `created_at`, `signal`, `text`, and domain context such as `report_date`, `article_headlines`, `source_id`, or `screen`. Keep one record per file. Consumers must enumerate `shared-list/app-feedback/` and app subfolders; do not probe guessed ids.
+
 ---
 
 ## No native dialogs

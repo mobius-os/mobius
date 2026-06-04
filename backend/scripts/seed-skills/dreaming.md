@@ -104,6 +104,8 @@ Don't over-record. Most of what clears the bar is a fact about the partner → d
 curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/apps/" | python3 -m json.tool
 ```
 
+Before reviewing, scan `/data/apps/dreaming/inputs/app-feedback.md` if present. It contains structured feedback that mini-apps mirrored to `shared/app-feedback/<app-slug>/`; treat it as partner/app signal alongside interviews and Mind, then decide whether to fix, adjust a prompt, or propose a change in the brief.
+
 Then, for the apps the partner actually uses (the interviews + Mind tell you which):
 
 - **Bugs + broken flows.** Open each app with `agent-browser`, exercise its real paths (the ones the partner uses), and look for broken renders, dead buttons, console errors, empty states that should have data, stale or orphaned data files. **Fix the small, obviously-correct ones** (a crash, a broken flow, a mis-wired storage path) — these are reversible and the partner wakes to a working app. **Don't auto-apply anything with a judgment call**; list it in the brief instead.
