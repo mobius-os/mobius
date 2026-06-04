@@ -2,6 +2,11 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
+import { webcrypto } from 'node:crypto'
+
+if (!globalThis.crypto) {
+  globalThis.crypto = webcrypto
+}
 
 // Service-worker integration uses `injectManifest` rather than the
 // `generateSW` shortcut: the SW source at `src/sw.js` still has
