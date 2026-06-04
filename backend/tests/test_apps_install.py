@@ -459,6 +459,58 @@ def test_install_update_path_in_place(client, auth, bypass_url_validation):
   assert jsx_file.read_text() == jsx_v2
 
 
+def test_installed_version_persisted_in_app_list(
+  client, auth, bypass_url_validation,
+):
+  """The installed manifest version is persisted on the App row and
+  surfaced by GET /api/apps/ (AppOut.version) — not just echoed once in
+  the install response. This is what lets the store read the installed
+  version of ANY app (agent-installed, pre-seeded, out-of-band), not
+  only the ones it installed through its own UI; an update re-stamps it."""
+  base = "https://x.test/versioned/"
+
+  def responses(version, jsx):
+    return {
+      base + "mobius.json": (200, json.dumps({
+        **MANIFEST_NEWS, "version": version,
+      }).encode()),
+      base + "index.jsx": (200, jsx.encode()),
+      base + "icon.png": (200, _png_bytes()),
+      base + "prompt.md": (200, b"p"),
+      base + "fetch.sh": (200, b""),
+    }
+
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses("1.0.0", JSX)),
+  ):
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r.status_code == 201, r.text
+  app_id = r.json()["id"]
+
+  # The fix: GET /api/apps/ carries the installed version. Before this,
+  # AppOut had no version field and the store read "unknown".
+  listed = client.get("/api/apps/", headers=auth).json()
+  row = next(a for a in listed if a["id"] == app_id)
+  assert row["version"] == "1.0.0"
+
+  # An update re-stamps the row's version so update-detection stays honest.
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses("1.3.0", JSX.replace("ok", "ok2"))),
+  ):
+    client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  row2 = next(
+    a for a in client.get("/api/apps/", headers=auth).json()
+    if a["id"] == app_id
+  )
+  assert row2["version"] == "1.3.0"
+
+
 def test_install_same_manifest_via_url_and_inline_matches(
   client, auth, bypass_url_validation,
 ):

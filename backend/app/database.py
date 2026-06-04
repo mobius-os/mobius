@@ -114,6 +114,12 @@ def run_migrations(eng) -> None:
         "NOT NULL DEFAULT 0"
       ))
       conn.commit()
+  if "version" not in apps_cols:
+    # Installed manifest version — see models.App.version. Nullable;
+    # existing rows backfill on their next install/update.
+    with eng.connect() as conn:
+      conn.execute(text("ALTER TABLE apps ADD COLUMN version VARCHAR(32) NULL"))
+      conn.commit()
   # Slug column: split into three independent idempotent gates so a
   # crash anywhere in the sequence leaves a recoverable state. The
   # previous shape gated the backfill on "column missing", which

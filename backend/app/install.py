@@ -1073,6 +1073,12 @@ async def install_from_manifest(
       )
       return app, mode, warnings, manifest, conflict_paths, divergence
 
+    # Stamp the installed version on the row now that we know the source is
+    # actually being applied (the conflict path returned above with the old
+    # version intact). This is what GET /api/apps/ exposes, so the store and
+    # any out-of-band caller read the installed version without a side-map.
+    app.version = str(manifest.get("version", "")).strip() or None
+
     if existing:
       # Apply the (possibly merged) source to the row now that the merge
       # decision is made. On the flag-off path this is just `jsx_source`.
