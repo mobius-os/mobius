@@ -10,6 +10,7 @@ silently disappears.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -31,12 +32,14 @@ from claude_agent_sdk.types import (
   UserMessage,
 )
 
+from app import models
 from app.claude_sdk_runner import (
   ActiveClaudeClient,
   dispatch_sdk_message,
   run_claude_sdk_turn,
   steer_into_active_turn,
 )
+from app.database import SessionLocal
 from app.runner_registry import registry
 
 
@@ -205,6 +208,85 @@ async def test_interrupt_and_resteer_loop_requeries_same_client(monkeypatch):
     {"type": "text", "content": "working"},
     {"type": "text", "content": "blue done"},
   ]
+
+
+def test_run_claude_sdk_turn_persists_session_id_before_terminal_result(
+  monkeypatch,
+):
+  """Claude session ids are durable as soon as the stream reveals them."""
+  from app import claude_sdk_runner
+
+  class _FakeClient:
+    def __init__(self, options):
+      del options
+      self.disconnected = False
+
+    async def connect(self):
+      return None
+
+    async def query(self, message):
+      del message
+
+    async def disconnect(self):
+      self.disconnected = True
+
+    async def receive_response(self):
+      yield StreamEvent(
+        uuid="evt-session",
+        session_id="sess-early",
+        event={
+          "type": "content_block_delta",
+          "delta": {"type": "text_delta", "text": "still running"},
+        },
+      )
+      yield ResultMessage(
+        subtype="success",
+        duration_ms=20,
+        duration_api_ms=15,
+        is_error=False,
+        num_turns=1,
+        session_id="sess-early",
+        stop_reason="end_turn",
+        total_cost_usd=0.02,
+        usage={"input_tokens": 3, "output_tokens": 4},
+      )
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
+
+  db = SessionLocal()
+  try:
+    db.add(models.Chat(
+      id="claude-early",
+      title="t",
+      messages=[],
+      pending_messages=[],
+      provider="claude",
+      session_id=None,
+    ))
+    db.commit()
+
+    result = asyncio.run(
+      run_claude_sdk_turn(
+        "hello",
+        session_id=None,
+        base_env={},
+        cwd="/tmp",
+        chat_id="claude-early",
+        skill_text="system",
+        bc=_ChatBus(),
+        pending_questions={},
+        db=db,
+      )
+    )
+
+    assert result["session_id"] == "sess-early"
+    db.expire_all()
+    chat = db.query(models.Chat).filter(
+      models.Chat.id == "claude-early"
+    ).first()
+    assert chat.session_id == "sess-early"
+  finally:
+    db.close()
 
 
 def test_dispatch_text_delta_emits_text():
