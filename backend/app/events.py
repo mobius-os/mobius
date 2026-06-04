@@ -40,27 +40,6 @@ SYSTEM_EVENT_TYPES: frozenset[str] = frozenset({
 })
 
 
-def _join_text_delta(existing: str, content: str) -> str:
-  """Join adjacent text events without collapsing separate prose blocks.
-
-  Codex streams text as deltas, so most adjacent chunks should be glued
-  exactly as received. Mobius can also emit separate assistant prose updates
-  as adjacent text events with no intervening tool event; those arrive as
-  e.g. "...reverted." + "Yes - ...", which otherwise renders as
-  "...reverted.Yes". Only insert a paragraph break for the conservative
-  sentence-boundary shape; leave ordinary token/word chunks untouched.
-  """
-  if (
-    existing
-    and content
-    and not existing[-1].isspace()
-    and existing[-1] in ".!?:"
-    and (content[0].isupper() or content.startswith(("`", "*", "#", "-")))
-  ):
-    return existing + "\n\n" + content
-  return existing + content
-
-
 def _join_text_parts(parts: list[str]) -> str:
   """Join persisted text blocks without inventing duplicate whitespace."""
   out = ""
@@ -90,10 +69,7 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     # Append to last text block or create new one.
     if (assistant_blocks
         and assistant_blocks[-1].get("type") == "text"):
-      assistant_blocks[-1]["content"] = _join_text_delta(
-        assistant_blocks[-1].get("content", ""),
-        content,
-      )
+      assistant_blocks[-1]["content"] += content
     else:
       assistant_blocks.append(
         {"type": "text", "content": content}

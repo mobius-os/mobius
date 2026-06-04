@@ -2,10 +2,6 @@ import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.
 import ToolBlock from './ToolBlock.jsx'
 import QuestionCard from './QuestionCard.jsx'
 
-function normalizeAssistantText(text) {
-  return (text || '').replace(/([.!?:])(?=[A-Z`#*-])/g, '$1\n\n')
-}
-
 /**
  * The single live `<li>` that renders the in-flight turn's
  * `streamItems` (text deltas, tool blocks, question cards, provider
@@ -72,7 +68,7 @@ export default function StreamingMessage({ streamItems, dataKey, onAnswer }) {
           const isLast = i === streamItems.length - 1
           return (
             <div key={`s-${i}`} className="chat__text chat__text--assistant">
-              <ProgressiveMarkdown text={normalizeAssistantText(item.content)} />
+              <ProgressiveMarkdown text={item.content} />
               {isLast && <span className="chat__cursor" />}
             </div>
           )
