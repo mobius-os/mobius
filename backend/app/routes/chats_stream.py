@@ -12,7 +12,7 @@ from starlette.responses import Response
 from sqlalchemy.orm import Session
 
 from app import models, questions, schemas
-from app.broadcast import create_broadcast, get_broadcast
+from app.broadcast import create_broadcast, get_broadcast, get_system_broadcast
 from app.chat import (
   _schedule_continuation,
   discard_starting,
@@ -97,6 +97,7 @@ def _content_with_uploads(chat: models.Chat, body: schemas.SendMessage) -> str:
 
 async def _append_to_pending(
   chat: models.Chat, body: schemas.SendMessage, db: Session,
+  *, initiated_by_app_id: int | None = None,
 ) -> dict:
   """Queue a message via the actor's AppendPending; return the stored dict.
 
@@ -122,6 +123,7 @@ async def _append_to_pending(
       user_msg=_user_message_from_body(chat, body),
       answers=body.answers,
       question_id=body.question_id,
+      initiated_by_app_id=initiated_by_app_id,
     )
   )
   result = await await_ack(ack)
@@ -294,12 +296,20 @@ async def send_message(
         await asyncio.sleep(_GRACE_INTERVAL)
         pending = questions.get(chat_id)
       if pending is not None:
+        if (
+          body.question_id is not None
+          and body.question_id != pending.question_id
+        ):
+          raise HTTPException(
+            status_code=410,
+            detail="The question is no longer accepting answers.",
+          )
         # Persist the answer through the actor FIRST (commit-before-
         # resolve). Keyed on the turn's run_token so the actor fences the
         # right (chat_id, run_token) snapshot; a tokenless pending (no
         # run_token) submits an empty token, which broad-fences by chat.
-        # The body's explicit question_id wins over the pending's
-        # (precise routing when two questions were open).
+        # The body question_id was checked against the live pending entry
+        # above, so a stale card cannot resolve a newer question.
         ack = get_writer().submit(
           AnswerQuestion(
             chat_id=chat_id,
@@ -426,7 +436,9 @@ async def send_message(
           })
         return _steered_response(chat_id)
 
-    new_msg = await _append_to_pending(chat, body, db)
+    new_msg = await _append_to_pending(
+      chat, body, db, initiated_by_app_id=principal.app_id,
+    )
 
     if not is_chat_running(chat_id):
       # Stale pending — try to claim and drain. mark_starting prevents
@@ -443,6 +455,10 @@ async def send_message(
             )
           )
           if next_user:
+            get_system_broadcast().publish({
+              "type": "chat_run_started",
+              "chatId": chat_id,
+            })
             _schedule_continuation(
               chat_id=chat_id,
               messages=next_messages,
@@ -469,13 +485,18 @@ async def send_message(
     try:
       position = [m.get("ts") for m in remaining].index(new_msg["ts"]) + 1
     except ValueError:
-      # Edge case: the new message was somehow consumed (shouldn't
-      # happen because promote takes the head, but defensive).
+      # Queue-collapse recovery consumed the message we just appended into
+      # the newly-started combined turn. Tell the client to connect to the
+      # stream instead of keeping a queued chip that no longer exists.
       position = 0
+    if position == 0:
+      return JSONResponse(status_code=202, content={"status": "started"})
     return _queued_response(new_msg, position)
 
   if not mark_starting(chat_id):
-    new_msg = await _append_to_pending(chat, body, db)
+    new_msg = await _append_to_pending(
+      chat, body, db, initiated_by_app_id=principal.app_id,
+    )
     return _queued_response(new_msg, len(chat.pending_messages))
 
   # From here until create_task, any exception must discard the
@@ -514,6 +535,7 @@ async def send_message(
         user_msg=user_msg,
         title_source=body.content,
         default_provider=default_provider,
+        initiated_by_app_id=principal.app_id,
       )
     )
     # StartTurn returns the agent history (schemas.ChatMessage list built
@@ -531,6 +553,10 @@ async def send_message(
       # before spawning so the stream endpoint can subscribe without a
       # race, then spawn the turn keyed on the generation we captured.
       bc = create_broadcast(chat_id)  # noqa: F841 — registered in global registry
+      get_system_broadcast().publish({
+        "type": "chat_run_started",
+        "chatId": chat_id,
+      })
       asyncio.create_task(
         run_chat(
           msgs, chat_id=chat_id, session_id=session_id,

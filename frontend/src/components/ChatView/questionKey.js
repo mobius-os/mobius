@@ -15,6 +15,7 @@
  */
 export function questionKey(block) {
   const questions = block?.questions || []
+  if (block?.question_id) return `question_id:${block.question_id}`
   if (questions.length === 0) return 'empty'
   const first = questions[0] || {}
   if (first.id) return `id:${first.id}`

@@ -73,7 +73,7 @@ def test_reset_for_tests_drops_lock_identity():
   asyncio.run(go())
 
 
-def test_promote_pending_messages_locked_drains_head(db):
+def test_promote_pending_messages_locked_collapses_queue(db):
   chat = models.Chat(
     id="cq-head-test",
     title="t",
@@ -92,15 +92,15 @@ def test_promote_pending_messages_locked_drains_head(db):
       db, "cq-head-test", "rt-cq",
     )
 
-  next_msgs, head, sid = asyncio.run(go())
+  next_msgs, promoted, sid = asyncio.run(go())
 
-  assert head is not None
-  assert head["content"] == "first"
+  assert promoted is not None
+  assert promoted["content"] == "first\nsecond"
+  assert promoted["ts"] == 1
   assert sid == "sess-cq"
-  assert [m.content for m in next_msgs] == ["first"]
+  assert [m.content for m in next_msgs] == ["first\nsecond"]
   db.refresh(chat)
-  assert len(chat.pending_messages) == 1
-  assert chat.pending_messages[0]["content"] == "second"
+  assert chat.pending_messages == []
 
 
 def test_promote_pending_messages_locked_returns_none_on_empty_queue(db):

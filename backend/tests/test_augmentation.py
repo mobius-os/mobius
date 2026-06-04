@@ -389,7 +389,7 @@ def test_pending_ts_strictly_unique_under_collision(client, db, auth, chat):
 
 
 def test_promote_pending_messages(db):
-  """_promote_pending_messages moves only the first pending into transcript."""
+  """_promote_pending_messages collapses pending sends into one turn."""
   import asyncio
   from app import models
   from app.chat_queue import promote_pending_messages as _promote_pending_messages
@@ -412,14 +412,12 @@ def test_promote_pending_messages(db):
   )
 
   db.refresh(chat)
-  # Only first pending promoted, second remains.
-  assert len(chat.pending_messages) == 1
-  assert chat.pending_messages[0]["content"] == "queued msg 2"
-  # First promoted to transcript.
+  assert chat.pending_messages == []
   assert len(chat.messages) == 2
-  assert chat.messages[1]["content"] == "queued msg 1"
+  assert chat.messages[1]["content"] == "queued msg 1\nqueued msg 2"
   # Returned values for next run.
-  assert next_user["content"] == "queued msg 1"
+  assert next_user["content"] == "queued msg 1\nqueued msg 2"
+  assert next_user["ts"] == 123
   assert session_id == "sess-1"
   assert len(next_msgs) == 2  # full history + new user msg
   # Promote does NOT claim _starting any more — caller manages it.
@@ -429,8 +427,8 @@ def test_promote_pending_messages(db):
   # messages were silently never promoted in production.
 
 
-def test_promote_drains_all_sequentially(db):
-  """Calling _promote_pending_messages repeatedly drains the queue one by one."""
+def test_promote_drains_all_at_once(db):
+  """Calling _promote_pending_messages drains the queue in one combined turn."""
   import asyncio
   from app import models
   from app.chat_queue import promote_pending_messages as _promote_pending_messages
@@ -450,21 +448,11 @@ def test_promote_drains_all_sequentially(db):
   db.commit()
 
   _, first, _ = asyncio.run(_promote_pending_messages(db, "drain-test", "rt-d1"))
-  assert first["content"] == "a"
-  db.refresh(chat)
-  assert len(chat.pending_messages) == 2
-
-  _, second, _ = asyncio.run(_promote_pending_messages(db, "drain-test", "rt-d2"))
-  assert second["content"] == "b"
-  db.refresh(chat)
-  assert len(chat.pending_messages) == 1
-
-  _, third, _ = asyncio.run(_promote_pending_messages(db, "drain-test", "rt-d3"))
-  assert third["content"] == "c"
+  assert first["content"] == "a\nb\nc"
   db.refresh(chat)
   assert len(chat.pending_messages) == 0
 
-  _, none_user, _ = asyncio.run(_promote_pending_messages(db, "drain-test", "rt-d4"))
+  _, none_user, _ = asyncio.run(_promote_pending_messages(db, "drain-test", "rt-d2"))
   assert none_user is None
 
 

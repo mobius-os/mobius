@@ -219,6 +219,7 @@ class StartTurn(_Command):
   user_msg: dict = field(default_factory=dict)
   title_source: str = ""
   default_provider: str = "claude"
+  initiated_by_app_id: int | None = None
 
 
 @dataclass
@@ -237,6 +238,7 @@ class AppendPending(_Command):
   user_msg: dict = field(default_factory=dict)
   answers: dict | None = None
   question_id: str | None = None
+  initiated_by_app_id: int | None = None
 
 
 @dataclass
@@ -267,16 +269,16 @@ class AppendSteeredUserMessage(_Command):
 
 @dataclass
 class PromotePending(_Command):
-  """Move the pending-queue head into the transcript and mark the run.
+  """Move pending follow-ups into the transcript and mark the run.
 
   Replicates `promote_pending_messages_locked`: refreshes the row, builds
   the next-turn message history (a list of `schemas.ChatMessage`) BEFORE
   committing (so a malformed entry can't silently consume a turn — building
-  the validated schema surfaces it), moves the head of `pending_messages`
-  into `messages`, sets the durable run marker, stamps `updated_at`, and
+  the validated schema surfaces it), collapses `pending_messages` into one
+  user message in `messages`, sets the durable run marker, stamps `updated_at`, and
   commits.  Returns `{"history", "promoted", "session_id"}`; `promoted`
   is None (queue unchanged) only when there was nothing to promote. A
-  malformed head that can't build a valid history instead RAISES
+  malformed pending entry that can't build a valid history instead RAISES
   `_PersistFailed` — the turn-end drain maps that to FAILED_LEAVE_MARKER
   (leave the marker for reconciliation) rather than confusing it with an
   empty queue and clearing the marker on stranded work.
@@ -1257,6 +1259,7 @@ class ChatWriterActor:
     db.add(ChatRun(
       id=cmd.run_token, chat_id=cmd.chat_id, status="running",
       provider=chat.provider, started_at=chat.run_started_at,
+      initiated_by_app_id=cmd.initiated_by_app_id,
     ))
     if not _commit_or_rollback(db):
       raise _PersistFailed("StartTurn did not persist")
@@ -1285,6 +1288,8 @@ class ChatWriterActor:
     apply_answers_to_last_question(chat, cmd.answers, cmd.question_id)
     pending = list(chat.pending_messages or [])
     new_msg = dict(cmd.user_msg)
+    if cmd.initiated_by_app_id is not None:
+      new_msg["_initiated_by_app_id"] = cmd.initiated_by_app_id
     _ensure_unique_ts(new_msg, pending + list(chat.messages or []))
     pending.append(new_msg)
     chat.pending_messages = pending
@@ -1358,11 +1363,11 @@ class ChatWriterActor:
     return {"stored": new_msg}
 
   def _promote_pending(self, db, cmd: PromotePending) -> dict:
-    """Move the pending-queue head into the transcript and mark the run.
+    """Move pending follow-ups into the transcript and mark the run.
 
     Replicates `promote_pending_messages_locked`: builds the next-turn
     history BEFORE committing (a malformed entry can't silently consume a
-    turn), moves the head into `messages`, sets the durable run marker,
+    turn), collapses the queue into `messages`, sets the durable run marker,
     commits.  `promoted` is None (queue left intact) only when there was
     nothing to promote; a malformed head that fails schema construction
     instead RAISES `_PersistFailed` (the drain maps that to
@@ -1377,7 +1382,10 @@ class ChatWriterActor:
     if not pending:
       return {"history": [], "promoted": None, "session_id": chat.session_id}
     existing = list(chat.messages or [])
-    first_pending = pending[0]
+    promoted_pending = _combine_pending_messages(pending)
+    consumed_ts = promoted_pending.pop("_consumed_ts", [])
+    initiated_by_app_id = promoted_pending.pop("_initiated_by_app_id", None)
+    returned_promoted = {**promoted_pending, "_consumed_ts": consumed_ts}
     # Build the next-turn history as schemas.ChatMessage objects BEFORE
     # committing, exactly as chat_queue.promote_pending_messages_locked does —
     # run_chat consumes `messages[-1].content` (attribute access).  A
@@ -1393,8 +1401,8 @@ class ChatWriterActor:
       ]
       history.append(
         schemas.ChatMessage(
-          role=first_pending.get("role", "user"),
-          content=first_pending.get("content", "") or "",
+          role=promoted_pending.get("role", "user"),
+          content=promoted_pending.get("content", "") or "",
         )
       )
     except Exception as exc:
@@ -1414,8 +1422,8 @@ class ChatWriterActor:
         cmd.chat_id,
       )
       raise _PersistFailed("PromotePending: malformed queue head") from exc
-    chat.messages = existing + [first_pending]
-    chat.pending_messages = pending[1:]
+    chat.messages = existing + [promoted_pending]
+    chat.pending_messages = []
     chat.run_status = "running"
     chat.run_started_at = datetime.now(UTC)
     chat.updated_at = datetime.now(UTC)
@@ -1431,6 +1439,7 @@ class ChatWriterActor:
     db.add(ChatRun(
       id=cmd.run_token, chat_id=cmd.chat_id, status="running",
       provider=chat.provider, started_at=chat.run_started_at,
+      initiated_by_app_id=initiated_by_app_id,
     ))
     if not _commit_or_rollback(db):
       raise _PersistFailed("PromotePending did not persist")
@@ -1438,7 +1447,7 @@ class ChatWriterActor:
     self._run_token_owner[cmd.chat_id] = cmd.run_token
     return {
       "history": history,
-      "promoted": first_pending,
+      "promoted": returned_promoted,
       "session_id": chat.session_id,
     }
 
@@ -1737,6 +1746,58 @@ def _ensure_unique_ts(new_msg: dict, others: list) -> None:
   max_ts = max((m.get("ts", 0) for m in others), default=0)
   if new_msg.get("ts", 0) <= max_ts:
     new_msg["ts"] = max_ts + 1
+
+
+def _combine_pending_messages(pending: list[dict]) -> dict:
+  """Return one user message representing every pending follow-up.
+
+  The first pending message owns the promoted turn's timestamp so the
+  `queued_turn_starting` SSE event can still identify the same anchor the
+  client already knows about. Content is joined in send order; attachments
+  are de-duplicated while preserving first occurrence.
+  """
+  if not pending:
+    raise _PersistFailed("PromotePending: no pending messages to combine")
+  first = dict(pending[0])
+  contents = []
+  attachments = []
+  seen_attachments = set()
+  for msg in pending:
+    content = msg.get("content", "")
+    if content:
+      if not isinstance(content, str):
+        raise _PersistFailed("PromotePending: malformed queue content")
+      contents.append(content)
+    for att in msg.get("attachments") or []:
+      key = (
+        att.get("name") or att.get("filename") or "",
+        att.get("url") or att.get("path") or "",
+        att.get("size") or 0,
+        att.get("mime_type") or att.get("type") or "",
+      )
+      if key in seen_attachments:
+        continue
+      seen_attachments.add(key)
+      attachments.append(att)
+  combined = {
+    **first,
+    "role": "user",
+    "content": "\n".join(contents),
+    "ts": first.get("ts"),
+    "_consumed_ts": [
+      msg.get("ts") for msg in pending if msg.get("ts") is not None
+    ],
+  }
+  if attachments:
+    combined["attachments"] = attachments
+  else:
+    combined.pop("attachments", None)
+  for key in ("timezone", "viewport"):
+    for msg in reversed(pending):
+      if msg.get(key) is not None:
+        combined[key] = msg.get(key)
+        break
+  return combined
 
 
 def _commit_or_rollback(db) -> bool:

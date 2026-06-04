@@ -11,7 +11,12 @@ function stripAugmentation(text) {
 }
 
 
-export default function MsgContent({ msg, chatId, onQuestionAnswer, questionAnswers }) {
+export default function MsgContent({
+  msg,
+  chatId,
+  onQuestionAnswer,
+  isQuestionAnswerable,
+}) {
   if (msg.blocks && msg.blocks.length > 0) {
     return (
       <>
@@ -37,14 +42,18 @@ export default function MsgContent({ msg, chatId, onQuestionAnswer, questionAnsw
             )
           }
           if (block.type === 'question') {
-            const answers = block.answers || questionAnswers
+            const answers = block.answers
+            const answerable = !!(
+              onQuestionAnswer && isQuestionAnswerable?.(block)
+            )
             return (
               <div key={i}>
                 <QuestionCard
                   questions={block.questions || []}
+                  questionId={block.question_id}
                   answeredMap={answers}
-                  onAnswer={onQuestionAnswer}
-                  disabled={!onQuestionAnswer && !answers}
+                  onAnswer={answerable ? onQuestionAnswer : undefined}
+                  disabled={!answerable && !answers}
                 />
               </div>
             )
