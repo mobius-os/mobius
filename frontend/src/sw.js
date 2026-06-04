@@ -595,6 +595,21 @@ self.addEventListener('notificationclick', (e) => {
     const visible = focusable.find(c => c.visibilityState === 'visible')
     const target_client = visible || focusable[0]
     if (target_client) {
+      // For shell deep-links, navigate the existing client instead of only
+      // postMessaging it. The message path is fast when the current Shell
+      // listener is alive, but installed PWAs can have a stale/booting page
+      // after a service-worker update; navigation gives the browser a durable
+      // URL to load so actions like "Open Klix" don't focus Mobius and then
+      // appear to do nothing.
+      if (/^\/shell\/?\?/.test(target) && 'navigate' in target_client) {
+        try {
+          const navigated = await target_client.navigate(target)
+          await (navigated || target_client).focus()
+          return
+        } catch {
+          // Fall back to focus + postMessage below.
+        }
+      }
       // Focus BEFORE postMessage so the message lands on the window
       // the user will end up on. If focus moves the active document
       // mid-handler, postMessage on the un-focused one can race.

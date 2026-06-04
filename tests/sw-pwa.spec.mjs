@@ -34,6 +34,7 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
     expect(body).toContain('precache')
     expect(body).toMatch(/mobius-vendor|mobius-esm|mobius-proxy/)
     expect(body).toContain('notificationclick')
+    expect(body).toContain('target_client.navigate(target)')
   })
 
   test('manifest is reachable', async ({ page }) => {
