@@ -5,6 +5,7 @@ static files.  API routes are registered first; the frontend SPA is
 mounted last as a catch-all so that client-side routing works.
 """
 
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -19,7 +20,7 @@ from slowapi.errors import RateLimitExceeded
 from sqlalchemy.exc import OperationalError
 
 from app.config import get_settings
-from app.database import Base, engine, run_migrations
+from app.database import Base, SessionLocal, engine, run_migrations
 from app import models
 # providers and push are on the agent's write surface; deferred into
 # lifespan with try/except so a SyntaxError in either doesn't prevent
@@ -499,6 +500,46 @@ def _is_static_asset_path(path: str) -> bool:
   )
 
 
+_RESERVED_TOP_LEVEL_APP_ALIASES = {
+  "api",
+  "app",
+  "apps",
+  "assets",
+  "chat",
+  "recover",
+  "shell",
+  "sw.js",
+  "vendor",
+}
+
+
+def _top_level_app_slug_alias(path: str) -> str | None:
+  """Return an app slug for legacy top-level app URLs like `/cuberun`.
+
+  Standalone apps are canonical at `/apps/<slug>/`, but older install
+  experiments and shortcuts used `/<slug>`. If the root-scoped shell SW does
+  not intercept that navigation, FastAPI's SPA fallback would otherwise serve
+  the Mobius shell at `/<slug>`, which looks like the app opened a copy of
+  Mobius. Redirect exact single-segment app slugs to the canonical standalone
+  URL before serving the SPA.
+  """
+  slug = path.strip("/")
+  if slug.endswith("/index.html"):
+    slug = slug[:-len("/index.html")]
+  if not slug or "/" in slug:
+    return None
+  if not all(ch.isalnum() or ch in "-_" for ch in slug):
+    return None
+  if slug in _RESERVED_TOP_LEVEL_APP_ALIASES:
+    return None
+  db = SessionLocal()
+  try:
+    exists = db.query(models.App.id).filter(models.App.slug == slug).first()
+    return slug if exists else None
+  finally:
+    db.close()
+
+
 _static_dir = _live_dir if _is_complete_build(_live_dir) else _baked_dir
 if _static_dir.is_dir():
   try:
@@ -522,6 +563,15 @@ if _static_dir.is_dir():
   @app.get("/{path:path}")
   async def spa_fallback(request: Request, path: str):
     """Serves the SPA index.html for any non-API, non-asset path."""
+    app_slug = await asyncio.to_thread(_top_level_app_slug_alias, path)
+    if app_slug:
+      from fastapi.responses import RedirectResponse
+      return RedirectResponse(
+        url=f"/apps/{app_slug}/",
+        status_code=307,
+        headers={"Cache-Control": "no-store"},
+      )
+
     # Dynamically update manifest background to match theme.
     if path == "manifest.webmanifest":
       import json

@@ -14,6 +14,7 @@ import useTheme from '../../hooks/useTheme.js'
 import useProviderAuthStatus from '../../hooks/useProviderAuthStatus.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import { appQueries, chatQueries, modelQueries, ownerQueries } from '../../hooks/queries.js'
+import { appVersionKey } from '../../lib/appVersion.js'
 import './Shell.css'
 
 export default function Shell() {
@@ -43,9 +44,7 @@ export default function Shell() {
   // Cache key from app.updated_at (server-side). Stable across reloads.
   const versionForApp = useCallback((id) => {
     const app = apps.find(a => String(a.id) === String(id))
-    if (!app?.updated_at) return 0
-    const t = Date.parse(app.updated_at)
-    return Number.isFinite(t) ? Math.floor(t / 1000) : 0
+    return appVersionKey(app?.updated_at)
   }, [apps])
   // LRU cache of recently-visited app IDs (most-recent first).
   // Each entry stays mounted as a hidden iframe so re-opening it via

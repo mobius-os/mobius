@@ -296,6 +296,7 @@ function offlineCapableHandler(cacheName) {
     const key = new URL(request.url)
     key.searchParams.delete('token')
     key.searchParams.delete('_')
+    key.searchParams.delete('install')
     const cacheKey = key.href
 
     // The (bounded) network fetch that refreshes the cache. cache:'reload'
@@ -468,7 +469,13 @@ registerRoute(
 // recovery page (and recovery was unreachable exactly when it's needed most).
 registerRoute(new NavigationRoute(
   createHandlerBoundToURL('/index.html'),
-  { denylist: [/^\/apps\//, /^\/cuberun(\/|$)/, /^\/recover(\/|$)/] },
+  {
+    denylist: [
+      /^\/apps\//,
+      /^\/recover(\/|$)/,
+      /^\/(?!(?:shell|apps|recover)(?:\/|$))[A-Za-z0-9_-]+(?:\/(?:index\.html)?)?$/,
+    ],
+  },
 ))
 
 // Standalone mini-app navigations: stored for offline-capable apps via
