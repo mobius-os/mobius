@@ -15,7 +15,7 @@ test('composer disables + notes when offline, re-enables online', async ({ page,
   await expect(page.locator('button[aria-label="Send"]')).toBeEnabled()
 
   await context.setOffline(true)
-  await expect(page.getByText("You're offline — chat needs a connection.")).toBeVisible()
+  await expect(page.locator('.shell__offline')).toHaveText(/Offline/i)
   await expect(page.locator('button[aria-label="Send"]')).toBeDisabled()
 
   await context.setOffline(false)

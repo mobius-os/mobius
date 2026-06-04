@@ -7,7 +7,7 @@
  *     content-hashed shell assets (no manual VERSION bump).
  *   - Workbox routing rules cover `/vendor/*`, `esm.sh/*`, and
  *     `/api/proxy?url=*.{img/font}` (SWR).
- *   - Push + notificationclick handlers are kept verbatim.
+ *   - Push + notificationclick handlers are present in the built SW.
  *
  * What this test guards against: any future refactor that
  * accidentally drops precache injection or runtime caching, or
@@ -34,7 +34,9 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
     expect(body).toContain('precache')
     expect(body).toMatch(/mobius-vendor|mobius-esm|mobius-proxy/)
     expect(body).toContain('notificationclick')
-    expect(body).toContain('target_client.navigate(target)')
+    expect(body).toContain('notification-click')
+    expect(body).toContain('postMessage')
+    expect(body).toMatch(/\.navigate\(/)
   })
 
   test('manifest is reachable', async ({ page }) => {

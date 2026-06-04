@@ -14,6 +14,11 @@ const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 // Per-worker cleanup: see tests/_chatTracker.mjs.
 attachCleanup()
 
+function fulfillStartedPost(route) {
+  if (route.request().method() !== 'POST') return route.continue()
+  return route.fulfill({ status: 202, body: '{"status":"started"}' })
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -22,7 +27,7 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
   await page.setViewportSize(viewport)
 
   await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
-    route.fulfill({ status: 202, body: '{}' })
+    fulfillStartedPost(route)
   )
   await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route =>
     route.fulfill({ status: 204, body: '' })
@@ -166,7 +171,7 @@ test.describe('Message rendering', () => {
 
   test('6a. Markdown links and images use an explicit URL allowlist', async ({ page }) => {
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
-      route.fulfill({ status: 202, body: '{}' })
+      fulfillStartedPost(route)
     )
     await page.route('**/api/chat/stop', route =>
       route.fulfill({ status: 200, body: '{}' })
@@ -220,8 +225,9 @@ test.describe('Message rendering', () => {
     const sentBodies = []
     let persistedAnswers = null
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
+      if (route.request().method() !== 'POST') return route.continue()
       sentBodies.push(route.request().postDataJSON())
-      route.fulfill({ status: 202, body: '{}' })
+      return fulfillStartedPost(route)
     })
     await page.route(/\/api\/chats\/[0-9a-f-]+\/question-answers$/, route => {
       persistedAnswers = route.request().postDataJSON().answers
@@ -244,6 +250,7 @@ test.describe('Message rendering', () => {
             'data: {"type":"text","content":"Let me ask you:"}\n\n',
             `data: ${JSON.stringify({
               type: 'question',
+              question_id: 'q-color',
               questions: [{
                 question: 'What color?',
                 header: 'Color',
@@ -322,8 +329,9 @@ test.describe('Message rendering', () => {
     // to the backend so question answers don't show as user bubbles.
     const sentBodies = []
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
+      if (route.request().method() !== 'POST') return route.continue()
       sentBodies.push(route.request().postDataJSON())
-      route.fulfill({ status: 202, body: '{}' })
+      return fulfillStartedPost(route)
     })
     await page.route(/\/api\/chats\/[0-9a-f-]+\/question-answers$/, route =>
       route.fulfill({ status: 200, body: '{"ok":true}' })
@@ -339,7 +347,7 @@ test.describe('Message rendering', () => {
         headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
         body: streamCount === 1
           ? [
-              `data: ${JSON.stringify({ type: 'question', questions: [{ question: 'Pick one', header: 'Test', multiSelect: false, options: [{ label: 'A', description: '' }, { label: 'B', description: '' }] }] })}\n\n`,
+              `data: ${JSON.stringify({ type: 'question', question_id: 'q-pick-one-hidden', questions: [{ question: 'Pick one', header: 'Test', multiSelect: false, options: [{ label: 'A', description: '' }, { label: 'B', description: '' }] }] })}\n\n`,
               'data: {"type":"done"}\n\n',
             ].join('')
           : [
@@ -371,7 +379,7 @@ test.describe('Message rendering', () => {
     // Regression: partial assistant events with empty questions array
     // must not create an empty QuestionCard.
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
-      route.fulfill({ status: 202, body: '{}' })
+      fulfillStartedPost(route)
     )
     await page.route('**/api/chat/stop', route =>
       route.fulfill({ status: 200, body: '{}' })
@@ -384,7 +392,7 @@ test.describe('Message rendering', () => {
           // Empty question (partial event) — should be filtered
           'data: {"type":"question","questions":[]}\n\n',
           // Real question
-          `data: ${JSON.stringify({ type: 'question', questions: [{ question: 'Real question', header: 'Q', multiSelect: false, options: [{ label: 'X', description: '' }, { label: 'Y', description: '' }] }] })}\n\n`,
+          `data: ${JSON.stringify({ type: 'question', question_id: 'q-real-question', questions: [{ question: 'Real question', header: 'Q', multiSelect: false, options: [{ label: 'X', description: '' }, { label: 'Y', description: '' }] }] })}\n\n`,
           'data: {"type":"done"}\n\n',
         ].join(''),
       })
@@ -522,7 +530,7 @@ test.describe('Enter key — touch-primary device (mobile)', () => {
     await page.setViewportSize({ width: 412, height: 915 })
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
-      route.fulfill({ status: 202, body: '{}' })
+      fulfillStartedPost(route)
     )
     await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route =>
       route.fulfill({ status: 204, body: '' })
@@ -622,7 +630,7 @@ test.describe('Scroll after stream end', () => {
 
     await page.setViewportSize({ width: 412, height: 915 })
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
-      route.fulfill({ status: 202, body: '{}' })
+      fulfillStartedPost(route)
     )
     await page.route('**/api/chat/stop', route =>
       route.fulfill({ status: 200, body: '{}' })
@@ -703,7 +711,7 @@ test.describe('Connection recovery', () => {
     let refreshReady = false
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
-      route.fulfill({ status: 202, body: '{}' })
+      fulfillStartedPost(route)
     )
     await page.route('**/api/chat/stop', route =>
       route.fulfill({ status: 200, body: '{}' })
@@ -769,7 +777,7 @@ test.describe('Connection recovery', () => {
     let streamCallCount = 0
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
-      route.fulfill({ status: 202, body: '{}' })
+      fulfillStartedPost(route)
     )
     await page.route('**/api/chat/stop', route =>
       route.fulfill({ status: 200, body: '{}' })

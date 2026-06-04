@@ -21,12 +21,18 @@ const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 attachCleanup()
 
 
+function fulfillStartedPost(route) {
+  if (route.request().method() !== 'POST') return route.continue()
+  return route.fulfill({ status: 202, body: '{"status":"started"}' })
+}
+
+
 /** Helper: log in via the storageState set by auth.setup.mjs and
  *  install a default route mock that returns 204 for /stream. */
 async function setupWithStreamMock(page, streamBody) {
   await page.setViewportSize({ width: 412, height: 915 })
   await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
-    route.fulfill({ status: 202, body: '{}' })
+    fulfillStartedPost(route)
   )
   await page.route('**/api/chat/stop', route =>
     route.fulfill({ status: 200, body: '{}' })
@@ -104,6 +110,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
       'data: {"type":"text","content":"Let me ask:"}\n\n',
       `data: ${JSON.stringify({
         type: 'question',
+        question_id: 'q-pick-one',
         questions: [{
           question: 'Pick one',
           header: 'Test',
@@ -330,8 +337,9 @@ test.describe('Q&A atomic write', () => {
     // separate POST /question-answers request.
     const sentBodies = []
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
+      if (route.request().method() !== 'POST') return route.continue()
       sentBodies.push(route.request().postDataJSON())
-      route.fulfill({ status: 202, body: '{}' })
+      return fulfillStartedPost(route)
     })
     await page.route(/\/api\/chats\/[0-9a-f-]+\/question-answers$/, route => {
       // SHOULD NOT be called by the new frontend.
@@ -343,6 +351,7 @@ test.describe('Q&A atomic write', () => {
     const streamBody = [
       `data: ${JSON.stringify({
         type: 'question',
+        question_id: 'q-pick-atomic',
         questions: [{
           question: 'Pick',
           header: 'X',
@@ -406,7 +415,7 @@ test.describe('Error block: persists across chat return', () => {
 
     await page.setViewportSize({ width: 412, height: 915 })
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
-      route.fulfill({ status: 202, body: '{}' })
+      fulfillStartedPost(route)
     )
     await page.route('**/api/chat/stop', route =>
       route.fulfill({ status: 200, body: '{}' })
@@ -476,7 +485,7 @@ test.describe('Error block: persists across chat return', () => {
 
     await page.setViewportSize({ width: 412, height: 915 })
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
-      route.fulfill({ status: 202, body: '{}' })
+      fulfillStartedPost(route)
     )
     await page.route('**/api/chat/stop', route =>
       route.fulfill({ status: 200, body: '{}' })

@@ -114,6 +114,17 @@ def run_migrations(eng) -> None:
         "NOT NULL DEFAULT 0"
       ))
       conn.commit()
+  if "manifest_url" not in apps_cols:
+    # Install identity — see models.App.manifest_url. Nullable for
+    # user-built apps; installed apps stamp it on install/update.
+    with eng.connect() as conn:
+      conn.execute(text("ALTER TABLE apps ADD COLUMN manifest_url VARCHAR(1024) NULL"))
+      conn.commit()
+  with eng.connect() as conn:
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_apps_manifest_url ON apps (manifest_url)"
+    ))
+    conn.commit()
   if "version" not in apps_cols:
     # Installed manifest version — see models.App.version. Nullable;
     # existing rows backfill on their next install/update.
