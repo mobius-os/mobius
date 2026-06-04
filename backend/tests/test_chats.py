@@ -30,3 +30,46 @@ def test_delete_chat_cancels_orphan_pending_question(client, auth, chat):
     assert pending.future.done()
 
   asyncio.run(go())
+
+
+def test_create_chat_rejects_cross_site_request(client, auth):
+  cross = client.post(
+    "/api/chats",
+    json={"title": "Blocked"},
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert cross.status_code == 403
+
+
+def test_update_chat_rejects_cross_site_request(client, auth, chat):
+  cross = client.put(
+    f"/api/chats/{chat.id}",
+    json={"title": "Blocked"},
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert cross.status_code == 403
+
+
+def test_delete_chat_rejects_cross_site_request(client, auth, chat):
+  cross = client.delete(
+    f"/api/chats/{chat.id}",
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert cross.status_code == 403
+
+
+def test_recover_chat_rejects_cross_site_request(client, auth, chat):
+  cross = client.post(
+    f"/api/chats/{chat.id}/recover",
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert cross.status_code == 403
+
+
+def test_question_answers_rejects_cross_site_request(client, auth, chat):
+  cross = client.post(
+    f"/api/chats/{chat.id}/question-answers",
+    json={"answers": {"q1": "red"}},
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert cross.status_code == 403

@@ -3,6 +3,15 @@
 import io
 
 
+def test_app_token_rejects_cross_site_request(client, auth):
+  cross = client.post(
+    "/api/auth/app-token",
+    json={"app_id": 1},
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert cross.status_code == 403
+
+
 def test_create_app_token(client, owner_token):
   # First create an app.
   r = client.post("/api/apps/", json={

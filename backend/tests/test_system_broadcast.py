@@ -302,6 +302,15 @@ async def test_notify_endpoint_reaches_system_broadcast(client, auth):
     sb.unsubscribe(q)
 
 
+def test_notify_rejects_cross_site_request(client, auth):
+  cross = client.post(
+    "/api/notify",
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+    json={"type": "app_updated", "appId": "36"},
+  )
+  assert cross.status_code == 403
+
+
 def test_notify_body_type_validator_rejects_unknown():
   """NotifyBody rejects unknown system-event types."""
   try:

@@ -36,7 +36,9 @@ from app.providers import effective_agent_settings
 from app.runner_registry import RunnerKind, registry
 from app.config import get_settings
 from app.database import get_db
-from app.deps import Principal, get_current_owner, get_principal
+from app.deps import (
+  Principal, get_current_owner, get_principal, reject_cross_site,
+)
 from app.resource_access import (
   get_active_chat_for_principal, get_active_chat_or_404,
 )
@@ -553,7 +555,11 @@ async def send_message(
   return JSONResponse(status_code=202, content={"status": "started"})
 
 
-@router.delete("/{chat_id}/pending/{ts}", status_code=200)
+@router.delete(
+  "/{chat_id}/pending/{ts}",
+  status_code=200,
+  dependencies=[Depends(reject_cross_site)],
+)
 async def cancel_pending_message(
   chat_id: str,
   ts: int,

@@ -23,6 +23,16 @@ def test_upload_single_file(client, db, auth, chat):
   assert chat.uploads[0]["name"] == "hello.txt"
 
 
+def test_upload_files_rejects_cross_site_request(client, auth, chat):
+  data = io.BytesIO(b"hello world")
+  cross = client.post(
+    f"/api/chats/{chat.id}/uploads",
+    files=[("files", ("hello.txt", data, "text/plain"))],
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert cross.status_code == 403
+
+
 def test_upload_deduplicates_filename(client, db, auth, chat):
   """Second upload with same name gets a numeric suffix."""
   for _ in range(2):
@@ -94,6 +104,14 @@ def test_delete_upload(client, db, auth, chat):
 
   db.refresh(chat)
   assert len(chat.uploads) == 0
+
+
+def test_delete_upload_rejects_cross_site_request(client, auth, chat):
+  cross = client.delete(
+    f"/api/chats/{chat.id}/uploads/remove-me.txt",
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert cross.status_code == 403
 
 
 def test_delete_upload_missing_chat(client, auth):

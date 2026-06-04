@@ -442,7 +442,12 @@ async def update_preview(
   )
 
 
-@router.post("/", response_model=schemas.AppOut, status_code=201)
+@router.post(
+  "/",
+  response_model=schemas.AppOut,
+  status_code=201,
+  dependencies=[Depends(reject_cross_site)],
+)
 async def create_app(
   body: schemas.AppCreate,
   db: Session = Depends(get_db),
@@ -520,7 +525,11 @@ def get_app(
   return app
 
 
-@router.patch("/{app_id}", response_model=schemas.AppOut)
+@router.patch(
+  "/{app_id}",
+  response_model=schemas.AppOut,
+  dependencies=[Depends(reject_cross_site)],
+)
 async def update_app(
   app_id: int,
   body: schemas.AppUpdate,

@@ -19,7 +19,7 @@ from app.auth import decrypt_api_key
 from app.auth_helpers import get_auth_token
 from app.config import get_settings
 from app.database import get_db
-from app.deps import get_current_owner, resolve_owner_only
+from app.deps import get_current_owner, reject_cross_site, resolve_owner_only
 from app.path_utils import validate_path_within_base
 from app.resource_access import get_active_chat_or_404
 
@@ -122,7 +122,9 @@ async def _call_gemini(
   raise HTTPException(status_code=502, detail=f"Image generation failed: {last_error}")
 
 
-@router.post("/{chat_id}/generate-image")
+@router.post(
+  "/{chat_id}/generate-image", dependencies=[Depends(reject_cross_site)],
+)
 async def generate_image(
   body: GenerateRequest,
   chat_id: str,
