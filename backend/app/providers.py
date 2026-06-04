@@ -824,12 +824,12 @@ async def _fetch_codex_models(data_dir: str) -> list[str]:
   codex_home = Path(data_dir) / "cli-auth" / "codex"
   if not (codex_home / "auth.json").exists():
     raise RuntimeError("codex credentials missing")
-  # Match codex_sdk_runner.py's binary resolution: pass the resolved
-  # path explicitly so AppServerConfig doesn't fall back to its own
-  # discovery, which has diverged from PATH in past SDK versions.
+  # Match codex_sdk_runner.py's binary/env resolution: pass the resolved
+  # path explicitly and set CODEX_HOME in the app-server environment.
+  # Recent SDKs no longer accept `codex_home=` on AppServerConfig.
   config = AppServerConfig(
-    codex_home=str(codex_home),
     codex_bin=shutil.which("codex"),
+    env={"CODEX_HOME": str(codex_home)},
   )
   ids: list[str] = []
   async with AsyncCodex(config=config) as codex:
