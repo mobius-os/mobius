@@ -228,7 +228,11 @@ def test_stale_pending_drains_on_fresh_send(client, db, auth, chat):
 
   try:
     assert resp.status_code == 202
-    assert resp.json()["status"] == "started"
+    data = resp.json()
+    assert data["status"] == "started"
+    assert data["message"]["content"] == "stale 1\nstale 2\nnew send"
+    assert data["message"]["_consumed_ts"][:2] == [100, 200]
+    assert len(data["message"]["_consumed_ts"]) == 3
     db.refresh(chat)
     # Stale pending plus the new send were promoted into one ordered turn.
     assert chat.messages[-1]["content"] == "stale 1\nstale 2\nnew send"

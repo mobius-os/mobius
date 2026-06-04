@@ -1422,7 +1422,15 @@ class ChatWriterActor:
     if not pending:
       return {"history": [], "promoted": None, "session_id": chat.session_id}
     existing = list(chat.messages or [])
-    promoted_pending = _combine_pending_messages(pending)
+    head_hidden = bool(pending[0].get("hidden"))
+    promote_count = 0
+    for msg in pending:
+      if bool(msg.get("hidden")) != head_hidden:
+        break
+      promote_count += 1
+    promoted_group = pending[:promote_count]
+    remaining_pending = pending[promote_count:]
+    promoted_pending = _combine_pending_messages(promoted_group)
     consumed_ts = promoted_pending.pop("_consumed_ts", [])
     initiated_by_app_id = promoted_pending.pop("_initiated_by_app_id", None)
     returned_promoted = {**promoted_pending, "_consumed_ts": consumed_ts}
@@ -1463,7 +1471,7 @@ class ChatWriterActor:
       )
       raise _PersistFailed("PromotePending: malformed queue head") from exc
     chat.messages = existing + [promoted_pending]
-    chat.pending_messages = []
+    chat.pending_messages = remaining_pending
     chat.run_status = "running"
     chat.run_started_at = datetime.now(UTC)
     chat.updated_at = datetime.now(UTC)

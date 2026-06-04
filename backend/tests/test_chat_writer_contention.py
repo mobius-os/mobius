@@ -547,6 +547,62 @@ def test_promote_pending_collapses_all_followups(actor):
   assert chat["run_status"] == "running"
 
 
+def test_promote_pending_stops_collapse_at_hidden_boundary(actor):
+  """Visible and hidden queued prompts must not be folded together."""
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[
+      {"role": "user", "content": "visible", "ts": 10},
+      {"role": "user", "content": "secret reminder", "ts": 11, "hidden": True},
+      {"role": "user", "content": "next visible", "ts": 12},
+    ],
+  )
+
+  result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
+
+  assert result["promoted"]["content"] == "visible"
+  assert result["promoted"]["_consumed_ts"] == [10]
+  assert "hidden" not in result["promoted"]
+  chat = _load_chat()
+  assert chat["messages"][-1]["content"] == "visible"
+  assert [m["content"] for m in chat["pending_messages"]] == [
+    "secret reminder",
+    "next visible",
+  ]
+
+  result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt2")))
+
+  assert result["promoted"]["content"] == "secret reminder"
+  assert result["promoted"]["hidden"] is True
+  assert result["promoted"]["_consumed_ts"] == [11]
+  chat = _load_chat()
+  assert chat["messages"][-1]["content"] == "secret reminder"
+  assert chat["messages"][-1]["hidden"] is True
+  assert [m["content"] for m in chat["pending_messages"]] == ["next visible"]
+
+
+def test_promote_pending_hidden_head_does_not_hide_visible_followup(actor):
+  """A hidden head promotes alone so the visible follow-up stays visible."""
+  _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[
+      {"role": "user", "content": "secret reminder", "ts": 10, "hidden": True},
+      {"role": "user", "content": "visible", "ts": 11},
+    ],
+  )
+
+  result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
+
+  assert result["promoted"]["content"] == "secret reminder"
+  assert result["promoted"]["hidden"] is True
+  assert result["promoted"]["_consumed_ts"] == [10]
+  chat = _load_chat()
+  assert chat["messages"][-1]["hidden"] is True
+  assert chat["pending_messages"] == [
+    {"role": "user", "content": "visible", "ts": 11},
+  ]
+
+
 def test_promote_pending_uses_first_queued_actor_for_run_attribution(actor):
   """Collapsed queued turns inherit the first queued message's actor.
 

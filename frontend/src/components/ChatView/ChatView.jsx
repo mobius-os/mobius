@@ -68,6 +68,26 @@ function sameMessageList(a, b) {
   return true
 }
 
+function startedMessageFromResponse(result) {
+  if (!result?.message) return null
+  const {
+    queued: _q,
+    cid: _c,
+    position: _p,
+    _consumed_ts: _cts,
+    ...msg
+  } = result.message
+  return msg
+}
+
+function findOptimisticUserIndex(messages, ts) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]
+    if (msg?.role === 'user' && msg.ts === ts) return i
+  }
+  return -1
+}
+
 
 export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystemEvent, builtApp, onOpenApp, onMessageStart, showPicker = true, embedded = false }) {
   const queryClient = useQueryClient()
@@ -860,7 +880,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     // be `true` in this render's closure, sending the message to the
     // queue path instead of the fresh-send path. Refs reflect the
     // latest commit and dodge that.
-    if (sendingRef.current || isStreamingRef.current) {
+    if (
+      sendingRef.current
+      || isStreamingRef.current
+      || pendingQueue.pendingMessagesRef.current.length > 0
+    ) {
       const cid = (typeof crypto !== 'undefined' && crypto.randomUUID)
         ? crypto.randomUUID()
         : `cid-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
@@ -904,10 +928,15 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         }
         // Race: server said "started" though we expected queued.
         if (result?.status === 'started') {
+          if (Array.isArray(result.message?._consumed_ts)) {
+            pendingQueue.promoteManyByTs(result.message._consumed_ts)
+          }
           pendingQueue.cancelByCid(queuedMsg.cid)
           onMessageStartRef.current?.()
           promotedRef.current = false
+          const startedMessage = startedMessageFromResponse(result)
           commitMessages(prev => {
+            if (startedMessage) return [...prev, startedMessage]
             const { queued: _q, cid: _c, position: _p, ...msg } = queuedMsg
             return [...prev, msg]
           })
@@ -963,7 +992,17 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     bridgeHook.markBridged()
 
     try {
-      await streamSend(text, attachments.length > 0 ? attachments : undefined)
+      const result = await streamSend(text, attachments.length > 0 ? attachments : undefined)
+      const startedMessage = startedMessageFromResponse(result)
+      if (startedMessage) {
+        commitMessages(prev => {
+          const next = [...prev]
+          const idx = findOptimisticUserIndex(next, userMsg.ts)
+          if (idx >= 0) next[idx] = startedMessage
+          else next.push(startedMessage)
+          return next
+        })
+      }
       if (!hadMessagesRef.current) {
         hadMessagesRef.current = true
         onFirstMessageRef.current?.()
