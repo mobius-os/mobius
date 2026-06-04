@@ -8,17 +8,30 @@ const SOURCE = readFileSync(
 )
 
 function shellNavigationDenylist() {
-  const match = SOURCE.match(/\{\s*denylist:\s*\[([^\]]+)\]\s*\}/)
+  const match = SOURCE.match(/denylist:\s*\[([\s\S]*?)\n\s*\]/)
   assert.ok(match, 'shell NavigationRoute denylist exists')
   return Function(`"use strict"; return [${match[1]}]`)()
 }
 
-test('shell app navigation does not intercept CubeRun root routes', () => {
+test('shell app navigation does not intercept top-level app-like routes', () => {
   const denylist = shellNavigationDenylist()
   const denied = path => denylist.some(re => re.test(path))
 
   assert.equal(denied('/cuberun'), true)
   assert.equal(denied('/cuberun/'), true)
   assert.equal(denied('/cuberun/index.html'), true)
-  assert.equal(denied('/cuberunner'), false)
+  assert.equal(denied('/klix-filter'), true)
+  assert.equal(denied('/cuberunner'), true)
+  assert.equal(denied('/shell/'), false)
+  assert.equal(denied('/shell/chat/abc'), false)
+  assert.equal(denied('/apps/cuberun/'), true)
+  assert.equal(denied('/recover/chat'), true)
+})
+
+test('offline app cache key ignores install intent query', () => {
+  assert.match(
+    SOURCE,
+    /searchParams\.delete\(['"]install['"]\)/,
+    'offline cache key strips ?install=1',
+  )
 })

@@ -11,6 +11,8 @@ second still bust the icon cache).
 
 import re
 
+import pytest
+
 from app import models
 from app.database import SessionLocal
 
@@ -27,6 +29,14 @@ def _create_app(client, owner_token, name):
   )
   assert r.status_code == 201, r.text
   return r.json()
+
+
+def _spa_active(client):
+  """The SPA catch-all only registers in built/container environments."""
+  r = client.get("/__definitely_shell_route__")
+  return r.status_code == 200 and "text/html" in r.headers.get(
+    "content-type", ""
+  )
 
 
 def test_manifest_has_no_cache_header(client, owner_token):
@@ -82,3 +92,47 @@ def test_manifest_and_loading_shell_use_app_declared_colors(client, owner_token)
   shell = client.get(f"/apps/{app['slug']}/")
   assert shell.status_code == 200
   assert "--bg: #101820;" in shell.text
+
+
+def test_top_level_app_slug_redirects_to_standalone_scope(client, owner_token):
+  if not _spa_active(client):
+    pytest.skip("SPA fallback not registered (no static dir in this env)")
+  app = _create_app(client, owner_token, "CubeRun")
+  assert app["slug"] == "cuberun"
+
+  for path in ("/cuberun", "/cuberun/", "/cuberun/index.html"):
+    r = client.get(path, follow_redirects=False)
+    assert r.status_code == 307, path
+    assert r.headers["location"] == "/apps/cuberun/"
+    assert r.headers["cache-control"] == "no-store"
+
+
+def test_reserved_top_level_routes_do_not_alias_to_apps(client, owner_token):
+  if not _spa_active(client):
+    pytest.skip("SPA fallback not registered (no static dir in this env)")
+
+  db = SessionLocal()
+  try:
+    for slug in ("api", "apps", "assets", "recover", "shell", "vendor"):
+      db.add(models.App(
+        name=slug,
+        slug=slug,
+        description="reserved route collision",
+        jsx_source="export default function App() { return null }",
+      ))
+    db.commit()
+  finally:
+    db.close()
+
+  for slug in ("api", "apps", "assets", "recover", "shell", "vendor"):
+    r = client.get(f"/{slug}", follow_redirects=False)
+    assert r.status_code != 307, slug
+    assert r.headers.get("location") != f"/apps/{slug}/"
+
+
+def test_unknown_top_level_route_still_serves_shell(client):
+  if not _spa_active(client):
+    pytest.skip("SPA fallback not registered (no static dir in this env)")
+  r = client.get("/not-an-installed-app")
+  assert r.status_code == 200
+  assert "text/html" in r.headers.get("content-type", "")
