@@ -59,10 +59,10 @@ test.describe('sw cache policy — isStaleRuntimeCache', () => {
   })
 })
 
-test.describe('sw cache policy — isKnownOnline (offline-capable frame/module gate)', () => {
+test.describe('sw cache policy — isKnownOnline (connectivity verdict helper)', () => {
   const NOW = 1_000_000
 
-  test('fresh positive verdict → known online (network-first keeps app code fresh)', () => {
+  test('fresh positive verdict → known online', () => {
     expect(isKnownOnline(true, NOW - 1000, NOW)).toBe(true)
   })
 
@@ -85,12 +85,12 @@ test.describe('sw cache policy — isKnownOnline (offline-capable frame/module g
   })
 })
 
-test.describe('sw cache policy — shouldServeCacheFirst (frame/module serve strategy)', () => {
+test.describe('sw cache policy — shouldServeCacheFirst (versioned app-code strategy)', () => {
   test('cached + NOT known-online → cache-first (instant offline / cold-restart)', () => {
     expect(shouldServeCacheFirst(true, false)).toBe(true)
   })
-  test('cached + known-online → network-first (agent edit fresh on current open)', () => {
-    expect(shouldServeCacheFirst(true, true)).toBe(false)
+  test('cached + known-online → cache-first (versioned URL keeps app edits fresh)', () => {
+    expect(shouldServeCacheFirst(true, true)).toBe(true)
   })
   test('no cache + NOT known-online → network (cold path, nothing to serve)', () => {
     expect(shouldServeCacheFirst(false, false)).toBe(false)

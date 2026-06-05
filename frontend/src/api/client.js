@@ -190,12 +190,10 @@ export const api = {
   },
   apps: {
     list: () => apiFetch('/apps/'),
-    // Stable per-app URL — cache freshness is handled by the server's
-    // ETag + the browser's HTTP cache, not by a manual `?v=` param.
-    // See backend/app/routes/apps.py for the ETag derivation. The
-    // iframe REMOUNTS on app_updated (via the React `key` prop in
-    // AppCanvas) which forces the browser to re-fetch and revalidate
-    // via If-None-Match.
+    // Stable base URL. AppCanvas appends `?v=<app.updated_at>` so the
+    // service worker can serve cached offline-capable apps cache-first while
+    // app edits naturally become cache misses. The backend still sends ETags
+    // for browser-cache revalidation on non-SW/cold paths.
     frameUrl: (appId) => `${BASE}/api/apps/${appId}/frame`,
   },
   settings: {

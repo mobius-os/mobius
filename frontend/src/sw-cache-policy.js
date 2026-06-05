@@ -65,33 +65,22 @@ export function isStaleRuntimeCache(name) {
 }
 
 // How long a page connectivity verdict (posted to the SW from useOnlineStatus's
-// /api/health probe) is trusted before it's considered stale. After this, the
-// SW treats connectivity as unknown (→ cache-first when cached) rather than
-// trusting a possibly-stale verdict across a long background gap or reconnect.
+// /api/health probe) is trusted before it's considered stale. Kept as a pure
+// helper because older SW policies and future non-versioned routes may still
+// need an explicit "known online" gate. Versioned offline-capable app code no
+// longer uses this gate: if there is a cached copy, it is served immediately and
+// refreshed in the background.
 //
-// This window is a deliberate two-sided knob. ACCEPTED BOUND: if connectivity
-// drops while no page is open, a recent positive verdict stays trusted for up
-// to this long, so a standalone PWA launch within the window goes network-first
-// and waits out NET_TIMEOUT_MS (~3s) before falling back to cache instead of
-// opening instantly. Shrinking it would reduce that edge but widen the opposite
-// risk (a stale-positive isn't the danger — a too-short window makes an
-// actively-online user's verdict expire between 20s probes and serve cache-first
-// → a possibly-stale open after an app edit). 60s ≈ 3× the probe poll interval:
-// long enough that an active session stays "known online" between polls, short
-// enough that the offline edge self-heals on the next probe.
+// This window was originally a two-sided knob for network-first vs cache-first
+// app-code serving. The current versioned app-code policy no longer depends on
+// it, but the helper stays conservative for any future route that needs a
+// positive, recent online verdict.
 export const VERDICT_MAX_AGE_MS = 60000
 
 // PURE: is the device KNOWN to be online — i.e. is there a FRESH, POSITIVE page
-// verdict? Gates the offline-capable frame/module fast path in sw.js: a cached
-// app is served cache-first UNLESS isKnownOnline() (then network-first keeps an
-// agent's edit fresh on the current open). Requiring a POSITIVE online proof
-// (pageOnline === true), not merely the absence of an offline proof, is what
-// makes a cold SW-restart open instant: at restart pageOnline is undefined →
-// not known-online → cached app served instantly, no race against the verdict
-// postMessage. A wrong "offline" guess (cold-restart-while-actually-online)
-// costs at most one stale open — the detached revalidate + the version-bump
-// iframe remount on reconnect self-heal it. Exported pure so the gate's truth
-// table is unit-testable without a service-worker context.
+// verdict? Exported pure so the truth table remains testable without a
+// service-worker context. The current offline-capable app route does not need
+// this to decide whether to serve cache-first because those URLs are versioned.
 //
 // @param {boolean|undefined} pageOnline last verdict (true/false/undefined)
 // @param {number} verdictAt  Date.now() when the verdict was recorded (0 if none)
@@ -102,24 +91,23 @@ export function isKnownOnline(pageOnline, verdictAt, now, maxAgeMs = VERDICT_MAX
 }
 
 // PURE: should offlineCapableHandler serve the CACHED copy first (instant) vs go
-// network-first? Cache-first only when we HAVE a cached copy AND are not
-// known-online — so a cold SW restart (connectivity unknown) still serves
-// instantly, while a known-online open stays network-first to keep an agent's
-// app edit fresh on the current open. No cached copy → always network (cold
-// path). A wrong "offline" guess self-heals via the background revalidate.
-// Extracted + exported so the branch is unit-testable without a SW context.
-export function shouldServeCacheFirst(hasCached, online) {
-  return hasCached && !online
+// to network? If the route is cached, serve it immediately and refresh in the
+// background. Freshness comes from the versioned frame/module URL (`?v=` is part
+// of the cache key): an app update changes the key and naturally becomes a cache
+// miss, so the updated app still goes to the network on its first open. No
+// cached copy → always network (cold path, nothing to serve).
+export function shouldServeCacheFirst(hasCached) {
+  return !!hasCached
 }
 
-// PURE: on the network-first path, should a network RESPONSE be replaced by the
-// cached copy? Yes for a SERVER error (>=500) when we have a cached app — a
-// transient backend 500/502/503 must not blank a known-good offline-capable app
-// that we have cached. NOT for 4xx (404 app-deleted / 401-403 auth are
-// authoritative — masking them with a stale cached app would hide a real state),
-// and NOT for 2xx/3xx (the real response). Network REJECTIONS (offline / DNS /
-// abort) are handled separately by the handler's catch; this is only for
-// resolved-but-failed HTTP responses. Exported pure so the rule is unit-tested.
+// PURE: on the network path, should a network RESPONSE be replaced by the cached
+// copy? Yes for a SERVER error (>=500) when we have a cached app — a transient
+// backend 500/502/503 must not blank a known-good offline-capable app that we
+// have cached. NOT for 4xx (404 app-deleted / 401-403 auth are authoritative —
+// masking them with a stale cached app would hide a real state), and NOT for
+// 2xx/3xx (the real response). Network REJECTIONS (offline / DNS / abort) are
+// handled separately by the handler's catch; this is only for resolved-but-
+// failed HTTP responses. Exported pure so the rule is unit-tested.
 export function shouldFallBackToCacheOnError(status, hasCached) {
   return hasCached && status >= 500
 }
