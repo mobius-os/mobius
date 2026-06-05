@@ -598,19 +598,21 @@ export default function App({ appId, token }) {
     const showLabel = shouldShowNodeLabel(globalScale, node, hoverId);
     if (showLabel) {
       const label = node.title || node.id;
-      const labelPx = clamp((isMoc ? 11.5 : 10.5) * Math.sqrt(globalScale), 9, 15);
+      const labelPx = clamp((isMoc ? 12.5 : 11.5) * Math.sqrt(globalScale), 10.5, 16);
       const fontSize = labelPx / globalScale;
-      const padX = 5.5 / globalScale;
-      const padY = 2.5 / globalScale;
-      const gap = 3 / globalScale;
+      const padX = 6 / globalScale;
+      const padY = 3 / globalScale;
+      const gap = 4 / globalScale;
       const labelY = node.y + r + gap;
-      const pillAlpha = (isHover ? 0.88 : 0.62) * (0.35 + 0.65 * f);
+      const labelAlpha = (isHover || isMoc || node.showLabelAlways) ? 1 : 0.55 + 0.45 * f;
+      const pillAlpha = (isHover || node.showLabelAlways ? 0.86 : 0.68) * (0.45 + 0.55 * f);
+      const fontFamily = 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
 
       ctx.save();
-      ctx.font = `${isMoc ? 600 : 500} ${fontSize}px var(--font, sans-serif)`;
+      ctx.font = `${isMoc ? 700 : 600} ${fontSize}px ${fontFamily}`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.globalAlpha = isHover ? 1 : 0.4 + 0.6 * f;
+      ctx.globalAlpha = labelAlpha;
 
       const width = ctx.measureText(label).width + padX * 2;
       const height = fontSize + padY * 2;
@@ -620,7 +622,7 @@ export default function App({ appId, token }) {
       roundedRect(ctx, x, y, width, height, 5 / globalScale);
       ctx.fill();
       ctx.lineWidth = 0.75 / globalScale;
-      ctx.strokeStyle = withAlpha(cssVar('--text', '#e5e5e5'), 0.12 * (isHover ? 1 : f));
+      ctx.strokeStyle = withAlpha(cssVar('--text', '#e5e5e5'), 0.22 * (isHover || node.showLabelAlways ? 1 : f));
       ctx.stroke();
 
       ctx.fillStyle = cssVar('--text', '#e5e5e5');
