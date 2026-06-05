@@ -34,6 +34,7 @@ test('shouldShowNodeLabel hides ordinary nodes below every threshold except clos
 
 test('shouldShowNodeLabel always shows small-graph labels when marked', () => {
   assert.equal(shouldShowNodeLabel(0.001, { id: 'plain', showLabelAlways: true }, null), true)
+  assert.equal(shouldShowNodeLabel(undefined, { id: 'plain', showLabelAlways: true }, null), true)
 })
 
 test('shouldShowNodeLabel shows MOC-linked nodes at 0.24 and above', () => {
@@ -60,8 +61,8 @@ test('shouldShowNodeLabel shows important nodes at 0.18', () => {
   assert.equal(shouldShowNodeLabel(0.18, almostImportant, null), false)
 })
 
-test('shouldShowNodeLabel rejects malformed scales', () => {
-  assert.equal(shouldShowNodeLabel(Number.NaN, { id: 'x', mocs: ['m'] }, 'x'), false)
+test('shouldShowNodeLabel rejects malformed scales for threshold labels', () => {
+  assert.equal(shouldShowNodeLabel(Number.NaN, { id: 'x', mocs: ['m'] }, null), false)
   assert.equal(shouldShowNodeLabel(Infinity, { id: 'x' }, null), false)
 })
 
