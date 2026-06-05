@@ -1,10 +1,14 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 export default function ToolBlock({ t }) {
   const [open, setOpen] = useState(() => !!t.defaultOpen)
   const toolName = t.tool || 'Tool'
   const label = toolName + (t.input ? `: ${t.input}` : '')
   const hasDetail = !!(t.input || t.output)
+
+  useEffect(() => {
+    if (t.defaultOpen) setOpen(true)
+  }, [t.defaultOpen])
 
   return (
     <div className={`chat__tool chat__tool--${t.status || 'done'}`}>

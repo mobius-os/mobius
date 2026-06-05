@@ -2,31 +2,13 @@ import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ToolBlock from './ToolBlock.jsx'
 import QuestionCard from './QuestionCard.jsx'
 import Attachments from './Attachments.jsx'
+import { compactionToolBlock } from './compactionToolBlock.js'
 
 
 function stripAugmentation(text) {
   let cleaned = text.replace(/\s*<agent_experience>[\s\S]*?<\/agent_experience>\s*/g, '')
   cleaned = cleaned.replace(/\s*\[Files in this session:\n[\s\S]*?\]\s*/g, '')
   return cleaned.trim()
-}
-
-function compactionToolBlock(msg, chatId) {
-  const blocks = Array.isArray(msg.blocks) ? msg.blocks : []
-  const existingTool = blocks.find(block => block.type === 'tool')
-  if (existingTool) {
-    return { ...existingTool, defaultOpen: true }
-  }
-  const textBlock = blocks.find(block => block.type === 'text')
-  return {
-    type: 'tool',
-    tool: 'CompactChat',
-    input: chatId
-      ? `POST /api/chats/${chatId}/compact`
-      : 'POST /api/chats/{chat_id}/compact',
-    output: msg.content || textBlock?.content || '',
-    status: 'done',
-    defaultOpen: true,
-  }
 }
 
 export default function MsgContent({
