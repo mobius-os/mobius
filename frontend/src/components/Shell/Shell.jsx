@@ -371,6 +371,12 @@ export default function Shell() {
   //     the drawer's onApp wiring (navTo('canvas', { appId })) so the
   //     existing iframe LRU + back-stack behavior applies.
   useEffect(() => {
+    const findAppForOpenTarget = (list, target) => {
+      if (target == null) return null
+      return (list || []).find(a =>
+        String(a.id) === String(target) || a.slug === target) || null
+    }
+
     async function handleAppError(e) {
       const appEntry = apps.find(a => String(a.id) === String(e.data.appId))
       const appName = appEntry?.name || `app ${e.data.appId}`
@@ -389,7 +395,7 @@ export default function Shell() {
       }
     }
 
-    function onMessage(e) {
+    async function onMessage(e) {
       // window 'message' events are for cross-frame postMessage —
       // mini-app iframes (origin 'null' from sandboxed iframes) or
       // same-origin sibling frames. NOT service-worker messages —
@@ -406,14 +412,25 @@ export default function Shell() {
       } else if (e.data?.type === 'moebius:open-app') {
         // Match against installed apps by numeric id OR slug, so the
         // sender can use whichever it has on hand. String() coercion
-        // covers the numeric-id case without trusting the payload's
-        // type. Unknown ids are dropped silently — a stale catalog
-        // entry or a buggy mini-app shouldn't take down the shell.
+        // covers the numeric-id case without trusting the payload's type.
+        //
+        // App installs can complete while the shell is holding a stale
+        // persisted /api/apps snapshot (common in installed PWAs). In that
+        // state the App Store iframe knows the installed DB id, but this
+        // handler's current list does not, and a silent return leaves the
+        // user on the previous chat. Refetch once before giving up so
+        // newly-installed external apps open from their own detail screen.
         const target = e.data.appId
-        if (target == null) return
-        const app = apps.find(a =>
-          String(a.id) === String(target) || a.slug === target)
-        if (!app) return
+        let app = findAppForOpenTarget(apps, target)
+        if (!app) {
+          const updatedApps = await refreshApps()
+          app = findAppForOpenTarget(updatedApps, target)
+        }
+        if (!app) {
+          setToast('App is not installed yet.')
+          setTimeout(() => setToast(null), 6000)
+          return
+        }
         navTo('canvas', { appId: app.id })
       }
     }
@@ -473,7 +490,7 @@ export default function Shell() {
         navigator.serviceWorker.removeEventListener('message', onSwMessage)
       }
     }
-  }, [apps, chats, navTo])
+  }, [apps, chats, navTo, refreshApps])
 
   async function newChat({ draft, forceNew, exclude } = {}) {
     // Reuse the most-recently-updated empty chat if one exists; only

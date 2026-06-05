@@ -317,6 +317,81 @@ def test_install_static_site_assets_route_css_fonts_and_chunks(
   assert "text/html" not in bad_font_path.headers.get("content-type", "")
 
 
+def test_static_site_asset_update_removes_old_manifest_owned_files(
+  client, auth, bypass_url_validation,
+):
+  """Hashed static bundles are declarative, not append-only.
+
+  When v2 stops declaring a v1 chunk, the old chunk must disappear so
+  missing manifest declarations surface as 404s. Files not owned by the
+  manifest survive because app/user code may keep its own static files in
+  the same directory.
+  """
+  base = "https://raw.githubusercontent.com/x/static-prune/main/"
+  manifest_v1 = {
+    "id": "static-prune",
+    "name": "Static Prune",
+    "version": "1.0.0",
+    "description": "Static update cleanup",
+    "entry": "index.jsx",
+    "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
+    "static_assets": {
+      "index.html": "build/index.html",
+      "static/js/old.js": "build/static/js/old.js",
+    },
+  }
+  responses_v1 = {
+    base + "mobius.json": (200, json.dumps(manifest_v1).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "build/index.html": (200, b"<!doctype html><script src='./static/js/old.js'></script>"),
+    base + "build/static/js/old.js": (200, b"console.log('old')"),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses_v1),
+  ):
+    r1 = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r1.status_code == 201, r1.text
+  app_id = r1.json()["id"]
+
+  data_dir = Path(get_settings().data_dir)
+  source_static = data_dir / "apps" / "static-prune" / "static"
+  unrelated = source_static / "user-kept.txt"
+  unrelated.write_text("do not prune")
+
+  manifest_v2 = {
+    **manifest_v1,
+    "version": "2.0.0",
+    "static_assets": {
+      "index.html": "build/index.html",
+      "static/js/new.js": "build/static/js/new.js",
+    },
+  }
+  responses_v2 = {
+    base + "mobius.json": (200, json.dumps(manifest_v2).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "build/index.html": (200, b"<!doctype html><script src='./static/js/new.js'></script>"),
+    base + "build/static/js/new.js": (200, b"console.log('new')"),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses_v2),
+  ):
+    r2 = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["mode"] == "update"
+
+  assert client.get(f"/app-assets/by-id/{app_id}/static/js/old.js").status_code == 404
+  new_js = client.get(f"/app-assets/by-id/{app_id}/static/js/new.js")
+  assert new_js.status_code == 200
+  assert "console.log('new')" in new_js.text
+  assert unrelated.read_text() == "do not prune"
+
+
 MANIFEST_ONDEMAND = {
   "id": "test-build",
   "name": "Test Build",
