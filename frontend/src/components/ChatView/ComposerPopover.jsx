@@ -75,6 +75,7 @@ export default function ComposerPopover({
   // flag with a `messages.some(m => m.role === 'assistant')`
   // check and passes the result down.
   hasAssistantTurns,
+  onCompactionStored,
 }) {
   const [open, setOpen] = useState(false)
   const wrapRef = useRef(null)
@@ -202,6 +203,7 @@ export default function ComposerPopover({
                 effective={chatInfo.effective}
                 hasAssistantTurns={hasAssistantTurns}
                 onChange={onChangeChatInfo}
+                onCompactionStored={onCompactionStored}
                 reqIdRef={reqIdRef}
                 wasInputFocusedRef={wasInputFocusedRef}
               />

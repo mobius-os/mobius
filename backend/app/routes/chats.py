@@ -636,8 +636,8 @@ async def compact_chat(
   loses the session (sessions aren't cross-provider portable), so this runs
   a one-shot summarize turn over the current transcript and stores the
   result as a recognizable `kind="compaction"` assistant message via the
-  writer actor. It does NOT switch provider here — the provider-switch
-  wiring and the warn dialog are frontend follow-ups; this endpoint only
+  writer actor. It does NOT switch provider here — the frontend owns the
+  confirmation and follow-up provider/model PATCH. This endpoint only
   produces + stores + returns the summary so the client can display it.
 
   A failed summarize (empty chat, disconnected provider, no text produced)
@@ -689,7 +689,13 @@ async def compact_chat(
     raise HTTPException(
       status_code=503, detail="Could not store the compaction; try again."
     )
-  return {"ok": True, "summary": summary, "stored": result.get("stored")}
+  command = f"POST /api/chats/{chat_id}/compact"
+  return {
+    "ok": True,
+    "summary": summary,
+    "command": command,
+    "stored": result.get("stored"),
+  }
 
 
 class AppChatCreate(BaseModel):

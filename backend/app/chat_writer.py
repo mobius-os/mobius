@@ -342,10 +342,11 @@ class PersistCompaction(_Command):
   snapshot path, which REPLACES the in-progress assistant message — so it
   never clobbers a live turn's transcript and renders as its own block.
 
-  The stored message carries `kind="compaction"` (so the frontend can render
-  a recognizable, collapsible "compacted chat" block) and `content` set to
-  the briefing text (so any plain renderer still shows it). Returns
-  `{"stored"}` — the message as appended, with its final ts.
+  The stored message carries `kind="compaction"` and `content` set to the
+  briefing text (so provider seeding and any plain renderer still see it).
+  Its visible block is a tool-style record containing the endpoint command
+  plus the briefing output. Returns `{"stored"}` — the message as appended,
+  with its final ts.
   """
 
   chat_id: str = ""
@@ -1383,10 +1384,11 @@ class ChatWriterActor:
     """Append the compaction briefing as a new assistant message; commit.
 
     The block is its OWN message (appended, not a replace) so it can't
-    clobber a streaming snapshot, and it carries `kind="compaction"` plus
-    a single text block so both the dedicated frontend renderer and any
-    plain renderer surface the briefing. The `ts` is set strictly past
-    every message in the transcript and the pending queue (via
+    clobber a streaming snapshot, and it carries `kind="compaction"` plus a
+    tool block so the frontend surfaces both the command that ran and the
+    resulting portable briefing. The `content` remains plain text for
+    provider seeding/backward-compatible renderers. The `ts` is set strictly
+    past every message in the transcript and the pending queue (via
     `next_message_ts`, so even an empty transcript gets a wall-clock ts)
     so it can't collide with a sibling's React key.
     """
@@ -1400,7 +1402,14 @@ class ChatWriterActor:
       "role": "assistant",
       "kind": "compaction",
       "content": cmd.summary,
-      "blocks": [{"type": "text", "content": cmd.summary}],
+      "blocks": [{
+        "type": "tool",
+        "tool": "CompactChat",
+        "input": f"POST /api/chats/{cmd.chat_id}/compact",
+        "output": cmd.summary,
+        "status": "done",
+        "defaultOpen": True,
+      }],
       "ts": next_message_ts(msgs + list(chat.pending_messages or [])),
     }
     msgs.append(new_msg)

@@ -1,8 +1,9 @@
 import { useState } from 'react'
 
 export default function ToolBlock({ t }) {
-  const [open, setOpen] = useState(false)
-  const label = t.tool + (t.input ? `: ${t.input}` : '')
+  const [open, setOpen] = useState(() => !!t.defaultOpen)
+  const toolName = t.tool || 'Tool'
+  const label = toolName + (t.input ? `: ${t.input}` : '')
   const hasDetail = !!(t.input || t.output)
 
   return (
@@ -14,7 +15,7 @@ export default function ToolBlock({ t }) {
             skill the agent reached for this turn. */}
         {t.skill && <span className="chat__tool-chip">skill: {t.skill}</span>}
         <span className="chat__tool-name">
-          {t.status === 'running' ? `Running ${t.tool}...` : label}
+          {t.status === 'running' ? `Running ${toolName}...` : label}
         </span>
         {hasDetail && <span className="chat__tool-toggle">{open ? '▾' : '▸'}</span>}
       </div>

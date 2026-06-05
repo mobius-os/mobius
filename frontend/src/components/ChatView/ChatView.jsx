@@ -372,6 +372,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     } catch { /* network error — silent, user can retry */ }
   }, [chatId, commitMessages, pendingQueue, queryClient])
 
+  const handleCompactionStored = useCallback(
+    () => fetchMessages({ force: true }),
+    [fetchMessages],
+  )
+
   const {
     streamItems,
     latestItemsRef,
@@ -1562,6 +1567,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                   effective: effective || prev.effective,
                 }) : prev)
               }}
+              onCompactionStored={handleCompactionStored}
             />
           }
         />
