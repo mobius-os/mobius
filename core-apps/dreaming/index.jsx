@@ -1,7 +1,7 @@
 /* Dreaming — the nightly morning-brief viewer.
  *
  * Lists the dated reports the dreaming agent leaves overnight, tracks a
- * streak, and lets the owner set the run hour + verbosity. Opening a brief
+ * streak, and lets the owner set the run hour and model. Opening a brief
  * shows TWO things stacked: the brief HTML up top (a sandboxed, script-free
  * iframe — the agent's static page) and, beneath it, the MORNING CHAT the
  * nightly run opened — the conversation about that brief, live, with a real
@@ -1204,7 +1204,6 @@ function StreakBar({ streak }) {
 
 function SettingsTab({ appId, storage, online, token }) {
   const [hour, setHour] = useState(DEFAULT_HOUR)
-  const [verbosity, setVerbosity] = useState(DEFAULT_VERBOSITY)
   const [excludeApps, setExcludeApps] = useState([])
   const [settingsExtra, setSettingsExtra] = useState({})
   const [agents, setAgents] = useState([])
@@ -1245,9 +1244,6 @@ function SettingsTab({ appId, storage, online, token }) {
           // readable default, then save in the cron shape the runner expects.
           setHour(s.hour)
           setCronIsCustom(false)
-        }
-        if (VERBOSITY_OPTIONS.some((v) => v.id === s.verbosity)) {
-          setVerbosity(s.verbosity)
         }
         if (Array.isArray(s.exclude_apps)) setExcludeApps(s.exclude_apps)
         if (typeof s.agent_id === 'string' && s.agent_id.trim()) {
@@ -1329,7 +1325,6 @@ function SettingsTab({ appId, storage, online, token }) {
         hour,
         minute: 0,
         timezone: settingsExtra.timezone ?? null,
-        verbosity,
         exclude_apps: excludeApps,
         agent_id: selectedAgent?.id || agentId || null,
         provider: provider || selectedAgent?.provider || settingsExtra.provider || DEFAULT_PROVIDER,
@@ -1343,7 +1338,7 @@ function SettingsTab({ appId, storage, online, token }) {
     } finally {
       setSaving(false)
     }
-  }, [saving, cronIsCustom, rawCron, hour, verbosity, excludeApps, agentId, agents, provider, model, settingsExtra, storage, online])
+  }, [saving, cronIsCustom, rawCron, hour, excludeApps, agentId, agents, provider, model, settingsExtra, storage, online])
 
   if (loading) {
     return (
@@ -1500,42 +1495,6 @@ function SettingsTab({ appId, storage, online, token }) {
             </div>
           </>
         )}
-      </div>
-
-      <div style={S.settingsCard}>
-        <div style={S.sectionHead}>
-          <span style={S.sectionIcon} aria-hidden="true">✍️</span>
-          <h2 style={S.sectionLabel}>How much detail</h2>
-        </div>
-        <p style={S.note}>How long and discursive each brief should be.</p>
-        <div style={S.verbList} role="radiogroup" aria-label="Verbosity">
-          {VERBOSITY_OPTIONS.map((opt) => {
-            const on = verbosity === opt.id
-            return (
-              <div
-                key={opt.id}
-                style={S.verbRow(on)}
-                className="dreaming-pressable"
-                onClick={() => setVerbosity(opt.id)}
-                role="radio"
-                aria-checked={on}
-                tabIndex={0}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault()
-                    setVerbosity(opt.id)
-                  }
-                }}
-              >
-                <span style={S.verbRadio(on)} aria-hidden="true" />
-                <div style={S.verbMain}>
-                  <span style={S.verbTitle}>{opt.label}</span>
-                  <span style={S.verbHint}>{opt.hint}</span>
-                </div>
-              </div>
-            )
-          })}
-        </div>
       </div>
 
       <div style={S.saveRow}>

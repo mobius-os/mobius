@@ -152,6 +152,13 @@ class AppInstallOut(AppOut):
   divergence: Literal["none", "fast_forward", "clean_merge"] = "none"
 
 
+class AppScheduleUpdate(BaseModel):
+  """Body for updating one installed app's cron schedule."""
+
+  cron: str
+  job: str | None = None
+
+
 class ConflictFile(BaseModel):
   path: str
   merged_with_markers: str

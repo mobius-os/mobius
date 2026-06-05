@@ -178,7 +178,7 @@ def load_settings() -> dict:
   """Reads /data/apps/dreaming/settings.json, tolerating absence/corruption.
 
   This is the SAME file the Dreaming mini-app writes (cron hour,
-  verbosity, exclude_apps). Provider/model selection adds two optional
+  exclude_apps). Provider/model selection adds two optional
   keys — `provider` ("claude" | "codex") and `model` (a provider model
   id) — so the owner can steer which agent dreams without a code
   change. Missing or malformed → {} (the caller applies defaults).
@@ -251,12 +251,11 @@ def build_goal(settings: dict) -> str:
   The skill (system prompt) holds the full procedure; this message is
   just the GO signal plus the run-specific context pointers the agent
   needs to start: today's date, where the wrapper staged its inputs,
-  the verbosity the owner picked, and the apps they excluded. Keep it
+  and the apps they excluded. Keep it
   short — the skill is the contract, the goal is the trigger.
   """
   from datetime import date
   today = date.today().isoformat()
-  verbosity = settings.get("verbosity") or "standard"
   exclude = settings.get("exclude_apps") or []
   inputs_dir = DATA_DIR / "apps" / "dreaming" / "inputs"
   lines = [
@@ -277,8 +276,6 @@ def build_goal(settings: dict) -> str:
     "as you go with pm-commit. Time-box: if you run long, finish the "
     "current chunk, then jump to writing the brief and opening the "
     "morning chat so the partner always wakes to something.",
-    "",
-    f"Owner preferences for this run: verbosity={verbosity}.",
   ]
   if exclude:
     lines.append(

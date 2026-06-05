@@ -48,3 +48,44 @@ def test_delete_app_removes_non_slug_source_dir(client, auth):
   r = client.delete(f"/api/apps/{app_id}", headers=auth)
   assert r.status_code == 204
   assert not source_dir.exists()
+
+
+def test_app_token_can_update_own_schedule_only(client, auth, monkeypatch):
+  calls = []
+
+  def fake_register(slug, schedule_expr, job_path, bundled_job_bytes, app_id=None):
+    calls.append((slug, schedule_expr, job_path.name, app_id))
+
+  monkeypatch.setattr("app.install._register_cron", fake_register)
+  source_dir = Path(get_settings().data_dir) / "apps" / "news"
+  source_dir.mkdir(parents=True)
+  (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+
+  r = client.post("/api/apps/", json={
+    "name": "News",
+    "description": "test",
+    "jsx_source": "export default function App() { return <div/> }",
+    "source_dir": str(source_dir),
+  }, headers=auth)
+  assert r.status_code == 201, r.text
+  app_id = r.json()["id"]
+
+  token = client.post(
+    "/api/auth/app-token", json={"app_id": app_id}, headers=auth,
+  ).json()["token"]
+  app_auth = {"Authorization": f"Bearer {token}"}
+
+  r = client.post(
+    f"/api/apps/{app_id}/schedule",
+    json={"cron": "15 7 * * *", "job": "fetch.sh"},
+    headers=app_auth,
+  )
+  assert r.status_code == 200, r.text
+  assert calls == [("news", "15 7 * * *", "fetch.sh", app_id)]
+
+  r = client.post(
+    f"/api/apps/{app_id + 1}/schedule",
+    json={"cron": "15 8 * * *", "job": "fetch.sh"},
+    headers=app_auth,
+  )
+  assert r.status_code == 403
