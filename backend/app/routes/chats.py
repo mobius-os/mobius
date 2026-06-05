@@ -732,6 +732,15 @@ def _merge_app_chat_settings(
     flag_modified(chat, "agent_settings_json")
 
 
+def _has_real_assistant_turn(chat: models.Chat) -> bool:
+  return any(
+    isinstance(m, dict)
+    and m.get("role") == "assistant"
+    and m.get("kind") != "compaction"
+    for m in (chat.messages or [])
+  )
+
+
 @app_chat_router.post(
   "", status_code=201, dependencies=[Depends(reject_cross_site)],
 )
@@ -818,6 +827,14 @@ def patch_app_chat(
         status_code=422, detail=f"unknown provider: {body.provider}"
       )
     if chat.provider != body.provider:
+      if _has_real_assistant_turn(chat):
+        raise HTTPException(
+          status_code=409,
+          detail=(
+            "Cannot switch provider for an app chat after it has assistant "
+            "turns. Create a new app chat instead."
+          ),
+        )
       chat.provider = body.provider
       chat.session_id = None
   _merge_app_chat_settings(

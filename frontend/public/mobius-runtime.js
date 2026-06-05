@@ -927,6 +927,23 @@ const EMBED_ERROR = EMBED_NS + 'error'
 
 let _embedSeq = 0
 
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key)
+
+export function appChatMetadataBody(opts = {}, { includeProvider = true } = {}) {
+  const body = {}
+  if (hasOwn(opts, 'systemPrompt')) {
+    body.system_prompt = opts.systemPrompt == null ? '' : String(opts.systemPrompt)
+  }
+  if (hasOwn(opts, 'model')) {
+    body.model = opts.model == null ? '' : String(opts.model)
+  }
+  if (includeProvider && hasOwn(opts, 'provider')) {
+    const provider = opts.provider == null ? '' : String(opts.provider).trim()
+    if (provider) body.provider = provider
+  }
+  return body
+}
+
 function makeChat({ appId, getToken }) {
   // Lazily create a chat the agent turn can be attributed to, via the
   // app-attributed backend contract (design §1.1: POST /api/app-chats).
@@ -950,9 +967,7 @@ function makeChat({ appId, getToken }) {
         // small design, design §1.5). Forward them so they're honored
         // the moment the backend accepts them; harmless extra fields
         // until then.
-        ...(opts && opts.systemPrompt ? { system_prompt: opts.systemPrompt } : {}),
-        ...(opts && opts.model ? { model: opts.model } : {}),
-        ...(opts && opts.provider ? { provider: opts.provider } : {}),
+        ...appChatMetadataBody(opts, { includeProvider: true }),
       }),
     })
     if (!res.ok) {
@@ -965,6 +980,25 @@ function makeChat({ appId, getToken }) {
     return String(data.id)
   }
 
+  async function updateChat(chatId, opts) {
+    if (!chatId || !opts) return
+    const body = {}
+    Object.assign(body, appChatMetadataBody(opts, { includeProvider: false }))
+    if (!Object.keys(body).length) return
+    const token = await getToken()
+    const res = await fetch(`/api/app-chats/${encodeURIComponent(chatId)}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(body),
+    })
+    if (!res.ok) {
+      throw new Error(`window.mobius.chat: update failed (${res.status})`)
+    }
+  }
+
   // Open the embed in a nested iframe inside `mount` (an element the app
   // controls). Returns a handle: { chatId, instanceId, iframe, destroy,
   // on(event, cb) }. Events: 'ready' | 'message-sent' | 'turn-done' |
@@ -975,6 +1009,7 @@ function makeChat({ appId, getToken }) {
       throw new Error('window.mobius.chat: opts.mount must be a DOM element')
     }
     let chatId = opts.chatId ? String(opts.chatId) : await createChat(opts)
+    if (opts.chatId) await updateChat(chatId, opts)
     const pickerOn = opts.picker !== false
     const instanceId = `${appId}:${++_embedSeq}:${Date.now()}`
     const listeners = { ready: [], 'message-sent': [], 'turn-done': [], error: [] }

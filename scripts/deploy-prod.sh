@@ -31,6 +31,7 @@ ASSUME_YES=0
 CHECK_ONLY=0
 BUILT_THIS_RUN=0  # set to 1 once we actually build, so the verify step only
                   # compares the served SHA when THIS run produced the image
+PREFLIGHT_WAIT_SECONDS="${PREFLIGHT_WAIT_SECONDS:-120}"
 for arg in "$@"; do
   case "$arg" in
     --target=prod) TARGET="prod" ;;
@@ -466,30 +467,31 @@ if [ "$BUILT_THIS_RUN" = "1" ] && [ -n "$IMAGE_TAG" ]; then
     -e "MOEBIUS_SKIP_BOOTSTRAP=1" \
     "$IMAGE_TAG" >/dev/null
   # Poll liveness then writer-readiness via `docker exec` (same probe as the
-  # live waits below). 45s, slightly longer than the live 30s: the scratch box
-  # cold-starts (tmpfs, no warm page cache) on a memory-tight host.
+  # live waits below). The scratch box cold-starts (tmpfs, no warm page cache)
+  # and can spend close to a minute on first-run setup on the memory-tight
+  # host, so keep this longer than the live cutover waits.
   _pf_live=0
-  info "waiting up to 45s for preflight ${INTERNAL_BASE}/api/health"
-  for i in $(seq 1 45); do
+  info "waiting up to ${PREFLIGHT_WAIT_SECONDS}s for preflight ${INTERNAL_BASE}/api/health"
+  for i in $(seq 1 "$PREFLIGHT_WAIT_SECONDS"); do
     code=$(docker exec "$PREFLIGHT_CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/health'" 2>/dev/null || echo "000")
     if [ "$code" = "200" ]; then ok "preflight /api/health: 200 after ${i}s"; _pf_live=1; break; fi
     sleep 1
   done
   if [ "$_pf_live" != "1" ]; then
-    fail "preflight: the new image never served /api/health 200 in 45s (last: ${code})."
+    fail "preflight: the new image never served /api/health 200 in ${PREFLIGHT_WAIT_SECONDS}s (last: ${code})."
     fail "it crash-loops at boot — the LIVE ${CONTAINER} was NOT touched. Last 40 log lines:"
     docker logs "$PREFLIGHT_CONTAINER" --tail 40 2>&1 | sed 's/^/    /' >&2 || true
     exit 1
   fi
   _pf_ready=0
-  info "waiting up to 45s for preflight ${INTERNAL_BASE}/api/ready"
-  for i in $(seq 1 45); do
+  info "waiting up to ${PREFLIGHT_WAIT_SECONDS}s for preflight ${INTERNAL_BASE}/api/ready"
+  for i in $(seq 1 "$PREFLIGHT_WAIT_SECONDS"); do
     rcode=$(docker exec "$PREFLIGHT_CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/ready'" 2>/dev/null || echo "000")
     if [ "$rcode" = "200" ]; then ok "preflight /api/ready: 200 after ${i}s"; _pf_ready=1; break; fi
     sleep 1
   done
   if [ "$_pf_ready" != "1" ]; then
-    fail "preflight: the new image's /api/ready never returned 200 in 45s (last: ${rcode})."
+    fail "preflight: the new image's /api/ready never returned 200 in ${PREFLIGHT_WAIT_SECONDS}s (last: ${rcode})."
     fail "the chat-persistence writer fails to start — the LIVE ${CONTAINER} was NOT touched. Last 40 log lines:"
     docker logs "$PREFLIGHT_CONTAINER" --tail 40 2>&1 | sed 's/^/    /' >&2 || true
     exit 1

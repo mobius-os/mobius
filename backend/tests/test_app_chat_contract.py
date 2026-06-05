@@ -53,6 +53,95 @@ def test_app_token_can_create_and_send_to_own_chat(client, owner_token, db):
   assert r.status_code == 202, r.text
 
 
+def test_app_chat_create_and_patch_store_custom_system_prompt(
+  client, owner_token, db
+):
+  app_id, app_token = _make_app(client, owner_token, "prompted")
+
+  r = client.post(
+    "/api/app-chats",
+    json={
+      "title": "App conversation",
+      "system_prompt": "You live inside the Notes app.",
+      "model": "claude-sonnet-4-6",
+    },
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert r.status_code == 201, r.text
+  chat_id = r.json()["id"]
+  row = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+  assert row.created_by_app_id == app_id
+  assert row.agent_settings_json["system_prompt"] == (
+    "You live inside the Notes app."
+  )
+  assert row.agent_settings_json["model"] == "claude-sonnet-4-6"
+
+  r = client.patch(
+    f"/api/app-chats/{chat_id}",
+    json={"system_prompt": "You live inside LaTeX.", "model": ""},
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert r.status_code == 200, r.text
+  db.refresh(row)
+  assert row.agent_settings_json["system_prompt"] == "You live inside LaTeX."
+  assert "model" not in row.agent_settings_json
+
+
+def test_app_chat_patch_can_set_provider_before_assistant_turns(
+  client, owner_token, db
+):
+  _, app_token = _make_app(client, owner_token, "provider-picker")
+
+  r = client.post(
+    "/api/app-chats",
+    json={"title": "App conversation", "provider": "claude"},
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert r.status_code == 201, r.text
+  chat_id = r.json()["id"]
+
+  r = client.patch(
+    f"/api/app-chats/{chat_id}",
+    json={"provider": "codex"},
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert r.status_code == 200, r.text
+  row = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+  assert row.provider == "codex"
+  assert row.session_id is None
+
+
+def test_app_chat_patch_rejects_provider_switch_after_assistant_turn(
+  client, owner_token, db
+):
+  _, app_token = _make_app(client, owner_token, "provider-locked")
+
+  r = client.post(
+    "/api/app-chats",
+    json={"title": "App conversation", "provider": "claude"},
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert r.status_code == 201, r.text
+  chat_id = r.json()["id"]
+  row = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+  row.session_id = "claude-session"
+  row.messages = [
+    {"role": "user", "content": "hello"},
+    {"role": "assistant", "content": "hi"},
+  ]
+  db.commit()
+
+  r = client.patch(
+    f"/api/app-chats/{chat_id}",
+    json={"provider": "codex"},
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert r.status_code == 409, r.text
+  db.refresh(row)
+  assert row.provider == "claude"
+  assert row.session_id == "claude-session"
+
+
 def test_app_cannot_touch_foreign_chat(client, owner_token, db):
   # Owner-created chat (created_by_app_id is NULL).
   owner_chat = models.Chat(id="owner-chat", title="owner's", messages=[])

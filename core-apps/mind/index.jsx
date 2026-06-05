@@ -200,6 +200,7 @@ export default function App({ appId, token }) {
   const fgRef = useRef(null);
   const splitRef = useRef(null);
   const splitDragRef = useRef(null);
+  const localPaneRef = useRef(null);
   const localWrapRef = useRef(null);
   const localFgRef = useRef(null);
   const [dims, setDims] = useState({ w: 0, h: 0 });
@@ -477,21 +478,21 @@ export default function App({ appId, token }) {
 
   const startMobileSplitDrag = useCallback((e) => {
     const split = splitRef.current;
-    const graph = localWrapRef.current;
-    if (!split || !graph) return;
+    const localPane = localPaneRef.current;
+    if (!split || !localPane) return;
     e.preventDefault();
     e.currentTarget.setPointerCapture?.(e.pointerId);
     splitDragRef.current = {
       startY: e.clientY,
-      startH: graph.getBoundingClientRect().height,
-      maxH: Math.max(220, split.getBoundingClientRect().height - 260),
+      startH: localPane.getBoundingClientRect().height,
+      maxH: Math.max(140, split.getBoundingClientRect().height - 140),
     };
   }, []);
 
   const moveMobileSplitDrag = useCallback((e) => {
     const drag = splitDragRef.current;
     if (!drag) return;
-    const next = clamp(drag.startH + e.clientY - drag.startY, 180, drag.maxH);
+    const next = clamp(drag.startH + e.clientY - drag.startY, 140, drag.maxH);
     setMobileGraphHeight(next);
   }, []);
 
@@ -989,7 +990,7 @@ export default function App({ appId, token }) {
                 <span style={S.mobileSplitGrip} />
               </div>
 
-              <section style={S.localPane} className="mg-local-pane">
+              <section ref={localPaneRef} style={S.localPane} className="mg-local-pane">
                 <div style={S.localHead}>
                   <div>
                     <div style={S.paneHead}>Local graph</div>
@@ -1590,7 +1591,7 @@ const CSS = `
   }
   .mg-panel-split {
     grid-template-columns: 1fr !important;
-    grid-template-rows: var(--mg-mobile-graph-h, minmax(260px, 42%)) 18px minmax(260px, 1fr);
+    grid-template-rows: minmax(0, var(--mg-mobile-graph-h, 42%)) 18px minmax(0, 1fr);
     overflow: hidden;
   }
   .mg-local-pane { order: 1; min-height: 0; }
@@ -1604,7 +1605,7 @@ const CSS = `
 @media (min-width: 641px) and (max-width: 860px) {
   .mg-panel-split {
     grid-template-columns: 1fr !important;
-    grid-template-rows: var(--mg-mobile-graph-h, minmax(300px, 45%)) 18px minmax(300px, 1fr);
+    grid-template-rows: minmax(0, var(--mg-mobile-graph-h, 45%)) 18px minmax(0, 1fr);
     overflow: hidden;
   }
   .mg-local-pane { order: 1; min-height: 0; }
