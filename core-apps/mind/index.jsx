@@ -18,6 +18,8 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 
 const GRAPH_URL = '/api/storage/shared/memory/graph.json';
 const NOTE_BASE = '/api/storage/shared/memory/';
+const ALL_LOCAL_DEPTH = -1;
+const WIKILINK_RE = /\[\[\s*([^\]|#]+?)\s*(?:#[^\]|]*)?(?:\|\s*([^\]]+?)\s*)?\]\]/g;
 
 // Stable, theme-agnostic accent palette for primary-MOC color coding.
 // Chosen for distinguishability in both light and dark mode; MOC nodes
@@ -85,9 +87,80 @@ export function shouldShowNodeLabel(globalScale, node = {}, hoverId = null) {
   const isHover = hoverId === node.id;
   const hasMocList = Array.isArray(node.mocs) && node.mocs.length > 0;
   const isImportant = (Number(node.importance) || 0) >= 7;
-  return scale >= 1.4
-    || (scale >= 0.8 && (hasMocList || isImportant || isHover))
-    || (scale >= 0.4 && (hasMocList || isHover));
+  const isMoc = node.type === 'moc';
+  const isLocalCenter = node.localDepth === 0;
+  return scale >= 0.95
+    || (isHover && scale >= 0.15)
+    || (isLocalCenter && scale >= 0.15)
+    || (isMoc && scale >= 0.25)
+    || (isImportant && scale >= 0.45)
+    || (hasMocList && scale >= 0.55);
+}
+
+export function buildTitleMap(nodes = []) {
+  const map = {};
+  for (const n of nodes || []) {
+    if (!n || !n.id) continue;
+    map[n.id] = n.title || n.id;
+  }
+  return map;
+}
+
+export function renderWikiLinks(md, nodes = []) {
+  if (!md) return '';
+  const titles = buildTitleMap(nodes);
+  return String(md).replace(WIKILINK_RE, (_, rawSlug, rawAlias) => {
+    const slug = String(rawSlug || '').trim();
+    if (!slug) return _;
+    const label = String(rawAlias || '').trim() || titles[slug] || slug;
+    return `[${escapeMarkdownLinkText(label)}](#mind-node-${encodeURIComponent(slug)})`;
+  });
+}
+
+export function buildLocalGraphData(graph, centerId, depth = 1) {
+  if (!graph || !centerId) return { nodes: [], links: [] };
+  const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+  const edges = Array.isArray(graph.edges) ? graph.edges : [];
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  if (!byId.has(centerId)) return { nodes: [], links: [] };
+
+  const maxDepth = Number(depth) === ALL_LOCAL_DEPTH ? Infinity : Math.max(0, Number(depth) || 0);
+  const adj = new Map();
+  const add = (a, b) => {
+    if (!adj.has(a)) adj.set(a, new Set());
+    adj.get(a).add(b);
+  };
+  for (const e of edges) {
+    const s = typeof e.source === 'object' ? e.source.id : e.source;
+    const t = typeof e.target === 'object' ? e.target.id : e.target;
+    if (!byId.has(s) || !byId.has(t)) continue;
+    add(s, t); add(t, s);
+  }
+
+  const seen = new Map([[centerId, 0]]);
+  const q = [centerId];
+  while (q.length) {
+    const cur = q.shift();
+    const d = seen.get(cur) || 0;
+    if (d >= maxDepth) continue;
+    for (const next of adj.get(cur) || []) {
+      if (seen.has(next)) continue;
+      seen.set(next, d + 1);
+      q.push(next);
+    }
+  }
+
+  const keep = new Set(seen.keys());
+  return {
+    nodes: [...keep].map((id) => ({ ...byId.get(id), localDepth: seen.get(id) || 0 })),
+    links: edges
+      .map((e) => ({
+        source: typeof e.source === 'object' ? e.source.id : e.source,
+        target: typeof e.target === 'object' ? e.target.id : e.target,
+        kind: e.kind,
+      }))
+      .filter((e) => keep.has(e.source) && keep.has(e.target)),
+  };
 }
 
 // A short, human relative-time from an ISO-ish frontmatter date string.
@@ -114,13 +187,17 @@ export default function App({ appId, token }) {
   const [sortKey, setSortKey] = useState('access_count');
   const [sortDir, setSortDir] = useState('desc');
   const [showHealth, setShowHealth] = useState(false);
+  const [localDepth, setLocalDepth] = useState(1);
   const [FG, setFG] = useState(null); // ForceGraph2D component
   const [marked, setMarked] = useState(null);
   const [purify, setPurify] = useState(null); // DOMPurify — audited HTML sanitizer
 
   const wrapRef = useRef(null);
   const fgRef = useRef(null);
+  const localWrapRef = useRef(null);
+  const localFgRef = useRef(null);
   const [dims, setDims] = useState({ w: 0, h: 0 });
+  const [localDims, setLocalDims] = useState({ w: 0, h: 0 });
 
   const authHeaders = useMemo(
     () => ({ Authorization: 'Bearer ' + token }),
@@ -184,6 +261,17 @@ export default function App({ appId, token }) {
     return () => ro.disconnect();
   }, [view, status]);
 
+  useEffect(() => {
+    const el = localWrapRef.current;
+    if (!el || !selected) return;
+    const ro = new ResizeObserver((entries) => {
+      const r = entries[0].contentRect;
+      setLocalDims({ w: Math.round(r.width), h: Math.round(r.height) });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [selected]);
+
   // --- Build a color map: stable moc-slug -> palette color. ---
   const mocColors = useMemo(() => {
     const map = {};
@@ -240,6 +328,25 @@ export default function App({ appId, token }) {
       })),
     };
   }, [graph]);
+
+  const nodesById = useMemo(() => {
+    const map = new Map();
+    if (graph) for (const n of graph.nodes) map.set(n.id, n);
+    return map;
+  }, [graph]);
+
+  const localGraphData = useMemo(
+    () => buildLocalGraphData(graph, selected?.id, localDepth),
+    [graph, selected, localDepth],
+  );
+
+  useEffect(() => {
+    if (!selected || !localFgRef.current || localDims.w <= 0 || localDims.h <= 0) return;
+    const t = setTimeout(() => {
+      localFgRef.current?.zoomToFit?.(260, 26);
+    }, 80);
+    return () => clearTimeout(t);
+  }, [selected, localDepth, localDims]);
 
   // --- Smooth hover focus: a 0..1 value per node that eases toward 1 for the
   //     hovered node + its neighbors and toward 0 for everything else, so the
@@ -330,20 +437,36 @@ export default function App({ appId, token }) {
 
   const noteHtml = useMemo(() => {
     if (noteState.status !== 'ready') return '';
+    const linkedMd = renderWikiLinks(noteState.md, graph?.nodes || []);
     // Require BOTH the renderer AND the sanitizer before producing HTML — never
     // render un-sanitized markup. Notes can contain dreaming-agent web-research
     // content, so DOMPurify (a real HTML-parser sanitizer) is the right tool;
     // a regex net is routinely bypassed.
     if (marked && purify) {
       try {
-        const raw = marked(noteState.md, { breaks: true, gfm: true });
+        const raw = marked(linkedMd, { breaks: true, gfm: true });
         return purify.sanitize(raw, { USE_PROFILES: { html: true } });
       } catch { return escapeHtml(noteState.md); }
     }
     return null; // renderer not ready yet -> fall back to plain text below
-  }, [noteState, marked, purify]);
+  }, [noteState, marked, purify, graph]);
 
-  const closePanel = useCallback(() => setSelected(null), []);
+  const onNoteClick = useCallback((e) => {
+    const a = e.target?.closest?.('a[href^="#mind-node-"]');
+    if (!a) return;
+    e.preventDefault();
+    const slug = decodeURIComponent(a.getAttribute('href').replace('#mind-node-', ''));
+    const node = nodesById.get(slug);
+    if (node) {
+      setSelected(node);
+      setHoverId(slug);
+    }
+  }, [nodesById]);
+
+  const closePanel = useCallback(() => {
+    setSelected(null);
+    setHoverId(null);
+  }, []);
 
   const discuss = useCallback((node) => {
     const title = node.title || node.id;
@@ -644,7 +767,7 @@ export default function App({ appId, token }) {
                 backgroundColor="rgba(0,0,0,0)"
                 nodeRelSize={1}
                 nodeVal={(n) => radiusForNode(n)}
-                nodeLabel={() => ''}
+                nodeLabel={(n) => n.title || n.id}
                 nodeCanvasObject={paintNode}
                 nodeCanvasObjectMode="replace"
                 nodePointerAreaPaint={paintPointer}
@@ -656,12 +779,13 @@ export default function App({ appId, token }) {
                 linkDirectionalParticleWidth={(link) => (link.kind === 'moc' ? 1.35 : 0.9)}
                 linkDirectionalParticleColor={(link) => linkColor(link)}
                 autoPauseRedraw={false}
-                cooldownTicks={260}
-                cooldownTime={30000}
-                onNodeClick={(n) => { setSelected(n); setHoverId(null); }}
+                cooldownTicks={Infinity}
+                cooldownTime={Infinity}
+                d3AlphaTarget={0.015}
+                onNodeClick={(n) => { setSelected(n); setHoverId(null); setLocalDepth(1); }}
                 onNodeHover={(n) => setHoverId(n ? n.id : null)}
                 onBackgroundClick={() => setSelected(null)}
-                d3VelocityDecay={0.24}
+                d3VelocityDecay={0.28}
                 warmupTicks={28}
               />
             ) : (
@@ -711,8 +835,8 @@ export default function App({ appId, token }) {
                   <Th label="Note" active={sortKey === 'title'} dir={sortDir} onClick={() => toggleSort('title')} align="left" />
                   <Th label="Type" />
                   <Th label="Weight" active={sortKey === 'importance'} dir={sortDir} onClick={() => toggleSort('importance')} />
-                  <Th label="Used" active={sortKey === 'access_count'} dir={sortDir} onClick={() => toggleSort('access_count')} />
-                  <Th label="Size" active={sortKey === 'size_bytes'} dir={sortDir} onClick={() => toggleSort('size_bytes')} />
+                  <Th label="Used" subLabel="loads" active={sortKey === 'access_count'} dir={sortDir} onClick={() => toggleSort('access_count')} />
+                  <Th label="Size" subLabel="bytes" active={sortKey === 'size_bytes'} dir={sortDir} onClick={() => toggleSort('size_bytes')} />
                 </tr>
               </thead>
               <tbody>
@@ -739,10 +863,10 @@ export default function App({ appId, token }) {
                         <ImportanceDots value={n.importance || 1} />
                       </td>
                       <td style={S.tdBar}>
-                        <Bar value={uN} label={String(n.access_count || 0)} hue="var(--green, #6ee7b7)" />
+                        <Bar metric="loads" value={uN} label={String(n.access_count || 0)} hue="var(--green, #6ee7b7)" />
                       </td>
                       <td style={S.tdBar}>
-                        <Bar value={sN} label={fmtBytes(n.size_bytes)} hue={colorForNode(n)} />
+                        <Bar metric="bytes" value={sN} label={fmtBytes(n.size_bytes)} hue={colorForNode(n)} />
                       </td>
                     </tr>
                   );
@@ -788,22 +912,82 @@ export default function App({ appId, token }) {
               </div>
             )}
 
-            <div style={S.panelBody} className="mg-md mg-scroll">
-              {noteState.status === 'loading' && (
-                <div style={S.notePlaceholder}>
-                  <div className="mg-skel" style={{ width: '70%' }} />
-                  <div className="mg-skel" style={{ width: '95%' }} />
-                  <div className="mg-skel" style={{ width: '88%' }} />
-                  <div className="mg-skel" style={{ width: '60%' }} />
+            <div style={S.panelSplit}>
+              <section style={S.notePane}>
+                <div style={S.paneHead}>Note</div>
+                <div style={S.panelBody} className="mg-md mg-scroll" onClick={onNoteClick}>
+                  {noteState.status === 'loading' && (
+                    <div style={S.notePlaceholder}>
+                      <div className="mg-skel" style={{ width: '70%' }} />
+                      <div className="mg-skel" style={{ width: '95%' }} />
+                      <div className="mg-skel" style={{ width: '88%' }} />
+                      <div className="mg-skel" style={{ width: '60%' }} />
+                    </div>
+                  )}
+                  {noteState.status === 'missing' && <div style={S.centerText}>No note body on disk for this entry.</div>}
+                  {noteState.status === 'error' && <div style={S.centerText}>Couldn't load: {noteState.md}</div>}
+                  {noteState.status === 'ready' && (
+                    noteHtml != null
+                      ? <div dangerouslySetInnerHTML={{ __html: noteHtml }} />
+                      : <pre style={S.pre}>{noteState.md}</pre>
+                  )}
                 </div>
-              )}
-              {noteState.status === 'missing' && <div style={S.centerText}>No note body on disk for this entry.</div>}
-              {noteState.status === 'error' && <div style={S.centerText}>Couldn't load: {noteState.md}</div>}
-              {noteState.status === 'ready' && (
-                noteHtml != null
-                  ? <div dangerouslySetInnerHTML={{ __html: noteHtml }} />
-                  : <pre style={S.pre}>{noteState.md}</pre>
-              )}
+              </section>
+
+              <section style={S.localPane}>
+                <div style={S.localHead}>
+                  <div>
+                    <div style={S.paneHead}>Local graph</div>
+                    <div style={S.localCount}>
+                      {localGraphData.nodes.length} nodes · {localGraphData.links.length} links
+                    </div>
+                  </div>
+                  <div style={S.depthToggle} aria-label="Local graph depth">
+                    {[1, 2, 3, ALL_LOCAL_DEPTH].map((d) => (
+                      <button
+                        key={d}
+                        style={{ ...S.depthBtn, ...(localDepth === d ? S.depthBtnActive : {}) }}
+                        onClick={() => setLocalDepth(d)}
+                        title={d === ALL_LOCAL_DEPTH ? 'All linked notes' : `${d} hop${d === 1 ? '' : 's'}`}
+                      >
+                        {d === ALL_LOCAL_DEPTH ? 'All' : d}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div ref={localWrapRef} style={S.localGraphWrap} className="mg-local-graph">
+                  {FG && localDims.w > 0 && localDims.h > 0 && localGraphData.nodes.length > 0 ? (
+                    <FG
+                      ref={localFgRef}
+                      graphData={localGraphData}
+                      width={localDims.w}
+                      height={localDims.h}
+                      backgroundColor="rgba(0,0,0,0)"
+                      nodeRelSize={1}
+                      nodeVal={(n) => radiusForNode(n)}
+                      nodeLabel={(n) => n.title || n.id}
+                      nodeCanvasObject={paintNode}
+                      nodeCanvasObjectMode="replace"
+                      nodePointerAreaPaint={paintPointer}
+                      linkColor={linkColor}
+                      linkWidth={linkWidth}
+                      linkCurvature={0.06}
+                      autoPauseRedraw={false}
+                      cooldownTicks={Infinity}
+                      cooldownTime={Infinity}
+                      d3AlphaTarget={0.02}
+                      d3VelocityDecay={0.3}
+                      warmupTicks={18}
+                      onNodeClick={(n) => { setSelected(nodesById.get(n.id) || n); setHoverId(null); }}
+                      onNodeHover={(n) => setHoverId(n ? n.id : null)}
+                    />
+                  ) : (
+                    <div style={S.localEmpty}>
+                      {FG === null ? 'Graph view is offline.' : 'Laying out local graph…'}
+                    </div>
+                  )}
+                </div>
+              </section>
             </div>
 
             <div style={S.panelFoot}>
@@ -821,22 +1005,26 @@ export default function App({ appId, token }) {
 
 // ------------------------------------------------------------- subcomponents ---
 
-function Th({ label, active, dir, onClick, align }) {
+function Th({ label, subLabel, active, dir, onClick, align }) {
   return (
     <th
       style={{ ...S.th, textAlign: align || 'right', cursor: onClick ? 'pointer' : 'default' }}
       onClick={onClick}
       className={onClick ? 'mg-th' : undefined}
     >
-      {label}
-      {active && <span style={S.sortCaret}>{dir === 'asc' ? '↑' : '↓'}</span>}
+      <span style={S.thMain}>
+        {label}
+        {active && <span style={S.sortCaret}>{dir === 'asc' ? '↑' : '↓'}</span>}
+      </span>
+      {subLabel && <span style={S.thSub}>{subLabel}</span>}
     </th>
   );
 }
 
-function Bar({ value, label, hue }) {
+function Bar({ metric, value, label, hue }) {
   return (
-    <div style={S.barCell}>
+    <div style={S.barCell} title={`${metric}: ${label}`} aria-label={`${metric}: ${label}`}>
+      <span style={S.barMetricLabel}>{metric}</span>
       <div style={S.barTrack}>
         <div style={{ ...S.barFill, width: Math.round(value * 100) + '%', background: hue }} />
       </div>
@@ -922,6 +1110,10 @@ function ChatGlyph() {
 function escapeHtml(s) {
   return String(s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function escapeMarkdownLinkText(s) {
+  return String(s).replace(/\\/g, '\\\\').replace(/]/g, '\\]');
 }
 
 function clamp(v, min, max) {
