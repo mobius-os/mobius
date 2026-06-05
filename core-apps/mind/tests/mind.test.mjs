@@ -32,30 +32,29 @@ test('shouldShowNodeLabel hides ordinary nodes below every threshold except clos
   assert.equal(shouldShowNodeLabel(0.95, node, null), true)
 })
 
-test('shouldShowNodeLabel shows MOC-linked nodes at 0.55 and above', () => {
+test('shouldShowNodeLabel shows MOC-linked nodes at 0.24 and above', () => {
   const node = { id: 'linked', importance: 1, mocs: ['projects'] }
-  assert.equal(shouldShowNodeLabel(0.5499, node, null), false)
-  assert.equal(shouldShowNodeLabel(0.55, node, null), true)
+  assert.equal(shouldShowNodeLabel(0.2399, node, null), false)
+  assert.equal(shouldShowNodeLabel(0.24, node, null), true)
 })
 
-test('shouldShowNodeLabel shows hovered nodes early', () => {
+test('shouldShowNodeLabel always shows hovered nodes', () => {
   const node = { id: 'hovered', importance: 1, mocs: [] }
-  assert.equal(shouldShowNodeLabel(0.1499, node, 'hovered'), false)
-  assert.equal(shouldShowNodeLabel(0.15, node, 'hovered'), true)
+  assert.equal(shouldShowNodeLabel(0.001, node, 'hovered'), true)
 })
 
-test('shouldShowNodeLabel shows MOC and local-center nodes while zoomed out', () => {
-  assert.equal(shouldShowNodeLabel(0.2499, { id: 'hub', type: 'moc' }, null), false)
-  assert.equal(shouldShowNodeLabel(0.25, { id: 'hub', type: 'moc' }, null), true)
-  assert.equal(shouldShowNodeLabel(0.15, { id: 'center', localDepth: 0 }, null), true)
+test('shouldShowNodeLabel shows MOC and local-center nodes while zoomed far out', () => {
+  assert.equal(shouldShowNodeLabel(0.0799, { id: 'hub', type: 'moc' }, null), false)
+  assert.equal(shouldShowNodeLabel(0.08, { id: 'hub', type: 'moc' }, null), true)
+  assert.equal(shouldShowNodeLabel(0.001, { id: 'center', localDepth: 0 }, null), true)
 })
 
-test('shouldShowNodeLabel shows important nodes at 0.45', () => {
+test('shouldShowNodeLabel shows important nodes at 0.18', () => {
   const important = { id: 'important', importance: 7, mocs: [] }
   const almostImportant = { id: 'almost', importance: 6.99, mocs: [] }
-  assert.equal(shouldShowNodeLabel(0.4499, important, null), false)
-  assert.equal(shouldShowNodeLabel(0.45, important, null), true)
-  assert.equal(shouldShowNodeLabel(0.45, almostImportant, null), false)
+  assert.equal(shouldShowNodeLabel(0.1799, important, null), false)
+  assert.equal(shouldShowNodeLabel(0.18, important, null), true)
+  assert.equal(shouldShowNodeLabel(0.18, almostImportant, null), false)
 })
 
 test('shouldShowNodeLabel rejects malformed scales', () => {
