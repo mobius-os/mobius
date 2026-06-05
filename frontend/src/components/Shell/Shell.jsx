@@ -40,6 +40,7 @@ export default function Shell() {
   // that); this just moves that one fetch to chat-open time, in the
   // background. Shares the cache key, so the picker's own useQuery reuses it.
   modelQueries.registry.useQuery({ enabled: !!activeChatId })
+  modelQueries.prefs.useQuery({ enabled: !!activeChatId })
 
   // Cache key from app.updated_at (server-side). Stable across reloads.
   const versionForApp = useCallback((id) => {

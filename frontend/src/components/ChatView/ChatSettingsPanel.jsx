@@ -283,6 +283,15 @@ export default function ChatSettingsPanel({
   const registry = registryQuery.data
   const prefs = prefsQuery.data
   const dataReady = !!registry && !!prefs
+  const loadingModels = !dataReady && (
+    registryQuery.isLoading
+    || registryQuery.isFetching
+    || prefsQuery.isLoading
+    || prefsQuery.isFetching
+  )
+  const modelLoadError = !dataReady && (
+    registryQuery.isError || prefsQuery.isError
+  )
 
   const [draftModel, setDraftModel] = useState(effective?.model || '')
   const [draftEffort, setDraftEffort] = useState(effective?.effort || '')
@@ -499,14 +508,26 @@ export default function ChatSettingsPanel({
     <div className="csp">
       <div className="csp__label">Model</div>
       {!dataReady && (
-        // Skeleton placeholder while registry + prefs resolve. Two
-        // rows mirror the typical visible count without committing
-        // to a specific model list — covers the case where prefs
-        // hide most of the rows once they land.
-        <div className="csp__skeleton" aria-hidden="true">
-          <div className="csp__skeleton-row" />
-          <div className="csp__skeleton-row" />
-        </div>
+        <>
+          <div className="csp__loading" role="status" aria-live="polite">
+            {loadingModels && <span className="csp__loading-spinner" aria-hidden="true" />}
+            <span>
+              {modelLoadError
+                ? 'Could not load models. Reopen this menu to retry.'
+                : 'Loading models…'}
+            </span>
+          </div>
+          {!modelLoadError && (
+            // Skeleton placeholder while registry + prefs resolve. Two
+            // rows mirror the typical visible count without committing
+            // to a specific model list — covers the case where prefs
+            // hide most of the rows once they land.
+            <div className="csp__skeleton" aria-hidden="true">
+              <div className="csp__skeleton-row" />
+              <div className="csp__skeleton-row" />
+            </div>
+          )}
+        </>
       )}
       {dataReady && PROVIDER_ORDER.map(pid => {
         const info = PROVIDER_INFO[pid]
