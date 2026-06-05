@@ -563,6 +563,10 @@ def _write_static_assets(
     return
   static_root = (source_dir_path / "static").resolve()
   static_root.mkdir(parents=True, exist_ok=True)
+  backup_root = (
+    source_dir_path.parent / f".{source_dir_path.name}.mobius-static-bak"
+  ).resolve()
+  backup_root_used = False
   for rel, content in assets.items():
     # rel was already validated as a simple repo-relative path. Resolve anyway
     # so this helper stays safe if future callers hand it unchecked data.
@@ -571,13 +575,23 @@ def _write_static_assets(
       raise HTTPException(400, "Manifest `static_assets` path escapes static dir.")
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
-      backup = target.with_name(target.name + ".mobius-bak")
+      backup = (backup_root / rel).resolve()
+      if backup_root not in backup.parents:
+        raise HTTPException(400, "Manifest `static_assets` backup path escapes.")
+      backup.parent.mkdir(parents=True, exist_ok=True)
       if backup.exists():
         try:
           backup.unlink()
         except OSError:
           pass
       shutil.copy2(target, backup)
+      if not backup_root_used:
+        backup_root_used = True
+        # Rollback actions execute in reverse order, so register directory
+        # cleanup before file restores; restores run first, cleanup last.
+        rollback_actions.append(
+          lambda d=backup_root: shutil.rmtree(d, ignore_errors=True)
+        )
       rollback_actions.append(
         lambda b=backup, o=target:
           os.replace(b, o) if b.exists() else None
@@ -588,6 +602,10 @@ def _write_static_assets(
     else:
       created_paths.append(target)
     atomic_write(target, content)
+  if backup_root_used:
+    commit_actions.append(
+      lambda d=backup_root: shutil.rmtree(d, ignore_errors=True)
+    )
 
 
 def _process_icon(raw: bytes) -> bytes:
