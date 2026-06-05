@@ -593,8 +593,7 @@ export default function App({ appId, token }) {
 
     // Label — zoom-based LOD, drawn in CSS px (font size / zoom) with a
     // rounded pill underlay so text stays legible over links and halos.
-    const showSmallGraphLabel = (graph?.nodes?.length || 0) <= 120;
-    const showLabel = showSmallGraphLabel || shouldShowNodeLabel(safeScale, node, hoverId);
+    const showLabel = true;
     if (showLabel) {
       const label = node.title || node.id;
       const labelPx = clamp((isMoc ? 12.5 : 11.5) * Math.sqrt(safeScale), 10.5, 16);
@@ -603,8 +602,8 @@ export default function App({ appId, token }) {
       const padY = 3 / safeScale;
       const gap = 4 / safeScale;
       const labelY = node.y + r + gap;
-      const labelAlpha = (isHover || isMoc || showSmallGraphLabel || node.showLabelAlways) ? 1 : 0.55 + 0.45 * f;
-      const pillAlpha = (isHover || showSmallGraphLabel || node.showLabelAlways ? 0.86 : 0.68) * (0.45 + 0.55 * f);
+      const labelAlpha = (isHover || isMoc || node.showLabelAlways) ? 1 : 0.55 + 0.45 * f;
+      const pillAlpha = (isHover || node.showLabelAlways ? 0.86 : 0.68) * (0.45 + 0.55 * f);
       const fontFamily = 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
 
       ctx.save();
@@ -621,7 +620,7 @@ export default function App({ appId, token }) {
       roundedRect(ctx, x, y, width, height, 5 / safeScale);
       ctx.fill();
       ctx.lineWidth = 0.75 / safeScale;
-      ctx.strokeStyle = withAlpha(cssVar('--text', '#e5e5e5'), 0.22 * (isHover || showSmallGraphLabel || node.showLabelAlways ? 1 : f));
+      ctx.strokeStyle = withAlpha(cssVar('--text', '#e5e5e5'), 0.22 * (isHover || node.showLabelAlways ? 1 : f));
       ctx.stroke();
 
       ctx.fillStyle = cssVar('--text', '#e5e5e5');
@@ -629,7 +628,7 @@ export default function App({ appId, token }) {
       ctx.restore();
     }
     ctx.globalAlpha = 1;
-  }, [colorForNode, radiusForNode, hoverId, focusOf, graph]);
+  }, [colorForNode, radiusForNode, hoverId, focusOf]);
 
   // Larger pointer hit-area than the dot so small nodes are clickable.
   const paintPointer = useCallback((node, color, ctx) => {
