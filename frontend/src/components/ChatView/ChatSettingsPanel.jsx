@@ -28,13 +28,12 @@
  * ║      with the platform's "reversibility over prevention"         ║
  * ║      philosophy — see mobius/CLAUDE.md design philosophy).       ║
  * ║                                                                  ║
- * ║   2. CROSS-PROVIDER LOCK                                         ║
- * ║      After a chat has at least one assistant turn, the OTHER     ║
- * ║      provider's models grey out. Sessions are not portable       ║
- * ║      between providers (Claude session id ≠ Codex thread id),   ║
- * ║      and the agent loses ALL conversation context on switch.     ║
- * ║      Same-provider model swaps stay available because both       ║
- * ║      SDKs preserve context within a session on `set_model`.      ║
+ * ║   2. CROSS-PROVIDER SWITCHING                                    ║
+ * ║      Sessions are not portable between providers (Claude session ║
+ * ║      id ≠ Codex thread id), so switching after assistant turns   ║
+ * ║      first calls the compaction endpoint. The stored portable    ║
+ * ║      briefing seeds the next fresh provider session. Same-       ║
+ * ║      provider model swaps stay available without compaction.     ║
  * ║      `hasAssistantTurns` is LIVE-DERIVED in the parent           ║
  * ║      (ChatView): `chatInfo.has_assistant_turns ||                ║
  * ║      messages.some(m => m.role === 'assistant')` — the           ║
@@ -263,6 +262,7 @@ export default function ChatSettingsPanel({
   wasInputFocusedRef,
 }) {
   const [saving, setSaving] = useState(false)
+  const [compacting, setCompacting] = useState(false)
   const [error, setError] = useState('')
   const [connectedProviders, setConnectedProviders] = useState(null)
   // True while the manage-models modal is mounted. When the modal
@@ -362,6 +362,29 @@ export default function ChatSettingsPanel({
     }
   }, [chatId, onChange, latestReqId])
 
+  const compactBeforeProviderSwitch = useCallback(async () => {
+    if (!chatId || !hasAssistantTurns) return true
+    setCompacting(true)
+    setError('')
+    try {
+      const res = await apiFetch(`/chats/${chatId}/compact`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        let detail = ''
+        try { detail = (await res.json()).detail || '' } catch {}
+        setError(detail ? `Could not compact: ${detail}` : 'Could not compact the chat before switching providers.')
+        return false
+      }
+      return true
+    } catch {
+      setError('Network error while compacting the chat.')
+      return false
+    } finally {
+      setCompacting(false)
+    }
+  }, [chatId, hasAssistantTurns])
+
   // Conditional refocus — only restores textarea focus if it was
   // ALREADY focused when the popover opened. Without this guard,
   // tapping + with the keyboard down and then picking a model
@@ -394,8 +417,8 @@ export default function ChatSettingsPanel({
     const prevProvider = draftProvider
     const prevModel = draftModel
     const prevEffort = draftEffort
-    setDraftModel(value)
     if (providerValue !== draftProvider) {
+      if (!(await compactBeforeProviderSwitch())) return
       // Cross-provider switch: restore this provider's last-known
       // effort (or fall back to the value already on screen — which
       // becomes that provider's first memory once they accept it).
@@ -407,6 +430,7 @@ export default function ChatSettingsPanel({
       // if the persisted value doesn't appear in the provider's
       // enum (see EffortSlider's findIndex/Math.max guard).
       const nextEffort = draftEffortByProvider[providerValue] ?? draftEffort
+      setDraftModel(value)
       setDraftProvider(providerValue)
       setDraftEffort(nextEffort)
       const outcome = await patchChat({
@@ -420,6 +444,7 @@ export default function ChatSettingsPanel({
       }
       return
     }
+    setDraftModel(value)
     const outcome = await patchChat({
       agent_settings_json: { model: value },
     })
@@ -429,6 +454,7 @@ export default function ChatSettingsPanel({
     draftModel,
     draftEffort,
     draftEffortByProvider,
+    compactBeforeProviderSwitch,
     patchChat,
     refocusChatInput,
   ])
@@ -490,11 +516,6 @@ export default function ChatSettingsPanel({
         if (connectedSet && !connectedSet.has(pid) && draftProvider !== pid) {
           return null
         }
-        // Provider lock: once the chat has assistant turns, the
-        // other provider's models grey out — cross-provider switch
-        // loses session context (see the "Composer popover" section in AGENTS.md).
-        // Same-provider model swaps remain available because both
-        // SDKs preserve context within a session on model change.
         const isCrossProvider = hasAssistantTurns && pid !== draftProvider
         const models = displayedByProvider[pid] || []
         return models.map(m => {
@@ -503,12 +524,12 @@ export default function ChatSettingsPanel({
             <div key={`${pid}-${m.id}`}>
               <button
                 type="button"
-                className={`csp-row${isSelected ? ' csp-row--selected' : ''}${isCrossProvider ? ' csp-row--locked' : ''}`}
+                className={`csp-row${isSelected ? ' csp-row--selected' : ''}`}
                 // Keep textarea focused so the keyboard stays open.
                 onPointerDown={(ev) => ev.preventDefault()}
-                onClick={() => !isCrossProvider && handlePickModel(m.id, pid)}
-                disabled={isCrossProvider}
-                title={isCrossProvider ? 'Cross-provider switch not allowed after the chat has started' : undefined}
+                onClick={() => handlePickModel(m.id, pid)}
+                disabled={saving || compacting}
+                title={isCrossProvider ? 'Compact this chat and switch providers' : undefined}
               >
                 <span className="csp-row__icon"><info.Logo /></span>
                 <span className="csp-row__main">
@@ -539,8 +560,13 @@ export default function ChatSettingsPanel({
           + Manage models
         </button>
       )}
-      {(codexSwitchWarning || error) && (
+      {(codexSwitchWarning || compacting || error) && (
         <div className="csp__foot">
+          {compacting && (
+            <p className="csp__note">
+              Compacting this chat before switching providers…
+            </p>
+          )}
           {codexSwitchWarning && (
             <p className="csp__note">
               Codex injects a one-time model-switch note on the next

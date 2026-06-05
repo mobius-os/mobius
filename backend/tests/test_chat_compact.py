@@ -9,8 +9,9 @@ summarize stores NOTHING and surfaces a non-2xx.
 """
 
 import pytest
+from types import SimpleNamespace
 
-from app import compaction
+from app import chat as chat_mod, compaction
 
 
 def _make_chat_with_messages(client, auth, messages):
@@ -136,3 +137,13 @@ def test_build_transcript_text_drops_empty_and_tail_caps():
   big = [{"role": "user", "content": "x" * (compaction._MAX_TRANSCRIPT_CHARS + 100)}]
   capped = compaction.build_transcript_text(big)
   assert len(capped) == compaction._MAX_TRANSCRIPT_CHARS
+
+
+def test_latest_compaction_brief_reads_newest_portable_seed():
+  row = SimpleNamespace(messages=[
+    {"role": "assistant", "kind": "compaction", "content": "old"},
+    {"role": "user", "content": "continue"},
+    {"role": "assistant", "kind": "compaction", "content": "new"},
+  ])
+
+  assert chat_mod._latest_compaction_brief(row) == "new"

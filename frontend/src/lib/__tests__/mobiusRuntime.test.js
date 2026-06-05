@@ -13,7 +13,10 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { overlayPending } from '../../../public/mobius-runtime.js'
+import {
+  appChatMetadataBody,
+  overlayPending,
+} from '../../../public/mobius-runtime.js'
 
 const SERVER = { value: 5 }       // a fallback (server/cache mirror) value
 const QUEUED = { value: 9 }
@@ -54,4 +57,27 @@ test('pending op only affects its own path', () => {
   assert.deepEqual(overlayPending(ops, 'a.json', SERVER), QUEUED)
   assert.equal(overlayPending(ops, 'b.json', SERVER), null)
   assert.deepEqual(overlayPending(ops, 'c.json', SERVER), SERVER)
+})
+
+test('app chat metadata body preserves explicit clears', () => {
+  assert.deepEqual(appChatMetadataBody({
+    systemPrompt: '',
+    model: null,
+    provider: 'codex',
+  }), {
+    system_prompt: '',
+    model: '',
+    provider: 'codex',
+  })
+})
+
+test('app chat metadata body can omit provider for existing-chat updates', () => {
+  assert.deepEqual(appChatMetadataBody({
+    systemPrompt: 'You are inside Notes.',
+    model: '',
+    provider: 'codex',
+  }, { includeProvider: false }), {
+    system_prompt: 'You are inside Notes.',
+    model: '',
+  })
 })
