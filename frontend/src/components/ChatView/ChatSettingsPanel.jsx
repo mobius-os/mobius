@@ -277,6 +277,9 @@ export default function ChatSettingsPanel({
   const [manageOpen, setManageOpen] = useState(false)
   const fallbackReqId = useRef(0)
   const latestReqId = reqIdRef || fallbackReqId
+  // Synchronous double-click guard: disabled={compacting || saving}
+  // only takes effect after React re-renders.
+  const providerSwitchInFlightRef = useRef(false)
 
   // Live model registry + owner prefs. Both ride 5-minute caches so
   // a popover open doesn't refetch. The deferred-render guard below
@@ -433,35 +436,42 @@ export default function ChatSettingsPanel({
   }, [draftProvider, draftEffortByProvider, patchChat, refocusChatInput])
 
   const switchProviderModel = useCallback(async (value, providerValue) => {
-    const prevProvider = draftProvider
-    const prevModel = draftModel
-    const prevEffort = draftEffort
-    if (!(await compactBeforeProviderSwitch())) return false
-    // Cross-provider switch: restore this provider's last-known
-    // effort (or fall back to the value already on screen — which
-    // becomes that provider's first memory once they accept it).
-    // The effort enums don't overlap perfectly (Codex has `none`
-    // + `minimal` that Claude lacks, Claude has `max` that Codex
-    // lacks), so a fallback that's invalid for the new provider
-    // is harmless — the runner ignores unknown values at turn
-    // time. The picker also auto-defaults the slider to index 0
-    // if the persisted value doesn't appear in the provider's
-    // enum (see EffortSlider's findIndex/Math.max guard).
-    const nextEffort = draftEffortByProvider[providerValue] ?? draftEffort
-    setDraftModel(value)
-    setDraftProvider(providerValue)
-    setDraftEffort(nextEffort)
-    const outcome = await patchChat({
-      provider: providerValue,
-      agent_settings_json: { model: value, effort: nextEffort },
-    })
-    if (outcome === 'fail') {
-      setDraftProvider(prevProvider)
-      setDraftModel(prevModel)
-      setDraftEffort(prevEffort)
-      return false
+    if (providerSwitchInFlightRef.current) return false
+    providerSwitchInFlightRef.current = true
+    try {
+      const prevProvider = draftProvider
+      const prevModel = draftModel
+      const prevEffort = draftEffort
+      if (!(await compactBeforeProviderSwitch())) return false
+      // Cross-provider switch: restore this provider's last-known
+      // effort (or fall back to the value already on screen — which
+      // becomes that provider's first memory once they accept it).
+      // The effort enums don't overlap perfectly (Codex has `none`
+      // + `minimal` that Claude lacks, Claude has `max` that Codex
+      // lacks), so a fallback that's invalid for the new provider
+      // is harmless — the runner ignores unknown values at turn
+      // time. The picker also auto-defaults the slider to index 0
+      // if the persisted value doesn't appear in the provider's
+      // enum (see EffortSlider's findIndex/Math.max guard).
+      const nextEffort = draftEffortByProvider[providerValue] ?? draftEffort
+      setDraftModel(value)
+      setDraftProvider(providerValue)
+      setDraftEffort(nextEffort)
+      const outcome = await patchChat({
+        provider: providerValue,
+        agent_settings_json: { model: value, effort: nextEffort },
+      })
+      if (outcome === 'fail') {
+        setDraftProvider(prevProvider)
+        setDraftModel(prevModel)
+        setDraftEffort(prevEffort)
+        return false
+      }
+      if (outcome === 'stale') return false
+      return true
+    } finally {
+      providerSwitchInFlightRef.current = false
     }
-    return true
   }, [
     draftProvider,
     draftModel,
@@ -474,6 +484,7 @@ export default function ChatSettingsPanel({
   const handlePickModel = useCallback(async (value, providerValue) => {
     refocusChatInput()
     if (providerValue !== draftProvider) {
+      if (providerSwitchInFlightRef.current) return
       if (hasAssistantTurns) {
         setError('')
         setPendingSwitch({ model: value, provider: providerValue })
@@ -499,7 +510,7 @@ export default function ChatSettingsPanel({
   ])
 
   const handleConfirmProviderSwitch = useCallback(async () => {
-    if (!pendingSwitch) return
+    if (!pendingSwitch || providerSwitchInFlightRef.current) return
     refocusChatInput()
     const ok = await switchProviderModel(
       pendingSwitch.model,
