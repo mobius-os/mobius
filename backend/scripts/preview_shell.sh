@@ -34,12 +34,13 @@ fi
 
 # Match the partner's actual viewport so the screenshot frames what
 # they see. chat.py exports VIEWPORT_WIDTH/HEIGHT from the React
-# shell's per-turn payload; on older shells or malformed payloads,
-# fall back to 412×915 (matches the Möbius live-view default and is
-# a sensible mobile shape) rather than agent-browser's default
-# which is desktop-sized.
-VW="${VIEWPORT_WIDTH:-412}"
-VH="${VIEWPORT_HEIGHT:-915}"
+# shell's per-turn payload; screenshots require those values.
+if [ -z "${VIEWPORT_WIDTH:-}" ] || [ -z "${VIEWPORT_HEIGHT:-}" ]; then
+  echo "preview_shell.sh: VIEWPORT_WIDTH and VIEWPORT_HEIGHT must be set" >&2
+  exit 1
+fi
+VW="$VIEWPORT_WIDTH"
+VH="$VIEWPORT_HEIGHT"
 agent-browser set viewport "$VW" "$VH" >/dev/null
 
 # Origin must be loaded before localStorage.setItem (localStorage is

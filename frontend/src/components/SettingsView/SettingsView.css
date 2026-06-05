@@ -72,6 +72,21 @@
   line-height: 1.5;
 }
 
+.settings__subtext--tight {
+  margin: 4px 0 0;
+}
+
+.settings__notice {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .settings__subtext a {
   color: var(--accent);
   text-decoration: underline;

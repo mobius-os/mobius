@@ -71,7 +71,7 @@ class Principal:
 
   `owner` is always set. `app_id` is the `app_id` claim from an
   app-scoped JWT, or None for full owner tokens. Routes that gate on
-  cross-app access (storage, AI proxy) read `app_id` to decide whether
+  cross-app access (storage, app-attributed chats) read `app_id` to decide whether
   the caller is the app itself, a different app, or the owner.
   """
   owner: models.Owner

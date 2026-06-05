@@ -57,7 +57,7 @@ bash /app/scripts/rebuild_shell.sh
 
 Each rebuild triggers a visible fade-transition reload — batch all edits first.
 
-**The rebuild does NOT live-reload.** `main.py` picks the static dir at module load, not per request. After `rebuild_shell.sh` writes a fresh `/data/shell/dist/`, the running uvicorn keeps serving the OLD bundle until the process restarts — so you'll claim "shell rebuilt" while the partner still sees the old UI. Tell the partner the shell updates after the next container restart, or have them click "Restart server" in the recovery chat (`recovery.md`). For CSS-only changes, prefer `theme.css` above (hot-reloaded, no rebuild, no restart).
+**The rebuild does NOT live-reload.** `main.py` picks the static dir at module load, not per request. After `rebuild_shell.sh` writes a fresh `/data/shell/dist/`, the running uvicorn keeps serving the OLD bundle until the process restarts — so you'll claim "shell rebuilt" while the partner still sees the old UI. Tell the partner the shell updates after the next container restart, or have them click "Restart server" in Settings -> Server when the main shell is healthy. Use recovery restart only when the shell is broken (`recovery.md`). For CSS-only changes, prefer `theme.css` above (hot-reloaded, no rebuild, no restart).
 
 **If you're patching the same selector 3+ times in one chat, the component shape is probably wrong.** Extract a new component (e.g. a dedicated `ChatInputBar.jsx` for the composer) instead of stacking CSS overrides. Four failed in-place tries beats one extraction every time.
 

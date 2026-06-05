@@ -4,20 +4,21 @@ How backend edits load (restart, not live-reload), how to make them permanent, t
 
 ---
 
-## Backend edits — restart to load, patch the host to persist
+## Backend edits — restart to load, hand off persistence
 
 Edits to `/app/app/*.py` take effect on the **next uvicorn restart** and survive container restarts, BUT are wiped by `docker compose up --build` (a rebuild restores the image's baked code). Two failure modes to respect:
 
 - **A bad import kills uvicorn at boot** — everything except `/recover` goes down. Always `python3 -m py_compile <file>` before asking for a restart; a failing compile proves you'll break boot.
-- **A container-only fix silently reverts on the next deploy.** To make a backend change permanent, the partner must also patch the host repo and commit. If unsure, ask whether the fix is a one-off (container-only) or permanent (host-repo too).
+- **A container-only fix silently reverts on the next deploy.** Möbius can make the local live fix, but host-repo/release work is a handoff outside the in-product agent. If unsure, ask whether the fix is a one-off local change or needs outside persistence work. Do not push, publish, or manage external repo workflow from inside Möbius.
 
 All chat-persistence writes must route through the `chat_writer` actor — never assign `Chat.messages` / `Chat.pending_messages` directly (see core.md's write-surface section for why).
 
 ### The backend-fix loop
 
 1. Edit `/app/app/...py` in place; `py_compile` it.
-2. Ask the partner to **open `/recover/chat` in a new browser tab** (they stay in your current chat — your session survives the restart). That chat may prompt for login: it uses the **same owner password** as the main shell, just behind a separate form.
-3. In that tab they click **"Restart server"** (POSTs `/recover/restart`, SIGTERMs uvicorn, container restarts). Restart takes ~5–15s; the page auto-reloads when healthy.
+2. If the main shell is healthy, ask the partner to open Settings -> Server and click **"Restart server"** (POSTs `/api/admin/restart`).
+3. If the main shell is broken, ask the partner to **open `/recover/chat` in a new browser tab** (they stay in your current chat — your session survives the restart). That chat may prompt for login: it uses the **same owner password** as the main shell, just behind a separate form. In that tab they click **"Restart server"** (POSTs `/recover/restart`, SIGTERMs uvicorn, container restarts).
+4. Restart takes ~5–15s; the page auto-reloads when healthy.
 4. Verify the fix in the original chat (still open, full history intact).
 
 ---
@@ -46,7 +47,8 @@ If you break a live copy, the partner recovers via `/recover` or a fresh you in 
 
 | Situation | URL | Action |
 |---|---|---|
-| Backend edit, ready to load | `/recover/chat` | Click "Restart server" |
+| Backend edit, main shell healthy | Settings -> Server | Click "Restart server" |
+| Backend edit, main shell broken | `/recover/chat` | Click "Restart server" |
 | Agent stuck or unable to fix | `/recover` | Click "Restore backend" / "Restore shell" / "Restore scripts" |
 | Lost ability to log in to main shell | `/recover` | Log in (owner password), then options above |
 

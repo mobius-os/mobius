@@ -155,3 +155,25 @@ def test_providers_models_returns_known_models_on_missing_creds(
   for rows in body.values():
     for row in rows:
       assert set(row).issubset({"id", "name", "tier"})
+
+
+def test_providers_models_respects_hidden_model_prefs(client, auth):
+  """Mini-app pickers use the same visible model list the chat picker
+  does, so hiding a model globally should remove it from this endpoint
+  too."""
+  from app.providers import invalidate_model_cache
+  invalidate_model_cache()
+  r0 = client.patch(
+    "/api/owner/model-prefs",
+    headers=auth,
+    json={"hidden_ids": ["claude-opus-4-8", "gpt-5.5"]},
+  )
+  assert r0.status_code == 200, r0.text
+
+  r = client.get("/api/auth/providers/models", headers=auth)
+  assert r.status_code == 200, r.text
+  body = r.json()
+  assert "claude-opus-4-8" not in [m["id"] for m in body["claude"]]
+  assert "gpt-5.5" not in [m["id"] for m in body["codex"]]
+  assert body["claude"]
+  assert body["codex"]

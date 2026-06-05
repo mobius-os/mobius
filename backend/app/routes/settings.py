@@ -20,7 +20,7 @@ from app import models, providers
 from app.auth import encrypt_api_key
 from app.config import get_settings as get_app_settings
 from app.database import get_db
-from app.deps import get_current_owner, reject_cross_site
+from app.deps import get_current_owner, get_current_owner_or_app, reject_cross_site
 from app.schemas import (
   AgentOut,
   AgentRegistryResponse,
@@ -120,7 +120,7 @@ agents_router = APIRouter(prefix="/api/agents", tags=["agents"])
 
 @agents_router.get("", response_model=AgentRegistryResponse)
 def list_agents(
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_or_app),
 ) -> AgentRegistryResponse:
   """Returns the named-agent registry: built-ins + owner overrides.
 

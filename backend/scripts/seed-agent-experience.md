@@ -232,8 +232,8 @@ contract-comment mismatch.
 
 - **Editing an existing app's JSX auto-recompiles.** A file watcher
   on `/data/apps/*/index.jsx` recompiles the bundle ~1s after you
-  save. You don't need to re-run `register_app.py` just to push code
-  changes to an existing app — only for the initial create (so the
+  save. You don't need to re-run `register_app.py` just to land local
+  edits in an existing app — only for the initial create (so the
   app gets an id + DB row). If your edit doesn't seem to land,
   refresh the iframe; if it still doesn't, check that
   `/data/compiled/app-<id>.js` mtime advanced.
@@ -280,7 +280,7 @@ contract-comment mismatch.
   change is correct, but a failing one is proof you'll break boot
   (recoverable via `/recover` → "Restore backend", but avoidable). The
   backend-edit *contracts* — edits live in the container's writable layer
-  (a `--build` wipes them unless the host repo is patched too), and ALL
+  (a `--build` wipes them unless outside persistence work happens), and ALL
   chat-persistence writes must route through the `chat_writer` actor, never
   direct `Chat.messages`/`pending_messages` assignment — are in the skill's
   "Write surface" section; read it before touching this layer.

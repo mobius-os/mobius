@@ -51,7 +51,6 @@ def _load(name: str) -> APIRouter:
 
 
 admin_router = _load("admin")
-ai_router = _load("ai")
 apps_router = _load("apps")
 auth_router = _load("auth")
 chat_router = _load("chat")
@@ -83,7 +82,6 @@ __all__ = [
   "chats_router",
   "chats_stream_router",
   "chat_logs_router",
-  "ai_router",
   "proxy_router",
   "recover_router",
   "notify_router",

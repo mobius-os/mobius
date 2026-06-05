@@ -41,10 +41,13 @@ if ! command -v agent-browser >/dev/null 2>&1; then
 fi
 
 # Match the partner's viewport (set by chat.py from the React
-# shell's per-turn payload). Fall back to a sensible mobile size
-# rather than agent-browser's desktop default.
-VW="${VIEWPORT_WIDTH:-412}"
-VH="${VIEWPORT_HEIGHT:-915}"
+# shell's per-turn payload). Screenshots require those values.
+if [ -z "${VIEWPORT_WIDTH:-}" ] || [ -z "${VIEWPORT_HEIGHT:-}" ]; then
+  echo "preview_app.sh: VIEWPORT_WIDTH and VIEWPORT_HEIGHT must be set" >&2
+  exit 1
+fi
+VW="$VIEWPORT_WIDTH"
+VH="$VIEWPORT_HEIGHT"
 agent-browser set viewport "$VW" "$VH" >/dev/null
 
 # Same auth dance as preview_shell.sh: load origin, write token to
