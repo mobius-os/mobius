@@ -1696,7 +1696,17 @@ const CSS = `
   .mg-local-graph { min-height: 0 !important; }
   .mg-local-head { padding: 7px 10px 6px !important; }
   .mg-note-pane > div:first-child { display: none; }
-  .mg-md { padding: 11px 14px 20px !important; }
+  .mg-md {
+    padding: 10px 14px 18px !important;
+    font-size: 13px !important;
+    line-height: 1.54 !important;
+  }
+  .mg-md h1 { font-size: 17px !important; }
+  .mg-md h2 { font-size: 15px !important; }
+  .mg-md h3 { font-size: 13px !important; }
+  .mg-md p { margin: 8px 0 !important; }
+  .mg-md ul, .mg-md ol { margin: 8px 0 !important; }
+  .mg-md code { font-size: 0.82em !important; }
   .mg-panel .mg-discuss { padding: 9px 12px !important; }
 }
 @media (min-width: 641px) and (max-width: 860px) {
