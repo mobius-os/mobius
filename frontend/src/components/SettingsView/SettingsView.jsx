@@ -36,6 +36,8 @@ export default function SettingsView({ onThemeChange }) {
   // persist would otherwise bounce the knob without telling the user
   // why.
   const [themeError, setThemeError] = useState('')
+  const [restartPhase, setRestartPhase] = useState('idle')
+  const [restartError, setRestartError] = useState('')
 
   useEffect(() => {
     // Mirror the full query value so a cache invalidation that
@@ -123,7 +125,6 @@ export default function SettingsView({ onThemeChange }) {
       settingsQueries.owner.invalidate(queryClient)
       setGeminiKey('')
       setStatus('success')
-      setKeyVisible(false)
       setJustSaved(true)
       setTimeout(() => setJustSaved(false), 2000)
     } catch {
@@ -131,6 +132,24 @@ export default function SettingsView({ onThemeChange }) {
       setStatus('error')
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function restartServer() {
+    if (restartPhase === 'restarting') return
+    setRestartPhase('restarting')
+    setRestartError('')
+    try {
+      const res = await api.admin.restart()
+      if (!res.ok) {
+        let detail = ''
+        try { detail = (await res.json()).detail || '' } catch {}
+        throw new Error(detail || `Restart failed (${res.status})`)
+      }
+      setTimeout(() => window.location.reload(), 10000)
+    } catch (err) {
+      setRestartPhase('idle')
+      setRestartError(err.message || 'Restart request failed.')
     }
   }
 
@@ -228,6 +247,37 @@ export default function SettingsView({ onThemeChange }) {
               color="danger"
               variant="soft"
               description={themeError}
+            />
+          )}
+        </section>
+
+        <section className="settings__section settings__section--compact">
+          <div className="settings__row">
+            <div>
+              <span className="settings__label">Server</span>
+              <p className="settings__subtext settings__subtext--tight">
+                Restart after backend or configuration changes.
+              </p>
+            </div>
+            <button
+              className="settings__btn settings__btn--outline settings__btn--sm"
+              type="button"
+              onClick={restartServer}
+              disabled={restartPhase === 'restarting'}
+            >
+              {restartPhase === 'restarting' ? 'Restarting…' : 'Restart'}
+            </button>
+          </div>
+          {restartPhase === 'restarting' && (
+            <div className="settings__notice" role="status">
+              Restart signal sent. The page will reload shortly.
+            </div>
+          )}
+          {restartError && (
+            <Alert
+              color="danger"
+              variant="soft"
+              description={restartError}
             />
           )}
         </section>

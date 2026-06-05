@@ -192,8 +192,8 @@ def load_settings() -> dict:
   return data if isinstance(data, dict) else {}
 
 
-def _resolve_model(settings: dict) -> tuple[str, str | None, str | None]:
-  """Returns (provider, model, effort) from settings.json + defaults.
+def _resolve_model(settings: dict) -> tuple[str | None, str, str | None, str | None]:
+  """Returns (agent_id, provider, model, effort) from settings.json + defaults.
 
   Provider defaults to Claude. Model/effort are passed through only
   when present and self-consistent: a model that belongs to the OTHER
@@ -201,6 +201,27 @@ def _resolve_model(settings: dict) -> tuple[str, str | None, str | None]:
   SDK error) — same defensive normalization the chat runners do. Both
   may be None, in which case the SDK uses its own account default.
   """
+  agent_id = settings.get("agent_id") or None
+  if agent_id:
+    try:
+      from app.providers import resolve_agent
+      agent = resolve_agent(str(DATA_DIR), str(agent_id))
+    except Exception as exc:
+      _log(f"could not resolve agent_id={agent_id!r}: {exc!r}")
+      agent = None
+    if agent:
+      provider = settings.get("provider") or agent.get("provider") or DEFAULT_PROVIDER
+      if provider not in ("claude", "codex"):
+        provider = DEFAULT_PROVIDER
+      return (
+        str(agent_id),
+        provider,
+        settings.get("model") or agent.get("model") or None,
+        settings.get("effort") or agent.get("effort") or None,
+      )
+    _log(f"settings agent_id={agent_id!r} is not in the registry; using provider/model")
+    agent_id = None
+
   provider = settings.get("provider") or DEFAULT_PROVIDER
   if provider not in ("claude", "codex"):
     provider = DEFAULT_PROVIDER
@@ -221,7 +242,7 @@ def _resolve_model(settings: dict) -> tuple[str, str | None, str | None]:
     if model in other:
       _log(f"settings model {model!r} mismatches provider {provider!r}; dropping")
       model = None
-  return provider, model, effort
+  return agent_id, provider, model, effort
 
 
 def build_goal(settings: dict) -> str:
@@ -342,6 +363,32 @@ def _drain_message(sdk_msg, log_fh) -> None:
     write(f"  = turn result (cost_usd={cost})")
 
 
+class _LogBroadcast:
+  """Minimal broadcast shim for the unattended Codex runner path."""
+
+  def __init__(self, log_fh):
+    self.log_fh = log_fh
+
+  def publish(self, event: dict) -> None:
+    if self.log_fh is None:
+      return
+    try:
+      kind = event.get("type") if isinstance(event, dict) else None
+      if kind == "text":
+        text = (event.get("content") or "").strip()
+        if text:
+          self.log_fh.write(f"  > {text[:500]}\n")
+      elif kind in ("tool_start", "tool_output", "error", "session_init"):
+        self.log_fh.write(
+          "  · codex "
+          + json.dumps(event, ensure_ascii=True, default=str)[:500]
+          + "\n"
+        )
+      self.log_fh.flush()
+    except OSError:
+      pass
+
+
 async def run() -> int:
   """Runs the whole Dreaming session and returns a process exit code.
 
@@ -352,31 +399,75 @@ async def run() -> int:
   the `cron_outcome` event, so this is the one signal the activity log
   records about whether the night ran.
   """
-  from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
-
   settings = load_settings()
-  provider, model, effort = _resolve_model(settings)
+  agent_id, provider, model, effort = _resolve_model(settings)
   skill_text = load_skill()
   seed_brief_template()
   goal = build_goal(settings)
   env = build_env()
   max_turns = int(settings.get("max_turns") or DEFAULT_MAX_TURNS)
+  log_fh = None
+  try:
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    log_fh = LOG_PATH.open("a", encoding="utf-8")
+  except OSError:
+    log_fh = None
 
   _log(
-    f"start provider={provider} model={model or '(default)'} "
+    f"start agent={agent_id or '(none)'} provider={provider} model={model or '(default)'} "
     f"effort={effort or '(default)'} max_turns={max_turns} cwd={DATA_DIR}"
   )
 
-  # Codex selection is recorded but the autonomous path runs through the
-  # Claude SDK only for now: the Codex SDK runner is built around a live
-  # TurnHandle + the request_user_input bridge, neither of which an
-  # unattended run uses. If the owner pins Codex we log it and proceed on
-  # Claude rather than failing the night — the skill is provider-agnostic
-  # and the dreaming work (forking sessions, editing files, the API
-  # calls) is identical. A dedicated Codex autonomous path can land later
-  # if the owner actually wants to dream on Codex.
+  # Codex can run the same Dreaming skill through the app-server SDK path. The
+  # normal chat runner publishes SSE; Dreaming swaps in a log-only broadcast so
+  # unattended runs still leave a useful trace.
   if provider == "codex":
-    _log("provider=codex requested; autonomous path runs on Claude SDK — proceeding on claude")
+    try:
+      from app.codex_sdk_runner import run_codex_sdk_turn
+      result = await run_codex_sdk_turn(
+        user_message=goal,
+        session_id=None,
+        base_env=env,
+        cwd=str(DATA_DIR),
+        chat_id="dreaming-nightly",
+        bc=_LogBroadcast(log_fh),
+        pending_questions={},
+        db=None,
+        agent_settings={
+          "model": model,
+          "effort": effort,
+        },
+        system_prompt=skill_text,
+      )
+      if result.get("error"):
+        _log(f"WARN codex run ended in error: {result.get('error')}")
+        if log_fh is not None:
+          try:
+            log_fh.close()
+          except OSError:
+            pass
+        return 1
+      _log(
+        "codex run complete "
+        f"session_id={result.get('session_id') or '(none)'} "
+        f"cost_usd={result.get('cost_usd')}"
+      )
+      if log_fh is not None:
+        try:
+          log_fh.close()
+        except OSError:
+          pass
+      return 0
+    except Exception as exc:
+      _log(f"ERROR codex runner failed: {exc!r}")
+      if log_fh is not None:
+        try:
+          log_fh.close()
+        except OSError:
+          pass
+      return 1
+
+  from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
   options_kwargs: dict = {
     "system_prompt": skill_text,
@@ -392,13 +483,6 @@ async def run() -> int:
   if effort:
     options_kwargs["effort"] = effort
   options = ClaudeAgentOptions(**options_kwargs)
-
-  log_fh = None
-  try:
-    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    log_fh = LOG_PATH.open("a", encoding="utf-8")
-  except OSError:
-    log_fh = None
 
   client = ClaudeSDKClient(options)
   try:

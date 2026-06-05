@@ -447,7 +447,7 @@ def _claude_tier(model_id: str) -> str | None:
 
 @router.get("/providers/models")
 async def providers_models(
-  _: models.Owner = Depends(get_current_owner_or_app),
+  owner: models.Owner = Depends(get_current_owner_or_app),
 ):
   """Per-provider model list for mini-app pickers.
 
@@ -464,7 +464,8 @@ async def providers_models(
   key already says it), and a derived `tier` for Claude models so
   pickers can group by Opus/Sonnet/Haiku without parsing ids. The
   shell keeps its own endpoint because its picker depends on the
-  richer fields; mini-apps get a stable, narrow surface.
+  richer fields; mini-apps get a stable, narrow surface. Hidden-model
+  preferences are still honored so app pickers match the chat picker.
 
   Accepts owner OR app-scoped tokens — mini-app Settings tabs (news
   picker, Dreaming Settings, recovery chat picker) need this list to
@@ -476,10 +477,17 @@ async def providers_models(
   from app.providers import list_models
   data_dir = get_settings().data_dir
   registry = await list_models(data_dir)
+  prefs = owner.model_prefs_json or {}
+  hidden_ids = {
+    entry for entry in (prefs.get("hidden_ids") or [])
+    if isinstance(entry, str)
+  }
   out: dict[str, list[dict[str, str]]] = {}
   for provider_id, entries in registry.items():
     rows: list[dict[str, str]] = []
     for entry in entries:
+      if entry["id"] in hidden_ids:
+        continue
       row: dict[str, str] = {
         "id": entry["id"],
         "name": entry["label"],

@@ -27,7 +27,7 @@ from app import models
 # uvicorn boot (and thereby kill the recovery surface). See the
 # wrapped imports in lifespan() below.
 from app.routes import (
-  admin_router, ai_router, apps_router, auth_router,
+  admin_router, apps_router, auth_router,
   chat_logs_router, chat_router, chats_router, chats_stream_router,
   debug_router, generate_router,
   notifications_router, notify_router, proxy_router, push_router,
@@ -357,7 +357,6 @@ except Exception as _exc:  # pragma: no cover - defensive boot guard
   logging.getLogger(__name__).error(
     "app_chat_router not mounted: %s", _exc, exc_info=True,
   )
-app.include_router(ai_router)
 app.include_router(notify_router)
 app.include_router(proxy_router)
 app.include_router(recover_router)
@@ -443,6 +442,22 @@ def version():
   verify-fresh.sh, which only see the shell bundle, not the backend).
   """
   return {"sha": get_settings().build_sha}
+
+
+@app.api_route(
+  "/api/{path:path}",
+  methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+  include_in_schema=False,
+)
+def unknown_api(path: str):
+  """Return a real API 404 instead of letting deleted endpoints fall through.
+
+  The SPA catch-all below intentionally serves index.html for client routes,
+  but `/api/*` misses are not client routes. Keeping this explicit makes
+  removed backend surfaces, such as the old `/api/ai`, disappear cleanly for
+  every HTTP method.
+  """
+  raise HTTPException(status_code=404, detail="Not found.")
 
 
 @app.get("/", include_in_schema=False)

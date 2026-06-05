@@ -36,6 +36,33 @@ const VERBOSITY_OPTIONS = [
   { id: 'chatty', label: 'Chatty', hint: 'A longer narrative with more pattern-spotting.' },
 ]
 const DEFAULT_VERBOSITY = 'standard'
+const DEFAULT_AGENT_ID = 'builder'
+const PROVIDER_LABELS = {
+  claude: 'Claude Code',
+  codex: 'OpenAI Codex',
+}
+const PROVIDER_ORDER = [
+  { key: 'claude', label: PROVIDER_LABELS.claude },
+  { key: 'codex', label: PROVIDER_LABELS.codex },
+]
+const FALLBACK_MODEL_GROUPS = [
+  {
+    key: 'claude',
+    label: PROVIDER_LABELS.claude,
+    models: [
+      { id: 'claude-opus-4-8', name: 'Opus 4.8' },
+      { id: 'claude-sonnet-4-6', name: 'Sonnet 4.6' },
+      { id: 'claude-haiku-4-5-20251001', name: 'Haiku 4.5' },
+    ],
+  },
+  {
+    key: 'codex',
+    label: PROVIDER_LABELS.codex,
+    models: [{ id: 'gpt-5.5', name: 'gpt-5.5' }],
+  },
+]
+const DEFAULT_PROVIDER = FALLBACK_MODEL_GROUPS[0].key
+const DEFAULT_MODEL = FALLBACK_MODEL_GROUPS[0].models[0].id
 
 // The default schedule: 06:00 local -> "0 6 * * *". We only ever let the
 // user pick an hour (minute pinned to 0), so the cron field is always
@@ -83,6 +110,21 @@ export function hardenReportHtml(html) {
   return `<!doctype html><html><head>${meta}</head><body>${body}</body></html>`
 }
 
+function htmlToText(html) {
+  return String(html || '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 // "0 6 * * *" -> "06:00" for the <input type="time"> value.
 function hourToTimeValue(hour) {
   return `${String(hour).padStart(2, '0')}:00`
@@ -94,6 +136,51 @@ function hourClockLabel(hour) {
   const d = new Date()
   d.setHours(hour, 0, 0, 0)
   return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+}
+
+async function fetchAgents(token) {
+  const r = await fetch('/api/agents', {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!r.ok) throw new Error(`agents ${r.status}`)
+  const data = await r.json()
+  return Array.isArray(data.agents) ? data.agents : []
+}
+
+function buildModelGroups(payload) {
+  if (!payload || typeof payload !== 'object') return FALLBACK_MODEL_GROUPS
+  const groups = []
+  for (const meta of PROVIDER_ORDER) {
+    const rows = Array.isArray(payload[meta.key]) ? payload[meta.key] : null
+    if (!rows || rows.length === 0) continue
+    groups.push({
+      key: meta.key,
+      label: meta.label,
+      models: rows
+        .filter((row) => row && typeof row.id === 'string')
+        .map((row) => ({ id: row.id, name: row.name || row.id })),
+    })
+  }
+  return groups
+}
+
+async function fetchModelConfig(token) {
+  const headers = { Authorization: `Bearer ${token}` }
+  const [statusRes, modelsRes] = await Promise.all([
+    fetch('/api/auth/providers/status', { headers }).catch(() => null),
+    fetch('/api/auth/providers/models', { headers }).catch(() => null),
+  ])
+  let connected = null
+  if (statusRes?.ok) {
+    const data = await statusRes.json()
+    connected = new Set(
+      Object.entries(data || {})
+        .filter(([, value]) => value && value.authenticated)
+        .map(([key]) => key),
+    )
+  }
+  const models = modelsRes?.ok ? buildModelGroups(await modelsRes.json()) : FALLBACK_MODEL_GROUPS
+  return { connected, models }
 }
 
 // ---------------------------------------------------------------------------
@@ -429,6 +516,14 @@ const S = {
     color: 'var(--muted)', fontSize: '12.5px', lineHeight: 1.55,
     display: 'flex', alignItems: 'flex-start', gap: '10px',
   },
+  feedbackRow: {
+    borderTop: '1px solid var(--border)', padding: '14px 16px 18px',
+    display: 'flex', justifyContent: 'flex-end',
+  },
+  feedbackBtn: {
+    border: '1px solid var(--border)', borderRadius: '10px', background: 'var(--surface2)',
+    color: 'var(--text)', padding: '9px 12px', fontSize: '12.5px', fontWeight: 700, cursor: 'pointer',
+  },
 
   // Settings
   settingsWrap: { maxWidth: '580px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '22px' },
@@ -455,6 +550,21 @@ const S = {
     fontSize: '12px', color: 'var(--muted)', lineHeight: 1.5,
     padding: '10px 12px', borderRadius: '11px',
     background: 'var(--bg)', border: '1px solid var(--border)', marginTop: '2px',
+  },
+  agentSelect: {
+    width: '100%', minHeight: '42px', padding: '9px 12px',
+    border: '1px solid var(--border)', borderRadius: '10px',
+    background: 'var(--bg)', color: 'var(--text)', fontSize: '14px',
+    fontFamily: 'var(--font)', fontWeight: 650, outline: 'none',
+  },
+  agentMeta: {
+    fontSize: '12px', color: 'var(--muted)', lineHeight: 1.5,
+    padding: '10px 12px', borderRadius: '11px',
+    background: 'var(--bg)', border: '1px solid var(--border)',
+  },
+  modelLabel: {
+    fontSize: '11px', color: 'var(--muted)', fontWeight: 750,
+    textTransform: 'uppercase', letterSpacing: '0.4px', marginTop: '4px',
   },
   verbList: { display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '2px' },
   verbRow: (on) => ({
@@ -742,15 +852,39 @@ function MorningChat({ chatId }) {
   )
 }
 
+function FeedbackLauncher({ dateStr, html }) {
+  const openFeedbackChat = () => {
+    const excerpt = htmlToText(html).slice(0, 1200)
+    const draft = [
+      `Feedback on the Dreaming brief for ${dateStr}:`,
+      '',
+      excerpt ? `Brief excerpt: ${excerpt}` : '',
+      '',
+      'My feedback:',
+    ].filter(Boolean).join('\n')
+    window.parent.postMessage(
+      { type: 'moebius:new-chat', draft },
+      window.location.origin,
+    )
+  }
+  return (
+    <div style={S.feedbackRow}>
+      <button style={S.feedbackBtn} className="dreaming-pressable" onClick={openFeedbackChat}>
+        Give feedback on this brief
+      </button>
+    </div>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Report detail — the brief + chat split view.
 //
 // The brief is the static, script-free HTML the agent authored: rendered in a
 // SANDBOXED srcDoc iframe with NO allow-scripts (containment). Beneath it, the
 // morning chat. We resolve the chat_id from `reports/<date>.meta.json` (the
-// cron's sibling), then mount the embed. Back is wired through
-// history.pushState + popstate so the phone's back gesture returns to the
-// list (falls back to the in-bar button when history is unavailable).
+// cron's sibling), then mount the embed. Back is wired through the shell
+// nav helper so the phone's back gesture returns to the list with a real
+// previous-screen preview.
 //
 // The brief iframe auto-sizes to its content (the document is short — a
 // morning read), measured via the iframe's own scrollHeight after load, so
@@ -819,32 +953,6 @@ function ReportDetail({ dateStr, storage, online, onBack }) {
   useEffect(() => () => {
     try { iframeRef.current?.__ro?.disconnect() } catch {}
   }, [])
-
-  // Push a history entry on mount so a back gesture pops it; intercept the
-  // pop to return to the list instead of leaving the app. If the user backs
-  // via the in-app button we go() to consume our own entry so we don't leave
-  // a dangling forward state.
-  const poppedRef = useRef(false)
-  useEffect(() => {
-    let pushed = false
-    try {
-      window.history.pushState({ dreamingDetail: dateStr }, '')
-      pushed = true
-    } catch {
-      pushed = false
-    }
-    const onPop = () => {
-      poppedRef.current = true
-      onBack()
-    }
-    window.addEventListener('popstate', onPop)
-    return () => {
-      window.removeEventListener('popstate', onPop)
-      if (pushed && !poppedRef.current) {
-        try { window.history.back() } catch { /* ignore */ }
-      }
-    }
-  }, [dateStr, onBack])
 
   return (
     <div style={S.detail} className="dreaming-rise">
@@ -922,6 +1030,7 @@ function ReportDetail({ dateStr, storage, online, onBack }) {
             ) : (
               <MorningChat chatId={chatId} />
             )}
+            <FeedbackLauncher dateStr={dateStr} html={state.html} />
           </div>
         </div>
       )}
@@ -1093,11 +1202,18 @@ function StreakBar({ streak }) {
 // Settings
 // ---------------------------------------------------------------------------
 
-function SettingsTab({ appId, storage, online }) {
+function SettingsTab({ appId, storage, online, token }) {
   const [hour, setHour] = useState(DEFAULT_HOUR)
   const [verbosity, setVerbosity] = useState(DEFAULT_VERBOSITY)
   const [excludeApps, setExcludeApps] = useState([])
   const [settingsExtra, setSettingsExtra] = useState({})
+  const [agents, setAgents] = useState([])
+  const [agentId, setAgentId] = useState(DEFAULT_AGENT_ID)
+  const [agentsPhase, setAgentsPhase] = useState('loading')
+  const [provider, setProvider] = useState(DEFAULT_PROVIDER)
+  const [model, setModel] = useState(DEFAULT_MODEL)
+  const [modelGroups, setModelGroups] = useState(null)
+  const [connectedProviders, setConnectedProviders] = useState(null)
   // The raw cron we loaded — when it's a custom shape parseCronHour can't
   // represent (a non-zero minute, multiple hours), we surface it read-only
   // rather than silently rewriting it to "0 <h> * * *" on the next save.
@@ -1134,12 +1250,57 @@ function SettingsTab({ appId, storage, online }) {
           setVerbosity(s.verbosity)
         }
         if (Array.isArray(s.exclude_apps)) setExcludeApps(s.exclude_apps)
+        if (typeof s.agent_id === 'string' && s.agent_id.trim()) {
+          setAgentId(s.agent_id.trim())
+        }
+        if (typeof s.provider === 'string' && s.provider.trim()) {
+          setProvider(s.provider.trim())
+        }
+        if (typeof s.model === 'string' && s.model.trim()) {
+          setModel(s.model.trim())
+        }
       }
       // res.notFound (first run) -> keep the 06:00 / standard defaults.
       setLoading(false)
     })()
     return () => { cancelled = true }
   }, [storage])
+
+  useEffect(() => {
+    let cancelled = false
+    setAgentsPhase('loading')
+    fetchAgents(token)
+      .then((rows) => {
+        if (cancelled) return
+        setAgents(rows)
+        setAgentsPhase('ready')
+        setAgentId((current) => {
+          if (!rows.length || rows.some((agent) => agent.id === current)) return current
+          const fallback = rows.find((agent) => agent.id === DEFAULT_AGENT_ID) || rows[0]
+          return fallback.id
+        })
+      })
+      .catch(() => {
+        if (cancelled) return
+        setAgentsPhase('error')
+      })
+    return () => { cancelled = true }
+  }, [token])
+
+  useEffect(() => {
+    let cancelled = false
+    fetchModelConfig(token)
+      .then(({ connected, models }) => {
+        if (cancelled) return
+        setConnectedProviders(connected)
+        setModelGroups(models)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setModelGroups(FALLBACK_MODEL_GROUPS)
+      })
+    return () => { cancelled = true }
+  }, [token])
 
   const onTimeChange = useCallback((e) => {
     // <input type="time"> can be cleared to "" -> NaN. Drop NaN so we never
@@ -1160,6 +1321,7 @@ function SettingsTab({ appId, storage, online }) {
     // Preserve a custom cron verbatim if the user never touched the hour;
     // otherwise write the standard "0 <h> * * *".
     const cron = cronIsCustom ? rawCron : buildCron(hour)
+    const selectedAgent = agents.find((agent) => agent.id === agentId) || null
     try {
       await storage.putJSON('settings.json', {
         ...settingsExtra,
@@ -1169,8 +1331,10 @@ function SettingsTab({ appId, storage, online }) {
         timezone: settingsExtra.timezone ?? null,
         verbosity,
         exclude_apps: excludeApps,
-        provider: settingsExtra.provider || 'claude',
-        model: settingsExtra.model ?? null,
+        agent_id: selectedAgent?.id || agentId || null,
+        provider: provider || selectedAgent?.provider || settingsExtra.provider || DEFAULT_PROVIDER,
+        model: model || selectedAgent?.model || settingsExtra.model || null,
+        effort: selectedAgent ? (selectedAgent.effort ?? null) : (settingsExtra.effort ?? null),
       })
       setToast('Saved ✓')
       setTimeout(() => setToast(''), 2600)
@@ -1179,7 +1343,7 @@ function SettingsTab({ appId, storage, online }) {
     } finally {
       setSaving(false)
     }
-  }, [saving, cronIsCustom, rawCron, hour, verbosity, excludeApps, settingsExtra, storage, online])
+  }, [saving, cronIsCustom, rawCron, hour, verbosity, excludeApps, agentId, agents, provider, model, settingsExtra, storage, online])
 
   if (loading) {
     return (
@@ -1244,6 +1408,102 @@ function SettingsTab({ appId, storage, online }) {
 
       <div style={S.settingsCard}>
         <div style={S.sectionHead}>
+          <span style={S.sectionIcon} aria-hidden="true">🤖</span>
+          <h2 style={S.sectionLabel}>Who dreams</h2>
+        </div>
+        <p style={S.note}>
+          Pick the named agent for the overnight pass. Dreaming keeps its own
+          procedure; the agent supplies provider, model, and effort.
+        </p>
+        <select
+          style={S.agentSelect}
+          value={agentId}
+          onChange={(e) => setAgentId(e.target.value)}
+          disabled={agentsPhase === 'loading' || agents.length === 0}
+          aria-label="Dreaming agent"
+        >
+          {agents.length === 0 ? (
+            <option value={agentId}>
+              {agentsPhase === 'loading' ? 'Loading agents...' : 'Builder'}
+            </option>
+          ) : agents.map((agent) => (
+            <option key={agent.id} value={agent.id}>
+              {agent.icon ? `${agent.icon} ` : ''}{agent.label || agent.id}
+            </option>
+          ))}
+        </select>
+        {agentsPhase === 'error' ? (
+          <div style={S.agentMeta}>Could not load agents. The saved agent will stay unchanged.</div>
+        ) : (
+          <div style={S.agentMeta}>
+            {(() => {
+              const selected = agents.find((agent) => agent.id === agentId)
+              if (!selected) return 'Builder uses the default Dreaming model settings.'
+              const provider = PROVIDER_LABELS[selected.provider] || selected.provider || 'default provider'
+              const model = selected.model || 'default model'
+              const effort = selected.effort ? `, ${selected.effort} effort` : ''
+              return `${provider}, ${model}${effort}`
+            })()}
+          </div>
+        )}
+        <div style={S.modelLabel}>Nightly model</div>
+        {modelGroups === null ? (
+          <div style={S.note}>Loading models…</div>
+        ) : (
+          <>
+            <select
+              style={S.agentSelect}
+              value={`${provider}\t${model}`}
+              onChange={(e) => {
+                const [nextProvider, nextModel] = e.target.value.split('\t')
+                if (nextProvider && nextModel) {
+                  setProvider(nextProvider)
+                  setModel(nextModel)
+                }
+              }}
+              aria-label="Dreaming model"
+            >
+              {!modelGroups.some((group) =>
+                group.key === provider && group.models.some((m) => m.id === model)
+              ) && (
+                <option value={`${provider}\t${model}`}>
+                  Current: {model || DEFAULT_MODEL}
+                </option>
+              )}
+              {modelGroups.map((group) => {
+                const isConnected = !connectedProviders || connectedProviders.has(group.key)
+                return (
+                  <optgroup
+                    key={group.key}
+                    label={`${group.label}${isConnected ? '' : ' (not connected)'}`}
+                  >
+                    {group.models.map((m) => {
+                      const on = provider === group.key && model === m.id
+                      return (
+                        <option
+                          key={`${group.key}-${m.id}`}
+                          value={`${group.key}\t${m.id}`}
+                          disabled={!isConnected && !on}
+                        >
+                          {m.name} ({m.id})
+                        </option>
+                      )
+                    })}
+                  </optgroup>
+                )
+              })}
+            </select>
+            <div style={S.agentMeta}>
+              {(modelGroups.find((group) => group.key === provider)?.label || provider)}
+              {' · '}
+              {model}
+            </div>
+          </>
+        )}
+      </div>
+
+      <div style={S.settingsCard}>
+        <div style={S.sectionHead}>
           <span style={S.sectionIcon} aria-hidden="true">✍️</span>
           <h2 style={S.sectionLabel}>How much detail</h2>
         </div>
@@ -1299,6 +1559,7 @@ export default function App({ appId, token }) {
   const [openDate, setOpenDate] = useState(null)
   const online = useOnline()
   const storage = useMemo(() => makeStorage(appId, token), [appId, token])
+  const detailNavRef = useRef(null)
 
   // Surface the streak in the header on the reports tab. We read it once
   // here (cheap, cached) so the badge is present even before the list
@@ -1316,7 +1577,30 @@ export default function App({ appId, token }) {
     return () => { cancelled = true }
   }, [storage, appId])
 
-  const closeDetail = useCallback(() => setOpenDate(null), [])
+  const closeDetail = useCallback(() => {
+    try { detailNavRef.current?.close?.() } catch {}
+    detailNavRef.current = null
+    setOpenDate(null)
+  }, [])
+
+  const openDetail = useCallback(async (dateStr) => {
+    try { detailNavRef.current?.close?.() } catch {}
+    detailNavRef.current = null
+    if (window.mobius?.nav?.open) {
+      const handle = window.mobius.nav.open('dreaming-report', () => {
+        detailNavRef.current = null
+        setOpenDate(null)
+      })
+      detailNavRef.current = handle
+      await handle.ready?.catch(() => false)
+      if (detailNavRef.current !== handle) return
+    }
+    setOpenDate(dateStr)
+  }, [])
+
+  useEffect(() => () => {
+    try { detailNavRef.current?.close?.() } catch {}
+  }, [])
 
   return (
     <div style={S.root}>
@@ -1342,7 +1626,7 @@ export default function App({ appId, token }) {
             <button style={S.tab(tab === 'reports')} onClick={() => setTab('reports')}>
               Briefs
             </button>
-            <button style={S.tab(tab === 'settings')} onClick={() => setTab('settings')}>
+            <button style={S.tab(tab === 'settings')} onClick={() => { closeDetail(); setTab('settings') }}>
               Settings
             </button>
           </div>
@@ -1356,7 +1640,7 @@ export default function App({ appId, token }) {
               appId={appId}
               storage={storage}
               online={online}
-              onOpen={setOpenDate}
+              onOpen={openDetail}
             />
             {openDate && (
               <ReportDetail
@@ -1368,7 +1652,7 @@ export default function App({ appId, token }) {
             )}
           </>
         ) : (
-          <SettingsTab appId={appId} storage={storage} online={online} />
+          <SettingsTab appId={appId} storage={storage} online={online} token={token} />
         )}
       </div>
     </div>

@@ -255,6 +255,9 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   },
+  admin: {
+    restart: () => apiFetch('/admin/restart', { method: 'POST' }),
+  },
   push: {
     vapidKey: () => apiFetch('/push/vapid-key'),
     subscribe: (payload) => apiFetch('/push/subscribe', {

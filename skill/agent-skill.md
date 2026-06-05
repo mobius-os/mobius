@@ -13,7 +13,7 @@ for a small "frozen island" that keeps recovery reachable.
 | Path | Editable? | Notes |
 |---|---|---|
 | `/data/shell/src/`, `/data/shell/dist/` | yes | Frontend source + built bundle. Rebuild with `bash /app/scripts/rebuild_shell.sh` after editing src/. |
-| `/app/app/` | yes | Backend Python. Edits take effect on next uvicorn restart — ask the partner to click Restart in the recovery chat. |
+| `/app/app/` | yes | Backend Python. Edits take effect on next uvicorn restart — use Settings -> Server -> Restart when the main shell is healthy; use recovery restart when the shell is broken. |
 | `/app/scripts/` | yes | Utility scripts (rebuild_shell.sh, init scripts). |
 | `/data/apps/<slug>/`, `/data/shared/` | yes | Mini-app source + shared data. |
 | `/app/app-baked/`, `/app/scripts-baked/`, `/app/static/`, `/app/shell-src/` | NO | Immutable recovery sources (chmod a-w). `recovery_restore.sh` copies from these back to live if you break something. |
@@ -37,9 +37,11 @@ exists to close). The only exempt direct writers are boot reconciliation
 backend edits to `/app/app/` and `/app/scripts/` survive container
 restarts BUT are wiped on `docker compose up --build` (a rebuild
 restores the image's baked content). To make a backend change
-permanent, the partner must also patch the source repo on the host
-and commit. If unsure, ask the partner whether the fix is meant to
-be a one-off (container-only) or permanent (host-repo too).
+permanent, host-repo/release work is a handoff outside the
+in-product agent. If unsure, ask the partner whether the fix is
+meant to be a one-off local change or needs outside persistence
+work. Do not push, publish, or manage external repo workflow from
+inside Möbius.
 
 **If you break the live copy of something, the partner can recover
 via the `/recover` page or by talking to a fresh you in the recovery
@@ -55,23 +57,26 @@ source back over the live copy.
 
 When working on a backend bug fix:
 1. Edit `/app/app/...py` in place
-2. Ask the partner to **open `/recover/chat` in a new browser tab**
-   (they stay in your current chat — your session survives the
-   restart). The recovery chat may prompt for login: it uses the
-   **same owner password as the main shell**, just behind a
-   separate login form, not a different credential.
-3. In that recovery-chat tab, the partner clicks "Restart server"
-   (POSTs `/recover/restart`, SIGTERMs uvicorn, container restarts).
-   The restart takes **~5-15 seconds**; the recovery-chat page
-   auto-reloads when the backend is healthy again.
-4. Verify the fix in the original chat (which is still open and
+2. If the main shell is working, ask the partner to open Settings and
+   click "Restart server" in the Server section (POSTs `/api/admin/restart`).
+3. If the main shell is broken, ask the partner to **open `/recover/chat`
+   in a new browser tab** (they stay in your current chat — your
+   session survives the restart). The recovery chat may prompt for
+   login: it uses the **same owner password as the main shell**, just
+   behind a separate login form, not a different credential. In that
+   recovery-chat tab, the partner clicks "Restart server" (POSTs
+   `/recover/restart`).
+4. The restart takes **~5-15 seconds**; the page auto-reloads when the
+   backend is healthy again.
+5. Verify the fix in the original chat (which is still open and
    still has your full conversation history).
 
 **Which recovery URL?**
 
 | Situation | URL | Action |
 |---|---|---|
-| Backend edit, ready to load | `/recover/chat` | Click "Restart server" |
+| Backend edit, main shell healthy | Settings -> Server | Click "Restart server" |
+| Backend edit, main shell broken | `/recover/chat` | Click "Restart server" |
 | Agent stuck or unable to fix | `/recover` | Click "Restore backend" / "Restore shell" / "Restore scripts" |
 | Lost ability to log in to main shell | `/recover` | Log in (owner password), then options above |
 
@@ -228,7 +233,8 @@ their register; otherwise the mechanism stays out of the chat.
    - `agent-browser set viewport "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT"`
      — match the partner's actual device so screenshots frame what
      they see. Both env vars are set when the shell sends viewport;
-     fall back to `412 915` if unset.
+     if either is missing, ask for or obtain the actual app viewport
+     before taking screenshots.
    - `agent-browser snapshot` — accessibility tree with `@eN` refs
      for every interactive element (useful for finding targets and
      verifying structure)
@@ -616,21 +622,30 @@ mode.
 (drill-downs, modals, nested views).** Most mini-apps don't need any
 of this.
 
-If a mini-app has internal navigation (tabs, drill-downs, modals), use
-`history.pushState` when navigating deeper and listen for `popstate` to
-go back:
+If a mini-app has internal navigation (drill-downs, modals, nested
+views), use the runtime helper. It asks the shell to install a real
+top-level back target, then calls your callback when the user uses
+device/browser back:
 
 ```jsx
-function goToDetail(id) {
-  history.pushState({ detail: id }, '')
-  setView('detail')
+const navRef = useRef(null)
+
+async function openDetail(item) {
+  const handle = window.mobius.nav.open('app-detail', () => {
+    navRef.current = null
+    setSelected(null)
+  })
+  navRef.current = handle
+  await handle.ready
+  if (navRef.current !== handle) return
+  setSelected(item)
 }
 
-useEffect(() => {
-  function onPop() { setView('list') }
-  window.addEventListener('popstate', onPop)
-  return () => window.removeEventListener('popstate', onPop)
-}, [])
+function closeDetail() {
+  navRef.current?.close()
+  navRef.current = null
+  setSelected(null)
+}
 ```
 
 **Android back-preview** — the swipe-back gesture renders a preview
@@ -651,6 +666,7 @@ function navPushAndAwaitAck(label) {
   return new Promise((resolve, reject) => {
     function onMsg(e) {
       if (e.origin !== window.location.origin) return
+      if (e.source !== window.parent) return
       if (e.data?.requestId !== requestId) return
       if (e.data.type === 'moebius:nav-push-ack') {
         window.removeEventListener('message', onMsg)
@@ -687,6 +703,7 @@ window.parent.postMessage(
 useEffect(() => {
   function onMessage(e) {
     if (e.origin !== window.location.origin) return
+    if (e.source !== window.parent) return
     if (e.data?.type !== 'moebius:nav-back') return
     closeNestedView()  // your app's own state mutation
   }
@@ -703,6 +720,7 @@ async function navPushAndAwaitAck(label) {
   await new Promise((resolve, reject) => {
     function onMsg(e) {
       if (e.origin !== window.location.origin) return
+      if (e.source !== window.parent) return
       if (e.data?.requestId !== requestId) return
       if (e.data.type === 'moebius:nav-push-ack') {
         window.removeEventListener('message', onMsg); resolve()
@@ -720,6 +738,7 @@ async function navPushAndAwaitAck(label) {
 
 window.addEventListener('message', (e) => {
   if (e.origin !== window.location.origin) return
+  if (e.source !== window.parent) return
   if (e.data?.type !== 'moebius:nav-back') return
   closeDetailView()
 })
@@ -798,18 +817,17 @@ const res = await fetch(`/api/proxy?url=${encodeURIComponent(url)}`, {
 })
 ```
 
-### AI-powered mini-apps
+### Agent-powered mini-apps
 
-POST `/api/ai` with `{messages, system, tools}` and stream the SSE
-body — parse `data: ` lines as JSON and yield each event.
+Apps that need agent assistance should create an app-attributed chat with
+`POST /api/app-chats`, persist the returned chat id, and mount the shell chat
+with `window.mobius.chat({ mount, chatId })`.
 
-- `tools: false` — text only (chat mode)
-- `tools: true` — stateless one-shot sub-agent with the full allowlist
-  (`Bash, Read, Write, Edit, Glob, Grep` — no skill file, no resume)
-- `tools: ["Read", "Glob"]` — pass a list to grant only a subset
-  (intersected against the full allowlist; unknown tool names are rejected)
-- Events: `{ type: 'text', content }`, `{ type: 'done' }`,
-  `{ type: 'error', message }`
+- Put app-specific instructions in `system_prompt` on create, and PATCH the
+  same `/api/app-chats/{id}` prompt when the app boots again.
+- Listen for the embed's `turn-done` event and refresh app storage/state.
+- Keep the chat as the interaction surface; it gives the user a persistent
+  transcript, normal agent tooling, and follow-up questions in one place.
 
 ### Communicating with the shell
 
@@ -823,7 +841,8 @@ window.parent.postMessage({ type: 'moebius:new-chat', draft: 'Hello!' }, window.
 ### Token scoping
 
 Mini-apps receive a scoped token (not the owner's full JWT). It can
-access: storage, proxy, AI, notifications, push, uploads, app endpoints.
+access: storage, proxy, app-attributed chats, notifications, push, uploads,
+app endpoints.
 It CANNOT access: auth or settings.
 
 For chat, an app can create and drive its OWN conversation: `POST
@@ -1287,4 +1306,3 @@ this chat is using (check the model picker in the composer's `+` popover),
 and prefer leaving it
 unset unless you have a specific reason — the per-provider default
 is sensible.
-

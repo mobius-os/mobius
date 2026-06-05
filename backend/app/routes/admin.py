@@ -15,11 +15,14 @@ principal" — keeping one auth model reduces surface area.
 from __future__ import annotations
 
 import json
+import os
+import signal
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -38,6 +41,10 @@ _KNOWN_EVENTS = {
 }
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+
+def _sigterm_self_after_response():
+  os.kill(os.getpid(), signal.SIGTERM)
 
 
 def _parse_iso(value: str, label: str) -> datetime:
@@ -199,3 +206,22 @@ def sign_out_everywhere(
   owner.token_epoch += 1
   db.add(owner)
   db.commit()
+
+
+@router.post(
+  "/restart",
+  dependencies=[Depends(reject_cross_site)],
+)
+def restart_server(
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Soft restart for the normal Settings surface.
+
+  Recovery keeps its isolated /recover/restart copy so a broken main app can
+  still reload uvicorn. This owner-auth route is the everyday path for applying
+  backend code/config changes without sending the user to recovery first.
+  """
+  return JSONResponse(
+    {"status": "restarting"},
+    background=BackgroundTask(_sigterm_self_after_response),
+  )

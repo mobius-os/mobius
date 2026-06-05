@@ -1,6 +1,6 @@
 # Building mini-apps
 
-The full mini-app contract: component shape, `window.mobius.storage` and its traps, the app lifecycle (register-on-create only), offline, fetching, AI, back-navigation, and theming. `Read` this before building or updating any mini-app.
+The full mini-app contract: component shape, `window.mobius.storage` and its traps, the app lifecycle (register-on-create only), offline, fetching, embedded app chats, back-navigation, and theming. `Read` this before building or updating any mini-app.
 
 Mini-apps are JSX components in sandboxed iframes. Each gets `appId` and `token` props and persists through `window.mobius.storage`. The iframe is same-origin, so all browser storage works and `fetch('/api/...')` is free; this also means a mini-app can read the owner JWT — an accepted single-owner trade-off, not a license to be careless.
 
@@ -264,14 +264,17 @@ const res = await fetch(`/api/proxy?url=${encodeURIComponent(url)}`, {
 
 ---
 
-## AI-powered mini-apps
+## Agent-powered mini-apps
 
-POST `/api/ai` with `{messages, system, tools}` and stream the SSE body — parse `data: ` lines as JSON and yield each event.
+Apps that need agent assistance should create an app-attributed chat with
+`POST /api/app-chats`, persist the returned chat id, and mount the shell chat
+with `window.mobius.chat({ mount, chatId })`.
 
-- `tools: false` — text only (chat mode)
-- `tools: true` — stateless one-shot sub-agent with the full allowlist (`Bash, Read, Write, Edit, Glob, Grep` — no skill file, no resume)
-- `tools: ["Read", "Glob"]` — a list grants only that subset (intersected against the full allowlist; unknown names rejected)
-- Events: `{ type: 'text', content }`, `{ type: 'done' }`, `{ type: 'error', message }`
+- Put app-specific instructions in `system_prompt` on create, and PATCH the
+  same `/api/app-chats/{id}` prompt when the app boots again.
+- Listen for the embed's `turn-done` event and refresh app storage/state.
+- Keep the chat as the interaction surface; it gives the user a persistent
+  transcript, normal agent tooling, and follow-up questions in one place.
 
 ---
 
@@ -286,7 +289,7 @@ window.parent.postMessage({ type: 'moebius:new-chat', draft: 'Hello!' }, window.
 
 ## Token scoping
 
-Mini-apps receive a scoped token (not the owner's full JWT). It CAN access: storage, proxy, AI, notifications, push, uploads, app endpoints. It CANNOT access: auth, settings, or chat endpoints.
+Mini-apps receive a scoped token (not the owner's full JWT). It CAN access: storage, proxy, app-attributed chats, notifications, push, uploads, and app endpoints. It CANNOT access: auth, settings, or owner-only chat endpoints.
 
 ---
 
@@ -294,23 +297,34 @@ Mini-apps receive a scoped token (not the owner's full JWT). It CAN access: stor
 
 Most mini-apps don't need any of this. **Skip unless your app has drill-downs, modals, or nested views.**
 
-For simple internal navigation, use `history.pushState` on descent and `popstate` to go back:
+For simple internal navigation, use the runtime helper. It asks the shell to
+install a real top-level back target, then calls your callback when the user
+uses device/browser back:
 
 ```jsx
-function goToDetail(id) {
-  history.pushState({ detail: id }, '')
-  setView('detail')
+const navRef = useRef(null)
+
+async function openDetail(item) {
+  const handle = window.mobius.nav.open('app-detail', () => {
+    navRef.current = null
+    setSelected(null)
+  })
+  navRef.current = handle
+  await handle.ready
+  if (navRef.current !== handle) return
+  setSelected(item)
 }
-useEffect(() => {
-  function onPop() { setView('list') }
-  window.addEventListener('popstate', onPop)
-  return () => window.removeEventListener('popstate', onPop)
-}, [])
+
+function closeDetail() {
+  navRef.current?.close()
+  navRef.current = null
+  setSelected(null)
+}
 ```
 
 ### Android back-preview — shell-mediated back protocol
 
-The swipe-back gesture renders a preview of the previous screen from a top-level history snapshot. Iframe `history.pushState` is invisible to that mechanism, so iframe-history-only apps get a blank preview. To get a real preview AND single-step back, opt into the shell-mediated protocol via postMessage. The push is a handshake: send `nav-push` with a fresh `requestId`, wait for `moebius:nav-push-ack` with the same id, THEN render the nested view. Opening optimistically lets the OS snapshot the nested view as the back-preview background — the gesture works but the preview shows the screen you're leaving.
+The swipe-back gesture renders a preview of the previous screen from a top-level history snapshot. Iframe `history.pushState` is invisible to that mechanism, so iframe-history-only apps get a blank preview. `window.mobius.nav.open(...)` wraps the shell-mediated protocol below; use the raw postMessage form only for legacy apps or custom choreography.
 
 ```jsx
 function navPushAndAwaitAck(label) {
@@ -318,6 +332,7 @@ function navPushAndAwaitAck(label) {
   return new Promise((resolve, reject) => {
     function onMsg(e) {
       if (e.origin !== window.location.origin) return
+      if (e.source !== window.parent) return
       if (e.data?.requestId !== requestId) return
       if (e.data.type === 'moebius:nav-push-ack') {
         window.removeEventListener('message', onMsg); resolve()
@@ -342,6 +357,7 @@ window.parent.postMessage({ type: 'moebius:nav-pop' }, window.location.origin)
 useEffect(() => {
   function onMessage(e) {
     if (e.origin !== window.location.origin) return
+    if (e.source !== window.parent) return
     if (e.data?.type !== 'moebius:nav-back') return
     closeNestedView()  // your app's own state mutation
   }
