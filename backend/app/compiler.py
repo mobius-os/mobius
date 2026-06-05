@@ -24,8 +24,48 @@ def _compiled_dir() -> Path:
   return path
 
 
+def _entry_source_path(app) -> Path | None:
+  source_dir = getattr(app, "source_dir", None)
+  if not source_dir:
+    return None
+  return Path(source_dir) / "index.jsx"
+
+
+def _atomic_write(path: Path, data: str) -> None:
+  path.parent.mkdir(parents=True, exist_ok=True)
+  fd, tmp = tempfile.mkstemp(
+    prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent),
+  )
+  try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+      f.write(data)
+    os.replace(tmp, path)
+  except Exception:
+    try:
+      os.unlink(tmp)
+    except OSError:
+      pass
+    raise
+
+
+def _restore_entry_source(
+  path: Path, previous_source: str | None, source_existed: bool,
+) -> None:
+  if source_existed:
+    _atomic_write(path, previous_source if previous_source is not None else "")
+    return
+  try:
+    path.unlink()
+  except FileNotFoundError:
+    pass
+
+
 async def compile_jsx(
-  app_id: int, jsx_source: str, *, out_path: str | Path | None = None,
+  app_id: int,
+  jsx_source: str,
+  *,
+  out_path: str | Path | None = None,
+  source_path: str | Path | None = None,
 ) -> str:
   """Compiles JSX source to an ES module and returns the output path.
 
@@ -36,6 +76,10 @@ async def compile_jsx(
       bundle path ``app-<id>.js``. Pass a staging path to compile
       out-of-place so the live bundle is only swapped in after the
       DB commit succeeds (see ``recompile_app_bundle``).
+    source_path: Optional real filesystem entrypoint. When present,
+      esbuild compiles that path directly, allowing relative imports from
+      sibling files in the app source tree. When omitted, the legacy
+      string-only path writes ``jsx_source`` to a temp file and compiles that.
 
   Returns:
     The absolute path of the compiled JS file.
@@ -60,17 +104,21 @@ async def compile_jsx(
 
   out = Path(out_path) if out_path is not None else _compiled_dir() / f"app-{app_id}.js"
 
-  with tempfile.NamedTemporaryFile(
-    suffix=".jsx", mode="w", delete=False, encoding="utf-8"
-  ) as f:
-    f.write(jsx_source)
-    tmp_path = f.name
+  entry_path = Path(source_path) if source_path is not None else None
+  tmp_path = None
+  if entry_path is None:
+    with tempfile.NamedTemporaryFile(
+      suffix=".jsx", mode="w", delete=False, encoding="utf-8"
+    ) as f:
+      f.write(jsx_source)
+      tmp_path = f.name
+    entry_path = Path(tmp_path)
 
   try:
     try:
       proc = await asyncio.create_subprocess_exec(
         "esbuild",
-        tmp_path,
+        str(entry_path),
         "--bundle",
         "--format=esm",
         "--jsx=automatic",
@@ -111,7 +159,8 @@ async def compile_jsx(
         f"Compilation failed:\n{stderr.decode()}"
       )
   finally:
-    os.unlink(tmp_path)
+    if tmp_path is not None:
+      os.unlink(tmp_path)
 
   return str(out)
 
@@ -122,11 +171,12 @@ async def recompile_app_bundle(db, app, jsx_source: str) -> None:
   The live bundle ``app-<id>.js`` is never left half-written or orphaned:
   the new code compiles to a ``.staging`` sibling, the DB transaction
   commits, and only a durable commit promotes the staging file into the
-  live path via an atomic rename. A compile error leaves the live bundle
-  untouched (esbuild writes its outfile only on success); a commit failure
-  discards the staging file and rolls back, so the live bundle keeps the
-  prior code. There is no snapshot to restore, and no window where the
-  live bundle is the new code while the DB still holds the old.
+  live path via an atomic rename. When the app has a ``source_dir``,
+  ``index.jsx`` is synced before compile so esbuild can resolve relative
+  imports from that real source tree; compile or commit failure restores the
+  previous entry file. The live bundle stays untouched on compile failure, and
+  a commit failure discards the staging file and rolls back, so there is no
+  window where the live bundle is the new code while the DB still holds the old.
 
   ``db.commit()`` here also flushes any other changes the caller staged on
   the session (e.g. a PATCH's name/description), so the whole update lands
@@ -146,7 +196,28 @@ async def recompile_app_bundle(db, app, jsx_source: str) -> None:
   """
   live = _compiled_dir() / f"app-{app.id}.js"
   staged = _compiled_dir() / f"app-{app.id}.js.staging"
-  await compile_jsx(app.id, jsx_source, out_path=staged)
+  source_path = _entry_source_path(app)
+  previous_source = None
+  source_existed = False
+  if source_path is not None:
+    try:
+      previous_source = source_path.read_text(encoding="utf-8")
+      source_existed = True
+    except FileNotFoundError:
+      pass
+    if previous_source != jsx_source:
+      _atomic_write(source_path, jsx_source)
+  try:
+    await compile_jsx(
+      app.id,
+      jsx_source,
+      out_path=staged,
+      source_path=source_path if source_path is not None else None,
+    )
+  except Exception:
+    if source_path is not None and previous_source != jsx_source:
+      _restore_entry_source(source_path, previous_source, source_existed)
+    raise
   app.jsx_source = jsx_source
   app.compiled_path = str(live)
   try:
@@ -154,6 +225,8 @@ async def recompile_app_bundle(db, app, jsx_source: str) -> None:
   except Exception:
     db.rollback()
     staged.unlink(missing_ok=True)
+    if source_path is not None and previous_source != jsx_source:
+      _restore_entry_source(source_path, previous_source, source_existed)
     raise
   os.replace(staged, live)
 

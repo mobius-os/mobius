@@ -71,7 +71,7 @@ Tell the partner about this safety net if they accidentally delete a chat. **App
 - **Uploaded files:** `/data/chats/{chat_id}/uploads/`
 - **Generated images:** `/data/chats/{chat_id}/generated/`
 - **Per-app storage (numeric id):** `/data/apps/{app_id}/<path>` — what `PUT /api/storage/apps/{app_id}/...` writes to, keyed by the numeric DB id.
-- **Per-app source (slug):** `/data/apps/{slug}/index.jsx` — where the JSX source lives, keyed by slug. NOT the same dir as storage; the slug tree and the numeric-id tree are separate.
+- **Per-app source (slug):** `/data/apps/{slug}/` — where app source lives, keyed by slug. `index.jsx` is the entrypoint and can import sibling `.js`, `.jsx`, `.ts`, or `.tsx` modules. NOT the same dir as storage; the slug tree and the numeric-id tree are separate.
 - **Shared storage (cross-app):** `/data/shared/<path>` — what `PUT /api/storage/shared/...` writes to; used for theme.css, agent-settings.json, the memory graph, etc.
 - **Compiled bundles:** `/data/compiled/app-{app_id}.js`.
 - **Cron logs:** `/data/cron-logs/`. **Service token:** `/data/service-token.txt` (chmod 600).

@@ -78,10 +78,25 @@ export default function MyApp({ appId, token }) {
 
 ---
 
-## Lifecycle — register on create, just save to edit
+## Lifecycle — source folder, register on create, just save to edit
 
-1. Write JSX to `/data/apps/<name>/index.jsx`.
-2. **On first create only**, register + compile (mints the id + DB row):
+1. Create a source folder at `/data/apps/<name>/`.
+2. Put the app entrypoint at `/data/apps/<name>/index.jsx`.
+3. Split larger apps into sibling `.js`, `.jsx`, `.ts`, or `.tsx` modules inside that same folder and import them relatively from `index.jsx`.
+4. Keep durable static build assets under `static/`; keep runtime data in storage, not in the source folder.
+
+Example:
+
+```text
+/data/apps/mood-board/
+  index.jsx
+  Board.jsx
+  cards.js
+  static/
+    sample.png
+```
+
+On first create only, register + compile (mints the id + DB row):
 
 ```bash
 python "$SCRIPTS_DIR/register_app.py" "<name>" "<description>" /data/apps/<name>/index.jsx
@@ -89,7 +104,7 @@ python "$SCRIPTS_DIR/register_app.py" "<name>" "<description>" /data/apps/<name>
 
 `register_app.py` reads `$CHAT_ID` from the environment and stores it with the app so crash reports route back to this chat.
 
-**For edits, just write the file — do NOT re-run `register_app.py`.** A file watcher recompiles `/data/apps/<slug>/index.jsx` ~1s after you save. Re-running the script creates a DUPLICATE every time the name differs by a character (slug-vs-title is the common slip). If the partner says it didn't change, check that `/data/compiled/app-<id>.js` mtime advanced and look for `compile failed for` in `/data/logs/chat.log` — a JSX syntax error blocks the recompile. If a duplicate appears, `DELETE /api/apps/<dup-id>`.
+**For edits, just write source files — do NOT re-run `register_app.py`.** A file watcher recompiles when `index.jsx` or a source-like sibling module changes under `/data/apps/<slug>/` (ignoring generated/static dirs such as `static/`, `.build/`, `dist/`, `node_modules/`, and `.git/`). Re-running the script creates a DUPLICATE every time the name differs by a character (slug-vs-title is the common slip). If the partner says it didn't change, check that `/data/compiled/app-<id>.js` mtime advanced and look for `compile failed for` in `/data/logs/chat.log` — a JSX syntax error or broken import blocks the recompile. If a duplicate appears, `DELETE /api/apps/<dup-id>`.
 
 **Use `register_app.py`, not raw `curl POST /api/apps/`.** The raw endpoint requires an undocumented `jsx_source` field (422 without it); updates are `PATCH` not `PUT` (405). The helper handles all of this — skipping it burns tool calls rediscovering the schema from error responses.
 
