@@ -18,6 +18,56 @@ If an app with the same purpose exists, update it instead of duplicating. If the
 
 ---
 
+## Packaging a third-party static app from GitHub
+
+For an existing React/Vite/CRA/WebGL game or tool, do **not** copy built files into `/data/shell` or `/data/shell/dist`. Deploy refreshes replace that tree, so the app disappears or, worse, `/some-app/index.html` falls through to the Möbius shell and opens Möbius inside Möbius.
+
+The durable pattern is a tiny Mobius wrapper plus manifest `static_assets`:
+
+1. Clone/fork the upstream repo.
+2. Make the app build as a static site with **relative** asset paths whenever the framework supports it (`PUBLIC_URL=.`, `homepage: "."`, Vite `base: "./"`, etc.).
+3. Build into `build/` or `dist/`.
+4. From the repo root, run:
+
+```bash
+node /app/scripts/package-static-app.mjs \
+  --id cuberun \
+  --name "CubeRun" \
+  --version "1.0.0-mobius.1" \
+  --description "Neon 3D runner game packaged for Mobius." \
+  --homepage "https://github.com/mobius-os/app-cuberun" \
+  --build-dir build \
+  --out-dir . \
+  --icon icon.png
+```
+
+The packager writes `mobius.json` and an iframe `index.jsx`, enumerates every build file as `static_assets`, rewrites root-relative HTML/CSS asset references such as `/static/js/main.js` or `/fonts/foo.ttf` when the target exists inside the build, and fails on unresolved local CSS URLs. Re-run with `--force` after edits. Verify the generated package before pushing:
+
+```bash
+node /app/scripts/package-static-app.mjs --help
+npm run test:packager --prefix /home/hmzmrzx/projects/mobius
+```
+
+After publishing the package repo, install it through the app installer, not by hand-copying into `/data`:
+
+```bash
+curl -s -X POST "$API_BASE_URL/api/apps/install" \
+  -H "Authorization: Bearer $AGENT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"manifest_url":"https://raw.githubusercontent.com/mobius-os/app-cuberun/main/mobius.json"}'
+```
+
+Runtime smoke checks for this class of app:
+
+- `/app-assets/by-id/<app-id>/index.html` returns the actual static app HTML.
+- `/app-assets/by-id/<app-id>/static/...` and fonts/media return 200.
+- Old ad-hoc routes such as `/cuberun/index.html` return 404, not the shell HTML.
+- Opening `/shell/?app=<app-id>` shows the game/tool inside the nested iframe, not a copy of Möbius.
+
+If a package update leaves `.mobius-bak` files or a dirty `/data/apps/<slug>` git tree, that is installer noise, not app source; re-run the installer on a backend that includes the static-asset backup fix.
+
+---
+
 ## Component shape
 
 ```jsx

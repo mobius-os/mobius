@@ -1,4 +1,7 @@
 {
+  "scripts": {
+    "test:packager": "node --test scripts/package-static-app.test.mjs"
+  },
   "devDependencies": {
     "@playwright/test": "^1.59.1"
   }

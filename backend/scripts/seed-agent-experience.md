@@ -120,6 +120,12 @@ order is implicit.
   `codex_steer_enabled` still works). Codex uses true turn/steer;
   Claude approximates it by interrupting the live response and
   re-prompting on the same connected SDK client.
+- Third-party static apps from GitHub should be packaged with
+  `/app/scripts/package-static-app.mjs` after building into `build/` or
+  `dist/`. The tool writes a Mobius iframe wrapper + `mobius.json`
+  `static_assets`, rewrites resolvable root-relative HTML/CSS asset
+  refs, and prevents the CubeRun failure mode where files copied into
+  `/data/shell` vanish on deploy or fall through to the shell.
 
 ## Querying the file structure
 
