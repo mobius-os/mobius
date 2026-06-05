@@ -540,6 +540,9 @@ export default function App({ appId, token }) {
 
   // --- Canvas node painter: glow halo + disc + crisp label, all in CSS px. ---
   const paintNode = useCallback((node, ctx, globalScale) => {
+    const safeScale = Number.isFinite(Number(globalScale)) && Number(globalScale) > 0
+      ? Number(globalScale)
+      : 1;
     const r = radiusForNode(node);
     const f = focusOf(node.id);        // 0..1, eased
     const isHover = hoverId === node.id;
@@ -580,7 +583,7 @@ export default function App({ appId, token }) {
 
     // Ring — every node gets a faint hairline so it sits cleanly on the bg;
     // MOC nodes + the hovered node get a bright accent ring.
-    ctx.lineWidth = (isHover || isMoc ? 1.6 : 1) / globalScale;
+    ctx.lineWidth = (isHover || isMoc ? 1.6 : 1) / safeScale;
     ctx.strokeStyle = isHover
       ? cssVar('--accent', '#a78bfa')
       : isMoc
@@ -590,14 +593,14 @@ export default function App({ appId, token }) {
 
     // Label — zoom-based LOD, drawn in CSS px (font size / zoom) with a
     // rounded pill underlay so text stays legible over links and halos.
-    const showLabel = shouldShowNodeLabel(globalScale, node, hoverId);
+    const showLabel = shouldShowNodeLabel(safeScale, node, hoverId);
     if (showLabel) {
       const label = node.title || node.id;
-      const labelPx = clamp((isMoc ? 12.5 : 11.5) * Math.sqrt(globalScale), 10.5, 16);
-      const fontSize = labelPx / globalScale;
-      const padX = 6 / globalScale;
-      const padY = 3 / globalScale;
-      const gap = 4 / globalScale;
+      const labelPx = clamp((isMoc ? 12.5 : 11.5) * Math.sqrt(safeScale), 10.5, 16);
+      const fontSize = labelPx / safeScale;
+      const padX = 6 / safeScale;
+      const padY = 3 / safeScale;
+      const gap = 4 / safeScale;
       const labelY = node.y + r + gap;
       const labelAlpha = (isHover || isMoc || node.showLabelAlways) ? 1 : 0.55 + 0.45 * f;
       const pillAlpha = (isHover || node.showLabelAlways ? 0.86 : 0.68) * (0.45 + 0.55 * f);
@@ -614,9 +617,9 @@ export default function App({ appId, token }) {
       const x = node.x - width / 2;
       const y = labelY;
       ctx.fillStyle = withAlpha(cssVar('--bg', '#0d0d0d'), pillAlpha);
-      roundedRect(ctx, x, y, width, height, 5 / globalScale);
+      roundedRect(ctx, x, y, width, height, 5 / safeScale);
       ctx.fill();
-      ctx.lineWidth = 0.75 / globalScale;
+      ctx.lineWidth = 0.75 / safeScale;
       ctx.strokeStyle = withAlpha(cssVar('--text', '#e5e5e5'), 0.22 * (isHover || node.showLabelAlways ? 1 : f));
       ctx.stroke();
 
