@@ -18,7 +18,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 
 const GRAPH_URL = '/api/storage/shared/memory/graph.json';
 const NOTE_BASE = '/api/storage/shared/memory/';
-const ALL_LOCAL_DEPTH = -1;
+const MAX_LOCAL_DEPTH = 4;
 const WIKILINK_RE = /\[\[\s*([^\]|#]+?)\s*(?:#[^\]|]*)?(?:\|\s*([^\]]+?)\s*)?\]\]/g;
 
 // Stable, theme-agnostic accent palette for primary-MOC color coding.
@@ -63,12 +63,6 @@ function fmtBytes(n) {
   if (n < 1024) return n + ' B';
   if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
   return (n / (1024 * 1024)).toFixed(1) + ' MB';
-}
-
-// A normalized 0..1 position of v within [min,max], guarded for degenerate ranges.
-function norm(v, min, max) {
-  if (max <= min) return v > min ? 1 : 0;
-  return Math.max(0, Math.min(1, (v - min) / (max - min)));
 }
 
 export function nodeRadius(node = {}) {
@@ -122,7 +116,7 @@ export function buildLocalGraphData(graph, centerId, depth = 1) {
   const byId = new Map(nodes.map((n) => [n.id, n]));
   if (!byId.has(centerId)) return { nodes: [], links: [] };
 
-  const maxDepth = Number(depth) === ALL_LOCAL_DEPTH ? Infinity : Math.max(0, Number(depth) || 0);
+  const maxDepth = Math.max(0, Math.min(MAX_LOCAL_DEPTH, Number(depth) || 0));
   const adj = new Map();
   const add = (a, b) => {
     if (!adj.has(a)) adj.set(a, new Set());
@@ -642,7 +636,7 @@ export default function App({ appId, token }) {
     ctx.fill();
   }, [radiusForNode]);
 
-  // --- List view: sorted rows with normalized usage/size bars. ---
+  // --- List view: sorted rows with plain usage/size metadata. ---
   const sortedNodes = useMemo(() => {
     if (!graph) return [];
     const rows = [...graph.nodes];
@@ -656,21 +650,6 @@ export default function App({ appId, token }) {
     });
     return rows;
   }, [graph, sortKey, sortDir]);
-
-  const ranges = useMemo(() => {
-    const r = { size_bytes: [Infinity, -Infinity], access_count: [Infinity, -Infinity], importance: [1, 5] };
-    if (graph) for (const n of graph.nodes) {
-      for (const k of ['size_bytes', 'access_count']) {
-        const v = n[k] || 0;
-        if (v < r[k][0]) r[k][0] = v;
-        if (v > r[k][1]) r[k][1] = v;
-      }
-    }
-    for (const k of ['size_bytes', 'access_count']) {
-      if (r[k][0] === Infinity) r[k] = [0, 0];
-    }
-    return r;
-  }, [graph]);
 
   const toggleSort = (key) => {
     if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
@@ -870,42 +849,34 @@ export default function App({ appId, token }) {
                   <Th label="Note" active={sortKey === 'title'} dir={sortDir} onClick={() => toggleSort('title')} align="left" />
                   <Th label="Type" />
                   <Th label="Weight" active={sortKey === 'importance'} dir={sortDir} onClick={() => toggleSort('importance')} />
-                  <Th label="Used" subLabel="loads" active={sortKey === 'access_count'} dir={sortDir} onClick={() => toggleSort('access_count')} />
-                  <Th label="Size" subLabel="bytes" active={sortKey === 'size_bytes'} dir={sortDir} onClick={() => toggleSort('size_bytes')} />
+                  <Th label="Reads" active={sortKey === 'access_count'} dir={sortDir} onClick={() => toggleSort('access_count')} />
+                  <Th label="Size" active={sortKey === 'size_bytes'} dir={sortDir} onClick={() => toggleSort('size_bytes')} />
                 </tr>
               </thead>
               <tbody>
-                {sortedNodes.map((n) => {
-                  const sN = norm(n.size_bytes || 0, ranges.size_bytes[0], ranges.size_bytes[1]);
-                  const uN = norm(n.access_count || 0, ranges.access_count[0], ranges.access_count[1]);
-                  return (
-                    <tr
-                      key={n.id}
-                      style={S.tr}
-                      onClick={() => { setSelected(n); }}
-                      className="mg-row"
-                    >
-                      <td style={S.tdTitle}>
-                        <span style={{ ...S.rowDot, background: colorForNode(n) }} />
-                        <span style={S.rowTitleText}>{n.title || n.id}</span>
-                      </td>
-                      <td style={S.td}>
-                        <span style={{ ...S.typeTag, ...(n.type === 'moc' ? S.typeMoc : {}) }}>
-                          {n.type === 'moc' ? 'hub' : 'note'}
-                        </span>
-                      </td>
-                      <td style={{ ...S.td, ...S.tdNum }}>
-                        <ImportanceDots value={n.importance || 1} />
-                      </td>
-                      <td style={S.tdBar}>
-                        <Bar metric="loads" value={uN} label={String(n.access_count || 0)} hue="var(--green, #6ee7b7)" />
-                      </td>
-                      <td style={S.tdBar}>
-                        <Bar metric="bytes" value={sN} label={fmtBytes(n.size_bytes)} hue={colorForNode(n)} />
-                      </td>
-                    </tr>
-                  );
-                })}
+                {sortedNodes.map((n) => (
+                  <tr
+                    key={n.id}
+                    style={S.tr}
+                    onClick={() => { setSelected(n); }}
+                    className="mg-row"
+                  >
+                    <td style={S.tdTitle}>
+                      <span style={{ ...S.rowDot, background: colorForNode(n) }} />
+                      <span style={S.rowTitleText}>{n.title || n.id}</span>
+                    </td>
+                    <td style={S.td}>
+                      <span style={{ ...S.typeTag, ...(n.type === 'moc' ? S.typeMoc : {}) }}>
+                        {n.type === 'moc' ? 'hub' : 'note'}
+                      </span>
+                    </td>
+                    <td style={{ ...S.td, ...S.tdNum }}>
+                      <ImportanceDots value={n.importance || 1} />
+                    </td>
+                    <td style={{ ...S.td, ...S.tdMeta }}>{n.access_count || 0}</td>
+                    <td style={{ ...S.td, ...S.tdMeta }}>{fmtBytes(n.size_bytes)}</td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
@@ -999,14 +970,14 @@ export default function App({ appId, token }) {
                     </div>
                   </div>
                   <div style={S.depthToggle} aria-label="Local graph depth">
-                    {[1, 2, 3, ALL_LOCAL_DEPTH].map((d) => (
+                    {[1, 2, 3, 4].map((d) => (
                       <button
                         key={d}
                         style={{ ...S.depthBtn, ...(localDepth === d ? S.depthBtnActive : {}) }}
                         onClick={() => setLocalDepth(d)}
-                        title={d === ALL_LOCAL_DEPTH ? 'All linked notes' : `${d} hop${d === 1 ? '' : 's'}`}
+                        title={`${d} hop${d === 1 ? '' : 's'}`}
                       >
-                        {d === ALL_LOCAL_DEPTH ? 'All' : d}
+                        {d}
                       </button>
                     ))}
                   </div>
@@ -1074,18 +1045,6 @@ function Th({ label, subLabel, active, dir, onClick, align }) {
       </span>
       {subLabel && <span style={S.thSub}>{subLabel}</span>}
     </th>
-  );
-}
-
-function Bar({ metric, value, label, hue }) {
-  return (
-    <div style={S.barCell} title={`${metric}: ${label}`} aria-label={`${metric}: ${label}`}>
-      <span style={S.barMetricLabel}>{metric}</span>
-      <div style={S.barTrack}>
-        <div style={{ ...S.barFill, width: Math.round(value * 100) + '%', background: hue }} />
-      </div>
-      <span style={S.barLabel}>{label}</span>
-    </div>
   );
 }
 
@@ -1371,7 +1330,10 @@ const S = {
     maxWidth: 300, minWidth: 150,
   },
   rowTitleText: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  tdBar: { padding: '10px 12px', minWidth: 116 },
+  tdMeta: {
+    textAlign: 'right', color: 'var(--muted)', fontVariantNumeric: 'tabular-nums',
+    whiteSpace: 'nowrap',
+  },
   rowDot: {
     width: 9, height: 9, borderRadius: '50%', flexShrink: 0, display: 'inline-block',
     boxShadow: '0 0 0 3px var(--surface)',
@@ -1392,21 +1354,6 @@ const S = {
     display: 'inline-block',
   },
   pipOn: { background: 'var(--accent)' },
-
-  barCell: { display: 'grid', gridTemplateColumns: '36px minmax(44px, 1fr) 56px', alignItems: 'center', gap: 8 },
-  barMetricLabel: {
-    fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase',
-    letterSpacing: 0, fontWeight: 700,
-  },
-  barTrack: {
-    flex: 1, height: 6, background: 'var(--surface2)', borderRadius: 999,
-    overflow: 'hidden', minWidth: 40, boxShadow: 'inset 0 0 0 1px var(--border-light, var(--border))',
-  },
-  barFill: { height: '100%', borderRadius: 999, transition: 'width 0.25s ease', minWidth: 2 },
-  barLabel: {
-    fontSize: 11.5, color: 'var(--muted)', fontVariantNumeric: 'tabular-nums',
-    minWidth: 52, textAlign: 'right', whiteSpace: 'nowrap',
-  },
 
   scrim: { position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 20 },
   panel: {

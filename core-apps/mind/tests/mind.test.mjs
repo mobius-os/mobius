@@ -101,11 +101,15 @@ test('buildLocalGraphData returns a depth-limited neighborhood', () => {
       { id: 'b', title: 'B' },
       { id: 'c', title: 'C' },
       { id: 'd', title: 'D' },
+      { id: 'e', title: 'E' },
+      { id: 'f', title: 'F' },
     ],
     edges: [
       { source: 'a', target: 'b', kind: 'link' },
       { source: 'b', target: 'c', kind: 'link' },
       { source: 'c', target: 'd', kind: 'link' },
+      { source: 'd', target: 'e', kind: 'link' },
+      { source: 'e', target: 'f', kind: 'link' },
     ],
   }
   const oneHop = buildLocalGraphData(graph, 'a', 1)
@@ -115,7 +119,7 @@ test('buildLocalGraphData returns a depth-limited neighborhood', () => {
   assert.equal(oneHop.nodes.every((n) => n.showLabelAlways), true)
   assert.deepEqual(oneHop.links.map((e) => `${e.source}-${e.target}`), ['a-b'])
 
-  const all = buildLocalGraphData(graph, 'a', -1)
-  assert.deepEqual(all.nodes.map((n) => n.id).sort(), ['a', 'b', 'c', 'd'])
-  assert.equal(all.links.length, 3)
+  const capped = buildLocalGraphData(graph, 'a', 99)
+  assert.deepEqual(capped.nodes.map((n) => n.id).sort(), ['a', 'b', 'c', 'd', 'e'])
+  assert.equal(capped.links.length, 4)
 })
