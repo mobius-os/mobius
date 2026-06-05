@@ -132,6 +132,25 @@ if changed_match '^frontend/'; then
   fi
 fi
 
+# 4b. Static-app packager — this is a repo-root Node tool used by agents to
+#     turn built third-party GitHub apps into Mobius `static_assets` packages.
+#     It has no npm deps, so run it whenever its implementation/test or root
+#     package script changes.
+if changed_match '^(backend/scripts/package-static-app\.mjs|scripts/package-static-app\.test\.mjs|package\.json)$'; then
+  if command -v node >/dev/null 2>&1; then
+    warn "running static-app packager unit…"
+    if npm run test:packager >"$PP_TMP/packager" 2>&1; then
+      ok "static-app packager unit passed"
+    else
+      err "static-app packager unit FAILED:"
+      tail -n 30 "$PP_TMP/packager" | sed 's/^/    /' >&2
+      FAIL=1
+    fi
+  else
+    warn "node not found — skipping static-app packager unit (CI runs it)."
+  fi
+fi
+
 # 5. Backend pytest — only if a local venv exists AND backend changed.
 #    No venv → skip with a one-time setup hint (CI still runs the suite).
 if changed_match '^backend/'; then
