@@ -31,9 +31,10 @@
  * ║   2. CROSS-PROVIDER SWITCHING                                    ║
  * ║      Sessions are not portable between providers (Claude session ║
  * ║      id ≠ Codex thread id), so switching after assistant turns   ║
- * ║      first calls the compaction endpoint. The stored portable    ║
- * ║      briefing seeds the next fresh provider session. Same-       ║
- * ║      provider model swaps stay available without compaction.     ║
+ * ║      asks for confirmation, then calls the compaction endpoint.  ║
+ * ║      The stored portable briefing seeds the next fresh provider  ║
+ * ║      session. Same-provider model swaps stay available without   ║
+ * ║      compaction.                                                 ║
  * ║      `hasAssistantTurns` is LIVE-DERIVED in the parent           ║
  * ║      (ChatView): `chatInfo.has_assistant_turns ||                ║
  * ║      messages.some(m => m.role === 'assistant')` — the           ║
@@ -260,9 +261,13 @@ export default function ChatSettingsPanel({
   // action so the soft keyboard stays in its previous state
   // (up if it was up, down if it was down).
   wasInputFocusedRef,
+  // Called after a successful compaction so the parent can refresh
+  // the transcript and show the persisted compaction tool block.
+  onCompactionStored,
 }) {
   const [saving, setSaving] = useState(false)
   const [compacting, setCompacting] = useState(false)
+  const [pendingSwitch, setPendingSwitch] = useState(null)
   const [error, setError] = useState('')
   const [connectedProviders, setConnectedProviders] = useState(null)
   // True while the manage-models modal is mounted. When the modal
@@ -321,6 +326,7 @@ export default function ChatSettingsPanel({
 
   useEffect(() => {
     setDraftProvider(provider || 'claude')
+    setPendingSwitch(null)
   }, [provider, chatId])
 
   useEffect(() => {
@@ -385,6 +391,11 @@ export default function ChatSettingsPanel({
         setError(detail ? `Could not compact: ${detail}` : 'Could not compact the chat before switching providers.')
         return false
       }
+      let data = null
+      try { data = await res.json() } catch {}
+      if (onCompactionStored) {
+        try { await onCompactionStored(data) } catch {}
+      }
       return true
     } catch {
       setError('Network error while compacting the chat.')
@@ -392,7 +403,7 @@ export default function ChatSettingsPanel({
     } finally {
       setCompacting(false)
     }
-  }, [chatId, hasAssistantTurns])
+  }, [chatId, hasAssistantTurns, onCompactionStored])
 
   // Conditional refocus — only restores textarea focus if it was
   // ALREADY focused when the popover opened. Without this guard,
@@ -421,38 +432,58 @@ export default function ChatSettingsPanel({
     refocusChatInput()
   }, [draftProvider, draftEffortByProvider, patchChat, refocusChatInput])
 
-  const handlePickModel = useCallback(async (value, providerValue) => {
-    refocusChatInput()
+  const switchProviderModel = useCallback(async (value, providerValue) => {
     const prevProvider = draftProvider
     const prevModel = draftModel
     const prevEffort = draftEffort
+    if (!(await compactBeforeProviderSwitch())) return false
+    // Cross-provider switch: restore this provider's last-known
+    // effort (or fall back to the value already on screen — which
+    // becomes that provider's first memory once they accept it).
+    // The effort enums don't overlap perfectly (Codex has `none`
+    // + `minimal` that Claude lacks, Claude has `max` that Codex
+    // lacks), so a fallback that's invalid for the new provider
+    // is harmless — the runner ignores unknown values at turn
+    // time. The picker also auto-defaults the slider to index 0
+    // if the persisted value doesn't appear in the provider's
+    // enum (see EffortSlider's findIndex/Math.max guard).
+    const nextEffort = draftEffortByProvider[providerValue] ?? draftEffort
+    setDraftModel(value)
+    setDraftProvider(providerValue)
+    setDraftEffort(nextEffort)
+    const outcome = await patchChat({
+      provider: providerValue,
+      agent_settings_json: { model: value, effort: nextEffort },
+    })
+    if (outcome === 'fail') {
+      setDraftProvider(prevProvider)
+      setDraftModel(prevModel)
+      setDraftEffort(prevEffort)
+      return false
+    }
+    return true
+  }, [
+    draftProvider,
+    draftModel,
+    draftEffort,
+    draftEffortByProvider,
+    compactBeforeProviderSwitch,
+    patchChat,
+  ])
+
+  const handlePickModel = useCallback(async (value, providerValue) => {
+    refocusChatInput()
     if (providerValue !== draftProvider) {
-      if (!(await compactBeforeProviderSwitch())) return
-      // Cross-provider switch: restore this provider's last-known
-      // effort (or fall back to the value already on screen — which
-      // becomes that provider's first memory once they accept it).
-      // The effort enums don't overlap perfectly (Codex has `none`
-      // + `minimal` that Claude lacks, Claude has `max` that Codex
-      // lacks), so a fallback that's invalid for the new provider
-      // is harmless — the runner ignores unknown values at turn
-      // time. The picker also auto-defaults the slider to index 0
-      // if the persisted value doesn't appear in the provider's
-      // enum (see EffortSlider's findIndex/Math.max guard).
-      const nextEffort = draftEffortByProvider[providerValue] ?? draftEffort
-      setDraftModel(value)
-      setDraftProvider(providerValue)
-      setDraftEffort(nextEffort)
-      const outcome = await patchChat({
-        provider: providerValue,
-        agent_settings_json: { model: value, effort: nextEffort },
-      })
-      if (outcome === 'fail') {
-        setDraftProvider(prevProvider)
-        setDraftModel(prevModel)
-        setDraftEffort(prevEffort)
+      if (hasAssistantTurns) {
+        setError('')
+        setPendingSwitch({ model: value, provider: providerValue })
+        return
       }
+      await switchProviderModel(value, providerValue)
       return
     }
+    setPendingSwitch(null)
+    const prevModel = draftModel
     setDraftModel(value)
     const outcome = await patchChat({
       agent_settings_json: { model: value },
@@ -461,12 +492,21 @@ export default function ChatSettingsPanel({
   }, [
     draftProvider,
     draftModel,
-    draftEffort,
-    draftEffortByProvider,
-    compactBeforeProviderSwitch,
+    hasAssistantTurns,
     patchChat,
     refocusChatInput,
+    switchProviderModel,
   ])
+
+  const handleConfirmProviderSwitch = useCallback(async () => {
+    if (!pendingSwitch) return
+    refocusChatInput()
+    const ok = await switchProviderModel(
+      pendingSwitch.model,
+      pendingSwitch.provider,
+    )
+    if (ok) setPendingSwitch(null)
+  }, [pendingSwitch, refocusChatInput, switchProviderModel])
 
   const isCodex = draftProvider === 'codex'
   const codexSwitchWarning = (
@@ -503,6 +543,14 @@ export default function ChatSettingsPanel({
     }
     return out
   }, [registry, hiddenIds, draftModel, draftProvider])
+
+  const pendingProviderInfo = pendingSwitch
+    ? PROVIDER_INFO[pendingSwitch.provider]
+    : null
+  const pendingModel = pendingSwitch
+    ? (displayedByProvider[pendingSwitch.provider] || [])
+      .find(m => m.id === pendingSwitch.model)
+    : null
 
   return (
     <div className="csp">
@@ -581,8 +629,38 @@ export default function ChatSettingsPanel({
           + Manage models
         </button>
       )}
-      {(codexSwitchWarning || compacting || error) && (
+      {(pendingSwitch || codexSwitchWarning || compacting || error) && (
         <div className="csp__foot">
+          {pendingSwitch && (
+            <div className="csp__confirm" role="group" aria-label="Confirm provider switch">
+              <p className="csp__confirm-copy">
+                Switch to {pendingModel?.label || pendingSwitch.model} on{' '}
+                {pendingProviderInfo?.label || pendingSwitch.provider}? This
+                will compact the chat first so the new provider has the
+                context.
+              </p>
+              <div className="csp__confirm-actions">
+                <button
+                  type="button"
+                  className="csp__confirm-btn csp__confirm-btn--primary"
+                  onPointerDown={(ev) => ev.preventDefault()}
+                  onClick={handleConfirmProviderSwitch}
+                  disabled={saving || compacting}
+                >
+                  Compact &amp; switch
+                </button>
+                <button
+                  type="button"
+                  className="csp__confirm-btn csp__confirm-btn--ghost"
+                  onPointerDown={(ev) => ev.preventDefault()}
+                  onClick={() => setPendingSwitch(null)}
+                  disabled={compacting}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
           {compacting && (
             <p className="csp__note">
               Compacting this chat before switching providers…

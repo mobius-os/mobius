@@ -47,7 +47,16 @@ def test_compact_stores_and_returns_summary(client, auth, monkeypatch):
   body = r.json()
   assert body["ok"] is True
   assert "Goal: build X" in body["summary"]
+  assert body["command"] == f"POST /api/chats/{chat_id}/compact"
   assert body["stored"]["kind"] == "compaction"
+  assert body["stored"]["content"] == body["summary"]
+  block = body["stored"]["blocks"][0]
+  assert block["type"] == "tool"
+  assert block["tool"] == "CompactChat"
+  assert block["input"] == body["command"]
+  assert block["output"] == body["summary"]
+  assert block["status"] == "done"
+  assert block["defaultOpen"] is True
   # The stored block carries a ts so it has a stable React key.
   assert isinstance(body["stored"].get("ts"), int)
 
@@ -60,6 +69,7 @@ def test_compact_stores_and_returns_summary(client, auth, monkeypatch):
   ]
   assert len(compaction_msgs) == 1
   assert compaction_msgs[-1]["content"] == body["summary"]
+  assert compaction_msgs[-1]["blocks"][0]["input"] == body["command"]
   # The prior turns are still present — compaction APPENDS, it does not wipe.
   assert any(
     m.get("content") == "Build me an app" for m in chat["messages"]
