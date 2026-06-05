@@ -97,6 +97,13 @@ def _manifest_color(value) -> str | None:
 _SEEDS_COUNT_MAX = 64
 _SEEDS_TOTAL_MAX = 32 * 1024 * 1024
 
+# Static site assets declared by a manifest. These are for prebuilt apps that
+# need durable files below /data/apps/<slug>/static (served at /app-assets/...),
+# not one-off shell files under /data/shell.
+_STATIC_ASSET_MAX_BYTES = 16 * 1024 * 1024
+_STATIC_ASSETS_COUNT_MAX = 256
+_STATIC_ASSETS_TOTAL_MAX = 64 * 1024 * 1024
+
 # Icon cap matches the icon-upload route's 12 MB ceiling.
 _ICON_MAX_BYTES = 12 * 1024 * 1024
 
@@ -228,6 +235,14 @@ def _validate_manifest(m: dict) -> None:
       raise HTTPException(400, "Manifest `storage_seeds` keys must be paths.")
     if isinstance(value, str):
       _validate_repo_relative_path(value, f"storage_seeds.{sub}")
+  static_assets = m.get("static_assets", {})
+  if static_assets is not None and not isinstance(static_assets, (dict, list)):
+    raise HTTPException(
+      400, "Manifest `static_assets` must be an object or array.",
+    )
+  for dest, src in _static_asset_entries(static_assets).items():
+    _validate_repo_relative_path(dest, f"static_assets.{dest}")
+    _validate_repo_relative_path(src, f"static_assets.{dest}")
   sched = m.get("schedule")
   if sched is not None:
     if not isinstance(sched, dict):
@@ -513,6 +528,66 @@ def _seed_value_is_inline(value) -> bool:
   """`storage_seeds` values: a string is a repo-relative path; anything
   else (dict, list, bool, number) is an inline JSON literal."""
   return not isinstance(value, str)
+
+
+def _static_asset_entries(value) -> dict[str, str]:
+  """Normalize manifest.static_assets into dest -> source repo paths."""
+  if not value:
+    return {}
+  if isinstance(value, list):
+    return {path: path for path in value}
+  if isinstance(value, dict):
+    entries: dict[str, str] = {}
+    for dest, src in value.items():
+      if not isinstance(dest, str) or not isinstance(src, str):
+        raise HTTPException(
+          400,
+          "Manifest `static_assets` entries must map paths to paths.",
+        )
+      entries[dest] = src
+    return entries
+  raise HTTPException(
+    400, "Manifest `static_assets` must be an object or array.",
+  )
+
+
+def _write_static_assets(
+  source_dir_path: Path,
+  assets: dict[str, bytes],
+  created_paths: list[Path],
+  rollback_actions: list[Callable[[], None]],
+  commit_actions: list[Callable[[], None]],
+) -> None:
+  """Write manifest static assets under source_dir/static with rollback."""
+  if not assets:
+    return
+  static_root = (source_dir_path / "static").resolve()
+  static_root.mkdir(parents=True, exist_ok=True)
+  for rel, content in assets.items():
+    # rel was already validated as a simple repo-relative path. Resolve anyway
+    # so this helper stays safe if future callers hand it unchecked data.
+    target = (static_root / rel).resolve()
+    if static_root not in target.parents:
+      raise HTTPException(400, "Manifest `static_assets` path escapes static dir.")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+      backup = target.with_name(target.name + ".mobius-bak")
+      if backup.exists():
+        try:
+          backup.unlink()
+        except OSError:
+          pass
+      shutil.copy2(target, backup)
+      rollback_actions.append(
+        lambda b=backup, o=target:
+          os.replace(b, o) if b.exists() else None
+      )
+      commit_actions.append(
+        lambda b=backup: b.unlink() if b.exists() else None
+      )
+    else:
+      created_paths.append(target)
+    atomic_write(target, content)
 
 
 def _process_icon(raw: bytes) -> bytes:
@@ -812,6 +887,29 @@ async def install_from_manifest(
       bundled_job = await _http_get(
         cli, raw_base + sched["job"], _ENTRY_MAX_BYTES,
       )
+
+    static_assets_fetched: dict[str, bytes] = {}
+    static_assets_total = 0
+    for dest, src in _static_asset_entries(
+      manifest.get("static_assets") or {},
+    ).items():
+      if len(static_assets_fetched) >= _STATIC_ASSETS_COUNT_MAX:
+        raise HTTPException(
+          400,
+          "Manifest has too many static_assets "
+          f"(max {_STATIC_ASSETS_COUNT_MAX}).",
+        )
+      data = await _http_get(
+        cli, raw_base + src, _STATIC_ASSET_MAX_BYTES,
+      )
+      static_assets_total += len(data)
+      if static_assets_total > _STATIC_ASSETS_TOTAL_MAX:
+        raise HTTPException(
+          400,
+          "Manifest static_assets exceed "
+          f"{_STATIC_ASSETS_TOTAL_MAX} bytes total.",
+        )
+      static_assets_fetched[dest] = data
 
     seeds_fetched: dict[str, bytes] = {}
     seeds_total = 0
@@ -1155,6 +1253,13 @@ async def install_from_manifest(
         else:
           created_paths.append(jsx_file)
         atomic_write(jsx_file, effective_source)
+        _write_static_assets(
+          source_dir_path,
+          static_assets_fetched,
+          created_paths,
+          rollback_actions,
+          commit_actions,
+        )
         # On the git path, commit the working-tree source onto the local
         # `main` branch so the watcher's future commits build on a known
         # base and the merge base for the NEXT update is the source we

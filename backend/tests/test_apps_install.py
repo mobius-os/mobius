@@ -175,6 +175,10 @@ def test_install_fresh_app_writes_everything(client, auth, tmp_path, bypass_url_
     **MANIFEST_NEWS,
     "theme_color": "#223344",
     "background_color": "#101820",
+    "static_assets": {
+      "index.html": "build/index.html",
+      "static/js/main.js": "build/static/js/main.js",
+    },
   }
   responses = {
     base + "mobius.json": (200, json.dumps(manifest).encode()),
@@ -182,6 +186,8 @@ def test_install_fresh_app_writes_everything(client, auth, tmp_path, bypass_url_
     base + "icon.png": (200, _png_bytes()),
     base + "prompt.md": (200, PROMPT.encode()),
     base + "fetch.sh": (200, b"#!/bin/bash\necho hi\n"),
+    base + "build/index.html": (200, b"<!doctype html><title>Static app</title>"),
+    base + "build/static/js/main.js": (200, b"console.log('static app')"),
   }
   with patch(
     "app.install.httpx.AsyncClient",
@@ -203,6 +209,12 @@ def test_install_fresh_app_writes_everything(client, auth, tmp_path, bypass_url_
   # source_dir/index.jsx written for the file watcher
   jsx_file = data_dir / "apps" / "test-news" / "index.jsx"
   assert jsx_file.read_text() == JSX
+  assert (
+    data_dir / "apps" / "test-news" / "static" / "index.html"
+  ).read_text() == "<!doctype html><title>Static app</title>"
+  assert (
+    data_dir / "apps" / "test-news" / "static" / "static" / "js" / "main.js"
+  ).read_text() == "console.log('static app')"
   # storage seeds live at /data/apps/<id>/ (storage API is id-keyed)
   assert (data_dir / "apps" / str(app_id) / "prompt.md").read_text() == PROMPT
   sched = json.loads((data_dir / "apps" / str(app_id) / "schedule.json").read_text())
@@ -667,6 +679,9 @@ def test_install_inline_rejects_malformed_raw_base(client, auth, raw_base):
   ({"icon": "/icon.png"}, "icon"),
   ({"storage_seeds": {"prompt.md": "https://example.com/prompt.md"}}, "storage_seeds.prompt.md"),
   ({"storage_seeds": []}, "storage_seeds"),
+  ({"static_assets": {"../index.html": "build/index.html"}}, "static_assets.../index.html"),
+  ({"static_assets": {"index.html": "/build/index.html"}}, "static_assets.index.html"),
+  ({"static_assets": "build/index.html"}, "static_assets"),
 ])
 def test_install_rejects_non_repo_relative_manifest_asset_paths(
   client, auth, field_patch, expected_field,

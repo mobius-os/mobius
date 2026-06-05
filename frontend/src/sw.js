@@ -471,6 +471,7 @@ registerRoute(new NavigationRoute(
   createHandlerBoundToURL('/index.html'),
   {
     denylist: [
+      /^\/app-assets\//,
       /^\/apps\//,
       /^\/recover(\/|$)/,
       /^\/(?!(?:shell|apps|recover)(?:\/|$))[A-Za-z0-9_-]+(?:\/(?:index\.html)?)?$/,
@@ -495,6 +496,9 @@ registerRoute(
 // everything else. matchPrecache resolves the content-hashed entry.
 setCatchHandler(async ({ request, url }) => {
   if (request.destination !== 'document') return Response.error()
+  if (url.pathname.startsWith('/app-assets/')) {
+    return (await matchPrecache('/offline.html')) || Response.error()
+  }
   if (!url.pathname.startsWith('/apps/')) {
     return (
       (await matchPrecache('/index.html')) ||

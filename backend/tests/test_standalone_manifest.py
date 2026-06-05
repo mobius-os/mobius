@@ -10,6 +10,7 @@ second still bust the icon cache).
 """
 
 import re
+from pathlib import Path
 
 import pytest
 
@@ -100,11 +101,62 @@ def test_top_level_app_slug_redirects_to_standalone_scope(client, owner_token):
   app = _create_app(client, owner_token, "CubeRun")
   assert app["slug"] == "cuberun"
 
-  for path in ("/cuberun", "/cuberun/", "/cuberun/index.html"):
+  for path in ("/cuberun", "/cuberun/"):
     r = client.get(path, follow_redirects=False)
     assert r.status_code == 307, path
     assert r.headers["location"] == "/apps/cuberun/"
     assert r.headers["cache-control"] == "no-store"
+
+
+def test_top_level_index_html_does_not_alias_to_standalone(
+  client, owner_token,
+):
+  if not _spa_active(client):
+    pytest.skip("SPA fallback not registered (no static dir in this env)")
+  app = _create_app(client, owner_token, "CubeRun")
+  assert app["slug"] == "cuberun"
+
+  r = client.get("/cuberun/index.html", follow_redirects=False)
+  assert r.status_code != 307
+  assert r.headers.get("location") != "/apps/cuberun/"
+
+
+def test_app_owned_static_assets_are_served_from_source_dir(
+  client, owner_token,
+):
+  app = _create_app(client, owner_token, "CubeRun")
+  db = SessionLocal()
+  try:
+    row = db.query(models.App).filter(models.App.id == app["id"]).one()
+    static = Path(row.source_dir) / "static"
+    static.mkdir(parents=True)
+    (static / "index.html").write_text(
+      "<!doctype html><title>CubeRun</title><main>game</main>",
+      encoding="utf-8",
+    )
+    (static / "main.js").write_text(
+      "console.log('cuberun')",
+      encoding="utf-8",
+    )
+  finally:
+    db.close()
+
+  html = client.get("/app-assets/cuberun/")
+  assert html.status_code == 200
+  assert "CubeRun" in html.text
+  assert "no-cache" in html.headers.get("cache-control", "")
+
+  by_id = client.get(f"/app-assets/by-id/{app['id']}/index.html")
+  assert by_id.status_code == 200
+  assert "CubeRun" in by_id.text
+
+  js = client.get("/app-assets/cuberun/main.js")
+  assert js.status_code == 200
+  assert "cuberun" in js.text
+  assert js.headers["x-content-type-options"] == "nosniff"
+
+  traversal = client.get("/app-assets/cuberun/../index.html")
+  assert traversal.status_code in (404, 405)
 
 
 def test_reserved_top_level_routes_do_not_alias_to_apps(client, owner_token):
