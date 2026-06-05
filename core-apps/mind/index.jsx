@@ -191,12 +191,15 @@ export default function App({ appId, token }) {
   const [sortDir, setSortDir] = useState('desc');
   const [showHealth, setShowHealth] = useState(false);
   const [localDepth, setLocalDepth] = useState(1);
+  const [mobileGraphHeight, setMobileGraphHeight] = useState(null);
   const [FG, setFG] = useState(null); // ForceGraph2D component
   const [marked, setMarked] = useState(null);
   const [purify, setPurify] = useState(null); // DOMPurify — audited HTML sanitizer
 
   const wrapRef = useRef(null);
   const fgRef = useRef(null);
+  const splitRef = useRef(null);
+  const splitDragRef = useRef(null);
   const localWrapRef = useRef(null);
   const localFgRef = useRef(null);
   const [dims, setDims] = useState({ w: 0, h: 0 });
@@ -470,6 +473,31 @@ export default function App({ appId, token }) {
   const closePanel = useCallback(() => {
     setSelected(null);
     setHoverId(null);
+  }, []);
+
+  const startMobileSplitDrag = useCallback((e) => {
+    const split = splitRef.current;
+    const graph = localWrapRef.current;
+    if (!split || !graph) return;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    splitDragRef.current = {
+      startY: e.clientY,
+      startH: graph.getBoundingClientRect().height,
+      maxH: Math.max(220, split.getBoundingClientRect().height - 260),
+    };
+  }, []);
+
+  const moveMobileSplitDrag = useCallback((e) => {
+    const drag = splitDragRef.current;
+    if (!drag) return;
+    const next = clamp(drag.startH + e.clientY - drag.startY, 180, drag.maxH);
+    setMobileGraphHeight(next);
+  }, []);
+
+  const endMobileSplitDrag = useCallback((e) => {
+    splitDragRef.current = null;
+    e.currentTarget.releasePointerCapture?.(e.pointerId);
   }, []);
 
   const discuss = useCallback((node) => {
@@ -916,7 +944,14 @@ export default function App({ appId, token }) {
               </div>
             )}
 
-            <div style={S.panelSplit} className="mg-panel-split">
+            <div
+              ref={splitRef}
+              style={{
+                ...S.panelSplit,
+                ...(mobileGraphHeight ? { '--mg-mobile-graph-h': `${mobileGraphHeight}px` } : {}),
+              }}
+              className="mg-panel-split"
+            >
               <section style={S.notePane} className="mg-note-pane">
                 <div style={S.paneHead}>Note</div>
                 <div style={S.panelBody} className="mg-md mg-scroll" onClick={onNoteClick}>
@@ -937,6 +972,20 @@ export default function App({ appId, token }) {
                   )}
                 </div>
               </section>
+
+              <div
+                style={S.mobileSplitHandle}
+                className="mg-mobile-split-handle"
+                role="separator"
+                aria-orientation="horizontal"
+                title="Resize note and local graph"
+                onPointerDown={startMobileSplitDrag}
+                onPointerMove={moveMobileSplitDrag}
+                onPointerUp={endMobileSplitDrag}
+                onPointerCancel={endMobileSplitDrag}
+              >
+                <span style={S.mobileSplitGrip} />
+              </div>
 
               <section style={S.localPane} className="mg-local-pane">
                 <div style={S.localHead}>
@@ -1436,6 +1485,19 @@ const S = {
     position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
     color: 'var(--muted)', fontSize: 13, padding: 18, textAlign: 'center',
   },
+  mobileSplitHandle: {
+    display: 'none',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: 'var(--surface)',
+    borderTop: '1px solid var(--border)',
+    borderBottom: '1px solid var(--border)',
+    touchAction: 'none',
+  },
+  mobileSplitGrip: {
+    width: 46, height: 4, borderRadius: 999, background: 'var(--border)',
+    display: 'block',
+  },
   panelBody: {
     flex: 1, overflowY: 'auto', padding: '12px 16px 20px', fontSize: 14, lineHeight: 1.62,
     minHeight: 0,
@@ -1524,14 +1586,32 @@ const CSS = `
     border-top: 1px solid var(--border); border-radius: 18px 18px 0 0;
     animation: mg-sheet-in 0.26s cubic-bezier(0.22,1,0.36,1);
   }
-  .mg-panel-split { grid-template-columns: 1fr !important; overflow-y: auto; }
-  .mg-note-pane { border-right: none !important; border-bottom: 1px solid var(--border); min-height: 220px; }
-  .mg-local-graph { min-height: 260px; }
+  .mg-panel-split {
+    grid-template-columns: 1fr !important;
+    grid-template-rows: var(--mg-mobile-graph-h, minmax(260px, 42%)) 18px minmax(260px, 1fr);
+    overflow: hidden;
+  }
+  .mg-local-pane { order: 1; min-height: 0; }
+  .mg-mobile-split-handle { display: flex !important; order: 2; cursor: ns-resize; }
+  .mg-note-pane {
+    order: 3; border-right: none !important; border-bottom: none;
+    min-height: 0; overflow: hidden;
+  }
+  .mg-local-graph { min-height: 0; }
 }
 @media (min-width: 641px) and (max-width: 860px) {
-  .mg-panel-split { grid-template-columns: 1fr !important; overflow-y: auto; }
-  .mg-note-pane { border-right: none !important; border-bottom: 1px solid var(--border); min-height: 260px; }
-  .mg-local-graph { min-height: 300px; }
+  .mg-panel-split {
+    grid-template-columns: 1fr !important;
+    grid-template-rows: var(--mg-mobile-graph-h, minmax(300px, 45%)) 18px minmax(300px, 1fr);
+    overflow: hidden;
+  }
+  .mg-local-pane { order: 1; min-height: 0; }
+  .mg-mobile-split-handle { display: flex !important; order: 2; cursor: ns-resize; }
+  .mg-note-pane {
+    order: 3; border-right: none !important; border-bottom: none;
+    min-height: 0; overflow: hidden;
+  }
+  .mg-local-graph { min-height: 0; }
 }
 @keyframes mg-sheet-in { from { transform: translateY(28px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 
