@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app import models, questions
@@ -25,7 +25,7 @@ from app.database import get_db
 from app.deps import (
   Principal, get_current_owner, get_principal, reject_cross_site,
 )
-from app.resource_access import get_active_chat_or_404
+from app.resource_access import get_active_chat_for_principal, get_active_chat_or_404
 from app.schemas import ChatPatch
 
 log = logging.getLogger(__name__)
@@ -694,6 +694,42 @@ async def compact_chat(
 
 class AppChatCreate(BaseModel):
   title: str | None = None
+  system_prompt: str | None = Field(default=None, max_length=20000)
+  model: str | None = Field(default=None, max_length=256)
+  provider: str | None = None
+
+
+class AppChatPatch(BaseModel):
+  system_prompt: str | None = Field(default=None, max_length=20000)
+  model: str | None = Field(default=None, max_length=256)
+  provider: str | None = None
+
+
+def _merge_app_chat_settings(
+  chat: models.Chat,
+  *,
+  system_prompt: str | None = None,
+  model: str | None = None,
+) -> None:
+  """Merge app-supplied runtime metadata into Chat.agent_settings_json."""
+  from sqlalchemy.orm.attributes import flag_modified
+
+  settings = _coerce_agent_settings(chat.agent_settings_json)
+  if system_prompt is not None:
+    value = system_prompt.strip()
+    if value:
+      settings["system_prompt"] = value
+    else:
+      settings.pop("system_prompt", None)
+  if model is not None:
+    value = model.strip()
+    if value:
+      settings["model"] = value
+    else:
+      settings.pop("model", None)
+  chat.agent_settings_json = settings or None
+  if settings:
+    flag_modified(chat, "agent_settings_json")
 
 
 @app_chat_router.post(
@@ -729,7 +765,9 @@ def create_app_chat(
   import uuid
 
   owner = db.query(models.Owner).first()
-  provider = (owner.provider if owner else None) or "claude"
+  provider = body.provider or (owner.provider if owner else None) or "claude"
+  if provider not in ("claude", "codex"):
+    raise HTTPException(status_code=422, detail=f"unknown provider: {provider}")
 
   chat = models.Chat(
     id=str(uuid.uuid4()),
@@ -739,6 +777,11 @@ def create_app_chat(
     agent_settings_json=None,
     created_by_app_id=principal.app_id,
   )
+  _merge_app_chat_settings(
+    chat,
+    system_prompt=body.system_prompt,
+    model=body.model,
+  )
   db.add(chat)
   db.commit()
   db.refresh(chat)
@@ -746,6 +789,50 @@ def create_app_chat(
     "id": chat.id,
     "title": chat.title,
     "created_by_app_id": chat.created_by_app_id,
+  }
+
+
+@app_chat_router.patch(
+  "/{chat_id}", dependencies=[Depends(reject_cross_site)],
+)
+def patch_app_chat(
+  chat_id: str,
+  body: AppChatPatch,
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+):
+  """Updates runtime metadata for a chat owned by the calling app.
+
+  This lets an embedded app re-assert its custom system prompt for an
+  already-created saved chat, instead of relying on a one-time create body.
+  """
+  if principal.app_id is None:
+    raise HTTPException(
+      status_code=403,
+      detail="App chat metadata may only be changed by an app token.",
+    )
+  chat = get_active_chat_for_principal(db, chat_id, principal)
+  if body.provider is not None:
+    if body.provider not in ("claude", "codex"):
+      raise HTTPException(
+        status_code=422, detail=f"unknown provider: {body.provider}"
+      )
+    if chat.provider != body.provider:
+      chat.provider = body.provider
+      chat.session_id = None
+  _merge_app_chat_settings(
+    chat,
+    system_prompt=body.system_prompt,
+    model=body.model,
+  )
+  chat.updated_at = datetime.now(UTC)
+  db.commit()
+  db.refresh(chat)
+  return {
+    "ok": True,
+    "id": chat.id,
+    "provider": chat.provider or "claude",
+    "agent_settings_json": _coerce_agent_settings(chat.agent_settings_json) or None,
   }
 
 

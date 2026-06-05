@@ -671,6 +671,7 @@ async def run_codex_sdk_turn(
   pending_questions: dict,
   db,
   agent_settings: dict | None = None,
+  system_prompt: str | None = None,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
@@ -733,12 +734,15 @@ async def run_codex_sdk_turn(
 
   base_instructions: str | None = None
   if session_id is None:
-    skill = get_skill_path()
-    if skill is not None:
-      try:
-        base_instructions = skill.read_text(encoding="utf-8")
-      except OSError:
-        base_instructions = None
+    if system_prompt is not None:
+      base_instructions = system_prompt
+    else:
+      skill = get_skill_path()
+      if skill is not None:
+        try:
+          base_instructions = skill.read_text(encoding="utf-8")
+        except OSError:
+          base_instructions = None
 
   env = dict(base_env)
   env.setdefault("CODEX_HOME", "/data/cli-auth/codex")
