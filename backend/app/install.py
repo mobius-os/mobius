@@ -103,6 +103,7 @@ _SEEDS_TOTAL_MAX = 32 * 1024 * 1024
 _STATIC_ASSET_MAX_BYTES = 16 * 1024 * 1024
 _STATIC_ASSETS_COUNT_MAX = 256
 _STATIC_ASSETS_TOTAL_MAX = 64 * 1024 * 1024
+_STATIC_ASSETS_MANIFEST = ".mobius-static-assets.json"
 
 # Icon cap matches the icon-upload route's 12 MB ceiling.
 _ICON_MAX_BYTES = 12 * 1024 * 1024
@@ -559,7 +560,16 @@ def _write_static_assets(
   commit_actions: list[Callable[[], None]],
 ) -> None:
   """Write manifest static assets under source_dir/static with rollback."""
-  if not assets:
+  metadata_path = (source_dir_path / _STATIC_ASSETS_MANIFEST).resolve()
+  previous_assets: set[str] = set()
+  if metadata_path.exists():
+    try:
+      previous_raw = json.loads(metadata_path.read_text())
+      if isinstance(previous_raw, list):
+        previous_assets = {p for p in previous_raw if isinstance(p, str)}
+    except (OSError, json.JSONDecodeError):
+      previous_assets = set()
+  if not assets and not previous_assets and not metadata_path.exists():
     return
   static_root = (source_dir_path / "static").resolve()
   static_root.mkdir(parents=True, exist_ok=True)
@@ -567,6 +577,37 @@ def _write_static_assets(
     source_dir_path.parent / f".{source_dir_path.name}.mobius-static-bak"
   ).resolve()
   backup_root_used = False
+
+  def backup_existing_file(target: Path, backup_rel: str) -> Path | None:
+    nonlocal backup_root_used
+    if not target.exists():
+      return None
+    backup = (backup_root / backup_rel).resolve()
+    if backup_root not in backup.parents:
+      raise HTTPException(400, "Manifest `static_assets` backup path escapes.")
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    if backup.exists():
+      try:
+        backup.unlink()
+      except OSError:
+        pass
+    shutil.copy2(target, backup)
+    if not backup_root_used:
+      backup_root_used = True
+      # Rollback actions execute in reverse order, so register directory
+      # cleanup before file restores; restores run first, cleanup last.
+      rollback_actions.append(
+        lambda d=backup_root: shutil.rmtree(d, ignore_errors=True)
+      )
+    rollback_actions.append(
+      lambda b=backup, o=target:
+        os.replace(b, o) if b.exists() else None
+    )
+    commit_actions.append(
+      lambda b=backup: b.unlink() if b.exists() else None
+    )
+    return backup
+
   for rel, content in assets.items():
     # rel was already validated as a simple repo-relative path. Resolve anyway
     # so this helper stays safe if future callers hand it unchecked data.
@@ -575,33 +616,26 @@ def _write_static_assets(
       raise HTTPException(400, "Manifest `static_assets` path escapes static dir.")
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
-      backup = (backup_root / rel).resolve()
-      if backup_root not in backup.parents:
-        raise HTTPException(400, "Manifest `static_assets` backup path escapes.")
-      backup.parent.mkdir(parents=True, exist_ok=True)
-      if backup.exists():
-        try:
-          backup.unlink()
-        except OSError:
-          pass
-      shutil.copy2(target, backup)
-      if not backup_root_used:
-        backup_root_used = True
-        # Rollback actions execute in reverse order, so register directory
-        # cleanup before file restores; restores run first, cleanup last.
-        rollback_actions.append(
-          lambda d=backup_root: shutil.rmtree(d, ignore_errors=True)
-        )
-      rollback_actions.append(
-        lambda b=backup, o=target:
-          os.replace(b, o) if b.exists() else None
-      )
-      commit_actions.append(
-        lambda b=backup: b.unlink() if b.exists() else None
-      )
+      backup_existing_file(target, rel)
     else:
       created_paths.append(target)
     atomic_write(target, content)
+
+  for rel in sorted(previous_assets - set(assets)):
+    target = (static_root / rel).resolve()
+    if static_root not in target.parents:
+      continue
+    if not target.exists() or not target.is_file():
+      continue
+    backup_existing_file(target, rel)
+    target.unlink()
+
+  if metadata_path.exists():
+    backup_existing_file(metadata_path, _STATIC_ASSETS_MANIFEST)
+  else:
+    created_paths.append(metadata_path)
+  atomic_write(metadata_path, json.dumps(sorted(assets), indent=2) + "\n")
+
   if backup_root_used:
     commit_actions.append(
       lambda d=backup_root: shutil.rmtree(d, ignore_errors=True)

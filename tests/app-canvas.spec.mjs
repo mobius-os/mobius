@@ -65,6 +65,51 @@ function mockFrameHTML(appId, opts = {}) {
 </body></html>`
 }
 
+async function setupShellBasics(page) {
+  await page.route(/\/api\/health$/, route =>
+    route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ok: true }),
+    })
+  )
+  await page.route(/\/api\/theme$/, route =>
+    route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ css: '', bg: '#000000' }),
+    })
+  )
+  await page.route(/\/api\/models(\?.*)?$/, route =>
+    route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ providers: {} }),
+    })
+  )
+  await page.route(/\/api\/owner\/walkthrough$/, route =>
+    route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ completed: true, completed_at: new Date().toISOString() }),
+    })
+  )
+  await page.route(/\/api\/auth\/providers\/status$/, route =>
+    route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ providers: {} }),
+    })
+  )
+  await page.route(/\/api\/events\/system$/, route =>
+    route.fulfill({
+      status: 204,
+      headers: { 'Content-Type': 'text/event-stream' },
+      body: '',
+    })
+  )
+}
+
 
 /** Set up the routes Shell needs to render an app canvas:
  *   - chats list (empty is fine — we land directly via /app/:id)
@@ -75,6 +120,10 @@ function mockFrameHTML(appId, opts = {}) {
  */
 async function setupAppRoutes(page, appId, frameHTML) {
   await page.setViewportSize({ width: 412, height: 915 })
+  await page.addInitScript(() => {
+    localStorage.setItem('token', 'mock-owner-token')
+  })
+  await setupShellBasics(page)
 
   await page.route(/\/api\/chats(\/[^?]*)?(\?.*)?$/, route => {
     if (route.request().method() !== 'GET') return route.fallback()
@@ -118,6 +167,86 @@ async function setupAppRoutes(page, appId, frameHTML) {
       body: frameHTML,
     })
   )
+}
+
+async function setupOpenAppRoutesWithStaleInitialList(page, appId, frameHTML) {
+  await page.setViewportSize({ width: 412, height: 915 })
+  await page.addInitScript(() => {
+    localStorage.setItem('token', 'mock-owner-token')
+    localStorage.setItem('moebius_active_chat', 'open-app-chat')
+  })
+  await setupShellBasics(page)
+
+  let appsFetches = 0
+  const chatId = 'open-app-chat'
+  const chat = {
+    id: chatId,
+    title: 'Last chat',
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    has_messages: true,
+    running: false,
+    run_status: null,
+  }
+  const app = {
+    id: appId,
+    name: 'CubeRun',
+    slug: 'cuberun',
+    description: 'test',
+    compiled_path: `/data/compiled/app-${appId}.js`,
+    chat_id: null,
+    source_dir: `/data/apps/cuberun`,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  }
+
+  await page.route(/\/api\/chats$/, route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify([chat]),
+    })
+  })
+  await page.route(new RegExp(`/api/chats/${chatId}(\\?.*)?$`), route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...chat, messages: [] }),
+    })
+  })
+  await page.route(/\/api\/chats\/[^/]+\/stream$/, route =>
+    route.fulfill({ status: 204, body: '' })
+  )
+  await page.route(/\/api\/apps\/$/, route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    appsFetches += 1
+    route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(appsFetches === 1 ? [] : [app]),
+    })
+  })
+  await page.route(/\/api\/auth\/app-token$/, route =>
+    route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: 'mock-app-token' }),
+    })
+  )
+  await page.route(new RegExp(`/api/apps/${appId}/frame`), route =>
+    route.fulfill({
+      status: 200,
+      headers: {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-cache',
+      },
+      body: frameHTML,
+    })
+  )
+
+  return { getAppsFetches: () => appsFetches }
 }
 
 
@@ -192,5 +321,28 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     // alternative signals — spinner must still be there.
     await page.evaluate(() => new Promise(r => setTimeout(r, 1000)))
     await expect(page.locator('.canvas-loading')).toBeVisible()
+  })
+
+  test('open-app message refetches stale app list before staying on chat', async ({ page }) => {
+    const appId = 55
+    const routes = await setupOpenAppRoutesWithStaleInitialList(
+      page,
+      appId,
+      mockFrameHTML(appId, { sendMounted: true })
+    )
+
+    await page.goto(`${BASE}/shell/?chat=open-app-chat`, { waitUntil: 'domcontentloaded' })
+    await page.waitForFunction(() => window.location.pathname === '/shell/')
+
+    await page.evaluate((targetAppId) => {
+      window.dispatchEvent(new MessageEvent('message', {
+        origin: window.location.origin,
+        data: { type: 'moebius:open-app', appId: targetAppId },
+      }))
+    }, appId)
+
+    await expect(page.locator(`iframe[data-app-id="${appId}"]`)).toBeVisible({ timeout: 8000 })
+    await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 8000 })
+    expect(routes.getAppsFetches()).toBeGreaterThanOrEqual(2)
   })
 })
