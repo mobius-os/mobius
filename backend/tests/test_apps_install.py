@@ -231,6 +231,92 @@ def test_install_fresh_app_writes_everything(client, auth, tmp_path, bypass_url_
   assert row["background_color"] == "#101820"
 
 
+def test_install_static_site_assets_route_css_fonts_and_chunks(
+  client, auth, bypass_url_validation,
+):
+  """CubeRun-style static bundles keep HTML, CSS, chunks, and media together.
+
+  The important regression here is path shape: CSS is served from
+  /app-assets/<slug>/static/css/..., so relative font URLs must resolve to
+  sibling static/media assets and missing app assets must stay a 404, never
+  the Mobius shell HTML.
+  """
+  base = "https://raw.githubusercontent.com/x/cuberun-lite/main/"
+  manifest = {
+    "id": "cuberun-lite",
+    "name": "CubeRun Lite",
+    "version": "1.0.0",
+    "description": "Static WebGL-style app",
+    "entry": "index.jsx",
+    "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
+    "static_assets": {
+      "index.html": "build/index.html",
+      "static/css/main.css": "build/static/css/main.css",
+      "static/js/main.js": "build/static/js/main.js",
+      "static/media/ship.gltf": "build/static/media/ship.gltf",
+      "static/media/commando.ttf": "build/static/media/commando.ttf",
+    },
+  }
+  css = (
+    "@font-face{font-family:Commando;"
+    "src:url(../media/commando.ttf) format('truetype')}"
+  )
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (
+      200,
+      (
+        "export default function App({ appId }) {"
+        "return <iframe title=\"game\" src={`/app-assets/by-id/${appId}/index.html`} />"
+        "}"
+      ).encode(),
+    ),
+    base + "build/index.html": (
+      200,
+      b"<!doctype html><link rel='stylesheet' href='./static/css/main.css'>"
+      b"<script src='./static/js/main.js'></script>",
+    ),
+    base + "build/static/css/main.css": (200, css.encode()),
+    base + "build/static/js/main.js": (200, b"console.log('game')"),
+    base + "build/static/media/ship.gltf": (200, b'{"asset":{"version":"2.0"}}'),
+    base + "build/static/media/commando.ttf": (200, b"fake-font"),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r.status_code == 201, r.text
+  app_id = r.json()["id"]
+
+  html = client.get(f"/app-assets/by-id/{app_id}/index.html")
+  assert html.status_code == 200
+  assert "static/css/main.css" in html.text
+  assert "text/html" in html.headers["content-type"]
+
+  css_res = client.get("/app-assets/cuberun-lite/static/css/main.css")
+  assert css_res.status_code == 200
+  assert "../media/commando.ttf" in css_res.text
+  assert "text/css" in css_res.headers["content-type"]
+
+  font = client.get("/app-assets/cuberun-lite/static/media/commando.ttf")
+  assert font.status_code == 200
+  assert font.content == b"fake-font"
+  assert font.headers["x-content-type-options"] == "nosniff"
+
+  js = client.get("/app-assets/cuberun-lite/static/js/main.js")
+  assert js.status_code == 200
+  assert "console.log" in js.text
+
+  bad_font_path = client.get(
+    "/app-assets/cuberun-lite/static/css/static/media/commando.ttf"
+  )
+  assert bad_font_path.status_code == 404
+  assert "text/html" not in bad_font_path.headers.get("content-type", "")
+
+
 MANIFEST_ONDEMAND = {
   "id": "test-build",
   "name": "Test Build",
