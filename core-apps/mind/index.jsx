@@ -345,13 +345,21 @@ export default function App({ appId, token }) {
   );
 
   const graphLabels = useMemo(
-    () => buildScreenLabels(fgRef.current, fgData.nodes, dims, labelTick),
-    [fgData.nodes, dims, labelTick],
+    () => buildScreenLabels(fgRef.current, fgData.nodes, dims, {
+      mode: 'global',
+      hoverId,
+      selectedId: selected?.id,
+    }, labelTick),
+    [fgData.nodes, dims, hoverId, selected?.id, labelTick],
   );
 
   const localGraphLabels = useMemo(
-    () => buildScreenLabels(localFgRef.current, localGraphData.nodes, localDims, labelTick),
-    [localGraphData.nodes, localDims, labelTick],
+    () => buildScreenLabels(localFgRef.current, localGraphData.nodes, localDims, {
+      mode: 'local',
+      hoverId,
+      selectedId: selected?.id,
+    }, labelTick),
+    [localGraphData.nodes, localDims, hoverId, selected?.id, labelTick],
   );
 
   useEffect(() => {
@@ -364,8 +372,17 @@ export default function App({ appId, token }) {
 
   useEffect(() => {
     if (status !== 'ready' || !FG) return;
-    const id = setInterval(() => setLabelTick((v) => (v + 1) % 100000), 250);
-    return () => clearInterval(id);
+    let raf = 0;
+    let last = 0;
+    const tick = (now) => {
+      if (now - last > 16) {
+        last = now;
+        setLabelTick((v) => (v + 1) % 100000);
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
   }, [status, FG]);
 
   // --- Smooth hover focus: a 0..1 value per node that eases toward 1 for the
@@ -637,9 +654,12 @@ export default function App({ appId, token }) {
         : withAlpha(col, 0.5 * alpha);
     ctx.stroke();
 
-    // Label — zoom-based LOD, drawn in CSS px (font size / zoom) with a
-    // rounded pill underlay so text stays legible over links and halos.
-    const showLabel = true;
+    // Label fallback for renderers where canvas text is visible. The DOM label
+    // layer below is the authoritative Obsidian-style label pass.
+    const showLabel = isHover || isMoc || node.localDepth === 0 || (
+      safeScale >= 1.6
+      && ((Number(node.importance) || 0) >= 7 || (Array.isArray(node.mocs) && node.mocs.length > 0))
+    );
     if (showLabel) {
       const label = node.title || node.id;
       const labelPx = clamp((isMoc ? 12.5 : 11.5) * Math.sqrt(safeScale), 10.5, 16);
@@ -1107,7 +1127,12 @@ function GraphLabelLayer({ labels }) {
       {labels.map((label) => (
         <span
           key={label.id}
-          style={{ ...S.graphLabel, left: label.x, top: label.y }}
+          style={{
+            ...S.graphLabel,
+            ...(label.strong ? S.graphLabelStrong : S.graphLabelSoft),
+            left: label.x,
+            top: label.y,
+          }}
         >
           {label.title}
         </span>
@@ -1203,17 +1228,58 @@ function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
 }
 
-function buildScreenLabels(fg, nodes = [], dims = {}, _tick = 0) {
+function buildScreenLabels(fg, nodes = [], dims = {}, opts = {}, _tick = 0) {
   if (!fg || !dims.w || !dims.h || !Array.isArray(nodes)) return [];
-  return nodes
-    .map((n) => {
+  const scale = Number(fg.zoom?.()) || 1;
+  const ranked = [...nodes]
+    .map((node) => ({ node, score: labelScore(node) }))
+    .sort((a, b) => b.score - a.score)
+    .map((item, labelRank) => ({ ...item, labelRank }));
+  return ranked
+    .filter(({ node, labelRank }) => shouldShowScreenLabel(node, scale, labelRank, opts))
+    .map(({ node: n }) => {
       if (!Number.isFinite(n.x) || !Number.isFinite(n.y)) return null;
       const p = fg.graph2ScreenCoords?.(n.x, n.y);
       if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return null;
       if (p.x < -80 || p.y < -24 || p.x > dims.w + 80 || p.y > dims.h + 80) return null;
-      return { id: n.id, title: n.title || n.id, x: p.x, y: p.y + nodeRadius(n) + 5 };
+      return {
+        id: n.id,
+        title: n.title || n.id,
+        x: Math.round(p.x),
+        y: Math.round(p.y + nodeRadius(n) + 5),
+        strong: n.type === 'moc' || n.id === opts.hoverId || n.id === opts.selectedId || n.localDepth === 0,
+      };
     })
     .filter(Boolean);
+}
+
+function labelScore(node = {}) {
+  const importance = Number(node.importance) || 0;
+  const access = Number(node.access_count) || 0;
+  const mocBonus = node.type === 'moc' ? 1000 : 0;
+  const linkedBonus = Array.isArray(node.mocs) && node.mocs.length > 0 ? 18 : 0;
+  const localBonus = node.localDepth === 0 ? 800 : node.localDepth === 1 ? 120 : 0;
+  return mocBonus + localBonus + importance * 12 + access * 4 + linkedBonus;
+}
+
+function shouldShowScreenLabel(node = {}, scale = 1, labelRank = 0, opts = {}) {
+  const isHover = node.id === opts.hoverId;
+  const isSelected = node.id === opts.selectedId;
+  const isHub = node.type === 'moc';
+  const isLocalCenter = node.localDepth === 0;
+  if (isHover || isSelected || isHub || isLocalCenter) return true;
+
+  if (opts.mode === 'local') {
+    if (node.localDepth === 1 && scale >= 0.72) return true;
+    if (node.localDepth === 2 && scale >= 1.15) return true;
+    return scale >= 1.7 && labelRank < 18;
+  }
+
+  if (scale < 0.9) return false;
+  if (scale < 1.25) return labelRank < 6;
+  if (scale < 1.7) return labelRank < 14;
+  if (scale < 2.2) return labelRank < 26;
+  return labelRank < 60;
 }
 
 function roundedRect(ctx, x, y, w, h, r) {
@@ -1368,14 +1434,17 @@ const S = {
     position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 2, overflow: 'hidden',
   },
   graphLabel: {
-    position: 'absolute', transform: 'translate(-50%, 0)', maxWidth: 160,
+    position: 'absolute', transform: 'translate3d(-50%, 0, 0)', maxWidth: 160,
     padding: '2px 6px', borderRadius: 7,
     background: 'color-mix(in srgb, var(--bg) 82%, transparent)',
     border: '1px solid color-mix(in srgb, var(--text) 16%, transparent)',
     color: 'var(--text)', fontSize: 11, fontWeight: 650,
     whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
     textShadow: '0 1px 2px rgba(0,0,0,0.55)',
+    willChange: 'left, top',
   },
+  graphLabelStrong: { opacity: 1 },
+  graphLabelSoft: { opacity: 0.78 },
 
   legend: {
     position: 'absolute', left: 12, bottom: 12, background: 'var(--surface)',
