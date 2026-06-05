@@ -865,6 +865,50 @@ def run_app_job(
   return {"started_at": datetime.now(UTC).isoformat()}
 
 
+@router.post(
+  "/{app_id}/schedule",
+  dependencies=[Depends(reject_cross_site)],
+)
+def update_app_schedule(
+  app_id: int,
+  body: schemas.AppScheduleUpdate,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Updates one app's recurring cron schedule.
+
+  Authorized for the owner OR for the app itself. This is the schedule
+  counterpart to run-job: a mini-app settings screen can tune its own
+  recurring job, but an app token cannot rewrite a sibling's crontab.
+  The scaffold writes both the live crontab and durable init-cron.sh so
+  the change survives container restarts.
+  """
+  if principal.app_id is not None and principal.app_id != app_id:
+    raise HTTPException(
+      status_code=403,
+      detail="App token can only update its own schedule.",
+    )
+  app = db.query(models.App).filter(models.App.id == app_id).first()
+  if not app:
+    raise HTTPException(status_code=404, detail="App not found.")
+  if not app.source_dir:
+    raise HTTPException(
+      status_code=400, detail="App has no source_dir; cannot locate job.",
+    )
+  from app.install import _register_cron, _validate_cron_expr
+  _validate_cron_expr(body.cron)
+  source_dir = Path(app.source_dir)
+  job_name = body.job or "fetch.sh"
+  if "/" in job_name or "\\" in job_name or not job_name.strip():
+    raise HTTPException(status_code=400, detail="Invalid job filename.")
+  job_path = source_dir / job_name
+  if not job_path.is_file():
+    raise HTTPException(status_code=400, detail="Job script not found.")
+  slug = app.slug or _slugify_for_source_dir(app.name)
+  _register_cron(slug, body.cron, job_path, None, app_id)
+  return {"cron": body.cron, "job": job_name}
+
+
 def _etag_for_app(app: models.App) -> str | None:
   """Weak ETag derived from `app.updated_at`. Microsecond precision
   so two updates within the same wall-clock second produce different
