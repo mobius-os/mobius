@@ -912,8 +912,8 @@ export default function App({ appId, token }) {
               </div>
             )}
 
-            <div style={S.panelSplit}>
-              <section style={S.notePane}>
+            <div style={S.panelSplit} className="mg-panel-split">
+              <section style={S.notePane} className="mg-note-pane">
                 <div style={S.paneHead}>Note</div>
                 <div style={S.panelBody} className="mg-md mg-scroll" onClick={onNoteClick}>
                   {noteState.status === 'loading' && (
@@ -934,7 +934,7 @@ export default function App({ appId, token }) {
                 </div>
               </section>
 
-              <section style={S.localPane}>
+              <section style={S.localPane} className="mg-local-pane">
                 <div style={S.localHead}>
                   <div>
                     <div style={S.paneHead}>Local graph</div>
@@ -1301,6 +1301,11 @@ const S = {
     letterSpacing: '0.05em', padding: '11px 12px', borderBottom: '1px solid var(--border)',
     whiteSpace: 'nowrap', userSelect: 'none',
   },
+  thMain: { display: 'block', lineHeight: 1.05 },
+  thSub: {
+    display: 'block', marginTop: 3, fontSize: 9, fontWeight: 600, color: 'var(--muted)',
+    textTransform: 'none', letterSpacing: 0, opacity: 0.8,
+  },
   sortCaret: { marginLeft: 5, fontSize: 11, color: 'var(--accent)' },
   tr: { cursor: 'pointer', borderBottom: '1px solid var(--border-light, var(--border))' },
   td: { padding: '10px 12px', verticalAlign: 'middle', color: 'var(--text)' },
@@ -1332,7 +1337,11 @@ const S = {
   },
   pipOn: { background: 'var(--accent)' },
 
-  barCell: { display: 'flex', alignItems: 'center', gap: 9 },
+  barCell: { display: 'grid', gridTemplateColumns: '36px minmax(44px, 1fr) 56px', alignItems: 'center', gap: 8 },
+  barMetricLabel: {
+    fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase',
+    letterSpacing: 0, fontWeight: 700,
+  },
   barTrack: {
     flex: 1, height: 6, background: 'var(--surface2)', borderRadius: 999,
     overflow: 'hidden', minWidth: 40, boxShadow: 'inset 0 0 0 1px var(--border-light, var(--border))',
@@ -1386,9 +1395,46 @@ const S = {
     fontSize: 11.5, color: 'var(--accent)', background: 'var(--accent-dim, rgba(167,139,250,0.12))',
     borderRadius: 999, padding: '2px 9px', fontWeight: 500,
   },
+  panelSplit: {
+    flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(260px, 0.9fr)',
+    gap: 0, borderTop: '1px solid var(--border)', marginTop: 10,
+  },
+  notePane: {
+    display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0,
+    borderRight: '1px solid var(--border)',
+  },
+  localPane: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0 },
+  paneHead: {
+    fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0,
+    color: 'var(--muted)',
+  },
+  localHead: {
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+    gap: 10, padding: '12px 12px 10px', borderBottom: '1px solid var(--border)',
+  },
+  localCount: {
+    fontSize: 11, color: 'var(--muted)', marginTop: 3, fontVariantNumeric: 'tabular-nums',
+  },
+  depthToggle: {
+    display: 'flex', alignItems: 'center', gap: 3, padding: 3, borderRadius: 8,
+    background: 'var(--surface2)', border: '1px solid var(--border)', flexShrink: 0,
+  },
+  depthBtn: {
+    minWidth: 28, height: 26, border: 'none', borderRadius: 6, background: 'transparent',
+    color: 'var(--muted)', fontSize: 12, fontWeight: 700, fontFamily: 'var(--font)',
+    cursor: 'pointer',
+  },
+  depthBtnActive: {
+    background: 'var(--bg)', color: 'var(--text)', boxShadow: '0 1px 3px rgba(0,0,0,0.16)',
+  },
+  localGraphWrap: { flex: 1, minHeight: 220, position: 'relative', overflow: 'hidden' },
+  localEmpty: {
+    position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+    color: 'var(--muted)', fontSize: 13, padding: 18, textAlign: 'center',
+  },
   panelBody: {
-    flex: 1, overflowY: 'auto', padding: '14px 16px 20px', fontSize: 14, lineHeight: 1.62,
-    borderTop: '1px solid var(--border)', marginTop: 10,
+    flex: 1, overflowY: 'auto', padding: '12px 16px 20px', fontSize: 14, lineHeight: 1.62,
+    minHeight: 0,
   },
   notePlaceholder: { display: 'flex', flexDirection: 'column', gap: 11, paddingTop: 4 },
   pre: { whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'var(--mono)', fontSize: 12.5 },
@@ -1457,14 +1503,31 @@ const CSS = `
   to { transform: translateX(0); opacity: 1; }
 }
 @keyframes mg-scrim-in { from { opacity: 0; } to { opacity: 1; } }
-.mg-panel { inset: 0 0 0 auto; width: min(460px, 92vw); animation: mg-panel-in 0.22s cubic-bezier(0.22,1,0.36,1); }
+.mg-panel { inset: 0 0 0 auto; width: min(980px, 96vw); animation: mg-panel-in 0.22s cubic-bezier(0.22,1,0.36,1); }
 .mg-scrim { animation: mg-scrim-in 0.2s ease; }
+.mg-local-graph { cursor: grab; background: var(--bg); }
+.mg-local-graph:active { cursor: grabbing; }
+.mg-md a[href^="#mind-node-"] {
+  border: 1px solid var(--accent-dim, rgba(167,139,250,0.35));
+  background: var(--accent-dim, rgba(167,139,250,0.12));
+  border-radius: 6px;
+  padding: 0 5px;
+  font-weight: 600;
+}
 @media (max-width: 640px) {
   .mg-panel {
     inset: auto 0 0 0; width: 100%; height: 82%; border-left: none;
     border-top: 1px solid var(--border); border-radius: 18px 18px 0 0;
     animation: mg-sheet-in 0.26s cubic-bezier(0.22,1,0.36,1);
   }
+  .mg-panel-split { grid-template-columns: 1fr !important; overflow-y: auto; }
+  .mg-note-pane { border-right: none !important; border-bottom: 1px solid var(--border); min-height: 220px; }
+  .mg-local-graph { min-height: 260px; }
+}
+@media (min-width: 641px) and (max-width: 860px) {
+  .mg-panel-split { grid-template-columns: 1fr !important; overflow-y: auto; }
+  .mg-note-pane { border-right: none !important; border-bottom: 1px solid var(--border); min-height: 260px; }
+  .mg-local-graph { min-height: 300px; }
 }
 @keyframes mg-sheet-in { from { transform: translateY(28px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 

@@ -20,40 +20,42 @@ execFileSync(esbuild, [
 })
 
 const {
+  buildLocalGraphData,
+  renderWikiLinks,
   nodeRadius,
   shouldShowNodeLabel,
 } = await import('./.build/index.mjs')
 
-test('shouldShowNodeLabel hides ordinary nodes below every threshold except broad zoom', () => {
+test('shouldShowNodeLabel hides ordinary nodes below every threshold except close zoom', () => {
   const node = { id: 'plain', importance: 6, mocs: [] }
-  assert.equal(shouldShowNodeLabel(0.3999, node, null), false)
-  assert.equal(shouldShowNodeLabel(0.4, node, null), false)
-  assert.equal(shouldShowNodeLabel(0.8, node, null), false)
-  assert.equal(shouldShowNodeLabel(1.3999, node, null), false)
-  assert.equal(shouldShowNodeLabel(1.4, node, null), true)
+  assert.equal(shouldShowNodeLabel(0.9499, node, null), false)
+  assert.equal(shouldShowNodeLabel(0.95, node, null), true)
 })
 
-test('shouldShowNodeLabel shows MOC-linked nodes at 0.4 and above', () => {
+test('shouldShowNodeLabel shows MOC-linked nodes at 0.55 and above', () => {
   const node = { id: 'linked', importance: 1, mocs: ['projects'] }
-  assert.equal(shouldShowNodeLabel(0.3999, node, null), false)
-  assert.equal(shouldShowNodeLabel(0.4, node, null), true)
-  assert.equal(shouldShowNodeLabel(0.8, node, null), true)
+  assert.equal(shouldShowNodeLabel(0.5499, node, null), false)
+  assert.equal(shouldShowNodeLabel(0.55, node, null), true)
 })
 
-test('shouldShowNodeLabel shows hovered nodes at 0.4 and above', () => {
+test('shouldShowNodeLabel shows hovered nodes early', () => {
   const node = { id: 'hovered', importance: 1, mocs: [] }
-  assert.equal(shouldShowNodeLabel(0.3999, node, 'hovered'), false)
-  assert.equal(shouldShowNodeLabel(0.4, node, 'hovered'), true)
-  assert.equal(shouldShowNodeLabel(0.8, node, 'hovered'), true)
+  assert.equal(shouldShowNodeLabel(0.1499, node, 'hovered'), false)
+  assert.equal(shouldShowNodeLabel(0.15, node, 'hovered'), true)
 })
 
-test('shouldShowNodeLabel shows important nodes at 0.8 but not 0.4', () => {
+test('shouldShowNodeLabel shows MOC and local-center nodes while zoomed out', () => {
+  assert.equal(shouldShowNodeLabel(0.2499, { id: 'hub', type: 'moc' }, null), false)
+  assert.equal(shouldShowNodeLabel(0.25, { id: 'hub', type: 'moc' }, null), true)
+  assert.equal(shouldShowNodeLabel(0.15, { id: 'center', localDepth: 0 }, null), true)
+})
+
+test('shouldShowNodeLabel shows important nodes at 0.45', () => {
   const important = { id: 'important', importance: 7, mocs: [] }
   const almostImportant = { id: 'almost', importance: 6.99, mocs: [] }
-  assert.equal(shouldShowNodeLabel(0.4, important, null), false)
-  assert.equal(shouldShowNodeLabel(0.7999, important, null), false)
-  assert.equal(shouldShowNodeLabel(0.8, important, null), true)
-  assert.equal(shouldShowNodeLabel(0.8, almostImportant, null), false)
+  assert.equal(shouldShowNodeLabel(0.4499, important, null), false)
+  assert.equal(shouldShowNodeLabel(0.45, important, null), true)
+  assert.equal(shouldShowNodeLabel(0.45, almostImportant, null), false)
 })
 
 test('shouldShowNodeLabel rejects malformed scales', () => {
@@ -75,4 +77,41 @@ test('nodeRadius guards sparse and malformed node data', () => {
   assert.equal(nodeRadius(), 4.55)
   assert.equal(nodeRadius({ importance: -5, access_count: -2 }), 4.55)
   assert.equal(nodeRadius({ importance: Number.NaN, access_count: Infinity }), 4.55)
+})
+
+test('renderWikiLinks replaces slugs with note titles and keeps aliases', () => {
+  const md = 'See [[abc]] and [[def|custom label]] and [[missing]].'
+  const out = renderWikiLinks(md, [
+    { id: 'abc', title: 'Alpha Beta' },
+    { id: 'def', title: 'Delta Echo' },
+  ])
+  assert.equal(
+    out,
+    'See [Alpha Beta](#mind-node-abc) and [custom label](#mind-node-def) and [missing](#mind-node-missing).',
+  )
+})
+
+test('buildLocalGraphData returns a depth-limited neighborhood', () => {
+  const graph = {
+    nodes: [
+      { id: 'a', title: 'A' },
+      { id: 'b', title: 'B' },
+      { id: 'c', title: 'C' },
+      { id: 'd', title: 'D' },
+    ],
+    edges: [
+      { source: 'a', target: 'b', kind: 'link' },
+      { source: 'b', target: 'c', kind: 'link' },
+      { source: 'c', target: 'd', kind: 'link' },
+    ],
+  }
+  const oneHop = buildLocalGraphData(graph, 'a', 1)
+  assert.deepEqual(oneHop.nodes.map((n) => n.id).sort(), ['a', 'b'])
+  assert.equal(oneHop.nodes.find((n) => n.id === 'a').localDepth, 0)
+  assert.equal(oneHop.nodes.find((n) => n.id === 'b').localDepth, 1)
+  assert.deepEqual(oneHop.links.map((e) => `${e.source}-${e.target}`), ['a-b'])
+
+  const all = buildLocalGraphData(graph, 'a', -1)
+  assert.deepEqual(all.nodes.map((n) => n.id).sort(), ['a', 'b', 'c', 'd'])
+  assert.equal(all.links.length, 3)
 })
