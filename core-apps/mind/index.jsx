@@ -190,6 +190,7 @@ export default function App({ appId, token }) {
   const [FG, setFG] = useState(null); // ForceGraph2D component
   const [marked, setMarked] = useState(null);
   const [purify, setPurify] = useState(null); // DOMPurify — audited HTML sanitizer
+  const panelNavRef = useRef(null);
 
   const wrapRef = useRef(null);
   const fgRef = useRef(null);
@@ -487,6 +488,24 @@ export default function App({ appId, token }) {
     setHoverId(null);
   }, []);
 
+  const openPanel = useCallback(async (node, opts = {}) => {
+    if (!node) return;
+    if (!selected && window.mobius?.nav?.open) {
+      try { panelNavRef.current?.close?.(); } catch {}
+      const handle = window.mobius.nav.open('mind-note', () => {
+        panelNavRef.current = null;
+        setSelected(null);
+        setHoverId(null);
+      });
+      panelNavRef.current = handle;
+      await handle.ready?.catch(() => false);
+      if (panelNavRef.current !== handle) return;
+    }
+    setSelected(node);
+    setHoverId(opts.hoverId ?? null);
+    if (opts.resetLocalDepth) setLocalDepth(1);
+  }, [selected]);
+
   const startMobileSplitDrag = useCallback((e) => {
     const split = splitRef.current;
     const localPane = localPaneRef.current;
@@ -524,10 +543,20 @@ export default function App({ appId, token }) {
   // Esc closes the panel — keyboard parity with the scrim tap.
   useEffect(() => {
     if (!selected) return;
-    const onKey = (e) => { if (e.key === 'Escape') setSelected(null); };
+    const onKey = (e) => { if (e.key === 'Escape') closePanel(); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selected]);
+  }, [selected, closePanel]);
+
+  useEffect(() => {
+    if (selected) return;
+    try { panelNavRef.current?.close?.(); } catch {}
+    panelNavRef.current = null;
+  }, [!!selected]);
+
+  useEffect(() => () => {
+    try { panelNavRef.current?.close?.(); } catch {}
+  }, []);
 
   // --- Canvas link painter: a soft curve, brighter when it touches the
   //     hovered focus. Drawn before nodes (react-force-graph paints links
@@ -816,9 +845,9 @@ export default function App({ appId, token }) {
                 cooldownTicks={Infinity}
                 cooldownTime={Infinity}
                 d3AlphaTarget={0.015}
-                onNodeClick={(n) => { setSelected(n); setHoverId(null); setLocalDepth(1); }}
+                onNodeClick={(n) => openPanel(n, { resetLocalDepth: true })}
                 onNodeHover={(n) => setHoverId(n ? n.id : null)}
-                onBackgroundClick={() => setSelected(null)}
+                onBackgroundClick={closePanel}
                 d3VelocityDecay={0.28}
                 warmupTicks={28}
               />
@@ -849,7 +878,7 @@ export default function App({ appId, token }) {
                     onMouseLeave={() => setHoverId(null)}
                     onClick={() => {
                       const n = graph.nodes.find((x) => x.id === it.slug);
-                      if (n) setSelected(n);
+                      if (n) openPanel(n);
                     }}
                   >
                     <span style={{ ...S.legendSwatch, background: it.color }} />
@@ -880,7 +909,7 @@ export default function App({ appId, token }) {
                   <tr
                     key={n.id}
                     style={S.tr}
-                    onClick={() => { setSelected(n); }}
+                    onClick={() => openPanel(n)}
                     className="mg-row"
                   >
                     <td style={S.tdTitle}>
@@ -1027,7 +1056,7 @@ export default function App({ appId, token }) {
                       d3AlphaTarget={0.02}
                       d3VelocityDecay={0.3}
                       warmupTicks={18}
-                      onNodeClick={(n) => { setSelected(nodesById.get(n.id) || n); setHoverId(null); }}
+                      onNodeClick={(n) => openPanel(nodesById.get(n.id) || n)}
                       onNodeHover={(n) => setHoverId(n ? n.id : null)}
                     />
                   ) : (
