@@ -56,12 +56,16 @@ test('legacy /cuberun route opens the standalone app, not the Mobius shell', asy
   const token = await ownerToken(page)
   await ensureCubeRun(request, token)
 
-  for (const path of ['/cuberun', '/cuberun/', '/cuberun/index.html']) {
+  for (const path of ['/cuberun', '/cuberun/']) {
     const redirect = await request.get(`${BASE}${path}`, { maxRedirects: 0 })
     expect(redirect.status()).toBe(307)
     expect(redirect.headers().location).toBe('/apps/cuberun/')
     expect(redirect.headers()['cache-control']).toBe('no-store')
   }
+
+  const indexHtml = await request.get(`${BASE}/cuberun/index.html`, { maxRedirects: 0 })
+  expect(indexHtml.status()).not.toBe(307)
+  expect(indexHtml.headers().location).not.toBe('/apps/cuberun/')
 
   await page.goto(`${BASE}/cuberun`, { waitUntil: 'domcontentloaded' })
   await expect(page).toHaveURL(`${BASE}/apps/cuberun/`)

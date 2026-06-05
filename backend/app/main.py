@@ -491,18 +491,23 @@ def _is_static_asset_path(path: str) -> bool:
   route — but if a future client route needs a `.js`/`.json` suffix,
   drop that extension from the set.
   """
+  if path == "index.html":
+    return False
   return (
     # First path segment — catches both `vendor` and `vendor/<file>`
     # without over-matching a route like `vendorfoo`.
     path.split("/", 1)[0] in {"vendor", "assets"}
     or path == "sw.js"
-    or path.rsplit(".", 1)[-1] in {"js", "mjs", "css", "map", "wasm", "json"}
+    or path.rsplit(".", 1)[-1] in {
+      "js", "mjs", "css", "html", "map", "wasm", "json",
+    }
   )
 
 
 _RESERVED_TOP_LEVEL_APP_ALIASES = {
   "api",
   "app",
+  "app-assets",
   "apps",
   "assets",
   "chat",
@@ -524,8 +529,6 @@ def _top_level_app_slug_alias(path: str) -> str | None:
   URL before serving the SPA.
   """
   slug = path.strip("/")
-  if slug.endswith("/index.html"):
-    slug = slug[:-len("/index.html")]
   if not slug or "/" in slug:
     return None
   if not all(ch.isalnum() or ch in "-_" for ch in slug):
@@ -538,6 +541,70 @@ def _top_level_app_slug_alias(path: str) -> str | None:
     return slug if exists else None
   finally:
     db.close()
+
+
+def _app_source_dir_for_static_asset(
+  *, slug: str | None = None, app_id: int | None = None,
+) -> str | None:
+  db = SessionLocal()
+  try:
+    query = db.query(models.App.source_dir)
+    if app_id is not None:
+      row = query.filter(models.App.id == app_id).first()
+    elif slug is not None:
+      row = query.filter(models.App.slug == slug).first()
+    else:
+      row = None
+    return row[0] if row else None
+  finally:
+    db.close()
+
+
+def _serve_app_static_asset(source_dir: str | None, asset_path: str):
+  if not source_dir:
+    raise HTTPException(status_code=404, detail="Not found.")
+
+  root = (Path(source_dir) / "static").resolve()
+  try:
+    target = (root / (asset_path or "index.html")).resolve()
+  except OSError:
+    raise HTTPException(status_code=404, detail="Not found.")
+  if target == root or target.is_dir():
+    target = (target / "index.html").resolve()
+  if root not in target.parents or not target.is_file():
+    raise HTTPException(status_code=404, detail="Not found.")
+
+  headers = {
+    "Cache-Control": "no-cache, must-revalidate",
+    "X-Content-Type-Options": "nosniff",
+  }
+  return FileResponse(str(target), headers=headers)
+
+
+@app.get("/app-assets/by-id/{app_id}/{asset_path:path}", include_in_schema=False)
+async def app_owned_asset_by_id(app_id: int, asset_path: str):
+  """Serve durable static assets owned by an installed app.
+
+  Imported apps like CubeRun can keep a built static site under
+  /data/apps/<slug>/static instead of copying it into /data/shell, which is
+  intentionally refreshed on deploy. This route is public like standalone app
+  shells; it serves only files below the installed app's source_dir/static.
+  """
+  return _serve_app_static_asset(
+    await asyncio.to_thread(_app_source_dir_for_static_asset, app_id=app_id),
+    asset_path,
+  )
+
+
+@app.get("/app-assets/{slug}/{asset_path:path}", include_in_schema=False)
+async def app_owned_asset(slug: str, asset_path: str):
+  """Serve durable static assets owned by an installed app slug."""
+  if not slug or not all(ch.isalnum() or ch in "-_" for ch in slug):
+    raise HTTPException(status_code=404, detail="Not found.")
+  return _serve_app_static_asset(
+    await asyncio.to_thread(_app_source_dir_for_static_asset, slug=slug),
+    asset_path,
+  )
 
 
 _static_dir = _live_dir if _is_complete_build(_live_dir) else _baked_dir
