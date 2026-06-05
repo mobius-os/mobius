@@ -89,9 +89,8 @@ export function shouldShowNodeLabel(globalScale, node = {}, hoverId = null) {
   const isImportant = (Number(node.importance) || 0) >= 7;
   const isMoc = node.type === 'moc';
   const isLocalCenter = node.localDepth === 0;
-  if (isHover || isLocalCenter) return true;
+  if (isHover || isLocalCenter || isMoc || node.showLabelAlways) return true;
   return scale >= 0.95
-    || (isMoc && scale >= 0.08)
     || (isImportant && scale >= 0.18)
     || (hasMocList && scale >= 0.24);
 }
@@ -150,8 +149,13 @@ export function buildLocalGraphData(graph, centerId, depth = 1) {
   }
 
   const keep = new Set(seen.keys());
+  const showLabelAlways = keep.size <= 150;
   return {
-    nodes: [...keep].map((id) => ({ ...byId.get(id), localDepth: seen.get(id) || 0 })),
+    nodes: [...keep].map((id) => ({
+      ...byId.get(id),
+      localDepth: seen.get(id) || 0,
+      showLabelAlways,
+    })),
     links: edges
       .map((e) => ({
         source: typeof e.source === 'object' ? e.source.id : e.source,
@@ -318,8 +322,9 @@ export default function App({ appId, token }) {
   //     needs its own object references. Build once per graph. ---
   const fgData = useMemo(() => {
     if (!graph) return { nodes: [], links: [] };
+    const showLabelAlways = graph.nodes.length <= 120;
     return {
-      nodes: graph.nodes.map((n) => ({ ...n })),
+      nodes: graph.nodes.map((n) => ({ ...n, showLabelAlways })),
       links: graph.edges.map((e) => ({
         source: typeof e.source === 'object' ? e.source.id : e.source,
         target: typeof e.target === 'object' ? e.target.id : e.target,

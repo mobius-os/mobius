@@ -32,6 +32,10 @@ test('shouldShowNodeLabel hides ordinary nodes below every threshold except clos
   assert.equal(shouldShowNodeLabel(0.95, node, null), true)
 })
 
+test('shouldShowNodeLabel always shows small-graph labels when marked', () => {
+  assert.equal(shouldShowNodeLabel(0.001, { id: 'plain', showLabelAlways: true }, null), true)
+})
+
 test('shouldShowNodeLabel shows MOC-linked nodes at 0.24 and above', () => {
   const node = { id: 'linked', importance: 1, mocs: ['projects'] }
   assert.equal(shouldShowNodeLabel(0.2399, node, null), false)
@@ -43,9 +47,8 @@ test('shouldShowNodeLabel always shows hovered nodes', () => {
   assert.equal(shouldShowNodeLabel(0.001, node, 'hovered'), true)
 })
 
-test('shouldShowNodeLabel shows MOC and local-center nodes while zoomed far out', () => {
-  assert.equal(shouldShowNodeLabel(0.0799, { id: 'hub', type: 'moc' }, null), false)
-  assert.equal(shouldShowNodeLabel(0.08, { id: 'hub', type: 'moc' }, null), true)
+test('shouldShowNodeLabel always shows MOC and local-center nodes', () => {
+  assert.equal(shouldShowNodeLabel(0.001, { id: 'hub', type: 'moc' }, null), true)
   assert.equal(shouldShowNodeLabel(0.001, { id: 'center', localDepth: 0 }, null), true)
 })
 
@@ -108,6 +111,7 @@ test('buildLocalGraphData returns a depth-limited neighborhood', () => {
   assert.deepEqual(oneHop.nodes.map((n) => n.id).sort(), ['a', 'b'])
   assert.equal(oneHop.nodes.find((n) => n.id === 'a').localDepth, 0)
   assert.equal(oneHop.nodes.find((n) => n.id === 'b').localDepth, 1)
+  assert.equal(oneHop.nodes.every((n) => n.showLabelAlways), true)
   assert.deepEqual(oneHop.links.map((e) => `${e.source}-${e.target}`), ['a-b'])
 
   const all = buildLocalGraphData(graph, 'a', -1)
