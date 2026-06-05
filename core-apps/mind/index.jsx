@@ -186,6 +186,7 @@ export default function App({ appId, token }) {
   const [showHealth, setShowHealth] = useState(false);
   const [localDepth, setLocalDepth] = useState(1);
   const [mobileGraphHeight, setMobileGraphHeight] = useState(null);
+  const [labelTick, setLabelTick] = useState(0);
   const [FG, setFG] = useState(null); // ForceGraph2D component
   const [marked, setMarked] = useState(null);
   const [purify, setPurify] = useState(null); // DOMPurify — audited HTML sanitizer
@@ -342,6 +343,16 @@ export default function App({ appId, token }) {
     [graph, selected, localDepth],
   );
 
+  const graphLabels = useMemo(
+    () => buildScreenLabels(fgRef.current, fgData.nodes, dims, labelTick),
+    [fgData.nodes, dims, labelTick],
+  );
+
+  const localGraphLabels = useMemo(
+    () => buildScreenLabels(localFgRef.current, localGraphData.nodes, localDims, labelTick),
+    [localGraphData.nodes, localDims, labelTick],
+  );
+
   useEffect(() => {
     if (!selected || !localFgRef.current || localDims.w <= 0 || localDims.h <= 0) return;
     const t = setTimeout(() => {
@@ -349,6 +360,12 @@ export default function App({ appId, token }) {
     }, 80);
     return () => clearTimeout(t);
   }, [selected, localDepth, localDims]);
+
+  useEffect(() => {
+    if (status !== 'ready' || !FG) return;
+    const id = setInterval(() => setLabelTick((v) => (v + 1) % 100000), 250);
+    return () => clearInterval(id);
+  }, [status, FG]);
 
   // --- Smooth hover focus: a 0..1 value per node that eases toward 1 for the
   //     hovered node + its neighbors and toward 0 for everything else, so the
@@ -841,6 +858,8 @@ export default function App({ appId, token }) {
                 ))}
               </div>
             )}
+
+            <GraphLabelLayer labels={graphLabels} />
           </div>
         )}
 
@@ -1016,6 +1035,7 @@ export default function App({ appId, token }) {
                       {FG === null ? 'Graph view is offline.' : 'Laying out local graph…'}
                     </div>
                   )}
+                  <GraphLabelLayer labels={localGraphLabels} />
                 </div>
               </section>
             </div>
@@ -1048,6 +1068,22 @@ function Th({ label, subLabel, active, dir, onClick, align }) {
       </span>
       {subLabel && <span style={S.thSub}>{subLabel}</span>}
     </th>
+  );
+}
+
+function GraphLabelLayer({ labels }) {
+  if (!labels.length) return null;
+  return (
+    <div style={S.graphLabelLayer}>
+      {labels.map((label) => (
+        <span
+          key={label.id}
+          style={{ ...S.graphLabel, left: label.x, top: label.y }}
+        >
+          {label.title}
+        </span>
+      ))}
+    </div>
   );
 }
 
@@ -1136,6 +1172,19 @@ function escapeMarkdownLinkText(s) {
 
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
+}
+
+function buildScreenLabels(fg, nodes = [], dims = {}, _tick = 0) {
+  if (!fg || !dims.w || !dims.h || !Array.isArray(nodes)) return [];
+  return nodes
+    .map((n) => {
+      if (!Number.isFinite(n.x) || !Number.isFinite(n.y)) return null;
+      const p = fg.graph2ScreenCoords?.(n.x, n.y);
+      if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return null;
+      if (p.x < -80 || p.y < -24 || p.x > dims.w + 80 || p.y > dims.h + 80) return null;
+      return { id: n.id, title: n.title || n.id, x: p.x, y: p.y + nodeRadius(n) + 5 };
+    })
+    .filter(Boolean);
 }
 
 function roundedRect(ctx, x, y, w, h, r) {
@@ -1285,6 +1334,18 @@ const S = {
     border: '1px solid var(--border)', borderRadius: 999, padding: '4px 12px',
     pointerEvents: 'none', opacity: 0.92, whiteSpace: 'nowrap', maxWidth: '92%',
     overflow: 'hidden', textOverflow: 'ellipsis',
+  },
+  graphLabelLayer: {
+    position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 2, overflow: 'hidden',
+  },
+  graphLabel: {
+    position: 'absolute', transform: 'translate(-50%, 0)', maxWidth: 160,
+    padding: '2px 6px', borderRadius: 7,
+    background: 'color-mix(in srgb, var(--bg) 82%, transparent)',
+    border: '1px solid color-mix(in srgb, var(--text) 16%, transparent)',
+    color: 'var(--text)', fontSize: 11, fontWeight: 650,
+    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+    textShadow: '0 1px 2px rgba(0,0,0,0.55)',
   },
 
   legend: {
