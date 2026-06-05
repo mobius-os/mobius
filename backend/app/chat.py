@@ -1577,6 +1577,46 @@ def _build_app_context(
   return "\n".join(lines), env
 
 
+def _chat_settings_dict(chat_row) -> dict | None:
+  """Return a plain dict from Chat.agent_settings_json."""
+  if chat_row is None or not chat_row.agent_settings_json:
+    return None
+  raw = chat_row.agent_settings_json
+  if isinstance(raw, dict):
+    return dict(raw)
+  if isinstance(raw, str):
+    try:
+      parsed = json.loads(raw)
+      return dict(parsed) if isinstance(parsed, dict) else None
+    except (json.JSONDecodeError, TypeError):
+      return None
+  return None
+
+
+def _custom_system_prompt(chat_overrides: dict | None) -> str | None:
+  """Per-app/per-chat system prompt stored in agent_settings_json."""
+  if not isinstance(chat_overrides, dict):
+    return None
+  value = chat_overrides.get("system_prompt")
+  if not isinstance(value, str):
+    return None
+  value = value.strip()
+  return value or None
+
+
+def _latest_compaction_brief(chat_row) -> str | None:
+  """Most recent portable compaction block, if the chat has one."""
+  if chat_row is None:
+    return None
+  for msg in reversed(list(chat_row.messages or [])):
+    if not isinstance(msg, dict) or msg.get("kind") != "compaction":
+      continue
+    content = msg.get("content")
+    if isinstance(content, str) and content.strip():
+      return content.strip()
+  return None
+
+
 def _is_cli_slash_command(text: str) -> bool:
   """True when `text` starts with a supported Claude CLI slash command.
 
@@ -1774,6 +1814,18 @@ async def _run_chat_impl(
   app_context_block, app_context_env = _build_app_context(
     db, chat_id, settings.data_dir,
   )
+  chat_row = None
+  chat_overrides: dict | None = None
+  if chat_id:
+    try:
+      chat_row = (
+        db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+      )
+      chat_overrides = _chat_settings_dict(chat_row)
+    except Exception:
+      log.exception(
+        "failed to load per-chat agent_settings chat_id=%s", chat_id,
+      )
 
   # Durable run marker: the turn's StartTurn (initial send) or
   # PromotePending (continuation / stale-pending drain) writer-actor
@@ -1861,6 +1913,21 @@ async def _run_chat_impl(
       user_message = f"{user_message}\n\n{app_context_block}"
     else:
       user_message = f"{app_context_block}\n\n{user_message}"
+
+  if not session_id:
+    compaction_brief = _latest_compaction_brief(chat_row)
+    if compaction_brief:
+      block = (
+        "The <compacted_chat> block below is a portable summary of earlier "
+        "turns in this same chat. It was written so this conversation can "
+        "continue after a context compaction or provider switch. Treat it as "
+        "conversation history, not as a new user request.\n\n"
+        f"<compacted_chat>\n{compaction_brief}\n</compacted_chat>"
+      )
+      if is_slash_command:
+        user_message = f"{user_message}\n\n{block}"
+      else:
+        user_message = f"{block}\n\n{user_message}"
 
   # Per-turn time context (EVERY turn, not just the first) so the agent has a
   # clock + a sense of recency (how long since the user last wrote). Prepended
@@ -1961,28 +2028,6 @@ async def _run_chat_impl(
   # PATCH /api/chats/{id}; the file remains the fallback every chat
   # starts from. Computed once here and threaded into the SDK runner
   # for each provider.
-  chat_overrides: dict | None = None
-  chat_row = None
-  if chat_id:
-    try:
-      chat_row = (
-        db.query(models.Chat).filter(models.Chat.id == chat_id).first()
-      )
-      if chat_row and chat_row.agent_settings_json:
-        if isinstance(chat_row.agent_settings_json, dict):
-          chat_overrides = chat_row.agent_settings_json
-        elif isinstance(chat_row.agent_settings_json, str):
-          # SQLite JSON columns occasionally surface as raw strings
-          # depending on driver version. Decode defensively so a
-          # str value doesn't silently disable overrides.
-          try:
-            chat_overrides = json.loads(chat_row.agent_settings_json)
-          except (json.JSONDecodeError, TypeError):
-            chat_overrides = None
-    except Exception:
-      log.exception(
-        "failed to load per-chat agent_settings chat_id=%s", chat_id,
-      )
   agent_settings = effective_agent_settings(
     settings.data_dir, chat_overrides, provider=provider_id,
   )
@@ -2033,7 +2078,7 @@ async def _run_chat_impl(
     from app.providers import resolve_agent
     selected_agent = resolve_agent(settings.data_dir, chat_row.agent_id)
   runner_agent_settings = agent_settings
-  agent_system_prompt: str | None = None
+  agent_system_prompt: str | None = _custom_system_prompt(chat_overrides)
   if selected_agent is not None:
     runner_agent_settings = dict(agent_settings)
     if selected_agent.get("model"):
@@ -2045,6 +2090,7 @@ async def _run_chat_impl(
     # skill text the non-agent path uses.
     if selected_agent.get("system_prompt"):
       agent_system_prompt = selected_agent["system_prompt"]
+  system_prompt = agent_system_prompt or _read_skill_text()
 
   # Pre-flight: check that provider credentials exist before invoking
   # the SDK runner. Without this, the SDK fails with a cryptic error.
@@ -2090,6 +2136,7 @@ async def _run_chat_impl(
         pending_questions=questions._pending,
         db=db,
         agent_settings=runner_agent_settings,
+        system_prompt=system_prompt,
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
@@ -2148,7 +2195,7 @@ async def _run_chat_impl(
         base_env=sdk_env,
         cwd=cwd,
         chat_id=chat_id,
-        skill_text=agent_system_prompt or _read_skill_text(),
+        skill_text=system_prompt,
         bc=sink,
         pending_questions=questions._pending,
         db=db,
