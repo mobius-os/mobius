@@ -89,12 +89,11 @@ export function shouldShowNodeLabel(globalScale, node = {}, hoverId = null) {
   const isImportant = (Number(node.importance) || 0) >= 7;
   const isMoc = node.type === 'moc';
   const isLocalCenter = node.localDepth === 0;
+  if (isHover || isLocalCenter) return true;
   return scale >= 0.95
-    || (isHover && scale >= 0.15)
-    || (isLocalCenter && scale >= 0.15)
-    || (isMoc && scale >= 0.25)
-    || (isImportant && scale >= 0.45)
-    || (hasMocList && scale >= 0.55);
+    || (isMoc && scale >= 0.08)
+    || (isImportant && scale >= 0.18)
+    || (hasMocList && scale >= 0.24);
 }
 
 export function buildTitleMap(nodes = []) {
