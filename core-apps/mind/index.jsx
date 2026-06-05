@@ -8,16 +8,18 @@
  *     problem: { severity:'warn'|'error', kind, detail }
  *   GET /api/storage/shared/memory/<node.path>  → raw markdown (frontmatter + body)
  *
- * Everything else here is presentation. The graph library
- * (react-force-graph-2d) and the markdown renderer (marked + DOMPurify) load
- * from esm.sh with react externalized so the single bundled React instance is
- * shared. All canvas drawing is done in CSS px (divided by globalScale) so it
- * stays crisp on HiDPI; react-force-graph handles the dpr backing store.
+ * Everything else here is presentation. The graph renderer intentionally follows
+ * Quartz's durable shape: d3-force for layout and PixiJS for links, nodes, and
+ * labels in one transformed scene. D3/Pixi load the same way Quartz does:
+ * pinned global scripts. Markdown rendering still lazy-loads marked + DOMPurify
+ * from esm.sh.
  */
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 
 const GRAPH_URL = '/api/storage/shared/memory/graph.json';
 const NOTE_BASE = '/api/storage/shared/memory/';
+const D3_URL = 'https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js';
+const PIXI_URL = 'https://cdn.jsdelivr.net/npm/pixi.js@8.19.0/dist/pixi.min.js';
 const MAX_LOCAL_DEPTH = 4;
 const WIKILINK_RE = /\[\[\s*([^\]|#]+?)\s*(?:#[^\]|]*)?(?:\|\s*([^\]]+?)\s*)?\]\]/g;
 
@@ -186,19 +188,16 @@ export default function App({ appId, token }) {
   const [showHealth, setShowHealth] = useState(false);
   const [localDepth, setLocalDepth] = useState(1);
   const [mobileGraphHeight, setMobileGraphHeight] = useState(null);
-  const [labelTick, setLabelTick] = useState(0);
-  const [FG, setFG] = useState(null); // ForceGraph2D component
+  const [graphRuntime, setGraphRuntime] = useState(undefined); // undefined loading | null failed | { d3, PIXI }
   const [marked, setMarked] = useState(null);
   const [purify, setPurify] = useState(null); // DOMPurify — audited HTML sanitizer
   const panelNavRef = useRef(null);
 
   const wrapRef = useRef(null);
-  const fgRef = useRef(null);
   const splitRef = useRef(null);
   const splitDragRef = useRef(null);
   const localPaneRef = useRef(null);
   const localWrapRef = useRef(null);
-  const localFgRef = useRef(null);
   const [dims, setDims] = useState({ w: 0, h: 0 });
   const [localDims, setLocalDims] = useState({ w: 0, h: 0 });
 
@@ -207,18 +206,22 @@ export default function App({ appId, token }) {
     [token],
   );
 
-  // --- Load the force-graph component (dynamic import, react externalized). ---
+  // --- Load the Quartz-style graph renderer runtime. ---
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
-        const mod = await import(
-          'https://esm.sh/react-force-graph-2d@1.27.1?external=react,react-dom'
-        );
-        if (alive) setFG(() => mod.default);
+        await Promise.all([
+          loadScriptOnce(D3_URL),
+          loadScriptOnce(PIXI_URL),
+        ]);
+        const d3 = window.d3;
+        const PIXI = window.PIXI;
+        if (!d3 || !PIXI) throw new Error('Graph runtime scripts loaded without d3/PIXI globals.');
+        if (alive) setGraphRuntime({ d3, PIXI });
       } catch (e) {
-        // Graph view degrades to the list view if the lib can't load.
-        if (alive) setFG(null);
+        // Graph view degrades to the list view if the runtime can't load.
+        if (alive) setGraphRuntime(null);
       }
     })();
     return () => { alive = false; };
@@ -252,7 +255,7 @@ export default function App({ appId, token }) {
     return () => { alive = false; };
   }, [authHeaders]);
 
-  // --- Measure the canvas container in CSS pixels (force-graph handles dpr). ---
+  // --- Measure graph containers in CSS pixels; Pixi handles the DPR backing store. ---
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
@@ -302,24 +305,8 @@ export default function App({ appId, token }) {
   // --- Node radius from importance + usage. ---
   const radiusForNode = useCallback((n) => nodeRadius(n), []);
 
-  // --- Neighbor sets for hover dimming. ---
-  const neighbors = useMemo(() => {
-    const map = new Map();
-    if (!graph) return map;
-    const add = (a, b) => {
-      if (!map.has(a)) map.set(a, new Set());
-      map.get(a).add(b);
-    };
-    for (const e of graph.edges) {
-      const s = typeof e.source === 'object' ? e.source.id : e.source;
-      const t = typeof e.target === 'object' ? e.target.id : e.target;
-      add(s, t); add(t, s);
-    }
-    return map;
-  }, [graph]);
-
-  // --- react-force-graph mutates node objects (x/y/vx/vy) in place, so it
-  //     needs its own object references. Build once per graph. ---
+  // --- D3 mutates node objects (x/y/vx/vy) in place, so the renderer gets
+  //     its own object references. Build once per graph. ---
   const fgData = useMemo(() => {
     if (!graph) return { nodes: [], links: [] };
     const showLabelAlways = graph.nodes.length <= 120;
@@ -343,89 +330,6 @@ export default function App({ appId, token }) {
     () => buildLocalGraphData(graph, selected?.id, localDepth),
     [graph, selected, localDepth],
   );
-
-  const graphLabels = useMemo(
-    () => buildScreenLabels(fgRef.current, fgData.nodes, dims, {
-      mode: 'global',
-      hoverId,
-      selectedId: selected?.id,
-    }, labelTick),
-    [fgData.nodes, dims, hoverId, selected?.id, labelTick],
-  );
-
-  const localGraphLabels = useMemo(
-    () => buildScreenLabels(localFgRef.current, localGraphData.nodes, localDims, {
-      mode: 'local',
-      hoverId,
-      selectedId: selected?.id,
-    }, labelTick),
-    [localGraphData.nodes, localDims, hoverId, selected?.id, labelTick],
-  );
-
-  useEffect(() => {
-    if (!selected || !localFgRef.current || localDims.w <= 0 || localDims.h <= 0) return;
-    const t = setTimeout(() => {
-      localFgRef.current?.zoomToFit?.(260, 26);
-    }, 80);
-    return () => clearTimeout(t);
-  }, [selected, localDepth, localDims]);
-
-  useEffect(() => {
-    if (status !== 'ready' || !FG) return;
-    let raf = 0;
-    let last = 0;
-    const tick = (now) => {
-      if (now - last > 16) {
-        last = now;
-        setLabelTick((v) => (v + 1) % 100000);
-      }
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [status, FG]);
-
-  // --- Smooth hover focus: a 0..1 value per node that eases toward 1 for the
-  //     hovered node + its neighbors and toward 0 for everything else, so the
-  //     dimming fades instead of snapping (the Obsidian feel). Animated via
-  //     rAF; we keep the values on a ref the painter reads each frame and ask
-  //     the canvas to repaint while anything is still in motion. ---
-  const focusRef = useRef(new Map()); // nodeId -> current 0..1
-  const rafRef = useRef(0);
-  useEffect(() => {
-    const targets = (id) => {
-      if (!hoverId) return null; // null => everything fully lit
-      if (id === hoverId) return 1;
-      return neighbors.get(hoverId)?.has(id) ? 1 : 0;
-    };
-    let last = performance.now();
-    const tick = (now) => {
-      const dt = Math.min(48, now - last); last = now;
-      const k = 1 - Math.pow(0.0015, dt / 1000); // ~time-constant ease
-      let moving = false;
-      const cur = focusRef.current;
-      if (graph) for (const n of graph.nodes) {
-        const want = targets(n.id);
-        const goal = want == null ? 1 : want;
-        const v0 = cur.has(n.id) ? cur.get(n.id) : 1;
-        const v1 = v0 + (goal - v0) * k;
-        cur.set(n.id, v1);
-        if (Math.abs(goal - v1) > 0.004) moving = true;
-      }
-      const fg = fgRef.current;
-      if (fg && fg.refresh) fg.refresh(); // force a canvas redraw this frame
-      if (moving) rafRef.current = requestAnimationFrame(tick);
-      else rafRef.current = 0;
-    };
-    cancelAnimationFrame(rafRef.current);
-    rafRef.current = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafRef.current);
-  }, [hoverId, neighbors, graph]);
-
-  const focusOf = useCallback((id) => {
-    const v = focusRef.current.get(id);
-    return v == null ? 1 : v;
-  }, []);
 
   // --- Load a note body when a node is selected. ---
   useEffect(() => {
@@ -576,136 +480,6 @@ export default function App({ appId, token }) {
     try { panelNavRef.current?.close?.(); } catch {}
   }, []);
 
-  // --- Canvas link painter: a soft curve, brighter when it touches the
-  //     hovered focus. Drawn before nodes (react-force-graph paints links
-  //     under nodes by default; we override per-link color for the focus glow). ---
-  const linkColor = useCallback((link) => {
-    const s = typeof link.source === 'object' ? link.source.id : link.source;
-    const t = typeof link.target === 'object' ? link.target.id : link.target;
-    // A link is "in focus" when both endpoints are lit. Use the min of the two
-    // focus values so a link to a dimmed node also dims.
-    const f = Math.min(focusOf(s), focusOf(t));
-    const isMoc = link.kind === 'moc';
-    const baseA = isMoc ? 0.5 : 0.32;
-    const dimA = 0.05;
-    const a = dimA + (baseA - dimA) * f;
-    return isMoc
-      ? cssVarA('--accent', '#a78bfa', a)
-      : cssVarA('--text', '#e5e5e5', a * 0.9);
-  }, [focusOf]);
-
-  const linkWidth = useCallback((link) => {
-    const s = typeof link.source === 'object' ? link.source.id : link.source;
-    const t = typeof link.target === 'object' ? link.target.id : link.target;
-    const f = Math.min(focusOf(s), focusOf(t));
-    const base = link.kind === 'moc' ? 1.3 : 0.7;
-    return base + f * (link.kind === 'moc' ? 1.1 : 0.6);
-  }, [focusOf]);
-
-  // --- Canvas node painter: glow halo + disc + crisp label, all in CSS px. ---
-  const paintNode = useCallback((node, ctx, globalScale) => {
-    const safeScale = Number.isFinite(Number(globalScale)) && Number(globalScale) > 0
-      ? Number(globalScale)
-      : 1;
-    const r = radiusForNode(node);
-    const f = focusOf(node.id);        // 0..1, eased
-    const isHover = hoverId === node.id;
-    const isMoc = node.type === 'moc';
-    const col = colorForNode(node);
-    const alpha = 0.16 + 0.84 * f;     // dimmed nodes never vanish entirely
-
-    // Outer glow — the Obsidian halo. Scales with focus so the hovered node
-    // and its neighborhood bloom. Drawn as a radial gradient in CSS px.
-    const glowR = r * (isHover ? 4.2 : 2.6);
-    const glowStrength = (isMoc ? 0.5 : 0.34) * (0.25 + 0.75 * f);
-    const grad = ctx.createRadialGradient(node.x, node.y, r * 0.6, node.x, node.y, glowR);
-    grad.addColorStop(0, withAlpha(col, glowStrength));
-    grad.addColorStop(1, withAlpha(col, 0));
-    ctx.beginPath();
-    ctx.arc(node.x, node.y, glowR, 0, 2 * Math.PI, false);
-    ctx.fillStyle = grad;
-    ctx.fill();
-
-    // Core disc.
-    ctx.globalAlpha = alpha;
-    ctx.beginPath();
-    ctx.arc(node.x, node.y, r, 0, 2 * Math.PI, false);
-    ctx.fillStyle = col;
-    ctx.fill();
-
-    // A subtle inner sheen so discs read as spheres, not flat dots.
-    const sheen = ctx.createRadialGradient(
-      node.x - r * 0.35, node.y - r * 0.4, r * 0.1,
-      node.x, node.y, r,
-    );
-    sheen.addColorStop(0, 'rgba(255,255,255,0.32)');
-    sheen.addColorStop(0.6, 'rgba(255,255,255,0)');
-    ctx.beginPath();
-    ctx.arc(node.x, node.y, r, 0, 2 * Math.PI, false);
-    ctx.fillStyle = sheen;
-    ctx.fill();
-
-    // Ring — every node gets a faint hairline so it sits cleanly on the bg;
-    // MOC nodes + the hovered node get a bright accent ring.
-    ctx.lineWidth = (isHover || isMoc ? 1.6 : 1) / safeScale;
-    ctx.strokeStyle = isHover
-      ? cssVar('--accent', '#a78bfa')
-      : isMoc
-        ? withAlpha(cssVar('--text', '#e5e5e5'), 0.55 * alpha)
-        : withAlpha(col, 0.5 * alpha);
-    ctx.stroke();
-
-    // Label fallback for renderers where canvas text is visible. The DOM label
-    // layer below is the authoritative Obsidian-style label pass.
-    const showLabel = isHover || isMoc || node.localDepth === 0 || (
-      safeScale >= 1.6
-      && ((Number(node.importance) || 0) >= 7 || (Array.isArray(node.mocs) && node.mocs.length > 0))
-    );
-    if (showLabel) {
-      const label = node.title || node.id;
-      const labelPx = clamp((isMoc ? 12.5 : 11.5) * Math.sqrt(safeScale), 10.5, 16);
-      const fontSize = labelPx / safeScale;
-      const padX = 6 / safeScale;
-      const padY = 3 / safeScale;
-      const gap = 4 / safeScale;
-      const labelY = node.y + r + gap;
-      const labelAlpha = (isHover || isMoc || node.showLabelAlways) ? 1 : 0.55 + 0.45 * f;
-      const pillAlpha = (isHover || node.showLabelAlways ? 0.86 : 0.68) * (0.45 + 0.55 * f);
-      const fontFamily = 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-
-      ctx.save();
-      ctx.font = `${isMoc ? 700 : 600} ${fontSize}px ${fontFamily}`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.globalAlpha = labelAlpha;
-
-      const width = ctx.measureText(label).width + padX * 2;
-      const height = fontSize + padY * 2;
-      const x = node.x - width / 2;
-      const y = labelY;
-      ctx.fillStyle = withAlpha(cssVar('--bg', '#0d0d0d'), pillAlpha);
-      roundedRect(ctx, x, y, width, height, 5 / safeScale);
-      ctx.fill();
-      ctx.lineWidth = 0.75 / safeScale;
-      ctx.strokeStyle = withAlpha(cssVar('--text', '#e5e5e5'), 0.22 * (isHover || node.showLabelAlways ? 1 : f));
-      ctx.stroke();
-
-      ctx.fillStyle = cssVar('--text', '#e5e5e5');
-      ctx.fillText(label, node.x, y + height / 2);
-      ctx.restore();
-    }
-    ctx.globalAlpha = 1;
-  }, [colorForNode, radiusForNode, hoverId, focusOf]);
-
-  // Larger pointer hit-area than the dot so small nodes are clickable.
-  const paintPointer = useCallback((node, color, ctx) => {
-    const r = radiusForNode(node);
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.arc(node.x, node.y, r + 4, 0, 2 * Math.PI, false);
-    ctx.fill();
-  }, [radiusForNode]);
-
   // --- List view: sorted rows with plain usage/size metadata. ---
   const sortedNodes = useMemo(() => {
     if (!graph) return [];
@@ -843,41 +617,26 @@ export default function App({ appId, token }) {
 
         {status === 'ready' && view === 'graph' && (
           <div ref={wrapRef} style={S.graphWrap} className="mg-graph">
-            {FG && dims.w > 0 ? (
-              <FG
-                ref={fgRef}
+            {graphRuntime && dims.w > 0 && dims.h > 0 ? (
+              <MindGraphRenderer
+                runtime={graphRuntime}
                 graphData={fgData}
                 width={dims.w}
                 height={dims.h}
-                backgroundColor="rgba(0,0,0,0)"
-                nodeRelSize={1}
-                nodeVal={(n) => radiusForNode(n)}
-                nodeLabel={(n) => n.title || n.id}
-                nodeCanvasObject={paintNode}
-                nodeCanvasObjectMode="replace"
-                nodePointerAreaPaint={paintPointer}
-                linkColor={linkColor}
-                linkWidth={linkWidth}
-                linkCurvature={0.08}
-                linkDirectionalParticles={(link) => (link.kind === 'moc' ? 1 : 0)}
-                linkDirectionalParticleSpeed={0.0025}
-                linkDirectionalParticleWidth={(link) => (link.kind === 'moc' ? 1.35 : 0.9)}
-                linkDirectionalParticleColor={(link) => linkColor(link)}
-                autoPauseRedraw={false}
-                cooldownTicks={Infinity}
-                cooldownTime={Infinity}
-                d3AlphaTarget={0.015}
+                mode="global"
+                selectedId={selected?.id}
+                hoverId={hoverId}
+                colorForNode={colorForNode}
+                radiusForNode={radiusForNode}
                 onNodeClick={(n) => openPanel(n, { resetLocalDepth: true })}
                 onNodeHover={(n) => setHoverId(n ? n.id : null)}
                 onBackgroundClick={closePanel}
-                d3VelocityDecay={0.28}
-                warmupTicks={28}
               />
             ) : (
               <div style={S.center}>
                 <div className="mg-orbit"><span /><span /><span /></div>
                 <div style={S.centerText}>
-                  {FG === null ? 'Graph view is offline — try List.' : 'Laying out the graph…'}
+                  {graphRuntime === null ? 'Graph view is offline — try List.' : 'Laying out the graph…'}
                 </div>
               </div>
             )}
@@ -909,8 +668,6 @@ export default function App({ appId, token }) {
                 ))}
               </div>
             )}
-
-            <GraphLabelLayer labels={graphLabels} />
           </div>
         )}
 
@@ -1050,37 +807,25 @@ export default function App({ appId, token }) {
                   </div>
                 </div>
                 <div ref={localWrapRef} style={S.localGraphWrap} className="mg-local-graph">
-                  {FG && localDims.w > 0 && localDims.h > 0 && localGraphData.nodes.length > 0 ? (
-                    <FG
-                      ref={localFgRef}
+                  {graphRuntime && localDims.w > 0 && localDims.h > 0 && localGraphData.nodes.length > 0 ? (
+                    <MindGraphRenderer
+                      runtime={graphRuntime}
                       graphData={localGraphData}
                       width={localDims.w}
                       height={localDims.h}
-                      backgroundColor="rgba(0,0,0,0)"
-                      nodeRelSize={1}
-                      nodeVal={(n) => radiusForNode(n)}
-                      nodeLabel={(n) => n.title || n.id}
-                      nodeCanvasObject={paintNode}
-                      nodeCanvasObjectMode="replace"
-                      nodePointerAreaPaint={paintPointer}
-                      linkColor={linkColor}
-                      linkWidth={linkWidth}
-                      linkCurvature={0.06}
-                      autoPauseRedraw={false}
-                      cooldownTicks={Infinity}
-                      cooldownTime={Infinity}
-                      d3AlphaTarget={0.02}
-                      d3VelocityDecay={0.3}
-                      warmupTicks={18}
+                      mode="local"
+                      selectedId={selected?.id}
+                      hoverId={hoverId}
+                      colorForNode={colorForNode}
+                      radiusForNode={radiusForNode}
                       onNodeClick={(n) => openPanel(nodesById.get(n.id) || n)}
                       onNodeHover={(n) => setHoverId(n ? n.id : null)}
                     />
                   ) : (
                     <div style={S.localEmpty}>
-                      {FG === null ? 'Graph view is offline.' : 'Laying out local graph…'}
+                      {graphRuntime === null ? 'Graph view is offline.' : 'Laying out local graph…'}
                     </div>
                   )}
-                  <GraphLabelLayer labels={localGraphLabels} />
                 </div>
               </section>
             </div>
@@ -1116,24 +861,509 @@ function Th({ label, subLabel, active, dir, onClick, align }) {
   );
 }
 
-function GraphLabelLayer({ labels }) {
-  if (!labels.length) return null;
+function MindGraphRenderer({
+  runtime,
+  graphData,
+  width,
+  height,
+  mode,
+  selectedId,
+  hoverId,
+  colorForNode,
+  radiusForNode,
+  onNodeClick,
+  onNodeHover,
+  onBackgroundClick,
+}) {
+  const hostRef = useRef(null);
+  const latestRef = useRef({});
+
+  useEffect(() => {
+    latestRef.current = {
+      selectedId,
+      hoverId,
+      colorForNode,
+      radiusForNode,
+      onNodeClick,
+      onNodeHover,
+      onBackgroundClick,
+    };
+  }, [selectedId, hoverId, colorForNode, radiusForNode, onNodeClick, onNodeHover, onBackgroundClick]);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host || !runtime || width <= 0 || height <= 0) return undefined;
+
+    let disposed = false;
+    let cleanup = () => {};
+    host.replaceChildren();
+
+    createMindGraphScene({
+      host,
+      runtime,
+      graphData,
+      width,
+      height,
+      mode,
+      latestRef,
+      isDisposed: () => disposed,
+    }).then((nextCleanup) => {
+      if (disposed) {
+        try { nextCleanup?.(); } catch {}
+      } else {
+        cleanup = nextCleanup || cleanup;
+      }
+    }).catch((err) => {
+      console.error('[Mind] Graph renderer failed', err);
+      if (!disposed) host.textContent = 'Graph could not render.';
+    });
+
+    return () => {
+      disposed = true;
+      try { cleanup(); } catch {}
+      host.replaceChildren();
+    };
+  }, [runtime, graphData, width, height, mode]);
+
   return (
-    <div style={S.graphLabelLayer}>
-      {labels.map((label) => (
-        <span
-          key={label.id}
-          style={{
-            ...S.graphLabel,
-            ...(label.strong ? S.graphLabelStrong : S.graphLabelSoft),
-            transform: `translate3d(${label.x}px, ${label.y}px, 0) translate(-50%, 0)`,
-          }}
-        >
-          {label.title}
-        </span>
-      ))}
-    </div>
+    <div
+      ref={hostRef}
+      style={S.pixiGraph}
+      className="mg-pixi-graph"
+      aria-label={mode === 'local' ? 'Local note graph' : 'Mind graph'}
+    />
   );
+}
+
+async function createMindGraphScene({
+  host,
+  runtime,
+  graphData,
+  width,
+  height,
+  mode,
+  latestRef,
+  isDisposed,
+}) {
+  const { d3, PIXI } = runtime;
+  const graph = normalizeRendererGraphData(graphData, width, height);
+  const app = new PIXI.Application();
+  await app.init({
+    width,
+    height,
+    antialias: true,
+    backgroundAlpha: 0,
+    autoDensity: true,
+    resolution: window.devicePixelRatio || 1,
+  });
+  if (isDisposed()) {
+    try { app.destroy(true); } catch {}
+    return () => {};
+  }
+
+  const canvas = app.canvas || app.view;
+  canvas.style.width = '100%';
+  canvas.style.height = '100%';
+  canvas.style.display = 'block';
+  canvas.style.touchAction = 'none';
+  host.appendChild(canvas);
+
+  const scene = new PIXI.Container();
+  const linkLayer = new PIXI.Graphics();
+  const nodeLayer = new PIXI.Container();
+  const labelLayer = new PIXI.Container();
+  scene.addChild(linkLayer);
+  scene.addChild(nodeLayer);
+  scene.addChild(labelLayer);
+  app.stage.addChild(scene);
+
+  const neighbors = buildRendererNeighborMap(graph.links);
+  const labelRanks = buildLabelRankMap(graph.nodes);
+  const focus = new Map(graph.nodes.map((node) => [node.id, 1]));
+  let currentTransform = d3.zoomIdentity.translate(width / 2, height / 2).scale(mode === 'local' ? 0.95 : 0.82);
+  let lastFrame = performance.now();
+  let dragStart = null;
+  let activeDragNode = null;
+  let lastNodeClickAt = 0;
+  let lastHoverId = null;
+
+  const linkDistance = mode === 'local' ? 42 : 64;
+  const chargeStrength = mode === 'local' ? -120 : -185;
+  const centerForce = d3.forceCenter(0, 0);
+  if (typeof centerForce.strength === 'function') centerForce.strength(mode === 'local' ? 0.12 : 0.06);
+
+  const simulation = d3.forceSimulation(graph.nodes)
+    .force('charge', d3.forceManyBody().strength((node) => node.type === 'moc' ? chargeStrength * 1.25 : chargeStrength))
+    .force('link', d3.forceLink(graph.links).distance((link) => link.kind === 'moc' ? linkDistance * 0.82 : linkDistance).strength((link) => link.kind === 'moc' ? 0.42 : 0.22))
+    .force('center', centerForce)
+    .force('collide', d3.forceCollide().radius((node) => latestRadius(node) + 8).iterations(2))
+    .velocityDecay(mode === 'local' ? 0.34 : 0.3)
+    .stop();
+
+  simulation.tick(mode === 'local' ? 80 : 130);
+
+  const renderNodes = graph.nodes.map((node) => {
+    const gfx = new PIXI.Graphics();
+    const label = new PIXI.Container();
+    const labelBg = new PIXI.Graphics();
+    const labelText = new PIXI.Text({
+      text: truncateGraphLabel(node.title || node.id),
+      style: {
+        fontFamily: graphFontFamily(),
+        fontSize: node.type === 'moc' ? 12 : 11,
+        fontWeight: node.type === 'moc' ? '700' : '650',
+        fill: colorNumber(cssVar('--text', '#e5e5e5'), '#e5e5e5'),
+      },
+      resolution: (window.devicePixelRatio || 1) * 3,
+    });
+    labelText.anchor.set(0.5, 0);
+    label.addChild(labelBg);
+    label.addChild(labelText);
+    nodeLayer.addChild(gfx);
+    labelLayer.addChild(label);
+    return { node, gfx, label, labelBg, labelText };
+  });
+
+  function latestRadius(node) {
+    return latestRef.current.radiusForNode?.(node) ?? nodeRadius(node);
+  }
+
+  function latestColor(node) {
+    return latestRef.current.colorForNode?.(node) || cssVar('--muted', '#8a8a93');
+  }
+
+  function isFocused(id) {
+    const hovered = latestRef.current.hoverId;
+    if (!hovered) return true;
+    return id === hovered || neighbors.get(hovered)?.has(id);
+  }
+
+  function focusOf(id, dt) {
+    const goal = isFocused(id) ? 1 : 0.18;
+    const current = focus.get(id) ?? 1;
+    const k = 1 - Math.pow(0.002, Math.min(48, dt) / 1000);
+    const next = current + (goal - current) * k;
+    focus.set(id, next);
+    return next;
+  }
+
+  function applyTransform(transform) {
+    currentTransform = transform;
+    scene.position.set(transform.x, transform.y);
+    scene.scale.set(transform.k, transform.k);
+  }
+
+  function hitNode(screenX, screenY) {
+    const k = currentTransform.k || 1;
+    const x = (screenX - currentTransform.x) / k;
+    const y = (screenY - currentTransform.y) / k;
+    let best = null;
+    let bestDist = Infinity;
+    for (const node of graph.nodes) {
+      if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) continue;
+      const dx = x - node.x;
+      const dy = y - node.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const hitR = latestRadius(node) + 10 / k;
+      if (dist <= hitR && dist < bestDist) {
+        best = node;
+        bestDist = dist;
+      }
+    }
+    return best;
+  }
+
+  function draw() {
+    if (isDisposed()) return;
+    const now = performance.now();
+    const dt = now - lastFrame;
+    lastFrame = now;
+    const hover = latestRef.current.hoverId;
+    const selected = latestRef.current.selectedId;
+    const textColor = colorNumber(cssVar('--text', '#e5e5e5'), '#e5e5e5');
+    const bgColor = colorNumber(cssVar('--bg', '#0d0d0d'), '#0d0d0d');
+    const borderColor = colorNumber(cssVar('--text', '#e5e5e5'), '#e5e5e5');
+    const linkColor = colorNumber(cssVar('--text', '#e5e5e5'), '#e5e5e5');
+    const accentColor = colorNumber(cssVar('--accent', '#a78bfa'), '#a78bfa');
+    const scale = currentTransform.k || 1;
+
+    linkLayer.clear();
+    for (const link of graph.links) {
+      const s = link.source;
+      const t = link.target;
+      if (!Number.isFinite(s.x) || !Number.isFinite(s.y) || !Number.isFinite(t.x) || !Number.isFinite(t.y)) continue;
+      const f = Math.min(focus.get(s.id) ?? 1, focus.get(t.id) ?? 1);
+      const isMoc = link.kind === 'moc';
+      linkLayer.moveTo(s.x, s.y);
+      linkLayer.lineTo(t.x, t.y);
+      linkLayer.stroke({
+        width: isMoc ? 1.55 : 0.8,
+        color: isMoc ? accentColor : linkColor,
+        alpha: (isMoc ? 0.48 : 0.28) * (0.18 + 0.82 * f),
+      });
+    }
+
+    for (const item of renderNodes) {
+      const { node, gfx, label, labelBg, labelText } = item;
+      if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) continue;
+      const f = focusOf(node.id, dt);
+      const r = latestRadius(node);
+      const color = colorNumber(latestColor(node), '#8a8a93');
+      const isHover = hover === node.id;
+      const isSelected = selected === node.id;
+      const isHub = node.type === 'moc';
+      const glowR = r * (isHover || isSelected ? 3.8 : 2.45);
+
+      gfx.clear();
+      gfx.position.set(node.x, node.y);
+      gfx.circle(0, 0, glowR);
+      gfx.fill({ color, alpha: (isHub ? 0.18 : 0.12) * (0.35 + 0.65 * f) });
+      gfx.circle(0, 0, r);
+      gfx.fill({ color, alpha: 0.18 + 0.82 * f });
+      gfx.circle(-r * 0.25, -r * 0.3, Math.max(1.5, r * 0.28));
+      gfx.fill({ color: 0xffffff, alpha: 0.18 * f });
+      gfx.circle(0, 0, r);
+      gfx.stroke({
+        width: isHover || isSelected || isHub ? 1.4 / scale : 0.85 / scale,
+        color: isHover || isSelected ? accentColor : borderColor,
+        alpha: isHover || isSelected || isHub ? 0.62 : 0.24 * f,
+      });
+
+      const rank = labelRanks.get(node.id) ?? 9999;
+      const showLabel = shouldShowScreenLabel(node, scale, rank, { mode, hoverId: hover, selectedId: selected });
+      label.visible = showLabel;
+      if (!showLabel) continue;
+
+      const strong = isHub || isHover || isSelected || node.localDepth === 0;
+      label.alpha = strong ? 1 : 0.7 + 0.25 * f;
+      label.scale.set(1 / scale);
+      label.position.set(node.x, node.y + r + 5 / scale);
+      labelText.style.fill = textColor;
+      labelText.style.fontSize = strong ? 12 : 11;
+      labelText.style.fontWeight = strong ? '700' : '650';
+      labelText.position.set(0, 2);
+
+      const w = Math.ceil(labelText.width + 12);
+      const h = Math.ceil(labelText.height + 5);
+      labelBg.clear();
+      labelBg.roundRect(-w / 2, 0, w, h, 7);
+      labelBg.fill({ color: bgColor, alpha: strong ? 0.88 : 0.74 });
+      labelBg.roundRect(-w / 2, 0, w, h, 7);
+      labelBg.stroke({ width: 1, color: borderColor, alpha: strong ? 0.26 : 0.16 });
+    }
+  }
+
+  const selection = d3.select(canvas);
+  const zoom = d3.zoom()
+    .extent([[0, 0], [width, height]])
+    .scaleExtent([0.22, 4.6])
+    .filter((event) => {
+      if (event.type === 'mousedown') return !hitNode(event.offsetX, event.offsetY);
+      return true;
+    })
+    .on('zoom', (event) => {
+      applyTransform(event.transform);
+      draw();
+    });
+
+  selection.call(zoom);
+  const fit = computeRendererFitTransform(graph.nodes, width, height, {
+    padding: mode === 'local' ? 34 : 72,
+    minScale: mode === 'local' ? 0.72 : 0.42,
+    maxScale: mode === 'local' ? 1.45 : 1.08,
+  });
+  selection.call(zoom.transform, d3.zoomIdentity.translate(fit.x, fit.y).scale(fit.k));
+
+  const drag = d3.drag()
+    .container(canvas)
+    .subject((event) => hitNode(event.x, event.y))
+    .on('start', (event) => {
+      if (!event.subject) return;
+      activeDragNode = event.subject;
+      dragStart = { x: event.x, y: event.y, t: Date.now() };
+      event.sourceEvent?.stopPropagation?.();
+      simulation.alphaTarget(0.2).restart();
+      event.subject.fx = event.subject.x;
+      event.subject.fy = event.subject.y;
+      latestRef.current.onNodeHover?.(event.subject);
+    })
+    .on('drag', (event) => {
+      if (!event.subject) return;
+      const k = currentTransform.k || 1;
+      event.subject.fx = (event.x - currentTransform.x) / k;
+      event.subject.fy = (event.y - currentTransform.y) / k;
+    })
+    .on('end', (event) => {
+      if (!event.subject) return;
+      event.sourceEvent?.stopPropagation?.();
+      simulation.alphaTarget(0);
+      event.subject.fx = null;
+      event.subject.fy = null;
+      const moved = dragStart
+        ? Math.hypot(event.x - dragStart.x, event.y - dragStart.y)
+        : Infinity;
+      const quick = dragStart ? Date.now() - dragStart.t < 520 : false;
+      activeDragNode = null;
+      dragStart = null;
+      if (moved < 7 && quick) {
+        lastNodeClickAt = Date.now();
+        latestRef.current.onNodeClick?.(event.subject);
+      }
+    });
+
+  selection.call(drag);
+
+  const onPointerMove = (event) => {
+    if (activeDragNode) return;
+    const node = hitNode(event.offsetX, event.offsetY);
+    const nextId = node?.id || null;
+    if (nextId === lastHoverId) return;
+    lastHoverId = nextId;
+    latestRef.current.onNodeHover?.(node || null);
+  };
+  const onPointerLeave = () => {
+    lastHoverId = null;
+    latestRef.current.onNodeHover?.(null);
+  };
+  const onCanvasClick = (event) => {
+    if (Date.now() - lastNodeClickAt < 160) return;
+    if (hitNode(event.offsetX, event.offsetY)) return;
+    latestRef.current.onBackgroundClick?.();
+  };
+  canvas.addEventListener('pointermove', onPointerMove);
+  canvas.addEventListener('pointerleave', onPointerLeave);
+  canvas.addEventListener('click', onCanvasClick);
+
+  app.ticker.add(draw);
+  simulation.alpha(mode === 'local' ? 0.22 : 0.34).restart();
+  draw();
+
+  return () => {
+    canvas.removeEventListener('pointermove', onPointerMove);
+    canvas.removeEventListener('pointerleave', onPointerLeave);
+    canvas.removeEventListener('click', onCanvasClick);
+    try { selection.on('.zoom', null).on('.drag', null); } catch {}
+    simulation.stop();
+    app.ticker.remove(draw);
+    try { app.destroy(true); } catch {}
+  };
+}
+
+export function normalizeRendererGraphData(graphData = {}, width = 0, height = 0) {
+  const rawNodes = Array.isArray(graphData.nodes) ? graphData.nodes : [];
+  const rawLinks = Array.isArray(graphData.links) ? graphData.links : [];
+  const spread = Math.max(80, Math.min(Math.max(width, 1), Math.max(height, 1)) * 0.34);
+  const nodes = rawNodes
+    .filter((node) => node && node.id)
+    .map((node, index) => {
+      const seeded = seededGraphPosition(node.id, index, rawNodes.length || 1, spread);
+      return {
+        ...node,
+        x: Number.isFinite(node.x) ? node.x : seeded.x,
+        y: Number.isFinite(node.y) ? node.y : seeded.y,
+      };
+    });
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const links = rawLinks
+    .map((link) => {
+      const sourceId = typeof link.source === 'object' ? link.source.id : link.source;
+      const targetId = typeof link.target === 'object' ? link.target.id : link.target;
+      const source = byId.get(sourceId);
+      const target = byId.get(targetId);
+      if (!source || !target) return null;
+      return { ...link, source, target, sourceId, targetId };
+    })
+    .filter(Boolean);
+  return { nodes, links };
+}
+
+export function computeRendererFitTransform(nodes = [], width = 0, height = 0, opts = {}) {
+  const finiteNodes = (Array.isArray(nodes) ? nodes : [])
+    .filter((node) => Number.isFinite(node.x) && Number.isFinite(node.y));
+  const padding = Number.isFinite(opts.padding) ? opts.padding : 64;
+  const minScale = Number.isFinite(opts.minScale) ? opts.minScale : 0.35;
+  const maxScale = Number.isFinite(opts.maxScale) ? opts.maxScale : 1.15;
+  if (!finiteNodes.length || width <= 0 || height <= 0) {
+    return { x: width / 2, y: height / 2, k: 1 };
+  }
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const node of finiteNodes) {
+    minX = Math.min(minX, node.x);
+    minY = Math.min(minY, node.y);
+    maxX = Math.max(maxX, node.x);
+    maxY = Math.max(maxY, node.y);
+  }
+  const graphW = Math.max(1, maxX - minX);
+  const graphH = Math.max(1, maxY - minY);
+  const scale = clamp(
+    Math.min((width - padding * 2) / graphW, (height - padding * 2) / graphH),
+    minScale,
+    maxScale,
+  );
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  return {
+    x: width / 2 - cx * scale,
+    y: height / 2 - cy * scale,
+    k: scale,
+  };
+}
+
+function buildRendererNeighborMap(links = []) {
+  const map = new Map();
+  const add = (a, b) => {
+    if (!map.has(a)) map.set(a, new Set());
+    map.get(a).add(b);
+  };
+  for (const link of links) {
+    const s = link.source?.id || link.sourceId || link.source;
+    const t = link.target?.id || link.targetId || link.target;
+    if (!s || !t) continue;
+    add(s, t);
+    add(t, s);
+  }
+  return map;
+}
+
+function buildLabelRankMap(nodes = []) {
+  const ranked = [...nodes]
+    .map((node) => ({ node, score: labelScore(node) }))
+    .sort((a, b) => b.score - a.score);
+  return new Map(ranked.map(({ node }, index) => [node.id, index]));
+}
+
+function seededGraphPosition(id, index, total, spread) {
+  const h = hashStr(String(id));
+  const angle = ((h % 3600) / 3600) * Math.PI * 2;
+  const ring = 0.35 + ((hashStr(String(id) + ':r') % 1000) / 1000) * 0.65;
+  const fallbackAngle = total > 0 ? (index / total) * Math.PI * 2 : angle;
+  const a = Number.isFinite(angle) ? angle : fallbackAngle;
+  return {
+    x: Math.cos(a) * spread * ring,
+    y: Math.sin(a) * spread * ring,
+  };
+}
+
+function truncateGraphLabel(label) {
+  const text = String(label || '');
+  if (text.length <= 34) return text;
+  return text.slice(0, 31).trimEnd() + '...';
+}
+
+function graphFontFamily() {
+  try {
+    return cssVar('--font', 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif');
+  } catch {
+    return 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  }
+}
+
+function colorNumber(color, fallback) {
+  const rgb = parseRGB(color) || parseRGB(fallback) || [138, 138, 147];
+  return (rgb[0] << 16) + (rgb[1] << 8) + rgb[2];
 }
 
 // Importance 1..5 rendered as filled/empty pips — calmer than a raw number,
@@ -1201,6 +1431,32 @@ function ChatGlyph() {
 
 // ----------------------------------------------------------------- helpers ---
 
+function loadScriptOnce(src) {
+  if (typeof document === 'undefined') return Promise.reject(new Error('document is not available'));
+  const existing = document.querySelector(`script[src="${src}"]`);
+  if (existing?.dataset.loaded === 'true') return Promise.resolve();
+  if (existing?.dataset.loading === 'true') {
+    return new Promise((resolve, reject) => {
+      existing.addEventListener('load', resolve, { once: true });
+      existing.addEventListener('error', reject, { once: true });
+    });
+  }
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = src;
+    script.async = true;
+    script.crossOrigin = 'anonymous';
+    script.dataset.loading = 'true';
+    script.onload = () => {
+      script.dataset.loading = 'false';
+      script.dataset.loaded = 'true';
+      resolve();
+    };
+    script.onerror = () => reject(new Error('Failed to load ' + src));
+    document.head.appendChild(script);
+  });
+}
+
 function escapeHtml(s) {
   return String(s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -1212,31 +1468,6 @@ function escapeMarkdownLinkText(s) {
 
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
-}
-
-export function buildScreenLabels(fg, nodes = [], dims = {}, opts = {}, _tick = 0) {
-  if (!fg || !dims.w || !dims.h || !Array.isArray(nodes)) return [];
-  const scale = Number(fg.zoom?.()) || 1;
-  const ranked = [...nodes]
-    .map((node) => ({ node, score: labelScore(node) }))
-    .sort((a, b) => b.score - a.score)
-    .map((item, labelRank) => ({ ...item, labelRank }));
-  return ranked
-    .filter(({ node, labelRank }) => shouldShowScreenLabel(node, scale, labelRank, opts))
-    .map(({ node: n }) => {
-      if (!Number.isFinite(n.x) || !Number.isFinite(n.y)) return null;
-      const p = fg.graph2ScreenCoords?.(n.x, n.y);
-      if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return null;
-      if (p.x < -80 || p.y < -24 || p.x > dims.w + 80 || p.y > dims.h + 80) return null;
-      return {
-        id: n.id,
-        title: n.title || n.id,
-        x: p.x,
-        y: p.y + nodeRadius(n) + 5,
-        strong: n.type === 'moc' || n.id === opts.hoverId || n.id === opts.selectedId || n.localDepth === 0,
-      };
-    })
-    .filter(Boolean);
 }
 
 export function labelScore(node = {}) {
@@ -1268,21 +1499,6 @@ export function shouldShowScreenLabel(node = {}, scale = 1, labelRank = 0, opts 
   return labelRank < 60;
 }
 
-function roundedRect(ctx, x, y, w, h, r) {
-  const rr = Math.min(r, w / 2, h / 2);
-  ctx.beginPath();
-  ctx.moveTo(x + rr, y);
-  ctx.lineTo(x + w - rr, y);
-  ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
-  ctx.lineTo(x + w, y + h - rr);
-  ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
-  ctx.lineTo(x + rr, y + h);
-  ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
-  ctx.lineTo(x, y + rr);
-  ctx.quadraticCurveTo(x, y, x + rr, y);
-  ctx.closePath();
-}
-
 // Read a CSS custom property off :root (computed) with a fallback.
 // Re-read on each entry because the parent can swap the theme live
 // (moebius:frame-theme); caching the computed style would freeze the old
@@ -1309,18 +1525,6 @@ function parseRGB(c) {
   m = s.match(/rgba?\(\s*([0-9.]+)[, ]+([0-9.]+)[, ]+([0-9.]+)/);
   if (m) return [+m[1], +m[2], +m[3]];
   return null;
-}
-
-// Apply an alpha to any color string (hex or named/rgb resolved via parse).
-function withAlpha(c, alpha) {
-  const rgb = parseRGB(c);
-  if (!rgb) return c;
-  return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha})`;
-}
-
-// CSS var resolved to an rgba() with the given alpha (for canvas strokes).
-function cssVarA(name, fallback, alpha) {
-  return withAlpha(cssVar(name, fallback), alpha);
 }
 
 // ------------------------------------------------------------------- styles ---
@@ -1409,6 +1613,7 @@ const S = {
   },
 
   graphWrap: { position: 'absolute', inset: 0 },
+  pixiGraph: { position: 'absolute', inset: 0, overflow: 'hidden' },
   graphHint: {
     position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
     fontSize: 11, color: 'var(--muted)', background: 'var(--surface)',
@@ -1416,23 +1621,6 @@ const S = {
     pointerEvents: 'none', opacity: 0.92, whiteSpace: 'nowrap', maxWidth: '92%',
     overflow: 'hidden', textOverflow: 'ellipsis',
   },
-  graphLabelLayer: {
-    position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 2, overflow: 'hidden',
-    contain: 'strict',
-  },
-  graphLabel: {
-    position: 'absolute', left: 0, top: 0, maxWidth: 160,
-    padding: '2px 6px', borderRadius: 7,
-    background: 'color-mix(in srgb, var(--bg) 82%, transparent)',
-    border: '1px solid color-mix(in srgb, var(--text) 16%, transparent)',
-    color: 'var(--text)', fontSize: 11, fontWeight: 650,
-    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-    textShadow: '0 1px 2px rgba(0,0,0,0.55)',
-    willChange: 'transform',
-  },
-  graphLabelStrong: { opacity: 1 },
-  graphLabelSoft: { opacity: 0.78 },
-
   legend: {
     position: 'absolute', left: 12, bottom: 12, background: 'var(--surface)',
     border: '1px solid var(--border)', borderRadius: 12, padding: '11px 12px',

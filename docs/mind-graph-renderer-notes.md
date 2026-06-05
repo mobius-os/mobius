@@ -4,20 +4,20 @@ Last checked: 2026-06-05.
 
 ## Current choice
 
-Mind currently uses `react-force-graph-2d`, which wraps `force-graph`: a
-Canvas renderer backed by `d3-force`. This is the short-term bridge, not the
-long-term renderer target. It is small, works in the mini-app runtime through
-ESM imports, supports pan/zoom/drag, and was useful for proving the Mind data
-contract and panel UX quickly.
+Mind now uses a Mobius-owned `MindGraphRenderer` inside
+`core-apps/mind/index.jsx`. It follows the Quartz rendering architecture:
+`d3-force` owns layout, while PixiJS renders links, nodes, and labels in one
+transformed scene.
 
-The weakness is labels. DOM overlay labels can be made selective and smoother,
-but they are still synchronized from outside the renderer's scene graph. That is
-more fragile than the Quartz approach and is already visible as label jitter and
-density tuning work.
+This replaced the previous `react-force-graph-2d` bridge and its DOM label
+overlay. That bridge was useful for proving the Mind data contract and panel UX,
+but synchronizing labels outside the graph scene was the wrong long-term shape:
+it introduced jitter, density tuning work, and a fragile dependency on
+screen-coordinate polling.
 
-Do not treat the current renderer as future-proof for Mind. It is acceptable for
-shipping incremental product fixes, but the robust target is a Quartz-style
-renderer module.
+The current renderer is the right ownership boundary for Mind: React owns data
+loading, markdown, mini-app navigation, and mobile layout; the graph renderer
+owns force layout, zoom/pan/drag, hit testing, hover focus, and label placement.
 
 ## Quartz reference
 
@@ -46,21 +46,31 @@ Useful links:
 - https://github.com/jackyzha0/quartz/blob/9737bce7095f93c9fb41700449505d963a6b2bb8/docs/configuration.md
 - https://github.com/quartz-community/graph
 
-## Target path
+## Implemented path
 
-Create a Mobius-owned `MindGraphRenderer` module that ports/adapts Quartz's
-D3 + Pixi pattern while preserving Mobius-specific behavior:
+`MindGraphRenderer` ports/adapts Quartz's D3 + Pixi pattern while preserving
+Mobius-specific behavior:
 
 - input is the existing `/api/storage/shared/memory/graph.json` data contract
 - labels are Pixi `Text` objects in the same transformed scene as nodes
-- global graph supports zoom-aware label opacity, hover focus, radial/global
-  layout tuning, MOC colors, and selected-node emphasis
+- global graph supports zoom-aware labels, hover focus, MOC colors, and
+  selected-node emphasis
 - local graph supports depth 1-4 and center-node pinning/priority
 - renderer emits `nodeClick` / `nodeHover` callbacks for the React note panel
 - React owns data loading, markdown rendering, mini-app nav, and mobile layout
 
 This gives us Quartz's maintainable rendering model without importing Quartz's
 site-generator assumptions into the mini-app runtime.
+
+Remaining hardening candidates:
+
+- move `MindGraphRenderer` into its own source module if/when core apps support
+  multi-file entries cleanly
+- add persisted node positions if the graph grows enough that deterministic
+  seeded starts feel too mobile between reloads
+- add radial/MOC-group layout tuning for larger global graphs
+- add a tiny renderer perf probe around frame time and visible node count before
+  Mind becomes a central navigation surface for hundreds of notes
 
 ## Other upgrade candidates
 
@@ -81,11 +91,11 @@ If Mind needs tens of thousands of visible nodes, revisit renderer choice:
 ## Current UX decisions
 
 - Global graph stays visible as the broad map.
-- Clicking a node opens a split pane: note text on the left, local graph on the
-  right.
+- Clicking a node opens a full-height note panel. Desktop uses note text on the
+  left and local graph on the right; phone uses local graph above scrollable note
+  text with browser/app back navigation closing the note.
 - Local graph depth is selected inside that split pane so the global toolbar
   stays simple.
 - `[[slug]]` links render using the target node title, matching Obsidian's feel.
-- The current renderer keeps the simulation lightly warm with a small alpha
-  target instead of cooling to a fully static layout. The Quartz-style renderer
-  should make this explicit and configurable per local/global graph.
+- The renderer warms from deterministic seeded positions, fits the graph to the
+  viewport, then lets D3 settle while Pixi keeps labels in the same scene.

@@ -19,7 +19,8 @@
       "react-dom"
     ],
     "esm_deps": [
-      "react-force-graph-2d",
+      "d3",
+      "pixi.js",
       "marked",
       "dompurify"
     ]

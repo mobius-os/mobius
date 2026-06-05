@@ -21,6 +21,8 @@ execFileSync(esbuild, [
 
 const {
   buildLocalGraphData,
+  computeRendererFitTransform,
+  normalizeRendererGraphData,
   shouldShowScreenLabel,
   renderWikiLinks,
   nodeRadius,
@@ -137,4 +139,36 @@ test('screen labels show local center and nearby nodes before distant nodes', ()
   assert.equal(shouldShowScreenLabel({ id: 'near', localDepth: 1 }, 0.72, 99, { mode: 'local' }), true)
   assert.equal(shouldShowScreenLabel({ id: 'far', localDepth: 2 }, 1.14, 0, { mode: 'local' }), false)
   assert.equal(shouldShowScreenLabel({ id: 'far', localDepth: 2 }, 1.15, 0, { mode: 'local' }), true)
+})
+
+test('normalizeRendererGraphData clones nodes and drops dangling links', () => {
+  const out = normalizeRendererGraphData({
+    nodes: [
+      { id: 'a', title: 'A' },
+      { id: 'b', title: 'B', x: 12, y: -3 },
+    ],
+    links: [
+      { source: 'a', target: 'b', kind: 'link' },
+      { source: 'a', target: 'missing', kind: 'link' },
+    ],
+  }, 400, 300)
+
+  assert.equal(out.nodes.length, 2)
+  assert.equal(out.links.length, 1)
+  assert.equal(out.links[0].source.id, 'a')
+  assert.equal(out.links[0].target.id, 'b')
+  assert.equal(out.nodes.find((n) => n.id === 'b').x, 12)
+  assert.equal(Number.isFinite(out.nodes.find((n) => n.id === 'a').x), true)
+})
+
+test('computeRendererFitTransform centers finite graph bounds within limits', () => {
+  const fit = computeRendererFitTransform([
+    { id: 'a', x: -100, y: -50 },
+    { id: 'b', x: 100, y: 50 },
+  ], 400, 300, { padding: 40, minScale: 0.5, maxScale: 1.2 })
+
+  assert.equal(fit.k <= 1.2, true)
+  assert.equal(fit.k >= 0.5, true)
+  assert.equal(Math.round(fit.x), 200)
+  assert.equal(Math.round(fit.y), 150)
 })
