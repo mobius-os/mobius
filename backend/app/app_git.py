@@ -68,6 +68,7 @@ _GITIGNORE = "\n".join([
   "*.js",
   "# Install/rollback snapshots are not source.",
   "*.bak",
+  "*.mobius-bak",
   "# Defensive: the integer-id storage tree is a sibling dir, but if a",
   "# numeric data dir ever lands here it is runtime data, not source.",
   "[0-9]*/",

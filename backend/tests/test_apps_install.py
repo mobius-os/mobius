@@ -1646,6 +1646,73 @@ def test_flag_on_clean_update_without_local_edits_is_fast_forward(
   assert payload["divergence"] == "fast_forward"
 
 
+def test_flag_on_static_asset_update_leaves_clean_app_repo(
+  client, auth, bypass_url_validation,
+):
+  """Static asset rollback snapshots must never land in per-app git.
+
+  CubeRun-style packages update dozens of static files. The installer uses
+  temporary snapshots for rollback, but those snapshots must live outside the
+  source repo so the post-write local commit stays clean and future updates
+  do not see installer noise as local edits.
+  """
+  _enable_per_app_git()
+  base = "https://static-clean.test/repo/"
+  manifest_v1 = {
+    **MANIFEST_NEWS,
+    "id": "static-clean",
+    "icon": None,
+    "storage_seeds": {},
+    "schedule": None,
+    "static_assets": {
+      "index.html": "build/index.html",
+      "static/css/main.css": "build/static/css/main.css",
+    },
+  }
+  responses_v1 = {
+    base + "mobius.json": (200, json.dumps(manifest_v1).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "build/index.html": (200, b"<!doctype html><title>v1</title>"),
+    base + "build/static/css/main.css": (200, b"body{color:red}"),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses_v1),
+  ):
+    r1 = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r1.status_code == 201, r1.text
+
+  manifest_v2 = {**manifest_v1, "version": "2.0.0"}
+  responses_v2 = {
+    base + "mobius.json": (200, json.dumps(manifest_v2).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "build/index.html": (200, b"<!doctype html><title>v2</title>"),
+    base + "build/static/css/main.css": (200, b"body{color:blue}"),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses_v2),
+  ):
+    r2 = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["mode"] == "update"
+
+  from app import app_git
+  data_dir = Path(get_settings().data_dir)
+  source_dir = data_dir / "apps" / "static-clean"
+  assert (source_dir / "static" / "index.html").read_text() == (
+    "<!doctype html><title>v2</title>"
+  )
+  assert list(source_dir.rglob("*.mobius-bak")) == []
+  assert not (data_dir / "apps" / ".static-clean.mobius-static-bak").exists()
+  assert app_git._run(source_dir, "status", "--porcelain").stdout == ""
+  assert app_git._run(source_dir, "ls-files", "*.mobius-bak").stdout == ""
+
+
 def test_flag_on_conflicting_update_returns_conflict_and_preserves_local(
   client, auth, bypass_url_validation,
 ):
