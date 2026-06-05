@@ -33,10 +33,9 @@ const HEALTH_URL = '/api/health'
 // margin. The timeout only bites in the pathological Android case where an
 // offline fetch hangs PENDING instead of failing fast (stale radio state) —
 // there it caps how long an offline-capable mini-app waits for `online` to
-// resolve false before it mounts with the owner token. (Combined with the
-// frame/module stale-while-revalidate in sw.js — which serves the cached app
-// instantly — this is what takes the offline mini-app open from ~12s, where the
-// gate + two 3s network-first waits stacked, down to ~2s worst case.) NOTE: we
+// resolve false before it mounts with the owner token. The frame/module route
+// itself is cache-first once warmed; this probe is now the remaining offline
+// auth boundary. NOTE: we
 // deliberately do NOT mount with the owner JWT BEFORE `online` resolves — that
 // would put the long-lived owner JWT in the module URL during what might be a
 // genuine online session (access-log exposure). Capping the probe is the safe
@@ -103,28 +102,17 @@ export default function useOnlineStatus() {
     // offline; a genuine reconnect (repeated successes) promotes on the 2nd.
     let successStreak = 0
 
-    // Tell the service worker our connectivity verdict so its offline-capable
-    // frame/module handler can serve cache-first instantly when we're offline
-    // instead of trusting navigator.onLine (which lies on Android PWAs). The SW
-    // caches the latest verdict; see sw.js 'Page → SW connectivity channel'.
-    //
-    // We deliberately post the SAME reconciled `online` value the UI uses (the
-    // streak-gated resolveOnline result), NOT the raw probe `reachable`. One
-    // connectivity truth, shared by the UI pill and the SW, avoids them
-    // disagreeing — and the reconciled value is the conservative one (it only
-    // flips to online once a probe success is confirmed, filtering the device's
-    // probe false-positives), which is exactly what the SW gate wants: err
-    // toward cache-first (fast offline). The cost is a brief window after a
-    // stale-`false`-navigator reconnect where the SW stays cache-first; that's
-    // the already-accepted self-healing "one stale open" class.
+    // Compatibility: older service workers used this verdict to decide whether
+    // offline-capable app code should go cache-first. Current SWs serve cached,
+    // versioned app code cache-first in every connectivity state, but keeping
+    // the post makes rolling updates safe for tabs still controlled by an older
+    // worker.
     function postToSW(online) {
       try {
         navigator.serviceWorker?.controller?.postMessage({
           type: 'moebius:connectivity', online,
         })
-      } catch (e) { /* no controller yet / unsupported — SW gate treats unknown
-        as not-known-online, i.e. cache-first when cached; self-heals on the
-        next verdict. */ }
+      } catch (e) { /* no controller yet / unsupported — best effort only. */ }
     }
 
     function publish(next) {

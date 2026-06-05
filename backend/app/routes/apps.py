@@ -936,18 +936,13 @@ def get_frame(
   token and the current theme via `postMessage` after the iframe
   loads, instead of having them server-templated into the body.
 
-  Cache freshness model (2026-05-25 refactor): URL is stable per
-  app_id (no `?v=` query). Response carries an ETag derived from
-  `app.updated_at` and `Cache-Control: no-cache`. Browsers send
-  `If-None-Match` on every navigation; we return 304 with empty
-  body when the app hasn't been updated, or 200 with the fresh
-  frame when it has. This removed the SW cache-first interception
-  for this route — the browser HTTP cache + ETag validation handle
-  it natively, which means the agent's fresh-Chromium tests and
-  the user's persistent-PWA cache converge on identical behavior
-  (the previous `?v=` counter was an in-memory value that reset on
-  reload, leaving the user pinned to whatever broken module they
-  first cached).
+  Cache freshness model: AppCanvas adds `?v=<app.updated_at>` to the
+  frame URL and the frame forwards that version into the module URL.
+  The service worker keeps that `v` in its cache key, so a cached
+  offline-capable app can open cache-first while app edits naturally
+  become cache misses. Responses still carry an ETag derived from
+  `app.updated_at` and `Cache-Control: no-cache` for browser-cache
+  revalidation on non-SW/cold paths.
 
   Frame is intentionally public — it's just the runtime shell
   (importmap, error UI, postMessage init script). Actual app
@@ -1008,10 +1003,9 @@ def get_frame(
   # Tells the service worker this app is safe to cache for offline use
   # (Tier 4a). The SW's offlineCapableHandler caches frame/module only when
   # this header is present, so non-offline_capable apps keep their network-only
-  # behavior. The SW serves them connectivity-aware: network-first when
-  # known-online (fresh app code on an edit), cache-first when not (instant
-  # offline). Cacheability is a function of server state, not a client-pushed
-  # list — consistent with the ETag freshness model.
+  # behavior. Cached offline-capable app code is served cache-first and
+  # refreshed in the background; versioned URLs keep app edits fresh.
+  # Cacheability is a function of server state, not a client-pushed list.
   if app.offline_capable:
     headers["X-Mobius-Offline"] = "1"
 
