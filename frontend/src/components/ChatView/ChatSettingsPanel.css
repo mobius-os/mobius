@@ -227,6 +227,31 @@
   color: var(--text);
 }
 
+.csp__loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 6px 10px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.csp__loading-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  flex-shrink: 0;
+  animation: csp-loading-spin 0.8s linear infinite;
+}
+
+@keyframes csp-loading-spin {
+  to { transform: rotate(360deg); }
+}
+
 /* Skeleton placeholder rendered while the registry + prefs queries
    resolve. Two rows mirror the typical visible count. Pulsing
    opacity rather than a flashy shimmer — the popover is already
