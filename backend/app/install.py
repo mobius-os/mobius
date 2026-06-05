@@ -458,6 +458,31 @@ def _canonical_identity_key(url_or_base: str, manifest_id: str) -> str:
   return f"{_canonical_base(url_or_base)}#manifest-id={manifest_id}"
 
 
+def _should_force_core_store_update(
+  source: str, manifest_id: str, canonical_manifest_url: str,
+) -> bool:
+  """Core App Store self-updates must not wedge behind their own local edits.
+
+  Normal apps preserve local edits and surface conflicts for an agent to
+  resolve. The App Store is the installer for resolving those conflicts, so
+  letting its own update conflict creates a dead-end: the user presses Update,
+  the backend records upstream, but the running store remains old forever. For
+  the canonical mobius-os App Store only, the published upstream source wins.
+  """
+  parsed = urlparse(canonical_manifest_url)
+  path_parts = [
+    unquote(part)
+    for part in parsed.path.split("/")
+    if part
+  ]
+  return (
+    source == "store"
+    and manifest_id == "store"
+    and parsed.hostname == "raw.githubusercontent.com"
+    and path_parts[:2] == ["mobius-os", "app-store"]
+  )
+
+
 async def _http_get(
   client: httpx.AsyncClient, url: str, max_bytes: int, _hops: int = 0,
 ) -> bytes:
@@ -999,6 +1024,9 @@ async def install_from_manifest(
   canonical_manifest_url = _canonical_identity_key(
     source_for_key, manifest_id,
   )
+  force_core_store_update = _should_force_core_store_update(
+    source, manifest_id, canonical_manifest_url,
+  )
   existing = (
     db.query(models.App)
     .filter(models.App.manifest_url == canonical_manifest_url)
@@ -1152,12 +1180,19 @@ async def install_from_manifest(
             app_git.merge_upstream, git_source_dir,
           )
           if merge.status == "conflict":
-            # Never rebase local. The app stays served with
-            # its current bundle + source; the new upstream is recorded
-            # for a later agent-resolution pass. Skip compile + source
-            # overwrite by switching to conflict mode below.
-            mode = "conflict"
-            conflict_paths = merge.conflict_paths
+            if force_core_store_update:
+              warnings.append(
+                "core App Store self-update replaced local edits with upstream"
+              )
+              effective_source = jsx_source
+              divergence = "fast_forward"
+            else:
+              # Never rebase local. The app stays served with
+              # its current bundle + source; the new upstream is recorded
+              # for a later agent-resolution pass. Skip compile + source
+              # overwrite by switching to conflict mode below.
+              mode = "conflict"
+              conflict_paths = merge.conflict_paths
           elif merge.merged_bytes is not None:
             # Clean merge: the merged source is what we compile + write.
             effective_source = merge.merged_bytes.decode("utf-8")
@@ -1197,8 +1232,14 @@ async def install_from_manifest(
             app_git.merge_upstream, git_source_dir,
           )
           if merge.status == "conflict":
-            mode = "conflict"
-            conflict_paths = merge.conflict_paths
+            if force_core_store_update:
+              warnings.append(
+                "core App Store self-update replaced local edits with upstream"
+              )
+              effective_source = jsx_source
+            else:
+              mode = "conflict"
+              conflict_paths = merge.conflict_paths
           elif merge.merged_bytes is not None:
             effective_source = merge.merged_bytes.decode("utf-8")
         else:

@@ -1836,6 +1836,85 @@ def test_flag_on_conflicting_update_returns_conflict_and_preserves_local(
     db.close()
 
 
+def test_core_app_store_self_update_overwrites_local_conflict(
+  client, auth, bypass_url_validation,
+):
+  """The App Store must be able to update itself from the App Store.
+
+  For normal apps, a same-hunk local/upstream conflict returns
+  mode='conflict'. For the canonical mobius-os App Store, upstream wins
+  so an old store cannot get permanently wedged behind its own local edit.
+  """
+  _enable_per_app_git()
+  base = "https://raw.githubusercontent.com/mobius-os/app-store/main/"
+  m = {
+    **MANIFEST_NEWS,
+    "id": "store",
+    "name": "App Store",
+    "version": "1.0.0",
+  }
+  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
+  assert r1.status_code == 201, r1.text
+  data_dir = Path(get_settings().data_dir)
+  jsx_file = data_dir / "apps" / "store" / "index.jsx"
+
+  local = JSX_MULTI.replace("ORIGINAL TITLE", "LOCAL STORE TITLE")
+  jsx_file.write_text(local)
+
+  jsx_v2 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM STORE TITLE")
+  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
+  assert r2.status_code == 201, r2.text
+  payload = r2.json()
+  assert payload["mode"] == "update"
+  assert payload["version"] == "2.0.0"
+  assert payload["conflict_paths"] == []
+  assert any("core App Store self-update" in w for w in payload["warnings"])
+
+  served = jsx_file.read_text()
+  assert served == jsx_v2
+  assert "LOCAL STORE TITLE" not in served
+  assert "<<<<<<<" not in served
+
+  from app.models import App
+  from app.database import SessionLocal
+  db = SessionLocal()
+  try:
+    app = db.query(App).filter(App.slug == "store").first()
+    assert app.version == "2.0.0"
+    assert app.jsx_source == jsx_v2
+  finally:
+    db.close()
+
+
+def test_store_id_from_spoofed_path_still_preserves_local_conflict(
+  client, auth, bypass_url_validation,
+):
+  """Only the exact raw.githubusercontent.com/mobius-os/app-store source is forced."""
+  _enable_per_app_git()
+  base = "https://example.test/raw.githubusercontent.com/mobius-os/app-store/main/"
+  m = {
+    **MANIFEST_NEWS,
+    "id": "store",
+    "name": "Spoof Store",
+    "version": "1.0.0",
+  }
+  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
+  assert r1.status_code == 201, r1.text
+  data_dir = Path(get_settings().data_dir)
+  jsx_file = data_dir / "apps" / "store" / "index.jsx"
+
+  local = JSX_MULTI.replace("ORIGINAL TITLE", "LOCAL SPOOF TITLE")
+  jsx_file.write_text(local)
+
+  jsx_v2 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM SPOOF TITLE")
+  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
+  assert r2.status_code == 201, r2.text
+  payload = r2.json()
+  assert payload["mode"] == "conflict"
+  assert "index.jsx" in payload["conflict_paths"]
+  assert jsx_file.read_text() == local
+
+
 def test_update_preview_clean_returns_upstream_diff(
   client, auth, bypass_url_validation,
 ):
