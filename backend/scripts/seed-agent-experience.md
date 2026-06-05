@@ -218,8 +218,10 @@ contract-comment mismatch.
 - **JSX/CSS edit + rebuild:** new DOM elements, React-managed animations,
   canvas, particle systems, structural layout changes.
   Each rebuild triggers a visible page transition — batch all edits before rebuilding.
-- App **source** lives at `/data/apps/<slug>/index.jsx` (+ any
-  companion files), keyed by slug. App **runtime data** written
+- App **source** lives under `/data/apps/<slug>/`, keyed by slug.
+  `index.jsx` is the entrypoint; larger apps can split React code into
+  sibling `.js`, `.jsx`, `.ts`, or `.tsx` modules imported relatively
+  from `index.jsx`. App **runtime data** written
   through the storage API lives at `/data/apps/<app_id>/<path>`,
   keyed by the numeric app id. These are SEPARATE trees — slugs and
   numeric ids don't coincide. If a mini-app PUTs to
@@ -230,9 +232,11 @@ contract-comment mismatch.
 
 ## Gotchas
 
-- **Editing an existing app's JSX auto-recompiles.** A file watcher
-  on `/data/apps/*/index.jsx` recompiles the bundle ~1s after you
-  save. You don't need to re-run `register_app.py` just to land local
+- **Editing an existing app's source auto-recompiles.** A file watcher
+  on `/data/apps/<slug>/` recompiles the bundle ~1s after `index.jsx`
+  or a source-like sibling module changes. Generated/static dirs such as
+  `static/`, `.build/`, `dist/`, `node_modules/`, and `.git/` are ignored.
+  You don't need to re-run `register_app.py` just to land local
   edits in an existing app — only for the initial create (so the
   app gets an id + DB row). If your edit doesn't seem to land,
   refresh the iframe; if it still doesn't, check that
@@ -245,7 +249,7 @@ contract-comment mismatch.
   `DELETE /api/apps/<dup-id>`.
 
 - **"The partner still sees the old app" — checklist, in order.**
-  If you edited `/data/apps/<slug>/index.jsx` and the partner says
+  If you edited source under `/data/apps/<slug>/` and the partner says
   it didn't change, **do not reach for `register_app.py`** — work
   these instead:
   1. **Compile mtime advanced?**

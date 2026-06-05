@@ -660,6 +660,31 @@ async def test_recompile_app_bundle_bad_jsx_keeps_live_bundle(
   assert open(live, "rb").read() == before
 
 
+def test_create_app_compiles_relative_source_import(client, owner_token):
+  """A real source_dir compile lets index.jsx import sibling modules."""
+  import os
+  data_dir = os.environ["DATA_DIR"]
+  src = os.path.join(data_dir, "apps", "modular-create")
+  os.makedirs(src, exist_ok=True)
+  with open(os.path.join(src, "Widget.jsx"), "w", encoding="utf-8") as f:
+    f.write("export function Widget(){ return <span>MODULAR_WIDGET</span> }")
+  jsx = (
+    "import { Widget } from './Widget.jsx';\n"
+    "export default function App(){ return <Widget /> }"
+  )
+  r = client.post("/api/apps/", json={
+    "name": "modular-create",
+    "description": "x",
+    "jsx_source": jsx,
+    "source_dir": src,
+  }, headers={"Authorization": f"Bearer {owner_token}"})
+  assert r.status_code == 201, r.text
+  app_id = r.json()["id"]
+  live = os.path.join(data_dir, "compiled", f"app-{app_id}.js")
+  assert "MODULAR_WIDGET" in open(live, encoding="utf-8").read()
+  assert open(os.path.join(src, "index.jsx"), encoding="utf-8").read() == jsx
+
+
 @pytest.mark.asyncio
 async def test_watcher_recompiles_registered_app(client, owner_token):
   """An on-disk source edit, resolved to its app by source_dir, recompiles the
@@ -690,6 +715,69 @@ async def test_watcher_recompiles_registered_app(client, owner_token):
     s.close()
   live = os.path.join(data_dir, "compiled", f"app-{app_id}.js")
   assert "V1" in open(live, encoding="utf-8").read()
+
+
+@pytest.mark.asyncio
+async def test_watcher_recompiles_when_imported_module_changes(
+  client, owner_token,
+):
+  """A sibling source edit rebuilds even when index.jsx bytes are unchanged."""
+  import asyncio
+  import os
+  import app.models as models
+  from app.app_watcher import _JsxHandler
+  from app.database import SessionLocal
+  data_dir = os.environ["DATA_DIR"]
+  src = os.path.join(data_dir, "apps", "watch-module")
+  os.makedirs(src, exist_ok=True)
+  component = os.path.join(src, "Widget.jsx")
+  with open(component, "w", encoding="utf-8") as f:
+    f.write("export function Widget(){ return <span>MODULE_V0</span> }")
+  jsx = (
+    "import { Widget } from './Widget.jsx';\n"
+    "export default function App(){ return <Widget /> }"
+  )
+  app_id = client.post("/api/apps/", json={
+    "name": "watch-module", "description": "x",
+    "jsx_source": jsx,
+    "source_dir": src,
+  }, headers={"Authorization": f"Bearer {owner_token}"}).json()["id"]
+  live = os.path.join(data_dir, "compiled", f"app-{app_id}.js")
+  assert "MODULE_V0" in open(live, encoding="utf-8").read()
+
+  with open(component, "w", encoding="utf-8") as f:
+    f.write("export function Widget(){ return <span>MODULE_V1</span> }")
+  await _JsxHandler(asyncio.get_running_loop())._recompile(component)
+
+  s = SessionLocal()
+  try:
+    row = s.query(models.App).filter(models.App.id == app_id).first()
+    assert row.jsx_source == jsx
+  finally:
+    s.close()
+  compiled = open(live, encoding="utf-8").read()
+  assert "MODULE_V1" in compiled
+  assert "MODULE_V0" not in compiled
+
+
+@pytest.mark.asyncio
+async def test_watcher_debounce_keeps_module_rebuild_signal():
+  """A later index event must not erase an earlier module-change rebuild."""
+  import asyncio
+  import os
+  from app.app_watcher import _JsxHandler
+  data_dir = os.environ["DATA_DIR"]
+  src = os.path.join(data_dir, "apps", "debounce-module")
+  index_path = os.path.join(src, "index.jsx")
+  module_path = os.path.join(src, "Widget.jsx")
+  handler = _JsxHandler(asyncio.get_running_loop())
+  await handler._reschedule(src, module_path, True)
+  await handler._reschedule(src, index_path, False)
+  try:
+    _, force_rebuild = handler._pending[src]
+    assert force_rebuild is True
+  finally:
+    handler.close()
 
 
 @pytest.mark.asyncio

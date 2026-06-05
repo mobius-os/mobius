@@ -611,7 +611,11 @@ async def update_app(
         _reject_if_source_dir_taken(db, new_source_dir, exclude_id=app_id)
         await _recompile_and_commit(app)
     else:
-      await _recompile_and_commit(app)
+      if body.jsx_source is not None and app.source_dir:
+        async with fs_locks.source_dir_lock(app.source_dir):
+          await _recompile_and_commit(app)
+      else:
+        await _recompile_and_commit(app)
     db.refresh(app)
     get_system_broadcast().publish(
       {"type": "app_updated", "appId": str(app.id)}

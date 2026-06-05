@@ -1,11 +1,12 @@
-"""File watcher that auto-recompiles mini-app JSX on edit.
+"""File watcher that auto-recompiles mini-app source on edit.
 
-Watches `/data/apps/*/index.jsx`.  When a JSX file changes, looks up
-the app by its directory name in the DB, re-reads the source from
-disk, recompiles via `compile_jsx`, and persists the new source +
-`compiled_path`.  Publishes `app_updated` to the SystemBroadcast so
-the Shell (which subscribes via /api/events/system) picks up the
-change without a manual `register_app.py` roundtrip.
+Watches source-like files under `/data/apps/<slug>/`.  When `index.jsx`
+or one of its sibling modules changes, looks up the app by its exact
+`source_dir` in the DB, re-reads `index.jsx`, recompiles from that real
+entry path so relative imports resolve, and persists the current entry
+source + `compiled_path`.  Publishes `app_updated` to the SystemBroadcast
+so the Shell (which subscribes via /api/events/system) picks up the change
+without a manual `register_app.py` roundtrip.
 
 Debounced (1s) to coalesce rapid saves during multi-line edits.
 
@@ -39,6 +40,37 @@ log = logging.getLogger(__name__)
 
 _DEBOUNCE_SECS = 1.0
 _INDEX_JSX = "index.jsx"
+_SOURCE_SUFFIXES = {".js", ".jsx", ".ts", ".tsx"}
+_IGNORED_SOURCE_PARTS = {
+  ".build",
+  ".git",
+  "dist",
+  "node_modules",
+  "static",
+}
+
+
+def _source_dir_for_changed_path(path: str | Path) -> Path | None:
+  """Returns the immediate `/data/apps/<slug>` owner for a source edit."""
+  p = Path(path)
+  if p.suffix not in _SOURCE_SUFFIXES:
+    return None
+  apps_dir = (Path(get_settings().data_dir) / "apps").resolve()
+  try:
+    rel = p.resolve().relative_to(apps_dir)
+  except ValueError:
+    return None
+  if len(rel.parts) < 2:
+    return None
+  ignored_parts = rel.parts[1:-1]
+  if any(
+    part in _IGNORED_SOURCE_PARTS or part.startswith(".")
+    for part in ignored_parts
+  ):
+    return None
+  if rel.name.startswith("."):
+    return None
+  return apps_dir / rel.parts[0]
 
 
 class _JsxHandler(FileSystemEventHandler):
@@ -46,8 +78,8 @@ class _JsxHandler(FileSystemEventHandler):
 
   def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
     self._loop = loop
-    # path → TimerHandle from loop.call_later
-    self._pending: dict[str, asyncio.TimerHandle] = {}
+    # source_dir → (TimerHandle from loop.call_later, force_rebuild)
+    self._pending: dict[str, tuple[asyncio.TimerHandle, bool]] = {}
 
   # Watchdog calls these on its own thread.
   def on_modified(self, event) -> None:  # noqa: ANN001
@@ -67,16 +99,25 @@ class _JsxHandler(FileSystemEventHandler):
     dest = getattr(event, "dest_path", None) or event.src_path
     self._schedule(dest)
 
-  def _schedule(self, path: str) -> None:
-    if not path.endswith(f"/{_INDEX_JSX}"):
+  def on_deleted(self, event) -> None:  # noqa: ANN001
+    if event.is_directory:
       return
+    self._schedule(event.src_path)
+
+  def _schedule(self, path: str) -> None:
+    source_dir = _source_dir_for_changed_path(path)
+    if source_dir is None:
+      return
+    force_rebuild = Path(path).resolve() != (source_dir / _INDEX_JSX).resolve()
     # Hop back to the asyncio loop thread to touch _pending safely.
     # Loop may already be closing if the watchdog thread fires during
     # shutdown — guard so we don't crash the observer thread.
     if self._loop.is_closed():
       return
     try:
-      asyncio.run_coroutine_threadsafe(self._reschedule(path), self._loop)
+      asyncio.run_coroutine_threadsafe(
+        self._reschedule(str(source_dir), path, force_rebuild), self._loop,
+      )
     except RuntimeError:
       # Loop stopped between the is_closed check and the call. Drop it.
       pass
@@ -87,25 +128,40 @@ class _JsxHandler(FileSystemEventHandler):
     Called from `lifespan` shutdown so a timer that hasn't fired yet
     doesn't post a `create_task` to a loop that's about to close.
     """
-    for handle in self._pending.values():
+    for handle, _ in self._pending.values():
       handle.cancel()
     self._pending.clear()
 
-  async def _reschedule(self, path: str) -> None:
-    handle = self._pending.pop(path, None)
-    if handle is not None:
+  async def _reschedule(
+    self, source_dir: str, changed_path: str, force_rebuild: bool,
+  ) -> None:
+    pending = self._pending.pop(source_dir, None)
+    if pending is not None:
+      handle, pending_force_rebuild = pending
       handle.cancel()
-    self._pending[path] = self._loop.call_later(
+      force_rebuild = force_rebuild or pending_force_rebuild
+    handle = self._loop.call_later(
       _DEBOUNCE_SECS,
-      lambda: asyncio.create_task(self._recompile(path)),
+      lambda: asyncio.create_task(
+        self._recompile(changed_path, force_rebuild=force_rebuild),
+      ),
     )
+    self._pending[source_dir] = (handle, force_rebuild)
 
-  async def _recompile(self, path: str) -> None:
-    self._pending.pop(path, None)
-    p = Path(path)
-    source_dir = str(p.parent)
+  async def _recompile(
+    self, changed_path: str, *, force_rebuild: bool = False,
+  ) -> None:
+    p = Path(changed_path)
+    source_dir_path = _source_dir_for_changed_path(p) or (
+      p if p.name != _INDEX_JSX else p.parent
+    )
+    source_dir = str(source_dir_path)
+    self._pending.pop(source_dir, None)
+    index_path = source_dir_path / _INDEX_JSX
+    changed_is_entry = p.resolve() == index_path.resolve()
+    skip_unchanged_entry = changed_is_entry and not force_rebuild
     try:
-      jsx_source = p.read_text(encoding="utf-8")
+      jsx_source = index_path.read_text(encoding="utf-8")
     except FileNotFoundError:
       return
     if not jsx_source.strip():
@@ -135,8 +191,10 @@ class _JsxHandler(FileSystemEventHandler):
           .filter(models.App.source_dir == source_dir)
           .first()
         )
-        if app is None or app.jsx_source == jsx_source:
-          return  # No such app, or already compiled — nothing to do.
+        if app is None:
+          return  # No such app — nothing to do.
+        if skip_unchanged_entry and app.jsx_source == jsx_source:
+          return  # Already compiled — nothing to do.
         app_id = app.id
         async with (
           fs_locks.app_storage_lock(app_id),
@@ -155,10 +213,12 @@ class _JsxHandler(FileSystemEventHandler):
           if app is None or app.source_dir != source_dir:
             return
           try:
-            jsx_source = p.read_text(encoding="utf-8")
+            jsx_source = index_path.read_text(encoding="utf-8")
           except FileNotFoundError:
             return
-          if not jsx_source.strip() or app.jsx_source == jsx_source:
+          if not jsx_source.strip():
+            return
+          if skip_unchanged_entry and app.jsx_source == jsx_source:
             return
           try:
             await recompile_app_bundle(db, app, jsx_source)
@@ -173,11 +233,11 @@ class _JsxHandler(FileSystemEventHandler):
               except subprocess.CalledProcessError as exc:
                 log.info(
                   "auto-recompile: git commit skipped for %s: %s",
-                  path, exc,
+                  changed_path, exc,
                 )
           except RuntimeError as exc:
             log.warning(
-              "auto-recompile: compile failed for %s: %s", path, exc,
+              "auto-recompile: compile failed for %s: %s", changed_path, exc,
             )
             db.rollback()
             return
