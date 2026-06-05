@@ -82,14 +82,14 @@ export function nodeRadius(node = {}) {
 }
 
 export function shouldShowNodeLabel(globalScale, node = {}, hoverId = null) {
-  const scale = Number(globalScale);
-  if (!Number.isFinite(scale)) return false;
   const isHover = hoverId === node.id;
   const hasMocList = Array.isArray(node.mocs) && node.mocs.length > 0;
   const isImportant = (Number(node.importance) || 0) >= 7;
   const isMoc = node.type === 'moc';
   const isLocalCenter = node.localDepth === 0;
   if (isHover || isLocalCenter || isMoc || node.showLabelAlways) return true;
+  const scale = Number(globalScale);
+  if (!Number.isFinite(scale)) return false;
   return scale >= 0.95
     || (isImportant && scale >= 0.18)
     || (hasMocList && scale >= 0.24);
