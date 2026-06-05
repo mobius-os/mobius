@@ -332,11 +332,13 @@ find /data -regextype posix-extended -mindepth 2 -maxdepth 4 \
 chown -R mobius:mobius /data/.git 2>/dev/null || true
 
 if [ ! -d /data/.git ]; then
-  git init /data
-  git -C /data config user.name 'Mobius Agent'
-  git -C /data config user.email 'agent@mobius'
-  git -C /data add -A
-  git -C /data commit -m 'init' --allow-empty
+  su -s /bin/sh mobius -c '
+    git init /data
+    git -C /data config user.name "Mobius Agent"
+    git -C /data config user.email "agent@mobius"
+    git -C /data add -A
+    git -C /data commit -m "init" --allow-empty
+  '
   chown -R mobius:mobius /data/.git 2>/dev/null || true
 else
   # Defensive: prior boots may have committed paths that the current
