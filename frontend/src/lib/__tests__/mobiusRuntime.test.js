@@ -15,6 +15,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   appChatMetadataBody,
+  makeNav,
   overlayPending,
 } from '../../../public/mobius-runtime.js'
 
@@ -79,5 +80,96 @@ test('app chat metadata body can omit provider for existing-chat updates', () =>
   }, { includeProvider: false }), {
     system_prompt: 'You are inside Notes.',
     model: '',
+  })
+})
+
+async function withFakeWindow(fn) {
+  const previousWindow = globalThis.window
+  const listeners = new Set()
+  const parent = {
+    messages: [],
+    postMessage(data, origin) {
+      this.messages.push({ data, origin })
+    },
+  }
+  const fakeWindow = {
+    location: { origin: 'https://mobius.test' },
+    parent,
+    addEventListener(type, cb) {
+      if (type === 'message') listeners.add(cb)
+    },
+    removeEventListener(type, cb) {
+      if (type === 'message') listeners.delete(cb)
+    },
+    emit(data, { origin = 'https://mobius.test', source = parent } = {}) {
+      for (const cb of [...listeners]) cb({ data, origin, source })
+    },
+  }
+  globalThis.window = fakeWindow
+  try {
+    await fn({ window: fakeWindow, parent })
+  } finally {
+    globalThis.window = previousWindow
+  }
+}
+
+test('nav helper waits for ack before owning a back entry', async () => {
+  await withFakeWindow(async ({ window, parent }) => {
+    const nav = makeNav()
+    let backed = false
+    const handle = nav.open('detail', () => { backed = true })
+    const push = parent.messages.at(-1).data
+    assert.equal(push.type, 'moebius:nav-push')
+    assert.equal(push.label, 'detail')
+
+    window.emit({ type: 'moebius:nav-push-ack', requestId: push.requestId })
+    assert.equal(await handle.ready, true)
+
+    window.emit({ type: 'moebius:nav-back' })
+    assert.equal(backed, true)
+    assert.equal(parent.messages.some((msg) => msg.data.type === 'moebius:nav-pop'), false)
+  })
+})
+
+test('nav helper ignores same-origin messages from non-parent frames', async () => {
+  await withFakeWindow(async ({ window, parent }) => {
+    const nav = makeNav()
+    const handle = nav.open('detail')
+    const push = parent.messages.at(-1).data
+
+    window.emit(
+      { type: 'moebius:nav-push-ack', requestId: push.requestId },
+      { source: { postMessage() {} } },
+    )
+    handle.close()
+    window.emit({ type: 'moebius:nav-push-rejected', requestId: push.requestId })
+    assert.equal(await handle.ready, false)
+    assert.equal(parent.messages.some((msg) => msg.data.type === 'moebius:nav-pop'), false)
+  })
+})
+
+test('nav helper handles rejected pushes without owning or popping', async () => {
+  await withFakeWindow(async ({ window, parent }) => {
+    const nav = makeNav()
+    const handle = nav.open('detail')
+    const push = parent.messages.at(-1).data
+
+    window.emit({ type: 'moebius:nav-push-rejected', requestId: push.requestId })
+    assert.equal(await handle.ready, false)
+    handle.close()
+    assert.equal(parent.messages.some((msg) => msg.data.type === 'moebius:nav-pop'), false)
+  })
+})
+
+test('nav helper auto-pops a late ack after local close', async () => {
+  await withFakeWindow(async ({ window, parent }) => {
+    const nav = makeNav()
+    const handle = nav.open('detail')
+    const push = parent.messages.at(-1).data
+
+    handle.close()
+    assert.equal(await handle.ready, false)
+    window.emit({ type: 'moebius:nav-push-ack', requestId: push.requestId })
+    assert.equal(parent.messages.at(-1).data.type, 'moebius:nav-pop')
   })
 })

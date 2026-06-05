@@ -21,6 +21,7 @@ execFileSync(esbuild, [
 
 const {
   buildLocalGraphData,
+  shouldShowScreenLabel,
   renderWikiLinks,
   nodeRadius,
   shouldShowNodeLabel,
@@ -122,4 +123,18 @@ test('buildLocalGraphData returns a depth-limited neighborhood', () => {
   const capped = buildLocalGraphData(graph, 'a', 99)
   assert.deepEqual(capped.nodes.map((n) => n.id).sort(), ['a', 'b', 'c', 'd', 'e'])
   assert.equal(capped.links.length, 4)
+})
+
+test('screen labels keep global graph selective at low zoom', () => {
+  assert.equal(shouldShowScreenLabel({ id: 'hub', type: 'moc' }, 0.2, 99, { mode: 'global' }), true)
+  assert.equal(shouldShowScreenLabel({ id: 'plain' }, 0.89, 0, { mode: 'global' }), false)
+  assert.equal(shouldShowScreenLabel({ id: 'plain' }, 1.1, 5, { mode: 'global' }), true)
+  assert.equal(shouldShowScreenLabel({ id: 'plain' }, 1.1, 6, { mode: 'global' }), false)
+})
+
+test('screen labels show local center and nearby nodes before distant nodes', () => {
+  assert.equal(shouldShowScreenLabel({ id: 'center', localDepth: 0 }, 0.1, 99, { mode: 'local' }), true)
+  assert.equal(shouldShowScreenLabel({ id: 'near', localDepth: 1 }, 0.72, 99, { mode: 'local' }), true)
+  assert.equal(shouldShowScreenLabel({ id: 'far', localDepth: 2 }, 1.14, 0, { mode: 'local' }), false)
+  assert.equal(shouldShowScreenLabel({ id: 'far', localDepth: 2 }, 1.15, 0, { mode: 'local' }), true)
 })

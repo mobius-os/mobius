@@ -515,8 +515,9 @@ export default function App({ appId, token }) {
         setHoverId(null);
       });
       panelNavRef.current = handle;
-      await handle.ready?.catch(() => false);
+      const ready = await handle.ready?.catch(() => false);
       if (panelNavRef.current !== handle) return;
+      if (!ready) panelNavRef.current = null;
     }
     setSelected(node);
     setHoverId(opts.hoverId ?? null);
@@ -532,14 +533,14 @@ export default function App({ appId, token }) {
     splitDragRef.current = {
       startY: e.clientY,
       startH: localPane.getBoundingClientRect().height,
-      maxH: Math.max(140, split.getBoundingClientRect().height - 140),
+      maxH: Math.max(150, split.getBoundingClientRect().height - 150),
     };
   }, []);
 
   const moveMobileSplitDrag = useCallback((e) => {
     const drag = splitDragRef.current;
     if (!drag) return;
-    const next = clamp(drag.startH + e.clientY - drag.startY, 140, drag.maxH);
+    const next = clamp(drag.startH + e.clientY - drag.startY, 150, drag.maxH);
     setMobileGraphHeight(next);
   }, []);
 
@@ -744,6 +745,7 @@ export default function App({ appId, token }) {
     if (graph) for (const n of graph.nodes) c[n.type === 'moc' ? 'moc' : 'note']++;
     return c;
   }, [graph]);
+  const selectedUpdated = relDate(noteState.fm.updated);
 
   // ---------------------------------------------------------------- render ---
   return (
@@ -960,31 +962,25 @@ export default function App({ appId, token }) {
           <div style={S.scrim} className="mg-scrim" onClick={closePanel} />
           <aside style={S.panel} className="mg-panel">
             <div style={{ ...S.panelAccent, background: colorForNode(selected) }} />
-            <div style={S.panelHead}>
+            <div style={S.panelHead} className="mg-panel-head">
               <div style={S.panelHeadMain}>
-                <span style={{ ...S.rowDot, background: colorForNode(selected), width: 12, height: 12, marginTop: 5 }} />
+                <span style={{ ...S.rowDot, background: colorForNode(selected), width: 11, height: 11, marginTop: 5 }} />
                 <div style={{ minWidth: 0 }}>
-                  <div style={S.panelKicker}>
-                    {selected.type === 'moc' ? 'Map of content' : 'Note'}
-                  </div>
                   <div style={S.panelTitle}>{selected.title || selected.id}</div>
+                  <div style={S.panelMetaLine}>
+                    <span>{selected.type === 'moc' ? 'Hub' : 'Note'}</span>
+                    <span>Weight <ImportanceDots value={selected.importance || 1} /></span>
+                    <span>{selected.access_count || 0} reads</span>
+                    <span>{fmtBytes(selected.size_bytes)}</span>
+                    {selectedUpdated && <span>{selectedUpdated}</span>}
+                  </div>
                 </div>
               </div>
               <button style={S.closeBtn} className="mg-close" onClick={closePanel} aria-label="Close">×</button>
             </div>
 
-            {/* Frontmatter chips — importance / usage / size / recency. */}
-            <div style={S.chipRow}>
-              <Chip label="weight"><ImportanceDots value={selected.importance || 1} /></Chip>
-              <Chip label="used">{(selected.access_count || 0)}×</Chip>
-              <Chip label="size">{fmtBytes(selected.size_bytes)}</Chip>
-              {relDate(noteState.fm.updated) && (
-                <Chip label="updated">{relDate(noteState.fm.updated)}</Chip>
-              )}
-            </div>
-
             {Array.isArray(selected.tags) && selected.tags.length > 0 && (
-              <div style={S.tagRow}>
+              <div style={S.tagRow} className="mg-tag-row">
                 {selected.tags.map((t) => <span key={t} style={S.tag}>#{t}</span>)}
               </div>
             )}
@@ -1033,7 +1029,7 @@ export default function App({ appId, token }) {
               </div>
 
               <section ref={localPaneRef} style={S.localPane} className="mg-local-pane">
-                <div style={S.localHead}>
+                <div style={S.localHead} className="mg-local-head">
                   <div>
                     <div style={S.paneHead}>Local graph</div>
                     <div style={S.localCount}>
@@ -1130,8 +1126,7 @@ function GraphLabelLayer({ labels }) {
           style={{
             ...S.graphLabel,
             ...(label.strong ? S.graphLabelStrong : S.graphLabelSoft),
-            left: label.x,
-            top: label.y,
+            transform: `translate3d(${label.x}px, ${label.y}px, 0) translate(-50%, 0)`,
           }}
         >
           {label.title}
@@ -1151,15 +1146,6 @@ function ImportanceDots({ value }) {
         <span key={i} style={{ ...S.pip, ...(i <= v ? S.pipOn : {}) }} />
       ))}
     </span>
-  );
-}
-
-function Chip({ label, children }) {
-  return (
-    <div style={S.chip}>
-      <span style={S.chipLabel}>{label}</span>
-      <span style={S.chipValue}>{children}</span>
-    </div>
   );
 }
 
@@ -1228,7 +1214,7 @@ function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
 }
 
-function buildScreenLabels(fg, nodes = [], dims = {}, opts = {}, _tick = 0) {
+export function buildScreenLabels(fg, nodes = [], dims = {}, opts = {}, _tick = 0) {
   if (!fg || !dims.w || !dims.h || !Array.isArray(nodes)) return [];
   const scale = Number(fg.zoom?.()) || 1;
   const ranked = [...nodes]
@@ -1245,15 +1231,15 @@ function buildScreenLabels(fg, nodes = [], dims = {}, opts = {}, _tick = 0) {
       return {
         id: n.id,
         title: n.title || n.id,
-        x: Math.round(p.x),
-        y: Math.round(p.y + nodeRadius(n) + 5),
+        x: p.x,
+        y: p.y + nodeRadius(n) + 5,
         strong: n.type === 'moc' || n.id === opts.hoverId || n.id === opts.selectedId || n.localDepth === 0,
       };
     })
     .filter(Boolean);
 }
 
-function labelScore(node = {}) {
+export function labelScore(node = {}) {
   const importance = Number(node.importance) || 0;
   const access = Number(node.access_count) || 0;
   const mocBonus = node.type === 'moc' ? 1000 : 0;
@@ -1262,7 +1248,7 @@ function labelScore(node = {}) {
   return mocBonus + localBonus + importance * 12 + access * 4 + linkedBonus;
 }
 
-function shouldShowScreenLabel(node = {}, scale = 1, labelRank = 0, opts = {}) {
+export function shouldShowScreenLabel(node = {}, scale = 1, labelRank = 0, opts = {}) {
   const isHover = node.id === opts.hoverId;
   const isSelected = node.id === opts.selectedId;
   const isHub = node.type === 'moc';
@@ -1432,16 +1418,17 @@ const S = {
   },
   graphLabelLayer: {
     position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 2, overflow: 'hidden',
+    contain: 'strict',
   },
   graphLabel: {
-    position: 'absolute', transform: 'translate3d(-50%, 0, 0)', maxWidth: 160,
+    position: 'absolute', left: 0, top: 0, maxWidth: 160,
     padding: '2px 6px', borderRadius: 7,
     background: 'color-mix(in srgb, var(--bg) 82%, transparent)',
     border: '1px solid color-mix(in srgb, var(--text) 16%, transparent)',
     color: 'var(--text)', fontSize: 11, fontWeight: 650,
     whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
     textShadow: '0 1px 2px rgba(0,0,0,0.55)',
-    willChange: 'left, top',
+    willChange: 'transform',
   },
   graphLabelStrong: { opacity: 1 },
   graphLabelSoft: { opacity: 0.78 },
@@ -1526,14 +1513,15 @@ const S = {
   panelAccent: { position: 'absolute', top: 0, left: 0, right: 0, height: 3, zIndex: 1 },
   panelHead: {
     display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between',
-    padding: '18px 16px 12px', gap: 10,
+    padding: '15px 16px 10px', gap: 10,
   },
   panelHeadMain: { display: 'flex', gap: 11, minWidth: 0, alignItems: 'flex-start' },
-  panelKicker: {
-    fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em',
-    color: 'var(--muted)', marginBottom: 3,
+  panelTitle: { fontSize: 18, fontWeight: 700, lineHeight: 1.18, letterSpacing: '-0.01em' },
+  panelMetaLine: {
+    display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+    marginTop: 5, color: 'var(--muted)', fontSize: 11.5,
+    fontVariantNumeric: 'tabular-nums',
   },
-  panelTitle: { fontSize: 19, fontWeight: 700, lineHeight: 1.22, letterSpacing: '-0.015em' },
   closeBtn: {
     border: 'none', background: 'var(--surface2)', color: 'var(--muted)',
     width: 30, height: 30, borderRadius: 8, fontSize: 20, lineHeight: 1, cursor: 'pointer',
@@ -1541,28 +1529,14 @@ const S = {
     justifyContent: 'center', transition: 'background 0.15s, color 0.15s',
   },
 
-  chipRow: { display: 'flex', flexWrap: 'wrap', gap: 7, padding: '0 16px 4px' },
-  chip: {
-    display: 'flex', flexDirection: 'column', gap: 2, background: 'var(--surface2)',
-    border: '1px solid var(--border)', borderRadius: 9, padding: '6px 10px', minWidth: 0,
-  },
-  chipLabel: {
-    fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em',
-    color: 'var(--muted)',
-  },
-  chipValue: {
-    fontSize: 13, fontWeight: 600, color: 'var(--text)', fontVariantNumeric: 'tabular-nums',
-    display: 'flex', alignItems: 'center', minHeight: 16,
-  },
-
-  tagRow: { display: 'flex', flexWrap: 'wrap', gap: 6, padding: '10px 16px 4px' },
+  tagRow: { display: 'flex', flexWrap: 'wrap', gap: 6, padding: '0 16px 8px' },
   tag: {
     fontSize: 11.5, color: 'var(--accent)', background: 'var(--accent-dim, rgba(167,139,250,0.12))',
     borderRadius: 999, padding: '2px 9px', fontWeight: 500,
   },
   panelSplit: {
     flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(260px, 0.9fr)',
-    gap: 0, borderTop: '1px solid var(--border)', marginTop: 10,
+    gap: 0, borderTop: '1px solid var(--border)',
   },
   notePane: {
     display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0,
@@ -1575,7 +1549,7 @@ const S = {
   },
   localHead: {
     display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-    gap: 10, padding: '12px 12px 10px', borderBottom: '1px solid var(--border)',
+    gap: 10, padding: '9px 12px 8px', borderBottom: '1px solid var(--border)',
   },
   localCount: {
     fontSize: 11, color: 'var(--muted)', marginTop: 3, fontVariantNumeric: 'tabular-nums',
@@ -1592,7 +1566,7 @@ const S = {
   depthBtnActive: {
     background: 'var(--bg)', color: 'var(--text)', boxShadow: '0 1px 3px rgba(0,0,0,0.16)',
   },
-  localGraphWrap: { flex: 1, minHeight: 220, position: 'relative', overflow: 'hidden' },
+  localGraphWrap: { flex: 1, minHeight: 180, position: 'relative', overflow: 'hidden' },
   localEmpty: {
     position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
     color: 'var(--muted)', fontSize: 13, padding: 18, textAlign: 'center',
@@ -1611,14 +1585,14 @@ const S = {
     display: 'block',
   },
   panelBody: {
-    flex: 1, overflowY: 'auto', padding: '12px 16px 20px', fontSize: 14, lineHeight: 1.62,
+    flex: 1, overflowY: 'auto', padding: '10px 16px 20px', fontSize: 14, lineHeight: 1.62,
     minHeight: 0,
   },
   notePlaceholder: { display: 'flex', flexDirection: 'column', gap: 11, paddingTop: 4 },
   pre: { whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'var(--mono)', fontSize: 12.5 },
-  panelFoot: { padding: 14, borderTop: '1px solid var(--border)', background: 'var(--surface)' },
+  panelFoot: { padding: 12, borderTop: '1px solid var(--border)', background: 'var(--surface)' },
   discussBtn: {
-    width: '100%', border: 'none', borderRadius: 11, padding: '12px 16px',
+    width: '100%', border: 'none', borderRadius: 10, padding: '10px 14px',
     background: 'var(--accent)', color: '#fff', fontSize: 14, fontWeight: 600,
     cursor: 'pointer', fontFamily: 'var(--font)', display: 'flex', alignItems: 'center',
     justifyContent: 'center', transition: 'filter 0.15s, transform 0.05s',
@@ -1693,14 +1667,24 @@ const CSS = `
   font-weight: 600;
 }
 @media (max-width: 640px) {
+  .mg-scrim { display: none; }
   .mg-panel {
-    inset: auto 0 0 0; width: 100%; height: 82%; border-left: none;
-    border-top: 1px solid var(--border); border-radius: 18px 18px 0 0;
-    animation: mg-sheet-in 0.26s cubic-bezier(0.22,1,0.36,1);
+    inset: 0; width: 100%; height: 100%; border-left: none;
+    border-top: none; border-radius: 0; box-shadow: none;
+    animation: mg-panel-in 0.18s cubic-bezier(0.22,1,0.36,1);
   }
+  .mg-panel-head { padding: 11px 12px 8px !important; }
+  .mg-panel .mg-close {
+    width: 34px !important; height: 34px !important; border-radius: 10px !important;
+  }
+  .mg-panel .mg-tag-row {
+    flex-wrap: nowrap !important; overflow-x: auto; padding: 0 12px 7px !important;
+    scrollbar-width: none;
+  }
+  .mg-panel .mg-tag-row::-webkit-scrollbar { display: none; }
   .mg-panel-split {
     grid-template-columns: 1fr !important;
-    grid-template-rows: minmax(0, var(--mg-mobile-graph-h, 42%)) 18px minmax(0, 1fr);
+    grid-template-rows: minmax(150px, var(--mg-mobile-graph-h, 32%)) 18px minmax(0, 1fr);
     overflow: hidden;
   }
   .mg-local-pane { order: 1; min-height: 0; }
@@ -1709,12 +1693,16 @@ const CSS = `
     order: 3; border-right: none !important; border-bottom: none;
     min-height: 0; overflow: hidden;
   }
-  .mg-local-graph { min-height: 0; }
+  .mg-local-graph { min-height: 0 !important; }
+  .mg-local-head { padding: 7px 10px 6px !important; }
+  .mg-note-pane > div:first-child { display: none; }
+  .mg-md { padding: 11px 14px 20px !important; }
+  .mg-panel .mg-discuss { padding: 9px 12px !important; }
 }
 @media (min-width: 641px) and (max-width: 860px) {
   .mg-panel-split {
     grid-template-columns: 1fr !important;
-    grid-template-rows: minmax(0, var(--mg-mobile-graph-h, 45%)) 18px minmax(0, 1fr);
+    grid-template-rows: minmax(180px, var(--mg-mobile-graph-h, 36%)) 18px minmax(0, 1fr);
     overflow: hidden;
   }
   .mg-local-pane { order: 1; min-height: 0; }
@@ -1725,8 +1713,6 @@ const CSS = `
   }
   .mg-local-graph { min-height: 0; }
 }
-@keyframes mg-sheet-in { from { transform: translateY(28px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-
 @media (prefers-reduced-motion: reduce) {
   .mg-orbit, .mg-star, .mg-pulse, .mg-skel, .mg-panel, .mg-scrim, .mg-star-hub { animation: none !important; }
 }

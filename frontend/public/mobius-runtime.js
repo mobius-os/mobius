@@ -1093,6 +1093,120 @@ function makeChat({ appId, getToken }) {
   }
 }
 
+export function makeNav() {
+  const stack = []
+
+  function open(label, onBack) {
+    const entry = {
+      owned: false,
+      done: false,
+      settled: false,
+      readyResolve: null,
+      onBack: typeof onBack === 'function' ? onBack : null,
+    }
+    const ready = new Promise((resolve) => {
+      entry.readyResolve = resolve
+    })
+    const settleReady = (value) => {
+      if (!entry.readyResolve) return
+      entry.readyResolve(value)
+      entry.readyResolve = null
+    }
+    const requestId = `nav-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const timer = setTimeout(() => {
+      entry.settled = true
+      settleReady(false)
+      window.removeEventListener('message', onMessage)
+    }, 5000)
+
+    const close = (fromShell = false) => {
+      if (entry.done) return
+      entry.done = true
+      const idx = stack.indexOf(entry)
+      if (idx !== -1) stack.splice(idx, 1)
+      if (!fromShell && entry.owned) {
+        try {
+          window.parent.postMessage({ type: 'moebius:nav-pop' }, window.location.origin)
+        } catch (e) {}
+      }
+      entry.owned = false
+      if (!entry.settled) settleReady(false)
+      if (entry.settled || fromShell) {
+        clearTimeout(timer)
+        window.removeEventListener('message', onMessage)
+      }
+    }
+
+    function onMessage(event) {
+      if (event.origin !== window.location.origin) return
+      if (event.source !== window.parent) return
+      const msg = event.data
+      if (msg?.type === 'moebius:nav-back') {
+        if (stack[stack.length - 1] !== entry) return
+        close(true)
+        if (entry.onBack) entry.onBack()
+        return
+      }
+      if (msg?.requestId !== requestId) return
+      if (msg.type === 'moebius:nav-push-ack') {
+        entry.settled = true
+        clearTimeout(timer)
+        if (entry.done) {
+          try {
+            window.parent.postMessage({ type: 'moebius:nav-pop' }, window.location.origin)
+          } catch (e) {}
+          settleReady(false)
+          window.removeEventListener('message', onMessage)
+          return
+        }
+        entry.owned = true
+        stack.push(entry)
+        settleReady(true)
+      } else if (msg.type === 'moebius:nav-push-rejected') {
+        entry.settled = true
+        clearTimeout(timer)
+        entry.owned = false
+        settleReady(false)
+        window.removeEventListener('message', onMessage)
+      }
+    }
+
+    window.addEventListener('message', onMessage)
+    if (window.parent === window) {
+      clearTimeout(timer)
+      entry.settled = true
+      settleReady(false)
+      window.removeEventListener('message', onMessage)
+      return {
+        ready,
+        close() {
+          close(false)
+        },
+      }
+    }
+    try {
+      window.parent.postMessage(
+        { type: 'moebius:nav-push', label: label || 'app-detail', requestId },
+        window.location.origin,
+      )
+    } catch (e) {
+      clearTimeout(timer)
+      entry.settled = true
+      settleReady(false)
+      window.removeEventListener('message', onMessage)
+    }
+
+    return {
+      ready,
+      close() {
+        close(false)
+      },
+    }
+  }
+
+  return { open }
+}
+
 export function init({ appId, getToken }) {
   const storage = makeStorage({ appId, getToken })
   window.mobius = {
@@ -1100,6 +1214,7 @@ export function init({ appId, getToken }) {
     get online() { return navigator.onLine },
     storage,
     chat: makeChat({ appId, getToken }),
+    nav: makeNav(),
   }
   storage._drain()    // flush anything left from a previous offline session
   // Ask for durable storage so the offline mirror + queued blob writes survive
