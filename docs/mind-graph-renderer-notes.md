@@ -5,13 +5,19 @@ Last checked: 2026-06-05.
 ## Current choice
 
 Mind currently uses `react-force-graph-2d`, which wraps `force-graph`: a
-Canvas renderer backed by `d3-force`. This remains a good fit for the current
-scope because it is small, works in the mini-app runtime through ESM imports,
-supports pan/zoom/drag, lets us custom-paint labels and halos, and has examples
-around a few thousand graph elements.
+Canvas renderer backed by `d3-force`. This is the short-term bridge, not the
+long-term renderer target. It is small, works in the mini-app runtime through
+ESM imports, supports pan/zoom/drag, and was useful for proving the Mind data
+contract and panel UX quickly.
 
-Keep it for now unless the real Mind graph starts showing frame drops or
-interaction lag at target scale.
+The weakness is labels. DOM overlay labels can be made selective and smoother,
+but they are still synchronized from outside the renderer's scene graph. That is
+more fragile than the Quartz approach and is already visible as label jitter and
+density tuning work.
+
+Do not treat the current renderer as future-proof for Mind. It is acceptable for
+shipping incremental product fixes, but the robust target is a Quartz-style
+renderer module.
 
 ## Quartz reference
 
@@ -29,13 +35,34 @@ The current community implementation advertises:
 - hover focus
 - fullscreen global graph
 
+Quartz is not a drop-in React library. Its graph code is a Quartz component
+script wired to Quartz's static content index, slugs, SPA navigation, and theme
+lifecycle. The reusable part for Mobius is its architecture: `d3-force` for
+layout and PixiJS for nodes, links, and labels in one render loop.
+
 Useful links:
 
 - https://github.com/jackyzha0/quartz/blob/9737bce7095f93c9fb41700449505d963a6b2bb8/docs/plugins/Graph.md
 - https://github.com/jackyzha0/quartz/blob/9737bce7095f93c9fb41700449505d963a6b2bb8/docs/configuration.md
 - https://github.com/quartz-community/graph
 
-## Upgrade path
+## Target path
+
+Create a Mobius-owned `MindGraphRenderer` module that ports/adapts Quartz's
+D3 + Pixi pattern while preserving Mobius-specific behavior:
+
+- input is the existing `/api/storage/shared/memory/graph.json` data contract
+- labels are Pixi `Text` objects in the same transformed scene as nodes
+- global graph supports zoom-aware label opacity, hover focus, radial/global
+  layout tuning, MOC colors, and selected-node emphasis
+- local graph supports depth 1-4 and center-node pinning/priority
+- renderer emits `nodeClick` / `nodeHover` callbacks for the React note panel
+- React owns data loading, markdown rendering, mini-app nav, and mobile layout
+
+This gives us Quartz's maintainable rendering model without importing Quartz's
+site-generator assumptions into the mini-app runtime.
+
+## Other upgrade candidates
 
 If Mind needs tens of thousands of visible nodes, revisit renderer choice:
 
@@ -47,9 +74,9 @@ If Mind needs tens of thousands of visible nodes, revisit renderer choice:
   rendering on the GPU and targets hundreds of thousands of points/links, but it
   is a bigger dependency and a less Obsidian-like note-graph UI out of the box.
   Repo: https://github.com/cosmosgl/graph
-- Quartz community graph: good UX reference for local/global controls and a
-  PixiJS+D3 implementation, but porting it wholesale would be more invasive
-  than adapting our current data contract.
+- Quartz graph: best UX/architecture fit for Obsidian-style Mind browsing, but
+  it should be ported as a Mobius renderer module rather than vendored
+  wholesale.
 
 ## Current UX decisions
 
@@ -59,5 +86,6 @@ If Mind needs tens of thousands of visible nodes, revisit renderer choice:
 - Local graph depth is selected inside that split pane so the global toolbar
   stays simple.
 - `[[slug]]` links render using the target node title, matching Obsidian's feel.
-- The simulation stays lightly warm with a small alpha target instead of cooling
-  to a fully static layout.
+- The current renderer keeps the simulation lightly warm with a small alpha
+  target instead of cooling to a fully static layout. The Quartz-style renderer
+  should make this explicit and configurable per local/global graph.
