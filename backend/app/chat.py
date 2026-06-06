@@ -1876,21 +1876,15 @@ async def _run_chat_impl(
       # session. Three load-bearing sentences:
       #  - no-echo: Codex occasionally echoes the whole block as its reply
       #    preamble on long first prompts; the explicit instruction stops it.
-      #  - data-not-instructions (review R4): notes are derived from past
-      #    chats + web research, so a poisoned note must not be obeyed as a
-      #    command — authored rules live only in the system prompt.
-      #  - pointer: where to recall more / record learnings, mode-aware so
-      #    the legacy fallback still points at the flat file.
-      if block.mode == "graph":
-        pointer = (
-          "To recall more, Read /data/shared/memory/index.md and follow "
-          "[[links]]. Record durable learnings per your skill (append to "
-          "/data/shared/memory/inbox.md)."
-        )
-      else:
-        pointer = (
-          "See 'About this file' inside for how to read and update it."
-        )
+      #  - data-not-instructions: notes are derived from past chats + web
+      #    research, so a poisoned note must not be obeyed as a command —
+      #    authored rules live only in the system prompt.
+      #  - pointer: where to recall more / record learnings.
+      pointer = (
+        "To recall more, Read /data/shared/memory/index.md and follow "
+        "[[links]]. Record durable learnings per your skill (append to "
+        "/data/shared/memory/inbox.md)."
+      )
       meta = (
         "The <agent_experience> block below is your PRIVATE MEMORY — "
         "recalled context about the user and the Möbius system. Read it "

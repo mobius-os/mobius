@@ -260,7 +260,7 @@ elif crontab -u mobius -l 2>/dev/null | grep -q .; then
   echo "Added PATH= to mobius crontab"
 fi
 
-# Initialize agent experience file (seeds from template on first boot).
+# Publish the per-deploy upstream-diff file (/data/shared/upstream-diff.txt).
 python3 /app/scripts/init_agent_context.py
 
 # Bootstrap the knowledge graph (/data/shared/memory/). CREATE-IF-ABSENT:
