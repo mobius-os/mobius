@@ -286,6 +286,46 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
   return _run(repo, "rev-parse", LOCAL_BRANCH).stdout.strip()
 
 
+def commit_merge(
+  source_dir: str | Path, upstream_tip: str, msg: str,
+) -> str | None:
+  """Records the working-tree source onto `main` as a merge of upstream.
+
+  Commits the current working tree (the just-applied merge result) with
+  TWO parents: the previous `main` tip and `upstream_tip` (the upstream
+  commit whose changes were merged in). The second parent is what makes
+  the base advance — after this, `upstream_tip` is an ancestor of `main`,
+  so the NEXT update's three-way merge diffs only the genuinely-new
+  upstream delta against local edits instead of re-litigating the whole
+  already-merged history against a stale base (the bug that turned every
+  repeated update into a spurious conflict).
+
+  A plain `commit_local` cannot do this: a single-parent commit leaves
+  `upstream` unreachable from `main`, so `git merge-base` keeps returning
+  the original install point. Returns the new commit sha, or None when
+  there is nothing to record (working tree already matches `main` and
+  `upstream_tip` is already an ancestor — e.g. a re-install of the same
+  version with no local edits).
+  """
+  repo = Path(source_dir)
+  ensure_repo(repo)
+  _run(repo, "add", *_tracked_source(repo))
+  tree = _run(repo, "write-tree").stdout.strip()
+  main_tree = _run(repo, "rev-parse", f"{LOCAL_BRANCH}^{{tree}}").stdout.strip()
+  already_merged = _run(
+    repo, "merge-base", "--is-ancestor", upstream_tip, LOCAL_BRANCH,
+    check=False,
+  ).returncode == 0
+  if tree == main_tree and already_merged:
+    return None
+  main_tip = _run(repo, "rev-parse", LOCAL_BRANCH).stdout.strip()
+  sha = _run(
+    repo, "commit-tree", tree, "-p", main_tip, "-p", upstream_tip, "-m", msg,
+  ).stdout.strip()
+  _run(repo, "update-ref", f"refs/heads/{LOCAL_BRANCH}", sha)
+  return sha
+
+
 def local_diverged_from(source_dir: str | Path, base_commit: str) -> bool:
   """Whether local `main` differs from `base_commit`.
 
