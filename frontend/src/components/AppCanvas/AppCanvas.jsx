@@ -54,6 +54,7 @@ import './AppCanvas.css'
 // Shell-level messages (handled by Shell.jsx, NOT this file):
 //   - {type: 'moebius:app-error', appId, error, chatId?}    frame → shell
 //   - {type: 'moebius:new-chat', draft?}                    frame → shell
+//   - {type: 'moebius:open-chat', chatId, draft?}           frame → shell
 //   - {type: 'moebius:open-app', appId}                     frame → shell
 //     Switch the shell to another installed app. `appId` may be the
 //     numeric DB id or the slug; Shell matches against its apps list

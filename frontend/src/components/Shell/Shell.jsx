@@ -365,6 +365,7 @@ export default function Shell() {
   //     the building chat was deleted. Error is set as a draft (not auto-sent)
   //     so the user can review before sending.
   //   moebius:new-chat — open a new chat with optional pre-filled draft text.
+  //   moebius:open-chat — open an existing chat, optionally pre-filling a draft.
   //   moebius:open-app — switch the shell to an installed app. Payload
   //     {appId} accepts either the numeric DB id or the slug; we match
   //     against the installed apps list and silently ignore unknown ids
@@ -409,6 +410,9 @@ export default function Shell() {
         newChat({ draft: e.data.draft, forceNew: true })
       } else if (e.data?.type === 'moebius:open-chat') {
         if (typeof e.data.chatId !== 'string' || !e.data.chatId) return
+        if (e.data.draft) {
+          try { sessionStorage.setItem('pending-draft', String(e.data.draft)) } catch {}
+        }
         navTo('chat', { chatId: e.data.chatId })
       } else if (e.data?.type === 'moebius:open-app') {
         // Match against installed apps by numeric id OR slug, so the
