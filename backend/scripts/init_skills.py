@@ -32,7 +32,7 @@ from pathlib import Path
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILLS = DATA_DIR / "shared" / "skills"
 VERSION_FILE = SKILLS / ".seed-version"
-SEED_VERSION = "2"  # bump when the baked seed skills change (v2: added dreaming.md)
+SEED_VERSION = "3"  # bump when the baked seed skills change (v2: added dreaming.md; v3: const-CSS styling standard in building-apps.md + new app-component-shapes.md)
 
 _SEED_CANDIDATES = [
   Path("/app/scripts/seed-skills"),

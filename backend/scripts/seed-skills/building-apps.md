@@ -108,6 +108,46 @@ python "$SCRIPTS_DIR/register_app.py" "<name>" "<description>" /data/apps/<name>
 
 **Use `register_app.py`, not raw `curl POST /api/apps/`.** The raw endpoint requires an undocumented `jsx_source` field (422 without it); updates are `PATCH` not `PUT` (405). The helper handles all of this — skipping it burns tool calls rediscovering the schema from error responses.
 
+### Module hierarchy — split a growing app on concept boundaries
+
+A trivial app is one `index.jsx`. As it grows, split on **concept boundaries,
+not line count** — when a file is doing two unrelated jobs (you'd describe it
+with an "and": "it holds the storage layer AND the globe AND the modal"), lift
+each job into a sibling module. (~200 lines is only a smell that prompts the
+look, never the trigger itself.) A clean hierarchy keeps each file small enough
+to reason about and edit reliably, and it keeps the shared chrome quarantined
+so a future library extraction is mechanical.
+
+Canonical layout for a complex app (a one-way dependency graph — nothing
+imports `index.jsx`):
+
+```text
+/data/apps/<slug>/
+  index.jsx        # the default-export App shell + composition ONLY (stays thin)
+  storage.js       # the window.mobius.storage data layer: typed get/set per record + the schema
+  domain.js        # pure logic / helpers (no React, no I/O) — the testable core
+  theme.js         # export const CSS = `...`  (split the stylesheet here once it's large)
+  chat.js          # the window.mobius.chat integration, if the app has one
+  ui/
+    Chrome.jsx     # the shared `mobius-ui:` chrome (Header, Sheet, EmptyState, …) — all fenced
+    <Feature>.jsx  # one file per view / feature
+  static/          # durable build assets (ignored by the watcher, not importable)
+```
+
+- **Keep the literal `export default` in `index.jsx`** — the compiler entry
+  point. Siblings import relatively (`./storage.js`, `./ui/Chrome.jsx`) and the
+  watcher recompiles when any source sibling changes.
+- **Split the stylesheet as a `.js` exporting a CSS string** (`export const
+  CSS = \`...\``), NOT a sibling `.css` import — esbuild emits a `.css` import
+  as a separate artifact the single-module serving path won't deliver, so the
+  app loads unstyled. A `.js` CSS string is just JS and serves fine.
+- **Put every `mobius-ui:` fenced block in one `ui/Chrome.jsx`** so the shared,
+  library-candidate components are in one place per app. When ~3 apps carry the
+  same fenced block, extraction is `grep -rl 'mobius-ui:'` + move + import — the
+  copy-then-extract discipline, applied within and across apps.
+- Don't pre-abstract. Colocate first; split when a real second concept appears.
+  An over-split trivial app is as hard to read as an over-grown one.
+
 ### Deleting an app — permanent, no recovery
 
 ```bash
@@ -192,89 +232,144 @@ The sandbox excludes `allow-modals`, so native `window.confirm/alert/prompt` sil
 
 ## Design conventions
 
-Mini-apps should look like they belong to the shell. Several real bugs came from drifting off these — follow them by default:
+Mini-apps should look like they belong to the shell, and like each other. The
+**full canonical shape** for every recurring block (header, sheet, card,
+button, empty state, segmented control, sync pill, …) lives in
+[app-component-shapes.md](app-component-shapes.md) — `Read` it when building or
+restyling UI and **copy the blocks you need**. The rules behind those shapes:
 
-- **Status colors:** the app frame defines exactly two status tokens — `var(--danger)` for errors and `var(--green)` for success. There is **no `--red`** (using it silently falls back to a hardcoded hex and never picks up the theme). Everything else uses `--accent`, `--text`, `--muted`, `--bg`, `--surface`, `--border`.
-- **Touch targets:** mobile is the primary target — every interactive control gets `min-height: 44px` and every icon-only button gets an `aria-label`. Larger targets don't hurt desktop.
-- **One inline-style object named `S` — REQUIRED, not a suggestion.** Every app declares a single `const S = { ... }` at the top and styles via `style={S.foo}`. Do NOT improvise the lowercase-`s` variant, a `styles`/`css` object, scattered className-only styling, or per-component color maps — those four variants are exactly what drifted the catalog apart. One object, one name, every app.
-- **Scheduled apps — never a dead time-picker.** If the cron cadence is NOT user-editable, show it in words ("Updates daily") plus "ask the Möbius agent to reschedule" — don't render a picker that writes a file nothing reads. If it IS editable, ship a `sync-cron.sh` that actually rewrites the crontab (see `cron.md`). Lead with the cadence either way.
-
-### Theme-aware colors
-
-**Use CSS variables for structural elements** (backgrounds, text, borders, cards, inputs) so apps work in both light and dark mode. Hardcoding `#0c0f14` instead of `var(--bg)` breaks the app when the partner toggles modes — half their devices are in the mode you didn't test. Hardcoded colors are fine only for app-specific accents (a brand color, a chart series).
-
-```jsx
-const S = {
-  root:  { padding: '16px', height: '100%', overflow: 'auto',
-           background: 'var(--bg)', color: 'var(--text)', fontFamily: 'var(--font)' },
-  btn:   { background: 'var(--accent)', color: '#fff', border: 'none',
-           borderRadius: '6px', padding: '8px 16px', cursor: 'pointer' },
-  card:  { background: 'var(--surface)', border: '1px solid var(--border)',
-           borderRadius: '8px', padding: '12px 16px' },
-  input: { background: 'var(--surface)', border: '1px solid var(--border)',
-           borderRadius: '6px', color: 'var(--text)', padding: '8px 12px', outline: 'none' },
-}
-```
-
-Variables: `--bg`, `--surface`, `--surface2`, `--text`, `--muted`, `--accent`, `--accent-hover`, `--accent-dim`, `--border`, `--border-light`, `--danger`, `--green`, `--font`, `--mono`. They adapt automatically when the partner toggles light/dark. Don't invent fallbacks like `var(--fg, #111)` — there is no `--fg` and a near-black fallback is invisible in dark mode. If you must read a token in JS, resolve it live (`getComputedStyle(document.documentElement).getPropertyValue('--accent')`) rather than hardcoding a hex twin that won't follow the theme.
-
-### Modals, scrims & radii
-
-In-app modals are the only option (no native dialogs). Standardize the overlay so every app reads the same — the App Store app is the reference:
-
-- **Placement: a bottom sheet.** Backdrop `position: fixed; inset: 0; display: flex; align-items: flex-end; justify-content: center`; panel `width: 100%; max-width: 480px; border-radius: 16px 16px 0 0; padding: 24px`. Bottom sheets are thumb-reachable on a phone; a centered dialog or a left/right slide-in is NOT the house style for confirmations. (A persistent full-height side panel is fine only for a detail inspector — e.g. a graph node — never for a confirm/input.)
-- **Scrim:** `rgba(0,0,0,0.6)`. Tapping the scrim cancels, unless a write is in flight.
-- **Radius scale:** `8px` inputs + small buttons, `10–12px` cards + primary buttons, `16px` sheet top. Don't invent per-app radii.
-
-### Empty states
-
-Every list / feed / graph gets a real empty state, never a bare muted string. Three parts, centered in the scroll area: a small icon or letter mark, a one-line **title** ("No briefs yet"), and a one-line **subtitle** that says what will fill it ("Möbius writes one each morning"). A blank panel or a lone "Nothing here." reads as broken.
+- **One scoped stylesheet, not inline-style objects.** Declare a module-level
+  ``const CSS = `...` `` and render it once at the app root as
+  `<style>{CSS}</style>`. Style via semantic classNames (`className="ma-card"`).
+  Use the inline `style={}` prop ONLY for values computed at render time (a
+  measured height, a drag transform, a per-row color). Inline objects cannot
+  express `:hover`/`:focus`/`:active`, media queries, `@keyframes`, or
+  pseudo-elements — that's the friction wall that stops an app from growing.
+  The app runs in its own iframe, so the `<style>` is scoped to your app
+  automatically; no CSS Modules, no BEM. (`app-latex` and `mind` are the
+  cleanest references — both already do exactly this.)
+- **Naming.** A short per-app class prefix (`mg-` mind, `cb-` atlas, a 2–3-char
+  mnemonic for yours) + semantic kebab roles (`ma-header`, `ma-sheet`,
+  `ma-btn`). States via REAL pseudo-classes (`:hover`, `:disabled`,
+  `:focus-visible`). App-driven state CSS can't read uses an `is-`/`has-`
+  modifier class (`.ma-card.is-selected`). **Never** a `tab(active)` /
+  `card(variant)` JS helper that returns a style object — it hides state in JS
+  and blocks reuse.
+- **Color is always a theme token** so the app follows light/dark:
+  `--bg --surface --surface2 --text --muted --accent --accent-hover
+  --accent-dim --border --border-light --danger --green --font --mono`. There
+  is **no `--red`** (use `--danger`) and **no `--fg`** (use `--text` — a
+  `var(--fg,#111)` fallback is invisible in dark mode). Hardcoded hex only for
+  an app-specific accent the theme can't express (a brand color, a chart
+  series). To read a token in JS, resolve it live
+  (`getComputedStyle(document.documentElement).getPropertyValue('--accent')`).
+- **Touch + radius.** Every interactive control `min-height: 44px`; every
+  icon-only button gets an `aria-label`. Radius scale: 8px inputs/small,
+  10–12px cards/primary buttons, 16px sheet top. Don't invent per-app radii.
+- **No native dialogs.** The sandbox has no `allow-modals`, so
+  `confirm/alert/prompt` silently no-op. Use the bottom-sheet (the canonical
+  dialog; a centered card is an allowed variant only for a tiny confirm).
+  Scrims/sheets/toasts are `position: absolute` anchored to the app root
+  (which is `position: relative`), never `fixed` — a `fixed` overlay can paint
+  over the shell's own chrome.
+- **Empty states.** Every list/feed/graph gets a 3-part empty state (mark +
+  one-line title + one-line subtitle), never a bare "Nothing here."
+- **Keep copies consistent with fence comments.** Each shared block is wrapped
+  in an IDENTICAL versioned marker across apps, so divergence is visible and a
+  future extraction into a real library is a `grep`-and-move:
+  `/* mobius-ui:Header v1 — keep in sync; library candidate. */` … `/* /mobius-ui:Header */`.
+  Keep the class names + markup inside a fence identical across apps; diverge
+  the *shape* when your app genuinely needs to, but never *rename* a shared
+  class for no reason (that breaks the extraction seam). We're not building the
+  shared library yet — consistent copies are correct until ~3 apps prove a
+  block identical, at which point the lift is mechanical.
+- **Scheduled apps — never a dead time-picker.** If the cron cadence is NOT
+  user-editable, show it in words ("Updates daily") plus "ask the Möbius agent
+  to reschedule" — don't render a picker that writes a file nothing reads. If
+  it IS editable, ship a `sync-cron.sh` that actually rewrites the crontab (see
+  `cron.md`). Lead with the cadence either way.
 
 ### Canonical single-file app skeleton
 
-Start every new app from this shape — it encodes all the conventions above (the `S` object on theme tokens, a header with a mark + title + subtitle, a list with a 3-part empty state, a bottom-sheet modal, and 44px controls). Copy it, then fill in the domain logic:
+Start every new app from this shape: ``const CSS`` rendered via
+`<style>{CSS}</style>`, fenced shared blocks, theme tokens, 44px controls, a
+header with a mark + title + subtitle, a list with a 3-part empty state, and a
+bottom-sheet. Copy more blocks (cards, segmented control, sync pill) from
+[app-component-shapes.md](app-component-shapes.md). Pick your own short class
+prefix (here `ma-`). Then fill in the domain logic.
 
 ```jsx
 import { useState, useEffect } from 'react'
 
-const S = {
-  root:   { height: '100%', display: 'flex', flexDirection: 'column',
-            background: 'var(--bg)', color: 'var(--text)', fontFamily: 'var(--font)' },
-  header: { display: 'flex', alignItems: 'center', gap: '12px',
-            padding: '16px', borderBottom: '1px solid var(--border)' },
-  mark:   { width: '36px', height: '36px', borderRadius: '10px', flexShrink: 0,
-            display: 'grid', placeItems: 'center', fontWeight: 700,
-            background: 'var(--accent)', color: '#fff' },
-  title:  { fontSize: '17px', fontWeight: 600, lineHeight: 1.2 },
-  sub:    { fontSize: '13px', color: 'var(--muted)' },
-  list:   { flex: 1, minHeight: 0, overflow: 'auto', padding: '16px',
-            display: 'flex', flexDirection: 'column', gap: '8px' },
-  card:   { background: 'var(--surface)', border: '1px solid var(--border)',
-            borderRadius: '12px', padding: '12px 16px' },
-  empty:  { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
-            justifyContent: 'center', gap: '6px', textAlign: 'center', color: 'var(--muted)' },
-  emptyMark: { fontSize: '28px', opacity: 0.7 },
-  fab:    { position: 'absolute', right: '16px', bottom: '16px', minHeight: '44px',
-            padding: '0 20px', borderRadius: '12px', border: 'none', cursor: 'pointer',
-            background: 'var(--accent)', color: '#fff', fontWeight: 600 },
-  scrim:  { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
-            display: 'flex', alignItems: 'flex-end', justifyContent: 'center' },
-  sheet:  { width: '100%', maxWidth: '480px', borderRadius: '16px 16px 0 0', padding: '24px',
-            background: 'var(--surface)', display: 'flex', flexDirection: 'column', gap: '12px' },
-  input:  { minHeight: '44px', padding: '8px 12px', borderRadius: '8px', outline: 'none',
-            background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)' },
-  btn:    { minHeight: '44px', padding: '0 16px', borderRadius: '12px', border: 'none',
-            cursor: 'pointer', background: 'var(--accent)', color: '#fff', fontWeight: 600 },
-  btnGhost: { minHeight: '44px', padding: '0 16px', borderRadius: '12px', cursor: 'pointer',
-            background: 'transparent', border: '1px solid var(--border)', color: 'var(--text)' },
-}
+const CSS = `
+/* mobius-ui:Root v1 — keep in sync; library candidate. */
+.ma-root { position: relative; display: flex; flex-direction: column; height: 100%;
+  overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--font); }
+.ma-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px 32px;
+  display: flex; flex-direction: column; gap: 8px; }
+/* /mobius-ui:Root */
+
+/* mobius-ui:Header v1 — keep in sync; library candidate. */
+.ma-header { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; min-height: 48px; padding: 12px 16px; background: var(--surface);
+  border-bottom: 1px solid var(--border); }
+.ma-brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.ma-mark { flex: 0 0 auto; width: 30px; height: 30px; border-radius: 9px; display: flex;
+  align-items: center; justify-content: center; font-size: 16px; font-weight: 700;
+  background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+.ma-title { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -0.015em; }
+.ma-subtitle { display: block; margin-top: 2px; font-size: 12px; color: var(--muted); }
+/* /mobius-ui:Header */
+
+/* mobius-ui:Empty v1 — keep in sync; library candidate. */
+.ma-empty { display: flex; flex-direction: column; align-items: center; text-align: center;
+  gap: 8px; margin: auto; padding: 48px 24px; color: var(--muted); }
+.ma-empty-mark { width: 64px; height: 64px; margin-bottom: 10px; border-radius: 18px; display: flex;
+  align-items: center; justify-content: center; font-size: 30px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.ma-empty-title { font-size: 17px; font-weight: 700; color: var(--text); }
+.ma-empty-text { margin: 0; font-size: 14px; line-height: 1.6; }
+/* /mobius-ui:Empty */
+
+/* mobius-ui:Card v1 — keep in sync; library candidate. */
+.ma-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  padding: 14px 16px; }
+/* /mobius-ui:Card */
+
+/* mobius-ui:Button v1 — keep in sync; library candidate. */
+.ma-btn { display: inline-flex; align-items: center; justify-content: center; min-height: 44px;
+  padding: 10px 16px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface);
+  color: var(--text); font-family: var(--font); font-size: 14px; font-weight: 600; cursor: pointer;
+  transition: background .14s ease, border-color .14s ease, transform .1s ease; }
+.ma-btn:active { transform: scale(0.97); }
+.ma-btn:disabled { opacity: 0.5; cursor: default; }
+.ma-btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.ma-btn-secondary { background: var(--surface2, var(--surface)); }
+/* /mobius-ui:Button */
+
+/* mobius-ui:Input v1 — keep in sync; library candidate. */
+.ma-input { display: block; width: 100%; box-sizing: border-box; min-height: 44px; padding: 11px 12px;
+  background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px;
+  outline: none; font-family: var(--font); font-size: 16px; }
+.ma-input:focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+/* /mobius-ui:Input */
+
+/* mobius-ui:Sheet v1 — keep in sync; library candidate. */
+.ma-scrim { position: absolute; inset: 0; z-index: 100; display: flex; align-items: flex-end;
+  justify-content: center; padding: 16px; background: rgba(0,0,0,0.5); }
+.ma-sheet { width: 100%; max-width: 480px; padding: 24px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 16px 16px 0 0; display: flex; flex-direction: column; gap: 12px; }
+.ma-sheet-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+.ma-sheet-actions .ma-btn { flex: 1; }
+/* /mobius-ui:Sheet */
+`
 
 export default function MyApp({ appId, token }) {
   const [items, setItems] = useState([])
   const [adding, setAdding] = useState(false)
   const [draft, setDraft] = useState('')
 
-  useEffect(() => window.mobius.storage.subscribe('items.json', v => setItems(v || [])), [])
+  useEffect(() => window.mobius.storage.subscribe('items.json', (v) => setItems(v || [])), [])
 
   async function save() {
     if (!draft.trim()) return
@@ -284,37 +379,39 @@ export default function MyApp({ appId, token }) {
   }
 
   return (
-    <div style={S.root}>
-      <header style={S.header}>
-        <div style={S.mark}>M</div>
-        <div>
-          <div style={S.title}>My App</div>
-          <div style={S.sub}>One-line description of what it does</div>
+    <div className="ma-root">
+      <style>{CSS}</style>
+      <header className="ma-header">
+        <div className="ma-brand">
+          <span className="ma-mark" aria-hidden="true">M</span>
+          <div>
+            <h1 className="ma-title">My App</h1>
+            <span className="ma-subtitle">One-line description of what it does</span>
+          </div>
         </div>
+        <button className="ma-btn ma-btn-primary" onClick={() => setAdding(true)}>+ New</button>
       </header>
 
       {items.length === 0 ? (
-        <div style={S.empty}>
-          <div style={S.emptyMark}>✶</div>
-          <div style={{ fontWeight: 600, color: 'var(--text)' }}>Nothing yet</div>
-          <div>Tap + to add your first item</div>
+        <div className="ma-empty">
+          <div className="ma-empty-mark" aria-hidden="true">✶</div>
+          <div className="ma-empty-title">Nothing yet</div>
+          <p className="ma-empty-text">Tap “+ New” to add your first item.</p>
         </div>
       ) : (
-        <div style={S.list}>
-          {items.map(it => <div key={it.id} style={S.card}>{it.text}</div>)}
+        <div className="ma-scroll">
+          {items.map((it) => <div key={it.id} className="ma-card">{it.text}</div>)}
         </div>
       )}
 
-      <button style={S.fab} onClick={() => setAdding(true)} aria-label="Add item">+ Add</button>
-
       {adding && (
-        <div style={S.scrim} onClick={() => setAdding(false)}>
-          <div style={S.sheet} onClick={e => e.stopPropagation()}>
-            <div style={S.title}>New item</div>
-            <input style={S.input} value={draft} onChange={e => setDraft(e.target.value)} autoFocus />
-            <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-              <button style={S.btnGhost} onClick={() => setAdding(false)}>Cancel</button>
-              <button style={S.btn} onClick={save}>Save</button>
+        <div className="ma-scrim" onClick={() => setAdding(false)} role="dialog" aria-modal="true">
+          <div className="ma-sheet" onClick={(e) => e.stopPropagation()}>
+            <h3 className="ma-sheet-title">New item</h3>
+            <input className="ma-input" value={draft} onChange={(e) => setDraft(e.target.value)} autoFocus />
+            <div className="ma-sheet-actions">
+              <button className="ma-btn ma-btn-secondary" onClick={() => setAdding(false)}>Cancel</button>
+              <button className="ma-btn ma-btn-primary" onClick={save}>Save</button>
             </div>
           </div>
         </div>
