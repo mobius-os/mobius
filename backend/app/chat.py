@@ -31,6 +31,7 @@ from app.broadcast import (
   set_active_broadcast,
 )
 from app.chat_writer import (
+  AppendSteeredUserMessage,
   ClearPending,
   ClearRunStatus,
   Finalize,
@@ -129,6 +130,37 @@ def _safe_commit(db: Session) -> bool:
 # lives in `app.questions`. chat.py imports both and uses them
 # directly; no shims remain.
 
+# Per-chat live sink, set while a turn is streaming so the steer route can
+# reach the runner's `_ChatEventSink` and split the turn at the steer
+# boundary (seal the streamed-so-far assistant text, append the steered user
+# message, reset for the continuation). The route and the sink's `publish()`
+# both run on the one FastAPI event loop, so reaching the sink from the route
+# is naturally serialized with streaming snapshots — no cross-thread lock is
+# needed. Keyed by chat_id; the value is replaced if a new turn registers and
+# cleared identity-keyed at turn end so a late clear can't drop a successor.
+_active_sinks: dict[str, "_ChatEventSink"] = {}
+
+
+def register_active_sink(chat_id: str, sink: "_ChatEventSink") -> None:
+  """Publish the live sink for `chat_id` so the steer route can reach it."""
+  _active_sinks[chat_id] = sink
+
+
+def get_active_sink(chat_id: str) -> "_ChatEventSink | None":
+  """Return the live sink for `chat_id`, or None when no turn is streaming."""
+  return _active_sinks.get(chat_id)
+
+
+def unregister_active_sink(chat_id: str, sink: "_ChatEventSink") -> None:
+  """Drop the live sink for `chat_id`, identity-keyed.
+
+  Only clears when `sink` still owns the slot, so a turn ending after a
+  successor turn already re-registered can't strand the successor's sink.
+  """
+  if _active_sinks.get(chat_id) is sink:
+    _active_sinks.pop(chat_id, None)
+
+
 class _ChatEventSink:
   """Bridges SDK-runner events to broadcast + the chat-writer actor.
 
@@ -193,6 +225,15 @@ class _ChatEventSink:
     self.session_id: str | None = None
     self.cost_usd: float | None = None
     self._last_save = 0.0
+    # True only for the duration of `split_for_steer`. While set, `publish()`
+    # still broadcasts and accumulates the continuation's blocks, but does NOT
+    # submit a transcript snapshot — a snapshot landing mid-split would target
+    # the still-trailing pre-steer assistant message (A1) and overwrite it
+    # with continuation text before A1 is sealed and the steered user row is
+    # appended. Cleared once the split's transcript writes have committed, so
+    # the next snapshot (or the terminal finalize) appends the continuation as
+    # a fresh assistant message.
+    self._steering = False
 
   def _submit_fire_and_forget(self, cmd) -> None:
     """Submit a fire-and-forget transcript write; log a failed ack.
@@ -241,7 +282,14 @@ class _ChatEventSink:
     # save is due (immediate for save-triggering types, throttled
     # otherwise).
     accumulated = process_event(event, self.assistant_blocks)
+    # `not self._steering`: a snapshot submitted mid-split would replace the
+    # still-trailing pre-steer assistant message (A1) with continuation text
+    # before A1 is sealed and the steered user row is appended. The split's
+    # own transcript writes carry the durable state across this window; once
+    # it completes the next snapshot appends the continuation cleanly.
     needs_save = accumulated and self.chat_id and self.run_token and (
+      not self._steering
+    ) and (
       event_type in self._IMMEDIATE_SAVE_TYPES
       or time.monotonic() - self._last_save >= self._SAVE_INTERVAL_SECS
     )
@@ -308,6 +356,61 @@ class _ChatEventSink:
       )
     )
     await _await_ack(ack)
+
+  async def split_for_steer(
+    self, user_msg: dict, consume_pending_ts: list[int],
+  ) -> dict:
+    """Split the streaming turn at a steer boundary so reload order is
+    Q1, A1, Q2, A2.
+
+    Called from the steer route (both providers) on the one FastAPI event
+    loop, so it is serialized with this sink's `publish()` snapshots. The
+    streamed-so-far assistant text (A1) becomes its own trailing assistant
+    message, the steered user message (Q2) is appended at the END, and the
+    sink resets its blocks so the post-steer continuation (A2) accumulates
+    fresh and the next snapshot appends it as a NEW assistant message —
+    rather than the old behaviour of keeping A1+A2 as one message with Q2
+    inserted before it (which reloaded as Q1, Q2, A1A2).
+
+    Race-free without a lock: `_steering` is set and the blocks captured +
+    reset SYNCHRONOUSLY before the first `await`, so any continuation delta
+    arriving during the awaited writes broadcasts and accumulates into the
+    fresh block list but submits no snapshot (publish gates on `_steering`).
+    The two transcript writes run as fenced actor commands, so a coalescible
+    snapshot enqueued earlier cannot clobber them. Returns the steered append
+    result (`stored` + remaining `pending`).
+
+    When there is no streamed-so-far text (an empty pre-steer turn) the seal
+    step is skipped — there is no A1 to commit — and Q2 is simply appended;
+    the trailing assistant message, if any, is already the in-progress one
+    the next snapshot will replace, matching the no-partial seed case.
+    """
+    self._steering = True
+    try:
+      sealed_blocks = self.assistant_blocks
+      # Reset BEFORE the first await so the continuation accumulates into a
+      # fresh list the instant the steer lands.
+      self.assistant_blocks = []
+      if self.chat_id and self.run_token and sealed_blocks:
+        ack = get_writer().submit(
+          Finalize(
+            chat_id=self.chat_id,
+            run_token=self.run_token,
+            snapshot=build_assistant_message(sealed_blocks),
+          )
+        )
+        await _await_ack(ack)
+      ack = get_writer().submit(
+        AppendSteeredUserMessage(
+          chat_id=self.chat_id,
+          run_token="",
+          user_msg=user_msg,
+          consume_pending_ts=consume_pending_ts,
+        )
+      )
+      return await _await_ack(ack)
+    finally:
+      self._steering = False
 
   async def publish_question(self, event: ChatEvent) -> None:
     """Save-before-broadcast for an AskUserQuestion card.
@@ -1281,6 +1384,12 @@ async def _complete_turn(
   `registry.is_alive` re-check is the discriminator (mirrors the lock-gated
   re-check in `run_chat`'s Stop-handoff finally).
   """
+  # The turn is over — drop the live sink so a late steer can't reach a
+  # finalizing turn. Identity-keyed, so a successor that already registered
+  # its own sink is untouched. Done before the finalize await so a steer
+  # landing during finalize falls back to the queue rather than splitting a
+  # turn that is already committing its terminal state.
+  unregister_active_sink(chat_id, sink)
   # GATE (pre-finalize): may this run write its terminal assistant message at
   # all? This is the PRE-finalize ownership snapshot, used ONLY for the
   # finalize/skip decision below. The end-of-turn drain re-decides ownership
@@ -2117,6 +2226,7 @@ async def _run_chat_impl(
       chat_id=chat_id,
     )
     sink = _ChatEventSink(bc, chat_id, run_token=run_token)
+    register_active_sink(chat_id, sink)
     runner_result: dict = {}
     try:
       from app.codex_sdk_runner import run_codex_sdk_turn
@@ -2180,6 +2290,7 @@ async def _run_chat_impl(
       chat_id=chat_id,
     )
     sink = _ChatEventSink(bc, chat_id, run_token=run_token)
+    register_active_sink(chat_id, sink)
     try:
       from app.claude_sdk_runner import run_claude_sdk_turn
       from app.providers import skills_enabled as _skills_enabled
