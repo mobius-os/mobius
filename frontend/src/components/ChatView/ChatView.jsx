@@ -444,16 +444,34 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     },
     onLiveQuestion: setLiveQuestionId,
     onSteeredIntoTurn: ({ ts, content }) => {
-      // A send was injected mid-turn into a live Codex turn (Codex
-      // steering). The backend persisted the user message in the
-      // transcript, so render it inline as a user message ABOVE the
-      // still-streaming assistant block (the streaming <li> renders
-      // after `messages`). This is content growth — do NOT re-arm the
-      // send-time spacer or pin the message to the viewport top; the
-      // ChatView scroll contract treats a mid-stream insertion as
-      // auto-follow growth (only snaps if the user is near the bottom),
-      // not a fresh send. Dedup by ts so a reconnect's catch-up replay
-      // of the same event can't double-insert.
+      // A send was injected mid-turn into a live turn (steering — fired for
+      // both providers when Stop is pressed with a queued message). The
+      // backend persisted the user message in the transcript, so render it
+      // inline as a user message ABOVE the still-streaming assistant block
+      // (the streaming <li> renders after `messages`). This is content
+      // growth — do NOT re-arm the send-time spacer or pin the message to
+      // the viewport top; the ChatView scroll contract treats a mid-stream
+      // insertion as auto-follow growth (only snaps if the user is near the
+      // bottom), not a fresh send.
+      //
+      // Promote the pre-steer assistant text to its OWN message FIRST,
+      // while messages[-1] is still the in-flight assistant block (a kept
+      // bridge partial, or a fresh live stream). If the steered user
+      // message landed first, the end-of-turn promote would see it as the
+      // last message, take the APPEND path, and stack a new assistant block
+      // holding the pre-steer text AFTER it — while the kept bridge partial
+      // stayed in place — duplicating the streamed-so-far content (the
+      // reported Q / A1 / Q2 / A1-again / A2 bug). Promoting here REPLACEs
+      // the partial (or appends when there is none), clears the live stream
+      // items, and retires the bridge gate. Re-arming promotedRef lets the
+      // post-steer continuation promote as its own message after the steered
+      // turn on `done`. The hook flushes the typewriter buffer before
+      // calling this, so latestItemsRef already holds the complete
+      // pre-steer text.
+      promoteStreamToMessages()
+      promotedRef.current = false
+      // Dedup by ts so a reconnect's catch-up replay of the same event
+      // can't double-insert the steered user message.
       commitMessages(prev => {
         if (ts != null && prev.some(m => m.ts === ts)) return prev
         return [...prev, { role: 'user', content, ts: ts ?? Date.now() }]

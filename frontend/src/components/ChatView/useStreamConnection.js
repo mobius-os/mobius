@@ -589,8 +589,12 @@ export default function useStreamConnection(chatId, {
             // The backend already put the user message in the transcript;
             // the caller drops the optimistic queued-tray entry and renders
             // it inline as content growth (no send-time spacer/scroll-pin).
-            // The steered text flows back as normal `text` deltas through
-            // this same stream, so nothing else is needed here.
+            // Flush the typewriter buffer FIRST so the pre-steer assistant
+            // text is fully in latestItemsRef before the caller promotes it
+            // to its own finished message — without this, the last frame of
+            // buffered chars would land in the NEXT (post-steer) turn. The
+            // post-steer text then streams in as normal `text` deltas.
+            flushBuffer()
             onSteeredIntoTurnRef.current?.({
               ts: event.ts ?? null,
               content: event.content || '',
