@@ -1754,6 +1754,71 @@ def test_flag_on_clean_update_without_local_edits_is_fast_forward(
   payload = r2.json()
   assert payload["mode"] == "update"
   assert payload["divergence"] == "fast_forward"
+  # With no local edits the served source must be the new upstream verbatim.
+  # The latent bug let a failed in-memory merge leave the OLD bytes on disk
+  # while still bumping the version, so assert the new content actually
+  # landed rather than trusting the divergence label alone.
+  data_dir = Path(get_settings().data_dir)
+  served = (data_dir / "apps" / "on-fast-forward" / "index.jsx").read_text()
+  assert "UPSTREAM FOOTER" in served
+  assert "ORIGINAL FOOTER" not in served
+
+
+def test_flag_on_consecutive_no_edit_updates_advance_base(
+  client, auth, bypass_url_validation,
+):
+  """Successive no-local-edit updates must each carry the new upstream
+  content and keep upstream an ancestor of `main`.
+
+  Without the no-edit fast path, the first update commits a single-parent
+  local commit (upstream unreachable from `main`), so the second update's
+  merge base is the original install point. The overlapping footer diff
+  then resolves to the LOCAL (stale) side and v3's content never lands.
+  Each update must advance the base so v3's bytes are served and the
+  merge-base invariant holds.
+  """
+  import subprocess
+
+  base = "https://on-consec.test/repo/"
+  m = {
+    **MANIFEST_NEWS,
+    "id": "on-consecutive",
+    "icon": None,
+    "storage_seeds": {},
+    "schedule": None,
+  }
+  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
+  assert r1.status_code == 201, r1.text
+  data_dir = Path(get_settings().data_dir)
+  repo = data_dir / "apps" / "on-consecutive"
+  jsx_file = repo / "index.jsx"
+
+  jsx_v2 = JSX_MULTI.replace("ORIGINAL FOOTER", "FOOTER V2")
+  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["divergence"] == "fast_forward"
+  assert "FOOTER V2" in jsx_file.read_text()
+
+  jsx_v3 = JSX_MULTI.replace("ORIGINAL FOOTER", "FOOTER V3")
+  r3 = _update_v2(client, auth, base, {**m, "version": "3.0.0"}, jsx_v3)
+  assert r3.status_code == 201, r3.text
+  assert r3.json()["mode"] == "update"
+  served = jsx_file.read_text()
+  assert "FOOTER V3" in served, (
+    "v3 upstream content must land on disk; a stale merge base resolves the "
+    f"footer to the local side and serves old bytes. got: {served!r}"
+  )
+  assert "FOOTER V2" not in served
+
+  from app import app_git
+  proc = subprocess.run(
+    ["git", "-C", str(repo), "merge-base", "--is-ancestor", "upstream", "main"],
+    env=app_git._git_env(repo), capture_output=True,
+  )
+  assert proc.returncode == 0, (
+    "upstream tip must stay an ancestor of main across consecutive no-edit "
+    "updates so each update's merge base is the just-installed version"
+  )
 
 
 def test_flag_on_static_asset_update_leaves_clean_app_repo(
