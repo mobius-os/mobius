@@ -981,7 +981,7 @@ export function appChatMetadataBody(opts = {}, { includeProvider = true } = {}) 
   return body
 }
 
-function makeChat({ appId, getToken }) {
+function makeChat({ appId, getToken, storage }) {
   // Lazily create a chat the agent turn can be attributed to, via the
   // app-attributed backend contract (design §1.1: POST /api/app-chats).
   // The ordinary /api/chats create route is owner-only and intentionally
@@ -1040,18 +1040,60 @@ function makeChat({ appId, getToken }) {
   // controls). Returns a handle: { chatId, instanceId, iframe, destroy,
   // on(event, cb) }. Events: 'ready' | 'message-sent' | 'turn-done' |
   // 'error', each carrying { chatId }.
+  //
+  // The helper owns the WHOLE app-chat lifecycle so apps don't hand-roll it:
+  //   - `persist: '<storage-key>'` — create the app-chat once, save its id to
+  //     that storage path, and REUSE it on every later mount (PATCHing the
+  //     prompt on resume). Without it, an explicit `chatId` is used as-is, or
+  //     an ephemeral chat is created (the original behavior).
+  //   - `systemPrompt` / `title` / `model` / `provider` — shape the chat on
+  //     create and re-apply (PATCH) on resume.
+  //   - `onReady` / `onTurnDone` / `onMessageSent` / `onError` — handlers wired
+  //     BEFORE the iframe mounts, so they never miss the mount-time READY.
+  // So the common app usage is one call:
+  //   const h = await window.mobius.chat({ mount, persist: 'chat_id.json',
+  //     systemPrompt, picker: false, onTurnDone: refresh })  // h.destroy() on unmount
   return async function chat(opts = {}) {
     const mount = opts.mount
     if (!mount || typeof mount.appendChild !== 'function') {
       throw new Error('window.mobius.chat: opts.mount must be a DOM element')
     }
-    let chatId = opts.chatId ? String(opts.chatId) : await createChat(opts)
-    if (opts.chatId) await updateChat(chatId, opts)
+    // `persist` lets the helper own create-once-then-reuse. The id is stored as
+    // `{ id }` (the shape apps already wrote to chat_id.json); we also accept a
+    // bare string or `{ chatId }` on read for tolerance.
+    const persistKey = typeof opts.persist === 'string' && opts.persist ? opts.persist : null
+    async function loadPersistedId() {
+      if (!persistKey || !storage) return null
+      try {
+        const saved = await storage.get(persistKey)
+        const id = saved && (typeof saved === 'string' ? saved : (saved.id || saved.chatId))
+        return id ? String(id) : null
+      } catch (e) { return null }
+    }
+    function savePersistedId(id) {
+      if (!persistKey || !storage || !id) return
+      try { Promise.resolve(storage.set(persistKey, { id: String(id) })).catch(() => {}) } catch (e) {}
+    }
+    // Explicit chatId wins; else a persisted id (PATCH its prompt on resume);
+    // else create one and persist it. With no persist + no chatId this is the
+    // original "ephemeral chat" path.
+    let chatId = opts.chatId ? String(opts.chatId) : await loadPersistedId()
+    if (chatId) {
+      await updateChat(chatId, opts)
+    } else {
+      chatId = await createChat(opts)
+      savePersistedId(chatId)
+    }
     const pickerOn = opts.picker !== false
     const instanceId = `${appId}:${++_embedSeq}:${Date.now()}`
     // Sticky 'ready'/'error' so a handler attached after `await chat(...)`
     // still observes the embed's mount-time READY (see makeEmbedEmitter).
     const { emit, on: onEvent } = makeEmbedEmitter()
+    // opts handlers register before mount → they never miss the early READY.
+    if (typeof opts.onReady === 'function') onEvent('ready', opts.onReady)
+    if (typeof opts.onTurnDone === 'function') onEvent('turn-done', opts.onTurnDone)
+    if (typeof opts.onMessageSent === 'function') onEvent('message-sent', opts.onMessageSent)
+    if (typeof opts.onError === 'function') onEvent('error', opts.onError)
 
     const iframe = document.createElement('iframe')
     iframe.title = 'Agent chat'
@@ -1092,8 +1134,12 @@ function makeChat({ appId, getToken }) {
       if (msg.instanceId && msg.instanceId !== instanceId) return
       if (msg.type === EMBED_READY) {
         // The embed resolved its chatId (e.g. it was opened without one
-        // and INIT carried it, or a future lazy path). Adopt it.
-        if (msg.chatId) chatId = String(msg.chatId)
+        // and INIT carried it, or a future lazy path). Adopt it, and
+        // re-persist if it differs from what we saved.
+        if (msg.chatId) {
+          const resolved = String(msg.chatId)
+          if (resolved !== chatId) { chatId = resolved; savePersistedId(chatId) }
+        }
         emit('ready', { chatId })
       } else if (msg.type === EMBED_MESSAGE_SENT) {
         emit('message-sent', { chatId })
@@ -1253,7 +1299,7 @@ export function init({ appId, getToken }) {
     appId,
     get online() { return navigator.onLine },
     storage,
-    chat: makeChat({ appId, getToken }),
+    chat: makeChat({ appId, getToken, storage }),
     nav: makeNav(),
   }
   storage._drain()    // flush anything left from a previous offline session
