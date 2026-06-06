@@ -39,9 +39,8 @@ lock itself — the lock is keyed on the source dir, which only the caller
 knows, and nesting lock acquisition inside would hide the ordering the
 rest of install.py reasons about.
 
-This module is gated OFF by `providers.per_app_git_enabled`: when the
-flag is off, install.py never calls in here and apps have no `.git` at
-all. See feature 084.
+install.py drives this module for every app that has a source directory; an
+app with no source_dir has no `.git`.
 """
 
 from __future__ import annotations

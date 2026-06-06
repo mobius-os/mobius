@@ -48,7 +48,6 @@ from sqlalchemy.orm import Session
 from app import activity, app_git, fs_locks, models
 from app.compiler import compile_jsx
 from app.config import get_settings
-from app.providers import per_app_git_enabled
 from app.storage_io import atomic_write
 from app.routes.apps import (
   _derive_source_dir, _reject_if_source_dir_taken, _slugify_for_source_dir,
@@ -883,9 +882,8 @@ async def install_from_manifest(
       that row's jsx_source + (missing) storage seeds + source_dir got
       refreshed in place. Icon + cron are re-applied to keep the
       end state coherent with the new manifest.
-    - 'conflict' — ONLY when the per-app git model is enabled
-      (providers.per_app_git_enabled) AND a three-way merge of the new
-      upstream into the app's local edits conflicted. Nothing is
+    - 'conflict' — ONLY when a three-way merge of the new upstream into
+      the app's local edits conflicted. Nothing is
       clobbered: the on-disk source, the compiled bundle, and the DB
       row's jsx_source all keep the local edits; the new upstream bytes
       are recorded on the `upstream` branch for a later agent-resolution
@@ -1047,14 +1045,9 @@ async def install_from_manifest(
   if icon_warning:
     warnings.append(icon_warning)
 
-  # The per-app git model is ON by default (feature 084). When explicitly
-  # off, everything below behaves exactly as before: a blind jsx_source
-  # overwrite with no .git repo. When on, an update merges the new
-  # upstream into the app's local edits instead of clobbering them, and
-  # `effective_source` may end up being the MERGED bytes rather than the
-  # upstream bytes we just fetched. We read the flag once so a mid-flight
-  # settings change can't split the decision across this one install.
-  git_on = per_app_git_enabled(str(get_settings().data_dir))
+  # The per-app git model: an update merges the new upstream into the app's
+  # local edits instead of clobbering them, so `effective_source` may end up
+  # being the MERGED bytes rather than the upstream bytes we just fetched.
   upstream_jsx_sha = hashlib.sha256(entry_bytes).hexdigest()
   # The source that actually gets compiled + written to disk. Defaults
   # to the upstream bytes; the git merge step below may replace it with
@@ -1151,7 +1144,7 @@ async def install_from_manifest(
     # row with an empty source_dir would otherwise initialize a git repo in
     # the server's working directory. Only engage git when there's a real dir.
     git_source_dir = Path(app.source_dir) if app.source_dir else None
-    if git_on and git_source_dir:
+    if git_source_dir:
       async with fs_locks.source_dir_lock(str(git_source_dir)):
         version = str(manifest.get("version", "unknown"))
         had_repo = app_git.is_repo(git_source_dir)
@@ -1379,7 +1372,7 @@ async def install_from_manifest(
         # even on disjoint changes. A plain local commit otherwise (fresh
         # install, or a conflict that left local untouched). No-op when the
         # source is unchanged.
-        if git_on:
+        if git_source_dir:
           commit_msg = (
             f"install: {manifest.get('name', app.slug)} "
             f"v{manifest.get('version', 'unknown')}"

@@ -1556,21 +1556,6 @@ JSX_MULTI = (
 )
 
 
-def _enable_per_app_git():
-  """Write agent-settings.json so per_app_git_enabled reads True. Returns
-  the path so a test can flip it back off if needed."""
-  from app.providers import write_agent_settings
-  data_dir = str(get_settings().data_dir)
-  write_agent_settings(data_dir, {"per_app_git_enabled": True})
-
-
-def _disable_per_app_git():
-  """Write agent-settings.json so per_app_git_enabled reads False."""
-  from app.providers import write_agent_settings
-  data_dir = str(get_settings().data_dir)
-  write_agent_settings(data_dir, {"per_app_git_enabled": False})
-
-
 def _install_v1(client, auth, base, manifest, jsx):
   responses = {
     base + "mobius.json": (200, json.dumps(manifest).encode()),
@@ -1605,52 +1590,11 @@ def _update_v2(client, auth, base, manifest, jsx):
     })
 
 
-def test_flag_off_install_creates_no_git_repo(client, auth, bypass_url_validation):
-  """With the flag explicitly OFF, fresh install keeps legacy behavior:
-  source written, but NO .git directory anywhere."""
-  _disable_per_app_git()
-  base = "https://off.test/repo/"
-  r = _install_v1(client, auth, base, {**MANIFEST_NEWS, "id": "off-install"}, JSX)
-  assert r.status_code == 201, r.text
-  assert r.json()["divergence"] == "none"
-  data_dir = Path(get_settings().data_dir)
-  assert not (data_dir / "apps" / "off-install" / ".git").exists()
-
-
-def test_flag_off_update_overwrites_local_edits_byte_identical(
-  client, auth, bypass_url_validation,
-):
-  """Flag OFF: the update blindly overwrites the on-disk source with
-  upstream, exactly as before this feature. No merge, no .git, no
-  conflict mode."""
-  _disable_per_app_git()
-  base = "https://off2.test/repo/"
-  m = {**MANIFEST_NEWS, "id": "off-update"}
-  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
-  assert r1.status_code == 201, r1.text
-  data_dir = Path(get_settings().data_dir)
-  jsx_file = data_dir / "apps" / "off-update" / "index.jsx"
-
-  # Agent edits the on-disk source locally.
-  jsx_file.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "AGENT EDIT"))
-
-  jsx_v2 = JSX_MULTI.replace("ORIGINAL FOOTER", "UPSTREAM FOOTER")
-  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
-  assert r2.status_code == 201, r2.text
-  assert r2.json()["mode"] == "update"
-  assert r2.json()["divergence"] == "none"
-  # Legacy behavior: upstream wins outright, the agent edit is GONE.
-  assert jsx_file.read_text() == jsx_v2
-  assert "AGENT EDIT" not in jsx_file.read_text()
-  assert not (data_dir / "apps" / "off-update" / ".git").exists()
-
-
 def test_flag_on_install_creates_repo_and_records_upstream(
   client, auth, bypass_url_validation,
 ):
   """Flag ON: a fresh install inits the per-app repo and stamps the
   upstream commit + jsx sha on the App row."""
-  _enable_per_app_git()
   base = "https://on.test/repo/"
   r = _install_v1(client, auth, base, {**MANIFEST_NEWS, "id": "on-install"}, JSX)
   assert r.status_code == 201, r.text
@@ -1674,7 +1618,6 @@ def test_flag_on_clean_update_carries_local_edits_forward(
 ):
   """Flag ON: a local edit to one region + an upstream edit to a DISJOINT
   region merges cleanly — the served source contains BOTH changes."""
-  _enable_per_app_git()
   base = "https://on2.test/repo/"
   m = {**MANIFEST_NEWS, "id": "on-clean"}
   r1 = _install_v1(client, auth, base, m, JSX_MULTI)
@@ -1711,7 +1654,6 @@ def test_flag_on_repeated_updates_to_same_region_stay_clean(
   ships v3's) and reports a spurious conflict. Recording the merge so the
   base advances keeps v3 clean.
   """
-  _enable_per_app_git()
   base = "https://on-repeat.test/repo/"
   m = {**MANIFEST_NEWS, "id": "on-repeat"}
   r1 = _install_v1(client, auth, base, m, JSX_MULTI)
@@ -1752,7 +1694,6 @@ def test_flag_on_clean_update_advances_merge_base(
   already-merged history."""
   import subprocess
 
-  _enable_per_app_git()
   base = "https://on-advance.test/repo/"
   m = {**MANIFEST_NEWS, "id": "on-advance"}
   r1 = _install_v1(client, auth, base, m, JSX_MULTI)
@@ -1783,7 +1724,6 @@ def test_flag_on_clean_update_without_local_edits_is_fast_forward(
 ):
   """Flag ON: when local main still matches the previous upstream, a
   clean update reports fast_forward for the seamless store path."""
-  _enable_per_app_git()
   base = "https://on-fast.test/repo/"
   m = {
     **MANIFEST_NEWS,
@@ -1813,7 +1753,6 @@ def test_flag_on_static_asset_update_leaves_clean_app_repo(
   source repo so the post-write local commit stays clean and future updates
   do not see installer noise as local edits.
   """
-  _enable_per_app_git()
   base = "https://static-clean.test/repo/"
   manifest_v1 = {
     **MANIFEST_NEWS,
@@ -1876,7 +1815,6 @@ def test_flag_on_conflicting_update_returns_conflict_and_preserves_local(
   """Flag ON: a local edit + an upstream edit to the SAME region conflicts.
   The endpoint returns mode='conflict' with the conflicting path, and the
   served source keeps the local edit untouched (no clobber, no markers)."""
-  _enable_per_app_git()
   base = "https://on3.test/repo/"
   m = {**MANIFEST_NEWS, "id": "on-conflict"}
   r1 = _install_v1(client, auth, base, m, JSX_MULTI)
@@ -1926,7 +1864,6 @@ def test_flag_on_conflict_does_not_apply_upstream_capabilities(
   an unreviewed old version could gain manage_apps install authority, or lose
   the offline semantics its service-worker code relies on, while still running
   the old bytes."""
-  _enable_per_app_git()
   base = "https://on-cap-conflict.test/repo/"
   m = {
     **MANIFEST_NEWS,
@@ -1982,7 +1919,6 @@ def test_core_app_store_self_update_overwrites_local_conflict(
   mode='conflict'. For the canonical mobius-os App Store, upstream wins
   so an old store cannot get permanently wedged behind its own local edit.
   """
-  _enable_per_app_git()
   base = "https://raw.githubusercontent.com/mobius-os/app-store/main/"
   m = {
     **MANIFEST_NEWS,
@@ -2027,7 +1963,6 @@ def test_store_id_from_spoofed_path_still_preserves_local_conflict(
   client, auth, bypass_url_validation,
 ):
   """Only the exact raw.githubusercontent.com/mobius-os/app-store source is forced."""
-  _enable_per_app_git()
   base = "https://example.test/raw.githubusercontent.com/mobius-os/app-store/main/"
   m = {
     **MANIFEST_NEWS,
@@ -2056,7 +1991,6 @@ def test_update_preview_clean_returns_upstream_diff(
   client, auth, bypass_url_validation,
 ):
   """Preview on a clean update reports clean status and the upstream diff."""
-  _enable_per_app_git()
   base = "https://preview-clean.test/repo/"
   m = {**MANIFEST_NEWS, "id": "preview-clean"}
   r1 = _install_v1(client, auth, base, m, JSX_MULTI)
@@ -2083,7 +2017,6 @@ def test_update_preview_accepts_app_token_with_manage_apps_for_other_app(
 ):
   """The App Store can review update previews for apps it manages."""
   from app.auth import create_access_token
-  _enable_per_app_git()
   base = "https://preview-manager.test/repo/"
   m = {**MANIFEST_NEWS, "id": "preview-manager-target"}
   r1 = _install_v1(client, auth, base, m, JSX_MULTI)
@@ -2117,7 +2050,6 @@ def test_update_preview_rejects_ordinary_app_token_for_other_app(
 ):
   """App tokens without manage_apps cannot read another app's source preview."""
   from app.auth import create_access_token
-  _enable_per_app_git()
   base = "https://preview-denied.test/repo/"
   m = {**MANIFEST_NEWS, "id": "preview-denied-target"}
   r1 = _install_v1(client, auth, base, m, JSX_MULTI)
@@ -2144,7 +2076,6 @@ def test_update_preview_conflict_returns_real_markers_without_live_mutation(
   client, auth, bypass_url_validation,
 ):
   """Preview materializes conflict markers in a throwaway worktree only."""
-  _enable_per_app_git()
   base = "https://preview-conflict.test/repo/"
   m = {**MANIFEST_NEWS, "id": "preview-conflict"}
   r1 = _install_v1(client, auth, base, m, JSX_MULTI)
