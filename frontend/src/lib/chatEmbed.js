@@ -69,6 +69,56 @@ export function isEmbedMessage(event, { origin, expectedSource, instanceId }) {
   return true
 }
 
+// Event bus for the embed handle (`window.mobius.chat(...).on(event, cb)`).
+// The four embed events split into two kinds:
+//   - one-shot lifecycle: 'ready' and 'error' fire at most once per mount,
+//     but the child posts its mount-time READY before the app (which only
+//     gets the handle AFTER `await chat(...)`) can attach a listener — so a
+//     handler registered "right after the await" would miss it. These are
+//     made STICKY: the latest detail is recorded, and a late `on('ready'|
+//     'error', cb)` replays it synchronously on registration.
+//   - repeatable: 'message-sent' and 'turn-done' fire once per turn. They are
+//     NOT sticky — replaying a past one to a late listener would double-fire.
+// Mirrored (not imported) by mobius-runtime.js's makeChat, which can't import
+// this /src module; keep the two in sync.
+const STICKY_EVENTS = new Set([
+  NS + 'ready',
+  NS + 'error',
+  'ready',
+  'error',
+])
+
+export function makeEmitter() {
+  const listeners = Object.create(null)
+  // Latest detail for sticky events only, so a late on() can replay it.
+  const lastEmit = Object.create(null)
+
+  function emit(name, detail) {
+    if (STICKY_EVENTS.has(name)) lastEmit[name] = detail
+    const cbs = listeners[name]
+    if (!cbs) return
+    for (const cb of cbs) {
+      try {
+        cb(detail)
+      } catch (e) {}
+    }
+  }
+
+  function on(name, cb) {
+    if (typeof cb !== 'function') return
+    ;(listeners[name] || (listeners[name] = [])).push(cb)
+    // Replay a one-shot lifecycle event that already fired, so a handler
+    // attached after the embed's mount-time READY still observes it.
+    if (STICKY_EVENTS.has(name) && Object.prototype.hasOwnProperty.call(lastEmit, name)) {
+      try {
+        cb(lastEmit[name])
+      } catch (e) {}
+    }
+  }
+
+  return { emit, on }
+}
+
 // Build the embed route URL. Stable, query-only (chatId may be absent on
 // lazy-create). Kept here so the helper and any test agree on the shape.
 export function embedUrl({ base = '', chatId, picker } = {}) {

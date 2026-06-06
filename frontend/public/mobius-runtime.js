@@ -925,6 +925,43 @@ const EMBED_MESSAGE_SENT = EMBED_NS + 'message-sent'
 const EMBED_TURN_DONE = EMBED_NS + 'turn-done'
 const EMBED_ERROR = EMBED_NS + 'error'
 
+// The four embed handle events split into two kinds. 'ready' and 'error'
+// are one-shot lifecycle events, but the child posts its mount-time READY
+// before the app (which only gets the handle AFTER `await chat(...)`) can
+// attach a listener — so a handler registered right after the await would
+// miss it. We make those two STICKY: emit() records the latest detail and a
+// late on('ready'|'error', cb) replays it synchronously. 'message-sent' and
+// 'turn-done' are repeatable (once per turn) and NOT sticky — replaying a
+// past one to a late listener would double-fire. This mirrors makeEmitter in
+// frontend/src/lib/chatEmbed.js (served verbatim from /public, can't import
+// the /src module); keep the two in sync.
+// Handle events use the SHORT names ('ready' etc.) the app passes to
+// handle.on() and makeChat passes to emit() — not the namespaced wire types.
+const EMBED_STICKY = new Set(['ready', 'error'])
+
+function makeEmbedEmitter() {
+  // Known events only — an unknown name is ignored on both emit and on,
+  // preserving the original `if (listeners[event])` guard.
+  const listeners = { ready: [], 'message-sent': [], 'turn-done': [], error: [] }
+  const lastEmit = {}
+  function emit(name, detail) {
+    if (EMBED_STICKY.has(name)) lastEmit[name] = detail
+    const cbs = listeners[name]
+    if (!cbs) return
+    for (const cb of cbs) {
+      try { cb(detail) } catch (e) {}
+    }
+  }
+  function on(name, cb) {
+    if (!listeners[name]) return
+    listeners[name].push(cb)
+    if (EMBED_STICKY.has(name) && hasOwn(lastEmit, name)) {
+      try { cb(lastEmit[name]) } catch (e) {}
+    }
+  }
+  return { emit, on }
+}
+
 let _embedSeq = 0
 
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key)
@@ -1012,8 +1049,9 @@ function makeChat({ appId, getToken }) {
     if (opts.chatId) await updateChat(chatId, opts)
     const pickerOn = opts.picker !== false
     const instanceId = `${appId}:${++_embedSeq}:${Date.now()}`
-    const listeners = { ready: [], 'message-sent': [], 'turn-done': [], error: [] }
-    const emit = (name, detail) => { for (const cb of listeners[name] || []) { try { cb(detail) } catch (e) {} } }
+    // Sticky 'ready'/'error' so a handler attached after `await chat(...)`
+    // still observes the embed's mount-time READY (see makeEmbedEmitter).
+    const { emit, on: onEvent } = makeEmbedEmitter()
 
     const iframe = document.createElement('iframe')
     iframe.title = 'Agent chat'
@@ -1081,7 +1119,9 @@ function makeChat({ appId, getToken }) {
       instanceId,
       iframe,
       on(event, cb) {
-        if (listeners[event]) listeners[event].push(cb)
+        // Delegates to the sticky emitter: a 'ready'/'error' that already
+        // fired (the mount-time READY) replays to a late handler.
+        onEvent(event, cb)
         return this
       },
       destroy() {
