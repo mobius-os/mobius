@@ -408,10 +408,26 @@ async def update_preview(
 ):
   """Read-only preview of the recorded upstream update vs local edits."""
   # The preview embeds full conflict-marker source text, so an app token
-  # must only read its OWN app's preview — never another app's. The owner
-  # (app_id is None) may read any. Mirrors run-job's scope guard.
+  # may read its own app's preview. App-manager tokens (the App Store)
+  # may read other apps so they can drive conflict-resolution updates.
+  # The owner (app_id is None) may read any. Mirrors install/delete's
+  # manage_apps trust boundary for app lifecycle operations.
   if principal.app_id is not None and principal.app_id != app_id:
-    raise HTTPException(status_code=403, detail="Not your app.")
+    caller = (
+      db.query(models.App)
+      .filter(models.App.id == principal.app_id)
+      .first()
+    )
+    if caller is None:
+      raise HTTPException(status_code=401, detail="App not found.")
+    if not bool(caller.manage_apps):
+      raise HTTPException(
+        status_code=403,
+        detail=(
+          "This app needs permissions.manage_apps=true in its manifest "
+          "to preview updates for other apps."
+        ),
+      )
   app = db.query(models.App).filter(models.App.id == app_id).first()
   if not app:
     raise HTTPException(status_code=404, detail="App not found.")

@@ -1941,6 +1941,68 @@ def test_update_preview_clean_returns_upstream_diff(
   assert "UPSTREAM FOOTER" in payload["upstream_diff"]
 
 
+def test_update_preview_accepts_app_token_with_manage_apps_for_other_app(
+  client, db, auth, bypass_url_validation,
+):
+  """The App Store can review update previews for apps it manages."""
+  from app.auth import create_access_token
+  _enable_per_app_git()
+  base = "https://preview-manager.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "preview-manager-target"}
+  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
+  assert r1.status_code == 201, r1.text
+  target_app_id = r1.json()["id"]
+
+  jsx_v2 = JSX_MULTI.replace("ORIGINAL FOOTER", "MANAGED UPDATE FOOTER")
+  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
+  assert r2.status_code == 201, r2.text
+
+  manager_app_id = _seed_app_with_perms(
+    db, perms_cross_write="none", manage_apps=True,
+  )
+  db.commit()
+  token = create_access_token({
+    "sub": "test", "scope": "app", "app_id": manager_app_id,
+  })
+
+  preview = client.get(
+    f"/api/apps/{target_app_id}/update-preview",
+    headers={"Authorization": f"Bearer {token}"},
+  )
+  assert preview.status_code == 200, preview.text
+  payload = preview.json()
+  assert payload["app_id"] == target_app_id
+  assert payload["upstream_version"] == "2.0.0"
+
+
+def test_update_preview_rejects_ordinary_app_token_for_other_app(
+  client, db, auth, bypass_url_validation,
+):
+  """App tokens without manage_apps cannot read another app's source preview."""
+  from app.auth import create_access_token
+  _enable_per_app_git()
+  base = "https://preview-denied.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "preview-denied-target"}
+  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
+  assert r1.status_code == 201, r1.text
+  target_app_id = r1.json()["id"]
+
+  caller_app_id = _seed_app_with_perms(
+    db, perms_cross_write="none", manage_apps=False,
+  )
+  db.commit()
+  token = create_access_token({
+    "sub": "test", "scope": "app", "app_id": caller_app_id,
+  })
+
+  preview = client.get(
+    f"/api/apps/{target_app_id}/update-preview",
+    headers={"Authorization": f"Bearer {token}"},
+  )
+  assert preview.status_code == 403, preview.text
+  assert "manage_apps" in preview.json()["detail"]
+
+
 def test_update_preview_conflict_returns_real_markers_without_live_mutation(
   client, auth, bypass_url_validation,
 ):
