@@ -58,14 +58,24 @@ UPSTREAM_BRANCH = "upstream"
 LOCAL_BRANCH = "main"
 
 # Files we never want in app source history regardless of who drops them
-# in the source dir. The integer-id storage tree lives at
-# /data/apps/<id>/ (a sibling of the slug dir, not nested here), so it
-# never appears — but a numeric subdir is gitignored defensively. The
-# compiled bundle is gitignored for the same reason. `.bak` snapshots are
-# install.py's rollback artifacts, not source.
+# in the source dir. The live compiled bundle is /data/compiled/app-<id>.js
+# (outside this tree), so it never appears here. We must NOT blanket-ignore
+# `*.js`: building-apps.md tells the agent to split larger apps into sibling
+# `.js`/`.jsx`/`.ts`/`.tsx` modules (e.g. `cards.js`) imported from index.jsx,
+# and those ARE hand-written source — a blanket `*.js` silently dropped them
+# from per-app history, breaking the merge/conflict-resolution model for any
+# modular app. So the ignore is scoped to genuine generated/vendored output
+# (mirrors the watcher's recompile-ignore set) plus install artifacts and the
+# integer-id storage tree.
 _GITIGNORE = "\n".join([
-  "# Compiled bundle is a build artifact, rebuilt from index.jsx.",
-  "*.js",
+  "# Generated build output and vendored deps are not hand-written source.",
+  "dist/",
+  ".build/",
+  "node_modules/",
+  "# Manifest static_assets are install-managed (re-fetched from the manifest,",
+  "# listed in .mobius-static-assets.json), not edited source — keep prebuilt",
+  "# bundles/binaries out of per-app history.",
+  "static/",
   "# Install/rollback snapshots are not source.",
   "*.bak",
   "*.mobius-bak",

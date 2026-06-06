@@ -272,3 +272,41 @@ def test_align_local_to_upstream_resets_main_to_upstream_tip(tmp_path):
   )
   # The on-disk working tree matches the installed version.
   assert (repo / "index.jsx").read_text() == "INSTALLED V1\n"
+
+
+def test_gitignore_tracks_sibling_source_modules_not_build_output(tmp_path):
+  """Modular apps split into sibling .js/.jsx/.ts/.tsx modules — building-apps.md
+  tells the agent to do exactly this (e.g. `cards.js`). Those are hand-written
+  SOURCE and must be tracked by per-app git so the merge/conflict-resolution
+  model sees them; a former blanket `*.js` silently dropped them. Generated or
+  vendored output (dist/, static/, node_modules/), install .bak snapshots, and
+  the integer-id storage tree must stay ignored.
+  """
+  repo = tmp_path / "app"
+  app_git.ensure_repo(repo)
+  # Hand-written source: the entry plus every sibling module extension.
+  (repo / "index.jsx").write_text("import './cards.js'\nexport default () => null\n")
+  (repo / "cards.js").write_text("export const cards = []\n")
+  (repo / "Board.jsx").write_text("export const Board = () => null\n")
+  (repo / "helpers.ts").write_text("export const x = 1\n")
+  (repo / "fetch.sh").write_text("#!/usr/bin/env bash\n")
+  # Generated / vendored / install-artifact / storage paths that must NOT track.
+  (repo / "dist").mkdir()
+  (repo / "dist" / "bundle.js").write_text("// built\n")
+  (repo / "static").mkdir()
+  (repo / "static" / "game.js").write_text("// prebuilt\n")
+  (repo / "node_modules").mkdir()
+  (repo / "node_modules" / "dep.js").write_text("// dep\n")
+  (repo / "index.jsx.bak").write_text("old\n")
+  (repo / "12").mkdir()
+  (repo / "12" / "data.json").write_text("{}\n")
+
+  app_git.commit_local(repo, "modular app")
+  tracked = set(app_git._run(repo, "ls-files").stdout.split())
+
+  assert {"index.jsx", "cards.js", "Board.jsx", "helpers.ts", "fetch.sh"} <= tracked
+  assert "dist/bundle.js" not in tracked
+  assert "static/game.js" not in tracked
+  assert "node_modules/dep.js" not in tracked
+  assert "index.jsx.bak" not in tracked
+  assert not any(t.startswith("12/") for t in tracked)
