@@ -16,6 +16,7 @@ from app.broadcast import create_broadcast, get_broadcast, get_system_broadcast
 from app.chat import (
   _schedule_continuation,
   discard_starting,
+  get_active_sink,
   is_chat_running,
   mark_starting,
   run_chat,
@@ -448,27 +449,38 @@ async def send_message(
         # runner already does and queue the message instead.
         steered = False
       if steered:
-        # Persist into the transcript via the actor (NOT pending), keeping
-        # the single-writer invariant. The empty run_token broad-fences by
-        # chat; the command inserts the row before the trailing assistant
-        # partial so the streaming snapshot still targets the assistant.
-        ack = get_writer().submit(
-          AppendSteeredUserMessage(
-            chat_id=chat_id,
-            run_token="",
-            user_msg=user_msg,
-            consume_pending_ts=body.consume_pending_ts or [],
-          )
-        )
+        # Split the turn so a reload renders Q1, A1, Q2, A2: seal the
+        # streamed-so-far assistant text as its own message, append this
+        # steered user row at the END, and reset the live sink so the
+        # post-steer continuation lands as a fresh assistant message. The
+        # sink runs on this same event loop, so driving it here is
+        # serialized with streaming snapshots without a lock. A turn with no
+        # registered sink (a closed-turn race, or a non-SDK path) falls back
+        # to a plain end-of-transcript append — the live turn still absorbed
+        # the steer, but without a sink there is no streamed text to seal.
         try:
-          stored_result = await await_ack(ack)
+          sink = get_active_sink(chat_id)
+          if sink is not None:
+            stored_result = await sink.split_for_steer(
+              user_msg, body.consume_pending_ts or [],
+            )
+          else:
+            ack = get_writer().submit(
+              AppendSteeredUserMessage(
+                chat_id=chat_id,
+                run_token="",
+                user_msg=user_msg,
+                consume_pending_ts=body.consume_pending_ts or [],
+              )
+            )
+            stored_result = await await_ack(ack)
         except Exception:
           # The transcript write didn't land, but the live turn already
           # absorbed the steer — we can't un-steer. Surface the failure so
           # the client refetches authoritative state rather than silently
           # dropping the message.
           log.warning(
-            "AppendSteeredUserMessage did not persist chat_id=%s", chat_id,
+            "steered transcript write did not persist chat_id=%s", chat_id,
           )
           raise HTTPException(
             status_code=503,

@@ -658,11 +658,14 @@ def test_stop_races_answer_real_lock_contention_returns_410(chat, owner_token):
 
 
 # -- AppendSteeredUserMessage — mid-turn Codex steer transcript write ----
-def test_append_steered_user_message_lands_before_assistant_partial():
-  """A steered user message is inserted just before the trailing
-  assistant partial, so the assistant stays `messages[-1]` and the
-  runner's streaming snapshot / finalize writes keep targeting it. The
-  ts is bumped past every transcript + queued ts."""
+def test_append_steered_user_message_lands_at_end_of_transcript():
+  """A steered user message is appended at the END of the transcript so a
+  reload renders Q1, A1, Q2, A2. The split path (the sink's
+  `split_for_steer`) seals the streamed-so-far assistant text as its own
+  message BEFORE submitting this, so after the append the trailing message
+  is the steered user row — which makes the runner's next snapshot append
+  the post-steer continuation as a fresh assistant. The ts is bumped past
+  every transcript + queued ts."""
   from app.chat_writer import AppendSteeredUserMessage
 
   _seed_chat(
@@ -685,8 +688,8 @@ def test_append_steered_user_message_lands_before_assistant_partial():
 
   chat = _load("c-steer")
   roles = [m["role"] for m in chat["messages"]]
-  assert roles == ["user", "user", "assistant"]
-  assert chat["messages"][1]["content"] == "steered"
+  assert roles == ["user", "assistant", "user"]
+  assert chat["messages"][-1]["content"] == "steered"
   # ts bumped past every transcript + pending ts (max was the queued 9).
   assert stored["ts"] > 9
   # The pending queue was untouched — a steer is NOT a queue append.

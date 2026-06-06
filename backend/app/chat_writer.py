@@ -257,24 +257,27 @@ class AppendPending(_Command):
 
 @dataclass
 class AppendSteeredUserMessage(_Command):
-  """Insert a mid-turn steered user message into the live transcript.
+  """Append a mid-turn steered user message at the END of the transcript.
 
-  Used by the Codex steer path (routes/chats_stream.py): when a send
-  lands while a Codex turn is streaming and `steer_into_active_turn`
-  accepts it, the user message belongs in the TRANSCRIPT, not the
-  pending queue — the live turn already saw the text, so it is part of
-  this turn rather than a queued follow-up.
+  Used by both steer paths (routes/chats_stream.py + the sink's
+  `split_for_steer`): when a send lands while a turn is streaming and
+  `steer_into_active_turn` accepts it, the user message belongs in the
+  TRANSCRIPT, not the pending queue — the live turn already saw the text,
+  so it is part of this turn rather than a queued follow-up.
 
-  Placement keeps the streaming invariant intact: the message is
-  inserted just BEFORE the trailing assistant partial (when one exists)
-  so `chat.messages[-1]` stays the in-progress assistant message that
-  the runner's `update_last_assistant_message` / `Finalize` snapshots
-  target. Visually that renders the steered user row above the still-
-  streaming assistant block, which is the frontend contract. The `ts`
-  is made unique against both the transcript and the pending queue so
-  it can't collide with a sibling message's React key. Returns
-  `{"stored", "pending"}` — the stored message with its final ts and the
-  remaining pending queue after any consumed queued messages are removed.
+  Placement is at the END so a reload renders Q1, A1, Q2, A2 (the steered
+  user row BETWEEN the pre-steer assistant text and the post-steer
+  continuation). The split path seals the streamed-so-far assistant text
+  as its own message FIRST, so when this command runs the trailing message
+  is that sealed assistant — appending the user row after it leaves
+  `chat.messages[-1]` a user message, which makes the runner's next
+  `update_last_assistant_message` / `Finalize` snapshot APPEND the
+  continuation as a fresh assistant rather than merging it into the
+  pre-steer text. The `ts` is made unique against both the transcript and
+  the pending queue so it can't collide with a sibling message's React key.
+  Returns `{"stored", "pending"}` — the stored message with its final ts
+  and the remaining pending queue after any consumed queued messages are
+  removed.
   """
 
   chat_id: str = ""
@@ -465,10 +468,10 @@ def _needs_broad_chat_fence(cmd: _Command) -> bool:
     tokenless path), so its exact-key fence reaches nothing — a snapshot under
     the live streaming token would survive and clobber the answer.
 
-  - An `AppendSteeredUserMessage` inserts the steered user turn mid-run with no
-    run_token; the interrupted run's still-pending snapshot (its own run_token)
-    would otherwise commit afterward and overwrite the insert. It must fence the
-    chat broadly so the pre-steer snapshot can't clobber it; the run's
+  - An `AppendSteeredUserMessage` appends the steered user turn mid-run with no
+    run_token; a still-pending snapshot under the run's own token would
+    otherwise commit afterward and overwrite the append. It must fence the
+    chat broadly so a pre-steer snapshot can't clobber it; the run's
     post-steer snapshots get the new generation and still land.
 
   A token-bearing `AnswerQuestion` (the live path) keeps the precise key fence.
@@ -1344,15 +1347,16 @@ class ChatWriterActor:
   def _append_steered_user_message(
     self, db, cmd: AppendSteeredUserMessage
   ) -> dict:
-    """Insert the steered user message into the live transcript; commit.
+    """Append the steered user message at the END of the transcript; commit.
 
-    The message lands just before the trailing assistant partial (when
-    one exists) so the in-progress assistant message stays last and the
-    runner's snapshot / finalize writes keep targeting it. When there is
-    no assistant message yet (the turn hasn't streamed any text), the
-    message is simply appended. The `ts` is bumped past every message in
-    the transcript and the pending queue so it can't collide with a
-    sibling's React key.
+    The message lands LAST so a reload renders Q1, A1, Q2, A2. The split
+    path seals the streamed-so-far assistant text as its own message before
+    submitting this, so the trailing message is that sealed assistant and
+    appending the user row after it leaves `chat.messages[-1]` a user
+    message — which makes the runner's next snapshot APPEND the post-steer
+    continuation as a fresh assistant rather than merging it into the
+    pre-steer text. The `ts` is bumped past every message in the transcript
+    and the pending queue so it can't collide with a sibling's React key.
     """
     from datetime import UTC, datetime
 
@@ -1364,10 +1368,7 @@ class ChatWriterActor:
     msgs = list(chat.messages or [])
     new_msg = dict(cmd.user_msg)
     _ensure_unique_ts(new_msg, msgs + list(chat.pending_messages or []))
-    if msgs and msgs[-1].get("role") == "assistant":
-      msgs.insert(len(msgs) - 1, new_msg)
-    else:
-      msgs.append(new_msg)
+    msgs.append(new_msg)
     chat.messages = msgs
     pending = list(chat.pending_messages or [])
     if cmd.consume_pending_ts:
