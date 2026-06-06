@@ -46,11 +46,14 @@ fi
 # restrictive mode (host umask 027 leaves files at 640) would be
 # unreadable by mobius. World-readable is the safe default for code
 # that doesn't hold secrets. `/app/skill` (the constitution mobius reads
-# for the system prompt) and `/app/shell-src` (the stock source a shell
-# refresh copies into /data/shell as mobius) get a+rX too — without it a
-# host-umask-tightened file blocks both reads.
-chmod -R a+rX /app/app /app/scripts /app/skill /app/shell-src 2>/dev/null || true
+# for the system prompt) gets it too.
+chmod -R a+rX /app/app /app/scripts /app/skill 2>/dev/null || true
 chown -R mobius:mobius /app/app /app/scripts 2>/dev/null || true
+# `/app/shell-src` (the stock source a shell refresh copies into /data/shell
+# as mobius) also needs a+rX, but it carries a ~30k-file node_modules — a
+# blanket `chmod -R` there blocks boot past the health window. chmod only the
+# git-sourced parts (src/public/config), pruning node_modules.
+find /app/shell-src -path '*/node_modules' -prune -o -exec chmod a+rX {} + 2>/dev/null || true
 
 # Auto-generate SECRET_KEY if not set (one-click deploy support).
 # Persisted to /data so it survives container restarts.
