@@ -23,18 +23,20 @@ previous (working) version the whole time** — the marker-bearing source won't
 compile, so the file watcher holds the last good bundle. Nothing is broken for
 the partner while you work; you're just finishing the merge.
 
-## Resolve it
+## Look at the conflict
 
 Everything is LOCAL — this repo has no `origin`, no GitHub. Never `git push`.
 
-```bash
-cd /data/apps/<slug>
-# /data is ITSELF a git repo, so pin the ceiling or git may walk up to it and
-# report the wrong repo's state. Do this before any git command here.
-export GIT_CEILING_DIRECTORIES=/data/apps
+Each app has its own `.git`, so git normally stays scoped to it. As cheap
+insurance against a missing/corrupt app repo silently committing into `/data`
+(which is *itself* a git repo), pin `GIT_CEILING_DIRECTORIES=/data/apps`. Shell
+state does NOT persist between separate commands here, so set it **inline on
+every git command** — the self-contained form below works in any single call:
 
-git status        # shows "Unmerged paths" — the files to resolve
-git diff          # shows the conflict hunks
+```bash
+GIT_CEILING_DIRECTORIES=/data/apps git -C /data/apps/<slug> status   # "Unmerged paths"
+GIT_CEILING_DIRECTORIES=/data/apps git -C /data/apps/<slug> diff      # the conflict hunks
+GIT_CEILING_DIRECTORIES=/data/apps git -C /data/apps/<slug> log --oneline -5
 ```
 
 A conflict hunk looks like this (shown indented; in the real file the marker
@@ -46,53 +48,77 @@ lines sit at column 0):
       const title = 'the upstream version'
     >>>>>>> upstream
 
-Edit each conflicted file (usually `index.jsx`, sometimes sibling modules):
-keep what's right — often a genuine merge of both sides, not just one — and
-**delete the `<<<<<<<`, `=======`, `>>>>>>>` lines**. Re-read the surrounding
-code so the result is coherent, not just marker-free.
+## Decide what to keep — read intent first, don't reflexively blend
 
-**Finishing the merge — the easy path:** once a file is marker-free, just save
-it. The watcher recompiles on save and, because a merge is in progress, the
-recompile's commit finalizes it as a proper merge commit — the update is now
-applied and the base advances so the *next* update merges cleanly. Confirm:
+`git log` (above) tells you the partner's INTENT: if the local side is a
+deliberate commit (e.g. `local: rename title + green accent`), they *meant* it.
+Then pick by conflict TYPE — "merge both sides" is only sometimes right:
+
+- **Cosmetic / either-or** (a title, a color, a copy string — you can't blend two
+  titles): keep the partner's deliberate local choice and **surface the upstream
+  alternative in chat** ("the update wanted X; I kept your Y — say the word and
+  I'll switch"). Don't invent a blend.
+- **Functional** (logic, a new feature, added lines): **layer both** — keep the
+  partner's customization AND fold in upstream's new behavior. This is the case
+  where a genuine merge of both sides is right.
+- **Can't read the intent, or it's risky:** `git merge --abort` (below) and ask
+  the partner rather than guessing.
+
+## Resolve + finish
+
+Edit each conflicted file (usually `index.jsx`, sometimes sibling modules) to the
+result you decided on, **deleting the `<<<<<<<`, `=======`, `>>>>>>>` lines**.
+Re-read the surrounding code so the result is coherent, not just marker-free.
+
+**Finish by saving — the watcher does the rest.** Once a file is marker-free,
+just save it. The watcher recompiles and, because a merge is in progress, its
+commit finalizes the merge for you. (Commit by hand only if that doesn't
+happen — fallback below.)
+
+**Confirm it took — one check is enough.** The single fact that proves it is
+that the finalizing commit is a **2-parent merge** (that's what advances the
+base so the *next* update won't re-conflict):
 
 ```bash
-git status                              # clean, no "unmerged paths", no MERGE_HEAD
-stat -c '%y' /data/compiled/app-<id>.js # timestamp should be fresh (just recompiled)
+GIT_CEILING_DIRECTORIES=/data/apps git -C /data/apps/<slug> log -1 --pretty='%p'
 ```
 
-(Find `<id>` with `curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/apps/" | python3 -m json.tool`.)
+TWO short SHAs printed = done — merge finalized, `MERGE_HEAD` gone, base
+advanced. Those are the **same fact seen different ways**, so you don't also
+need to check `MERGE_HEAD` or `git status`; the 2-parent line settles it. (The
+commit subject reads `agent edit`, not `Merge` — that's the watcher finalizing;
+expected, don't let it fool you.)
 
-If `git status` still shows `MERGE_HEAD` after a moment (or the recompile
-failed — check `/data/logs/chat.log` for `compile failed`), finalize by hand:
+Optional eyeball that the app rebuilt: `stat -c '%y' /data/compiled/app-<id>.js`
+should be fresh (`<id>` from `curl -s -H "Authorization: Bearer $AGENT_TOKEN"
+"$API_BASE_URL/api/apps/" | python3 -c 'import sys,json;[print(a["id"],a["slug"]) for a in json.load(sys.stdin)]'`).
+This is a nice-to-have, not a gate — the 2-parent commit already tells you the
+resolution stuck.
+
+If a merge is still in progress (`.git/MERGE_HEAD` exists) or the recompile
+failed (`/data/logs/chat.log` shows `compile failed`), finish by hand:
 
 ```bash
-git add -A
-git -c user.name=Mobius -c user.email=mobius@localhost commit --no-edit
+GIT_CEILING_DIRECTORIES=/data/apps git -C /data/apps/<slug> add -A
+GIT_CEILING_DIRECTORIES=/data/apps git -C /data/apps/<slug> \
+  -c user.name=Mobius -c user.email=mobius@localhost commit --no-edit
 ```
 
-A failed recompile almost always means leftover markers or a real syntax error
-from the merge — open the file, fix it, save again.
+A failed recompile almost always means leftover markers or a syntax error from
+the merge — open the file, fix it, save again.
 
 ## Backing out (it's always reversible)
 
 You never have to force a resolution you're unsure about.
 
-- **Mid-resolution, want out:** restore the pre-update version and walk away —
-  ```bash
-  git merge --abort
-  ```
-  The app keeps serving what it served before; nothing is lost. The new version
-  is still recorded on `upstream`, so the partner can retry the update later.
-
-- **Already finalized and it's wrong:** undo the merge commit —
-  ```bash
-  git revert -m 1 <merge-commit-sha>     # preferred — reversible, keeps history
-  # or, to erase the attempt entirely:
-  git reset --hard <pre-merge-sha>
-  ```
-  Either way, save/touch the source so the watcher recompiles the reverted
-  version. `upstream` is untouched, so a future update can try again.
+- **Mid-resolution, want out:** `GIT_CEILING_DIRECTORIES=/data/apps git -C
+  /data/apps/<slug> merge --abort` restores the pre-update version. The app keeps
+  serving what it served before; nothing is lost. The new version is still
+  recorded on `upstream`, so the partner can retry later.
+- **Already finalized and it's wrong:** undo the merge commit — `git revert -m 1
+  <merge-sha>` (reversible, keeps history) or `git reset --hard <pre-merge-sha>`
+  (erases the attempt). Save/touch the source so the watcher recompiles the
+  reverted version. `upstream` is untouched, so a retry still works.
 
 ## Don't
 
@@ -100,5 +126,5 @@ You never have to force a resolution you're unsure about.
 - Don't commit conflict markers (a failed recompile is the tell — fix and save).
 - Don't edit the `upstream` branch.
 
-When done, leave a one-line note of what you merged and why in the chat so the
-partner knows what changed.
+When done, leave a one-line note in the chat of what you merged and any
+alternative you set aside, so the partner knows what changed.
