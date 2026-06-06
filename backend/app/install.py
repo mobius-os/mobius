@@ -1079,29 +1079,18 @@ async def install_from_manifest(
       app = existing
       app.name = manifest["name"]
       app.description = manifest.get("description", "")
-      # jsx_source is assigned from `effective_source` AFTER the git
-      # merge decision below — on a conflict we keep the local edits, so
-      # we must not blindly stamp the upstream bytes here.
-      # Rewrite the manifest_url column to the canonical shape so
-      # rows installed before the canonicaliser landed migrate
-      # forward on their next update. New installs already write
-      # the canonical form below.
+      # jsx_source AND the capability/offline fields are assigned AFTER the
+      # git merge decision below and AFTER the conflict short-circuit returns.
+      # On a conflict we keep the local edits and keep serving the OLD code,
+      # so we must not stamp the new manifest's source — nor its capabilities
+      # or offline semantics — onto a row whose running code is still the old
+      # version. Doing so would, e.g., grant manage_apps install authority to
+      # unreviewed old code, or flip offline_capable away from what the
+      # running code's service-worker logic expects.
+      # Rewrite the manifest_url column to the canonical shape so rows
+      # installed before the canonicaliser landed migrate forward on their
+      # next update. New installs already write the canonical form below.
       app.manifest_url = canonical_manifest_url
-      app.cross_app_access = perms.get("cross_app_access", app.cross_app_access)
-      app.share_with_apps = perms.get("share_with_apps", app.share_with_apps)
-      app.chat_log_access = perms.get("chat_log_access", app.chat_log_access)
-      # Mirror manage_apps on update too — an app can gain or lose
-      # install authority across versions. Default to the existing
-      # value when the manifest omits the key.
-      if "manage_apps" in perms:
-        app.manage_apps = bool(perms["manage_apps"])
-      # Mirror manifest.offline_capable into the App row on every
-      # update, so an app that flips its offline behaviour between
-      # versions (e.g. news 1.5.1 online-only → 1.5.2 offline-capable)
-      # gets the SW + outbox semantics matching what it ships, not
-      # what it used to ship.
-      if "offline_capable" in manifest:
-        app.offline_capable = bool(manifest["offline_capable"])
       db.flush()
     else:
       # Identity by manifest_url means we're now genuinely in the
@@ -1247,6 +1236,10 @@ async def install_from_manifest(
               )
               effective_source = jsx_source
               merge_applied = True
+              # Upstream replaced local on the lazy-migration path too; report
+              # it as a fast-forward like the already-had-repo branch does, so
+              # the divergence signal the dreaming agent reads is consistent.
+              divergence = "fast_forward"
             else:
               mode = "conflict"
               conflict_paths = merge.conflict_paths
@@ -1296,9 +1289,22 @@ async def install_from_manifest(
     app.background_color = _manifest_color(manifest.get("background_color")) or app.theme_color
 
     if existing:
-      # Apply the (possibly merged) source to the row now that the merge
-      # decision is made. On the flag-off path this is just `jsx_source`.
+      # Apply the (possibly merged) source AND the new manifest's capability /
+      # offline fields now that the merge decision is made and the conflict
+      # short-circuit above has already returned. Deferring these past the
+      # conflict return keeps a served-old-code conflict from jumping
+      # capabilities or offline semantics ahead of the code actually running.
+      # On the flag-off path effective_source is just the upstream jsx_source.
       app.jsx_source = effective_source
+      app.cross_app_access = perms.get("cross_app_access", app.cross_app_access)
+      app.share_with_apps = perms.get("share_with_apps", app.share_with_apps)
+      app.chat_log_access = perms.get("chat_log_access", app.chat_log_access)
+      # manage_apps and offline_capable can change across versions; default to
+      # the existing value when the manifest omits the key.
+      if "manage_apps" in perms:
+        app.manage_apps = bool(perms["manage_apps"])
+      if "offline_capable" in manifest:
+        app.offline_capable = bool(manifest["offline_capable"])
 
     # Compile the JSX OUT OF PLACE to a staging file and promote it into the
     # live bundle only AFTER the DB commit (commit_actions run post-commit). So
