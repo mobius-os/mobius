@@ -24,3 +24,6 @@ def test_run_migrations_adds_manifest_url_to_existing_apps_table(tmp_path):
 
   assert "manifest_url" in cols
   assert "ix_apps_manifest_url" in indexes
+  # Reversible-uninstall tombstone column is added on an existing apps table
+  # (feature 110) — the path that runs on a real prod boot, not create_all.
+  assert "deleted_at" in cols

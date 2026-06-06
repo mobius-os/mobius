@@ -172,7 +172,15 @@ def _enforce_app_scope(payload: dict, db: Session) -> int | None:
   app_id = payload.get("app_id")
   if not isinstance(app_id, int):
     raise HTTPException(status_code=401, detail="Malformed app token.")
-  app = db.query(models.App).filter(models.App.id == app_id).first()
+  # A tombstoned (soft-deleted) app has no live authority: its token must stop
+  # working immediately, the same as a hard-deleted one did, so it can't write
+  # storage during the recovery window. Revive (reinstall/recover) issues fresh
+  # tokens. See feature 110.
+  app = (
+    db.query(models.App)
+    .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
+    .first()
+  )
   if not app:
     raise HTTPException(status_code=401, detail="App no longer exists.")
   stamped = payload.get("app_nonce")

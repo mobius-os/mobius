@@ -139,6 +139,13 @@ def run_migrations(eng) -> None:
         "ALTER TABLE apps ADD COLUMN embeds_agent BOOLEAN NOT NULL DEFAULT 0"
       ))
       conn.commit()
+  if "deleted_at" not in apps_cols:
+    # Reversible-uninstall tombstone — see models.App.deleted_at (feature 110).
+    # Additive + nullable: every existing row reads deleted_at IS NULL = live,
+    # so behavior is byte-identical until an app is actually soft-deleted.
+    with eng.connect() as conn:
+      conn.execute(text("ALTER TABLE apps ADD COLUMN deleted_at DATETIME NULL"))
+      conn.commit()
   if "theme_color" not in apps_cols:
     with eng.connect() as conn:
       conn.execute(text("ALTER TABLE apps ADD COLUMN theme_color VARCHAR(16) NULL"))

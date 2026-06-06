@@ -1070,6 +1070,13 @@ async def install_from_manifest(
   try:
     if existing:
       app = existing
+      # Reinstalling a tombstoned app REVIVES it: the manifest_url match finds
+      # the soft-deleted row (the query is deleted_at-agnostic on purpose), and
+      # clearing deleted_at reattaches the SAME id + its preserved storage tree
+      # instead of minting a fresh empty app. No-op for a normal update. The
+      # recompile + cron re-register + updated_at bump happen on this path too,
+      # so a revived store app comes back fully wired (feature 110).
+      app.deleted_at = None
       app.name = manifest["name"]
       app.description = manifest.get("description", "")
       # jsx_source AND the capability/offline fields are assigned AFTER the
