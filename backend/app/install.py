@@ -1148,48 +1148,62 @@ async def install_from_manifest(
           prev_upstream_commit = app.upstream_commit
           # Update of an app already on the git model. First capture any
           # uncommitted on-disk local edits onto `main` (the watcher may
-          # not have committed the agent's latest save yet) so the merge
-          # diffs against the real local source. Then record the new
-          # pristine bytes on `upstream` (parent = the previously-recorded
-          # upstream, giving a shared merge base) and ask for a clean-vs-
-          # conflict verdict WITHOUT touching the working tree.
+          # not have committed the agent's latest save yet) so the
+          # divergence check and any merge see the real local source.
           await asyncio.to_thread(
             app_git.commit_local, git_source_dir,
             "local edits before update",
+          )
+          # Decide divergence against the PREVIOUS upstream before advancing
+          # it. When local `main` never diverged from what upstream last
+          # shipped, the new upstream is the answer outright: no three-way
+          # merge is needed or wanted. Taking the bytes verbatim here keeps
+          # the no-edit case off merge_upstream entirely, so it can never
+          # hinge on merge-tree's in-memory cat-file succeeding — the path
+          # that, when it returned None, dropped to a single-parent local
+          # commit and left `upstream` unreachable from `main`, stranding the
+          # merge base at the install point and resolving the NEXT update to
+          # stale local content. commit_merge still runs (merge_applied gate)
+          # so the two-parent commit advances the base.
+          diverged = bool(prev_upstream_commit) and await asyncio.to_thread(
+            app_git.local_diverged_from,
+            git_source_dir, prev_upstream_commit,
           )
           await asyncio.to_thread(
             app_git.record_upstream,
             git_source_dir, entry_bytes, canonical_manifest_url, version,
           )
-          merge = await asyncio.to_thread(
-            app_git.merge_upstream, git_source_dir,
-          )
-          if merge.status == "conflict":
-            if force_core_store_update:
-              warnings.append(
-                "core App Store self-update replaced local edits with upstream"
-              )
-              effective_source = jsx_source
-              divergence = "fast_forward"
-              merge_applied = True
-            else:
-              # Never rebase local. The app stays served with
-              # its current bundle + source; the new upstream is recorded
-              # for a later agent-resolution pass. Skip compile + source
-              # overwrite by switching to conflict mode below.
-              mode = "conflict"
-              conflict_paths = merge.conflict_paths
-          elif merge.merged_bytes is not None:
-            # Clean merge: the merged source is what we compile + write.
-            effective_source = merge.merged_bytes.decode("utf-8")
-            diverged = False
-            if prev_upstream_commit:
-              diverged = await asyncio.to_thread(
-                app_git.local_diverged_from,
-                git_source_dir, prev_upstream_commit,
-              )
-            divergence = "clean_merge" if diverged else "fast_forward"
+          if not diverged:
+            effective_source = jsx_source
+            divergence = "fast_forward"
             merge_applied = True
+          else:
+            # Local diverged: fold the new upstream into the local edits with
+            # a three-way merge that touches neither `main` nor the working
+            # tree, then act on the clean-vs-conflict verdict.
+            merge = await asyncio.to_thread(
+              app_git.merge_upstream, git_source_dir,
+            )
+            if merge.status == "conflict":
+              if force_core_store_update:
+                warnings.append(
+                  "core App Store self-update replaced local edits with upstream"
+                )
+                effective_source = jsx_source
+                divergence = "fast_forward"
+                merge_applied = True
+              else:
+                # Never rebase local. The app stays served with
+                # its current bundle + source; the new upstream is recorded
+                # for a later agent-resolution pass. Skip compile + source
+                # overwrite by switching to conflict mode below.
+                mode = "conflict"
+                conflict_paths = merge.conflict_paths
+            elif merge.merged_bytes is not None:
+              # Clean merge: the merged source is what we compile + write.
+              effective_source = merge.merged_bytes.decode("utf-8")
+              divergence = "clean_merge"
+              merge_applied = True
         else:
           # Fresh install (or an existing app that somehow lost its repo):
           # record the pristine bytes on `upstream`, then align the local
