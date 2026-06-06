@@ -4,10 +4,13 @@ import asyncio
 import hashlib
 import io
 import json
+import logging
 import re
 import shutil
 import subprocess
 import tempfile
+import time
+import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -26,6 +29,8 @@ from app.deps import (
 )
 
 router = APIRouter(prefix="/api/apps", tags=["apps"])
+
+log = logging.getLogger("mobius.apps")
 
 
 def _slugify_for_source_dir(name: str) -> str:
@@ -287,6 +292,16 @@ async def install_app(
   get_system_broadcast().publish(
     {"type": "app_updated", "appId": str(app.id)}
   )
+  # A conflicting update left a REAL working-tree merge (markers + MERGE_HEAD)
+  # in /data/apps/<slug>/. Open a chat that drives the agent to resolve it with
+  # ordinary git — the Möbius way (the agent fixes its own breaks). Best-effort:
+  # the app IS installed and the conflict is on disk regardless, so a spawn
+  # failure must never fail this response.
+  if mode == "conflict":
+    try:
+      await _spawn_app_conflict_chat(db, app, conflict_paths)
+    except Exception as exc:
+      log.warning("conflict-resolver chat spawn failed for %s: %r", app.slug, exc)
   return schemas.AppInstallOut(
     id=app.id,
     name=app.name,
@@ -311,6 +326,127 @@ async def install_app(
     conflict_paths=conflict_paths,
     divergence=divergence,
   )
+
+
+async def _spawn_app_conflict_chat(db: Session, app, conflict_paths) -> str | None:
+  """Open a visible chat that drives the agent to resolve an app update merge
+  conflict, and notify the owner.
+
+  The conflict is already materialized on disk (markers + MERGE_HEAD) by
+  `install.start_conflict_merge`; this just opens the chat that resolves it, the
+  same way a person handles a `git pull` conflict. No programmatic resolve API —
+  the agent uses ordinary git per the `resolving-app-git.md` skill.
+
+  Dedupe: skip when a resolver chat for this app is already RUNNING, so a
+  repeated failing update doesn't pile up duplicate chats (a finished resolver
+  doesn't block a fresh one for a later conflict). Returns the chat id, or None
+  when skipped/unavailable. Mirrors the canonical spawn sequence in
+  `routes/chats_stream.py` (StartTurn actor → run_chat task).
+  """
+  from app.broadcast import create_broadcast
+  from app.chat import (
+    current_run_generation, discard_starting, mark_starting, run_chat,
+  )
+  from app.chat_writer import StartTurn, alloc_run_token, await_ack, get_writer
+  from app.push import notify_owner
+
+  title = f"Resolve update conflict — {app.name}"
+  running = (
+    db.query(models.Chat.id)
+    .filter(models.Chat.title == title)
+    .filter(models.Chat.run_status == "running")
+    .filter(models.Chat.deleted_at.is_(None))
+    .first()
+  )
+  if running is not None:
+    return None
+
+  owner = db.query(models.Owner).first()
+  if owner is None:
+    return None
+  provider = owner.provider or "claude"
+
+  files = ", ".join(conflict_paths) if conflict_paths else "the source files"
+  content = (
+    f"An update to the app **{app.name}** hit a merge conflict — the new "
+    f"upstream version and the local edits both changed the same lines, so the "
+    f"update can't apply cleanly.\n\n"
+    f"The app's source at `/data/apps/{app.slug}/` is mid-merge with conflict "
+    f"markers in: {files}. Read `/data/shared/skills/resolving-app-git.md`, "
+    f"then resolve the markers there and finish the merge "
+    f"(`git add` + `git commit` / `git merge --continue`) — the watcher "
+    f"recompiles the app when you save. The app keeps serving its previous "
+    f"version until you finish.\n\n"
+    f"To back out instead, run `git merge --abort` in that directory — it "
+    f"restores the pre-update version."
+  )
+
+  chat_id = str(uuid.uuid4())
+  chat = models.Chat(
+    id=chat_id,
+    title=title,
+    messages=[],
+    pending_messages=[],
+    provider=provider,
+    created_by_app_id=None,  # visible in the drawer — the owner should see it
+  )
+  db.add(chat)
+  db.commit()
+
+  if not mark_starting(chat_id):
+    return chat_id
+
+  try:
+    start_gen = current_run_generation(chat_id)
+    run_token = alloc_run_token()
+    user_msg = {
+      "role": "user", "content": content, "ts": int(time.time() * 1000),
+    }
+    ack = get_writer().submit(StartTurn(
+      chat_id=chat_id,
+      run_token=run_token,
+      user_msg=user_msg,
+      title_source=title,
+      default_provider=provider,
+    ))
+    result = await await_ack(ack)
+    if current_run_generation(chat_id) == start_gen:
+      create_broadcast(chat_id)
+      get_system_broadcast().publish(
+        {"type": "chat_run_started", "chatId": chat_id}
+      )
+      asyncio.create_task(run_chat(
+        result["history"],
+        chat_id=chat_id,
+        session_id=result["session_id"],
+        provider_id=result["provider"],
+        run_gen=start_gen,
+        run_token=run_token,
+      ))
+    else:
+      discard_starting(chat_id)
+  except Exception:
+    discard_starting(chat_id)
+    raise
+  finally:
+    # Notify regardless of whether the run started — the open chat + the
+    # on-disk conflict still need the owner's attention.
+    try:
+      notify_owner(
+        db, owner.id,
+        title="App update needs conflict resolution",
+        body=(
+          f"{app.name}: the update conflicts with local edits. Opened a chat "
+          f"to resolve it."
+        ),
+        source_type="app_conflict",
+        source_id=chat_id,
+        target=f"chat:{chat_id}",
+      )
+    except Exception as exc:
+      log.warning("conflict-resolver notify failed for %s: %r", app.slug, exc)
+
+  return chat_id
 
 
 def _upstream_parent(repo: Path, upstream_commit: str | None) -> str | None:

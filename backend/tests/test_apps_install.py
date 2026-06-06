@@ -27,6 +27,19 @@ def _bypass_cron_scaffold():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _stub_resolver_run_chat():
+  """A conflicting update spawns a resolver chat that calls run_chat to start a
+  real agent turn. Install tests never want a real turn, so stub run_chat to a
+  no-op — the StartTurn actor still sets the run marker, so the spawn is fully
+  exercised up to (but not including) the agent subprocess. A test that needs
+  the real spawn behavior patches over this locally."""
+  async def _noop(*args, **kwargs):
+    return None
+  with patch("app.chat.run_chat", new=_noop):
+    yield
+
+
 @pytest.fixture
 def bypass_url_validation():
   """Skip the SSRF URL-safety check so mocked-httpx tests using
@@ -1809,21 +1822,24 @@ def test_flag_on_static_asset_update_leaves_clean_app_repo(
   assert app_git._run(source_dir, "ls-files", "*.mobius-bak").stdout == ""
 
 
-def test_flag_on_conflicting_update_returns_conflict_and_preserves_local(
+def test_flag_on_conflicting_update_materializes_real_merge_conflict(
   client, auth, bypass_url_validation,
 ):
-  """Flag ON: a local edit + an upstream edit to the SAME region conflicts.
-  The endpoint returns mode='conflict' with the conflicting path, and the
-  served source keeps the local edit untouched (no clobber, no markers)."""
+  """A local edit + an upstream edit to the SAME region conflicts. The endpoint
+  returns mode='conflict' and materializes a REAL working-tree merge — conflict
+  markers + MERGE_HEAD — for the agent to resolve like a `git pull` conflict.
+  The DB row is NOT stamped with the upstream bytes (the served version stays
+  local/old, markers won't compile), and the new upstream is recorded for the
+  resolution. (Per-app git is unconditional now — no enabler needed.)"""
   base = "https://on3.test/repo/"
   m = {**MANIFEST_NEWS, "id": "on-conflict"}
   r1 = _install_v1(client, auth, base, m, JSX_MULTI)
   assert r1.status_code == 201, r1.text
   data_dir = Path(get_settings().data_dir)
-  jsx_file = data_dir / "apps" / "on-conflict" / "index.jsx"
+  app_dir = data_dir / "apps" / "on-conflict"
+  jsx_file = app_dir / "index.jsx"
 
-  local = JSX_MULTI.replace("ORIGINAL TITLE", "AGENT TITLE")
-  jsx_file.write_text(local)
+  jsx_file.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "AGENT TITLE"))
 
   # Upstream v2 edits the SAME title line differently → conflict.
   jsx_v2 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
@@ -1831,18 +1847,16 @@ def test_flag_on_conflicting_update_returns_conflict_and_preserves_local(
   assert r2.status_code == 201, r2.text
   payload = r2.json()
   assert payload["mode"] == "conflict"
-  assert payload["divergence"] == "none"
   assert "index.jsx" in payload["conflict_paths"]
-  # Local edit preserved verbatim — no upstream bytes, no conflict markers.
+
+  # A REAL merge conflict is materialized in the working tree for the agent.
   served = jsx_file.read_text()
-  assert served == local
-  assert "<<<<<<<" not in served
-  assert "UPSTREAM TITLE" not in served
-  # The DB row's jsx_source is NOT overwritten with the upstream bytes —
-  # it stays whatever it was before the update (here the v1 install value,
-  # since the test wrote the local edit straight to disk without the
-  # watcher running). The point: a conflict never stamps upstream onto the
-  # row, so the served version stays local until an agent resolves it.
+  assert "<<<<<<<" in served and ">>>>>>>" in served
+  assert "AGENT TITLE" in served and "UPSTREAM TITLE" in served
+  assert (app_dir / ".git" / "MERGE_HEAD").exists()
+
+  # The DB row is NOT stamped with the upstream bytes — served version stays
+  # local/old until the agent resolves; the new upstream is recorded for it.
   from app.models import App
   from app.database import SessionLocal
   db = SessionLocal()
@@ -1850,8 +1864,65 @@ def test_flag_on_conflicting_update_returns_conflict_and_preserves_local(
     app = db.query(App).filter(App.slug == "on-conflict").first()
     assert app.jsx_source != jsx_v2
     assert "UPSTREAM TITLE" not in app.jsx_source
-    # The new upstream WAS recorded for the later resolution pass.
     assert app.upstream_commit
+  finally:
+    db.close()
+
+
+def test_conflicting_update_spawns_resolver_chat_and_dedupes(
+  client, auth, bypass_url_validation,
+):
+  """A conflicting update opens ONE visible resolver chat (the agent-driven
+  resolution flow) + an app_conflict notification; a repeated conflict while
+  that resolver is still running does not pile up a second chat. (run_chat is
+  stubbed autouse, so the StartTurn run marker is set but no real agent runs.)"""
+  base = "https://spawn-conflict.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "spawn-conflict", "name": "Spawn Conflict"}
+  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
+  assert r1.status_code == 201, r1.text
+  data_dir = Path(get_settings().data_dir)
+  jsx_file = data_dir / "apps" / "spawn-conflict" / "index.jsx"
+
+  jsx_file.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "AGENT TITLE"))
+  jsx_v2 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
+  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["mode"] == "conflict"
+
+  from app.models import Chat, Notification
+  from app.database import SessionLocal
+  title = "Resolve update conflict — Spawn Conflict"
+  db = SessionLocal()
+  try:
+    chats = db.query(Chat).filter(Chat.title == title).all()
+    assert len(chats) == 1
+    chat = chats[0]
+    assert chat.created_by_app_id is None       # visible in the drawer
+    assert chat.run_status == "running"          # StartTurn set the run marker
+    assert any(
+      "resolving-app-git" in (msg.get("content") or "")
+      for msg in (chat.messages or [])
+    )
+    notifs = (
+      db.query(Notification)
+      .filter(Notification.source_type == "app_conflict")
+      .all()
+    )
+    assert any(n.source_id == chat.id for n in notifs)
+  finally:
+    db.close()
+
+  # A second conflicting update while the resolver is still running must NOT
+  # spawn a second chat (dedupe by running-resolver title). The abort guard
+  # also keeps the second update from committing the stale markers.
+  jsx_v3 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE 3")
+  r3 = _update_v2(client, auth, base, {**m, "version": "3.0.0"}, jsx_v3)
+  assert r3.status_code == 201, r3.text
+  assert r3.json()["mode"] == "conflict"
+  db = SessionLocal()
+  try:
+    chats = db.query(Chat).filter(Chat.title == title).all()
+    assert len(chats) == 1  # still just the one running resolver
   finally:
     db.close()
 
@@ -1984,7 +2055,11 @@ def test_store_id_from_spoofed_path_still_preserves_local_conflict(
   payload = r2.json()
   assert payload["mode"] == "conflict"
   assert "index.jsx" in payload["conflict_paths"]
-  assert jsx_file.read_text() == local
+  # NOT force-take-upstream (only the exact mobius-os/app-store source is) — a
+  # normal conflict materializes real markers for the agent, keeping both sides.
+  served = jsx_file.read_text()
+  assert "<<<<<<<" in served
+  assert "LOCAL SPOOF TITLE" in served and "UPSTREAM SPOOF TITLE" in served
 
 
 def test_update_preview_clean_returns_upstream_diff(
@@ -2091,6 +2166,12 @@ def test_update_preview_conflict_returns_real_markers_without_live_mutation(
   assert r2.status_code == 201, r2.text
   assert r2.json()["mode"] == "conflict"
 
+  # The conflict install already materialized real markers in the LIVE tree
+  # (start_conflict_merge); the preview reads from a throwaway worktree and
+  # must not further mutate the live tree.
+  before_preview = jsx_file.read_text()
+  assert "<<<<<<<" in before_preview
+
   preview = client.get(f"/api/apps/{app_id}/update-preview", headers=auth)
   assert preview.status_code == 200, preview.text
   payload = preview.json()
@@ -2106,4 +2187,4 @@ def test_update_preview_conflict_returns_real_markers_without_live_mutation(
   assert ">>>>>>>" in markers
   assert "AGENT TITLE" in markers
   assert "UPSTREAM TITLE" in markers
-  assert jsx_file.read_text() == local
+  assert jsx_file.read_text() == before_preview
