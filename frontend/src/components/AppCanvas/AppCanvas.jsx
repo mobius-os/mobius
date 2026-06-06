@@ -343,7 +343,8 @@ export default function AppCanvas({
         title={appName || 'Mini-app'}
         data-app-id={appId}
         sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-top-navigation-by-user-activation"
-        allow="microphone"
+        allow="microphone; fullscreen"
+        allowFullScreen
         onLoad={() => {
           // Per the HTML spec, the iframe's `load` event fires after
           // every <script type="module"> has executed. The frame's
