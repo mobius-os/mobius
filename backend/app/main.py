@@ -171,7 +171,7 @@ async def lifespan(app):
         # Derive from the UNIQUE slug (the migration assigns one) — NOT the raw
         # name, which would give two legacy rows named "News" the same
         # /data/apps/news tree. Skip a dir another app already claims so the
-        # repair never creates a shared source tree (Codex review round-10 #2).
+        # repair never creates a shared source tree.
         if not _a.slug:
           continue
         candidate = str(_Path(settings.data_dir) / "apps" / _a.slug)
@@ -271,7 +271,7 @@ _MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024
 
 class _BodySizeLimitMiddleware:
   """ASGI middleware that bounds the request body — including chunked bodies
-  with no Content-Length (Codex review round-10 #5).
+  with no Content-Length.
 
   A declared Content-Length over the cap is rejected with 413 before the app
   runs. Otherwise the body stream is wrapped with a running byte counter; once

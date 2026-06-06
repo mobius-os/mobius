@@ -290,7 +290,7 @@ function offlineCapableHandler(cacheName) {
       // browser keeps the SW alive until the fetch + cache.put finish — a bare
       // detached promise can be cut off when the worker is terminated right
       // after the cached response returns, leaving stale code cached for the
-      // next open (Codex review). event may be absent in non-FetchEvent
+      // next open. event may be absent in non-FetchEvent
       // dispatch; fall back to detached then.
       const refresh = revalidate().catch(() => {})  // rejects harmlessly when offline
       if (event && typeof event.waitUntil === 'function') event.waitUntil(refresh)

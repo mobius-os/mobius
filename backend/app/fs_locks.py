@@ -98,7 +98,7 @@ def source_dir_lock(source_dir: str) -> asyncio.Lock:
   The key is CANONICALIZED here (``Path(...).resolve()``) so callers that pass a
   derived/unresolved path and callers that pass an already-resolved one map to
   the SAME lock — otherwise a symlinked or relative DATA_DIR would split them
-  into two locks and silently lose serialization (Codex review round-7 #3).
+  into two locks and silently lose serialization.
   """
   key = str(Path(source_dir).resolve())
   lock = _source_locks.get(key)
