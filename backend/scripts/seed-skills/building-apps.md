@@ -375,13 +375,39 @@ const res = await fetch(`/api/proxy?url=${encodeURIComponent(url)}`, {
 
 ## Agent-powered mini-apps
 
-Apps that need agent assistance should create an app-attributed chat with
-`POST /api/app-chats`, persist the returned chat id, and mount the shell chat
-with `window.mobius.chat({ mount, chatId })`.
+Apps that need agent assistance embed the real shell chat with one call —
+`window.mobius.chat(...)` owns the whole lifecycle, so do NOT hand-roll the
+`POST /api/app-chats` create, the `PATCH` prompt update, or the chat-id
+persistence yourself:
 
-- Put app-specific instructions in `system_prompt` on create, and PATCH the
-  same `/api/app-chats/{id}` prompt when the app boots again.
-- Listen for the embed's `turn-done` event and refresh app storage/state.
+```jsx
+const mountRef = useRef(null)
+useEffect(() => {
+  const mount = mountRef.current
+  if (!mount) return
+  let handle
+  let disposed = false
+  window.mobius.chat({
+    mount,
+    persist: 'chat_id.json',   // create the app-chat ONCE, save its id here, reuse it forever
+    systemPrompt,              // shapes the chat on create + re-applies on resume
+    picker: false,             // hide the provider/effort picker inside the app sheet
+    onTurnDone: () => refresh(),   // a turn finished — reload app state
+  }).then((h) => { if (disposed) h.destroy(); else handle = h })
+  return () => { disposed = true; handle?.destroy() }
+}, [/* stable deps */])
+// ...
+<div ref={mountRef} style={S.chatMount} />
+```
+
+- `persist` makes the helper create the chat the first time and **reuse the same
+  one** on every later mount (PATCHing `systemPrompt` on resume) — the persistent
+  transcript the user expects. Omit it only for a throwaway chat.
+- `onReady` / `onTurnDone` / `onMessageSent` / `onError` are wired before the
+  embed mounts, so they never miss an event. `onTurnDone` is where you refresh.
+- **Viewer variant:** to display an EXISTING chat the app didn't create (e.g. a
+  cron-attributed daily chat resolved from a `meta.json`), pass an explicit
+  `chatId` and no `persist` — the helper just mounts it read-through.
 - Keep the chat as the interaction surface; it gives the user a persistent
   transcript, normal agent tooling, and follow-up questions in one place.
 
