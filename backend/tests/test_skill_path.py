@@ -1,10 +1,10 @@
 """Unit tests for `app.providers.get_skill_path`.
 
-The system prompt prefers the split CONSTITUTION (`core.md`) and falls back to
-the legacy monolith (`agent-skill.md`), checking the baked `/app/skill/` path
-first, then the in-repo `skill/` dir (computed relative to the providers module
-file). These tests use a fake Path keyed by string so they're robust to call
-order and pass in both the local-venv and in-container pytest environments.
+The system prompt is the CONSTITUTION (`core.md`), resolved from the baked
+`/app/skill/` path first, then the in-repo `skill/` dir (computed relative to
+the providers module file). These tests use a fake Path keyed by string so
+they're robust to call order and pass in both the local-venv and in-container
+pytest environments.
 """
 
 from unittest.mock import patch
@@ -48,15 +48,9 @@ def _resolve(exists_set, providers_file="/repo/backend/app/providers.py"):
 
 
 def test_prefers_baked_core_md():
-  """`/app/skill/core.md` (the constitution) wins over everything."""
-  r = _resolve({"/app/skill/core.md", "/app/skill/agent-skill.md"})
+  """`/app/skill/core.md` (the constitution) wins over the in-repo copy."""
+  r = _resolve({"/app/skill/core.md", "/repo/skill/core.md"})
   assert r is not None and r.p == "/app/skill/core.md"
-
-
-def test_falls_back_to_baked_agent_skill():
-  """Mid-migration (no core.md yet) → the legacy monolith still loads."""
-  r = _resolve({"/app/skill/agent-skill.md"})
-  assert r is not None and r.p == "/app/skill/agent-skill.md"
 
 
 def test_repo_core_when_baked_missing():
@@ -71,9 +65,9 @@ def test_returns_none_when_nothing_exists():
 
 
 def test_resolves_real_skill_in_test_env():
-  """Sanity, unmocked: resolves to a real core.md or agent-skill.md."""
+  """Sanity, unmocked: resolves to a real core.md."""
   result = get_skill_path()
   if result is None:
     return
   assert result.exists()
-  assert result.name in ("core.md", "agent-skill.md")
+  assert result.name == "core.md"

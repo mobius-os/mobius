@@ -1,11 +1,10 @@
 """Assembles the agent's injected memory block from the knowledge graph.
 
 Möbius gives the agent its long-term memory by prepending a block to the
-FIRST user message of a session (see `chat.py`). Historically that block was
-the entire flat `/data/shared/agent-experience.md`. This module builds a
-*progressive-disclosure* block instead: a small always-loaded index (the root
-"Home" MOC) plus the highest-value notes, with everything else left on disk
-for the agent to `Read` on demand by following `[[wikilinks]]`.
+FIRST user message of a session (see `chat.py`). This module builds a
+*progressive-disclosure* block: a small always-loaded index (the root "Home"
+MOC) plus the highest-value notes, with everything else left on disk for the
+agent to `Read` on demand by following `[[wikilinks]]`.
 
 Layout under `<data_dir>/shared/memory/` (the "graph"):
 
@@ -20,18 +19,18 @@ Layout under `<data_dir>/shared/memory/` (the "graph"):
   .ready                sentinel: present iff a validated graph is published.
 
 The `.ready` sentinel — not the mere existence of `index.md` — gates graph
-mode. A migration/consolidation builds into a staging tree, lints, publishes
-atomically, and only then writes `.ready`; a partial or failed migration
-therefore never disables the legacy fallback (Codex review R2).
+mode. A consolidation builds into a staging tree, lints, publishes atomically,
+and only then writes `.ready`; a partial or failed publish therefore leaves the
+previously published graph in place rather than exposing a half-built one.
 
 `build_memory_block` is a PURE function (no writes, no logging) so it is
 trivially unit-testable; the caller in `chat.py` owns the activity emit and
 the surrounding `<agent_experience>` envelope.
 
-Selection vs. rendering order (Codex review R3): hot notes are *selected* by
-score (importance, then access_count) but *rendered* in stable path order, so
-a nightly access_count change can't reorder the cached first-message prefix
-and bust prompt-cache reuse.
+Selection vs. rendering order: hot notes are *selected* by score (importance,
+then access_count) but *rendered* in stable path order, so a nightly
+access_count change can't reorder the cached first-message prefix and bust
+prompt-cache reuse.
 """
 
 from __future__ import annotations
@@ -61,7 +60,7 @@ class MemoryBlock:
   adds that plus the dynamic provider/timezone/viewport tail). `loaded` is the
   list of graph-relative paths that made it into the block, so the caller can
   credit their access (the `memory_load` activity event). `mode` is
-  "graph" | "legacy" | "empty" for observability.
+  "graph" | "empty" for observability.
   """
 
   text: str
@@ -229,7 +228,7 @@ def _select_hot_notes(
 ) -> list[tuple[Path, str]]:
   """Returns up to `max_notes` (path, full_text) pairs SELECTED by score but
   SORTED by path, so the rendered order is stable across nightly score
-  changes (Codex review R3)."""
+  changes."""
   candidates: list[tuple[tuple[int, int], Path, str]] = []
   try:
     files = sorted(notes_dir.glob("*.md"))
@@ -259,16 +258,18 @@ def build_memory_block(
   budget_bytes: int = DEFAULT_BUDGET_BYTES,
   max_notes: int = DEFAULT_MAX_NOTES,
 ) -> MemoryBlock:
-  """Assembles the injected memory context.
+  """Assembles the injected memory context from the knowledge graph.
 
-  Graph mode (`.ready` present): `index.md` (full, capped to the budget) +
-  hot notes (selected by score, rendered in path order, until the byte budget
-  is consumed) + the `inbox.md` tail. Each included file is fenced with a
-  `<<< path >>>` marker so the agent knows what a `[[link]]` resolves to.
+  `index.md` (full, capped to the budget) + hot notes (selected by score,
+  rendered in path order, until the byte budget is consumed) + the `inbox.md`
+  tail. Each included file is fenced with a `<<< path >>>` marker so the agent
+  knows what a `[[link]]` resolves to.
 
-  Legacy mode (no `.ready`): the flat `agent-experience.md`, unchanged — the
-  exact pre-graph behaviour, so an instance never loses memory on upgrade or a
-  failed migration.
+  Returns an empty block when the graph is not yet published (`.ready` absent)
+  or is empty — the agent then has no injected memory for this turn but can
+  still `Read` the graph on demand. `.ready` is written atomically after the
+  graph lints, so a partial/failed publish leaves the previous graph in place
+  rather than handing over a half-built one.
 
   Pure: never writes, never raises on a missing/garbled file.
   """
@@ -277,19 +278,8 @@ def build_memory_block(
   budget_bytes = max(0, budget_bytes)
   root = memory_dir(data_dir)
   if is_graph_ready(data_dir):
-    block = _build_graph_block(root, budget_bytes, max_notes)
-    if block.mode != "empty":
-      return block
-    # .ready is present but the graph yielded nothing (index/notes/inbox all
-    # empty or deleted) — don't hand the agent an empty memory block; fall
-    # through to the legacy file so an emptied-but-published graph never
-    # silently wipes the agent's memory.
-
-  legacy = Path(data_dir) / "shared" / "agent-experience.md"
-  ctx = _read(legacy).strip()
-  if not ctx:
-    return MemoryBlock(text="", loaded=[], mode="empty")
-  return MemoryBlock(text=ctx, loaded=["agent-experience.md"], mode="legacy")
+    return _build_graph_block(root, budget_bytes, max_notes)
+  return MemoryBlock(text="", loaded=[], mode="empty")
 
 
 def _build_graph_block(

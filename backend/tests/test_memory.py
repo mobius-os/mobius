@@ -22,19 +22,19 @@ def _graph(tmp: Path, *, ready=True):
   return root
 
 
-# --- legacy fallback ---------------------------------------------------
+# --- empty (no published graph) ----------------------------------------
 
 
-def test_legacy_fallback_when_no_ready_sentinel(tmp_path):
+def test_no_ready_sentinel_is_empty(tmp_path):
   shared = tmp_path / "shared"
   shared.mkdir(parents=True)
-  (shared / "agent-experience.md").write_text("legacy memory here")
-  # A memory dir without .ready must NOT activate graph mode.
+  # A memory dir without .ready must NOT activate graph mode; with no
+  # published graph the injected block is empty (the agent reads on demand).
   (shared / "memory" / "notes").mkdir(parents=True)
   block = memory.build_memory_block(tmp_path)
-  assert block.mode == "legacy"
-  assert "legacy memory here" in block.text
-  assert block.loaded == ["agent-experience.md"]
+  assert block.mode == "empty"
+  assert block.text == ""
+  assert block.loaded == []
 
 
 def test_empty_when_nothing_present(tmp_path):
@@ -130,20 +130,10 @@ def test_truncated_index_stays_within_budget(tmp_path):
   assert len(block.text.encode("utf-8")) <= 4000
 
 
-def test_empty_published_graph_falls_back_to_legacy(tmp_path):
-  # .ready present but the graph has no index/notes/inbox — must NOT inject an
-  # empty block; fall back to the legacy file so memory isn't silently wiped.
-  shared = tmp_path / "shared"
-  (shared / "memory" / "notes").mkdir(parents=True)
-  (shared / "memory" / ".ready").write_text("")
-  (shared / "agent-experience.md").write_text("legacy memory survives")
-  block = memory.build_memory_block(tmp_path)
-  assert block.mode == "legacy"
-  assert "legacy memory survives" in block.text
-
-
-def test_empty_published_graph_and_no_legacy_is_empty(tmp_path):
-  # Same empty graph but with no legacy file either — genuinely empty.
+def test_empty_published_graph_is_empty(tmp_path):
+  # .ready present but the graph has no index/notes/inbox — the injected block
+  # is empty (the agent can still Read the graph on demand). No flat-file
+  # fallback exists.
   shared = tmp_path / "shared"
   (shared / "memory" / "notes").mkdir(parents=True)
   (shared / "memory" / ".ready").write_text("")

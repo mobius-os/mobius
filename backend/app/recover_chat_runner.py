@@ -452,7 +452,7 @@ def _system_prompt(
     "uvicorn; the container's restart policy brings it back with "
     "your edits loaded. No need to leave this chat.\n"
     "5. After the partner confirms the fix, append a Lesson to "
-    "/data/shared/agent-experience.md describing what went wrong "
+    "/data/shared/memory/inbox.md describing what went wrong "
     "and how to avoid it.\n\n"
     "If you cannot fix it from here, tell the user: \"Open "
     "/recover in a new tab; click 'Restore backend' (or 'Restore "
