@@ -2,7 +2,19 @@ import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { apiFetch } from '../../api/client.js'
 import { appQueries } from '../../hooks/queries.js'
+import { detectInstallPlatform } from '../../utils/installPlatform.js'
 import './InstallSheet.css'
+
+// True when this document is running as an installed standalone PWA.
+// iOS uses the non-standard `navigator.standalone`; everything else
+// exposes the display-mode media query. Either signal counts.
+function isStandaloneDisplay() {
+  if (typeof navigator !== 'undefined' && navigator.standalone === true) return true
+  if (typeof window !== 'undefined' && window.matchMedia) {
+    return window.matchMedia('(display-mode: standalone)').matches
+  }
+  return false
+}
 
 // Home-screen names are short; the OS truncates long ones anyway and
 // `short_name` is the first 12 chars. Cap generously but keep it sane.
@@ -45,6 +57,15 @@ export default function InstallSheet({ appId, appName, appSlug, appUpdatedAt, on
   const [iconPreview, setIconPreview] = useState(null) // object URL or null
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
+  // iOS Safari can't install via a navigation to /apps/<slug>/?install=1:
+  // the standalone page asks the user to "tap the Share button below," but
+  // navigating same-tab from inside an installed Möbius PWA opens WITHIN
+  // standalone, where there is no Safari chrome and so no Share button.
+  // Instead we save the name/icon, then show the Share → Add to Home
+  // Screen steps right here in the shell, where the Safari Share button
+  // IS on screen. `iosInstructions` flips the card to that step.
+  const [platform] = useState(() => detectInstallPlatform())
+  const [iosInstructions, setIosInstructions] = useState(false)
 
   // Revoke the object URL when it changes or on unmount — leaks are
   // small but the pattern should be clean.
@@ -117,6 +138,16 @@ export default function InstallSheet({ appId, appName, appSlug, appUpdatedAt, on
       }
       // Reflect the new name/icon in the drawer when the user returns.
       appQueries.list.invalidate(queryClient)
+      if (platform.iosSafari) {
+        // iOS Safari: don't navigate into standalone (Share button is
+        // absent there). Show the Share → Add to Home Screen steps in
+        // place — the Safari chrome around the shell still has the
+        // Share button on screen. Name/icon are already saved, so the
+        // manifest the OS reads on Add-to-Home is fresh.
+        setSubmitting(false)
+        setIosInstructions(true)
+        return
+      }
       // Same-tab navigation to the install surface. Manifest is already
       // fresh (saved above + no-cache), so the OS shows the new name.
       window.location.href = `/apps/${appSlug}/?install=1`
@@ -140,6 +171,36 @@ export default function InstallSheet({ appId, appName, appSlug, appUpdatedAt, on
         aria-label="Add to home screen"
         onClick={e => e.stopPropagation()}
       >
+        {iosInstructions ? (
+          <>
+            <h2 className="is__title">Add {label} to your home screen</h2>
+            {isStandaloneDisplay() ? (
+              <p className="is__hint is__hint--steps">
+                You’re in the installed app, so the Share button isn’t on
+                screen. Open this page in <strong>Safari</strong>, then tap
+                the <strong>Share</strong> button and choose{' '}
+                <strong>Add to Home Screen</strong>.
+              </p>
+            ) : (
+              <p className="is__hint is__hint--steps">
+                Tap the <strong>Share</strong> button below{' '}
+                <span aria-hidden="true">(the square with the up-arrow)</span>,
+                then choose <strong>Add to Home Screen</strong>.
+                <span className="is__arrow" aria-hidden="true">↓</span>
+              </p>
+            )}
+            <div className="is__actions">
+              <button
+                type="button"
+                className="is__btn is__btn--primary"
+                onClick={() => onClose?.()}
+              >
+                Got it
+              </button>
+            </div>
+          </>
+        ) : (
+        <>
         <h2 className="is__title">Add to home screen</h2>
 
         <div className="is__row">
@@ -213,6 +274,8 @@ export default function InstallSheet({ appId, appName, appSlug, appUpdatedAt, on
           hidden
           onChange={onPickFile}
         />
+        </>
+        )}
       </div>
     </div>
   )

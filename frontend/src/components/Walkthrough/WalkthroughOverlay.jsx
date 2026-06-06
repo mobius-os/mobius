@@ -120,6 +120,29 @@ export default function WalkthroughOverlay({ onDone }) {
     return () => document.removeEventListener('keydown', onKey)
   }, [skip])
 
+  // Already installed → complete silently. If the shell is running as a
+  // standalone PWA, the user has clearly installed Möbius, so the
+  // walkthrough (and especially its install step) is moot. More
+  // importantly this clears the sticky-overlay failure: the overlay is
+  // position:fixed/inset:0/z-index:1000 and only unmounts on finish();
+  // a user who installed and relaunched would otherwise stare through a
+  // covered shell until app restart. finish() unmounts it now and marks
+  // the walkthrough complete (correct: a real standalone launch means a
+  // real install). The guard lives ONLY here on mount — fetchWalkthrough's
+  // completion OR-logic is deliberately untouched, so we don't reshape
+  // the broader gating for an emulated-standalone non-installed user.
+  useEffect(() => {
+    const standalone =
+      (typeof window !== 'undefined' &&
+        window.matchMedia &&
+        window.matchMedia('(display-mode: standalone)').matches) ||
+      (typeof navigator !== 'undefined' && navigator.standalone === true)
+    if (standalone) finish()
+    // finish is a stable function decl guarded by closingRef; running
+    // once on mount is the intent.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   async function handleInstallCta() {
     if (installCopy.unsupported && platform.iosNonSafari) {
       const ok = await copyOriginUrl()
@@ -297,6 +320,20 @@ export default function WalkthroughOverlay({ onDone }) {
                 {installCopy.ctaLabel}
               </button>
             </div>
+            {/* The CTA above advances (or copies a link) but never ends
+                the walkthrough — install happens out-of-band in the
+                browser's own UI, so there's no in-page event to hook.
+                A user who has already installed needs an explicit way to
+                clear the overlay for good; "I've installed it" finishes
+                the walkthrough so it (and this fixed full-screen overlay)
+                never returns. */}
+            <button
+              type="button"
+              className="wt__skip-link"
+              onClick={finish}
+            >
+              I’ve installed it
+            </button>
           </>
         )}
 
