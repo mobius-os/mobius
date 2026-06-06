@@ -313,6 +313,16 @@ PREV_IMAGE=$(docker inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null || echo "")
 IMAGE_TAG=$(docker inspect -f '{{.Config.Image}}' "$CONTAINER" 2>/dev/null || echo "")
 info "rollback image: ${IMAGE_TAG:-<unknown>} (${PREV_IMAGE:0:19}…)"
 
+# Pin the previous image under a stable tag BEFORE the build. A
+# `docker compose build` reuses IMAGE_TAG for the new image, which untags the
+# old one; that now-dangling image can then be pruned (by this run's cleanup,
+# a sibling, or earlyoom housekeeping) before a rollback needs it — the
+# 2026-06-06 "No such image: sha256:…" rollback failure. A tagged image is
+# never dangling, so this keeps PREV_IMAGE alive and resolvable for rollback.
+if [ -n "$PREV_IMAGE" ]; then
+  docker tag "$PREV_IMAGE" "${IMAGE_TAG%%:*}:rollback-prev" 2>/dev/null || true
+fi
+
 # Best-effort restore of the previous image after a failed cutover. Called
 # as `attempt_rollback || true`, which disables errexit inside the function,
 # so a failing docker step here can't itself abort the script. It is
@@ -337,7 +347,7 @@ attempt_rollback() {
     fail "rollback: 'compose up -d --force-recreate' failed — recover ${CONTAINER} manually."
     return 1
   fi
-  for i in $(seq 1 30); do
+  for i in $(seq 1 120); do
     code=$(docker exec "$CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/health'" 2>/dev/null || echo "000")
     if [ "$code" = "200" ]; then
       ok "rolled back — ${CONTAINER} healthy on the previous image again"
@@ -514,8 +524,8 @@ else
   intent "docker compose ${COMPOSE_ARGS[*]} up -d"
   docker compose "${COMPOSE_ARGS[@]}" up -d
 fi
-info "waiting up to 30s for ${INTERNAL_BASE}/api/health"
-for i in $(seq 1 30); do
+info "waiting up to 120s for ${INTERNAL_BASE}/api/health"
+for i in $(seq 1 120); do
   code=$(docker exec "$CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/health'" 2>/dev/null || echo "000")
   if [ "$code" = "200" ]; then
     ok "healthy after ${i}s"
@@ -531,11 +541,11 @@ done
 
 # Liveness alone is not enough: the chat-persistence writer must be ready
 # (started, alive, not fatal, not stopping) or every chat write fails on a
-# process that still answers /api/health 200. Give it the same 30s budget —
+# process that still answers /api/health 200. Give it the same 120s budget —
 # start_writer runs in the lifespan before serving, so this is normally
 # already 200 by the time /api/health was.
-info "waiting up to 30s for ${INTERNAL_BASE}/api/ready"
-for i in $(seq 1 30); do
+info "waiting up to 120s for ${INTERNAL_BASE}/api/ready"
+for i in $(seq 1 120); do
   rcode=$(ready_code)
   if [ "$rcode" = "200" ]; then
     ok "writer ready after ${i}s"
@@ -580,8 +590,8 @@ docker exec "$CONTAINER" bash /app/scripts/rebuild_shell.sh
 # restarts. See "Shell rebuild + static-dir resolution" in CLAUDE.md.
 intent "docker restart ${CONTAINER}  # so main.py re-resolves _static_dir"
 docker restart "$CONTAINER" >/dev/null
-info "waiting up to 30s for ${INTERNAL_BASE}/api/health after restart"
-for i in $(seq 1 30); do
+info "waiting up to 120s for ${INTERNAL_BASE}/api/health after restart"
+for i in $(seq 1 120); do
   code=$(docker exec "$CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/health'" 2>/dev/null || echo "000")
   if [ "$code" = "200" ]; then
     ok "healthy after ${i}s"
@@ -594,8 +604,8 @@ for i in $(seq 1 30); do
     exit 1
   fi
 done
-info "waiting up to 30s for ${INTERNAL_BASE}/api/ready after restart"
-for i in $(seq 1 30); do
+info "waiting up to 120s for ${INTERNAL_BASE}/api/ready after restart"
+for i in $(seq 1 120); do
   rcode=$(ready_code)
   if [ "$rcode" = "200" ]; then
     ok "writer ready after ${i}s"
