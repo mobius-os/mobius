@@ -30,12 +30,6 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 // Constants
 // ---------------------------------------------------------------------------
 
-const VERBOSITY_OPTIONS = [
-  { id: 'terse', label: 'Terse', hint: 'A short paragraph — just the highlights.' },
-  { id: 'standard', label: 'Standard', hint: 'A few paragraphs, a suggestion or two, one closing thought.' },
-  { id: 'chatty', label: 'Chatty', hint: 'A longer narrative with more pattern-spotting.' },
-]
-const DEFAULT_VERBOSITY = 'standard'
 const DEFAULT_AGENT_ID = 'builder'
 const PROVIDER_LABELS = {
   claude: 'Claude Code',
@@ -108,21 +102,6 @@ export function hardenReportHtml(html) {
   if (/<head[\s>]/i.test(body)) return body.replace(/<head([^>]*)>/i, `<head$1>${meta}`)
   if (/<html[\s>]/i.test(body)) return body.replace(/<html([^>]*)>/i, `<html$1><head>${meta}</head>`)
   return `<!doctype html><html><head>${meta}</head><body>${body}</body></html>`
-}
-
-function htmlToText(html) {
-  return String(html || '')
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/\s+/g, ' ')
-    .trim()
 }
 
 // "0 6 * * *" -> "06:00" for the <input type="time"> value.
@@ -852,18 +831,24 @@ function MorningChat({ chatId }) {
   )
 }
 
-function FeedbackLauncher({ dateStr, html }) {
+function FeedbackLauncher({ dateStr, chatId }) {
   const openFeedbackChat = () => {
-    const excerpt = htmlToText(html).slice(0, 1200)
+    // Keep the draft to a one-line header + the partner's entry. The brief
+    // itself is already on screen (and, when we continue the morning chat,
+    // in the conversation), so echoing an excerpt back is just noise.
     const draft = [
       `Feedback on the Dreaming brief for ${dateStr}:`,
       '',
-      excerpt ? `Brief excerpt: ${excerpt}` : '',
-      '',
       'My feedback:',
-    ].filter(Boolean).join('\n')
+    ].join('\n')
+    // Prefer continuing the morning chat the nightly run opened — it already
+    // holds the brief and the agent's overnight work, so the partner lands
+    // in-context and can inspect it before replying. Fall back to a fresh
+    // chat only when no morning chat was linked for this date.
     window.parent.postMessage(
-      { type: 'moebius:new-chat', draft },
+      chatId
+        ? { type: 'moebius:open-chat', chatId, draft }
+        : { type: 'moebius:new-chat', draft },
       window.location.origin,
     )
   }
@@ -1030,7 +1015,7 @@ function ReportDetail({ dateStr, storage, online, onBack }) {
             ) : (
               <MorningChat chatId={chatId} />
             )}
-            <FeedbackLauncher dateStr={dateStr} html={state.html} />
+            <FeedbackLauncher dateStr={dateStr} chatId={chatId} />
           </div>
         </div>
       )}
