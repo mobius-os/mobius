@@ -3,7 +3,7 @@
 Lives apart from ``routes/storage.py`` so the installer (``install.py``) can
 reuse the SAME atomic write the storage API uses when it seeds an app's initial
 files — otherwise a seed would be written non-atomically and a concurrent read
-could observe it torn (Codex review round-8 #2).
+could observe it torn.
 """
 
 import os
@@ -16,7 +16,7 @@ from fastapi import HTTPException, Request
 # and the file served back. Möbius runs on a memory-tight host (recurring OOM),
 # so an app writing or reading an unbounded blob would threaten the whole
 # instance. 50 MB is far above any real per-key app payload (notes, reports,
-# save files) while still bounding the blast radius (Codex review round-8 #3).
+# save files) while still bounding the blast radius.
 MAX_STORAGE_BYTES = 50 * 1024 * 1024
 
 

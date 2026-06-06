@@ -87,7 +87,7 @@ def _check_cross_app(
   # The target app must EXIST for any storage access — owner, own-app, or
   # cross-app. Without this, a token (or an owner) addressing a deleted or
   # never-created app id could read, recreate, list, or delete an orphan
-  # /data/apps/<id> storage tree (Codex review #1). Load it once up front so
+  # /data/apps/<id> storage tree. Load it once up front so
   # every branch below can assume the row is real.
   target = (
     db.query(models.App).filter(models.App.id == target_app_id).first()
@@ -173,7 +173,7 @@ def _resolve(base: Path, rel: str) -> Path:
   # surprising policy (a DELETE through a link removes the TARGET, not the
   # link). Walk the literal, unresolved path and reject any existing symlink
   # component so the resolve-based routes match the listing's no-symlink
-  # contract (Codex review #12). is_symlink() is lstat-based (never follows)
+  # contract. is_symlink() is lstat-based (never follows)
   # and is False for not-yet-created components, so a write that creates new
   # dirs/files is unaffected.
   walk = base
@@ -191,7 +191,7 @@ _TEXT_PREFIXES = ("text/", "application/json", "application/xml")
 
 # Text/JSON files at or below this size are read into memory and served inline
 # (PlainTextResponse) for low latency; larger ones (and all binaries) stream
-# from disk via FileResponse so a big read never buffers whole (round-8 #3).
+# from disk via FileResponse so a big read never buffers whole.
 _INLINE_READ_MAX = 256 * 1024
 
 # Listing page size: the default when the caller omits `?limit`, and
@@ -207,7 +207,7 @@ def _is_listable_dirent(entry: os.DirEntry) -> bool:
   Mirrors `_list_entry`'s skip rules WITHOUT a stat (the DirEntry's cached
   type answers `is_symlink`; the name answers the whitelist), so the
   paginator can exclude symlinks and unsafe names DURING the scan instead
-  of after selecting them — see `_list_directory_page` (Codex review #5).
+  of after selecting them — see `_list_directory_page`.
   """
   try:
     if entry.is_symlink():
@@ -288,7 +288,7 @@ def _list_directory_page(
   """Returns one keyset page `(entries, next_cursor)` of a directory.
 
   Shared by the app and shared listing routes so both enforce the SAME
-  contract (Codex review #10): symlinks and names that can't round-trip
+  contract: symlinks and names that can't round-trip
   through `_resolve` are excluded (a listing never advertises a child a
   read/PUT would reject), one un-stat-able dirent drops out instead of
   500-ing the page, and pagination is identical.
@@ -297,7 +297,7 @@ def _list_directory_page(
   strictly greater than the decoded cursor, walked in O(n log limit) time
   and O(limit) memory — it never materializes or sorts the whole directory
   per page, so a large directory can't be turned into a repeated expensive
-  full scan (Codex review #9). Validity (not a symlink, name passes the
+  full scan. Validity (not a symlink, name passes the
   whitelist) is checked DURING the scan, so excluded entries don't consume
   page slots — a page returns `limit` real entries and the cursor advances
   past the skipped ones, rather than selecting raw dirents and filtering
@@ -338,7 +338,7 @@ def _serve_file(file_path: Path):
   text/JSON is read into memory (PlainTextResponse) so the common small-doc
   read stays inline + low-latency. This bounds the per-read memory to the
   threshold rather than the full file size — a 50 MB doc no longer buffers
-  whole on the memory-tight host (Codex review round-8 #3).
+  whole on the memory-tight host.
   """
   mime, _ = mimetypes.guess_type(file_path.name)
   is_text = mime is None or mime.startswith(tuple(_TEXT_PREFIXES))
@@ -436,7 +436,7 @@ def read_app_file(
   file_path = _resolve(base, path)
   # is_file() (not exists()) so a directory path 404s cleanly instead of
   # reaching _serve_file, which would try to read a directory and 500
-  # (Codex review #11).
+  #.
   if not file_path.is_file():
     raise HTTPException(status_code=404, detail="File not found.")
   return _serve_file(file_path)
@@ -583,7 +583,7 @@ async def write_app_file(
   async with fs_locks.app_storage_lock(app_id):
     _recheck_app_identity(db, app_id, expected_nonce)
     # A directory destination would make the write raise IsADirectory and
-    # surface as an opaque 500; reject it explicitly (Codex review #11).
+    # surface as an opaque 500; reject it explicitly.
     if file_path.is_dir():
       raise HTTPException(status_code=400, detail="Destination is a directory.")
     # Snapshot the pre-write size for size_delta. A missing file is zero; a
@@ -664,7 +664,7 @@ def read_shared_file(
   base = Path(get_settings().data_dir) / "shared"
   file_path = _resolve(base, path)
   # is_file() so a directory path 404s instead of 500-ing in _serve_file
-  # (Codex review #11) — same contract as the per-app read above.
+  # — same contract as the per-app read above.
   if not file_path.is_file():
     raise HTTPException(status_code=404, detail="File not found.")
   return _serve_file(file_path)
@@ -697,7 +697,7 @@ async def write_shared_file(
   base = Path(settings.data_dir) / "shared"
   file_path = _resolve(base, path)
   # Reject a directory destination explicitly rather than 500-ing on the
-  # write below (Codex review #11) — same contract as the per-app write.
+  # write below — same contract as the per-app write.
   if file_path.is_dir():
     raise HTTPException(status_code=400, detail="Destination is a directory.")
   # Snapshot pre-write size for size_delta. Same best-effort pattern
@@ -827,7 +827,7 @@ def list_shared_dir(
   """Lists the immediate children of a shared-storage directory.
 
   Same hardened contract and `{entries, next_cursor}` shape as the
-  per-app `apps-list` route (Codex review #10): symlinks and unsafe names
+  per-app `apps-list` route: symlinks and unsafe names
   are dropped by `_list_entry`, `OSError` on a racing dirent can't 500 the
   page, and the listing is keyset-paginated. An empty `path` is the shared
   root; a path that doesn't resolve to a directory returns an empty

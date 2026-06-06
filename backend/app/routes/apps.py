@@ -40,7 +40,7 @@ def _slugify_for_source_dir(name: str) -> str:
   # A purely-numeric slug would collide with the numeric-id storage tree:
   # an app named "123" derives source dir /data/apps/123, which is exactly
   # where /api/storage/apps/123/... writes land for app id 123. Prefix it
-  # so a source-dir name is never a bare integer (Codex review #4).
+  # so a source-dir name is never a bare integer.
   if slug.isdigit():
     slug = f"app-{slug}"
   return slug
@@ -69,7 +69,7 @@ def _validate_source_dir(source_dir: str, data_dir: str) -> str:
     - a purely-numeric basename would collide with the per-app STORAGE tree
       /data/apps/<id> (storage is keyed by the integer app id): a write to
       that app's storage could clobber this app's source, and uninstall's
-      rmtree could delete the other app's storage tree (Codex review #4).
+      rmtree could delete the other app's storage tree.
   Raises 400 on either violation. `.resolve()` collapses symlinks and `..`
   before the containment check.
   """
@@ -105,7 +105,7 @@ def _reject_if_source_dir_taken(
   the subsequent assignment are atomic against a concurrent create/patch.
   Two apps sharing one source tree is ambiguous for the file watcher and makes
   uninstall cleanup conservative (it must refuse to rmtree a shared dir), so
-  forbid the duplicate at assignment time (Codex review round-9 #3). Compared
+  forbid the duplicate at assignment time. Compared
   on RESOLVED paths so a symlinked/relative spelling can't smuggle a duplicate.
   """
   try:
@@ -133,7 +133,7 @@ def _safe_to_rmtree_source(
   """Whether uninstall may recursively delete this resolved source dir.
 
   Only an IMMEDIATE, non-numeric child of /data/apps that NO OTHER app row
-  still resolves to. Refuses to delete (Codex review #4):
+  still resolves to. Refuses to delete:
     - a nested descendant (parent != apps_root) — a legacy/invalid row whose
       source_dir points deep into /data/apps could otherwise rmtree a path
       inside another app's tree,
@@ -164,7 +164,7 @@ def _drop_cron_and_rmtree(resolved: Path) -> None:
 
   Pure-filesystem so it can run via ``asyncio.to_thread`` off the sole event
   loop — ``_unregister_cron`` shells out to crontab (can block seconds) and
-  ``rmtree`` is unbounded (Codex review round-7 #4). The caller has ALREADY
+  ``rmtree`` is unbounded. The caller has ALREADY
   decided it's safe (``_safe_to_rmtree_source``, which needs the DB) while
   holding ``source_dir_lock``, and keeps holding it across this call so the
   check and the removal stay atomic. Drops the cron even when the tree is gone
@@ -488,7 +488,7 @@ async def create_app(
   )
   # Hold the per-source-dir lock across the row commit so this app's source_dir
   # becomes visible to a concurrent uninstall's shared-dir dedup check before
-  # that uninstall could rmtree the directory (Codex review round-6 #4), and so
+  # that uninstall could rmtree the directory, and so
   # the uniqueness check + assignment are atomic vs another create. One uvicorn
   # worker => this in-process lock fully serializes the two.
   async with fs_locks.source_dir_lock(source_dir):
@@ -674,19 +674,19 @@ async def update_icon(
   # standalone shell downscales client-side before upload, so well-behaved
   # clients never approach this. Stream-cap the read (Content-Length precheck +
   # running-total abort) rather than buffering an unbounded body first, so a
-  # giant direct-API upload can't OOM the host (Codex review round-9 #4).
+  # giant direct-API upload can't OOM the host.
   body = await read_capped_body(request, cap=12 * 1024 * 1024)
   # Capture the app's identity at authorization; recheck the nonce under the
   # per-app lock so a slow icon upload can't alter a DIFFERENT app that reused
   # this id between authorization and commit — the same id-reuse race fixed for
-  # storage PUT/DELETE (Codex review round-10 #3).
+  # storage PUT/DELETE.
   app0 = db.query(models.App).filter(models.App.id == app_id).first()
   if not app0:
     raise HTTPException(404, "App not found.")
   expected_nonce = app0.token_nonce
   # Decode/normalize via the SHARED installer pipeline, which inspects the
   # image header dimensions BEFORE img.load() so a decompression bomb is
-  # rejected before it can allocate (Codex review round-10 #4). Done outside
+  # rejected before it can allocate. Done outside
   # the lock — only the DB mutation needs serializing. Lazy import avoids the
   # install.py <-> routes.apps circular import.
   from app.install import _process_icon
@@ -777,9 +777,9 @@ async def delete_app(
     # directory; legacy apps fall back to name-based cleanup. Resolve the
     # candidate, then dedup-check + cron-drop + rmtree UNDER the per-source-dir
     # lock so a concurrent create/patch/install can't claim the directory
-    # between the shared-dir check and the rmtree (round-6 #4). The blocking
+    # between the shared-dir check and the rmtree. The blocking
     # cron-drop + rmtree run in a thread so they don't stall the loop while the
-    # lock is held (round-7 #4).
+    # lock is held.
     resolved_source = None
     if app_source_dir:
       try:
@@ -802,7 +802,7 @@ async def delete_app(
 
     # Per-app STORAGE tree under /data/apps/<numeric-id>/ — distinct from the
     # slug-keyed SOURCE tree above. /api/storage/apps/{id}/... writes land here
-    # keyed by the integer id (Codex review #1). rmtree in a thread (round-7
+    # keyed by the integer id. rmtree in a thread (round-7
     # #4); still under the outer per-app lock.
     storage_dir = apps_root / str(deleted_app_id)
     if storage_dir.is_dir():

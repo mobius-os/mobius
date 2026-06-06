@@ -215,7 +215,7 @@ class App(Base):
   # that later reused its SQLite integer id (which `INTEGER PRIMARY KEY`
   # does, lacking AUTOINCREMENT). Nullable so the additive migration can
   # backfill existing rows; tokens minted before the `app_nonce` claim
-  # existed fall back to row-existence only (Codex review #1).
+  # existed fall back to row-existence only.
   token_nonce = Column(
     String(32), nullable=True, default=lambda: secrets.token_hex(16)
   )

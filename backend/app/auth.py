@@ -68,7 +68,7 @@ def create_app_token(
   resolver reject a token whose app was deleted and whose integer id was
   reused by a different app (the new app has a different nonce). Omitted
   only by callers without the row; the resolver then falls back to
-  row-existence (Codex review #1).
+  row-existence.
   """
   claims = {"sub": owner_username, "scope": "app", "app_id": app_id}
   if app_nonce is not None:

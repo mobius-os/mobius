@@ -187,7 +187,7 @@ def _validate_manifest(m: dict) -> None:
   # A purely-numeric id becomes the slug and source dir /data/apps/<id>,
   # which collides with the numeric-id storage tree another app writes to
   # (storage uses /data/apps/<integer app id>). Reserve bare integers for
-  # storage (Codex review #4).
+  # storage.
   if mid.isdigit():
     raise HTTPException(
       400,
@@ -1080,10 +1080,6 @@ async def install_from_manifest(
       # version. Doing so would, e.g., grant manage_apps install authority to
       # unreviewed old code, or flip offline_capable away from what the
       # running code's service-worker logic expects.
-      # Rewrite the manifest_url column to the canonical shape so rows
-      # installed before the canonicaliser landed migrate forward on their
-      # next update. New installs already write the canonical form below.
-      app.manifest_url = canonical_manifest_url
       db.flush()
     else:
       # Identity by manifest_url means we're now genuinely in the
@@ -1194,56 +1190,12 @@ async def install_from_manifest(
               )
             divergence = "clean_merge" if diverged else "fast_forward"
             merge_applied = True
-        elif existing and not had_repo:
-          # Lazy migration: an app installed before the flag was on has
-          # no repo. Seed it with its CURRENT on-disk source as the base
-          # upstream version, then record the new upstream on top. The
-          # base IS the local source, so there is no historical divergence
-          # to conflict on — the addendum's accepted "no historical
-          # conflicts" migration. The first post-migration update takes
-          # upstream for any line it changed; subsequent updates merge
-          # normally against the recorded base.
-          jsx_path = git_source_dir / "index.jsx"
-          base_bytes = (
-            jsx_path.read_bytes() if jsx_path.exists() else entry_bytes
-          )
-          await asyncio.to_thread(
-            app_git.record_upstream,
-            git_source_dir, base_bytes, canonical_manifest_url,
-            "migrated-base",
-          )
-          await asyncio.to_thread(
-            app_git.align_local_to_upstream, git_source_dir,
-          )
-          await asyncio.to_thread(
-            app_git.record_upstream,
-            git_source_dir, entry_bytes, canonical_manifest_url, version,
-          )
-          merge = await asyncio.to_thread(
-            app_git.merge_upstream, git_source_dir,
-          )
-          if merge.status == "conflict":
-            if force_core_store_update:
-              warnings.append(
-                "core App Store self-update replaced local edits with upstream"
-              )
-              effective_source = jsx_source
-              merge_applied = True
-              # Upstream replaced local on the lazy-migration path too; report
-              # it as a fast-forward like the already-had-repo branch does, so
-              # the divergence signal the dreaming agent reads is consistent.
-              divergence = "fast_forward"
-            else:
-              mode = "conflict"
-              conflict_paths = merge.conflict_paths
-          elif merge.merged_bytes is not None:
-            effective_source = merge.merged_bytes.decode("utf-8")
-            merge_applied = True
         else:
-          # Install: record the pristine bytes on `upstream`, then align
-          # the local `main` branch to that commit so the working branch
-          # starts exactly at the installed version — a shared base for
-          # the next update's merge.
+          # Fresh install (or an existing app that somehow lost its repo):
+          # record the pristine bytes on `upstream`, then align the local
+          # `main` branch to that commit so the working branch starts exactly
+          # at the installed version — a shared base for the next update's
+          # merge.
           await asyncio.to_thread(
             app_git.record_upstream,
             git_source_dir, entry_bytes, canonical_manifest_url, version,
@@ -1322,10 +1274,10 @@ async def install_from_manifest(
     # per-source-dir lock (the endpoint already holds the lifecycle lock, and
     # the seeds' app_storage_lock below is acquired SEPARATELY, never nested
     # with this — so no lock-order violation) a concurrent create/patch can't
-    # claim this directory mid-write (Codex review round-9 #3). Written
+    # claim this directory mid-write. Written
     # atomically, and on an UPDATE the prior JSX is snapshotted to a .bak so a
     # later rollback restores it — otherwise the watcher would compile the
-    # rolled-back (broken) update (round-9 #2).
+    # rolled-back (broken) update.
     source_dir_path = Path(app.source_dir or "")
     if source_dir_path:
       async with fs_locks.source_dir_lock(str(source_dir_path)):

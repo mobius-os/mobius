@@ -312,7 +312,7 @@ def _action_reinstall_store() -> str:
   db = SessionLocal()
   try:
     # Installs store the canonical key (`<base>#manifest-id=<id>`, /mobius.json
-    # stripped), not the bare URL — match that prefix (Codex review round-11 #1).
+    # stripped), not the bare URL — match that prefix.
     from app.install import _canonical_base
     _store_like = (
       _canonical_base(BOOTSTRAP_STORE_MANIFEST_URL) + "#manifest-id=%"
