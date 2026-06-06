@@ -62,7 +62,24 @@ Deleted chats remain in the system for **7 days** and can be recovered:
 curl -s -X POST "$API_BASE_URL/api/chats/{chat_id}/recover" -H "Authorization: Bearer $AGENT_TOKEN"
 ```
 
-Tell the partner about this safety net if they accidentally delete a chat. **Apps cannot be recovered after deletion** — always confirm before deleting one (see `building-apps.md`).
+Tell the partner about this safety net if they accidentally delete a chat.
+
+## App recovery
+
+Deleted apps are **tombstoned, not destroyed** — they stay for **7 days** with
+their source and saved data intact, and can be recovered:
+
+```bash
+curl -s -X POST "$API_BASE_URL/api/apps/{app_id}/recover" -H "Authorization: Bearer $AGENT_TOKEN"
+```
+
+For a **store-installed** app you can equivalently just reinstall it (same
+`manifest_url`) — the install reattaches to the tombstoned row, so it comes back
+with the SAME id and all its data. The app id is in your memory inbox from when
+you logged the deletion. After 7 days a tombstoned app is purged for good. So
+uninstall is reversible within the window — still confirm before deleting (see
+`building-apps.md`), but reassure the partner it's recoverable if they change
+their mind.
 
 ---
 

@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -29,6 +30,12 @@ from app.deps import (
 )
 
 router = APIRouter(prefix="/api/apps", tags=["apps"])
+
+# Tombstoned apps are hard-purged this long after uninstall. Matches the chat
+# soft-delete window (routes/chats.py SOFT_DELETE_TTL) so app and chat recovery
+# feel the same — the agent recovers within the window by reinstalling (store
+# apps) or POST /{id}/recover (any app). See feature 110.
+APP_SOFT_DELETE_TTL = timedelta(days=7)
 
 log = logging.getLogger("mobius.apps")
 
@@ -184,6 +191,80 @@ def _drop_cron_and_rmtree(resolved: Path) -> None:
     pass
 
 
+def _drop_cron_only(resolved: Path) -> None:
+  """Unregister a source tree's cron WITHOUT removing the tree.
+
+  The soft-delete (tombstone) path: a tombstoned app must stop running its
+  scheduled jobs, but its source — including the job.sh — has to survive so a
+  reinstall/recover can re-register the schedule. Pure-filesystem so it runs via
+  ``asyncio.to_thread`` (``_unregister_cron`` shells out to crontab). Swallows
+  errors like ``_drop_cron_and_rmtree``.
+  """
+  from app.install import _unregister_cron
+  try:
+    _unregister_cron(resolved)
+  except OSError:
+    pass
+
+
+def _resolve_app_source_dir(app_source_dir, app_name, settings) -> Path | None:
+  """Resolve an app's source tree: the stored source_dir, else a name-based
+  fallback for legacy rows. Returns None when neither resolves."""
+  if app_source_dir:
+    try:
+      return Path(app_source_dir).resolve()
+    except OSError:
+      return None
+  if app_name and re.fullmatch(r"[a-zA-Z0-9_-]+", app_name):
+    try:
+      return (Path(settings.data_dir) / "apps" / app_name).resolve()
+    except OSError:
+      return None
+  return None
+
+
+async def _hard_delete_app(db: Session, app: models.App) -> None:
+  """Permanently remove an app's DB row, compiled bundle, source tree, and
+  id-keyed storage tree — the pre-110 destructive uninstall, now reached only by
+  the TTL purge of tombstoned rows.
+
+  The CALLER must already hold ``install_uninstall_lock`` AND
+  ``app_storage_lock(app.id)`` (the order ``delete_app`` documents), so a
+  replacement app can't reuse the freed integer id and then have its storage
+  deleted by this cleanup.
+  """
+  compiled_path = app.compiled_path
+  app_name = app.name
+  app_source_dir = app.source_dir
+  deleted_app_id = app.id
+
+  # Delete the row first so a partial filesystem cleanup leaves the registry
+  # coherent — stale files are harmless orphans, a row pointing at missing
+  # files is a live 404.
+  db.delete(app)
+  db.commit()
+  get_system_broadcast().publish(
+    {"type": "app_updated", "appId": str(deleted_app_id)}
+  )
+
+  if compiled_path:
+    try:
+      Path(compiled_path).unlink(missing_ok=True)
+    except OSError:
+      pass  # best effort — a stale compiled file is harmless
+
+  settings = get_settings()
+  apps_root = (Path(settings.data_dir) / "apps").resolve()
+  resolved_source = _resolve_app_source_dir(app_source_dir, app_name, settings)
+  if resolved_source is not None:
+    async with fs_locks.source_dir_lock(str(resolved_source)):
+      if _safe_to_rmtree_source(resolved_source, apps_root, db, deleted_app_id):
+        await asyncio.to_thread(_drop_cron_and_rmtree, resolved_source)
+  storage_dir = apps_root / str(deleted_app_id)
+  if storage_dir.is_dir():
+    await asyncio.to_thread(shutil.rmtree, storage_dir, ignore_errors=True)
+
+
 def allocate_unique_slug(db: Session, name: str, exclude_id: int | None = None) -> str:
   """Returns a slug that isn't taken by any other App row.
 
@@ -222,19 +303,45 @@ def ensure_slug(db: Session, app: models.App) -> str:
 
 
 @router.get("/", response_model=list[schemas.AppOut])
-def list_apps(
+async def list_apps(
   db: Session = Depends(get_db),
   _: models.Owner = Depends(get_current_owner_or_app),
 ):
-  """Returns all registered mini-apps.
+  """Returns all LIVE registered mini-apps (tombstoned ones are hidden).
 
   Pinned apps sort first (newest pin at top of the pinned group),
   then unpinned apps by creation time (oldest first — the drawer's
   apps list has historically been stable-ordered). See `Chat.pinned_at`
   for the same contract on chats.
+
+  Piggybacks the TTL purge of tombstoned apps onto this list call, the way
+  `list_chats` does. The pre-check is lock-free so the hot drawer path pays
+  nothing in the common case; only when a stale tombstone actually exists do we
+  take `install_uninstall_lock` to serialize the hard-delete against a
+  concurrent reinstall/recover — otherwise the purge could delete a row the
+  reinstall is reviving, re-opening the slug-flip race (feature 110).
   """
+  cutoff = datetime.now(UTC).replace(tzinfo=None) - APP_SOFT_DELETE_TTL
+  has_stale = (
+    db.query(models.App.id)
+    .filter(models.App.deleted_at.isnot(None), models.App.deleted_at < cutoff)
+    .first()
+  )
+  if has_stale:
+    async with fs_locks.install_uninstall_lock():
+      stale = (
+        db.query(models.App)
+        .filter(
+          models.App.deleted_at.isnot(None), models.App.deleted_at < cutoff
+        )
+        .all()
+      )
+      for app in stale:
+        async with fs_locks.app_storage_lock(app.id):
+          await _hard_delete_app(db, app)
   return (
     db.query(models.App)
+    .filter(models.App.deleted_at.is_(None))
     .order_by(
       models.App.pinned_at.is_(None),
       models.App.pinned_at.desc(),
@@ -673,9 +780,11 @@ def get_app(
   db: Session = Depends(get_db),
   _: models.Owner = Depends(get_current_owner_or_app),
 ):
-  """Returns a single mini-app by ID."""
+  """Returns a single mini-app by ID (404 for a tombstoned one)."""
   app = (
-    db.query(models.App).filter(models.App.id == app_id).first()
+    db.query(models.App)
+    .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
+    .first()
   )
   if not app:
     raise HTTPException(status_code=404, detail="App not found.")
@@ -849,100 +958,91 @@ async def delete_app(
   db: Session = Depends(get_db),
   _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
 ):
-  """Permanently deletes a mini-app — DB row, compiled bundle, source tree.
+  """Soft-deletes (tombstones) a mini-app — sets deleted_at and drops its cron,
+  PRESERVING the source tree and the id-keyed runtime storage tree.
 
-  This is irreversible.  The caller is expected to confirm with the
-  partner before invoking (the agent skill spells this out).
+  The app vanishes from the drawer and its module/frame 404, but a reinstall
+  (matched by manifest_url) or POST /{id}/recover within APP_SOFT_DELETE_TTL
+  revives the SAME id + data instead of orphaning it under a freed integer id.
+  The destructive filesystem cleanup is deferred to the TTL purge in list_apps.
+  Mirrors chat soft-delete; recovery is agent-driven (feature 110).
 
-  Async so the source-tree and storage-tree cleanup can run under the same
-  per-source-dir / per-app fs_locks a concurrent create / patch / storage
-  write takes, closing the uninstall-vs-create and uninstall-vs-write races
-  (Codex review round-6 #3, #4) on the single uvicorn worker.
+  Still async + lock-held: holding install_uninstall_lock serializes the
+  tombstone against a concurrent install of the same app, and the per-app
+  storage lock matches the order the purge (which DOES rmtree) takes them.
   """
-  # Take the lifecycle lock (vs a concurrent install) THEN the per-app storage
-  # lock (vs a concurrent write), in that order (see fs_locks LOCK ORDERING).
-  # The per-app lock is held across the ENTIRE uninstall — row delete THROUGH
-  # storage-tree removal. SQLite reuses a freed integer id, so if the lock were
-  # taken only around the rmtree, a replacement app could reuse this id, write
-  # valid storage, and then have its tree deleted by this cleanup (Codex review
-  # round-7 #1). Holding it from before the delete means any write for this id
-  # (which also takes this lock) serializes after us, and the rmtree only ever
-  # removes THIS app's (empty-or-stale) tree.
   async with (
     fs_locks.install_uninstall_lock(),
     fs_locks.app_storage_lock(app_id),
   ):
     app = (
-      db.query(models.App).filter(models.App.id == app_id).first()
+      db.query(models.App)
+      .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
+      .first()
     )
     if not app:
       raise HTTPException(status_code=404, detail="App not found.")
 
-    # Capture paths before dropping the DB row.  Delete the row first so
-    # a partial filesystem cleanup leaves the registry coherent — stale
-    # files are harmless orphans, a DB row pointing at missing files is
-    # a live 404.
-    compiled_path = app.compiled_path
+    app.deleted_at = datetime.now(UTC)
     app_name = app.name
     app_source_dir = app.source_dir
-    deleted_app_id = app.id
-
-    db.delete(app)
     db.commit()
 
-    # Notify the Shell that the app registry changed. The handler in
-    # Shell.jsx refetches /api/apps/ and reconciles the drawer; an
-    # app_updated for an id that no longer exists simply causes that id
-    # to disappear from the next render. Published after the commit so an
-    # event never refers to an app the rollback would have kept alive.
+    # The Shell refetches /api/apps/ and the now-tombstoned app drops out
+    # (list_apps filters deleted_at IS NULL).
     get_system_broadcast().publish(
-      {"type": "app_updated", "appId": str(deleted_app_id)}
+      {"type": "app_updated", "appId": str(app_id)}
     )
 
-    # Compiled bundle — one file under /data/compiled/.
-    if compiled_path:
-      try:
-        Path(compiled_path).unlink(missing_ok=True)
-      except OSError:
-        pass  # best effort — a stale compiled file is harmless
-
+    # Stop the tombstoned app's scheduled jobs WITHOUT touching its files — the
+    # job.sh stays in the preserved source tree so a reinstall/recover can
+    # re-register the schedule. Drop cron under the per-source-dir lock, off the
+    # loop (crontab shells out).
     settings = get_settings()
-    apps_root = (Path(settings.data_dir) / "apps").resolve()
-
-    # Source tree under /data/apps/.  Newer apps store the exact source
-    # directory; legacy apps fall back to name-based cleanup. Resolve the
-    # candidate, then dedup-check + cron-drop + rmtree UNDER the per-source-dir
-    # lock so a concurrent create/patch/install can't claim the directory
-    # between the shared-dir check and the rmtree. The blocking
-    # cron-drop + rmtree run in a thread so they don't stall the loop while the
-    # lock is held.
-    resolved_source = None
-    if app_source_dir:
-      try:
-        resolved_source = Path(app_source_dir).resolve()
-      except OSError:
-        resolved_source = None
-    elif app_name and re.fullmatch(r"[a-zA-Z0-9_-]+", app_name):
-      try:
-        resolved_source = (
-          Path(settings.data_dir) / "apps" / app_name
-        ).resolve()
-      except OSError:
-        resolved_source = None
+    resolved_source = _resolve_app_source_dir(
+      app_source_dir, app_name, settings
+    )
     if resolved_source is not None:
       async with fs_locks.source_dir_lock(str(resolved_source)):
-        if _safe_to_rmtree_source(
-          resolved_source, apps_root, db, deleted_app_id
-        ):
-          await asyncio.to_thread(_drop_cron_and_rmtree, resolved_source)
+        await asyncio.to_thread(_drop_cron_only, resolved_source)
 
-    # Per-app STORAGE tree under /data/apps/<numeric-id>/ — distinct from the
-    # slug-keyed SOURCE tree above. /api/storage/apps/{id}/... writes land here
-    # keyed by the integer id. rmtree in a thread (round-7
-    # #4); still under the outer per-app lock.
-    storage_dir = apps_root / str(deleted_app_id)
-    if storage_dir.is_dir():
-      await asyncio.to_thread(shutil.rmtree, storage_dir, ignore_errors=True)
+
+@router.post(
+  "/{app_id}/recover",
+  dependencies=[Depends(reject_cross_site)],
+)
+async def recover_app(
+  app_id: int,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+):
+  """Restores a soft-deleted app if the TTL window hasn't expired.
+
+  Agent-driven recovery, consistent with chats (POST /api/chats/{id}/recover):
+  the agent calls this when the partner asks to undo an uninstall. Store apps can
+  also be revived by reinstalling — the install reattaches by manifest_url. The
+  id-keyed storage tree was never removed, so the revived app keeps its data.
+  (Cron for an agent-built app is not auto-restored here; reinstalling a store
+  app re-registers it. See feature 110.)
+  """
+  app = (
+    db.query(models.App)
+    .filter(models.App.id == app_id, models.App.deleted_at.isnot(None))
+    .first()
+  )
+  if not app:
+    raise HTTPException(status_code=404, detail="App not found or not deleted.")
+  if (
+    datetime.now(UTC).replace(tzinfo=None) - app.deleted_at
+  ) >= APP_SOFT_DELETE_TTL:
+    raise HTTPException(status_code=410, detail="Recovery window has expired.")
+  app.deleted_at = None
+  db.commit()
+  # Refetch the drawer (app reappears) and bust any cached iframe for it.
+  get_system_broadcast().publish(
+    {"type": "app_updated", "appId": str(app_id)}
+  )
+  return {"ok": True}
 
 
 @router.post(
@@ -1153,7 +1253,11 @@ def get_frame(
   rejects any reply from a non-Möbius origin, so no token can be
   coerced into the frame.
   """
-  app = db.query(models.App).filter(models.App.id == app_id).first()
+  app = (
+    db.query(models.App)
+    .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
+    .first()
+  )
   if not app or not app.compiled_path:
     raise HTTPException(status_code=404, detail="App not found.")
   compiled = Path(app.compiled_path)
@@ -1255,7 +1359,9 @@ def get_module(
     )
   resolve_owner_or_app(token, db)
   app = (
-    db.query(models.App).filter(models.App.id == app_id).first()
+    db.query(models.App)
+    .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
+    .first()
   )
   if not app or not app.compiled_path:
     raise HTTPException(status_code=404, detail="Module not found.")

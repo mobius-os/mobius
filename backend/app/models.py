@@ -226,6 +226,12 @@ class App(Base):
   # between user-built apps and store-installed apps are tolerated
   # because allocate_unique_slug just picks the next free suffix.
   manifest_url = Column(String(1024), nullable=True, index=True)
+  # Soft-delete tombstone. Uninstall sets this instead of dropping the row, so
+  # the source tree AND the id-keyed runtime storage tree survive — a reinstall
+  # (matched by manifest_url) or POST /{id}/recover then revives the SAME id +
+  # data instead of orphaning it under a freed integer id. Mirrors
+  # Chat.deleted_at; hard-purged after APP_SOFT_DELETE_TTL. See feature 110.
+  deleted_at = Column(DateTime, nullable=True, default=None)
   # The manifest's declared version that is currently installed (e.g.
   # "1.7.0"). Stamped on every clean install/update from the manifest;
   # left unchanged on a per-app-git conflict (the served code stays at

@@ -426,9 +426,10 @@ def test_deleted_app_token_rejected(client, owner_token):
                     headers=app_auth).status_code == 401
 
 
-def test_uninstall_deletes_storage_tree(client, owner_token):
-  """Uninstall removes the numeric /data/apps/<id> storage tree, not just
-  the slug source dir (Codex review #1)."""
+def test_uninstall_preserves_storage_tree_for_recovery(client, owner_token):
+  """Soft-delete (uninstall) PRESERVES the numeric /data/apps/<id> storage tree
+  so a reinstall/recover keeps the app's data; the TTL purge removes it later
+  (see test_app_uninstall_reversible.py). Feature 110."""
   import os
   app_id, app_token = _make_app_and_token(client, owner_token)
   client.put(
@@ -441,7 +442,9 @@ def test_uninstall_deletes_storage_tree(client, owner_token):
     f"/api/apps/{app_id}",
     headers={"Authorization": f"Bearer {owner_token}"},
   ).status_code == 204
-  assert not os.path.isdir(storage_dir)
+  # Tombstoned, not destroyed — the data survives the recovery window.
+  assert os.path.isdir(storage_dir)
+  assert os.path.isfile(os.path.join(storage_dir, "data.json"))
 
 
 def test_deleted_app_token_rejected_on_shared_storage(client, owner_token):

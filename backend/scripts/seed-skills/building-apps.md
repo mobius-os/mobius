@@ -148,14 +148,20 @@ imports `index.jsx`):
 - Don't pre-abstract. Colocate first; split when a real second concept appears.
   An over-split trivial app is as hard to read as an over-grown one.
 
-### Deleting an app — permanent, no recovery
+### Deleting an app — reversible for 7 days
 
 ```bash
 curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/apps/" | python3 -m json.tool   # find the id
 curl -s -X DELETE -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/apps/<id>"
 ```
 
-Before deleting: verify the app exists, tell the partner which one (name, id, description), ask for explicit textual confirmation ("Are you sure you want to delete [name]? This cannot be undone."), and only delete after they confirm. Log creates and deletions to the inbox in the same turn; updates skip the log unless they revealed something non-obvious.
+Delete is a **soft delete**: the app is tombstoned and its saved data is kept for
+7 days, then purged. Recover within the window with `POST /api/apps/{id}/recover`
+(or, for a store app, just reinstall it) — see `recovery.md`. Before deleting:
+verify the app exists, tell the partner which one (name, id, description), and
+ask for confirmation ("Delete [name]? You can recover it for 7 days."), then
+delete. Log creates and deletions to the inbox in the same turn (the id is your
+recovery handle); updates skip the log unless they revealed something non-obvious.
 
 ---
 

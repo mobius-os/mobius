@@ -27,8 +27,12 @@ def test_update_app_rejects_cross_site_request(client, auth):
   assert cross.status_code == 403
 
 
-def test_delete_app_removes_non_slug_source_dir(client, auth):
-  """Delete uses source_dir rather than the display-name slug."""
+def test_delete_then_purge_removes_non_slug_source_dir(client, auth, db):
+  """Delete is soft (the source tree survives for recovery); the TTL purge
+  removes it, using the stored source_dir rather than the display-name slug.
+  Feature 110."""
+  from datetime import datetime, timedelta
+  from app import models
   source_dir = Path(get_settings().data_dir) / "apps" / "My App (draft)"
   source_dir.mkdir(parents=True)
   (source_dir / "index.jsx").write_text(
@@ -45,8 +49,17 @@ def test_delete_app_removes_non_slug_source_dir(client, auth):
   assert r.status_code == 201
   app_id = r.json()["id"]
 
+  # Soft delete tombstones the app but preserves its source tree.
   r = client.delete(f"/api/apps/{app_id}", headers=auth)
   assert r.status_code == 204
+  assert source_dir.exists()
+
+  # Age the tombstone past the TTL; the next list call purges it, resolving the
+  # tree via the stored source_dir (not the "My App (draft)" display name).
+  row = db.query(models.App).filter(models.App.id == app_id).first()
+  row.deleted_at = datetime.utcnow() - timedelta(days=8)
+  db.commit()
+  client.get("/api/apps/", headers=auth)
   assert not source_dir.exists()
 
 
