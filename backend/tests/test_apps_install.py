@@ -1918,6 +1918,61 @@ def test_flag_on_conflicting_update_returns_conflict_and_preserves_local(
     db.close()
 
 
+def test_flag_on_conflict_does_not_apply_upstream_capabilities(
+  client, auth, bypass_url_validation,
+):
+  """A conflicting update keeps serving the OLD code, so it must NOT jump the
+  App row's capability/offline fields to the NEW manifest's values — otherwise
+  an unreviewed old version could gain manage_apps install authority, or lose
+  the offline semantics its service-worker code relies on, while still running
+  the old bytes."""
+  _enable_per_app_git()
+  base = "https://on-cap-conflict.test/repo/"
+  m = {
+    **MANIFEST_NEWS,
+    "id": "on-cap-conflict",
+    "permissions": {
+      "cross_app_access": "none", "share_with_apps": "none",
+      "manage_apps": False,
+    },
+    "offline_capable": False,
+  }
+  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
+  assert r1.status_code == 201, r1.text
+  data_dir = Path(get_settings().data_dir)
+  jsx_file = data_dir / "apps" / "on-cap-conflict" / "index.jsx"
+
+  # Local edit + upstream edit to the SAME region → conflict. The v2 manifest
+  # also flips every capability/offline field "up".
+  jsx_file.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "AGENT TITLE"))
+  m2 = {
+    **m,
+    "version": "2.0.0",
+    "permissions": {
+      "cross_app_access": "read", "share_with_apps": "read",
+      "manage_apps": True,
+    },
+    "offline_capable": True,
+  }
+  jsx_v2 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
+  r2 = _update_v2(client, auth, base, m2, jsx_v2)
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["mode"] == "conflict"
+
+  from app.models import App
+  from app.database import SessionLocal
+  db = SessionLocal()
+  try:
+    app = db.query(App).filter(App.slug == "on-cap-conflict").first()
+    # Served code is still v1, so capability/offline fields stay at v1 values.
+    assert app.manage_apps is False
+    assert app.offline_capable is False
+    assert app.cross_app_access == "none"
+    assert app.share_with_apps == "none"
+  finally:
+    db.close()
+
+
 def test_core_app_store_self_update_overwrites_local_conflict(
   client, auth, bypass_url_validation,
 ):
