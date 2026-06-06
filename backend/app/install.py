@@ -1146,6 +1146,15 @@ async def install_from_manifest(
         had_repo = app_git.is_repo(git_source_dir)
         if existing and had_repo:
           prev_upstream_commit = app.upstream_commit
+          # If a PRIOR update left an unresolved conflict (MERGE_HEAD still
+          # set, markers on disk), abort it first — otherwise the commit_local
+          # below would commit the conflict markers as "local edits" (silent
+          # source corruption). The newer update supersedes the abandoned one
+          # and re-merges against the latest upstream; the resolver chat is
+          # deduped so this doesn't pile up chats.
+          await asyncio.to_thread(
+            app_git.abort_in_progress_merge, git_source_dir,
+          )
           # Update of an app already on the git model. First capture any
           # uncommitted on-disk local edits onto `main` (the watcher may
           # not have committed the agent's latest save yet) so the merge
@@ -1209,15 +1218,22 @@ async def install_from_manifest(
         )
 
     if mode == "conflict":
-      # Conflict short-circuit: persist the recorded upstream provenance
-      # (upstream_commit + upstream_jsx_sha, set above) but leave the
-      # served app entirely as-is. We deliberately do NOT touch
-      # `app.jsx_source` — it still holds the LOCAL source, and the
-      # on-disk file + compiled bundle keep the local edits — so the row,
-      # the disk, and the bundle stay consistent on the local version
-      # until an agent resolves the conflict and saves. Skip the compile,
-      # source-write, seeds, icon, and cron blocks below; the served
-      # version is unchanged so its seeds/cron are unchanged too.
+      # Conflict: materialize a REAL working-tree merge conflict (markers +
+      # MERGE_HEAD) so the agent resolves it with ordinary git, exactly like a
+      # `git pull` conflict — then the install ENDPOINT spawns a resolver chat.
+      # We deliberately do NOT recompile: the marker-bearing source won't
+      # compile, so the file watcher keeps serving the prior good bundle until
+      # the agent finishes the merge (resolve markers + commit → commit_local
+      # finalizes the 2-parent merge → base advances). `app.jsx_source` stays
+      # the LOCAL source and the upstream provenance (upstream_commit /
+      # upstream_jsx_sha, set above) persists for the resolution; the agent can
+      # back out anytime with `git merge --abort`. Re-acquire source_dir_lock
+      # as its own critical section (the git block above already released it).
+      if git_source_dir:
+        async with fs_locks.source_dir_lock(str(git_source_dir)):
+          conflict_paths = await asyncio.to_thread(
+            app_git.start_conflict_merge, git_source_dir,
+          ) or conflict_paths
       db.commit()
       db.refresh(app)
       activity.log_event(

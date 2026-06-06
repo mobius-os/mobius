@@ -284,6 +284,11 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
   a local edit. Returns the new commit sha, or None when there was
   nothing to commit (the tree already matches `main`'s tip) — a no-op
   rather than an empty commit so the history stays meaningful.
+
+  If a merge is in progress (MERGE_HEAD present — e.g. the agent resolved a
+  conflict that `start_conflict_merge` materialized and saved), the `git
+  commit` here finalizes it as a 2-parent merge commit, so the upstream tip
+  becomes an ancestor of `main` and the merge base advances for free.
   """
   repo = Path(source_dir)
   ensure_repo(repo)
@@ -403,6 +408,62 @@ def merge_upstream(source_dir: str | Path) -> MergeResult:
   )
   merged_bytes = merged.stdout if merged.returncode == 0 else None
   return MergeResult(status="clean", merged_bytes=merged_bytes)
+
+
+def start_conflict_merge(source_dir: str | Path) -> list[str]:
+  """Starts a REAL merge of `upstream` into the working tree on `main`.
+
+  Unlike `merge_upstream` (an in-memory verdict that never touches the tree),
+  this MUTATES the working tree: `git merge --no-commit --no-ff upstream`
+  writes conflict markers into the conflicting files and records `MERGE_HEAD`,
+  leaving exactly the state a human's `git pull` would — so the agent resolves
+  it with ordinary git. The caller must NOT recompile afterward: the
+  marker-bearing source won't compile, so the file watcher keeps serving the
+  prior good bundle until the agent resolves the markers and finishes the merge
+  (`git add` + `git commit` / `git merge --continue`), at which point
+  `commit_local` finalizes the 2-parent merge and the base advances.
+
+  To back out, the agent runs `git merge --abort`, restoring `main` to its
+  pre-merge (committed local) state. Call only after `merge_upstream` verdicted
+  a conflict, and under `source_dir_lock`.
+
+  Returns the conflicting repo-relative paths. In the pathological case where
+  the real merge resolves clean (it shares ort machinery with `merge_upstream`,
+  so they agree in practice), the in-progress merge is aborted and an empty list
+  is returned so the caller never strands a half-merge.
+  """
+  repo = Path(source_dir)
+  ensure_repo(repo)
+  _run(repo, "merge", "--no-commit", "--no-ff", UPSTREAM_BRANCH, check=False)
+  # Unmerged paths show in `git status --porcelain` with a U in either status
+  # column (UU/AU/UA/UD/DU) or the AA/DD both-added/both-deleted codes.
+  status = _run(repo, "status", "--porcelain").stdout
+  conflict_paths: list[str] = []
+  for line in status.splitlines():
+    xy = line[:2]
+    if "U" in xy or xy in ("AA", "DD"):
+      conflict_paths.append(line[3:].strip())
+  if not conflict_paths and (repo / ".git" / "MERGE_HEAD").exists():
+    # Real merge resolved clean (vs the conflict verdict). Don't strand a
+    # dangling --no-commit merge; abort back to the committed local state.
+    _run(repo, "merge", "--abort", check=False)
+  return conflict_paths
+
+
+def abort_in_progress_merge(source_dir: str | Path) -> bool:
+  """Abort a half-finished merge left by a prior unresolved conflict.
+
+  When a `start_conflict_merge` was never resolved (MERGE_HEAD still set,
+  markers on disk) and a NEW update arrives, the caller must abort the stale
+  merge before committing local edits — otherwise the markers get committed as
+  source. `git merge --abort` restores `main`'s working tree to its pre-merge
+  (committed local) state. Returns True if a merge was aborted, else False.
+  """
+  repo = Path(source_dir)
+  if not is_repo(repo) or not (repo / ".git" / "MERGE_HEAD").exists():
+    return False
+  _run(repo, "merge", "--abort", check=False)
+  return True
 
 
 # Smells

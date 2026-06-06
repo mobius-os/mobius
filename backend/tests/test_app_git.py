@@ -225,6 +225,57 @@ def test_merge_conflict_names_paths_and_leaves_worktree_intact(tmp_path):
   assert (repo / "index.jsx").read_text() == worktree_before
 
 
+def test_start_conflict_merge_leaves_real_markers_and_merge_head(tmp_path):
+  """start_conflict_merge runs a REAL merge into the working tree, leaving
+  conflict markers + MERGE_HEAD for the agent to resolve like a `git pull`
+  conflict — and `git merge --abort` cleanly restores the local version."""
+  repo = tmp_path / "app"
+  _install(repo, b"shared line\n")
+  _write(repo, "shared line LOCAL\n")
+  app_git.commit_local(repo, "local edit")
+  local_before = (repo / "index.jsx").read_text()
+  app_git.record_upstream(
+    repo, b"shared line UPSTREAM\n", "https://x/mobius.json", "2.0.0",
+  )
+  # The in-memory verdict agrees it's a conflict.
+  assert app_git.merge_upstream(repo).status == "conflict"
+
+  paths = app_git.start_conflict_merge(repo)
+
+  assert "index.jsx" in paths
+  body = (repo / "index.jsx").read_text()
+  assert "<<<<<<<" in body and ">>>>>>>" in body
+  assert "shared line LOCAL" in body and "shared line UPSTREAM" in body
+  assert (repo / ".git" / "MERGE_HEAD").exists()
+
+  # Bail out: git merge --abort restores the pre-update local version.
+  app_git._run(repo, "merge", "--abort")
+  assert not (repo / ".git" / "MERGE_HEAD").exists()
+  assert (repo / "index.jsx").read_text() == local_before
+
+
+def test_resolved_conflict_commit_advances_base(tmp_path):
+  """After start_conflict_merge, resolving the markers + commit_local
+  finalizes a 2-parent merge so upstream becomes an ancestor of main — the
+  next update merges clean (the B1 base-advance the watcher gives for free)."""
+  repo = tmp_path / "app"
+  _install(repo, b"l1\nshared\nl3\n")
+  _write(repo, "l1\nshared LOCAL\nl3\n")
+  app_git.commit_local(repo, "local edit")
+  app_git.record_upstream(
+    repo, b"l1\nshared UPSTREAM\nl3\n", "https://x/mobius.json", "2.0.0",
+  )
+  app_git.start_conflict_merge(repo)
+  # Agent resolves the markers (keeps both sides), marker-free.
+  _write(repo, "l1\nshared LOCAL+UPSTREAM\nl3\n")
+  sha = app_git.commit_local(repo, "resolved merge")
+
+  assert sha is not None
+  assert not (repo / ".git" / "MERGE_HEAD").exists()
+  # upstream is now an ancestor of main → a re-merge is clean (no re-conflict).
+  assert app_git.merge_upstream(repo).status == "clean"
+
+
 def test_commit_local_is_noop_when_unchanged(tmp_path):
   """commit_local returns None and adds no commit when the tree already
   matches main's tip."""
