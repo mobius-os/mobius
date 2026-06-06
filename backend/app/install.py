@@ -1037,6 +1037,13 @@ async def install_from_manifest(
   warnings: list[str] = []
   conflict_paths: list[str] = []
   divergence: str = "none"
+  # Set when upstream content is actually folded into the served `main`
+  # branch (a clean merge, or a forced take-upstream). The post-write
+  # commit then records the upstream tip as a second parent so the merge
+  # base advances — otherwise every later update re-merges from the
+  # install point and conflicts spuriously. None means a plain local
+  # commit (fresh install, or a conflict that left local untouched).
+  merge_applied = False
   if icon_warning:
     warnings.append(icon_warning)
 
@@ -1186,6 +1193,7 @@ async def install_from_manifest(
               )
               effective_source = jsx_source
               divergence = "fast_forward"
+              merge_applied = True
             else:
               # Never rebase local. The app stays served with
               # its current bundle + source; the new upstream is recorded
@@ -1203,6 +1211,7 @@ async def install_from_manifest(
                 git_source_dir, prev_upstream_commit,
               )
             divergence = "clean_merge" if diverged else "fast_forward"
+            merge_applied = True
         elif existing and not had_repo:
           # Lazy migration: an app installed before the flag was on has
           # no repo. Seed it with its CURRENT on-disk source as the base
@@ -1237,11 +1246,13 @@ async def install_from_manifest(
                 "core App Store self-update replaced local edits with upstream"
               )
               effective_source = jsx_source
+              merge_applied = True
             else:
               mode = "conflict"
               conflict_paths = merge.conflict_paths
           elif merge.merged_bytes is not None:
             effective_source = merge.merged_bytes.decode("utf-8")
+            merge_applied = True
         else:
           # Install: record the pristine bytes on `upstream`, then align
           # the local `main` branch to that commit so the working branch
@@ -1355,15 +1366,27 @@ async def install_from_manifest(
         )
         # On the git path, commit the working-tree source onto the local
         # `main` branch so the watcher's future commits build on a known
-        # base and the merge base for the NEXT update is the source we
-        # just wrote, not a stale tree. No-op when the source is
-        # unchanged.
+        # base. When this update folded upstream into the served source,
+        # record the merge with the upstream tip as a second parent
+        # (commit_merge) so the merge base advances — otherwise the NEXT
+        # update re-merges from the install point and conflicts spuriously
+        # even on disjoint changes. A plain local commit otherwise (fresh
+        # install, or a conflict that left local untouched). No-op when the
+        # source is unchanged.
         if git_on:
-          await asyncio.to_thread(
-            app_git.commit_local, source_dir_path,
+          commit_msg = (
             f"install: {manifest.get('name', app.slug)} "
-            f"v{manifest.get('version', 'unknown')}",
+            f"v{manifest.get('version', 'unknown')}"
           )
+          if merge_applied and app.upstream_commit:
+            await asyncio.to_thread(
+              app_git.commit_merge, source_dir_path,
+              app.upstream_commit, commit_msg,
+            )
+          else:
+            await asyncio.to_thread(
+              app_git.commit_local, source_dir_path, commit_msg,
+            )
 
     # Storage seeds — fresh installs always seed; updates only fill in keys
     # that don't exist yet so user data isn't clobbered. Under the per-app lock

@@ -1696,6 +1696,88 @@ def test_flag_on_clean_update_carries_local_edits_forward(
   assert "UPSTREAM FOOTER" in merged   # upstream change applied
 
 
+def test_flag_on_repeated_updates_to_same_region_stay_clean(
+  client, auth, bypass_url_validation,
+):
+  """A clean merge must advance the merge base so the NEXT update only
+  reconciles the genuinely-new upstream delta.
+
+  Upstream evolves the footer across v2 and v3 while the agent's local
+  edit sits on the disjoint title line. Each update is individually a
+  disjoint clean merge, so BOTH should apply seamlessly. If a clean merge
+  is recorded as a plain commit (upstream never an ancestor of the local
+  branch), the v3 merge re-runs against the v1 install point: it sees the
+  footer changed on both sides (local already holds v2's footer, upstream
+  ships v3's) and reports a spurious conflict. Recording the merge so the
+  base advances keeps v3 clean.
+  """
+  _enable_per_app_git()
+  base = "https://on-repeat.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "on-repeat"}
+  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
+  assert r1.status_code == 201, r1.text
+  data_dir = Path(get_settings().data_dir)
+  jsx_file = data_dir / "apps" / "on-repeat" / "index.jsx"
+
+  # Agent edits the title locally — a region upstream never touches.
+  jsx_file.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "AGENT TITLE"))
+
+  jsx_v2 = JSX_MULTI.replace("ORIGINAL FOOTER", "FOOTER V2")
+  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["mode"] == "update"
+  assert r2.json()["divergence"] == "clean_merge"
+
+  # Upstream evolves the SAME footer line again. With the base advanced to
+  # v2 this is still disjoint from the local title edit -> clean.
+  jsx_v3 = JSX_MULTI.replace("ORIGINAL FOOTER", "FOOTER V3")
+  r3 = _update_v2(client, auth, base, {**m, "version": "3.0.0"}, jsx_v3)
+  assert r3.status_code == 201, r3.text
+  assert r3.json()["mode"] == "update", (
+    "v3 update should merge cleanly, not conflict against a stale base; "
+    f"got {r3.json()}"
+  )
+  merged = jsx_file.read_text()
+  assert "AGENT TITLE" in merged   # local edit still preserved
+  assert "FOOTER V3" in merged     # latest upstream footer applied
+  assert "<<<<<<<" not in merged
+
+
+def test_flag_on_clean_update_advances_merge_base(
+  client, auth, bypass_url_validation,
+):
+  """After a clean update the local branch records upstream as an
+  ancestor, so the recorded upstream tip is reachable from `main`. This is
+  the structural invariant that keeps repeated updates from re-litigating
+  already-merged history."""
+  import subprocess
+
+  _enable_per_app_git()
+  base = "https://on-advance.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "on-advance"}
+  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
+  assert r1.status_code == 201, r1.text
+  data_dir = Path(get_settings().data_dir)
+  repo = data_dir / "apps" / "on-advance"
+  (repo / "index.jsx").write_text(JSX_MULTI.replace("ORIGINAL TITLE", "AGENT TITLE"))
+
+  jsx_v2 = JSX_MULTI.replace("ORIGINAL FOOTER", "FOOTER V2")
+  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["divergence"] == "clean_merge"
+
+  from app import app_git
+  env = app_git._git_env(repo)
+  proc = subprocess.run(
+    ["git", "-C", str(repo), "merge-base", "--is-ancestor", "upstream", "main"],
+    env=env, capture_output=True,
+  )
+  assert proc.returncode == 0, (
+    "upstream tip must be an ancestor of main after a clean merge so the "
+    "next update's base is the just-merged version"
+  )
+
+
 def test_flag_on_clean_update_without_local_edits_is_fast_forward(
   client, auth, bypass_url_validation,
 ):
