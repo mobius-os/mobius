@@ -178,3 +178,32 @@
   color: var(--muted, #9ca3af);
   border: 1px solid var(--border, #252b36);
 }
+
+/* iOS Safari Share-step copy: larger, higher-contrast than the form
+   hint since it's now the card's main content, and a bounce-arrow that
+   points down at the Safari Share button in the browser chrome. */
+.is__hint--steps {
+  margin-top: 4px;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text, #d4d4d8);
+}
+
+.is__hint--steps strong {
+  color: var(--accent, #a78bfa);
+  font-weight: 600;
+}
+
+.is__arrow {
+  display: block;
+  margin-top: 10px;
+  font-size: 22px;
+  text-align: center;
+  color: var(--accent, #a78bfa);
+  animation: is-arrow-bounce 1.6s ease-in-out infinite;
+}
+
+@keyframes is-arrow-bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
