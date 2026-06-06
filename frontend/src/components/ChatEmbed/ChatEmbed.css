@@ -12,6 +12,18 @@
   background: var(--bg);
 }
 
+/* ChatView's root (`.chat`) is the single flex child here. Stretch it
+   to fill the embed host so the chat owns the whole app sheet — no
+   shell-scale gutter around it. `min-height: 0` lets the inner
+   scroll area shrink correctly inside the flex column. The composer
+   safe-area zero-out and the embedded empty-state rules live in
+   ChatView.css, scoped under this same `.chat-embed` parent so the
+   non-embedded ChatView stays pixel-identical. */
+.chat-embed > .chat {
+  flex: 1;
+  min-height: 0;
+}
+
 .chat-embed--empty {
   align-items: center;
   justify-content: center;

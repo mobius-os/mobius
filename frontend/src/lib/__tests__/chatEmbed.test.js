@@ -19,7 +19,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   NS, INIT, READY, MESSAGE_SENT, TURN_DONE, ERROR, HEIGHT,
-  isEmbedMessage, embedUrl,
+  isEmbedMessage, embedUrl, makeEmitter,
 } from '../chatEmbed.js'
 
 const ORIGIN = 'https://mobius.example'
@@ -102,4 +102,61 @@ test('embedUrl builds the route with and without a chatId, honoring base', () =>
   assert.equal(embedUrl({ chatId: 'a b/c' }), '/shell/embed/chat?chatId=a%20b%2Fc')
   // Deploy prefix (e.g. /proxy/8001) is prepended.
   assert.equal(embedUrl({ base: '/proxy/8001', chatId: 'x' }), '/proxy/8001/shell/embed/chat?chatId=x')
+})
+
+// makeEmitter is the sticky-emit core that mobius-runtime.js's makeChat
+// uses (and mirrors). makeChat depends on a DOM (iframe, postMessage,
+// fetch) the lib harness has no jsdom for, so we unit-test the pure core
+// directly — the same emit/on the handle delegates to.
+
+test('makeEmitter delivers an event to a listener registered before it fires', () => {
+  const { emit, on } = makeEmitter()
+  const seen = []
+  on('turn-done', (d) => seen.push(d))
+  emit('turn-done', { chatId: 'c1' })
+  assert.deepEqual(seen, [{ chatId: 'c1' }])
+})
+
+test("makeEmitter replays a 'ready' that already fired to a late handler (the early-ready drop fix)", () => {
+  // The child posts its mount-time READY before the app — which only gets
+  // the handle AFTER `await chat(...)` — can attach a listener. Without
+  // sticky replay, a handler attached right after the await misses it.
+  const { emit, on } = makeEmitter()
+  emit('ready', { chatId: 'c1' })
+  const seen = []
+  on('ready', (d) => seen.push(d)) // attached AFTER ready already emitted
+  assert.deepEqual(seen, [{ chatId: 'c1' }], 'late ready handler must still observe the ready')
+})
+
+test("makeEmitter replays the LATEST sticky detail, and 'error' is sticky too", () => {
+  const { emit, on } = makeEmitter()
+  emit('ready', { chatId: 'first' })
+  emit('ready', { chatId: 'second' })
+  emit('error', { chatId: 'c1', error: 'boom' })
+  const readySeen = []
+  const errSeen = []
+  on('ready', (d) => readySeen.push(d))
+  on('error', (d) => errSeen.push(d))
+  assert.deepEqual(readySeen, [{ chatId: 'second' }], 'replays the most recent ready')
+  assert.deepEqual(errSeen, [{ chatId: 'c1', error: 'boom' }], 'error is sticky and replays')
+})
+
+test("makeEmitter does NOT replay a repeatable 'turn-done' to a late handler", () => {
+  // turn-done / message-sent fire once per turn — replaying a past one to a
+  // newly-attached handler would double-fire. They are deliberately not sticky.
+  const { emit, on } = makeEmitter()
+  emit('turn-done', { chatId: 'c1' })
+  const seen = []
+  on('turn-done', (d) => seen.push(d)) // attached AFTER a turn-done fired
+  assert.deepEqual(seen, [], 'a past turn-done must not replay to a late listener')
+})
+
+test('makeEmitter still fires sticky events live to handlers attached before they fire (no double-fire)', () => {
+  // A handler present at emit time gets exactly one call — the replay path
+  // must not pile a second delivery onto an already-notified early listener.
+  const { emit, on } = makeEmitter()
+  const seen = []
+  on('ready', (d) => seen.push(d))
+  emit('ready', { chatId: 'c1' })
+  assert.deepEqual(seen, [{ chatId: 'c1' }], 'exactly one delivery for an early ready listener')
 })

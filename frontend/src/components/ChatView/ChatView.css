@@ -211,6 +211,17 @@
 /* .chat__empty-title lives in index.css (gradient text). */
 .chat__empty-sub { font-size: 14px; color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */ line-height: 1.7; }
 
+/* App-embedded empty state: no shell-scale 72px top padding (the
+   embed sheet is small) and no -5% lift — the quiet "Ask the agent
+   to get started." line should read as a calm hint centered in the
+   sheet, not a buried splash. Only the contextual subtitle renders
+   (see ChatView.jsx's `embedded` branch), so this just tightens the
+   wrapper. */
+.chat-embed .chat__empty--embed {
+  padding: 24px;
+  transform: none;
+}
+
 /* ── Messages ──────────────────────────────────────── */
 
 .chat__msg {
@@ -494,6 +505,14 @@
 .chat__foot .chat__attach-tray,
 .chat__foot .chat__pill,
 .chat__foot .composer-plus { pointer-events: auto; }
+
+/* Embedded composer: the app sheet (not the chat) owns the device
+   safe area, so the `env(safe-area-inset-bottom)` reservation here
+   would double-gap the bottom inside the sheet. Pin the bottom
+   padding to a flat 8px so the pill sits flush in the embed. */
+.chat-embed .chat__foot {
+  padding-bottom: 8px;
+}
 
 /* The form is a transparent shell. File chips render above the
    input row when present; the `+` button and pill share the row. */

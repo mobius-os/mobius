@@ -196,7 +196,7 @@ Mini-apps should look like they belong to the shell. Several real bugs came from
 
 - **Status colors:** the app frame defines exactly two status tokens — `var(--danger)` for errors and `var(--green)` for success. There is **no `--red`** (using it silently falls back to a hardcoded hex and never picks up the theme). Everything else uses `--accent`, `--text`, `--muted`, `--bg`, `--surface`, `--border`.
 - **Touch targets:** mobile is the primary target — every interactive control gets `min-height: 44px` and every icon-only button gets an `aria-label`. Larger targets don't hurt desktop.
-- **One inline-style object named `S`** (`const S = { ... }`), consistently, so apps read alike.
+- **One inline-style object named `S` — REQUIRED, not a suggestion.** Every app declares a single `const S = { ... }` at the top and styles via `style={S.foo}`. Do NOT improvise the lowercase-`s` variant, a `styles`/`css` object, scattered className-only styling, or per-component color maps — those four variants are exactly what drifted the catalog apart. One object, one name, every app.
 - **Scheduled apps — never a dead time-picker.** If the cron cadence is NOT user-editable, show it in words ("Updates daily") plus "ask the Möbius agent to reschedule" — don't render a picker that writes a file nothing reads. If it IS editable, ship a `sync-cron.sh` that actually rewrites the crontab (see `cron.md`). Lead with the cadence either way.
 
 ### Theme-aware colors
@@ -229,6 +229,100 @@ In-app modals are the only option (no native dialogs). Standardize the overlay s
 ### Empty states
 
 Every list / feed / graph gets a real empty state, never a bare muted string. Three parts, centered in the scroll area: a small icon or letter mark, a one-line **title** ("No briefs yet"), and a one-line **subtitle** that says what will fill it ("Möbius writes one each morning"). A blank panel or a lone "Nothing here." reads as broken.
+
+### Canonical single-file app skeleton
+
+Start every new app from this shape — it encodes all the conventions above (the `S` object on theme tokens, a header with a mark + title + subtitle, a list with a 3-part empty state, a bottom-sheet modal, and 44px controls). Copy it, then fill in the domain logic:
+
+```jsx
+import { useState, useEffect } from 'react'
+
+const S = {
+  root:   { height: '100%', display: 'flex', flexDirection: 'column',
+            background: 'var(--bg)', color: 'var(--text)', fontFamily: 'var(--font)' },
+  header: { display: 'flex', alignItems: 'center', gap: '12px',
+            padding: '16px', borderBottom: '1px solid var(--border)' },
+  mark:   { width: '36px', height: '36px', borderRadius: '10px', flexShrink: 0,
+            display: 'grid', placeItems: 'center', fontWeight: 700,
+            background: 'var(--accent)', color: '#fff' },
+  title:  { fontSize: '17px', fontWeight: 600, lineHeight: 1.2 },
+  sub:    { fontSize: '13px', color: 'var(--muted)' },
+  list:   { flex: 1, minHeight: 0, overflow: 'auto', padding: '16px',
+            display: 'flex', flexDirection: 'column', gap: '8px' },
+  card:   { background: 'var(--surface)', border: '1px solid var(--border)',
+            borderRadius: '12px', padding: '12px 16px' },
+  empty:  { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
+            justifyContent: 'center', gap: '6px', textAlign: 'center', color: 'var(--muted)' },
+  emptyMark: { fontSize: '28px', opacity: 0.7 },
+  fab:    { position: 'absolute', right: '16px', bottom: '16px', minHeight: '44px',
+            padding: '0 20px', borderRadius: '12px', border: 'none', cursor: 'pointer',
+            background: 'var(--accent)', color: '#fff', fontWeight: 600 },
+  scrim:  { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
+            display: 'flex', alignItems: 'flex-end', justifyContent: 'center' },
+  sheet:  { width: '100%', maxWidth: '480px', borderRadius: '16px 16px 0 0', padding: '24px',
+            background: 'var(--surface)', display: 'flex', flexDirection: 'column', gap: '12px' },
+  input:  { minHeight: '44px', padding: '8px 12px', borderRadius: '8px', outline: 'none',
+            background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)' },
+  btn:    { minHeight: '44px', padding: '0 16px', borderRadius: '12px', border: 'none',
+            cursor: 'pointer', background: 'var(--accent)', color: '#fff', fontWeight: 600 },
+  btnGhost: { minHeight: '44px', padding: '0 16px', borderRadius: '12px', cursor: 'pointer',
+            background: 'transparent', border: '1px solid var(--border)', color: 'var(--text)' },
+}
+
+export default function MyApp({ appId, token }) {
+  const [items, setItems] = useState([])
+  const [adding, setAdding] = useState(false)
+  const [draft, setDraft] = useState('')
+
+  useEffect(() => window.mobius.storage.subscribe('items.json', v => setItems(v || [])), [])
+
+  async function save() {
+    if (!draft.trim()) return
+    const next = [...items, { id: crypto.randomUUID(), text: draft.trim() }]
+    await window.mobius.storage.set('items.json', next)  // pass the object directly — no JSON.stringify
+    setDraft(''); setAdding(false)
+  }
+
+  return (
+    <div style={S.root}>
+      <header style={S.header}>
+        <div style={S.mark}>M</div>
+        <div>
+          <div style={S.title}>My App</div>
+          <div style={S.sub}>One-line description of what it does</div>
+        </div>
+      </header>
+
+      {items.length === 0 ? (
+        <div style={S.empty}>
+          <div style={S.emptyMark}>✶</div>
+          <div style={{ fontWeight: 600, color: 'var(--text)' }}>Nothing yet</div>
+          <div>Tap + to add your first item</div>
+        </div>
+      ) : (
+        <div style={S.list}>
+          {items.map(it => <div key={it.id} style={S.card}>{it.text}</div>)}
+        </div>
+      )}
+
+      <button style={S.fab} onClick={() => setAdding(true)} aria-label="Add item">+ Add</button>
+
+      {adding && (
+        <div style={S.scrim} onClick={() => setAdding(false)}>
+          <div style={S.sheet} onClick={e => e.stopPropagation()}>
+            <div style={S.title}>New item</div>
+            <input style={S.input} value={draft} onChange={e => setDraft(e.target.value)} autoFocus />
+            <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+              <button style={S.btnGhost} onClick={() => setAdding(false)}>Cancel</button>
+              <button style={S.btn} onClick={save}>Save</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+```
 
 ---
 
