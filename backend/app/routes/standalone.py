@@ -806,9 +806,16 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       function copyForPlatform() {{
         if (platform.iosSafari) {{
           return {{
-            installLabel: 'Show install steps',
+            // The steps panel is pre-revealed for every non-BIP path
+            // (see preReveal below), so the instructions are already on
+            // screen — a "Show install steps" button would just be a
+            // redundant tap revealing what's visible. Make the button a
+            // plain dismiss instead.
+            installLabel: 'Got it',
+            dismissOnAction: true,
             // No BIP on iOS Safari — install is always the manual
-            // Share menu path. Tier-1 = reveal the steps panel.
+            // Share menu path. The panel is pre-revealed; nothing to do
+            // on tap but dismiss.
             bipExpected: false,
             fallbackHTML:
               '<span class="ic-fallback-arrow" aria-hidden="true">↓</span>' +
@@ -833,7 +840,9 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         }}
         if (platform.firefox && platform.android) {{
           return {{
-            installLabel: 'Show install steps',
+            // Steps pre-revealed (non-BIP path) — button just dismisses.
+            installLabel: 'Got it',
+            dismissOnAction: true,
             bipExpected: false,
             fallbackHTML:
               '<span class="ic-fallback-arrow" aria-hidden="true">↑</span>' +
@@ -843,7 +852,9 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         }}
         if (platform.firefox && platform.desktop) {{
           return {{
-            installLabel: 'Show install steps',
+            // Steps pre-revealed (non-BIP path) — button just dismisses.
+            installLabel: 'Got it',
+            dismissOnAction: true,
             bipExpected: false,
             unsupported: true,
             fallbackHTML:
@@ -877,9 +888,11 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
               '<strong>Install {app_name_html}</strong>.',
           }};
         }}
-        // Fallback for unknown browsers — generic instruction.
+        // Fallback for unknown browsers — generic instruction. Steps
+        // pre-revealed (non-BIP path) — button just dismisses.
         return {{
-          installLabel: 'Show install steps',
+          installLabel: 'Got it',
+          dismissOnAction: true,
           bipExpected: false,
           fallbackHTML:
             'Look for an <strong>Install</strong> or <strong>Add to ' +
@@ -953,7 +966,13 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
         if (cardTitle) cardTitle.textContent = 'Add {app_name_html} to your home screen';
         if (cardSub) cardSub.textContent =
           'Möbius is already installed, so this needs one quick step';
-        installBtn.textContent = 'Show install steps';
+        // Suppression means BIP won't fire here, so we pre-reveal the
+        // steps panel below (suppressionLikely → preReveal). With the
+        // instructions already on screen, the button reveals nothing —
+        // make it a dismiss instead of the redundant "Show install
+        // steps" tap.
+        installBtn.textContent = 'Got it';
+        copy.dismissOnAction = true;
       }}
 
       function showCard(reason) {{
@@ -1087,6 +1106,16 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
           }} catch (err) {{
             showToast('Copy failed — long-press the URL bar');
           }}
+          return;
+        }}
+
+        // Dismiss-on-action paths: the manual steps are already
+        // pre-revealed (every non-BIP path, plus the suppressed-Chromium
+        // case), so the only thing left for the button to do is close
+        // the card. Treat it like the user acknowledged the steps.
+        if (copy.dismissOnAction) {{
+          sessionStorage.setItem(DISMISS_KEY, '1');
+          hideCard('got_it');
           return;
         }}
 

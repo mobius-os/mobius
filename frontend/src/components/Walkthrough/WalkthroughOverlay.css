@@ -193,3 +193,25 @@
   margin: 0 auto;
   padding: 12px 28px;
 }
+
+/* Quiet text affordance under the install step's action row. Lower
+   visual weight than the buttons — it's the escape hatch for a user
+   who already installed and just wants the overlay gone, not the
+   primary path. */
+.wt__skip-link {
+  display: block;
+  margin: 14px auto 0;
+  padding: 4px 8px;
+  background: transparent;
+  border: none;
+  color: var(--muted, #9ca3af);
+  font-family: inherit;
+  font-size: 13px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.wt__skip-link:hover {
+  color: var(--text, #d4d4d8);
+}

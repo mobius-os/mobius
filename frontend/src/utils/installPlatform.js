@@ -65,8 +65,31 @@ export function detectInstallPlatform(ua) {
 // reliably auto-fire prompt() at walkthrough-step-2 time, especially
 // for first-time visitors who haven't built engagement yet). The
 // honest copy matches that reality.
-export function installCopyForPlatform(p = detectInstallPlatform()) {
+//
+// `standaloneMode` (optional, default false) flags that the caller is
+// ALREADY running inside an installed standalone PWA. On iOS Safari the
+// Share button only exists in the in-browser chrome; a standalone
+// launch has none, so the "tap the Share button below" copy would point
+// at an absent control. When standaloneMode is true on iOS Safari we
+// advise opening the page in Safari proper instead. Default-false keeps
+// the return shape and copy identical for every existing caller — an
+// unset param means "behave exactly as before"; callers that care detect
+// navigator.standalone===true themselves and pass it in.
+export function installCopyForPlatform(
+  p = detectInstallPlatform(),
+  standaloneMode = false,
+) {
   if (p.iosSafari) {
+    if (standaloneMode) {
+      // Already launched standalone — the Share button isn't on screen.
+      // Tell the user to open the page in Safari, where it lives.
+      return {
+        title: 'Open Möbius in Safari',
+        body: 'You’re already in the installed app, so the Share button isn’t shown here. Open this page in Safari to add another app to your home screen.',
+        ctaLabel: 'Got it',
+        arrowDir: null,
+      }
+    }
     return {
       title: 'Add Möbius to your home screen',
       body: 'Tap the Share button below (the square with the up-arrow), then choose Add to Home Screen.',
