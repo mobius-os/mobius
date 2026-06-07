@@ -375,6 +375,7 @@ export default function Drawer({
                     id={app.id}
                     label={app.name}
                     slug={app.slug}
+                    embedsAgent={!!app.embeds_agent}
                     pinned={!!app.pinned_at}
                     active={activeView === 'canvas' && Number(activeAppId) === Number(app.id)}
                     onSelect={() => onApp(app.id)}
@@ -448,6 +449,7 @@ function DrawerRow({
   pinned,
   active,
   slug,
+  embedsAgent,
   streaming,
   attention,
   onSelect,
@@ -574,6 +576,13 @@ function DrawerRow({
           />
         ) : null}
         <span className="drawer__item-text">{label}</span>
+        {embedsAgent && (
+          <span
+            className="drawer__item-agent"
+            aria-label="Has a built-in agent"
+            title="Has a built-in agent"
+          />
+        )}
         {pinned && (
           <span className="drawer__item-pin" aria-label="Pinned" title="Pinned">
             <PinFilled width={14} height={14} />
