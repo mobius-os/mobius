@@ -82,6 +82,8 @@ class AppOut(BaseModel):
   cross_app_access: ShareLevel = "none"
   share_with_apps: ShareLevel = "none"
   offline_capable: bool = False
+  # The app embeds an agent chat — surfaced as a badge. See models.App.
+  embeds_agent: bool = False
   # Install authority — see models.App.manage_apps for the contract.
   manage_apps: bool = False
   # URL slug for the standalone PWA install at /apps/<slug>/. Null
