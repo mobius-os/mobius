@@ -71,6 +71,12 @@ async def ensure_store_installed(db: Session) -> None:
     .filter(models.App.manifest_url.like(
       _canonical_base(BOOTSTRAP_STORE_MANIFEST_URL) + "#manifest-id=%"
     ))
+    # A tombstoned (soft-deleted) store reads as ABSENT here so this boot
+    # reinstalls it — install_from_manifest reattaches the same row and clears
+    # deleted_at, reviving it with its data. Without this filter an uninstalled
+    # store would never return on restart, contradicting reason (2) above and
+    # leaving the owner with no UI surface to get it back (feature 110).
+    .filter(models.App.deleted_at.is_(None))
     .first()
   )
   if existing is not None:

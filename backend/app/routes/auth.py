@@ -198,7 +198,14 @@ def create_app_token_endpoint(
   db: Session = Depends(get_db),
 ):
   """Returns a short-lived JWT scoped to a specific mini-app."""
-  app = db.query(models.App).filter(models.App.id == body.app_id).first()
+  # A tombstoned (soft-deleted) app must not be granted fresh authority — no new
+  # token for an uninstalled app. Revive (reinstall/recover) makes it mintable
+  # again. See feature 110.
+  app = (
+    db.query(models.App)
+    .filter(models.App.id == body.app_id, models.App.deleted_at.is_(None))
+    .first()
+  )
   if not app:
     raise HTTPException(status_code=404, detail="App not found.")
   token = auth.create_app_token(

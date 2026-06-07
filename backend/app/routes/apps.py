@@ -273,6 +273,12 @@ def allocate_unique_slug(db: Session, name: str, exclude_id: int | None = None) 
   for an existing row without colliding with itself (e.g. backfill).
   Slugs pin standalone-install identity (manifest `id`) — keep them
   stable across renames so home-screen icons don't orphan.
+
+  Deliberately scans ALL rows including tombstoned (deleted_at IS NOT NULL)
+  ones: a soft-deleted app holds its slug until the TTL purge so a
+  reinstall-reattach (which revives the SAME slug) can't be blocked by a new
+  allocation in the recovery window. Do NOT add a deleted_at filter here — it
+  would break that invariant (feature 110).
   """
   base = _slugify_for_source_dir(name)
   candidate = base
@@ -671,7 +677,11 @@ async def update_preview(
           "to preview updates for other apps."
         ),
       )
-  app = db.query(models.App).filter(models.App.id == app_id).first()
+  app = (
+    db.query(models.App)
+    .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
+    .first()
+  )
   if not app:
     raise HTTPException(status_code=404, detail="App not found.")
   if not app.source_dir:
@@ -840,7 +850,8 @@ async def update_app(
   ):
     app = (
       db.query(models.App).populate_existing()
-      .filter(models.App.id == app_id).first()
+      .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
+      .first()
     )
     if not app:
       raise HTTPException(status_code=404, detail="App not found.")
@@ -939,7 +950,8 @@ async def update_icon(
   async with fs_locks.app_storage_lock(app_id):
     app = (
       db.query(models.App).populate_existing()
-      .filter(models.App.id == app_id).first()
+      .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
+      .first()
     )
     if app is None or app.token_nonce != expected_nonce:
       raise HTTPException(404, "App not found.")
@@ -983,7 +995,10 @@ async def delete_app(
     if not app:
       raise HTTPException(status_code=404, detail="App not found.")
 
-    app.deleted_at = datetime.now(UTC)
+    # Naive UTC to match SQLite's naive storage + the naive TTL comparison in
+    # list_apps / recover_app (same contract chats.py documents). Avoids a
+    # platform-dependent aware/naive round-trip mismatch.
+    app.deleted_at = datetime.now(UTC).replace(tzinfo=None)
     app_name = app.name
     app_source_dir = app.source_dir
     db.commit()
@@ -1024,20 +1039,29 @@ async def recover_app(
   id-keyed storage tree was never removed, so the revived app keeps its data.
   (Cron for an agent-built app is not auto-restored here; reinstalling a store
   app re-registers it. See feature 110.)
+
+  Held under install_uninstall_lock — the same lock the TTL purge takes — so a
+  recover near the TTL boundary can't race the purge into reviving a row the
+  sweep is hard-deleting (or vice versa). Whoever wins the lock leaves a
+  consistent state: a purged row → recover 404s; a recovered row → purge's
+  under-lock stale re-query no longer matches it.
   """
-  app = (
-    db.query(models.App)
-    .filter(models.App.id == app_id, models.App.deleted_at.isnot(None))
-    .first()
-  )
-  if not app:
-    raise HTTPException(status_code=404, detail="App not found or not deleted.")
-  if (
-    datetime.now(UTC).replace(tzinfo=None) - app.deleted_at
-  ) >= APP_SOFT_DELETE_TTL:
-    raise HTTPException(status_code=410, detail="Recovery window has expired.")
-  app.deleted_at = None
-  db.commit()
+  async with fs_locks.install_uninstall_lock():
+    app = (
+      db.query(models.App)
+      .filter(models.App.id == app_id, models.App.deleted_at.isnot(None))
+      .first()
+    )
+    if not app:
+      raise HTTPException(
+        status_code=404, detail="App not found or not deleted."
+      )
+    if (
+      datetime.now(UTC).replace(tzinfo=None) - app.deleted_at
+    ) >= APP_SOFT_DELETE_TTL:
+      raise HTTPException(status_code=410, detail="Recovery window has expired.")
+    app.deleted_at = None
+    db.commit()
   # Refetch the drawer (app reappears) and bust any cached iframe for it.
   get_system_broadcast().publish(
     {"type": "app_updated", "appId": str(app_id)}
@@ -1086,7 +1110,11 @@ def run_app_job(
       status_code=403,
       detail="App token can only run its own job.",
     )
-  app = db.query(models.App).filter(models.App.id == app_id).first()
+  app = (
+    db.query(models.App)
+    .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
+    .first()
+  )
   if not app:
     raise HTTPException(status_code=404, detail="App not found.")
   if not app.source_dir:
@@ -1144,7 +1172,11 @@ def update_app_schedule(
       status_code=403,
       detail="App token can only update its own schedule.",
     )
-  app = db.query(models.App).filter(models.App.id == app_id).first()
+  app = (
+    db.query(models.App)
+    .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
+    .first()
+  )
   if not app:
     raise HTTPException(status_code=404, detail="App not found.")
   if not app.source_dir:

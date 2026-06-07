@@ -8,7 +8,7 @@ chats: POST /api/apps/{id}/recover, plus reinstall-reattach for store apps.
 
 import io
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 from urllib.parse import urlparse
@@ -184,7 +184,7 @@ def test_recover_expired_returns_410(client, auth, db, bypass_url_validation):
   app = _install(client, auth)
   app_id = app["id"]
   row = db.query(models.App).filter(models.App.id == app_id).first()
-  row.deleted_at = datetime.utcnow() - timedelta(days=8)
+  row.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
   db.commit()
 
   r = client.post(f"/api/apps/{app_id}/recover", headers=auth)
@@ -205,7 +205,7 @@ def test_purge_after_ttl_hard_deletes(client, auth, db, bypass_url_validation):
 
   # Age the tombstone past the TTL, then a list call sweeps it.
   row = db.query(models.App).filter(models.App.id == app_id).first()
-  row.deleted_at = datetime.utcnow() - timedelta(days=8)
+  row.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
   db.commit()
 
   client.get("/api/apps/", headers=auth)
@@ -228,3 +228,27 @@ def test_tombstoned_app_module_and_frame_404(
     f"/api/apps/{app_id}/module?token={owner_token}"
   ).status_code == 404
   assert client.get(f"/api/apps/{app_id}/frame").status_code == 404
+
+
+def test_tombstoned_app_standalone_route_404(
+  client, auth, bypass_url_validation,
+):
+  app = _install(client, auth)
+  app_id, slug = app["id"], app["slug"]
+  assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
+  # A home-screen PWA deep-link must not render an uninstalled app.
+  assert client.get(f"/apps/{slug}/manifest.json").status_code == 404
+
+
+def test_tombstoned_app_cannot_mint_token(
+  client, auth, owner_token, bypass_url_validation,
+):
+  """No fresh app authority for an uninstalled app — the mint endpoint 404s,
+  which also keeps its cron/run-job endpoints unreachable. Revive makes it
+  mintable again (security contract, feature 110 Q12)."""
+  app = _install(client, auth)
+  app_id = app["id"]
+  assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
+  r = client.post("/api/auth/app-token", json={"app_id": app_id},
+                  headers={"Authorization": f"Bearer {owner_token}"})
+  assert r.status_code == 404

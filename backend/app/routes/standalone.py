@@ -172,11 +172,19 @@ def _generate_icon_png(name: str, slug: str, size: int = 512) -> bytes:
 
 
 def _get_app_by_slug(db: Session, slug: str) -> models.App:
-  """Resolve `<slug>` to an App row. Also handles the lazy-backfill
+  """Resolve `<slug>` to a LIVE App row. Also handles the lazy-backfill
   case where an old app has a NULL slug — we don't try to match
   against null, so legacy apps surface here via their lazily-assigned
-  slug from the first time someone accessed them via the API."""
-  app = db.query(models.App).filter(models.App.slug == slug).first()
+  slug from the first time someone accessed them via the API.
+
+  Excludes tombstoned (soft-deleted) apps so a home-screen PWA deep-link to
+  `/apps/<slug>/` can't render an uninstalled app — same rule the in-shell
+  get/module/frame routes apply (feature 110)."""
+  app = (
+    db.query(models.App)
+    .filter(models.App.slug == slug, models.App.deleted_at.is_(None))
+    .first()
+  )
   if not app:
     raise HTTPException(status_code=404, detail="App not found.")
   return app

@@ -31,7 +31,7 @@ def test_delete_then_purge_removes_non_slug_source_dir(client, auth, db):
   """Delete is soft (the source tree survives for recovery); the TTL purge
   removes it, using the stored source_dir rather than the display-name slug.
   Feature 110."""
-  from datetime import datetime, timedelta
+  from datetime import datetime, timedelta, UTC
   from app import models
   source_dir = Path(get_settings().data_dir) / "apps" / "My App (draft)"
   source_dir.mkdir(parents=True)
@@ -57,7 +57,7 @@ def test_delete_then_purge_removes_non_slug_source_dir(client, auth, db):
   # Age the tombstone past the TTL; the next list call purges it, resolving the
   # tree via the stored source_dir (not the "My App (draft)" display name).
   row = db.query(models.App).filter(models.App.id == app_id).first()
-  row.deleted_at = datetime.utcnow() - timedelta(days=8)
+  row.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
   db.commit()
   client.get("/api/apps/", headers=auth)
   assert not source_dir.exists()
