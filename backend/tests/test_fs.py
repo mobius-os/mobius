@@ -153,3 +153,48 @@ def test_write_rejects_cross_site(client, auth, fsroot):
                  headers={**auth, "Content-Type": "text/plain",
                           "Sec-Fetch-Site": "cross-site"})
   assert r.status_code == 403
+
+
+def test_tree_pagination_mixed_case_and_dirs(client, auth, fsroot):
+  # The offset cursor must page a dir whose names mix case and whose dirs sort
+  # among the files, without skipping or duplicating (the keyset-cursor bug).
+  _, work, _ = fsroot
+  files = ["Banana.txt", "apple.txt", "Zebra.txt", "mango.txt", "Cherry.txt"]
+  for n in files:
+    (work / n).write_text("x")
+  (work / "Zdir").mkdir(exist_ok=True)
+  (work / "adir").mkdir(exist_ok=True)
+  seen, cursor = [], None
+  for _ in range(20):
+    params = {"path": "fstest", "limit": 2}
+    if cursor:
+      params["cursor"] = cursor
+    d = client.get("/api/fs/tree", params=params, headers=auth).json()
+    seen += [e["name"] for e in d["entries"]]
+    cursor = d["next_cursor"]
+    if not cursor:
+      break
+  assert sorted(seen) == sorted(files + ["Zdir", "adir"])
+  assert len(seen) == len(set(seen))
+
+
+def test_db_sidecars_denied(client, auth, fsroot):
+  # The DB runs in WAL mode; its -wal/-shm/-journal sidecars hold live DB
+  # pages and must be denied just like db/ultimate.db itself.
+  root, _, made = fsroot
+  dbdir = root / "db"
+  dbdir.mkdir(exist_ok=True)
+  made.append(dbdir)
+  for name in ("ultimate.db", "ultimate.db-wal", "ultimate.db-shm",
+               "ultimate.db-journal"):
+    (dbdir / name).write_text("secret pages")
+  tree = client.get("/api/fs/tree", params={"path": "db"}, headers=auth).json()
+  assert tree["entries"] == []
+  assert {"ultimate.db", "ultimate.db-wal", "ultimate.db-shm",
+          "ultimate.db-journal"} <= set(tree["redacted"])
+  for name in ("ultimate.db-wal", "ultimate.db-shm", "ultimate.db-journal"):
+    assert client.get("/api/fs/read", params={"path": f"db/{name}"},
+                      headers=auth).status_code == 403
+    assert client.put("/api/fs/write", params={"path": f"db/{name}"},
+                      content="x",
+                      headers={**auth, "Content-Type": "text/plain"}).status_code == 403
