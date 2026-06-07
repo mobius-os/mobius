@@ -25,6 +25,11 @@ class Settings(BaseSettings):
   domain: str = "localhost"
   database_url: str = "sqlite:////data/db/ultimate.db"
   data_dir: str = "/data"
+  # Root the owner-facing /api/fs viewer is confined to (reads). Empty falls
+  # back to data_dir; ships narrow (`/data`) and can widen later without code.
+  # Writes are always pinned to data_dir regardless (the mobius process can
+  # only write /data).
+  fs_view_root: str = ""
   frontend_origin: str = "http://localhost:5173"
   api_base_url: str = f"http://localhost:{os.environ.get('PORT', '8000')}"
   # Git commit the running image was built from, baked at `docker build` time

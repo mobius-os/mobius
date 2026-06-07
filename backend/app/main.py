@@ -29,7 +29,7 @@ from app import models
 from app.routes import (
   admin_router, apps_router, auth_router,
   chat_logs_router, chat_router, chats_router, chats_stream_router,
-  debug_router, generate_router,
+  debug_router, fs_router, generate_router,
   notifications_router, notify_router, proxy_router, push_router,
   recover_router, self_reminders_router, settings_router,
   standalone_router, storage_router,
@@ -341,6 +341,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(apps_router)
 app.include_router(storage_router)
+app.include_router(fs_router)
 app.include_router(chat_router)
 app.include_router(chats_router)
 app.include_router(chats_stream_router)

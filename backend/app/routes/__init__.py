@@ -64,6 +64,7 @@ notify_router = _load("notify")
 recover_router = _load("recover")
 settings_router = _load("settings")
 storage_router = _load("storage")
+fs_router = _load("fs")
 uploads_router = _load("uploads")
 generate_router = _load("generate")
 push_router = _load("push")
@@ -78,6 +79,7 @@ __all__ = [
   "auth_router",
   "apps_router",
   "storage_router",
+  "fs_router",
   "chat_router",
   "chats_router",
   "chats_stream_router",
