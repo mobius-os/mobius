@@ -363,6 +363,16 @@ class _ChatEventSink:
     """Split the streaming turn at a steer boundary so reload order is
     Q1, A1, Q2, A2.
 
+    Deterministic for Claude: its steer is interrupt + re-query, a real turn
+    boundary, so the sealed A1 is exactly the pre-interrupt text. For Codex,
+    `turn.steer()` injects into the SAME running turn with no boundary, so the
+    A1/A2 cut is best-effort — a continuation delta already in flight when the
+    steer lands can be sealed as the tail of A1 rather than the head of A2.
+    The split still imposes Möbius-side ordering (seal A1-so-far, append Q2,
+    accumulate A2 fresh); only the exact cut point is upstream-determined for
+    Codex. Stop (interrupt + fresh turn) is the path with a real boundary on
+    both providers.
+
     Called from the steer route (both providers) on the one FastAPI event
     loop, so it is serialized with this sink's `publish()` snapshots. The
     streamed-so-far assistant text (A1) becomes its own trailing assistant
