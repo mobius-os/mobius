@@ -891,10 +891,10 @@ async def install_from_manifest(
       App row is committed (so the recorded upstream sha persists) but
       the served app is unchanged.
 
-  The per-app git model is ON by default. When explicitly off, install
-  + update behave exactly as before this feature: a blind jsx_source
-  overwrite with no `.git` repo created. 'conflict' never occurs while
-  the flag is off.
+  The per-app git model is unconditional for any app with a real
+  source_dir. An app with no source_dir takes the legacy path — a blind
+  jsx_source overwrite with no `.git` repo created — and 'conflict' never
+  occurs there.
 
   Failure modes:
     - Pre-commit failures (manifest fetch, validation, JSX compile,
@@ -1137,7 +1137,8 @@ async def install_from_manifest(
       db.flush()  # assign app.id without committing yet
 
     # --- Per-app git: record upstream + (on update) merge into local ---
-    # Gated on the flag. The git ops run under source_dir_lock — the same
+    # Engaged whenever the app has a real source_dir. The git ops run under
+    # source_dir_lock — the same
     # lock the source write below takes — acquired here as a SEPARATE,
     # non-nested critical section (acquire/release, then re-acquire for
     # the write), which is safe for a non-reentrant asyncio.Lock. We do
@@ -1221,6 +1222,20 @@ async def install_from_manifest(
               effective_source = merge.merged_bytes.decode("utf-8")
               divergence = "clean_merge"
               merge_applied = True
+            else:
+              # Clean verdict (no conflict) but merge-tree produced no
+              # index.jsx bytes — e.g. the in-memory cat-file read failed.
+              # Falling through here would silently keep effective_source =
+              # jsx_source (pure upstream, clobbering local) AND leave
+              # merge_applied False, so commit_merge never runs and `upstream`
+              # stays unreachable from `main`: the same stranded-merge-base
+              # failure the no-edit fast-path avoids, which resolves the NEXT
+              # update to stale local content. Treat it exactly like a
+              # conflict — keep local source + bundle served, leave the new
+              # upstream recorded, and let an agent-resolution pass reconcile
+              # it — rather than half-applying a merge we couldn't read.
+              mode = "conflict"
+              conflict_paths = merge.conflict_paths or ["index.jsx"]
         else:
           # Fresh install (or an existing app that somehow lost its repo):
           # record the pristine bytes on `upstream`, then align the local
@@ -1277,7 +1292,8 @@ async def install_from_manifest(
       # short-circuit above has already returned. Deferring these past the
       # conflict return keeps a served-old-code conflict from jumping
       # capabilities or offline semantics ahead of the code actually running.
-      # On the flag-off path effective_source is just the upstream jsx_source.
+      # Without local divergence (or for an app with no source_dir),
+      # effective_source is just the upstream jsx_source.
       app.jsx_source = effective_source
       app.cross_app_access = perms.get("cross_app_access", app.cross_app_access)
       app.share_with_apps = perms.get("share_with_apps", app.share_with_apps)

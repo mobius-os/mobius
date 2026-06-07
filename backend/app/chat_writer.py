@@ -267,7 +267,9 @@ class AppendSteeredUserMessage(_Command):
 
   Placement is at the END so a reload renders Q1, A1, Q2, A2 (the steered
   user row BETWEEN the pre-steer assistant text and the post-steer
-  continuation). The split path seals the streamed-so-far assistant text
+  continuation). That ordering is exact for Claude; for Codex the A1/A2 cut
+  is best-effort because turn.steer() has no turn boundary (see
+  `_ChatEventSink.split_for_steer`). The split path seals the streamed-so-far assistant text
   as its own message FIRST, so when this command runs the trailing message
   is that sealed assistant — appending the user row after it leaves
   `chat.messages[-1]` a user message, which makes the runner's next

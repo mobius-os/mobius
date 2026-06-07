@@ -1934,6 +1934,57 @@ def test_flag_on_conflicting_update_materializes_real_merge_conflict(
     db.close()
 
 
+def test_clean_merge_with_unreadable_bytes_is_treated_as_conflict(
+  client, auth, bypass_url_validation, monkeypatch,
+):
+  """A clean merge VERDICT whose merged index.jsx came back as None bytes (an
+  in-memory cat-file read that failed inside merge_upstream) must NOT fall
+  through to a silent pure-upstream overwrite + single-parent commit — that
+  strands the merge base and resolves the NEXT update to stale local content.
+  The fix routes it to the same safe path as a real conflict: local source is
+  preserved (served version unchanged) and the new upstream is recorded for an
+  agent-resolution pass. Regression for the clean-verdict-no-bytes gap."""
+  base = "https://on-cleanempty.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "on-cleanempty"}
+  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
+  assert r1.status_code == 201, r1.text
+  data_dir = Path(get_settings().data_dir)
+  app_dir = data_dir / "apps" / "on-cleanempty"
+  jsx_file = app_dir / "index.jsx"
+
+  # Local edit (diverged) that collides with the upstream edit below, so
+  # start_conflict_merge materializes a real working-tree conflict once the
+  # fix routes us there.
+  jsx_file.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "AGENT TITLE"))
+  jsx_v2 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
+
+  # Force merge_upstream to report clean but yield NO bytes — the contract
+  # violation the fix guards against (clean status normally implies bytes).
+  from app.app_git import MergeResult
+  monkeypatch.setattr(
+    "app.app_git.merge_upstream",
+    lambda *a, **k: MergeResult(status="clean", merged_bytes=None),
+  )
+
+  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
+  assert r2.status_code == 201, r2.text
+  payload = r2.json()
+  assert payload["mode"] == "conflict", payload
+  assert "index.jsx" in payload["conflict_paths"]
+
+  from app.models import App
+  from app.database import SessionLocal
+  db = SessionLocal()
+  try:
+    app = db.query(App).filter(App.slug == "on-cleanempty").first()
+    # Local source preserved (NOT clobbered with pure upstream); the new
+    # upstream provenance recorded for the resolution pass.
+    assert "UPSTREAM TITLE" not in app.jsx_source
+    assert app.upstream_commit
+  finally:
+    db.close()
+
+
 def test_conflicting_update_spawns_resolver_chat_and_dedupes(
   client, auth, bypass_url_validation,
 ):

@@ -595,10 +595,23 @@ export default function useStreamConnection(chatId, {
             // buffered chars would land in the NEXT (post-steer) turn. The
             // post-steer text then streams in as normal `text` deltas.
             flushBuffer()
-            onSteeredIntoTurnRef.current?.({
-              ts: event.ts ?? null,
-              content: event.content || '',
-            })
+            if (isCatchUp) {
+              // Replay during the catch-up burst (a mid-A2 reconnect or
+              // remount): the DB fetch already returned the sealed pre-steer
+              // assistant (A1) AND the steered user row (Q2), so promoting the
+              // replayed pre-steer text into a fresh message would DUPLICATE
+              // A1, and re-inserting Q2 is redundant. Drop the replayed
+              // pre-steer segment from streamItems so the post-steer
+              // continuation (A2) accumulates fresh and promotes as its own
+              // assistant after Q2. (setStreamItems clears latestItemsRef
+              // synchronously too, so a later promote can't resurrect A1.)
+              setStreamItems([])
+            } else {
+              onSteeredIntoTurnRef.current?.({
+                ts: event.ts ?? null,
+                content: event.content || '',
+              })
+            }
           } else if (event.type === 'done') {
             flushBuffer()
             setIsStreaming(false)
