@@ -757,6 +757,9 @@ def test_stop_chat_for_clears_pending_queue(db):
   """stop_chat_for must clear pending_messages too (mirror of the
   global path test). Backend Stop is purely interrupt; frontend
   owns the collapse-and-resend.
+
+  Also asserts the returned cleared_pending_ts reports exactly the ts it
+  removed — the signal the frontend resends by (PM 115).
   """
   import asyncio
   from app import models
@@ -766,17 +769,71 @@ def test_stop_chat_for_clears_pending_queue(db):
     id="stop-for-clears",
     title="t",
     messages=[],
-    pending_messages=[{"role": "user", "content": "queued", "ts": 1}],
+    pending_messages=[
+      {"role": "user", "content": "q1", "ts": 1},
+      {"role": "user", "content": "q2", "ts": 2},
+    ],
   )
   db.add(chat)
   db.commit()
 
   try:
-    asyncio.run(stop_chat_for("stop-for-clears", db=db))
+    stopped, cleared_ts = asyncio.run(stop_chat_for("stop-for-clears", db=db))
     db.refresh(chat)
     assert chat.pending_messages == []
+    assert cleared_ts == [1, 2]
   finally:
     registry.forget("stop-for-clears")
+
+
+def test_stop_chat_for_empty_pending_reports_no_cleared_ts(db):
+  """When the queue is already empty at Stop time — the natural-finish race
+  where the turn-end drain already promoted the queued message into a
+  continuation — cleared_pending_ts is []. The frontend resends only
+  cleared_pending_ts, so it does NOT re-send the already-promoted message,
+  closing the double-send (PM 115).
+  """
+  import asyncio
+  from app import models
+  from app.chat import stop_chat_for
+
+  chat = models.Chat(
+    id="stop-for-empty", title="t", messages=[], pending_messages=[],
+  )
+  db.add(chat)
+  db.commit()
+
+  try:
+    stopped, cleared_ts = asyncio.run(stop_chat_for("stop-for-empty", db=db))
+    assert cleared_ts == []
+  finally:
+    registry.forget("stop-for-empty")
+
+
+def test_chat_stop_route_returns_cleared_pending_ts(client, db, auth):
+  """POST /api/chat/stop surfaces cleared_pending_ts so handleStop can resend
+  only what Stop actually removed (PM 115)."""
+  from app import models
+
+  chat = models.Chat(
+    id="stop-route-clears",
+    title="t",
+    messages=[],
+    pending_messages=[{"role": "user", "content": "queued", "ts": 7}],
+  )
+  db.add(chat)
+  db.commit()
+
+  try:
+    res = client.post(
+      "/api/chat/stop", headers=auth, json={"chat_id": "stop-route-clears"},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert "cleared_pending_ts" in body
+    assert body["cleared_pending_ts"] == [7]
+  finally:
+    registry.forget("stop-route-clears")
 
 
 def test_cancel_pending_message_by_ts(client, db, auth):

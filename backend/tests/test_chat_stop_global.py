@@ -24,7 +24,7 @@ def test_global_stop_stops_all_registered_kinds():
   registry.register(_Handle("chat-claude", RunnerKind.CLAUDE_SDK, called))
   registry.register(_Handle("chat-codex", RunnerKind.CODEX_SDK, called))
 
-  stopped = asyncio.run(chat_mod.stop_chat(None))
+  stopped, _ = asyncio.run(chat_mod.stop_chat(None))
 
   assert stopped is True
   assert called == {
