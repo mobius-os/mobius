@@ -1542,22 +1542,28 @@ class ChatWriterActor:
     return {"pending": remaining}
 
   def _clear_pending(self, db, cmd: ClearPending) -> dict:
-    """Empty the pending queue; return the count removed.
+    """Empty the pending queue; return the count + the cleared timestamps.
 
     Commits only when the queue was non-empty — clearing an already-empty
-    queue is a no-op and skips the commit.
+    queue is a no-op and skips the commit. `cleared_ts` is the ts of every
+    message actually removed (empty when the queue was already empty), which
+    is how Stop tells apart a message it truly cleared from one the turn-end
+    drain already promoted into a continuation — see stop_chat_for and the
+    natural-finish-races-Stop guard in ChatView.handleStop.
     """
     from app.models import Chat
 
     chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
     if chat is None:
       raise _PersistFailed("ClearPending: chat not found")
-    cleared = len(chat.pending_messages or [])
+    pending = list(chat.pending_messages or [])
+    cleared_ts = [m.get("ts") for m in pending if m.get("ts") is not None]
+    cleared = len(pending)
     if cleared:
       chat.pending_messages = []
       if not _commit_or_rollback(db):
         raise _PersistFailed("ClearPending did not persist")
-    return {"cleared": cleared}
+    return {"cleared": cleared, "cleared_ts": cleared_ts}
 
   def _replace_transcript(self, db, cmd: ReplaceTranscript) -> bool:
     """Replace the whole `messages` blob (and optional title); commit.

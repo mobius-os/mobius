@@ -1028,8 +1028,10 @@ def test_reconciliation_works_independent_of_actor():
 # DB; assert each mutates the row (or no-ops correctly) as the production
 # helper it replicates would.
 def test_clear_pending_empties_queue_and_returns_count(actor):
-  """ClearPending empties pending_messages and returns the count removed —
-  the Stop / terminal-setup-error path."""
+  """ClearPending empties pending_messages and returns the count + the ts it
+  removed (cleared_ts) — the Stop / terminal-setup-error path. cleared_ts is
+  what handleStop resends by, closing the natural-finish-races-Stop double-send
+  (PM 115)."""
   _seed_chat(
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[
@@ -1038,17 +1040,20 @@ def test_clear_pending_empties_queue_and_returns_count(actor):
     ],
   )
   result = _await(actor.submit(ClearPending(chat_id="c1", run_token="rt1")))
-  assert result == {"cleared": 2}
+  assert result == {"cleared": 2, "cleared_ts": [10, 11]}
   chat = _load_chat()
   assert chat["pending_messages"] == []
 
 
 def test_clear_pending_empty_queue_is_noop(actor):
-  """ClearPending on an already-empty queue returns cleared=0 and commits
-  nothing (the production helper skips the commit when nothing changed)."""
+  """ClearPending on an already-empty queue returns cleared=0 / cleared_ts=[]
+  and commits nothing (the production helper skips the commit when nothing
+  changed). The empty cleared_ts is exactly the natural-finish case: the
+  turn-end drain already promoted the queued message, so Stop reports nothing
+  and handleStop resends nothing (PM 115)."""
   _seed_chat(messages=[{"role": "user", "content": "hi", "ts": 1}], pending=[])
   result = _await(actor.submit(ClearPending(chat_id="c1", run_token="rt1")))
-  assert result == {"cleared": 0}
+  assert result == {"cleared": 0, "cleared_ts": []}
   chat = _load_chat()
   assert chat["pending_messages"] == []
 

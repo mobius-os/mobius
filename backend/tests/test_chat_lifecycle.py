@@ -35,7 +35,7 @@ def test_stop_chat_for_wedged_sdk_client_times_out(client, auth, chat):
   hanging.chat_id = chat.id
   registry.register(hanging)
   start = time.monotonic()
-  stopped = asyncio.run(chat_mod.stop_chat_for(chat.id))
+  stopped, _ = asyncio.run(chat_mod.stop_chat_for(chat.id))
   elapsed = time.monotonic() - start
   assert elapsed < 3.0, f"stop_chat_for hung for {elapsed}s"
   assert stopped is False
@@ -67,7 +67,7 @@ def test_global_stop_targets_sdk_only_chats(client, auth, chat):
 
   registry.register(FakeClient())
   registry.register(FakeSession())
-  stopped = asyncio.run(chat_mod.stop_chat(None))
+  stopped, _ = asyncio.run(chat_mod.stop_chat(None))
   assert stopped is True
   assert called["claude"] and called["codex"]
   assert registry.get_handle("claude-chat-id", RunnerKind.CLAUDE_SDK) is None

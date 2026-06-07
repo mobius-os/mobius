@@ -17,6 +17,11 @@ async def chat_stop(
   db: Session = Depends(get_db),
   _: models.Owner = Depends(get_current_owner),
 ):
-  """Stops the agent subprocess and clears its session."""
-  stopped = await stop_chat(body.chat_id or None, db=db)
-  return {"stopped": stopped}
+  """Stops the agent subprocess and clears its session.
+
+  `cleared_pending_ts` is the ts of the queued messages this Stop actually
+  removed; the frontend resends only those so a queued message the turn-end
+  drain already promoted into a continuation isn't double-sent (PM 115).
+  """
+  stopped, cleared_pending_ts = await stop_chat(body.chat_id or None, db=db)
+  return {"stopped": stopped, "cleared_pending_ts": cleared_pending_ts}

@@ -1260,6 +1260,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       pendingQueue.clear()
 
       let stoppedCleanly = true
+      // The backend reports which queued ts it actually removed. null = an
+      // older backend without the field (→ fall back to resending all); an
+      // array is the authoritative cleared set.
+      let clearedPendingTs = null
       try {
         const stopRes = await fetch(`${BASE}/api/chat/stop`, {
           method: 'POST',
@@ -1280,6 +1284,14 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           try {
             const data = await stopRes.json()
             if (data && data.stopped === false) stoppedCleanly = false
+            // Resend only what Stop truly cleared: a queued message the
+            // turn-end drain already promoted into a continuation (right as
+            // Stop landed) is gone from the queue, so it's absent here and
+            // must NOT be re-sent — that was the natural-finish-races-Stop
+            // double-send (PM 115).
+            if (Array.isArray(data?.cleared_pending_ts)) {
+              clearedPendingTs = data.cleared_pending_ts
+            }
           } catch { /* non-JSON body — assume legacy success */ }
         }
       } catch { /* network error during stop is non-critical */ }
@@ -1314,19 +1326,56 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       // pending + fetchGen were cleared/bumped BEFORE the await above.
       onStreamEnd?.({ continues: false })
 
-      if (combined) {
-        // doSend's guard reads sendingRef/isStreamingRef (just synced
-        // to false above) → fresh-send path. pin:false so the
-        // synthetic combined-from-queue message doesn't yank the
-        // viewport to top, pushing the partial the user just stopped
-        // (and the original turn-1 user msg) above the viewport.
-        // Mode stays whatever the user had — they were reading the
+      // Resend the queued work as ONE fresh turn — but ONLY the messages the
+      // backend confirms it cleared (clearedPendingTs). Default to the full
+      // combined text; narrow to the cleared subset only when we can match
+      // EVERY cleared ts in the local snapshot.
+      let resendText = combined
+      let resendAttachments = combinedAttachments
+      if (Array.isArray(clearedPendingTs)) {
+        const clearedSet = new Set(clearedPendingTs)
+        const toResend = queuedSnapshot.filter(
+          m => m.ts != null && clearedSet.has(m.ts),
+        )
+        // Narrow to the cleared subset only when it accounts for every ts the
+        // backend cleared. The race-closure case lands here too: when the
+        // turn-end drain already promoted the queued message,
+        // clearedPendingTs is [], toResend is [], 0 === 0, so resendText
+        // becomes '' and nothing is re-sent (no double-send). But if some
+        // cleared ts did NOT match — the snapshot still holds an OPTIMISTIC ts
+        // for a message whose queue-POST was in flight when Stop was pressed —
+        // we must NOT drop it: fall back to the full combined text (a visible
+        // resend beats a silent loss). The backend drain promotes the queue
+        // all-or-nothing, so a non-empty clearedPendingTs means none were
+        // promoted and resending all of combined can't double-send.
+        if (toResend.length === clearedPendingTs.length) {
+          resendText = toResend
+            .map(m => (m.content || '').trim())
+            .filter(Boolean)
+            .join('\n\n')
+          const seen = new Set()
+          resendAttachments = []
+          for (const m of toResend) {
+            for (const a of (m.attachments || [])) {
+              if (a && a.name && !seen.has(a.name)) {
+                seen.add(a.name)
+                resendAttachments.push(a)
+              }
+            }
+          }
+        }
+      }
+
+      if (resendText) {
+        // doSend's guard reads sendingRef/isStreamingRef (just synced to false
+        // above) → fresh-send path. pin:false so the synthetic combined-from-
+        // queue message doesn't yank the viewport to top, pushing the partial
+        // the user just stopped (and the original turn-1 user msg) above the
+        // viewport. Mode stays whatever the user had — they were reading the
         // partial, the new turn streams in continuing from there.
-        doSend(combined, {
+        doSend(resendText, {
           pin: false,
-          attachments: combinedAttachments.length > 0
-            ? combinedAttachments
-            : undefined,
+          attachments: resendAttachments.length > 0 ? resendAttachments : undefined,
         })
       }
     } finally {

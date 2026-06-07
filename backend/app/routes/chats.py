@@ -560,7 +560,7 @@ async def delete_chat(
   # to protect against (orphan runner writing to a soft-deleted row).
   if is_chat_running(chat_id):
     try:
-      stopped = await stop_chat_for(chat_id, db=db)
+      stopped, _ = await stop_chat_for(chat_id, db=db)
     except Exception:
       log.warning("Failed to stop agent for chat %s during delete", chat_id)
       stopped = False
