@@ -130,7 +130,7 @@ When about to stop tool-calling and write the final assistant message, walk this
 |---|---|
 | Created an app | `echo '- Built **X** (id N). <desc>' >> /data/shared/memory/inbox.md`, then the notification curl (`notifications.md`). |
 | Updated an app | The notification curl (`notifications.md`). Don't log the update *event* — but if it surfaced a gotcha, log the gotcha. |
-| Deleted an app | `echo '- Deleted **X** (id N). <reason>' >> /data/shared/memory/inbox.md`. Apps can't be recovered — record it. |
+| Deleted an app | `echo '- Deleted **X** (id N). <reason>' >> /data/shared/memory/inbox.md`. Uninstall is a reversible 7-day tombstone — log the id so you can recover it later (`POST /api/apps/{id}/recover`, or reinstall a store app to reattach by manifest_url). |
 | Took a screenshot | In the SAME message, emit the `![]` embed BEFORE any describing text; confirm the embed is present. See step 6. |
 | Discovered a gotcha/workaround | `echo '- Gotcha: <one-line>' >> /data/shared/memory/inbox.md`. |
 | Learned a partner preference | `echo '- Partner preference: <one-line>' >> /data/shared/memory/inbox.md`. |
