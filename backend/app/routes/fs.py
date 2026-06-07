@@ -41,7 +41,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 
 from app import models
 from app.config import get_settings
-from app.deps import get_current_owner
+from app.deps import get_current_owner, reject_cross_site
 from app.path_utils import validate_path_within_base
 
 router = APIRouter(prefix="/api/fs", tags=["fs"])
@@ -182,12 +182,16 @@ def fs_tree(
             "entries": [], "next_cursor": None, "redacted": []}
 
   limit = max(1, min(limit, _LIST_MAX_LIMIT))
-  after = None
+  # Offset cursor: the count already returned. The listing is re-scanned and
+  # re-sorted deterministically each request, so an offset resumes correctly —
+  # and (unlike a name-keyed cursor) it matches the dirs-first, then
+  # case-insensitive-name sort without needing to re-encode that whole key.
+  offset = 0
   if cursor:
     try:
-      after = base64.urlsafe_b64decode(cursor.encode()).decode()
+      offset = max(0, int(base64.urlsafe_b64decode(cursor.encode()).decode()))
     except Exception:
-      after = None
+      offset = 0
 
   redacted: list[str] = []
   rows: list[dict] = []
@@ -206,12 +210,11 @@ def fs_tree(
 
   # Directories first, then files; alphabetical within each, case-insensitive.
   rows.sort(key=lambda r: (r["type"] != "directory", r["name"].lower()))
-  if after is not None:
-    rows = [r for r in rows if r["name"] > after]
-  page = rows[:limit]
+  page = rows[offset:offset + limit]
   next_cursor = None
-  if len(rows) > limit and page:
-    next_cursor = base64.urlsafe_b64encode(page[-1]["name"].encode()).decode()
+  if len(rows) > offset + limit:
+    nxt = str(offset + limit)
+    next_cursor = base64.urlsafe_b64encode(nxt.encode()).decode()
 
   return {
     "root": str(root),
@@ -304,7 +307,7 @@ def _is_writable(resolved: Path) -> bool:
   return parent.exists() and os.access(parent, os.W_OK)
 
 
-@router.put("/write")
+@router.put("/write", dependencies=[Depends(reject_cross_site)])
 def fs_write(
   path: str = Query(..., description="path relative to the data dir"),
   content: str = Body(..., media_type="text/plain"),
@@ -320,7 +323,9 @@ def fs_write(
   if path and "\x00" in path:
     raise HTTPException(status_code=400, detail="Invalid path.")
   resolved = validate_path_within_base((path or "").lstrip("/"), wroot)
-  if _is_denied(resolved, _fs_root()):
+  # Deny against the WRITE root (always /data), not the read view — a widened
+  # fs_view_root must never let a write reach a secret the read view exposes.
+  if _is_denied(resolved, wroot):
     raise HTTPException(status_code=403, detail="This file is protected.")
   if resolved.is_dir():
     raise HTTPException(status_code=400, detail="Path is a directory.")

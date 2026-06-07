@@ -127,3 +127,29 @@ def test_owner_required(client, fsroot):
   assert client.get("/api/fs/read", params={"path": "fstest/x"}).status_code == 401
   assert client.put("/api/fs/write", params={"path": "fstest/x"},
                     content="x").status_code == 401
+
+
+def test_tree_pagination_offset_cursor(client, auth, fsroot):
+  _, work, _ = fsroot
+  for i in range(7):
+    (work / f"f{i}.txt").write_text("x")
+  seen, cursor = [], None
+  for _ in range(10):  # guard against a runaway cursor
+    params = {"path": "fstest", "limit": 3}
+    if cursor:
+      params["cursor"] = cursor
+    d = client.get("/api/fs/tree", params=params, headers=auth).json()
+    seen += [e["name"] for e in d["entries"]]
+    cursor = d["next_cursor"]
+    if not cursor:
+      break
+  assert sorted(seen) == [f"f{i}.txt" for i in range(7)]
+  assert len(seen) == len(set(seen))  # every entry returned exactly once
+
+
+def test_write_rejects_cross_site(client, auth, fsroot):
+  # The reject_cross_site CSRF guard on PUT /write rejects a cross-site fetch.
+  r = client.put("/api/fs/write", params={"path": "fstest/x.txt"}, content="x",
+                 headers={**auth, "Content-Type": "text/plain",
+                          "Sec-Fetch-Site": "cross-site"})
+  assert r.status_code == 403
