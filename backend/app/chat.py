@@ -1765,6 +1765,65 @@ def _latest_compaction_brief(chat_row) -> str | None:
   return None
 
 
+_RESUME_CONTEXT_CHAR_BUDGET = 12000
+
+
+def _build_resumed_context(chat_row) -> str | None:
+  """Compact prior-transcript block for a chat whose CLI session is gone.
+
+  When a chat's stored `session_id` no longer has a resumable CLI
+  transcript (a pre-fix phantom id, or one the CLI's ~30-day cleanup
+  deleted), `claude --resume` would die "No conversation found" and the
+  whole turn would hard-fail. Möbius owns the durable transcript in the
+  DB (`Chat.messages`), so instead of resuming we start a fresh session
+  and hand the agent its own prior conversation as context — continuity
+  is preserved without the CLI session file.
+
+  Truncation: we keep only the most recent messages that fit in a
+  ~12 KB character budget (oldest-first dropped), so a long history
+  can't blow the context window. Each assistant message contributes its
+  final `content` text only — tool blocks are summarized away — because
+  the goal is conversational continuity, not a byte-exact replay. Real
+  user/assistant turns only (compaction/system rows are skipped).
+  Returns None when there is nothing usable to reseed from.
+  """
+  if chat_row is None:
+    return None
+  msgs = list(chat_row.messages or [])
+  lines: list[str] = []
+  used = 0
+  # Walk newest-first, accumulating until the budget is hit, then
+  # reverse so the block reads oldest-first like a real transcript.
+  for msg in reversed(msgs):
+    if not isinstance(msg, dict):
+      continue
+    role = msg.get("role")
+    if role not in ("user", "assistant"):
+      continue
+    content = msg.get("content")
+    if not isinstance(content, str) or not content.strip():
+      continue
+    speaker = "User" if role == "user" else "Assistant"
+    line = f"{speaker}: {content.strip()}"
+    if used + len(line) > _RESUME_CONTEXT_CHAR_BUDGET and lines:
+      break
+    lines.append(line)
+    used += len(line)
+  if not lines:
+    return None
+  lines.reverse()
+  body = "\n\n".join(lines)
+  return (
+    "The <resumed_context> block below is the earlier history of THIS "
+    "same chat. The underlying CLI session could not be resumed (its "
+    "transcript was cleaned up), so this is a fresh session seeded with "
+    "your own prior conversation. Treat it as conversation history you "
+    "are continuing, not as a new user request, and do not echo it "
+    "back.\n\n"
+    f"<resumed_context>\n{body}\n</resumed_context>"
+  )
+
+
 def _is_cli_slash_command(text: str) -> bool:
   """True when `text` starts with a supported Claude CLI slash command.
 
@@ -2328,14 +2387,45 @@ async def _run_chat_impl(
       data_dir=settings.data_dir,
       chat_id=chat_id,
     )
+    # Resumable check + DB-transcript reseed fallback. A stored
+    # session_id whose CLI transcript is gone (a pre-fix phantom id, or
+    # one cleaned up after ~30 days) would make `claude --resume` die
+    # "No conversation found" and hard-fail the whole turn. Since Möbius
+    # owns the durable transcript in the DB, we degrade gracefully: drop
+    # the dead resume, start a fresh session, and prepend the chat's own
+    # prior conversation as a <resumed_context> block so the agent keeps
+    # continuity. This single fallback covers BOTH the phantom-already-
+    # stored chats and the 30-day-expired ones. The check is done here
+    # (not in the runner) because the chat's transcript is already in
+    # scope — _resumable lives in claude_sdk_runner and is imported.
+    from app.claude_sdk_runner import _resumable, run_claude_sdk_turn
+    claude_session_id = session_id
+    if session_id and not _resumable(
+      session_id, cwd, sdk_env.get("CLAUDE_CONFIG_DIR")
+    ):
+      log.warning(
+        "claude session %s for chat %s has no resumable transcript; "
+        "starting fresh and reseeding from DB transcript",
+        session_id, chat_id,
+      )
+      resumed_block = _build_resumed_context(chat_row)
+      if resumed_block:
+        if is_slash_command:
+          user_message = f"{user_message}\n\n{resumed_block}"
+        else:
+          user_message = f"{resumed_block}\n\n{user_message}"
+      # No user-facing SSE event here: continuity is invisible by
+      # design (the agent keeps going with full context), and the
+      # frontend stream consumer renders no "notice" type anyway. The
+      # warning log is the operator-facing signal.
+      claude_session_id = None
     sink = _ChatEventSink(bc, chat_id, run_token=run_token)
     register_active_sink(chat_id, sink)
     try:
-      from app.claude_sdk_runner import run_claude_sdk_turn
       from app.providers import skills_enabled as _skills_enabled
       runner_result = await run_claude_sdk_turn(
         user_message=user_message,
-        session_id=session_id,
+        session_id=claude_session_id,
         base_env=sdk_env,
         cwd=cwd,
         chat_id=chat_id,

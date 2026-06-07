@@ -58,6 +58,7 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 from typing import Any
 from uuid import uuid4
 
@@ -107,6 +108,38 @@ async def _persist_session_id(db, chat_id: str, session_id: str | None) -> None:
       session_id,
       exc_info=True,
     )
+
+
+def _resumable(
+  session_id: str | None, cwd: str, config_dir: str | None = None
+) -> bool:
+  """True iff a transcript .jsonl for session_id exists for this cwd.
+
+  `claude --resume <id>` reads the transcript the CLI stored under
+  `<CLAUDE_CONFIG_DIR>/projects/<encoded-cwd>/<id>.jsonl`, where the
+  project dir encodes the cwd by stripping the leading slash and
+  replacing every `/` with `-` (cwd `/data` -> `-data`, cwd
+  `/data/apps/news-2` -> `-data-apps-news-2`). A stored id can fail to
+  resolve two ways, both of which make `--resume` die "No conversation
+  found" (exit 1): a pre-fix PHANTOM id (the codex plugin's SessionStart
+  hook minted an id that got a `session-env/<id>` dir but never a
+  transcript), or a real id whose transcript the CLI's ~30-day cleanup
+  has since deleted. Callers use this to fall back to a DB-transcript
+  reseed instead of letting the turn hard-fail.
+
+  The `-data` derivation is verified against prod: every stored
+  session id that resolves on disk lives under `projects/-data/`, and
+  `fork-chat.sh` resumes chat sessions from the same `/data` cwd.
+  """
+  if not session_id:
+    return False
+  base = config_dir or os.environ.get("CLAUDE_CONFIG_DIR", "")
+  if not base:
+    return False
+  proj = "-" + cwd.strip("/").replace("/", "-")
+  return os.path.isfile(
+    os.path.join(base, "projects", proj, f"{session_id}.jsonl")
+  )
 
 
 class ActiveClaudeClient:
@@ -709,9 +742,22 @@ async def run_claude_sdk_turn(
 
       while True:
         async for sdk_msg in client.receive_response():
-          incoming_session_id = getattr(sdk_msg, "session_id", None)
-          if incoming_session_id and incoming_session_id != current_session_id:
-            await _persist_session_id(db, chat_id, incoming_session_id)
+          # Persist the session id ONLY from real conversation messages.
+          # SystemMessage and its subclasses — notably HookEventMessage,
+          # which the codex plugin's SessionStart hook emits on every
+          # resumed turn — carry a PHANTOM session id that gets a
+          # `session-env/<id>` dir but never a transcript `.jsonl`.
+          # Persisting that phantom overwrites Chat.session_id with an id
+          # the CLI cannot resume, so the next turn dies "No conversation
+          # found". Only StreamEvent/Assistant/User/Result carry the
+          # resumable id (the same types dispatch advances the session from).
+          if isinstance(
+            sdk_msg,
+            (StreamEvent, AssistantMessage, UserMessage, ResultMessage),
+          ):
+            incoming_session_id = getattr(sdk_msg, "session_id", None)
+            if incoming_session_id and incoming_session_id != current_session_id:
+              await _persist_session_id(db, chat_id, incoming_session_id)
           current_session_id, terminal = dispatch_sdk_message(
             sdk_msg, bc, current_session_id,
           )

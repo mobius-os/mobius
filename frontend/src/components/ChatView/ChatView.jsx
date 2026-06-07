@@ -137,6 +137,15 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // (the model + effort picker inside the `+` popover). Stays null
   // until the fetch lands; the picker simply hides until then.
   const [chatInfo, setChatInfo] = useState(null)
+  // The question_id of the AskUserQuestion the runner is currently parked
+  // on, set from the live SSE `question` event (onLiveQuestion). It is a
+  // FAST-PATH HINT only, never the sole gate: the backend does not persist
+  // a `pending_question_id`, so on a fresh load / navigate-back it is null
+  // (we never saw the live event), and answerability falls back to the
+  // durable "tail unanswered question of the last assistant message"
+  // invariant. See isQuestionAnswerable in the render. (The `cached`
+  // read is forward-compat: harmlessly null today, it would pick up a
+  // persisted pending_question_id if one is ever added.)
   const [liveQuestionId, setLiveQuestionId] = useState(() => cached?.pending_question_id ?? null)
 
   // Mirror `messages` in a ref so commitMessages can compute the next
@@ -1487,14 +1496,36 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                 && sending && streamItems.length > 0) {
               return null
             }
+            // A question is answerable while the runner is parked on it,
+            // waiting for the answer. The runner BLOCKS the turn on the
+            // AskUserQuestion future until it is answered, so an unanswered
+            // question that is still the TAIL of the last assistant message
+            // means the runner is parked right there — nothing follows it
+            // until the answer arrives.
+            //
+            // That invariant is fully DURABLE: it reads only the persisted
+            // message blocks, so it survives a reload AND Möbius's
+            // kill-on-question `done` (the SSE closes the moment a question
+            // fires, but the runner keeps waiting). Gating on the live
+            // stream instead — an earlier version required `isStreaming`,
+            // which flips false on that `done` — is exactly what wedged the
+            // card disabled-forever. `liveQuestionId`, when the live stream
+            // handed it to us, is an extra precision filter; after a reload
+            // we may never have seen it, and then the tail-unanswered
+            // invariant stands on its own.
+            //
+            // MsgContent enforces the "tail block" half (the question is the
+            // LAST block): once the turn truly ends or `reconcile` appends an
+            // interrupted-turn note, a block follows the question and it
+            // stops being answerable, so a dead/orphaned turn's card doesn't
+            // linger. Double-submit is prevented by QuestionCard's own
+            // `submitted` state + doSendSilent's synchronous sendingRef flip.
             const isQuestionAnswerable = (block) => (
               msg.role === 'assistant'
               && block?.type === 'question'
               && isLastMsg
-              && !sending
               && !block.answers
-              && !!liveQuestionId
-              && block.question_id === liveQuestionId
+              && (!liveQuestionId || block.question_id === liveQuestionId)
             )
             // Stable per-message DOM key for the scroll state machine.
             // data-key is queried by applyMode when restoring an

@@ -637,4 +637,140 @@ test.describe('Stream reconnection', () => {
     })
     expect(streamRequestCount).toBeGreaterThanOrEqual(3)
   })
+
+  test('10. Reload of a running chat frozen on a question renders an ANSWERABLE card', async ({ page }) => {
+    // Regression for the wedged-chat bug: a chat whose agent turn is
+    // frozen on an unanswered AskUserQuestion, reopened via deep link.
+    // The persisted last assistant message ends in a `question` block;
+    // the chat is `running:true`. Before the fix, ChatView restored
+    // `liveQuestionId` only from the live SSE `question` event, and the
+    // load path set `sending:true` — so the persisted question card
+    // rendered through the DISABLED gate (`!sending && liveQuestionId`)
+    // and the user could never answer, leaving the turn frozen forever
+    // (prod symptom: GET /chats + /stream reconnects but never a POST
+    // carrying answers).
+    //
+    // This test models the prod symptom faithfully: the /stream
+    // catch-up is EMPTY (no text, no `question` event — just the
+    // catch_up_done marker) and the connection holds open. So
+    // `streamItems` stays empty (the bridge suppression that hides the
+    // persisted last-assistant message never fires — it requires
+    // streamItems.length > 0), the persisted question block renders
+    // through the normal messages.map path, and `liveQuestionId` is
+    // never set by the stream. Pre-fix that path disabled the card
+    // (`!sending` was false because the load set sending:true). Post-fix
+    // it is answerable, derived from the durable persisted block + the
+    // running stream (isStreaming), and answering MUST POST the answer.
+    const CHAT_ID = '11111111-1111-1111-1111-111111111111'
+    const QUESTION_ID = 'q-frozen-1'
+    const TURN_TS = 1700000000000
+
+    let answerPosted = null
+
+    // Initial chat load: a running chat whose last assistant message is
+    // frozen on an unanswered question. Crucially `pending_question_id`
+    // is null (the live in-process registry hint is absent — the path
+    // that used to wedge), forcing the durable fallback.
+    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=20$/, route => {
+      if (route.request().method() !== 'GET') { route.continue(); return }
+      route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: CHAT_ID,
+          title: 'frozen chat',
+          messages: [
+            { role: 'user', content: 'help me pick', ts: TURN_TS - 1000 },
+            {
+              role: 'assistant',
+              ts: TURN_TS,
+              blocks: [
+                { type: 'text', content: 'A couple of choices:' },
+                {
+                  type: 'question',
+                  question_id: QUESTION_ID,
+                  questions: [
+                    {
+                      question: 'Which color?',
+                      options: [{ label: 'Red' }, { label: 'Blue' }],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+          pending_messages: [],
+          total: 2,
+          offset: 0,
+          running: true,
+          pending_question_id: null,
+          session_id: 'sess-1',
+          provider: 'claude',
+        }),
+      })
+    })
+
+    // The /stream catch-up is EMPTY (just catch_up_done) and the body
+    // holds open indefinitely — the turn is parked on the question
+    // future, so no `done` and no `question` event ever arrives.
+    // `streamItems` stays empty (no live card, no bridge suppression),
+    // `liveQuestionId` is never set by the stream, and `isStreaming`
+    // stays true. We use a never-resolving ReadableStream so the EOF
+    // reconnect loop doesn't churn — the connection just stays open the
+    // way a real parked turn's SSE does.
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async route => {
+      const body = [
+        'data: {"type":"catch_up_done"}\n\n',
+      ].join('')
+      await route.fulfill({
+        status: 200,
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          // A chunked SSE response that Playwright keeps open: fulfilling
+          // with a finite body still signals EOF, which would re-arm the
+          // reconnect. That's fine — every reconnect replays the same
+          // empty catch-up, isStreaming stays true throughout, and the
+          // persisted card stays answerable. We assert on that steady
+          // state.
+        },
+        body,
+      })
+    })
+
+    // Capture the answer POST so we can assert it carries the answers.
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
+      if (route.request().method() !== 'POST') { route.continue(); return }
+      try { answerPosted = route.request().postDataJSON() } catch { answerPosted = null }
+      route.fulfill({
+        status: 202,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'answer_delivered', chat_id: CHAT_ID }),
+      })
+    })
+
+    await page.setViewportSize({ width: 412, height: 915 })
+    await page.goto(`${BASE}/shell/?chat=${CHAT_ID}`, {
+      waitUntil: 'domcontentloaded',
+    })
+
+    // The persisted question card renders.
+    await expect(page.locator('.qcard')).toBeVisible({ timeout: 10000 })
+
+    // The option buttons must be ENABLED (the bug rendered them
+    // disabled). Pick an answer + submit.
+    const redBtn = page.getByRole('radio', { name: 'Red' })
+    await expect(redBtn).toBeEnabled({ timeout: 5000 })
+    await redBtn.click()
+
+    const submitBtn = page.getByRole('button', { name: 'Submit' })
+    await expect(submitBtn).toBeEnabled()
+    await submitBtn.click()
+
+    // Answering MUST POST the answer payload (the turn unfreezes).
+    await expect.poll(() => answerPosted, { timeout: 5000 }).not.toBeNull()
+    expect(answerPosted.answers).toBeTruthy()
+    expect(answerPosted.question_id).toBe(QUESTION_ID)
+    expect(JSON.stringify(answerPosted.answers)).toContain('Red')
+  })
 })
