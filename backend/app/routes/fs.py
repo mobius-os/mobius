@@ -107,7 +107,11 @@ def _is_denied(resolved: Path, root: Path) -> bool:
   if rel == "":
     return False  # the root itself
   for d in _DENY_RELPATHS:
-    if rel == d or rel.startswith(d + "/"):
+    # `d + "-"` denies a file's sidecars alongside the file itself — chiefly
+    # SQLite's WAL-mode companions db/ultimate.db-wal / -shm / -journal, which
+    # hold live pages of the very rows db/ultimate.db protects (password hash,
+    # encrypted keys, chats). Without this the sidecars read raw + list openly.
+    if rel == d or rel.startswith(d + "/") or rel.startswith(d + "-"):
       return True
   return any(part in _SECRET_NAMES for part in Path(rel).parts)
 
