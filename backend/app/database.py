@@ -131,6 +131,14 @@ def run_migrations(eng) -> None:
     with eng.connect() as conn:
       conn.execute(text("ALTER TABLE apps ADD COLUMN version VARCHAR(32) NULL"))
       conn.commit()
+  if "embeds_agent" not in apps_cols:
+    # The app mounts an embedded agent chat — see models.App.embeds_agent.
+    # Existing rows default false; backfill on their next install/update.
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN embeds_agent BOOLEAN NOT NULL DEFAULT 0"
+      ))
+      conn.commit()
   if "theme_color" not in apps_cols:
     with eng.connect() as conn:
       conn.execute(text("ALTER TABLE apps ADD COLUMN theme_color VARCHAR(16) NULL"))

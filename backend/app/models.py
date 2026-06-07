@@ -295,6 +295,11 @@ class App(Base):
   # apps. The flag is a declaration, not a firewall (design philosophy
   # §4 "code empowers the agent; it does not police it").
   offline_capable = Column(Boolean, nullable=False, default=False)
+  # Declared in the manifest as `embeds_agent`: the app mounts the agent
+  # chat inside itself (e.g. LaTeX, Workout, the Editor). Purely informational
+  # — the store + drawer surface a small "agent" badge so the owner knows
+  # which apps drive a sub-agent. Not a permission.
+  embeds_agent = Column(Boolean, nullable=False, default=False)
   # Chat-log read tier this app's token may request against
   # GET /api/chat-logs. Read at request time (not baked into the JWT)
   # so flipping it revokes access on the very next request — the

@@ -1124,6 +1124,7 @@ async def install_from_manifest(
         # — apps that paid the cost of being offline-ready in code
         # didn't actually behave offline-ready end-to-end.
         offline_capable=bool(manifest.get("offline_capable", False)),
+        embeds_agent=bool(manifest.get("embeds_agent", False)),
       )
       db.add(app)
       db.flush()  # assign app.id without committing yet
@@ -1280,6 +1281,8 @@ async def install_from_manifest(
         app.manage_apps = bool(perms["manage_apps"])
       if "offline_capable" in manifest:
         app.offline_capable = bool(manifest["offline_capable"])
+      if "embeds_agent" in manifest:
+        app.embeds_agent = bool(manifest["embeds_agent"])
 
     # Compile the JSX OUT OF PLACE to a staging file and promote it into the
     # live bundle only AFTER the DB commit (commit_actions run post-commit). So
