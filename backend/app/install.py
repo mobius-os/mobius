@@ -271,9 +271,23 @@ def _validate_repo_relative_path(path: str, field: str) -> None:
   The public schema says entry/icon/job/string storage seeds are paths within
   the manifest repo. Enforcing that here keeps community-manifest mistakes as
   clean 400s instead of fetching odd concatenated URLs or surfacing later 500s.
+
+  For `storage_seeds` the rejection also names the contract: a string value is
+  a path, a non-string is an inline JSON literal. Authors routinely reach for a
+  string to inline file content (HTML/CSS/JS), which trips this check on the
+  first scheme/fragment in the markup — a bare "must be a relative path" then
+  reads as a typo rather than the wrong shape. The hint teaches the fork.
   """
+  seed_hint = (
+    " For storage_seeds, a string value is a repo-relative path that the"
+    " installer fetches, not inline content. To seed literal text, put it in"
+    " a repo file and point this key at that path; to store an inline JSON"
+    " value, use a non-string (object/array/number/bool/null)."
+  ) if field.startswith("storage_seeds.") else ""
   if not isinstance(path, str) or not path:
-    raise HTTPException(400, f"Manifest `{field}` must be a non-empty string.")
+    raise HTTPException(
+      400, f"Manifest `{field}` must be a non-empty string.{seed_hint}"
+    )
   parsed = urlparse(path)
   if (
     parsed.scheme or parsed.netloc or parsed.query or parsed.fragment or
@@ -281,18 +295,21 @@ def _validate_repo_relative_path(path: str, field: str) -> None:
   ):
     raise HTTPException(
       400,
-      f"Manifest `{field}` must be a relative path inside the app repo.",
+      f"Manifest `{field}` must be a relative path inside the app repo."
+      f"{seed_hint}",
     )
   parts = [unquote(part) for part in path.split("/")]
   if any(part in ("", ".", "..") for part in parts):
     raise HTTPException(
       400,
-      f"Manifest `{field}` must not contain empty, '.', or '..' segments.",
+      f"Manifest `{field}` must not contain empty, '.', or '..' segments."
+      f"{seed_hint}",
     )
   if any("/" in part or "\\" in part for part in parts):
     raise HTTPException(
       400,
-      f"Manifest `{field}` must not contain encoded path separators.",
+      f"Manifest `{field}` must not contain encoded path separators."
+      f"{seed_hint}",
     )
 
 

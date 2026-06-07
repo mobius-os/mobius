@@ -874,6 +874,42 @@ def test_install_rejects_non_repo_relative_manifest_asset_paths(
   assert expected_field in r.json()["detail"]
 
 
+def test_storage_seeds_inline_content_400_teaches_the_contract(client, auth):
+  """A string seed value that is really inline content fails the path check,
+  and the 400 names the path-vs-inline-JSON contract — not just "must be a
+  relative path" — so the author sees the wrong shape, not a phantom typo.
+  This is the footgun that made Web Studio mis-encode its starter files."""
+  inline_html = '<!DOCTYPE html>\n<a href="#features">hi</a>\n'
+  manifest = {
+    **MANIFEST_NEWS,
+    "id": "seed-inline-content",
+    "storage_seeds": {"files/index.html": inline_html},
+  }
+  r = client.post("/api/apps/install", headers=auth, json={
+    "manifest": manifest,
+    "raw_base": "https://raw.githubusercontent.com/x/app/main/",
+  })
+  assert r.status_code == 400
+  detail = r.json()["detail"]
+  assert "storage_seeds.files/index.html" in detail
+  assert "non-string" in detail and "installer fetches" in detail
+
+
+def test_non_seed_path_rejection_omits_the_seed_hint(client, auth):
+  """The seed-specific teaching hint attaches only to storage_seeds fields;
+  entry/icon/static_assets strings are always paths, so their 400 stays
+  generic and never mentions storage_seeds."""
+  manifest = {**MANIFEST_NEWS, "id": "bad-entry-path", "entry": "../index.jsx"}
+  r = client.post("/api/apps/install", headers=auth, json={
+    "manifest": manifest,
+    "raw_base": "https://raw.githubusercontent.com/x/app/main/",
+  })
+  assert r.status_code == 400
+  detail = r.json()["detail"]
+  assert "entry" in detail
+  assert "storage_seeds" not in detail
+
+
 def test_install_rejects_both_manifest_and_url(client, auth):
   r = client.post("/api/apps/install", headers=auth, json={
     "manifest_url": "https://x/m.json",
