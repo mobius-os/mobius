@@ -51,8 +51,13 @@ export default function MsgContent({
           }
           if (block.type === 'question') {
             const answers = block.answers
+            // Only the LAST block's question is the one the runner is parked
+            // on (see isQuestionAnswerable in ChatView). A question with any
+            // block after it — the turn continued, or `reconcile` appended an
+            // interrupted-turn note — is history, not the live prompt.
+            const isTailBlock = i === msg.blocks.length - 1
             const answerable = !!(
-              onQuestionAnswer && isQuestionAnswerable?.(block)
+              onQuestionAnswer && isTailBlock && isQuestionAnswerable?.(block)
             )
             return (
               <div key={i}>
