@@ -258,6 +258,20 @@
   text-overflow: ellipsis;
 }
 
+/* Quiet marker on apps that embed an agent (Editor, Web Studio, LaTeX,
+   Workout, Dreaming). A small accent dot — the App Store carries the
+   explicit "agent" text badge; the drawer just needs a recognisable
+   tag without crowding the row. */
+.drawer__item-agent {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  opacity: 0.9;
+}
+
 /* Trailing pin badge on pinned rows — small, muted, sits flush to
    the row's right edge. Doesn't compete with the chat title; just
    signals the row is in the pinned group. */
