@@ -252,3 +252,22 @@ def test_tombstoned_app_cannot_mint_token(
   r = client.post("/api/auth/app-token", json={"app_id": app_id},
                   headers={"Authorization": f"Bearer {owner_token}"})
   assert r.status_code == 404
+
+
+def test_tombstoned_app_no_slug_redirect_or_static(
+  client, auth, bypass_url_validation,
+):
+  """The /<slug> alias redirect and /app-assets static resolver both treat a
+  tombstoned app as absent (feature 110)."""
+  from app.main import (
+    _top_level_app_slug_alias, _app_source_dir_for_static_asset,
+  )
+  app = _install(client, auth)
+  app_id, slug = app["id"], app["slug"]
+  assert _top_level_app_slug_alias(slug) == slug
+  assert _app_source_dir_for_static_asset(slug=slug) is not None
+
+  assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
+  assert _top_level_app_slug_alias(slug) is None
+  assert _app_source_dir_for_static_asset(slug=slug) is None
+  assert _app_source_dir_for_static_asset(app_id=app_id) is None
