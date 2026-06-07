@@ -652,8 +652,9 @@ function DrawerRow({
                   Delete
                 </Menu.Item>
               ) : (
-                // Apps are hard-deleted (no recovery), so we need a
-                // confirm step. `preventDefault` on onSelect stops
+                // Deleting an app is a reversible soft-delete (the agent
+                // can recover it for 7 days, like a chat), but we still
+                // want a confirm step. `preventDefault` on onSelect stops
                 // Radix from auto-closing the menu when the item is
                 // selected — we want the menu to stay open and swap
                 // to the confirm-chip below.
@@ -697,11 +698,9 @@ function DrawerRow({
               </div>
             </div>
           )}
-          {kind === 'chat' && (
-            <p className="drawer__menu-note">
-              The agent can recover deleted chats for 7 days.
-            </p>
-          )}
+          <p className="drawer__menu-note">
+            The agent can recover deleted {kind === 'chat' ? 'chats' : 'apps'} for 7 days.
+          </p>
         </Menu.Content>
       </Menu>
     </div>

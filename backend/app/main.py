@@ -553,7 +553,13 @@ def _top_level_app_slug_alias(path: str) -> str | None:
     return None
   db = SessionLocal()
   try:
-    exists = db.query(models.App.id).filter(models.App.slug == slug).first()
+    # Only LIVE apps redirect — a tombstoned (soft-deleted) app's `/<slug>`
+    # shouldn't bounce to a now-404 standalone route (feature 110).
+    exists = (
+      db.query(models.App.id)
+      .filter(models.App.slug == slug, models.App.deleted_at.is_(None))
+      .first()
+    )
     return slug if exists else None
   finally:
     db.close()
@@ -564,7 +570,11 @@ def _app_source_dir_for_static_asset(
 ) -> str | None:
   db = SessionLocal()
   try:
-    query = db.query(models.App.source_dir)
+    # Tombstoned apps don't serve their /app-assets/ static files either —
+    # consistent with the frame/module/standalone routes (feature 110).
+    query = db.query(models.App.source_dir).filter(
+      models.App.deleted_at.is_(None)
+    )
     if app_id is not None:
       row = query.filter(models.App.id == app_id).first()
     elif slug is not None:

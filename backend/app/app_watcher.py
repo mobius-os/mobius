@@ -190,8 +190,9 @@ class _JsxHandler(FileSystemEventHandler):
           .filter(models.App.source_dir == source_dir)
           .first()
         )
-        if app is None:
-          return  # No such app — nothing to do.
+        if app is None or app.deleted_at is not None:
+          return  # No such app, or it's tombstoned — don't recompile/revive
+          # a soft-deleted app's source touched during the recovery window.
         if skip_unchanged_entry and app.jsx_source == jsx_source:
           return  # Already compiled — nothing to do.
         app_id = app.id
@@ -209,7 +210,7 @@ class _JsxHandler(FileSystemEventHandler):
             db.query(models.App).populate_existing()
             .filter(models.App.id == app_id).first()
           )
-          if app is None or app.source_dir != source_dir:
+          if app is None or app.deleted_at is not None or app.source_dir != source_dir:
             return
           try:
             jsx_source = index_path.read_text(encoding="utf-8")
