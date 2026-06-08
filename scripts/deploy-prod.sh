@@ -19,6 +19,13 @@
 #   scripts/deploy-prod.sh --target=test    # redirect to mobius-test (port 8001) instead of prod
 #   scripts/deploy-prod.sh --check          # verify-only: bundle hash, internal health, public health
 #
+# Env knobs (seconds; both default 120):
+#   PREFLIGHT_WAIT_SECONDS  how long the scratch-container preflight waits for boot
+#   CUTOVER_WAIT_SECONDS    how long the LIVE cutover health/ready checks wait
+#                           before rolling back. Raise it on a memory-thrashing
+#                           host so a slow-but-healthy boot doesn't false-fail
+#                           (e.g. CUTOVER_WAIT_SECONDS=240 scripts/deploy-prod.sh).
+#
 # Safety: only the `docker compose build` step prompts (it's slow and
 # has OOM'd this 7.6GB host before). Everything else auto-proceeds.
 
@@ -32,6 +39,15 @@ CHECK_ONLY=0
 BUILT_THIS_RUN=0  # set to 1 once we actually build, so the verify step only
                   # compares the served SHA when THIS run produced the image
 PREFLIGHT_WAIT_SECONDS="${PREFLIGHT_WAIT_SECONDS:-120}"
+# How long the LIVE cutover health/ready checks wait before giving up and
+# rolling back. Same knob shape as PREFLIGHT_WAIT_SECONDS. On the memory-tight
+# 7.6GB host, a freshly-recreated container with a populated /data volume can
+# take well over a minute to bind uvicorn when the build's memory hasn't fully
+# released and sibling containers are thrashing — a slow-but-healthy boot, not
+# a crash. The window must outlast that stall, or the deploy false-fails and
+# rolls back an image that was about to come up fine. Override upward on a
+# heavily-loaded host (e.g. CUTOVER_WAIT_SECONDS=240).
+CUTOVER_WAIT_SECONDS="${CUTOVER_WAIT_SECONDS:-120}"
 for arg in "$@"; do
   case "$arg" in
     --target=prod) TARGET="prod" ;;
@@ -242,6 +258,18 @@ ready_code() {
   docker exec "$CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/ready'" 2>/dev/null || echo "000"
 }
 
+# Docker's restart counter for the live container, as an integer. This is the
+# real "is the new image actually crash-looping?" signal: the preflight already
+# proved the image BOOTS in a scratch box, so during cutover a climbing
+# RestartCount means the container died and Docker is restarting it (a genuine
+# boot failure → roll back now), whereas a steady count that simply hasn't
+# served /api/health yet is a slow-but-healthy boot under memory pressure (keep
+# waiting). Returns -1 if inspect fails so a transient inspect error can't be
+# mistaken for "no restarts."
+container_restart_count() {
+  docker inspect -f '{{.RestartCount}}' "$CONTAINER" 2>/dev/null || echo "-1"
+}
+
 # ── --check shortcut: verification-only, no deploy ─────────────────────
 if [ "$CHECK_ONLY" = "1" ]; then
   step "[check] verifying ${CONTAINER}"
@@ -347,7 +375,7 @@ attempt_rollback() {
     fail "rollback: 'compose up -d --force-recreate' failed — recover ${CONTAINER} manually."
     return 1
   fi
-  for i in $(seq 1 120); do
+  for i in $(seq 1 "$CUTOVER_WAIT_SECONDS"); do
     code=$(docker exec "$CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/health'" 2>/dev/null || echo "000")
     if [ "$code" = "200" ]; then
       ok "rolled back — ${CONTAINER} healthy on the previous image again"
@@ -355,8 +383,58 @@ attempt_rollback() {
     fi
     sleep 1
   done
-  fail "rollback did not restore health within 30s — manual intervention required."
+  fail "rollback did not restore health within ${CUTOVER_WAIT_SECONDS}s — manual intervention required."
   return 1
+}
+
+# Wait for a live-container probe to return 200, then roll back + exit if it
+# never does. Consolidates the four formerly-near-identical cutover waits so
+# the window is honest and configurable in ONE place. Args:
+#   $1 probe command (a string eval'd each poll; must echo an HTTP status)
+#   $2 success label   (e.g. "healthy", "writer ready")
+#   $3 failure summary (printed before rollback, names what didn't come up)
+#
+# Two behaviors replace the old `for i in $(seq 1 120); … if [ "$i" = "30" ]`
+# loops, whose 120 bound was dead code: the i==30 trap rolled back at 30s, so
+# despite the "waiting up to 120s" message a slow-but-healthy boot false-failed
+# at 30s (card 116). Now:
+#   1. Configurable window — poll up to CUTOVER_WAIT_SECONDS (default 120), so a
+#      slow real-data boot under memory pressure has room to bind before we
+#      give up; override upward on a thrashing host.
+#   2. Adaptive early rollback — if Docker's RestartCount climbs above where it
+#      sat when the wait began, the container is genuinely crash-looping (not
+#      just slow), so roll back immediately instead of burning the full window.
+#      The preflight already proved the image boots, so a restart here is a real
+#      runtime failure (bad migration on the populated volume, OOM-kill), worth
+#      catching fast — while a steady count keeps waiting through a slow boot.
+wait_for_cutover() {
+  local probe="$1" ok_label="$2" fail_summary="$3"
+  local code="000" baseline_restarts now_restarts i
+  baseline_restarts=$(container_restart_count)
+  for i in $(seq 1 "$CUTOVER_WAIT_SECONDS"); do
+    code=$(eval "$probe")
+    if [ "$code" = "200" ]; then
+      ok "${ok_label} after ${i}s"
+      return 0
+    fi
+    # Crash-loop detection: a RestartCount above the baseline means the
+    # container died and Docker restarted it — a genuine boot failure, not a
+    # slow bind. Roll back now rather than wait out the whole window. Guard
+    # against the -1 inspect-error sentinel so a transient inspect hiccup
+    # doesn't trip a false crash-loop verdict.
+    now_restarts=$(container_restart_count)
+    if [ "$now_restarts" -ge 0 ] 2>/dev/null &&
+       [ "$baseline_restarts" -ge 0 ] 2>/dev/null &&
+       [ "$now_restarts" -gt "$baseline_restarts" ]; then
+      fail "${fail_summary} (last: ${code}); ${CONTAINER} restarted $((now_restarts - baseline_restarts))× — it is crash-looping, not just slow."
+      attempt_rollback || true
+      exit 1
+    fi
+    sleep 1
+  done
+  fail "${fail_summary} after ${CUTOVER_WAIT_SECONDS}s (last: ${code}) — the new image is not serving."
+  attempt_rollback || true
+  exit 1
 }
 
 # ── prod source-safety guard ────────────────────────────────────────────
@@ -524,40 +602,20 @@ else
   intent "docker compose ${COMPOSE_ARGS[*]} up -d"
   docker compose "${COMPOSE_ARGS[@]}" up -d
 fi
-info "waiting up to 120s for ${INTERNAL_BASE}/api/health"
-for i in $(seq 1 120); do
-  code=$(docker exec "$CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/health'" 2>/dev/null || echo "000")
-  if [ "$code" = "200" ]; then
-    ok "healthy after ${i}s"
-    break
-  fi
-  sleep 1
-  if [ "$i" = "30" ]; then
-    fail "health check never returned 200 (last: ${code}) — the new image is not serving."
-    attempt_rollback || true
-    exit 1
-  fi
-done
+info "waiting up to ${CUTOVER_WAIT_SECONDS}s for ${INTERNAL_BASE}/api/health"
+wait_for_cutover \
+  "docker exec \"\$CONTAINER\" sh -c \"curl -s -o /dev/null -w '%{http_code}' '\${INTERNAL_BASE}/api/health'\" 2>/dev/null || echo 000" \
+  "healthy" \
+  "health check never returned 200"
 
 # Liveness alone is not enough: the chat-persistence writer must be ready
 # (started, alive, not fatal, not stopping) or every chat write fails on a
-# process that still answers /api/health 200. Give it the same 120s budget —
+# process that still answers /api/health 200. Give it the same budget —
 # start_writer runs in the lifespan before serving, so this is normally
 # already 200 by the time /api/health was.
-info "waiting up to 120s for ${INTERNAL_BASE}/api/ready"
-for i in $(seq 1 120); do
-  rcode=$(ready_code)
-  if [ "$rcode" = "200" ]; then
-    ok "writer ready after ${i}s"
-    break
-  fi
-  sleep 1
-  if [ "$i" = "30" ]; then
-    fail "readiness check never returned 200 (last: ${rcode}) — the chat-persistence writer is not serving."
-    attempt_rollback || true
-    exit 1
-  fi
-done
+info "waiting up to ${CUTOVER_WAIT_SECONDS}s for ${INTERNAL_BASE}/api/ready"
+wait_for_cutover "ready_code" "writer ready" \
+  "readiness check never returned 200 — the chat-persistence writer is not serving"
 
 # ── step 3: refresh /data/shell/{src,dist} so new bundle isn't masked ──
 # The data volume survives the container recreation. /data/shell/dist/
@@ -590,34 +648,14 @@ docker exec "$CONTAINER" bash /app/scripts/rebuild_shell.sh
 # restarts. See "Shell rebuild + static-dir resolution" in CLAUDE.md.
 intent "docker restart ${CONTAINER}  # so main.py re-resolves _static_dir"
 docker restart "$CONTAINER" >/dev/null
-info "waiting up to 120s for ${INTERNAL_BASE}/api/health after restart"
-for i in $(seq 1 120); do
-  code=$(docker exec "$CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/health'" 2>/dev/null || echo "000")
-  if [ "$code" = "200" ]; then
-    ok "healthy after ${i}s"
-    break
-  fi
-  sleep 1
-  if [ "$i" = "30" ]; then
-    fail "post-restart health check never returned 200 (last: ${code})"
-    attempt_rollback || true
-    exit 1
-  fi
-done
-info "waiting up to 120s for ${INTERNAL_BASE}/api/ready after restart"
-for i in $(seq 1 120); do
-  rcode=$(ready_code)
-  if [ "$rcode" = "200" ]; then
-    ok "writer ready after ${i}s"
-    break
-  fi
-  sleep 1
-  if [ "$i" = "30" ]; then
-    fail "post-restart readiness check never returned 200 (last: ${rcode}) — the chat-persistence writer is not serving."
-    attempt_rollback || true
-    exit 1
-  fi
-done
+info "waiting up to ${CUTOVER_WAIT_SECONDS}s for ${INTERNAL_BASE}/api/health after restart"
+wait_for_cutover \
+  "docker exec \"\$CONTAINER\" sh -c \"curl -s -o /dev/null -w '%{http_code}' '\${INTERNAL_BASE}/api/health'\" 2>/dev/null || echo 000" \
+  "healthy" \
+  "post-restart health check never returned 200"
+info "waiting up to ${CUTOVER_WAIT_SECONDS}s for ${INTERNAL_BASE}/api/ready after restart"
+wait_for_cutover "ready_code" "writer ready" \
+  "post-restart readiness check never returned 200 — the chat-persistence writer is not serving"
 
 # ── step 4: verify bundle rotated + endpoints respond ──────────────────
 step "[4/4] verify"
