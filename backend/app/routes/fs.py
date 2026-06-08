@@ -61,16 +61,21 @@ _WRITE_MAX = 5 * 1024 * 1024
 _GIT_TIMEOUT = 30
 _GIT_LIST_CAP = 200  # per-category status list cap; counts stay exact
 
-# Secret paths relative to the FS root. A resolved path at or under any of
-# these is never read/written/git'd (403) and is omitted from listings
-# (reported in `redacted`). The DB stays *listable* (size visible) but not
-# raw-readable — the /recover backup is the right channel for a consistent copy.
+# Paths relative to the FS root that the viewer never reads/writes/git's
+# (403) and omits from listings (reported in `redacted`). Mostly secrets;
+# `.storage-meta` is the one non-secret entry — it's the storage layer's
+# internal MIME-sidecar tree (routes/storage.py), kept out of the owner's
+# File Explorer so it can't be mistaken for app data or hand-edited (the card
+# 085 contract that sidecars never leak into listings or agent edits). The DB
+# stays *listable* (size visible) but not raw-readable — the /recover backup
+# is the right channel for a consistent copy.
 _DENY_RELPATHS = (
   "cli-auth",
   "service-token.txt",
   ".secret-key",
   ".env",
   "db/ultimate.db",
+  ".storage-meta",
 )
 # Defense in depth: a secret-shaped filename anywhere in the tree is denied,
 # in case one is copied outside its canonical home.
