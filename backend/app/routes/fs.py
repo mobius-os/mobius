@@ -360,6 +360,40 @@ def fs_write(
           ).isoformat().replace("+00:00", "Z")}
 
 
+@router.delete("/delete", dependencies=[Depends(reject_cross_site)])
+def fs_delete(
+  path: str = Query(..., description="path relative to the data dir"),
+  _owner: models.Owner = Depends(get_current_owner),
+):
+  """Delete a single file under `/data`.
+
+  Owner-only, same bounded surface as fs_write: a path outside the data dir, a
+  denied secret, or a root-owned platform file is refused (403) rather than
+  acted on. Directories are refused (400) — this is a file delete, not a
+  recursive tree removal, so a mistaken path can't wipe a folder."""
+  wroot = _write_root()
+  if path and "\x00" in path:
+    raise HTTPException(status_code=400, detail="Invalid path.")
+  resolved = validate_path_within_base((path or "").lstrip("/"), wroot)
+  # Deny against the WRITE root (always /data) — same invariant as fs_write.
+  if _is_denied(resolved, wroot):
+    raise HTTPException(status_code=403, detail="This file is protected.")
+  if not resolved.exists():
+    raise HTTPException(status_code=404, detail="File not found.")
+  if resolved.is_dir():
+    raise HTTPException(status_code=400, detail="Path is a directory.")
+  try:
+    resolved.unlink()
+  except PermissionError:
+    raise HTTPException(
+      status_code=403,
+      detail="Platform-managed file — read-only. Ask the agent if it must change.",
+    )
+  except OSError as e:
+    raise HTTPException(status_code=400, detail=f"Could not delete: {e}")
+  return {"path": _rel_to_root(resolved, wroot), "deleted": True}
+
+
 def _git_env(repo: Path) -> dict:
   """Isolated env so a status op can't bleed into /data's own repo (scrub
   inherited GIT_* pointers + pin GIT_CEILING_DIRECTORIES above the repo).
