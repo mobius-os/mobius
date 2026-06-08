@@ -137,6 +137,42 @@ _REQUIRED_FIELDS = ("id", "name", "version", "description", "entry")
 _SLUG_OK = "abcdefghijklmnopqrstuvwxyz0123456789-_"
 
 
+def _validate_slug_field(value, field: str) -> None:
+  """Apply the manifest-id slug rules to `value`, raising HTTPException(400).
+
+  Both `id` and `previous_id` become a /data/apps/<slug> path component and a
+  cron-script argv, so they share one charset + shape contract. Factored out so
+  the two checks can't drift (and so a renamed app's old id is held to the same
+  bar its new id was held to when it first installed).
+  """
+  if not isinstance(value, str) or not value:
+    raise HTTPException(400, f"Manifest `{field}` must be a non-empty string.")
+  if any(ch not in _SLUG_OK for ch in value):
+    raise HTTPException(
+      400,
+      f"Manifest `{field}` {value!r} contains invalid chars "
+      "(allow a-z, 0-9, -, _).",
+    )
+  # Reject leading `-` / `_` to prevent the slug from being smuggled
+  # as an argv flag into init-cron-scaffold.sh (or any other tool we
+  # hand it to). The scaffold uses `$1` directly so this is defense-
+  # in-depth — the real concern is future callers that do use getopt.
+  if value[0] in "-_":
+    raise HTTPException(
+      400, f"Manifest `{field}` must not start with '-' or '_', got {value!r}",
+    )
+  # A purely-numeric id becomes the slug and source dir /data/apps/<id>,
+  # which collides with the numeric-id storage tree another app writes to
+  # (storage uses /data/apps/<integer app id>). Reserve bare integers for
+  # storage.
+  if value.isdigit():
+    raise HTTPException(
+      400,
+      f"Manifest `{field}` {value!r} must not be purely numeric — bare "
+      "integers are reserved for the per-app storage path /data/apps/<id>.",
+    )
+
+
 def _validate_manifest(m: dict) -> None:
   """Raises HTTPException(400) with a precise message on any issue."""
   missing = [k for k in _REQUIRED_FIELDS if not m.get(k)]
@@ -146,31 +182,18 @@ def _validate_manifest(m: dict) -> None:
       f"Manifest is missing required fields: {', '.join(missing)}",
     )
   mid = m["id"]
-  if not isinstance(mid, str) or not mid:
-    raise HTTPException(400, "Manifest `id` must be a non-empty string.")
-  if any(ch not in _SLUG_OK for ch in mid):
-    raise HTTPException(
-      400,
-      f"Manifest `id` {mid!r} contains invalid chars (allow a-z, 0-9, -, _).",
-    )
-  # Reject leading `-` / `_` to prevent the slug from being smuggled
-  # as an argv flag into init-cron-scaffold.sh (or any other tool we
-  # hand it to). The scaffold uses `$1` directly so this is defense-
-  # in-depth — the real concern is future callers that do use getopt.
-  if mid[0] in "-_":
-    raise HTTPException(
-      400, f"Manifest `id` must not start with '-' or '_', got {mid!r}",
-    )
-  # A purely-numeric id becomes the slug and source dir /data/apps/<id>,
-  # which collides with the numeric-id storage tree another app writes to
-  # (storage uses /data/apps/<integer app id>). Reserve bare integers for
-  # storage.
-  if mid.isdigit():
-    raise HTTPException(
-      400,
-      f"Manifest `id` {mid!r} must not be purely numeric — bare integers "
-      "are reserved for the per-app storage path /data/apps/<id>.",
-    )
+  _validate_slug_field(mid, "id")
+  # `previous_id` is the optional predecessor identity an app declares when it
+  # renames (or adopts a baked predecessor). It must pass the SAME slug rules as
+  # `id` and name a DIFFERENT app — pointing it at its own id is a no-op that
+  # would only confuse the rename migration below.
+  prev_id = m.get("previous_id")
+  if prev_id is not None:
+    _validate_slug_field(prev_id, "previous_id")
+    if prev_id == mid:
+      raise HTTPException(
+        400, "Manifest `previous_id` must differ from `id`.",
+      )
   if not isinstance(m.get("name"), str):
     raise HTTPException(400, "Manifest `name` must be a string.")
   if not isinstance(m.get("entry"), str):
@@ -942,6 +965,68 @@ async def install_from_manifest(
     .filter(models.App.manifest_url == canonical_manifest_url)
     .first()
   )
+  # adopt_kind records HOW a predecessor was matched when the manifest_url
+  # lookup missed — "" for a normal install/update (the canonical match above),
+  # "rename" when this manifest renamed a prior catalog app (via `previous_id`),
+  # "legacy" when it adopts a baked/register_app predecessor that carried no
+  # catalog identity. The rename-migration block below keys off this so it only
+  # moves a source tree on a genuine rename, never on a plain re-install.
+  adopt_kind = ""
+  if existing is None:
+    # PREDECESSOR ADOPTION. The canonical manifest_url didn't match, but this
+    # install may be the SUCCESSOR of an already-installed app — a rename, or a
+    # catalog version of a predecessor that was baked in without a manifest_url.
+    # Adopting that row (instead of minting a new one) keeps the numeric id —
+    # and therefore all storage under /data/apps/<id> — and avoids a duplicate
+    # drawer entry. Unlike the primary lookup (deliberately tombstone-agnostic
+    # so a re-install REVIVES a soft-deleted app), adoption stays clear of
+    # tombstones: silently resurrecting a deleted predecessor under a new
+    # identity would be surprising, and the deleted row holds its slug until the
+    # TTL purge anyway.
+    # Both predecessor lookups are gated on the manifest DECLARING `previous_id`.
+    # That declaration is the author's explicit "this install supersedes app
+    # <previous_id>" intent — the only signal that distinguishes a deliberate
+    # takeover from the accidental case the platform already tolerates: a
+    # user-built app and a store app innocently sharing a slug stem coexist as
+    # two rows (allocate_unique_slug suffixes the newcomer). Without the
+    # declaration there is NO DB field separating a baked predecessor from a
+    # user-built app at the same slug, so adopting on slug-match alone would
+    # silently hijack the user's app — which `test_install_with_same_slug_
+    # different_manifest_keeps_both` exists to forbid.
+    prev_id = manifest.get("previous_id")
+    if prev_id:
+      # RENAME: the predecessor came through the catalog under `previous_id`.
+      # Match its canonical identity from the SAME base.
+      prev_canonical = _canonical_identity_key(source_for_key, prev_id)
+      existing = (
+        db.query(models.App)
+        .filter(
+          models.App.manifest_url == prev_canonical,
+          models.App.deleted_at.is_(None),
+        )
+        .first()
+      )
+      if existing:
+        adopt_kind = "rename"
+      else:
+        # LEGACY-SLUG: the predecessor was a baked/register_app app at slug
+        # `previous_id` that never carried a catalog identity (manifest_url
+        # NULL or ""). Adopt ONLY such no-identity rows — a real catalog
+        # install at a coincidental slug keeps its own manifest_url and is
+        # never hijacked. Matching on `previous_id` (not the new `manifest_id`)
+        # keeps this an opt-in, author-declared takeover.
+        existing = (
+          db.query(models.App)
+          .filter(
+            models.App.slug == prev_id,
+            models.App.deleted_at.is_(None),
+            (models.App.manifest_url.is_(None))
+            | (models.App.manifest_url == ""),
+          )
+          .first()
+        )
+        if existing:
+          adopt_kind = "legacy"
   mode = "update" if existing else "install"
 
   warnings: list[str] = []
@@ -1008,6 +1093,86 @@ async def install_from_manifest(
       # unreviewed old code, or flip offline_capable away from what the
       # running code's service-worker logic expects.
       db.flush()
+      # Identity migration after an ADOPTION (rename or legacy). The adopted row
+      # still carries the predecessor's slug + on-disk source tree, but its new
+      # identity is `manifest_id` — move the tree to the new id's path and
+      # re-stamp the row so the app is fully consistent. The watcher resolves
+      # source_dir from this row, and the per-app .git rides along inside the
+      # directory, so an atomic same-filesystem os.rename keeps git history +
+      # working tree intact. The numeric id (and thus /data/apps/<id> storage)
+      # is never touched. Done BEFORE the git block + source-write + cron phases
+      # so the rest of the install writes to and registers cron at the NEW path.
+      # A plain re-install (adopt_kind == "") never enters here.
+      if adopt_kind and manifest_id != app.slug:
+        old_source_dir = app.source_dir
+        target_slug = manifest_id
+        target_source_dir = str(data_dir / "apps" / target_slug)
+        moved = False
+        if old_source_dir and Path(old_source_dir).is_dir():
+          async with fs_locks.source_dir_lock(old_source_dir):
+            try:
+              # Reject the move if the target path is already another app's
+              # source tree — adopting a rename must never stomp a coexisting
+              # app. The lock above + this check are atomic against a concurrent
+              # create/patch claiming target_source_dir.
+              _reject_if_source_dir_taken(
+                db, target_source_dir, exclude_id=app.id,
+              )
+              target_taken = False
+            except HTTPException:
+              target_taken = True
+            if not target_taken and not Path(target_source_dir).exists():
+              # Drop the predecessor's crontab entry at the OLD path first; the
+              # source-write + cron phases below re-register at the new path.
+              _unregister_cron(Path(old_source_dir))
+              os.rename(old_source_dir, target_source_dir)
+              moved = True
+              # Re-establish the predecessor's crontab at the restored old path
+              # if the move is rolled back, otherwise a later-phase failure
+              # leaves the source tree back at the old path but its cron entry
+              # gone until the next reboot. Rollback actions run in REVERSE
+              # append order, so this is appended BEFORE the move-reversal below
+              # to run AFTER the dir is back at old_source_dir. For a
+              # non-scheduled app (no init-cron.sh) it's a no-op.
+              rollback_actions.append(
+                lambda o=old_source_dir:
+                  subprocess.run(
+                    ["bash", str(Path(o) / "init-cron.sh")],
+                    timeout=10, check=False,
+                  ) if (Path(o) / "init-cron.sh").exists() else None
+              )
+              # Reverse the move on rollback so a later-phase failure doesn't
+              # leave a half-renamed app. Registered before slug/source_dir are
+              # re-stamped on the row, which roll back with the DB transaction.
+              rollback_actions.append(
+                lambda o=old_source_dir, n=target_source_dir:
+                  os.rename(n, o) if Path(n).is_dir()
+                  and not Path(o).exists() else None
+              )
+        if moved:
+          app.slug = target_slug
+          app.source_dir = target_source_dir
+          # Re-stamp the canonical identity here, INSIDE the adoption block, so
+          # the row's three identity fields (slug, source_dir, manifest_url) move
+          # together regardless of which update branch runs below. The later
+          # restamp at the end of the existing-update path is past the conflict
+          # short-circuit return — a rename that hits a git conflict would
+          # otherwise keep the predecessor's OLD url while carrying the new
+          # slug/source_dir, so the next install of the new id would miss the
+          # manifest_url match and mint a duplicate. The later assignment stays
+          # (idempotent) for the non-conflict paths.
+          app.manifest_url = canonical_manifest_url
+          db.flush()
+        else:
+          # Target slug/dir taken (or the old tree is missing): keep the old
+          # slug + dir and surface the skipped rename. The update still lands
+          # on the SAME row, so there's still no duplicate — only the on-disk
+          # identity stays at the old name.
+          if old_source_dir and Path(old_source_dir).is_dir():
+            warnings.append(
+              f"could not rename slug {app.slug}->{manifest_id}: "
+              "target in use"
+            )
     else:
       # Identity by manifest_url means we're now genuinely in the
       # install branch — but slug is a separate concern. The user
@@ -1229,6 +1394,14 @@ async def install_from_manifest(
       # Without local divergence (or for an app with no source_dir),
       # effective_source is just the upstream jsx_source.
       app.jsx_source = effective_source
+      # Re-stamp the canonical identity. A no-op for a plain re-install (the
+      # row already matched on this exact value), but LOAD-BEARING for an
+      # adopted predecessor: a rename carried the predecessor's OLD canonical
+      # url and a legacy adoption carried NULL/"" — without this, the next
+      # install of the new id would miss the manifest_url match and mint a
+      # duplicate, defeating the adoption. Deferred past the conflict return so
+      # a served-old-code conflict keeps its old provenance.
+      app.manifest_url = canonical_manifest_url
       app.cross_app_access = perms.get("cross_app_access", app.cross_app_access)
       app.share_with_apps = perms.get("share_with_apps", app.share_with_apps)
       app.chat_log_access = perms.get("chat_log_access", app.chat_log_access)

@@ -5,55 +5,61 @@ canonical field reference.
 
 **The enforcing source of truth is `install._validate_manifest` in
 `backend/app/install.py`.** If this doc and that function disagree, the
-function wins — fix the doc. Citations below point at the line that enforces
-or applies each rule (`install.py:N`); they were accurate at the time of
-writing but the function is authoritative.
+function wins — fix the doc. Citations below name the function or symbol that
+enforces or applies each rule (e.g. `install._validate_manifest`,
+`install._manifest_color`) rather than a line number, which drifts whenever
+`install.py` changes; the named symbols are authoritative — grep for them.
 
 Install runs through `POST /api/apps/install` with a `manifest_url` (or an
 inline `manifest` + `raw_base`). The installer fetches the manifest, validates
-it (`_validate_manifest`, `install.py:140`), then fetches `entry`/`icon`/string
+it (`install._validate_manifest`), then fetches `entry`/`icon`/string
 seeds/static assets relative to the manifest's directory.
 
 ## Required fields
 
 All five must be present and truthy or install 400s
-(`_REQUIRED_FIELDS`, `install.py:133`; missing-check at `install.py:142`).
+(`install._REQUIRED_FIELDS`, enforced in `install._validate_manifest`).
 
 | Field | Type | Notes |
 |-------|------|-------|
 | `id` | string | App identity. Charset + reservation rules below. |
-| `name` | string | Display name. Must be a string (`install.py:175`). |
-| `version` | string | Installed version, stamped onto the App row and surfaced by `GET /api/apps/` (`install.py:1200`). |
-| `description` | string | Stored on the App row (`install.py:1033`). |
-| `entry` | string | Repo-relative path to the JSX entry (e.g. `index.jsx`), validated as a repo-relative path (`install.py:178`). |
+| `name` | string | Display name. Must be a string (`install._validate_manifest`). |
+| `version` | string | Installed version, stamped onto the App row and surfaced by `GET /api/apps/` (stamped in `install.install_from_manifest`). |
+| `description` | string | Stored on the App row (`install.install_from_manifest`). |
+| `entry` | string | Repo-relative path to the JSX entry (e.g. `index.jsx`), validated as a repo-relative path (`install._validate_manifest` via `install._validate_repo_relative_path`). |
 
-### `id` rules (`install.py:163-173`)
+### `id` rules (enforced in `install._validate_manifest`)
 
-- Charset: `a-z`, `0-9`, `-`, `_` only (`_SLUG_OK`, `install.py:137`; checked at `install.py:163`). No uppercase, no spaces, no dots.
-- Must **not** start with `-` or `_` (`install.py:165`) — a leading dash could be smuggled as an argv flag into the cron scaffold.
-- Must **not** be purely numeric (`install.py:168`) — bare integers are reserved for the per-app storage path `/data/apps/<int app id>`; a numeric slug would collide with that tree.
+- Charset: `a-z`, `0-9`, `-`, `_` only (`install._SLUG_OK`). No uppercase, no spaces, no dots.
+- Must **not** start with `-` or `_` — a leading dash could be smuggled as an argv flag into the cron scaffold.
+- Must **not** be purely numeric — bare integers are reserved for the per-app storage path `/data/apps/<int app id>`; a numeric slug would collide with that tree.
 
-The `id` is load-bearing in three places: it is the **cron job identifier**, the **source-directory slug** (`/data/apps/<id>/`), and the **install-identity key** that discriminates update-vs-fresh-install. Changing it across versions creates a new app rather than updating the old one.
+The `id` is load-bearing in three places: it is the **cron job identifier**, the **source-directory slug** (`/data/apps/<id>/`), and the **install-identity key** that discriminates update-vs-fresh-install. Changing it across versions creates a new app rather than updating the old one — unless you declare `previous_id` (below).
+
+### `previous_id` rules (enforced in `install._validate_manifest`)
+
+Optional string: the app's prior `id` from before a rename. On install, if no app matches the current `id`, the installer adopts the app previously installed under `previous_id` (same canonical base) and migrates it in place — preserving its data — instead of creating a duplicate. Same slug rules as `id` (charset, no leading `-`/`_`, not purely numeric); must differ from `id`. `install._validate_manifest` is authoritative.
 
 ## Optional fields
 
 | Field | Type | Validated / stored? |
 |-------|------|---------------------|
-| `icon` | string | Repo-relative path; validated as such when present (`install.py:177`). Capped at 12 MB on fetch. |
+| `icon` | string | Repo-relative path; validated as such when present (`install._validate_manifest`). Capped at 12 MB on fetch. |
+| `previous_id` | string | The app's prior `id` from before a rename; lets the installer migrate in place instead of duplicating. See below (`install._validate_manifest`). |
 | `author` | string | **Decorative.** Not validated, not stored. For humans reading the repo. |
 | `license` | string | **Decorative.** Not validated, not stored. |
 | `homepage` | string | **Decorative.** Not validated, not stored. |
-| `theme_color` | hex string | Coerced to `#RRGGBB` via `_manifest_color` (`install.py:87`, applied `install.py:1201`); a non-hex value is silently dropped to `None`. |
-| `background_color` | hex string | Same coercion; falls back to `theme_color` when absent (`install.py:1202`). |
-| `offline_capable` | bool | Opts the app into SW caching for offline open (`install.py:1048`). Defaults `false`. |
-| `embeds_agent` | bool | Marks an app that embeds the Möbius chat agent (badge + behavior). Stored (`install.py:1049`). Defaults `false`. |
-| `permissions` | object | See below. Must be an object (`install.py:183`). |
-| `storage_seeds` | object | See below. Must be an object (`install.py:210`). |
-| `static_assets` | object or array | See below (`install.py:217`). |
+| `theme_color` | hex string | Coerced to `#RRGGBB` via `install._manifest_color` (applied in `install.install_from_manifest`); a non-hex value is silently dropped to `None`. |
+| `background_color` | hex string | Same coercion; falls back to `theme_color` when absent (`install.install_from_manifest`). |
+| `offline_capable` | bool | Opts the app into SW caching for offline open (stored in `install.install_from_manifest`). Defaults `false`. |
+| `embeds_agent` | bool | Marks an app that embeds the Möbius chat agent (badge + behavior). Stored in `install.install_from_manifest`. Defaults `false`. |
+| `permissions` | object | See below. Must be an object (`install._validate_manifest`). |
+| `storage_seeds` | object | See below. Must be an object (`install._validate_manifest`). |
+| `static_assets` | object or array | See below (`install._validate_manifest`). |
 | `runtime` | object | **Informational only** — the installer never reads it (see below). |
-| `schedule` | object | See below. Must be an object (`install.py:226`). |
+| `schedule` | object | See below. Must be an object (`install._validate_manifest`). |
 
-### `permissions` (`install.py:182-206`)
+### `permissions` (enforced in `install._validate_manifest`)
 
 | Key | Values | Default |
 |-----|--------|---------|
@@ -63,28 +69,28 @@ The `id` is load-bearing in three places: it is the **cron job identifier**, the
 | `manage_apps` | bool | `false` |
 
 `cross_app_access` and `share_with_apps` share the storage read/write/none
-ladder (`install.py:184-190`). `chat_log_access` has a **different** value
-space — the redaction tiers `none`/`summary`/`full` (`install.py:196`); `full`
-is accepted into the manifest so the column round-trips, but the read API
-defers it until a concrete consumer lands. `manage_apps`, if present, must be a
-boolean (`install.py:203`).
+ladder. `chat_log_access` has a **different** value space — the redaction tiers
+`none`/`summary`/`full`; `full` is accepted into the manifest so the column
+round-trips, but the read API defers it until a concrete consumer lands.
+`manage_apps`, if present, must be a boolean. All enforced in
+`install._validate_manifest`.
 
-### `storage_seeds` (`install.py:209-216`) — the string-vs-non-string distinction
+### `storage_seeds` (enforced in `install._validate_manifest`) — the string-vs-non-string distinction
 
 `storage_seeds` maps a storage sub-path to its seed value. The value's **type**
 selects two completely different behaviors:
 
 - **String value → a repo-relative path the installer FETCHES.** The string is
-  validated as a repo-relative path (`install.py:215`, via
-  `_validate_repo_relative_path`) and its file contents are fetched and seeded.
+  validated as a repo-relative path (via `install._validate_repo_relative_path`)
+  and its file contents are fetched and seeded.
 - **Non-string value (object/array/number/bool/null) → stored INLINE** as a
   JSON literal. No fetch happens; the literal becomes the seed.
 
 **Common mistake:** authors reach for a string to inline literal content
 (HTML/CSS/JS/markdown). That trips the repo-relative-path check on the first
 `://` or `#` in the markup and surfaces as a confusing "must be a relative
-path" 400 (the validator's docstring at `install.py:246` calls this out and
-hints the fix). To seed literal **text**, put it in a repo file and point the
+path" 400 (the `install._validate_repo_relative_path` docstring calls this out
+and hints the fix). To seed literal **text**, put it in a repo file and point the
 key at that path. To store an inline **JSON** value, use a non-string.
 
 ```json
@@ -97,13 +103,13 @@ key at that path. To store an inline **JSON** value, use a non-string.
 The first key is a string (fetch the repo file `system-prompt.md`); the second
 is an object (store `{"hour":10,"minute":0}` inline).
 
-### `static_assets` (`install.py:217-224`, `_static_asset_entries` at `install.py:473`)
+### `static_assets` (validated in `install._validate_manifest`; normalized by `install._static_asset_entries`)
 
 A dest→source map of prebuilt files written under `/data/apps/<slug>/static`
 and served at `/app-assets/...`. May be an object (`{ "dest": "source" }`) or a
 bare array (each entry is both dest and source). Every dest and source is
-validated as a repo-relative path. Caps (`install.py:483-486`): 256 files,
-16 MB per file, 64 MB total per manifest.
+validated as a repo-relative path. Caps (in `install._static_asset_entries`):
+256 files, 16 MB per file, 64 MB total per manifest.
 
 ### `runtime` (informational only)
 
@@ -115,17 +121,17 @@ PWA). Keep `runtime` accurate for human readers if you like, but it has no
 runtime effect; a dependency only resolves if it is wired into `runtime_libs.py`
 and both importmaps.
 
-### `schedule` (`install.py:225-242`)
+### `schedule` (enforced in `install._validate_manifest`)
 
 An object that registers a scheduled task and/or names a bundled job script.
 
 | Key | Type | Notes |
 |-----|------|-------|
-| `default` | cron string | A 5-field cron expression, validated by `_validate_cron_expr` (`install.py:229`, def at `install.py:293`). Only when present is a recurring crontab entry installed. |
+| `default` | cron string | A 5-field cron expression, validated by `install._validate_cron_expr`. Only when present is a recurring crontab entry installed. |
 | `user_configurable` | bool | Whether the owner may edit the schedule from the app. |
-| `job` | bare filename | The job script (e.g. `fetch.sh`). Must be a bare filename — no `/` or `..` (`install.py:230`) — because cron registration and the run-job endpoint both use only the basename. |
+| `job` | bare filename | The job script (e.g. `fetch.sh`). Must be a bare filename — no `/` or `..` (`install._validate_manifest`) — because cron registration and the run-job endpoint both use only the basename. |
 
-**Dual semantics of `job`** (`install.py:1374-1408`): a bundled `job` script is
+**Dual semantics of `job`** (handled in `install.install_from_manifest`): a bundled `job` script is
 written to the source dir whenever one is fetched, **independent** of whether
 `schedule.default` is also declared.
 

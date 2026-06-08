@@ -2418,3 +2418,269 @@ def test_update_preview_conflict_returns_real_markers_without_live_mutation(
   assert "AGENT TITLE" in markers
   assert "UPSTREAM TITLE" in markers
   assert jsx_file.read_text() == before_preview
+
+
+# --------------------------------------------------------------------------
+# Predecessor adoption — a renamed app (or a baked predecessor installed
+# without a manifest_url) UPDATES the existing row instead of duplicating it.
+# --------------------------------------------------------------------------
+
+
+def _simple_manifest(app_id, version="1.0.0", previous_id=None):
+  """A minimal installable manifest (no schedule/icon/seeds) for the
+  adoption tests, so the response map only needs mobius.json + index.jsx."""
+  m = {
+    "id": app_id,
+    "name": app_id.replace("-", " ").title(),
+    "version": version,
+    "description": f"{app_id} app",
+    "entry": "index.jsx",
+    "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
+  }
+  if previous_id is not None:
+    m["previous_id"] = previous_id
+  return m
+
+
+def _install_simple(client, auth, base, manifest, jsx=JSX):
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, jsx.encode()),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    return client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+
+
+def test_install_validates_previous_id_field(client, auth, bypass_url_validation):
+  """`previous_id` is held to the same slug rules as `id`, and may not equal
+  `id` (a self-pointer would be a no-op that only confuses the migration)."""
+  base = "https://prev-bad.test/repo/"
+  # Purely numeric — reserved for the storage path, same as `id`.
+  bad_numeric = _simple_manifest("renamed", previous_id="123")
+  r = _install_simple(client, auth, base, bad_numeric)
+  assert r.status_code == 400, r.text
+  assert "previous_id" in r.text
+
+  # Equal to id.
+  base2 = "https://prev-self.test/repo/"
+  self_ref = _simple_manifest("renamed", previous_id="renamed")
+  r2 = _install_simple(client, auth, base2, self_ref)
+  assert r2.status_code == 400, r2.text
+  assert "previous_id" in r2.text
+
+
+def test_rename_adopts_predecessor_row_and_moves_source_dir(
+  client, auth, bypass_url_validation,
+):
+  """(a) install id=gym, then install id=workout + previous_id=gym from the
+  SAME base. The second install ADOPTS the gym row: same numeric id (no new
+  row), final slug == 'workout', source_dir moved to .../apps/workout, the old
+  gym dir is gone, and the id-keyed storage tree is preserved across the move."""
+  base = "https://rename.test/repo/"
+  data_dir = Path(get_settings().data_dir)
+
+  r1 = _install_simple(client, auth, base, _simple_manifest("gym"))
+  assert r1.status_code == 201, r1.text
+  gym_id = r1.json()["id"]
+  assert r1.json()["slug"] == "gym"
+
+  # App data lives under the id-keyed storage tree; seed a file to prove it
+  # survives the rename (the move never touches /data/apps/<id>).
+  storage_file = data_dir / "apps" / str(gym_id) / "log.json"
+  storage_file.parent.mkdir(parents=True, exist_ok=True)
+  storage_file.write_text('{"workouts": 3}')
+  assert (data_dir / "apps" / "gym" / "index.jsx").exists()
+
+  r2 = _install_simple(
+    client, auth, base,
+    _simple_manifest("workout", version="2.0.0", previous_id="gym"),
+  )
+  assert r2.status_code == 201, r2.text
+  payload = r2.json()
+  assert payload["mode"] == "update"
+  assert payload["id"] == gym_id          # SAME row — no duplicate
+  assert payload["slug"] == "workout"
+  assert payload["version"] == "2.0.0"
+
+  # Only one app row total.
+  listed = client.get("/api/apps/", headers=auth).json()
+  assert len([a for a in listed if a["id"] == gym_id]) == 1
+  assert len(listed) == 1
+
+  # Source dir moved; old gym dir gone.
+  assert (data_dir / "apps" / "workout" / "index.jsx").exists()
+  assert not (data_dir / "apps" / "gym").exists()
+  # Storage (id-keyed) preserved untouched.
+  assert storage_file.read_text() == '{"workouts": 3}'
+
+  # The identity is re-stamped: re-installing id=workout now hits the canonical
+  # match (update), not adoption, and still doesn't duplicate.
+  r3 = _install_simple(
+    client, auth, base, _simple_manifest("workout", version="3.0.0"),
+  )
+  assert r3.status_code == 201, r3.text
+  assert r3.json()["mode"] == "update"
+  assert r3.json()["id"] == gym_id
+
+
+def test_legacy_slug_adoption_of_no_manifest_url_row(
+  client, auth, db, bypass_url_validation,
+):
+  """(b) a baked/register_app predecessor (slug='dreaming-old',
+  manifest_url=None) is ADOPTED by a catalog manifest id='dreaming' that
+  declares previous_id='dreaming-old': same numeric id, manifest_url now set,
+  source moved to the new slug, NO duplicate.
+
+  Legacy adoption is opt-in via `previous_id` BY DESIGN. A baked predecessor
+  created through register_app.py is byte-for-byte indistinguishable from a
+  user-built app (both go through POST /api/apps/ → manifest_url=None,
+  source_dir set), so adopting on slug-match ALONE would hijack a user's app —
+  forbidden by test_install_with_same_slug_different_manifest_keeps_both. The
+  manifest declaring previous_id is the author's explicit takeover intent."""
+  from app import models
+  data_dir = Path(get_settings().data_dir)
+  src_dir = data_dir / "apps" / "dreaming-old"
+  src_dir.mkdir(parents=True, exist_ok=True)
+  (src_dir / "index.jsx").write_text(JSX)
+  app = models.App(
+    name="Dreaming",
+    description="baked predecessor",
+    jsx_source=JSX,
+    source_dir=str(src_dir),
+    slug="dreaming-old",
+    manifest_url=None,
+    cross_app_access="none",
+    share_with_apps="none",
+    offline_capable=False,
+  )
+  db.add(app)
+  db.commit()
+  baked_id = app.id
+
+  base = "https://catalog.test/dreaming/"
+  r = _install_simple(
+    client, auth, base,
+    _simple_manifest("dreaming", version="2.0.0", previous_id="dreaming-old"),
+  )
+  assert r.status_code == 201, r.text
+  payload = r.json()
+  assert payload["mode"] == "update"
+  assert payload["id"] == baked_id        # adopted the baked row
+  assert payload["slug"] == "dreaming"    # migrated to the new id's slug
+  canonical = base.rstrip("/") + "#manifest-id=dreaming"
+  assert payload["manifest_url"] == canonical
+
+  # Source moved to the new slug; the old baked dir is gone.
+  assert (data_dir / "apps" / "dreaming" / "index.jsx").exists()
+  assert not (data_dir / "apps" / "dreaming-old").exists()
+
+  listed = client.get("/api/apps/", headers=auth).json()
+  assert len(listed) == 1                  # no duplicate
+
+
+def test_previous_id_matching_nothing_is_a_fresh_install(
+  client, auth, bypass_url_validation,
+):
+  """(c) a previous_id that matches no installed app falls through to a
+  normal fresh install (new row, mode='install')."""
+  base = "https://no-pred.test/repo/"
+  r = _install_simple(
+    client, auth, base,
+    _simple_manifest("brandnew", previous_id="never-existed"),
+  )
+  assert r.status_code == 201, r.text
+  payload = r.json()
+  assert payload["mode"] == "install"
+  assert payload["slug"] == "brandnew"
+  assert len(client.get("/api/apps/", headers=auth).json()) == 1
+
+
+def test_previous_id_ignored_when_canonical_match_exists(
+  client, auth, bypass_url_validation,
+):
+  """(d) when a workout row already exists (manifest_url match), previous_id is
+  ignored: it's a normal update of workout and the gym row is left untouched."""
+  base = "https://both.test/repo/"
+  data_dir = Path(get_settings().data_dir)
+
+  # Pre-existing gym app from a DIFFERENT base (so its canonical url differs).
+  gym_base = "https://both-gym.test/repo/"
+  rg = _install_simple(client, auth, gym_base, _simple_manifest("gym"))
+  assert rg.status_code == 201, rg.text
+  gym_id = rg.json()["id"]
+
+  # First install of workout (fresh) from `base`.
+  rw1 = _install_simple(
+    client, auth, base,
+    _simple_manifest("workout", previous_id="gym"),
+  )
+  assert rw1.status_code == 201, rw1.text
+  assert rw1.json()["mode"] == "install"
+  workout_id = rw1.json()["id"]
+  assert workout_id != gym_id
+
+  # Second install of workout (canonical match exists) — previous_id is
+  # ignored, gym is NOT adopted/moved.
+  rw2 = _install_simple(
+    client, auth, base,
+    _simple_manifest("workout", version="2.0.0", previous_id="gym"),
+  )
+  assert rw2.status_code == 201, rw2.text
+  assert rw2.json()["mode"] == "update"
+  assert rw2.json()["id"] == workout_id
+
+  # gym row untouched: still present, still at its own slug + source dir.
+  listed = client.get("/api/apps/", headers=auth).json()
+  gym_row = next(a for a in listed if a["id"] == gym_id)
+  assert gym_row["slug"] == "gym"
+  assert (data_dir / "apps" / "gym" / "index.jsx").exists()
+  assert len(listed) == 2
+
+
+def test_rename_keeps_old_slug_when_target_taken(
+  client, auth, bypass_url_validation,
+):
+  """(e) rename when the target slug is already claimed by ANOTHER app: keep the
+  old slug, emit the 'could not rename' warning, and still adopt the same row
+  (no duplicate)."""
+  base = "https://rename-taken.test/repo/"
+  data_dir = Path(get_settings().data_dir)
+
+  # The predecessor we'll try to rename.
+  r1 = _install_simple(client, auth, base, _simple_manifest("gym"))
+  assert r1.status_code == 201, r1.text
+  gym_id = r1.json()["id"]
+
+  # Another app already occupies the target slug 'workout' (different base).
+  other_base = "https://rename-other.test/repo/"
+  r_other = _install_simple(
+    client, auth, other_base, _simple_manifest("workout"),
+  )
+  assert r_other.status_code == 201, r_other.text
+  other_id = r_other.json()["id"]
+  assert other_id != gym_id
+
+  # Rename gym -> workout. The target dir is taken, so the move is skipped.
+  r2 = _install_simple(
+    client, auth, base,
+    _simple_manifest("workout", version="2.0.0", previous_id="gym"),
+  )
+  assert r2.status_code == 201, r2.text
+  payload = r2.json()
+  assert payload["mode"] == "update"
+  assert payload["id"] == gym_id          # adopted the same row
+  assert payload["slug"] == "gym"          # slug NOT changed
+  assert any(
+    "could not rename slug gym->workout" in w for w in payload["warnings"]
+  )
+
+  # Both apps still exist; neither was duplicated, the other app is intact.
+  listed = client.get("/api/apps/", headers=auth).json()
+  assert len(listed) == 2
+  assert (data_dir / "apps" / "gym" / "index.jsx").exists()
+  assert (data_dir / "apps" / "workout" / "index.jsx").exists()
