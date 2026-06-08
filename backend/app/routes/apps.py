@@ -1223,7 +1223,7 @@ def update_app_schedule(
   if not job_path.is_file():
     raise HTTPException(status_code=400, detail="Job script not found.")
   slug = app.slug or _slugify_for_source_dir(app.name)
-  _register_cron(slug, body.cron, job_path, None, app_id)
+  _register_cron(slug, body.cron, job_path, app_id)
   return {"cron": body.cron, "job": job_name}
 
 

@@ -629,18 +629,18 @@ def _process_icon(raw: bytes) -> bytes:
 
 
 def _register_cron(slug: str, schedule_expr: str, job_path: Path,
-                   bundled_job_bytes: bytes | None,
                    app_id: int | None = None) -> None:
-  """Writes the bundled job (if any) then runs init-cron-scaffold.sh.
+  """Runs init-cron-scaffold.sh to install the crontab entry.
 
   The scaffold script writes init-cron.sh + installs the crontab entry
   AND restores it on the next container restart by replaying every
   /data/apps/*/init-cron.sh from the entrypoint. Idempotent — calling
   it for an unchanged (slug, schedule, job) is a no-op.
 
-  If the manifest bundled a job script, write it first so the scaffold
-  doesn't stub-out the same path. The scaffold preserves existing job
-  files; the agent or user can edit them later.
+  The job script itself is written earlier, in the transactional source
+  write (so a locally edited job survives an update via the per-app git
+  merge); the scaffold preserves an existing job file rather than stubbing
+  it, so it never clobbers what we wrote.
 
   The job filename (e.g. fetch.sh, from the manifest's schedule.job) is
   passed to the scaffold so the crontab entry points at the real job —
@@ -654,9 +654,6 @@ def _register_cron(slug: str, schedule_expr: str, job_path: Path,
   such a job runs with no id and exits early — which is exactly how a
   freshly-installed news app's cron lands dead on arrival.
   """
-  if bundled_job_bytes:
-    job_path.write_bytes(bundled_job_bytes)
-    job_path.chmod(0o755)
   scaffold = CRON_SCAFFOLD
   if not scaffold.exists():
     # In tests we mock this away; in containers it's always present.
@@ -968,6 +965,14 @@ async def install_from_manifest(
   # to the upstream bytes; the git merge step below may replace it with
   # the merged bytes on a clean update.
   effective_source = jsx_source
+  # The schedule job script the per-app git model tracks (e.g. fetch.sh /
+  # build.sh). Derived ONCE here so both the git block and the source-write
+  # below agree on the path; Phase 5 re-reads it but does not change it.
+  # effective_job defaults to the bundled (upstream) job and is replaced by
+  # the merged job on a clean update — the same shape effective_source has,
+  # so a locally edited job script survives an update like index.jsx does.
+  job_name = sched.get("job", "fetch.sh") if sched else "fetch.sh"
+  effective_job: bytes | None = bundled_job
 
   # --- Phase 4: materialize. Wrapped so cleanup runs on any failure. --
   # `created_paths`: files/dirs to delete on failure (and leave on
@@ -1105,17 +1110,21 @@ async def install_from_manifest(
           await asyncio.to_thread(
             app_git.record_upstream,
             git_source_dir, entry_bytes, canonical_manifest_url, version,
+            job_name, bundled_job,
           )
           if not diverged:
             effective_source = jsx_source
+            # No local edits → upstream wins for the job script too.
+            effective_job = bundled_job
             divergence = "fast_forward"
             merge_applied = True
           else:
             # Local diverged: fold the new upstream into the local edits with
             # a three-way merge that touches neither `main` nor the working
-            # tree, then act on the clean-vs-conflict verdict.
+            # tree, then act on the clean-vs-conflict verdict. Pass job_name so
+            # the merge carries a locally edited job script forward too.
             merge = await asyncio.to_thread(
-              app_git.merge_upstream, git_source_dir,
+              app_git.merge_upstream, git_source_dir, job_name,
             )
             if merge.status == "conflict":
               if force_core_store_update:
@@ -1123,18 +1132,26 @@ async def install_from_manifest(
                   "core App Store self-update replaced local edits with upstream"
                 )
                 effective_source = jsx_source
+                effective_job = bundled_job
                 divergence = "fast_forward"
                 merge_applied = True
               else:
                 # Never rebase local. The app stays served with
                 # its current bundle + source; the new upstream is recorded
                 # for a later agent-resolution pass. Skip compile + source
-                # overwrite by switching to conflict mode below.
+                # overwrite by switching to conflict mode below. The job
+                # script is left untouched on disk like index.jsx.
                 mode = "conflict"
                 conflict_paths = merge.conflict_paths
             elif merge.merged_bytes is not None:
               # Clean merge: the merged source is what we compile + write.
               effective_source = merge.merged_bytes.decode("utf-8")
+              # Carry a local job-script edit forward when the merge produced
+              # merged job bytes; otherwise fall back to the bundled job (e.g.
+              # an upstream tree recorded before job scripts were tracked).
+              effective_job = (
+                merge.merged_job if merge.merged_job is not None else bundled_job
+              )
               divergence = "clean_merge"
               merge_applied = True
             else:
@@ -1156,10 +1173,12 @@ async def install_from_manifest(
           # record the pristine bytes on `upstream`, then align the local
           # `main` branch to that commit so the working branch starts exactly
           # at the installed version — a shared base for the next update's
-          # merge.
+          # merge. Record the job script too so a future update can merge
+          # against the version the app shipped with.
           await asyncio.to_thread(
             app_git.record_upstream,
             git_source_dir, entry_bytes, canonical_manifest_url, version,
+            job_name, bundled_job,
           )
           await asyncio.to_thread(
             app_git.align_local_to_upstream, git_source_dir,
@@ -1279,6 +1298,37 @@ async def install_from_manifest(
         else:
           created_paths.append(jsx_file)
         atomic_write(jsx_file, effective_source)
+        # Write the schedule job script in the SAME transactional unit as
+        # index.jsx so a locally edited fetch.sh/build.sh survives an update
+        # (effective_job is the merged job on a clean update, the bundled job
+        # otherwise). On a conflict effective_job is left as the bundled bytes
+        # but we never reach here — the conflict branch returned above leaving
+        # the local job file untouched, exactly like index.jsx. Snapshot the
+        # prior job to a .bak on update so a rollback restores it, and write
+        # before the git commit so commit_local/commit_merge stages it onto
+        # `main`. The Phase 5 post-commit blind overwrite is gone; the cron
+        # scaffold preserves an existing job file, so this is the only writer.
+        if effective_job is not None:
+          job_file = source_dir_path / job_name
+          if job_file.exists():
+            job_backup = job_file.with_suffix(job_file.suffix + ".bak")
+            if job_backup.exists():
+              try:
+                job_backup.unlink()
+              except OSError:
+                pass
+            shutil.copy2(job_file, job_backup)
+            rollback_actions.append(
+              lambda b=job_backup, o=job_file:
+                os.replace(b, o) if b.exists() else None
+            )
+            commit_actions.append(
+              lambda b=job_backup: b.unlink() if b.exists() else None
+            )
+          else:
+            created_paths.append(job_file)
+          atomic_write(job_file, effective_job)
+          job_file.chmod(0o755)
         _write_static_assets(
           source_dir_path,
           static_assets_fetched,
@@ -1371,22 +1421,22 @@ async def install_from_manifest(
     _cleanup(created_paths)
     raise HTTPException(500, f"Install failed: {exc!r}")
 
-  # --- Phase 5: post-commit job-script write + cron registration ------
-  # The app is fully installed at this point. Job-write / cron failures
-  # become warnings, not 500s — the user just needs to re-set the schedule.
+  # --- Phase 5: post-commit cron registration -------------------------
+  # The app is fully installed at this point. Cron failures become
+  # warnings, not 500s — the user just needs to re-set the schedule.
   #
-  # A bundled job script (manifest `schedule.job`) is written to source_dir
-  # whenever one was fetched, INDEPENDENT of whether the manifest also
-  # declares a recurring `schedule.default`. An app may ship an on-demand
-  # job invoked only through the run-job endpoint (e.g. the LaTeX app's
-  # build.sh, compiled on a Build click) with no recurring schedule —
-  # coupling the write to cron registration would fetch the script but never
-  # land it on disk, and run-job would 400 with "no job script". A recurring
-  # crontab entry is installed only when `schedule.default` is present.
+  # The job script (manifest `schedule.job`) is ALREADY on disk: it was
+  # written in the transactional source write above, INDEPENDENT of whether
+  # the manifest also declares a recurring `schedule.default`. An app may
+  # ship an on-demand job invoked only through the run-job endpoint (e.g. the
+  # LaTeX app's build.sh, compiled on a Build click) with no recurring
+  # schedule, and run-job needs the script on disk to find it. A recurring
+  # crontab entry is installed here only when `schedule.default` is present.
+  # `job_name` was derived once before the git block; reuse it so the cron
+  # entry points at the same file the source write produced.
   has_cron = bool(sched and sched.get("default"))
   if bundled_job or has_cron:
     slug = app.slug
-    job_name = sched.get("job", "fetch.sh") if sched else "fetch.sh"
     # Use the app's ACTUAL source_dir (where the JSX + job script live), not a
     # freshly re-derived /data/apps/<slug>. After a valid source-dir PATCH the
     # two diverge, which would split the job file from the source tree (Codex
@@ -1400,23 +1450,21 @@ async def install_from_manifest(
       # vanished row) — Codex review round-9 #3.
       async with fs_locks.source_dir_lock(str(app_data_dir)):
         if not db.query(models.App.id).filter(models.App.id == app.id).first():
-          raise HTTPException(404, "App removed before job-script write.")
+          raise HTTPException(404, "App removed before cron registration.")
         app_data_dir.mkdir(parents=True, exist_ok=True)
         job_path = app_data_dir / job_name
         if has_cron and CRON_SCAFFOLD.exists():
-          # _register_cron writes the bundled job first, then installs the
-          # crontab entry pointing at it.
+          # The job script is already on disk; the scaffold preserves it and
+          # installs the crontab entry pointing at it.
           await asyncio.to_thread(
             _register_cron,
-            slug, sched["default"], job_path, bundled_job, app.id,
+            slug, sched["default"], job_path, app.id,
           )
         else:
           # Either an on-demand-only job (no recurring schedule) or, when a
-          # schedule IS declared, a test env that mocks the scaffold away.
-          # Land the script on disk so run-job can find it either way.
-          if bundled_job:
-            job_path.write_bytes(bundled_job)
-            job_path.chmod(0o755)
+          # schedule IS declared, a test env that mocks the scaffold away. The
+          # job script already landed in the transactional source write, so
+          # run-job can find it either way.
           if has_cron:
             # Schedule declared but the scaffold isn't on PATH (tests):
             # persist a sentinel so the contract is observable + warn.

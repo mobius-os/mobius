@@ -467,7 +467,9 @@ def test_register_cron_passes_job_name_to_scaffold(tmp_path):
   """The scaffold defaults its job filename to job.sh; the installer must
   pass the manifest's job name (e.g. fetch.sh) as the 3rd scaffold arg so
   the crontab points at the real bundled job, not the empty stub.
-  Regression for the bug where every scheduled app fired an empty job.sh."""
+  Regression for the bug where every scheduled app fired an empty job.sh.
+  The job script itself is written in the transactional source write, not
+  here, so _register_cron only installs the crontab entry."""
   from app import install
 
   app_dir = tmp_path / "dreaming"
@@ -481,12 +483,8 @@ def test_register_cron_passes_job_name_to_scaffold(tmp_path):
   with patch("app.install.CRON_SCAFFOLD", fake_scaffold), \
        patch("app.install.subprocess.run") as mock_run:
     mock_run.return_value = MagicMock(returncode=0, stderr="")
-    install._register_cron(
-      "dreaming", "0 6 * * *", job_path, b"#!/bin/bash\necho real work\n",
-      42,
-    )
+    install._register_cron("dreaming", "0 6 * * *", job_path, 42)
 
-  assert job_path.read_text() == "#!/bin/bash\necho real work\n"
   # 5th arg is the app id — so a reusable fetch.sh that reads "$1" fires
   # from cron, not just from the run-job endpoint. Regression for news-2:
   # a bundled fetch.sh requires its id and exits 2 without it.
@@ -509,7 +507,7 @@ def test_register_cron_omits_app_id_when_none(tmp_path):
   with patch("app.install.CRON_SCAFFOLD", fake_scaffold), \
        patch("app.install.subprocess.run") as mock_run:
     mock_run.return_value = MagicMock(returncode=0, stderr="")
-    install._register_cron("selfcontained", "0 6 * * *", job_path, None)
+    install._register_cron("selfcontained", "0 6 * * *", job_path)
 
   assert mock_run.call_args.args[0] == [
     str(fake_scaffold), "selfcontained", "0 6 * * *", "job.sh",
@@ -1686,6 +1684,86 @@ def test_flag_on_clean_update_carries_local_edits_forward(
   merged = jsx_file.read_text()
   assert "AGENT TITLE" in merged       # local edit carried forward
   assert "UPSTREAM FOOTER" in merged   # upstream change applied
+
+
+# A multi-line job script with two editable regions (the first and last
+# step) separated by unchanged context, so git's line-based 3-way merge can
+# interleave a local edit and a disjoint upstream edit cleanly — the same
+# spacing reason JSX_MULTI documents.
+JOB_MULTI = (
+  "#!/bin/bash\n"
+  "echo step ONE\n"
+  "echo a\n"
+  "echo b\n"
+  "echo c\n"
+  "echo d\n"
+  "echo step FIVE\n"
+)
+
+
+def _install_with_job(client, auth, base, manifest, jsx, job):
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, jsx.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, PROMPT.encode()),
+    base + "fetch.sh": (200, job.encode()),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    return client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+
+
+def test_fresh_install_writes_bundled_job_script(
+  client, auth, bypass_url_validation,
+):
+  """A fresh install writes the manifest's bundled job script to source_dir,
+  executable, so cron + run-job can find it. The transactional source write
+  (not the removed post-commit blind overwrite) is the writer now."""
+  base = "https://job-fresh.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "job-fresh"}
+  r = _install_with_job(client, auth, base, m, JSX, JOB_MULTI)
+  assert r.status_code == 201, r.text
+  data_dir = Path(get_settings().data_dir)
+  job_file = data_dir / "apps" / "job-fresh" / "fetch.sh"
+  assert job_file.read_text() == JOB_MULTI
+  assert job_file.stat().st_mode & 0o111  # executable bit set
+
+
+def test_clean_update_preserves_local_job_script_edit(
+  client, auth, bypass_url_validation,
+):
+  """A locally edited job script survives a clean update: the agent edits one
+  step of fetch.sh, an upstream v2 edits a DISJOINT step, and the served job
+  script contains BOTH changes — the bundled copy no longer clobbers the
+  local edit. The schedule job now flows through the same 3-way merge as
+  index.jsx."""
+  base = "https://job-clean.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "job-clean"}
+  r1 = _install_with_job(client, auth, base, m, JSX, JOB_MULTI)
+  assert r1.status_code == 201, r1.text
+  data_dir = Path(get_settings().data_dir)
+  job_file = data_dir / "apps" / "job-clean" / "fetch.sh"
+
+  # Agent edits the FIRST step of the job locally.
+  job_file.write_text(JOB_MULTI.replace("step ONE", "step ONE LOCAL"))
+
+  # Upstream v2 edits the LAST step — a disjoint region.
+  job_v2 = JOB_MULTI.replace("step FIVE", "step FIVE UPSTREAM")
+  r2 = _install_with_job(
+    client, auth, base, {**m, "version": "2.0.0"}, JSX, job_v2,
+  )
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["mode"] == "update"
+  assert r2.json()["divergence"] == "clean_merge"
+  served = job_file.read_text()
+  assert "step ONE LOCAL" in served      # local job edit carried forward
+  assert "step FIVE UPSTREAM" in served  # upstream job change applied
+  assert "<<<<<<<" not in served
 
 
 def test_flag_on_repeated_updates_to_same_region_stay_clean(
