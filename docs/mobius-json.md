@@ -167,4 +167,5 @@ written to the source dir whenever one is fetched, **independent** of whether
 - `install._validate_manifest` (`backend/app/install.py`) — the enforcing validator; authoritative.
 - `backend/app/runtime_libs.py` + the two importmaps (`app-frame.html`, `routes/standalone.py`) — what actually governs dependency resolution.
 - `backend/scripts/seed-skills/building-apps.md` (live: `/data/shared/skills/building-apps.md`) — how to build a mini-app.
-- `docs/public-apps-spec.md` — the public catalog-app spec.
+- the published public spec at mobius-os.github.io/spec/manifest.md + spec/mobius.schema.json (mirror of install._validate_manifest, which stays authoritative).
+- `docs/public-apps-spec.md` — the UNIMPLEMENTED `/p/<slug>` public-sharing brainstorm (Status: brainstorming), NOT the manifest spec.
