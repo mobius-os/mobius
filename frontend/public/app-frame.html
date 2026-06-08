@@ -16,13 +16,13 @@
       "three": "/vendor/three@0.184.0/three.module.js",
       "three/addons/": "/vendor/three@0.184.0/addons/",
       "pdfjs-dist": "/vendor/pdfjs/pdf.mjs",
-      "codemirror": "https://esm.sh/codemirror@6.0.2",
-      "@codemirror/state": "https://esm.sh/@codemirror/state@6.6.0",
-      "@codemirror/view": "https://esm.sh/@codemirror/view@6.43.0?external=@codemirror/state",
-      "@codemirror/commands": "https://esm.sh/@codemirror/commands@6.10.3?external=@codemirror/language,@codemirror/state,@codemirror/view",
-      "@codemirror/language": "https://esm.sh/@codemirror/language@6.12.3?external=@codemirror/state,@codemirror/view,@lezer/highlight",
-      "@codemirror/lang-markdown": "https://esm.sh/@codemirror/lang-markdown@6.5.0?external=@codemirror/language,@codemirror/state,@codemirror/view,@lezer/highlight",
-      "@lezer/highlight": "https://esm.sh/@lezer/highlight@1.2.3",
+      "codemirror": "/vendor/codemirror@6/codemirror.mjs",
+      "@codemirror/state": "/vendor/codemirror@6/state.mjs",
+      "@codemirror/view": "/vendor/codemirror@6/view.mjs",
+      "@codemirror/commands": "/vendor/codemirror@6/commands.mjs",
+      "@codemirror/language": "/vendor/codemirror@6/language.mjs",
+      "@codemirror/lang-markdown": "/vendor/codemirror@6/lang-markdown.mjs",
+      "@lezer/highlight": "/vendor/codemirror@6/lezer-highlight.mjs",
       "katex": "https://esm.sh/katex@0.16.22"
     }
   }
@@ -39,7 +39,15 @@
       --font: 'Inter', system-ui, sans-serif;
       --mono: 'JetBrains Mono', ui-monospace, monospace;
     }
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    /* No grey/blue tap-flash on any interactive element across mini-apps (mobile). */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    /* Native-app feel: no text-selection bounding box over buttons / labels /
+       UI chrome when tapped or long-pressed. Re-enabled on the things you
+       genuinely select into: form fields and contenteditable (CodeMirror's
+       editor surface is contenteditable, so editors stay selectable). The
+       News report renders in its own iframe, so its body text is unaffected. */
+    body { -webkit-user-select: none; user-select: none; }
+    input, textarea, [contenteditable], [contenteditable] * { -webkit-user-select: text; user-select: text; }
     /* Always-hidden scrollbars in mini-app frames — matches the shell's
        global default after the on-scroll reveal mechanism was retired
        (owner preference: scrollbars never show, in any surface). */

@@ -375,7 +375,12 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       --danger: #f87171;
       --font: 'Inter', system-ui, sans-serif;
     }}
-    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    /* No grey/blue tap-flash on any interactive element across mini-apps (mobile). */
+    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }}
+    /* Native-app feel: no text-selection box over buttons / UI chrome. Inputs,
+       textareas and contenteditable (incl. CodeMirror editors) stay selectable. */
+    body {{ -webkit-user-select: none; user-select: none; }}
+    input, textarea, [contenteditable], [contenteditable] * {{ -webkit-user-select: text; user-select: text; }}
     html, body, #root {{ height: 100%; }}
     body {{
       background: var(--bg); color: var(--text);

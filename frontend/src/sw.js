@@ -96,12 +96,33 @@ const VENDORED_REACT = [
   `${REACT_VENDOR}/jsx-runtime.mjs`,
 ].map(url => ({ url, revision: null }))
 
+// Self-hosted CodeMirror 6 — same precache rationale as React above. The
+// Notes / LaTeX / Editor / Web Studio apps STATICALLY import @codemirror/* +
+// @lezer/highlight + the `codemirror` meta-package at module top via the
+// import maps; left to the runtime CacheFirst /vendor route they were never
+// warmed on an installed PWA, so offline the import rejected and took the
+// whole app (incl. the LaTeX PDF viewer) down. Precaching makes them
+// install-time offline-guaranteed. Bumping the version here means bumping it
+// in app-frame.html's import map + the Dockerfile vendor step in lockstep
+// (standalone.py derives its import map from app-frame.html via importmap_block).
+const CODEMIRROR_VENDOR = '/vendor/codemirror@6'
+const VENDORED_CODEMIRROR = [
+  `${CODEMIRROR_VENDOR}/core.mjs`,
+  `${CODEMIRROR_VENDOR}/codemirror.mjs`,
+  `${CODEMIRROR_VENDOR}/state.mjs`,
+  `${CODEMIRROR_VENDOR}/view.mjs`,
+  `${CODEMIRROR_VENDOR}/commands.mjs`,
+  `${CODEMIRROR_VENDOR}/language.mjs`,
+  `${CODEMIRROR_VENDOR}/lang-markdown.mjs`,
+  `${CODEMIRROR_VENDOR}/lezer-highlight.mjs`,
+].map(url => ({ url, revision: null }))
+
 // Inject point — Workbox replaces `self.__WB_MANIFEST` with the precache
 // manifest derived from the Vite build's content-hashed assets. The result
 // is that every release's shell precache lives under a unique
 // content-versioned cache name; `cleanupOutdatedCaches()` purges
 // older precaches when this SW activates.
-precacheAndRoute([...self.__WB_MANIFEST, ...VENDORED_REACT])
+precacheAndRoute([...self.__WB_MANIFEST, ...VENDORED_REACT, ...VENDORED_CODEMIRROR])
 cleanupOutdatedCaches()
 
 // On activate: evict stale runtime caches — the legacy hand-written

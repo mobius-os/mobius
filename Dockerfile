@@ -180,6 +180,30 @@ RUN mkdir -p /tmp/pdfjs-install && cd /tmp/pdfjs-install \
     && ln -s pdfjs@4.10.38 /app/static/vendor/pdfjs \
     && cd / && rm -rf /tmp/pdfjs-install
 
+# Self-hosted CodeMirror 6 for the mini-app import map — same OFFLINE
+# rationale as React above. The Notes / LaTeX / Editor / Web Studio apps
+# import @codemirror/* + @lezer/highlight + the `codemirror` meta-package
+# via the import map. Served from esm.sh, those were static top-level
+# imports an offline (or flaky-network) app had to fetch from a third-party
+# CDN before any app code ran — a single uncached hop took the WHOLE app
+# down (this is the "LaTeX PDF won't load / struggling" report: CodeMirror's
+# failed fetch rejected the app's dynamic import and the PDF viewer never
+# mounted). The build (build-codemirror-vendor.mjs) bundles every import-map
+# specifier into ONE core.mjs so the shared cores (@codemirror/state,
+# @lezer/common) exist exactly once — CodeMirror requires a single instance —
+# then emits facades that re-export it. See the script header for rationale.
+COPY backend/scripts/build-codemirror-vendor.mjs /tmp/build-codemirror-vendor.mjs
+RUN mkdir -p /tmp/cm-install && cd /tmp/cm-install \
+    && npm init -y >/dev/null \
+    && npm install --no-audit --no-fund --silent \
+         codemirror@6.0.2 @codemirror/state@6.6.0 @codemirror/view@6.43.0 \
+         @codemirror/commands@6.10.3 @codemirror/language@6.12.3 \
+         @codemirror/lang-markdown@6.5.0 @lezer/highlight@1.2.3 \
+    && mkdir -p /app/static/vendor/codemirror@6 \
+    && node /tmp/build-codemirror-vendor.mjs /tmp/cm-install \
+         /app/static/vendor/codemirror@6 "$(command -v esbuild)" \
+    && cd / && rm -rf /tmp/cm-install /tmp/build-codemirror-vendor.mjs
+
 # Full frontend source so the agent can edit and rebuild the shell.
 # /app/shell-src/ is the read-only reference (originals for recovery).
 # On first boot, entrypoint copies to /data/shell/ if it doesn't exist.
