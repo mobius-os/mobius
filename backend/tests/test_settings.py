@@ -94,6 +94,85 @@ def test_skills_enabled_defaults_off(client, auth):
   assert r.json()["skills_enabled"] is False
 
 
+# ─── CLI version surfacing (feature 005) ──────────────────────────────
+
+
+def test_get_settings_surfaces_cli_versions(client, auth, monkeypatch):
+  """GET /api/settings reports the installed Claude/Codex CLI versions.
+
+  The shell-out is mocked so the assertion is deterministic — we only
+  verify that whatever `_cli_version` returns flows into the response
+  under the documented keys.
+  """
+  from app.routes import settings as settings_route
+
+  versions = {"claude": "2.1.152 (Claude Code)", "codex": "codex 0.134.0"}
+  monkeypatch.setattr(
+    settings_route, "_cli_version", lambda cmd: versions[cmd],
+  )
+  body = client.get("/api/settings", headers=auth).json()
+  assert body["claude_version"] == "2.1.152 (Claude Code)"
+  assert body["codex_version"] == "codex 0.134.0"
+
+
+def test_get_settings_cli_missing_degrades_to_null(client, auth, monkeypatch):
+  """A missing/un-runnable CLI surfaces as null, never a 500.
+
+  `_cli_version` returns None when the binary is absent; the route must
+  pass that through rather than letting the failure bubble up.
+  """
+  from app.routes import settings as settings_route
+
+  monkeypatch.setattr(
+    settings_route, "_cli_version", lambda cmd: None,
+  )
+  res = client.get("/api/settings", headers=auth)
+  assert res.status_code == 200
+  body = res.json()
+  assert body["claude_version"] is None
+  assert body["codex_version"] is None
+
+
+def test_cli_version_returns_none_when_binary_absent(monkeypatch):
+  """`_cli_version` degrades to None when the CLI is not on PATH —
+  the helper resolves the binary first and never shells out blind."""
+  from app.routes import settings as settings_route
+
+  monkeypatch.setattr(settings_route.shutil, "which", lambda _name: None)
+  assert settings_route._cli_version("claude") is None
+
+
+def test_cli_version_returns_none_on_timeout(monkeypatch):
+  """A slow/hanging CLI is bounded by a timeout and degrades to None
+  rather than blocking the settings request."""
+  from app.routes import settings as settings_route
+
+  monkeypatch.setattr(
+    settings_route.shutil, "which", lambda _name: "/usr/local/bin/claude",
+  )
+
+  def _hang(*_args, **_kwargs):
+    raise settings_route.subprocess.TimeoutExpired(cmd="claude", timeout=2)
+
+  monkeypatch.setattr(settings_route.subprocess, "run", _hang)
+  assert settings_route._cli_version("claude") is None
+
+
+def test_cli_version_parses_stdout(monkeypatch):
+  """A successful run returns the trimmed first line of stdout."""
+  from app.routes import settings as settings_route
+
+  monkeypatch.setattr(
+    settings_route.shutil, "which", lambda _name: "/usr/local/bin/claude",
+  )
+
+  def _ok(*_args, **_kwargs):
+    return SimpleNamespace(returncode=0, stdout="2.1.152 (Claude Code)\n")
+
+  monkeypatch.setattr(settings_route.subprocess, "run", _ok)
+  assert settings_route._cli_version("claude") == "2.1.152 (Claude Code)"
+
+
 def test_set_skills_enabled_persists_to_shared_settings(client, auth):
   """POST /api/settings with skills_enabled writes the shared file and
   the provider gate reads it back."""

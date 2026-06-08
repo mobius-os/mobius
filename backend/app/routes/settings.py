@@ -9,6 +9,9 @@ owner-scoped surface = define a sub-router in this file and
 `outer_router.include_router(...)` it below.
 """
 
+import logging
+import shutil
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -29,19 +32,58 @@ from app.schemas import (
   SettingsUpdate,
 )
 
+logger = logging.getLogger(__name__)
+
+# Bound the version shell-out so a wedged CLI can never hang the
+# settings request. `--version` is a near-instant probe; two seconds is
+# generous headroom.
+_VERSION_TIMEOUT = 2.0
+
 # Outer composer — this is what routes/__init__.py picks up. The
-# real surfaces live on the three child routers below.
+# real surfaces live on the three child surfaces below.
 router = APIRouter()
 
 # Owner-level settings (Gemini key, provider preference).
 settings_router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
+def _cli_version(cmd: str) -> str | None:
+  """Best-effort installed version of a CLI, or None if unavailable.
+
+  Resolves the binary on PATH first so we never shell out blind, then
+  runs `<cmd> --version` under a short timeout. Every failure mode — the
+  binary missing, a non-zero exit, a hang, or any OS error — degrades to
+  None so the settings request can't break on a flaky CLI. Returns the
+  trimmed first line of stdout (the CLIs print one line).
+  """
+  if shutil.which(cmd) is None:
+    return None
+  try:
+    result = subprocess.run(
+      [cmd, "--version"],
+      capture_output=True,
+      text=True,
+      timeout=_VERSION_TIMEOUT,
+    )
+  except (subprocess.SubprocessError, OSError) as exc:
+    logger.warning("%s --version failed: %s", cmd, exc)
+    return None
+  if result.returncode != 0:
+    return None
+  first_line = result.stdout.strip().splitlines()
+  return first_line[0].strip() if first_line else None
+
+
 @settings_router.get("")
 def get_settings_view(
   owner: models.Owner = Depends(get_current_owner),
 ) -> dict:
-  """Returns which optional integrations are configured."""
+  """Returns which optional integrations are configured.
+
+  `claude_version` / `codex_version` are probed live on each request
+  (the CLIs can be upgraded in place), and are None when the CLI isn't
+  installed or doesn't respond — the UI renders those read-only.
+  """
   data_dir = get_app_settings().data_dir
   codex_creds = Path(data_dir) / "cli-auth" / "codex" / "auth.json"
   return {
@@ -49,6 +91,8 @@ def get_settings_view(
     "codex_authenticated": codex_creds.exists(),
     "provider": owner.provider or "claude",
     "skills_enabled": providers.skills_enabled(data_dir),
+    "claude_version": _cli_version("claude"),
+    "codex_version": _cli_version("codex"),
   }
 
 

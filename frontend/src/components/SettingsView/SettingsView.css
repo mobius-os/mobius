@@ -76,6 +76,19 @@
   margin: 4px 0 0;
 }
 
+.settings__versions {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings__version {
+  font-family: var(--font-mono, monospace);
+  font-size: 13px;
+  color: var(--muted);
+}
+
 .settings__notice {
   margin-top: 12px;
   padding: 10px 12px;
