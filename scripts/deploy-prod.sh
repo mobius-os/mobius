@@ -48,6 +48,30 @@ PREFLIGHT_WAIT_SECONDS="${PREFLIGHT_WAIT_SECONDS:-120}"
 # rolls back an image that was about to come up fine. Override upward on a
 # heavily-loaded host (e.g. CUTOVER_WAIT_SECONDS=240).
 CUTOVER_WAIT_SECONDS="${CUTOVER_WAIT_SECONDS:-120}"
+# How many restarts above the baseline mean a genuine crash-loop. This
+# memory-thrashing 7.6GB host can OOM-kill a freshly-recreated container ONCE
+# and self-heal on Docker's automatic restart — a single restart is not proof
+# of a crash-loop, just of the host being tight. Require at least this many
+# extra restarts before rolling back, so a one-off OOM bounce doesn't abort a
+# deploy that was about to come up fine (card 116). 2 = the container must die
+# and be restarted twice within the cutover window.
+CRASH_RESTART_THRESHOLD="${CRASH_RESTART_THRESHOLD:-2}"
+# Both wait knobs feed `seq 1 "$N"` loops; an empty, zero, negative, or
+# unit-suffixed value (e.g. "240s", which arithmetic reads as 240… or, in a
+# `[ -eq ]`, errors) yields an EMPTY sequence — the loop body never runs, the
+# health probe is skipped entirely, and the deploy false-fails into an instant
+# rollback that looks like a boot failure. Reject anything that isn't a bare
+# positive integer up front, where the operator can see and fix it (card 116).
+for _knob in PREFLIGHT_WAIT_SECONDS CUTOVER_WAIT_SECONDS; do
+  case "${!_knob}" in
+    ''|*[!0-9]*|0)
+      printf 'deploy-prod: %s=%q must be a positive integer (seconds)\n' \
+        "$_knob" "${!_knob}" >&2
+      exit 2
+      ;;
+  esac
+done
+unset _knob
 for arg in "$@"; do
   case "$arg" in
     --target=prod) TARGET="prod" ;;
@@ -417,15 +441,18 @@ wait_for_cutover() {
       ok "${ok_label} after ${i}s"
       return 0
     fi
-    # Crash-loop detection: a RestartCount above the baseline means the
-    # container died and Docker restarted it — a genuine boot failure, not a
-    # slow bind. Roll back now rather than wait out the whole window. Guard
+    # Crash-loop detection: a RestartCount that climbs CRASH_RESTART_THRESHOLD
+    # above the baseline means the container died and Docker restarted it
+    # repeatedly — a genuine boot failure, not a slow bind. A SINGLE extra
+    # restart is tolerated: this host OOM-bounces a recreated container once and
+    # self-heals, so a delta of 1 isn't proof of a loop. Roll back only once the
+    # delta reaches the threshold, rather than wait out the whole window. Guard
     # against the -1 inspect-error sentinel so a transient inspect hiccup
     # doesn't trip a false crash-loop verdict.
     now_restarts=$(container_restart_count)
     if [ "$now_restarts" -ge 0 ] 2>/dev/null &&
        [ "$baseline_restarts" -ge 0 ] 2>/dev/null &&
-       [ "$now_restarts" -gt "$baseline_restarts" ]; then
+       [ $((now_restarts - baseline_restarts)) -ge "$CRASH_RESTART_THRESHOLD" ]; then
       fail "${fail_summary} (last: ${code}); ${CONTAINER} restarted $((now_restarts - baseline_restarts))× — it is crash-looping, not just slow."
       attempt_rollback || true
       exit 1

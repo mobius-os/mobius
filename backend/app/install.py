@@ -1637,7 +1637,11 @@ async def install_from_manifest(
   # (recurring → on-demand migration). So on update we unconditionally drop
   # the existing entry first, then re-register below only if the new manifest
   # still declares one. A fresh install has nothing to drop. (Card 099.)
-  drop_prior_cron = mode == "update"
+  # Guard on source_dir like the git block above: a legacy no-source_dir app
+  # never had a per-app dir or a crontab line to converge, so forcing the cron
+  # block on its update would only materialize a stray empty /data/apps/<slug>/
+  # via the app_data_dir.mkdir below (card 099, stray-dir follow-up).
+  drop_prior_cron = mode == "update" and bool(app.source_dir)
   if bundled_job or has_cron or drop_prior_cron:
     slug = app.slug
     # Use the app's ACTUAL source_dir (where the JSX + job script live), not a
