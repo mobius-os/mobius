@@ -86,3 +86,49 @@ def get_active_chat_or_404(
   if chat is None:
     raise HTTPException(status_code=404, detail="Chat not found.")
   return chat
+
+
+def live_app(
+  db: Session, app_id: int, *, populate: bool = False,
+) -> models.App | None:
+  """Fetches a non-tombstoned App by id, or None.
+
+  The App analogue of `get_active_chat_or_404`'s filter, factored out because
+  feature 110 made uninstall a reversible tombstone (`App.deleted_at`) and the
+  "hide a tombstoned app" filter then scattered to ~10 sites in `routes/apps.py`
+  plus `deps`/`standalone`/`main` — and a review still missed `validate_app`. A
+  single definition makes the next app-read endpoint correct by construction.
+
+  Non-raising (returns None) so token/scope checks that raise their OWN 401 can
+  reuse it; route reads that want a 404 use `live_app_or_404`.
+
+  The deliberate tombstone-VISIBLE paths stay inline so they read as special:
+  `delete_app` (SETS deleted_at), `recover_app` (INVERSE filter), the purge
+  sweep, and `allocate_unique_slug` (which MUST see tombstones to avoid reusing
+  a still-claimed id/slug). Do not route those through here.
+
+  `populate=True` forces `populate_existing()` so a caller about to MUTATE the
+  row (update_app, update_icon) refreshes its identity-map copy instead of
+  acting on a stale in-session object.
+  """
+  q = db.query(models.App)
+  if populate:
+    q = q.populate_existing()
+  return q.filter(
+    models.App.id == app_id,
+    models.App.deleted_at.is_(None),
+  ).first()
+
+
+def live_app_or_404(
+  db: Session, app_id: int, *, populate: bool = False,
+) -> models.App:
+  """Fetches a non-tombstoned App by id, raising 404 otherwise.
+
+  Same 404 shape a missing app returns, so a tombstoned app can't be probed
+  for existence by a caller that shouldn't see it.
+  """
+  app = live_app(db, app_id, populate=populate)
+  if app is None:
+    raise HTTPException(status_code=404, detail="App not found.")
+  return app

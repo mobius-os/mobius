@@ -61,6 +61,7 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -78,6 +79,8 @@ LOG_PATH = DATA_DIR / "cron-logs" / "dreaming.log"
 CLAUDE_CONFIG_DIR = DATA_DIR / "cli-auth" / "claude"
 CODEX_HOME = DATA_DIR / "cli-auth" / "codex"
 CLI_PATH = "/usr/local/bin/claude"
+# The denylist-guarded `git add -A && git commit` helper baked into the image.
+PM_COMMIT = "/app/scripts/pm-commit"
 
 # The brief template is baked into the image at /app/scripts; the agent runs
 # with cwd=/data and the SDK Read tool is scoped to that subtree, so a Read of
@@ -100,6 +103,40 @@ DEFAULT_MAX_TURNS = 60
 # override per-instance via /data/apps/dreaming/settings.json without
 # touching code.
 DEFAULT_PROVIDER = "claude"
+
+
+def _safety_snapshot(label: str) -> None:
+  """Best-effort git snapshot of /data BEFORE Dreaming mutates anything.
+
+  The nightly run consolidates the memory graph, rewrites skills, and fixes
+  apps — destructive overwrites of agent-owned files under /data/shared that
+  the "git is the undo" contract (mind.md) promises are recoverable. Until now
+  that promise rested entirely on the agent's own `pm-commit` discipline
+  MID-run, so a consolidation that overwrote a note before the first commit had
+  no pre-state restore point beyond LAST night's. Committing the current tree as
+  the very first thing the run does guarantees one.
+
+  `--allow-broad` so a full day's accumulated changes aren't refused by
+  pm-commit's 50-file guard; a no-op (nothing changed) exits 0. Any failure is
+  logged and swallowed — a snapshot must NEVER block the night's run.
+  """
+  try:
+    proc = subprocess.run(
+      [PM_COMMIT, "--allow-broad", label],
+      cwd=str(DATA_DIR),
+      capture_output=True,
+      text=True,
+      timeout=120,
+    )
+    if proc.returncode == 0:
+      _log("pre-run safety snapshot committed (or no-op)")
+    else:
+      _log(
+        f"WARN pre-run snapshot rc={proc.returncode}: "
+        f"{(proc.stderr or '').strip()[:200]}"
+      )
+  except Exception as exc:
+    _log(f"WARN pre-run snapshot failed: {exc!r}")
 
 
 def _log(message: str) -> None:
@@ -414,6 +451,12 @@ async def run() -> int:
     f"start agent={agent_id or '(none)'} provider={provider} model={model or '(default)'} "
     f"effort={effort or '(default)'} max_turns={max_turns} cwd={DATA_DIR}"
   )
+
+  # Guaranteed pre-run restore point: commit /data BEFORE the agent consolidates
+  # memory / rewrites skills, so "git is the undo" holds even if tonight's run
+  # overwrites a note before its own first pm-commit. Best-effort; never blocks.
+  from datetime import date
+  _safety_snapshot(f"dreaming: pre-run safety snapshot {date.today().isoformat()}")
 
   # Codex can run the same Dreaming skill through the app-server SDK path. The
   # normal chat runner publishes SSE; Dreaming swaps in a log-only broadcast so

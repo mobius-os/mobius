@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import time
 import uuid
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, UTC
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -28,14 +28,16 @@ from app.deps import (
   get_current_owner, get_current_owner_or_app, get_principal, Principal,
   get_owner_or_app_with_manage_apps, reject_cross_site, resolve_owner_or_app,
 )
+from app.resource_access import live_app, live_app_or_404
+from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
 
 router = APIRouter(prefix="/api/apps", tags=["apps"])
 
-# Tombstoned apps are hard-purged this long after uninstall. Matches the chat
-# soft-delete window (routes/chats.py SOFT_DELETE_TTL) so app and chat recovery
-# feel the same — the agent recovers within the window by reinstalling (store
-# apps) or POST /{id}/recover (any app). See feature 110.
-APP_SOFT_DELETE_TTL = timedelta(days=7)
+# Tombstoned apps are hard-purged this long after uninstall. Aliases the single
+# shared SOFT_DELETE_TTL (app.timeutil) — the same window chat soft-delete uses,
+# so the two recovery windows can't drift. The agent recovers within the window
+# by reinstalling (store apps) or POST /{id}/recover (any app). See feature 110.
+APP_SOFT_DELETE_TTL = SOFT_DELETE_TTL
 
 log = logging.getLogger("mobius.apps")
 
@@ -327,7 +329,7 @@ async def list_apps(
   concurrent reinstall/recover — otherwise the purge could delete a row the
   reinstall is reviving, re-opening the slug-flip race (feature 110).
   """
-  cutoff = datetime.now(UTC).replace(tzinfo=None) - APP_SOFT_DELETE_TTL
+  cutoff = now_naive_utc() - APP_SOFT_DELETE_TTL
   has_stale = (
     db.query(models.App.id)
     .filter(models.App.deleted_at.isnot(None), models.App.deleted_at < cutoff)
@@ -677,13 +679,7 @@ async def update_preview(
           "to preview updates for other apps."
         ),
       )
-  app = (
-    db.query(models.App)
-    .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
-    .first()
-  )
-  if not app:
-    raise HTTPException(status_code=404, detail="App not found.")
+  app = live_app_or_404(db, app_id)
   if not app.source_dir:
     raise HTTPException(status_code=400, detail="App has no source_dir.")
   repo = Path(app.source_dir)
@@ -791,13 +787,7 @@ def get_app(
   _: models.Owner = Depends(get_current_owner_or_app),
 ):
   """Returns a single mini-app by ID (404 for a tombstoned one)."""
-  app = (
-    db.query(models.App)
-    .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
-    .first()
-  )
-  if not app:
-    raise HTTPException(status_code=404, detail="App not found.")
+  app = live_app_or_404(db, app_id)
   return app
 
 
@@ -848,13 +838,7 @@ async def update_app(
     fs_locks.install_uninstall_lock(),
     fs_locks.app_storage_lock(app_id),
   ):
-    app = (
-      db.query(models.App).populate_existing()
-      .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
-      .first()
-    )
-    if not app:
-      raise HTTPException(status_code=404, detail="App not found.")
+    app = live_app_or_404(db, app_id, populate=True)
     if body.name is not None:
       app.name = body.name
     if body.description is not None:
@@ -864,10 +848,7 @@ async def update_app(
     if new_source_dir is not None:
       app.source_dir = new_source_dir
     if body.pinned is not None:
-      from datetime import UTC, datetime
-      app.pinned_at = (
-        datetime.now(UTC).replace(tzinfo=None) if body.pinned else None
-      )
+      app.pinned_at = now_naive_utc() if body.pinned else None
     if body.share_with_apps is not None:
       app.share_with_apps = body.share_with_apps
     if body.cross_app_access is not None:
@@ -948,11 +929,7 @@ async def update_icon(
   from app.install import _process_icon
   processed = _process_icon(body) if body else None
   async with fs_locks.app_storage_lock(app_id):
-    app = (
-      db.query(models.App).populate_existing()
-      .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
-      .first()
-    )
+    app = live_app(db, app_id, populate=True)
     if app is None or app.token_nonce != expected_nonce:
       raise HTTPException(404, "App not found.")
     app.icon_png = processed
@@ -998,7 +975,7 @@ async def delete_app(
     # Naive UTC to match SQLite's naive storage + the naive TTL comparison in
     # list_apps / recover_app (same contract chats.py documents). Avoids a
     # platform-dependent aware/naive round-trip mismatch.
-    app.deleted_at = datetime.now(UTC).replace(tzinfo=None)
+    app.deleted_at = now_naive_utc()
     app_name = app.name
     app_source_dir = app.source_dir
     db.commit()
@@ -1057,7 +1034,7 @@ async def recover_app(
         status_code=404, detail="App not found or not deleted."
       )
     if (
-      datetime.now(UTC).replace(tzinfo=None) - app.deleted_at
+      now_naive_utc() - app.deleted_at
     ) >= APP_SOFT_DELETE_TTL:
       raise HTTPException(status_code=410, detail="Recovery window has expired.")
     app.deleted_at = None
@@ -1110,13 +1087,7 @@ def run_app_job(
       status_code=403,
       detail="App token can only run its own job.",
     )
-  app = (
-    db.query(models.App)
-    .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
-    .first()
-  )
-  if not app:
-    raise HTTPException(status_code=404, detail="App not found.")
+  app = live_app_or_404(db, app_id)
   if not app.source_dir:
     raise HTTPException(
       status_code=400, detail="App has no source_dir; cannot locate job.",
@@ -1172,13 +1143,7 @@ def update_app_schedule(
       status_code=403,
       detail="App token can only update its own schedule.",
     )
-  app = (
-    db.query(models.App)
-    .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
-    .first()
-  )
-  if not app:
-    raise HTTPException(status_code=404, detail="App not found.")
+  app = live_app_or_404(db, app_id)
   if not app.source_dir:
     raise HTTPException(
       status_code=400, detail="App has no source_dir; cannot locate job.",
@@ -1285,11 +1250,7 @@ def get_frame(
   rejects any reply from a non-Möbius origin, so no token can be
   coerced into the frame.
   """
-  app = (
-    db.query(models.App)
-    .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
-    .first()
-  )
+  app = live_app(db, app_id)
   if not app or not app.compiled_path:
     raise HTTPException(status_code=404, detail="App not found.")
   compiled = Path(app.compiled_path)
@@ -1390,11 +1351,7 @@ def get_module(
       status_code=401, detail="Valid token required."
     )
   resolve_owner_or_app(token, db)
-  app = (
-    db.query(models.App)
-    .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
-    .first()
-  )
+  app = live_app(db, app_id)
   if not app or not app.compiled_path:
     raise HTTPException(status_code=404, detail="Module not found.")
   path = Path(app.compiled_path)
@@ -1435,11 +1392,7 @@ async def validate_app(
   default, and that the source JSX is present. Returns a report the
   agent can use to decide whether to offer debugging.
   """
-  app = (
-    db.query(models.App).filter(models.App.id == app_id).first()
-  )
-  if not app:
-    raise HTTPException(status_code=404, detail="App not found.")
+  app = live_app_or_404(db, app_id)
 
   issues = []
 
