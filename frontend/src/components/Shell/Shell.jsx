@@ -154,6 +154,48 @@ export default function Shell() {
     })
   }, [activeAppId])
 
+  // Evict tombstoned apps from the LRU. When an app is uninstalled
+  // (feature 110 soft-delete) it drops out of /api/apps, the server
+  // 404s its /module + /frame, and `app_updated` fires → refreshApps.
+  // But the hidden AppCanvas iframe stays mounted as long as its id is
+  // in appCache, so it re-fetches /module, 404s, and shows an error
+  // canvas that lingers until the next navigation. Reconcile the cache
+  // against the live apps list: any cached id no longer present is
+  // dropped so its AppCanvas unmounts. If the tombstoned app is the
+  // ACTIVE canvas, fall back to the chat view so the user isn't left
+  // staring at the error canvas (feature 114).
+  //
+  // Gate on a live-confirmed list (isSuccess + isFetchedAfterMount),
+  // mirroring the chat-demotion effect above: a transiently-empty
+  // `apps` (cold cache, a refetch that resolved to []) must not evict
+  // valid cached apps. This is bookkeeping only — render still iterates
+  // the id-sorted snapshot, never appCache's LRU order directly.
+  const appsLiveFetched = appsQuery.isSuccess && appsQuery.isFetchedAfterMount
+  useEffect(() => {
+    if (!appsLiveFetched) return
+    if (appCache.length === 0) return
+    const liveIds = new Set(apps.map(a => a.id))
+    const stale = appCache.filter(id => !liveIds.has(id))
+    if (stale.length === 0) return
+    setAppCache(prev => prev.filter(id => liveIds.has(id)))
+    // Drop any back-stack entries pointing at a now-dead app so a later
+    // back-gesture can't restore the canvas of an uninstalled app (which
+    // would render a blank `<main>` — its iframe is evicted). Mirrors the
+    // navStack scrub deleteChat does for deleted chats.
+    navStackRef.current = navStackRef.current.filter(
+      e => !(e.view === 'canvas' && stale.includes(e.appId))
+    )
+    // If we're sitting ON the tombstoned app, leave the canvas for the
+    // chat view directly (not navTo — there's no meaningful "back to the
+    // app" target to push; the app is gone). setActiveView last so the
+    // canvas->chat flip only happens once activeView's payload is set.
+    if (activeView === 'canvas' && stale.includes(activeAppId)) {
+      setActiveAppId(null)
+      setActiveView('chat')
+    }
+  }, [apps, appsLiveFetched, appCache, activeView, activeAppId,
+      navStackRef, setActiveAppId, setActiveView])
+
   usePushSubscription()
 
   // Stable refresh callbacks. Earlier versions used
