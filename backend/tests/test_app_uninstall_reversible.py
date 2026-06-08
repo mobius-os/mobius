@@ -337,3 +337,65 @@ def test_now_naive_utc_returns_naive():
   from app.timeutil import now_naive_utc
   v = now_naive_utc()
   assert v.tzinfo is None
+
+
+# --- cron-tombstone replay robustness (entrypoint replays init-cron.sh) ---
+
+
+def _write_init_cron(source_dir: Path) -> Path:
+  """Drop a harmless init-cron.sh into an app's source tree.
+
+  The real scaffold installs a crontab entry; this stub just exits 0 so
+  _reenable_init_cron_replay's one-shot run touches nothing global but still
+  exercises the rename + bash-run path.
+  """
+  script = source_dir / "init-cron.sh"
+  script.write_text("#!/bin/bash\nexit 0\n")
+  return script
+
+
+def test_tombstone_disables_init_cron_replay(
+  client, auth, db, bypass_url_validation,
+):
+  """Tombstoning a scheduled app moves init-cron.sh aside so entrypoint.sh's
+  boot replay (which runs every /data/apps/*/init-cron.sh) can't resurrect the
+  schedule the tombstone just dropped."""
+  app = _install(client, auth)
+  app_id = app["id"]
+  source_dir = Path(
+    db.query(models.App).filter(models.App.id == app_id).first().source_dir
+  )
+  script = _write_init_cron(source_dir)
+  tombstoned = source_dir / "init-cron.sh.tombstoned"
+
+  assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
+
+  # init-cron.sh renamed outside the entrypoint's */init-cron.sh glob.
+  assert not script.exists()
+  assert tombstoned.exists()
+
+
+def test_recover_reenables_init_cron_replay(
+  client, auth, db, bypass_url_validation,
+):
+  """Recovery renames init-cron.sh.tombstoned back into the replay glob (and
+  re-runs it) so the revived app's schedule is re-armed — recovery undoes every
+  side-effect the delete tore down."""
+  app = _install(client, auth)
+  app_id = app["id"]
+  source_dir = Path(
+    db.query(models.App).filter(models.App.id == app_id).first().source_dir
+  )
+  script = _write_init_cron(source_dir)
+  tombstoned = source_dir / "init-cron.sh.tombstoned"
+
+  assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
+  assert tombstoned.exists() and not script.exists()
+
+  assert client.post(
+    f"/api/apps/{app_id}/recover", headers=auth
+  ).status_code == 200
+
+  # Renamed back into place; the tombstoned copy is gone.
+  assert script.exists()
+  assert not tombstoned.exists()

@@ -158,13 +158,13 @@ def test_validate_url_safe_blocks_ipv6_embedded_ipv4():
     return [(_socket.AF_INET6, _socket.SOCK_STREAM, 0, "", (ip_str, 0, 0, 0))]
 
   for ip_str in ("::127.0.0.1", "::ffff:169.254.169.254", "64:ff9b::a9fe:a9fe"):
-    with patch("app.install.socket.getaddrinfo", return_value=_gai(ip_str)):
+    with patch("app.net_utils.socket.getaddrinfo", return_value=_gai(ip_str)):
       with pytest.raises(Exception):  # HTTPException(400)
         _validate_url_safe("https://evil.example/mobius.json")
 
   # A genuine public IPv6 is allowed through AND pins to that exact IP, with the
   # authority preserved for the Host header and the bare hostname for TLS SNI.
-  with patch("app.install.socket.getaddrinfo",
+  with patch("app.net_utils.socket.getaddrinfo",
              return_value=_gai("2606:4700:4700::1111")):
     pinned, host_header, sni = _validate_url_safe(
       "https://cloudflare.example/mobius.json")

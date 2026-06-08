@@ -290,7 +290,11 @@ def _force_steer_matches_pending(chat: models.Chat, body: schemas.SendMessage) -
   return bool(expected) and body.content == expected
 
 
-@router.post("/{chat_id}/messages", status_code=202)
+@router.post(
+  "/{chat_id}/messages",
+  status_code=202,
+  dependencies=[Depends(reject_cross_site)],
+)
 async def send_message(
   body: schemas.SendMessage,
   chat_id: str,
