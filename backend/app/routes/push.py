@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.database import get_db
-from app.deps import get_current_owner_or_app
+from app.deps import get_current_owner_or_app, reject_cross_site
 from app.push import get_public_key_base64url
 from app.schemas import PushSubscribeRequest, PushUnsubscribeRequest
 
@@ -21,7 +21,9 @@ def vapid_key():
   return {"publicKey": get_public_key_base64url()}
 
 
-@router.post("/subscribe", status_code=201)
+@router.post(
+  "/subscribe", status_code=201, dependencies=[Depends(reject_cross_site)]
+)
 def subscribe(
   body: PushSubscribeRequest,
   owner: models.Owner = Depends(get_current_owner_or_app),
@@ -50,7 +52,9 @@ def subscribe(
   return {"status": "subscribed"}
 
 
-@router.delete("/subscribe", status_code=204)
+@router.delete(
+  "/subscribe", status_code=204, dependencies=[Depends(reject_cross_site)]
+)
 def unsubscribe(
   body: PushUnsubscribeRequest,
   _owner: models.Owner = Depends(get_current_owner_or_app),

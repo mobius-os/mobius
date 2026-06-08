@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.database import get_db
-from app.deps import get_current_owner_or_app
+from app.deps import get_current_owner_or_app, reject_cross_site
 from app.push import notify_owner
 from app.schemas import NotificationOut, NotificationSendRequest
 
@@ -20,7 +20,7 @@ router = APIRouter(prefix="/api/notifications", tags=["notifications"])
 limiter = Limiter(key_func=get_remote_address)
 
 
-@router.post("/send")
+@router.post("/send", dependencies=[Depends(reject_cross_site)])
 @limiter.limit("10/minute")
 def send_notification(
   request: Request,
