@@ -38,6 +38,28 @@ def _call(url: str, token: str, method: str, data: dict | None = None):
     sys.exit(1)
 
 
+def _find_existing(apps: list, source_dir: str, name: str):
+  """Find the app this (re-)registration refers to, by STABLE identity.
+
+  Identity is source_dir, not the display name. A core app renamed in place
+  (Memory Graph -> Mind, feature 097) keeps the same /data/apps/<slug>/ source
+  dir, so matching on name would miss the existing row and CREATE a duplicate.
+  The file watcher already keys edits on the exact source_dir, so it is the
+  canonical per-app key. Fall back to the name only for legacy rows that
+  predate source_dir being populated (NULL/absent in the API response), where
+  there is no stable key to compare.
+  """
+  by_dir = next(
+    (a for a in apps if a.get("source_dir") == source_dir), None
+  )
+  if by_dir is not None:
+    return by_dir
+  return next(
+    (a for a in apps if not a.get("source_dir") and a.get("name") == name),
+    None,
+  )
+
+
 def _notify(token: str, base: str, event_type: str, **kwargs):
   """Best-effort notification — failures are not fatal."""
   try:
@@ -81,7 +103,10 @@ def main() -> None:
   # Trailing slash required — FastAPI redirects /api/apps → /api/apps/ and
   # urllib does not follow POST redirects, so use the canonical URL directly.
   apps = _call(f"{base}/api/apps/", token, "GET")
-  existing = next((a for a in apps if a["name"] == name), None)
+  # Match on the stable source_dir, not the display name: a rename keeps the
+  # source dir but changes the name, and a name-only match would create a
+  # duplicate row for the renamed app (feature 097).
+  existing = _find_existing(apps, source_dir, name)
 
   if existing:
     app = _call(
