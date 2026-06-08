@@ -17,7 +17,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from app import models
-from app.deps import get_current_owner_or_app
+from app.deps import get_current_owner_or_app, reject_cross_site
 
 router = APIRouter(prefix="/api/proxy", tags=["proxy"])
 
@@ -56,7 +56,7 @@ async def proxy_get(
   )
 
 
-@router.post("")
+@router.post("", dependencies=[Depends(reject_cross_site)])
 async def proxy_post(
   body: ProxyPostRequest,
   _: models.Owner = Depends(get_current_owner_or_app),

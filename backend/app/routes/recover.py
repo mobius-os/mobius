@@ -163,6 +163,9 @@ def _request_is_https(request: Request) -> bool:
   return request.url.scheme == "https"
 
 
+# The /recover POST routes are deliberately EXEMPT from reject_cross_site: they
+# authenticate via the separate recovery session-cookie surface (recover_auth
+# HMAC cookie), not the owner JWT, so the JWT-oriented CSRF guard doesn't apply.
 @router.post("/recover/auth")
 @_limiter.limit("5/minute")
 def recover_login(
