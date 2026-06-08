@@ -248,10 +248,13 @@ def recover_action(
 ):
   """Executes a recovery action.
 
-  Only two actions remain: `download_backup` streams a zip, and
-  `factory_reset` wipes state and bounces to the setup wizard.
-  Everything else the dashboard used to expose (reset/restore knobs)
-  is now the recovery chat agent's job — see /recover/chat.
+  Three actions are live: `download_backup` streams a zip,
+  `factory_reset` wipes state and bounces to the setup wizard, and
+  `reinstall_store` re-runs the first-boot store bootstrap (idempotent
+  — a no-op when the store is already installed). Each has a button in
+  the dashboard (see `recover_html.py`). Everything else the dashboard
+  used to expose (the deeper reset/restore knobs) is now the recovery
+  chat agent's job — see /recover/chat.
   """
   _verify_session(request)
   data_dir = _DATA_DIR

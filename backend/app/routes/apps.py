@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -193,20 +194,64 @@ def _drop_cron_and_rmtree(resolved: Path) -> None:
     pass
 
 
+def _disable_init_cron_replay(resolved: Path) -> None:
+  """Move a source tree's ``init-cron.sh`` aside so boot replay skips it.
+
+  ``entrypoint.sh`` re-runs EVERY ``/data/apps/*/init-cron.sh`` on boot, which
+  would resurrect a tombstoned scheduled app's crontab entry that
+  ``_drop_cron_only`` just removed. Renaming the script to
+  ``init-cron.sh.tombstoned`` puts it outside the entrypoint's
+  ``*/init-cron.sh`` glob while keeping it on disk so ``recover`` can rename it
+  back and reinstall the schedule. Swallows ``OSError`` like its siblings.
+  """
+  try:
+    os.replace(
+      resolved / "init-cron.sh", resolved / "init-cron.sh.tombstoned"
+    )
+  except OSError:
+    pass
+
+
+def _reenable_init_cron_replay(resolved: Path) -> None:
+  """Re-arm a recovered app's cron: undo ``_disable_init_cron_replay``.
+
+  Renames ``init-cron.sh.tombstoned`` back to ``init-cron.sh`` (so the next
+  boot replays it too) and runs it once now to reinstall the crontab entry the
+  tombstone dropped — recovery must re-establish every side-effect the delete
+  tore down. Swallows ``OSError``; the ``init-cron.sh`` run is best-effort
+  (``check=False``) and bounded.
+  """
+  try:
+    os.replace(
+      resolved / "init-cron.sh.tombstoned", resolved / "init-cron.sh"
+    )
+  except OSError:
+    return
+  try:
+    subprocess.run(
+      ["bash", str(resolved / "init-cron.sh")], timeout=10, check=False
+    )
+  except OSError:
+    pass
+
+
 def _drop_cron_only(resolved: Path) -> None:
   """Unregister a source tree's cron WITHOUT removing the tree.
 
   The soft-delete (tombstone) path: a tombstoned app must stop running its
   scheduled jobs, but its source — including the job.sh — has to survive so a
-  reinstall/recover can re-register the schedule. Pure-filesystem so it runs via
-  ``asyncio.to_thread`` (``_unregister_cron`` shells out to crontab). Swallows
-  errors like ``_drop_cron_and_rmtree``.
+  reinstall/recover can re-register the schedule. Drops the live crontab entry
+  AND moves ``init-cron.sh`` aside (``_disable_init_cron_replay``) so the boot
+  replay in ``entrypoint.sh`` can't resurrect the schedule. Pure-filesystem so
+  it runs via ``asyncio.to_thread`` (``_unregister_cron`` shells out to
+  crontab). Swallows errors like ``_drop_cron_and_rmtree``.
   """
   from app.install import _unregister_cron
   try:
     _unregister_cron(resolved)
   except OSError:
     pass
+  _disable_init_cron_replay(resolved)
 
 
 def _resolve_app_source_dir(app_source_dir, app_name, settings) -> Path | None:
@@ -876,7 +921,11 @@ async def update_app(
   return app
 
 
-@router.put("/{app_id}/icon", status_code=204)
+@router.put(
+  "/{app_id}/icon",
+  status_code=204,
+  dependencies=[Depends(reject_cross_site)],
+)
 async def update_icon(
   app_id: int,
   request: Request,
@@ -1014,8 +1063,10 @@ async def recover_app(
   the agent calls this when the partner asks to undo an uninstall. Store apps can
   also be revived by reinstalling — the install reattaches by manifest_url. The
   id-keyed storage tree was never removed, so the revived app keeps its data.
-  (Cron for an agent-built app is not auto-restored here; reinstalling a store
-  app re-registers it. See feature 110.)
+  Cron IS re-registered on recover for any app that had a scheduled
+  ``init-cron.sh`` (the tombstoned replay script is restored and re-run under the
+  source-dir lock); reinstalling a store app also re-registers it. See feature
+  110.
 
   Held under install_uninstall_lock — the same lock the TTL purge takes — so a
   recover near the TTL boundary can't race the purge into reviving a row the
@@ -1038,7 +1089,21 @@ async def recover_app(
     ) >= APP_SOFT_DELETE_TTL:
       raise HTTPException(status_code=410, detail="Recovery window has expired.")
     app.deleted_at = None
+    app_name = app.name
+    app_source_dir = app.source_dir
     db.commit()
+
+    # Re-arm the schedule the tombstone dropped: rename init-cron.sh back into
+    # the entrypoint's replay glob and run it once to reinstall the crontab
+    # entry. Recovery must re-establish every side-effect delete tore down.
+    # Off the loop under the per-source-dir lock (bash run can block).
+    settings = get_settings()
+    resolved_source = _resolve_app_source_dir(
+      app_source_dir, app_name, settings
+    )
+    if resolved_source is not None:
+      async with fs_locks.source_dir_lock(str(resolved_source)):
+        await asyncio.to_thread(_reenable_init_cron_replay, resolved_source)
   # Refetch the drawer (app reappears) and bust any cached iframe for it.
   get_system_broadcast().publish(
     {"type": "app_updated", "appId": str(app_id)}
@@ -1233,15 +1298,19 @@ def get_frame(
   token and the current theme via `postMessage` after the iframe
   loads, instead of having them server-templated into the body.
 
-  Cache freshness model: ETag-based revalidation keyed on
-  `app.updated_at`. Responses carry a compound ETag (see
-  `_frame_etag`, folding `app.updated_at` with the shared frame
-  file's content) and `Cache-Control: no-cache`, so the browser
-  revalidates with `If-None-Match` and gets a 304 when nothing
-  changed or fresh 200 when `updated_at` advanced. The service
-  worker revalidates offline-capable apps against the same ETag
-  (`offlineCapableHandler` in `sw.js`); the old `?v=`/version-query
-  cache key was retired with that move.
+  Cache freshness model: two independent mechanisms COEXIST. The
+  compound `_frame_etag` (folding `app.updated_at` with the shared
+  frame file's content) plus `Cache-Control: no-cache` drives the
+  browser's HTTP-cache revalidation on cold / non-SW paths — the
+  browser sends `If-None-Match` and gets a 304 when nothing changed
+  or a fresh 200 when `updated_at` advanced or the frame file
+  changed. The service worker revalidates offline-capable apps
+  against the same ETag (`offlineCapableHandler` in `sw.js`).
+  SEPARATELY, `AppCanvas` appends `?v=<app.updated_at>` to the frame
+  URL, which the SW keeps as its offline cache key (it strips only
+  token/_/install, not `v`), so an app edit changes the SW key and
+  forces a fresh load. `v` is purely a client/SW cache-buster — this
+  endpoint never reads it.
 
   Frame is intentionally public — it's just the runtime shell
   (importmap, error UI, postMessage init script). Actual app

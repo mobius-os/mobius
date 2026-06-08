@@ -2046,10 +2046,11 @@ async def _run_chat_impl(
   # continuation handoff keeps the marker continuously set across the
   # whole chain of turns.
 
-  # On the first message of a session, prepend the agent experience file so
+  # On the first message of a session, prepend the dynamic memory block (built
+  # from the knowledge graph, empty when no validated graph is published) so
   # the agent always sees it without needing a tool call.  The system prompt
-  # (skill) stays static for API-level caching; the dynamic experience
-  # travels here instead.
+  # (skill) stays static for API-level caching; the dynamic memory travels in
+  # the user turn here instead.
   if not session_id:
     # Build the memory block from the knowledge graph at
     # /data/shared/memory/ when a validated graph is published (the

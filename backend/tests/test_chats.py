@@ -73,3 +73,23 @@ def test_question_answers_rejects_cross_site_request(client, auth, chat):
     headers={**auth, "Sec-Fetch-Site": "cross-site"},
   )
   assert cross.status_code == 403
+
+
+def test_send_message_rejects_cross_site_request(client, auth, chat):
+  cross = client.post(
+    f"/api/chats/{chat.id}/messages",
+    json={"content": "hi"},
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert cross.status_code == 403
+
+
+def test_update_icon_rejects_cross_site_request(client, auth):
+  # The cross-site dependency fires before the handler, so a non-existent
+  # app id still 403s (mirrors test_update_app_rejects_cross_site_request).
+  cross = client.put(
+    "/api/apps/1/icon",
+    content=b"not-an-image",
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert cross.status_code == 403
