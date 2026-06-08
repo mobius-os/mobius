@@ -241,6 +241,10 @@
           rt.init({ appId: _FRAME_APP_ID, getToken: async () => token });
         } catch (e) {}
         const frameVersion = new URLSearchParams(window.location.search).get('v') || '0';
+        // &v=frameVersion is REQUIRED as the SW offline cache-buster: the server
+        // /module route ignores v (its ETag keys on app.updated_at), but the SW
+        // offline handler keeps v in its cache key (it strips token, _ and install but keeps v), so
+        // an app update changes the key and forces a fresh fetch.
         const url = `/api/apps/${_FRAME_APP_ID}/module?token=${encodeURIComponent(token)}&v=${encodeURIComponent(frameVersion)}`;
         const mod = await import(url);
         const Component = mod.default;

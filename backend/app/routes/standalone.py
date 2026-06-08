@@ -31,7 +31,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from sqlalchemy.orm import Session
 
-from app import models
+from app import models, runtime_libs
 from app.database import get_db
 
 router = APIRouter(tags=["standalone"])
@@ -346,6 +346,13 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   # quotes, so callers interpolate it bare.
   app_name_js_literal = json.dumps(app_name).replace("</", "<\\/")
   app_bg = _app_background_color(app)
+  # Single source of truth: pull the mini-app importmap from app-frame.html
+  # instead of carrying a hand-synced brace-doubled copy here. Precomputed as a
+  # ready-to-embed <script> string so the f-string interpolates {import_map_html}
+  # with no brace-doubling (the JSON's own braces never reach str.format).
+  import_map_html = (
+    '<script type="importmap">\n' + runtime_libs.importmap_block() + "\n</script>"
+  )
   html = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -359,29 +366,7 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   <link rel="manifest" href="/apps/{slug}/manifest.json">
   <link rel="icon" type="image/png" sizes="192x192" href="/apps/{slug}/icon-192.png?v={app_v}">
   <link rel="apple-touch-icon" href="/apps/{slug}/icon-192.png?v={app_v}">
-  <script type="importmap">
-  {{
-    "imports": {{
-      "react": "/vendor/react@19.2.6/react.mjs",
-      "react/jsx-runtime": "/vendor/react@19.2.6/jsx-runtime.mjs",
-      "react-dom": "/vendor/react@19.2.6/react-dom.mjs",
-      "react-dom/client": "/vendor/react@19.2.6/client.mjs",
-      "recharts": "https://esm.sh/recharts@2.15.4?exports=LineChart,BarChart,PieChart,AreaChart,Line,Bar,Pie,Area,XAxis,YAxis,ZAxis,Tooltip,CartesianGrid,Legend,ResponsiveContainer,Cell,LabelList,Brush,ComposedChart,ScatterChart,Scatter,RadarChart,Radar,PolarGrid,PolarAngleAxis,PolarRadiusAxis,RadialBarChart,RadialBar&external=react,react-dom",
-      "date-fns": "https://esm.sh/date-fns@4.3.0",
-      "three": "/vendor/three@0.184.0/three.module.js",
-      "three/addons/": "/vendor/three@0.184.0/addons/",
-      "pdfjs-dist": "/vendor/pdfjs/pdf.mjs",
-      "codemirror": "https://esm.sh/codemirror@6.0.2",
-      "@codemirror/state": "https://esm.sh/@codemirror/state@6.6.0",
-      "@codemirror/view": "https://esm.sh/@codemirror/view@6.43.0?external=@codemirror/state",
-      "@codemirror/commands": "https://esm.sh/@codemirror/commands@6.10.3?external=@codemirror/language,@codemirror/state,@codemirror/view",
-      "@codemirror/language": "https://esm.sh/@codemirror/language@6.12.3?external=@codemirror/state,@codemirror/view,@lezer/highlight",
-      "@codemirror/lang-markdown": "https://esm.sh/@codemirror/lang-markdown@6.5.0?external=@codemirror/language,@codemirror/state,@codemirror/view,@lezer/highlight",
-      "@lezer/highlight": "https://esm.sh/@lezer/highlight@1.2.3",
-      "katex": "https://esm.sh/katex@0.16.22"
-    }}
-  }}
-  </script>
+  {import_map_html}
   <style>
     :root {{
       --bg: {app_bg}; --surface: #14181f; --surface2: #1a1f28;
@@ -706,6 +691,10 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
           rt.init({{ appId: APP_ID, getToken: async function(){{ return appToken; }} }});
         }} catch (e) {{}}
         const bust = cacheBust ? '&_=' + Date.now() : '';
+        // &v=APP_VERSION is REQUIRED as the SW offline cache-buster: the server
+        // /module route ignores v (its ETag keys on app.updated_at), but the SW
+        // offline handler keeps v in its cache key (it strips token, _ and install but keeps v), so
+        // an app update changes the key and forces a fresh fetch.
         const module = await import(
           '/api/apps/' + APP_ID + '/module?token=' +
           encodeURIComponent(appToken) + '&v=' + encodeURIComponent(APP_VERSION) + bust
