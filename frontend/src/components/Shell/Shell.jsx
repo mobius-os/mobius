@@ -55,6 +55,19 @@ export default function Shell() {
   // can hold tens of MB).
   const APP_CACHE_MAX = 4
   const [appCache, setAppCache] = useState([])
+  // Ids ever observed PRESENT in a fetched /api/apps list. The eviction
+  // effect below treats an app as uninstalled only on a genuine
+  // present→absent transition (it was here, now it's gone), never on a
+  // never-yet-seen id. That distinction is load-bearing: opening an app
+  // whose install raced ahead of the apps query (the moebius:open-app
+  // stale-list path — refreshApps resolves the new id, navTo adds it to
+  // the LRU, but the `apps` derived value lags one render behind) would
+  // otherwise look "absent from the live list" for that one render and
+  // get wrongly evicted the instant it was opened. Tracking observed-
+  // present ids closes the window without a timer: a freshly-opened id
+  // hasn't been seen present yet, so it's exempt until the list catches
+  // up; a real uninstall flips a previously-seen id to absent and evicts.
+  const seenAppIdsRef = useRef(new Set())
   const [toast, setToast] = useState(null)
   // Global connectivity indicator. The composer already disables send when
   // offline (ChatView); this surfaces the state shell-wide so the user is
@@ -173,11 +186,25 @@ export default function Shell() {
   const appsLiveFetched = appsQuery.isSuccess && appsQuery.isFetchedAfterMount
   useEffect(() => {
     if (!appsLiveFetched) return
-    if (appCache.length === 0) return
     const liveIds = new Set(apps.map(a => a.id))
-    const stale = appCache.filter(id => !liveIds.has(id))
+    // Record everything the live list currently shows, so a later
+    // disappearance reads as a real uninstall rather than a never-seen id.
+    for (const id of liveIds) seenAppIdsRef.current.add(id)
+    if (appCache.length === 0) return
+    // Evict only ids that were once present and are now gone — a genuine
+    // present→absent transition. A cached id we've never seen in a fetched
+    // list yet (just-opened app whose query hasn't caught up) is left alone
+    // until the list confirms it; this is the open-app stale-list race guard.
+    const stale = appCache.filter(
+      id => !liveIds.has(id) && seenAppIdsRef.current.has(id)
+    )
     if (stale.length === 0) return
-    setAppCache(prev => prev.filter(id => liveIds.has(id)))
+    // Evict exactly the confirmed-stale ids — NOT every id absent from
+    // liveIds. A just-opened app we've not yet seen present is absent from
+    // liveIds for one render but must survive; filtering on `stale` (which
+    // already excludes never-seen ids) keeps it mounted.
+    const staleSet = new Set(stale)
+    setAppCache(prev => prev.filter(id => !staleSet.has(id)))
     // Drop any back-stack entries pointing at a now-dead app so a later
     // back-gesture can't restore the canvas of an uninstalled app (which
     // would render a blank `<main>` — its iframe is evicted). Mirrors the
@@ -207,9 +234,23 @@ export default function Shell() {
   // Driving the refetch via the query client's stable
   // `refetchQueries` keeps the callback identity steady.
   const refreshApps = useCallback(() => {
-    return queryClient.refetchQueries({ queryKey: appQueries.keys.all })
-      .then(() => queryClient.getQueryData(appQueries.keys.all) || [])
-      .catch(() => [])
+    // Force a genuinely fresh fetch and return THAT fetch's result.
+    // refetchQueries alone can coalesce with an initial mount fetch that's
+    // still in flight (React Query dedups), then resolve against the stale
+    // in-flight value — so a moebius:open-app that arrives while the apps
+    // list is mid-load would read the pre-install list and wrongly conclude
+    // the just-installed app "is not installed yet". cancelQueries aborts any
+    // in-flight fetch first; fetchQuery(staleTime:0) then guarantees a new
+    // request and returns its data directly (not a getQueryData re-read,
+    // which can still observe the canceled fetch's stale snapshot).
+    return queryClient.cancelQueries({ queryKey: appQueries.keys.all })
+      .then(() => queryClient.fetchQuery({
+        queryKey: appQueries.keys.all,
+        queryFn: appQueries.list.fetch,
+        staleTime: 0,
+      }))
+      .then(data => data || [])
+      .catch(() => queryClient.getQueryData(appQueries.keys.all) || [])
   }, [queryClient])
   const refreshChats = useCallback(() => {
     return queryClient.refetchQueries({ queryKey: chatQueries.keys.all })

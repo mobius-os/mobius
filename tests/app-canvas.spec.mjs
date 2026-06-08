@@ -66,6 +66,23 @@ function mockFrameHTML(appId, opts = {}) {
 }
 
 async function setupShellBasics(page) {
+  // Safety net registered FIRST so it has the LOWEST precedence (Playwright
+  // matches routes last-registered-first). Any /api/ call the mounted Shell
+  // makes that no specific mock below covers gets a benign 200 instead of
+  // falling through to the real container, where the test's fake owner token
+  // 401s and the api client reloads the page mid-test (the failure mode that
+  // broke this whole spec when a new mount-time query — /api/owner/model-prefs
+  // — was added upstream). The specific mocks below still win on their paths;
+  // this only catches the gaps, so a future Shell-mount query can't silently
+  // reintroduce the 401-reload flake.
+  await page.route(/\/api\//, route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+  })
   await page.route(/\/api\/health$/, route =>
     route.fulfill({
       status: 200,
@@ -85,6 +102,21 @@ async function setupShellBasics(page) {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ providers: {} }),
+    })
+  )
+  // Shell fires this on mount whenever a chat is active (the composer's
+  // model picker prefetch — `modelQueries.prefs`, enabled on activeChatId).
+  // The saved auth storageState restores `moebius_active_chat`, so it IS
+  // active here. Leaving it unmocked sends the test's fake owner token to
+  // the real container, which 401s, and the api client's 401 handler calls
+  // `window.location.reload()` — that reload destroys the page mid-test
+  // (iframe goes null → contentWindow throws; "execution context destroyed").
+  // Mock EVERY endpoint the mounted Shell touches so no real 401 can fire.
+  await page.route(/\/api\/owner\/model-prefs$/, route =>
+    route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hidden_ids: [] }),
     })
   )
   await page.route(/\/api\/owner\/walkthrough$/, route =>
