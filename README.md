@@ -105,7 +105,7 @@ Read more in [Apps that work together](#apps-that-work-together).
 
 The usual way to get an app is to ask for one: describe it in chat and the agent writes the JSX, compiles it, and mounts it next to the conversation. But the contract is open, so you can also write one by hand or fork an existing one.
 
-An app is a public repo with a `mobius.json` manifest and an `index.jsx`. The component receives `{ appId, token }` and persists through `/api/storage/apps/{appId}/...`. The full contract — manifest fields, the storage layer, the shared component shapes the starter apps are built from — is documented in the seed skills the agent itself reads: [`backend/scripts/seed-skills/building-apps.md`](backend/scripts/seed-skills/building-apps.md) and [`backend/scripts/seed-skills/app-component-shapes.md`](backend/scripts/seed-skills/app-component-shapes.md).
+An app is a public repo with a `mobius.json` manifest and an `index.jsx`. The component receives `{ appId, token }` and persists through `/api/storage/apps/{appId}/...`. The full contract — manifest fields, the storage layer, the shared component shapes the starter apps are built from — is documented in the seed skills the agent itself reads: [`backend/scripts/seed-skills/building-apps.md`](backend/scripts/seed-skills/building-apps.md) and [`backend/scripts/seed-skills/app-component-shapes.md`](backend/scripts/seed-skills/app-component-shapes.md). Every `mobius.json` field is catalogued in [`docs/mobius-json.md`](docs/mobius-json.md).
 
 The whole starter catalog under [github.com/mobius-os](https://github.com/mobius-os) is working code to read or fork — each `app-*` repo is one installable app. Install yours by pasting its repo URL; update it by pasting the same URL again.
 
