@@ -237,13 +237,79 @@ def reap_staging_bundles() -> None:
   ``recompile_app_bundle`` (and the installer) compile to a staging file and
   promote it with an atomic rename only after the DB commit. A process death in
   the tiny window between commit and rename would leave a staging file behind.
-  Discarding it is always safe: it was either never committed, or
-  committed-but-not-promoted — in which case the live bundle keeps the prior
-  code and the next edit recompiles. A staging file is never served, so a leak
-  is at worst a stale bundle that self-heals, never wrong code being served.
+
+  Discarding the staging file is always safe to do, but it only self-heals the
+  UPDATE path: there the prior live bundle survives the crash, so dropping the
+  orphaned staging file leaves the app serving its previous (committed) code and
+  the next edit recompiles. On a FRESH install there is no prior live bundle, so
+  the same crash leaves the row pointing at a bundle that was never written and
+  reaping the staging file destroys the only compiled copy — that case is healed
+  by ``reconcile_missing_bundles`` (run right after this), not here. A staging
+  file is never served, so reaping it can never serve wrong code.
   """
   for f in _compiled_dir().glob("*.js.staging"):
     try:
       f.unlink()
     except OSError:
       pass
+
+
+async def reconcile_missing_bundles(db) -> list[int]:
+  """Recompiles live App rows whose compiled bundle is missing or empty.
+
+  A crash (OOM/SIGKILL — a recurring failure mode on this 7.6 GB host) between
+  the install's ``db.commit()`` and the post-commit ``os.replace`` that promotes
+  the staging bundle leaves a durable App row whose ``compiled_path`` file was
+  never written; ``reap_staging_bundles`` then deletes the only staging copy, so
+  every open of that app 404s forever with no self-heal. This boot reconciler
+  closes that gap (and the whole missing-bundle class — a manually-deleted
+  bundle, a volume restore that missed ``/data/compiled``) by recompiling each
+  affected row from its stored ``jsx_source`` under the same out-of-place
+  compile + atomic promote ``recompile_app_bundle`` uses.
+
+  Only rows that need healing are recompiled: tombstoned (uninstalled) apps are
+  skipped so the sweep never resurrects a deleted app, and a row with empty
+  ``jsx_source`` is skipped because there is nothing to compile. A compile error
+  on one app is logged and skipped so it can't block the others from healing or
+  brick boot. Runs single-threaded before the server accepts requests, so no
+  per-app lock is needed — no other operation can reference these ids yet.
+
+  Returns:
+    The ids of the apps whose bundle was successfully recompiled (the rest were
+    already healthy, tombstoned, source-less, or failed to compile).
+  """
+  import logging
+
+  from app import models
+
+  log = logging.getLogger(__name__)
+  compiled = _compiled_dir()
+  rows = (
+    db.query(models.App)
+    .filter(models.App.deleted_at.is_(None))
+    .all()
+  )
+  healed: list[int] = []
+  for app in rows:
+    bundle = compiled / f"app-{app.id}.js"
+    # An empty (zero-byte) bundle is an aborted/partial write and is as
+    # unservable as a missing file, so treat both the same.
+    try:
+      present = bundle.exists() and bundle.stat().st_size > 0
+    except OSError:
+      present = False
+    if present:
+      continue
+    if not app.jsx_source or not app.jsx_source.strip():
+      continue
+    try:
+      await recompile_app_bundle(db, app, app.jsx_source)
+      healed.append(app.id)
+    except Exception as exc:
+      # One app's bad source must not block the rest of the sweep or boot;
+      # the agent can fix the source later from the still-present row.
+      log.error(
+        "missing-bundle reconcile failed for app %s: %s",
+        app.id, exc, exc_info=True,
+      )
+  return healed

@@ -660,6 +660,118 @@ async def test_recompile_app_bundle_bad_jsx_keeps_live_bundle(
   assert open(live, "rb").read() == before
 
 
+# Startup missing-bundle reconciler — a crash between the install's db.commit()
+# and the post-commit os.replace() that promotes the staging bundle leaves an
+# App row whose compiled_path was never written (and reap_staging_bundles then
+# deletes the only staging copy). The boot reconciler recompiles any live App
+# with non-empty jsx_source whose bundle is missing/empty, so the app self-heals
+# on the next restart instead of 404ing forever. See feature 109.
+
+
+@pytest.mark.asyncio
+async def test_reconcile_missing_bundles_recompiles_missing_file(
+  client, owner_token, db,
+):
+  """A live App whose compiled bundle file is gone is recompiled from its
+  stored jsx_source, exactly as a crash-interrupted install would need."""
+  import os
+  import app.models as models
+  from app.compiler import reconcile_missing_bundles
+  app_id = _make_app(client, owner_token)
+  data_dir = os.environ["DATA_DIR"]
+  live = os.path.join(data_dir, "compiled", f"app-{app_id}.js")
+  # Simulate the crash window: the row exists with jsx_source + compiled_path,
+  # but the bundle file the post-commit os.replace would have written is absent.
+  row = db.query(models.App).filter(models.App.id == app_id).first()
+  row.jsx_source = "export default function App(){ return <div>HEALED</div> }"
+  db.commit()
+  os.remove(live)
+  assert not os.path.exists(live)
+
+  healed = await reconcile_missing_bundles(db)
+
+  assert app_id in healed
+  assert "HEALED" in open(live, encoding="utf-8").read()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_missing_bundles_recompiles_empty_file(
+  client, owner_token, db,
+):
+  """A zero-byte bundle (a partial/aborted write) is treated as missing and
+  recompiled, not served as an empty module."""
+  import os
+  import app.models as models
+  from app.compiler import reconcile_missing_bundles
+  app_id = _make_app(client, owner_token)
+  data_dir = os.environ["DATA_DIR"]
+  live = os.path.join(data_dir, "compiled", f"app-{app_id}.js")
+  open(live, "w").close()
+  assert os.path.getsize(live) == 0
+
+  await reconcile_missing_bundles(db)
+
+  assert os.path.getsize(live) > 0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_missing_bundles_skips_healthy_and_tombstoned(
+  client, owner_token, db,
+):
+  """The sweep recompiles nothing it shouldn't: a healthy app keeps its bundle
+  untouched, and a tombstoned (uninstalled) app is not resurrected."""
+  import os
+  import app.models as models
+  from app.compiler import reconcile_missing_bundles
+  healthy_id = _make_app(client, owner_token)
+  tombstoned_id = _make_app(client, owner_token)
+  data_dir = os.environ["DATA_DIR"]
+  healthy = os.path.join(data_dir, "compiled", f"app-{healthy_id}.js")
+  tombstoned = os.path.join(data_dir, "compiled", f"app-{tombstoned_id}.js")
+  before = open(healthy, "rb").read()
+  # Tombstone the second app and delete its bundle — a uninstalled row must not
+  # be recompiled back to life.
+  row = db.query(models.App).filter(models.App.id == tombstoned_id).first()
+  row.deleted_at = __import__("app.timeutil", fromlist=["now_naive_utc"]).now_naive_utc()
+  db.commit()
+  os.remove(tombstoned)
+
+  healed = await reconcile_missing_bundles(db)
+
+  assert healthy_id not in healed
+  assert tombstoned_id not in healed
+  assert open(healthy, "rb").read() == before
+  assert not os.path.exists(tombstoned)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_missing_bundles_isolates_one_apps_failure(
+  client, owner_token, db,
+):
+  """One app whose jsx_source no longer compiles must not block the sweep from
+  healing the others — a compile error is logged and skipped, not fatal."""
+  import os
+  import app.models as models
+  from app.compiler import reconcile_missing_bundles
+  broken_id = _make_app(client, owner_token)
+  good_id = _make_app(client, owner_token)
+  data_dir = os.environ["DATA_DIR"]
+  broken = os.path.join(data_dir, "compiled", f"app-{broken_id}.js")
+  good = os.path.join(data_dir, "compiled", f"app-{good_id}.js")
+  broken_row = db.query(models.App).filter(models.App.id == broken_id).first()
+  broken_row.jsx_source = "export default function App(){ return <div> }"
+  db.commit()
+  os.remove(broken)
+  os.remove(good)
+
+  healed = await reconcile_missing_bundles(db)
+
+  assert good_id in healed
+  assert broken_id not in healed
+  assert os.path.getsize(good) > 0
+  assert not os.path.exists(broken)
+
+
 def test_create_app_compiles_relative_source_import(client, owner_token):
   """A real source_dir compile lets index.jsx import sibling modules."""
   import os

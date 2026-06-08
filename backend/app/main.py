@@ -110,6 +110,24 @@ async def lifespan(app):
     reap_staging_bundles()
   except Exception as exc:
     _log.error("staging-bundle reap failed: %s", exc, exc_info=True)
+  # Recompile any live App row whose compiled bundle is missing/empty. A crash
+  # between the install's db.commit() and its post-commit os.replace leaves a
+  # durable row pointing at a bundle that was never written (the staging copy
+  # reaped just above), so the app 404s forever with no self-heal — this heals
+  # it from the stored jsx_source. Runs AFTER the reap (so a half-promoted
+  # staging file is gone before we decide a bundle is missing) and before the
+  # server serves requests. Wrapped + per-app error-isolated so neither a bad
+  # source nor a compile failure can brick boot or the recovery surface.
+  try:
+    from app.compiler import reconcile_missing_bundles
+    from app.database import SessionLocal as _BundleSession
+    _bn_db = _BundleSession()
+    try:
+      await reconcile_missing_bundles(_bn_db)
+    finally:
+      _bn_db.close()
+  except Exception as exc:
+    _log.error("missing-bundle reconcile wiring failed: %s", exc, exc_info=True)
   # Start the single-writer chat-persistence actor AFTER db init and
   # crash reconciliation. Order is load-bearing: reconcile_interrupted_chats
   # must run BEFORE the actor exists — recovery has to work even when
