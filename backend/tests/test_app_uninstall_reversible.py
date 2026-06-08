@@ -271,3 +271,69 @@ def test_tombstoned_app_no_slug_redirect_or_static(
   assert _top_level_app_slug_alias(slug) is None
   assert _app_source_dir_for_static_asset(slug=slug) is None
   assert _app_source_dir_for_static_asset(app_id=app_id) is None
+
+
+# --- feature 113: soft-delete tooling (live_app helper, now_naive_utc) ---
+
+
+def test_validate_app_404s_tombstoned(client, auth, db, bypass_url_validation):
+  """A tombstoned app must not validate.
+
+  validate_app was the one per-app read path the feature-110 sweep AND two
+  reviews all missed — it queried by id with no deleted_at filter. This is
+  the regression guard for the 113 live_app_or_404 conversion.
+  """
+  app = _install(client, auth)
+  app_id = app["id"]
+  assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
+  assert client.get(
+    f"/api/apps/{app_id}/validate", headers=auth
+  ).status_code == 404
+
+
+def test_app_read_endpoints_hide_tombstoned(
+  client, auth, db, bypass_url_validation,
+):
+  """Every owner-facing per-app GET resolves through the live-app filter, so a
+  future read endpoint that forgets it fails CI (the scatter 113 centralizes)."""
+  app = _install(client, auth)
+  app_id = app["id"]
+  assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
+  for path in (
+    f"/api/apps/{app_id}",
+    f"/api/apps/{app_id}/validate",
+    f"/api/apps/{app_id}/update-preview",
+  ):
+    assert client.get(path, headers=auth).status_code == 404, path
+
+
+def test_live_app_helpers(client, auth, db, bypass_url_validation):
+  """live_app returns None / live_app_or_404 raises 404 for a tombstoned or
+  missing app; both return the row when live (the App analogue of
+  get_active_chat_or_404)."""
+  from fastapi import HTTPException
+  from app.resource_access import live_app, live_app_or_404
+  app = _install(client, auth)
+  app_id = app["id"]
+  assert live_app(db, app_id) is not None
+  assert live_app_or_404(db, app_id).id == app_id
+
+  assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
+  db.expire_all()
+  assert live_app(db, app_id) is None
+  with pytest.raises(HTTPException) as ei:
+    live_app_or_404(db, app_id)
+  assert ei.value.status_code == 404
+
+  assert live_app(db, 10_000_001) is None
+  with pytest.raises(HTTPException):
+    live_app_or_404(db, 10_000_001)
+
+
+def test_now_naive_utc_returns_naive():
+  """now_naive_utc centralizes the datetime.now(UTC).replace(tzinfo=None)
+  boilerplate the soft-delete write/compare sites repeat (App wrote naive,
+  Chat wrote aware — this aligns them)."""
+  from app.timeutil import now_naive_utc
+  v = now_naive_utc()
+  assert v.tzinfo is None

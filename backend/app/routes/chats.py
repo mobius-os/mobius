@@ -27,6 +27,7 @@ from app.deps import (
 )
 from app.resource_access import get_active_chat_for_principal, get_active_chat_or_404
 from app.schemas import ChatPatch
+from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +39,8 @@ router = APIRouter(prefix="/api/chats", tags=["chats"])
 # greppable, not a flag threaded through the owner routes.
 app_chat_router = APIRouter(prefix="/api/app-chats", tags=["app-chats"])
 
-SOFT_DELETE_TTL = timedelta(days=7)
+# SOFT_DELETE_TTL is imported from app.timeutil — one shared window for chat +
+# app soft-delete so the two recovery periods can't drift.
 
 # How long an untouched empty chat (no session, no messages, no pending
 # queue) survives before the list_chats sweeper hard-deletes it. Long
@@ -115,7 +117,7 @@ def list_chats(
   # Purge chats soft-deleted more than TTL ago.
   # Use naive datetime to match SQLite's naive UTC storage — comparing an
   # aware datetime against a naive DB value throws TypeError in Python 3.11+.
-  cutoff = datetime.now(UTC).replace(tzinfo=None) - SOFT_DELETE_TTL
+  cutoff = now_naive_utc() - SOFT_DELETE_TTL
   stale = db.query(models.Chat).filter(
     models.Chat.deleted_at.isnot(None),
     models.Chat.deleted_at < cutoff,
@@ -577,7 +579,7 @@ async def delete_chat(
   bump_run_generation(chat_id)
   chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
   if chat:
-    chat.deleted_at = datetime.now(UTC)
+    chat.deleted_at = now_naive_utc()
     db.commit()
   # Flag the chat soft-deleted in the registry (NOT forget_chat, which resets
   # the generation counter to a reusable 0). mark_chat_deleted preserves the
@@ -612,7 +614,7 @@ def recover_chat(
   ).first()
   if not chat:
     raise HTTPException(status_code=404, detail="Chat not found or not deleted.")
-  if (datetime.now(UTC).replace(tzinfo=None) - chat.deleted_at) >= SOFT_DELETE_TTL:
+  if (now_naive_utc() - chat.deleted_at) >= SOFT_DELETE_TTL:
     raise HTTPException(status_code=410, detail="Recovery window has expired.")
   chat.deleted_at = None
   db.commit()
