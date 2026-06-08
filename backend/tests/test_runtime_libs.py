@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from app.config import get_settings
-from app.runtime_libs import RUNTIME_LIBS
+from app.runtime_libs import RUNTIME_LIBS, importmap_block
 
 
 CODEMIRROR_DIRECT_IMPORTS = {
@@ -48,23 +48,6 @@ def _importmap_keys(html: str) -> set[str]:
   )
   assert match, "no importmap block found in app-frame.html"
   return set(json.loads(match.group(1))["imports"].keys())
-
-
-def _standalone_importmap_keys() -> set[str]:
-  """The standalone PWA route (routes/standalone.py) ships its OWN importmap
-  embedded in a Python f-string, so its braces are doubled. It must carry the
-  same specifiers as app-frame.html, or an app resolves a bare import in the
-  shell but 404s the module on its standalone home-screen surface (the Notes
-  /codemirror runtime regression)."""
-  src = (
-    Path(__file__).resolve().parents[1] / "app" / "routes" / "standalone.py"
-  ).read_text()
-  match = re.search(
-    r'<script type="importmap">(.*?)</script>', src, re.DOTALL
-  )
-  assert match, "no importmap block found in standalone.py"
-  block = match.group(1).strip().replace("{{", "{").replace("}}", "}")
-  return set(json.loads(block)["imports"].keys())
 
 
 def _externalized(key: str) -> bool:
@@ -139,21 +122,27 @@ def test_codemirror_subpackages_are_supported_as_direct_imports():
 
 
 def test_standalone_importmap_matches_app_frame():
-  """The standalone PWA route and the in-shell frame must offer the SAME
-  bare specifiers. They drifted once: codemirror/katex were added to
-  app-frame.html (Notes worked in-shell) but not to standalone.py (Notes
-  404'd the module on its home-screen surface). Keep them identical so an
-  app resolves the same imports on both surfaces."""
+  """The standalone PWA route and the in-shell frame must serve the SAME
+  importmap — not just the same KEY SET (the old test let URLs silently drift),
+  but byte-for-byte the same import targets. The standalone route now SOURCES its
+  importmap from app-frame.html via runtime_libs.importmap_block() instead of
+  carrying a hand-synced copy, so this asserts that single source resolves and
+  deep-equals app-frame's importmap (the Notes/codemirror regression was a drift
+  in this exact pair)."""
   frame = _find_app_frame()
   if frame is None:
     pytest.skip("app-frame.html not resolvable in this environment")
-  shell_keys = _importmap_keys(frame.read_text())
-  standalone_keys = _standalone_importmap_keys()
-  only_in_shell = sorted(shell_keys - standalone_keys)
-  only_in_standalone = sorted(standalone_keys - shell_keys)
-  assert shell_keys == standalone_keys, (
-    "in-shell (app-frame.html) and standalone (standalone.py) importmaps "
-    f"have drifted. Only in app-frame: {only_in_shell}. Only in "
-    f"standalone: {only_in_standalone}. An app's bare imports must resolve "
-    "the same on both surfaces."
+  match = re.search(
+    r'<script type="importmap">\s*(\{.*?\})\s*</script>',
+    frame.read_text(),
+    re.DOTALL,
+  )
+  assert match, "no importmap block found in app-frame.html"
+  frame_imports = json.loads(match.group(1))
+  sourced_imports = json.loads(importmap_block())
+  assert sourced_imports == frame_imports, (
+    "the importmap sourced by runtime_libs.importmap_block() (which "
+    "routes/standalone.py embeds) does not deep-equal app-frame.html's "
+    "importmap. They must be identical — URLs included, not just keys — so an "
+    "app resolves the same imports on both the in-shell and standalone surfaces."
   )
