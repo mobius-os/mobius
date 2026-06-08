@@ -6,7 +6,10 @@ files — otherwise a seed would be written non-atomically and a concurrent read
 could observe it torn.
 """
 
+import json
 import os
+import shutil
+import stat
 import tempfile
 from pathlib import Path
 
@@ -18,6 +21,16 @@ from fastapi import HTTPException, Request
 # instance. 50 MB is far above any real per-key app payload (notes, reports,
 # save files) while still bounding the blast radius.
 MAX_STORAGE_BYTES = 50 * 1024 * 1024
+
+# Hard cap on the TOTAL on-disk bytes a single mini-app may store. The per-blob
+# cap above bounds one object; this bounds the app's whole tree so one app
+# (buggy or runaway) can't fill `/data` and take the disk-tight host down for
+# every other app. Generous — a few hundred max-blobs — so no legitimate app
+# (media library, save files, offline cache) hits it in normal use; it's a
+# blast-radius bound, not a usage budget. Per the data-layer philosophy this is
+# a backstop, not a wall: the owner's agent can raise it in code if a real app
+# needs more headroom.
+MAX_APP_STORAGE_BYTES = 1024 * 1024 * 1024
 
 
 def atomic_write(file_path: Path, content: str | bytes) -> None:
@@ -81,3 +94,147 @@ async def read_capped_body(request: Request, cap: int = MAX_STORAGE_BYTES) -> by
       raise HTTPException(status_code=413, detail="Request body too large.")
     chunks.append(chunk)
   return b"".join(chunks)
+
+
+def app_dir_usage(app_dir: Path) -> int:
+  """Returns the total bytes of regular files under an app's storage tree.
+
+  Walks `app_dir` once, summing the size of every regular file (symlinks are
+  not followed — they're rejected at write time and never counted, so the
+  number reflects only bytes this app actually owns). A missing tree is 0
+  (a fresh app that has written nothing). This is the live usage the per-app
+  quota is checked against; it intentionally re-walks rather than caching a
+  counter, so it can never drift out of sync with the filesystem the agent or
+  a sibling process can also mutate.
+  """
+  total = 0
+  for root, _dirs, files in os.walk(app_dir):
+    for name in files:
+      try:
+        st = os.lstat(os.path.join(root, name))
+      except OSError:
+        continue
+      # Count only regular, non-symlink files. lstat doesn't follow links, so
+      # a symlink's own (tiny) entry is what `st` describes; S_ISREG filters
+      # it out and avoids ever attributing a link target's size to this app.
+      if stat.S_ISREG(st.st_mode):
+        total += st.st_size
+  return total
+
+
+# Content-Type sidecars live in a meta tree PARALLEL to the storage tree, never
+# inside it — so a `<path>.json` of stored MIME can't leak into an app's own
+# listing or be edited/served as if it were app data. The layout mirrors the
+# storage path: `<data_dir>/.storage-meta/apps/<id>/<path>.json`.
+_META_DIRNAME = ".storage-meta"
+
+
+def _meta_path(data_dir: str, scope_rel: Path, rel: str) -> Path:
+  """The sidecar path for a stored file.
+
+  `scope_rel` is the storage scope relative to data_dir (e.g. `apps/7` or
+  `shared`); `rel` is the file's path within that scope. The sidecar is the
+  same relative path under the parallel meta root, with `.json` appended — so
+  it round-trips one-to-one with the file and is trivially locatable on read,
+  write, and delete.
+  """
+  return Path(data_dir) / _META_DIRNAME / scope_rel / (rel + ".json")
+
+
+def write_content_type(
+  data_dir: str, scope_rel: Path, rel: str, content_type: str | None
+) -> None:
+  """Records (or clears) the served Content-Type for a stored file.
+
+  Written on every PUT so a COLD read (cache miss / fresh device) of an
+  extensionless or custom-MIME blob can serve the type the app declared,
+  instead of the server's filename guess. A None/blank type clears any prior
+  sidecar — a later read then falls back to the extension guess, which is the
+  right behavior for a plain text/JSON write that carried no explicit type.
+  Best-effort: a sidecar write failure must never fail the data write it
+  annotates (the bytes are the source of truth; the MIME is a hint).
+  """
+  meta = _meta_path(data_dir, scope_rel, rel)
+  if not content_type:
+    try:
+      meta.unlink()
+    except OSError:
+      pass
+    return
+  try:
+    atomic_write(meta, json.dumps({"content_type": content_type}))
+  except OSError:
+    pass
+
+
+def read_content_type(data_dir: str, scope_rel: Path, rel: str) -> str | None:
+  """Returns the stored Content-Type for a file, or None if no sidecar.
+
+  A missing or unparseable sidecar yields None so the caller falls back to
+  the extension guess — the sidecar is an override, never a hard dependency.
+  """
+  meta = _meta_path(data_dir, scope_rel, rel)
+  try:
+    data = json.loads(meta.read_text(encoding="utf-8"))
+  except (OSError, ValueError):
+    return None
+  ct = data.get("content_type") if isinstance(data, dict) else None
+  return ct if isinstance(ct, str) and ct else None
+
+
+def delete_content_type(data_dir: str, scope_rel: Path, rel: str) -> None:
+  """Removes a file's sidecar, leaving no stale stored MIME behind.
+
+  Called when the file is deleted so a later write to the SAME path with a
+  different type isn't shadowed by the old sidecar. Best-effort — a missing
+  sidecar is fine (a file written without an explicit type never had one).
+  """
+  meta = _meta_path(data_dir, scope_rel, rel)
+  try:
+    meta.unlink()
+  except OSError:
+    pass
+
+
+def delete_content_type_tree(data_dir: str, scope_rel: Path, rel: str) -> None:
+  """Removes the sidecar subtree mirroring a deleted storage FOLDER.
+
+  A recursive folder delete must drop every sidecar under it, for the same
+  reason a single delete drops its one sidecar — otherwise a later file at a
+  path inside the recreated folder would be shadowed by a stale stored MIME.
+  The meta tree mirrors the storage path, so the folder's sidecars live at
+  `<meta>/<scope>/<rel>` (a directory, no `.json` suffix). Best-effort.
+  """
+  meta_dir = Path(data_dir) / _META_DIRNAME / scope_rel / rel
+  try:
+    shutil.rmtree(meta_dir)
+  except OSError:
+    pass
+
+
+def move_content_type(
+  data_dir: str, scope_rel: Path, src_rel: str, dst_rel: str
+) -> None:
+  """Moves a sidecar (or sidecar subtree) alongside a storage move/rename.
+
+  Keeps the stored MIME attached to the bytes after a move: the file's
+  sidecar follows to the new path so a cold read still serves the right
+  type, and the old path is left with no stale sidecar to shadow a future
+  write. Handles both a single file's sidecar (`<src>.json` → `<dst>.json`)
+  and a folder's sidecar subtree (`<src>/` → `<dst>/`). Best-effort — the
+  bytes already moved, the MIME hint must not be able to fail the move.
+  """
+  meta_root = Path(data_dir) / _META_DIRNAME / scope_rel
+  pairs = (
+    (_meta_path(data_dir, scope_rel, src_rel),
+     _meta_path(data_dir, scope_rel, dst_rel)),
+    (meta_root / src_rel, meta_root / dst_rel),
+  )
+  for src, dst in pairs:
+    if not src.exists():
+      continue
+    try:
+      dst.parent.mkdir(parents=True, exist_ok=True)
+      shutil.move(str(src), str(dst))
+    except OSError:
+      pass

@@ -49,7 +49,17 @@ from sqlalchemy.orm import Session
 from app import activity, fs_locks, models
 from app.config import get_settings
 from app.database import get_db
-from app.storage_io import atomic_write, read_capped_body
+from app import storage_io
+from app.storage_io import (
+  app_dir_usage,
+  atomic_write,
+  delete_content_type,
+  delete_content_type_tree,
+  move_content_type,
+  read_capped_body,
+  read_content_type,
+  write_content_type,
+)
 from app.deps import (
   Principal,
   get_current_owner,
@@ -217,7 +227,7 @@ def _is_listable_dirent(entry: os.DirEntry) -> bool:
   return bool(_SAFE_RE.match(entry.name))
 
 
-def _list_entry(child: Path, prefix: str) -> dict | None:
+def _list_entry(child: Path, prefix: str, mime_override=None) -> dict | None:
   """Builds one listing entry for an immediate child of a directory.
 
   `prefix` is the request's prefix (relative to the app dir), used to
@@ -225,6 +235,11 @@ def _list_entry(child: Path, prefix: str) -> dict | None:
   (the byte count is the file's; a directory's is meaningless here) and
   no mime_type; files carry both. `modified_at` is ISO-8601 UTC with a
   trailing `Z`, derived from the child's mtime.
+
+  `mime_override`, when given, is called with the entry's scope-relative
+  path and returns the stored sidecar MIME (or None). A stored type wins
+  over the filename guess so a listing reports the same type a read would
+  serve — chiefly for extensionless or custom-MIME blobs.
 
   Returns None for any child the listing must not surface, so the caller
   filters it out: a symlink (following it with stat() could leak the
@@ -256,8 +271,8 @@ def _list_entry(child: Path, prefix: str) -> dict | None:
     "modified_at": modified.isoformat().replace("+00:00", "Z"),
   }
   if not is_dir:
-    mime, _ = mimetypes.guess_type(child.name)
-    entry["mime_type"] = mime
+    stored = mime_override(rel) if mime_override else None
+    entry["mime_type"] = stored or mimetypes.guess_type(child.name)[0]
   return entry
 
 
@@ -283,7 +298,8 @@ def _encode_cursor(name: str) -> str:
 
 
 def _list_directory_page(
-  dir_path: Path, prefix: str, limit: int, cursor: str | None
+  dir_path: Path, prefix: str, limit: int, cursor: str | None,
+  mime_override=None,
 ) -> tuple[list[dict], str | None]:
   """Returns one keyset page `(entries, next_cursor)` of a directory.
 
@@ -325,12 +341,14 @@ def _list_directory_page(
   page = page_plus[:limit]
   # _list_entry still runs (it does the stat for size/mtime and re-checks the
   # same predicates); a dirent that vanished between scan and stat drops out.
-  entries = [e for e in (_list_entry(c, prefix) for c in page) if e]
+  entries = [
+    e for e in (_list_entry(c, prefix, mime_override) for c in page) if e
+  ]
   next_cursor = _encode_cursor(page[-1].name) if has_more and page else None
   return entries, next_cursor
 
 
-def _serve_file(file_path: Path):
+def _serve_file(file_path: Path, stored_mime: str | None = None):
   """Serve a file with the right content type, STREAMING large reads.
 
   Binary types and any file past the inline threshold are served via
@@ -339,8 +357,14 @@ def _serve_file(file_path: Path):
   read stays inline + low-latency. This bounds the per-read memory to the
   threshold rather than the full file size — a 50 MB doc no longer buffers
   whole on the memory-tight host.
+
+  `stored_mime` (from the MIME sidecar) OVERRIDES the filename guess when
+  present — that's how a cold read of an extensionless or custom-MIME blob
+  serves the type the app declared instead of `text/plain`. The text/binary
+  branch decision uses the effective type so a sidecar marking a file as,
+  say, `image/png` streams it as binary even if the name looks text-y.
   """
-  mime, _ = mimetypes.guess_type(file_path.name)
+  mime = stored_mime or mimetypes.guess_type(file_path.name)[0]
   is_text = mime is None or mime.startswith(tuple(_TEXT_PREFIXES))
   try:
     too_big = file_path.stat().st_size > _INLINE_READ_MAX
@@ -368,8 +392,19 @@ def _is_envelope(body) -> bool:
   )
 
 
-async def _decode_write_body(request: Request, file_path: Path) -> str | bytes:
-  """Decodes a PUT body into text or bytes to write to disk.
+async def _decode_write_body(
+  request: Request, file_path: Path
+) -> tuple[str | bytes, str | None]:
+  """Decodes a PUT body into `(content, stored_mime)`.
+
+  `content` is the text or bytes to write; `stored_mime` is the
+  Content-Type to record in the MIME sidecar, or None to record none
+  (clearing any prior sidecar). Only a raw-bytes write carries a
+  stored_mime — that's the case where the served type must come from the
+  app's declared `setBlob` Content-Type rather than the filename guess
+  (an extensionless or custom-MIME blob). Text and JSON writes leave it
+  None: their type is recovered from the extension (`text/plain`,
+  `application/json`), so a sidecar would only add a stale override.
 
   Accepts JSON inner objects for `.json` files, the legacy JSON
   envelope for text files, raw text for non-JSON files, and raw bytes
@@ -387,13 +422,16 @@ async def _decode_write_body(request: Request, file_path: Path) -> str | bytes:
           detail="Raw text writes are only accepted for non-JSON paths.",
         )
       try:
-        return raw.decode("utf-8")
+        return raw.decode("utf-8"), None
       except UnicodeDecodeError:
         raise HTTPException(
           status_code=400,
           detail="Text storage writes must be valid UTF-8.",
         )
-    return raw
+    # Raw bytes: keep the declared MIME so a cold read serves the app's
+    # type. A blank content-type records nothing (read falls back to the
+    # extension guess).
+    return raw, (content_type or None)
 
   try:
     body = json.loads(raw)
@@ -409,10 +447,10 @@ async def _decode_write_body(request: Request, file_path: Path) -> str | bytes:
   # meaningful when the path is non-JSON (the envelope was added so
   # text files could be PUT via a JSON body, not the other way).
   if is_json_path:
-    return json.dumps(body, ensure_ascii=False)
+    return json.dumps(body, ensure_ascii=False), None
 
   if _is_envelope(body):
-    return body["content"]
+    return body["content"], None
 
   raise HTTPException(
     status_code=400,
@@ -432,14 +470,16 @@ def read_app_file(
 ):
   """Returns a file from an app's data directory."""
   _check_cross_app(db, principal, app_id, mode="read")
-  base = Path(get_settings().data_dir) / "apps" / str(app_id)
+  data_dir = get_settings().data_dir
+  base = Path(data_dir) / "apps" / str(app_id)
   file_path = _resolve(base, path)
   # is_file() (not exists()) so a directory path 404s cleanly instead of
   # reaching _serve_file, which would try to read a directory and 500
   #.
   if not file_path.is_file():
     raise HTTPException(status_code=404, detail="File not found.")
-  return _serve_file(file_path)
+  stored = read_content_type(data_dir, Path("apps") / str(app_id), path)
+  return _serve_file(file_path, stored)
 
 
 class _MoveBody(BaseModel):
@@ -486,7 +526,8 @@ async def move_app_file(
   asks before clobbering.
   """
   expected_nonce = _check_cross_app(db, principal, app_id, mode="write").token_nonce
-  base = Path(get_settings().data_dir) / "apps" / str(app_id)
+  data_dir = get_settings().data_dir
+  base = Path(data_dir) / "apps" / str(app_id)
   src = _resolve(base, body.from_path)
   dst = _resolve(base, body.to)
   async with fs_locks.app_storage_lock(app_id):
@@ -497,6 +538,11 @@ async def move_app_file(
       raise HTTPException(status_code=409, detail="Destination already exists.")
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src), str(dst))
+    # Carry the MIME sidecar(s) to the new path so the moved bytes keep their
+    # stored type, and the old path keeps no stale sidecar.
+    move_content_type(
+      data_dir, Path("apps") / str(app_id), body.from_path, body.to
+    )
   if activity.should_emit_storage_write(app_id, body.to):
     activity.log_event(
       "storage_write", app_id=app_id, path=body.to, size_delta=0
@@ -534,7 +580,8 @@ async def delete_app_folder(
   rather than a directory 400s (use the per-file DELETE for that).
   """
   expected_nonce = _check_cross_app(db, principal, app_id, mode="write").token_nonce
-  base = Path(get_settings().data_dir) / "apps" / str(app_id)
+  data_dir = get_settings().data_dir
+  base = Path(data_dir) / "apps" / str(app_id)
   target = _resolve(base, path)
   async with fs_locks.app_storage_lock(app_id):
     _recheck_app_identity(db, app_id, expected_nonce)
@@ -549,6 +596,9 @@ async def delete_app_folder(
         status_code=400, detail="Path is not a directory."
       )
     shutil.rmtree(target)
+    # Drop the mirrored sidecar subtree so no stale stored MIME survives a
+    # folder removal to shadow a future file recreated at the same path.
+    delete_content_type_tree(data_dir, Path("apps") / str(app_id), path)
   if activity.should_emit_storage_write(app_id, path):
     activity.log_event(
       "storage_write", app_id=app_id, path=path, size_delta=0
@@ -570,9 +620,13 @@ async def write_app_file(
 ):
   """Writes content to a file in an app's data directory."""
   expected_nonce = _check_cross_app(db, principal, app_id, mode="write").token_nonce
-  base = Path(get_settings().data_dir) / "apps" / str(app_id)
+  data_dir = get_settings().data_dir
+  base = Path(data_dir) / "apps" / str(app_id)
   file_path = _resolve(base, path)
-  content = await _decode_write_body(request, file_path)
+  content, stored_mime = await _decode_write_body(request, file_path)
+  new_size = len(
+    content.encode("utf-8") if isinstance(content, str) else content
+  )
   # Serialize the write against this app's uninstall AND re-verify, under the
   # lock, that this is still the SAME app (its token_nonce is unchanged). A
   # write that paused to read its body could otherwise land after an
@@ -593,7 +647,30 @@ async def write_app_file(
       before_size = file_path.stat().st_size if file_path.is_file() else 0
     except OSError:
       before_size = 0
+    # Per-app quota: reject a write that would push the app's total stored
+    # bytes over the cap, BEFORE writing — so one runaway app can't fill
+    # /data. An overwrite charges only the delta (new minus the bytes it
+    # replaces), so rewriting the same key never falsely exhausts the quota.
+    # Computed inside the lock so a concurrent same-app write can't both pass
+    # the check and overflow. `app_dir_usage` re-walks the tree (it can't
+    # drift from a stale counter); the cap is read from the module so a test
+    # can shrink it.
+    projected = app_dir_usage(base) - before_size + new_size
+    if projected > storage_io.MAX_APP_STORAGE_BYTES:
+      raise HTTPException(
+        status_code=413,
+        detail=(
+          "App storage quota exceeded — this write would bring the app "
+          f"to {projected} bytes, over the "
+          f"{storage_io.MAX_APP_STORAGE_BYTES}-byte per-app limit. Delete "
+          "unused files or store large media outside per-app storage."
+        ),
+      )
     atomic_write(file_path, content)
+    # Record (or clear) the served MIME sidecar so a cold read of an
+    # extensionless or custom-MIME blob returns the app's declared type.
+    # Inside the lock so the sidecar can't outlive a racing delete.
+    write_content_type(data_dir, Path("apps") / str(app_id), path, stored_mime)
   # storage_write: debounced per (app_id, path) to ≤1 event per
   # minute. Agents writing many small files in a single chat shouldn't
   # flood the log. size_delta uses post-write size minus pre-write
@@ -625,7 +702,8 @@ async def delete_app_file(
 ):
   """Deletes a file from an app's data directory. 404 if missing."""
   expected_nonce = _check_cross_app(db, principal, app_id, mode="write").token_nonce
-  base = Path(get_settings().data_dir) / "apps" / str(app_id)
+  data_dir = get_settings().data_dir
+  base = Path(data_dir) / "apps" / str(app_id)
   file_path = _resolve(base, path)
   # Serialize with this app's uninstall + re-verify, under the per-app lock,
   # that this is still the SAME app (token_nonce unchanged), exactly like
@@ -645,6 +723,9 @@ async def delete_app_file(
     except OSError:
       deleted_size = 0
     file_path.unlink()
+    # Drop the MIME sidecar in lockstep so a later write to the same path
+    # with a different type isn't shadowed by the stale stored MIME.
+    delete_content_type(data_dir, Path("apps") / str(app_id), path)
   if activity.should_emit_storage_write(app_id, path):
     activity.log_event(
       "storage_write",
@@ -706,7 +787,10 @@ async def write_shared_file(
     before_size = file_path.stat().st_size if file_path.is_file() else 0
   except OSError:
     before_size = 0
-  content = await _decode_write_body(request, file_path)
+  # Shared storage carries no MIME sidecar (its files — theme.css, skills,
+  # memory — are always extensioned text the filename guess recovers), so the
+  # stored-mime half of the decode result is discarded here.
+  content, _ = await _decode_write_body(request, file_path)
   # Snapshot the prior theme.css before any overwrite. The agent
   # already does this informally; making it automatic means no
   # accidental clobber when the agent forgets.
@@ -805,7 +889,8 @@ def list_app_dir(
   and is NOT subject to the stored-file JSON-envelope rules.
   """
   _check_cross_app(db, principal, app_id, mode="read")
-  base = Path(get_settings().data_dir) / "apps" / str(app_id)
+  data_dir = get_settings().data_dir
+  base = Path(data_dir) / "apps" / str(app_id)
   # An empty prefix means the app's root dir; _resolve's whitelist
   # rejects the empty string, so short-circuit to base here. A
   # non-empty prefix goes through the same containment + traversal
@@ -813,7 +898,13 @@ def list_app_dir(
   dir_path = base if prefix == "" else _resolve(base, prefix)
   if not dir_path.is_dir():
     return {"entries": [], "next_cursor": None}
-  entries, next_cursor = _list_directory_page(dir_path, prefix, limit, cursor)
+  # Resolve each file's stored MIME from its sidecar so the listing reports
+  # the same type a read would serve (extensionless/custom-MIME blobs).
+  scope = Path("apps") / str(app_id)
+  entries, next_cursor = _list_directory_page(
+    dir_path, prefix, limit, cursor,
+    mime_override=lambda rel: read_content_type(data_dir, scope, rel),
+  )
   return {"entries": entries, "next_cursor": next_cursor}
 
 
