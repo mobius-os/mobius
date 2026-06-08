@@ -156,7 +156,13 @@ async function withStore(storeName, mode, fn) {
   })
 }
 
-function makeStorage({ appId, getToken }) {
+// Exported so the stateful offline core (per-path serialization, the
+// read-through cache, subscribe() fan-out, and the drain's poison-op
+// dead-letter + reconcile) is unit-testable headless — driven by
+// fake-indexeddb + a mocked fetch/navigator under node:test
+// (mobiusRuntimeStore.test.js), the same way overlayPending exposes the
+// PURE read-your-writes logic. `init()` is the only production caller.
+export function makeStorage({ appId, getToken }) {
   // Drop every queued op for this app + path in one transaction, then run
   // `after(store)` (if given) inside the SAME transaction. Used to enforce
   // last-write-wins at path granularity: a newer write for a path
