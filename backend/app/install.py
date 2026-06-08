@@ -784,6 +784,30 @@ def _unregister_cron(source_dir: Path) -> None:
     )
 
 
+def _drop_app_cron(source_dir: Path) -> None:
+  """Converge an updated app's cron to "no schedule": drop its live crontab
+  entry AND delete the replayable init-cron.sh under `source_dir`.
+
+  The update path is otherwise add-only, so an app that migrates from a
+  recurring schedule (v1) to on-demand-only (v2, no `schedule.default`) would
+  leave the v1 crontab line firing and its init-cron.sh re-installed by the
+  entrypoint boot replay forever (card 099). Removing the script — not just
+  tombstoning it like the soft-delete path — is correct here because an
+  in-place update has no recover step to re-arm from; the next update that
+  re-declares a schedule rewrites init-cron.sh from scratch via the scaffold.
+  Pure-filesystem so it runs via `asyncio.to_thread` (`_unregister_cron`
+  shells out to crontab); best-effort, mirroring `_unregister_cron` itself.
+  """
+  try:
+    _unregister_cron(source_dir)
+  except OSError:
+    pass
+  try:
+    (source_dir / "init-cron.sh").unlink()
+  except OSError:
+    pass
+
+
 def _storage_path(app_id: int, sub: str) -> Path:
   """Mirror of routes/storage.py's per-app path layout."""
   data_dir = Path(get_settings().data_dir)
@@ -1608,7 +1632,13 @@ async def install_from_manifest(
   # `job_name` was derived once before the git block; reuse it so the cron
   # entry points at the same file the source write produced.
   has_cron = bool(sched and sched.get("default"))
-  if bundled_job or has_cron:
+  # An UPDATE must CONVERGE cron state, not just add to it: the prior install
+  # may have registered a crontab line this new manifest no longer wants
+  # (recurring → on-demand migration). So on update we unconditionally drop
+  # the existing entry first, then re-register below only if the new manifest
+  # still declares one. A fresh install has nothing to drop. (Card 099.)
+  drop_prior_cron = mode == "update"
+  if bundled_job or has_cron or drop_prior_cron:
     slug = app.slug
     # Use the app's ACTUAL source_dir (where the JSX + job script live), not a
     # freshly re-derived /data/apps/<slug>. After a valid source-dir PATCH the
@@ -1625,6 +1655,12 @@ async def install_from_manifest(
         if not db.query(models.App.id).filter(models.App.id == app.id).first():
           raise HTTPException(404, "App removed before cron registration.")
         app_data_dir.mkdir(parents=True, exist_ok=True)
+        # Drop any prior crontab entry + init-cron.sh BEFORE re-registering, so
+        # the net effect matches the new manifest. The scaffold's own rewrite is
+        # idempotent, but it never removes a line the new manifest dropped — that
+        # is exactly the orphan this clears. Off the event loop (shells out).
+        if drop_prior_cron:
+          await asyncio.to_thread(_drop_app_cron, app_data_dir)
         job_path = app_data_dir / job_name
         if has_cron and CRON_SCAFFOLD.exists():
           # The job script is already on disk; the scaffold preserves it and
