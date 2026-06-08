@@ -19,6 +19,7 @@
   <a href="#batteries-included">Batteries included</a> &middot;
   <a href="#you-grow-it">You grow it</a> &middot;
   <a href="#apps-that-work-together">Apps that work together</a> &middot;
+  <a href="#build-an-app">Build an app</a> &middot;
   <a href="#it-improves-itself-for-you">It improves itself for you</a> &middot;
   <a href="#how-the-agent-itself-gets-better">How the agent gets better</a> &middot;
   <a href="#get-started">Get started</a>
@@ -97,6 +98,16 @@ You can reshape the platform the same way. "Make it warmer." "Restyle the whole 
 Möbius apps are not sealed boxes. They share a common storage layer and a permission model, so with your say-so one app can read another's data. That turns the app store into something closer to a personal data platform. Ask for a dashboard that pulls your **Workout** log and your habit tracker into one view, and the agent can build an app that reads across both. Apps adapt and grow together, recombining the data you already own into whatever shape is useful next.
 
 Read more in [Apps that work together](#apps-that-work-together).
+
+---
+
+## Build an app
+
+The usual way to get an app is to ask for one: describe it in chat and the agent writes the JSX, compiles it, and mounts it next to the conversation. But the contract is open, so you can also write one by hand or fork an existing one.
+
+An app is a public repo with a `mobius.json` manifest and an `index.jsx`. The component receives `{ appId, token }` and persists through `/api/storage/apps/{appId}/...`. The full contract — manifest fields, the storage layer, the shared component shapes the starter apps are built from — is documented in the seed skills the agent itself reads: [`backend/scripts/seed-skills/building-apps.md`](backend/scripts/seed-skills/building-apps.md) and [`backend/scripts/seed-skills/app-component-shapes.md`](backend/scripts/seed-skills/app-component-shapes.md).
+
+The whole starter catalog under [github.com/mobius-os](https://github.com/mobius-os) is working code to read or fork — each `app-*` repo is one installable app. Install yours by pasting its repo URL; update it by pasting the same URL again.
 
 ---
 

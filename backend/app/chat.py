@@ -2053,7 +2053,10 @@ async def _run_chat_impl(
   if not session_id:
     # Build the memory block from the knowledge graph at
     # /data/shared/memory/ when a validated graph is published (the
-    # `.ready` sentinel), else fall back to the flat experience file.
+    # `.ready` sentinel). When no validated graph is published,
+    # `build_memory_block` returns an empty block — there is no
+    # flat-file fallback; the agent simply gets no injected memory
+    # this turn and can Read the graph on demand.
     # `build_memory_block` is pure; the activity emit + envelope live here.
     block = memory.build_memory_block(settings.data_dir)
     ctx = block.text

@@ -1233,13 +1233,15 @@ def get_frame(
   token and the current theme via `postMessage` after the iframe
   loads, instead of having them server-templated into the body.
 
-  Cache freshness model: AppCanvas adds `?v=<app.updated_at>` to the
-  frame URL and the frame forwards that version into the module URL.
-  The service worker keeps that `v` in its cache key, so a cached
-  offline-capable app can open cache-first while app edits naturally
-  become cache misses. Responses still carry an ETag derived from
-  `app.updated_at` and `Cache-Control: no-cache` for browser-cache
-  revalidation on non-SW/cold paths.
+  Cache freshness model: ETag-based revalidation keyed on
+  `app.updated_at`. Responses carry a compound ETag (see
+  `_frame_etag`, folding `app.updated_at` with the shared frame
+  file's content) and `Cache-Control: no-cache`, so the browser
+  revalidates with `If-None-Match` and gets a 304 when nothing
+  changed or fresh 200 when `updated_at` advanced. The service
+  worker revalidates offline-capable apps against the same ETag
+  (`offlineCapableHandler` in `sw.js`); the old `?v=`/version-query
+  cache key was retired with that move.
 
   Frame is intentionally public — it's just the runtime shell
   (importmap, error UI, postMessage init script). Actual app

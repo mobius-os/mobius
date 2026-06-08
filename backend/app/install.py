@@ -336,8 +336,12 @@ def _validate_cron_expr(expr: str) -> None:
     )
 
 
-def _validate_url_safe(url: str) -> tuple[str, str]:
-  """Validates a URL against the SSRF blocklist and returns `(pinned_url, host)`.
+def _validate_url_safe(url: str) -> tuple[str, str, str]:
+  """Validates a URL against the SSRF blocklist; returns `(pinned_url, host_header, sni_host)`.
+
+  `pinned_url` connects to the resolved IP (defeats DNS-rebinding); `host_header`
+  is the original authority host[:port] for the Host header; `sni_host` is the
+  bare DNS name for TLS SNI/cert validation (see the return site below).
 
   The install endpoint is the SSRF surface: we fetch arbitrary URLs on behalf
   of an authenticated owner. From inside the container we can reach our own

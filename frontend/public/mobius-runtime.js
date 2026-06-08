@@ -36,6 +36,7 @@
 //     Embeds the real agent chat (ChatView) in a nested iframe inside
 //     `mount`. handle.on('ready'|'message-sent'|'turn-done'|'error', cb)
 //     and handle.destroy(). See the "Agent-chat embed" block below.
+//   window.mobius.nav.open(label, onBack)        -> { ready, close }  (shell-mediated back target; see building-apps.md)
 //
 // "No walls": this runtime is the easy DEFAULT, not a cage. An app is free to
 // ignore it and use raw IndexedDB / OPFS / SQLite-wasm directly (same-origin
