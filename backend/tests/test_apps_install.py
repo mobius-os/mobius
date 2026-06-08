@@ -655,6 +655,127 @@ def test_install_update_path_in_place(client, auth, bypass_url_validation):
   assert jsx_file.read_text() == jsx_v2
 
 
+def test_update_dropping_schedule_unregisters_orphan_cron(
+    client, auth, bypass_url_validation):
+  """Recurring → on-demand migration must converge cron state, not just add.
+
+  Install v1 with `schedule.default` (a crontab line + init-cron.sh on disk),
+  then update to a manifest that DROPS `schedule.default`. The old crontab
+  entry and the replayable init-cron.sh must be gone — otherwise the boot
+  replay resurrects a dead job every restart (card 099). The autouse
+  scaffold-bypass keeps the install off the real crontab, so we drop a stub
+  init-cron.sh in by hand (as the real scaffold would have) and spy on
+  _unregister_cron to confirm the update tears the live entry down too."""
+  base = "https://x.test/repo-drop/"
+  responses_v1 = {
+    base + "mobius.json": (200, json.dumps({
+      **MANIFEST_NEWS, "version": "1.0.0",
+    }).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, b"v1 prompt"),
+    base + "fetch.sh": (200, b""),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses_v1),
+  ):
+    r1 = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r1.status_code == 201
+  v1_id = r1.json()["id"]
+  assert r1.json()["version"] == "1.0.0"
+
+  # Stand in for the crontab line the real scaffold would have written.
+  data_dir = Path(get_settings().data_dir)
+  source_dir = data_dir / "apps" / "test-news"
+  init_cron = source_dir / "init-cron.sh"
+  init_cron.write_text("#!/bin/bash\nexit 0\n")
+
+  # v2 drops `schedule.default` entirely (becomes on-demand-only): the
+  # crontab entry registered for v1 is now an orphan.
+  manifest_v2 = {
+    **MANIFEST_NEWS,
+    "version": "2.0.0",
+    "schedule": {"job": "fetch.sh"},  # no `default`
+  }
+  responses_v2 = {
+    base + "mobius.json": (200, json.dumps(manifest_v2).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, b"v2 prompt"),
+    base + "fetch.sh": (200, b""),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses_v2),
+  ), patch("app.install._unregister_cron") as mock_unregister:
+    r2 = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["mode"] == "update"
+  assert r2.json()["id"] == v1_id
+
+  # Live crontab line dropped for THIS app's source dir.
+  assert mock_unregister.called, "update never unregistered the v1 cron"
+  assert mock_unregister.call_args.args[0] == source_dir
+  # The replayable init-cron.sh is gone so boot replay can't resurrect it.
+  assert not init_cron.exists()
+
+
+def test_update_keeping_schedule_still_registers_cron(
+    client, auth, bypass_url_validation):
+  """The drop-then-maybe-reregister convergence must NOT regress the common
+  case: an update that still declares `schedule.default` re-registers cron
+  (the scaffold-bypass routes that through the cron-pending sentinel/warning,
+  the same observable signal the fresh-install test asserts on)."""
+  base = "https://x.test/repo-keep/"
+  responses = {
+    base + "mobius.json": (200, json.dumps({
+      **MANIFEST_NEWS, "version": "1.0.0",
+    }).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, b"prompt"),
+    base + "fetch.sh": (200, b""),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    r1 = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r1.status_code == 201
+  v1_id = r1.json()["id"]
+
+  responses_v2 = {
+    base + "mobius.json": (200, json.dumps({
+      **MANIFEST_NEWS, "version": "2.0.0",  # schedule.default kept
+    }).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, b"prompt v2"),
+    base + "fetch.sh": (200, b""),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses_v2),
+  ):
+    r2 = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r2.status_code == 201, r2.text
+  payload = r2.json()
+  assert payload["mode"] == "update"
+  assert payload["id"] == v1_id
+  # Schedule still declared → cron re-registration attempted (warning under
+  # the test scaffold-bypass).
+  assert any("cron" in w for w in payload["warnings"])
+
+
 def test_installed_version_persisted_in_app_list(
   client, auth, bypass_url_validation,
 ):
