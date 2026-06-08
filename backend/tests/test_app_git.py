@@ -166,6 +166,89 @@ def test_record_upstream_commits_pristine_bytes_without_touching_worktree(
   assert (repo / "index.jsx").read_text() == before == "LOCAL EDIT"
 
 
+def test_record_upstream_stages_job_script_on_upstream_tree(tmp_path):
+  """record_upstream commits the schedule job script into the `upstream`
+  tree alongside index.jsx (when job_name + job_bytes are given), so a
+  later update can three-way-merge a locally edited job. The checked-out
+  `main` working tree is left untouched — only `upstream` advances."""
+  repo = tmp_path / "app"
+  app_git.ensure_repo(repo)
+  _write(repo, "LOCAL EDIT")
+  app_git.commit_local(repo, "local edit")
+  before = (repo / "index.jsx").read_text()
+
+  app_git.record_upstream(
+    repo, b"UPSTREAM V2", "https://x/mobius.json", "2.0.0",
+    job_name="fetch.sh", job_bytes=b"#!/bin/bash\necho upstream\n",
+  )
+
+  # The job script is in the upstream tree...
+  job_blob = subprocess.run(
+    ["git", "-C", str(repo), "cat-file", "blob",
+     f"{app_git.UPSTREAM_BRANCH}:fetch.sh"],
+    env=app_git._git_env(repo), capture_output=True, check=True,
+  ).stdout
+  assert job_blob == b"#!/bin/bash\necho upstream\n"
+  # ...and the working tree (on main) is untouched — no fetch.sh appeared,
+  # and index.jsx still holds the local edit.
+  assert not (repo / "fetch.sh").exists()
+  assert (repo / "index.jsx").read_text() == before == "LOCAL EDIT"
+
+
+def test_merge_clean_carries_local_job_edit_forward(tmp_path):
+  """A locally edited job script flows through a clean merge: merge_upstream
+  returns merged_job carrying the local edit when an upstream v2 changes a
+  DISJOINT region of the same script."""
+  repo = tmp_path / "app"
+  base_jsx = b"export default () => null\n"
+  base_job = "#!/bin/bash\nstep one\nstep two\nstep three\nstep four\nstep five\n"
+  app_git.ensure_repo(repo)
+  app_git.record_upstream(
+    repo, base_jsx, "https://x/mobius.json", "1.0.0",
+    job_name="fetch.sh", job_bytes=base_job.encode(),
+  )
+  app_git.align_local_to_upstream(repo)
+
+  # Agent edits the FIRST step of the job locally on main.
+  (repo / "fetch.sh").write_text(
+    base_job.replace("step one", "step ONE LOCAL")
+  )
+  app_git.commit_local(repo, "local job edit")
+  # Upstream v2 edits the LAST step — disjoint from the local change.
+  app_git.record_upstream(
+    repo, base_jsx, "https://x/mobius.json", "2.0.0",
+    job_name="fetch.sh",
+    job_bytes=base_job.replace("step five", "step FIVE UPSTREAM").encode(),
+  )
+
+  result = app_git.merge_upstream(repo, job_name="fetch.sh")
+  assert result.status == "clean"
+  assert result.merged_job is not None
+  merged_job = result.merged_job.decode()
+  assert "step ONE LOCAL" in merged_job       # local edit carried forward
+  assert "step FIVE UPSTREAM" in merged_job   # upstream change applied
+
+
+def test_merge_clean_without_job_name_leaves_merged_job_none(tmp_path):
+  """Omitting job_name keeps merged_job None — the job script is only read
+  back when the caller asks for it (a manifest with no schedule.job)."""
+  repo = tmp_path / "app"
+  base = "line A\nline B\nline C\n"
+  app_git.ensure_repo(repo)
+  app_git.record_upstream(repo, base.encode(), "https://x/mobius.json", "1.0.0")
+  app_git.align_local_to_upstream(repo)
+  _write(repo, "line A LOCAL\nline B\nline C\n")
+  app_git.commit_local(repo, "local edit")
+  app_git.record_upstream(
+    repo, b"line A\nline B\nline C UPSTREAM\n", "https://x/mobius.json", "2.0.0",
+  )
+
+  result = app_git.merge_upstream(repo)
+  assert result.status == "clean"
+  assert result.merged_bytes is not None
+  assert result.merged_job is None
+
+
 def _install(repo: Path, bytes_v1: bytes) -> None:
   """The install sequence app_git models: record the pristine v1 bytes on
   `upstream`, then align `main` to it so the working branch starts at the

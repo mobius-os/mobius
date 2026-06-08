@@ -107,10 +107,17 @@ class MergeResult:
   conflicted; `conflict_paths` names them and `merged_bytes` is None —
   the caller must NOT write anything, leaving the local edits intact for
   an agent to resolve.
+
+  `merged_job` is the merged bytes of the schedule job script (when the
+  caller passed `job_name` to `merge_upstream`), carried back so a locally
+  edited `fetch.sh`/`build.sh` survives a clean update instead of being
+  overwritten by the bundled copy. It is None when no `job_name` was
+  requested, or when the job is not present in the merged tree.
   """
   status: str
   conflict_paths: list[str] = field(default_factory=list)
   merged_bytes: bytes | None = None
+  merged_job: bytes | None = None
 
 
 def _git_env(repo: Path | str) -> dict:
@@ -226,6 +233,8 @@ def record_upstream(
   entry_bytes: bytes,
   manifest_url: str,
   version: str,
+  job_name: str | None = None,
+  job_bytes: bytes | None = None,
 ) -> str:
   """Commits the pristine installed `index.jsx` bytes onto `upstream`.
 
@@ -233,6 +242,12 @@ def record_upstream(
   it as the canonical "this is what version <version> shipped" snapshot,
   WITHOUT disturbing the checked-out `main` working tree. Returns the new
   upstream commit sha (the merge base a later update will diverge from).
+
+  When both `job_name` and `job_bytes` are given, the schedule job script
+  (e.g. `fetch.sh`) is committed into the same `upstream` tree alongside
+  `index.jsx`, so a later update can three-way-merge a locally edited job
+  script the same way it merges `index.jsx` — instead of the bundled copy
+  silently clobbering the local edit.
 
   Implemented by staging the bytes into the index against the `upstream`
   tip and committing with an explicit parent, so the working tree (on
@@ -264,6 +279,27 @@ def record_upstream(
     capture_output=True, text=True, timeout=_GIT_TIMEOUT, check=True,
     env=_git_env(repo),
   )
+  # Stage the schedule job script alongside index.jsx so it lives in the
+  # same upstream tree and a later update merges local job edits the same
+  # way it merges index.jsx. Same bytes-on-stdin reason as the index.jsx
+  # blob, so a direct subprocess call rather than `_run`.
+  if job_name and job_bytes is not None:
+    job_blob = subprocess.run(
+      [
+        "git", "-C", str(repo), "hash-object", "-w", "--stdin",
+        "--path", job_name,
+      ],
+      input=job_bytes, capture_output=True, timeout=_GIT_TIMEOUT, check=True,
+      env=_git_env(repo),
+    ).stdout.decode().strip()
+    subprocess.run(
+      [
+        "git", "-C", str(repo), "update-index", "--add", "--cacheinfo",
+        f"100644,{job_blob},{job_name}",
+      ],
+      capture_output=True, text=True, timeout=_GIT_TIMEOUT, check=True,
+      env=_git_env(repo),
+    )
   tree = _run(repo, "write-tree").stdout.strip()
   msg = f"install v{version} from {manifest_url}"
   sha = _run(
@@ -354,16 +390,21 @@ def local_diverged_from(source_dir: str | Path, base_commit: str) -> bool:
   return proc.returncode != 0
 
 
-def merge_upstream(source_dir: str | Path) -> MergeResult:
+def merge_upstream(
+  source_dir: str | Path, job_name: str | None = None,
+) -> MergeResult:
   """Merges `upstream` into `main` and returns the verdict.
 
   Uses `git merge-tree --write-tree` to perform the three-way merge in
   memory: it neither moves `main` nor touches the working tree, so a
   conflict cannot leave the app served in a half-merged state. On a clean
   merge the merged `index.jsx` bytes are read out of the resulting tree
-  and returned for the caller to write + recompile. On conflict the
-  conflicting paths are returned and `merged_bytes` is None — the caller
-  leaves the local edits untouched.
+  and returned for the caller to write + recompile. When `job_name` is
+  given, the merged job script bytes are read out of the same tree into
+  `merged_job` (None when the job is not tracked in the tree) so a locally
+  edited job script flows through the merge like `index.jsx`. On conflict
+  the conflicting paths are returned and `merged_bytes` is None — the
+  caller leaves the local edits untouched.
 
   The caller is responsible for advancing `main` to the merged tree (by
   writing `merged_bytes` and letting the watcher/`commit_local` commit
@@ -407,7 +448,21 @@ def merge_upstream(source_dir: str | Path) -> MergeResult:
     env=_git_env(repo),
   )
   merged_bytes = merged.stdout if merged.returncode == 0 else None
-  return MergeResult(status="clean", merged_bytes=merged_bytes)
+  merged_job: bytes | None = None
+  if job_name:
+    # Read the merged job script in BINARY mode, same as index.jsx. rc != 0
+    # means the job isn't present in the merged tree (e.g. a tree recorded
+    # before job scripts were tracked) — leave merged_job None and let the
+    # caller fall back to the bundled job.
+    job = subprocess.run(
+      ["git", "-C", str(repo), "cat-file", "blob", f"{tree_oid}:{job_name}"],
+      capture_output=True, timeout=_GIT_TIMEOUT, check=False,
+      env=_git_env(repo),
+    )
+    merged_job = job.stdout if job.returncode == 0 else None
+  return MergeResult(
+    status="clean", merged_bytes=merged_bytes, merged_job=merged_job,
+  )
 
 
 def start_conflict_merge(source_dir: str | Path) -> list[str]:
@@ -475,8 +530,9 @@ def abort_in_progress_merge(source_dir: str | Path) -> bool:
 #   the module top; flagged here because the index-borrow is the spot that
 #   relies on it. A conflict-free alternative is a bare temp index
 #   (GIT_INDEX_FILE), deferred until a non-locked caller needs it.
-# - merge_upstream reads ONLY index.jsx out of the merged tree. Job
-#   scripts are tracked but a clean merge to a `.sh` is not carried back
-#   yet — install.py rewrites scripts from the manifest on update anyway,
-#   so source-of-truth for scripts stays the manifest. Revisit if local
-#   script edits need to survive an update.
+# - The schedule job script now flows through record_upstream + merge_upstream
+#   like index.jsx: record_upstream commits it into the `upstream` tree (when
+#   the caller passes job_name + job_bytes), and merge_upstream reads the merged
+#   job back into MergeResult.merged_job (when the caller passes job_name). So a
+#   locally edited fetch.sh/build.sh survives a clean update instead of being
+#   clobbered by the bundled copy — the gap the old note flagged is closed.

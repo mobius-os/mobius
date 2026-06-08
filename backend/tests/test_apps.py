@@ -66,7 +66,7 @@ def test_delete_then_purge_removes_non_slug_source_dir(client, auth, db):
 def test_app_token_can_update_own_schedule_only(client, auth, monkeypatch):
   calls = []
 
-  def fake_register(slug, schedule_expr, job_path, bundled_job_bytes, app_id=None):
+  def fake_register(slug, schedule_expr, job_path, app_id=None):
     calls.append((slug, schedule_expr, job_path.name, app_id))
 
   monkeypatch.setattr("app.install._register_cron", fake_register)
