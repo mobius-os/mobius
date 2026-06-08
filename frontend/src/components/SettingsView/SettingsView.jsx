@@ -51,6 +51,10 @@ export default function SettingsView({ onThemeChange }) {
 
   const configured = !!settingsQuery.data?.gemini_configured
   const codexAuthenticated = !!settingsQuery.data?.codex_authenticated
+  // Live-probed CLI versions (null when the CLI isn't installed or
+  // didn't respond). Read-only — updates happen via the agent, not here.
+  const claudeVersion = settingsQuery.data?.claude_version
+  const codexVersion = settingsQuery.data?.codex_version
   const claudeAuthenticated = !!claudeStatusQuery.data?.authenticated
   const providerLoaded = settingsQuery.isFetched && claudeStatusQuery.isFetched
 
@@ -190,6 +194,28 @@ export default function SettingsView({ onThemeChange }) {
               </ProviderRow>
             </div>
           )}
+        </section>
+
+        <section className="settings__section">
+          <h2 className="settings__section-title">Runtime</h2>
+          <p className="settings__subtext">
+            Installed CLI versions, probed each time Settings opens.
+            Updates are handled by the agent.
+          </p>
+          <div className="settings__versions">
+            <div className="settings__row">
+              <span className="settings__label">Claude Code</span>
+              <span className="settings__version">
+                {claudeVersion || 'Not installed'}
+              </span>
+            </div>
+            <div className="settings__row">
+              <span className="settings__label">OpenAI Codex</span>
+              <span className="settings__version">
+                {codexVersion || 'Not installed'}
+              </span>
+            </div>
+          </div>
         </section>
 
         <section className="settings__section">
