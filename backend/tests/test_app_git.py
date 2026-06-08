@@ -444,3 +444,36 @@ def test_gitignore_tracks_sibling_source_modules_not_build_output(tmp_path):
   assert "node_modules/dep.js" not in tracked
   assert "index.jsx.bak" not in tracked
   assert not any(t.startswith("12/") for t in tracked)
+
+
+def test_init_cron_is_never_tracked_so_a_reset_cannot_resurrect_it(tmp_path):
+  """init-cron.sh must stay OUT of per-app history (card 099).
+
+  The scaffold writes init-cron.sh on every scheduled update; the cron-orphan
+  drop unlinks it from the WORKING TREE when a later manifest removes the
+  schedule. If git tracked it, a subsequent `merge --abort` / conflict
+  hard-reset would restore the committed copy, and the entrypoint boot replay
+  would re-arm the orphan cron. Gitignoring it severs that resurrection path:
+  the file is never in a commit, so no reset can bring back a copy the drop
+  removed.
+  """
+  repo = tmp_path / "app"
+  app_git.ensure_repo(repo)
+  _write(repo, "v1\n")
+  (repo / "init-cron.sh").write_text("#!/bin/bash\ncrontab -\n")
+  app_git.commit_local(repo, "scheduled v1")
+
+  # Never tracked, even though git add -A swept the whole tree.
+  tracked = set(app_git._run(repo, "ls-files").stdout.split())
+  assert "init-cron.sh" not in tracked
+  assert "index.jsx" in tracked
+
+  # The drop unlinks the working-tree copy when the schedule goes away.
+  (repo / "init-cron.sh").unlink()
+  app_git.commit_local(repo, "schedule removed")
+
+  # A hard reset back to the scheduled-v1 commit (the merge-abort / conflict
+  # reset shape) must NOT resurrect init-cron.sh, because v1 never committed it.
+  v1_sha = app_git._run(repo, "rev-list", "--max-parents=1", "HEAD").stdout.split()[-1]
+  app_git._run(repo, "reset", "--hard", v1_sha)
+  assert not (repo / "init-cron.sh").exists()

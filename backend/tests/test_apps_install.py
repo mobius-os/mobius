@@ -725,6 +725,81 @@ def test_update_dropping_schedule_unregisters_orphan_cron(
   assert not init_cron.exists()
 
 
+def test_update_of_legacy_no_source_dir_app_makes_no_stray_dir(
+    client, auth, db, bypass_url_validation):
+  """A legacy app with no source_dir must not get a /data/apps/<slug>/ on update.
+
+  `drop_prior_cron` forced EVERY update into the cron block, whose
+  `app_data_dir.mkdir` then materialized an empty /data/apps/<slug>/ even for a
+  legacy row that never had a source dir or a crontab line to converge (card
+  099, stray-dir follow-up). Guarding `drop_prior_cron` on `app.source_dir`
+  mirrors the git block and keeps the cron block off a sourceless update.
+  """
+  from app import models
+
+  # No `schedule` at all, so bundled_job/has_cron are both false on update —
+  # the ONLY thing that can force the cron block (and its stray mkdir) is
+  # drop_prior_cron. That isolates the guard under test.
+  manifest_noschedule = {
+    "id": "test-legacy",
+    "name": "Test Legacy",
+    "version": "1.0.0",
+    "description": "Legacy app, no schedule.",
+    "entry": "index.jsx",
+    "icon": "icon.png",
+    "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
+    "runtime": {"imports": ["react"], "esm_deps": []},
+  }
+  base = "https://x.test/repo-legacy/"
+  responses_v1 = {
+    base + "mobius.json": (200, json.dumps(manifest_noschedule).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, _png_bytes()),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses_v1),
+  ):
+    r1 = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r1.status_code == 201
+  v1_id = r1.json()["id"]
+
+  data_dir = Path(get_settings().data_dir)
+  source_dir = data_dir / "apps" / "test-legacy"
+  # Simulate a legacy row predating the source_dir era: clear source_dir and
+  # remove its on-disk tree so the next update takes the sourceless path. Match
+  # by manifest_url is independent of source_dir, so this still resolves as an
+  # update.
+  row = db.query(models.App).filter(models.App.id == v1_id).first()
+  row.source_dir = ""
+  db.commit()
+  if source_dir.exists():
+    import shutil as _shutil
+    _shutil.rmtree(source_dir)
+
+  responses_v2 = {
+    base + "mobius.json": (200, json.dumps({
+      **manifest_noschedule, "version": "2.0.0",
+    }).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, _png_bytes()),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses_v2),
+  ):
+    r2 = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["mode"] == "update"
+  assert r2.json()["id"] == v1_id
+  # No stray empty /data/apps/<slug>/ materialized for the sourceless update.
+  assert not source_dir.exists(), "update materialized a stray source dir"
+
+
 def test_update_keeping_schedule_still_registers_cron(
     client, auth, bypass_url_validation):
   """The drop-then-maybe-reregister convergence must NOT regress the common

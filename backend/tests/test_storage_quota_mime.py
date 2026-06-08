@@ -16,6 +16,7 @@ Two deferred-from-083 tails:
 """
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -175,6 +176,39 @@ def test_text_path_still_guesses_without_sidecar(client, auth, owner_token):
   r = client.get(f"/api/storage/apps/{app_id}/note.txt", headers=auth)
   assert r.text == "hello"
   assert r.headers["content-type"].split(";")[0] == "text/plain"
+
+
+def test_move_folder_onto_stale_meta_dest_does_not_nest_sidecars(tmp_path):
+  """A folder move must REPLACE a stale dest sidecar subtree, not nest into it.
+
+  The data move 409s on an existing destination, but the meta tree is DERIVED
+  and can still hold a stale sidecar dir at the dest (a prior occupant whose
+  data was deleted but whose meta lingered). `shutil.move` of a dir ONTO an
+  existing dir NESTS it (`dst/<src-name>/...`), which buries every moved
+  sidecar one level too deep — `read_content_type` at the moved file's path
+  then misses, dropping the blob back to extension-guess MIME. The source is
+  authoritative, so the move must replace the stale dest (card 085).
+  """
+  scope = Path("apps") / "7"
+  data_dir = str(tmp_path)
+  # Source folder `src/` holds one extensionless blob with a custom sidecar.
+  storage_io.write_content_type(data_dir, scope, "src/blob", "image/png")
+  assert storage_io.read_content_type(data_dir, scope, "src/blob") == "image/png"
+  # A STALE sidecar dir already sits at the destination path `dst/` — a former
+  # occupant's meta the data side never cleaned up. Its content differs so a
+  # merge-without-replace would be detectable too.
+  storage_io.write_content_type(data_dir, scope, "dst/old", "text/plain")
+
+  storage_io.move_content_type(data_dir, scope, "src", "dst")
+
+  # The moved blob's sidecar resolves at its NEW path — proving it landed at
+  # `dst/blob`, not the nested `dst/src/blob` a bare shutil.move would produce.
+  assert storage_io.read_content_type(data_dir, scope, "dst/blob") == "image/png"
+  # The stale occupant is gone (source authoritative), and nothing nested.
+  meta_root = tmp_path / ".storage-meta" / scope
+  assert not (meta_root / "dst" / "src").exists()
+  assert not (meta_root / "src").exists()
+  assert not (meta_root / "dst" / "old.json").exists()
 
 
 # --- Per-app quota --------------------------------------------------------

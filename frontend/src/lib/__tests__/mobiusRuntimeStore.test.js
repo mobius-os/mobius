@@ -25,7 +25,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { IDBFactory } from 'fake-indexeddb'
-import { freshEnv, tick } from './mobiusRuntimeHarness.mjs'
+import { freshEnv, tick, waitFor } from './mobiusRuntimeHarness.mjs'
 
 // makeStorage is imported lazily inside each test AFTER freshEnv() installs the
 // browser globals it reads at construction time. A top-level import would run
@@ -158,19 +158,21 @@ test('subscribe() fires the initial value, then again on every set()', async () 
 
   const seen = []
   const unsub = s.subscribe('a.json', (v) => seen.push(v))
-  await tick(10)
+  await waitFor(() => seen.length >= 1)
   assert.deepEqual(seen, [{ v: 0 }])        // initial
 
   await s.set('a.json', { v: 1 })
-  await tick(5)
+  await waitFor(() => seen.length >= 2)
   assert.deepEqual(seen, [{ v: 0 }, { v: 1 }])
 
   await s.set('a.json', { v: 2 })
-  await tick(5)
+  await waitFor(() => seen.length >= 3)
   assert.deepEqual(seen, [{ v: 0 }, { v: 1 }, { v: 2 }])
   unsub()
 
-  // After unsubscribe, no further fires.
+  // After unsubscribe, no further fires. There's no positive end-state to wait
+  // on (we're asserting an ABSENCE), so a fixed settle is the right tool here —
+  // give any erroneous fire a window to land, then assert it didn't.
   await s.set('a.json', { v: 3 })
   await tick(5)
   assert.deepEqual(seen, [{ v: 0 }, { v: 1 }, { v: 2 }])
@@ -183,11 +185,11 @@ test('subscribe() initial fires null on an absent path, then on remove() fires n
 
   const seen = []
   const unsub = s.subscribe('r.json', (v) => seen.push(v))
-  await tick(10)
+  await waitFor(() => seen.length >= 1)
   assert.deepEqual(seen, [{ v: 1 }])
 
   await s.remove('r.json')
-  await tick(5)
+  await waitFor(() => seen.length >= 2)
   assert.deepEqual(seen, [{ v: 1 }, null])  // remove notifies null
   unsub()
 })
@@ -220,9 +222,9 @@ test('one throwing subscriber does not break delivery to the others', async () =
   const good = []
   const unsubBad = s.subscribe('s.json', () => { throw new Error('listener boom') })
   const unsubGood = s.subscribe('s.json', (v) => good.push(v))
-  await tick(10)
+  await waitFor(() => good.length >= 1)
   await s.set('s.json', { ok: true })
-  await tick(5)
+  await waitFor(() => good.length >= 2)
   // The good subscriber still got both its initial (null) and the set value.
   assert.deepEqual(good, [null, { ok: true }])
   unsubBad()
@@ -239,7 +241,7 @@ test('a 4xx-poison write is dropped AND the mirror reconciles to the server valu
 
   const seen = []
   const unsub = s.subscribe('p.json', (v) => seen.push(v))
-  await tick(10)
+  await waitFor(() => seen.length >= 1)
   assert.deepEqual(seen, [{ server: 'truth' }])
 
   server.forceWrite('p.json', 422)          // the next PUT is poison (fatal 4xx)
@@ -247,7 +249,15 @@ test('a 4xx-poison write is dropped AND the mirror reconciles to the server valu
   // settle() reports {synced} because the op was dead-lettered (removed) — the
   // dead-letter reconcile is what actually re-syncs the mirror, below.
   assert.deepEqual(r, { synced: true })
-  await tick(20)
+  // Wait on the reconcile END-STATE: the dead-letter must drop the pending op
+  // AND the subscriber must observe the optimistic value then the reconcile
+  // back to the server value (3 notifies total). Polling both conditions is
+  // deterministic where a fixed tick(20) raced the scheduled reconcile.
+  await waitFor(async () =>
+    (await s.pendingCount()) === 0 &&
+    seen.length >= 3 &&
+    JSON.stringify(seen[seen.length - 1]) === JSON.stringify({ server: 'truth' })
+  )
 
   // The poison op is dropped (not stuck retrying forever).
   assert.equal(await s.pendingCount(), 0)

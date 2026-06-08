@@ -158,6 +158,28 @@ export function tick(ms = 0) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+// Wait until `pred()` is truthy, polling every `step` ms up to `timeout` ms.
+// A fixed `tick(N)` barrier is timing-flaky: it passes only if the scheduled
+// work happens to land inside N ms, which a loaded CI box can blow past, so the
+// test fails for reasons unrelated to the code under test (card 079's whole
+// point was a DETERMINISTIC core). Polling the actual end-state condition makes
+// the wait as long as it needs to be and no longer — it resolves the instant
+// the condition holds, and only the (generous) timeout is a wall-clock value,
+// hit only on a genuine hang. Rejects on timeout so a real regression still
+// fails loudly rather than hanging the suite.
+export async function waitFor(pred, { timeout = 1000, step = 1 } = {}) {
+  const deadline = Date.now() + timeout
+  for (;;) {
+    // `await` so an async predicate (e.g. one that reads pendingCount()) is
+    // resolved before the truthiness check — a bare Promise is always truthy.
+    if (await pred()) return
+    if (Date.now() >= deadline) {
+      throw new Error(`waitFor: condition not met within ${timeout}ms`)
+    }
+    await tick(step)
+  }
+}
+
 // Collect the values a subscriber sees, in order. Returns { values, unsub }.
 export function recordSubscription(subscribeFn) {
   const values = []

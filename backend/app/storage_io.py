@@ -235,6 +235,17 @@ def move_content_type(
       continue
     try:
       dst.parent.mkdir(parents=True, exist_ok=True)
+      # The data move already 409s on an existing destination (routes/storage),
+      # so the meta tree should be clear too — but the meta tree is DERIVED and
+      # can hold a stale sidecar dir the data side never knew about. shutil.move
+      # of a dir ONTO an existing dir NESTS it (`dst/<src-name>/...`) instead of
+      # renaming, which orphans every moved sidecar one level too deep and
+      # silently drops the moved blobs back to extension-guess MIME. The source
+      # is authoritative, so replace a stale dest subtree rather than nest into
+      # it. (A file dest is overwritten by shutil.move already — only the dir
+      # case nests.)
+      if dst.is_dir() and not dst.is_symlink():
+        shutil.rmtree(dst, ignore_errors=True)
       shutil.move(str(src), str(dst))
     except OSError:
       pass
