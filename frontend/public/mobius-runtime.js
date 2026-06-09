@@ -1004,16 +1004,53 @@ function makeChat({ appId, getToken, storage }) {
   // app-attributed backend contract (design §1.1: POST /api/app-chats).
   // The ordinary /api/chats create route is owner-only and intentionally
   // leaves created_by_app_id NULL.
+  // /api/app-chats is APP-TOKEN-ONLY: the create + the resume PATCH both 403 an
+  // owner JWT ("Use POST /api/chats for owner-created chats." / "App chat
+  // metadata may only be changed by an app token."). The in-shell app frame's
+  // getToken returns the OWNER JWT (app-frame.html posts the shell token), so
+  // calling /api/app-chats with it 403d — surfacing as the embedded chat's
+  // "create/update failed (403)". Mint a short-lived app-scoped token for THIS
+  // app (the owner JWT is allowed to mint one for any of its apps via
+  // /api/auth/app-token) and use it for the whole app-chat lifecycle. A
+  // STANDALONE host's getToken already returns an app token; if the mint fails
+  // there we fall back to it (still app-scoped, so app-chats accepts it).
+  // Cached; re-minted on a 401 (the 8-hour app token expired mid-session).
+  let _appChatToken = null
+  async function appChatToken(refresh) {
+    if (_appChatToken && !refresh) return _appChatToken
+    const owner = await getToken()
+    try {
+      const res = await fetch('/api/auth/app-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${owner}` },
+        body: JSON.stringify({ app_id: Number(appId) }),
+      })
+      if (res.ok) {
+        const data = await res.json()
+        if (data && data.token) { _appChatToken = data.token; return _appChatToken }
+      }
+    } catch (e) { /* fall through to the host token */ }
+    return owner
+  }
+
+  // Call an /api/app-chats endpoint with the app-scoped token, re-minting once on
+  // a 401 (the app token expired mid-session). init.headers is merged so the
+  // caller sets Content-Type without clobbering Authorization.
+  async function appChatFetch(url, init) {
+    const withAuth = (t) => ({ ...init, headers: { ...(init.headers || {}), Authorization: `Bearer ${t}` } })
+    let res = await fetch(url, withAuth(await appChatToken()))
+    if (res.status === 401) res = await fetch(url, withAuth(await appChatToken(true)))
+    return res
+  }
+
   async function createChat(opts) {
-    const token = await getToken()
     // Root-relative, same as storage above — the app frame is same-origin
     // with the shell, so /api/app-chats resolves regardless of the deploy
     // prefix the browser uses for the embed iframe src.
-    const res = await fetch('/api/app-chats', {
+    const res = await appChatFetch('/api/app-chats', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({
         title: opts && opts.title ? opts.title : 'App chat',
@@ -1040,13 +1077,9 @@ function makeChat({ appId, getToken, storage }) {
     const body = {}
     Object.assign(body, appChatMetadataBody(opts, { includeProvider: false }))
     if (!Object.keys(body).length) return
-    const token = await getToken()
-    const res = await fetch(`/api/app-chats/${encodeURIComponent(chatId)}`, {
+    const res = await appChatFetch(`/api/app-chats/${encodeURIComponent(chatId)}`, {
       method: 'PATCH',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })
     if (!res.ok) {
