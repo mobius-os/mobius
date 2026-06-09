@@ -23,10 +23,8 @@ from app import models, providers
 from app.auth import encrypt_api_key
 from app.config import get_settings as get_app_settings
 from app.database import get_db
-from app.deps import get_current_owner, get_current_owner_or_app, reject_cross_site
+from app.deps import get_current_owner, reject_cross_site
 from app.schemas import (
-  AgentOut,
-  AgentRegistryResponse,
   ModelPrefsUpdate,
   ModelRegistryResponse,
   SettingsUpdate,
@@ -156,42 +154,6 @@ async def list_model_registry(
   return ModelRegistryResponse(providers=registry)
 
 
-# Named-agent registry — the picker lists these (agents, not just
-# models). Built-ins overlaid by /data/shared/agents.json. Sits next
-# to the model registry because the two are picked together.
-agents_router = APIRouter(prefix="/api/agents", tags=["agents"])
-
-
-@agents_router.get("", response_model=AgentRegistryResponse)
-def list_agents(
-  _: models.Owner = Depends(get_current_owner_or_app),
-) -> AgentRegistryResponse:
-  """Returns the named-agent registry: built-ins + owner overrides.
-
-  `system_prompt` is stripped here — the picker only needs identity +
-  provider/model/effort + display fields; the runner reads the prompt
-  server-side. `default_id` is the agent a chat with no agent selected
-  behaves like (the Builder persona).
-  """
-  data_dir = get_app_settings().data_dir
-  agents = [
-    AgentOut(
-      id=a["id"],
-      label=a.get("label") or a["id"],
-      provider=a.get("provider") or providers.DEFAULT_PROVIDER,
-      model=a.get("model"),
-      effort=a.get("effort"),
-      skill_ref=a.get("skill_ref"),
-      icon=a.get("icon"),
-    )
-    for a in providers.effective_agents(data_dir)
-  ]
-  return AgentRegistryResponse(
-    agents=agents,
-    default_id=providers.DEFAULT_AGENT_ID,
-  )
-
-
 owner_router = APIRouter(prefix="/api/owner", tags=["owner"])
 
 
@@ -282,5 +244,4 @@ def mark_walkthrough_complete(
 # `_load("settings")` picks up all the surfaces.
 router.include_router(settings_router)
 router.include_router(models_router)
-router.include_router(agents_router)
 router.include_router(owner_router)

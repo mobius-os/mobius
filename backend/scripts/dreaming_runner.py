@@ -229,8 +229,8 @@ def load_settings() -> dict:
   return data if isinstance(data, dict) else {}
 
 
-def _resolve_model(settings: dict) -> tuple[str | None, str, str | None, str | None]:
-  """Returns (agent_id, provider, model, effort) from settings.json + defaults.
+def _resolve_model(settings: dict) -> tuple[str, str | None, str | None]:
+  """Returns (provider, model, effort) from settings.json + defaults.
 
   Provider defaults to Claude. Model/effort are passed through only
   when present and self-consistent: a model that belongs to the OTHER
@@ -238,27 +238,6 @@ def _resolve_model(settings: dict) -> tuple[str | None, str, str | None, str | N
   SDK error) — same defensive normalization the chat runners do. Both
   may be None, in which case the SDK uses its own account default.
   """
-  agent_id = settings.get("agent_id") or None
-  if agent_id:
-    try:
-      from app.providers import resolve_agent
-      agent = resolve_agent(str(DATA_DIR), str(agent_id))
-    except Exception as exc:
-      _log(f"could not resolve agent_id={agent_id!r}: {exc!r}")
-      agent = None
-    if agent:
-      provider = settings.get("provider") or agent.get("provider") or DEFAULT_PROVIDER
-      if provider not in ("claude", "codex"):
-        provider = DEFAULT_PROVIDER
-      return (
-        str(agent_id),
-        provider,
-        settings.get("model") or agent.get("model") or None,
-        settings.get("effort") or agent.get("effort") or None,
-      )
-    _log(f"settings agent_id={agent_id!r} is not in the registry; using provider/model")
-    agent_id = None
-
   provider = settings.get("provider") or DEFAULT_PROVIDER
   if provider not in ("claude", "codex"):
     provider = DEFAULT_PROVIDER
@@ -279,7 +258,7 @@ def _resolve_model(settings: dict) -> tuple[str | None, str, str | None, str | N
     if model in other:
       _log(f"settings model {model!r} mismatches provider {provider!r}; dropping")
       model = None
-  return agent_id, provider, model, effort
+  return provider, model, effort
 
 
 def build_goal(settings: dict) -> str:
@@ -434,7 +413,7 @@ async def run() -> int:
   records about whether the night ran.
   """
   settings = load_settings()
-  agent_id, provider, model, effort = _resolve_model(settings)
+  provider, model, effort = _resolve_model(settings)
   skill_text = load_skill()
   seed_brief_template()
   goal = build_goal(settings)
@@ -448,7 +427,7 @@ async def run() -> int:
     log_fh = None
 
   _log(
-    f"start agent={agent_id or '(none)'} provider={provider} model={model or '(default)'} "
+    f"start provider={provider} model={model or '(default)'} "
     f"effort={effort or '(default)'} max_turns={max_turns} cwd={DATA_DIR}"
   )
 

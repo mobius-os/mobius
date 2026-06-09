@@ -63,31 +63,25 @@ SUBPROCESS_CWD = "/data"
 SUPPORTED_PROVIDERS: tuple[str, ...] = ("claude", "codex")
 
 
-# ─── Frozen recovery agent + model literals ─────────────────────────
+# ─── Frozen recovery model literals ─────────────────────────────────
 #
 # Recovery is SDK-isolated: this module imports only stdlib and MUST
 # NOT import app.providers or the SDK stack (the production chat path
-# may be exactly what's broken). So the named-agent set + model lists
-# the recovery picker offers are FROZEN LITERALS here, deliberately
-# duplicated from providers.BUILT_IN_AGENTS / providers.KNOWN_MODELS
-# rather than imported. They drift only when someone hand-edits both —
-# acceptable, because the recovery surface is small, rarely changed,
-# and its whole value is surviving a broken import chain.
+# may be exactly what's broken). So the model lists the recovery picker
+# offers are FROZEN LITERALS here, deliberately duplicated from
+# providers.KNOWN_MODELS rather than imported. They drift only when
+# someone hand-edits both — acceptable, because the recovery surface is
+# small, rarely changed, and its whole value is surviving a broken
+# import chain.
 #
-# An agent here is {id, label, system_prompt-builder selection}. The
-# system prompt itself is built by `_system_prompt(chat_id, agent_id)`
-# (it needs the per-chat log path interpolated, so it can't be a static
-# string). Models are per-provider id lists; the picker offers them and
-# the chosen one is appended to the spawn argv as `--model` (Claude) /
-# `-m` (Codex). An unset / unknown model means "CLI default" — the same
-# behavior recovery had before model selection existed.
-RECOVERY_AGENTS: tuple[dict, ...] = (
-  {"id": "recovery", "label": "Recovery (default)"},
-  {"id": "builder", "label": "Builder"},
-  {"id": "reviewer", "label": "Reviewer"},
-)
-RECOVERY_AGENT_IDS: tuple[str, ...] = tuple(a["id"] for a in RECOVERY_AGENTS)
-DEFAULT_RECOVERY_AGENT_ID = "recovery"
+# Recovery always runs the single recovery system prompt built by
+# `_system_prompt(chat_id)` (it needs the per-chat log path
+# interpolated, so it can't be a static string) — there is no
+# selectable persona. Models are per-provider id lists; the picker
+# offers them and the chosen one is appended to the spawn argv as
+# `--model` (Claude) / `-m` (Codex). An unset / unknown model means
+# "CLI default" — the same behavior recovery had before model
+# selection existed.
 
 # Per-provider model lists offered in the recovery picker. Frozen copy
 # of providers.KNOWN_MODELS — top entry is the suggested default but the
@@ -116,17 +110,6 @@ def is_valid_recovery_model(provider: str, model: str | None) -> bool:
   if not model:
     return True
   return model in RECOVERY_MODELS.get(provider, ())
-
-
-def is_valid_recovery_agent(agent_id: str | None) -> bool:
-  """True when `agent_id` is a known recovery agent (or None/empty).
-
-  None / empty resolves to the default Recovery agent. A non-empty
-  value must be one of RECOVERY_AGENT_IDS.
-  """
-  if not agent_id:
-    return True
-  return agent_id in RECOVERY_AGENT_IDS
 
 
 def provider_status() -> dict[str, bool]:
@@ -326,37 +309,7 @@ def _sse(event: dict) -> str:
   return f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
 
 
-def _agent_persona_line(agent_id: str | None) -> str:
-  """Returns the persona framing for a recovery agent, or "" for default.
-
-  The default Recovery agent uses the unchanged opening paragraph (so
-  its prompt is byte-identical to the pre-agent-selection version).
-  Builder / Reviewer prepend a one-paragraph persona that shapes HOW
-  the agent approaches the same recovery surface — Builder leans toward
-  making the fix, Reviewer toward diagnosing without editing. Every
-  agent still gets the full recovery-surface instructions below (write
-  surface, frozen island, restart workflow) — the persona only adjusts
-  posture, never the safety rails.
-  """
-  if agent_id == "builder":
-    return (
-      "Adopt the Builder posture: you are comfortable making edits. "
-      "Once you understand the breakage, implement the fix directly in "
-      "the write surface below and walk the owner through restarting.\n\n"
-    )
-  if agent_id == "reviewer":
-    return (
-      "Adopt the Reviewer posture: diagnose with skeptical, fresh eyes "
-      "and explain the root cause before touching anything. Prefer "
-      "recommending the smallest correct fix over making sweeping edits "
-      "yourself unless the owner asks you to apply it.\n\n"
-    )
-  return ""
-
-
-def _system_prompt(
-  chat_id: str | None = None, agent_id: str | None = None,
-) -> str:
+def _system_prompt(chat_id: str | None = None) -> str:
   """Recovery agent instructions. Minimal — agent is here to fix.
 
   `chat_id` is interpolated into the "read prior turns" instruction
@@ -366,12 +319,9 @@ def _system_prompt(
   prompt hardcoded the legacy path and silently broke multi-turn
   context after the migration (Claude review caught it).
 
-  `agent_id` selects a persona (RECOVERY_AGENTS). The default Recovery
-  agent (None / "recovery") yields the unchanged prompt; Builder /
-  Reviewer prepend a persona paragraph via `_agent_persona_line`. The
-  recovery-surface instructions (write surface, frozen island, restart
-  workflow) are identical across all personas — the persona only shapes
-  posture, never the safety rails.
+  There is one recovery posture — be direct and conservative,
+  reversibility over cleverness — baked into the prompt below. There
+  is no selectable persona.
 
   Updated 2026-05-26 per multi-reviewer findings:
     - `diff -ru` not `git diff`: /app/app-baked/ has no .git
@@ -407,10 +357,11 @@ def _system_prompt(
       "content; the FIRST line is a `_meta` record — skip it."
     )
   return (
-    _agent_persona_line(agent_id)
-    + "You are running inside the Mobius recovery chat. The user has "
+    "You are running inside the Mobius recovery chat. The user has "
     "reached you here because something in the platform is broken "
-    "and they need help fixing it.\n\n"
+    "and they need help fixing it. Be direct and conservative — "
+    "diagnose the root cause, make the smallest correct fix, and "
+    "prefer reversibility over cleverness.\n\n"
     + prior_turns + "\n\n"
     "You have filesystem-only access. There is NO $AGENT_TOKEN, NO "
     "$API_BASE_URL, NO $CHAT_ID env var here — the production chat "
@@ -853,7 +804,6 @@ async def stream_turn(
   provider: str | None = None,
   chat_id: str | None = None,
   model: str | None = None,
-  agent_id: str | None = None,
 ) -> AsyncIterator[str]:
   """Spawns the rescue CLI for one turn and yields SSE events.
 
@@ -865,9 +815,7 @@ async def stream_turn(
 
   `model` (validated against RECOVERY_MODELS by the HTTP layer) is
   appended to the spawn argv as `--model`/`-m`; None/empty → the CLI's
-  default model (the pre-model-selection behavior). `agent_id`
-  (RECOVERY_AGENT_IDS) selects the system-prompt persona; None →
-  the default Recovery agent (byte-identical to before).
+  default model (the pre-model-selection behavior).
 
   Concurrency contract: at most one subprocess runs at a time. A
   second /stream request that arrives while one is in flight gets a
@@ -904,9 +852,8 @@ async def stream_turn(
     # to the CLI default. The HTTP layer already validates, but this
     # keeps the runner correct for direct/test callers too.
     safe_model = model if is_valid_recovery_model(chosen, model) else None
-    safe_agent = agent_id if is_valid_recovery_agent(agent_id) else None
     async for chunk in _stream_turn_impl(
-      user_message, claim, chosen, chat_id, safe_model, safe_agent,
+      user_message, claim, chosen, chat_id, safe_model,
     ):
       yield chunk
   finally:
@@ -944,16 +891,15 @@ async def _stream_turn_impl(
   provider: str,
   chat_id: str | None,
   model: str | None = None,
-  agent_id: str | None = None,
 ) -> AsyncIterator[str]:
   """Dispatches to the per-provider spawn function and forwards events."""
   if provider == "codex":
-    async for ev in _spawn_codex(user_message, claim, chat_id, model, agent_id):
+    async for ev in _spawn_codex(user_message, claim, chat_id, model):
       yield ev
     return
   # Default: Claude. Unknown provider names also fall through to Claude
   # so a typo doesn't silently produce zero output.
-  async for ev in _spawn_claude(user_message, claim, chat_id, model, agent_id):
+  async for ev in _spawn_claude(user_message, claim, chat_id, model):
     yield ev
 
 
@@ -962,7 +908,6 @@ async def _spawn_claude(
   claim: dict,
   chat_id: str | None,
   model: str | None = None,
-  agent_id: str | None = None,
 ) -> AsyncIterator[str]:
   """Spawns the Claude CLI, writes the message to stdin, streams stdout.
 
@@ -972,7 +917,6 @@ async def _spawn_claude(
   reads from stdin (input-format text is the CLI default).
 
   `model` (when set) is appended as `--model <id>`; None → CLI default.
-  `agent_id` selects the system-prompt persona via `_system_prompt`.
   """
   claude_bin = shutil.which("claude")
   if not claude_bin:
@@ -995,7 +939,7 @@ async def _spawn_claude(
     "--verbose",
     "--include-partial-messages",
     "--dangerously-skip-permissions",
-    "--system-prompt", _system_prompt(chat_id, agent_id),
+    "--system-prompt", _system_prompt(chat_id),
   ]
   # Append the model selection only when one was chosen; absent →
   # the CLI uses its own default (pre-model-selection behavior).
@@ -1113,7 +1057,6 @@ async def _spawn_codex(
   claim: dict,
   chat_id: str | None,
   model: str | None = None,
-  agent_id: str | None = None,
 ) -> AsyncIterator[str]:
   """Spawns the Codex CLI for one turn and yields SSE events.
 
@@ -1128,7 +1071,7 @@ async def _spawn_codex(
   don't hit Linux's argv cap, mirroring the Claude path.
 
   `model` (when set) is appended as `-m <id>` (Codex's model flag);
-  None → CLI default. `agent_id` selects the system-prompt persona.
+  None → CLI default.
   """
   codex_bin = shutil.which("codex")
   if not codex_bin:
@@ -1188,7 +1131,7 @@ async def _spawn_codex(
   # bare codex session — Claude reviewer flagged this gap.
   assert proc.stdin is not None
   combined = (
-    _system_prompt(chat_id, agent_id)
+    _system_prompt(chat_id)
     + "\n\n---\n\nUser message follows:\n\n"
     + user_message
   )

@@ -187,11 +187,11 @@ def recover_chat_new(
   The chat is created with a `_meta` line carrying the provider so
   later opens render the picker with the original provider preset.
 
-  Optional `model` and `agent_id` are validated against the frozen
-  recovery literals (400 on unknown) but are NOT persisted on the chat
-  — they're per-turn selections the /stream POST carries. Validating
-  here gives the client a clean early error rather than a silent
-  fall-through to the CLI default.
+  Optional `model` is validated against the frozen recovery literals
+  (400 on unknown) but is NOT persisted on the chat — it's a per-turn
+  selection the /stream POST carries. Validating here gives the client
+  a clean early error rather than a silent fall-through to the CLI
+  default.
   """
   _require_session(moebius_recover)
   provider = (payload or {}).get("provider")
@@ -200,9 +200,6 @@ def recover_chat_new(
   model = (payload or {}).get("model")
   if not recover_chat_runner.is_valid_recovery_model(provider, model):
     raise HTTPException(status_code=400, detail="invalid model")
-  agent_id = (payload or {}).get("agent_id")
-  if not recover_chat_runner.is_valid_recovery_agent(agent_id):
-    raise HTTPException(status_code=400, detail="invalid agent")
   try:
     chat_id = recover_chat_runner.create_chat(provider)
   except (ValueError, RuntimeError) as exc:
@@ -286,8 +283,7 @@ async def recover_chat_stream(
   user message. POST (not GET) so the message body never appears in
   uvicorn access logs, Caddy access logs, or browser history.
 
-  Body: {chat_id: str, turn_id: int, provider?: str, model?: str,
-  agent_id?: str}.
+  Body: {chat_id: str, turn_id: int, provider?: str, model?: str}.
 
   Provider defaults to the chat's stored `_meta.provider`, but the
   client can override (e.g. a chat was created with Codex but the
@@ -295,10 +291,10 @@ async def recover_chat_stream(
   Unknown provider names normalize to None so the runner picks the
   chat's default.
 
-  `model` and `agent_id` are validated against the frozen recovery
-  literals — an unknown value 400s rather than silently falling back,
-  so the user knows their selection didn't take. They scope this turn
-  only (recovery doesn't persist per-turn model/agent on the chat).
+  `model` is validated against the frozen recovery literals — an
+  unknown value 400s rather than silently falling back, so the user
+  knows their selection didn't take. It scopes this turn only
+  (recovery doesn't persist per-turn model on the chat).
 
   Replay guard: each (chat_id, turn_id) can only be streamed once.
   A duplicate POST gets 409 instead of spawning a second CLI.
@@ -326,9 +322,6 @@ async def recover_chat_stream(
   )
   if not recover_chat_runner.is_valid_recovery_model(validate_provider, model):
     raise HTTPException(status_code=400, detail="invalid model")
-  agent_id = (payload or {}).get("agent_id") if payload else None
-  if not recover_chat_runner.is_valid_recovery_agent(agent_id):
-    raise HTTPException(status_code=400, detail="invalid agent")
   if isinstance(turn_id, int):
     if (chat_id, turn_id) in _streamed_turn_ids:
       raise HTTPException(
@@ -348,8 +341,7 @@ async def recover_chat_stream(
 
   async def gen():
     async for chunk in recover_chat_runner.stream_turn(
-      message, effective_provider, chat_id=chat_id,
-      model=model, agent_id=agent_id,
+      message, effective_provider, chat_id=chat_id, model=model,
     ):
       yield chunk
 
@@ -530,11 +522,6 @@ def _render_page(
     f'<select class="rc-select rc-model-sel">{"".join(model_group_parts)}</select>'
     '</label>'
   )
-  # The agent (builder/reviewer/recovery) picker was removed — recovery
-  # always runs the recovery agent; exposing the choice added a decision
-  # with no payoff. Kept as an empty string so the existing view templates
-  # that interpolate it render nothing.
-  agent_select_html = ""
 
   # Chat list — newest first, each row shows provider + relative
   # mtime + open + delete buttons. Used by both picker view and
@@ -817,7 +804,6 @@ def _render_page(
     <div class="rc-newchat-row">
       <span class="rc-prov-label">Provider:</span>
       {provider_picker_html}
-      {agent_select_html}
       {model_select_html}
       <button type="button" id="rc-start-btn" class="rc-start-btn">Start chat</button>
     </div>
@@ -834,9 +820,8 @@ def _render_page(
     <button id="rc-reset-btn">Reset chat</button>
   </div>
   <div class="rc-prov-row">
-    <span class="rc-prov-label">Rescue agent (override):</span>
+    <span class="rc-prov-label">Provider (override):</span>
     {provider_picker_html}
-    {agent_select_html}
     {model_select_html}
   </div>
   <div id="rc-log" class="rc-log">{history_html}</div>

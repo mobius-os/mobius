@@ -508,7 +508,7 @@ def test_turn_id_replay_returns_409(client, auth_cookie, chat_id, monkeypatch):
   # Stub stream_turn so the test doesn't actually spawn a CLI.
   from app import recover_chat_runner as rcr
 
-  async def _empty_stream(_message, _provider=None, chat_id=None, model=None, agent_id=None):
+  async def _empty_stream(_message, _provider=None, chat_id=None, model=None):
     if False:
       yield ""
 
@@ -952,7 +952,7 @@ def test_reset_clears_streamed_turn_ids(
   # End-to-end: after reset, a fresh send + stream cycle must work.
   from app import recover_chat_runner as rcr
 
-  async def _empty_stream(_message, _provider=None, chat_id=None, model=None, agent_id=None):
+  async def _empty_stream(_message, _provider=None, chat_id=None, model=None):
     if False:
       yield ""
 
@@ -1115,7 +1115,7 @@ def test_provider_picker_flows_to_runner(
 
   seen_provider: list = []
 
-  async def _capturing_stream(_message, provider=None, chat_id=None, model=None, agent_id=None):
+  async def _capturing_stream(_message, provider=None, chat_id=None, model=None):
     seen_provider.append(provider)
     if False:
       yield ""
@@ -1154,7 +1154,7 @@ def test_provider_picker_unknown_falls_back_to_default(
 
   seen_provider: list = []
 
-  async def _capturing_stream(_message, provider=None, chat_id=None, model=None, agent_id=None):
+  async def _capturing_stream(_message, provider=None, chat_id=None, model=None):
     seen_provider.append(provider)
     if False:
       yield ""
@@ -1295,28 +1295,19 @@ async def test_recovery_cross_provider_model_ignored(monkeypatch):
   assert "--model" not in captured["argv"]
 
 
-def test_recovery_system_prompt_persona_swaps():
-  """Builder/Reviewer agents prepend a persona; the default Recovery
-  agent yields the unchanged prompt (byte-identical to before)."""
+def test_recovery_system_prompt_is_single_recovery_posture():
+  """There is one recovery prompt with the conservative posture baked
+  in — no selectable persona. The prompt names the recovery surface."""
   from app import recover_chat_runner as rcr
 
-  default = rcr._system_prompt("abc123")
-  recovery = rcr._system_prompt("abc123", "recovery")
-  builder = rcr._system_prompt("abc123", "builder")
-  reviewer = rcr._system_prompt("abc123", "reviewer")
-
-  # Default == explicit "recovery" == None: no persona prefix.
-  assert default == recovery
-  assert default.startswith("You are running inside the Mobius recovery")
-  # Builder / Reviewer prepend a persona but keep the recovery surface.
-  assert builder.startswith("Adopt the Builder posture")
-  assert reviewer.startswith("Adopt the Reviewer posture")
-  assert "frozen island" in builder.lower() or "frozen-island" in builder.lower()
-  assert "recovery chat" in reviewer.lower()
+  prompt = rcr._system_prompt("abc123")
+  assert prompt.startswith("You are running inside the Mobius recovery")
+  assert "conservative" in prompt.lower()
+  assert "frozen island" in prompt.lower() or "frozen-island" in prompt.lower()
 
 
 def test_recovery_validation_helpers():
-  """is_valid_recovery_model / is_valid_recovery_agent gate the literals."""
+  """is_valid_recovery_model gates the frozen model literals."""
   from app import recover_chat_runner as rcr
 
   assert rcr.is_valid_recovery_model("claude", None) is True
@@ -1325,17 +1316,12 @@ def test_recovery_validation_helpers():
   assert rcr.is_valid_recovery_model("claude", "gpt-5.5") is False
   assert rcr.is_valid_recovery_model("codex", "gpt-5.5") is True
 
-  assert rcr.is_valid_recovery_agent(None) is True
-  assert rcr.is_valid_recovery_agent("recovery") is True
-  assert rcr.is_valid_recovery_agent("builder") is True
-  assert rcr.is_valid_recovery_agent("nope") is False
 
-
-def test_recovery_stream_passes_model_and_agent_to_runner(
+def test_recovery_stream_passes_model_to_runner(
   client, auth_cookie, chat_id, monkeypatch,
 ):
-  """The /stream endpoint forwards a valid model + agent_id into
-  stream_turn; an unknown model 400s before the runner is touched."""
+  """The /stream endpoint forwards a valid model into stream_turn; an
+  unknown model 400s before the runner is touched."""
   from app import recover_chat as rc
   from app import recover_chat_runner as rcr
   rc._streamed_turn_ids.clear()
@@ -1343,10 +1329,9 @@ def test_recovery_stream_passes_model_and_agent_to_runner(
   seen = {}
 
   async def _capturing_stream(
-    _message, provider=None, chat_id=None, model=None, agent_id=None,
+    _message, provider=None, chat_id=None, model=None,
   ):
     seen["model"] = model
-    seen["agent_id"] = agent_id
     if False:
       yield ""
 
@@ -1363,12 +1348,12 @@ def test_recovery_stream_passes_model_and_agent_to_runner(
     "/recover/chat/stream",
     json={
       "chat_id": chat_id, "turn_id": turn_id,
-      "model": "claude-opus-4-8", "agent_id": "reviewer",
+      "model": "claude-opus-4-8",
     },
     cookies=auth_cookie,
   )
   assert r.status_code == 200, r.text
-  assert seen == {"model": "claude-opus-4-8", "agent_id": "reviewer"}
+  assert seen == {"model": "claude-opus-4-8"}
 
 
 def test_recovery_stream_rejects_unknown_model(
@@ -1391,15 +1376,14 @@ def test_recovery_stream_rejects_unknown_model(
   assert "model" in r.json()["detail"].lower()
 
 
-def test_recovery_new_chat_validates_model_and_agent(
+def test_recovery_new_chat_validates_model(
   client, auth_cookie,
 ):
-  """/recover/chat/new 400s on an unknown model or agent; accepts
-  valid ones (without persisting them — they're per-turn)."""
+  """/recover/chat/new 400s on an unknown model; accepts a valid one
+  (without persisting it — it's per-turn)."""
   ok = client.post(
     "/recover/chat/new",
-    json={"provider": "claude", "model": "claude-opus-4-8",
-          "agent_id": "builder"},
+    json={"provider": "claude", "model": "claude-opus-4-8"},
     cookies=auth_cookie,
   )
   assert ok.status_code == 200
@@ -1410,13 +1394,6 @@ def test_recovery_new_chat_validates_model_and_agent(
     cookies=auth_cookie,
   )
   assert bad_model.status_code == 400
-
-  bad_agent = client.post(
-    "/recover/chat/new",
-    json={"provider": "claude", "agent_id": "nope"},
-    cookies=auth_cookie,
-  )
-  assert bad_agent.status_code == 400
 
 
 def test_recovery_page_renders_unified_model_select(

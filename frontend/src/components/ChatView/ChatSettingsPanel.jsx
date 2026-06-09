@@ -367,7 +367,6 @@ export default function ChatSettingsPanel({
       onChange?.({
         agent_settings_json: data.agent_settings_json,
         provider: data.provider,
-        agent_id: data.agent_id,
         effective: data.effective,
       })
       return 'ok'
