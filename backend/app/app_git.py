@@ -331,6 +331,41 @@ def record_upstream(
   return sha
 
 
+def has_unresolved_conflicts(source_dir: str | Path) -> bool:
+  """Whether an in-progress merge still has ANY tracked file unresolved.
+
+  The invariant this guards: an update must NEVER finalize while conflict
+  markers remain in any tracked file. Two signals, BOTH required, because
+  they cover disjoint moments of the resolve flow:
+
+  - `git ls-files -u` lists unmerged index entries. It is non-empty right
+    after `start_conflict_merge` materializes the conflict, BUT it clears
+    the instant the agent `git add`s a file — even one that still carries
+    `<<<<<<<` markers (adding marks the path "resolved" in the index
+    regardless of content).
+  - `git diff --check` reports "leftover conflict marker" lines, so it
+    still fires on a marker-bearing file the agent has already staged. We
+    use git's own marker detection (not a naive grep for `=======`, which
+    would false-positive on a legitimate setext heading or separator) and
+    diff against HEAD so both staged and unstaged markers are seen.
+
+  Only meaningful while a merge is in progress: outside a merge there is
+  nothing to finalize, so the caller is expected to check MERGE_HEAD first
+  and this returns False (no unmerged entries, `--check` not run).
+  """
+  repo = Path(source_dir)
+  if not (repo / ".git" / "MERGE_HEAD").exists():
+    return False
+  unmerged = _run(repo, "ls-files", "-u").stdout.strip()
+  if unmerged:
+    return True
+  # `diff --check` exits 2 when it finds leftover conflict markers, 1 on
+  # whitespace errors, 0 when clean. Only the marker case (the precise
+  # "leftover conflict marker" line) means an unresolved conflict here.
+  check = _run(repo, "diff", "HEAD", "--check", check=False)
+  return "leftover conflict marker" in check.stdout
+
+
 def commit_local(source_dir: str | Path, msg: str) -> str | None:
   """Commits the current working-tree source onto `main`.
 
@@ -339,14 +374,32 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
   nothing to commit (the tree already matches `main`'s tip) — a no-op
   rather than an empty commit so the history stays meaningful.
 
-  If a merge is in progress (MERGE_HEAD present — e.g. the agent resolved a
-  conflict that `start_conflict_merge` materialized and saved), the `git
-  commit` here finalizes it as a 2-parent merge commit, so the upstream tip
-  becomes an ancestor of `main` and the merge base advances for free.
+  HARD GATE on the merge-finalize path: if a merge is in progress
+  (MERGE_HEAD present) and `has_unresolved_conflicts` is True, this REFUSES
+  to commit and returns None, leaving the merge in progress. The invariant
+  is that an update is never finalized while ANY tracked file still holds
+  conflict markers — without this gate a conflict in a NON-entry file (a
+  job script like `fetch.sh`) would sail through, because the only other
+  resolution signal is "does index.jsx compile", which stays true. So no
+  caller (watcher or install) can commit a marker-bearing tree as source.
+
+  If a merge is in progress and FULLY resolved (no unmerged entries, no
+  markers), the `git commit` here finalizes it as a 2-parent merge commit,
+  so the upstream tip becomes an ancestor of `main` and the merge base
+  advances for free.
   """
   repo = Path(source_dir)
   ensure_repo(repo)
+  # Stage BEFORE the gate so `has_unresolved_conflicts` reads git's resolved
+  # state: staging marks unmerged paths resolved in the index (clearing
+  # `ls-files -u`) whether or not their content is clean, so the gate then
+  # rests on the marker scan, which fires only when markers actually remain.
+  # If we gated before staging, a conflict the agent resolved on disk but
+  # never `git add`ed would still show as an unmerged index entry and we'd
+  # wrongly refuse to finalize a clean resolution.
   _run(repo, "add", *_tracked_source(repo))
+  if (repo / ".git" / "MERGE_HEAD").exists() and has_unresolved_conflicts(repo):
+    return None
   status = _run(repo, "status", "--porcelain").stdout.strip()
   if not status:
     return None

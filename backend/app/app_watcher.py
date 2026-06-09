@@ -220,6 +220,21 @@ class _JsxHandler(FileSystemEventHandler):
             return
           if skip_unchanged_entry and app.jsx_source == jsx_source:
             return
+          # Hold the PRIOR version entirely while a conflicting update is
+          # unresolved. `index.jsx` may well compile (the conflict can be in
+          # a NON-entry file like a job script), so without this gate the
+          # bundle would swap to "updated" while `commit_local` is forced to
+          # commit a tree still full of `<<<<<<<` markers — the invariant is
+          # that an update finalizes (recompile/swap AND commit) only when no
+          # tracked file has unresolved conflicts. commit_local refuses the
+          # commit on its own; bailing here also blocks the bundle swap.
+          if (
+            app_git.is_repo(source_dir)
+            and await asyncio.to_thread(
+              app_git.has_unresolved_conflicts, source_dir,
+            )
+          ):
+            return
           try:
             await recompile_app_bundle(db, app, jsx_source)
             if app_git.is_repo(source_dir):
