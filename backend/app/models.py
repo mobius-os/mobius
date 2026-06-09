@@ -89,15 +89,8 @@ class Chat(Base):
   # file-loaded defaults; written by `PATCH /api/chats/{id}` from the
   # `/` slash picker (see `frontend/.../SlashPicker.jsx`).
   agent_settings_json = Column(JSON, nullable=True, default=None)
-  # Named agent attached to this chat (providers.BUILT_IN_AGENTS over
-  # /data/shared/agents.json). NULL = no agent selected → today's
-  # behavior exactly: the deployed skill + the picker-chosen
-  # model/effort. When set, the runner maps the agent to
-  # system_prompt + model + effort, overriding the defaults. PATCH
-  # /api/chats/{id} accepts `agent_id` and validates it against
-  # providers.effective_agents (409 on unknown, like the provider
-  # check). Nullable + default None so existing rows and new chats
-  # stay on the byte-identical default path without a backfill.
+  # Vestigial: the named-agent feature was removed; column retained
+  # nullable to avoid a prod migration. Nothing reads or writes it.
   agent_id = Column(String(64), nullable=True, default=None)
   # Drawer pinning: NOT NULL = pinned, NULL = unpinned. Sort key for
   # the chats list — pinned rows render first, ordered by this

@@ -236,15 +236,6 @@ class ChatPatch(BaseModel):
   agent_settings_json: AgentSettingsOverride | None = None
   clear_agent_settings: bool = False
   provider: str | None = None
-  # Named agent to attach to this chat. Omitted → leave unchanged.
-  # null or empty string → clear the agent (back to the default path).
-  # A non-empty value is validated against the effective registry in
-  # the handler (409 on unknown), not here — the registry is
-  # per-instance (/data/shared/agents.json over the built-ins), so a
-  # Pydantic field validator can't see it. The handler reads
-  # `model_fields_set` to tell "omitted" from "explicitly cleared",
-  # the same way `agent_settings_json` uses `exclude_unset`.
-  agent_id: str | None = None
   # Drawer rename uses this. Empty string is rejected so a misfired
   # blur on an empty input can't blank the title in the sidebar.
   # 500-char cap defends against runaway-agent megabyte payloads
@@ -361,32 +352,6 @@ class ModelRegistryResponse(BaseModel):
 
   # Map provider id → ordered list of models.
   providers: dict[str, list[ModelEntry]]
-
-
-class AgentOut(BaseModel):
-  """One named agent in the `GET /api/agents` response.
-
-  Mirrors the dict shape produced by `providers.effective_agents`.
-  `system_prompt` is intentionally omitted from this DTO — the picker
-  only needs identity + provider/model/effort + display fields, and
-  the (potentially long) prompt text would bloat every list response.
-  The runner reads the prompt server-side via `providers.resolve_agent`.
-  """
-
-  id: str
-  label: str
-  provider: str
-  model: str | None = None
-  effort: str | None = None
-  skill_ref: str | None = None
-  icon: str | None = None
-
-
-class AgentRegistryResponse(BaseModel):
-  """`GET /api/agents` response shape."""
-
-  agents: list[AgentOut]
-  default_id: str
 
 
 class ModelPrefsUpdate(BaseModel):
