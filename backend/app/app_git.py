@@ -343,11 +343,14 @@ def has_unresolved_conflicts(source_dir: str | Path) -> bool:
     the instant the agent `git add`s a file — even one that still carries
     `<<<<<<<` markers (adding marks the path "resolved" in the index
     regardless of content).
-  - `git diff --check` reports "leftover conflict marker" lines, so it
-    still fires on a marker-bearing file the agent has already staged. We
-    use git's own marker detection (not a naive grep for `=======`, which
-    would false-positive on a legitimate setext heading or separator) and
-    diff against HEAD so both staged and unstaged markers are seen.
+  - A `git grep` for the LABELED boundary markers (`<<<<<<< <ref>` and
+    `>>>>>>> <ref>`) still fires on a marker-bearing file the agent has
+    already staged. We match only those two boundaries — NOT `git diff
+    --check`, which flags any 7-char marker line including a bare `=======`.
+    A legitimate `=======` separator (a heredoc divider, a setext rule) in
+    resolved app content would otherwise read as an unresolved conflict
+    forever and deadlock the update. The labeled boundaries that a real `git
+    merge` always writes essentially never start a line of real source.
 
   Only meaningful while a merge is in progress: outside a merge there is
   nothing to finalize, so the caller is expected to check MERGE_HEAD first
@@ -359,11 +362,13 @@ def has_unresolved_conflicts(source_dir: str | Path) -> bool:
   unmerged = _run(repo, "ls-files", "-u").stdout.strip()
   if unmerged:
     return True
-  # `diff --check` exits 2 when it finds leftover conflict markers, 1 on
-  # whitespace errors, 0 when clean. Only the marker case (the precise
-  # "leftover conflict marker" line) means an unresolved conflict here.
-  check = _run(repo, "diff", "HEAD", "--check", check=False)
-  return "leftover conflict marker" in check.stdout
+  # Scan tracked content for the labeled conflict boundaries. `git grep`
+  # exits 0 when a line matches, 1 when none do. We match only `<<<<<<< ` and
+  # `>>>>>>> ` (7 chars + the space before the ref that `git merge` writes),
+  # never the bare `=======` separator that `git diff --check` would flag on
+  # legitimate content — see the docstring.
+  markers = _run(repo, "grep", "-lE", r"^(<<<<<<< |>>>>>>> )", check=False)
+  return markers.returncode == 0
 
 
 def commit_local(source_dir: str | Path, msg: str) -> str | None:
