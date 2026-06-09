@@ -1,7 +1,7 @@
 {
   "id": "mind",
   "name": "Mind",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "What M\u00f6bius knows about you \u2014 an Obsidian-style graph of the agent's memory. Nodes are the notes and maps-of-content it grows and links as you use it; tap any node to read the markdown behind it. The graph fills in over time as M\u00f6bius learns.",
   "author": "mobius-os",
   "license": "MIT",
