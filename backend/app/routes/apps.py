@@ -986,6 +986,25 @@ async def update_icon(
   return Response(status_code=204)
 
 
+@router.get("/{app_id}/icon")
+def get_icon(app_id: int, db: Session = Depends(get_db)):
+  """Public read of an app's icon PNG, so a mini-app can render its own logo
+  with a plain `<img src="/api/apps/<id>/icon">` (e.g. as its file-drawer
+  toggle, mirroring the shell's logo). Public + by-id on purpose: the embedded
+  mini-app has its numeric `appId` but not its slug, and the slug-based
+  standalone icon route (`/apps/<slug>/icon-<N>.png`) is already public — an app
+  icon is not a secret. Returns 404 when the app uses the auto-generated letter
+  icon (no stored PNG) so the caller can fall back to its own glyph."""
+  app = live_app(db, app_id, populate=True)
+  if app is None or not app.icon_png:
+    raise HTTPException(404, "No icon set.")
+  return Response(
+    content=app.icon_png,
+    media_type="image/png",
+    headers={"Cache-Control": "no-cache"},
+  )
+
+
 @router.delete(
   "/{app_id}",
   status_code=204,
