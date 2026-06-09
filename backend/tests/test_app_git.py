@@ -7,6 +7,8 @@ merge must hand back the merged bytes and a conflict must name the file
 WITHOUT touching the working tree.
 """
 
+import os
+import stat
 import subprocess
 from pathlib import Path
 
@@ -227,6 +229,98 @@ def test_merge_clean_carries_local_job_edit_forward(tmp_path):
   merged_job = result.merged_job.decode()
   assert "step ONE LOCAL" in merged_job       # local edit carried forward
   assert "step FIVE UPSTREAM" in merged_job   # upstream change applied
+
+
+def _job_mode(repo: Path, ref: str, name: str) -> str:
+  """The recorded file mode (e.g. `100755`) of `name` on `ref`, or '' when
+  the file is absent in that tree. Used to assert upstream and main agree
+  on the executable bit so the merge never sees a spurious mode skew."""
+  out = subprocess.run(
+    ["git", "-C", str(repo), "ls-tree", ref, name],
+    env=app_git._git_env(repo), capture_output=True, text=True, check=True,
+  ).stdout
+  return out.split()[0] if out.strip() else ""
+
+
+def test_merge_clean_when_only_the_job_exec_bit_differs(tmp_path):
+  """An exec-bit-only difference on a job script must merge CLEAN, not conflict.
+
+  Regression for the 2026-06-08 incident (News, LaTeX, Notes, Web Studio all
+  fired spurious "merge conflict" chats at once). The install path writes job
+  scripts EXECUTABLE on disk (cron runs the bare path, which needs +x), so
+  `commit_local` records them at 100755 on `main`. When an app's earliest
+  install predated job-script tracking, the merge base has no job script, so the
+  v2 update is an ADD/ADD of `fetch.sh`: 100755 on `main` vs whatever
+  `record_upstream` stages on `upstream`. With IDENTICAL bytes the only delta is
+  the mode — git reports CONFLICT (add/add) when the modes disagree. The fix
+  records the job at the same 100755 the local side uses, so the modes match and
+  the merge is clean.
+  """
+  repo = tmp_path / "app"
+  base_jsx = b"export default () => null\n"
+  job = b"#!/bin/bash\necho hi\n"
+  app_git.ensure_repo(repo)
+  # v1 install predates job-script tracking — no job recorded on upstream, so
+  # the merge base carries no fetch.sh.
+  app_git.record_upstream(repo, base_jsx, "https://x/mobius.json", "1.0.0")
+  app_git.align_local_to_upstream(repo)
+  # The agent's job script lands on disk EXECUTABLE (the install chmod 0o755),
+  # and commit_local records it at 100755 on main.
+  (repo / "fetch.sh").write_bytes(job)
+  os.chmod(repo / "fetch.sh", 0o755)
+  app_git.commit_local(repo, "agent adds executable job")
+  # v2 update now tracks the job with IDENTICAL bytes. The only possible delta
+  # against main is the recorded mode.
+  app_git.record_upstream(
+    repo, base_jsx, "https://x/mobius.json", "2.0.0",
+    job_name="fetch.sh", job_bytes=job,
+  )
+
+  # Both branches must record the job EXECUTABLE so no mode skew exists.
+  assert _job_mode(repo, app_git.LOCAL_BRANCH, "fetch.sh") == "100755"
+  assert _job_mode(repo, app_git.UPSTREAM_BRANCH, "fetch.sh") == "100755"
+
+  result = app_git.merge_upstream(repo, job_name="fetch.sh")
+  assert result.status == "clean"
+  assert not result.conflict_paths
+
+
+def test_record_upstream_keeps_index_jsx_non_executable(tmp_path):
+  """Only job scripts gain the exec bit on upstream — index.jsx stays 100644.
+
+  The skew fix targets job scripts (cron runs them by path), not the JSX
+  entry, which is read by the compiler and never executed. Recording it
+  executable would create the inverse skew against main's 100644.
+  """
+  repo = tmp_path / "app"
+  app_git.ensure_repo(repo)
+  app_git.record_upstream(
+    repo, b"export default () => null\n", "https://x/mobius.json", "1.0.0",
+    job_name="fetch.sh", job_bytes=b"#!/bin/bash\necho hi\n",
+  )
+
+  assert _job_mode(repo, app_git.UPSTREAM_BRANCH, "index.jsx") == "100644"
+  assert _job_mode(repo, app_git.UPSTREAM_BRANCH, "fetch.sh") == "100755"
+
+
+def test_recorded_job_checks_out_executable(tmp_path):
+  """A job recorded on upstream lands EXECUTABLE on disk after a checkout.
+
+  cron runs the bare job path (`init-cron-scaffold.sh` puts `<path> [id]` in the
+  crontab), so the script MUST keep its +x through an install/update. Because
+  record_upstream stamps the job 100755, the align-to-upstream checkout restores
+  it executable on its own — the executability rides in git, not only in the
+  install path's explicit chmod.
+  """
+  repo = tmp_path / "app"
+  app_git.ensure_repo(repo)
+  app_git.record_upstream(
+    repo, b"export default () => null\n", "https://x/mobius.json", "1.0.0",
+    job_name="fetch.sh", job_bytes=b"#!/bin/bash\necho hi\n",
+  )
+  app_git.align_local_to_upstream(repo)
+
+  assert (repo / "fetch.sh").stat().st_mode & stat.S_IXUSR
 
 
 def test_merge_clean_without_job_name_leaves_merged_job_none(tmp_path):
