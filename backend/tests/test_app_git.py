@@ -453,6 +453,128 @@ def test_resolved_conflict_commit_advances_base(tmp_path):
   assert app_git.merge_upstream(repo).status == "clean"
 
 
+def _stage_non_entry_conflict(repo: Path) -> str:
+  """Install + diverge so a NON-entry file (fetch.sh) conflicts.
+
+  `index.jsx` is identical on both sides, so it compiles fine; only the
+  job script `fetch.sh` carries the conflict. Returns the resolved-clean
+  `fetch.sh` body the agent would save to finish the merge. Leaves the
+  repo with a real in-progress merge (MERGE_HEAD + markers in fetch.sh).
+  """
+  base_jsx = b"export default () => null\n"
+  base_job = b"#!/bin/bash\nshared step\n"
+  app_git.ensure_repo(repo)
+  app_git.record_upstream(
+    repo, base_jsx, "https://x/mobius.json", "1.0.0",
+    job_name="fetch.sh", job_bytes=base_job,
+  )
+  app_git.align_local_to_upstream(repo)
+  # Agent edits the job (and only the job) locally on main.
+  (repo / "fetch.sh").write_text("#!/bin/bash\nLOCAL step\n")
+  app_git.commit_local(repo, "local job edit")
+  # Upstream v2 edits the SAME line of the job — index.jsx is unchanged.
+  app_git.record_upstream(
+    repo, base_jsx, "https://x/mobius.json", "2.0.0",
+    job_name="fetch.sh", job_bytes=b"#!/bin/bash\nUPSTREAM step\n",
+  )
+  assert app_git.merge_upstream(repo, job_name="fetch.sh").status == "conflict"
+  app_git.start_conflict_merge(repo)
+  return "#!/bin/bash\nRESOLVED step\n"
+
+
+def test_has_unresolved_conflicts_true_for_unstaged_and_staged_markers(tmp_path):
+  """has_unresolved_conflicts catches a marker-bearing non-entry file both
+  before AND after the agent stages it. `ls-files -u` reports the unmerged
+  index entry; once the agent `git add`s the still-marker-bearing file that
+  clears, but `git diff --check` still flags the leftover markers — so both
+  signals are needed and the helper must fire in both states."""
+  repo = tmp_path / "app"
+  _stage_non_entry_conflict(repo)
+  # Unstaged: unmerged index entry present.
+  assert app_git.has_unresolved_conflicts(repo) is True
+  # Agent stages the still-conflicted file (clears ls-files -u, markers remain).
+  app_git._run(repo, "add", "fetch.sh")
+  assert "<<<<<<<" in (repo / "fetch.sh").read_text()
+  assert app_git.has_unresolved_conflicts(repo) is True
+
+
+def test_has_unresolved_conflicts_false_when_resolved_clean(tmp_path):
+  """Once the agent writes the file marker-free and stages it, the merge has
+  no unresolved conflicts even though MERGE_HEAD is still set."""
+  repo = tmp_path / "app"
+  resolved = _stage_non_entry_conflict(repo)
+  (repo / "fetch.sh").write_text(resolved)
+  app_git._run(repo, "add", "fetch.sh")
+  assert (repo / ".git" / "MERGE_HEAD").exists()
+  assert app_git.has_unresolved_conflicts(repo) is False
+
+
+def test_has_unresolved_conflicts_false_without_merge(tmp_path):
+  """No merge in progress → no unresolved conflicts, even when a tracked
+  markdown/code file legitimately contains a bare `=======` separator (which
+  a naive grep would false-positive on). `git diff --check` only runs under a
+  live merge, and ls-files -u is empty, so the helper stays False."""
+  repo = tmp_path / "app"
+  app_git.ensure_repo(repo)
+  _write(repo, "export default () => null\n")
+  (repo / "NOTES.md").write_text("# Heading\n=======\nbody\n")
+  app_git.commit_local(repo, "docs with a separator line")
+  assert not (repo / ".git" / "MERGE_HEAD").exists()
+  assert app_git.has_unresolved_conflicts(repo) is False
+
+
+def test_commit_local_refuses_to_finalize_non_entry_marker_conflict(tmp_path):
+  """The invariant: an update must NEVER finalize while ANY tracked file has
+  unresolved conflict markers. A conflict in a NON-entry file (fetch.sh) does
+  not break index.jsx's compile, so the watcher would happily call
+  commit_local — which must REFUSE, leaving the prior version entirely intact
+  (HEAD unmoved, markers never committed, no MERGE_HEAD finalization)."""
+  repo = tmp_path / "app"
+  _stage_non_entry_conflict(repo)
+  head_before = app_git.head_sha(repo, app_git.LOCAL_BRANCH)
+  # Agent (or watcher) stages the marker-bearing file and tries to commit.
+  app_git._run(repo, "add", "fetch.sh")
+
+  result = app_git.commit_local(repo, "agent edit")
+
+  # No commit: the gate refused.
+  assert result is None
+  # The prior committed version is unchanged — base did not advance.
+  assert app_git.head_sha(repo, app_git.LOCAL_BRANCH) == head_before
+  # The merge is still in progress for the agent to finish resolving.
+  assert (repo / ".git" / "MERGE_HEAD").exists()
+  # The committed fetch.sh still holds the PRIOR local content, never the
+  # marker-bearing tree.
+  committed = app_git._run(
+    repo, "show", f"{app_git.LOCAL_BRANCH}:fetch.sh",
+  ).stdout
+  assert "<<<<<<<" not in committed
+  assert "LOCAL step" in committed
+
+
+def test_commit_local_finalizes_once_markers_resolved(tmp_path):
+  """Once ALL markers are resolved (agent writes the file clean + it's
+  staged), commit_local DOES finalize the 2-parent merge: HEAD advances,
+  MERGE_HEAD clears, and the clean bytes are committed."""
+  repo = tmp_path / "app"
+  resolved = _stage_non_entry_conflict(repo)
+  head_before = app_git.head_sha(repo, app_git.LOCAL_BRANCH)
+  (repo / "fetch.sh").write_text(resolved)
+
+  sha = app_git.commit_local(repo, "resolved merge")
+
+  assert sha is not None
+  assert sha != head_before
+  assert not (repo / ".git" / "MERGE_HEAD").exists()
+  # The finalize is a true 2-parent merge (upstream became an ancestor).
+  assert app_git.merge_upstream(repo, job_name="fetch.sh").status == "clean"
+  committed = app_git._run(
+    repo, "show", f"{app_git.LOCAL_BRANCH}:fetch.sh",
+  ).stdout
+  assert "RESOLVED step" in committed
+  assert "<<<<<<<" not in committed
+
+
 def test_commit_local_is_noop_when_unchanged(tmp_path):
   """commit_local returns None and adds no commit when the tree already
   matches main's tip."""

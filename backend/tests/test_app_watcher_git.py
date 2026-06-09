@@ -62,3 +62,80 @@ async def test_watcher_commits_successful_recompile_and_noops_unchanged(
   await _JsxHandler(asyncio.get_running_loop())._recompile(str(jsx_path))
   assert app_git.head_sha(src, app_git.LOCAL_BRANCH) == after
   assert _commit_count(src) == before_count + 1
+
+
+@pytest.mark.asyncio
+async def test_watcher_holds_prior_bundle_while_non_entry_conflict_unresolved(
+  client, owner_token,
+):
+  """The invariant on the watcher side: when a merge is in progress with an
+  unresolved conflict in a NON-entry file (fetch.sh), a save that touches the
+  compilable index.jsx must NOT swap the bundle or commit. index.jsx compiles
+  fine, so the only thing keeping the broken job-script tree from being
+  finalized is this gate — without it, the app shows updated AND fetch.sh gets
+  committed full of `<<<<<<<` markers (the 2026-06-08 News incident)."""
+  import asyncio
+  import app.models as models
+  from app.app_watcher import _JsxHandler
+  from app.database import SessionLocal
+
+  data_dir = Path(get_settings().data_dir)
+  src = data_dir / "apps" / "watch-conflict"
+  src.mkdir(parents=True, exist_ok=True)
+  base_jsx = "export default function App(){ return <div>V0</div> }"
+  base_job = "#!/bin/bash\nshared step\n"
+  app_id = client.post("/api/apps/", json={
+    "name": "watchconflict",
+    "description": "x",
+    "jsx_source": base_jsx,
+    "source_dir": str(src),
+  }, headers={"Authorization": f"Bearer {owner_token}"}).json()["id"]
+
+  # Install v1 with a job script, diverge the job locally, then upstream v2
+  # edits the SAME job line → a NON-entry conflict (index.jsx is unchanged).
+  app_git.ensure_repo(src)
+  app_git.record_upstream(
+    src, base_jsx.encode(), "https://x/mobius.json", "1.0.0",
+    job_name="fetch.sh", job_bytes=base_job.encode(),
+  )
+  app_git.align_local_to_upstream(src)
+  (src / "fetch.sh").write_text("#!/bin/bash\nLOCAL step\n")
+  app_git.commit_local(src, "local job edit")
+  app_git.record_upstream(
+    src, base_jsx.encode(), "https://x/mobius.json", "2.0.0",
+    job_name="fetch.sh", job_bytes=b"#!/bin/bash\nUPSTREAM step\n",
+  )
+  assert app_git.merge_upstream(src, job_name="fetch.sh").status == "conflict"
+  app_git.start_conflict_merge(src)
+  assert (src / ".git" / "MERGE_HEAD").exists()
+
+  head_before = app_git.head_sha(src, app_git.LOCAL_BRANCH)
+  count_before = _commit_count(src)
+  db = SessionLocal()
+  try:
+    bundle_before = (
+      db.query(models.App).filter(models.App.id == app_id).first().compiled_path
+    )
+  finally:
+    db.close()
+
+  # The agent saves a NEW (compilable) index.jsx while the fetch.sh conflict is
+  # still unresolved — the watcher fires.
+  jsx_path = src / "index.jsx"
+  jsx_path.write_text(
+    "export default function App(){ return <div>V1</div> }", encoding="utf-8",
+  )
+  await _JsxHandler(asyncio.get_running_loop())._recompile(str(jsx_path))
+
+  # No commit, no base advance — the prior version is held entirely.
+  assert app_git.head_sha(src, app_git.LOCAL_BRANCH) == head_before
+  assert _commit_count(src) == count_before
+  assert (src / ".git" / "MERGE_HEAD").exists()
+  db = SessionLocal()
+  try:
+    row = db.query(models.App).filter(models.App.id == app_id).first()
+    # Bundle not swapped: still serving the prior compiled output + source.
+    assert row.compiled_path == bundle_before
+    assert row.jsx_source == base_jsx
+  finally:
+    db.close()
