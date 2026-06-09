@@ -187,16 +187,19 @@ export default function App({ appId, token }) {
   const [sortDir, setSortDir] = useState('desc');
   const [showHealth, setShowHealth] = useState(false);
   const [localDepth, setLocalDepth] = useState(1);
-  const [mobileGraphHeight, setMobileGraphHeight] = useState(null);
+  // Node-detail tab: 'text' shows the note, 'graph' shows the local graph.
+  // Defaults to 'text' — the user arrives here from the global graph, so they
+  // already have spatial context; the note body is what they came to read.
+  // Only the active tab's pane mounts, so the Pixi local-graph renderer is
+  // never resized (the old draggable split rebuilt it on every drag tick and
+  // crashed). See the graph/text tab panes below.
+  const [detailTab, setDetailTab] = useState('text');
   const [graphRuntime, setGraphRuntime] = useState(undefined); // undefined loading | null failed | { d3, PIXI }
   const [marked, setMarked] = useState(null);
   const [purify, setPurify] = useState(null); // DOMPurify — audited HTML sanitizer
   const panelNavRef = useRef(null);
 
   const wrapRef = useRef(null);
-  const splitRef = useRef(null);
-  const splitDragRef = useRef(null);
-  const localPaneRef = useRef(null);
   const localWrapRef = useRef(null);
   const [dims, setDims] = useState({ w: 0, h: 0 });
   const [localDims, setLocalDims] = useState({ w: 0, h: 0 });
@@ -267,16 +270,20 @@ export default function App({ appId, token }) {
     return () => ro.disconnect();
   }, [view, status]);
 
+  // The local-graph host only exists in the DOM while the graph tab is active,
+  // so re-run the measurement when the tab flips — not just when the node
+  // changes. Without the detailTab dep the observer would attach to a stale
+  // (or absent) element and the graph would never get non-zero dimensions.
   useEffect(() => {
     const el = localWrapRef.current;
-    if (!el || !selected) return;
+    if (!el || !selected || detailTab !== 'graph') return;
     const ro = new ResizeObserver((entries) => {
       const r = entries[0].contentRect;
       setLocalDims({ w: Math.round(r.width), h: Math.round(r.height) });
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, [selected]);
+  }, [selected, detailTab]);
 
   // --- Build a color map: stable moc-slug -> palette color. ---
   const mocColors = useMemo(() => {
@@ -425,33 +432,9 @@ export default function App({ appId, token }) {
     }
     setSelected(node);
     setHoverId(opts.hoverId ?? null);
+    setDetailTab('text'); // every node opens on its note, not the graph
     if (opts.resetLocalDepth) setLocalDepth(1);
   }, [selected]);
-
-  const startMobileSplitDrag = useCallback((e) => {
-    const split = splitRef.current;
-    const localPane = localPaneRef.current;
-    if (!split || !localPane) return;
-    e.preventDefault();
-    e.currentTarget.setPointerCapture?.(e.pointerId);
-    splitDragRef.current = {
-      startY: e.clientY,
-      startH: localPane.getBoundingClientRect().height,
-      maxH: Math.max(150, split.getBoundingClientRect().height - 150),
-    };
-  }, []);
-
-  const moveMobileSplitDrag = useCallback((e) => {
-    const drag = splitDragRef.current;
-    if (!drag) return;
-    const next = clamp(drag.startH + e.clientY - drag.startY, 150, drag.maxH);
-    setMobileGraphHeight(next);
-  }, []);
-
-  const endMobileSplitDrag = useCallback((e) => {
-    splitDragRef.current = null;
-    e.currentTarget.releasePointerCapture?.(e.pointerId);
-  }, []);
 
   const discuss = useCallback((node) => {
     const title = node.title || node.id;
@@ -742,16 +725,67 @@ export default function App({ appId, token }) {
               </div>
             )}
 
-            <div
-              ref={splitRef}
-              style={{
-                ...S.panelSplit,
-                ...(mobileGraphHeight ? { '--mg-mobile-graph-h': `${mobileGraphHeight}px` } : {}),
-              }}
-              className="mg-panel-split"
-            >
-              <section style={S.notePane} className="mg-note-pane">
-                <div style={S.paneHead}>Note</div>
+            {/* Tab toggle replaces the old resizable note/graph split. Only the
+                active tab's pane mounts: keeping the local graph unmounted while
+                reading text means the Pixi renderer is never resized, which was
+                the entire crash class the draggable divider produced. */}
+            <div style={S.detailBar}>
+              <div style={S.detailContext}>
+                {detailTab === 'graph' ? (
+                  <>
+                    <span style={S.paneHead}>Local graph</span>
+                    <span style={S.localCount}>
+                      {localGraphData.nodes.length} nodes · {localGraphData.links.length} links
+                    </span>
+                  </>
+                ) : (
+                  <span style={S.paneHead}>Note</span>
+                )}
+              </div>
+
+              {detailTab === 'graph' && (
+                <div style={S.depthToggle} aria-label="Local graph depth">
+                  {[1, 2, 3, 4].map((d) => (
+                    <button
+                      key={d}
+                      style={{ ...S.depthBtn, ...(localDepth === d ? S.depthBtnActive : {}) }}
+                      onClick={() => setLocalDepth(d)}
+                      title={`${d} hop${d === 1 ? '' : 's'}`}
+                    >
+                      {d}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <div style={S.tabToggle} role="tablist" aria-label="Note or local graph">
+                <button
+                  className="mg-tab"
+                  style={{ ...S.tabBtn, ...(detailTab === 'text' ? S.tabBtnActive : {}) }}
+                  onClick={() => setDetailTab('text')}
+                  role="tab"
+                  aria-selected={detailTab === 'text'}
+                  aria-label="Show note text"
+                  title="Note text"
+                >
+                  <TextGlyph />
+                </button>
+                <button
+                  className="mg-tab"
+                  style={{ ...S.tabBtn, ...(detailTab === 'graph' ? S.tabBtnActive : {}) }}
+                  onClick={() => setDetailTab('graph')}
+                  role="tab"
+                  aria-selected={detailTab === 'graph'}
+                  aria-label="Show local graph"
+                  title="Local graph"
+                >
+                  <NetworkGlyph />
+                </button>
+              </div>
+            </div>
+
+            <div style={S.detailBody}>
+              {detailTab === 'text' ? (
                 <div style={S.panelBody} className="mg-md mg-scroll" onClick={onNoteClick}>
                   {noteState.status === 'loading' && (
                     <div style={S.notePlaceholder}>
@@ -769,43 +803,7 @@ export default function App({ appId, token }) {
                       : <pre style={S.pre}>{noteState.md}</pre>
                   )}
                 </div>
-              </section>
-
-              <div
-                style={S.mobileSplitHandle}
-                className="mg-mobile-split-handle"
-                role="separator"
-                aria-orientation="horizontal"
-                title="Resize note and local graph"
-                onPointerDown={startMobileSplitDrag}
-                onPointerMove={moveMobileSplitDrag}
-                onPointerUp={endMobileSplitDrag}
-                onPointerCancel={endMobileSplitDrag}
-              >
-                <span style={S.mobileSplitGrip} />
-              </div>
-
-              <section ref={localPaneRef} style={S.localPane} className="mg-local-pane">
-                <div style={S.localHead} className="mg-local-head">
-                  <div>
-                    <div style={S.paneHead}>Local graph</div>
-                    <div style={S.localCount}>
-                      {localGraphData.nodes.length} nodes · {localGraphData.links.length} links
-                    </div>
-                  </div>
-                  <div style={S.depthToggle} aria-label="Local graph depth">
-                    {[1, 2, 3, 4].map((d) => (
-                      <button
-                        key={d}
-                        style={{ ...S.depthBtn, ...(localDepth === d ? S.depthBtnActive : {}) }}
-                        onClick={() => setLocalDepth(d)}
-                        title={`${d} hop${d === 1 ? '' : 's'}`}
-                      >
-                        {d}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+              ) : (
                 <div ref={localWrapRef} style={S.localGraphWrap} className="mg-local-graph">
                   {graphRuntime && localDims.w > 0 && localDims.h > 0 && localGraphData.nodes.length > 0 ? (
                     <MindGraphRenderer
@@ -827,7 +825,7 @@ export default function App({ appId, token }) {
                     </div>
                   )}
                 </div>
-              </section>
+              )}
             </div>
 
             <div style={S.panelFoot}>
@@ -955,6 +953,9 @@ async function createMindGraphScene({
     backgroundAlpha: 0,
     autoDensity: true,
     resolution: window.devicePixelRatio || 1,
+    // Drive rendering ourselves (below) so each app.render() is wrapped in a
+    // guard — a single bad batcher frame can never take down the whole app.
+    autoStart: false,
   });
   if (isDisposed()) {
     try { app.destroy(true); } catch {}
@@ -1131,8 +1132,12 @@ async function createMindGraphScene({
 
       const rank = labelRanks.get(node.id) ?? 9999;
       const showLabel = shouldShowScreenLabel(node, scale, rank, { mode, hoverId: hover, selectedId: selected });
-      label.visible = showLabel;
-      if (!showLabel) continue;
+      // Hide via alpha rather than .visible — toggling visibility on a label
+      // mid-frame has tripped the Pixi v8 batcher; alpha=0 is the safe mute.
+      if (!showLabel) {
+        label.alpha = 0;
+        continue;
+      }
 
       const strong = isHub || isHover || isSelected || node.localDepth === 0;
       label.alpha = strong ? 1 : 0.7 + 0.25 * f;
@@ -1234,9 +1239,26 @@ async function createMindGraphScene({
   canvas.addEventListener('pointerleave', onPointerLeave);
   canvas.addEventListener('click', onCanvasClick);
 
-  app.ticker.add(draw);
+  // Self-driven render loop. app.render() is in a try/catch so a single bad
+  // Pixi batcher frame is skipped (logged once) instead of throwing out of the
+  // ticker and tearing down the whole app.
+  let rafId = 0;
+  let renderErrorLogged = false;
+  const frame = () => {
+    if (isDisposed()) return;
+    draw();
+    try {
+      app.render();
+    } catch (err) {
+      if (!renderErrorLogged) {
+        renderErrorLogged = true;
+        console.warn('[Mind] Skipped a bad render frame', err);
+      }
+    }
+    rafId = requestAnimationFrame(frame);
+  };
   simulation.alpha(mode === 'local' ? 0.22 : 0.34).restart();
-  draw();
+  rafId = requestAnimationFrame(frame);
 
   return () => {
     canvas.removeEventListener('pointermove', onPointerMove);
@@ -1244,7 +1266,7 @@ async function createMindGraphScene({
     canvas.removeEventListener('click', onCanvasClick);
     try { selection.on('.zoom', null).on('.drag', null); } catch {}
     simulation.stop();
-    app.ticker.remove(draw);
+    if (rafId) cancelAnimationFrame(rafId);
     try { app.destroy(true); } catch {}
   };
 }
@@ -1425,6 +1447,30 @@ function ChatGlyph() {
     <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true" style={{ marginRight: 7 }}>
       <path d="M2.5 4.5a1.5 1.5 0 0 1 1.5-1.5h8a1.5 1.5 0 0 1 1.5 1.5v5A1.5 1.5 0 0 1 12 11H6l-3 2.5V11H4a1.5 1.5 0 0 1-1.5-1.5v-5Z"
         stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+// Document glyph for the "note text" tab — a page with a few ruled lines.
+function TextGlyph() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M4 2.5h5l3 3V13a0.5 0.5 0 0 1-0.5 0.5h-7A0.5 0.5 0 0 1 4 13V3a0.5 0.5 0 0 1 0.5-0.5Z"
+        stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+      <path d="M9 2.5V5.5h3" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+      <path d="M6 8h4M6 10.5h4" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+// Network glyph for the "local graph" tab — three linked nodes.
+function NetworkGlyph() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M5.4 5.4 10.3 4M4.8 6.6 7 10.6" stroke="currentColor" strokeWidth="1.1" />
+      <circle cx="4" cy="5" r="2.1" fill="currentColor" />
+      <circle cx="12" cy="3.6" r="2" fill="currentColor" />
+      <circle cx="8" cy="12" r="2.1" fill="currentColor" />
     </svg>
   );
 }
@@ -1722,25 +1768,24 @@ const S = {
     fontSize: 11.5, color: 'var(--accent)', background: 'var(--accent-dim, rgba(167,139,250,0.12))',
     borderRadius: 999, padding: '2px 9px', fontWeight: 500,
   },
-  panelSplit: {
-    flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(260px, 0.9fr)',
-    gap: 0, borderTop: '1px solid var(--border)',
+  // Thin tab strip: context label (left) + depth control (graph tab only) +
+  // the icon toggle (right). Minimal chrome — one row, no full-width tab bar.
+  detailBar: {
+    display: 'flex', alignItems: 'center', gap: 10, padding: '9px 12px 8px',
+    borderTop: '1px solid var(--border)', borderBottom: '1px solid var(--border)',
+    flexShrink: 0,
   },
-  notePane: {
-    display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0,
-    borderRight: '1px solid var(--border)',
+  detailContext: {
+    display: 'flex', alignItems: 'baseline', gap: 8, flex: 1, minWidth: 0,
+    overflow: 'hidden',
   },
-  localPane: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0 },
   paneHead: {
     fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0,
-    color: 'var(--muted)',
-  },
-  localHead: {
-    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-    gap: 10, padding: '9px 12px 8px', borderBottom: '1px solid var(--border)',
+    color: 'var(--muted)', whiteSpace: 'nowrap',
   },
   localCount: {
-    fontSize: 11, color: 'var(--muted)', marginTop: 3, fontVariantNumeric: 'tabular-nums',
+    fontSize: 11, color: 'var(--muted)', fontVariantNumeric: 'tabular-nums',
+    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
   },
   depthToggle: {
     display: 'flex', alignItems: 'center', gap: 3, padding: 3, borderRadius: 8,
@@ -1754,23 +1799,26 @@ const S = {
   depthBtnActive: {
     background: 'var(--bg)', color: 'var(--text)', boxShadow: '0 1px 3px rgba(0,0,0,0.16)',
   },
-  localGraphWrap: { flex: 1, minHeight: 180, position: 'relative', overflow: 'hidden' },
+  tabToggle: {
+    display: 'flex', gap: 2, padding: 3, borderRadius: 8,
+    background: 'var(--surface2)', border: '1px solid var(--border)', flexShrink: 0,
+  },
+  tabBtn: {
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    width: 32, height: 26, border: 'none', borderRadius: 6, background: 'transparent',
+    color: 'var(--muted)', cursor: 'pointer', fontFamily: 'var(--font)',
+    transition: 'color 0.15s, background 0.15s',
+  },
+  tabBtnActive: {
+    background: 'var(--bg)', color: 'var(--text)', boxShadow: '0 1px 3px rgba(0,0,0,0.16)',
+  },
+  // The active tab's pane fills all remaining panel height. The local graph
+  // mounts absolutely-positioned inside it so Pixi always gets the full box.
+  detailBody: { flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column' },
+  localGraphWrap: { position: 'absolute', inset: 0, overflow: 'hidden' },
   localEmpty: {
     position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
     color: 'var(--muted)', fontSize: 13, padding: 18, textAlign: 'center',
-  },
-  mobileSplitHandle: {
-    display: 'none',
-    alignItems: 'center',
-    justifyContent: 'center',
-    background: 'var(--surface)',
-    borderTop: '1px solid var(--border)',
-    borderBottom: '1px solid var(--border)',
-    touchAction: 'none',
-  },
-  mobileSplitGrip: {
-    width: 46, height: 4, borderRadius: 999, background: 'var(--border)',
-    display: 'block',
   },
   panelBody: {
     flex: 1, overflowY: 'auto', padding: '10px 16px 20px', fontSize: 14, lineHeight: 1.62,
@@ -1819,6 +1867,7 @@ const CSS = `
 .mg-th:hover { color: var(--text); }
 .mg-legend-row:hover { background: var(--surface2); }
 .mg-tgl:hover { color: var(--text); }
+.mg-tab:hover { color: var(--text); }
 .mg-close:hover { background: var(--border); color: var(--text); }
 .mg-discuss:hover { filter: brightness(1.06); }
 .mg-discuss:active { transform: translateY(1px); }
@@ -1870,20 +1919,6 @@ const CSS = `
     scrollbar-width: none;
   }
   .mg-panel .mg-tag-row::-webkit-scrollbar { display: none; }
-  .mg-panel-split {
-    grid-template-columns: 1fr !important;
-    grid-template-rows: minmax(150px, var(--mg-mobile-graph-h, 32%)) 18px minmax(0, 1fr);
-    overflow: hidden;
-  }
-  .mg-local-pane { order: 1; min-height: 0; }
-  .mg-mobile-split-handle { display: flex !important; order: 2; cursor: ns-resize; }
-  .mg-note-pane {
-    order: 3; border-right: none !important; border-bottom: none;
-    min-height: 0; overflow: hidden;
-  }
-  .mg-local-graph { min-height: 0 !important; }
-  .mg-local-head { padding: 7px 10px 6px !important; }
-  .mg-note-pane > div:first-child { display: none; }
   .mg-md {
     padding: 10px 14px 18px !important;
     font-size: 13px !important;
@@ -1896,20 +1931,6 @@ const CSS = `
   .mg-md ul, .mg-md ol { margin: 8px 0 !important; }
   .mg-md code { font-size: 0.82em !important; }
   .mg-panel .mg-discuss { padding: 9px 12px !important; }
-}
-@media (min-width: 641px) and (max-width: 860px) {
-  .mg-panel-split {
-    grid-template-columns: 1fr !important;
-    grid-template-rows: minmax(180px, var(--mg-mobile-graph-h, 36%)) 18px minmax(0, 1fr);
-    overflow: hidden;
-  }
-  .mg-local-pane { order: 1; min-height: 0; }
-  .mg-mobile-split-handle { display: flex !important; order: 2; cursor: ns-resize; }
-  .mg-note-pane {
-    order: 3; border-right: none !important; border-bottom: none;
-    min-height: 0; overflow: hidden;
-  }
-  .mg-local-graph { min-height: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
   .mg-orbit, .mg-star, .mg-pulse, .mg-skel, .mg-panel, .mg-scrim, .mg-star-hub { animation: none !important; }

@@ -157,6 +157,14 @@ def list_chats(
   for c in candidates:
     if c.messages or c.pending_messages:
       continue
+    # An app-attributed chat is a mini-app's durable anchor: the app persists
+    # its id (window.mobius.chat persist -> chat_id.json) and resumes it across
+    # mounts, so an empty app-chat is not abandoned scratch the way an owner's
+    # new-chat-then-leave is. Hard-deleting it left the app's persisted id
+    # pointing at a dead row, so the next mount's resume PATCH 404'd. Leave
+    # app-chats for the app + the soft-delete TTL to manage.
+    if c.created_by_app_id is not None:
+      continue
     questions.cancel(c.id)
     forget_chat(c.id)
     _purge_chat_dir(c.id)
