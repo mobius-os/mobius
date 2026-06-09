@@ -781,7 +781,18 @@ export function makeStorage({ appId, getToken }) {
     // wasteful + the change-detector can't diff a Blob). A first-ever read awaits
     // the network online, or resolves null offline.
     const cached = await cacheGet(path)
-    if (cached) {
+    // A not-present BLOB tombstone is RE-CHECKED against the server when online
+    // rather than trusted forever. Blobs are never background-revalidated (the
+    // guard below skips them), so a blob that was absent at its first read — a
+    // PDF probed before its build compiled it, an image before the agent wrote
+    // it — would otherwise read as missing for good, even after the build/agent
+    // writes it to the server filesystem (which never touches this IndexedDB
+    // mirror). Treating the tombstone as a cache miss lets the network branch
+    // below re-fetch it; a PRESENT blob still serves from cache (no wasteful
+    // re-download of a large binary).
+    const staleBlobTombstone =
+      cached && cached.present === false && kind === 'blob' && navigator.onLine
+    if (cached && !staleBlobTombstone) {
       // Present value: the stored kind is authoritative — a wrong-typed read
       // throws (loud) instead of handing back a string-as-Blob. A tombstone
       // (present:false) has no value to type-check; it resolves null below.
@@ -1085,8 +1096,22 @@ function makeChat({ appId, getToken, storage }) {
     // else create one and persist it. With no persist + no chatId this is the
     // original "ephemeral chat" path.
     let chatId = opts.chatId ? String(opts.chatId) : await loadPersistedId()
+    const fromPersist = !opts.chatId && !!chatId
     if (chatId) {
-      await updateChat(chatId, opts)
+      try {
+        await updateChat(chatId, opts)
+      } catch (e) {
+        // A persisted chat id can go stale: the empty-chat sweeper purges an
+        // app-chat that never got a turn past its grace window, but the
+        // persisted id (chat_id.json) still points at it, so the resume PATCH
+        // 404s. Self-heal by dropping the dead id and creating a fresh chat —
+        // only for a persisted id; an explicit caller-supplied chatId surfaces
+        // the error (the caller named a specific chat and should hear it's gone).
+        const dead = fromPersist && /\((?:404|410)\)/.test(String(e && e.message))
+        if (!dead) throw e
+        chatId = await createChat(opts)
+        savePersistedId(chatId)
+      }
     } else {
       chatId = await createChat(opts)
       savePersistedId(chatId)
