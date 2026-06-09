@@ -776,4 +776,16 @@ if [ -n "$PUBLIC_URL" ]; then
   fi
 fi
 
+# Reclaim the image this deploy superseded. A cutover leaves the prior `latest`
+# untagged (rollback-prev just moved to the new previous), so without this every
+# deploy permanently accumulates a ~4.7GB dangling image on /mnt/data — the
+# recurring disk-full cause that crash-looped prod on 2026-06-08 (a full volume
+# fails SQLite WAL with "disk I/O error", which the auto-rollback can't escape
+# because both images share the full disk). Prune ONLY dangling (untagged)
+# images: never a tagged image (the current, the rollback-prev, or a sibling
+# mobius-test:ci), and shared base layers stay alive via the running container's
+# refcount. Best-effort — a prune failure must not fail a successful deploy.
+info "reclaiming the superseded image (dangling only)…"
+docker image prune -f >/dev/null 2>&1 || true
+
 printf '\n%sdeploy complete%s\n' "$C_GREEN$C_BOLD" "$C_RESET"
