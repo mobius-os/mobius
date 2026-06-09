@@ -258,21 +258,6 @@
   text-overflow: ellipsis;
 }
 
-/* Quiet capability marker on apps that embed an agent (Editor, Web Studio,
-   LaTeX, Workout, Dreaming). A hollow muted ring — deliberately NOT a filled
-   accent dot, so it doesn't read as a stuck unread/activity notification (the
-   streaming/attention dots are filled --accent). It's a persistent tag, not a
-   clearable badge. The App Store carries the explicit "agent" text badge. */
-.drawer__item-agent {
-  flex-shrink: 0;
-  width: 6px;
-  height: 6px;
-  margin-left: 6px;
-  border-radius: 999px;
-  background: transparent;
-  border: 1.5px solid var(--muted);
-  opacity: 0.7;
-}
 
 /* Trailing pin badge on pinned rows — small, muted, sits flush to
    the row's right edge. Doesn't compete with the chat title; just
