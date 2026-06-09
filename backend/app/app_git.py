@@ -289,6 +289,18 @@ def record_upstream(
   # same upstream tree and a later update merges local job edits the same
   # way it merges index.jsx. Same bytes-on-stdin reason as the index.jsx
   # blob, so a direct subprocess call rather than `_run`.
+  #
+  # Job scripts are staged EXECUTABLE (100755), matching the mode the local
+  # `main` branch records for them. cron runs the bare job path (the crontab
+  # entry init-cron-scaffold.sh writes is `<job-path> [app-id]`, with no `bash`
+  # prefix), so the script lives on disk with the exec bit, and commit_local's
+  # plain `git add` under the default core.fileMode=true records 100755. Staging
+  # the upstream copy at 100644 instead would leave a permanent 644-vs-755 skew
+  # between `upstream` and `main` that the merge has to reconcile on every
+  # update — and when the merge base predates job-script tracking (the job is an
+  # add/add against an empty base), the mode mismatch alone makes git report a
+  # spurious CONFLICT (add/add) even with identical bytes. Recording the same
+  # 100755 keeps the modes equal so the only thing the merge sees is content.
   if job_name and job_bytes is not None:
     job_blob = subprocess.run(
       [
@@ -301,7 +313,7 @@ def record_upstream(
     subprocess.run(
       [
         "git", "-C", str(repo), "update-index", "--add", "--cacheinfo",
-        f"100644,{job_blob},{job_name}",
+        f"100755,{job_blob},{job_name}",
       ],
       capture_output=True, text=True, timeout=_GIT_TIMEOUT, check=True,
       env=_git_env(repo),
