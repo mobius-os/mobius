@@ -523,6 +523,22 @@ def test_has_unresolved_conflicts_false_without_merge(tmp_path):
   assert app_git.has_unresolved_conflicts(repo) is False
 
 
+def test_has_unresolved_conflicts_false_for_resolved_file_with_separator(tmp_path):
+  """A resolution whose content legitimately contains a bare `=======` line
+  (a heredoc divider, a setext rule) UNDER a live merge must NOT read as an
+  unresolved conflict. `git diff --check` flags any 7-char marker line, which
+  would deadlock the update forever; we match only the labeled boundaries a
+  real conflict carries, so a lone `=======` is ignored."""
+  repo = tmp_path / "app"
+  _stage_non_entry_conflict(repo)
+  # Agent resolves the job; the resolved content has a bare `=======` line.
+  (repo / "fetch.sh").write_text("#!/bin/bash\ncat <<'EOF'\n=======\nEOF\n")
+  app_git._run(repo, "add", "fetch.sh")
+  assert (repo / ".git" / "MERGE_HEAD").exists()
+  assert "<<<<<<<" not in (repo / "fetch.sh").read_text()
+  assert app_git.has_unresolved_conflicts(repo) is False
+
+
 def test_commit_local_refuses_to_finalize_non_entry_marker_conflict(tmp_path):
   """The invariant: an update must NEVER finalize while ANY tracked file has
   unresolved conflict markers. A conflict in a NON-entry file (fetch.sh) does
