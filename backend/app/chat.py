@@ -225,6 +225,14 @@ class _ChatEventSink:
     self.session_id: str | None = None
     self.cost_usd: float | None = None
     self._last_save = 0.0
+    # The last error message published via publish() during this turn, or None.
+    # Used by finalize(): a turn that errors before accumulating any content
+    # (auth failure, connect timeout) leaves assistant_blocks empty, so the
+    # normal finalize no-op fires and the error is never persisted — it exists
+    # only in the 30s in-memory event log. On reconnect the failure is
+    # invisible. When blocks are empty but _last_error is set, finalize()
+    # synthesizes a minimal error block so the turn is durable.
+    self._last_error: str | None = None
     # True only for the duration of `split_for_steer`. While set, `publish()`
     # still broadcasts and accumulates the continuation's blocks, but does NOT
     # submit a transcript snapshot — a snapshot landing mid-split would target
@@ -294,6 +302,12 @@ class _ChatEventSink:
       or time.monotonic() - self._last_save >= self._SAVE_INTERVAL_SECS
     )
 
+    # Track the most recent error message so finalize() can synthesize a
+    # durable error block when the turn produced no assistant content at all
+    # (e.g. auth failure or connect timeout before any text arrived).
+    if event_type == "error":
+      self._last_error = event.get("message") or "An error occurred."
+
     self.bc.publish(event)
 
     # done: capture cost.
@@ -344,12 +358,26 @@ class _ChatEventSink:
     set for reconciliation to repair) — see the design's failure
     semantics. No fallback direct write.
 
-    No-op when there's nothing to finalize (no chat_id, no token, or no
-    accumulated blocks — an empty turn), matching the pre-C2 guard.
+    No-op when there's nothing to finalize (no chat_id, no token, and
+    no accumulated blocks AND no recorded error — a truly empty turn).
+    When blocks are empty but _last_error is set (a turn that errored before
+    any content arrived — auth failure, connect timeout, provider error),
+    synthesize a minimal error block so the turn is durably persisted rather
+    than vanishing from the transcript after the 30s in-memory event log expires.
+    The error block shape matches the renderer's "error" branch (see
+    reconcile_interrupted_chats and MsgContent.jsx: keyed on block["message"]).
     """
-    if not (self.chat_id and self.run_token and self.assistant_blocks):
+    if not (self.chat_id and self.run_token):
       return
-    snapshot = build_assistant_message(self.assistant_blocks)
+    if not self.assistant_blocks:
+      if not self._last_error:
+        # Genuinely empty turn (no content, no error) — nothing to persist.
+        return
+      # Synthesize an error block so the failure is durable in the transcript.
+      blocks = [{"type": "error", "message": self._last_error}]
+    else:
+      blocks = self.assistant_blocks
+    snapshot = build_assistant_message(blocks)
     ack = get_writer().submit(
       Finalize(
         chat_id=self.chat_id, run_token=self.run_token, snapshot=snapshot,
@@ -409,7 +437,17 @@ class _ChatEventSink:
             snapshot=build_assistant_message(sealed_blocks),
           )
         )
-        await _await_ack(ack)
+        try:
+          await _await_ack(ack)
+        except Exception:
+          # Finalize ack failed: assistant_blocks was already reset. Restore
+          # the sealed blocks before re-raising so the turn-end Finalize
+          # carries A1+A2 rather than only the post-steer continuation.
+          # Continuation deltas that arrived during the await are already in
+          # self.assistant_blocks (the reset list); prepend the sealed content
+          # so the combined snapshot is complete.
+          self.assistant_blocks = sealed_blocks + self.assistant_blocks
+          raise
       ack = get_writer().submit(
         AppendSteeredUserMessage(
           chat_id=self.chat_id,
@@ -1092,13 +1130,27 @@ async def stop_chat_for(
   for handle in handles:
     stopped = await handle.stop(timeout=2.0)
     if not stopped:
+      # SDK subprocess is still draining — do NOT unregister/finalize-broadcast
+      # here. Unregistering while the runner is alive lets it later finalize
+      # against a reclaimed chat (zombie-run clobber). Leave the registry entry
+      # and broadcast intact so the runner's own finally does teardown; the
+      # generation guard already protects the transcript from a stale write.
       log.warning(
         "stop_chat_for: handle.stop() timed out for chat %s "
-        "(%s) — unregistering anyway to converge state",
+        "(%s) — leaving registry/broadcast for runner teardown",
         chat_id, handle.kind,
       )
       all_stopped = False
+      continue
     registry.unregister(chat_id, handle.kind)
+  # Broadcast and run-status cleanup only when EVERY handle stopped cleanly.
+  # A still-draining runner owns both; it will finalize and clear in its own
+  # finally block (guarded by _clear_after_terminal_generation). Only the
+  # no-handles path and the all-stopped path finalize here.
+  if not all_stopped:
+    # At least one runner is still alive — leave run-status + broadcast for it.
+    registry.discard_starting(chat_id)
+    return all_stopped, cleared_pending_ts
   # With no active handle there is no runner-side final save left to
   # await, so clear immediately (via the actor's ClearRunStatus). Active
   # handles hand this clear back to run_chat's finally block: SDK stop
