@@ -260,7 +260,40 @@
         // offline handler keeps v in its cache key (it strips token, _ and install but keeps v), so
         // an app update changes the key and forces a fresh fetch.
         const url = `/api/apps/${_FRAME_APP_ID}/module?token=${encodeURIComponent(token)}&v=${encodeURIComponent(frameVersion)}`;
-        const mod = await import(url);
+        // Dynamic import() can't set request headers, so the token is a query
+        // param. An expired or revoked token causes the server to 401, which the
+        // browser surfaces as a network-error on import() (CORS/opaque failure),
+        // not as an HTTP status. We detect auth failures by probing the same URL
+        // with fetch() first (can read the status) when import throws. If the
+        // probe says 401/403 we tell the parent to refresh the token rather than
+        // showing a permanent error panel, preserving the app's in-session state.
+        let mod;
+        try {
+          mod = await import(url);
+        } catch (importErr) {
+          // Probe whether the failure is auth-related (401/403). The probe must
+          // be a regular fetch because dynamic import() cannot expose the status.
+          // We fire it only after the import fails so cold-start performance is
+          // unchanged (the common case never probes).
+          let isAuthError = false;
+          try {
+            const probe = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+            isAuthError = probe.status === 401 || probe.status === 403;
+          } catch (_) { /* network offline — not an auth error */ }
+          if (isAuthError) {
+            // Tell the parent shell the token is expired. AppCanvas listens
+            // for this, invalidates the app-token query, waits for a fresh token,
+            // and re-sends moebius:frame-init with the new value. The initialized
+            // flag is reset here so the listener will accept the re-init.
+            initialized = false;
+            window.parent.postMessage(
+              { type: 'moebius:token-expired', appId: _FRAME_APP_ID },
+              window.location.origin
+            );
+            return;  // do NOT show the error panel — the re-init will retry
+          }
+          throw importErr;
+        }
         const Component = mod.default;
         if (!Component) {
           showErr('Module error', 'The app module has no default export.');

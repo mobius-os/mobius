@@ -191,6 +191,8 @@ export const api = {
   },
   apps: {
     list: () => apiFetch('/apps/'),
+    remove: (appId) => apiFetch(`/apps/${appId}`, { method: 'DELETE' }),
+    recover: (appId) => apiFetch(`/apps/${appId}/recover`, { method: 'POST' }),
     // Stable base URL. AppCanvas appends `?v=<app.updated_at>` so the
     // service worker can serve cached offline-capable apps cache-first while
     // app edits naturally become cache misses. The backend still sends ETags

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, getToken } from '../../api/client.js'
 import { appQueries, themeQueries } from '../../hooks/queries.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
@@ -84,6 +84,7 @@ export default function AppCanvas({
   appId, version = 0, appName, offlineCapable = false,
   onNavPush, onNavPop, onNavReset,
 }) {
+  const queryClient = useQueryClient()
   // The app-scoped token is fetched from the server and isn't available
   // offline (short-lived; not persisted). Offline, fall back to the
   // owner JWT from localStorage so an offline-capable app still renders
@@ -218,6 +219,20 @@ export default function AppCanvas({
       if (msg.type === 'moebius:frame-error' && String(msg.appId) === String(appId)) {
         setLoaded(true)
       }
+      // Token-expiry recovery. The frame detects a 401/403 on the module
+      // import probe and posts this instead of showing a permanent error
+      // panel. We invalidate the app-token query so React Query refetches
+      // a fresh 8h token from the server, then sendInit() fires on the
+      // next token change (the useEffect below depends on `token`) and
+      // the frame re-receives moebius:frame-init with the new value.
+      // The frame resets its own `initialized` flag before posting this,
+      // so the listener accepts the follow-up frame-init.
+      // Latch semantics are preserved: the latch for this app+version is
+      // cleared when the fresh token resolves (resolveLatchedToken stores
+      // the new live token and returns it as the latch).
+      if (msg.type === 'moebius:token-expired' && String(msg.appId) === String(appId)) {
+        appQueries.token.invalidate(queryClient, appId)
+      }
       // Mini-app back-nav protocol (see useNavigation.appNavPush /
       // appNavPop). The app announces nested-view enter/exit via
       // postMessage; the shell installs a real top-level history
@@ -261,7 +276,7 @@ export default function AppCanvas({
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
-  }, [appId, onNavPush, onNavPop])
+  }, [appId, onNavPush, onNavPop, queryClient])
 
   // Clear this app's pending nav-sentinels when the iframe stops
   // representing the same browsing context. That happens on:
