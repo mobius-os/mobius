@@ -53,6 +53,11 @@ export default function ManageModelsModal({
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [refreshing, setRefreshing] = useState(false)
+  // pendingClose: true when the user tried to close with unsaved changes.
+  // iOS PWA suppresses window.confirm (always returns false), so we render
+  // an inline "Discard changes?" row instead — same pattern as the
+  // pendingSwitch confirm in ChatSettingsPanel.
+  const [pendingClose, setPendingClose] = useState(false)
 
   // Re-seed the draft when persisted prefs change underneath us
   // (e.g. another tab edited them). Skipping this would silently
@@ -78,9 +83,12 @@ export default function ManageModelsModal({
   // Dismiss-with-dirty-guard. Escape, overlay-click, and the explicit
   // Cancel button all route through this so a user can't silently lose
   // toggle changes by reaching for the keyboard or tapping outside.
-  // When clean, closes immediately; when dirty, confirms first.
+  // When clean, closes immediately; when dirty, shows the inline
+  // confirm row (window.confirm is suppressed in iOS PWA contexts and
+  // always returns false there, which would make the modal impossible
+  // to close after any toggle — so we never use it here).
   const tryClose = useCallback(() => {
-    if (dirty && !window.confirm('Discard unsaved changes?')) return
+    if (dirty) { setPendingClose(true); return }
     onClose()
   }, [dirty, onClose])
 
@@ -93,6 +101,7 @@ export default function ManageModelsModal({
   }, [tryClose])
 
   const toggle = useCallback((modelId) => {
+    setPendingClose(false)
     setDraftHidden(prev => {
       const next = new Set(prev)
       if (next.has(modelId)) next.delete(modelId)
@@ -229,6 +238,28 @@ export default function ManageModelsModal({
         })}
 
         {error && <p className="mmm__error">{error}</p>}
+
+        {pendingClose && (
+          <div className="mmm__confirm" role="group" aria-label="Confirm discard">
+            <p className="mmm__confirm-copy">Discard unsaved changes?</p>
+            <div className="mmm__confirm-actions">
+              <button
+                type="button"
+                className="mmm__btn mmm__btn--ghost"
+                onClick={onClose}
+              >
+                Discard
+              </button>
+              <button
+                type="button"
+                className="mmm__btn"
+                onClick={() => setPendingClose(false)}
+              >
+                Keep editing
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="mmm__foot">
           <button
