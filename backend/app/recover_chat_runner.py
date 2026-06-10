@@ -1033,7 +1033,24 @@ async def _spawn_claude(
       stderr_b = await proc.stderr.read() if proc.stderr else b""
       err = stderr_b.decode("utf-8", errors="replace").strip()[:500]
       if err:
-        yield _sse({"type": "error", "message": f"CLI exit {rc}: {err}"})
+        # Detect authentication failures specifically so the user gets
+        # an actionable message rather than a raw CLI error. The patterns
+        # below cover the three surfaces that produce auth errors:
+        # "authentication_error" (Anthropic API), "invalid_api_key"
+        # (some SDK paths), "401" in the message (generic HTTP auth).
+        auth_patterns = ["authentication_error", "invalid_api_key", "401"]
+        is_auth_error = any(p in err.lower() for p in auth_patterns)
+        if is_auth_error:
+          yield _sse({
+            "type": "error",
+            "message": (
+              f"CLI authentication error (exit {rc}). "
+              "Use the Connect button on the chat picker to reconnect "
+              "your AI provider credentials, then try again."
+            ),
+          })
+        else:
+          yield _sse({"type": "error", "message": f"CLI exit {rc}: {err}"})
 
   except Exception as exc:
     yield _sse({

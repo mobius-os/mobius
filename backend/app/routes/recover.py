@@ -253,6 +253,22 @@ def _action_factory_reset(data_dir: Path) -> None:
   ]:
     _rm_tree(data_dir / subdir)
     (data_dir / subdir).mkdir(parents=True, exist_ok=True)
+  # Delete identity secrets so the next boot regenerates them cleanly.
+  # A factory reset must produce a completely clean slate: different
+  # secrets mean a new identity so prior sessions/tokens from the old
+  # owner cannot be reused on the fresh instance. Next boot's entrypoint
+  # auto-generates new values for .secret-key and service-token.txt;
+  # recover_auth._recovery_secret_bytes() generates .recovery-secret on
+  # first use.
+  for name in [".secret-key", ".recovery-secret", "service-token.txt"]:
+    p = data_dir / name
+    try:
+      p.unlink(missing_ok=True)
+    except OSError:
+      pass
+  # Recovery chat history is the prior owner's private data — a new owner
+  # must not see it. Wipe the whole directory; it's recreated on demand.
+  _rm_tree(data_dir / "recovery")
 
 
 @router.post("/recover/action")
@@ -404,10 +420,38 @@ def _backup_db(src_path: Path, dest_path: Path) -> None:
   src.close()
 
 
-def _create_backup(data_dir: Path) -> StreamingResponse:
-  """Creates a ZIP archive of the database and app data.
+def _safe_add_file(zf: zipfile.ZipFile, f: Path, data_dir: Path) -> None:
+  """Adds a single file to the zip archive, skipping symlinks and out-of-tree
+  paths. Symlinks inside /data can point outside the data directory (e.g.
+  a misconfigured app); writing them would either follow the link (leaking
+  host files) or archive the dangling name (confusing a restore). Skipping
+  is the safe default — the restore recipient doesn't need symlinks."""
+  if f.is_symlink():
+    return
+  try:
+    arc_name = str(f.relative_to(data_dir))
+  except ValueError:
+    # Path is outside data_dir — don't archive it.
+    return
+  try:
+    zf.write(f, arc_name)
+  except OSError:
+    # Permission denied or file vanished between stat and read — skip
+    # rather than aborting the whole backup. The user can investigate
+    # the missing file after restore.
+    pass
 
-  Backup includes CLI auth credentials. Store the backup file securely.
+
+def _create_backup(data_dir: Path) -> StreamingResponse:
+  """Creates a ZIP archive of all data needed for a complete restore.
+
+  Includes database, app storage, CLI credentials, identity secrets
+  (.secret-key, .recovery-secret, service-token.txt), VAPID keys
+  (push/), and recovery chat history (recovery/). Restoring without
+  the identity secrets would invalidate every device session, break
+  scheduled-task service tokens, and permanently break Web Push —
+  the previous incomplete backup left the user in a worse state than
+  before. Store the backup file securely.
   """
   buf = io.BytesIO()
   with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -421,20 +465,56 @@ def _create_backup(data_dir: Path) -> StreamingResponse:
         zf.write(tmp_db_path, "db/ultimate.db")
       finally:
         tmp_db_path.unlink(missing_ok=True)
-    # App storage.
+
+    # App storage (agents' built apps, shared knowledge, compiled bundles).
     for sub in ["apps", "shared", "compiled"]:
       base = data_dir / sub
       if not base.exists():
         continue
       for f in base.rglob("*"):
         if f.is_file():
-          zf.write(f, str(f.relative_to(data_dir)))
+          _safe_add_file(zf, f, data_dir)
+
     # CLI auth credentials (OAuth tokens for Claude and other providers).
     cli_auth = data_dir / "cli-auth"
     if cli_auth.exists():
       for f in cli_auth.rglob("*"):
         if f.is_file():
-          zf.write(f, str(f.relative_to(data_dir)))
+          _safe_add_file(zf, f, data_dir)
+
+    # Identity secrets — critical for a working restore.
+    # .secret-key signs all JWTs; .recovery-secret signs recovery cookies;
+    # service-token.txt is the long-lived cron/agent service token.
+    # Without these the restore target has a different identity than the
+    # original: every device session becomes invalid, scheduled tasks stop
+    # working, and the recovery surface gets a fresh key (one re-login).
+    for name in [".secret-key", ".recovery-secret", "service-token.txt"]:
+      p = data_dir / name
+      if p.exists() and not p.is_symlink():
+        try:
+          zf.write(p, name)
+        except OSError:
+          pass
+
+    # VAPID keys (Web Push). Without these, Web Push subscriptions on
+    # the restore target can never be notified — the VAPID key pair is
+    # baked into the browser's push subscription at subscribe() time,
+    # so a different key means silent delivery failure forever.
+    push_dir = data_dir / "push"
+    if push_dir.exists():
+      for f in push_dir.rglob("*"):
+        if f.is_file():
+          _safe_add_file(zf, f, data_dir)
+
+    # Recovery chat history — the user's conversation with the rescue
+    # agent during a previous incident. Useful context for diagnosis
+    # after a restore.
+    recovery_dir = data_dir / "recovery"
+    if recovery_dir.exists():
+      for f in recovery_dir.rglob("*"):
+        if f.is_file():
+          _safe_add_file(zf, f, data_dir)
+
   buf.seek(0)
   ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
   return StreamingResponse(
