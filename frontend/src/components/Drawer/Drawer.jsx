@@ -25,6 +25,7 @@ export default function Drawer({
   onApp,
   onNewChat,
   onDeleteChat,
+  onDeleteApp,
   onSettings,
   // Set of chat ids whose agent is currently streaming. Used to
   // pulse a small accent dot next to the row label so the user can
@@ -202,10 +203,9 @@ export default function Drawer({
     else queryClient.setQueryData(key, prev)
   }
 
-  async function deleteApp(id) {
-    const res = await apiFetch(`/apps/${id}`, { method: 'DELETE' })
-    if (res.ok || res.status === 404) refreshApps()
-  }
+  // deleteApp is handled by Shell (where showToast lives) — the local
+  // implementation silently swallowed 409 and network errors. Calls are
+  // forwarded via the onDeleteApp prop; the local function is removed.
 
   // Focus management: move focus into the drawer on open; restore to
   // the toggle on close. The drawer panel gets tabIndex=-1 so it can
@@ -431,7 +431,7 @@ export default function Drawer({
                       if (next && next !== app.name) renameApp(app.id, next)
                     }}
                     onPin={(next) => pinApp(app.id, next)}
-                    onDelete={() => deleteApp(app.id)}
+                    onDelete={() => onDeleteApp?.(app.id)}
                     onInstall={() => setInstallingApp({ id: app.id, name: app.name, slug: app.slug, updatedAt: app.updated_at })}
                   />
                 ))}
