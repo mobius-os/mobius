@@ -69,6 +69,29 @@ def debug_status(
   }
   if reconciliation_failed:
     result["reconciliation_failed"] = True
+
+  # Phase 3 crash-loop recovery flag: set by entrypoint when the boot-attempt
+  # counter reaches the threshold and a baked restore fires automatically.
+  # Cleared by the background health probe once the server is confirmed healthy.
+  # Follows the same absent-when-false pattern as reconciliation_failed so the
+  # golden_debug_status.json test is unaffected.
+  settings = get_settings()
+  _restore_flag = Path(settings.data_dir) / ".platform-restore-active"
+  if _restore_flag.exists():
+    try:
+      result["platform_restore_active"] = _restore_flag.read_text().strip()
+    except OSError:
+      result["platform_restore_active"] = True
+
+  # Phase 4 upgrade-available notice: set when the baked image SHA changed
+  # from the recorded one. Cleared when they match again.
+  _upgrade_flag = Path(settings.data_dir) / ".platform-upgrade-available"
+  if _upgrade_flag.exists():
+    try:
+      result["platform_upgrade_available"] = _upgrade_flag.read_text().strip()
+    except OSError:
+      result["platform_upgrade_available"] = True
+
   return result
 
 
