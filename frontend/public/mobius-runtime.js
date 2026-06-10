@@ -920,6 +920,176 @@ export function makeStorage({ appId, getToken }) {
   }
 }
 
+// ── App analytics: window.mobius.signal() (design §3) ──────────────
+//
+// Fire-and-forget telemetry for Dreaming. Buffers events in memory and
+// debounce-flushes them to `signals.jsonl` in the app's own storage
+// path, overwriting the full file on each flush (avoids read-append
+// races). On first signal of a session the existing signals.jsonl is
+// read once and its tail (≤400 lines) seeds the in-memory buffer, so
+// entries from prior sessions are preserved across the overwrite.
+//
+// Placement note: this block lives adjacent to the storage machinery
+// (makeStorage above) to minimize merge conflicts with sibling agents
+// working on other mobius-runtime.js features. The signal() impl is
+// self-contained — it calls makeStorage's storage object methods but
+// shares no mutable state with the storage internals above.
+//
+// Implementation invariants:
+//   - never throws; all async work is fire-and-forget
+//   - no-ops when storage is unavailable (null storage arg)
+//   - name: short kebab-case string; anything else is dropped silently
+//   - payload values: primitives only (string/number/boolean); non-
+//     primitive values (objects, arrays) are dropped with no error
+//   - ring buffer cap 500; oldest entries evicted when full
+//   - debounce: at most one flush per 5 seconds; a final flush fires on
+//     pagehide and visibilitychange-hidden so no events are lost on tab close
+//   - on first signal: read existing signals.jsonl once, seed buffer
+//     with its tail ≤400 lines, then overwrite going forward
+//
+// Exported as makeSignal(appId, storage) → the signal() fn, so
+// init() can wire it and tests can drive it without a full init().
+
+const SIGNAL_PATH = 'signals.jsonl'
+const SIGNAL_BUF_CAP = 500
+const SIGNAL_SEED_CAP = 400
+const SIGNAL_FLUSH_INTERVAL_MS = 5000
+
+export function makeSignal(appId, storage) {
+  if (!storage || !appId) return () => {}
+
+  // State for this session: whether we've seeded the buffer from the
+  // existing file, and the ring buffer of {ts, name, ...payload} lines.
+  let _seeded = false
+  let _seeding = false
+  let _buf = []      // objects not yet serialised
+  let _flushTimer = null
+  let _flushPending = false
+
+  // Validate and normalise one signal call. Returns null if invalid.
+  function _prepare(name, payload) {
+    if (typeof name !== 'string' || !name) return null
+    // Kebab-case is recommended but we only reject non-strings, not bad format.
+    const entry = { ts: new Date().toISOString(), name }
+    if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      for (const [k, v] of Object.entries(payload)) {
+        const t = typeof v
+        if (t === 'string' || t === 'number' || t === 'boolean') {
+          entry[k] = v
+        }
+        // non-primitives silently dropped
+      }
+    }
+    return entry
+  }
+
+  // Add an entry to the ring buffer, evicting oldest if over cap.
+  function _push(entry) {
+    _buf.push(entry)
+    if (_buf.length > SIGNAL_BUF_CAP) {
+      _buf = _buf.slice(_buf.length - SIGNAL_BUF_CAP)
+    }
+  }
+
+  // Flush the current buffer to storage as a full overwrite of signals.jsonl.
+  // The overwrite-not-append design avoids read-append races (two flushes
+  // from concurrent tabs would each read, append, and write back, potentially
+  // losing one batch; a full overwrite means whichever tab wins last has the
+  // authoritative snapshot of ITS buffer, which is already seeded from the
+  // prior file). Both tabs share the same seeded history so no entries are lost.
+  async function _flush() {
+    _flushPending = false
+    if (_buf.length === 0) return
+    try {
+      const lines = _buf.map((e) => JSON.stringify(e)).join('\n') + '\n'
+      await storage.setText(SIGNAL_PATH, lines)
+    } catch (e) {
+      // storage unavailable (offline, token expired) — entries stay in
+      // the buffer and will be included in the next flush attempt
+    }
+  }
+
+  // Schedule a debounced flush. At most one flush every 5 seconds.
+  function _scheduleFlush() {
+    if (_flushTimer !== null || _flushPending) return
+    _flushTimer = setTimeout(() => {
+      _flushTimer = null
+      _flushPending = true
+      _flush().catch(() => {})
+    }, SIGNAL_FLUSH_INTERVAL_MS)
+  }
+
+  // Immediate flush (for pagehide / visibilitychange-hidden).
+  function _flushNow() {
+    if (_flushTimer !== null) { clearTimeout(_flushTimer); _flushTimer = null }
+    _flush().catch(() => {})
+  }
+
+  // Register page-lifecycle hooks once (on first call) to drain the buffer
+  // when the tab is about to close or go to background.
+  let _hooksRegistered = false
+  function _ensureHooks() {
+    if (_hooksRegistered) return
+    _hooksRegistered = true
+    try {
+      window.addEventListener('pagehide', _flushNow)
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') _flushNow()
+      })
+    } catch (e) {}
+  }
+
+  // Seed the in-memory buffer from the existing signals.jsonl (≤400 tail
+  // lines) so that prior-session entries survive the next overwrite. Called
+  // once per session, before the first flush. Runs async; calls that arrive
+  // while seeding are buffered normally and included in the eventual flush.
+  async function _seed() {
+    _seeding = true
+    try {
+      const text = await storage.getText(SIGNAL_PATH)
+      if (text) {
+        const tail = text
+          .split('\n')
+          .filter((l) => l.trim())
+          .slice(-SIGNAL_SEED_CAP)
+          .map((l) => { try { return JSON.parse(l) } catch (e) { return null } })
+          .filter(Boolean)
+        // Prepend the seeded tail; then add any entries buffered while seeding;
+        // then apply the cap so the total stays within SIGNAL_BUF_CAP.
+        _buf = [...tail, ..._buf].slice(-SIGNAL_BUF_CAP)
+      }
+    } catch (e) {
+      // seed failed (file absent, storage error) — proceed with empty history
+    }
+    _seeded = true
+    _seeding = false
+  }
+
+  // The public signal() function. Fire-and-forget: starts the async seed
+  // path if needed, pushes the entry, schedules a debounced flush.
+  function signal(name, payload) {
+    try {
+      const entry = _prepare(name, payload)
+      if (!entry) return
+      _ensureHooks()
+      _push(entry)
+      // Kick off the one-time seed from storage. The entry was already pushed
+      // to _buf above; after seeding it gets prepended to the historical tail,
+      // so it will be included in the next flush regardless of seed timing.
+      if (!_seeded && !_seeding) {
+        _seed().then(_scheduleFlush).catch(() => { _seeded = true; _scheduleFlush() })
+        return
+      }
+      if (_seeded) _scheduleFlush()
+      // While seeding: entry is in _buf, flush will be triggered by _seed().then
+    } catch (e) {
+      // signal() must never propagate exceptions
+    }
+  }
+
+  return signal
+}
+
 // ── Agent-chat embed (capability A, design §1) ──────────────────────
 //
 // `window.mobius.chat(opts)` mounts the real ChatView (the shell's chat
@@ -1364,6 +1534,7 @@ export function init({ appId, getToken }) {
     appId,
     get online() { return navigator.onLine },
     storage,
+    signal: makeSignal(appId, storage),
     chat: makeChat({ appId, getToken, storage }),
     nav: makeNav(),
   }

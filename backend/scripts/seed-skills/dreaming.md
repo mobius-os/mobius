@@ -22,9 +22,11 @@ This skill is itself agent-editable (it lives under `/data/shared/skills/`). Whe
 
 Work through these as one multi-turn goal. Earlier phases feed later ones — the interviews surface what to fix, the fixes inform the brief. Don't skip the interviews to get to the fun parts; they are the point.
 
-### 1. INTROSPECTION IS MANDATORY — interview every agent that worked today
+### 1. INTROSPECTION — interview every agent that worked today (adaptive depth)
 
-This is the first phase and the one you may not skip. The agents that did today's work hold context you don't: what surprised them, what they'd warn future-you about, where a skill let them down. You recover it by **forking their session and asking them.**
+**Adaptive rule.** Before starting interviews, check whether today had any user chat activity. Read `activity.jsonl` (already staged in `inputs/`) and count events where `ev == "app_open"` or where a chat row exists with a human turn. If **tonight is a cron-only night** (no user chat activity, only background jobs ran), do a **light pass** on phase 1 — scan the cron session jsonls for any unexpected errors, but spend the saved turns on phases 3–4 (Mind consolidation and app improvement), where the value compounds. A quiet night is a good night to deepen the graph and fix the apps the partner uses every day. Write one sentence in the brief noting it was a cron-only night.
+
+On nights with user activity, this is the first phase and the one you may not skip. The agents that did today's work hold context you don't: what surprised them, what they'd warn future-you about, where a skill let them down. You recover it by **forking their session and asking them.**
 
 **Find every chat and subagent run with activity in the last 24h.**
 
@@ -107,24 +109,41 @@ topics in `avoid` when deciding what to consolidate, promote, or surface in the
 brief. (This anticipates an in-app setting — act on it if present, ignore if
 absent.)
 
-### 4. IMPROVE APPS — fix, propose, and a light security pass
+### 4. IMPROVE APPS — triage with the digest, then fix and propose
 
-`Read /data/shared/skills/building-apps.md` before touching any app; it owns the component shape, storage traps, and lifecycle. List what's installed first:
+**Only improve apps the partner actually touched.** This is the leading rule. The `per-app-digest.json` staged in `inputs/` is your first stop — read it before reviewing any app. It gives you: `opens_24h` (how many times the partner opened the app today), `signal_counts` (what events fired), `last_5_errors` (the most recent error messages), and `has_signals` (whether the app emits analytics at all). Sort by `opens_24h` descending. An app with `opens_24h == 0` and no recent errors does not need attention tonight — skip it unless an interview specifically flagged it.
+
+`Read /data/shared/skills/building-apps.md` before touching any app; it owns the component shape, storage traps, and lifecycle. List what's installed if you need the full set:
 
 ```bash
 curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/apps/" | python3 -m json.tool
 ```
 
-Before reviewing, scan `/data/apps/dreaming/inputs/app-feedback.md` if present. It contains structured feedback that mini-apps mirrored to `shared/app-feedback/<app-slug>/`; treat it as partner/app signal alongside interviews and Mind, then decide whether to fix, adjust a prompt, or propose a change in the brief.
+Before reviewing, scan `/data/apps/dreaming/inputs/app-feedback.md` if present. It contains structured feedback that mini-apps mirrored to `shared/app-feedback/<app-slug>/`; treat it as partner/app signal alongside interviews, the digest, and Mind.
 
-Then, for the apps the partner actually uses (the interviews + Mind tell you which):
+Then, for the apps the digest + interviews confirm the partner actually uses:
 
-- **Bugs + broken flows.** Open each app with `agent-browser`, exercise its real paths (the ones the partner uses), and look for broken renders, dead buttons, console errors, empty states that should have data, stale or orphaned data files. **Fix the small, obviously-correct ones** (a crash, a broken flow, a mis-wired storage path) — these are reversible and the partner wakes to a working app. **Don't auto-apply anything with a judgment call**; list it in the brief instead.
+- **Bugs + broken flows.** The `last_5_errors` in the digest are your first signal. If an app has error signals, read its source and check the obvious paths before reaching for `agent-browser`. **Use `agent-browser` only when a suspected bug can't be confirmed from source alone** — as a diagnostic tool, not a default sweep of every app. This saves turns. When you do use it, exercise the specific path the error points at, not the whole app. **Fix the small, obviously-correct ones** (a crash, a broken flow, a mis-wired storage path) — these are reversible and the partner wakes to a working app. **Don't auto-apply anything with a judgment call**; list it in the brief instead.
 - **Stale data.** A scheduled app that stopped updating, a data file that's gone stale — diagnose root cause (often a vanished cron entry; see `cron.md`'s "every cron task needs an init-cron.sh"). Fix the mechanism; note it in the brief.
-- **Suggest 2–4 ranked features.** Tie EACH to observed usage — "you opened Habits 11 times this week but there's no streak view" beats a generic idea. Rank by value-to-effort. These are proposals for the brief, not builds — you don't build features unattended without approval.
+- **Suggest features — ranked, max one per app.** For each app that had meaningful `opens_24h`, suggest at most one feature. Rank by: touch-frequency × usefulness ÷ effort. "You opened Habits 11 times this week (touch-frequency: high) and there's no streak view (usefulness: high, effort: low)" is a well-ranked suggestion. Generic ideas with no usage backing are noise — drop them. These are proposals for the brief, not builds.
 - **Light security pass (surface, don't auto-fix the risky ones).** A SAST-ish read of changed/owned app source for the usual mini-app footguns — unsanitized HTML injection (needs DOMPurify), secrets or tokens written to storage or logs, a `connect-src`-violating external fetch, an over-broad token scope, an `eval`/`dangerouslySetInnerHTML` on untrusted input. Plus a dependency sanity check (anything pinned to a known-bad or wildly-stale version). **Auto-apply only the trivially-safe, behavior-preserving fixes** (wrap a render in DOMPurify, tighten a token scope) and only when you're certain. **Surface everything else as a proposal** — a security fix that changes behavior is exactly the kind of thing that must wait for a tap.
 
 Commit each fix on its own: `pm-commit 'app(<slug>): <what and why>'`.
+
+### Turn-budget guide
+
+The whole run — interviews, skill edits, Mind consolidation, app triage, research, brief + morning chat — must fit within 60 turns. **The brief is the deliverable, not the work that precedes it.** Phases eat turns fast; here is a guide for a typical night (cron-only nights front-load phases 3–4 and skip or shorten 1):
+
+| Phase | Turns | Notes |
+|---|---|---|
+| 1. Interviews | ≤15 | Light pass on cron-only nights (≤5) |
+| 2. Skill edits | ≤5 | Only confirmed gaps from interviews |
+| 3. Mind consolidation | ≤10 | Inbox drain + prune; skip reorg unless one change is obvious |
+| 4. App triage + fixes | ≤15 | Digest-first; skip apps with 0 opens |
+| 5. Research | ≤5 | Only if a clear topic cleared the bar; otherwise skip |
+| 6. Brief + morning chat | ≤10 | Hard stop at 10 — never let this exceed budget |
+
+**At turn 40, stop any phase still in progress, commit what's done, and jump straight to phase 6.** A partial night with a brief beats a complete night where the brief never ships. Note in the brief what you skipped.
 
 ### 5. RESEARCH tailored to the partner's known interests
 
