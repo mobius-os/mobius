@@ -2,9 +2,9 @@
  *
  * Lists the dated reports the dreaming agent leaves overnight, tracks a
  * streak, and lets the owner set the run hour and model. Opening a brief
- * shows TWO things stacked: the brief HTML up top (a sandboxed, script-free
- * iframe — the agent's static page) and, beneath it, the MORNING CHAT the
- * nightly run opened — the conversation about that brief, live, with a real
+ * shows TWO things stacked: the brief HTML up top (a sandboxed iframe —
+ * the agent's static page) and, beneath it, the MORNING CHAT the nightly
+ * run opened — the conversation about that brief, live, with a real
  * composer and tappable AskUserQuestion cards. The brief is the read; the
  * chat is where the partner steers the next night.
  *
@@ -12,7 +12,11 @@
  *  - List reports:  GET /api/storage/apps-list/{appId}/reports/   (cursor-paged)
  *  - Read a brief:  GET /api/storage/apps/{appId}/reports/<date>.html  (TEXT)
  *  - settings.json / state.json: JSON via the same storage base.
- *  - Reports render in a SANDBOXED srcDoc iframe with NO allow-scripts.
+ *  - Reports render in a sandboxed srcDoc iframe. Sandbox: allow-scripts but
+ *    NOT allow-same-origin, so the iframe has a null origin and its scripts
+ *    can NOT access the parent's DOM, localStorage, or owner JWT. Scripts
+ *    run for the sole purpose of reporting content height via postMessage.
+ *    hardenReportHtml injects a CSP + a minimal height-reporter snippet.
  *
  * Brief↔chat link: the cron creates the morning chat (`POST /api/chats`,
  * title "Morning brief — <date>") and SHOULD write a sibling
@@ -38,24 +42,12 @@ const PROVIDER_ORDER = [
   { key: 'claude', label: PROVIDER_LABELS.claude },
   { key: 'codex', label: PROVIDER_LABELS.codex },
 ]
-const FALLBACK_MODEL_GROUPS = [
-  {
-    key: 'claude',
-    label: PROVIDER_LABELS.claude,
-    models: [
-      { id: 'claude-opus-4-8', name: 'Opus 4.8' },
-      { id: 'claude-sonnet-4-6', name: 'Sonnet 4.6' },
-      { id: 'claude-haiku-4-5-20251001', name: 'Haiku 4.5' },
-    ],
-  },
-  {
-    key: 'codex',
-    label: PROVIDER_LABELS.codex,
-    models: [{ id: 'gpt-5.5', name: 'gpt-5.5' }],
-  },
-]
-const DEFAULT_PROVIDER = FALLBACK_MODEL_GROUPS[0].key
-const DEFAULT_MODEL = FALLBACK_MODEL_GROUPS[0].models[0].id
+// When /api/auth/providers/models is unreachable we use an empty fallback
+// rather than guessing model IDs. Stale hardcoded IDs would 400 the nightly
+// run; letting the CLI use its own account default is always safe.
+const FALLBACK_MODEL_GROUPS = []
+const DEFAULT_PROVIDER = 'claude'
+const DEFAULT_MODEL = null
 
 // The default schedule: 06:00 local -> "0 6 * * *". We only ever let the
 // user pick an hour (minute pinned to 0), so the cron field is always
@@ -88,6 +80,7 @@ function buildCron(hour) {
 
 const REPORT_CSP = [
   "default-src 'none'",
+  "script-src 'unsafe-inline'",
   "style-src 'unsafe-inline'",
   'img-src data: blob:',
   'font-src data:',
@@ -95,12 +88,38 @@ const REPORT_CSP = [
   "form-action 'none'",
 ].join('; ')
 
+// Injected into every brief's <head>. Reports scrollHeight to the parent
+// via postMessage so the parent can size the iframe without needing
+// allow-same-origin (which would give the iframe the shell origin and its
+// owner JWT). The script is intentionally tiny — no external deps, no
+// network calls. The CSP above allows 'unsafe-inline' scripts precisely
+// for this snippet; together with the absence of allow-same-origin the
+// iframe's origin is null and it cannot reach the parent's DOM or storage.
+const REPORT_HEIGHT_SCRIPT = `<script>
+(function(){
+  function emit(){
+    var h=Math.max(document.body?document.body.scrollHeight:0,
+                   document.documentElement.scrollHeight);
+    if(h>0)parent.postMessage({type:'dreaming:brief-height',height:h},'*');
+  }
+  if(document.readyState==='loading'){
+    document.addEventListener('DOMContentLoaded',emit);
+  } else { emit(); }
+  if(typeof ResizeObserver!=='undefined'){
+    var ro=new ResizeObserver(emit);
+    ro.observe(document.documentElement);
+  } else {
+    window.addEventListener('resize',emit);
+  }
+})();
+</script>`
+
 export function hardenReportHtml(html) {
   const body = typeof html === 'string' ? html : ''
-  const meta = `<meta http-equiv="Content-Security-Policy" content="${REPORT_CSP}">`
-  if (/<head[\s>]/i.test(body)) return body.replace(/<head([^>]*)>/i, `<head$1>${meta}`)
-  if (/<html[\s>]/i.test(body)) return body.replace(/<html([^>]*)>/i, `<html$1><head>${meta}</head>`)
-  return `<!doctype html><html><head>${meta}</head><body>${body}</body></html>`
+  const inject = `<meta http-equiv="Content-Security-Policy" content="${REPORT_CSP}">${REPORT_HEIGHT_SCRIPT}`
+  if (/<head[\s>]/i.test(body)) return body.replace(/<head([^>]*)>/i, `<head$1>${inject}`)
+  if (/<html[\s>]/i.test(body)) return body.replace(/<html([^>]*)>/i, `<html$1><head>${inject}</head>`)
+  return `<!doctype html><html><head>${inject}</head><body>${body}</body></html>`
 }
 
 // "0 6 * * *" -> "06:00" for the <input type="time"> value.
@@ -854,18 +873,14 @@ function FeedbackLauncher({ dateStr, chatId }) {
 // ---------------------------------------------------------------------------
 // Report detail — the brief + chat split view.
 //
-// The brief is the static, script-free HTML the agent authored: rendered in a
-// SANDBOXED srcDoc iframe with NO allow-scripts (containment). Beneath it, the
-// morning chat. We resolve the chat_id from `reports/<date>.meta.json` (the
-// cron's sibling), then mount the embed. Back is wired through the shell
-// nav helper so the phone's back gesture returns to the list with a real
-// previous-screen preview.
-//
-// The brief iframe auto-sizes to its content (the document is short — a
-// morning read), measured via the iframe's own scrollHeight after load, so
-// the page scrolls as one column (brief, then chat) instead of nesting two
-// scroll regions. Same-origin sandbox lets us read contentDocument for that
-// measurement; no scripts run inside.
+// The brief is the static HTML the agent authored: rendered in a sandboxed
+// srcDoc iframe. Sandbox: allow-scripts WITHOUT allow-same-origin — the
+// iframe has a null origin so its scripts cannot access the parent's DOM,
+// localStorage, or owner JWT (the security risk of allow-same-origin+scripts).
+// hardenReportHtml injects a tiny height-reporter script that postMessages
+// scrollHeight to the parent. The parent sizes the iframe from those messages
+// so the page scrolls as one column (brief, then chat) without nesting two
+// scroll regions. Beneath it, the morning chat embed.
 // ---------------------------------------------------------------------------
 
 function ReportDetail({ dateStr, storage, online, onBack }) {
@@ -894,39 +909,27 @@ function ReportDetail({ dateStr, storage, online, onBack }) {
     return () => { cancelled = true }
   }, [dateStr, storage])
 
-  // Size the brief iframe to its content so the column scrolls as one. The
-  // sandbox is same-origin (no scripts), so contentDocument is readable. We
-  // re-measure on a ResizeObserver of the inner body for late layout (web
-  // fonts, images) and clamp to a sane range.
-  const measure = useCallback(() => {
-    const el = iframeRef.current
-    if (!el) return
-    try {
-      const doc = el.contentDocument
-      if (!doc || !doc.body) return
-      const h = Math.max(doc.body.scrollHeight, doc.documentElement.scrollHeight)
-      if (h > 0) setBriefHeight(Math.min(Math.max(h, 200), 100000))
-    } catch {
-      // Cross-origin guard (shouldn't happen with allow-same-origin) — leave
-      // the default height; the inner doc keeps its own scroll as a fallback.
+  // Size the brief iframe from postMessage events sent by the injected
+  // height-reporter script (see hardenReportHtml + REPORT_HEIGHT_SCRIPT).
+  // The iframe runs with allow-scripts but WITHOUT allow-same-origin, so
+  // contentDocument is NOT readable from the parent — we receive height
+  // passively via postMessage instead.
+  useEffect(() => {
+    const onMessage = (ev) => {
+      if (!ev.data || ev.data.type !== 'dreaming:brief-height') return
+      const h = Number(ev.data.height)
+      if (Number.isFinite(h) && h > 0) {
+        setBriefHeight(Math.min(Math.max(h, 200), 100000))
+      }
     }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
   }, [])
 
   const onIframeLoad = useCallback(() => {
-    measure()
-    try {
-      const doc = iframeRef.current?.contentDocument
-      if (doc && doc.body && typeof ResizeObserver !== 'undefined') {
-        const ro = new ResizeObserver(() => measure())
-        ro.observe(doc.body)
-        // Stash so we can disconnect on unmount via the iframe element.
-        iframeRef.current.__ro = ro
-      }
-    } catch {}
-  }, [measure])
-
-  useEffect(() => () => {
-    try { iframeRef.current?.__ro?.disconnect() } catch {}
+    // The height reporter inside the iframe fires on DOMContentLoaded and
+    // on ResizeObserver changes. Nothing to do here from the parent side,
+    // but we keep the onLoad prop in case subclasses need it later.
   }, [])
 
   return (
@@ -974,11 +977,13 @@ function ReportDetail({ dateStr, storage, online, onBack }) {
               title={`Morning brief for ${dateStr}`}
               srcDoc={state.html}
               onLoad={onIframeLoad}
-              // The report is static HTML/CSS authored by the agent. sandbox
-              // WITHOUT allow-scripts is the containment: same-origin so its
-              // own <style> + relative anchors resolve (and we can measure its
-              // height), but no script execution.
-              sandbox="allow-same-origin"
+              // allow-scripts lets the injected height-reporter run.
+              // allow-same-origin is intentionally absent: without it the
+              // iframe gets a null origin, so its scripts cannot reach the
+              // parent's DOM, localStorage, or owner JWT regardless of what
+              // the brief HTML contains. allow-popups lets the agent include
+              // external links that open in a new tab.
+              sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
             />
           </div>
 
@@ -1358,27 +1363,29 @@ function SettingsTab({ appId, storage, online, token }) {
         </p>
         {modelGroups === null ? (
           <div style={S.note}>Loading models…</div>
+        ) : modelGroups.length === 0 ? (
+          // Models API unavailable — fall back to letting the CLI choose.
+          <div style={S.note}>
+            Model list unavailable. Dreaming will use the CLI's default model
+            for your account.
+          </div>
         ) : (
           <>
             <select
               style={S.agentSelect}
-              value={`${provider}\t${model}`}
+              value={model ? `${provider}\t${model}` : `${provider}\t`}
               onChange={(e) => {
-                const [nextProvider, nextModel] = e.target.value.split('\t')
-                if (nextProvider && nextModel) {
+                const idx = e.target.value.indexOf('\t')
+                const nextProvider = e.target.value.slice(0, idx)
+                const nextModel = e.target.value.slice(idx + 1) || null
+                if (nextProvider) {
                   setProvider(nextProvider)
                   setModel(nextModel)
                 }
               }}
               aria-label="Dreaming model"
             >
-              {!modelGroups.some((group) =>
-                group.key === provider && group.models.some((m) => m.id === model)
-              ) && (
-                <option value={`${provider}\t${model}`}>
-                  Current: {model || DEFAULT_MODEL}
-                </option>
-              )}
+              <option value={`${provider}\t`}>Provider default</option>
               {modelGroups.map((group) => {
                 const isConnected = !connectedProviders || connectedProviders.has(group.key)
                 return (
@@ -1405,7 +1412,7 @@ function SettingsTab({ appId, storage, online, token }) {
             <div style={S.agentMeta}>
               {(modelGroups.find((group) => group.key === provider)?.label || provider)}
               {' · '}
-              {model}
+              {model || 'provider default'}
             </div>
           </>
         )}
