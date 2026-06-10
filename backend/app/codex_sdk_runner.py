@@ -74,6 +74,31 @@ from app.runner_registry import RunnerKind, registry
 log = logging.getLogger("moebius.chat")
 
 
+class _BridgeError(Exception):
+  """Signals the sync AskUserQuestion handler to return an error response
+  to Codex rather than continuing with empty or fabricated answers.
+
+  Module-level so test code and any future bridge paths can catch it by
+  name without importing from inside a closure.
+  """
+
+
+class _OverlapError(_BridgeError):
+  """An AskUserQuestion was submitted while one was already pending.
+
+  The sync handler returns a JSON-RPC error so Codex fails the tool call
+  rather than continuing with empty answers (B2/B5 from round-5 review).
+  """
+
+
+# How long the sync bridge waits for the user to answer an AskUserQuestion.
+# 420 s is long enough for a deliberate slow answer while staying under
+# common reverse-proxy idle-timeout windows (~600 s for most setups) —
+# a 600 s fut.result sits at the proxy deadline and races a TCP reset,
+# leaving the Codex worker thread hung with no cleanup path.
+_BRIDGE_USER_ANSWER_TIMEOUT_SECS = 420.0
+
+
 async def _persist_session_id(db, chat_id: str, session_id: str | None) -> None:
   """Best-effort early persistence for provider resume continuity."""
   if db is None or not chat_id or not session_id:
@@ -410,17 +435,10 @@ def _install_request_user_input_handler(
   from app.pending_questions import PendingQuestion
   from uuid import uuid4
 
-  # Sentinel return values the sync handler interprets to surface the
-  # right error to Codex. Returning a literal `{}` would let Codex
-  # continue the turn with empty answers, which silently drops the
-  # interaction (B2/B5 from round-5 review). Instead we raise
-  # `_OverlapError` / `_TimeoutError` from `park_question`, catch them
-  # in `handler`, and translate to a JSON-RPC-shaped failure response.
-  class _BridgeError(Exception):
-    """Signals the sync handler to return an error response to Codex."""
-
-  class _OverlapError(_BridgeError):
-    pass
+  # _BridgeError / _OverlapError are module-level classes (see top of file).
+  # `park_question` raises them to signal the sync handler to return a
+  # JSON-RPC error to Codex rather than continuing with empty answers
+  # (B2/B5 from round-5 review).
 
   async def park_question(questions_payload: list[dict]) -> dict:
     """Asyncio side of the bridge — creates the future, publishes the
@@ -578,21 +596,22 @@ def _install_request_user_input_handler(
       return {"error": {"message": "Möbius bridge unavailable."}}
 
     try:
-      text_keyed = fut.result(timeout=600.0)  # 10 min cap on user
+      text_keyed = fut.result(timeout=_BRIDGE_USER_ANSWER_TIMEOUT_SECS)
     except _OverlapError as exc:
       log.warning(
         "Codex bridge: overlap rejected chat_id=%s: %s", chat_id, exc,
       )
       return {"error": {"message": str(exc)}}
     except TimeoutError:
-      # The user didn't answer in 10 minutes. Cancel the parked
-      # future so the runner-side coroutine can clean up, and return
-      # an error so Codex aborts the tool call instead of continuing
-      # with fabricated empty answers (B5).
+      # The user didn't answer within the timeout window. Cancel the parked
+      # future so the runner-side coroutine can clean up, and return an error
+      # so Codex aborts the tool call instead of continuing with fabricated
+      # empty answers (B5). The timeout is set below common proxy idle windows
+      # so this path fires before the proxy tears down the connection.
       fut.cancel()
       log.warning(
-        "Codex bridge: user did not answer within 10 minutes "
-        "chat_id=%s", chat_id,
+        "Codex bridge: user did not answer within %.0fs chat_id=%s",
+        _BRIDGE_USER_ANSWER_TIMEOUT_SECS, chat_id,
       )
       return {"error": {"message": "User did not answer in time."}}
     except (asyncio.CancelledError, _cf.CancelledError):
