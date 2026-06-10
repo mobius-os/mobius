@@ -13,6 +13,15 @@ from typing import Optional
 
 log = logging.getLogger("moebius.broadcast")
 
+# Hard cap on event_log entries. A long turn with rapid text-delta events
+# would otherwise grow the log without bound, consuming memory for the
+# process lifetime of that broadcast (30s TTL after completion). When the
+# cap is reached the OLDEST event is dropped so the tail (most recent
+# state) is preserved for reconnect catch-up. The cap is generous — a
+# typical turn produces far fewer events — and coalescing text-deltas below
+# keeps the effective count well under it.
+_EVENT_LOG_MAX = 10_000
+
 # Global registry of active broadcasts, keyed by chat_id.
 _broadcasts: dict[str, "ChatBroadcast"] = {}
 
@@ -72,8 +81,39 @@ class ChatBroadcast:
     self.completed_at: Optional[float] = None
 
   def publish(self, event: dict):
-    """Appends event to log and pushes to all subscriber queues."""
-    self.event_log.append(event)
+    """Appends event to log and pushes to all subscriber queues.
+
+    Coalesces adjacent text-delta events in the log to bound memory use
+    during long turns with many rapid deltas. The live push to subscribers
+    is always the raw event — coalescing is log-only so in-flight streaming
+    clients receive every delta verbatim. A reconnecting client replays the
+    coalesced log, which is semantically equivalent (same final text) with
+    fewer entries.
+
+    When the log reaches _EVENT_LOG_MAX the oldest entry is dropped to keep
+    the cap. The tail (most recent state) is always preserved.
+    """
+    # Coalesce: if the last log entry is also a text-delta for the same
+    # block index, merge the text rather than appending a new entry. This
+    # keeps the log size proportional to block count rather than character
+    # count.
+    event_type = event.get("type")
+    if (
+      event_type == "text_delta"
+      and self.event_log
+      and self.event_log[-1].get("type") == "text_delta"
+      and self.event_log[-1].get("index") == event.get("index")
+    ):
+      # Merge into the last entry in-place (the entry is already in the log;
+      # mutating it here is safe — subscribers got the original delta live and
+      # reconnect catch-up replays the coalesced form).
+      prev = self.event_log[-1]
+      self.event_log[-1] = dict(prev, text=(prev.get("text") or "") + (event.get("text") or ""))
+    else:
+      self.event_log.append(event)
+      # Drop the oldest entry when the cap is exceeded to bound memory.
+      if len(self.event_log) > _EVENT_LOG_MAX:
+        self.event_log.pop(0)
     for q in self.subscribers:
       try:
         q.put_nowait(event)
