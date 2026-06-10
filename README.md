@@ -95,9 +95,7 @@ You can reshape the platform the same way. "Make it warmer." "Restyle the whole 
 
 ## Apps that work together
 
-Möbius apps are not sealed boxes. They share a common storage layer and a permission model, so with your say-so one app can read another's data. That turns the app store into something closer to a personal data platform. Ask for a dashboard that pulls your **Workout** log and your habit tracker into one view, and the agent can build an app that reads across both. Apps adapt and grow together, recombining the data you already own into whatever shape is useful next.
-
-Read more in [Apps that work together](#apps-that-work-together).
+Möbius apps share a common storage layer and a permission model. With your say-so, one app can read another's data, so the app store works more like a personal data platform than a grid of separate apps. Ask for a dashboard that pulls your **Workout** log and your habit tracker into one view, and the agent can build an app that reads across both. Apps adapt and grow together, recombining the data you already own into whatever shape is useful next.
 
 ---
 
@@ -105,9 +103,9 @@ Read more in [Apps that work together](#apps-that-work-together).
 
 The usual way to get an app is to ask for one: describe it in chat and the agent writes the JSX, compiles it, and mounts it next to the conversation. But the contract is open, so you can also write one by hand or fork an existing one.
 
-An app is a public repo with a `mobius.json` manifest and an `index.jsx`. The component receives `{ appId, token }` and persists through `/api/storage/apps/{appId}/...`. The full contract — manifest fields, the storage layer, the shared component shapes the starter apps are built from — is documented in the seed skills the agent itself reads: [`backend/scripts/seed-skills/building-apps.md`](backend/scripts/seed-skills/building-apps.md) and [`backend/scripts/seed-skills/app-component-shapes.md`](backend/scripts/seed-skills/app-component-shapes.md). Every `mobius.json` field is catalogued in [`docs/mobius-json.md`](docs/mobius-json.md).
+An app is a public repo with a `mobius.json` manifest and an `index.jsx`. The component receives `{ appId, token }` and persists through `/api/storage/apps/{appId}/...`. The full contract (manifest fields, the storage layer, the shared component shapes the starter apps are built from) is documented in the seed skills the agent itself reads: [`backend/scripts/seed-skills/building-apps.md`](backend/scripts/seed-skills/building-apps.md) and [`backend/scripts/seed-skills/app-component-shapes.md`](backend/scripts/seed-skills/app-component-shapes.md). Every `mobius.json` field is catalogued in [`docs/mobius-json.md`](docs/mobius-json.md).
 
-The whole starter catalog under [github.com/mobius-os](https://github.com/mobius-os) is working code to read or fork — each `app-*` repo is one installable app. Install yours by pasting its repo URL; update it by pasting the same URL again.
+The whole starter catalog under [github.com/mobius-os](https://github.com/mobius-os) is working code to read or fork. Each `app-*` repo is one installable app. Install yours by pasting its repo URL; update it by pasting the same URL again.
 
 ---
 
@@ -117,7 +115,7 @@ Möbius does not just keep your chat history. It builds a lasting memory of ever
 
 And every night, while you sleep, it dreams. The **Dreaming** agent reviews the day and looks for ways to be more useful to you tomorrow. It tidies and reorganizes the Mind, anticipates what you are likely to need next, suggests new apps and features worth building, and audits your instance for improvements and weak spots. You wake up to an agent that is a little sharper and a little more yours than the day before.
 
-This nightly loop is not a gimmick. It is the self-improvement research below, productized. The same techniques we use to develop Möbius now run inside your own instance, on your behalf.
+The same self-improvement loop we use to develop Möbius runs inside your own instance every night, on your behalf.
 
 ---
 
@@ -129,15 +127,15 @@ Möbius the product improves through a self-improvement **harness** we run durin
 2. The worry that asking the model directly just yields sycophancy turned out to be too simple. Confrontational prompts get binary compliance or defiance; warm, curious framings get the model to push back on bad premises and cooperate on good ones.
 3. Once the loop works, the limit stops being the model and becomes the meta-goals you optimize for, which come from real users hitting real friction on real apps.
 
-All of it is backed by a run of controlled experiments, not anecdotes. The coaching and ensemble methods let two agents solve more together than either does alone, and those are the lessons the Dreaming agent above now runs on your behalf.
+These came out of running that loop on ourselves across many sessions. The coaching and ensemble methods we found let two agents solve more together than either does alone, and those are the lessons the Dreaming agent above now runs on your behalf.
 
 ---
 
 ## It's yours
 
-Möbius runs in a single Docker container you control. Your chats, apps, data, theme, and the agent's memory all live on your server. The whole instance is a git repo, so a bad change can be read back and undone, and every install behaves like the [Möbius strip](https://en.wikipedia.org/wiki/M%C3%B6bius_strip) it is named after. The agent builds the surface it runs on, then uses it to build the next thing, with no clean inside or outside.
+Möbius runs in a single Docker container you control. Your chats, apps, data, theme, and the agent's memory all live on your server. The whole instance is a git repo, so a bad change can be read back and undone, and every install behaves like the [Möbius strip](https://en.wikipedia.org/wiki/M%C3%B6bius_strip) it is named after. The agent builds the surface it runs on, then uses it to build the next thing.
 
-If the UI ever breaks, every instance ships with `/recover`. It resets the shell and leaves your chats, apps, and data untouched. Installs are atomic, so a failed one cannot half-land.
+If the UI ever breaks, every instance ships with `/recover`. It resets the shell and leaves your chats, apps, and data untouched. Installs are atomic, so a failed one won't half-land.
 
 ---
 
