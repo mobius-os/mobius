@@ -1221,6 +1221,13 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     } catch (err) {
       setSending(false)
       if (err.message === 'HTTP 410') {
+        // The pending question is stale — the backend process restarted and
+        // the in-memory future is gone. Backend reconcile_interrupted_chats
+        // already dropped the unanswered question block from the transcript
+        // and appended an interruption error block (see chat.py). Force-
+        // refetching shows the reconciled state: the card is gone (replaced
+        // by the error note) so the UI automatically presents the interrupted
+        // state without any further client-side changes.
         setLiveQuestionId(null)
         fetchMessages({ force: true })
         sendSilentInFlightRef.current = false
