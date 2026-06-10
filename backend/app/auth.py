@@ -80,6 +80,24 @@ def create_app_token(
   )
 
 
+def create_media_token(chat_id: str, owner_username: str, token_epoch: int) -> str:
+  """Creates a short-lived JWT scoped to media (uploads/generated) for one chat.
+
+  The token's `scope` is "media" and `media_chat` carries the chat_id so the
+  serve routes can verify the token is for the exact resource being requested.
+  TTL is 15 minutes — long enough for a page session to render all images,
+  short enough that a URL leaking into logs expires quickly.
+
+  Signed with the same SECRET_KEY as all other tokens; revocable via
+  token_epoch so a "sign out everywhere" invalidates outstanding media tokens.
+  """
+  return create_access_token(
+    {"sub": owner_username, "scope": "media", "media_chat": chat_id},
+    expires_delta=timedelta(minutes=15),
+    token_epoch=token_epoch,
+  )
+
+
 def decode_access_token(token: str) -> Optional[dict]:
   """Decodes a JWT and returns the payload, or None if invalid."""
   settings = get_settings()
