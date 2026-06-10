@@ -67,11 +67,22 @@ def test_recover_auth_rejects_expired(monkeypatch):
   assert recover_auth.decode_session_token(tok) is None
 
 
-def test_recover_auth_rejects_signed_with_different_key(monkeypatch):
-  """Key rotation invalidates old cookies (no in-memory cache)."""
+def test_recover_auth_survives_secret_key_rotation(monkeypatch, tmp_path):
+  """Rotating SECRET_KEY must NOT invalidate recovery cookies.
+
+  The recovery cookie is now keyed on /data/.recovery-secret, not
+  SECRET_KEY — so a SECRET_KEY drift (the documented JWT-invalidation
+  outage) leaves the recovery surface reachable.  This is the inverse
+  of the old behavior (which was the P0 bug we fixed).
+  """
+  monkeypatch.setattr(recover_auth, "_RECOVERY_SECRET_PATH", tmp_path / ".recovery-secret")
   tok = recover_auth.create_session_token("alice")
+  # Rotate SECRET_KEY — old behavior would have invalidated the cookie.
   monkeypatch.setenv("SECRET_KEY", "b" * 64)
-  assert recover_auth.decode_session_token(tok) is None
+  # Cookie must STILL be valid after SECRET_KEY rotation.
+  assert recover_auth.decode_session_token(tok) == "alice", (
+    "recovery cookie must survive SECRET_KEY rotation"
+  )
 
 
 def test_recover_auth_password_verify():
@@ -318,24 +329,41 @@ def test_recover_chat_page_escapes_role_field(
   assert "&lt;script&gt;alert(1)&lt;/script&gt;" in r.text
 
 
-def test_recover_auth_empty_secret_key():
-  """SECRET_KEY missing or empty: create_session_token raises (the
-  caller / route is responsible for surfacing this), decode returns
-  None (graceful degradation for inbound requests)."""
-  import os
-  saved = os.environ.get("SECRET_KEY")
-  os.environ["SECRET_KEY"] = ""
+def test_recover_auth_empty_secret_key_is_ok(tmp_path, monkeypatch):
+  """An empty SECRET_KEY must NOT break recovery auth.
+
+  Recovery cookies are now keyed on /data/.recovery-secret, NOT on
+  SECRET_KEY. An empty/missing SECRET_KEY is the documented JWT-
+  invalidation outage mode — that is EXACTLY when recovery matters
+  most, so recovery cookie creation and validation must still work.
+  """
+  monkeypatch.setattr(recover_auth, "_RECOVERY_SECRET_PATH", tmp_path / ".recovery-secret")
+  monkeypatch.setenv("SECRET_KEY", "")
+  # Must NOT raise, even with an empty SECRET_KEY.
+  tok = recover_auth.create_session_token("alice")
+  assert recover_auth.decode_session_token(tok) == "alice", (
+    "recovery cookies must work even when SECRET_KEY is empty"
+  )
+
+
+def test_recover_auth_unreadable_recovery_secret_degrades_gracefully(
+  tmp_path, monkeypatch,
+):
+  """If /data/.recovery-secret cannot be read OR created (permissions
+  failure — genuinely unusual), decode_session_token must return None
+  rather than raising, so the endpoint sees a 401 instead of a 500."""
+  import stat
+  secret_path = tmp_path / ".recovery-secret"
+  # Make the directory unwritable so generation fails.
+  tmp_path.chmod(stat.S_IRUSR | stat.S_IXUSR)  # r-x, no write
+  monkeypatch.setattr(recover_auth, "_RECOVERY_SECRET_PATH", secret_path)
   try:
-    import pytest
-    with pytest.raises(RuntimeError):
-      recover_auth.create_session_token("alice")
-    # decode is the inbound path — must NOT raise; returns None.
-    assert recover_auth.decode_session_token("any.token") is None
+    # decode must not raise — graceful degradation.
+    result = recover_auth.decode_session_token("any.token")
+    assert result is None
   finally:
-    if saved is None:
-      os.environ.pop("SECRET_KEY", None)
-    else:
-      os.environ["SECRET_KEY"] = saved
+    # Restore write permission so tmp_path cleanup works.
+    tmp_path.chmod(0o755)
 
 
 # ---------------------------------------------------------------------
@@ -2277,4 +2305,423 @@ def test_system_prompt_with_chat_id_still_emits_read_instruction():
   prompt = rcr._system_prompt("xyz789")
   assert "Read /data/recovery/chats/xyz789.jsonl" in prompt, (
     "the chat_id path must still tell the agent to read its log"
+  )
+
+
+# =====================================================================
+# P0 / P1 / P2 fixes — recovery subsystem hardening
+# =====================================================================
+
+# ---------------------------------------------------------------------
+# P0 — recovery HMAC key independence from SECRET_KEY
+#
+# A SECRET_KEY rotation (the documented outage mode) must NOT
+# invalidate recovery cookies. The recovery HMAC is keyed on
+# /data/.recovery-secret, not SECRET_KEY.
+# ---------------------------------------------------------------------
+
+class TestRecoverySecretIndependence:
+  """Recovery cookie validity must be decoupled from SECRET_KEY."""
+
+  def test_recovery_cookie_survives_secret_key_rotation(self, tmp_path, monkeypatch):
+    """Changing SECRET_KEY must NOT invalidate a recovery cookie.
+
+    This is the core P0 guarantee: when SECRET_KEY drifts (the
+    documented outage mode that invalidates all JWTs), the recovery
+    surface — the only way to get back in — must remain reachable.
+    """
+    # Point the recovery-secret path at a known temp file.
+    monkeypatch.setattr(recover_auth, "_RECOVERY_SECRET_PATH", tmp_path / ".recovery-secret")
+
+    # Create a cookie under the initial key.
+    tok = recover_auth.create_session_token("alice")
+    assert recover_auth.decode_session_token(tok) == "alice"
+
+    # Rotate SECRET_KEY (the JWT key — simulates the documented outage).
+    monkeypatch.setenv("SECRET_KEY", "z" * 64)
+
+    # The recovery cookie must still be valid — it uses the recovery
+    # secret, not SECRET_KEY.
+    assert recover_auth.decode_session_token(tok) == "alice", (
+      "recovery cookie became invalid after SECRET_KEY rotation — "
+      "the recovery surface is now unreachable during the very outage "
+      "it exists to fix"
+    )
+
+  def test_different_recovery_secret_invalidates_cookie(self, tmp_path, monkeypatch):
+    """Two instances with different recovery secrets must not accept
+    each other's cookies — the secret IS the identity boundary."""
+    secret_path = tmp_path / ".recovery-secret"
+    monkeypatch.setattr(recover_auth, "_RECOVERY_SECRET_PATH", secret_path)
+
+    tok = recover_auth.create_session_token("bob")
+
+    # Overwrite the recovery secret — simulates a factory reset
+    # followed by a fresh secret generation on next use.
+    secret_path.write_text("0" * 64, encoding="ascii")
+    secret_path.chmod(0o600)
+
+    assert recover_auth.decode_session_token(tok) is None, (
+      "old cookie must be invalid after the recovery secret changes"
+    )
+
+  def test_recovery_secret_generated_on_first_use(self, tmp_path, monkeypatch):
+    """_recovery_secret_bytes must create /data/.recovery-secret when
+    it doesn't exist, and the file must be mode 600."""
+    secret_path = tmp_path / ".recovery-secret"
+    assert not secret_path.exists()
+    monkeypatch.setattr(recover_auth, "_RECOVERY_SECRET_PATH", secret_path)
+
+    key = recover_auth._recovery_secret_bytes()
+    assert secret_path.exists()
+    assert len(key) >= 32, "generated key must be at least 32 bytes"
+    mode = oct(secret_path.stat().st_mode & 0o777)
+    assert mode == "0o600", f"recovery secret must be mode 600, got {mode}"
+
+  def test_recovery_secret_stable_across_calls(self, tmp_path, monkeypatch):
+    """_recovery_secret_bytes must return the same value on every call
+    (reads the file each time; does NOT regenerate if present)."""
+    secret_path = tmp_path / ".recovery-secret"
+    monkeypatch.setattr(recover_auth, "_RECOVERY_SECRET_PATH", secret_path)
+
+    k1 = recover_auth._recovery_secret_bytes()
+    k2 = recover_auth._recovery_secret_bytes()
+    assert k1 == k2
+
+  def test_secret_key_env_empty_with_recovery_secret_present(self, tmp_path, monkeypatch):
+    """When SECRET_KEY is empty but /data/.recovery-secret exists,
+    cookie creation and validation must still work (the recovery secret
+    is the only key that matters for recovery cookies)."""
+    secret_path = tmp_path / ".recovery-secret"
+    monkeypatch.setattr(recover_auth, "_RECOVERY_SECRET_PATH", secret_path)
+    # Ensure the secret file exists first.
+    recover_auth._recovery_secret_bytes()
+
+    # Now clear SECRET_KEY. create_session_token uses _recovery_secret_bytes
+    # (not SECRET_KEY), so it must succeed even if SECRET_KEY is empty.
+    monkeypatch.setenv("SECRET_KEY", "")
+    tok = recover_auth.create_session_token("carol")
+    # Decode must also work — it uses the same recovery secret.
+    assert recover_auth.decode_session_token(tok) == "carol"
+
+
+# ---------------------------------------------------------------------
+# P0 — backup zip completeness
+# ---------------------------------------------------------------------
+
+class TestBackupZipCompleteness:
+  """Backup must include all identity secrets and key material."""
+
+  def _make_data_dir(self, tmp_path):
+    """Builds a minimal /data layout for backup tests."""
+    data = tmp_path / "data"
+    # Database
+    (data / "db").mkdir(parents=True)
+    import sqlite3
+    conn = sqlite3.connect(str(data / "db" / "ultimate.db"))
+    conn.execute("CREATE TABLE test (x INTEGER)")
+    conn.commit()
+    conn.close()
+    # Identity secrets
+    (data / ".secret-key").write_text("sk-" + "x" * 60, encoding="ascii")
+    (data / ".secret-key").chmod(0o600)
+    (data / ".recovery-secret").write_text("rs-" + "y" * 60, encoding="ascii")
+    (data / ".recovery-secret").chmod(0o600)
+    (data / "service-token.txt").write_text("svc-token-placeholder", encoding="ascii")
+    (data / "service-token.txt").chmod(0o600)
+    # VAPID keys
+    (data / "push").mkdir()
+    (data / "push" / "vapid-private.pem").write_text("---BEGIN---", encoding="ascii")
+    (data / "push" / "vapid-public.pem").write_text("---BEGIN---", encoding="ascii")
+    # Recovery chat history
+    (data / "recovery" / "chats").mkdir(parents=True)
+    (data / "recovery" / "chats" / "abc123.jsonl").write_text(
+      '{"_meta":{"provider":"claude"}}\n', encoding="utf-8"
+    )
+    # App storage
+    (data / "apps" / "notes").mkdir(parents=True)
+    (data / "apps" / "notes" / "index.jsx").write_text("export default () => null;", encoding="utf-8")
+    # CLI auth
+    (data / "cli-auth" / "claude").mkdir(parents=True)
+    (data / "cli-auth" / "claude" / ".credentials.json").write_text("{}", encoding="utf-8")
+    return data
+
+  def _zip_names(self, data_dir):
+    """Calls _create_backup and returns the zip entry names by running
+    the async generator via asyncio.run."""
+    import asyncio
+    import io
+    import zipfile
+    from app.routes.recover import _create_backup
+
+    resp = _create_backup(data_dir)
+    # StreamingResponse wraps a BytesIO as an async iterable. Collect
+    # all chunks by running the generator under a fresh event loop.
+    async def _collect():
+      chunks = []
+      async for chunk in resp.body_iterator:
+        chunks.append(chunk if isinstance(chunk, bytes) else chunk.encode())
+      return b"".join(chunks)
+
+    raw = asyncio.run(_collect())
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+      return zf.namelist()
+
+  def test_backup_includes_secret_key(self, tmp_path, monkeypatch):
+    """The backup zip must contain .secret-key."""
+    data = self._make_data_dir(tmp_path)
+    names = self._zip_names(data)
+    assert ".secret-key" in names, (
+      "backup is missing .secret-key — restoring would invalidate all sessions"
+    )
+
+  def test_backup_includes_recovery_secret(self, tmp_path):
+    """The backup zip must contain .recovery-secret."""
+    data = self._make_data_dir(tmp_path)
+    names = self._zip_names(data)
+    assert ".recovery-secret" in names, (
+      "backup is missing .recovery-secret — restoring would break the recovery surface"
+    )
+
+  def test_backup_includes_service_token(self, tmp_path):
+    """The backup zip must contain service-token.txt."""
+    data = self._make_data_dir(tmp_path)
+    names = self._zip_names(data)
+    assert "service-token.txt" in names, (
+      "backup is missing service-token.txt — restoring would break scheduled tasks"
+    )
+
+  def test_backup_includes_vapid_keys(self, tmp_path):
+    """The backup zip must contain push/ (VAPID keys)."""
+    data = self._make_data_dir(tmp_path)
+    names = self._zip_names(data)
+    push_files = [n for n in names if n.startswith("push/")]
+    assert push_files, (
+      "backup is missing push/ (VAPID keys) — restoring would permanently "
+      "break Web Push for all subscribed devices"
+    )
+
+  def test_backup_includes_recovery_history(self, tmp_path):
+    """The backup zip must contain recovery/ (prior rescue chat history)."""
+    data = self._make_data_dir(tmp_path)
+    names = self._zip_names(data)
+    recovery_files = [n for n in names if n.startswith("recovery/")]
+    assert recovery_files, (
+      "backup is missing recovery/ — prior rescue chat history lost on restore"
+    )
+
+  def test_backup_skips_symlinks(self, tmp_path):
+    """Symlinks inside /data must not be followed or archived.
+    A symlink pointing outside /data could leak host files or produce
+    a zip with a confusing entry."""
+    data = self._make_data_dir(tmp_path)
+    # Plant a symlink inside apps/
+    link = data / "apps" / "notes" / "evil-link"
+    target = tmp_path / "outside-data.txt"
+    target.write_text("should not appear in backup", encoding="utf-8")
+    link.symlink_to(target)
+    names = self._zip_names(data)
+    assert "apps/notes/evil-link" not in names, (
+      "symlink was included in backup — could leak out-of-tree files"
+    )
+
+
+# ---------------------------------------------------------------------
+# P1 — factory reset produces a clean slate
+# ---------------------------------------------------------------------
+
+class TestFactoryResetCleanSlate:
+  """Factory reset must delete all identity secrets and prior-owner data."""
+
+  def _setup_data_dir(self, tmp_path):
+    """Creates a minimal populated /data layout."""
+    data = tmp_path / "data"
+    (data / "db").mkdir(parents=True)
+    import sqlite3
+    conn = sqlite3.connect(str(data / "db" / "ultimate.db"))
+    conn.execute("CREATE TABLE owner (id INTEGER, username TEXT, hashed_password TEXT)")
+    conn.execute("CREATE TABLE apps (id INTEGER)")
+    conn.execute("CREATE TABLE chats (id TEXT, messages TEXT, deleted_at TEXT)")
+    conn.execute("CREATE TABLE notifications (id INTEGER)")
+    conn.execute("CREATE TABLE push_subscriptions (id INTEGER)")
+    conn.execute(
+      "INSERT INTO owner VALUES (1, 'oldowner', '$2b$12$placeholder')"
+    )
+    conn.commit()
+    conn.close()
+    (data / ".secret-key").write_text("old-sk", encoding="ascii")
+    (data / ".recovery-secret").write_text("old-rs", encoding="ascii")
+    (data / "service-token.txt").write_text("old-svc", encoding="ascii")
+    (data / "recovery" / "chats").mkdir(parents=True)
+    (data / "recovery" / "chats" / "old.jsonl").write_text(
+      '{"role":"user","content":"prior owner private chat"}\n', encoding="utf-8"
+    )
+    # Standard subdirs
+    for d in ["compiled", "apps", "shared", "logs", "cli-auth", "chats",
+              "agent-browser-profiles"]:
+      (data / d).mkdir(parents=True, exist_ok=True)
+    return data
+
+  def test_factory_reset_removes_secret_key(self, tmp_path):
+    """After factory reset, .secret-key must be absent so the next
+    boot regenerates it (new identity)."""
+    from app.routes.recover import _action_factory_reset
+    data = self._setup_data_dir(tmp_path)
+    # We need a valid SQLite DB at the path recover.py reads from.
+    import os
+    monkeypatch_env = f"sqlite:////{data}/db/ultimate.db"
+    old = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = monkeypatch_env
+    # Patch the module-level constant used by the route
+    from app.routes import recover as recover_mod
+    orig_db = recover_mod.RECOVERY_DB_PATH
+    recover_mod.RECOVERY_DB_PATH = str(data / "db" / "ultimate.db")
+    try:
+      _action_factory_reset(data)
+    finally:
+      recover_mod.RECOVERY_DB_PATH = orig_db
+      if old is None:
+        os.environ.pop("DATABASE_URL", None)
+      else:
+        os.environ["DATABASE_URL"] = old
+
+    assert not (data / ".secret-key").exists(), (
+      ".secret-key must be deleted by factory reset so next boot generates a fresh one"
+    )
+
+  def test_factory_reset_removes_recovery_secret(self, tmp_path):
+    """After factory reset, .recovery-secret must be absent."""
+    from app.routes.recover import _action_factory_reset
+    data = self._setup_data_dir(tmp_path)
+    from app.routes import recover as recover_mod
+    orig_db = recover_mod.RECOVERY_DB_PATH
+    recover_mod.RECOVERY_DB_PATH = str(data / "db" / "ultimate.db")
+    try:
+      _action_factory_reset(data)
+    finally:
+      recover_mod.RECOVERY_DB_PATH = orig_db
+
+    assert not (data / ".recovery-secret").exists(), (
+      ".recovery-secret must be deleted by factory reset"
+    )
+
+  def test_factory_reset_removes_service_token(self, tmp_path):
+    """After factory reset, service-token.txt must be absent."""
+    from app.routes.recover import _action_factory_reset
+    data = self._setup_data_dir(tmp_path)
+    from app.routes import recover as recover_mod
+    orig_db = recover_mod.RECOVERY_DB_PATH
+    recover_mod.RECOVERY_DB_PATH = str(data / "db" / "ultimate.db")
+    try:
+      _action_factory_reset(data)
+    finally:
+      recover_mod.RECOVERY_DB_PATH = orig_db
+
+    assert not (data / "service-token.txt").exists(), (
+      "service-token.txt must be deleted by factory reset"
+    )
+
+  def test_factory_reset_removes_recovery_directory(self, tmp_path):
+    """After factory reset, the recovery/ directory must be absent.
+    It contains the prior owner's private rescue-chat history."""
+    from app.routes.recover import _action_factory_reset
+    data = self._setup_data_dir(tmp_path)
+    from app.routes import recover as recover_mod
+    orig_db = recover_mod.RECOVERY_DB_PATH
+    recover_mod.RECOVERY_DB_PATH = str(data / "db" / "ultimate.db")
+    try:
+      _action_factory_reset(data)
+    finally:
+      recover_mod.RECOVERY_DB_PATH = orig_db
+
+    assert not (data / "recovery").exists(), (
+      "recovery/ must be deleted by factory reset — it is the prior owner's private data"
+    )
+
+
+# ---------------------------------------------------------------------
+# P1 — debug status exposes reconciliation failure
+# ---------------------------------------------------------------------
+
+def test_debug_status_exposes_reconciliation_failure(client, auth_cookie, monkeypatch):
+  """When startup reconciliation fails, /api/debug/status must include
+  reconciliation_failed: true so operators and tests can see it.
+
+  The test simulates the failure by setting app.state.reconciliation_failed
+  directly (the same flag lifespan() sets on exception). The never-crash-
+  boot contract is preserved: the endpoint must still return 200.
+  """
+  from app.main import app
+  app.state.reconciliation_failed = True
+  try:
+    # /api/debug/status requires JWT auth; the auth_cookie fixture
+    # creates an owner and returns a recovery-cookie dict, but we need
+    # the API JWT. Use the existing `auth` fixture pattern instead.
+    from app.database import SessionLocal
+    from app import models, auth as auth_mod
+    import bcrypt
+
+    db = SessionLocal()
+    existing = db.query(models.Owner).filter(
+      models.Owner.username == "rec_test_owner"
+    ).first()
+    if not existing:
+      owner = models.Owner(
+        username="rec_test_owner",
+        hashed_password=bcrypt.hashpw(b"pw", bcrypt.gensalt()).decode(),
+        provider="claude",
+      )
+      db.add(owner)
+      db.commit()
+    db.close()
+
+    token = auth_mod.create_access_token({"sub": "rec_test_owner"})
+    headers = {"Authorization": f"Bearer {token}"}
+
+    r = client.get("/api/debug/status", headers=headers)
+    assert r.status_code == 200
+    body = r.json()
+    assert body.get("reconciliation_failed") is True, (
+      "/api/debug/status must expose reconciliation_failed=true when "
+      "startup reconciliation threw an exception"
+    )
+  finally:
+    # Clean up so this flag doesn't leak into other tests.
+    app.state.reconciliation_failed = False
+
+
+def test_debug_status_no_reconciliation_flag_when_ok(client, monkeypatch):
+  """When reconciliation succeeded (the normal case), the
+  reconciliation_failed field must be absent from the response."""
+  from app.main import app
+  # Ensure the flag is not set.
+  if hasattr(app.state, "reconciliation_failed"):
+    del app.state.reconciliation_failed
+
+  from app.database import SessionLocal
+  from app import models, auth as auth_mod
+  import bcrypt
+
+  db = SessionLocal()
+  existing = db.query(models.Owner).filter(
+    models.Owner.username == "rec_ok_owner"
+  ).first()
+  if not existing:
+    owner = models.Owner(
+      username="rec_ok_owner",
+      hashed_password=bcrypt.hashpw(b"pw", bcrypt.gensalt()).decode(),
+      provider="claude",
+    )
+    db.add(owner)
+    db.commit()
+  db.close()
+
+  token = auth_mod.create_access_token({"sub": "rec_ok_owner"})
+  headers = {"Authorization": f"Bearer {token}"}
+  r = client.get("/api/debug/status", headers=headers)
+  assert r.status_code == 200
+  body = r.json()
+  assert "reconciliation_failed" not in body, (
+    "reconciliation_failed must be absent from debug/status when "
+    "reconciliation succeeded"
   )

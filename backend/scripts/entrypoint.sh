@@ -296,6 +296,7 @@ push/*.json
 push/*.txt
 service-token.txt
 .secret-key
+.recovery-secret
 .pm-commit
 compiled/
 shell/dist/

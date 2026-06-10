@@ -102,6 +102,10 @@ async def lifespan(app):
       _rc_db.close()
   except Exception as exc:
     _log.error("startup chat reconciliation failed: %s", exc, exc_info=True)
+    # Expose the failure through /api/debug/status so operators and
+    # tests can detect it without tailing logs. The never-crash-boot
+    # contract is preserved: we only set a flag, never raise.
+    app.state.reconciliation_failed = True
   # Discard any `*.js.staging` bundle left by a crash between a recompile's
   # commit and its atomic promote (see compiler.recompile_app_bundle). A leaked
   # staging file is never served; reaping it just keeps the compiled dir clean.

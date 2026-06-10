@@ -901,6 +901,16 @@ async function handleSend(e) {{
       headers: {{'Content-Type': 'application/json'}},
       body: JSON.stringify({{chat_id: CHAT_ID, message: text}}),
     }});
+    if (r.status === 401) {{
+      // Recovery session expired — show a clear, actionable message
+      // with a link rather than a generic "send failed: 401" string.
+      asstMsg.role.textContent = 'error';
+      asstMsg.text.innerHTML =
+        'Your recovery session has expired. ' +
+        '<a href="/recover" style="color:#8b6cf7">Log in again at /recover</a>.';
+      sendBtn.disabled = false;
+      return false;
+    }}
     if (!r.ok) throw new Error('send failed: ' + r.status);
     const sendBody = await r.json();
     turnId = sendBody.turn_id;
@@ -935,6 +945,16 @@ async function handleSend(e) {{
         model: ovrModel,
       }}),
     }});
+    if (resp.status === 401) {{
+      // Session expired between /send and /stream — same actionable
+      // message as the /send 401 path above.
+      asstMsg.role.textContent = 'error';
+      asstMsg.text.innerHTML =
+        'Your recovery session has expired. ' +
+        '<a href="/recover" style="color:#8b6cf7">Log in again at /recover</a>.';
+      sendBtn.disabled = false;
+      return false;
+    }}
     if (!resp.ok || !resp.body) {{
       throw new Error('stream failed: ' + resp.status);
     }}
@@ -988,7 +1008,18 @@ async function handleRestart() {{
     // which several reviews flagged as poor UX.
     const start = Date.now();
     const tick = async () => {{
-      if (Date.now() - start > 30000) {{ location.reload(); return; }}
+      if (Date.now() - start > 30000) {{
+        // Health never came back within 30 s. If the container has no
+        // restart policy, the server will not come back on its own —
+        // a location.reload() into a dead server would just show a
+        // browser error page with no context. Tell the user what to do.
+        const sys = makeMsg('system');
+        sys.text.innerHTML =
+          'Server did not restart automatically. ' +
+          'If Möbius runs without a restart policy, restart the container manually, ' +
+          'then <a href="/recover/chat" style="color:#8b6cf7">reload this page</a>.';
+        return;
+      }}
       try {{
         const r = await fetch('/api/health', {{cache: 'no-store'}});
         if (r.ok) {{ location.reload(); return; }}

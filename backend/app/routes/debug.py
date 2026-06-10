@@ -9,7 +9,7 @@ ad-hoc debug endpoints.
 import os
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 
 from app import models
 from app.broadcast import get_broadcast, get_all_active_broadcasts
@@ -22,6 +22,7 @@ router = APIRouter(prefix="/api/debug", tags=["debug"])
 
 @router.get("/status")
 def debug_status(
+  request: Request,
   _owner: models.Owner = Depends(get_current_owner),
 ):
   """Returns active agent runtimes, broadcasts, and starting state.
@@ -30,6 +31,12 @@ def debug_status(
   runtimes (Claude via claude-agent-sdk, Codex via openai-codex).
   Completion monitors should treat a chat as "running" if it appears
   in `active_sdk_clients`, `active_sdk_sessions`, or `starting`.
+
+  `reconciliation_failed` is True when the startup chat reconciliation
+  step threw an exception. A failed reconciliation means interrupted
+  chats may still show as "running" in the UI after a crash — the
+  operator should investigate and restart. The field is absent (or
+  False) when reconciliation succeeded.
   """
   sdk_clients = [
     {"chat_id": handle.chat_id}
@@ -49,12 +56,20 @@ def debug_status(
       "subscriber_count": len(bc.subscribers),
     })
 
-  return {
+  # app.state.reconciliation_failed is set by lifespan() when the
+  # startup reconciliation throws. Absent (getattr default False)
+  # when reconciliation succeeded so the field is stable to check.
+  reconciliation_failed = getattr(request.app.state, "reconciliation_failed", False)
+
+  result = {
     "active_sdk_clients": sdk_clients,
     "active_sdk_sessions": sdk_sessions,
     "starting": list(registry.starting_chat_ids()),
     "broadcasts": broadcasts,
   }
+  if reconciliation_failed:
+    result["reconciliation_failed"] = True
+  return result
 
 
 @router.get("/logs")
