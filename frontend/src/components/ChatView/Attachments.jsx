@@ -16,7 +16,7 @@ export default function Attachments({ attachments, chatId }) {
           {images.map((img, i) => (
             <AttachImage
               key={i}
-              src={`${BASE}/api/chats/${chatId}/uploads/${img.name}?token=${token}`}
+              src={`${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(img.name)}?token=${token}`}
               alt={img.name}
             />
           ))}
@@ -26,7 +26,7 @@ export default function Attachments({ attachments, chatId }) {
         <a
           key={i}
           className="chat__attach-file"
-          href={`${BASE}/api/chats/${chatId}/uploads/${f.name}?token=${token}`}
+          href={`${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(f.name)}?token=${token}`}
           target="_blank"
           rel="noopener noreferrer"
         >

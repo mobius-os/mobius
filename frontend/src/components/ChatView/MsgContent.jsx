@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ToolBlock from './ToolBlock.jsx'
 import QuestionCard from './QuestionCard.jsx'
@@ -11,12 +12,36 @@ function stripAugmentation(text) {
   return cleaned.trim()
 }
 
-export default function MsgContent({
+// Answerability is purely a function of the block + its position + live hint.
+// Computing it here (rather than passing an arrow from ChatView's render loop)
+// lets React.memo skip re-renders for non-last messages on every streaming
+// tick — the only message that changes during streaming is the streaming <li>
+// itself, not the static history above it.
+function blockAnswerable(block, { msg, isLastMsg, liveQuestionId, onQuestionAnswer }) {
+  return !!(
+    onQuestionAnswer
+    && msg.role === 'assistant'
+    && block?.type === 'question'
+    && isLastMsg
+    && !block.answers
+    && (!liveQuestionId || block.question_id === liveQuestionId)
+  )
+}
+
+function MsgContentInner({
   msg,
   chatId,
   onQuestionAnswer,
-  isQuestionAnswerable,
+  // isLastMsg + liveQuestionId replace the old inline isQuestionAnswerable
+  // arrow so memo can do a stable shallow comparison instead of seeing a
+  // fresh function reference every render.
+  isLastMsg,
+  liveQuestionId,
 }) {
+  // Build a stable per-render answerable predicate that closes over the
+  // scalar props (no function prop needed from ChatView).
+  const isQuestionAnswerable = (block) =>
+    blockAnswerable(block, { msg, isLastMsg, liveQuestionId, onQuestionAnswer })
   if (msg.kind === 'compaction') {
     return (
       <div className="chat__tools">
@@ -117,3 +142,21 @@ export default function MsgContent({
     </>
   )
 }
+
+// Memoize by shallow prop comparison. The comparison below skips re-renders
+// when neither the message content nor the answerability scalars changed.
+// During streaming, only the last <li>'s props change; the history above is
+// stable and skips entirely.
+//
+// isLastMsg is intentionally compared as a scalar so that the last-message
+// becoming non-last (when a new message arrives) triggers a re-render to
+// mark the previous question card as no-longer-answerable.
+export default memo(MsgContentInner, (prev, next) => {
+  return (
+    prev.msg === next.msg
+    && prev.chatId === next.chatId
+    && prev.onQuestionAnswer === next.onQuestionAnswer
+    && prev.isLastMsg === next.isLastMsg
+    && prev.liveQuestionId === next.liveQuestionId
+  )
+})

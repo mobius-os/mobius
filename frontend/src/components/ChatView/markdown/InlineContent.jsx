@@ -142,11 +142,32 @@ function ExpandableImage({ href, alt }) {
   )
 }
 
+// KaTeX produces MathML + SVG markup — DOMPurify supports both namespaces
+// out of the box via ADD_TAGS / FORCE_BODY.  The config below is the
+// minimal allow-list that lets KaTeX output survive without stripping its
+// namespaced elements while blocking all non-math HTML injection paths.
+const KATEX_PURIFY_CONFIG = {
+  ADD_TAGS: ['math', 'mrow', 'mn', 'mo', 'mi', 'mspace', 'msup', 'msub',
+             'msubsup', 'mfrac', 'msqrt', 'mroot', 'mtext', 'mstyle',
+             'mover', 'munder', 'munderover', 'mtable', 'mtr', 'mtd',
+             'menclose', 'mpadded', 'mphantom', 'semantics', 'annotation',
+             'annotation-xml'],
+  ADD_ATTR: ['xmlns', 'display', 'encoding', 'columnalign', 'mathvariant',
+             'mathsize', 'stretchy', 'symmetric', 'lspace', 'rspace',
+             'rowalign', 'columnspacing', 'rowspacing', 'width', 'height',
+             'depth', 'voffset'],
+  FORCE_BODY: true,
+}
+
+function sanitizeKatex(html) {
+  return DOMPurify.sanitize(html, KATEX_PURIFY_CONFIG)
+}
+
 function BlockMathDiv({ tex }) {
   // Synchronous render — no useEffect, no reflow.
   const html = renderMathToString(tex, true)
   if (html) {
-    return <div className="md-math-block" dangerouslySetInnerHTML={{ __html: html }} />
+    return <div className="md-math-block" dangerouslySetInnerHTML={{ __html: sanitizeKatex(html) }} />
   }
   return <div className="md-math-block">{tex}</div>
 }
@@ -154,7 +175,7 @@ function BlockMathDiv({ tex }) {
 function InlineMathSpan({ tex }) {
   const html = renderMathToString(tex, false)
   if (html) {
-    return <span className="md-math-inline" dangerouslySetInnerHTML={{ __html: html }} />
+    return <span className="md-math-inline" dangerouslySetInnerHTML={{ __html: sanitizeKatex(html) }} />
   }
   return <span className="md-math-inline">{tex}</span>
 }
