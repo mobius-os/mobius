@@ -230,6 +230,56 @@ Use a small structured object: `app`, `kind`, `created_at`, `signal`, `text`, an
 
 ---
 
+## App analytics — emit signals for Dreaming
+
+`window.mobius.signal(name, payload?)` is the lightweight analytics hook every app should use. It feeds Dreaming's nightly digest so the agent knows which apps the partner actually used, what errors hit, and where to focus improvement work. Calling it costs nothing at runtime: fire-and-forget, never throws, buffers in memory and flushes at most once per 5 seconds to `signals.jsonl` in the app's own storage.
+
+**Every app must emit at minimum:**
+
+```jsx
+// When the component mounts and data has loaded — lets Dreaming count real opens
+// (distinct from the platform's own app_open event, which fires on iframe load)
+window.mobius.signal('app_ready', { item_count: items.length })
+
+// When the user creates a record
+window.mobius.signal('item_created', { type: 'note' })   // type = your domain noun
+
+// When the user deletes a record
+window.mobius.signal('item_deleted')
+
+// In error boundaries and catch blocks — the message field is what Dreaming reads
+window.mobius.signal('error', { message: err.message, source: 'save' })
+```
+
+**Cron-driven apps** replace `item_created`/`item_deleted` with one signal per run:
+
+```jsx
+window.mobius.signal('cron_summary', { status: 'ok', items_fetched: 12 })
+// or on failure:
+window.mobius.signal('cron_summary', { status: 'error', message: err.message })
+```
+
+**Payload rules** (enforced by the runtime — violations are dropped silently, not thrown):
+- `name`: short kebab-case string (`'app_ready'`, `'item_created'`, `'error'`).
+- `payload`: flat object with primitive values only (string, number, boolean). Nested objects and arrays are dropped. No PII.
+
+**No setup required.** `window.mobius.signal` is always available after `init()` — you don't need a token, a storage call, or any initialization. Just call it.
+
+```jsx
+// Minimal app_ready example — add to your top-level useEffect after loading data
+useEffect(() => {
+  window.mobius.storage.subscribe('items.json', (v) => {
+    const items = v || []
+    setItems(items)
+    window.mobius.signal('app_ready', { item_count: items.length })
+  })
+}, [])
+```
+
+Signals land in `signals.jsonl` in the app's own storage path, readable by Dreaming via the storage API. Dreaming's nightly `per-app-digest.json` counts signal names within 24h and surfaces the last 5 error messages — it does not read the raw file. The raw file is only read for the digest build; nothing else touches it.
+
+---
+
 ## No native dialogs
 
 The sandbox excludes `allow-modals`, so native `window.confirm/alert/prompt` silently no-op — `confirm` returns `false`, `prompt` returns `null`. A delete-confirm that always returns false looks like a broken feature. Build in-app modal components for confirmations and inputs (see the app-store `ConfirmModal` pattern), themed with the CSS variables below.

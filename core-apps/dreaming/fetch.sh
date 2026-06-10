@@ -276,10 +276,146 @@ if [[ -n "$PREV" ]]; then
     >"$INPUTS/prev-report.html" 2>>"$LOG" || true
 fi
 
+# per-app-digest.json — compact per-app analytics summary the Dreaming
+# agent uses to triage which apps need attention tonight. Produced from
+# two sources:
+#   - activity.jsonl ON DISK (already staged above) for opens_24h counts
+#   - each app's signals.jsonl read via the storage API for signal counts,
+#     last-5-error messages, and the has_signals flag
+# ~2–3 KB for 12 apps vs 10–100 KB of raw log; gives the agent a
+# digest-first orientation so it doesn't burn turns re-reading raw events.
+# Graceful on API errors: a failed app-read records has_signals:false and
+# an error note rather than aborting the whole step.
+APP_ID_FOR_DIGEST="$APP_ID" python3 - "$API_BASE_URL" "$SERVICE_TOKEN" "$INPUTS" \
+  >"$INPUTS/per-app-digest.json" 2>>"$LOG" <<'PY' || true
+import json, os, sys, urllib.request, urllib.error, datetime
+
+base    = sys.argv[1].rstrip("/")
+token   = sys.argv[2]
+inp_dir = sys.argv[3]
+headers = {"Authorization": "Bearer " + token}
+now_utc = datetime.datetime.now(datetime.timezone.utc)
+cutoff  = now_utc - datetime.timedelta(hours=24)
+
+# --- helpers ---
+
+def api_get(path, timeout=20):
+    req = urllib.request.Request(base + path, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+def storage_get_text(app_id, path, timeout=15):
+    """Fetch a text file from an app's storage; return None on 404/error."""
+    url = f"{base}/api/storage/apps/{app_id}/{path}"
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise
+    except Exception:
+        return None
+
+# --- opens_24h: count app_open events in the already-staged activity.jsonl ---
+activity_path = os.path.join(inp_dir, "activity.jsonl")
+opens_by_app = {}   # app_id (str) -> count
+if os.path.exists(activity_path):
+    with open(activity_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if ev.get("ev") != "app_open":
+                continue
+            aid = str(ev.get("app_id", ""))
+            if aid:
+                opens_by_app[aid] = opens_by_app.get(aid, 0) + 1
+
+# --- fetch app list ---
+try:
+    apps = api_get("/api/apps/")
+    if isinstance(apps, dict):
+        apps = apps.get("apps", [])
+except Exception as e:
+    # API unavailable — write an empty digest so the agent knows it failed
+    print(json.dumps({"_error": str(e), "apps": []}))
+    sys.exit(0)
+
+digests = []
+for app in apps:
+    app_id  = str(app.get("id", ""))
+    slug    = app.get("name") or app.get("slug") or app_id
+    name    = app.get("display_name") or slug
+    if not app_id:
+        continue
+
+    opens_24h = opens_by_app.get(app_id, 0)
+
+    # Parse signals.jsonl for this app from the storage API.
+    signal_counts = {}
+    last_5_errors = []
+    has_signals   = False
+    signals_error = None
+    try:
+        raw = storage_get_text(app_id, "signals.jsonl")
+        if raw:
+            has_signals = True
+            for line in raw.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    sig = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                # Count by name, limited to the last 24h
+                ts_str = sig.get("ts", "")
+                try:
+                    ts = datetime.datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    # Make tz-aware for comparison
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=datetime.timezone.utc)
+                    if ts < cutoff:
+                        continue
+                except (ValueError, TypeError):
+                    continue
+                sname = sig.get("name", "")
+                if sname:
+                    signal_counts[sname] = signal_counts.get(sname, 0) + 1
+                # Collect last-5 error messages (newest last in file → reverse later)
+                if sname == "error":
+                    msg = sig.get("message") or sig.get("msg") or ""
+                    if msg:
+                        last_5_errors.append(str(msg)[:200])
+    except Exception as e:
+        signals_error = str(e)[:200]
+
+    entry = {
+        "app_id":      app_id,
+        "slug":        slug,
+        "name":        name,
+        "opens_24h":   opens_24h,
+        "has_signals": has_signals,
+        "signal_counts": signal_counts,
+        "last_5_errors": last_5_errors[-5:],
+    }
+    if signals_error:
+        entry["signals_read_error"] = signals_error
+    digests.append(entry)
+
+print(json.dumps({"generated_at": now_utc.isoformat(), "apps": digests}, indent=2))
+PY
+
 # Record the app id where the runner's goal message and the agent can
 # find it (the agent writes reports to apps/<app_id>/reports/).
 printf '%s\n' "$APP_ID" >"$INPUTS/app_id"
-log "gathered inputs (activity, chats, app-feedback, prev-report) into $INPUTS/"
+log "gathered inputs (activity, chats, app-feedback, prev-report, per-app-digest) into $INPUTS/"
 
 # --- heartbeat: prove liveness while the long run is in flight --------
 # A background loop touches the heartbeat file every 60s. A monitor (or a

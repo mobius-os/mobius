@@ -265,10 +265,10 @@ def build_goal(settings: dict) -> str:
   """Builds the first user message — the 'dreaming goal' that kicks off the loop.
 
   The skill (system prompt) holds the full procedure; this message is
-  just the GO signal plus the run-specific context pointers the agent
-  needs to start: today's date, where the wrapper staged its inputs,
-  and the apps they excluded. Keep it
-  short — the skill is the contract, the goal is the trigger.
+  the GO signal plus the run-specific context pointers the agent needs:
+  today's date, where the wrapper staged its inputs (including the new
+  per-app-digest.json), and which apps to skip. Keep it short — the
+  skill is the contract, the goal is the trigger.
   """
   from datetime import date
   today = date.today().isoformat()
@@ -277,25 +277,24 @@ def build_goal(settings: dict) -> str:
   lines = [
     f"It is the night of {today}. Begin tonight's Dreaming run.",
     "",
-    "Follow your skill (your system prompt) end-to-end: interview every "
-    "agent that worked in the last 24h, improve the skills from what you "
-    "learn, consolidate the Mind graph, fix and harden the apps, do any "
-    "predictable research, then write the brief and open the morning chat.",
+    f"Staged context is under {inputs_dir}/ — start here:",
+    f"  - per-app-digest.json   compact analytics digest (opens_24h, signal counts,",
+    f"                          last errors) — read this FIRST to orient phase 4",
+    f"  - activity.jsonl        last 24h of raw platform events",
+    f"  - chats.md              recent chats list (fork + interview these)",
+    f"  - prev-report.html      yesterday's brief (don't repeat yourself)",
     "",
-    f"The wrapper has staged this run's context under {inputs_dir}/ — "
-    "read it first (activity.jsonl for the last 24h of platform events, "
-    "chats.md for the recent chats list, prev-report.html for yesterday's "
-    "brief so you don't repeat yourself).",
+    "Follow your skill (your system prompt) for the full procedure. "
+    "The brief is the deliverable — at turn 40 cut any unfinished phase "
+    "and jump to phase 6 so the partner always wakes to something.",
     "",
     f"Your working directory is {DATA_DIR}. You have a real token "
-    "($AGENT_TOKEN / $SERVICE_TOKEN) and full tools — no sandbox. Commit "
-    "as you go with pm-commit. Time-box: if you run long, finish the "
-    "current chunk, then jump to writing the brief and opening the "
-    "morning chat so the partner always wakes to something.",
+    "($AGENT_TOKEN / $SERVICE_TOKEN) and full tools — no sandbox. "
+    "Commit as you go with pm-commit.",
   ]
   if exclude:
     lines.append(
-      f"The owner asked you to SKIP these apps tonight: {', '.join(map(str, exclude))}."
+      f"\nThe owner asked you to SKIP these apps tonight: {', '.join(map(str, exclude))}."
     )
   return "\n".join(lines)
 
