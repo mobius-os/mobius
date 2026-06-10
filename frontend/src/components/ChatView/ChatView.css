@@ -408,7 +408,7 @@
 
 .chat__tool {
   border-radius: 10px;
-  font-size: 11px;
+  font-size: 12px; /* floor raised from 11px for readability */
   font-family: var(--mono); /* CONTRACT: monospace font stack for tool-call output */
   overflow: hidden;
 }
@@ -441,13 +441,13 @@
 }
 
 .chat__tool--done .chat__tool-name { color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */ }
-.chat__tool-toggle { color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */ font-size: 10px; flex-shrink: 0; }
+.chat__tool-toggle { color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */ font-size: 12px; /* floor raised from 10px */ flex-shrink: 0; }
 
 .chat__tool-chip {
   flex-shrink: 0;
   padding: 1px 6px;
   border-radius: 9px;
-  font-size: 9.5px;
+  font-size: 12px; /* floor raised from 9.5px */
   font-family: var(--mono); /* CONTRACT: monospace font stack, matches tool output */
   color: var(--accent); /* CONTRACT: vivid accent text — marks the skill load */
   background: color-mix(in srgb, var(--accent) 12%, transparent); /* CONTRACT: faint accent tint on the opaque tool fill */
@@ -457,7 +457,7 @@
 
 .chat__tool-detail {
   padding: 0 10px 8px;
-  font-size: 10.5px;
+  font-size: 12px; /* floor raised from 10.5px */
   color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
   white-space: pre-wrap;
   word-break: break-all;
@@ -1308,4 +1308,42 @@
 .queued__cancel:hover {
   background: var(--bg); /* CONTRACT: opaque app-wide fill — must hide content beneath */
   color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
+}
+
+/* ── Screen-reader-only utility ─────────────────────────────────────────── */
+/* Visually hidden but fully accessible to AT. Standard clip-path technique. */
+.chat__sr-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Hit-area expansion for small × buttons ─────────────────────────────── */
+/* The inset-expansion ::after pattern from Drawer.css: the visual button
+   stays small but the tap target grows to ≥40px without affecting layout.
+   queued__cancel needs position: relative added (it has no positioning yet).
+   chat__attach-card-remove is already position: absolute — its ::after
+   simply expands the hit area in place. */
+.queued__cancel {
+  position: relative;
+}
+
+.queued__cancel::after {
+  content: '';
+  position: absolute;
+  /* queued__cancel is 28×28; expand to 40px on each axis */
+  inset: -6px;
+}
+
+.chat__attach-card-remove::after {
+  content: '';
+  position: absolute;
+  /* chat__attach-card-remove is 20×20; expand to 40px on each axis */
+  inset: -10px;
 }

@@ -52,3 +52,11 @@
 .lightbox-btn:hover {
   background: rgba(255, 255, 255, 0.25);
 }
+
+/* Brief "!" shown in place of the download icon when the fetch fails. */
+.lightbox-dl-err {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
+  color: #ff6b6b;
+}

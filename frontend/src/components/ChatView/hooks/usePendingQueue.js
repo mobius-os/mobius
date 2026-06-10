@@ -137,7 +137,9 @@ export default function usePendingQueue() {
     }
     const promoted = {
       ...first,
-      content: promotedGroup.map(m => m.content || '').filter(Boolean).join('\n'),
+      // Double-newline matches handleStop's join so promoted multi-message
+      // blocks render as separate paragraphs in the markdown renderer.
+      content: promotedGroup.map(m => m.content || '').filter(Boolean).join('\n\n'),
       ts: first.ts,
     }
     if (attachments.length > 0) promoted.attachments = attachments
@@ -173,7 +175,8 @@ export default function usePendingQueue() {
     }
     const promoted = {
       ...first,
-      content: promotedGroup.map(m => m.content || '').filter(Boolean).join('\n'),
+      // Double-newline matches handleStop's join and promoteAll above.
+      content: promotedGroup.map(m => m.content || '').filter(Boolean).join('\n\n'),
       ts: first.ts,
     }
     if (attachments.length > 0) promoted.attachments = attachments

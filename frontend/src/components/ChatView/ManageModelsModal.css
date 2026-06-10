@@ -221,6 +221,31 @@
   color: var(--danger);
 }
 
+/* Inline discard-confirm — replaces window.confirm which iOS PWA suppresses.
+   Mirrors the pendingSwitch confirm in ChatSettingsPanel. */
+.mmm__confirm {
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--border));
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mmm__confirm-copy {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.mmm__confirm-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .mmm__foot {
   display: flex;
   align-items: center;

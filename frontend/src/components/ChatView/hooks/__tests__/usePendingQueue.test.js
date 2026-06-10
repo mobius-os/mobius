@@ -74,7 +74,8 @@ test('promoteAll collapses the matching entry and everything after it', () => {
   const got = result.current.promoteAll(2)
   assert.equal(got.cid, 'b')
   assert.equal(got.ts, 2)
-  assert.equal(got.content, 'second\nthird')
+  // Double-newline join matches handleStop and renders as separate paragraphs.
+  assert.equal(got.content, 'second\n\nthird')
   assert.deepEqual(
     result.current.pendingMessagesRef.current.map(m => m.cid),
     ['a'],
@@ -87,7 +88,7 @@ test('promoteAll only consumes the queue present at promotion time', () => {
   result.current.add(fixtureMsg({ cid: 'b', ts: 2, content: 'second' }))
   const got = result.current.promoteAll(1)
   result.current.add(fixtureMsg({ cid: 'c', ts: 3, content: 'third' }))
-  assert.equal(got.content, 'first\nsecond')
+  assert.equal(got.content, 'first\n\nsecond')
   assert.deepEqual(
     result.current.pendingMessagesRef.current.map(m => m.cid),
     ['c'],
@@ -100,7 +101,8 @@ test('promoteManyByTs preserves later entries not consumed by the backend', () =
   result.current.add(fixtureMsg({ cid: 'b', ts: 2, content: 'second' }))
   result.current.add(fixtureMsg({ cid: 'c', ts: 3, content: 'third' }))
   const got = result.current.promoteManyByTs([1, 2])
-  assert.equal(got.content, 'first\nsecond')
+  // Double-newline join matches handleStop and promoteAll.
+  assert.equal(got.content, 'first\n\nsecond')
   assert.deepEqual(
     result.current.pendingMessagesRef.current.map(m => m.cid),
     ['c'],
