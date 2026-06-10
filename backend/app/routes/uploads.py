@@ -18,11 +18,32 @@ from app.database import get_db
 from app.deps import get_current_owner, reject_cross_site, resolve_owner_only
 from app.path_utils import validate_path_within_base
 from app.resource_access import get_active_chat_or_404
-from app.storage_io import atomic_write
+from app.storage_io import atomic_write, app_dir_usage
+
+# Chat IDs are UUID4 strings (str(uuid.uuid4()), 36 chars with dashes).
+# Validating the format before constructing any filesystem path prevents
+# a crafted chat_id from escaping the /data/chats/ subtree.
+_CHAT_ID_RE = re.compile(
+  r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+  re.IGNORECASE,
+)
+
+
+def _validate_chat_id(chat_id: str) -> None:
+  """Raises 400 if chat_id doesn't look like a UUID4."""
+  if not _CHAT_ID_RE.match(chat_id):
+    raise HTTPException(status_code=400, detail="Invalid chat id.")
 
 router = APIRouter(prefix="/api/chats", tags=["uploads"])
 
 _MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "20")) * 1024 * 1024
+
+# Per-chat directory total caps. Enforced before each write so a chat
+# that accumulates many uploads can't fill /data and OOM the host.
+# 200 MB is generous for attachment use (10 × 20 MB max files) while
+# still bounding blast radius. Mirror the storage_io.py approach:
+# measure once per request, then gate the write.
+_MAX_CHAT_UPLOADS_BYTES = 200 * 1024 * 1024  # 200 MB per chat uploads dir
 
 # Images are served inline; everything else is forced to download so the
 # browser never executes uploaded content (harmless for a single-owner app,
@@ -81,6 +102,7 @@ async def upload_files(
   db: Session = Depends(get_db),
 ):
   """Saves uploaded files to /data/chats/{id}/uploads/ and records metadata."""
+  _validate_chat_id(chat_id)
   chat = get_active_chat_or_404(db, chat_id)
 
   settings = get_settings()
@@ -112,6 +134,18 @@ async def upload_files(
           )
         chunks.append(chunk)
       content = b"".join(chunks)
+      # Enforce the per-chat directory total before writing, so a chat
+      # can't accumulate unbounded uploads and fill the host disk.
+      dir_used = app_dir_usage(upload_dir)
+      if dir_used + len(content) > _MAX_CHAT_UPLOADS_BYTES:
+        raise HTTPException(
+          status_code=413,
+          detail=(
+            f"This chat's uploads directory is full "
+            f"({_MAX_CHAT_UPLOADS_BYTES // (1024 * 1024)} MB limit per chat). "
+            f"Delete some existing uploads to free space."
+          ),
+        )
       name = _unique_name(upload_dir, _safe_filename(file.filename or "upload"))
       dest = upload_dir / name
       atomic_write(dest, content)
@@ -152,6 +186,7 @@ def list_uploads(
   gated chat-log capability that would grant scoped app access here
   is not built yet.
   """
+  _validate_chat_id(chat_id)
   chat = get_active_chat_or_404(db, chat_id)
   return chat.uploads or []
 
@@ -168,6 +203,7 @@ def delete_upload(
   db: Session = Depends(get_db),
 ):
   """Removes an uploaded file from disk and from the chat's upload list."""
+  _validate_chat_id(chat_id)
   chat = get_active_chat_or_404(db, chat_id)
 
   settings = get_settings()
@@ -200,6 +236,7 @@ def serve_upload(
   tokens (an app token must not read partner attachments) and enforces
   token revocation (a signed-out token is rejected here too).
   """
+  _validate_chat_id(chat_id)
   resolve_owner_only(raw_token, db)
 
   settings = get_settings()

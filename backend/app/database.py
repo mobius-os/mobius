@@ -35,14 +35,19 @@ def _make_engine():
     # - busy_timeout waits up to N ms for a lock instead of
     #   immediately raising "database is locked" when two
     #   coroutines try to commit in the same window.
-    # - synchronous=NORMAL keeps durability for the WAL but skips
-    #   the per-commit fsync that FULL does; safe for chat data.
+    # - synchronous=FULL fsyncs the WAL on every commit so an
+    #   OOM kill (which this host suffers periodically) or a
+    #   power loss can't leave the last N commits in the kernel
+    #   page cache but not on disk. NORMAL skips that fsync and
+    #   risks losing the last committed transaction on an abrupt
+    #   kill; FULL adds ~1 fsync per write transaction, acceptable
+    #   given write frequency on this platform.
     @event.listens_for(eng, "connect")
     def _set_sqlite_pragmas(dbapi_conn, _record):
       cur = dbapi_conn.cursor()
       cur.execute("PRAGMA journal_mode=WAL")
       cur.execute("PRAGMA busy_timeout=5000")
-      cur.execute("PRAGMA synchronous=NORMAL")
+      cur.execute("PRAGMA synchronous=FULL")
       cur.close()
   return eng
 
@@ -170,7 +175,24 @@ def run_migrations(eng) -> None:
   # Backfill: runs whenever any row has a NULL slug. Idempotent —
   # already-populated rows are filtered out by the WHERE clause and
   # their slugs are read into `taken` so we don't collide with them.
-  from app.routes.apps import _slugify_for_source_dir
+  #
+  # _slugify_for_source_dir is intentionally inlined here rather than
+  # imported from app.routes.apps.  routes/apps.py is on the agent's
+  # write surface (chmod 664) — importing it into the migration path
+  # would mean a broken or agent-edited apps.py prevents the DB from
+  # booting.  The implementation is frozen to this copy; if the slug
+  # algorithm ever changes in apps.py, update both together.
+  def _slugify_for_source_dir(name: str) -> str:
+    slug = "".join(
+      ch if ch.isalnum() else "-" for ch in (name or "").lower()
+    ).strip("-")
+    while "--" in slug:
+      slug = slug.replace("--", "-")
+    slug = slug or "app"
+    if slug.isdigit():
+      slug = f"app-{slug}"
+    return slug
+
   with eng.connect() as conn:
     null_rows = conn.execute(
       text("SELECT id, name FROM apps WHERE slug IS NULL ORDER BY id")
