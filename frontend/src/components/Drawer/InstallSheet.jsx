@@ -215,8 +215,14 @@ export default function InstallSheet({ appId, appName, appSlug, appUpdatedAt, on
               alt=""
               src={
                 iconPreview ||
-                `/apps/${appSlug}/icon-192.png?v=${encodeURIComponent(appUpdatedAt || '')}`
+                `/api/apps/${appId}/icon?v=${encodeURIComponent(appUpdatedAt || '')}`
               }
+              onError={e => {
+                // Fall back to the flattened manifest icon if the raw icon
+                // route returns 404 (app uses the auto-generated letter icon).
+                const fallback = `/apps/${appSlug}/icon-192.png?v=${encodeURIComponent(appUpdatedAt || '')}`
+                if (e.target.src !== fallback) e.target.src = fallback
+              }}
             />
             <span className="is__icon-edit" aria-hidden="true">✎</span>
           </button>
