@@ -19,6 +19,15 @@ from app.runner_registry import RunnerKind, registry
 
 router = APIRouter(prefix="/api/debug", tags=["debug"])
 
+# Path to the flag file written by entrypoint.sh when the SECRET_KEY changed
+# between boots. Backend checks for this on startup and surfaces it in
+# /api/debug/status so operators know all outstanding JWTs were invalidated.
+# The file contains the ISO timestamp of the detection; it is cleared by
+# entrypoint.sh on the next boot where the key is stable.
+_SECRET_KEY_CHANGED_FLAG = Path(
+  os.environ.get("DATA_DIR", "/data")
+) / ".secret-key-changed"
+
 
 @router.get("/status")
 def debug_status(
@@ -69,6 +78,18 @@ def debug_status(
   }
   if reconciliation_failed:
     result["reconciliation_failed"] = True
+
+  # Surface the SECRET_KEY drift flag written by entrypoint.sh.
+  # Present (with the detection timestamp as a string) when the key changed
+  # between boots; absent when the key is stable. Lets operators discover
+  # accidental drift via the API rather than having to tail container logs.
+  if _SECRET_KEY_CHANGED_FLAG.exists():
+    try:
+      timestamp = _SECRET_KEY_CHANGED_FLAG.read_text().strip()
+    except OSError:
+      timestamp = "unknown"
+    result["secret_key_changed"] = timestamp
+
   return result
 
 

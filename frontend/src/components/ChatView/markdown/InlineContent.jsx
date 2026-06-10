@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import DOMPurify from 'dompurify'
 import { getToken, BASE } from '../../../api/client.js'
+import { mediaTokenParam } from '../../../api/mediaToken.js'
 import { renderInlineMath, renderBlockMath, renderMathToString } from './math.js'
 import ImageLightbox from './ImageLightbox.jsx'
 import '../lightbox.css'
@@ -99,7 +100,22 @@ function safeLinkHref(href) {
   return safeUrl(href, SAFE_LINK_PROTOCOLS)
 }
 
-function resolveImageSrc(href) {
+// Matches /api/chats/<chat_id>/uploads/<file> and /api/chats/<chat_id>/generated/<file>.
+// These paths require a short-lived media token on ?token=; the owner JWT must not
+// appear there (it would leak into access logs, history, Referer). Other /api/ paths
+// that appear in markdown images (rare) still get the owner token in the URL, but
+// the primary media-serve paths are hardened.
+const MEDIA_PATH_RE = /^(?:.*)?\/api\/chats\/([^/]+)\/(?:uploads|generated)\//
+
+function getMediaChatId(src) {
+  const m = src.match(MEDIA_PATH_RE)
+  return m ? m[1] : null
+}
+
+function resolveStaticImageSrc(href) {
+  // Returns a URL for non-media API paths (or null for invalid hrefs).
+  // Appends the owner token for API paths that aren't upload/generated routes —
+  // those use the async ExpandableImage path instead.
   let src = safeUrl(href, SAFE_IMAGE_PROTOCOLS)
   if (!src) return null
   if (src.startsWith('/api/') || src.startsWith(BASE + '/api/')) {
@@ -113,8 +129,27 @@ function resolveImageSrc(href) {
 function ExpandableImage({ href, alt }) {
   const [open, setOpen] = useState(false)
   const [ratio, setRatio] = useState(null)
-  const src = resolveImageSrc(href)
-  if (!src) return null
+  const [resolvedSrc, setResolvedSrc] = useState(null)
+
+  const rawSrc = safeUrl(href, SAFE_IMAGE_PROTOCOLS)
+  const mediaChatId = rawSrc ? getMediaChatId(rawSrc) : null
+
+  useEffect(() => {
+    if (!rawSrc) { setResolvedSrc(null); return }
+    let cancelled = false
+    if (mediaChatId) {
+      // Media path: fetch a short-lived media token, never the owner JWT in URL.
+      mediaTokenParam(mediaChatId).then(param => {
+        if (!cancelled) setResolvedSrc(`${BASE}${new URL(rawSrc, location.origin).pathname}${param}`)
+      })
+    } else {
+      // Non-media API path or external URL: use owner token (or no token for external).
+      setResolvedSrc(resolveStaticImageSrc(rawSrc))
+    }
+    return () => { cancelled = true }
+  }, [rawSrc, mediaChatId])
+
+  if (!resolvedSrc) return null
   return (
     <>
       <span
@@ -122,7 +157,7 @@ function ExpandableImage({ href, alt }) {
         style={ratio ? { '--md-image-ratio': ratio } : undefined}
       >
         <img
-          src={src}
+          src={resolvedSrc}
           alt={alt}
           className="md-image"
           onLoad={(e) => {
@@ -135,7 +170,7 @@ function ExpandableImage({ href, alt }) {
         />
       </span>
       {open && createPortal(
-        <ImageLightbox src={src} alt={alt} onClose={() => setOpen(false)} />,
+        <ImageLightbox src={resolvedSrc} alt={alt} onClose={() => setOpen(false)} />,
         document.body,
       )}
     </>

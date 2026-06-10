@@ -60,6 +60,11 @@ export function clearQueryCache() {
   // app/owner tokens across iframe remounts; drop it on logout so a remount
   // after the session ends can't reuse the previous owner's token.
   try { clearLatchedTokens() } catch {}
+  // Media token cache is per-owner (tokens carry the owner's epoch). Clear
+  // on logout so a new session doesn't inherit stale media tokens.
+  try {
+    import('./mediaToken.js').then(m => m.clearMediaTokenCache()).catch(() => {})
+  } catch {}
   return Promise.all([
     idbDel('mobius-query-cache').catch(() => {}),
     delOutboxDb().catch(() => {}),
