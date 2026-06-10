@@ -439,3 +439,103 @@ No FAB shape is specced — zero apps use a floating action button today.
 Compose affordances live inline in a header or list. If a future app needs
 one, build it from the `.ma-btn-primary` look + the sync-pill's floating
 mechanics, with an `aria-label`.
+
+---
+
+## 9. ChatSplit — embedded chat panel with pill ↔ split ↔ full state machine
+
+`window.mobius.split(opts)` owns the drag handle, state machine, and
+`sessionStorage` persistence. Your mount element needs CSS that reads the two
+custom properties the helper sets:
+
+- **`--cs-content-h`** — content-pane height in px (portrait / vertical split)
+- **`--cs-content-w`** — content-pane width in px (side / horizontal split, ≥ 600px)
+- **`data-split-state`** — `"pill"` | `"split"` | `"full"`
+- **`data-orientation`** — `"portrait"` | `"side"`
+
+The handle element is injected into `mount`; set `position: relative` on it
+and `position: absolute; inset: 0` on both child panes.
+
+**Usage:**
+
+```js
+// After window.mobius.chat() resolves:
+const split = window.mobius.split({
+  mount: document.getElementById('ma-root'),
+  defaultRatio: 0.65,   // content takes 65%, chat 35%
+  minContentPx: 120,
+  minChatPx: 96,
+  persistKey: 'split-state-v1',  // sessionStorage key
+})
+// To programmatically switch state:
+split.setState('split')    // 'pill' | 'split' | 'full'
+// On unmount:
+split.destroy()
+```
+
+**JSX mount structure:**
+
+```jsx
+<div id="ma-root" className="ma-root ma-root--split">
+  <style>{CSS}</style>
+  <div data-split-role="content" className="ma-split-content">
+    {/* your app content here */}
+  </div>
+  <div data-split-role="chat" className="ma-split-chat" ref={chatMountRef}>
+    {/* window.mobius.chat({ mount: chatMountRef.current, … }) */}
+  </div>
+  {/* window.mobius.split injects a drag handle here */}
+</div>
+```
+
+```css
+/* mobius-ui:ChatSplit v1 — keep in sync; library candidate. Diverge below the marker only. */
+.ma-root--split {
+  position: relative;
+  overflow: hidden;
+}
+
+/* Portrait (stacked): content on top, chat panel below */
+.ma-root--split[data-orientation="portrait"] .ma-split-content {
+  position: absolute; top: 0; left: 0; right: 0;
+  height: var(--cs-content-h, 100%);
+  overflow: hidden;
+  transition: height 0.18s ease;
+}
+.ma-root--split[data-orientation="portrait"] .ma-split-chat {
+  position: absolute; bottom: 0; left: 0; right: 0;
+  top: var(--cs-content-h, 100%);
+  overflow: hidden;
+  transition: top 0.18s ease;
+}
+
+/* Pill state: a fixed-height pill anchor at safe-area bottom */
+.ma-root--split[data-split-state="pill"][data-orientation="portrait"] .ma-split-chat {
+  top: auto;
+  height: 36px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  border-radius: 12px 12px 0 0;
+  display: flex; align-items: center; justify-content: center;
+}
+
+/* Side-by-side (wide): content left, chat right */
+.ma-root--split[data-orientation="side"] .ma-split-content {
+  position: absolute; top: 0; left: 0; bottom: 0;
+  width: var(--cs-content-w, 65%);
+  overflow: hidden;
+  transition: width 0.18s ease;
+}
+.ma-root--split[data-orientation="side"] .ma-split-chat {
+  position: absolute; top: 0; right: 0; bottom: 0;
+  left: var(--cs-content-w, 65%);
+  overflow: hidden;
+  transition: left 0.18s ease;
+}
+/* /mobius-ui:ChatSplit */
+```
+
+The `transition` lines are optional but recommended — they give a 180ms ease
+when state machine snaps to pill/full. Remove them if you need instant snaps
+(e.g. during drag itself, which the helper handles by updating the property
+directly without a CSS transition class).

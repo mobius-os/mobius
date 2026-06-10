@@ -40,6 +40,15 @@ export const HEIGHT = NS + 'height' // optional content height (see note below)
 // Parent (app frame) → child (embed frame).
 export const INIT = NS + 'init' // hand the embed its config + correlation id
 
+// Context protocol (send-time app state injection).
+//
+// Before the child submits a user message it posts CONTEXT_REQUEST to the
+// parent. The parent calls opts.getContext() if provided and posts
+// CONTEXT_RESPONSE back. The child waits ≤50ms then sends regardless —
+// the protocol is best-effort, never blocking.
+export const CONTEXT_REQUEST = NS + 'context-request'  // child → parent: {nonce}
+export const CONTEXT_RESPONSE = NS + 'context-response' // parent → child: {nonce, context}
+
 // Why no height relay by default: the design (§1.2) calls for a
 // FIXED-HEIGHT panel — ChatView owns its own scroll + spacer, and
 // relaying height across three frames invites layout thrash and feedback
