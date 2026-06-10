@@ -1358,11 +1358,62 @@ export function makeNav() {
   return { open }
 }
 
+// ── P1-A: probed-online reactive backing ─────────────────────────────────────
+// window.mobius.online returns this value (seeded from navigator.onLine).
+// AppCanvas (the in-shell iframe host) posts `moebius:online-status` whenever
+// the shell's probed reachability verdict changes; the message listener below
+// updates _online and notifies subscribers. Standalone context (no AppCanvas)
+// falls back to navigator.onLine via the seed — still a useful signal.
+//
+// Kept in a deliberately-delimited block so concurrent worktree merges stay
+// clean — edits to this runtime should land near existing connectivity code.
+// ─────────────────────────────────────────────────────────────────────────────
+let _online = typeof navigator !== 'undefined' ? navigator.onLine : true
+const _onlineListeners = new Set()
+
+function _setOnline(next) {
+  if (next === _online) return
+  _online = next
+  for (const cb of [..._onlineListeners]) {
+    try { cb(next) } catch (e) {}
+  }
+}
+
+// Listen for the probed verdict from AppCanvas. Ignored in standalone context
+// (window.parent === window, no AppCanvas, navigator.onLine is the fallback).
+if (typeof window !== 'undefined') {
+  window.addEventListener('message', (e) => {
+    if (e.origin !== window.location.origin) return
+    const msg = e.data
+    if (!msg || typeof msg !== 'object') return
+    if (msg.type === 'moebius:online-status' && typeof msg.online === 'boolean') {
+      _setOnline(msg.online)
+    }
+  })
+  // Keep the seed roughly current while in the standalone host (no AppCanvas).
+  // In the in-shell host AppCanvas drives _online; these are harmless extras.
+  window.addEventListener('online', () => _setOnline(true))
+  window.addEventListener('offline', () => _setOnline(false))
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 export function init({ appId, getToken }) {
   const storage = makeStorage({ appId, getToken })
   window.mobius = {
     appId,
-    get online() { return navigator.onLine },
+    // Returns the probed reachability verdict (not raw navigator.onLine).
+    // In the in-shell iframe AppCanvas forwards the shell's /api/health probe
+    // result; in the standalone PWA host it seeds from navigator.onLine.
+    get online() { return _online },
+    // Subscribe to online/offline changes. `cb(boolean)` fires immediately
+    // with the current value and again whenever the value changes.
+    // Returns an unsubscribe function (call it on component unmount).
+    onOnlineChange(cb) {
+      if (typeof cb !== 'function') return () => {}
+      _onlineListeners.add(cb)
+      try { cb(_online) } catch (e) {}
+      return () => { _onlineListeners.delete(cb) }
+    },
     storage,
     chat: makeChat({ appId, getToken, storage }),
     nav: makeNav(),

@@ -313,6 +313,34 @@ export default function AppCanvas({
     )
   }, [theme?.css, theme?.bg])
 
+  // ── P1-A: probed-online forwarding ──────────────────────────────
+  // Forward the shell's real reachability verdict (from useOnlineStatus, which
+  // probes /api/health) into the app iframe. The runtime's window.mobius.online
+  // previously returned raw navigator.onLine, which is stale on Android PWAs
+  // (reads 'true' while genuinely offline). By posting the probed verdict we
+  // give apps accurate connectivity without requiring them to probe themselves.
+  //
+  // Sent once on iframe load (via sendOnlineStatus called in onLoad) and again
+  // whenever `online` changes — so apps always see the current verdict.
+  // The iframe may not be loaded yet when `online` first changes; the onLoad
+  // handler is the init path, the useEffect below is the update path.
+  //
+  // Standalone context (routes/standalone.py) has no AppCanvas, so the
+  // runtime's navigator.onLine fallback is the only signal there — graceful.
+  function sendOnlineStatus() {
+    if (!iframeRef.current?.contentWindow) return
+    iframeRef.current.contentWindow.postMessage(
+      { type: 'moebius:online-status', online },
+      window.location.origin,
+    )
+  }
+
+  useEffect(() => {
+    if (!loadedRef.current) return
+    sendOnlineStatus()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [online])
+
   if (!appId) {
     return (
       <div className="canvas canvas--empty">
@@ -376,6 +404,7 @@ export default function AppCanvas({
           // ≠ app rendered).
           loadedRef.current = true
           sendInit()
+          sendOnlineStatus()
         }}
       />
       {!loaded && (
