@@ -41,10 +41,17 @@ export default function useVoiceInput({ onTranscript, inputRef }) {
   const recognitionRef = useRef(null)
   const listeningRef = useRef(false)
   const voiceFinalRef = useRef('')  // accumulated finals across all sessions
+  // Handle for the restart setTimeout in onend. Stored so unmount can
+  // cancel it and prevent a session restart from firing after teardown.
+  const restartTimerRef = useRef(null)
 
   // Cleanup on unmount.
   useEffect(() => () => {
     listeningRef.current = false
+    if (restartTimerRef.current !== null) {
+      clearTimeout(restartTimerRef.current)
+      restartTimerRef.current = null
+    }
     recognitionRef.current?.abort()
   }, [])
 
@@ -99,7 +106,8 @@ export default function useVoiceInput({ onTranscript, inputRef }) {
       if (voiceFinalRef.current && !voiceFinalRef.current.endsWith(' ')) {
         voiceFinalRef.current += ' '
       }
-      setTimeout(() => {
+      restartTimerRef.current = setTimeout(() => {
+        restartTimerRef.current = null
         if (listeningRef.current) startVoiceSession()
       }, 100)
     }
@@ -119,6 +127,10 @@ export default function useVoiceInput({ onTranscript, inputRef }) {
 
   function stopVoice() {
     listeningRef.current = false
+    if (restartTimerRef.current !== null) {
+      clearTimeout(restartTimerRef.current)
+      restartTimerRef.current = null
+    }
     recognitionRef.current?.abort()
     recognitionRef.current = null
     setListening(false)
