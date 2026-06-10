@@ -12,11 +12,17 @@
     <meta name="apple-mobile-web-app-title" content="Möbius" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="icon" type="image/png" href="/moebius.png" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" />
-    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <!-- Fonts are self-hosted under /vendor/fonts/ (Inter + JetBrains Mono,
+         latin subset, woff2). @font-face declarations are in src/index.css.
+         Preloading the primary text face (Inter 400) avoids a FOUT on first
+         paint without blocking non-Latin weights until they're needed. -->
+    <link rel="preload" href="/vendor/fonts/inter-400.woff2" as="font" type="font/woff2" crossorigin />
+    <!-- KaTeX CSS + JS are self-hosted under /vendor/katex@0.17.0/ (built
+         into the image by the Dockerfile). The script is deferred so it
+         does not block first paint; math.js guards on window.katex before
+         calling any render function. -->
+    <link rel="stylesheet" href="/vendor/katex@0.17.0/katex.min.css" />
+    <script defer src="/vendor/katex@0.17.0/katex.min.js"></script>
     <title>Möbius</title>
     <link rel="manifest" href="/manifest.webmanifest" />
   </head>
