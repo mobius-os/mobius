@@ -31,7 +31,7 @@ class ProxyPostRequest(BaseModel):
   content_type: str = "application/x-www-form-urlencoded"
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(reject_cross_site)])
 async def proxy_get(
   url: str,
   _: models.Owner = Depends(get_current_owner_or_app),

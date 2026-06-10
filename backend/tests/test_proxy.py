@@ -125,6 +125,30 @@ def test_validate_url_preserves_https_scheme():
   assert "93.184.216.34" in pinned
 
 
+def test_proxy_get_rejects_cross_site_request(client, owner_token):
+  """GET /api/proxy must reject cross-site requests (Task 1b CSRF fix)."""
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  r = client.get(
+    "/api/proxy",
+    params={"url": "http://example.com/"},
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert r.status_code == 403
+
+
+def test_proxy_get_allows_same_origin_request(client, owner_token):
+  """GET /api/proxy allows requests without Sec-Fetch-Site (e.g. curl, native)."""
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  # We only need to confirm the CSRF guard passes — the URL itself can fail.
+  r = client.get(
+    "/api/proxy",
+    params={"url": "http://this-domain-does-not-exist-xyz123.invalid/"},
+    headers=auth,
+  )
+  # 400 = URL rejected by SSRF validator, not 403 CSRF → guard passed.
+  assert r.status_code == 400
+
+
 def test_validate_url_rejects_if_any_ip_is_private():
   """If even one resolved address is internal, reject the entire request."""
   fake = _fake_getaddrinfo([

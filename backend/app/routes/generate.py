@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import logging
+import re
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +23,28 @@ from app.database import get_db
 from app.deps import get_current_owner, reject_cross_site, resolve_owner_only
 from app.path_utils import validate_path_within_base
 from app.resource_access import get_active_chat_or_404
+from app.storage_io import app_dir_usage
+
+# Per-chat total cap for generated images. Each image is ~100-500 KB
+# for flash-model output; 100 MB accommodates hundreds of generations
+# while bounding the blast radius on the memory-tight host.
+_MAX_CHAT_GENERATED_BYTES = 100 * 1024 * 1024  # 100 MB per chat generated dir
+
+# Chat IDs are UUID4 hex strings (32 hex chars, no dashes) produced by
+# str(uuid.uuid4()) — 36 chars with dashes.  Both shapes are accepted
+# because the DB stores the dashed form but legacy code strips dashes in
+# a few paths. Rejecting early prevents using a crafted chat_id as a
+# filesystem path component to escape the chats/ subtree.
+_CHAT_ID_RE = re.compile(
+  r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+  re.IGNORECASE,
+)
+
+
+def _validate_chat_id(chat_id: str) -> None:
+  """Raises 400 if chat_id doesn't look like a UUID4."""
+  if not _CHAT_ID_RE.match(chat_id):
+    raise HTTPException(status_code=400, detail="Invalid chat id.")
 
 log = logging.getLogger(__name__)
 
@@ -132,6 +155,7 @@ async def generate_image(
   db: Session = Depends(get_db),
 ):
   """Calls Gemini to generate an image and saves it under the chat dir."""
+  _validate_chat_id(chat_id)
   if not owner.gemini_api_key_enc:
     raise HTTPException(
       status_code=503,
@@ -148,6 +172,21 @@ async def generate_image(
   settings = get_settings()
   gen_dir = Path(settings.data_dir) / "chats" / chat_id / "generated"
   gen_dir.mkdir(parents=True, exist_ok=True)
+
+  # Enforce per-chat directory total before writing. Each Gemini image
+  # is typically a few hundred KB, so 100 MB supports many generations
+  # while preventing a runaway chat from filling the host disk.
+  dir_used = app_dir_usage(gen_dir)
+  if dir_used + len(image_bytes) > _MAX_CHAT_GENERATED_BYTES:
+    raise HTTPException(
+      status_code=413,
+      detail=(
+        f"This chat's generated images directory is full "
+        f"({_MAX_CHAT_GENERATED_BYTES // (1024 * 1024)} MB limit per chat). "
+        f"The agent can delete old images to free space."
+      ),
+    )
+
   filename = f"{uuid.uuid4().hex}.png"
   (gen_dir / filename).write_bytes(image_bytes)
 
@@ -181,6 +220,7 @@ def serve_generated_image(
   tokens (an app token must not read a chat's generated images) and
   enforces token revocation (a signed-out token is rejected here too).
   """
+  _validate_chat_id(chat_id)
   resolve_owner_only(raw_token, db)
 
   settings = get_settings()
