@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { api, apiFetch } from '../api/client.js'
+import { api } from '../api/client.js'
 
 function jsonOrThrow(res, label) {
   if (!res.ok) throw new Error(`${label} ${res.status}`)
@@ -153,9 +153,8 @@ function useProvidersStatusQuery({ enabled = true } = {}) {
   })
 }
 
-async function fetchModelRegistry({ refresh = false } = {}) {
-  const path = refresh ? '/models?refresh=true' : '/models'
-  const res = await apiFetch(path)
+async function fetchModelRegistry() {
+  const res = await api.models.list()
   const data = await jsonOrThrow(res, 'model registry fetch failed:')
   return data?.providers || {}
 }
@@ -163,7 +162,7 @@ async function fetchModelRegistry({ refresh = false } = {}) {
 function useModelRegistryQuery({ enabled = true } = {}) {
   return useQuery({
     queryKey: modelRegistryKey,
-    queryFn: () => fetchModelRegistry(),
+    queryFn: fetchModelRegistry,
     enabled,
     // Mirror the server-side cache TTL so the client doesn't refetch
     // more often than upstream gives us new data. Refetches happen
@@ -174,7 +173,7 @@ function useModelRegistryQuery({ enabled = true } = {}) {
 }
 
 async function fetchModelPrefs() {
-  const res = await apiFetch('/owner/model-prefs')
+  const res = await api.owner.modelPrefs.get()
   const data = await jsonOrThrow(res, 'model prefs fetch failed:')
   return { hidden_ids: data?.hidden_ids || [] }
 }
@@ -188,7 +187,7 @@ function useModelPrefsQuery({ enabled = true } = {}) {
 }
 
 async function fetchWalkthrough() {
-  const res = await apiFetch('/owner/walkthrough')
+  const res = await api.owner.walkthrough.get()
   const data = await jsonOrThrow(res, 'walkthrough status fetch failed:')
   // localStorage fallback: the WalkthroughOverlay writes this key on
   // dismiss alongside the optimistic-cache update, so even when the
@@ -206,7 +205,7 @@ async function fetchWalkthrough() {
   // downstream onboarding analytics. Fire-and-forget; the next fetch
   // sees the updated server state OR the local flag still holds.
   if (localCompleted && !data?.completed) {
-    apiFetch('/owner/walkthrough/complete', { method: 'POST' }).catch(() => {})
+    api.owner.walkthrough.complete().catch(() => {})
   }
   return {
     completed,
@@ -342,8 +341,5 @@ export const ownerQueries = {
   },
 }
 
-export const themeQueryKey = themeQueries.keys.all
-export const chatsQueryKey = chatQueries.keys.all
+// Convenience re-export used by ChatView's setQueryData calls.
 export const chatMessagesQueryKey = chatQueries.keys.messages
-export const appsQueryKey = appQueries.keys.all
-export const appTokenQueryKey = appQueries.keys.token
