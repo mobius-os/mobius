@@ -6,19 +6,29 @@
 # produces the same result.
 #
 # Modes:
-#   shell-dist   Restore the prebuilt frontend bundle (fast; no
-#                rebuild needed; serves immediately after restart).
-#   shell-src    Restore the editable frontend source (the agent's
-#                edits to /data/shell/src/ are wiped). Requires a
-#                rebuild to take visual effect.
-#   backend      Restore /app/app/ from /app/app-baked/ (skipping
-#                files listed in protected-files.txt — those are
-#                already root-owned and chmod 444, so cp -a would
-#                fail to overwrite them anyway).
-#   scripts      Restore /app/scripts/ from /app/scripts-baked/.
+#   shell-dist      Restore the prebuilt frontend bundle (fast; no
+#                   rebuild needed; serves immediately after restart).
+#   shell-src       Restore the editable frontend source (the agent's
+#                   edits to /data/shell/src/ are wiped). Requires a
+#                   rebuild to take visual effect.
+#   backend         Restore /app/app/ from /app/app-baked/ (skipping
+#                   files listed in protected-files.txt — those are
+#                   already root-owned and chmod 444, so cp -a would
+#                   fail to overwrite them anyway).
+#   scripts         Restore /app/scripts/ from /app/scripts-baked/.
+#   platform        Git restore: `git -C /data/platform reset --hard HEAD`
+#                   (reverts uncommitted agent edits; commits are preserved).
+#                   Use when the agent made edits that broke the platform
+#                   but hasn't committed them yet. Fast; no image needed.
+#   platform-baked  Full restore: wipe /data/platform/app and
+#                   /data/platform/scripts, recopy from baked floor, then
+#                   commit the restore to /data/platform git history.
+#                   Use when the agent broke something and committed it, or
+#                   when git reset --hard is not enough.
 #
-# After 'backend' or 'scripts', the caller should trigger
-# POST /recover/restart so uvicorn picks up the restored code.
+# After 'backend', 'scripts', 'platform', or 'platform-baked', the
+# caller should trigger POST /recover/restart so uvicorn picks up the
+# restored code.
 #
 # Exit codes:
 #   0  success
@@ -35,12 +45,90 @@ if [ -z "$MODE" ]; then
 Usage: recovery_restore.sh <mode>
 
 Modes:
-  shell-dist   Restore /data/shell/dist/ from /app/static/
-  shell-src    Restore /data/shell/src/ from /app/shell-src/
-  backend      Restore /app/app/ from /app/app-baked/
-  scripts      Restore /app/scripts/ from /app/scripts-baked/
+  shell-dist      Restore /data/shell/dist/ from /app/static/
+  shell-src       Restore /data/shell/src/ from /app/shell-src/
+  backend         Restore /app/app/ from /app/app-baked/
+  scripts         Restore /app/scripts/ from /app/scripts-baked/
+  platform        git reset --hard HEAD in /data/platform
+  platform-baked  Wipe + recopy /data/platform/{app,scripts} from baked floor
 EOF
   exit 1
+fi
+
+# --- platform mode: git reset --hard HEAD (reverts uncommitted edits) ---
+if [ "$MODE" = "platform" ]; then
+  if [ ! -d /data/platform/.git ]; then
+    echo "platform restore: /data/platform/.git not found — run 'platform-baked' instead." >&2
+    exit 2
+  fi
+  echo "Restoring /data/platform via git reset --hard HEAD..."
+  # Clear pycache first so stale bytecache doesn't survive the reset.
+  find /data/platform -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+  find /data/platform -name '*.pyc' -delete 2>/dev/null || true
+  if su -s /bin/sh mobius -c 'git -C /data/platform reset --hard HEAD'; then
+    echo "platform restore: git reset --hard HEAD succeeded."
+    exit 0
+  else
+    echo "FATAL: git reset --hard HEAD failed in /data/platform" >&2
+    exit 3
+  fi
+fi
+
+# --- platform-baked mode: full wipe + recopy from baked floor -----------
+if [ "$MODE" = "platform-baked" ]; then
+  SRC_APP="/app/app-baked"
+  SRC_SCR="/app/scripts-baked"
+  DST_APP="/data/platform/app"
+  DST_SCR="/data/platform/scripts"
+  if [ ! -d "$SRC_APP" ]; then
+    echo "Source missing: $SRC_APP (broken image?)" >&2
+    exit 2
+  fi
+  echo "Restoring /data/platform from baked floor..."
+  # Clear pycache before the overwrite to avoid stale bytecache.
+  find "$DST_APP" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+  find "$DST_APP" -name '*.pyc' -delete 2>/dev/null || true
+  find "$DST_SCR" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+  mkdir -p "$DST_APP" "$DST_SCR"
+  cp_out=$(cp -a "$SRC_APP/." "$DST_APP/" 2>&1) || {
+    echo "FATAL: cp -a $SRC_APP -> $DST_APP failed: $cp_out" >&2; exit 3
+  }
+  cp_out=$(cp -a "$SRC_SCR/." "$DST_SCR/" 2>&1) || {
+    echo "FATAL: cp -a $SRC_SCR -> $DST_SCR failed: $cp_out" >&2; exit 3
+  }
+  # Re-open write access (baked copies are chmod a-w; cp -a preserves that).
+  chmod -R u+w "$DST_APP" "$DST_SCR" 2>/dev/null || true
+  chown -R mobius:mobius /data/platform 2>/dev/null || true
+  # Re-enforce protected-file perms in the new platform tree.
+  # The protected-files.txt entries use /app/app/ paths; those symlink to
+  # /data/platform/app/ so chmod on /app/app/X acts on /data/platform/app/X.
+  # We also walk with the real /data/platform/app/ prefix so the protection
+  # holds whether the symlink exists or not.
+  if [ -f /app/protected-files.txt ]; then
+    while IFS= read -r line; do
+      case "$line" in \#*|"") continue ;; esac
+      case "$line" in
+        /*) target="$line" ;;
+        *)  target="/data/shell/$line" ;;
+      esac
+      if [ -f "$target" ]; then
+        chown root:root "$target" 2>/dev/null || true
+        case "$target" in
+          *.sh) chmod 555 "$target" 2>/dev/null || true ;;
+          *)    chmod 444 "$target" 2>/dev/null || true ;;
+        esac
+      fi
+    done < /app/protected-files.txt
+  fi
+  # Commit the restore to /data/platform git history.
+  if [ -d /data/platform/.git ]; then
+    su -s /bin/sh mobius -c '
+      git -C /data/platform add -A
+      git -C /data/platform commit -m "restore: platform-baked restore from baked floor" 2>/dev/null || true
+    '
+  fi
+  echo "Restore complete: /data/platform (platform-baked)"
+  exit 0
 fi
 
 case "$MODE" in
