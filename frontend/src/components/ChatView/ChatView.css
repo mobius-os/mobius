@@ -222,6 +222,56 @@
   transform: none;
 }
 
+/* Quick-action chip row — embedded empty state with app-declared suggestions.
+   Horizontally scrollable pill row; max 4 chips rendered by ChatView.jsx.
+   Tap pre-fills the composer (never auto-sends). */
+.chat__empty--chips {
+  padding: 20px 16px;
+  align-items: flex-start;
+  text-align: left;
+}
+.chat__quick-actions {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  gap: 8px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;        /* Firefox */
+  padding-bottom: 2px;          /* room for focus ring */
+  width: 100%;
+}
+.chat__quick-actions::-webkit-scrollbar { display: none; }
+.chat__quick-action-chip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 8px 14px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.3;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, border-color 0.12s;
+  min-height: 36px;             /* 44px touch target via padding */
+}
+.chat__quick-action-chip:hover {
+  background: var(--surface2, var(--surface));
+  border-color: var(--accent-dim, var(--accent));
+}
+.chat__quick-action-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.chat__quick-action-chip:active {
+  background: var(--accent-dim, color-mix(in srgb, var(--accent) 12%, transparent));
+}
+
 /* ── Messages ──────────────────────────────────────── */
 
 .chat__msg {

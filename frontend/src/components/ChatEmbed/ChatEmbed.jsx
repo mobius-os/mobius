@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import ChatView from '../ChatView/ChatView.jsx'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
 import {
   INIT, READY, MESSAGE_SENT, TURN_DONE, ERROR,
+  CONTEXT_REQUEST, CONTEXT_RESPONSE,
   isEmbedMessage,
 } from '../../lib/chatEmbed.js'
 import './ChatEmbed.css'
@@ -68,6 +69,9 @@ export default function ChatEmbed() {
   // resolved, so keep it in state.
   const [chatId, setChatId] = useState(() => readChatIdFromUrl())
   const [picker, setPicker] = useState(() => readPickerFromUrl())
+  // quickActions: array of {label, prompt} from the INIT payload. Max 4.
+  // Passed to ChatView which renders them as chips on the embedded empty state.
+  const [quickActions, setQuickActions] = useState(null)
 
   // The correlation token the parent (app frame) minted in INIT. Until
   // it arrives our outbound messages omit instanceId; the parent's
@@ -84,6 +88,35 @@ export default function ChatEmbed() {
   // re-subscribing the listener.
   const chatIdRef = useRef(chatId)
   chatIdRef.current = chatId
+
+  // Pending context request resolvers keyed by nonce. The getContext callback
+  // posts CONTEXT_REQUEST to the parent and resolves within ≤50ms timeout.
+  const pendingContextResolversRef = useRef(new Map())
+  let _contextNonce = 0
+
+  // getContext: called by ChatView before submitting a message. Posts a
+  // CONTEXT_REQUEST to the parent, waits ≤50ms for CONTEXT_RESPONSE, then
+  // resolves (with null on timeout). The nonce correlates request ↔ response.
+  const getContext = useCallback(() => {
+    const target = parentRef.current
+    if (!target || target === window) return Promise.resolve(null)
+    const nonce = `ctx-${++_contextNonce}-${Date.now()}`
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        pendingContextResolversRef.current.delete(nonce)
+        resolve(null)
+      }, 50)
+      pendingContextResolversRef.current.set(nonce, (ctx) => {
+        clearTimeout(timer)
+        resolve(ctx)
+      })
+      target.postMessage(
+        { type: CONTEXT_REQUEST, instanceId: instanceIdRef.current, nonce },
+        window.location.origin,
+      )
+    })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   function postToParent(type, extra) {
     const target = parentRef.current
@@ -103,14 +136,23 @@ export default function ChatEmbed() {
       if (splash) splash.remove()
     } catch {}
     function onMessage(event) {
-      // INIT is the only inbound type and the one place we skip the
-      // instanceId check — the parent is telling us what the id IS.
-      // Source + origin are still enforced.
+      // Two inbound types: INIT (skip instanceId check — we're learning it)
+      // and CONTEXT_RESPONSE (carries nonce + context for a pending request).
+      // Source + origin are enforced for both.
       if (!isEmbedMessage(event, {
         origin: window.location.origin,
         expectedSource: parentRef.current,
       })) return
       const msg = event.data
+      if (msg.type === CONTEXT_RESPONSE) {
+        // Dispatch to any pending context resolver keyed by nonce.
+        const resolver = pendingContextResolversRef.current.get(msg.nonce)
+        if (resolver) {
+          pendingContextResolversRef.current.delete(msg.nonce)
+          resolver(msg.context || null)
+        }
+        return
+      }
       if (msg.type !== INIT) return
       if (typeof msg.instanceId === 'string') instanceIdRef.current = msg.instanceId
       // The helper may pass an authoritative chatId in INIT (it
@@ -119,6 +161,10 @@ export default function ChatEmbed() {
       // chat instead of the no-chat notice.
       if (msg.chatId && !chatIdRef.current) setChatId(String(msg.chatId))
       if (typeof msg.picker === 'boolean') setPicker(msg.picker)
+      // Extract quickActions from INIT payload (max 4, filtered in the runtime).
+      if (Array.isArray(msg.quickActions) && msg.quickActions.length > 0) {
+        setQuickActions(msg.quickActions)
+      }
       // Re-announce, now correlated, so the parent learns the resolved
       // chatId under the right instanceId.
       postToParent(READY)
@@ -162,6 +208,8 @@ export default function ChatEmbed() {
           chatId={chatId}
           embedded
           showPicker={picker}
+          quickActions={quickActions}
+          getContext={getContext}
           onMessageStart={() => postToParent(MESSAGE_SENT)}
           onStreamEnd={() => postToParent(TURN_DONE)}
           // System events (theme_updated, app_created, …) are Shell-level
