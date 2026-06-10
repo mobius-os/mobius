@@ -204,6 +204,30 @@ RUN mkdir -p /tmp/cm-install && cd /tmp/cm-install \
          /app/static/vendor/codemirror@6 "$(command -v esbuild)" \
     && cd / && rm -rf /tmp/cm-install /tmp/build-codemirror-vendor.mjs
 
+# KaTeX — self-hosted for both the shell (window.katex via <script> in
+# index.html) and mini-apps (ES module import via the app-frame.html
+# importmap). Eliminates the last two third-party CDN dependencies
+# (cdn.jsdelivr.net for the shell, esm.sh for mini-apps).
+#
+# JS: katex.min.js (UMD global, loaded as window.katex by the shell) +
+#     katex.mjs (ESM, imported by mini-apps via importmap).
+# CSS: katex.min.css with @font-face rules that reference ./fonts/*.
+# Fonts: woff2 only (all modern browsers support woff2; skipping ttf/woff
+#        shrinks the layer by ~1.5 MB).
+# A bare /vendor/katex/ symlink acts as a stable unversioned alias so
+# any cached standalone PWA app-frame that referenced the old
+# esm.sh-backed katex still resolves after the upgrade.
+RUN mkdir -p /tmp/katex-install && cd /tmp/katex-install \
+    && npm init -y >/dev/null \
+    && npm install --no-audit --no-fund --silent katex@0.17.0 \
+    && mkdir -p /app/static/vendor/katex@0.17.0/fonts \
+    && cp node_modules/katex/dist/katex.min.js /app/static/vendor/katex@0.17.0/ \
+    && cp node_modules/katex/dist/katex.mjs    /app/static/vendor/katex@0.17.0/ \
+    && cp node_modules/katex/dist/katex.min.css /app/static/vendor/katex@0.17.0/ \
+    && cp node_modules/katex/dist/fonts/*.woff2 /app/static/vendor/katex@0.17.0/fonts/ \
+    && ln -s katex@0.17.0 /app/static/vendor/katex \
+    && cd / && rm -rf /tmp/katex-install
+
 # Full frontend source so the agent can edit and rebuild the shell.
 # /app/shell-src/ is the read-only reference (originals for recovery).
 # On first boot, entrypoint copies to /data/shell/ if it doesn't exist.
