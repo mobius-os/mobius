@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { getToken, BASE } from '../../api/client.js'
 
 /**
@@ -9,6 +9,18 @@ import { getToken, BASE } from '../../api/client.js'
  */
 export default function useFileUpload({ chatId }) {
   const [files, setFiles] = useState([])
+  // Keep a ref in sync so the unmount cleanup can revoke object URLs
+  // without closing over a stale `files` state value.
+  const filesRef = useRef(files)
+  filesRef.current = files
+
+  // Revoke any surviving object URLs when the component unmounts —
+  // e.g. the user navigated away while files were still staged.
+  useEffect(() => () => {
+    for (const f of filesRef.current) {
+      if (f.objectUrl) URL.revokeObjectURL(f.objectUrl)
+    }
+  }, [])
 
   async function addFiles(fileList) {
     if (!fileList.length) return
@@ -60,17 +72,19 @@ export default function useFileUpload({ chatId }) {
   }
 
   function removeFile(id) {
-    setFiles(prev => {
-      const removing = prev.find(c => c.id === id)
-      if (removing?.objectUrl) URL.revokeObjectURL(removing.objectUrl)
-      if (removing?.status === 'done' && removing.name) {
-        fetch(`${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(removing.name)}`, {
-          method: 'DELETE',
-          headers: { Authorization: `Bearer ${getToken()}` },
-        }).catch(() => {})
-      }
-      return prev.filter(c => c.id !== id)
-    })
+    // Extract the side effects (URL revoke + network DELETE) from the
+    // setFiles updater. React may double-invoke state updaters in
+    // Strict Mode, which would fire two DELETE requests for the same
+    // file. Compute the next state first, then apply side effects once.
+    const removing = filesRef.current.find(c => c.id === id)
+    if (removing?.objectUrl) URL.revokeObjectURL(removing.objectUrl)
+    setFiles(prev => prev.filter(c => c.id !== id))
+    if (removing?.status === 'done' && removing.name) {
+      fetch(`${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(removing.name)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${getToken()}` },
+      }).catch(() => {})
+    }
   }
 
   function clearFiles() {
