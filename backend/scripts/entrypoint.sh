@@ -10,7 +10,7 @@ trap cleanup TERM INT
 # Ensure /data and key subdirectories exist and are writable by mobius.
 # Railway (and similar platforms) mount a fresh volume at /data owned by
 # root — the dirs from the Dockerfile are replaced by the empty mount.
-mkdir -p /data/db /data/apps /data/compiled /data/shared /data/shell /data/logs /data/cron-logs /data/cli-auth /data/agent-browser-profiles
+mkdir -p /data/db /data/apps /data/compiled /data/shared /data/shell /data/logs /data/cron-logs /data/cli-auth /data/agent-browser-profiles /data/platform
 
 # /data/agent-browser-profiles holds PER-CHAT Chrome user-data dirs
 # (chat-<chat_id>/...) for agent-browser. The path is set per-chat by
@@ -19,6 +19,101 @@ mkdir -p /data/db /data/apps /data/compiled /data/shared /data/shell /data/logs 
 # closer match to the partner's persistent PWA state). Per-chat
 # isolation avoids the lock conflict that would happen if two parallel
 # agent chats both tried to launch Chrome against a shared dir.
+
+# -----------------------------------------------------------------------
+# PHASE 1: Platform layer — dual-layer boot
+#
+# /data/platform/ is the agent-editable, git-tracked copy of the backend
+# Python source and scripts. On first boot (or after a wiped volume) we
+# copy from the baked read-only floor at /app/app-baked/ and
+# /app/scripts-baked/. After that the agent's edits live here and
+# survive across container restarts and image upgrades.
+#
+# Invariant: /app/app and /app/scripts are ALWAYS symlinks pointing at
+# the live platform copies. uvicorn runs as `cd /app && uvicorn
+# app.main:app` — Python adds /app to sys.path, finds the `app` package
+# through the symlink. Symlink indirection is transparent to the Python
+# importer: `from app.config import ...` resolves the symlink and loads
+# the real file from /data/platform/app/. __pycache__ directories land
+# inside /data/platform/app/ (mobius-owned) so the agent's edits and
+# Python's compiled bytecache are co-located.
+#
+# Fallback invariant: if /data/platform/app/main.py is absent or doesn't
+# parse, we boot from baked directly (log loudly) so the recovery surface
+# stays reachable even on a completely corrupt platform tree.
+# -----------------------------------------------------------------------
+
+# PHASE 3: Boot-attempt counter. Written BEFORE starting uvicorn so a
+# crash during startup (or a SIGKILL before the health probe writes the
+# success sentinel) increments the count on the next boot. Counter is a
+# plain integer in /data/.boot-attempt. On >=3 failures without an
+# intervening /data/.last-successful-boot reset, we trigger a
+# platform-baked restore and reset the counter, then log a flag that
+# /api/debug/status surfaces.
+#
+# The counter file stores "N TIMESTAMP" — two fields so we can correlate
+# crash times in the log. We read just the first field.
+_boot_counter=0
+if [ -f /data/.boot-attempt ]; then
+  _boot_counter=$(cut -d' ' -f1 /data/.boot-attempt 2>/dev/null || echo 0)
+  # Validate: must be a non-negative integer.
+  case "$_boot_counter" in
+    ''|*[!0-9]*) _boot_counter=0 ;;
+  esac
+fi
+_boot_counter=$((_boot_counter + 1))
+echo "$_boot_counter $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.boot-attempt
+# chown deferred until after the broad /data chown below; done explicitly
+# here only if that chown is not going to happen (Railway fallback path).
+
+# If the counter reached the threshold, trigger automatic platform-baked
+# restore so a broken platform doesn't brick the container in a crash
+# loop. Threshold = 3 because a transient OOM or SIGKILL can cause 1-2
+# false failures; three consecutive failures without a health success
+# strongly implies the platform code itself is broken.
+if [ "$_boot_counter" -ge 3 ] && [ -f /data/.last-successful-boot ]; then
+  echo "PLATFORM-RESTORE: boot-attempt counter = $_boot_counter, restoring from baked floor..." >&2
+  # Clear pycache in the live platform tree before the restore so stale
+  # bytecache doesn't survive the copy-over.
+  find /data/platform -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+  find /data/platform -name '*.pyc' -delete 2>/dev/null || true
+  # Restore platform from baked. This runs as root so it can overwrite
+  # protected (root-owned 444) files. After the restore, re-enforce
+  # protected-file perms.
+  mkdir -p /data/platform/app /data/platform/scripts
+  if cp -a /app/app-baked/. /data/platform/app/ && cp -a /app/scripts-baked/. /data/platform/scripts/; then
+    # Re-open write access (baked copies are chmod a-w; cp -a preserves that).
+    chmod -R u+w /data/platform/app /data/platform/scripts 2>/dev/null || true
+    echo "PLATFORM-RESTORE: baked restore succeeded." >&2
+    # Record the restore event in a flag file that debug/status surfaces.
+    echo "baked-restore $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.platform-restore-active
+    chown mobius:mobius /data/.platform-restore-active 2>/dev/null || true
+    # git commit the restore so history records what happened.
+    if [ -d /data/platform/.git ]; then
+      su -s /bin/sh mobius -c '
+        git -C /data/platform add -A
+        git -C /data/platform commit -m "auto: crash-loop restore from baked floor" 2>/dev/null || true
+      '
+    fi
+  else
+    echo "PLATFORM-RESTORE: baked restore FAILED — continuing with potentially broken code." >&2
+  fi
+  # Reset counter after the restore attempt regardless of success, so
+  # the next boot gets a clean slate. If the restore fixed things, the
+  # health probe will write last-successful-boot and suppress further
+  # auto-restores. If it didn't fix things, we'll restore again after 3
+  # more attempts (an explicit loop so the operator can see what's
+  # happening via the counter file).
+  echo "0 $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.boot-attempt
+  _boot_counter=0
+elif [ "$_boot_counter" -ge 3 ] && [ ! -f /data/.last-successful-boot ]; then
+  # Fresh volume or first-ever boot — last-successful-boot not yet written.
+  # Don't trigger restore on what is literally the first few boots.
+  # Reset counter so it doesn't grow forever on a slow-starting instance.
+  echo "0 $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.boot-attempt
+  _boot_counter=0
+fi
+
 if ! chown -R mobius:mobius /data 2>/dev/null; then
   echo "WARNING: chown -R mobius:mobius /data failed (likely a managed-volume platform like Railway)." >&2
   echo "WARNING: Falling back to chmod 1777 /data + 777 on subdirs so the mobius user can traverse" >&2
@@ -47,13 +142,220 @@ fi
 # unreadable by mobius. World-readable is the safe default for code
 # that doesn't hold secrets. `/app/skill` (the constitution mobius reads
 # for the system prompt) gets it too.
-chmod -R a+rX /app/app /app/scripts /app/skill 2>/dev/null || true
-chown -R mobius:mobius /app/app /app/scripts 2>/dev/null || true
-# `/app/shell-src` (the stock source a shell refresh copies into /data/shell
+chmod -R a+rX /app/skill 2>/dev/null || true
+# /app/shell-src (the stock source a shell refresh copies into /data/shell
 # as mobius) also needs a+rX, but it carries a ~30k-file node_modules — a
 # blanket `chmod -R` there blocks boot past the health window. chmod only the
 # git-sourced parts (src/public/config), pruning node_modules.
 find /app/shell-src -path '*/node_modules' -prune -o -exec chmod a+rX {} + 2>/dev/null || true
+
+# -----------------------------------------------------------------------
+# Platform layer init (Phase 1).
+#
+# Step 1: Determine whether to boot from /data/platform or fall back to
+# the baked /app/app-baked/ floor. The sanity check is whether
+# /data/platform/app/main.py exists AND compiles cleanly. This is the
+# single most crash-relevant file (a SyntaxError here means uvicorn
+# can't import app.main and dies immediately with no health response).
+# -----------------------------------------------------------------------
+_platform_app=/data/platform/app
+_platform_scripts=/data/platform/scripts
+_baked_app=/app/app-baked
+_baked_scripts=/app/scripts-baked
+_use_platform=0
+
+# Sanity check: does a usable platform tree exist?
+# We require main.py to exist AND to parse. python3 -c "compile(...)" is
+# cheaper than importing the whole app; it catches syntax errors without
+# running any code.
+_platform_sane() {
+  [ -f "$_platform_app/main.py" ] && \
+    python3 -c "
+import ast, sys
+try:
+  ast.parse(open('$_platform_app/main.py').read())
+  sys.exit(0)
+except SyntaxError as e:
+  print('PLATFORM SANITY FAIL: main.py SyntaxError:', e, file=sys.stderr)
+  sys.exit(1)
+" 2>&1
+}
+
+if [ -d "$_platform_app" ] && _platform_sane > /dev/null 2>&1; then
+  _use_platform=1
+  echo "Platform layer: /data/platform is present and healthy — serving from there."
+else
+  if [ ! -d "$_platform_app" ]; then
+    echo "Platform layer: /data/platform/app absent — first boot, copying from baked floor..."
+  else
+    echo "PLATFORM LAYER WARNING: /data/platform/app/main.py failed sanity check — falling back to baked floor." >&2
+    echo "  The agent's platform edits are preserved in /data/platform but NOT served." >&2
+    echo "  To restore: run recovery_restore.sh platform-baked, or fix main.py and restart." >&2
+  fi
+fi
+
+# Step 2: If we should use the platform layer but it's missing (first boot
+# or wiped volume), copy from the baked floor.
+if [ "$_use_platform" -eq 0 ] && [ ! -d "$_platform_app" ]; then
+  # First boot: copy baked app and scripts into /data/platform.
+  mkdir -p "$_platform_app" "$_platform_scripts"
+  cp -a "$_baked_app/." "$_platform_app/"
+  cp -a "$_baked_scripts/." "$_platform_scripts/"
+  # The baked copies have chmod a-w (Dockerfile: chmod -R a-w /app/app-baked
+  # /app/scripts-baked) — cp -a preserves those read-only modes. Re-open
+  # write access for the mobius user so the agent can edit and Python can
+  # write __pycache__ entries. The protected-file enforcement loop below
+  # re-locks the specific frozen files after this broad chmod.
+  chmod -R u+w "$_platform_app" "$_platform_scripts" 2>/dev/null || true
+  # Clear any stale __pycache__ from the baked copy — bytecache is
+  # path-dependent and the path has changed from /app/app to /data/platform/app.
+  find "$_platform_app" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+  find "$_platform_app" -name '*.pyc' -delete 2>/dev/null || true
+  find "$_platform_scripts" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+  chown -R mobius:mobius /data/platform 2>/dev/null || true
+  echo "Platform layer: initial copy complete."
+  _use_platform=1
+fi
+
+# Step 3: Symlink swap — make /app/app and /app/scripts point at the
+# platform tree so uvicorn's `cd /app && uvicorn app.main:app` picks up
+# the right code. Python resolves the symlink transparently; __pycache__
+# will land inside /data/platform/app/ (mobius-owned).
+#
+# We replace the existing /app/app and /app/scripts directories with
+# symlinks. If they're already symlinks pointing at the right target, this
+# is a no-op (ln -sfn handles re-pointing safely).
+#
+# IMPORTANT: if the sanity check failed (_use_platform=0), we do NOT
+# create the symlink — /app/app and /app/scripts stay as real directories
+# (the baked originals) so uvicorn still boots even if /data/platform is
+# corrupt. The loud log above alerts the operator.
+if [ "$_use_platform" -eq 1 ]; then
+  # Replace real dir with symlink only if not already a symlink to the
+  # right target. Guard: if /app/app is a non-symlink dir, rename it to
+  # _baked (for the first ever swap); ln -sfn then creates the symlink.
+  # On subsequent boots it's already a symlink — ln -sfn re-points it.
+  if [ -d /app/app ] && [ ! -L /app/app ]; then
+    # First-ever swap: /app/app is a real dir. We need to remove it before
+    # we can create the symlink. The baked copies already exist in
+    # /app/app-baked/ so we can safely remove the real /app/app dir.
+    # Clear pycache first (it's baked-path-addressed, would confuse Python
+    # if somehow loaded through the new symlink path).
+    find /app/app -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+    rm -rf /app/app
+    echo "Platform layer: replaced /app/app directory with symlink."
+  fi
+  if [ -d /app/scripts ] && [ ! -L /app/scripts ]; then
+    find /app/scripts -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+    rm -rf /app/scripts
+    echo "Platform layer: replaced /app/scripts directory with symlink."
+  fi
+  # Create (or re-point) the symlinks.
+  ln -sfn "$_platform_app" /app/app
+  ln -sfn "$_platform_scripts" /app/scripts
+  echo "Platform layer: /app/app -> $_platform_app, /app/scripts -> $_platform_scripts"
+  # Ensure platform tree is mobius-owned and world-readable (same as the
+  # old /app/app /app/scripts permissions above).
+  chmod -R a+rX "$_platform_app" "$_platform_scripts" 2>/dev/null || true
+  chown -R mobius:mobius "$_platform_app" "$_platform_scripts" 2>/dev/null || true
+else
+  # Fallback: boot from baked directly. Ensure baked dirs are accessible.
+  # /app/app and /app/scripts remain as real directories (the baked originals).
+  chmod -R a+rX /app/app /app/scripts 2>/dev/null || true
+  chown -R mobius:mobius /app/app /app/scripts 2>/dev/null || true
+fi
+
+# -----------------------------------------------------------------------
+# PHASE 2: Git tracking for /data/platform
+#
+# /data/platform is its own git repo (distinct from /data's repo) so
+# the agent's platform edits are versioned and reversible. First boot
+# initialises the repo and records the baked image's SHA as a tag so
+# future diffs can compare against the shipped baseline.
+#
+# We initialise here, after the platform tree is populated and
+# mobius-owned but before uvicorn starts, so git commands run
+# synchronously and the repo is ready before the agent can edit files.
+# -----------------------------------------------------------------------
+
+# Ensure /data/platform is mobius-owned before any git operations.
+# (The chown may have been done above but let's be explicit.)
+chown -R mobius:mobius /data/platform 2>/dev/null || true
+
+if [ -d /data/platform ] && [ ! -d /data/platform/.git ]; then
+  # First-time init: create the repo, write a sensible .gitignore,
+  # and make an initial commit so `git log` always has at least one
+  # entry to diff against.
+  echo "Platform git: initialising /data/platform..."
+  su -s /bin/sh mobius -c '
+    git init /data/platform
+    git -C /data/platform config user.name "Mobius Agent"
+    git -C /data/platform config user.email "agent@mobius"
+  '
+  # .gitignore: exclude pycache and pyc files. The platform tree is
+  # source-only; compiled bytecache does not belong in git.
+  cat > /data/platform/.gitignore <<'PGITIGNORE'
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+dist/
+build/
+PGITIGNORE
+  chown mobius:mobius /data/platform/.gitignore 2>/dev/null || true
+  su -s /bin/sh mobius -c '
+    git -C /data/platform add -A
+    git -C /data/platform commit -m "init: platform layer from baked image floor"
+  '
+  # Tag the initial commit with the baked image SHA so the agent (or an
+  # operator) can diff against it later: `git -C /data/platform diff
+  # baked-<sha>..HEAD`. BUILD_SHA is baked at docker-build time via the
+  # BUILD_SHA ARG (Dockerfile line "ENV BUILD_SHA=${BUILD_SHA}").
+  _build_sha=${BUILD_SHA:-unknown}
+  if [ "$_build_sha" != "unknown" ]; then
+    su -s /bin/sh mobius -c "git -C /data/platform tag baked-${_build_sha} HEAD 2>/dev/null || true"
+  fi
+  # Record the baked SHA in a plain ref file as a belt-and-suspenders
+  # fallback (the tag above can be deleted by the agent; this file is
+  # just informational and lives outside git).
+  echo "$_build_sha" > /data/platform/.baked-sha
+  chown mobius:mobius /data/platform/.baked-sha 2>/dev/null || true
+  echo "Platform git: initialised with commit and baked-sha tag."
+elif [ -d /data/platform/.git ]; then
+  # Subsequent boot: ensure the repo is mobius-owned (docker pull + volume
+  # recreate can leave root-owned .git).
+  chown -R mobius:mobius /data/platform/.git 2>/dev/null || true
+  # Check if the baked SHA changed since the recorded one — this means
+  # an image upgrade happened. Do NOT auto-merge (Phase 4, deferred).
+  # Log a prominent warning and set a debug flag so the operator knows.
+  _build_sha=${BUILD_SHA:-unknown}
+  _recorded_sha=""
+  if [ -f /data/platform/.baked-sha ]; then
+    _recorded_sha=$(cat /data/platform/.baked-sha 2>/dev/null | tr -d '[:space:]')
+  fi
+  if [ "$_build_sha" != "unknown" ] && [ -n "$_recorded_sha" ] && \
+     [ "$_build_sha" != "$_recorded_sha" ]; then
+    echo "PLATFORM UPGRADE NOTICE: image SHA changed from $_recorded_sha to $_build_sha." >&2
+    echo "  /data/platform is unchanged — your agent's edits are intact." >&2
+    echo "  To see what's new: git -C /data/platform diff baked-${_recorded_sha}..HEAD (if that tag exists)" >&2
+    echo "  To merge upstream changes: ask the agent, or run recovery_restore.sh platform-baked" >&2
+    # Write a flag file that /api/debug/status surfaces so the UI can
+    # surface the notice (Phase 4 UX, but we surface the flag now).
+    echo "upgrade-available ${_build_sha} (was ${_recorded_sha}) $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      > /data/.platform-upgrade-available
+    chown mobius:mobius /data/.platform-upgrade-available 2>/dev/null || true
+    # Update the recorded SHA so we don't repeat this on the next boot
+    # unless ANOTHER upgrade happens.
+    echo "$_build_sha" > /data/platform/.baked-sha
+    chown mobius:mobius /data/platform/.baked-sha 2>/dev/null || true
+  else
+    # No upgrade: remove stale flag if present.
+    rm -f /data/.platform-upgrade-available 2>/dev/null || true
+  fi
+fi
 
 # Auto-generate SECRET_KEY if not set (one-click deploy support).
 # Persisted to /data so it survives container restarts.
@@ -315,16 +617,29 @@ agent-browser-profiles/
 generated/
 logs/
 cron-logs/
+# platform/ has its own git repo; exclude it from the outer /data repo so
+# `git add -A` from /data doesn't treat platform as an untracked submodule.
+# The .baked-sha and .gitignore inside platform/ are tracked by platform's own
+# git, not /data's.
+platform/
+# Phase 3 boot-state files — runtime counters, not content the agent manages.
+.boot-attempt
+.last-successful-boot
+.platform-restore-active
+.platform-upgrade-available
 EOF
 chown mobius:mobius /data/.gitignore 2>/dev/null || true
 
 # Drop accidental nested git repos under /data, but preserve the intentional
-# per-app repos at /data/apps/<slug>/.git. The outer /data repo ignores those
-# app repos so `git add -A` does not try to treat them as submodules, while
-# the installer/update path can still keep each manifest-installed app's
-# upstream/main history across container restarts.
+# per-app repos at /data/apps/<slug>/.git AND the platform git at
+# /data/platform/.git. The outer /data repo ignores those repos so `git add -A`
+# does not try to treat them as submodules, while the installer/update path can
+# still keep each manifest-installed app's upstream/main history across
+# container restarts, and the platform git is its own repo.
 find /data -regextype posix-extended -mindepth 2 -maxdepth 4 \
-  -type d -name '.git' ! -regex '/data/apps/[^/]+/\.git' \
+  -type d -name '.git' \
+  ! -regex '/data/apps/[^/]+/\.git' \
+  ! -regex '/data/platform/\.git' \
   -prune -exec rm -rf {} + 2>/dev/null || true
 
 # Idempotent re-chown of /data/.git BEFORE the if/else below — git
@@ -404,7 +719,7 @@ if [ -f /data/.recover-pending ]; then
   rm -f /data/.recover-pending
   restore_status=""
   case "$mode" in
-    backend|scripts|shell-dist|shell-src)
+    backend|scripts|shell-dist|shell-src|platform|platform-baked)
       echo "Recovery flag detected: $mode — running recovery_restore.sh as root..."
       if /app/scripts/recovery_restore.sh "$mode"; then
         restore_status="ok"
@@ -495,5 +810,40 @@ umask 022
 # polls /api/health itself; idempotent; non-fatal. Runs as mobius so the
 # registered app files are mobius-owned.
 su -s /bin/sh mobius -c "umask 022 && CLAUDE_CONFIG_DIR=/data/cli-auth/claude bash /app/scripts/install-core-apps.sh" &
+
+# PHASE 3: Background health probe — writes /data/.last-successful-boot
+# and resets the boot-attempt counter once the server is confirmed
+# healthy. This is the "success" signal that prevents false-positive
+# crash-loop detection.
+#
+# The probe polls /api/health (127.0.0.1, never routed outside the
+# container) with a 60-second timeout (generous for slow first-boots
+# with DB migrations). On success it writes the sentinel and zeroes the
+# counter. It does NOT restart uvicorn or take any other action — it is
+# purely the signal that "this boot succeeded."
+#
+# pgrep self-match trap: we do NOT use `until ! pgrep -f uvicorn` or
+# similar — the probe waits on the outcome (/api/health 200), not on a
+# process name. See feedback_pgrep_self_match_in_monitor_loops.md.
+_port=${PORT:-8000}
+(
+  # Wait up to 90 seconds for /api/health to return 200.
+  for i in $(seq 1 90); do
+    if curl -sf "http://127.0.0.1:${_port}/api/health" > /dev/null 2>&1; then
+      # Health probe passed — record the success sentinel and reset counter.
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.last-successful-boot
+      echo "0 $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.boot-attempt
+      # Remove the restore-active flag if set — the server is healthy now.
+      rm -f /data/.platform-restore-active 2>/dev/null || true
+      echo "Platform health probe: /api/health OK — boot success recorded."
+      exit 0
+    fi
+    sleep 1
+  done
+  # 90 seconds elapsed without a 200 — uvicorn failed to start.
+  echo "Platform health probe: /api/health did not return 200 within 90s — boot failure." >&2
+  # Leave .boot-attempt in place (already incremented before uvicorn).
+  exit 1
+) &
 
 exec su -s /bin/sh mobius -c "umask 022 && cd /app && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"
