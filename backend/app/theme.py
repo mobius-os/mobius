@@ -53,6 +53,16 @@ DEFAULT_THEME = """\
   --accent-hover: #7c5ce6;
   --accent-dim: rgba(139, 108, 247, 0.14);
 
+  /* The ONLY legal foreground for text/icons sitting on an --accent
+     or --danger FILL (a primary button, a danger button, an accent
+     chip). Resolves a prior three-way split where apps hardcoded
+     #fff / #0d0d0d / #062016 for that foreground. White is chosen
+     for the #8b6cf7 purple accent (and the #f87171 danger), where
+     it's the legible choice. A custom theme that changes --accent
+     to a light color must also set --accent-fg to a dark value so
+     fill-foreground contrast holds. */
+  --accent-fg: #ffffff;
+
   /* Status colors. */
   --danger: #f87171;
   --green: #10b981;

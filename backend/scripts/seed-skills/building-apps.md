@@ -68,6 +68,28 @@ If a package update leaves `.mobius-bak` files or a dirty `/data/apps/<slug>` gi
 
 ---
 
+## Wrapping a pre-built / third-party web app
+
+Sometimes the app you want isn't authored fresh in JSX — it's an existing built web app (a packaged CRA/Vite/WebGL game, a tool's `dist/`) that you mount whole. The wrapper is a thin Möbius app around someone else's build. The general pattern, learned the hard way adapting one:
+
+1. **Shape: a thin `index.jsx` wrapper around an iframe.** The wrapper mounts the build's entry HTML in an `<iframe>` and stays small — chrome (loader, error state) plus the iframe, nothing more. The build's own files are declared in `mobius.json` `static_assets` as a map of *logical path → build file* so Möbius serves them under the app's asset route. Set `offline_capable: false` unless EVERY asset the build pulls is precached (an offline-capable wrapper that fetches one uncached chunk renders broken).
+
+2. **Relative asset paths are mandatory.** Build with a relative public base — CRA `homepage: "."` (`PUBLIC_URL=.`), Vite `base: './'`. Absolute references like `/static/js/main.js` 404 under the app serve path (the app lives at `/app-assets/by-id/<id>/`, not site root), so the build loads blank. Rebuild with the relative base and re-check the emitted HTML/CSS reference assets relatively.
+
+3. **No external CDNs — prod CSP is `default-src 'self'`.** The only off-origin source allowed is `esm.sh` for importmap scripts; everything else (a webfont from Google Fonts, a wasm/decoder fetched from a CDN, analytics, an external `<img>`) is silently blocked, so the build half-works with no console clue in some cases. **Grep the build for `https://`** before mounting; for each hit, vendor the asset same-origin (add it to `static_assets`) or route it through `/api/proxy`. If a library defaults to fetching something from a CDN, disable that default when the asset isn't actually needed.
+
+4. **Probe the entry asset before mounting.** HEAD/GET the build's entry HTML (or its main JS) first; if it's missing, render a clean, actionable error (Retry / Reinstall) inside the themed wrapper rather than leaving a blank iframe. A blank frame reads as "the whole platform broke"; a labeled error tells the owner exactly what to do.
+
+5. **Theme the wrapper chrome.** The loader and error states use `var(--bg) / var(--surface) / var(--text) / var(--border) / var(--accent)` and `var(--font)`, and honor `prefers-reduced-motion` on any spinner — so the chrome tracks the owner's theme instead of clashing with the embedded build.
+
+6. **Keep `static_assets` consistent with the build, and validate it.** Hashed filenames (`main.4f2a.js`) change on every rebuild, so a manifest written against an old build points at files that no longer exist — a stale manifest is 404s is a broken app. Run a package validator that confirms every `static_assets` entry resolves to a real file in the build before installing, and re-generate the manifest whenever you rebuild.
+
+7. **Fix forward, no dead references.** If a build ships a feature you don't use that pulls an external/CSP-blocked resource (e.g. a compression decoder for an asset you actually ship uncompressed), disable that feature outright rather than leaving the dead CDN reference in place "just in case." A dead reference is either a silent CSP failure or future confusion; remove it.
+
+(This is the technical wrapping pattern only. Mounting and serving the build inside this instance is the whole job — there is no public-repo publish step here.)
+
+---
+
 ## Component shape
 
 ```jsx
@@ -312,12 +334,15 @@ restyling UI and **copy the blocks you need**. The rules behind those shapes:
   `card(variant)` JS helper that returns a style object — it hides state in JS
   and blocks reuse.
 - **Color is always a theme token** so the app follows light/dark:
-  `--bg --surface --surface2 --text --muted --accent --accent-hover
+  `--bg --surface --surface2 --text --muted --accent --accent-fg --accent-hover
   --accent-dim --border --border-light --danger --green --font --mono`. There
   is **no `--red`** (use `--danger`) and **no `--fg`** (use `--text` — a
-  `var(--fg,#111)` fallback is invisible in dark mode). Hardcoded hex only for
-  an app-specific accent the theme can't express (a brand color, a chart
-  series). To read a token in JS, resolve it live
+  `var(--fg,#111)` fallback is invisible in dark mode). Text/icons on an
+  accent or danger FILL use `var(--accent-fg)` with **no fallback hex** — it's
+  the one legal foreground there, replacing the old `#fff`/`#0d0d0d`/`#062016`
+  hardcodes that a custom theme would break. Hardcoded hex only for an
+  app-specific accent the theme can't express (a brand color, a chart series).
+  To read a token in JS, resolve it live
   (`getComputedStyle(document.documentElement).getPropertyValue('--accent')`).
 - **Touch + radius.** Every interactive control `min-height: 44px`; every
   icon-only button gets an `aria-label`. Radius scale: 8px inputs/small,
@@ -399,7 +424,7 @@ const CSS = `
   transition: background .14s ease, border-color .14s ease, transform .1s ease; }
 .ma-btn:active { transform: scale(0.97); }
 .ma-btn:disabled { opacity: 0.5; cursor: default; }
-.ma-btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.ma-btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 .ma-btn-secondary { background: var(--surface2, var(--surface)); }
 /* /mobius-ui:Button */
 
