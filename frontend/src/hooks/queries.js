@@ -113,6 +113,12 @@ function useAppTokenQuery(appId) {
     enabled: !!appId,
     queryFn: () => fetchAppToken(appId),
     staleTime: 5 * 60_000,
+    // Belt: server tokens expire at 8h. Cap gc below that expiry so a
+    // re-opened app that sat idle overnight fetches a fresh token rather
+    // than serving a long-cached (possibly expired) one. 7 hours keeps
+    // the latch semantics and the offline-fallback path unchanged — the
+    // latch store is keyed by appId+version and is not affected by gcTime.
+    gcTime: 7 * 60 * 60_000,
   })
 }
 

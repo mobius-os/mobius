@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
@@ -139,6 +139,16 @@ export default function SettingsView({ onThemeChange }) {
     }
   }
 
+  // Ref to track the active health-poll interval so we can cancel it on
+  // component unmount or on a second restart attempt (shouldn't happen —
+  // the button is disabled while restarting, but belt-and-braces).
+  const restartPollRef = useRef(null)
+  useEffect(() => {
+    return () => {
+      if (restartPollRef.current) clearInterval(restartPollRef.current)
+    }
+  }, [])
+
   async function restartServer() {
     if (restartPhase === 'restarting') return
     setRestartPhase('restarting')
@@ -150,7 +160,31 @@ export default function SettingsView({ onThemeChange }) {
         try { detail = (await res.json()).detail || '' } catch {}
         throw new Error(detail || `Restart failed (${res.status})`)
       }
-      setTimeout(() => window.location.reload(), 10000)
+      // Poll /api/health every ~1.5s instead of a fixed 10s blind reload.
+      // Reload as soon as the server is back; surface a notice if it hasn't
+      // returned within ~45s (30 polls × 1500ms) so the user knows to check
+      // the container rather than waiting indefinitely.
+      const POLL_INTERVAL_MS = 1500
+      const POLL_MAX = 30
+      let polls = 0
+      restartPollRef.current = setInterval(async () => {
+        polls++
+        try {
+          const probe = await fetch('/api/health', { cache: 'no-store' })
+          if (probe.ok) {
+            clearInterval(restartPollRef.current)
+            restartPollRef.current = null
+            window.location.reload()
+            return
+          }
+        } catch (_) { /* server still down — keep polling */ }
+        if (polls >= POLL_MAX) {
+          clearInterval(restartPollRef.current)
+          restartPollRef.current = null
+          setRestartError("Server hasn't come back yet — check the container.")
+          setRestartPhase('idle')
+        }
+      }, POLL_INTERVAL_MS)
     } catch (err) {
       setRestartPhase('idle')
       setRestartError(err.message || 'Restart request failed.')

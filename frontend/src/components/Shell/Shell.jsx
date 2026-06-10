@@ -27,6 +27,7 @@ export default function Shell() {
     drawerOpen, openDrawer, closeDrawer,
     navTo, backFiredRef, drawerPushedRef, navStackRef,
     activeViewRef, activeChatIdRef, activeAppIdRef,
+    drawerOpenRef,
     appNavPush, appNavPop, appNavReset,
   } = useNavigation()
 
@@ -87,6 +88,15 @@ export default function Shell() {
   // this guard a rapid double-tap on "+ New chat" before the API
   // returns races two creates and leaves an extra empty chat behind.
   const creatingChatRef = useRef(false)
+  // Recently-recovered chat ids: excluded from the empty-chat-reuse scan
+  // in newChat() until they receive their first message. Without this, an
+  // Undo that recovers a chat C (which has no messages in the live cache
+  // yet because refreshChats hasn't propagated has_messages=true yet) lets
+  // a subsequent newChat() reuse C instead of a genuine empty. The id
+  // stays in this set until ChatView reports a first message, which
+  // guarantees the has_messages flag is now true and the reuse guard
+  // (which reads has_messages from the chats query) is reliable again.
+  const recoveredChatIdsRef = useRef(new Set())
   const [builtApp, setBuiltApp] = useState(null)
   // First-sign-in walkthrough. The query result is the source of
   // truth — backend persists completion via
@@ -418,11 +428,18 @@ export default function Shell() {
       const lastRebuilt = Number(sessionStorage.getItem('shell-rebuilt-at') || 0)
       if (now - lastRebuilt < 5000) return
       sessionStorage.setItem('shell-rebuilt-at', String(now))
+      // Read view state from refs, not closure-captured state. The
+      // callback's dependency array includes the scalar state values
+      // (activeView, activeAppId, etc.) because React requires them for
+      // correctness checking, but by the time shell_rebuilt fires those
+      // closure values may be one render behind concurrent state updates.
+      // Sibling branches (chat_run_started, chat_run_finished) already
+      // use refs for exactly this reason.
       sessionStorage.setItem('shell-reload', JSON.stringify({
-        activeView,
-        activeAppId,
-        drawerOpen,
-        activeChatId,
+        activeView: activeViewRef.current,
+        activeAppId: activeAppIdRef.current,
+        drawerOpen: drawerOpenRef.current,
+        activeChatId: activeChatIdRef.current,
       }))
       // Match the manifest scope so the post-reload page lands inside
       // the installed PWA's declared scope — writing `/` here would
@@ -436,8 +453,11 @@ export default function Shell() {
       showToast('Shell rebuild failed.', { variant: 'error', duration: 8000 })
     }
   }, [
-    activeAppId, activeView, drawerOpen, activeChatId,
-    activeChatIdRef, loadTheme, markStreamingEnd, markStreamingStart,
+    // Scalar state removed: shell_rebuilt now reads from refs (activeViewRef,
+    // activeAppIdRef, activeChatIdRef, drawerOpenRef) so stale closure values
+    // can't be serialized. Refs themselves don't need to be in deps (they're
+    // stable objects whose .current is read at call time, not at capture time).
+    loadTheme, markStreamingEnd, markStreamingStart,
     refreshApps, refreshChats,
   ])
 
@@ -488,12 +508,18 @@ export default function Shell() {
     }
 
     async function onMessage(e) {
-      // window 'message' events are for cross-frame postMessage —
-      // mini-app iframes (origin 'null' from sandboxed iframes) or
+      // window 'message' events are for cross-frame postMessage from
       // same-origin sibling frames. NOT service-worker messages —
       // those arrive on navigator.serviceWorker, handled separately
       // below.
-      if (e.origin !== 'null' && e.origin !== window.location.origin) return
+      //
+      // The iframes mount with allow-same-origin so e.origin is always
+      // window.location.origin, never the string 'null'. The 'null'-origin
+      // branch was dead (sandboxed-without-allow-same-origin iframes).
+      // e.source is intentionally NOT checked: Möbius is single-owner and
+      // every iframe on this origin is owned by the shell, so source
+      // verification would add complexity with no security benefit.
+      if (e.origin !== window.location.origin) return
       if (e.data?.type === 'moebius:app-error') {
         handleAppError(e)
       } else if (e.data?.type === 'moebius:new-chat') {
@@ -633,7 +659,14 @@ export default function Shell() {
         // post-delete refreshChats lands (else reuse would re-open it).
         && (exclude == null || String(c.id) !== String(exclude))
         && !streamingChatIds.has(c.id)
-        && (!draft || String(c.id) !== String(activeChatIdRef.current)))
+        && (!draft || String(c.id) !== String(activeChatIdRef.current))
+        // Exclude recently-recovered chats: an Undo may restore a chat
+        // whose has_messages=true hasn't propagated yet (optimistic delete
+        // left the cache with the tombstoned state). Reusing such a chat
+        // would silently navigate back into the just-recovered item instead
+        // of a genuine empty. The id is cleared once ChatView reports the
+        // first message (has_messages is then reliably true).
+        && !recoveredChatIdsRef.current.has(c.id))
       .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''))
       [0]
     if (empty) {
@@ -756,9 +789,64 @@ export default function Shell() {
         onAction: async () => {
           try {
             await api.chats.recover(id)
+            // Guard against the newChat() reuse scan picking up this
+            // recovered chat before its has_messages=true propagates from
+            // the server. The guard is cleared once ChatView fires
+            // onFirstMessage (meaning the server confirmed the chat has
+            // content and has_messages is reliably true).
+            recoveredChatIdsRef.current.add(id)
             await refreshChats()
           } catch {
             showToast("Couldn't undo — chat may be gone.", { variant: 'error' })
+          }
+        },
+      },
+    })
+  }
+
+  // App delete lives here (not in Drawer) so we have access to showToast.
+  // The Drawer's local deleteApp swallowed all errors silently — 409 means
+  // the agent is still working and the app cannot be safely removed yet;
+  // network errors must not leave the UI in an ambiguous state.
+  async function deleteApp(id) {
+    let res
+    try {
+      res = await api.apps.remove(id)
+    } catch {
+      showToast("Couldn't delete — check your connection.", { variant: 'error' })
+      return
+    }
+    if (!res.ok) {
+      if (res.status === 409) {
+        showToast('Agent is still working in this app — stop it first.', { duration: 6000 })
+        return
+      }
+      // Other non-2xx (e.g. 404 = already gone) — fall through to local
+      // cleanup so the app doesn't linger as a phantom in the UI.
+    }
+    // Evict the app from the LRU cache so its iframe unmounts immediately.
+    // The eviction effect (appsLiveFetched) would also catch it on the next
+    // refreshApps, but evicting inline is faster and avoids a transient
+    // "app is gone but iframe is still visible" state.
+    setAppCache(prev => prev.filter(cachedId => cachedId !== id))
+    navStackRef.current = navStackRef.current.filter(
+      e => !(e.view === 'canvas' && e.appId === id)
+    )
+    if (activeView === 'canvas' && activeAppId === id) {
+      setActiveAppId(null)
+      setActiveView('chat')
+    }
+    await refreshApps()
+    showToast('App deleted', {
+      duration: 5000,
+      action: {
+        label: 'Undo',
+        onAction: async () => {
+          try {
+            await api.apps.recover(id)
+            await refreshApps()
+          } catch {
+            showToast("Couldn't undo — app may be gone.", { variant: 'error' })
           }
         },
       },
@@ -854,6 +942,7 @@ export default function Shell() {
         onApp={(id) => navTo('canvas', { appId: id })}
         onNewChat={newChat}
         onDeleteChat={deleteChat}
+        onDeleteApp={deleteApp}
         onSettings={() => navTo('settings')}
         streamingChatIds={streamingChatIds}
         attentionChatIds={attentionChatIds}
@@ -902,7 +991,12 @@ export default function Shell() {
               loadTheme()
               refreshChats()
             }}
-            onFirstMessage={refreshChats}
+            onFirstMessage={() => {
+              // The chat has its first message — has_messages is now
+              // reliably true, so remove it from the recovered-chat guard.
+              recoveredChatIdsRef.current.delete(activeChatId)
+              refreshChats()
+            }}
             onSystemEvent={handleSystemEvent}
             builtApp={builtApp}
             onOpenApp={(appId) => { navTo('canvas', { appId }); setBuiltApp(null) }}

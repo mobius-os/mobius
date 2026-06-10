@@ -18,7 +18,10 @@ function _anyAppHasSentinels(map) {
 }
 
 // Parse shell-reload state (shell rebuild preserves view across reload).
-const shellReload = (() => {
+// Exported so App.jsx can read the parsed value without a second
+// sessionStorage.getItem() call — the IIFE already consumed and removed the
+// key, so a second read would always return null (dead branch in App.jsx).
+export const shellReload = (() => {
   const raw = sessionStorage.getItem('shell-reload')
   if (!raw) return null
   sessionStorage.removeItem('shell-reload')
@@ -396,6 +399,7 @@ export default function useNavigation() {
     canGoBack: navStackRef.current.length > 0,
     backFiredRef,
     drawerPushedRef,
+    drawerOpenRef,
     navStackRef,
     activeViewRef,
     activeChatIdRef,
