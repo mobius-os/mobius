@@ -14,6 +14,10 @@ before you record, link, or tidy notes.
 
 - [[how-the-memory-graph-works]] — the format, the inbox, and the daytime vs.
   nightly split in one note. (Also the canonical example of the note shape.)
+- [[memory-is-visible-to-the-partner]] — the Mind app shows every note to the
+  partner; write as if you'd stand behind it when quoted back.
+- [[a-nightly-dreaming-pass-exists]] — the overnight pass consolidates the
+  graph and fixes apps; defer heavy reorganizing to it.
 
 ## The short version
 

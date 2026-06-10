@@ -46,6 +46,13 @@ Link related notes inline with [[another-slug]] and a reason.
 
 Filename stem = the note's `id` (the slug other notes `[[link]]` to).
 
+**`usage.json` sidecar (do not hand-edit).** Live loads are tracked
+automatically in `shared/memory/usage.json` — the platform increments a counter
+each time a note is injected. The effective `access_count` = frontmatter
+baseline + sidecar count. Do NOT bump `access_count` by hand to reflect loads
+(it double-counts) and do NOT delete `usage.json` during tidy passes (you'd
+erase the real load history).
+
 ## What to record — the inclusion bar
 
 Record a fact only if it clears ALL of:
@@ -72,6 +79,14 @@ Default to recording **nothing**. "Store only the future-useful" means
 aggressively dropping one-off trivia. When unsure, prefer a cheap inbox line
 over a full note — the nightly pass decides if it's worth promoting.
 
+## What importance buys
+
+`importance 5` notes are injected every session. The injection budget is roughly
+the top 12 notes by (importance, then load count) within 25 KB — treat 4–5 as
+a scarce slot. If more than ~10 notes sit at importance ≥ 4, the nightly
+Dreaming pass demotes the least-loaded ones to free room for notes that are
+actually being used.
+
 ## The daytime contract (light consistency)
 
 Day-to-day you have a few low-effort moves, in order of effort. Anything past
@@ -80,8 +95,14 @@ these is deferred to Dreaming.
 1. **Quick observation → inbox.** When you notice something durable mid-task,
    append one line and move on — same recipe as the old experience log:
    ```bash
-   echo '- <terse durable observation, with file paths / package names>' \
+   echo '- [chat:<id>] <terse durable observation, with file paths / package names>' \
      >> /data/shared/memory/inbox.md
+   ```
+   Carry the source chat id (`[chat:<id>]`) so consolidated notes can record
+   where a fact came from. When promoting an inbox line to a proper note, carry
+   those ids into the note's optional `source:` frontmatter list:
+   ```yaml
+   source: [chat:abc123, chat:def456]
    ```
    This is the default — don't break flow to author a perfect note. The nightly
    Dreaming pass turns inbox lines into proper notes.
@@ -123,6 +144,8 @@ two, stop and drop an inbox line for Dreaming instead.
 - If a note has started asserting **2+ independent claims**, leave a note for
   Dreaming to split it — don't split mid-chat unless it's trivial. Split on idea
   boundaries, never on length alone.
+- A note over **~1.5 KB** is a signal it probably contains 2+ claims — either
+  split it now (if the boundary is obvious) or leave a split note for Dreaming.
 
 ## Anti-orphan + dedup (every write)
 
@@ -137,6 +160,9 @@ two, stop and drop an inbox line for Dreaming instead.
 - **Supersede, don't contradict.** When new info contradicts an old note, edit
   or replace the old note (newer wins) — don't leave two contradictory notes.
   Git history is the undo.
+- **Partner corrections are authoritative.** When the partner says a memory is
+  wrong, their correction outranks everything else — supersede the note in the
+  same turn, keep the correction's date, and tell the partner what you changed.
 
 `about-the-user` is the **primary map you grow.** Most of what clears the
 inclusion bar is a fact about the partner; default new notes into that map

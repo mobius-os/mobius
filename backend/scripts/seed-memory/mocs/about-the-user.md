@@ -16,6 +16,11 @@ interest, a personality trait that affects collaboration — not one-off task
 details. One fact per note; title it as the specific claim
 ("User prefers X", not "User stuff").
 
+## Bootstrap notes
+
+- [[this-instance-is-fresh]] — nothing durable is known yet; weight observation
+  extra until this map holds real notes.
+
 ## Preferences
 
 *(none recorded yet — add `user-prefers-*` notes as you learn them)*

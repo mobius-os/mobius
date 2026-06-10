@@ -30,6 +30,15 @@ It **grows through use**, and the nightly **Dreaming** pass curates it.
   platform how-to lives in skills, not here).
 - [[maintaining-memory]] — how this graph works and how to grow it.
 
+## Notes
+
+- [[this-instance-is-fresh]] — you know nothing durable about this partner yet;
+  weight observation extra in early chats.
+- [[memory-is-visible-to-the-partner]] — the Mind app shows every note to the
+  partner; write as if you'd stand behind it when quoted back.
+- [[a-nightly-dreaming-pass-exists]] — the overnight pass drains the inbox,
+  consolidates the graph, and fixes apps; defer heavy reorganizing to it.
+
 ## Inbox
 
 Raw same-day observations live in `inbox.md` (also injected). The nightly
