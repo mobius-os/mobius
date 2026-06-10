@@ -77,9 +77,10 @@ def test_serve_uploaded_file(client, db, auth, chat):
 
 
 def test_upload_rejects_missing_chat(client, auth):
-  """Upload to nonexistent chat must return 404."""
+  """Upload to a well-formed but non-existent chat_id must return 404."""
+  import uuid
   res = client.post(
-    "/api/chats/nope/uploads",
+    f"/api/chats/{uuid.uuid4()}/uploads",
     files=[("files", ("x.txt", io.BytesIO(b"x"), "text/plain"))],
     headers=auth,
   )
@@ -115,8 +116,9 @@ def test_delete_upload_rejects_cross_site_request(client, auth, chat):
 
 
 def test_delete_upload_missing_chat(client, auth):
-  """DELETE to a nonexistent chat returns 404."""
-  res = client.delete("/api/chats/nope/uploads/any.txt", headers=auth)
+  """DELETE to a well-formed but non-existent chat_id returns 404."""
+  import uuid
+  res = client.delete(f"/api/chats/{uuid.uuid4()}/uploads/any.txt", headers=auth)
   assert res.status_code == 404
 
 
@@ -164,6 +166,66 @@ def test_delete_upload_missing_file_still_cleans_db(client, db, auth, chat):
   assert res.status_code == 204
   db.refresh(chat)
   assert len(chat.uploads) == 0
+
+
+def test_upload_rejects_invalid_chat_id_format(client, auth):
+  """Upload to a chat_id that is not a UUID4 must return 400 (Task 2 path hygiene)."""
+  import io
+  res = client.post(
+    "/api/chats/../etc/passwd/uploads",
+    files=[("files", ("x.txt", io.BytesIO(b"x"), "text/plain"))],
+    headers=auth,
+  )
+  # FastAPI path routing may normalise .. but the slug 'etc' is not a UUID4.
+  assert res.status_code in (400, 404, 422)
+
+
+def test_upload_rejects_non_uuid_chat_id(client, auth):
+  """chat_id that looks like a path component but isn't a UUID4 returns 400."""
+  import io
+  res = client.post(
+    "/api/chats/not-a-uuid/uploads",
+    files=[("files", ("x.txt", io.BytesIO(b"x"), "text/plain"))],
+    headers=auth,
+  )
+  assert res.status_code == 400
+
+
+def test_serve_upload_rejects_non_uuid_chat_id(client, auth):
+  """Serve endpoint rejects non-UUID4 chat_id with 400 (Task 2)."""
+  from app.auth import create_access_token
+  token = create_access_token({"sub": "test"})
+  res = client.get(
+    "/api/chats/not-a-uuid/uploads/file.txt",
+    params={"token": token},
+  )
+  assert res.status_code == 400
+
+
+def test_upload_rejects_over_dir_cap(client, db, auth, chat, monkeypatch):
+  """Upload that would exceed the per-chat directory total cap returns 413 (Task 8)."""
+  import io
+  import sys
+  # Patch the dir cap to 1 byte so any upload overflows.
+  for mod in list(sys.modules.values()):
+    if getattr(mod, "__name__", "") == "app.routes.uploads":
+      monkeypatch.setattr(mod, "_MAX_CHAT_UPLOADS_BYTES", 1, raising=False)
+  ep = next(
+    (r.endpoint for r in client.app.routes
+     if getattr(r, "path", None) == "/api/chats/{chat_id}/uploads"
+     and "POST" in getattr(r, "methods", set())),
+    None,
+  )
+  if ep is not None:
+    monkeypatch.setitem(ep.__globals__, "_MAX_CHAT_UPLOADS_BYTES", 1)
+
+  res = client.post(
+    f"/api/chats/{chat.id}/uploads",
+    files=[("files", ("small.txt", io.BytesIO(b"hello"), "text/plain"))],
+    headers=auth,
+  )
+  assert res.status_code == 413
+  assert "full" in res.json()["detail"].lower() or "limit" in res.json()["detail"].lower()
 
 
 def test_upload_multi_file_over_cap_cleans_partial(client, db, auth, chat, monkeypatch):

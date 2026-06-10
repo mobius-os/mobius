@@ -31,6 +31,15 @@ log = logging.getLogger("moebius.auth")
 
 # Global login attempt tracking keyed by username. IP-level defense
 # remains handled separately by slowapi rate limits.
+#
+# Both dicts are bounded at _LOGIN_TRACK_CAP entries: a real instance
+# never sees more than a handful of distinct usernames, so a much lower
+# cap would suffice, but 10k guards against a targeted enumeration
+# attack stuffing the maps with random usernames and exhausting the
+# process heap (a low-cost attack that would OOM the already-tight host).
+# When the cap is hit, oldest entries (sorted by key insertion order,
+# which CPython's dict preserves) are evicted first.
+_LOGIN_TRACK_CAP = 10_000
 _login_failures: dict[str, int] = {}
 _login_cooldown_until: dict[str, datetime] = {}
 
@@ -58,17 +67,32 @@ def _check_login_cooldown(username: str):
     _login_cooldown_until.pop(username, None)
 
 
+def _evict_oldest_if_over_cap(d: dict) -> None:
+  """Removes the oldest entry when the dict exceeds _LOGIN_TRACK_CAP.
+
+  CPython dicts maintain insertion order, so `next(iter(d))` is the
+  oldest key. Evicting one entry per insertion keeps the dict at most
+  _LOGIN_TRACK_CAP + 1 briefly, then immediately back to the cap.
+  """
+  if len(d) > _LOGIN_TRACK_CAP:
+    d.pop(next(iter(d)), None)
+
+
 def _record_login_failure(username: str):
   """Increments failure count and sets cooldown if threshold reached."""
   _ensure_login_tracking_maps()
   failures = _login_failures.get(username, 0) + 1
   _login_failures[username] = failures
+  _evict_oldest_if_over_cap(_login_failures)
   if failures >= 30:
     _login_cooldown_until[username] = datetime.now(UTC) + timedelta(minutes=15)
+    _evict_oldest_if_over_cap(_login_cooldown_until)
   elif failures >= 20:
     _login_cooldown_until[username] = datetime.now(UTC) + timedelta(minutes=5)
+    _evict_oldest_if_over_cap(_login_cooldown_until)
   elif failures >= 10:
     _login_cooldown_until[username] = datetime.now(UTC) + timedelta(minutes=1)
+    _evict_oldest_if_over_cap(_login_cooldown_until)
 
 
 def _reset_login_failures(username: str):
@@ -133,7 +157,8 @@ def _write_service_token(username: str, token_epoch: int) -> None:
     f.write(token)
 
 
-@router.post("/setup", response_model=schemas.TokenResponse)
+@router.post("/setup", response_model=schemas.TokenResponse,
+             dependencies=[Depends(reject_cross_site)])
 @_limiter.limit("3/minute")
 def setup(
   request: Request,

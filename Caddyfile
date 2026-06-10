@@ -7,7 +7,17 @@
         Referrer-Policy "strict-origin-when-cross-origin"
         Permissions-Policy "camera=(), geolocation=()"
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-        # unsafe-inline is required for server-injected theme <style> blocks.
+        # script-src notes:
+        #   'unsafe-inline' — cannot be removed: index.html, app-frame.html,
+        #   standalone.py, and recover_html.py all contain inline <script>
+        #   blocks (error handlers, postMessage init, BIP capture, factory-
+        #   reset localStorage wipe). Replacing them with nonce/hash-based CSP
+        #   requires server-side rendering changes across all four surfaces.
+        #   https://esm.sh — cannot be removed: mini-app importmaps point
+        #   recharts, date-fns, and katex at esm.sh. Those dynamic import()
+        #   calls are governed by script-src; removing the origin would break
+        #   every mini-app that uses those libraries at runtime. Removing it
+        #   requires vendoring all three libraries under /vendor (like three.js).
         Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; frame-src 'self'; frame-ancestors 'self'"
     }
 

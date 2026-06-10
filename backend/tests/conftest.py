@@ -179,9 +179,15 @@ def db():
 
 @pytest.fixture
 def chat(db, owner_token):
-  """Creates an empty chat row with id 'testchat' and returns the Chat model."""
+  """Creates an empty chat row with a UUID4 id and returns the Chat model.
+
+  UUID4 is the production format (str(uuid.uuid4())); using it here
+  keeps upload/generate endpoint tests valid after the chat_id format
+  check landed in those routes.
+  """
+  import uuid
   from app import models
-  c = models.Chat(id="testchat", title="Test chat", messages=[])
+  c = models.Chat(id=str(uuid.uuid4()), title="Test chat", messages=[])
   db.add(c)
   db.commit()
   db.refresh(c)

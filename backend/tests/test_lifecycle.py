@@ -6,26 +6,28 @@ from app import models
 
 def test_ttl_is_seven_days(client, db, auth, chat):
   """Chats deleted fewer than 7 days ago must not be purged."""
+  chat_id = chat.id  # capture before any purge
   chat.deleted_at = datetime.utcnow() - timedelta(days=6)
   db.commit()
 
   client.get("/api/chats", headers=auth)
 
   still_there = db.query(models.Chat).filter(
-    models.Chat.id == "testchat"
+    models.Chat.id == chat_id
   ).first()
   assert still_there is not None, "Chat deleted 6 days ago must survive"
 
 
 def test_purge_after_seven_days(client, db, auth, chat):
   """Chats deleted more than 7 days ago must be hard-deleted."""
+  chat_id = chat.id  # capture before purge deletes the row
   chat.deleted_at = datetime.utcnow() - timedelta(days=8)
   db.commit()
 
   client.get("/api/chats", headers=auth)
 
   gone = db.query(models.Chat).filter(
-    models.Chat.id == "testchat"
+    models.Chat.id == chat_id
   ).first()
   assert gone is None, "Chat deleted 8 days ago must be purged"
 
@@ -33,11 +35,12 @@ def test_purge_after_seven_days(client, db, auth, chat):
 def test_purge_removes_data_dir(client, db, auth, chat):
   """Hard delete must remove /data/chats/{id}/ directory."""
   import os
+  chat_id = chat.id  # capture before purge
   chat.deleted_at = datetime.utcnow() - timedelta(days=8)
   db.commit()
 
   data_dir = os.environ["DATA_DIR"]
-  chat_dir = Path(data_dir) / "chats" / "testchat"
+  chat_dir = Path(data_dir) / "chats" / chat_id
   chat_dir.mkdir(parents=True, exist_ok=True)
   (chat_dir / "uploads").mkdir()
   (chat_dir / "uploads" / "file.txt").write_text("hello")
@@ -56,11 +59,12 @@ def test_purge_removes_agent_browser_profile(client, db, auth, chat):
   profile to disk indefinitely (ticket 051).
   """
   import os
+  chat_id = chat.id  # capture before purge
   chat.deleted_at = datetime.utcnow() - timedelta(days=8)
   db.commit()
 
   data_dir = os.environ["DATA_DIR"]
-  profile_dir = Path(data_dir) / "agent-browser-profiles" / "chat-testchat"
+  profile_dir = Path(data_dir) / "agent-browser-profiles" / f"chat-{chat_id}"
   profile_dir.mkdir(parents=True, exist_ok=True)
   (profile_dir / "Cache").mkdir()
   (profile_dir / "Cache" / "blob.bin").write_text("fake-cache")
@@ -80,12 +84,14 @@ def test_notifications_older_than_90_days_purged(client, db, auth):
   Ticket 052 caps growth by deleting >90-day rows alongside the
   existing soft-deleted-chat purge.
   """
+  import uuid
+  notif_source = str(uuid.uuid4())  # doesn't need to match a real chat
   owner = db.query(models.Owner).first()
   old = models.Notification(
     id="old-notif",
     owner_id=owner.id,
     source_type="chat",
-    source_id="testchat",
+    source_id=notif_source,
     title="Old",
     body="should be purged",
     sent_at=datetime.utcnow() - timedelta(days=91),
@@ -94,7 +100,7 @@ def test_notifications_older_than_90_days_purged(client, db, auth):
     id="recent-notif",
     owner_id=owner.id,
     source_type="chat",
-    source_id="testchat",
+    source_id=notif_source,
     title="Recent",
     body="should survive",
     sent_at=datetime.utcnow() - timedelta(days=30),
