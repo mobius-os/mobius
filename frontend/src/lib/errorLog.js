@@ -7,7 +7,6 @@
 // can hook recordClientError later without touching any caller.
 
 const RING_KEY = 'mobius:error-log' // ring buffer of the last MAX errors
-const LAST_KEY = 'mobius:last-error' // single most-recent (kept for back-compat)
 const MAX = 10
 
 /**
@@ -29,7 +28,6 @@ export function recordClientError({ where, message, error, stack, componentStack
     ring.push(record)
     while (ring.length > MAX) ring.shift()
     sessionStorage.setItem(RING_KEY, JSON.stringify(ring))
-    sessionStorage.setItem(LAST_KEY, JSON.stringify(record))
   } catch {
     /* storage full/disabled — the console line above is the fallback */
   }

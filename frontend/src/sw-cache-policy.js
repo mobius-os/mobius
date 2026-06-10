@@ -64,32 +64,6 @@ export function isStaleRuntimeCache(name) {
   return false
 }
 
-// How long a page connectivity verdict (posted to the SW from useOnlineStatus's
-// /api/health probe) is trusted before it's considered stale. Kept as a pure
-// helper because older SW policies and future non-versioned routes may still
-// need an explicit "known online" gate. Versioned offline-capable app code no
-// longer uses this gate: if there is a cached copy, it is served immediately and
-// refreshed in the background.
-//
-// This window was originally a two-sided knob for network-first vs cache-first
-// app-code serving. The current versioned app-code policy no longer depends on
-// it, but the helper stays conservative for any future route that needs a
-// positive, recent online verdict.
-export const VERDICT_MAX_AGE_MS = 60000
-
-// PURE: is the device KNOWN to be online — i.e. is there a FRESH, POSITIVE page
-// verdict? Exported pure so the truth table remains testable without a
-// service-worker context. The current offline-capable app route does not need
-// this to decide whether to serve cache-first because those URLs are versioned.
-//
-// @param {boolean|undefined} pageOnline last verdict (true/false/undefined)
-// @param {number} verdictAt  Date.now() when the verdict was recorded (0 if none)
-// @param {number} now        current Date.now()
-// @param {number} maxAgeMs   freshness window (default VERDICT_MAX_AGE_MS)
-export function isKnownOnline(pageOnline, verdictAt, now, maxAgeMs = VERDICT_MAX_AGE_MS) {
-  return pageOnline === true && (now - verdictAt) < maxAgeMs
-}
-
 // PURE: should offlineCapableHandler serve the CACHED copy first (instant) vs go
 // to network? If the route is cached, serve it immediately and refresh in the
 // background. Freshness comes from the versioned frame/module URL (`?v=` is part
