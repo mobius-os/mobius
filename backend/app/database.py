@@ -275,6 +275,17 @@ def run_migrations(eng) -> None:
         "ALTER TABLE apps ADD COLUMN upstream_jsx_sha VARCHAR(64) NULL"
       ))
       conn.commit()
+  if "offline_contract" not in apps_cols:
+    # Offline contract from the manifest `offline` block (P1-D). Nullable JSON;
+    # NULL for apps with no block or apps installed before this migration. The
+    # column is informational — no existing query filters on it (that is an
+    # explicit design decision: the offline_capable bool flag is the runtime
+    # gate; this stores the rich declaration for the agent + future UI).
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN offline_contract JSON NULL"
+      ))
+      conn.commit()
   if "chats" in tables:
     chats_cols = {c["name"] for c in inspector.get_columns("chats")}
     _add = []

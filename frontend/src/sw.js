@@ -96,6 +96,19 @@ const VENDORED_REACT = [
   `${REACT_VENDOR}/jsx-runtime.mjs`,
 ].map(url => ({ url, revision: null }))
 
+// Self-hosted recharts + date-fns — same precache rationale as React above.
+// Mini-apps that render charts / format dates import these from the importmap.
+// Left to the runtime CacheFirst /vendor route they would only warm on the
+// first ONLINE open of a chart/date app; an installed PWA that opens a chart
+// app offline for the first time would import-fail. Precaching makes them
+// install-time guaranteed offline. Version in the path is the cache-bust.
+const VENDORED_RECHARTS = [
+  { url: '/vendor/recharts@2.15.4/recharts.mjs', revision: null },
+]
+const VENDORED_DATE_FNS = [
+  { url: '/vendor/date-fns@4.3.0/date-fns.mjs', revision: null },
+]
+
 // Self-hosted CodeMirror 6 — same precache rationale as React above. The
 // Notes / LaTeX / Editor / Web Studio apps STATICALLY import @codemirror/* +
 // @lezer/highlight + the `codemirror` meta-package at module top via the
@@ -122,7 +135,13 @@ const VENDORED_CODEMIRROR = [
 // is that every release's shell precache lives under a unique
 // content-versioned cache name; `cleanupOutdatedCaches()` purges
 // older precaches when this SW activates.
-precacheAndRoute([...self.__WB_MANIFEST, ...VENDORED_REACT, ...VENDORED_CODEMIRROR])
+precacheAndRoute([
+  ...self.__WB_MANIFEST,
+  ...VENDORED_REACT,
+  ...VENDORED_CODEMIRROR,
+  ...VENDORED_RECHARTS,
+  ...VENDORED_DATE_FNS,
+])
 cleanupOutdatedCaches()
 
 // On activate: evict stale runtime caches — the legacy hand-written
@@ -465,6 +484,70 @@ setCatchHandler(async ({ request, url }) => {
     )
   }
   return (await matchPrecache('/offline.html')) || Response.error()
+})
+
+// ── P1-B: precache warming on install ───────────────────────────
+//
+// Shell.jsx posts `moebius:precache-app` when an offline-capable app is
+// installed or updated, so its frame + module are immediately available for
+// offline use — rather than waiting for the user to open the app once online.
+//
+// Message payload:
+//   { type: 'moebius:precache-app', frameUrl: string, moduleUrl: string }
+//
+// Key-normalization mirrors offlineCapableHandler exactly (strips token, _,
+// install query params) so the warmed cache entries are found on the next
+// cache.match(). We only store when the response carries X-Mobius-Offline:1
+// to mirror the live-open gate — if the server flips offline_capable off, the
+// warning entry never lands.
+
+self.addEventListener('message', (event) => {
+  const msg = event.data
+  if (!msg || typeof msg !== 'object') return
+  if (msg.type !== 'moebius:precache-app') return
+
+  const { frameUrl, moduleUrl } = msg
+  if (!frameUrl || !moduleUrl) return
+
+  // Normalize a URL to its cache key (strip token/_ /install params).
+  function normKey(rawUrl) {
+    try {
+      const u = new URL(rawUrl, self.location.origin)
+      u.searchParams.delete('token')
+      u.searchParams.delete('_')
+      u.searchParams.delete('install')
+      return u.href
+    } catch {
+      return null
+    }
+  }
+
+  async function warmOne(rawUrl, cacheName) {
+    const key = normKey(rawUrl)
+    if (!key) return
+    // Already cached? Skip redundant fetch.
+    const existing = await caches.open(cacheName).then(c => c.match(key))
+    if (existing) return
+    const resp = await boundedFetch((signal) => {
+      try {
+        return new Request(rawUrl, { cache: 'reload', credentials: 'same-origin', signal })
+      } catch {
+        return new Request(rawUrl, { cache: 'reload', signal })
+      }
+    })
+    if (resp && resp.status === 200 && resp.headers.get('X-Mobius-Offline') === '1') {
+      const cache = await caches.open(cacheName)
+      await cache.put(key, resp.clone())
+    }
+  }
+
+  // Tie the warming to the install event lifetime so the SW stays alive.
+  // Falls back gracefully if event.waitUntil is unavailable.
+  const work = (async () => {
+    await warmOne(frameUrl, OFFLINE_APPS_CACHE)
+    await warmOne(moduleUrl, OFFLINE_APPS_CACHE)
+  })().catch(() => {})
+  if (event && typeof event.waitUntil === 'function') event.waitUntil(work)
 })
 
 // ── Web Push ────────────────────────────────────────────────────
