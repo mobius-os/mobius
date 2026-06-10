@@ -23,6 +23,7 @@ chat's `session_id`, run markers, or broadcast.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 log = logging.getLogger("moebius.chat")
@@ -32,6 +33,18 @@ log = logging.getLogger("moebius.chat")
 # "where we are now" context for continuing the work, so we keep the most
 # recent characters rather than the oldest.
 _MAX_TRANSCRIPT_CHARS = 60_000
+
+# Timeout for the SDK client connect() call. A stuck DNS lookup or hung
+# subprocess launch should fail fast rather than blocking the compaction
+# endpoint indefinitely.
+_CONNECT_TIMEOUT_SECS = 30.0
+
+# Overall timeout for the entire summarize receive loop. Prevents an
+# unresponsive Claude CLI from holding the compaction endpoint open until
+# an upstream proxy idle-timeout (typically 300–600 s) forcibly closes it.
+# 180 s is well under common proxy idle windows and long enough for any
+# realistic summarize response.
+_RECEIVE_TIMEOUT_SECS = 180.0
 
 # The summarize instruction. The output is replayed verbatim as the prefix
 # of the next provider's first turn, so it must be self-contained prose a
@@ -131,14 +144,24 @@ async def _run_summarize_turn(prompt: str, *, data_dir: str) -> str:
   )
   client = ClaudeSDKClient(options)
   parts: list[str] = []
-  await client.connect()
   try:
-    await client.query(prompt)
-    async for msg in client.receive_response():
-      if isinstance(msg, AssistantMessage):
-        for block in msg.content:
-          if isinstance(block, TextBlock):
-            parts.append(block.text)
+    await asyncio.wait_for(client.connect(), timeout=_CONNECT_TIMEOUT_SECS)
+  except asyncio.TimeoutError:
+    raise CompactionError(
+      f"Compaction client connect timed out after {_CONNECT_TIMEOUT_SECS:.0f}s."
+    )
+  try:
+    async with asyncio.timeout(_RECEIVE_TIMEOUT_SECS):
+      await client.query(prompt)
+      async for msg in client.receive_response():
+        if isinstance(msg, AssistantMessage):
+          for block in msg.content:
+            if isinstance(block, TextBlock):
+              parts.append(block.text)
+  except asyncio.TimeoutError:
+    raise CompactionError(
+      f"Compaction receive loop timed out after {_RECEIVE_TIMEOUT_SECS:.0f}s."
+    )
   finally:
     await client.disconnect()
   return "".join(parts)
