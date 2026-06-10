@@ -187,6 +187,7 @@ export const api = {
       body: JSON.stringify(payload),
     }),
     remove: (chatId) => apiFetch(`/chats/${chatId}`, { method: 'DELETE' }),
+    recover: (chatId) => apiFetch(`/chats/${chatId}/recover`, { method: 'POST' }),
   },
   apps: {
     list: () => apiFetch('/apps/'),

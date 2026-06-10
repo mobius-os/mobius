@@ -357,7 +357,7 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <meta name="referrer" content="no-referrer">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -375,6 +375,10 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
       --danger: #f87171;
       --font: 'Inter', system-ui, sans-serif;
     }}
+    /* Prevent iOS Safari page-level pinch-zoom (user-scalable=no is ignored
+       by iOS Safari; this CSS lock covers that gap). Elements with their own
+       pinch gesture set touch-action: none to override. */
+    html, body {{ touch-action: pan-x pan-y; }}
     /* No grey/blue tap-flash on any interactive element across mini-apps (mobile). */
     *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }}
     /* Native-app feel: no text-selection box over buttons / UI chrome. Inputs,
