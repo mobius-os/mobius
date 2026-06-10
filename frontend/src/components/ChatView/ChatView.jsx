@@ -119,7 +119,7 @@ function evictOldestDraft() {
 }
 
 
-export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystemEvent, builtApp, onOpenApp, onMessageStart, showPicker = true, embedded = false }) {
+export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystemEvent, builtApp, onOpenApp, onMessageStart, showPicker = true, embedded = false, quickActions = null, getContext = null }) {
   const queryClient = useQueryClient()
   // Chat is online-only (it spawns a server-side agent). When offline
   // the composer disables send and says so, rather than failing into a
@@ -335,6 +335,13 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   onMessageStartRef.current = onMessageStart
   const onFirstMessageRef = useRef(onFirstMessage)
   onFirstMessageRef.current = onFirstMessage
+  // getContext: optional callback that returns a Promise<object|null> with
+  // the current app state snapshot. Called on the fresh-send path only (not
+  // the queue path, which is already mid-turn). The result is serialized as a
+  // compact <app_state> block appended to the outgoing message content so the
+  // backend agent receives it alongside the user's text.
+  const getContextRef = useRef(getContext)
+  getContextRef.current = getContext
 
   // Re-entry guard for handleStop. Two rapid Stop clicks (e.g. during
   // the await on /chat/stop) would otherwise both snapshot the same
@@ -1078,8 +1085,30 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     // Fresh turn — not a bridge from a mounted DB partial.
     bridgeHook.markBridged()
 
+    // Append <app_state> context block if the embed provided a getContext
+    // callback. The displayed message (`userMsg`) stays clean; only the
+    // content sent to the backend carries the structured block.
+    let sendText = text
+    if (getContextRef.current) {
+      try {
+        const ctx = await getContextRef.current()
+        if (ctx && typeof ctx === 'object') {
+          // Serialize as a compact inline XML block. Keep it small — this
+          // goes inline into the user's message, not a separate system block.
+          const parts = Object.entries(ctx)
+            .filter(([, v]) => v != null && String(v).trim() !== '')
+            .map(([k, v]) => `  <${k}>${String(v).replace(/</g, '&lt;')}</${k}>`)
+          if (parts.length > 0) {
+            sendText = `${text}\n\n<app_state>\n${parts.join('\n')}\n</app_state>`
+          }
+        }
+      } catch (e) {
+        // Context fetch failed — send the original text unchanged.
+      }
+    }
+
     try {
-      const result = await streamSend(text, attachments.length > 0 ? attachments : undefined)
+      const result = await streamSend(sendText, attachments.length > 0 ? attachments : undefined)
       if (result?.status === 'queued') {
         commitMessages(prev => {
           const next = [...prev]
@@ -1506,12 +1535,30 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       {showEmpty && (
         <div className="chat__empty-wrap">
           {embedded ? (
-            // App-embedded chats are scoped to one app — the shell-branded
-            // "What's on your mind? / Möbius improves…" splash is out of
-            // place there. Show a quiet, contextual prompt instead.
-            <div className="chat__empty chat__empty--embed">
-              <p className="chat__empty-sub">Ask the agent to get started.</p>
-            </div>
+            // App-embedded chats: render quick action chips when the app
+            // provided them via opts.quickActions; otherwise a neutral hint.
+            // Chips pre-fill the composer (never auto-send) — max 4 rendered.
+            Array.isArray(quickActions) && quickActions.length > 0 ? (
+              <div className="chat__empty chat__empty--embed chat__empty--chips">
+                <div className="chat__quick-actions" role="list">
+                  {quickActions.slice(0, 4).map((action, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      className="chat__quick-action-chip"
+                      role="listitem"
+                      onClick={() => setInput(action.prompt)}
+                    >
+                      {action.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="chat__empty chat__empty--embed">
+                <p className="chat__empty-sub">How can I help?</p>
+              </div>
+            )
           ) : (
             <div className="chat__empty">
               <img className="chat__empty-glyph" src={`${BASE}/moebius.png`} alt="" width="120" height="120" />
