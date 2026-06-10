@@ -12,9 +12,17 @@ keeps its own tiny implementation that the agent cannot edit
 
 Cookie format is HMAC-SHA256-signed JSON: `<b64(payload)>.<b64(sig)>`.
 Deliberately not JWT — no library, no algorithm-negotiation surface,
-no library-CVE blast radius. The secret key reused from
-`SECRET_KEY` ensures parity with the existing /recover/auth cookie
-so old + new auth paths can interop during the transition.
+no library-CVE blast radius.
+
+The recovery HMAC key is derived from an independent file,
+`/data/.recovery-secret`, NOT from `SECRET_KEY`. This is load-bearing:
+when SECRET_KEY drifts (the documented outage mode that invalidates
+all JWTs), the recovery surface is exactly when the user most needs
+it. Tying it to the same key means both break together. The recovery
+secret is generated once (secrets.token_hex(32)) and never rotated
+by anything else. Old cookies just become invalid on first deploy
+(one re-login); the UX cost is trivial compared to the availability
+guarantee.
 """
 
 from __future__ import annotations
@@ -24,7 +32,9 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
 import time
+from pathlib import Path
 from typing import Optional
 
 import bcrypt
@@ -32,6 +42,13 @@ import bcrypt
 
 COOKIE_NAME = "moebius_recover"
 SESSION_TTL_SECONDS = 3600  # 1 hour, matches the existing recover.py value
+
+# Recovery secret file lives at a fixed, volume-backed path.
+# Determined once at module scope so callers don't have to thread
+# DATA_DIR through; overridable for tests via _RECOVERY_SECRET_PATH.
+_RECOVERY_SECRET_PATH = Path(
+  os.environ.get("DATA_DIR", "/data")
+) / ".recovery-secret"
 
 
 def verify_password(plain: str, hashed: str) -> bool:
@@ -52,14 +69,42 @@ def _b64decode(s: str) -> bytes:
   return base64.urlsafe_b64decode(s + padding)
 
 
-def _secret_key_bytes() -> bytes:
-  """Returns SECRET_KEY as bytes. Read at call time, not module
-  load, so a key rotation propagates without a restart."""
-  key = os.environ.get("SECRET_KEY", "")
-  if not key:
-    # Fail loudly — recovery without a signing key is broken.
-    raise RuntimeError("SECRET_KEY env var is empty")
-  return key.encode("utf-8")
+def _recovery_secret_bytes() -> bytes:
+  """Returns the recovery HMAC key, generating it on first use.
+
+  Read at call time (not module load) so the file can be created
+  after module import without a restart — e.g. entrypoint.sh starts
+  the server before /data/.recovery-secret exists on a fresh volume.
+
+  Generates the file with chmod 600 if absent. Never rotated by
+  anything except a deliberate factory-reset (which regenerates it
+  on next boot). Raises RuntimeError only if both read and generate
+  fail (genuine disk/permission catastrophe).
+  """
+  path = _RECOVERY_SECRET_PATH
+  # Try reading the existing file first.
+  try:
+    key = path.read_text(encoding="ascii").strip()
+    if key:
+      return key.encode("ascii")
+  except FileNotFoundError:
+    pass
+  except Exception as exc:
+    raise RuntimeError(f"could not read recovery secret at {path}: {exc}") from exc
+
+  # File absent — generate and persist it.
+  new_key = secrets.token_hex(32)
+  try:
+    # Write to a temp file in the same directory, then rename atomically
+    # so a crash mid-write never leaves a partial file that silently
+    # invalidates future cookies.
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(new_key, encoding="ascii")
+    tmp.chmod(0o600)
+    tmp.rename(path)
+  except Exception as exc:
+    raise RuntimeError(f"could not write recovery secret to {path}: {exc}") from exc
+  return new_key.encode("ascii")
 
 
 def create_session_token(username: str) -> str:
@@ -72,7 +117,7 @@ def create_session_token(username: str) -> str:
     payload, separators=(",", ":"), sort_keys=True,
   ).encode("utf-8")
   sig = hmac.new(
-    _secret_key_bytes(), payload_b, hashlib.sha256,
+    _recovery_secret_bytes(), payload_b, hashlib.sha256,
   ).digest()
   return f"{_b64encode(payload_b)}.{_b64encode(sig)}"
 
@@ -86,8 +131,15 @@ def decode_session_token(token: Optional[str]) -> Optional[str]:
     payload_part, sig_part = token.split(".", 1)
     payload_b = _b64decode(payload_part)
     sig = _b64decode(sig_part)
+    try:
+      key = _recovery_secret_bytes()
+    except RuntimeError:
+      # Can't read the recovery secret — treat the token as invalid
+      # rather than raising. The caller (a route handler) would 500
+      # otherwise, and the recovery surface must degrade gracefully.
+      return None
     expected = hmac.new(
-      _secret_key_bytes(), payload_b, hashlib.sha256,
+      key, payload_b, hashlib.sha256,
     ).digest()
     if not hmac.compare_digest(sig, expected):
       return None
