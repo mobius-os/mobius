@@ -730,12 +730,14 @@
   color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
 }
 
-/* No focus outline of any kind on the + button. The color change
-   (active state below) is the only visual feedback — a second
-   concentric ring on top of the active fill reads as a "broken"
-   double outline. */
-.chat__plus:focus,
-.chat__plus:focus-visible { outline: none; }
+/* Keyboard-only focus ring on the + button. No :focus rule (pointer
+   focus must not show a ring — the one-halo invariant). :focus-visible
+   fires only for keyboard navigation. When the popover is active the
+   accent fill already signals the state, so we suppress the ring on
+   --active to avoid a second concentric halo on top of the accent fill. */
+.chat__plus:focus { outline: none; }
+.chat__plus:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chat__plus.chat__plus--active:focus-visible { outline: none; }
 
 /* Active state: PURPLE FROSTED GLASS — translucent accent fill so
    the same backdrop-blur the pill uses shows through, but tinted

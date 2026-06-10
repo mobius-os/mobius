@@ -207,6 +207,44 @@ export default function Drawer({
     if (res.ok || res.status === 404) refreshApps()
   }
 
+  // Focus management: move focus into the drawer on open; restore to
+  // the toggle on close. The drawer panel gets tabIndex=-1 so it can
+  // receive programmatic focus without appearing in the tab order.
+  // previousFocusRef records the element that was focused when the
+  // drawer opened so we can restore it on close regardless of how the
+  // drawer was dismissed (Escape, overlay tap, swipe).
+  const previousFocusRef = useRef(null)
+  useEffect(() => {
+    if (open) {
+      previousFocusRef.current = document.activeElement
+      // Defer to next frame so the drawer's CSS transition has begun
+      // and the panel is in the rendered DOM before we focus it.
+      requestAnimationFrame(() => {
+        drawerRef.current?.focus()
+      })
+    } else {
+      // Restore focus when the drawer closes so keyboard users land
+      // back on the toggle that opened it (or whatever was focused).
+      if (previousFocusRef.current && typeof previousFocusRef.current.focus === 'function') {
+        previousFocusRef.current.focus()
+        previousFocusRef.current = null
+      }
+    }
+  }, [open])
+
+  // Escape key closes the drawer while it is open.
+  useEffect(() => {
+    if (!open) return
+    function onKeyDown(e) {
+      if (e.key === 'Escape') {
+        e.stopPropagation()
+        onClose?.()
+      }
+    }
+    document.addEventListener('keydown', onKeyDown, { capture: true })
+    return () => document.removeEventListener('keydown', onKeyDown, { capture: true })
+  }, [open, onClose])
+
   // Swipe-left-to-close. Mirror of the mobius-design-iter pattern:
   // touchstart captures origin, touchmove drags the panel 1:1 with
   // the finger when the gesture is dominantly horizontal-left,
@@ -293,6 +331,7 @@ export default function Drawer({
         className={`drawer ${open ? 'drawer--open' : ''}`}
         aria-hidden={!open}
         inert={!open ? '' : undefined}
+        tabIndex={-1}
         onTouchStart={onTouchStart}
         onTouchMove={onTouchMove}
         onTouchEnd={onTouchEnd}
