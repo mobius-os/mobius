@@ -146,9 +146,7 @@ def list_chats(
   # rather than SQL because cross-dialect `JSON = '[]'` is fragile;
   # the SQL prefilter (NULL session, NULL deleted_at, older than the
   # grace) keeps the candidate set small.
-  empty_cutoff = (
-    datetime.now(UTC).replace(tzinfo=None) - EMPTY_CHAT_GRACE
-  )
+  empty_cutoff = now_naive_utc() - EMPTY_CHAT_GRACE
   candidates = db.query(models.Chat).filter(
     models.Chat.deleted_at.is_(None),
     models.Chat.session_id.is_(None),
@@ -181,9 +179,7 @@ def list_chats(
   # transaction. Naive UTC matches `Notification.sent_at`'s storage
   # format (see the chat cutoff above for the same TypeError-avoidance
   # rationale).
-  notification_cutoff = (
-    datetime.now(UTC).replace(tzinfo=None) - timedelta(days=90)
-  )
+  notification_cutoff = now_naive_utc() - timedelta(days=90)
   db.query(models.Notification).filter(
     models.Notification.sent_at < notification_cutoff,
   ).delete(synchronize_session=False)
@@ -355,9 +351,7 @@ async def patch_chat(
     # Drawer pin toggle. We stamp the time on pin so the pinned group
     # sorts newest-pinned-first within itself.
     if body.pinned is not None:
-      chat.pinned_at = (
-        datetime.now(UTC).replace(tzinfo=None) if body.pinned else None
-      )
+      chat.pinned_at = now_naive_utc() if body.pinned else None
 
     if body.clear_agent_settings:
       chat.agent_settings_json = None
