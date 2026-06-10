@@ -1,4 +1,12 @@
-"""Delete-safety contract for registry-backed stop."""
+"""Stop-contract for registry-backed handles on timeout.
+
+When handle.stop() returns False (the SDK subprocess is still draining),
+stop_chat_for must NOT unregister the handle or finalize the broadcast.
+The zombie runner is still alive and will call its own finally block; that
+block holds the generation guard and owns transcript teardown. Removing
+the registry entry here would allow a new turn to claim the chat before
+the zombie finalizes — a zombie-run clobber.
+"""
 
 import asyncio
 
@@ -18,7 +26,9 @@ class _FailingHandle:
     return False
 
 
-def test_stop_chat_for_false_unregisters_handle():
+def test_stop_chat_for_false_leaves_handle_registered():
+  """When stop() returns False the handle is left in the registry so the
+  zombie runner's own finally block owns teardown."""
   handle = _FailingHandle("chat-delete-safety")
   registry.register(handle)
 
@@ -26,13 +36,17 @@ def test_stop_chat_for_false_unregisters_handle():
 
   assert stopped is False
   assert handle.stop_calls == 1
+  # Handle must remain — the zombie runner still needs to clean up.
   assert (
     registry.get_handle("chat-delete-safety", RunnerKind.CLAUDE_SDK)
-    is None
+    is not None
   )
 
 
-def test_stop_chat_for_unregisters_on_timeout():
+def test_stop_chat_for_timeout_leaves_chat_running():
+  """A timed-out stop leaves the chat in a running-ish state (the zombie
+  runner is still alive). is_chat_running may still return True because
+  the handle is still registered."""
   chat_id = "chat-delete-safety-timeout"
   handle = _FailingHandle(chat_id)
   registry.register(handle)
@@ -41,5 +55,5 @@ def test_stop_chat_for_unregisters_on_timeout():
 
   assert stopped is False
   assert handle.stop_calls == 1
-  assert registry.is_alive(chat_id) is False
-  assert chat_mod.is_chat_running(chat_id) is False
+  # The handle was NOT unregistered — is_alive reports True.
+  assert registry.is_alive(chat_id) is True
