@@ -228,6 +228,33 @@ RUN mkdir -p /tmp/katex-install && cd /tmp/katex-install \
     && ln -s katex@0.17.0 /app/static/vendor/katex \
     && cd / && rm -rf /tmp/katex-install
 
+# recharts — self-hosted for the mini-app import map (P1-C). Mini-apps that
+# render charts import recharts; serving from esm.sh meant an offline-capable
+# chart app depended on a third-party CDN fetch. We self-host same-origin so
+# offline is deterministic. recharts externalises react/react-dom and maps them
+# to the already-vendored /vendor/react entries in the importmap.
+# The build (build-recharts-vendor.mjs) bundles only the exported components
+# listed in the old esm.sh ?exports= filter so the bundle is not inflated.
+COPY backend/scripts/build-recharts-vendor.mjs /tmp/build-recharts-vendor.mjs
+RUN mkdir -p /tmp/recharts-install && cd /tmp/recharts-install \
+    && npm init -y >/dev/null \
+    && npm install --no-audit --no-fund --silent recharts@2.15.4 react@19.2.6 react-dom@19.2.6 \
+    && mkdir -p /app/static/vendor/recharts@2.15.4 \
+    && node /tmp/build-recharts-vendor.mjs /tmp/recharts-install \
+         /app/static/vendor/recharts@2.15.4 "$(command -v esbuild)" \
+    && cd / && rm -rf /tmp/recharts-install /tmp/build-recharts-vendor.mjs
+
+# date-fns — self-hosted for the mini-app import map (P1-C). date-fns is a
+# pure-JS date utility library with no peer deps; a simple bundle suffices.
+COPY backend/scripts/build-date-fns-vendor.mjs /tmp/build-date-fns-vendor.mjs
+RUN mkdir -p /tmp/datefns-install && cd /tmp/datefns-install \
+    && npm init -y >/dev/null \
+    && npm install --no-audit --no-fund --silent date-fns@4.3.0 \
+    && mkdir -p /app/static/vendor/date-fns@4.3.0 \
+    && node /tmp/build-date-fns-vendor.mjs /tmp/datefns-install \
+         /app/static/vendor/date-fns@4.3.0 "$(command -v esbuild)" \
+    && cd / && rm -rf /tmp/datefns-install /tmp/build-date-fns-vendor.mjs
+
 # Full frontend source so the agent can edit and rebuild the shell.
 # /app/shell-src/ is the read-only reference (originals for recovery).
 # On first boot, entrypoint copies to /data/shell/ if it doesn't exist.

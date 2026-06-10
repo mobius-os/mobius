@@ -332,6 +332,11 @@ class App(Base):
   # shipped" without a full repo, and survives even when the git model
   # is off. Null until the first flagged install/update sets it.
   upstream_jsx_sha = Column(String(64), nullable=True, default=None)
+  # Offline contract declared in the manifest's `offline` block (P1-D).
+  # Stored as JSON; None when no block was declared. Schema only — informational
+  # for the agent and SW; no server-side enforcement. Example shape:
+  #   {"reads": true, "writes": "queued", "execution": "full", "precache": []}
+  offline_contract = Column(JSON, nullable=True, default=None)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
