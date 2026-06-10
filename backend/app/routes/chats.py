@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app import models, questions
+from app import auth, models, questions
 from app.config import get_settings
 from app.chat import (
   _clear_run_status,
@@ -105,6 +105,38 @@ def _coerce_agent_settings(raw) -> dict:
     except (ValueError, TypeError):
       return {}
   return {}
+
+
+@router.post(
+  "/{chat_id}/media-token",
+  dependencies=[Depends(reject_cross_site)],
+)
+def issue_media_token(
+  chat_id: str,
+  owner: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Issues a short-lived media token scoped to one chat's uploads/generated images.
+
+  <img> tags and direct image fetches can't set Authorization headers, so they
+  must use ?token= query params. Passing the full 30-day owner JWT as a query
+  param leaks it into access logs, browser history, and Referer headers.
+
+  This endpoint mints a 15-minute token with scope='media' and media_chat=chat_id.
+  The serve routes (uploads, generated images) accept ONLY these tokens on ?token=;
+  they explicitly reject owner JWTs arriving via query params.
+
+  Cache the returned token client-side (~10 min) and refresh on 401. The token is
+  revoked by "sign out everywhere" like all other tokens (carries token_epoch).
+  """
+  # Verify the chat exists and belongs to this owner before issuing a token.
+  get_active_chat_or_404(db, chat_id)
+  token = auth.create_media_token(
+    chat_id=chat_id,
+    owner_username=owner.username,
+    token_epoch=owner.token_epoch,
+  )
+  return {"token": token, "expires_in": 900}
 
 
 @router.get("")

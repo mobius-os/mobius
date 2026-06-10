@@ -73,6 +73,57 @@ if [ -z "$SECRET_KEY" ]; then
   exit 1
 fi
 
+# SECRET_KEY drift detection.
+#
+# Compute sha256 of the ACTIVE key and compare against the persisted
+# fingerprint from the previous boot. A mismatch means the key changed
+# between boots — all outstanding JWTs (owner tokens, app tokens, service
+# token, media tokens) are now invalid. This is intentional when the
+# operator rotates the key; it is UNINTENTIONAL (and data-losing) when the
+# auto-generate fallback fires on a previously-pinned instance (e.g.
+# SECRET_KEY dropped from .env after a deploy-prod.sh run that stored it
+# only in the container's .env, then the container was recreated from a
+# fresh image without the .env copy — see the "SECRET_KEY drift fail-loud"
+# memory note).
+#
+# On mismatch: emit a loud multi-line warning to the container log AND write
+# /data/.secret-key-changed so the backend can surface it in /api/debug/status.
+# On match (or first boot where no fingerprint exists): write/refresh the
+# fingerprint file. Both paths run as root (we haven't dropped to mobius yet)
+# so the fingerprint file stays root-owned with mode 640 — readable by mobius
+# (the uvicorn process) but not world-readable.
+_key_hash=$(echo -n "$SECRET_KEY" | sha256sum | cut -d' ' -f1)
+_fp_file=/data/.secret-key-fingerprint
+_changed_file=/data/.secret-key-changed
+
+if [ -f "$_fp_file" ]; then
+  _prev_hash=$(cat "$_fp_file" 2>/dev/null | tr -d '[:space:]')
+  if [ -n "$_prev_hash" ] && [ "$_key_hash" != "$_prev_hash" ]; then
+    echo ""
+    echo "========================================================="
+    echo "WARNING: SECRET_KEY changed since last boot"
+    echo "  All sessions and tokens have been invalidated."
+    echo "  If this is UNINTENTIONAL:"
+    echo "    1. Restore the previous SECRET_KEY value, OR"
+    echo "    2. Pin SECRET_KEY in your .env file so it survives"
+    echo "       image rebuilds (see the 'SECRET_KEY drift' note)."
+    echo "  If this is INTENTIONAL (key rotation), users will need"
+    echo "    to log in again and re-connect their AI providers."
+    echo "========================================================="
+    echo ""
+    # Write the flag file so /api/debug/status can surface it.
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$_changed_file"
+  else
+    # Key unchanged: clear any stale changed-flag from a previous anomalous boot.
+    rm -f "$_changed_file"
+  fi
+fi
+
+# Always write (or refresh) the fingerprint for the current key.
+echo "$_key_hash" > "$_fp_file"
+chmod 640 "$_fp_file"
+chown root:mobius "$_fp_file" 2>/dev/null || true
+
 # Start cron daemon (runs as root, jobs execute as mobius).
 cron
 

@@ -1,13 +1,24 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { createPortal } from 'react-dom'
-import { getToken, BASE } from '../../api/client.js'
+import { BASE } from '../../api/client.js'
+import { mediaTokenParam } from '../../api/mediaToken.js'
 import ImageLightbox from './markdown/ImageLightbox.jsx'
 
 export default function Attachments({ attachments, chatId }) {
   if (!attachments || attachments.length === 0) return null
-  const token = getToken()
   const images = attachments.filter(a => a.mime_type?.startsWith('image/'))
   const files = attachments.filter(a => !a.mime_type?.startsWith('image/'))
+
+  // Fetch a short-lived media token for this chat. Owner JWTs must not appear
+  // in ?token= query params (they leak into access logs/history/Referer).
+  const [tokenParam, setTokenParam] = useState('')
+  useEffect(() => {
+    let cancelled = false
+    mediaTokenParam(chatId).then(p => {
+      if (!cancelled) setTokenParam(p)
+    })
+    return () => { cancelled = true }
+  }, [chatId])
 
   return (
     <div className="chat__attachments">
@@ -16,7 +27,7 @@ export default function Attachments({ attachments, chatId }) {
           {images.map((img, i) => (
             <AttachImage
               key={i}
-              src={`${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(img.name)}?token=${token}`}
+              src={`${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(img.name)}${tokenParam}`}
               alt={img.name}
             />
           ))}
@@ -26,7 +37,7 @@ export default function Attachments({ attachments, chatId }) {
         <a
           key={i}
           className="chat__attach-file"
-          href={`${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(f.name)}?token=${token}`}
+          href={`${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(f.name)}${tokenParam}`}
           target="_blank"
           rel="noopener noreferrer"
         >
@@ -44,6 +55,8 @@ export default function Attachments({ attachments, chatId }) {
 
 function AttachImage({ src, alt }) {
   const [open, setOpen] = useState(false)
+  // Don't render the image until we have a token (src would 403 without one).
+  if (!src.includes('?token=')) return null
   return (
     <>
       <img
