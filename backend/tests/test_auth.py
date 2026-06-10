@@ -177,3 +177,62 @@ def test_providers_models_respects_hidden_model_prefs(client, auth):
   assert "gpt-5.5" not in [m["id"] for m in body["codex"]]
   assert body["claude"]
   assert body["codex"]
+
+
+# ---------------------------------------------------------------------------
+# CSRF hardening (Task 1): setup endpoint now protected
+# ---------------------------------------------------------------------------
+
+def test_setup_rejects_cross_site_request(client):
+  """POST /api/auth/setup must reject cross-site requests (Sec-Fetch-Site:
+  cross-site). First-boot setup via curl is unaffected because curl does not
+  send Sec-Fetch-Site at all, so the guard passes the request through."""
+  r = client.post(
+    "/api/auth/setup",
+    json={"username": "admin", "password": "securepassword123"},
+    headers={"Sec-Fetch-Site": "cross-site"},
+  )
+  assert r.status_code == 403
+
+
+def test_setup_allows_curl_style_request(client):
+  """Setup with no Sec-Fetch-Site header (e.g. curl) must still work."""
+  r = client.post(
+    "/api/auth/setup",
+    json={"username": "admin", "password": "securepassword123"},
+  )
+  assert r.status_code == 200
+  assert "access_token" in r.json()
+
+
+# ---------------------------------------------------------------------------
+# Login tracking cap (Task 7): dict eviction on overflow
+# ---------------------------------------------------------------------------
+
+def test_login_failure_tracking_caps_at_10k(client):
+  """_login_failures must not grow beyond _LOGIN_TRACK_CAP entries so a
+  username-enumeration flood can't exhaust the process heap."""
+  from app.routes.auth import (
+    _LOGIN_TRACK_CAP, _login_failures, _record_login_failure,
+  )
+  # Snapshot the starting length (other tests may leave entries).
+  import app.routes.auth as _auth_mod
+  _auth_mod._login_failures = {}
+  # Insert one more than the cap — the dict must stay at or below the cap.
+  for i in range(_LOGIN_TRACK_CAP + 5):
+    _record_login_failure(f"user_{i}")
+  assert len(_auth_mod._login_failures) <= _LOGIN_TRACK_CAP
+
+
+def test_login_cooldown_tracking_caps_at_10k(client):
+  """_login_cooldown_until must also be capped to avoid unbounded growth."""
+  import app.routes.auth as _auth_mod
+  _auth_mod._login_failures = {}
+  _auth_mod._login_cooldown_until = {}
+  # 30+ failures triggers the longest cooldown and writes to _login_cooldown_until.
+  from app.routes.auth import _LOGIN_TRACK_CAP, _record_login_failure
+  for i in range(_LOGIN_TRACK_CAP + 5):
+    # Directly set failures to 30 so each record_failure call creates a cooldown.
+    _auth_mod._login_failures[f"user_{i}"] = 29
+    _record_login_failure(f"user_{i}")
+  assert len(_auth_mod._login_cooldown_until) <= _LOGIN_TRACK_CAP

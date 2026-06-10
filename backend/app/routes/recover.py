@@ -22,8 +22,18 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
+import bcrypt
+
 from app import recover_auth
 from app.routes.recover_html import dashboard_html, login_html
+
+# Pre-computed bcrypt hash of a random string. When the submitted
+# username doesn't exist we still run checkpw against this hash so
+# the response time is indistinguishable from a wrong-password response
+# for a real account. Without this, an attacker can binary-search
+# valid usernames purely from timing (a missing-user response returns
+# ~microseconds; a wrong-password response returns ~100ms of bcrypt work).
+_DUMMY_HASH = bcrypt.hashpw(b"__dummy_password__", bcrypt.gensalt()).decode()
 
 router = APIRouter(tags=["recover"])
 _limiter = Limiter(key_func=get_remote_address)
@@ -175,7 +185,12 @@ def recover_login(
 ):
   """Authenticates and sets a recovery session cookie."""
   pw_hash = _owner_password_hash(username)
-  if not pw_hash or not recover_auth.verify_password(password, pw_hash):
+  # Always run bcrypt regardless of whether the username exists.
+  # Skipping the hash work when the user is absent leaks existence via
+  # a ~100ms timing difference; checking against a dummy hash makes
+  # both failure paths take the same bcrypt time.
+  candidate_hash = pw_hash if pw_hash else _DUMMY_HASH
+  if not recover_auth.verify_password(password, candidate_hash) or not pw_hash:
     return HTMLResponse(login_html(error="Incorrect username or password."))
   token = recover_auth.create_session_token(username)
   resp = HTMLResponse(dashboard_html())
@@ -363,7 +378,25 @@ def _backup_db(src_path: Path, dest_path: Path) -> None:
   A raw file copy of an open WAL-mode database can produce an inconsistent
   snapshot.  The backup API performs a live, consistent copy regardless of
   concurrent writes.
+
+  We run PRAGMA wal_checkpoint(FULL) on the source before backing up so
+  that all committed WAL frames are flushed into the main database file.
+  Without this, the backup zip contains a consistent copy of whatever
+  frames already made it into the .db file, but any frames still sitting
+  only in the .wal sidecar are silently absent from the backup — the
+  recipient of the zip sees those commits as lost. The checkpoint is
+  best-effort: a FULL checkpoint may not complete if readers are active,
+  but it always moves as many frames as possible; the backup API then
+  captures a consistent view of the resulting state.
   """
+  # Checkpoint WAL into the main file before copying so the backup
+  # reflects the most recent committed state.
+  src_chk = sqlite3.connect(str(src_path))
+  try:
+    src_chk.execute("PRAGMA wal_checkpoint(FULL)")
+  finally:
+    src_chk.close()
+
   src = sqlite3.connect(str(src_path))
   dst = sqlite3.connect(str(dest_path))
   src.backup(dst)
