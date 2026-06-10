@@ -10,6 +10,11 @@ import { getToken, BASE } from './api/client.js'
 import * as setupSession from './lib/setupSession.js'
 import { setupQueries } from './hooks/queries.js'
 import { queryClient, persistOptions } from './queryClient.js'
+// Import the already-parsed shell-reload value from useNavigation — that
+// module-level IIFE already consumed and removed the sessionStorage key, so
+// reading it again here would always return null (dead branch). We use the
+// exported value directly so there is one reader, not two.
+import { shellReload } from './hooks/useNavigation.js'
 
 // True when this SPA load is the stripped-chrome chat embed
 // (capability A). The SPA catch-all serves index.html for any non-API
@@ -58,8 +63,10 @@ function AppRoot() {
   const [initialSetupStep] = useState(resumeStep || 'account')
 
   useEffect(() => {
-    // shell-reload: skip splash entirely, go straight to shell
-    const shellReload = sessionStorage.getItem('shell-reload')
+    // shell-reload: skip splash entirely, go straight to shell.
+    // `shellReload` is the value parsed at module load by useNavigation's
+    // IIFE — the sessionStorage key has already been consumed and removed
+    // there; re-reading it here would always be null.
     if (shellReload) {
       const splash = document.getElementById('splash')
       if (splash) splash.remove()
