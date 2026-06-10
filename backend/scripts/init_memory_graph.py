@@ -39,7 +39,7 @@ _SEED_CANDIDATES = [
   Path("/app/scripts/seed-memory"),
   Path(__file__).resolve().parent / "seed-memory",
 ]
-SEED_VERSION = "1"  # bump when the seed graph's authored content changes
+SEED_VERSION = "2"  # bump when the seed graph's authored content changes
 
 INBOX_HEADER = (
   "# Inbox\n\n"

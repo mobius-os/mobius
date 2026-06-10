@@ -18,5 +18,5 @@ belongs. Add a note here only when the fact is specific to *this* deployment.
 
 ## Notes
 
-*(none recorded yet — add a note when you learn something about this particular
-instance that isn't a general platform technique)*
+- [[a-nightly-dreaming-pass-exists]] — the overnight pass consolidates the
+  graph, fixes apps, and writes a morning brief; overnight changes are normal.
