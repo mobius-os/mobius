@@ -19,6 +19,22 @@ import { appQueries, chatQueries, modelQueries, ownerQueries } from '../../hooks
 import { appVersionKey } from '../../lib/appVersion.js'
 import './Shell.css'
 
+// P1-B: post a precache-warming message to the active service worker for an
+// offline-capable app. The SW handler fetches both URLs with cache:'reload'
+// (bypassing the browser HTTP cache) and stores them in the offline-apps cache
+// under token-stripped keys — so the app is immediately available offline.
+// Safe to call speculatively; the SW no-ops if the entry is already cached.
+function _precacheApp(app) {
+  try {
+    const sw = navigator.serviceWorker?.controller
+    if (!sw) return
+    const version = app.updated_at || '0'
+    const frameUrl = `${BASE}/api/apps/${app.id}/frame?v=${encodeURIComponent(version)}`
+    const moduleUrl = `${BASE}/api/apps/${app.id}/module?v=${encodeURIComponent(version)}`
+    sw.postMessage({ type: 'moebius:precache-app', frameUrl, moduleUrl })
+  } catch (e) { /* best-effort — SW may not be available */ }
+}
+
 export default function Shell() {
   const {
     activeView, setActiveView,
@@ -385,7 +401,16 @@ export default function Shell() {
       // SystemBroadcast), so it must NOT plant the "Open app" CTA — that's
       // the chat-scoped `app_built` event's job (below). Doing the CTA here
       // is what leaked it into unrelated chats.
-      refreshApps()
+      refreshApps().then(updatedApps => {
+        // P1-B: warm the offline cache for the updated app immediately so it
+        // is available offline without the user needing to open it first.
+        if (ev.appId) {
+          const app = updatedApps.find(a => String(a.id) === String(ev.appId))
+          if (app && app.offline_capable) {
+            _precacheApp(app)
+          }
+        }
+      })
     } else if (ev.type === 'app_built') {
       // CHAT-SCOPED CTA. The backend publishes `app_built` onto ONLY the
       // broadcast of the chat that built the app (routes/notify.py), so it
@@ -398,8 +423,13 @@ export default function Shell() {
       // isn't guaranteed).
       if (ev.appId) {
         refreshApps().then(updatedApps => {
-          const name = updatedApps.find(a => String(a.id) === String(ev.appId))?.name || null
+          const app = updatedApps.find(a => String(a.id) === String(ev.appId))
+          const name = app?.name || null
           setBuiltApp({ id: Number(ev.appId), name })
+          // P1-B: warm the offline cache immediately after a build lands.
+          if (app && app.offline_capable) {
+            _precacheApp(app)
+          }
         })
       }
     } else if (ev.type === 'chat_run_started') {
