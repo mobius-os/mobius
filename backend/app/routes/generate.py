@@ -17,10 +17,12 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.auth import decrypt_api_key
-from app.auth_helpers import get_auth_token
+from app.auth_helpers import TokenSource, get_auth_token_source
 from app.config import get_settings
 from app.database import get_db
-from app.deps import get_current_owner, reject_cross_site, resolve_owner_only
+from app.deps import (
+  get_current_owner, reject_cross_site, resolve_media_or_header_owner,
+)
 from app.path_utils import validate_path_within_base
 from app.resource_access import get_active_chat_or_404
 from app.storage_io import app_dir_usage
@@ -208,20 +210,23 @@ async def generate_image(
 def serve_generated_image(
   chat_id: str,
   filename: str = FastPath(...),
-  raw_token: str = Depends(get_auth_token),
+  token_src: TokenSource = Depends(get_auth_token_source),
   db: Session = Depends(get_db),
 ):
-  """Serves a generated image. Accepts JWT from header or ?token= param.
+  """Serves a generated image. Accepts JWT from header or media token on ?token=.
 
-  Owner-only. The token rides on `?token=` because <img>/iframe
-  fetches can't set headers, so we resolve it from the string rather
-  than via the get_current_owner header dependency — but it goes
-  through the same resolve_owner_only path, which rejects app-scoped
-  tokens (an app token must not read a chat's generated images) and
-  enforces token revocation (a signed-out token is rejected here too).
+  Owner-only. The token can come from two sources:
+  - Authorization header: any valid owner JWT (full-session auth).
+  - ?token= query param: ONLY a short-lived media-scoped token minted by
+    POST /api/chats/{id}/media-token. Owner JWTs are explicitly rejected on
+    this path to prevent the 30-day token from leaking into logs/history.
+
+  App tokens are rejected on both paths.
   """
   _validate_chat_id(chat_id)
-  resolve_owner_only(raw_token, db)
+  resolve_media_or_header_owner(
+    token_src.token, db, chat_id=chat_id, from_query=token_src.from_query,
+  )
 
   settings = get_settings()
   gen_dir = Path(settings.data_dir) / "chats" / chat_id / "generated"

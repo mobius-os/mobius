@@ -60,17 +60,24 @@ def test_list_uploads(client, db, auth, chat):
 
 
 def test_serve_uploaded_file(client, db, auth, chat):
-  """GET /api/chats/{id}/uploads/{filename} returns the file content."""
+  """GET /api/chats/{id}/uploads/{filename} returns the file content.
+
+  Uses a media token on ?token= (owner JWTs are rejected on that path to
+  prevent the 30-day token from leaking into access logs/history/Referer).
+  """
   client.post(
     f"/api/chats/{chat.id}/uploads",
     files=[("files", ("note.txt", io.BytesIO(b"secret"), "text/plain"))],
     headers=auth,
   )
-  from app.auth import create_access_token
-  token = create_access_token({"sub": "test"})
+  media_token_r = client.post(
+    f"/api/chats/{chat.id}/media-token",
+    headers=auth,
+  )
+  media_token = media_token_r.json()["token"]
   res = client.get(
     f"/api/chats/{chat.id}/uploads/note.txt",
-    params={"token": token},
+    params={"token": media_token},
   )
   assert res.status_code == 200
   assert res.content == b"secret"

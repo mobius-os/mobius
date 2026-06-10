@@ -134,6 +134,53 @@ def resolve_owner_only(token: str, db: Session) -> models.Owner:
   return owner
 
 
+def resolve_media_or_header_owner(
+  token: str, db: Session, *, chat_id: str, from_query: bool,
+) -> models.Owner:
+  """Resolves an owner for media-serving routes.
+
+  The serve routes (uploads, generated images) accept the token from two
+  sources: the Authorization header (Bearer) OR a `?token=` query param.
+  The security fix is the asymmetry:
+
+  - Header tokens may be any valid owner token (full scope, no chat_id check).
+  - Query-param tokens MUST be media-scoped (`scope == "media"`) for the
+    exact chat_id. An owner JWT in `?token=` is explicitly rejected — that's
+    the point of this hardening.
+
+  This prevents the 30-day owner JWT from leaking into server access logs,
+  browser history, and Referer headers. A media token is 15 minutes, scoped
+  to one chat, and only appears in URLs for that chat's own resources.
+
+  App tokens are rejected on both paths.
+  """
+  owner, payload = _resolve_owner(token, db)
+  scope = payload.get("scope")
+  if scope == "app":
+    raise HTTPException(
+      status_code=403,
+      detail="App tokens cannot access media routes.",
+    )
+  if from_query:
+    # Query-param path: only short-lived media tokens are accepted.
+    # Owner JWTs on ?token= are the vulnerability being fixed.
+    if scope != "media":
+      raise HTTPException(
+        status_code=403,
+        detail=(
+          "Owner JWTs must not be passed as query parameters. "
+          "Use a media token (POST /api/chats/{id}/media-token)."
+        ),
+      )
+    if payload.get("media_chat") != chat_id:
+      raise HTTPException(
+        status_code=403,
+        detail="Media token is not valid for this chat.",
+      )
+  # Header path (from_query=False): any valid non-app owner token is accepted.
+  return owner
+
+
 def get_current_owner(
   token: str = Depends(_oauth2),
   db: Session = Depends(get_db),

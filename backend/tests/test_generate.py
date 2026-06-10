@@ -73,7 +73,10 @@ def test_generate_image_returns_url(client, db, auth, chat):
 
 
 def test_serve_generated_image(client, db, auth, chat):
-  """GET /api/chats/{id}/generated/{filename} serves the saved file."""
+  """GET /api/chats/{id}/generated/{filename} serves the saved file.
+
+  Uses a media token on ?token= (owner JWTs are rejected on that path).
+  """
   _set_gemini_key(client, auth)
 
   mock_response = MagicMock()
@@ -96,11 +99,14 @@ def test_serve_generated_image(client, db, auth, chat):
   url = gen_res.json()["url"]
   filename = url.split("/")[-1].split("?")[0]
 
-  from app.auth import create_access_token
-  token = create_access_token({"sub": "test"})
+  media_token_r = client.post(
+    f"/api/chats/{chat.id}/media-token",
+    headers=auth,
+  )
+  media_token = media_token_r.json()["token"]
   serve_res = client.get(
     f"/api/chats/{chat.id}/generated/{filename}",
-    params={"token": token},
+    params={"token": media_token},
   )
   assert serve_res.status_code == 200
   assert serve_res.content == b"fake-png-bytes"
