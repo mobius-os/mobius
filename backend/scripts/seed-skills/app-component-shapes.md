@@ -34,13 +34,32 @@ match). Until then, consistent copies are correct. This is the platform's
   JS-helper that returns a style object — that hides state in JS and blocks
   extraction.
 - **Structural color is always a theme token** so the app follows light/dark:
-  `--bg --surface --surface2 --text --muted --accent --accent-hover
+  `--bg --surface --surface2 --text --muted --accent --accent-fg --accent-hover
   --accent-dim --border --border-light --danger --green --font --mono`. There
   is **no `--red`** (use `--danger`) and **no `--fg`** (use `--text`).
   Hardcoded hex only for an app-specific accent the theme can't express.
+- **`--accent-fg` is the ONLY legal foreground on an accent/danger FILL**
+  (a `.ma-btn-primary`, a `.ma-btn-danger`, an accent chip). It resolves a
+  prior three-way split — apps had been hardcoding `#fff` / `#0d0d0d` /
+  `#062016` for that foreground, so a custom theme broke one of them. Write
+  `color: var(--accent-fg)` with **NO fallback hex** (`var(--accent-fg, #fff)`
+  re-introduces the exact split the token exists to kill). Never hardcode the
+  foreground on a fill.
 - **Touch + radius:** every interactive control `min-height: 44px`; icon-only
   buttons get an `aria-label`. Radius scale: 8px inputs/small, 10–12px
   cards/primary buttons, 16px sheet top.
+- **Hard pre-ship checklist (don't skip — these are the gaps a grep found
+  recur in every app):**
+  - Every focusable input is `font-size: 16px` (anything smaller triggers
+    iOS Safari zoom-on-focus). Don't go lower on a field the user can tap into.
+  - Every tap target is `>= 44px`. A thin control (a resizer, a drag handle)
+    stays thin VISUALLY but gets a fat invisible hit-area (a transparent
+    `::before`/`::after` or padding that pushes the hit-box to 44px).
+  - No bare `outline: none` on an interactive control — keep a visible
+    `:focus-visible` ring (see the Focus shape) or the keyboard user is lost.
+  - One `mobius-ui:ReducedMotion` block per app (below); every `@keyframes`
+    animation also has a `prefers-reduced-motion` escape.
+  - Edge-pinned surfaces respect `env(safe-area-inset-*)` (below).
 - **No native `confirm/alert/prompt`** — the sandbox has no `allow-modals`,
   so they silently no-op. Use the bottom-sheet (§3).
 - The app-frame already injects a global reset + the theme `:root`. **Do not
@@ -92,6 +111,14 @@ Diverge on padding, a desktop `max-width` cap, or (rarely, for a full-bleed
 canvas like a map) `position: fixed; inset: 0`. `min-height: 0` on the scroll
 child is non-negotiable.
 
+**Safe area:** a full-bleed root (one that paints to the device edges — a
+`position: fixed; inset: 0` canvas, or a root with no edge-pinned header/sheet
+chrome of its own) must inset its content for the notch and home indicator:
+`padding: env(safe-area-inset-top) env(safe-area-inset-right)
+env(safe-area-inset-bottom) env(safe-area-inset-left)`. A normal root whose
+header and bottom sheet already handle their own edges (below) does NOT need
+this — only add safe-area on the surface that actually touches an edge.
+
 ---
 
 ## 2. Header (`ma-header`) — brand cluster + right-side SLOT
@@ -138,6 +165,11 @@ The right side is a SLOT — drop your tabs / toggle / badge / sync pill in.
 The mark may be omitted entirely (title + subtitle alone is valid). Don't
 diverge on the flex/space-between skeleton or the 48px min-height.
 
+**Safe area:** a top-pinned header (one the root does NOT inset for you) keeps
+its content clear of the notch by folding the inset into its top padding:
+`padding-top: max(12px, env(safe-area-inset-top))` (keep the existing `12px`
+as the floor). Only the header that actually sits at the top edge needs this.
+
 ---
 
 ## 3. Bottom-sheet modal + scrim (`ma-sheet` / `ma-scrim`) — the dialog
@@ -183,6 +215,12 @@ diverge on the flex/space-between skeleton or the 48px min-height.
 The one allowed structural divergence is `align-items: center` + all-corner
 radius for a tiny centered confirm. Keep the scrim, `stopPropagation`,
 `aria-modal`, and the flex:1 action row.
+
+**Safe area:** a bottom-pinned sheet (and any other bottom-pinned surface — a
+floating pill, a docked composer) keeps its controls above the home indicator
+with `padding-bottom: max(24px, env(safe-area-inset-bottom))` (keep the
+shape's base padding as the floor). Only bottom-edge surfaces need it; the
+scrim itself, being full-bleed, does not.
 
 ---
 
@@ -281,20 +319,22 @@ Static container cards drop the `button` pseudo-states + chevron. State
 .ma-btn:active { transform: scale(0.97); }
 .ma-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .ma-btn:disabled { opacity: 0.5; cursor: default; transform: none; }
-.ma-btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.ma-btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 .ma-btn-primary:hover { filter: brightness(1.06); }
 .ma-btn-secondary { background: var(--surface2, var(--surface)); }
 .ma-btn-secondary:hover { border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
 .ma-btn-ghost { background: transparent; border-color: transparent; color: var(--accent); }
 .ma-btn-ghost:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
-.ma-btn-danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+.ma-btn-danger { background: var(--danger); border-color: var(--danger); color: var(--accent-fg); }
 .ma-btn-icon { width: 44px; padding: 0; border-radius: 8px; font-size: 18px; }   /* icon-only → needs aria-label */
 /* /mobius-ui:Button */
 ```
 
-The highest-value shared shape. An app whose theme accent is LIGHT may set
-`.ma-btn-primary { color: <dark>; }` locally (white would be illegible). A
-full-width form-submit adds `width: 100%` via a `.ma-btn-block` modifier.
+The highest-value shared shape. The fill foreground is `var(--accent-fg)` —
+the shell sets it to white for the default purple accent, and a custom theme
+that goes light should set `--accent-fg` to a dark value (this replaces the
+old per-app `color: <dark>` override; theme it once at the token, not per app).
+A full-width form-submit adds `width: 100%` via a `.ma-btn-block` modifier.
 
 ---
 
@@ -349,7 +389,7 @@ full-width form-submit adds `width: 100%` via a `.ma-btn-block` modifier.
 }
 .ma-seg-btn:hover { color: var(--text); }
 .ma-seg-btn.is-active { background: var(--bg); color: var(--text); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18); }
-.ma-seg.is-accent .ma-seg-btn.is-active { background: var(--accent); color: #fff; box-shadow: none; }
+.ma-seg.is-accent .ma-seg-btn.is-active { background: var(--accent); color: var(--accent-fg); box-shadow: none; }
 /* /mobius-ui:Segmented */
 ```
 
@@ -384,6 +424,33 @@ section for the one-call helper (`persist` + `onTurnDone`).
 ## 10. Smaller recurring blocks
 
 ```css
+/* mobius-ui:Focus v1 — keep in sync; library candidate. Required once per app. */
+/* A visible keyboard-focus ring on every interactive control (WCAG 2.4.7).
+   :focus-visible only shows for keyboard nav, so mouse/touch taps stay clean.
+   Per-control shapes (.ma-btn, .ma-card) already carry their own ring; this is
+   the catch-all for anything that doesn't. */
+:where(button, a, input, textarea, select, summary, [role="button"],
+       [tabindex]:not([tabindex="-1"])):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* Never ship a bare `outline: none` on an interactive control — it strips the
+   ring for keyboard users with no replacement. The ONLY allowed suppression is
+   `:focus:not(:focus-visible) { outline: none }`, and only when a custom
+   :focus-visible style already exists to replace it. */
+/* /mobius-ui:Focus */
+
+/* mobius-ui:ReducedMotion v1 — keep in sync; library candidate. Required once per app. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+/* /mobius-ui:ReducedMotion */
+
 /* mobius-ui:SyncPill v1 — keep in sync; library candidate. */
 .ma-sync-pill {  /* floating offline/pending indicator; hidden when online + 0 pending */
   position: absolute; right: 12px; bottom: 12px; z-index: 40;
