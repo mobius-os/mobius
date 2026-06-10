@@ -227,6 +227,12 @@ def _validate_manifest(m: dict) -> None:
     raise HTTPException(
       400, "Manifest `permissions.manage_apps` must be a boolean.",
     )
+  # Optional `offline` block — declares the app's offline contract.
+  # Schema only (P1-D): accepted, validated, and stored on the App row as JSON;
+  # no store badge built yet. The block is informational for the SW/agent but
+  # shapes no server-side enforcement — design philosophy §4 ("code empowers
+  # the agent; it does not police it").
+  _validate_manifest_offline(m.get("offline"))
   seeds = m.get("storage_seeds", {})
   if seeds is not None and not isinstance(seeds, dict):
     raise HTTPException(400, "Manifest `storage_seeds` must be an object.")
@@ -263,6 +269,47 @@ def _validate_manifest(m: dict) -> None:
       )
     if job is not None:
       _validate_repo_relative_path(job, "schedule.job")
+
+
+def _validate_manifest_offline(offline) -> None:
+  """Validate the optional `offline` block in a manifest.
+
+  Accepted shape:
+    {
+      "reads":     bool,              # app reads storage offline (optional)
+      "writes":    "queued" | "none", # write strategy (optional)
+      "execution": "full" | "partial" | "none", # compute capability (optional)
+      "precache":  [str, ...]         # extra repo-relative paths to precache (optional)
+    }
+
+  All keys are optional; an empty dict {} is valid. The block is stored as JSON
+  on the App row and forwarded in AppOut. It is informational — no field gates
+  server behaviour (the offline_capable flag on the App row is the runtime gate).
+  """
+  if offline is None:
+    return
+  if not isinstance(offline, dict):
+    raise HTTPException(400, "Manifest `offline` must be an object.")
+  if "reads" in offline and not isinstance(offline["reads"], bool):
+    raise HTTPException(400, "Manifest `offline.reads` must be a boolean.")
+  if "writes" in offline:
+    if offline["writes"] not in ("queued", "none"):
+      raise HTTPException(
+        400,
+        "Manifest `offline.writes` must be one of queued/none.",
+      )
+  if "execution" in offline:
+    if offline["execution"] not in ("full", "partial", "none"):
+      raise HTTPException(
+        400,
+        "Manifest `offline.execution` must be one of full/partial/none.",
+      )
+  precache = offline.get("precache")
+  if precache is not None:
+    if not isinstance(precache, list):
+      raise HTTPException(400, "Manifest `offline.precache` must be an array.")
+    for i, p in enumerate(precache):
+      _validate_repo_relative_path(p, f"offline.precache[{i}]")
 
 
 def _validate_repo_relative_path(path: str, field: str) -> None:
@@ -1241,6 +1288,8 @@ async def install_from_manifest(
         # didn't actually behave offline-ready end-to-end.
         offline_capable=bool(manifest.get("offline_capable", False)),
         embeds_agent=bool(manifest.get("embeds_agent", False)),
+        # P1-D: persist the offline contract block (None when not declared).
+        offline_contract=manifest.get("offline") or None,
       )
       db.add(app)
       db.flush()  # assign app.id without committing yet
@@ -1437,6 +1486,9 @@ async def install_from_manifest(
         app.offline_capable = bool(manifest["offline_capable"])
       if "embeds_agent" in manifest:
         app.embeds_agent = bool(manifest["embeds_agent"])
+      # P1-D: persist the offline contract block (replaces on update to match
+      # the new manifest; None if the key is absent in the new manifest).
+      app.offline_contract = manifest.get("offline") or None
 
     # Compile the JSX OUT OF PLACE to a staging file and promote it into the
     # live bundle only AFTER the DB commit (commit_actions run post-commit). So

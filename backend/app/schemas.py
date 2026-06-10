@@ -104,6 +104,10 @@ class AppOut(BaseModel):
   # Optional standalone PWA colors persisted from installed app manifests.
   theme_color: str | None = None
   background_color: str | None = None
+  # Offline contract from the manifest `offline` block (P1-D). None when no
+  # block was declared; otherwise the raw validated JSON object. Informational
+  # for the agent + future store badge — no server-side enforcement.
+  offline_contract: dict | None = None
   created_at: datetime
   updated_at: datetime
 
