@@ -121,10 +121,25 @@ export function ListBlock({ token }) {
   )
 }
 
+// KaTeX produces MathML elements — the same allow-list used in InlineContent.
+// Keep the two in sync when bumping KaTeX.
+const KATEX_PURIFY_CONFIG = {
+  ADD_TAGS: ['math', 'mrow', 'mn', 'mo', 'mi', 'mspace', 'msup', 'msub',
+             'msubsup', 'mfrac', 'msqrt', 'mroot', 'mtext', 'mstyle',
+             'mover', 'munder', 'munderover', 'mtable', 'mtr', 'mtd',
+             'menclose', 'mpadded', 'mphantom', 'semantics', 'annotation',
+             'annotation-xml'],
+  ADD_ATTR: ['xmlns', 'display', 'encoding', 'columnalign', 'mathvariant',
+             'mathsize', 'stretchy', 'symmetric', 'lspace', 'rspace',
+             'rowalign', 'columnspacing', 'rowspacing', 'width', 'height',
+             'depth', 'voffset'],
+  FORCE_BODY: true,
+}
+
 export function MathBlock({ tex }) {
   const html = renderMathToString(tex, true)
   if (html) {
-    return <div className="md-math-block" dangerouslySetInnerHTML={{ __html: html }} />
+    return <div className="md-math-block" dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(html, KATEX_PURIFY_CONFIG) }} />
   }
   return <div className="md-math-block">{tex}</div>
 }

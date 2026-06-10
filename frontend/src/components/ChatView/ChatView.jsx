@@ -88,6 +88,36 @@ function findOptimisticUserIndex(messages, ts) {
   return -1
 }
 
+// Exported so sibling components (Shell, etc.) can clean up drafts when a
+// chat is deleted.  Shell owns the deletion flow; it should call this after
+// the chat row is removed from the list.
+// NOTE: if deletion ever moves inside ChatView's own scope, call this inline
+// instead of leaving the orphaned key behind.
+export function deleteChatDraft(chatId) {
+  try { sessionStorage.removeItem(`draft:${chatId}`) } catch { /* private browsing */ }
+}
+
+// Evict the oldest draft: key from sessionStorage so a new draft can land.
+// Oldest = smallest numeric suffix after the colon; that's the chat that
+// was least recently opened (chats get integer IDs assigned in order).
+function evictOldestDraft() {
+  try {
+    const draftKeys = []
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const key = sessionStorage.key(i)
+      if (key?.startsWith('draft:')) draftKeys.push(key)
+    }
+    if (draftKeys.length === 0) return
+    // Sort ascending by the numeric part; remove the oldest (lowest ID).
+    draftKeys.sort((a, b) => {
+      const na = parseInt(a.slice(6), 10) || 0
+      const nb = parseInt(b.slice(6), 10) || 0
+      return na - nb
+    })
+    sessionStorage.removeItem(draftKeys[0])
+  } catch { /* ignore */ }
+}
+
 
 export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystemEvent, builtApp, onOpenApp, onMessageStart, showPicker = true, embedded = false }) {
   const queryClient = useQueryClient()
@@ -619,7 +649,17 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     try {
       if (input) sessionStorage.setItem(`draft:${chatId}`, input)
       else sessionStorage.removeItem(`draft:${chatId}`)
-    } catch { /* quota exceeded or private browsing */ }
+    } catch (e) {
+      // QuotaExceededError: evict the oldest draft: key and retry once so the
+      // current chat's draft is always fresh.
+      if (e?.name === 'QuotaExceededError' || e?.code === 22) {
+        evictOldestDraft()
+        try {
+          if (input) sessionStorage.setItem(`draft:${chatId}`, input)
+        } catch { /* still no room — skip */ }
+      }
+      // Otherwise private browsing / storage disabled — silently skip.
+    }
   }, [input, chatId])
 
   // Auto-size textarea when a draft is restored. Cap matches the
@@ -1331,7 +1371,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             const res = await apiFetch(`/chats/${chatId}?limit=1`)
             const data = await res.json()
             pendingQueue.hydrate(data.pending_messages || [])
-          } catch { /* leave empty; user can resend */ }
+          } catch {
+            // Refetch failed — restore the local snapshot so the user
+            // can still see and re-send what was in the queue before Stop.
+            pendingQueue.hydrate(queuedSnapshot)
+          }
         }
         return
       }
@@ -1436,11 +1480,29 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     return last.id || `${last.role}-${last.ts ?? messages.length - 1}`
   })()
 
+  // Polite aria-live status: announced once per state transition, not per
+  // token. Visually hidden via the sr-only utility in ChatView.css.
+  const ariaStatus = sending
+    ? 'Assistant is responding…'
+    : (messages.length > 0 && messages[messages.length - 1]?.role === 'assistant'
+        ? 'Response ready.'
+        : '')
+
   return (
     <div
       ref={chatRef}
       className={`chat${showEmpty || showLoadError ? ' chat--empty' : ''}`}
     >
+      {/* Single polite live region — announces state transitions only.
+          aria-atomic keeps the full phrase together for NVDA/VoiceOver. */}
+      <div
+        className="chat__sr-status"
+        aria-live="polite"
+        aria-atomic="true"
+        aria-relevant="text"
+      >
+        {ariaStatus}
+      </div>
       {showEmpty && (
         <div className="chat__empty-wrap">
           {embedded ? (
@@ -1535,13 +1597,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             // stops being answerable, so a dead/orphaned turn's card doesn't
             // linger. Double-submit is prevented by QuestionCard's own
             // `submitted` state + doSendSilent's synchronous sendingRef flip.
-            const isQuestionAnswerable = (block) => (
-              msg.role === 'assistant'
-              && block?.type === 'question'
-              && isLastMsg
-              && !block.answers
-              && (!liveQuestionId || block.question_id === liveQuestionId)
-            )
+            //
+            // isLastMsg + liveQuestionId are passed as stable scalars so
+            // MsgContent's memo can skip non-last messages on every streaming
+            // tick. The inline-arrow form (isQuestionAnswerable) created a
+            // fresh function identity every render and defeated memo entirely.
             // Stable per-message DOM key for the scroll state machine.
             // data-key is queried by applyMode when restoring an
             // ANCHOR_AT mode. msg.id (server-assigned UUID) is ideal;
@@ -1562,7 +1622,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                 msg={msg}
                 chatId={chatId}
                 onQuestionAnswer={doSendSilent}
-                isQuestionAnswerable={isQuestionAnswerable}
+                isLastMsg={isLastMsg}
+                liveQuestionId={liveQuestionId}
               />
               {msg.ts && msg.role === 'user' && (
                 <time className="chat__ts">
