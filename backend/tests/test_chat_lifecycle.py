@@ -30,7 +30,14 @@ class HangingHandle:
 
 
 def test_stop_chat_for_wedged_sdk_client_times_out(client, auth, chat):
-  """A wedged SDK client must not hang stop_chat_for past ~2s."""
+  """A wedged SDK client must not hang stop_chat_for past ~2s.
+
+  The handle is intentionally left registered when stop() times out:
+  the zombie runner is still draining (its SDK subprocess has not
+  confirmed shutdown), so unregistering it now would allow a later
+  reclaim of the chat before the runner's own finally runs — the
+  registry entry is the guard the runner's teardown path uses.
+  """
   hanging = HangingHandle()
   hanging.chat_id = chat.id
   registry.register(hanging)
@@ -39,7 +46,8 @@ def test_stop_chat_for_wedged_sdk_client_times_out(client, auth, chat):
   elapsed = time.monotonic() - start
   assert elapsed < 3.0, f"stop_chat_for hung for {elapsed}s"
   assert stopped is False
-  assert registry.get_handle(chat.id, RunnerKind.CLAUDE_SDK) is None
+  # Handle stays registered: the zombie runner owns teardown.
+  assert registry.get_handle(chat.id, RunnerKind.CLAUDE_SDK) is not None
 
 
 def test_global_stop_targets_sdk_only_chats(client, auth, chat):
