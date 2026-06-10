@@ -102,6 +102,15 @@ html, body, #root {
   width: 100%;
 }
 
+/* Prevent iOS Safari (which ignores user-scalable=no in the viewport
+   meta) from intercepting two-finger spread as a page-level pinch-zoom.
+   pan-x pan-y allows one-finger scrolling; pinch-zoom is blocked at the
+   document root. Elements that implement their own pinch (e.g.
+   .lightbox-image) declare touch-action: none directly and override this. */
+html, body {
+  touch-action: pan-x pan-y;
+}
+
 /* Accessibility: respect prefers-reduced-motion. Collapses all
    transitions and animations to near-instant — the user has asked
    the OS to suppress non-essential motion. The shell + drawer +
@@ -189,7 +198,7 @@ input, textarea {
    path stays unchanged. */
 input:focus-visible,
 textarea:focus-visible {
-  outline: 2px solid var(--accent, #a78bfa);
+  outline: 2px solid var(--accent, #8b6cf7);
   outline-offset: 1px;
 }
 
@@ -288,12 +297,14 @@ textarea:focus-visible {
 }
 
 /* High-contrast text selection so the highlight is visible on every
-   theme (including custom dark themes). Without this, themes with
-   subtle accent colors leave selections nearly invisible against the
-   message background. */
+   theme (including custom dark themes). The accent-on-text combination
+   was ~2.6:1 in dark mode — below AA for selection highlights. The
+   color-mix treatment below matches the user-bubble override logic:
+   a near-white (14% accent tint) background paired with a dark-accent
+   foreground gives ~6:1 contrast on both dark and light themes. */
 ::selection {
-  background: var(--accent, #8b6cf7);
-  color: var(--text);
+  background: color-mix(in srgb, var(--accent, #8b6cf7) 14%, #fff);
+  color: color-mix(in srgb, var(--accent, #8b6cf7) 78%, #000);
 }
 
 /* Your OWN messages sit on the accent-gradient bubble (see
@@ -307,3 +318,48 @@ textarea:focus-visible {
   background: color-mix(in srgb, var(--accent) 14%, #fff);
   color: color-mix(in srgb, var(--accent) 78%, #000);
 }
+
+/* ── Native-feel UI chrome pass ─────────────────────────
+   user-select: none on non-content interactive surfaces so long-press
+   and drag over them doesn't produce a text selection box.  Message /
+   tool block content is EXCLUDED (stays selectable) — only shell
+   chrome gets the lock.  buttons already get this via the rule above;
+   these selectors cover labelled containers that aren't `<button>`. */
+
+/* Shell header (logo, wordmark, brand area, offline pill). */
+.shell__bar,
+.shell__brand,
+.shell__offline,
+.shell__wordmark {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Tool block header row (collapse toggle, status badge).  The block
+   body that shows code / tool output stays selectable. */
+.chat__tool-header,
+.tool-block__header {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Drawer header label rows, section labels, and action buttons. */
+.drawer__label,
+.drawer__new-label {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* ── Active-state press feedback ─────────────────────────
+   Drawer items already get scale(0.96) from .drawer__item:active
+   (defined in index.css above).  The send button (.chat__send) gets it
+   too.  Ensure the shell-bar menu button also has a press scale so it
+   reads as tappable on mobile. */
+.menu-btn:active { transform: scale(0.93); }
+
+/* ── @media (hover:hover) guard audit ─────────────────────
+   Hover rules on shell-bar buttons are already gated via the
+   .shell__bar button rule above using transition-only — no bare
+   :hover fill changes exist there that need gating.  Drawer hover
+   rules are already in @media (hover:hover) blocks (Drawer.css).
+   No additional un-gated :hover rules were found in this file. */

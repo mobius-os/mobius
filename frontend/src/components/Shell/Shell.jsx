@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import Drawer from '../Drawer/Drawer.jsx'
+import MenuButton from '../MenuButton/MenuButton.jsx'
+import Toast from '../ui/Toast.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
 import ChatView from '../ChatView/ChatView.jsx'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
@@ -68,7 +70,13 @@ export default function Shell() {
   // hasn't been seen present yet, so it's exempt until the list catches
   // up; a real uninstall flips a previously-seen id to absent and evicts.
   const seenAppIdsRef = useRef(new Set())
+  // toast state: null | { message, variant, duration, action }
+  // variant: 'info' | 'error'  (see components/ui/Toast.jsx)
   const [toast, setToast] = useState(null)
+  function showToast(message, { variant = 'info', duration = 4000, action } = {}) {
+    setToast({ message, variant, duration, action })
+  }
+  function dismissToast() { setToast(null) }
   // Global connectivity indicator. The composer already disables send when
   // offline (ChatView); this surfaces the state shell-wide so the user is
   // never tapping in the dark about whether they're connected.
@@ -425,8 +433,7 @@ export default function Shell() {
       document.body.style.opacity = '0'
       setTimeout(() => window.location.reload(), 220)
     } else if (ev.type === 'shell_rebuild_failed') {
-      setToast('Shell rebuild failed.')
-      setTimeout(() => setToast(null), 8000)
+      showToast('Shell rebuild failed.', { variant: 'error', duration: 8000 })
     }
   }, [
     activeAppId, activeView, drawerOpen, activeChatId,
@@ -515,8 +522,7 @@ export default function Shell() {
           app = findAppForOpenTarget(updatedApps, target)
         }
         if (!app) {
-          setToast('App is not installed yet.')
-          setTimeout(() => setToast(null), 6000)
+          showToast('App is not installed yet.', { duration: 6000 })
           return
         }
         navTo('canvas', { appId: app.id })
@@ -641,8 +647,7 @@ export default function Shell() {
       // offline-friendly case, so reaching here means we truly need
       // the network.)
       if (!online) {
-        setToast('You’re offline.')
-        setTimeout(() => setToast(null), 4000)
+        showToast("You're offline.")
         closeDrawer()
         return
       }
@@ -663,9 +668,8 @@ export default function Shell() {
         chatId = chat.id
         await refreshChats()
       } catch {
-        // Don't leave a dead, drawer-still-open tap on a failed create.
-        setToast('Couldn’t start a new chat — please try again.')
-        setTimeout(() => setToast(null), 4000)
+        // Don’t leave a dead, drawer-still-open tap on a failed create.
+        showToast("Couldn't start a new chat — please try again.", { variant: 'error' })
         closeDrawer()
         return
       } finally {
@@ -714,12 +718,12 @@ export default function Shell() {
       res = await api.chats.remove(id)
     } catch {
       // Network error — treat as inconclusive, don't touch local state.
+      showToast("Couldn't delete — check your connection.", { variant: 'error' })
       return
     }
     if (!res.ok) {
       if (res.status === 409) {
-        // TODO: surface a toast once we have that primitive. For now
-        // the chat row stays in the list and the user can retry.
+        showToast('Agent is still working in this chat — stop it first.', { duration: 6000 })
         return
       }
       // Other non-2xx (404 = already gone, etc.) — fall through to
@@ -743,6 +747,22 @@ export default function Shell() {
       await newChat({ exclude: id })
     }
     await refreshChats()
+    // 5-second Undo toast: calls POST /api/chats/{id}/recover then
+    // refreshes the chat list so the recovered chat re-appears.
+    showToast('Chat deleted', {
+      duration: 5000,
+      action: {
+        label: 'Undo',
+        onAction: async () => {
+          try {
+            await api.chats.recover(id)
+            await refreshChats()
+          } catch {
+            showToast("Couldn't undo — chat may be gone.", { variant: 'error' })
+          }
+        },
+      },
+    })
   }
 
   // Bootstrap: create an initial chat once the server confirms zero
@@ -789,7 +809,20 @@ export default function Shell() {
 
   return (
     <div className="shell">
-      <header className="shell__bar">
+      {/* inert on the header while the drawer is open so keyboard / AT
+          focus cannot reach shell-chrome behind the open drawer. The
+          drawer itself gains focus on open (Drawer.jsx focus-management
+          effect) and restores it here on close. */}
+      <header className="shell__bar" inert={drawerOpen ? '' : undefined}>
+        {/* MenuButton is the primary drawer toggle for keyboard / AT
+            users. The brand area also toggles the drawer for touch/pointer
+            users so the entire header bar is a tap target — both remain
+            clickable, aria-expanded tracks drawer state on each. */}
+        <MenuButton
+          onClick={() => { if (backFiredRef.current) return; drawerOpen ? closeDrawer() : openDrawer() }}
+          aria-label="Toggle navigation"
+          aria-expanded={drawerOpen}
+        />
         <div
           className="shell__brand"
           role="button"
@@ -837,7 +870,11 @@ export default function Shell() {
         />
       )}
 
-      <main className="shell__content">
+      {/* inert on the main content while the drawer is open — mirrors
+          the drawer's own inert-when-closed contract, but inverted.
+          Prevents pointer / keyboard events from reaching the chat or
+          app canvas while the drawer is overlaid in front of it. */}
+      <main className="shell__content" inert={drawerOpen ? '' : undefined}>
         {/* Single-mount ChatView, keyed by activeChatId. Switching
             chats unmounts and remounts; ChatView's hide-then-reveal
             scroll-restore (visibility:hidden until lazy renderers
@@ -912,26 +949,13 @@ export default function Shell() {
           <SettingsView onThemeChange={loadTheme} />
         )}
       </main>
-      {toast && (
-        <div
-          style={{
-            position: 'fixed',
-            bottom: '1rem',
-            left: '50%',
-            transform: 'translateX(-50%)',
-            background: 'var(--danger, #ef4444)',
-            color: '#fff',
-            padding: '0.75rem 1.5rem',
-            borderRadius: '0.5rem',
-            fontSize: '0.875rem',
-            zIndex: 9000,
-            maxWidth: '90vw',
-            textAlign: 'center',
-          }}
-        >
-          {toast}
-        </div>
-      )}
+      <Toast
+        message={toast?.message}
+        variant={toast?.variant}
+        duration={toast?.duration}
+        action={toast?.action}
+        onDismiss={dismissToast}
+      />
     </div>
   )
 }

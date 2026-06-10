@@ -1,0 +1,88 @@
+/* Toast notification — surface at the bottom-center of the viewport.
+   Sits above all content (z-index 9000, matching the old inline toast).
+   Two variants: info (neutral surface) and error (danger color). */
+
+.toast {
+  position: fixed;
+  bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0.75rem 1.25rem;
+  border-radius: 10px;
+  font-size: 0.875rem;
+  font-family: var(--font);
+  max-width: 90vw;
+  text-align: center;
+  /* Subtle entrance — short fade+slide from below. Reduced-motion
+     rule in index.css collapses this to 1ms without removing it. */
+  animation: toast-in 0.18s var(--spring, cubic-bezier(0.16, 1, 0.3, 1));
+  /* Prevent user selecting toast text accidentally on long-press. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(8px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+.toast--info {
+  background: var(--surface2, #212121);
+  color: var(--text, #ececec);
+  border: 1px solid var(--border, #2a2a2a);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.toast--error {
+  background: var(--danger, #f87171);
+  color: #fff;
+  border: none;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+
+.toast__message {
+  flex: 1;
+}
+
+/* Inline action button (e.g. "Undo"). Inherits the toast's color so it
+   reads as part of the same unit, not a separate control. */
+.toast__action {
+  background: transparent;
+  border: none;
+  padding: 0 4px;
+  font-size: inherit;
+  font-family: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  color: inherit;
+  opacity: 0.85;
+  flex-shrink: 0;
+  white-space: nowrap;
+  border-radius: 4px;
+  /* Slightly elevated contrast on hover so it reads as interactive. */
+  transition: opacity 0.15s;
+}
+
+.toast--info .toast__action {
+  /* On the neutral surface variant, colour the action with the accent
+     so it stands out as an interactive call-to-action. */
+  color: var(--accent, #8b6cf7);
+  opacity: 1;
+}
+
+@media (hover: hover) {
+  .toast__action:hover {
+    opacity: 1;
+    text-decoration: underline;
+  }
+}
+
+.toast__action:focus { outline: none; }
+.toast__action:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
