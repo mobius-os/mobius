@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
-import { BASE, getToken } from '../api/client.js'
+import { BASE, getToken, clearToken, clearQueryCache } from '../api/client.js'
+import * as setupSession from '../lib/setupSession.js'
 
 /**
  * Persistent SSE subscription to /api/events/system. Lives on the
@@ -50,6 +51,22 @@ export default function useSystemEventStream(onEvent) {
           headers: { Authorization: `Bearer ${token}` },
           signal: controller.signal,
         })
+        if (res.status === 401) {
+          // Stale / expired token. Reconnecting with the same token would
+          // loop forever. Mirror apiFetch's AUTH_EXPIRED path: clear local
+          // credentials and reload so the auth boundary takes over.
+          // (Guard against the setup-wizard flow where 401s are expected.)
+          if (!setupSession.isInProgress()) {
+            clearToken()
+            try { sessionStorage.setItem('auth_expired', '1') } catch {}
+            await clearQueryCache()
+            setTimeout(() => window.location.reload(), 100)
+          }
+          // Stop the reconnect loop regardless — either the page is
+          // reloading or the setup-wizard will re-authenticate.
+          cancelled = true
+          return
+        }
         if (!res.ok || !res.body) {
           throw new Error(`system stream status ${res.status}`)
         }
