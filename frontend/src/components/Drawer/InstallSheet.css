@@ -48,13 +48,16 @@
 
 .is__icon-wrap {
   position: relative;
-  flex: 0 0 64px;
-  width: 64px;
-  height: 64px;
-  border-radius: 14px;
+  flex: 0 0 72px;
+  width: 72px;
+  height: 72px;
+  border-radius: 16px;
   overflow: hidden;
+  /* No opaque tile — the raw /api/apps/{id}/icon route returns the original
+     transparent PNG so glossy 3D catalog icons render without a dark halo.
+     A 1px border keeps the tap-target visible for the custom-icon affordance. */
   border: 1px solid var(--border, #252b36);
-  background: var(--surface2, #1a1f28);
+  background: transparent;
   cursor: pointer;
   padding: 0;
 }
@@ -68,7 +71,7 @@
   width: 100%;
   height: 100%;
   display: block;
-  object-fit: cover;
+  object-fit: contain;
 }
 
 .is__icon-edit {
