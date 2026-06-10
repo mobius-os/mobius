@@ -147,6 +147,21 @@ export default function useStreamConnection(chatId, {
 }) {
   const [streamItems, _setStreamItems] = useState([])
   const latestItemsRef = useRef([])
+  // Snapshot of the last non-empty latestItemsRef value. Written every
+  // time items become non-empty; never cleared by a reconnect reset.
+  // On retry exhaustion we promote from this ref so the user sees the
+  // partial response instead of a blank screen.
+  //
+  // CONTRACT: updated before any reconnect wipes latestItemsRef.
+  // Only wiped when a successful catch-up burst begins (items actually
+  // arrive on the new connection), preventing stale partial from
+  // doubling into a complete response on a successful reconnect.
+  const lastGoodItemsRef = useRef([])
+  // Set to true from the first event of a catch-up burst on a new
+  // connection. Once we see real events, lastGoodItemsRef can be
+  // cleared; if retries exhaust before this flag fires, we still have
+  // the last-good snapshot.
+  const catchUpStartedRef = useRef(false)
 
   // Wrapper that keeps latestItemsRef in sync synchronously.
   // This prevents promoteStreamToMessages from reading stale items
@@ -154,6 +169,7 @@ export default function useStreamConnection(chatId, {
   // processes a queued state updater.
   function setStreamItems(updater) {
     const next = typeof updater === 'function' ? updater(latestItemsRef.current) : updater
+    if (next.length > 0) lastGoodItemsRef.current = next
     latestItemsRef.current = next
     _setStreamItems(next)
   }
@@ -309,7 +325,20 @@ export default function useStreamConnection(chatId, {
     }
   }, [flushBuffer])
 
-  useEffect(() => () => disconnect(), [chatId, disconnect])
+  useEffect(() => () => {
+    // On chatId change: tear down the old connection AND wipe stream
+    // state. Without the wipe, streamItems from the previous chat
+    // survive into the new chat's mount: connectToStream(false) passes
+    // resetState=false so the catch-up burst appends onto the survivor
+    // items, and the user sees ghost content from the previous chat.
+    // The bridge-partial bridge logic is NOT affected — useBridgePartial
+    // captures its ts from the initial DB fetch, not from streamItems;
+    // clearing streamItems here does not interact with that gate.
+    disconnect()
+    setStreamItems([])
+    textBufferRef.current = ''
+    lastGoodItemsRef.current = []
+  }, [chatId, disconnect])
 
   useEffect(() => {
     function trackMaxHeight() {
@@ -348,6 +377,13 @@ export default function useStreamConnection(chatId, {
     disconnect()
 
     if (resetState) {
+      // Clear visible state but preserve lastGoodItemsRef — that snapshot
+      // survives until we confirm the new connection is delivering events.
+      // Wiping latestItemsRef here is safe for a SUCCESSFUL reconnect
+      // because the catch-up burst will replay everything; it's only
+      // unsafe on retry exhaustion where no events arrive. catchUpStarted
+      // tracks whether events arrived on this connection attempt.
+      catchUpStartedRef.current = false
       setStreamItems([])
       textBufferRef.current = ''
     }
@@ -446,6 +482,14 @@ export default function useStreamConnection(chatId, {
           if (!line.startsWith('data: ')) continue
           let event
           try { event = JSON.parse(line.slice(6)) } catch { continue }
+
+          // First real event on this connection: the catch-up burst is
+          // delivering content. It is now safe to clear lastGoodItemsRef
+          // because a full replay will rebuild latestItemsRef from scratch.
+          if (!catchUpStartedRef.current) {
+            catchUpStartedRef.current = true
+            lastGoodItemsRef.current = []
+          }
 
           if (SYSTEM_EVENTS.has(event.type)) {
             onSystemEventRef.current?.(event)
@@ -690,6 +734,21 @@ export default function useStreamConnection(chatId, {
         // Null the stale controller so visibility/online handlers can
         // trigger reconnection after retries exhaust.
         abortRef.current = null
+        // Restore the last-good snapshot so promoteStreamToMessages has
+        // something to promote. Every reconnect attempt called
+        // connectToStream(resetState=true) which wiped latestItemsRef;
+        // if no events arrived on any attempt, latestItemsRef is empty
+        // and promoteStreamToMessages's early-return (items.length === 0)
+        // would silently discard the user's partial response. Restoring
+        // from lastGoodItemsRef here lets the caller promote and display
+        // whatever the stream produced before the connection collapsed.
+        // On a successful reconnect lastGoodItemsRef was already cleared
+        // (catchUpStartedRef fired) so this no-ops there.
+        if (lastGoodItemsRef.current.length > 0 && latestItemsRef.current.length === 0) {
+          const saved = lastGoodItemsRef.current
+          latestItemsRef.current = saved
+          _setStreamItems(saved)
+        }
         // Retries are exhausted and no reconnect is scheduled, so this is
         // a terminal end of the stream. Signal stream-end like the normal
         // close path above does, otherwise ChatView's `sending` stays true

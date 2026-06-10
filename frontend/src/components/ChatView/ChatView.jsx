@@ -281,6 +281,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // useStreamConnection and is exposed below as `isStreamingRef`.
   const sendingRef = useRef(false)
   sendingRef.current = sending
+  // Re-entrancy guard for doSendSilent (answer submissions). sendingRef
+  // alone cannot guard doSendSilent because answer sends are deliberately
+  // allowed while sendingRef is true (the runner is parked waiting for
+  // the answer). A dedicated flag flipped synchronously at entry protects
+  // against a fast double-tap submitting the same answer twice.
+  const sendSilentInFlightRef = useRef(false)
 
   // Ref mirrors of prop callbacks. doSend / doSendSilent are
   // memoized via useCallback; if these props were listed in the
@@ -1103,12 +1109,18 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // stream remount, causing answers to disappear on first return
   // and reappear on the second.
   const doSendSilent = useCallback(async (text, resolvedAnswers, questionId) => {
-    // Guard on refs, not render-time `sending`. A fast double-click
-    // fires two handlers in the same tick before React commits the
-    // setSending(true) below — both closures see `sending === false`
-    // and both submit the same answer. Flip sendingRef synchronously
-    // right after the guard so the second click bails immediately.
-    if (!text.trim()) return
+    // Synchronous re-entrancy guard: flip BEFORE any other logic so a
+    // second concurrent call (fast double-tap) bails immediately. This
+    // is separate from sendingRef because answer submissions are
+    // deliberately allowed while sendingRef is true (the runner is
+    // parked waiting for the answer), but we still need to prevent the
+    // same answer from being submitted twice concurrently.
+    if (sendSilentInFlightRef.current) return
+    sendSilentInFlightRef.current = true
+    if (!text.trim()) {
+      sendSilentInFlightRef.current = false
+      return
+    }
     // Answer submissions (resolvedAnswers truthy) are allowed mid-turn:
     // the runner is paused on the AskUserQuestion future and is waiting
     // for exactly this POST. BOTH gates must relax — `sending` is set
@@ -1119,6 +1131,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     // came back with no answer"). QuestionCard's own `submitted` state
     // guards against double-clicks on the same card.
     if ((sendingRef.current || isStreamingRef.current) && !resolvedAnswers) {
+      sendSilentInFlightRef.current = false
       return
     }
     sendingRef.current = true
@@ -1170,12 +1183,15 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       if (err.message === 'HTTP 410') {
         setLiveQuestionId(null)
         fetchMessages({ force: true })
+        sendSilentInFlightRef.current = false
         return
       }
       commitMessages(prev => [
         ...prev,
         { role: 'assistant', content: `Error: ${err.message}`, blocks: [] },
       ])
+    } finally {
+      sendSilentInFlightRef.current = false
     }
   }, [streamSend, commitMessages, fetchMessages])
 
