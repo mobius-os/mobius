@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no" />
   <meta name="referrer" content="no-referrer">
   <script type="importmap">
   {
@@ -48,6 +48,12 @@
        News report renders in its own iframe, so its body text is unaffected. */
     body { -webkit-user-select: none; user-select: none; }
     input, textarea, [contenteditable], [contenteditable] * { -webkit-user-select: text; user-select: text; }
+    /* Prevent iOS Safari page-level pinch-zoom. user-scalable=no in the
+       viewport meta is ignored by iOS Safari; touch-action: pan-x pan-y
+       on html/body is the CSS-level lock. Mini-apps that need their own
+       pinch (e.g. image lightboxes) set touch-action: none on their own
+       interactive surface to override this. */
+    html, body { touch-action: pan-x pan-y; }
     /* Always-hidden scrollbars in mini-app frames — matches the shell's
        global default after the on-scroll reveal mechanism was retired
        (owner preference: scrollbars never show, in any surface). */

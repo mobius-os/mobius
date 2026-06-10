@@ -1,33 +1,43 @@
+/* Inline shell-bar variant. The old position:fixed/z-index form was
+   for standalone floating use; as a header child it flows naturally. */
 .menu-btn {
-  position: fixed;
-  top: 14px;
-  left: 14px;
-  z-index: 100;
   width: 40px;
   height: 40px;
-  background: var(--surface);
-  border: 1px solid var(--border);
+  background: transparent;
+  border: none;
   border-radius: 8px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 4px;
   padding: 0;
+  flex-shrink: 0;
   transition: background 0.15s;
+  color: var(--text);
 }
 
-.menu-btn:hover {
-  background: var(--surface2);
+@media (hover: hover) {
+  .menu-btn:hover {
+    background: color-mix(in srgb, var(--text) 8%, transparent);
+  }
+}
+
+.menu-btn:active {
+  transform: scale(0.93);
+}
+
+/* Keyboard-only focus ring — matches drawer row and shell__brand rings. */
+.menu-btn:focus { outline: none; }
+.menu-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .menu-btn__bar {
   display: block;
   width: 18px;
   height: 2px;
-  background: var(--text);
+  background: currentColor;
   border-radius: 2px;
 }
