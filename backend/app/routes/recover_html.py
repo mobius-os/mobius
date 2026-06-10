@@ -269,8 +269,9 @@ _CONFIRM_FACTORY = (
   " and theme. Chat history is preserved. Continue?"
 )
 _CONFIRM_BACKUP = (
-  "Backup includes OAuth credentials for Claude and Codex."
-  " Store the file securely. Continue?"
+  "Backup includes OAuth credentials, identity secrets (.secret-key,"
+  " .recovery-secret, service-token.txt), VAPID keys, and recovery"
+  " chat history. Store the file securely. Continue?"
 )
 _CONFIRM_REINSTALL_STORE = (
   "Reinstall the app store from its pinned manifest URL?"
@@ -308,7 +309,7 @@ def dashboard_html(msg: str = "") -> str:
 
     <div class="section">
       <p class="section-title">Backup</p>
-      <p class="desc" style="margin-bottom:8px;">Download a snapshot of chats, mini-apps, theme, and CLI credentials. Store securely — the .zip includes secrets.</p>
+      <p class="desc" style="margin-bottom:8px;">Download a snapshot of chats, mini-apps, theme, CLI credentials, identity secrets (.secret-key, service-token.txt), VAPID keys, and recovery chat history. Store securely — the .zip includes all secrets needed for a complete restore.</p>
       <div class="actions">
         <form method="POST" action="/recover/action"
               onsubmit="{_confirm_attr(_CONFIRM_BACKUP)}">
