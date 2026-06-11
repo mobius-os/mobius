@@ -28,6 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.memory_graph import build_graph, write_graph  # noqa: E402
+from app.memory_trace import prune_traces  # noqa: E402
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 MEMORY = DATA_DIR / "shared" / "memory"
@@ -39,7 +40,7 @@ _SEED_CANDIDATES = [
   Path("/app/scripts/seed-memory"),
   Path(__file__).resolve().parent / "seed-memory",
 ]
-SEED_VERSION = "2"  # bump when the seed graph's authored content changes
+SEED_VERSION = "3"  # bump when the seed graph's authored content changes
 
 INBOX_HEADER = (
   "# Inbox\n\n"
@@ -47,6 +48,22 @@ INBOX_HEADER = (
   "append recipe writes to this file). The nightly dreaming pass folds these\n"
   "into atomic notes under `notes/` and then truncates this file. Anything\n"
   "here is recalled next session, so nothing is lost before consolidation.\n\n"
+)
+
+# Mirrors seed-memory/recent-chats.md, for the self-heal path: instances
+# seeded before the queue existed get the same file on next boot (like
+# inbox.md, the queue is instance state — never overwritten once present).
+RECENT_CHATS_HEADER = (
+  "# Recent chats\n\n"
+  "A fixed-size queue of the last chats — at most 10 entries, oldest first,\n"
+  "one line each:\n\n"
+  "`- [chat:<id>] <YYYY-MM-DD> — <1-2 sentence summary>`\n\n"
+  "The nightly Dreaming pass maintains it: appends the day's chats from its\n"
+  "interviews and evicts the oldest beyond 10. Don't grow it by hand during\n"
+  "the day. The summaries are usually enough to recall what recently\n"
+  "happened; when a specific exchange matters, fetch the full transcript\n"
+  "with `GET /api/chats/<id>`.\n\n"
+  "*(no chats recorded yet — the first nightly pass fills this in)*\n"
 )
 
 
@@ -83,6 +100,10 @@ def _publish_from_staging() -> bool:
   shutil.copytree(seed, staging)
   if not (staging / "inbox.md").is_file():
     (staging / "inbox.md").write_text(INBOX_HEADER, encoding="utf-8")
+  if not (staging / "recent-chats.md").is_file():
+    (staging / "recent-chats.md").write_text(
+      RECENT_CHATS_HEADER, encoding="utf-8"
+    )
 
   res = build_graph(root=staging)  # lint the staging tree in place
   if res.errors:
@@ -103,6 +124,13 @@ def _publish_from_staging() -> bool:
 
 def init() -> None:
   MEMORY.parent.mkdir(parents=True, exist_ok=True)
+  # Cheap boot-time sweep of stale per-chat read-traces. The nightly
+  # Dreaming pass prunes too, but a long-idle or dreaming-less instance
+  # shouldn't accumulate one file per chat forever. Best-effort by
+  # construction (prune_traces never raises).
+  pruned = prune_traces(DATA_DIR)
+  if pruned:
+    print(f"init_memory_graph: pruned {pruned} stale read-trace file(s)")
   if not MEMORY.exists():
     if _publish_from_staging():
       _chown_mobius(MEMORY)
@@ -111,6 +139,9 @@ def init() -> None:
   # Graph already present — preserve agent edits. Only self-heal.
   if not INBOX.is_file():
     INBOX.write_text(INBOX_HEADER, encoding="utf-8")
+  recent_chats = MEMORY / "recent-chats.md"
+  if not recent_chats.is_file():
+    recent_chats.write_text(RECENT_CHATS_HEADER, encoding="utf-8")
   if not READY.is_file():
     # A prior boot crashed mid-publish, or the graph was hand-created. Lint
     # and re-arm the sentinel only if it's actually valid.

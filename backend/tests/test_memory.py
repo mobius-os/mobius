@@ -142,6 +142,79 @@ def test_empty_published_graph_is_empty(tmp_path):
   assert block.text == ""
 
 
+# --- recent-chats queue --------------------------------------------------
+
+
+def test_recent_chats_injected_after_index_before_hot_notes(tmp_path):
+  root = _graph(tmp_path)
+  (root / "index.md").write_text("# Home")
+  (root / "recent-chats.md").write_text(
+    "- [chat:c1] 2026-06-10 — built the Habits app\n"
+  )
+  (root / "notes" / "hot.md").write_text(_note(importance=5, title="hot"))
+  (root / ".ready").write_text("")
+
+  block = memory.build_memory_block(tmp_path)
+  assert "recent-chats.md" in block.loaded
+  assert "built the Habits app" in block.text
+  # Position: index first, then recent chats, then hot notes.
+  assert (
+    block.text.index("# Home")
+    < block.text.index("recent-chats.md")
+    < block.text.index("notes/hot.md")
+  )
+
+
+def test_recent_chats_truncates_oldest_first_when_tight(tmp_path):
+  # 40 entries at ~40 bytes each ≈ 1.6 KB; a budget that fits the index
+  # plus only part of the queue must keep the NEWEST tail and drop the
+  # oldest entries behind the omission marker.
+  root = _graph(tmp_path)
+  (root / "index.md").write_text("# Home")
+  lines = [f"- [chat:c{i:02d}] 2026-06-01 — summary {i:02d}" for i in range(40)]
+  (root / "recent-chats.md").write_text("\n".join(lines))
+  (root / ".ready").write_text("")
+
+  block = memory.build_memory_block(tmp_path, budget_bytes=600)
+  assert "recent-chats.md" in block.loaded
+  assert "[older recent-chats entries omitted]" in block.text
+  assert "summary 39" in block.text  # newest survives
+  assert "summary 00" not in block.text  # oldest evicted
+  assert len(block.text.encode("utf-8")) <= 600
+
+
+def test_recent_chats_skipped_when_no_room(tmp_path):
+  root = _graph(tmp_path)
+  (root / "index.md").write_text("# Home\n" + "x" * 580)
+  (root / "recent-chats.md").write_text("- [chat:c1] 2026-06-10 — summary")
+  (root / ".ready").write_text("")
+
+  block = memory.build_memory_block(tmp_path, budget_bytes=600)
+  assert "recent-chats.md" not in block.loaded
+  assert len(block.text.encode("utf-8")) <= 600
+
+
+def test_recent_chats_not_counted_as_usage(tmp_path):
+  memory.record_usage(tmp_path, ["recent-chats.md", "notes/a.md"])
+  # The queue is a buffer, not a graph node — no phantom id accrues.
+  assert memory.load_usage(tmp_path) == {"a": 1}
+
+
+def test_redirect_stub_excluded_from_hot_notes(tmp_path):
+  root = _graph(tmp_path)
+  (root / "index.md").write_text("# Home")
+  (root / "notes" / "moved.md").write_text(
+    "---\ntitle: Old slug\ntype: redirect\ntarget: new-slug\n"
+    "importance: 5\n---\nThis content has moved to [[new-slug]].\n"
+  )
+  (root / "notes" / "real.md").write_text(_note(importance=1, title="real"))
+  (root / ".ready").write_text("")
+  block = memory.build_memory_block(tmp_path, max_notes=1)
+  # Even at importance 5, the stub never wins an injection slot.
+  assert "notes/real.md" in block.loaded
+  assert "notes/moved.md" not in block.loaded
+
+
 # --- frontmatter parsing ----------------------------------------------
 
 

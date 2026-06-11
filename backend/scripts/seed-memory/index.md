@@ -39,6 +39,13 @@ It **grows through use**, and the nightly **Dreaming** pass curates it.
 - [[a-nightly-dreaming-pass-exists]] — the overnight pass drains the inbox,
   consolidates the graph, and fixes apps; defer heavy reorganizing to it.
 
+## Recent chats
+
+The last ~10 chats live in `recent-chats.md` (also injected) — one line per
+chat: the chat id, date, and a 1-2 sentence summary. The summaries usually
+suffice; fetch a full transcript with `GET /api/chats/<id>` when a specific
+exchange matters. The nightly dreaming pass maintains the queue.
+
 ## Inbox
 
 Raw same-day observations live in `inbox.md` (also injected). The nightly
