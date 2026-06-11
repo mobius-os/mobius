@@ -511,7 +511,21 @@ export default function App({ appId, token }) {
 
       <header style={S.header}>
         <div style={S.brand}>
-          <span style={S.brandDot}><span style={S.brandDotCore} /></span>
+          {/* The app's own glossy icon as the brand mark; falls back to the
+              accent dot if this install has no custom icon (the route 404s). */}
+          <img
+            src={`/api/apps/${appId}/icon`}
+            alt=""
+            width={28}
+            height={28}
+            style={S.brandIcon}
+            onError={(e) => {
+              e.currentTarget.style.display = 'none'
+              const dot = e.currentTarget.nextElementSibling
+              if (dot) dot.style.display = 'flex'
+            }}
+          />
+          <span style={{ ...S.brandDot, display: 'none' }}><span style={S.brandDotCore} /></span>
           <div style={{ minWidth: 0 }}>
             <div style={S.title}>Mind</div>
             <div style={S.subtitle}>
@@ -1595,6 +1609,9 @@ const S = {
   brandDotCore: {
     width: 7, height: 7, borderRadius: '50%', background: 'rgba(255,255,255,0.92)',
     boxShadow: '0 0 6px rgba(255,255,255,0.7)',
+  },
+  brandIcon: {
+    width: 28, height: 28, borderRadius: 7, flexShrink: 0, display: 'block',
   },
   title: { fontSize: 16, fontWeight: 700, lineHeight: 1.05, letterSpacing: '-0.015em' },
   subtitle: {
