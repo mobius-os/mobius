@@ -186,7 +186,7 @@ export default function ChatEmbed() {
     return (
       <div className="chat-embed chat-embed--empty">
         <p className="chat-embed__notice">
-          No conversation yet.
+          Starting conversation…
         </p>
       </div>
     )
