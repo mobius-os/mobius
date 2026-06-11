@@ -287,3 +287,222 @@ test('removeFile revokes object URLs outside the updater', () => {
   assert.equal(revokedUrls.length, 1)
   assert.equal(revokedUrls[0], 'blob:abc123')
 })
+
+// ---------------------------------------------------------------------------
+// Fix 1: Duplicate question cards — dedupe by identity at render-assembly time
+// (streamItemQuestionKeys suppression in MsgContent)
+// ---------------------------------------------------------------------------
+
+// Simulate the questionKey logic used in the real code
+function questionKey(block) {
+  const questions = block?.questions || []
+  if (block?.question_id) return `question_id:${block.question_id}`
+  if (questions.length === 0) return 'empty'
+  const first = questions[0] || {}
+  if (first.id) return `id:${first.id}`
+  return `text:${first.question || first.text || ''}`
+}
+
+// Simulate how streamItemQuestionKeys is built from streamItems
+function buildStreamItemQuestionKeys(sending, streamItems) {
+  if (sending && streamItems.length > 0) {
+    return new Set(
+      streamItems
+        .filter(it => it.type === 'question')
+        .map(it => questionKey(it))
+    )
+  }
+  return null
+}
+
+// Simulate the MsgContent suppression check
+function shouldSuppressBlock(block, suppressedQuestionKeys) {
+  if (block.type !== 'question') return false
+  return suppressedQuestionKeys?.has(questionKey(block)) ?? false
+}
+
+test('streamItemQuestionKeys is null when not sending', () => {
+  const streamItems = [{ type: 'question', question_id: 'q1', questions: [] }]
+  const keys = buildStreamItemQuestionKeys(false, streamItems)
+  assert.equal(keys, null, 'null when sending=false')
+})
+
+test('streamItemQuestionKeys is null when streamItems is empty', () => {
+  const keys = buildStreamItemQuestionKeys(true, [])
+  assert.equal(keys, null, 'null when streamItems empty')
+})
+
+test('streamItemQuestionKeys includes question_id-keyed questions', () => {
+  const streamItems = [
+    { type: 'text', content: 'hello' },
+    { type: 'question', question_id: 'q1', questions: [{ question: 'Pick one?' }] },
+  ]
+  const keys = buildStreamItemQuestionKeys(true, streamItems)
+  assert.ok(keys instanceof Set)
+  assert.ok(keys.has('question_id:q1'))
+  assert.equal(keys.size, 1, 'only question items contribute keys')
+})
+
+test('MsgContent suppresses a persisted question block whose key is in streamItems', () => {
+  const block = { type: 'question', question_id: 'q1', questions: [] }
+  const streamItems = [
+    { type: 'question', question_id: 'q1', questions: [] },
+  ]
+  const keys = buildStreamItemQuestionKeys(true, streamItems)
+  assert.ok(shouldSuppressBlock(block, keys), 'block suppressed when key matches streamItems')
+})
+
+test('MsgContent does NOT suppress a question block whose key differs from streamItems', () => {
+  const block = { type: 'question', question_id: 'q2', questions: [] }
+  const streamItems = [
+    { type: 'question', question_id: 'q1', questions: [] },
+  ]
+  const keys = buildStreamItemQuestionKeys(true, streamItems)
+  assert.equal(shouldSuppressBlock(block, keys), false, 'different question_id is not suppressed')
+})
+
+test('MsgContent does NOT suppress text or tool blocks', () => {
+  const textBlock = { type: 'text', content: 'hello' }
+  const toolBlock = { type: 'tool', tool: 'Bash', status: 'done' }
+  const streamItems = [{ type: 'question', question_id: 'q1', questions: [] }]
+  const keys = buildStreamItemQuestionKeys(true, streamItems)
+  assert.equal(shouldSuppressBlock(textBlock, keys), false)
+  assert.equal(shouldSuppressBlock(toolBlock, keys), false)
+})
+
+test('MsgContent suppression uses text-based key when question_id absent', () => {
+  const q = { question: 'What is your preference?' }
+  const block = { type: 'question', questions: [q] }
+  const streamItem = { type: 'question', questions: [q] }
+  const keys = buildStreamItemQuestionKeys(true, [streamItem])
+  assert.ok(keys.has('text:What is your preference?'))
+  assert.ok(shouldSuppressBlock(block, keys), 'text-keyed block suppressed')
+})
+
+test('no suppression when suppressedQuestionKeys is null (not sending)', () => {
+  const block = { type: 'question', question_id: 'q1', questions: [] }
+  assert.equal(shouldSuppressBlock(block, null), false, 'null keys = no suppression')
+})
+
+// ---------------------------------------------------------------------------
+// Fix 2: patchQuestionAnswers — streamItems answers optimistic update
+// ---------------------------------------------------------------------------
+
+// Simulate patchQuestionAnswers logic from useStreamConnection
+function patchQuestionAnswers(streamItems, questionId, answers) {
+  const key = questionId ? `question_id:${questionId}` : null
+  return streamItems.map(it => {
+    if (it.type !== 'question') return it
+    const itKey = questionKey(it)
+    if (key ? itKey === key : true) {
+      return { ...it, answers }
+    }
+    return it
+  })
+}
+
+test('patchQuestionAnswers updates the matching question item by question_id', () => {
+  const items = [
+    { type: 'text', content: 'hello' },
+    { type: 'question', question_id: 'q1', questions: [{ question: 'Pick?' }] },
+  ]
+  const answers = { 'Pick?': 'Option A' }
+  const updated = patchQuestionAnswers(items, 'q1', answers)
+  assert.deepEqual(updated[1].answers, answers)
+  assert.equal(updated[0].type, 'text', 'text item untouched')
+})
+
+test('patchQuestionAnswers leaves non-matching question items unchanged', () => {
+  const items = [
+    { type: 'question', question_id: 'q1', questions: [] },
+    { type: 'question', question_id: 'q2', questions: [] },
+  ]
+  const answers = { 'Q': 'A' }
+  const updated = patchQuestionAnswers(items, 'q1', answers)
+  assert.deepEqual(updated[0].answers, answers, 'q1 patched')
+  assert.equal(updated[1].answers, undefined, 'q2 not patched')
+})
+
+test('patchQuestionAnswers patches all questions when no questionId given', () => {
+  const items = [
+    { type: 'question', question_id: 'q1', questions: [] },
+    { type: 'question', question_id: 'q2', questions: [] },
+  ]
+  const answers = { 'Q': 'A' }
+  const updated = patchQuestionAnswers(items, null, answers)
+  assert.deepEqual(updated[0].answers, answers)
+  assert.deepEqual(updated[1].answers, answers)
+})
+
+test('patchQuestionAnswers preserves all other item fields', () => {
+  const items = [
+    {
+      type: 'question',
+      question_id: 'q1',
+      questions: [{ question: 'Foo?' }],
+      some_extra: 'keep me',
+    },
+  ]
+  const answers = { 'Foo?': 'Bar' }
+  const updated = patchQuestionAnswers(items, 'q1', answers)
+  assert.equal(updated[0].some_extra, 'keep me')
+  assert.equal(updated[0].question_id, 'q1')
+  assert.deepEqual(updated[0].questions, [{ question: 'Foo?' }])
+})
+
+test('patchQuestionAnswers returns original array when no items match', () => {
+  const items = [
+    { type: 'text', content: 'just text' },
+  ]
+  const updated = patchQuestionAnswers(items, 'q1', { Q: 'A' })
+  assert.deepEqual(updated, items)
+})
+
+// ---------------------------------------------------------------------------
+// Fix 3: Multi-select answered state — split logic correctness
+// ---------------------------------------------------------------------------
+
+// Simulate the answeredArr split from QuestionCard
+function buildAnsweredArr(answered, isMulti, answeredValue) {
+  if (answered && isMulti) {
+    return answeredValue ? answeredValue.split(', ').map(s => s.trim()) : []
+  }
+  return null
+}
+
+function isOptionChosen(answered, isMulti, answeredArr, answeredValue, optLabel) {
+  if (!answered) return false
+  return isMulti
+    ? (answeredArr?.includes(optLabel) ?? false)
+    : answeredValue === optLabel
+}
+
+test('multi-select answeredArr splits comma-joined value correctly', () => {
+  const arr = buildAnsweredArr(true, true, 'Option A, Option B, Option C')
+  assert.deepEqual(arr, ['Option A', 'Option B', 'Option C'])
+})
+
+test('multi-select: isChosen is true for each individual selected option', () => {
+  const answeredValue = 'Option A, Option C'
+  const arr = buildAnsweredArr(true, true, answeredValue)
+  assert.ok(isOptionChosen(true, true, arr, answeredValue, 'Option A'))
+  assert.ok(isOptionChosen(true, true, arr, answeredValue, 'Option C'))
+  assert.equal(isOptionChosen(true, true, arr, answeredValue, 'Option B'), false)
+})
+
+test('single-select: isChosen uses exact string match, not includes', () => {
+  const answeredValue = 'Option A'
+  assert.ok(isOptionChosen(true, false, null, answeredValue, 'Option A'))
+  assert.equal(isOptionChosen(true, false, null, answeredValue, 'Option'), false)
+})
+
+test('multi-select: empty answeredValue yields empty array (no chosen options)', () => {
+  const arr = buildAnsweredArr(true, true, '')
+  assert.deepEqual(arr, [])
+})
+
+test('multi-select: single selected option still works (no trailing comma)', () => {
+  const arr = buildAnsweredArr(true, true, 'Option A')
+  assert.deepEqual(arr, ['Option A'])
+  assert.ok(isOptionChosen(true, true, arr, 'Option A', 'Option A'))
+})

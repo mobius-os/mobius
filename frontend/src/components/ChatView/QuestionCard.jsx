@@ -122,31 +122,44 @@ export default function QuestionCard({ questions, questionId, answeredMap, onAns
               role={isMulti ? 'group' : 'radiogroup'}
               aria-label={q.question}
             >
-              {q.options?.map((opt, oi) => {
-                const isChosen = answeredValue === opt.label
-                const isActive = answered
-                  ? isChosen
-                  : (isMulti ? selectedArr.includes(opt.label) : selected === opt.label)
-                const dimmed = answered && !isChosen
-                return (
-                  <button
-                    key={oi}
-                    type="button"
-                    role={isMulti ? 'checkbox' : 'radio'}
-                    aria-checked={isActive}
-                    className={`qcard__opt${isActive ? ' qcard__opt--on' : ''}${dimmed ? ' qcard__opt--dim' : ''}`}
-                    onClick={answered ? undefined : () => selectOption(q.question, opt.label)}
-                    disabled={inactive}
-                    title={opt.description || ''}
-                  >
-                    <span
-                      className={`qcard__mark qcard__mark--${isMulti ? 'box' : 'radio'}`}
-                      aria-hidden="true"
-                    />
-                    {opt.label}
-                  </button>
-                )
-              })}
+              {/* For multi-select answered state, parse the comma-joined
+                  value back into an array so each chosen option highlights
+                  correctly. Without this split, isChosen = (fullString ===
+                  opt.label) was always false and a fallback span rendered
+                  the whole joined string instead of individual chips. */}
+              {(() => {
+                const answeredArr = answered && isMulti
+                  ? (answeredValue ? answeredValue.split(', ').map(s => s.trim()) : [])
+                  : null
+
+                return q.options?.map((opt, oi) => {
+                  const isChosen = answered
+                    ? (isMulti ? (answeredArr?.includes(opt.label) ?? false) : answeredValue === opt.label)
+                    : false
+                  const isActive = answered
+                    ? isChosen
+                    : (isMulti ? selectedArr.includes(opt.label) : selected === opt.label)
+                  const dimmed = answered && !isChosen
+                  return (
+                    <button
+                      key={oi}
+                      type="button"
+                      role={isMulti ? 'checkbox' : 'radio'}
+                      aria-checked={isActive}
+                      className={`qcard__opt${isActive ? ' qcard__opt--on' : ''}${dimmed ? ' qcard__opt--dim' : ''}`}
+                      onClick={answered ? undefined : () => selectOption(q.question, opt.label)}
+                      disabled={inactive}
+                      title={opt.description || ''}
+                    >
+                      <span
+                        className={`qcard__mark qcard__mark--${isMulti ? 'box' : 'radio'}`}
+                        aria-hidden="true"
+                      />
+                      {opt.label}
+                    </button>
+                  )
+                })
+              })()}
               {!answered && (
               <button
                 type="button"
@@ -163,7 +176,16 @@ export default function QuestionCard({ questions, questionId, answeredMap, onAns
                 Other
               </button>
               )}
-              {answered && answeredValue && !q.options?.some(o => o.label === answeredValue) && (
+              {/* Fallback span for "other" text answers that don't match
+                  any known option label. For multi-select, show the unmatched
+                  entries; for single-select, show the whole value. */}
+              {answered && isMulti && (() => {
+                const answeredArr = answeredValue ? answeredValue.split(', ').map(s => s.trim()) : []
+                const unmatched = answeredArr.filter(v => !q.options?.some(o => o.label === v))
+                if (unmatched.length === 0) return null
+                return <span className="qcard__opt qcard__opt--on">{unmatched.join(', ')}</span>
+              })()}
+              {answered && !isMulti && answeredValue && !q.options?.some(o => o.label === answeredValue) && (
                 <span className="qcard__opt qcard__opt--on">{answeredValue}</span>
               )}
             </div>
