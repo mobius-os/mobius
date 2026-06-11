@@ -987,21 +987,32 @@ async def update_icon(
 
 
 @router.get("/{app_id}/icon")
-def get_icon(app_id: int, db: Session = Depends(get_db)):
+def get_icon(app_id: int, request: Request, db: Session = Depends(get_db)):
   """Public read of an app's icon PNG, so a mini-app can render its own logo
   with a plain `<img src="/api/apps/<id>/icon">` (e.g. as its file-drawer
   toggle, mirroring the shell's logo). Public + by-id on purpose: the embedded
   mini-app has its numeric `appId` but not its slug, and the slug-based
   standalone icon route (`/apps/<slug>/icon-<N>.png`) is already public — an app
   icon is not a secret. Returns 404 when the app uses the auto-generated letter
-  icon (no stored PNG) so the caller can fall back to its own glyph."""
+  icon (no stored PNG) so the caller can fall back to its own glyph.
+
+  Icons are hundreds of KB and the store grid renders a dozen at once, so
+  the old `Cache-Control: no-cache` made every grid open re-download ~4MB.
+  ETag on `updated_at` (same validator family as /module) + a 1h max-age:
+  repeat opens are free, and an app update advances the validator so the
+  next revalidation picks up the new icon within the hour."""
   app = live_app(db, app_id, populate=True)
   if app is None or not app.icon_png:
     raise HTTPException(404, "No icon set.")
+  etag = f'W/"{int(app.updated_at.timestamp() * 1e6) if app.updated_at else 0}"'
+  if request.headers.get("if-none-match") == etag:
+    return Response(status_code=304, headers={
+      "ETag": etag, "Cache-Control": "public, max-age=3600",
+    })
   return Response(
     content=app.icon_png,
     media_type="image/png",
-    headers={"Cache-Control": "no-cache"},
+    headers={"ETag": etag, "Cache-Control": "public, max-age=3600"},
   )
 
 
