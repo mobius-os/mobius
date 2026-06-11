@@ -4,6 +4,7 @@ import ToolBlock from './ToolBlock.jsx'
 import QuestionCard from './QuestionCard.jsx'
 import Attachments from './Attachments.jsx'
 import { compactionToolBlock } from './compactionToolBlock.js'
+import { questionKey } from './questionKey.js'
 
 
 function stripAugmentation(text) {
@@ -37,6 +38,13 @@ function MsgContentInner({
   // fresh function reference every render.
   isLastMsg,
   liveQuestionId,
+  // Set of questionKey strings currently live in streamItems. When
+  // non-null, any question block whose key appears here is already
+  // rendered by the streaming <li> and should be suppressed to prevent
+  // the duplicate card that arises when the bridge gate retires mid-turn
+  // and the SSE catch-up re-emits the same question event into both
+  // the persisted message and streamItems.
+  suppressedQuestionKeys,
 }) {
   // Build a stable per-render answerable predicate that closes over the
   // scalar props (no function prop needed from ChatView).
@@ -75,6 +83,13 @@ function MsgContentInner({
             )
           }
           if (block.type === 'question') {
+            // Suppress if this exact question is currently live in
+            // streamItems — the streaming <li> is already rendering it.
+            // This prevents the duplicate card that appears when the
+            // bridge gate retires and the SSE catch-up burst fires a
+            // `question` event into both the persisted message and
+            // streamItems simultaneously.
+            if (suppressedQuestionKeys?.has(questionKey(block))) return null
             const answers = block.answers
             // Only the LAST block's question is the one the runner is parked
             // on (see isQuestionAnswerable in ChatView). A question with any
@@ -158,5 +173,14 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.onQuestionAnswer === next.onQuestionAnswer
     && prev.isLastMsg === next.isLastMsg
     && prev.liveQuestionId === next.liveQuestionId
+    // suppressedQuestionKeys is a Set (new reference each render) or null.
+    // Compare by size + content when both are Sets; treat null vs Set as unequal.
+    // This is intentionally conservative — a false inequality triggers a
+    // re-render for the affected message, which is rare and cheap.
+    && (prev.suppressedQuestionKeys === next.suppressedQuestionKeys
+        || (prev.suppressedQuestionKeys != null
+            && next.suppressedQuestionKeys != null
+            && prev.suppressedQuestionKeys.size === next.suppressedQuestionKeys.size
+            && [...prev.suppressedQuestionKeys].every(k => next.suppressedQuestionKeys.has(k))))
   )
 })

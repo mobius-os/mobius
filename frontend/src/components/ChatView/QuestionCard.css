@@ -44,6 +44,9 @@
   align-items: center;
   gap: 7px;
   padding: 6px 12px;
+  /* 36px minimum tap target — chips wrap so a taller button keeps rows
+     comfortably tappable on mobile while preserving the chip-pill density. */
+  min-height: 36px;
   border-radius: 8px;
   border: 1px solid var(--border);
   background: transparent;
@@ -55,6 +58,12 @@
      last clicked option — visually inconsistent with un-clicked
      options. Keyboard-focus uses :focus-visible below for a11y. */
   outline: none;
+  /* Press feedback on touch — a brief opacity dip on active is the
+     low-cost equivalent of a scale transform without triggering layout. */
+  -webkit-tap-highlight-color: transparent;
+}
+.qcard__opt:active:not(:disabled) {
+  opacity: .75;
 }
 .qcard__opt:focus-visible {
   outline: 2px solid var(--accent);
@@ -80,17 +89,22 @@
   border-color: transparent;
 }
 
-/* Pick-one vs pick-many glyph. Uses currentColor so it's an outline on the
-   transparent pill (currentColor = --text) and a filled mark on the selected
-   accent pill (currentColor = --bg) — a clear checked/unchecked read in both
-   states and both themes, no extra color tokens. Box = multi, circle = single. */
+/* Pick-one vs pick-many glyph.
+   Unselected: outline ring in var(--border) / currentColor at 65% opacity.
+   Selected radio: accent ring + a center dot via radial-gradient — looks like
+     a proper radio button rather than a solid filled blob.
+   Selected checkbox: accent-filled rounded square + a white checkmark glyph
+     via an ::after pseudo-element — standard checkbox affordance.
+   Box = multi (checkbox), circle = single (radio). */
 .qcard__mark {
   flex: none;
-  width: 13px;
-  height: 13px;
+  width: 14px;
+  height: 14px;
   border: 1.5px solid currentColor;
   background: transparent;
   opacity: .65;
+  /* position: relative needed for the ::after checkmark pseudo-element */
+  position: relative;
 }
 .qcard__mark--box {
   border-radius: 4px;
@@ -98,9 +112,38 @@
 .qcard__mark--radio {
   border-radius: 50%;
 }
-.qcard__opt--on .qcard__mark {
-  background: currentColor;
+
+/* Selected radio: accent ring + center dot (not a solid fill) */
+.qcard__opt--on .qcard__mark--radio {
+  background: radial-gradient(
+    circle,
+    var(--accent) 0%,
+    var(--accent) 38%,
+    transparent 40%
+  );
+  border-color: var(--accent);
   opacity: 1;
+}
+
+/* Selected checkbox: accent fill + white checkmark */
+.qcard__opt--on .qcard__mark--box {
+  background: var(--accent);
+  border-color: var(--accent);
+  opacity: 1;
+}
+.qcard__opt--on .qcard__mark--box::after {
+  content: '';
+  position: absolute;
+  /* Checkmark drawn as a rotated L: left stroke + right stroke */
+  left: 2px;
+  top: 1px;
+  width: 4px;
+  height: 7px;
+  border: 1.5px solid var(--bg, #fff);
+  border-top: none;
+  border-left: none;
+  transform: rotate(45deg);
+  transform-origin: center;
 }
 
 .qcard__input {
