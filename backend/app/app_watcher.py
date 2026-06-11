@@ -28,7 +28,7 @@ import subprocess
 from pathlib import Path
 
 from watchdog.events import FileSystemEventHandler
-from watchdog.observers import Observer
+from watchdog.observers.polling import PollingObserver
 
 from app import app_git, fs_locks, models
 from app.compiler import recompile_app_bundle
@@ -293,7 +293,7 @@ class _JsxHandler(FileSystemEventHandler):
 
 def start_watcher(
   loop: asyncio.AbstractEventLoop,
-) -> tuple[Observer, _JsxHandler]:
+) -> tuple[PollingObserver, _JsxHandler]:
   """Starts a watchdog Observer on the apps directory.
 
   Returns `(observer, handler)` so the caller can stop the observer
@@ -302,7 +302,13 @@ def start_watcher(
   apps_dir = Path(get_settings().data_dir) / "apps"
   apps_dir.mkdir(parents=True, exist_ok=True)
   handler = _JsxHandler(loop)
-  observer = Observer()
+  # PollingObserver, not the default inotify Observer: inotify events are
+  # unreliable on the Docker volume backing /data (overlay/bind mounts can
+  # silently drop IN_MODIFY/IN_CLOSE_WRITE), which left an agent's edit during
+  # an app-update merge un-recompiled and the merge unfinalized (.pm/124).
+  # Polling stats the small /data/apps tree on an interval — reliable
+  # everywhere, negligible cost for this watch.
+  observer = PollingObserver()
   observer.schedule(handler, str(apps_dir), recursive=True)
   observer.start()
   log.info("app watcher started on %s", apps_dir)
