@@ -18,13 +18,13 @@ If an app with the same purpose exists, update it instead of duplicating. If the
 
 ---
 
-## Packaging a third-party static app from GitHub
+## Packaging / wrapping a pre-built or third-party web app
 
-For an existing React/Vite/CRA/WebGL game or tool, do **not** copy built files into `/data/shell` or `/data/shell/dist`. Deploy refreshes replace that tree, so the app disappears or, worse, `/some-app/index.html` falls through to the Möbius shell and opens Möbius inside Möbius.
+Sometimes the app you want isn't authored fresh in JSX — it's an existing built web app (a React/Vite/CRA/WebGL game, a tool's `dist/`) that you mount whole. The durable pattern is a thin Möbius wrapper (a small `index.jsx` around an iframe) plus a `mobius.json` that declares the build's own files as `static_assets`, so Möbius serves them under the app's asset route. Do **not** copy built files into `/data/shell` or `/data/shell/dist`: deploy refreshes replace that tree, so the app disappears or, worse, `/some-app/index.html` falls through to the Möbius shell and opens Möbius inside Möbius.
 
-The durable pattern is a tiny Mobius wrapper plus manifest `static_assets`:
+Mechanics:
 
-1. Clone/fork the upstream repo.
+1. Clone the upstream third-party repo as input.
 2. Make the app build as a static site with **relative** asset paths whenever the framework supports it (`PUBLIC_URL=.`, `homepage: "."`, Vite `base: "./"`, etc.).
 3. Build into `build/` or `dist/`.
 4. From the repo root, run:
@@ -35,26 +35,26 @@ node /app/scripts/package-static-app.mjs \
   --name "CubeRun" \
   --version "1.0.0-mobius.1" \
   --description "Neon 3D runner game packaged for Mobius." \
-  --homepage "https://github.com/mobius-os/app-cuberun" \
+  --homepage "https://github.com/<you>/<your-app>" \
   --build-dir build \
   --out-dir . \
   --icon icon.png
 ```
 
-The packager writes `mobius.json` and an iframe `index.jsx`, enumerates every build file as `static_assets`, rewrites root-relative HTML/CSS asset references such as `/static/js/main.js` or `/fonts/foo.ttf` when the target exists inside the build, and fails on unresolved local CSS URLs. Re-run with `--force` after edits. Verify the generated package before pushing:
+The packager writes `mobius.json` and an iframe `index.jsx`, enumerates every build file as `static_assets`, rewrites root-relative HTML/CSS asset references such as `/static/js/main.js` or `/fonts/foo.ttf` when the target exists inside the build, and fails on unresolved local CSS URLs. Re-run with `--force` after edits. Verify the generated package before installing:
 
 ```bash
 node /app/scripts/package-static-app.mjs --help
 npm run test:packager --prefix /home/hmzmrzx/projects/mobius
 ```
 
-After publishing the package repo, install it through the app installer, not by hand-copying into `/data`:
+Install it through the app installer (it registers the local package — no public repo or GitHub push), not by hand-copying into `/data`:
 
 ```bash
 curl -s -X POST "$API_BASE_URL/api/apps/install" \
   -H "Authorization: Bearer $AGENT_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"manifest_url":"https://raw.githubusercontent.com/mobius-os/app-cuberun/main/mobius.json"}'
+  -d '{"manifest_url":"<url-to-your-mobius.json>"}'
 ```
 
 Runtime smoke checks for this class of app:
@@ -66,11 +66,9 @@ Runtime smoke checks for this class of app:
 
 If a package update leaves `.mobius-bak` files or a dirty `/data/apps/<slug>` git tree, that is installer noise, not app source; re-run the installer on a backend that includes the static-asset backup fix.
 
----
+### What to watch for
 
-## Wrapping a pre-built / third-party web app
-
-Sometimes the app you want isn't authored fresh in JSX — it's an existing built web app (a packaged CRA/Vite/WebGL game, a tool's `dist/`) that you mount whole. The wrapper is a thin Möbius app around someone else's build. The general pattern, learned the hard way adapting one:
+The wrapper is a thin Möbius app around someone else's build. The gotchas, learned the hard way adapting one:
 
 1. **Shape: a thin `index.jsx` wrapper around an iframe.** The wrapper mounts the build's entry HTML in an `<iframe>` and stays small — chrome (loader, error state) plus the iframe, nothing more. The build's own files are declared in `mobius.json` `static_assets` as a map of *logical path → build file* so Möbius serves them under the app's asset route. Set `offline_capable: false` unless EVERY asset the build pulls is precached (an offline-capable wrapper that fetches one uncached chunk renders broken).
 
@@ -86,7 +84,7 @@ Sometimes the app you want isn't authored fresh in JSX — it's an existing buil
 
 7. **Fix forward, no dead references.** If a build ships a feature you don't use that pulls an external/CSP-blocked resource (e.g. a compression decoder for an asset you actually ship uncompressed), disable that feature outright rather than leaving the dead CDN reference in place "just in case." A dead reference is either a silent CSP failure or future confusion; remove it.
 
-(This is the technical wrapping pattern only. Mounting and serving the build inside this instance is the whole job — there is no public-repo publish step here.)
+(This is the technical packaging/wrapping pattern only. Mounting and serving the build inside this instance is the whole job — there is no public-repo publish step here.)
 
 ---
 
