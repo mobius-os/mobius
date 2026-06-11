@@ -2,8 +2,9 @@
 
 How you grow and lightly maintain your long-term memory: the graph at
 `/data/shared/memory/`, surfaced as the **Mind** app. The system prompt's
-"Sessions and memory" section points here; `Read` this when you need to record
-a fact, link a note, or tidy an obvious duplicate.
+"Sessions and memory" section points here; `Read` this when you need to
+recall more than the injected block gave you, record a fact, link a note,
+or tidy an obvious duplicate.
 
 This skill lives under `/data/shared/skills/` — **you can edit it**. When you
 find a maintenance rule that keeps biting you, improve the skill so future-you
@@ -20,9 +21,14 @@ below). Don't try to do Dreaming's work mid-chat.
 ```
 /data/shared/memory/
   index.md            root "Home" map. Injected every session. Keep it tiny.
+  recent-chats.md     fixed queue of the last ~10 chats (id + date + 1-2
+                      sentence summary). Injected after the index; the
+                      nightly pass maintains it — don't grow it by hand.
   inbox.md            persistent buffer for the day's raw observations.
   mocs/<slug>.md      topic maps (hubs): curated [[links]] under ## sections.
   notes/<slug>.md     atomic notes: ONE fact each, with YAML frontmatter.
+  read-trace/<id>.json  what each chat was shown and Read (platform-written;
+                      the nightly pass diffs it — never edit it yourself).
   graph.json          generated index for the Mind viewer (rebuild after edits).
 ```
 
@@ -45,6 +51,38 @@ Link related notes inline with [[another-slug]] and a reason.
 ```
 
 Filename stem = the note's `id` (the slug other notes `[[link]]` to).
+
+Optional frontmatter, when it applies: `as-of: YYYY-MM-DD` (the claim is
+time-sensitive — date it), `supersedes: [old-slug]` (this note replaces an
+older one), `source: [chat:abc123]` (where the fact came from). A moved or
+renamed note leaves a `type: redirect` stub behind — see the structure
+rules below.
+
+## Reading — descend until you have enough
+
+Each session opens with the index, the recent-chats queue, and the hottest
+notes already injected. When that's not enough, read **iteratively, by
+depth** — navigate, don't grep:
+
+1. Start at `index.md`; pick the most relevant map by its one-line entry
+   descriptions.
+2. `Read` that map; descend into the most promising [[child]] — a sub-map
+   or a note — one level at a time.
+3. **Stop as soon as you have enough.** Every split parent keeps a 3-5
+   sentence summary of each child next to the [[link]] (Wikipedia
+   summary-style), so a parent often answers the question without opening
+   the child. Open a child only when its summary doesn't suffice.
+
+The descriptions and parent summaries exist precisely so you can orient
+without opening everything — a whole-graph sweep is the failure mode this
+layout prevents. For "what happened recently," the recent-chats summaries
+are usually enough; fetch a full transcript (`GET /api/chats/<id>`) only
+when a specific exchange matters.
+
+The platform records what you were shown and what you `Read` into
+`read-trace/<chat>.json`. The nightly pass diffs that trace against the
+graph to find what *would* have helped you, then reorganizes so next time
+it's nearer the surface. You don't maintain the trace — just read normally.
 
 **`usage.json` sidecar (do not hand-edit).** Live loads are tracked
 automatically in `shared/memory/usage.json` — the platform increments a counter
@@ -144,8 +182,58 @@ two, stop and drop an inbox line for Dreaming instead.
 - If a note has started asserting **2+ independent claims**, leave a note for
   Dreaming to split it — don't split mid-chat unless it's trivial. Split on idea
   boundaries, never on length alone.
-- A note over **~1.5 KB** is a signal it probably contains 2+ claims — either
-  split it now (if the boundary is obvious) or leave a split note for Dreaming.
+- A note past **~30 prose lines** (the linter warns) is a signal it probably
+  contains 2+ claims — either split it now per the structure rules below (if
+  the boundary is obvious) or leave a split note for Dreaming.
+
+## The shape of the graph (structure rules)
+
+These rules keep the graph balanced as it grows — shallow enough to orient
+in, deep enough that no node overflows. The linter
+(`python3 /app/scripts/build_memory_graph.py`) warns when one is broken; by
+day you act only on the obvious ones, and the nightly Dreaming pass works
+the rest (its reorganization worklist IS the warning list).
+
+- **Every map entry carries a one-line description.** `- [[slug]] — what
+  you will find there`, never a bare `- [[slug]]`. A bare entry forces a
+  reader to open the child just to judge relevance.
+- **7-10 children per map; 15 is the hard cap.** Past the cap, split into
+  sub-maps. Under ~3 children, a map is better off as a content note with
+  inline links.
+- **Split an overgrown note into children — and keep a summary in the
+  parent.** Move the detail to child notes under a (possibly new) map, and
+  leave a 3-5 sentence summary of each child plus the `[[child]]` link in
+  the parent, Wikipedia summary-style. A parent reduced to a naked
+  forward-link breaks the stop-early reading rule above.
+- **Depth is a cost — inline thin parents upward.** When a reorg leaves a
+  parent as a thin pass-through (no content of its own, a child or two),
+  fold its children into the level above. Depth vs width is an active
+  balance: every extra level costs a hop on the way down; every extra
+  sibling costs orientation. Prefer shallow-and-wide.
+- **Promote a note to a map at ~5 outbound links.** A note that is mostly
+  links is already doing a map's job — move it to `mocs/` and give every
+  entry its one-line description.
+- **A move or rename leaves a redirect stub** at the old slug so existing
+  `[[links]]` keep resolving:
+
+  ```yaml
+  ---
+  title: <old title>
+  type: redirect
+  target: <new-slug>
+  ---
+  This content has moved to [[new-slug]].
+  ```
+
+  The indexer follows stubs, flags chains (A → B → C — repoint to C), and
+  flags stubs nothing links to anymore (safe to delete).
+- **Date time-sensitive claims; supersede rather than delete.** Give the
+  note `as-of: YYYY-MM-DD` and anchor the claim in the body ("As of June
+  2026, ..."). When the fact changes, update the note and advance the date.
+  When a new note replaces an old one, give it `supersedes: [old-slug]` and
+  turn the old into a redirect (or a one-line "superseded by [[new-slug]]"
+  banner). Delete outright only when the fact is wrong AND no future reader
+  benefits from knowing it existed — git is the undo.
 
 ## Anti-orphan + dedup (every write)
 
@@ -155,11 +243,13 @@ two, stop and drop an inbox line for Dreaming instead.
   (or read the relevant MOC) before adding a note. If a near-duplicate exists,
   extend or link it instead of forking a sibling.
 - **Link with a reason.** 1 mandatory map link + ~1-5 lateral `[[links]]`,
-  each with a one-line reason. 0 links = orphan; many links = the note is really
-  a disguised MOC (leave a note for Dreaming to promote it).
+  each with a one-line reason. 0 links = orphan; ~5+ outbound links = the note
+  is really a disguised map (the linter flags it — leave a note for Dreaming
+  to promote it).
 - **Supersede, don't contradict.** When new info contradicts an old note, edit
   or replace the old note (newer wins) — don't leave two contradictory notes.
-  Git history is the undo.
+  Time-sensitive claims carry `as-of:` dates so staleness is visible instead
+  of silent (structure rules above). Git history is the undo.
 - **Partner corrections are authoritative.** When the partner says a memory is
   wrong, their correction outranks everything else — supersede the note in the
   same turn, keep the correction's date, and tell the partner what you changed.
@@ -176,9 +266,11 @@ Rebuild the viewer index and lint the graph:
 python3 /app/scripts/build_memory_graph.py
 ```
 
-It prints any problems (dangling links, duplicate ids, orphans, unreachable
-nodes) and exits non-zero on errors — fix those before you finish, because a
+It prints any problems and exits non-zero on **errors** (dangling links,
+duplicate ids, broken redirects) — fix those before you finish, because a
 broken graph means the viewer and the nightly pass disagree about your memory.
+**Warnings** (bare map entries, oversized notes, overfull maps, redirect
+chains) don't block — leave them for Dreaming unless the fix is trivial.
 Then commit: `pm-commit 'memory: <what changed>'`.
 
 ## Invariant
