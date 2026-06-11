@@ -233,8 +233,7 @@ export default function SettingsView({ onThemeChange }) {
         <section className="settings__section">
           <h2 className="settings__section-title">Runtime</h2>
           <p className="settings__subtext">
-            Installed CLI versions, probed each time Settings opens.
-            Updates are handled by the agent.
+            Installed CLI versions.
           </p>
           <div className="settings__versions">
             <div className="settings__row">
@@ -315,9 +314,6 @@ export default function SettingsView({ onThemeChange }) {
           <div className="settings__row">
             <div>
               <span className="settings__label">Server</span>
-              <p className="settings__subtext settings__subtext--tight">
-                Restart after backend or configuration changes.
-              </p>
             </div>
             <button
               className="settings__btn settings__btn--outline settings__btn--sm"
