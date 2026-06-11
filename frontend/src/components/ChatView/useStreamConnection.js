@@ -953,6 +953,27 @@ export default function useStreamConnection(chatId, {
     textBufferRef.current = ''
   }
 
+  // Patch the `answers` field on the matching question item in streamItems.
+  // Used by doSendSilent's optimistic update when the question is still live
+  // in streamItems (not yet promoted to messages) — without this, the
+  // answered state only lands on messages[-1] (which may be the user message,
+  // not the assistant), so the card never visually transitions to answered.
+  function patchQuestionAnswers(questionId, answers) {
+    setStreamItems(prev => {
+      const key = questionId ? `question_id:${questionId}` : null
+      return prev.map(it => {
+        if (it.type !== 'question') return it
+        // When we have a questionId, match by id; otherwise patch the
+        // first question item (mirrors the single-question-per-turn norm).
+        const itKey = questionKey(it)
+        if (key ? itKey === key : true) {
+          return { ...it, answers }
+        }
+        return it
+      })
+    })
+  }
+
   return {
     streamItems,
     latestItemsRef,
@@ -964,5 +985,6 @@ export default function useStreamConnection(chatId, {
     retry,
     disconnect,
     clearStreamItems,
+    patchQuestionAnswers,
   }
 }
