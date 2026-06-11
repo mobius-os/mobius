@@ -675,3 +675,86 @@ def test_run_codex_sdk_turn_stream_exhaustion_relies_on_sdk_terminal_contract(
   )
 
   assert result["error"] is None
+
+
+# ---------------------------------------------------------------------------
+# skill_loaded observability — Codex mirror. Codex has no Read tool and
+# no can_use_tool hook; skill loads surface as shell reads of
+# /data/shared/skills/<name>.md in the command-execution item stream.
+# ---------------------------------------------------------------------------
+
+def test_skill_names_in_command_extracts_and_dedupes():
+  cmd = (
+    "cat /data/shared/skills/mind.md && "
+    "sed -n 1,40p /data/shared/skills/building-apps.md; "
+    "cat /data/shared/skills/mind.md"
+  )
+  names = codex_sdk_runner._skill_names_in_command(cmd, "/data")
+  assert names == ["mind", "building-apps"]
+
+
+def test_skill_names_in_command_ignores_other_paths():
+  fn = codex_sdk_runner._skill_names_in_command
+  assert fn("cat /data/shared/memory/index.md", "/data") == []
+  assert fn("cat /elsewhere/shared/skills/mind.md", "/data") == []
+  assert fn("cat /data/shared/skills/notes.txt", "/data") == []
+  assert fn("", "/data") == []
+
+
+def test_observe_skill_reads_publishes_chip_and_activity(monkeypatch):
+  import os
+
+  from app import activity
+  from app.config import get_settings
+
+  logged: list[tuple] = []
+  monkeypatch.setattr(
+    activity, "log_skill_load",
+    lambda chat_id, skill, ts=None: logged.append((chat_id, skill)),
+  )
+
+  class _Cmd:
+    def __init__(self, command):
+      self.command = command
+
+  sdk = {"CommandExecutionThreadItem": _Cmd}
+  bc = _FakeBroadcast()
+  skills = os.path.join(get_settings().data_dir, "shared", "skills")
+  item = _Cmd(f"cat {skills}/cron.md")
+  codex_sdk_runner._observe_skill_reads(item, sdk, bc=bc, chat_id="cx-1")
+  assert bc.events == [{"type": "skill_loaded", "skill": "cron"}]
+  assert logged == [("cx-1", "cron")]
+
+  # Non-command items and non-skill commands emit nothing.
+  class _Other:
+    command = f"cat {skills}/cron.md"
+
+  codex_sdk_runner._observe_skill_reads(
+    _Other(), sdk, bc=bc, chat_id="cx-1",
+  )
+  codex_sdk_runner._observe_skill_reads(
+    _Cmd("ls /data"), sdk, bc=bc, chat_id="cx-1",
+  )
+  assert len(bc.events) == 1
+
+
+def test_observe_skill_reads_never_raises(monkeypatch):
+  """Fire-and-forget: a broken broadcast must not break the loop."""
+  import os
+
+  from app.config import get_settings
+
+  class _Cmd:
+    def __init__(self, command):
+      self.command = command
+
+  class _ExplodingBus:
+    def publish(self, event):
+      raise RuntimeError("wire down")
+
+  sdk = {"CommandExecutionThreadItem": _Cmd}
+  skills = os.path.join(get_settings().data_dir, "shared", "skills")
+  codex_sdk_runner._observe_skill_reads(
+    _Cmd(f"cat {skills}/mind.md"), sdk, bc=_ExplodingBus(),
+    chat_id="cx-2",
+  )

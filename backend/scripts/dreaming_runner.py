@@ -45,9 +45,28 @@ deliberate and all in service of "autonomous":
     research → brief + morning chat) fits in one goal loop.
   - We loop on `client.receive_response()` exactly once: the SDK's
     own `max_turns` is the multi-turn budget, and a single
-    `query(goal)` + drain runs the whole autonomous session. We do
-    NOT re-`query()` — the agent decides its own sub-steps via tool
-    use within that budget.
+    `query(goal)` + drain runs the whole autonomous session. The
+    agent decides its own sub-steps via tool use within that budget;
+    the only extra `query()` calls are the turn-budget steering
+    messages (below), which speak the turn count into the session
+    because the agent cannot observe it on its own.
+
+Two reliability layers protect the brief (the night's one
+non-negotiable deliverable), added after three of four prod nights
+died at `max_turns` (subtype error_max_turns) with NO brief:
+
+  - **Turn-countdown injection.** The drain loop counts assistant
+    turns and injects a steering user message when the run crosses
+    the thresholds from `steering_thresholds` (35 and 45 with the
+    default 60-turn budget). The skill's "bail to the brief by turn
+    40" rule is prose the agent can't act on — it has no view of its
+    own turn count — so the runner supplies the number at the moment
+    it matters.
+  - **Guaranteed-brief fallback.** When the main session still ends
+    in error and tonight's brief file is missing, `run()` spawns ONE
+    short rescue session (`FALLBACK_MAX_TURNS`) whose only goal is a
+    minimal brief + morning chat from whatever the cut-off run left
+    behind. The rescue never spawns another rescue.
 
 Importability: every heavyweight import (the SDK) is inside `run()`,
 so `import backend.scripts.dreaming_runner` (and `py_compile`) works
@@ -103,6 +122,126 @@ DEFAULT_MAX_TURNS = 60
 # override per-instance via /data/apps/dreaming/settings.json without
 # touching code.
 DEFAULT_PROVIDER = "claude"
+
+# Turn budget for the guaranteed-brief rescue session. Small on
+# purpose: read the cut-off run's leavings, write a minimal brief,
+# open the morning chat, commit — no investigation.
+FALLBACK_MAX_TURNS = 12
+
+
+def steering_thresholds(max_turns: int) -> tuple[int, int]:
+  """Returns the (soft, hard) turn counts that trigger budget steering.
+
+  Scaled from the 60-turn default (35 and 45) so an owner-overridden
+  max_turns keeps the same shape: the soft warning lands just past
+  halfway, the hard one at three quarters. Integer floor math keeps
+  the result deterministic, and the hard threshold always trails the
+  soft one by at least one turn so the two messages can't collapse
+  into the same turn.
+  """
+  soft = max(1, max_turns * 35 // 60)
+  hard = max(soft + 1, max_turns * 45 // 60)
+  return soft, hard
+
+
+def steering_message(
+  prev_turn: int, turn: int, max_turns: int,
+) -> str | None:
+  """Returns the turn-budget steering text to inject, or None.
+
+  Pure crossing detector: fires when the (prev_turn, turn] step
+  crosses a threshold from `steering_thresholds`. The skill tells the
+  agent to bail to the brief by turn 40, but the agent cannot observe
+  its own turn count — the runner counts assistant turns and speaks
+  the number into the session at the right moments. When a single
+  step crosses both thresholds, only the sterner message is returned
+  (two back-to-back budget warnings would dilute each other).
+  """
+  soft, hard = steering_thresholds(max_turns)
+  if prev_turn < hard <= turn:
+    return (
+      f"TURN BUDGET: you are at turn {turn} of {max_turns} and almost "
+      "out. Write a MINIMAL brief NOW — a heading and a few honest "
+      "lines on what was done and what was cut off — save it to the "
+      "reports dir, open the morning chat, and stop. Skip everything "
+      "else."
+    )
+  if prev_turn < soft <= turn:
+    return (
+      f"TURN BUDGET: you are at turn {turn} of {max_turns}. STOP "
+      "investigating now. Write the brief and open the morning chat "
+      "immediately — phases 1-5 are over."
+    )
+  return None
+
+
+def todays_brief_path() -> Path | None:
+  """Returns tonight's expected brief path, or None when unknowable.
+
+  The brief lands in the Dreaming app's NUMERIC storage dir
+  (`/data/apps/<id>/reports/<date>.html`); the numeric id is staged
+  by fetch.sh at inputs/app_id before the runner starts. A missing or
+  empty stage means the path can't be resolved here — callers treat
+  that as "assume no brief" and let the rescue agent resolve the id
+  itself.
+  """
+  app_id_file = DATA_DIR / "apps" / "dreaming" / "inputs" / "app_id"
+  try:
+    app_id = app_id_file.read_text(encoding="utf-8").strip()
+  except OSError:
+    return None
+  if not app_id:
+    return None
+  from datetime import date
+  return (
+    DATA_DIR / "apps" / app_id / "reports"
+    / f"{date.today().isoformat()}.html"
+  )
+
+
+def fallback_needed(rc: int, brief_path: Path | None) -> bool:
+  """True when the night failed AND left no brief for the partner.
+
+  A clean run (rc 0) wrote its brief per the skill contract — trust
+  it. A failed run whose brief is already on disk (the agent shipped
+  phase 6 and then crashed) needs no rescue. Everything else does,
+  including an unresolvable brief path — one redundant rescue pass
+  beats a morning with nothing.
+  """
+  if rc == 0:
+    return False
+  if brief_path is None:
+    return True
+  return not brief_path.is_file()
+
+
+def build_fallback_goal() -> str:
+  """Builds the goal message for the guaranteed-brief rescue pass."""
+  from datetime import date
+  today = date.today().isoformat()
+  runs_dir = DATA_DIR / "apps" / "dreaming" / "runs" / today
+  inputs_dir = DATA_DIR / "apps" / "dreaming" / "inputs"
+  return "\n".join([
+    f"The main Dreaming run of {today} was CUT OFF (turn budget or "
+    "crash) before it could deliver the brief. You are a short rescue "
+    f"pass with roughly {FALLBACK_MAX_TURNS} turns and ONE goal: the "
+    "partner must not wake to nothing.",
+    "",
+    "Do NOT restart the night's phases. Instead:",
+    f"1. Skim what the run left behind: {runs_dir}/ (interviews, "
+    f"working notes) and `git -C {DATA_DIR} log --oneline -10` for "
+    "what it committed.",
+    "2. Write a minimal self-contained HTML brief — a heading plus a "
+    "few honest paragraphs covering what got done and what was cut "
+    f"off mid-flight — to {DATA_DIR}/apps/$APP_ID/reports/{today}.html, "
+    f"where APP_ID is the number in {inputs_dir}/app_id (mkdir -p the "
+    "reports dir first).",
+    "3. Open the morning chat per your skill's phase 6 with a 2-3 "
+    "line summary, note that tonight's run was cut off, and write the "
+    "reports meta.json chat link.",
+    "4. Commit with pm-commit and stop. The brief file is the one "
+    "non-negotiable deliverable; skip anything that threatens it.",
+  ])
 
 
 def _safety_snapshot(label: str) -> None:
@@ -401,90 +540,79 @@ class _LogBroadcast:
       pass
 
 
-async def run() -> int:
-  """Runs the whole Dreaming session and returns a process exit code.
+async def _drain_session(
+  client, log_fh, *, max_turns: int, countdown: bool,
+) -> tuple[bool, bool]:
+  """Drains one SDK response stream to its terminal result.
 
-  Returns 0 on a clean run (the SDK reached a terminal result, error
-  or not — an agent that decides "quiet night, nothing to do" is a
-  success), 1 on an infrastructure failure (skill missing, SDK couldn't
-  start, an unexpected exception). The wrapper maps the exit code into
-  the `cron_outcome` event, so this is the one signal the activity log
-  records about whether the night ran.
+  Counts assistant turns and, when `countdown` is on, injects the
+  turn-budget steering text from `steering_message` as a user message
+  into the live session — `client.query` writes to the streaming
+  stdin, and the CLI hands queued user input to the model between
+  tool iterations of the in-flight loop. Message types are detected
+  by class NAME so the drain avoids a second SDK import and works
+  against test fakes; `_drain_message` already imported the real
+  types for log formatting.
+
+  Returns (saw_result, result_error).
   """
-  settings = load_settings()
-  provider, model, effort = _resolve_model(settings)
-  skill_text = load_skill()
-  seed_brief_template()
-  goal = build_goal(settings)
-  env = build_env()
-  max_turns = int(settings.get("max_turns") or DEFAULT_MAX_TURNS)
-  log_fh = None
-  try:
-    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    log_fh = LOG_PATH.open("a", encoding="utf-8")
-  except OSError:
-    log_fh = None
-
-  _log(
-    f"start provider={provider} model={model or '(default)'} "
-    f"effort={effort or '(default)'} max_turns={max_turns} cwd={DATA_DIR}"
-  )
-
-  # Guaranteed pre-run restore point: commit /data BEFORE the agent consolidates
-  # memory / rewrites skills, so "git is the undo" holds even if tonight's run
-  # overwrites a note before its own first pm-commit. Best-effort; never blocks.
-  from datetime import date
-  _safety_snapshot(f"dreaming: pre-run safety snapshot {date.today().isoformat()}")
-
-  # Codex can run the same Dreaming skill through the app-server SDK path. The
-  # normal chat runner publishes SSE; Dreaming swaps in a log-only broadcast so
-  # unattended runs still leave a useful trace.
-  if provider == "codex":
-    try:
-      from app.codex_sdk_runner import run_codex_sdk_turn
-      result = await run_codex_sdk_turn(
-        user_message=goal,
-        session_id=None,
-        base_env=env,
-        cwd=str(DATA_DIR),
-        chat_id="dreaming-nightly",
-        bc=_LogBroadcast(log_fh),
-        pending_questions={},
-        db=None,
-        agent_settings={
-          "model": model,
-          "effort": effort,
-        },
-        system_prompt=skill_text,
-      )
-      if result.get("error"):
-        _log(f"WARN codex run ended in error: {result.get('error')}")
-        if log_fh is not None:
+  turns_seen = 0
+  saw_result = False
+  result_error = False
+  async for sdk_msg in client.receive_response():
+    if log_fh is not None:
+      _drain_message(sdk_msg, log_fh)
+    kind = type(sdk_msg).__name__
+    if kind == "AssistantMessage":
+      prev_turn = turns_seen
+      turns_seen += 1
+      if countdown:
+        steer = steering_message(prev_turn, turns_seen, max_turns)
+        if steer is not None:
+          # Best-effort: a failed injection leaves the run no worse
+          # than before this layer existed (the fallback still
+          # guarantees the brief), so log and keep draining.
           try:
-            log_fh.close()
-          except OSError:
-            pass
-        return 1
-      _log(
-        "codex run complete "
-        f"session_id={result.get('session_id') or '(none)'} "
-        f"cost_usd={result.get('cost_usd')}"
-      )
-      if log_fh is not None:
-        try:
-          log_fh.close()
-        except OSError:
-          pass
-      return 0
-    except Exception as exc:
-      _log(f"ERROR codex runner failed: {exc!r}")
-      if log_fh is not None:
-        try:
-          log_fh.close()
-        except OSError:
-          pass
-      return 1
+            await client.query(steer)
+            _log(
+              "injected turn-budget steering at turn "
+              f"{turns_seen}/{max_turns}"
+            )
+          except Exception as exc:
+            _log(f"WARN steering injection failed: {exc!r}")
+    if kind == "ResultMessage":
+      saw_result = True
+      # is_error covers a hard failure AND the max_turns cap (subtype
+      # error_max_turns). A night that ended in error must NOT report
+      # success — otherwise cron_outcome records exit 0 and both the
+      # next run and the Dreaming app believe a brief was produced
+      # when none was.
+      if getattr(sdk_msg, "is_error", False):
+        result_error = True
+        _log(
+          "WARN run ended in error "
+          f"(subtype={getattr(sdk_msg, 'subtype', '?')})"
+        )
+  return saw_result, result_error
 
+
+async def _run_claude_session(
+  *,
+  goal: str,
+  skill_text: str,
+  env: dict[str, str],
+  model: str | None,
+  effort: str | None,
+  max_turns: int,
+  log_fh,
+  countdown: bool,
+) -> int:
+  """Runs one Claude SDK goal loop and returns a process exit code.
+
+  `countdown=True` enables turn-budget steering (the main nightly
+  run). The rescue pass runs with it off — its budget is tiny and its
+  goal already IS "write the brief".
+  """
   from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
   options_kwargs: dict = {
@@ -511,31 +639,14 @@ async def run() -> int:
       return 1
 
     await client.query(goal)
-
-    saw_result = False
-    result_error = False
-    async for sdk_msg in client.receive_response():
-      if log_fh is not None:
-        _drain_message(sdk_msg, log_fh)
-      # The terminal ResultMessage ends the goal loop. We detect it by
-      # class name to avoid a second import here; the drain above already
-      # imported the real types for formatting.
-      if type(sdk_msg).__name__ == "ResultMessage":
-        saw_result = True
-        # is_error covers a hard failure AND the max_turns cap (subtype
-        # error_max_turns). A night that ended in error must NOT report
-        # success — otherwise cron_outcome records exit 0 and both the next
-        # run and the Dreaming app believe a brief was produced when none was.
-        if getattr(sdk_msg, "is_error", False):
-          result_error = True
-          _log(f"WARN run ended in error (subtype={getattr(sdk_msg, 'subtype', '?')})")
-
+    saw_result, result_error = await _drain_session(
+      client, log_fh, max_turns=max_turns, countdown=countdown,
+    )
     if not saw_result:
       _log("WARN stream ended without a terminal ResultMessage")
       return 2
     if result_error:
       return 2
-    _log("done")
     return 0
   except Exception as exc:  # noqa: BLE001 — top-level guard for cron
     _log(f"ERROR dreaming run crashed: {exc!r}")
@@ -545,6 +656,172 @@ async def run() -> int:
       await client.disconnect()
     except Exception:
       pass
+
+
+async def _run_codex_session(
+  *,
+  goal: str,
+  skill_text: str,
+  env: dict[str, str],
+  model: str | None,
+  effort: str | None,
+  log_fh,
+) -> int:
+  """Runs one Codex SDK goal loop and returns a process exit code.
+
+  Codex can run the same Dreaming skill through the app-server SDK
+  path. The normal chat runner publishes SSE; Dreaming swaps in a
+  log-only broadcast so unattended runs still leave a useful trace.
+  Codex has no max_turns option — the wrapper's wall-clock timeout is
+  its hard bound, and the goal text carries any turn guidance.
+  """
+  try:
+    from app.codex_sdk_runner import run_codex_sdk_turn
+    result = await run_codex_sdk_turn(
+      user_message=goal,
+      session_id=None,
+      base_env=env,
+      cwd=str(DATA_DIR),
+      chat_id="dreaming-nightly",
+      bc=_LogBroadcast(log_fh),
+      pending_questions={},
+      db=None,
+      agent_settings={
+        "model": model,
+        "effort": effort,
+      },
+      system_prompt=skill_text,
+    )
+  except Exception as exc:
+    _log(f"ERROR codex runner failed: {exc!r}")
+    return 1
+  if result.get("error"):
+    _log(f"WARN codex run ended in error: {result.get('error')}")
+    return 1
+  _log(
+    "codex run complete "
+    f"session_id={result.get('session_id') or '(none)'} "
+    f"cost_usd={result.get('cost_usd')}"
+  )
+  return 0
+
+
+async def _maybe_write_fallback_brief(
+  rc: int,
+  *,
+  provider: str,
+  skill_text: str,
+  env: dict[str, str],
+  model: str | None,
+  effort: str | None,
+  log_fh,
+) -> None:
+  """Guaranteed-brief layer: rescues a failed night that has no brief.
+
+  Three of four prod nights died at max_turns (subtype
+  error_max_turns) with NO brief — the partner woke to nothing. When
+  the main session ends non-zero and tonight's brief file is missing,
+  spawn one short rescue session whose only goal is a minimal brief +
+  morning chat built from whatever the cut-off run left behind.
+
+  Recursion guard: this helper is called exactly once, from run(),
+  after the MAIN session only. The rescue session it spawns goes
+  through the plain session helpers (countdown off, no further
+  fallback), so a failing rescue ends the night instead of recursing.
+  Best-effort throughout — the rescue must never turn a recorded
+  failure into a crash, and the main run's exit code is preserved
+  either way so cron_outcome stays honest about the night.
+  """
+  try:
+    brief = todays_brief_path()
+    if not fallback_needed(rc, brief):
+      return
+    _log(
+      f"main run failed (rc={rc}) with no brief at "
+      f"{brief or '(unresolved path)'} — running guaranteed-brief "
+      "fallback"
+    )
+    goal = build_fallback_goal()
+    if provider == "codex":
+      fallback_rc = await _run_codex_session(
+        goal=goal, skill_text=skill_text, env=env,
+        model=model, effort=effort, log_fh=log_fh,
+      )
+    else:
+      fallback_rc = await _run_claude_session(
+        goal=goal, skill_text=skill_text, env=env, model=model,
+        effort=effort, max_turns=FALLBACK_MAX_TURNS, log_fh=log_fh,
+        countdown=False,
+      )
+    wrote = brief is not None and brief.is_file()
+    _log(
+      f"guaranteed-brief fallback finished rc={fallback_rc} "
+      f"brief_written={'yes' if wrote else 'no'}"
+    )
+  except Exception as exc:
+    _log(f"ERROR guaranteed-brief fallback crashed: {exc!r}")
+
+
+async def run() -> int:
+  """Runs the whole Dreaming session and returns a process exit code.
+
+  Returns 0 on a clean run (the SDK reached a terminal result, error
+  or not — an agent that decides "quiet night, nothing to do" is a
+  success), 1 on an infrastructure failure (skill missing, SDK couldn't
+  start, an unexpected exception), 2 when the goal loop ended in an
+  error result (including the max_turns cap). The wrapper maps the
+  exit code into the `cron_outcome` event, so this is the one signal
+  the activity log records about whether the night ran. A non-zero
+  night additionally triggers the guaranteed-brief fallback (which
+  never changes the exit code — it rescues the deliverable, not the
+  record).
+  """
+  settings = load_settings()
+  provider, model, effort = _resolve_model(settings)
+  skill_text = load_skill()
+  seed_brief_template()
+  goal = build_goal(settings)
+  env = build_env()
+  max_turns = int(settings.get("max_turns") or DEFAULT_MAX_TURNS)
+  log_fh = None
+  try:
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    log_fh = LOG_PATH.open("a", encoding="utf-8")
+  except OSError:
+    log_fh = None
+
+  _log(
+    f"start provider={provider} model={model or '(default)'} "
+    f"effort={effort or '(default)'} max_turns={max_turns} cwd={DATA_DIR}"
+  )
+
+  # Guaranteed pre-run restore point: commit /data BEFORE the agent consolidates
+  # memory / rewrites skills, so "git is the undo" holds even if tonight's run
+  # overwrites a note before its own first pm-commit. Best-effort; never blocks.
+  from datetime import date
+  _safety_snapshot(f"dreaming: pre-run safety snapshot {date.today().isoformat()}")
+
+  try:
+    if provider == "codex":
+      rc = await _run_codex_session(
+        goal=goal, skill_text=skill_text, env=env,
+        model=model, effort=effort, log_fh=log_fh,
+      )
+    else:
+      rc = await _run_claude_session(
+        goal=goal, skill_text=skill_text, env=env, model=model,
+        effort=effort, max_turns=max_turns, log_fh=log_fh,
+        countdown=True,
+      )
+    if rc == 0:
+      _log("done")
+    else:
+      await _maybe_write_fallback_brief(
+        rc, provider=provider, skill_text=skill_text, env=env,
+        model=model, effort=effort, log_fh=log_fh,
+      )
+    return rc
+  finally:
     if log_fh is not None:
       try:
         log_fh.close()

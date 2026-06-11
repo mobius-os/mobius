@@ -63,6 +63,8 @@ import asyncio
 import concurrent.futures as _cf
 import json
 import logging
+import os
+import re
 import shutil
 from typing import Any
 
@@ -357,6 +359,53 @@ def _tool_completed_events(item: Any, sdk: dict[str, Any]) -> list[dict[str, Any
     return [{"type": "tool_end"}]
 
   return []
+
+
+def _skill_names_in_command(command: str, data_dir: str) -> list[str]:
+  """Extracts Möbius skill names a shell command reads.
+
+  Codex has no Read tool and no `can_use_tool` hook — its closest
+  interception point is the command-execution item stream, where a
+  skill load looks like `cat /data/shared/skills/<name>.md` (or a
+  sed/head/grep over the same path). Any reference to a skill file in
+  a command counts as a load; that over-counts an edit-in-place,
+  which is acceptable for an aggregate most-used signal. Returns
+  deduped names in first-mention order.
+  """
+  if not command:
+    return []
+  prefix = re.escape(
+    os.path.normpath(os.path.join(data_dir, "shared", "skills"))
+  )
+  names: list[str] = []
+  for match in re.finditer(prefix + r"/([A-Za-z0-9._-]+)\.md\b", command):
+    name = match.group(1)
+    if name not in names:
+      names.append(name)
+  return names
+
+
+def _observe_skill_reads(
+  item: Any, sdk: dict[str, Any], *, bc: Any, chat_id: str,
+) -> None:
+  """Fire-and-forget `skill_loaded` events for skill-file shell reads.
+
+  Mirrors `observe_skill_file_read` in claude_sdk_runner: same wire
+  event (chip), same activity record (most-used-skills aggregation).
+  Never raises — observability must not break the notification loop.
+  """
+  try:
+    if not isinstance(item, sdk["CommandExecutionThreadItem"]):
+      return
+    from app import activity
+    from app.config import get_settings
+    command = _extract_bash_command(item.command or "")
+    skills = _skill_names_in_command(command, get_settings().data_dir)
+    for skill in skills:
+      bc.publish({"type": "skill_loaded", "skill": skill})
+      activity.log_skill_load(chat_id, skill)
+  except Exception:
+    log.debug("codex skill_loaded observability failed", exc_info=True)
 
 
 def _file_change_patch_summary(changes: list[Any]) -> str:
@@ -918,6 +967,7 @@ async def run_codex_sdk_turn(
           event = _tool_start_event(item, sdk)
           if event is not None:
             bc.publish(event)
+          _observe_skill_reads(item, sdk, bc=bc, chat_id=chat_id)
           continue
 
         if isinstance(payload, sdk["FileChangePatchUpdatedNotification"]):
