@@ -50,17 +50,25 @@ lines sit at column 0):
 
 ## Decide what to keep — read intent first, don't reflexively blend
 
+**First classify the two sides: ADDITIVE or MUTUALLY EXCLUSIVE?** Additive means
+both can coexist (a new feature + a customization) → layer both. Mutually
+exclusive means picking one discards the other (two different titles, two colors)
+→ choose one. This classification, not a reflex, decides everything below.
+
 `git log` (above) tells you the partner's INTENT: if the local side is a
 deliberate commit (e.g. `local: rename title + green accent`), they *meant* it.
-Then pick by conflict TYPE — "merge both sides" is only sometimes right:
+Then resolve by the type you classified:
 
 - **Cosmetic / either-or** (a title, a color, a copy string — you can't blend two
   titles): keep the partner's deliberate local choice and **surface the upstream
   alternative in chat** ("the update wanted X; I kept your Y — say the word and
   I'll switch"). Don't invent a blend.
-- **Functional** (logic, a new feature, added lines): **layer both** — keep the
-  partner's customization AND fold in upstream's new behavior. This is the case
-  where a genuine merge of both sides is right.
+- **Functional / additive** (logic, a new feature, added lines): **layer both** —
+  keep the partner's customization AND fold in upstream's new behavior. When you
+  splice a block from one side into the host file, reconcile hook/import naming so
+  the result is consistent (e.g. don't leave a pasted `React.useEffect` next to
+  the file's bare `useEffect` — match whichever the host already imports), or the
+  recompile fails on an undefined reference.
 - **Can't read the intent, or it's risky:** `git merge --abort` (below) and ask
   the partner rather than guessing.
 
@@ -70,12 +78,15 @@ Edit each conflicted file (usually `index.jsx`, sometimes sibling modules) to th
 result you decided on, **deleting the `<<<<<<<`, `=======`, `>>>>>>>` lines**.
 Re-read the surrounding code so the result is coherent, not just marker-free.
 
-**Finish by saving — the watcher does the rest.** Once a file is marker-free,
-just save it. The watcher recompiles and, because a merge is in progress, its
-commit finalizes the merge for you. (Commit by hand only if that doesn't
-happen — fallback below.)
+**Save, then VERIFY — the auto-finalize watcher is unreliable, so never assume
+it fired.** Once a file is marker-free, save it. The watcher *may* recompile and,
+because a merge is in progress, finalize the merge for you — but in practice it
+often stalls and doesn't, so the manual fallback below is the normal case, not
+an edge case. After saving, always check that all three landed: `MERGE_HEAD` is
+gone, the finalizing commit is a 2-parent merge, and a fresh non-stub bundle was
+compiled. If any didn't, run the manual finalize + manual recompile yourself.
 
-**Confirm it took — one check is enough.** The single fact that proves it is
+**Confirm it took.** The single fact that proves the merge finalized is
 that the finalizing commit is a **2-parent merge** (that's what advances the
 base so the *next* update won't re-conflict):
 
@@ -83,20 +94,22 @@ base so the *next* update won't re-conflict):
 GIT_CEILING_DIRECTORIES=/data/apps git -C /data/apps/<slug> log -1 --pretty='%p'
 ```
 
-TWO short SHAs printed = done — merge finalized, `MERGE_HEAD` gone, base
-advanced. Those are the **same fact seen different ways**, so you don't also
-need to check `MERGE_HEAD` or `git status`; the 2-parent line settles it. (The
-commit subject reads `agent edit`, not `Merge` — that's the watcher finalizing;
-expected, don't let it fool you.)
+TWO short SHAs printed = merge finalized, `MERGE_HEAD` gone, base advanced. ONE
+SHA means the watcher didn't finalize — go finish by hand (below). (When it did
+finalize, the commit subject reads `agent edit`, not `Merge` — that's the
+watcher; expected, don't let it fool you.)
 
-Optional eyeball that the app rebuilt: `stat -c '%y' /data/compiled/app-<id>.js`
-should be fresh (`<id>` from `curl -s -H "Authorization: Bearer $AGENT_TOKEN"
-"$API_BASE_URL/api/apps/" | python3 -c 'import sys,json;[print(a["id"],a["slug"]) for a in json.load(sys.stdin)]'`).
-This is a nice-to-have, not a gate — the 2-parent commit already tells you the
-resolution stuck.
+Then confirm the app actually rebuilt — this is a gate, not a nice-to-have,
+because a stalled watcher leaves the previous bundle in place: `stat -c '%y'
+/data/compiled/app-<id>.js` must be FRESH and the file must be a real bundle, not
+the compile-failed stub (`<id>` from `curl -s -H "Authorization: Bearer
+$AGENT_TOKEN" "$API_BASE_URL/api/apps/" | python3 -c 'import sys,json;[print(a["id"],a["slug"]) for a in json.load(sys.stdin)]'`).
+If it's stale, recompile by hand (the manual finalize below re-touches the source
+so the watcher recompiles; if it still doesn't, save/touch the file again).
 
-If a merge is still in progress (`.git/MERGE_HEAD` exists) or the recompile
-failed (`/data/logs/chat.log` shows `compile failed`), finish by hand:
+When the watcher didn't finalize (a merge still in progress — `.git/MERGE_HEAD`
+exists) or the recompile failed (`/data/logs/chat.log` shows `compile failed`),
+finish by hand. Expect to do this regularly:
 
 ```bash
 GIT_CEILING_DIRECTORIES=/data/apps git -C /data/apps/<slug> add -A
