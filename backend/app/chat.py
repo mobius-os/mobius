@@ -21,7 +21,16 @@ from pathlib import Path
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from app import activity, auth, chat_queue, memory, models, questions, schemas
+from app import (
+  activity,
+  auth,
+  chat_queue,
+  memory,
+  memory_trace,
+  models,
+  questions,
+  schemas,
+)
 from app.broadcast import (
   ChatBroadcast,
   clear_active_broadcast_if,
@@ -2124,6 +2133,11 @@ async def _run_chat_impl(
       # accrues (it was always 0 before — the Mind app's "Used" column read
       # a counter nothing incremented). Feeds hot-note selection + graph.json.
       memory.record_usage(settings.data_dir, block.loaded)
+      # Per-chat read-trace: record which nodes this chat's agent got for
+      # free, so the nightly Dreaming pass can diff "what was seen" against
+      # "what a deeper search would have surfaced" and reorganize the graph
+      # accordingly. Fire-and-forget — never blocks or fails the turn.
+      memory_trace.record_injected(settings.data_dir, chat_id, block.loaded)
     # Dynamic fields go at the end for cache efficiency.  Use safe
     # dict access on viewport so a malformed payload (missing keys,
     # wrong types) doesn't crash the agent spawn — skip the line
