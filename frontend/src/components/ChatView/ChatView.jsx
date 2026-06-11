@@ -440,6 +440,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     retry,
     disconnect,
     clearStreamItems,
+    patchQuestionAnswers,
   } = useStreamConnection(chatId, {
     onStreamEnd: ({ continues, promotedMessage } = {}) => {
       promoteStreamToMessages()
@@ -568,6 +569,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           type: 'question',
           questions: item.questions,
           ...(item.question_id ? { question_id: item.question_id } : {}),
+          // Carry optimistic answers that landed in streamItems via
+          // patchQuestionAnswers so the promoted block shows the answered
+          // state immediately, before the backend round-trip confirms.
+          ...(item.answers ? { answers: item.answers } : {}),
         }
       }
       if (item.type === 'error') return { type: 'error', message: item.message }
@@ -1224,6 +1229,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         }
         return updated
       })
+      // When the question is still live in streamItems (not yet promoted
+      // to messages — the turn is mid-flight and messages[-1] is the user
+      // message, not the assistant), the commitMessages patch above has no
+      // target. Also update streamItems so the card visually transitions to
+      // answered regardless of which source is currently rendering it.
+      patchQuestionAnswers(questionId, resolvedAnswers)
     }
 
     setSending(true)
@@ -1493,6 +1504,21 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // whether the chat is empty — surfacing that branch separately keeps
   // us from lying with "What's on your mind?" over a network failure.
   const showEmpty = !loadError && messages.length === 0 && !isStreaming && !loading && !sending
+
+  // Collect the question keys currently live in streamItems so MsgContent
+  // can suppress any persisted question block that is already rendered by
+  // the streaming <li>. Without this dedup, when doSendSilent retires the
+  // bridge gate and the SSE catch-up burst fires a `question` event into
+  // streamItems, BOTH the persisted message row AND the streaming <li>
+  // render the card — the duplicate is impossible by construction when
+  // MsgContent skips blocks whose key is already in streamItems.
+  const streamItemQuestionKeys = (sending && streamItems.length > 0)
+    ? new Set(
+        streamItems
+          .filter(it => it.type === 'question')
+          .map(it => questionKey(it))
+      )
+    : null
   const showLoadError = loadError && messages.length === 0 && !loading && !sending
   const lastUserIdx = messages.reduce((acc, m, i) => (m.role === 'user' && !m.hidden) ? i : acc, -1)
 
@@ -1678,6 +1704,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                 onQuestionAnswer={doSendSilent}
                 isLastMsg={isLastMsg}
                 liveQuestionId={liveQuestionId}
+                suppressedQuestionKeys={streamItemQuestionKeys}
               />
               {msg.ts && msg.role === 'user' && (
                 <time className="chat__ts">

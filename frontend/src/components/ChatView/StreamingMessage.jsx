@@ -54,12 +54,18 @@ export default function StreamingMessage({ streamItems, dataKey, onAnswer }) {
           // user MUST be able to click these chips even while
           // the turn is otherwise "streaming". No external
           // disabled gate.
+          //
+          // Pass item.answers as answeredMap so patchQuestionAnswers's
+          // optimistic update is visible immediately when the question
+          // is still in streamItems — without this, the card stays
+          // in the interactive state even after the user submitted.
           return (
             <div key={`s-${i}`}>
               <QuestionCard
                 questions={item.questions}
                 questionId={item.question_id}
-                onAnswer={onAnswer}
+                answeredMap={item.answers}
+                onAnswer={item.answers ? undefined : onAnswer}
               />
             </div>
           )
