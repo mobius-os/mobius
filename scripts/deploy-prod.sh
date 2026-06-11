@@ -670,6 +670,44 @@ docker exec "$CONTAINER" rm -rf /data/shell/dist
 intent "docker exec ${CONTAINER} bash /app/scripts/rebuild_shell.sh"
 docker exec "$CONTAINER" bash /app/scripts/rebuild_shell.sh
 
+# ── step 3b: sync /data/platform from the new baked floor ──────────────
+# The backend serves from /data/platform (the agent-editable, git-tracked
+# platform layer), which persists across image deploys BY DESIGN. A deploy
+# therefore does not reach the served backend until /data/platform is
+# synced from the new image's baked copy — without this step, prod keeps
+# running the previous deploy's backend while the sha-verify below reads
+# the new image and reports success (exactly how the icon-transparency
+# fix "deployed" but never served). Fast-forward automatically only when
+# the platform repo shows no agent work: tree clean (mode-only and dotfile
+# boot artifacts ignored) and every commit is a system commit
+# (init/restore/sync). Agent divergence is left for the in-product agent
+# to merge — discarding it here would violate the reversibility contract.
+step "[3b/4] sync /data/platform from the new baked floor"
+platform_state=$(docker exec -u mobius "$CONTAINER" bash -c '
+  cd /data/platform 2>/dev/null || { echo missing; exit 0; }
+  dirty=$(git -c core.fileMode=false status --porcelain | grep -v "^?? \." || true)
+  agent_commits=$(git log --format="%s" \
+    | grep -cvE "^(init: platform layer|restore: platform|sync: platform)" || true)
+  if [ -n "$dirty" ] || [ "$agent_commits" != "0" ]; then echo diverged
+  else echo clean; fi
+' 2>/dev/null || echo missing)
+case "$platform_state" in
+  clean)
+    intent "docker exec -u root ${CONTAINER} bash /app/scripts/recovery_restore.sh platform-baked"
+    docker exec -u root "$CONTAINER" bash /app/scripts/recovery_restore.sh platform-baked >/dev/null
+    info "platform layer fast-forwarded to the new baked tree"
+    ;;
+  missing)
+    info "no /data/platform yet — the entrypoint creates it on the restart below"
+    ;;
+  *)
+    warn "/data/platform has agent changes — NOT auto-synced."
+    warn "The served backend stays on the PREVIOUS version until merged:"
+    warn "ask the in-product agent to merge /app/app-baked into /data/platform,"
+    warn "or discard agent edits with: recovery_restore.sh platform-baked"
+    ;;
+esac
+
 # main.py resolves _static_dir at module load time, so the freshly
 # rebuilt /data/shell/dist isn't actually served until uvicorn
 # restarts. See "Shell rebuild + static-dir resolution" in CLAUDE.md.
