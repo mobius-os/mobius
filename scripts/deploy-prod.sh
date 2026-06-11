@@ -685,7 +685,7 @@ docker exec "$CONTAINER" bash /app/scripts/rebuild_shell.sh
 step "[3b/4] sync /data/platform from the new baked floor"
 platform_state=$(docker exec -u mobius "$CONTAINER" bash -c '
   cd /data/platform 2>/dev/null || { echo missing; exit 0; }
-  dirty=$(git -c core.fileMode=false status --porcelain | grep -v "^?? \." || true)
+  dirty=$(git -c core.fileMode=false status --porcelain | grep -vE "^\?\? \.|\.baked-sha$" || true)
   agent_commits=$(git log --format="%s" \
     | grep -cvE "^(init: platform layer|restore: platform|sync: platform)" || true)
   if [ -n "$dirty" ] || [ "$agent_commits" != "0" ]; then echo diverged
