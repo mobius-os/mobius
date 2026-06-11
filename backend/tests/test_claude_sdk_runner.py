@@ -11,6 +11,7 @@ silently disappears.
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any
 
 import pytest
@@ -591,3 +592,175 @@ def test_dispatch_completely_unknown_sdk_class_emits_unknown(monkeypatch):
   assert len(bus.events) == 1
   assert bus.events[0]["type"] == "unknown_sdk_event"
   assert "FreshSdkMessage" in bus.events[0]["kind"]
+
+
+# ---------------------------------------------------------------------------
+# Read-based skill_loaded observability. The in-product agent loads
+# skills by Reading /data/shared/skills/<name>.md (the Skill tool is
+# never offered on the default skills-disabled posture), so the
+# can_use_tool callback is where skill loads actually become visible.
+# ---------------------------------------------------------------------------
+
+def _skills_dir() -> str:
+  from app.config import get_settings
+  return os.path.join(get_settings().data_dir, "shared", "skills")
+
+
+def test_skill_file_read_name_matches_absolute_skill_path():
+  from app.claude_sdk_runner import _skill_file_read_name
+
+  path = os.path.join(_skills_dir(), "mind.md")
+  assert _skill_file_read_name("Read", {"file_path": path}, "/data") == "mind"
+
+
+def test_skill_file_read_name_resolves_relative_against_cwd():
+  from app.claude_sdk_runner import _skill_file_read_name
+  from app.config import get_settings
+
+  rel = os.path.join("shared", "skills", "building-apps.md")
+  name = _skill_file_read_name(
+    "Read", {"file_path": rel}, get_settings().data_dir,
+  )
+  assert name == "building-apps"
+
+
+def test_skill_file_read_name_normalizes_dot_segments():
+  from app.claude_sdk_runner import _skill_file_read_name
+
+  path = os.path.join(_skills_dir(), "..", "skills", "dreaming.md")
+  assert (
+    _skill_file_read_name("Read", {"file_path": path}, "/data")
+    == "dreaming"
+  )
+
+
+def test_skill_file_read_name_rejects_non_matches():
+  from app.claude_sdk_runner import _skill_file_read_name
+
+  skills = _skills_dir()
+  cases = [
+    # A non-Read tool never matches, even on a skill path.
+    ("Bash", {"file_path": os.path.join(skills, "mind.md")}),
+    # Only .md files in the skills dir are skills.
+    ("Read", {"file_path": os.path.join(skills, "notes.txt")}),
+    # Same-suffix path under a DIFFERENT root is not a skill load.
+    ("Read", {"file_path": "/somewhere/else/shared/skills/mind.md"}),
+    # Nested subdirectories are not skill files.
+    ("Read", {"file_path": os.path.join(skills, "deeper", "mind.md")}),
+    ("Read", {}),
+    ("Read", {"file_path": "   "}),
+    ("Read", "not a dict"),
+  ]
+  for tool, input_data in cases:
+    assert _skill_file_read_name(tool, input_data, "/data") == ""
+
+
+def test_observe_skill_file_read_publishes_chip_and_activity(monkeypatch):
+  from app import activity
+  from app.claude_sdk_runner import observe_skill_file_read
+
+  logged: list[tuple] = []
+  monkeypatch.setattr(
+    activity, "log_skill_load",
+    lambda chat_id, skill, ts=None: logged.append((chat_id, skill)),
+  )
+  bus = _Bus()
+  path = os.path.join(_skills_dir(), "mind.md")
+  observe_skill_file_read(
+    "Read", {"file_path": path}, bc=bus, chat_id="chat-7", cwd="/data",
+  )
+  assert bus.events == [{"type": "skill_loaded", "skill": "mind"}]
+  assert logged == [("chat-7", "mind")]
+
+
+def test_observe_skill_file_read_never_raises(monkeypatch):
+  """Fire-and-forget: a broken broadcast must not fail the tool call."""
+  from app.claude_sdk_runner import observe_skill_file_read
+
+  class _ExplodingBus:
+    def publish(self, event):
+      raise RuntimeError("wire down")
+
+  path = os.path.join(_skills_dir(), "mind.md")
+  observe_skill_file_read(
+    "Read", {"file_path": path}, bc=_ExplodingBus(), chat_id="c",
+    cwd="/data",
+  )
+
+
+@pytest.mark.asyncio
+async def test_can_use_tool_read_of_skill_file_emits_skill_loaded(
+  monkeypatch,
+):
+  """The canonical interception point: the runner's can_use_tool
+  callback observes skill-file Reads — chip event + activity record —
+  and still allows the tool with its input unchanged."""
+  from app import activity, claude_sdk_runner
+  from claude_agent_sdk.types import PermissionResultAllow
+
+  logged: list[tuple] = []
+  monkeypatch.setattr(
+    activity, "log_skill_load",
+    lambda chat_id, skill, ts=None: logged.append((chat_id, skill)),
+  )
+
+  captured: dict = {}
+
+  class _FakeClient:
+    def __init__(self, options):
+      captured["options"] = options
+
+    async def connect(self):
+      return None
+
+    async def query(self, message):
+      del message
+
+    async def disconnect(self):
+      return None
+
+    async def receive_response(self):
+      yield ResultMessage(
+        subtype="success",
+        duration_ms=10,
+        duration_api_ms=5,
+        is_error=False,
+        num_turns=1,
+        session_id="sess-skill",
+        stop_reason="end_turn",
+        total_cost_usd=0.01,
+        usage={"input_tokens": 1, "output_tokens": 1},
+      )
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
+
+  bus = _ChatBus()
+  await run_claude_sdk_turn(
+    "hello",
+    session_id=None,
+    base_env={},
+    cwd="/data",
+    chat_id="chat-42",
+    skill_text="system",
+    bc=bus,
+    pending_questions={},
+    db=None,
+  )
+
+  can_use_tool = captured["options"].can_use_tool
+  path = os.path.join(_skills_dir(), "notifications.md")
+  input_data = {"file_path": path}
+  result = await can_use_tool("Read", input_data, None)
+  assert isinstance(result, PermissionResultAllow)
+  assert result.updated_input == input_data
+  assert {"type": "skill_loaded", "skill": "notifications"} in bus.events
+  assert logged == [("chat-42", "notifications")]
+
+  # A Read outside the skills dir passes through silently.
+  before = list(bus.events)
+  result = await can_use_tool(
+    "Read", {"file_path": "/data/notes/today.md"}, None,
+  )
+  assert isinstance(result, PermissionResultAllow)
+  assert bus.events == before
+  assert logged == [("chat-42", "notifications")]
