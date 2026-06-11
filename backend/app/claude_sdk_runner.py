@@ -240,6 +240,67 @@ async def steer_into_active_turn(chat_id: str, text: str) -> bool:
   return await handle.steer(text)
 
 
+def _skill_file_read_name(
+  tool_name: str, input_data: Any, cwd: str,
+) -> str:
+  """Returns the skill name when a Read targets a Möbius skill file.
+
+  The in-product agent loads its skills by Reading
+  `<data_dir>/shared/skills/<name>.md` — on the default posture
+  (skills_enabled off) the SDK Skill tool is never offered, so the
+  Read input is the only place skill loads are actually observable.
+  The match is purely lexical (normpath, no filesystem access) and
+  returns "" for anything that isn't a direct skill-file read. A
+  relative path is resolved against the turn's cwd: the agent runs
+  with cwd=/data, so `shared/skills/mind.md` is the same load.
+  """
+  if tool_name != "Read" or not isinstance(input_data, dict):
+    return ""
+  raw = input_data.get("file_path")
+  if not isinstance(raw, str) or not raw.strip():
+    return ""
+  path = raw.strip()
+  if not os.path.isabs(path):
+    path = os.path.join(cwd or "/", path)
+  path = os.path.normpath(path)
+  from app.config import get_settings
+  skills_dir = os.path.normpath(
+    os.path.join(get_settings().data_dir, "shared", "skills")
+  )
+  parent, filename = os.path.split(path)
+  if parent != skills_dir or not filename.endswith(".md"):
+    return ""
+  return filename[: -len(".md")]
+
+
+def observe_skill_file_read(
+  tool_name: str,
+  input_data: Any,
+  *,
+  bc,
+  chat_id: str,
+  cwd: str,
+) -> None:
+  """Fire-and-forget skill observability for skill-file Reads.
+
+  Publishes the same `skill_loaded` event + activity record the Skill
+  tool path emits (see the dispatch below), so the activity log's
+  most-used-skills cross-check sees Read-based loads too — before
+  this, the cross-check endpoint returned empty every night because
+  the agent never goes through the Skill tool. Never raises: a broken
+  broadcast or a full disk must not block or fail the tool call being
+  intercepted.
+  """
+  try:
+    skill = _skill_file_read_name(tool_name, input_data, cwd)
+    if not skill:
+      return
+    bc.publish({"type": "skill_loaded", "skill": skill})
+    activity.log_skill_load(chat_id, skill)
+  except Exception:
+    log.debug("skill_loaded read observability failed", exc_info=True)
+
+
 def _skill_name_from_input(input_data: Any) -> str:
   """Extracts the loaded skill's name from a Skill tool_use input.
 
@@ -568,8 +629,15 @@ async def run_claude_sdk_turn(
     del context
     # Auto-approve every tool except AskUserQuestion — this preserves
     # the "trust the agent" posture (no tool gating) while still
-    # intercepting AskUserQuestion for the partner UX.
+    # intercepting AskUserQuestion for the partner UX. The callback is
+    # also the canonical observation point for skill-file Reads (the
+    # agent loads /data/shared/skills/*.md via Read, not the Skill
+    # tool); the observe call is fire-and-forget and never blocks or
+    # fails the tool.
     if tool_name != "AskUserQuestion":
+      observe_skill_file_read(
+        tool_name, input_data, bc=bc, chat_id=chat_id, cwd=cwd,
+      )
       return PermissionResultAllow(updated_input=input_data)
 
     questions = input_data.get("questions", [])
