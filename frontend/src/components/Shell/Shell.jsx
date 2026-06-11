@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import Drawer from '../Drawer/Drawer.jsx'
-import MenuButton from '../MenuButton/MenuButton.jsx'
+
 import Toast from '../ui/Toast.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
 import ChatView from '../ChatView/ChatView.jsx'
@@ -932,15 +932,10 @@ export default function Shell() {
           drawer itself gains focus on open (Drawer.jsx focus-management
           effect) and restores it here on close. */}
       <header className="shell__bar" inert={drawerOpen ? '' : undefined}>
-        {/* MenuButton is the primary drawer toggle for keyboard / AT
-            users. The brand area also toggles the drawer for touch/pointer
-            users so the entire header bar is a tap target — both remain
-            clickable, aria-expanded tracks drawer state on each. */}
-        <MenuButton
-          onClick={() => { if (backFiredRef.current) return; drawerOpen ? closeDrawer() : openDrawer() }}
-          aria-label="Toggle navigation"
-          aria-expanded={drawerOpen}
-        />
+        {/* The brand area is the drawer toggle — logo-only, no hamburger
+            (owner's explicit call: the bare logo IS the affordance). It is
+            a focusable button with aria-expanded so keyboard / AT users get
+            the same entry point as touch users. */}
         <div
           className="shell__brand"
           role="button"

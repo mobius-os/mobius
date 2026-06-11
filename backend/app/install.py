@@ -684,7 +684,18 @@ def _process_icon(raw: bytes) -> bytes:
   except Exception:
     raise HTTPException(415, "Icon is not a valid image.")
   if img.mode not in ("RGB", "RGBA"):
-    img = img.convert("RGBA" if "A" in img.mode else "RGB")
+    # Palette-mode PNGs carry transparency in a tRNS chunk, not in the
+    # mode string — `"A" in img.mode` reads "P" as opaque, and a convert
+    # to RGB flattens every transparent pixel to black. That is exactly
+    # how the catalog's quantized (palette-mode) icons got a baked black
+    # background at install time. Convert to RGBA whenever the image has
+    # any transparency signal; RGB only when provably opaque.
+    has_alpha = (
+      "A" in img.mode
+      or "transparency" in img.info
+      or img.mode == "P"
+    )
+    img = img.convert("RGBA" if has_alpha else "RGB")
   w, h = img.size
   if w != h:
     side = min(w, h)
