@@ -53,3 +53,5 @@ Either way, embed the image in chat after creating it (an image you generated bu
 ```markdown
 ![description](/api/chats/$CHAT_ID/generated/<filename>)
 ```
+
+`$CHAT_ID` above is a shell placeholder — it only expands inside a bash command. In the markdown link you write, the path must carry the RESOLVED chat id, never the literal `$CHAT_ID` segment: the renderer extracts the chat id from the path, so an unexpanded `$CHAT_ID` matches no real chat and 404s. Two-part discipline: put the real chat id in the link, and make sure the file physically lives in `/data/chats/<resolved-id>/generated/` before you embed it.

@@ -84,6 +84,8 @@ The wrapper is a thin Möbius app around someone else's build. The gotchas, lear
 
 7. **Fix forward, no dead references.** If a build ships a feature you don't use that pulls an external/CSP-blocked resource (e.g. a compression decoder for an asset you actually ship uncompressed), disable that feature outright rather than leaving the dead CDN reference in place "just in case." A dead reference is either a silent CSP failure or future confusion; remove it.
 
+8. **Mark invented business details as PLACEHOLDERS.** When localizing or rebranding a site (a garage, a shop, a clinic), any address, phone number, price, or testimonial you didn't get from the owner is fabricated — flag it as a placeholder the owner must replace (an inline `<!-- PLACEHOLDER: real address -->` plus a line in your handoff), don't present an invented Sarajevo address and phone as finished contact facts. Made-up contact info reads as done and ships a lie.
+
 (This is the technical packaging/wrapping pattern only. Mounting and serving the build inside this instance is the whole job — there is no public-repo publish step here.)
 
 ---
@@ -127,6 +129,14 @@ python "$SCRIPTS_DIR/register_app.py" "<name>" "<description>" /data/apps/<name>
 **For edits, just write source files — do NOT re-run `register_app.py`.** A file watcher recompiles when `index.jsx` or a source-like sibling module changes under `/data/apps/<slug>/` (ignoring generated/static dirs such as `static/`, `.build/`, `dist/`, `node_modules/`, and `.git/`). Re-running the script creates a DUPLICATE every time the name differs by a character (slug-vs-title is the common slip). If the partner says it didn't change, check that `/data/compiled/app-<id>.js` mtime advanced and look for `compile failed for` in `/data/logs/chat.log` — a JSX syntax error or broken import blocks the recompile. If a duplicate appears, `DELETE /api/apps/<dup-id>`.
 
 **Use `register_app.py`, not raw `curl POST /api/apps/`.** The raw endpoint requires an undocumented `jsx_source` field (422 without it); updates are `PATCH` not `PUT` (405). The helper handles all of this — skipping it burns tool calls rediscovering the schema from error responses.
+
+### Verify your own output — don't make the owner the test loop
+
+Confirm the change works before handing control back, especially for a bug the owner already reported once: bouncing the same fix back unverified ("hit Build/preview and tell me if it works") is the failure mode, and it compounds when you claim "fixed" twice without ever checking. You can't drive the live shell UI yourself — it needs the owner's password — so verify by the strongest available proxy and SAY which one you used and where it stopped: byte-check the served code (`curl` the compiled module / static asset and grep for the fix), walk the full dependency chain over HTTP (each import/asset returns 200, not the SPA HTML fallback), and curl the actual `/api/...` path end-to-end so a broken link or no-op handler shows up before the owner finds it. Name the verification ceiling you hit ("compiled module carries the fix and `/api/storage/...` round-trips; I can't drive the live tap myself, so confirm the anchor scrolls on your end") instead of ending every turn by punting the test to the owner.
+
+### Don't fabricate — clarify, then cite or hedge
+
+When the owner asks you to "figure out something based on my preferences," ASK the clarifying questions and WAIT for the answers before producing a "tailored" result; never assert constraints they never gave (a cuisine, a budget, an occasion). For date-sensitive or live facts — fixtures, venues, standings, prices — fetch and cite (via `/api/proxy`) or hedge explicitly; when the facts aren't determined yet, give the structural answer and name the unknowns rather than inventing specifics that read as settled.
 
 ### Module hierarchy — split a growing app on concept boundaries
 
@@ -212,6 +222,8 @@ await window.mobius.storage.pendingCount()  // unsynced writes
 ```
 
 Conflict policy is last-write-wins per path; where a lost edit would matter, store one file per record (`items/<uuid>.json`) so concurrent edits to different records don't clobber. `window.mobius.storage` is the easy default, not a cage — an app may use raw IndexedDB / OPFS / its own backend (same-origin iframe); the platform never blocks the escape hatch.
+
+**Any view the agent might write to externally MUST `subscribe()`, not load-on-mount.** A current-session draft, today's log, an inbox — anything the Möbius agent populates from a chat turn while the app sits open — has to use `window.mobius.storage.subscribe(path, cb)` so it repaints when that storage changes under it. A view that only reads once in its mount effect leaves the owner staring at a blank panel after the agent writes (the Workout current-session card was the case). If a view genuinely can't subscribe, tell the owner up front they must reopen or refresh to see agent-written entries — and never claim the shell remounts a mini-app when your turn ends, because there is no such guarantee (the iframe stays in the LRU cache).
 
 ### The `.json`-no-envelope trap (silent data loss)
 
@@ -546,6 +558,8 @@ const res = await fetch(`/api/proxy?url=${encodeURIComponent(url)}`, {
   headers: { Authorization: `Bearer ${token}` },
 })
 ```
+
+A non-self external resource referenced at load time — a Google Fonts `<link>`/`@import`, any off-origin CDN script or stylesheet — can do worse than fail silently under the `default-src 'self'` CSP: it can HANG the in-app browser so the page never finishes loading and the whole app goes non-interactive (taps and anchors dead, "loading timeout"). So when the owner reports BOTH "X doesn't work" AND "loading timeout" in the same breath, treat the hang as the primary signal and grep the app for off-origin references first — it is not a scroll/offset bug. Vendor the font/asset same-origin or drop it; bundle fonts as a `@font-face` over a self-hosted file, never a CDN link.
 
 ---
 
