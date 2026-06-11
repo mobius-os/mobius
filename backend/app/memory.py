@@ -9,6 +9,9 @@ agent to `Read` on demand by following `[[wikilinks]]`.
 Layout under `<data_dir>/shared/memory/` (the "graph"):
 
   index.md              root MOC-of-MOCs. Always injected in full.
+  recent-chats.md       fixed-size queue of the last ~10 chats (one line per
+                        chat: id + date + summary), maintained by the nightly
+                        "dreaming" pass; injected right after the index.
   inbox.md              persistent append-only buffer for the day's raw
                         observations; injected as a tail so same-day learnings
                         are visible next session. Consolidated into notes by
@@ -16,6 +19,9 @@ Layout under `<data_dir>/shared/memory/` (the "graph"):
   mocs/<topic>.md       topic hubs (curated [[links]]); read on demand.
   notes/<slug>.md       atomic notes (one fact each) with YAML frontmatter
                         carrying `importance` (1-5) and `access_count`.
+  read-trace/<id>.json  per-chat record of which nodes were injected/read,
+                        written by chat.py + the SDK runner (memory_trace.py);
+                        the dreaming pass diffs it against the graph.
   .ready                sentinel: present iff a validated graph is published.
 
 The `.ready` sentinel — not the mere existence of `index.md` — gates graph
@@ -50,6 +56,11 @@ DEFAULT_MAX_NOTES = 12
 # The inbox can grow unbounded between nightly consolidations; only its tail
 # is injected so a busy day can't crowd out the index + hot notes.
 INBOX_TAIL_BYTES = 6_000
+# The recent-chats queue is dreaming-maintained at ~10 one-line entries, so
+# this cap should never bind in practice; it bounds the damage if the file
+# is ever grown by hand. The queue is chronological (oldest first), so any
+# truncation keeps the newest TAIL.
+RECENT_CHATS_TAIL_BYTES = 4_000
 
 
 @dataclass
@@ -94,10 +105,12 @@ def _usage_path(data_dir: str | Path) -> Path:
 
 def _loaded_path_to_id(rel: str) -> str | None:
   """Maps a `loaded` entry (e.g. 'notes/foo.md', 'index.md') to its graph
-  node id. inbox.md and anything unrecognised return None (not counted)."""
+  node id. inbox.md, recent-chats.md, and anything unrecognised return None
+  (rolling buffers aren't graph nodes — counting them would invent phantom
+  ids in usage.json and the read-trace)."""
   import os
   name = os.path.basename(rel)
-  if name == "inbox.md":
+  if name in ("inbox.md", "recent-chats.md"):
     return None
   if name == "index.md":
     return "index"
@@ -242,7 +255,12 @@ def _select_hot_notes(
     text = _read(fp)
     if not text.strip():
       continue
-    imp, base_acc = _note_score(parse_frontmatter(text))
+    fm = parse_frontmatter(text)
+    # Redirect stubs are forwarding pointers left behind by a move/rename
+    # (see memory_graph.py) — pure noise in the injected block.
+    if fm.get("type") == "redirect":
+      continue
+    imp, base_acc = _note_score(fm)
     score = (imp, base_acc + usage.get(fp.stem, 0))
     candidates.append((score, fp, text))
   # Select the top-N by score (descending), then re-sort the winners by path.
@@ -260,7 +278,8 @@ def build_memory_block(
 ) -> MemoryBlock:
   """Assembles the injected memory context from the knowledge graph.
 
-  `index.md` (full, capped to the budget) + hot notes (selected by score,
+  `index.md` (full, capped to the budget) + the `recent-chats.md` queue
+  (truncated oldest-first when tight) + hot notes (selected by score,
   rendered in path order, until the byte budget is consumed) + the `inbox.md`
   tail. Each included file is fenced with a `<<< path >>>` marker so the agent
   knows what a `[[link]]` resolves to.
@@ -307,6 +326,32 @@ def _build_graph_block(
     parts.append(index)
     loaded.append("index.md")
     used += len(index.encode("utf-8"))
+
+  # The recent-chats queue rides right after the index, before hot notes:
+  # "what just happened" is orientation, like the index, and must not lose
+  # its slot to a fat note. The queue is chronological (oldest first), so
+  # when the remaining budget is tight it is truncated OLDEST-FIRST — the
+  # newest tail survives.
+  recent = _read(root / "recent-chats.md").strip()
+  if recent:
+    marker = "<<< recent-chats.md (last chats — oldest first) >>>\n"
+    omitted = "[older recent-chats entries omitted]\n"
+    overhead = len(marker.encode("utf-8")) + 2
+    room = min(RECENT_CHATS_TAIL_BYTES, budget_bytes - used - overhead)
+    body = recent
+    if len(body.encode("utf-8")) > room:
+      tail_room = room - len(omitted.encode("utf-8"))
+      if tail_room > 0:
+        body = omitted + body.encode("utf-8")[-tail_room:].decode(
+          "utf-8", errors="ignore"
+        )
+      else:
+        body = ""
+    if body:
+      chunk = marker + body
+      parts.append(chunk)
+      loaded.append("recent-chats.md")
+      used += len(chunk.encode("utf-8")) + 2
 
   # Hot notes fill the remaining budget. Skip entirely if the index already
   # consumed it (Codex review P3 — oversized index).

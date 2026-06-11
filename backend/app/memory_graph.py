@@ -7,9 +7,21 @@ regenerate it after editing notes. It is also the lint authority: a publish
 step (bootstrap or nightly consolidation) calls `build_graph`, and refuses to
 mark the graph `.ready` if `problems` contains an error (Codex review R7).
 
-Node = one note or MOC. Edge = a `mocs:` membership or a body `[[link]]`.
-The graph is "healthy" when, from `index`, every MOC is reachable and from
-every MOC every note is reachable, with no dangling links and no orphans.
+Node = one note, MOC, or redirect stub (`type: redirect` + `target:`
+frontmatter — the forwarding pointer a move/rename leaves behind so old
+`[[links]]` keep resolving). Edge = a `mocs:` membership, a body `[[link]]`,
+or a redirect's forward to its target. The graph is "healthy" when, from
+`index`, every MOC is reachable and from every MOC every note is reachable,
+with no dangling links and no orphans.
+
+Beyond the publish-blocking errors, the lint emits WARNINGS that encode the
+graph's structure rules (mind.md owns the prose; the thresholds live here):
+a MOC over 15 children, a bare `[[slug]]` MOC entry with no one-line
+description, a note body over ~30 prose lines (split candidate), a note
+with 5+ outbound links (MOC-promotion candidate), redirect chains and
+orphaned stubs, and malformed `as-of:`/`supersedes:`/`source:` fields.
+Warnings never block `.ready` — they are the nightly Dreaming pass's
+reorganization worklist.
 """
 
 from __future__ import annotations
@@ -24,8 +36,20 @@ from app.memory import _read_usage_file, memory_dir, parse_frontmatter
 
 # `[[slug]]` or `[[slug|display text]]` — capture the slug (left of any pipe).
 _WIKILINK = re.compile(r"\[\[\s*([^\]|#]+?)\s*(?:[|#][^\]]*)?\]\]")
+# A MOC entry bullet that is ONLY a link — no one-line description after it.
+_BARE_ENTRY = re.compile(r"^\s*[-*]\s*\[\[[^\]]+\]\]\s*$")
+# Any link-list bullet (described or bare) — excluded from prose-line counts,
+# the way WP:SIZERULE measures readable prose rather than navigation lists.
+_LINK_BULLET = re.compile(r"^\s*[-*]\s*\[\[")
+_AS_OF_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 ROOT_ID = "index"
+
+# Structure-rule thresholds (the prose rules live in mind.md; Dreaming acts
+# on the warnings these produce).
+MOC_CHILDREN_CAP = 15
+NOTE_PROSE_LINE_CAP = 30
+MOC_PROMOTION_LINKS = 5
 
 
 @dataclass
@@ -53,6 +77,33 @@ def _slug(path: Path) -> str:
 
 def _wikilinks(body: str) -> list[str]:
   return [m.group(1).strip() for m in _WIKILINK.finditer(body)]
+
+
+def _split_body(text: str) -> str:
+  """Returns the text after the YAML frontmatter (or all of it)."""
+  if not text.startswith("---"):
+    return text
+  end = text.find("\n---", 3)
+  if end == -1:
+    return text
+  nl = text.find("\n", end + 1)
+  return text[nl + 1:] if nl != -1 else ""
+
+
+def _prose_line_count(body: str) -> int:
+  """Counts the body lines that are actual prose.
+
+  Blank lines, headings, and link-list bullets don't count — the split
+  trigger measures readable content, not navigation structure (a MOC-ish
+  note full of described links is handled by the promotion warning, not
+  the size one)."""
+  count = 0
+  for line in body.splitlines():
+    s = line.strip()
+    if not s or s.startswith("#") or _LINK_BULLET.match(line):
+      continue
+    count += 1
+  return count
 
 
 def _read(path: Path) -> str:
@@ -92,7 +143,12 @@ def build_graph(
          "detail": f"{sid} ({path.name})"}
       )
       return
-    nodes_by_id[sid] = {
+    # A `type: redirect` stub overrides the directory-derived type: the
+    # stub lives wherever the moved file lived, but it is neither a note
+    # nor a MOC — just a forwarding pointer.
+    if fm.get("type") == "redirect":
+      ntype = "redirect"
+    node = {
       "id": sid,
       "title": str(fm.get("title") or sid),
       "type": ntype,
@@ -103,7 +159,20 @@ def build_graph(
       "mocs": fm.get("mocs") if isinstance(fm.get("mocs"), list) else [],
       "tags": fm.get("tags") if isinstance(fm.get("tags"), list) else [],
       "_links": _wikilinks(text),
+      "_body": _split_body(text),
     }
+    if ntype == "redirect":
+      target = fm.get("target")
+      node["target"] = target.strip() if isinstance(target, str) else ""
+    # Staleness/supersession metadata: tolerated on any node, validated in
+    # the shape-lint pass below, surfaced in graph.json for the viewer and
+    # the Dreaming staleness sweep.
+    for fm_key, node_key in (
+      ("as-of", "as_of"), ("supersedes", "supersedes"), ("source", "source"),
+    ):
+      if fm_key in fm:
+        node[node_key] = fm[fm_key]
+    nodes_by_id[sid] = node
 
   index_path = root / "index.md"
   if index_path.is_file():
@@ -123,6 +192,64 @@ def build_graph(
       continue
     for fp in sorted(d.glob("*.md")):
       add_node(fp, ntype)
+
+  # Per-node shape lint (warnings only — never blocks a publish). These
+  # encode the structure rules the Dreaming pass enforces: every MOC entry
+  # carries a one-line description, a note over ~30 prose lines is a split
+  # candidate, a note with 5+ outbound links is doing a MOC's job, and
+  # time-sensitive metadata must be well-formed enough to act on.
+  for sid, node in nodes_by_id.items():
+    body = node.pop("_body")
+    if node["type"] == "moc":
+      bare = [ln.strip() for ln in body.splitlines() if _BARE_ENTRY.match(ln)]
+      if bare:
+        res.problems.append(
+          {"severity": "warn", "kind": "bare_moc_entry",
+           "detail": f"{sid}: {len(bare)} entry line(s) without a one-line "
+                     f"description (first: {bare[0]})"}
+        )
+    elif node["type"] == "note":
+      prose = _prose_line_count(body)
+      if prose > NOTE_PROSE_LINE_CAP:
+        res.problems.append(
+          {"severity": "warn", "kind": "oversized_note",
+           "detail": f"{sid}: {prose} prose lines "
+                     f"(> {NOTE_PROSE_LINE_CAP} — split candidate)"}
+        )
+      outbound = {l for l in node["_links"] if l != sid}
+      if len(outbound) >= MOC_PROMOTION_LINKS:
+        res.problems.append(
+          {"severity": "warn", "kind": "moc_candidate",
+           "detail": f"{sid}: {len(outbound)} outbound links "
+                     f"(promote to a MOC?)"}
+        )
+    as_of = node.get("as_of")
+    if as_of is not None and not (
+      isinstance(as_of, str) and _AS_OF_DATE.match(as_of)
+    ):
+      res.problems.append(
+        {"severity": "warn", "kind": "bad_as_of",
+         "detail": f"{sid}: as-of {as_of!r} is not YYYY-MM-DD"}
+      )
+    sup = node.get("supersedes")
+    if sup is not None:
+      if isinstance(sup, str):
+        node["supersedes"] = [sup]
+      elif not (
+        isinstance(sup, list) and all(isinstance(x, str) for x in sup)
+      ):
+        res.problems.append(
+          {"severity": "warn", "kind": "bad_supersedes",
+           "detail": f"{sid}: supersedes must be a slug or list of slugs"}
+        )
+      # No referential check on purpose: a superseded note is often pruned
+      # later, and a pointer into git history is not a lint problem.
+    src = node.get("source")
+    if src is not None and not isinstance(src, (str, list)):
+      res.problems.append(
+        {"severity": "warn", "kind": "bad_source",
+         "detail": f"{sid}: source must be a list of chat ids"}
+      )
 
   # Edges: membership (note.mocs -> moc) + lateral/body links. A note's
   # `mocs:` backlink and the MOC body's `[[link]]` describe the same
@@ -150,6 +277,15 @@ def build_graph(
           {"severity": "error", "kind": "dangling_moc",
            "detail": f"{sid} -> {target}"}
         )
+  # Redirect forwarding edges, BEFORE body links so the pair's kind reads
+  # "redirect" (a stub's body conventionally also [[links]] its target).
+  # Traversal — and the reachability lint — flows through the stub, so
+  # moved content stays reachable from every note still linking the old
+  # slug.
+  for sid, node in nodes_by_id.items():
+    if node["type"] == "redirect" and node.get("target") in ids:
+      add_edge(sid, node["target"], "redirect")
+
   # Pass 2: body `[[links]]` (validated for every link; deduped for the graph).
   for sid, node in nodes_by_id.items():
     for link in node.pop("_links"):
@@ -160,6 +296,53 @@ def build_graph(
           {"severity": "warn", "kind": "dangling_link",
            "detail": f"{sid} -> {link}"}
         )
+
+  # Redirect resolution. Every stub must terminate at a real, non-redirect
+  # node: a missing target or a cycle never resolves (error — any link
+  # routed through the stub dead-ends). A chain that does resolve but takes
+  # more than one hop is legal yet flagged for Dreaming to collapse
+  # (A -> B -> C becomes A -> C, Wikipedia's double-redirect bot rule).
+  redirects = {
+    sid: node.get("target") or ""
+    for sid, node in nodes_by_id.items()
+    if node["type"] == "redirect"
+  }
+  for sid, first in redirects.items():
+    hops = 0
+    chain = {sid}
+    cur = first
+    while True:
+      if not cur or cur not in ids:
+        res.problems.append(
+          {"severity": "error", "kind": "dangling_redirect",
+           "detail": f"{sid} -> {cur or '(no target)'}"}
+        )
+        break
+      hops += 1
+      if cur not in redirects:
+        if hops > 1:
+          res.problems.append(
+            {"severity": "warn", "kind": "redirect_chain",
+             "detail": f"{sid} resolves in {hops} hops (collapse to {cur})"}
+          )
+        break
+      if cur in chain:
+        res.problems.append(
+          {"severity": "error", "kind": "dangling_redirect",
+           "detail": f"{sid} -> redirect cycle"}
+        )
+        break
+      chain.add(cur)
+      cur = redirects[cur]
+
+  # A stub nothing points at anymore has served its purpose: every inbound
+  # link to the old slug has been updated, so Dreaming can purge it.
+  inbound = {e["target"] for e in res.edges}
+  for sid in redirects:
+    if sid not in inbound:
+      res.problems.append(
+        {"severity": "warn", "kind": "orphan_redirect", "detail": sid}
+      )
 
   # Orphan = a note reachable from nothing and pointing nowhere.
   linked = {e["source"] for e in res.edges} | {e["target"] for e in res.edges}
@@ -209,6 +392,12 @@ def build_graph(
       kids = sorted(children.get(sid, ()))
       node["children"] = kids
       node["children_count"] = len(kids)
+      if len(kids) > MOC_CHILDREN_CAP:
+        res.problems.append(
+          {"severity": "warn", "kind": "moc_overfull",
+           "detail": f"{sid}: {len(kids)} children "
+                     f"(cap {MOC_CHILDREN_CAP} — split into sub-MOCs)"}
+        )
     node["access_count"] = node.get("access_count", 0) + usage.get(sid, 0)
 
   res.nodes = list(nodes_by_id.values())
