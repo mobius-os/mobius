@@ -27,6 +27,9 @@ const {
   renderWikiLinks,
   nodeRadius,
   shouldShowNodeLabel,
+  safeMemoryPath,
+  neutralizeMemoryMarkdown,
+  MEMORY_SANITIZE_OPTIONS,
 } = await import('./.build/index.mjs')
 
 test('shouldShowNodeLabel hides ordinary nodes below every threshold except close zoom', () => {
@@ -171,4 +174,65 @@ test('computeRendererFitTransform centers finite graph bounds within limits', ()
   assert.equal(fit.k >= 0.5, true)
   assert.equal(Math.round(fit.x), 200)
   assert.equal(Math.round(fit.y), 150)
+})
+
+test('safeMemoryPath accepts normal markdown note paths and encodes segments', () => {
+  assert.equal(safeMemoryPath('notes/about me.md'), 'notes/about%20me.md')
+  assert.equal(safeMemoryPath('mocs/platform.md'), 'mocs/platform.md')
+})
+
+test('safeMemoryPath rejects traversal, absolute, empty, and non-markdown paths', () => {
+  const bad = [
+    null,
+    undefined,
+    '',
+    '   ',
+    '/etc/passwd',
+    '..\\notes\\x.md',
+    'notes/../../service-token.txt',
+    'notes/./x.md',
+    'notes//x.md',
+    'notes/x.md?inline=1',
+    'notes/x.md#frag',
+    'notes/x.txt',
+  ]
+  for (const path of bad) {
+    assert.equal(safeMemoryPath(path), null, String(path))
+  }
+})
+
+test('neutralizeMemoryMarkdown keeps labels but removes urls before rendering', () => {
+  const md = [
+    '![remote pixel](https://example.test/track.png)',
+    '[source](https://example.test/page)',
+    '[local](notes/idea.md)',
+  ].join('\n')
+  const out = neutralizeMemoryMarkdown(md)
+
+  assert.ok(out.includes('remote pixel'))
+  assert.ok(out.includes('source'))
+  assert.ok(out.includes('local'))
+  assert.ok(!out.includes('https://'))
+  assert.ok(!out.includes('notes/idea.md'))
+})
+
+test('neutralizeMemoryMarkdown leaves wikilink syntax for renderWikiLinks', () => {
+  const md = 'See [[some-note]] and [[other|alias]] but not [ext](https://evil.test/x).'
+  const out = renderWikiLinks(neutralizeMemoryMarkdown(md), [
+    { id: 'some-note', title: 'Some Note' },
+  ])
+  assert.ok(out.includes('[Some Note](#mind-node-some-note)'))
+  assert.ok(out.includes('[alias](#mind-node-other)'))
+  assert.ok(!out.includes('https://evil.test'))
+})
+
+test('memory sanitizer forbids network-bearing tags and attributes', () => {
+  assert.ok(MEMORY_SANITIZE_OPTIONS.FORBID_TAGS.includes('img'))
+  assert.ok(MEMORY_SANITIZE_OPTIONS.FORBID_TAGS.includes('iframe'))
+  assert.ok(MEMORY_SANITIZE_OPTIONS.FORBID_TAGS.includes('form'))
+  assert.ok(MEMORY_SANITIZE_OPTIONS.FORBID_ATTR.includes('src'))
+  assert.ok(MEMORY_SANITIZE_OPTIONS.FORBID_ATTR.includes('srcset'))
+  // href is deliberately NOT forbidden — wikilink anchors need it; the
+  // restrictNoteHtml pass strips every non-#mind-node- href instead.
+  assert.ok(!MEMORY_SANITIZE_OPTIONS.FORBID_ATTR.includes('href'))
 })

@@ -348,7 +348,13 @@ export default function App({ appId, token }) {
   useEffect(() => {
     if (!selected) return;
     let alive = true;
-    const path = selected.path || ('notes/' + selected.id + '.md');
+    // node.path comes from agent-written graph.json — refuse traversal,
+    // absolute paths, and query/fragment smuggling before fetching.
+    const path = safeMemoryPath(selected.path || ('notes/' + selected.id + '.md'));
+    if (!path) {
+      setNoteState({ status: 'missing', md: '', fm: {} });
+      return;
+    }
     setNoteState({ status: 'loading', md: '', fm: {} });
     (async () => {
       try {
@@ -391,7 +397,11 @@ export default function App({ appId, token }) {
 
   const noteHtml = useMemo(() => {
     if (noteState.status !== 'ready') return '';
-    const linkedMd = renderWikiLinks(noteState.md, graph?.nodes || []);
+    // Plain markdown links/images are neutralized BEFORE wikilink expansion:
+    // notes can carry dreaming-agent web-research content, so remote URLs are
+    // dropped (their label text survives). Wikilinks expand after, so the only
+    // live anchors are the #mind-node- fragments this app generates itself.
+    const linkedMd = renderWikiLinks(neutralizeMemoryMarkdown(noteState.md), graph?.nodes || []);
     // Require BOTH the renderer AND the sanitizer before producing HTML — never
     // render un-sanitized markup. Notes can contain dreaming-agent web-research
     // content, so DOMPurify (a real HTML-parser sanitizer) is the right tool;
@@ -399,7 +409,7 @@ export default function App({ appId, token }) {
     if (marked && purify) {
       try {
         const raw = marked(linkedMd, { breaks: true, gfm: true });
-        return purify.sanitize(raw, { USE_PROFILES: { html: true } });
+        return restrictNoteHtml(purify.sanitize(raw, MEMORY_SANITIZE_OPTIONS));
       } catch { return escapeHtml(noteState.md); }
     }
     return null; // renderer not ready yet -> fall back to plain text below
@@ -584,7 +594,7 @@ export default function App({ appId, token }) {
               <span style={{ ...S.sevTag, ...(p.severity === 'error' ? S.sevErr : S.sevWarn) }}>
                 {p.severity}
               </span>
-              <span style={S.healthKind}>{p.kind.replace(/_/g, ' ')}</span>
+              <span style={S.healthKind}>{String(p.kind || '').replace(/_/g, ' ')}</span>
               <span style={S.healthDetail}>{p.detail}</span>
             </div>
           ))}
@@ -978,7 +988,7 @@ async function createMindGraphScene({
     autoStart: false,
   });
   if (isDisposed()) {
-    try { app.destroy(true); } catch {}
+    try { app.destroy(true, { children: true, texture: true, textureSource: true }); } catch {}
     return () => {};
   }
 
@@ -1184,6 +1194,17 @@ async function createMindGraphScene({
     .scaleExtent([0.22, 4.6])
     .filter((event) => {
       if (event.type === 'mousedown') return !hitNode(event.offsetX, event.offsetY);
+      if (event.type === 'touchstart') {
+        // Same node-exclusion as mousedown. Without it, zoom and drag both
+        // claim the touch (touch events skip the mousedown branch) and
+        // dragging a node also pans the whole scene. Touch events carry no
+        // offsetX/Y, so map the first touch into canvas coordinates by hand.
+        const touch = event.touches?.[0];
+        if (touch) {
+          const rect = canvas.getBoundingClientRect();
+          return !hitNode(touch.clientX - rect.left, touch.clientY - rect.top);
+        }
+      }
       return true;
     })
     .on('zoom', (event) => {
@@ -1287,7 +1308,10 @@ async function createMindGraphScene({
     try { selection.on('.zoom', null).on('.drag', null); } catch {}
     simulation.stop();
     if (rafId) cancelAnimationFrame(rafId);
-    try { app.destroy(true); } catch {}
+    // Destroy children + textures explicitly: every label owns a canvas-backed
+    // texture, and resize remounts rebuild the whole scene — without this the
+    // old scene's textures linger until GC gets around to them.
+    try { app.destroy(true, { children: true, texture: true, textureSource: true }); } catch {}
   };
 }
 
@@ -1530,6 +1554,54 @@ function escapeHtml(s) {
 
 function escapeMarkdownLinkText(s) {
   return String(s).replace(/\\/g, '\\\\').replace(/]/g, '\\]');
+}
+
+// Note paths come from agent-written graph.json. Reject traversal, absolute
+// paths, query/fragment smuggling, and non-markdown targets, and encode each
+// segment so the fetch URL can't be reshaped by the path contents.
+export function safeMemoryPath(path) {
+  if (typeof path !== 'string') return null;
+  const trimmed = path.trim();
+  if (!trimmed || trimmed.startsWith('/') || trimmed.includes('\\')) return null;
+  if (trimmed.includes('?') || trimmed.includes('#')) return null;
+  const parts = trimmed.split('/');
+  if (parts.some((part) => !part || part === '.' || part === '..')) return null;
+  if (!parts[parts.length - 1].endsWith('.md')) return null;
+  return parts.map((part) => encodeURIComponent(part)).join('/');
+}
+
+// DOMPurify policy for memory notes: on top of the html profile, forbid every
+// network-bearing tag and attribute (the prod CSP blocks remote img/connect,
+// but form-action is NOT covered by default-src and test instances run without
+// the Caddy CSP entirely — so the app forbids these itself). href is the one
+// URL attribute left allowed, because wikilink anchors need it;
+// restrictNoteHtml then drops every href that isn't a #mind-node- fragment.
+export const MEMORY_SANITIZE_OPTIONS = {
+  USE_PROFILES: { html: true },
+  FORBID_TAGS: ['img', 'picture', 'source', 'video', 'audio', 'iframe', 'object', 'embed', 'form', 'input', 'button'],
+  FORBID_ATTR: ['src', 'srcset', 'xlink:href', 'formaction'],
+};
+
+// Markdown-level twin of the sanitize policy: plain links keep their label
+// but lose the URL, images collapse to their alt text. Wikilink syntax
+// ([[slug]] / [[slug|alias]]) never matches either pattern, so running this
+// before renderWikiLinks leaves wikilinks intact.
+export function neutralizeMemoryMarkdown(md) {
+  return (md || '')
+    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_m, alt) => ` ${alt || 'image'} `)
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1');
+}
+
+// Post-sanitize pass over already-DOMPurify-clean HTML: strip every anchor
+// href except the #mind-node- fragments renderWikiLinks generates. Removal
+// only — it cannot introduce markup the sanitizer didn't already allow.
+function restrictNoteHtml(html) {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  for (const a of tpl.content.querySelectorAll('a[href]')) {
+    if (!a.getAttribute('href').startsWith('#mind-node-')) a.removeAttribute('href');
+  }
+  return tpl.innerHTML;
 }
 
 function clamp(v, min, max) {
