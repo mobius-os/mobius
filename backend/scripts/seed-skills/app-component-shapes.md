@@ -132,7 +132,7 @@ this — only add safe-area on the surface that actually touches an edge.
       <span className="ma-subtitle">12 of 195 countries visited</span>
     </div>
   </div>
-  <div className="ma-header-right">{/* tabs / segmented / badge / sync pill */}</div>
+  <div className="ma-header-right">{/* tabs / segmented / badge */}</div>
 </header>
 ```
 
@@ -161,9 +161,10 @@ this — only add safe-area on the surface that actually touches an edge.
 /* /mobius-ui:Header */
 ```
 
-The right side is a SLOT — drop your tabs / toggle / badge / sync pill in.
-The mark may be omitted entirely (title + subtitle alone is valid). Don't
-diverge on the flex/space-between skeleton or the 48px min-height.
+The right side is a SLOT — drop your tabs / toggle / badge in. Never a sync
+or save-status indicator here (see the SyncPill rule in §10 — silent when
+healthy). The mark may be omitted entirely (title + subtitle alone is valid).
+Don't diverge on the flex/space-between skeleton or the 48px min-height.
 
 **Safe area:** a top-pinned header (one the root does NOT inset for you) keeps
 its content clear of the notch by folding the inset into its top padding:
@@ -451,18 +452,6 @@ section for the one-call helper (`persist` + `onTurnDone`).
 }
 /* /mobius-ui:ReducedMotion */
 
-/* mobius-ui:SyncPill v1 — keep in sync; library candidate. */
-.ma-sync-pill {  /* floating offline/pending indicator; hidden when online + 0 pending */
-  position: absolute; right: 12px; bottom: 12px; z-index: 40;
-  display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px;
-  background: var(--surface); border: 1px solid var(--border); color: var(--muted);
-  font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; box-shadow: 0 2px 8px rgba(0,0,0,0.18);
-}
-.ma-sync-pill-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
-.ma-sync-pill.is-pending .ma-sync-pill-dot { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
-.ma-sync-pill.is-offline { border-color: var(--accent); color: var(--accent); }
-/* /mobius-ui:SyncPill */
-
 /* mobius-ui:Spinner v1 — keep in sync; library candidate. */
 @keyframes ma-spin { to { transform: rotate(360deg); } }
 .ma-spinner {
@@ -500,6 +489,35 @@ section for the one-call helper (`persist` + `onTurnDone`).
 .ma-scroll::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: padding-box; }
 .ma-scroll::-webkit-scrollbar-track { background: transparent; }
 /* /mobius-ui:Scrollskin */
+```
+
+### SyncPill — SILENT WHEN HEALTHY
+
+Render NOTHING while online. Saving and pending writes are invisible plumbing
+— `window.mobius.storage` queues writes safely — not information; never show
+"Saving…", pending-write counters, or last-synced timestamps while online.
+Mount the pill ONLY when the app is offline, with the plain text "Offline" (no
+counts, no timestamps). The one other state that may surface is an
+error/conflict the owner must act on (`.is-error`), plainly worded
+("Couldn't save — tap to retry").
+
+```jsx
+{/* track `online` via window.mobius.online + the window 'online'/'offline' events */}
+{!online && <div className="ma-sync-pill" role="status">Offline</div>}
+```
+
+```css
+/* mobius-ui:SyncPill v2 — keep in sync; library candidate. SILENT WHEN HEALTHY:
+   not mounted while online (never "Saving" / pending counts); plain "Offline"
+   when offline; .is-error only for a failure the owner can act on. */
+.ma-sync-pill {
+  position: absolute; right: 12px; bottom: 12px; z-index: 40;
+  display: inline-flex; align-items: center; padding: 6px 12px; border-radius: 999px;
+  background: var(--surface); border: 1px solid var(--border); color: var(--muted);
+  font-size: 11px; font-weight: 600; box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+}
+.ma-sync-pill.is-error { border-color: var(--danger); color: var(--danger); }
+/* /mobius-ui:SyncPill */
 ```
 
 No FAB shape is specced — zero apps use a floating action button today.
