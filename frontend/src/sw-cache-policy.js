@@ -16,12 +16,14 @@ export const VENDOR_CACHE = 'mobius-vendor-v2'
 export const ESM_CACHE = 'mobius-esm-v2'
 export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v2'
 export const STANDALONE_APPS_CACHE = 'mobius-standalone-v2'
+export const APP_ASSETS_CACHE = 'mobius-app-assets-v1'
 
 const KEEP_RUNTIME_CACHES = new Set([
   VENDOR_CACHE,
   ESM_CACHE,
   OFFLINE_APPS_CACHE,
   STANDALONE_APPS_CACHE,
+  APP_ASSETS_CACHE,
 ])
 
 // Content types we're willing to store in a cache-first asset cache.
@@ -62,6 +64,32 @@ export function isStaleRuntimeCache(name) {
   if (/^mobius-(vendor|esm)/.test(name)) return true
   if (/^mobius-(offline-apps|standalone)(?:-v\d+)?$/.test(name)) return true
   return false
+}
+
+// PURE: is a packaged-app static asset (/app-assets/{slug}/...) immutable?
+// Mirrors the server's _HASHED_ASSET_NAME (backend/app/main.py): a
+// content-hash segment in the FILENAME ([.-]<8+ hex>.<ext>) means a
+// re-install that changes the bytes also changes the name, so the URL is
+// the validator — the server sends `Cache-Control: ... immutable` and the
+// SW may cache it forever. Keep the regex in sync with the backend.
+const HASHED_ASSET_NAME = /[.-][0-9a-f]{8,}\./i
+
+export function isImmutableAppAsset(pathname) {
+  if (!pathname.startsWith('/app-assets/')) return false
+  const name = pathname.slice(pathname.lastIndexOf('/') + 1)
+  return HASHED_ASSET_NAME.test(name)
+}
+
+// True when a response may enter the immutable half of the app-assets
+// cache. App assets span arbitrary content types (models, textures,
+// fonts, audio), so unlike CACHEABLE_ASSET_TYPES this is a denylist:
+// refuse non-200 and text/html — a hashed filename is never a document,
+// so an HTML body at one can only be a fallback/error page (the
+// poisoning class isCacheableAssetResponse exists for).
+export function isCacheableAppAssetResponse(response) {
+  if (!response || response.status !== 200) return false
+  const ct = (response.headers.get('content-type') || '').toLowerCase()
+  return !ct.includes('text/html')
 }
 
 // PURE: should offlineCapableHandler serve the CACHED copy first (instant) vs go
