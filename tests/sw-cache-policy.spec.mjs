@@ -13,12 +13,12 @@ import { test, expect } from '@playwright/test'
 import {
   VENDOR_CACHE,
   ESM_CACHE,
+  APP_ASSETS_CACHE,
   isCacheableAssetResponse,
+  isRangeRequest,
   isStaleRuntimeCache,
-  isKnownOnline,
   shouldServeCacheFirst,
   shouldFallBackToCacheOnError,
-  VERDICT_MAX_AGE_MS,
 } from '../frontend/src/sw-cache-policy.js'
 
 const resp = (status, ct) => ({ status, headers: { get: () => ct } })
@@ -59,29 +59,29 @@ test.describe('sw cache policy — isStaleRuntimeCache', () => {
   })
 })
 
-test.describe('sw cache policy — isKnownOnline (connectivity verdict helper)', () => {
-  const NOW = 1_000_000
-
-  test('fresh positive verdict → known online', () => {
-    expect(isKnownOnline(true, NOW - 1000, NOW)).toBe(true)
+test.describe('sw cache policy — app-assets poisoned-cache eviction', () => {
+  test('evicts the v1 app-assets cache (held 1-byte ranged-slice bodies)', () => {
+    expect(isStaleRuntimeCache('mobius-app-assets-v1')).toBe(true)
   })
 
-  test('fresh negative verdict → NOT known online (cache-first instant offline)', () => {
-    expect(isKnownOnline(false, NOW - 1000, NOW)).toBe(false)
+  test('keeps the current app-assets cache', () => {
+    expect(isStaleRuntimeCache(APP_ASSETS_CACHE)).toBe(false)
+  })
+})
+
+test.describe('sw cache policy — isRangeRequest (ranged fetches bypass caches)', () => {
+  const req = (headers) => ({
+    headers: { has: (name) => Object.hasOwn(headers, name) },
   })
 
-  test('unknown verdict (cold SW restart, no postMessage yet) → NOT known online → cache-first, no race', () => {
-    // The cold-start win: undefined !== true, so a cached app is served instantly
-    // on the very first request without waiting for the verdict to arrive.
-    expect(isKnownOnline(undefined, 0, NOW)).toBe(false)
+  test('a Range-bearing request is detected (the CubeRun probe shape)', () => {
+    expect(isRangeRequest(req({ range: 'bytes=0-0' }))).toBe(true)
   })
 
-  test('stale positive verdict → NOT known online (do not trust an old "online" across a gap)', () => {
-    expect(isKnownOnline(true, NOW - (VERDICT_MAX_AGE_MS + 1), NOW)).toBe(false)
-    // exactly at the boundary is stale (strict <)
-    expect(isKnownOnline(true, NOW - VERDICT_MAX_AGE_MS, NOW)).toBe(false)
-    // just inside the window is fresh
-    expect(isKnownOnline(true, NOW - (VERDICT_MAX_AGE_MS - 1), NOW)).toBe(true)
+  test('plain requests and degenerate inputs are not ranged', () => {
+    expect(isRangeRequest(req({}))).toBe(false)
+    expect(isRangeRequest(null)).toBe(false)
+    expect(isRangeRequest({})).toBe(false)
   })
 })
 

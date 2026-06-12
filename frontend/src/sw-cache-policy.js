@@ -16,7 +16,13 @@ export const VENDOR_CACHE = 'mobius-vendor-v2'
 export const ESM_CACHE = 'mobius-esm-v2'
 export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v2'
 export const STANDALONE_APPS_CACHE = 'mobius-standalone-v2'
-export const APP_ASSETS_CACHE = 'mobius-app-assets-v1'
+// app-assets bumped to -v2 ONCE (2026-06-12) to evict entries poisoned by
+// ranged-request bodies: CubeRun's probe GET with `Range: bytes=0-0` came
+// back from Chromium's HTTP cache as a status-200 response holding only the
+// 1-byte slice, passed the status===200 check, and was stored under the
+// bare index.html URL — every later open of the game served a one-character
+// document (black screen). isRangeRequest below is the structural guard.
+export const APP_ASSETS_CACHE = 'mobius-app-assets-v2'
 
 const KEEP_RUNTIME_CACHES = new Set([
   VENDOR_CACHE,
@@ -60,10 +66,26 @@ export function isCacheableAssetResponse(response) {
 // every activate (re-fetching all proxied assets on every deploy).
 export function isStaleRuntimeCache(name) {
   if (KEEP_RUNTIME_CACHES.has(name)) return false
-  if (/^mobius-(vendor|assets|apps|proxy|esm)-v\d+$/.test(name)) return true
+  if (/^mobius-(vendor|assets|app-assets|apps|proxy|esm)-v\d+$/.test(name)) return true
   if (/^mobius-(vendor|esm)/.test(name)) return true
   if (/^mobius-(offline-apps|standalone)(?:-v\d+)?$/.test(name)) return true
   return false
+}
+
+// PURE: does this request ask for a byte sub-range? Ranged requests must
+// bypass the app-assets caches entirely (neither served from cache nor
+// stored). Two failure modes force the REQUEST-side check:
+//   - storing: Chromium can satisfy a ranged fetch from its HTTP cache as a
+//     STATUS-200 response whose body is just the requested slice — there is
+//     no response-side marker (no 206, no Content-Range) distinguishing it
+//     from a full body, so a cacheWillUpdate status check cannot catch it.
+//     Cached under the bare URL it truncates the asset for every later
+//     consumer (the 2026-06-12 CubeRun black-screen outage).
+//   - matching: cache.match ignores request headers, so a cached full body
+//     would be returned uncut to a ranged request (harmless for probes,
+//     wrong for media seeking).
+export function isRangeRequest(request) {
+  return !!request && !!request.headers && request.headers.has('range')
 }
 
 // PURE: is a packaged-app static asset (/app-assets/{slug}/...) immutable?
