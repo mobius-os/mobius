@@ -46,7 +46,10 @@ import {
   ESM_CACHE,
   OFFLINE_APPS_CACHE,
   STANDALONE_APPS_CACHE,
+  APP_ASSETS_CACHE,
   isCacheableAssetResponse,
+  isCacheableAppAssetResponse,
+  isImmutableAppAsset,
   isStaleRuntimeCache,
   shouldServeCacheFirst,
   shouldFallBackToCacheOnError,
@@ -182,6 +185,43 @@ registerRoute(
 registerRoute(
   ({ url }) => url.hostname === 'esm.sh',
   new CacheFirst({ cacheName: ESM_CACHE, plugins: [assetCacheGuard] }),
+)
+
+// /app-assets/{slug}/* — durable static files owned by packaged apps
+// (CubeRun's ~19MB of models/textures re-downloaded on EVERY open before
+// this). The server splits cache semantics by filename
+// (_serve_app_static_asset in backend/app/main.py): content-hashed names
+// are immutable — a re-install that changes the bytes changes the name —
+// and everything else is no-cache + ETag/304. Mirror that split:
+//   - hashed names: CacheFirst, the same tier as /vendor/ above. Once
+//     stored we never refetch; entries superseded by a re-install are
+//     left harmlessly behind, like stale vendor entries.
+//   - the rest (index.html, un-hashed media): StaleWhileRevalidate —
+//     instant cached serve + background refresh, which the server now
+//     answers with a bodiless 304 when nothing changed. The foreground
+//     path only blocks on a cache miss, where there is nothing to serve
+//     yet (the NET_TIMEOUT_MS rationale below).
+// A raw 304 reaching either strategy (request carried the browser's
+// If-None-Match) is refused by cacheWillUpdate — non-200 never replaces
+// a stored copy, and the browser synthesizes the body from its own HTTP
+// cache, so there is no frame/module-style never-cached trap here.
+registerRoute(
+  ({ url }) =>
+    url.origin === self.location.origin && isImmutableAppAsset(url.pathname),
+  new CacheFirst({
+    cacheName: APP_ASSETS_CACHE,
+    plugins: [{
+      cacheWillUpdate: async ({ response }) =>
+        isCacheableAppAssetResponse(response) ? response : null,
+    }],
+  }),
+)
+registerRoute(
+  ({ url }) =>
+    url.origin === self.location.origin &&
+    url.pathname.startsWith('/app-assets/') &&
+    !isImmutableAppAsset(url.pathname),
+  new StaleWhileRevalidate({ cacheName: APP_ASSETS_CACHE }),
 )
 
 // /api/proxy — server-side CORS bypass. Only cache asset

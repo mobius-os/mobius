@@ -7,8 +7,11 @@ mounted last as a catch-all so that client-side routing works.
 
 import asyncio
 import logging
+import re
 import time
 from contextlib import asynccontextmanager
+from datetime import timezone
+from email.utils import formatdate, parsedate_to_datetime
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -608,7 +611,45 @@ def _app_source_dir_for_static_asset(
     db.close()
 
 
-def _serve_app_static_asset(source_dir: str | None, asset_path: str):
+# A content-hash segment in the filename (main.8f3a2b1c.js,
+# commando.f3b9c2e1a4.ttf) marks the asset immutable: a re-install that
+# changes the bytes ships a different name, so the URL itself is the
+# validator. Mirrored by isImmutableAppAsset in frontend/src/
+# sw-cache-policy.js — keep the two in sync.
+_HASHED_ASSET_NAME = re.compile(r"[.-][0-9a-f]{8,}\.", re.IGNORECASE)
+
+
+def _client_copy_is_fresh(request: Request, etag: str, mtime: float) -> bool:
+  """True when conditional headers prove the client's copy is current.
+
+  If-None-Match takes precedence over If-Modified-Since when both are
+  present (RFC 7232 section 6); the date check is the fallback for
+  clients that dropped the ETag.
+  """
+  if_none_match = request.headers.get("if-none-match")
+  if if_none_match is not None:
+    if if_none_match.strip() == "*":
+      return True
+    candidates = [
+      tag.strip().removeprefix("W/") for tag in if_none_match.split(",")
+    ]
+    return etag in candidates
+  if_modified_since = request.headers.get("if-modified-since")
+  if if_modified_since is not None:
+    try:
+      since = parsedate_to_datetime(if_modified_since)
+    except (TypeError, ValueError):
+      return False
+    if since.tzinfo is None:
+      since = since.replace(tzinfo=timezone.utc)
+    # HTTP dates have one-second resolution, so compare whole seconds.
+    return int(mtime) <= since.timestamp()
+  return False
+
+
+def _serve_app_static_asset(
+  source_dir: str | None, asset_path: str, request: Request,
+):
   if not source_dir:
     raise HTTPException(status_code=404, detail="Not found.")
 
@@ -622,15 +663,34 @@ def _serve_app_static_asset(source_dir: str | None, asset_path: str):
   if root not in target.parents or not target.is_file():
     raise HTTPException(status_code=404, detail="Not found.")
 
+  try:
+    stat = target.stat()
+  except OSError:
+    raise HTTPException(status_code=404, detail="Not found.")
+
+  # Asset files under a slug change only on app re-install, so
+  # hashed-named files are cacheable forever (the new name busts the
+  # cache) and everything else revalidates — but a revalidation is now
+  # a bodiless 304 instead of a full re-download (CubeRun re-shipped
+  # ~19MB of models/textures on every open before this).
+  etag = f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
   headers = {
-    "Cache-Control": "no-cache, must-revalidate",
+    "Cache-Control": (
+      "public, max-age=31536000, immutable"
+      if _HASHED_ASSET_NAME.search(target.name)
+      else "no-cache, must-revalidate"
+    ),
+    "ETag": etag,
+    "Last-Modified": formatdate(stat.st_mtime, usegmt=True),
     "X-Content-Type-Options": "nosniff",
   }
+  if _client_copy_is_fresh(request, etag, stat.st_mtime):
+    return Response(status_code=304, headers=headers)
   return FileResponse(str(target), headers=headers)
 
 
 @app.get("/app-assets/by-id/{app_id}/{asset_path:path}", include_in_schema=False)
-async def app_owned_asset_by_id(app_id: int, asset_path: str):
+async def app_owned_asset_by_id(app_id: int, asset_path: str, request: Request):
   """Serve durable static assets owned by an installed app.
 
   Imported apps like CubeRun can keep a built static site under
@@ -641,17 +701,19 @@ async def app_owned_asset_by_id(app_id: int, asset_path: str):
   return _serve_app_static_asset(
     await asyncio.to_thread(_app_source_dir_for_static_asset, app_id=app_id),
     asset_path,
+    request,
   )
 
 
 @app.get("/app-assets/{slug}/{asset_path:path}", include_in_schema=False)
-async def app_owned_asset(slug: str, asset_path: str):
+async def app_owned_asset(slug: str, asset_path: str, request: Request):
   """Serve durable static assets owned by an installed app slug."""
   if not slug or not all(ch.isalnum() or ch in "-_" for ch in slug):
     raise HTTPException(status_code=404, detail="Not found.")
   return _serve_app_static_asset(
     await asyncio.to_thread(_app_source_dir_for_static_asset, slug=slug),
     asset_path,
+    request,
   )
 
 
