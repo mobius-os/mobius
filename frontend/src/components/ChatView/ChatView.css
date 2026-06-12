@@ -278,6 +278,20 @@
   display: flex;
   flex-direction: column;
   max-width: 100%;
+  /* Long chats have no virtualization (ChatView renders every message;
+     useScrollMode anchors by element offsets). Without a rendering hint
+     the browser keeps the whole conversation live during scroll — every
+     highlight.js block, KaTeX formula, and image, even far off-screen —
+     which produces stuttery scrolling on phone-sized viewports.
+     content-visibility skips render work for off-screen messages. The
+     `auto` keyword in contain-intrinsic-size makes the browser remember
+     each message's real size once rendered, so offsetTop/offsetHeight
+     reads in useScrollMode (spacer math, PIN_USER_MSG, ANCHOR_AT) stay
+     exact for everything that has been on screen; 120px is only the
+     pre-first-render estimate. Off-screen estimate error is absorbed by
+     the existing reveal-window re-anchoring in useScrollMode. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
 }
 
 .chat__msg--user { align-items: flex-end; }
