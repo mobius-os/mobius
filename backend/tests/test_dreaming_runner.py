@@ -330,3 +330,30 @@ async def test_fallback_crash_is_swallowed(tmp_path, monkeypatch):
     2, provider="claude", skill_text="s", env={}, model=None,
     effort=None, log_fh=None,
   )
+
+
+# ---------------------------------------------------------------------------
+# Morning-chat creation contract (seed skill)
+# ---------------------------------------------------------------------------
+
+def test_seed_skill_morning_chat_is_app_attributed():
+  """The morning chat must ride the app-attributed chat contract.
+
+  The conversation about a brief lives inside the Dreaming app,
+  embedded under the brief. Creating it owner-side (`POST
+  /api/chats` with the service token) leaves created_by_app_id
+  NULL, so it lands in the owner's drawer history next to their own
+  conversations — the clutter the contract exists to prevent. The
+  seed must instruct the app-attributed create (mint an app token,
+  POST /api/app-chats); the owner token stays correct for the later
+  sends, since the owner can always drive an app's chats.
+  """
+  from pathlib import Path
+
+  seed = (
+    Path(dr.__file__).resolve().parent / "seed-skills" / "dreaming.md"
+  ).read_text(encoding="utf-8")
+  assert "/api/app-chats" in seed
+  assert "/api/auth/app-token" in seed
+  # The owner-create recipe must not come back for the morning chat.
+  assert 'POST "$API_BASE_URL/api/chats"' not in seed
