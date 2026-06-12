@@ -16,22 +16,24 @@ import useProviderAuthStatus from '../../hooks/useProviderAuthStatus.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import { appQueries, chatQueries, modelQueries, ownerQueries } from '../../hooks/queries.js'
 import { appVersionKey } from '../../lib/appVersion.js'
+import {
+  APP_LRU_STORAGE_KEY, mergeAppLru, parseStoredAppLru, selectAppsToWarm,
+} from '../../lib/appPrecache.js'
 import './Shell.css'
 
-// P1-B: post a precache-warming message to the active service worker for an
-// offline-capable app. The SW handler fetches both URLs with cache:'reload'
-// (bypassing the browser HTTP cache) and stores them in the offline-apps cache
-// under token-stripped keys — so the app is immediately available offline.
-// Safe to call speculatively; the SW no-ops if the entry is already cached.
-function _precacheApp(app) {
-  try {
-    const sw = navigator.serviceWorker?.controller
-    if (!sw) return
-    const version = app.updated_at || '0'
-    const frameUrl = `${BASE}/api/apps/${app.id}/frame?v=${encodeURIComponent(version)}`
-    const moduleUrl = `${BASE}/api/apps/${app.id}/module?v=${encodeURIComponent(version)}`
-    sw.postMessage({ type: 'moebius:precache-app', frameUrl, moduleUrl })
-  } catch (e) { /* best-effort — SW may not be available */ }
+// Resolves the service worker to post warm-up messages to. The page is
+// uncontrolled on its very first load (clientsClaim only takes over once
+// the SW activates), so falling back to `ready.active` lets the first
+// session still prime the cache. `ready` never resolves when no SW is
+// registered (dev server) — the early null return guards that, and the
+// callers treat a hanging promise as a harmless no-op anyway.
+function _warmTargetSw() {
+  if (!navigator.serviceWorker) return Promise.resolve(null)
+  const ctrl = navigator.serviceWorker.controller
+  if (ctrl) return Promise.resolve(ctrl)
+  return navigator.serviceWorker.ready
+    .then(reg => reg.active)
+    .catch(() => null)
 }
 
 export default function Shell() {
@@ -200,6 +202,56 @@ export default function Shell() {
     })
   }, [activeAppId])
 
+  // Cross-session recency for SW cache warming. The persisted LRU read
+  // once at mount (useState initializer, so the persist effect below
+  // can't clobber it first) feeds the warm-on-load effect; every LRU
+  // rotation then MERGES into storage rather than overwriting, keeping
+  // depth WARM_APP_LIMIT across sessions (the in-memory list holds only
+  // APP_CACHE_MAX ids). Failures degrade to pinned-only warming.
+  const [initialAppLru] = useState(() => {
+    try {
+      return parseStoredAppLru(localStorage.getItem(APP_LRU_STORAGE_KEY))
+    } catch { return [] }
+  })
+  useEffect(() => {
+    // The empty mount state carries no recency information — persisting
+    // it would erase the previous session's signal before it's used.
+    if (appCache.length === 0) return
+    try {
+      const stored = parseStoredAppLru(localStorage.getItem(APP_LRU_STORAGE_KEY))
+      localStorage.setItem(
+        APP_LRU_STORAGE_KEY, JSON.stringify(mergeAppLru(appCache, stored)),
+      )
+    } catch { /* storage unavailable (private mode) — warming degrades */ }
+  }, [appCache])
+
+  // Posts a precache-warming message to the service worker for one app.
+  // The SW handler (moebius:precache-app in sw.js) fetches frame + module
+  // with cache:'reload' and stores them under token-stripped keys, so the
+  // next open of the app is a pure cache read. The module endpoint 401s
+  // without a token, so one is resolved through the SAME query key the
+  // open path uses (priming that cache is a free side benefit); passing
+  // it as a query param mirrors how the iframe itself loads the module.
+  // Safe to call speculatively — the SW skips already-cached entries.
+  const warmAppCode = useCallback(async (app) => {
+    try {
+      const sw = await _warmTargetSw()
+      if (!sw) return
+      const token = await queryClient.fetchQuery({
+        queryKey: appQueries.token.key(app.id),
+        queryFn: () => appQueries.token.fetch(app.id),
+        staleTime: 5 * 60_000,
+      })
+      const version = appVersionKey(app.updated_at)
+      const frameUrl =
+        `${BASE}/api/apps/${app.id}/frame?v=${encodeURIComponent(version)}`
+      const moduleUrl =
+        `${BASE}/api/apps/${app.id}/module?v=${encodeURIComponent(version)}`
+        + `&token=${encodeURIComponent(token)}`
+      sw.postMessage({ type: 'moebius:precache-app', frameUrl, moduleUrl })
+    } catch { /* best-effort — warming must never break the shell */ }
+  }, [queryClient])
+
   // Evict tombstoned apps from the LRU. When an app is uninstalled
   // (feature 110 soft-delete) it drops out of /api/apps, the server
   // 404s its /module + /frame, and `app_updated` fires → refreshApps.
@@ -255,6 +307,28 @@ export default function Shell() {
     }
   }, [apps, appsLiveFetched, appCache, activeView, activeAppId,
       navStackRef, setActiveAppId, setActiveView])
+
+  // Warm the SW app-code cache once per shell load for the apps the user
+  // is most likely to open next — pinned + most-recent (the persisted
+  // LRU) — so the first app-open of the session is served from cache.
+  // Deliberately off the critical path: waits for a live-confirmed apps
+  // list, then runs at browser idle (with a timeout so a busy page still
+  // warms eventually). Skipped entirely under data-saver. The ref flips
+  // BEFORE scheduling so apps-list refetches can't re-trigger the pass;
+  // once scheduled it is never cancelled — priming the cache after a
+  // view change (or even unmount) is exactly the point.
+  const warmedOnLoadRef = useRef(false)
+  useEffect(() => {
+    if (warmedOnLoadRef.current || !appsLiveFetched || apps.length === 0) return
+    warmedOnLoadRef.current = true
+    if (navigator.connection?.saveData) return
+    const toWarm = selectAppsToWarm(apps, initialAppLru)
+    if (toWarm.length === 0) return
+    const idle = typeof requestIdleCallback === 'function'
+      ? (fn) => requestIdleCallback(fn, { timeout: 5000 })
+      : (fn) => setTimeout(fn, 1500)
+    idle(() => { for (const app of toWarm) warmAppCode(app) })
+  }, [appsLiveFetched, apps, initialAppLru, warmAppCode])
 
   usePushSubscription()
 
@@ -401,13 +475,13 @@ export default function Shell() {
       // the chat-scoped `app_built` event's job (below). Doing the CTA here
       // is what leaked it into unrelated chats.
       refreshApps().then(updatedApps => {
-        // P1-B: warm the offline cache for the updated app immediately so it
-        // is available offline without the user needing to open it first.
+        // Warm the SW cache for the updated app immediately — the edit
+        // rotated the `?v=` cache key, so without this the next open pays
+        // the network round trip. Every app's read path is cached now
+        // (not just offline-capable ones), so no flag gate here.
         if (ev.appId) {
           const app = updatedApps.find(a => String(a.id) === String(ev.appId))
-          if (app && app.offline_capable) {
-            _precacheApp(app)
-          }
+          if (app) warmAppCode(app)
         }
       })
     } else if (ev.type === 'app_built') {
@@ -425,10 +499,9 @@ export default function Shell() {
           const app = updatedApps.find(a => String(a.id) === String(ev.appId))
           const name = app?.name || null
           setBuiltApp({ id: Number(ev.appId), name })
-          // P1-B: warm the offline cache immediately after a build lands.
-          if (app && app.offline_capable) {
-            _precacheApp(app)
-          }
+          // Warm the SW cache immediately after a build lands so the
+          // "Open app" CTA tap is served from cache.
+          if (app) warmAppCode(app)
         })
       }
     } else if (ev.type === 'chat_run_started') {
@@ -487,7 +560,7 @@ export default function Shell() {
     // can't be serialized. Refs themselves don't need to be in deps (they're
     // stable objects whose .current is read at call time, not at capture time).
     loadTheme, markStreamingEnd, markStreamingStart,
-    refreshApps, refreshChats,
+    refreshApps, refreshChats, warmAppCode,
   ])
 
   // Shell-level SSE subscription for system events. Stays open for
