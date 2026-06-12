@@ -290,6 +290,10 @@
         // with fetch() first (can read the status) when import throws. If the
         // probe says 401/403 we tell the parent to refresh the token rather than
         // showing a permanent error panel, preserving the app's in-session state.
+        // Long enough for a woken radio to re-associate; short enough that the
+        // parent's loading overlay (still up — we haven't posted frame-mounted
+        // or frame-error yet) reads as a slow load, not a hang.
+        const IMPORT_RETRY_DELAY_MS = 800;
         let mod;
         try {
           mod = await import(url);
@@ -315,7 +319,22 @@
             );
             return;  // do NOT show the error panel — the re-init will retry
           }
-          throw importErr;
+          // Mobile networks routinely drop the first fetch after device
+          // wake, and without a retry one transient blip becomes a
+          // permanent "Failed to load app" panel for every app. Network-
+          // class import failures surface as TypeError ("Failed to fetch
+          // dynamically imported module"); anything else (SyntaxError in
+          // the module, a throwing module body) is deterministic, so
+          // retrying would only repeat the failure. ONE retry, structurally
+          // bounded (no loop), pre-mount only — `window.__frameMounted`
+          // stays false on every load-failure path, so the guard is
+          // belt-and-braces against a future caller re-running loadModule
+          // on a live app, where a second import would double-render.
+          if (!(importErr instanceof TypeError) || window.__frameMounted) {
+            throw importErr;
+          }
+          await new Promise((r) => setTimeout(r, IMPORT_RETRY_DELAY_MS));
+          mod = await import(url);  // a second failure falls through to showErr
         }
         const Component = mod.default;
         if (!Component) {
