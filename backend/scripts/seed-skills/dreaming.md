@@ -158,13 +158,50 @@ Use Mind's model of the partner (their recurring interests, projects they care a
 
 Two artifacts: the static **brief** (an HTML page) and a **morning chat** (where the questions live as tappable cards).
 
-**Fill the brief template.** Read `/data/apps/dreaming/dreaming-brief-template.html` (the runner seeds it there before every run — it lives under `/data` because your Read tool is scoped to that tree and can't reach `/app/scripts`), copy it to tonight's run dir, and fill the five sections — exec-summary → what-I-did → what-I-learned → what-needs-your-input → details. Every item carries trigger/why/next-action. Keep the exec-summary to the 3–5 things that matter; push everything else down into details. The **what-I-did** section always ends with one memory-hygiene line: "Memory: N notes created, N merged, N pruned." (Use 0 for unchanged categories — the count matters less than the habit of including it.) **Do not summarize the partner's own Mobius interactions back to them.** Use chat/interview facts only as evidence for what *you* did, what *you* learned, what changed in the platform, and what needs a decision. If a sentence reads like a recap of the partner's day ("you discussed X, then Y"), delete it or turn it into an outcome ("I fixed/propose/learned X because today's agents hit Y"). **Save the finished brief to `/data/apps/$APP_ID/reports/<date>.html`** — first `APP_ID="$(cat /data/apps/dreaming/inputs/app_id)"` and `mkdir -p /data/apps/$APP_ID/reports`. `$APP_ID` is the Dreaming app's **numeric** id: the app lists + renders its briefs from its numeric storage dir (`/api/storage/apps/<id>/...` → `/data/apps/<id>/reports/`), **NOT** the `dreaming` slug dir (which holds the app's *source*, not its *storage*) — write to the slug dir and the app shows "No briefs yet" forever. `<date>` is `YYYY-MM-DD`. If a brief item benefits from one illustration, follow `images.md`; don't decorate for its own sake.
+**Fill the brief template.** Read `/data/apps/dreaming/dreaming-brief-template.html` (the runner seeds it there before every run — it lives under `/data` because your Read tool is scoped to that tree and can't reach `/app/scripts`), copy it to tonight's run dir, and fill the five sections — exec-summary → what-I-did → what-I-learned → what-needs-your-input → details. Every item carries trigger/why/next-action. Keep the exec-summary to the 3–5 things that matter; everything else lives inside collapsed `<details>` items (the shape contract below). The **what-I-did** section always ends with one memory-hygiene line: "Memory: N notes created, N merged, N pruned." (Use 0 for unchanged categories — the count matters less than the habit of including it.) **Do not summarize the partner's own Mobius interactions back to them.** Use chat/interview facts only as evidence for what *you* did, what *you* learned, what changed in the platform, and what needs a decision. If a sentence reads like a recap of the partner's day ("you discussed X, then Y"), delete it or turn it into an outcome ("I fixed/propose/learned X because today's agents hit Y"). **Save the finished brief to `/data/apps/$APP_ID/reports/<date>.html`** — first `APP_ID="$(cat /data/apps/dreaming/inputs/app_id)"` and `mkdir -p /data/apps/$APP_ID/reports`. `$APP_ID` is the Dreaming app's **numeric** id: the app lists + renders its briefs from its numeric storage dir (`/api/storage/apps/<id>/...` → `/data/apps/<id>/reports/`), **NOT** the `dreaming` slug dir (which holds the app's *source*, not its *storage*) — write to the slug dir and the app shows "No briefs yet" forever. `<date>` is `YYYY-MM-DD`. If a brief item benefits from one illustration, follow `images.md`; don't decorate for its own sake.
 
-**Summary-first, high-level by default — the partner should grasp the night in 15 seconds.** The brief must OPEN with the exec-summary: a 2–3 sentence TL;DR of the night plus the 3–5 keypoints, and nothing the partner has to scroll past to reach it. Everything below the summary stays at the altitude of "here's the headline, tap if you want the receipts." Default to terse. The standing complaint is briefs that are too long and too detailed up front, so be ruthless: a section with nothing that clears the trigger/why/next-action bar gets deleted, not padded.
+**The brief's fixed shape — TL;DR, headline cards, then everything collapsed.** The standing complaint is briefs that are too long and too detailed up front. The shape is a contract, top to bottom:
 
-Put the depth behind a tap. For any item whose detail runs past two or three sentences — a long trigger, a diff, a chain of reasoning, the full ledger — wrap the detail in a `<details><summary>…</summary>…</details>` so the default view shows only the one-line headline and the partner expands what they care about. The Dreaming app styles `<details>/<summary>` natively, so this renders as a clean drill-down. The §5 "Details" receipts can live entirely inside `<details>` blocks. The exec-summary itself is never collapsed.
+1. **TL;DR block** (the template's `.lede` headline) — **3–6 sentences max**: what happened tonight and what needs the owner. This is the only always-visible prose in the brief; the partner should grasp the night without scrolling. Never collapsed.
+2. **Headline cards** — the 3–5 keypoints, one line each ("Fixed: gym cron stopped syncing", "Decide: archive 12 stale News digests?"). No sub-prose, no meta rows up here.
+3. **Collapsed details** — EVERY item below the lede (§2–§5) is a `<details class="item">` collapsed by default (never write the `open` attribute) whose `<summary>` is the one-line headline. The lead paragraph, the trigger/why/next-action triad, diffs, ledgers and commit logs all live inside. The partner expands only what they tap.
 
-**Honor the brief-style setting.** If `/data/apps/dreaming/settings.json` has a `verbosity` value, let it set how much prose you write: `terse` = TL;DR plus keypoints plus only the must-act items, almost everything else collapsed; `standard` = the default above; `chatty` = the partner has opted into more narrative, so you may expand the lead paragraphs (but keep summary-first and keep the receipts behind `<details>`). Absent or unrecognized → treat as `standard`.
+Copy this skeleton — the template (and the base style the app injects into every brief, including hand-written fallback ones) ships the `details`/`summary`/`.item` styling, so structure is all you owe:
+
+```html
+<section id="summary">                      <!-- §1 — never collapsed -->
+  <div class="lede">
+    <!-- TL;DR: 3–6 sentences MAX — what happened + what needs the owner. -->
+    <p class="headline">Quiet night: I fixed the Gym sync cron, consolidated
+    four Mind notes, and found one decision for you — archiving the stale
+    News digests. Nothing else needs your attention.</p>
+    <ul class="keypoints">                  <!-- 3–5 one-line headline cards -->
+      <li>Fixed: Gym cron had silently stopped — root-caused and repaired</li>
+      <li>Decide: archive 12 stale News digests? (card in the chat below)</li>
+      <li>Learned: Habits is your most-opened app; proposed a streak view</li>
+    </ul>
+  </div>
+</section>
+
+<section id="did">                          <!-- §2–§5 — every item collapsed -->
+  <div class="sec-head"><span class="sec-num">2</span><h2>What I did</h2></div>
+  <div class="items">
+    <details class="item">                  <!-- collapsed: no `open` -->
+      <summary><span class="badge fixed">Fixed</span> Gym cron had silently stopped</summary>
+      <p class="lead">One short lead paragraph.</p>
+      <dl class="meta">
+        <div><dt>Trigger</dt><span class="v">what you observed</span></div>
+        <div><dt>Why</dt><span class="v">why it matters to the partner</span></div>
+        <div><dt>Done</dt><span class="v action">the one concrete outcome</span></div>
+      </dl>
+    </details>
+  </div>
+</section>
+```
+
+Be ruthless below the lede: a section with nothing that clears the trigger/why/next-action bar gets deleted, not padded, and a one-item night is a fine brief. The exec-summary is never collapsed; everything else defaults shut.
+
+**Honor the brief-style setting.** If `/data/apps/dreaming/settings.json` has a `verbosity` value, let it set how much prose you write: `terse` = TL;DR plus keypoints plus only the must-act items, everything else dropped entirely; `standard` = the default above; `chatty` = the partner has opted into more narrative, so the lead paragraphs *inside* the collapsed items may run longer (the TL;DR cap and collapsed-by-default details still hold). Absent or unrecognized → treat as `standard`.
 
 **Put the questions IN the brief, too.** The decisions also live in the morning chat as tappable cards (below), but the partner asked to see them in the report itself. After §4 (or as the close of §4), include a clearly-styled questions block the app recognizes: a `<section class="brief-questions">` (or a `<div class="brief-questions">`) with an `<h2>` like "A few questions for you" and an `<ol>`/`<ul>` listing each question in plain language. The app styles `.brief-questions` as a distinct card so it stands out at the end of the read. Keep it to the same 2–4 decisions you'll render as cards. End the block with a short `<p class="q-note">` pointing the partner to the chat below ("Answer these with a tap in the conversation below"). This is a *read-only* echo — the static page still can't collect answers; the morning chat does (next).
 
