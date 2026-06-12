@@ -218,7 +218,7 @@ const unsub = window.mobius.storage.subscribe('notes.json', v => setNotes(v || [
 // (list() has NO offline mirror, unlike get()).
 const entries = await window.mobius.storage.list('items/')
 window.mobius.online                        // boolean
-await window.mobius.storage.pendingCount()  // unsynced writes
+await window.mobius.storage.pendingCount()  // unsynced writes — for sync logic only, never rendered as UI
 ```
 
 Conflict policy is last-write-wins per path; where a lost edit would matter, store one file per record (`items/<uuid>.json`) so concurrent edits to different records don't clobber. `window.mobius.storage` is the easy default, not a cage — an app may use raw IndexedDB / OPFS / its own backend (same-origin iframe); the platform never blocks the escape hatch.
@@ -322,7 +322,7 @@ The sandbox excludes `allow-modals`, so native `window.confirm/alert/prompt` sil
 
 Mini-apps should look like they belong to the shell, and like each other. The
 **full canonical shape** for every recurring block (header, sheet, card,
-button, empty state, segmented control, sync pill, …) lives in
+button, empty state, segmented control, offline pill, …) lives in
 [app-component-shapes.md](app-component-shapes.md) — `Read` it when building or
 restyling UI and **copy the blocks you need**. The rules behind those shapes:
 
@@ -365,6 +365,12 @@ restyling UI and **copy the blocks you need**. The rules behind those shapes:
   over the shell's own chrome.
 - **Empty states.** Every list/feed/graph gets a 3-part empty state (mark +
   one-line title + one-line subtitle), never a bare "Nothing here."
+- **Sync status is SILENT WHEN HEALTHY — never show "Saving" or pending-write
+  counters while online.** `window.mobius.storage` queues writes safely; that's
+  invisible plumbing, not information. When offline, show a plain "Offline"
+  pill (no counts, no timestamps); an error the owner must act on may surface,
+  plainly worded. See the SyncPill shape in
+  [app-component-shapes.md](app-component-shapes.md).
 - **Keep copies consistent with fence comments.** Each shared block is wrapped
   in an IDENTICAL versioned marker across apps, so divergence is visible and a
   future extraction into a real library is a `grep`-and-move:
@@ -385,7 +391,7 @@ restyling UI and **copy the blocks you need**. The rules behind those shapes:
 Start every new app from this shape: ``const CSS`` rendered via
 `<style>{CSS}</style>`, fenced shared blocks, theme tokens, 44px controls, a
 header with a mark + title + subtitle, a list with a 3-part empty state, and a
-bottom-sheet. Copy more blocks (cards, segmented control, sync pill) from
+bottom-sheet. Copy more blocks (cards, segmented control, offline pill) from
 [app-component-shapes.md](app-component-shapes.md). Pick your own short class
 prefix (here `ma-`). Then fill in the domain logic.
 
