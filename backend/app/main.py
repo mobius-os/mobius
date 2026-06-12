@@ -7,6 +7,7 @@ mounted last as a catch-all so that client-side routing works.
 
 import asyncio
 import logging
+import mimetypes
 import re
 import time
 from contextlib import asynccontextmanager
@@ -673,11 +674,12 @@ def _serve_app_static_asset(
   # cache) and everything else revalidates — but a revalidation is now
   # a bodiless 304 instead of a full re-download (CubeRun re-shipped
   # ~19MB of models/textures on every open before this).
+  hashed = bool(_HASHED_ASSET_NAME.search(target.name))
   etag = f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
   headers = {
     "Cache-Control": (
       "public, max-age=31536000, immutable"
-      if _HASHED_ASSET_NAME.search(target.name)
+      if hashed
       else "no-cache, must-revalidate"
     ),
     "ETag": etag,
@@ -686,10 +688,34 @@ def _serve_app_static_asset(
   }
   if _client_copy_is_fresh(request, etag, stat.st_mtime):
     return Response(status_code=304, headers=headers)
-  return FileResponse(str(target), headers=headers)
+  if request.method == "HEAD" or hashed:
+    # FileResponse answers HEAD header-only with the true Content-Length,
+    # and gives immutable (hashed-name) files Range/206 support — safe
+    # there because Chromium never revalidates an immutable entry, so the
+    # partial-slice-as-200 trap below can't fire.
+    return FileResponse(str(target), headers=headers)
+  # Revalidating (non-hashed) assets get the full body unconditionally,
+  # ignoring any Range header (RFC 9110 lets a server do that). Serving a
+  # 206 slice of a `no-cache` + ETag asset poisoned Chromium's HTTP cache:
+  # the stored slice revalidated 304 and was then served as a status-200
+  # full response — 1 byte long. CubeRun's `Range: bytes=0-0` probe turned
+  # the game's index.html into the single character '<' for every later
+  # open (the 2026-06-12 black-screen outage).
+  media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+  return Response(
+    content=target.read_bytes(), media_type=media_type, headers=headers,
+  )
 
 
-@app.get("/app-assets/by-id/{app_id}/{asset_path:path}", include_in_schema=False)
+# HEAD is registered alongside GET because client-side asset probes ("are
+# the files installed?") want existence + headers without the body; a 405
+# pushes well-meaning probes into `Range: bytes=0-0` fallbacks, which is
+# exactly the poisoning trigger described in _serve_app_static_asset.
+@app.api_route(
+  "/app-assets/by-id/{app_id}/{asset_path:path}",
+  methods=["GET", "HEAD"],
+  include_in_schema=False,
+)
 async def app_owned_asset_by_id(app_id: int, asset_path: str, request: Request):
   """Serve durable static assets owned by an installed app.
 
@@ -705,7 +731,11 @@ async def app_owned_asset_by_id(app_id: int, asset_path: str, request: Request):
   )
 
 
-@app.get("/app-assets/{slug}/{asset_path:path}", include_in_schema=False)
+@app.api_route(
+  "/app-assets/{slug}/{asset_path:path}",
+  methods=["GET", "HEAD"],
+  include_in_schema=False,
+)
 async def app_owned_asset(slug: str, asset_path: str, request: Request):
   """Serve durable static assets owned by an installed app slug."""
   if not slug or not all(ch.isalnum() or ch in "-_" for ch in slug):
