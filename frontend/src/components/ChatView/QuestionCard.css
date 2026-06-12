@@ -89,13 +89,18 @@
   border-color: transparent;
 }
 
-/* Pick-one vs pick-many glyph.
-   Unselected: outline ring in var(--border) / currentColor at 65% opacity.
-   Selected radio: accent ring + a center dot via radial-gradient — looks like
-     a proper radio button rather than a solid filled blob.
-   Selected checkbox: accent-filled rounded square + a white checkmark glyph
-     via an ::after pseudo-element — standard checkbox affordance.
-   Box = multi (checkbox), circle = single (radio). */
+/* Pick-one vs pick-many glyph. Box = multi (checkbox), circle = single
+   (radio).
+   Unselected: outline ring in currentColor (= --text on the transparent
+     chip) at 65% opacity.
+   Selected marks sit INSIDE the accent-filled chip, so they must be drawn
+   in the chip's on-accent foreground (currentColor = the chip's text
+   color), never in var(--accent) — accent-on-accent renders an invisible
+   glyph in every theme:
+   Selected radio: ring + center dot via radial-gradient, both currentColor.
+   Selected checkbox: currentColor-filled rounded square with the checkmark
+     stroked in var(--accent) so it contrasts against that fill (reads as a
+     cut-out of the chip background). */
 .qcard__mark {
   flex: none;
   width: 14px;
@@ -113,33 +118,36 @@
   border-radius: 50%;
 }
 
-/* Selected radio: accent ring + center dot (not a solid fill) */
+/* Selected radio: ring + center dot in the chip's on-accent foreground */
 .qcard__opt--on .qcard__mark--radio {
   background: radial-gradient(
     circle,
-    var(--accent) 0%,
-    var(--accent) 38%,
+    currentColor 0%,
+    currentColor 38%,
     transparent 40%
   );
-  border-color: var(--accent);
+  border-color: currentColor;
   opacity: 1;
 }
 
-/* Selected checkbox: accent fill + white checkmark */
+/* Selected checkbox: on-accent fill + accent checkmark */
 .qcard__opt--on .qcard__mark--box {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: currentColor;
+  border-color: currentColor;
   opacity: 1;
 }
 .qcard__opt--on .qcard__mark--box::after {
   content: '';
   position: absolute;
-  /* Checkmark drawn as a rotated L: left stroke + right stroke */
+  /* Checkmark drawn as a rotated L: left stroke + right stroke. Stroked in
+     var(--accent) — the box behind it is currentColor-filled (on-accent
+     foreground), so the accent stroke is the contrasting color here, and it
+     visually matches the chip's accent background showing through. */
   left: 2px;
   top: 1px;
   width: 4px;
   height: 7px;
-  border: 1.5px solid var(--bg, #fff);
+  border: 1.5px solid var(--accent);
   border-top: none;
   border-left: none;
   transform: rotate(45deg);
