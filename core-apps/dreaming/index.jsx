@@ -18,15 +18,18 @@
  *    run for the sole purpose of reporting content height via postMessage.
  *    hardenReportHtml injects a CSP + a minimal height-reporter snippet.
  *
- * Brief↔chat link: the cron creates the morning chat (`POST /api/chats`,
- * title "Morning brief — <date>") and SHOULD write a sibling
+ * Brief↔chat link: the nightly run creates the morning chat app-attributed
+ * (`POST /api/app-chats` with a Dreaming app token, title "Morning brief —
+ * <date>") so the conversation lives HERE, under its brief, and stays out of
+ * the owner's drawer history (`GET /api/chats` hides `created_by_app_id`
+ * chats by default). The run SHOULD write a sibling
  * `reports/<date>.meta.json` = { "chat_id": "<id>" } so the date maps to a
  * chat without guessing. The app reads that meta with its app token; when a
  * chat_id resolves it mounts the real ChatView via `window.mobius.chat({
- * mount, chatId })` (the embed runs in the shell origin with the owner JWT —
- * the only path that can read/post an owner-created chat; the app token alone
- * is 403'd on /api/chats). No chat_id (or no `window.mobius.chat`) → the
- * brief stands alone, gracefully.
+ * mount, chatId })` (the embed runs in the shell origin with the owner JWT,
+ * which can always read/post an app's chats — and still renders legacy
+ * owner-created morning chats through the same path). No chat_id (or no
+ * `window.mobius.chat`) → the brief stands alone, gracefully.
  */
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 
@@ -774,8 +777,11 @@ function useOnline() {
 // Morning chat embed. `window.mobius.chat({ mount, chatId })` mounts the real
 // ChatView (composer + live SSE + tappable AskUserQuestion cards) inside a
 // nested same-origin iframe that runs in the SHELL origin — so it carries the
-// owner JWT and can read/post the owner-created morning chat the cron opened.
-// (The app token alone is 403'd on /api/chats; this is the supported path.)
+// owner JWT and can read/post the morning chat the nightly run opened. The
+// chat is app-attributed (created via /api/app-chats), so the drawer's chat
+// list hides it and THIS embed is its home surface; the owner JWT still
+// drives it (the owner can always read/post an app's chats), and legacy
+// owner-created morning chats render through the same path.
 //
 // We MUST pass an existing chatId. The runtime can lazy-create a chat when
 // none is given, but that would make a brand-new empty chat, not find the
@@ -820,8 +826,8 @@ function MorningChat({ chatId }) {
       <div style={S.noChatNote}>
         <span aria-hidden="true" style={{ fontSize: '15px', lineHeight: 1.2 }}>💬</span>
         <span>
-          The conversation about this brief isn’t available here. Open it from
-          your chat list to reply.
+          The conversation about this brief isn’t available in this view.
+          Open the Dreaming app inside Möbius to reply.
         </span>
       </div>
     )

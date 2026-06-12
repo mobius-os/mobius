@@ -182,13 +182,17 @@ brief ("I prepared questions but could not open the morning chat") and
 do not write "I asked" or "answer below." Static HTML cannot collect
 answers.
 
-1. Create the chat:
+1. Create the chat — **app-attributed, owned by the Dreaming app** (`POST /api/app-chats` with a Dreaming app token). An app-attributed chat lives inside the app — rendered under the brief — and stays out of the partner's drawer history (`GET /api/chats` hides `created_by_app_id` chats by default), which is exactly where this conversation belongs. Do NOT create it with `POST /api/chats` + `$AGENT_TOKEN`: that makes an owner chat that clutters the chat list next to the partner's own conversations. Mint the app token with the same numeric `$APP_ID` as the brief, then create:
    ```bash
-   curl -s -X POST "$API_BASE_URL/api/chats" \
+   APP_TOKEN=$(curl -s -X POST "$API_BASE_URL/api/auth/app-token" \
      -H "Authorization: Bearer $AGENT_TOKEN" -H "Content-Type: application/json" \
+     -d "{\"app_id\": $APP_ID}" \
+     | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+   curl -s -X POST "$API_BASE_URL/api/app-chats" \
+     -H "Authorization: Bearer $APP_TOKEN" -H "Content-Type: application/json" \
      -d "{\"title\": \"Morning brief — $(date +%Y-%m-%d)\"}"
    ```
-   Capture the returned `id` as `$MORNING_CHAT`, then **write the brief↔chat link** the app needs to wire the date to its conversation — a sibling file next to the brief (same numeric `$APP_ID` storage dir as the brief above, NOT the slug dir):
+   (`$APP_TOKEN` is only for this create; every later call below keeps using `$AGENT_TOKEN` — the owner token can always read, send to, and stream an app's chats, and the push deep-link still opens the chat by id.) Capture the returned `id` as `$MORNING_CHAT`, then **write the brief↔chat link** the app needs to wire the date to its conversation — a sibling file next to the brief (same numeric `$APP_ID` storage dir as the brief above, NOT the slug dir):
    ```bash
    printf '{"chat_id": "%s"}' "$MORNING_CHAT" > /data/apps/$APP_ID/reports/$(date +%Y-%m-%d).meta.json
    ```
