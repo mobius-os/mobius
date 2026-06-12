@@ -72,6 +72,33 @@ def test_app_token_can_access_storage(client, owner_token):
   assert r.status_code == 204
 
 
+def test_app_token_can_list_models(client, owner_token):
+  """App tokens can GET /api/models — read-only, needed by in-app
+  model pickers. Same response shape as the owner gets."""
+  from app.providers import invalidate_model_cache
+  invalidate_model_cache()
+  _, app_token = _make_app_and_token(client, owner_token)
+  r = client.get("/api/models", headers={
+    "Authorization": f"Bearer {app_token}",
+  })
+  assert r.status_code == 200
+  body = r.json()
+  assert set(body["providers"]) == {"claude", "codex"}
+  for entries in body["providers"].values():
+    for entry in entries:
+      assert set(entry) >= {"id", "label", "provider", "available"}
+
+
+def test_app_token_cannot_write_settings(client, owner_token):
+  """The models route accepting app tokens must not loosen the rest of
+  the module — a settings WRITE with an app token is still rejected."""
+  _, app_token = _make_app_and_token(client, owner_token)
+  r = client.post("/api/settings", json={"provider": "codex"}, headers={
+    "Authorization": f"Bearer {app_token}",
+  })
+  assert r.status_code == 403
+
+
 def test_app_token_cannot_create_apps(client, owner_token):
   # Create an app first to get a valid app token.
   r = client.post("/api/apps/", json={

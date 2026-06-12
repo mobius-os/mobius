@@ -23,7 +23,11 @@ from app import models, providers
 from app.auth import encrypt_api_key
 from app.config import get_settings as get_app_settings
 from app.database import get_db
-from app.deps import get_current_owner, reject_cross_site
+from app.deps import (
+  get_current_owner,
+  get_current_owner_or_app,
+  reject_cross_site,
+)
 from app.schemas import (
   ModelPrefsUpdate,
   ModelRegistryResponse,
@@ -141,13 +145,18 @@ async def list_model_registry(
     description="When true, bypass the 5-minute cache and re-fetch "
     "upstream. Used by the manage-models modal's explicit refresh.",
   ),
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_or_app),
 ) -> ModelRegistryResponse:
   """Returns the registry of available models per provider.
 
   Live data is cached for 5 minutes per provider. A fetch failure
   falls back to KNOWN_MODELS for that provider — the other
   provider's live data still flows.
+
+  Accepts app-scoped tokens, unlike the rest of this module: the
+  registry is read-only and model ids aren't secrets, and mini-apps
+  with a model picker (e.g. a per-conversation model selector) need
+  the list. Settings reads/writes and owner prefs stay owner-only.
   """
   data_dir = get_app_settings().data_dir
   registry = await providers.list_models(data_dir, force_refresh=refresh)
