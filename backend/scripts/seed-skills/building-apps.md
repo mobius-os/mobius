@@ -618,6 +618,26 @@ window.parent.postMessage({ type: 'moebius:new-chat', draft: 'Hello!' }, window.
 
 ---
 
+## Immersive mode — full-screen apps (games)
+
+The shell's top bar takes ~58px a game wants back. An app can ask the shell to hide its chrome and hand over the full viewport — including under the iPhone notch (the shell ships `viewport-fit=cover` and a translucent status bar):
+
+```jsx
+useEffect(() => {
+  const post = (value) => window.parent.postMessage(
+    { type: 'moebius:immersive', value, appId }, window.location.origin)
+  post(true)
+  return () => post(false)
+}, [appId])
+```
+
+- `value: true` hides the top bar while your app is the active canvas; `value: false` (your effect cleanup) restores it. The shell also restores chrome on app switch or unmount on its own, so you can't strand the user — but post the cleanup anyway for the in-place case.
+- While immersive you own safe-area padding: pad HUD/overlay elements with `env(safe-area-inset-*)` so the notch or punch-hole doesn't cover them.
+- The shell renders its own floating exit button at the top-left (safe-area inset) while immersive. Don't draw a competing exit control, and keep critical tap targets out of that corner. If the user taps it, the shell stays in normal chrome until your app remounts and posts again — respect that choice; don't re-post on a timer.
+- Standalone opens (`/apps/<slug>/`) have no shell; the message is harmlessly ignored. No flag, no manifest field, no DB column — the postMessage is the whole opt-in.
+
+---
+
 ## Token scoping
 
 Mini-apps receive a scoped token (not the owner's full JWT). It CAN access: storage, proxy, app-attributed chats, notifications, push, uploads, app endpoints, and the read-only model list (`GET /api/models`). It CANNOT access: auth, settings, or owner-only chat endpoints.

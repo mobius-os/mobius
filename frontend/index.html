@@ -8,7 +8,12 @@
     <meta name="description" content="AI-powered personal app platform." />
     <!-- iOS PWA: hides Safari UI chrome when launched from home screen -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+    <!-- black-translucent extends the web view UNDER the iOS status bar /
+         notch — the shell bar pads by env(safe-area-inset-top), and
+         immersive mode (moebius:immersive, .pm/128) relies on it for true
+         full-viewport games. iOS reads this at PWA LAUNCH: changing it
+         needs the installed PWA fully relaunched from the home screen. -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Möbius" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="icon" type="image/png" href="/moebius.png" />
