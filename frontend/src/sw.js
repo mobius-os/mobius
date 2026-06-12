@@ -50,6 +50,7 @@ import {
   isCacheableAssetResponse,
   isCacheableAppAssetResponse,
   isImmutableAppAsset,
+  isRangeRequest,
   isStaleRuntimeCache,
   shouldServeCacheFirst,
   shouldFallBackToCacheOnError,
@@ -221,9 +222,18 @@ registerRoute(
 // If-None-Match) is refused by cacheWillUpdate — non-200 never replaces
 // a stored copy, and the browser synthesizes the body from its own HTTP
 // cache, so there is no frame/module-style never-cached trap here.
+// Ranged requests (`Range:` header) bypass BOTH routes — straight to the
+// network, never matched against or stored in the cache. A response to a
+// ranged fetch can come back from Chromium's HTTP cache as a status-200
+// body holding only the slice (no 206/Content-Range marker), and caching
+// that under the bare URL truncates the asset for every later consumer —
+// CubeRun's `Range: bytes=0-0` probe blacked out the game this way
+// (2026-06-12); the request side is the only place the case is visible.
 registerRoute(
-  ({ url }) =>
-    url.origin === self.location.origin && isImmutableAppAsset(url.pathname),
+  ({ url, request }) =>
+    url.origin === self.location.origin &&
+    isImmutableAppAsset(url.pathname) &&
+    !isRangeRequest(request),
   new CacheFirst({
     cacheName: APP_ASSETS_CACHE,
     plugins: [{
@@ -233,10 +243,11 @@ registerRoute(
   }),
 )
 registerRoute(
-  ({ url }) =>
+  ({ url, request }) =>
     url.origin === self.location.origin &&
     url.pathname.startsWith('/app-assets/') &&
-    !isImmutableAppAsset(url.pathname),
+    !isImmutableAppAsset(url.pathname) &&
+    !isRangeRequest(request),
   new StaleWhileRevalidate({ cacheName: APP_ASSETS_CACHE }),
 )
 

@@ -199,3 +199,56 @@ def test_security_guards_run_before_caching(client, owner_token):
     headers={"If-None-Match": '"anything"'},
   )
   assert unknown.status_code == 404
+
+
+def test_head_is_supported_with_validators_and_no_body(client, owner_token):
+  app = _create_app(client, owner_token)
+  _write_static(app["id"], "index.html", "<title>CubeRun</title>")
+
+  r = client.head("/app-assets/cuberun/index.html")
+  assert r.status_code == 200
+  assert r.content == b""
+  assert r.headers.get("etag")
+  # A 405 here pushes client-side probes into a `Range: bytes=0-0` GET
+  # fallback — the trigger for the partial-body cache poisoning below.
+
+  by_id = client.head(f"/app-assets/by-id/{app['id']}/index.html")
+  assert by_id.status_code == 200
+  assert by_id.content == b""
+
+
+def test_range_is_ignored_on_revalidating_assets(client, owner_token):
+  """A ranged GET of a no-cache asset must get the FULL 200 body.
+
+  Serving a 206 slice of a `no-cache` + ETag asset poisoned Chromium's
+  HTTP cache: the stored slice revalidated 304 and was then served as a
+  status-200 full response, one byte long — CubeRun's index.html became
+  the single character '<' for every later open (2026-06-12 outage).
+  RFC 9110 explicitly allows ignoring Range, so these assets do.
+  """
+  app = _create_app(client, owner_token)
+  _write_static(app["id"], "index.html", "<title>CubeRun</title>")
+
+  r = client.get(
+    "/app-assets/cuberun/index.html",
+    headers={"Range": "bytes=0-0"},
+  )
+  assert r.status_code == 200
+  assert r.text == "<title>CubeRun</title>"
+  assert "content-range" not in r.headers
+
+
+def test_range_still_works_on_immutable_hashed_assets(client, owner_token):
+  """Hashed-name assets keep 206 support (media seeking) — safe because
+  immutable entries are never revalidated, so the 304-slice trap above
+  cannot fire for them."""
+  app = _create_app(client, owner_token)
+  _write_static(app["id"], "media/track.a1b2c3d4.mp3", "0123456789")
+
+  r = client.get(
+    "/app-assets/cuberun/media/track.a1b2c3d4.mp3",
+    headers={"Range": "bytes=0-3"},
+  )
+  assert r.status_code == 206
+  assert r.content == b"0123"
+  assert r.headers["content-range"] == "bytes 0-3/10"
