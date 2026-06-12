@@ -130,6 +130,21 @@ const VENDORED_CODEMIRROR = [
   `${CODEMIRROR_VENDOR}/lezer-highlight.mjs`,
 ].map(url => ({ url, revision: null }))
 
+// Self-hosted d3 + PixiJS for the Mind graph — same precache rationale as
+// React above. Unlike the importmap libs these are CLASSIC script-tag loads
+// (the app's loadScriptOnce expects window.d3 / window.PIXI globals); they
+// were previously fetched from cdn.jsdelivr.net, which the prod CSP
+// (script-src 'self' ... https://esm.sh) blocks — the graph silently
+// degraded to the list view and could never work offline. The files are
+// committed at frontend/public/vendor/ (Vite copies public/ verbatim, so no
+// Dockerfile npm-install step); the version in the path is the cache-bust.
+// Bumping a version here means bumping the dir under frontend/public/vendor/
+// + the D3_URL / PIXI_URL constants in core-apps/mind/index.jsx in lockstep.
+const VENDORED_MIND_GRAPH = [
+  '/vendor/d3@7.9.0/d3.min.js',
+  '/vendor/pixi.js@8.19.0/pixi.min.js',
+].map(url => ({ url, revision: null }))
+
 // Inject point — Workbox replaces `self.__WB_MANIFEST` with the precache
 // manifest derived from the Vite build's content-hashed assets. The result
 // is that every release's shell precache lives under a unique
@@ -141,6 +156,7 @@ precacheAndRoute([
   ...VENDORED_CODEMIRROR,
   ...VENDORED_RECHARTS,
   ...VENDORED_DATE_FNS,
+  ...VENDORED_MIND_GRAPH,
 ])
 cleanupOutdatedCaches()
 
