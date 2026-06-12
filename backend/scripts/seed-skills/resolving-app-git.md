@@ -78,15 +78,16 @@ Edit each conflicted file (usually `index.jsx`, sometimes sibling modules) to th
 result you decided on, **deleting the `<<<<<<<`, `=======`, `>>>>>>>` lines**.
 Re-read the surrounding code so the result is coherent, not just marker-free.
 
-**Save, then VERIFY — the auto-finalize watcher is unreliable, so never assume
-it fired.** Once a file is marker-free, save it. The watcher *may* recompile and,
-because a merge is in progress, finalize the merge for you — but in practice it
-often stalls and doesn't, so the manual fallback below is the normal case, not
-an edge case. After saving, always check that all three landed: `MERGE_HEAD` is
-gone, the finalizing commit is a 2-parent merge, and a fresh non-stub bundle was
-compiled. If any didn't, run the manual finalize + manual recompile yourself.
+**Finish by saving — the watcher does the rest.** Once every file is
+marker-free, just save. The watcher recompiles and, because a merge is in
+progress, its commit finalizes the merge for you. It deliberately refuses to
+finalize while ANY tracked file still holds markers — the conflict can live in
+a non-entry file (a job script, a sibling module), so resolve them all, not
+just `index.jsx`. (An earlier watcher silently missed edits on the data volume
+and stalled here routinely; that bug is fixed — a memory note saying
+hand-finalizing is the norm predates the fix.)
 
-**Confirm it took.** The single fact that proves the merge finalized is
+**Confirm it took — one check is enough.** The single fact that proves it is
 that the finalizing commit is a **2-parent merge** (that's what advances the
 base so the *next* update won't re-conflict):
 
@@ -94,22 +95,24 @@ base so the *next* update won't re-conflict):
 GIT_CEILING_DIRECTORIES=/data/apps git -C /data/apps/<slug> log -1 --pretty='%p'
 ```
 
-TWO short SHAs printed = merge finalized, `MERGE_HEAD` gone, base advanced. ONE
-SHA means the watcher didn't finalize — go finish by hand (below). (When it did
-finalize, the commit subject reads `agent edit`, not `Merge` — that's the
-watcher; expected, don't let it fool you.)
+TWO short SHAs printed = done — merge finalized, `MERGE_HEAD` gone, base
+advanced. (The commit subject reads `agent edit`, not `Merge` — that's the
+watcher finalizing; expected, don't let it fool you.) ONE SHA means it hasn't
+finalized — almost always leftover markers in SOME tracked file. Hunt across
+the whole repo, not just the file you edited
+(`GIT_CEILING_DIRECTORIES=/data/apps git -C /data/apps/<slug> grep -n '<<<<<<<'`),
+fix, save again. If it's genuinely clean and still not finalized, finish by
+hand (below).
 
-Then confirm the app actually rebuilt — this is a gate, not a nice-to-have,
-because a stalled watcher leaves the previous bundle in place: `stat -c '%y'
-/data/compiled/app-<id>.js` must be FRESH and the file must be a real bundle, not
-the compile-failed stub (`<id>` from `curl -s -H "Authorization: Bearer
-$AGENT_TOKEN" "$API_BASE_URL/api/apps/" | python3 -c 'import sys,json;[print(a["id"],a["slug"]) for a in json.load(sys.stdin)]'`).
-If it's stale, recompile by hand (the manual finalize below re-touches the source
-so the watcher recompiles; if it still doesn't, save/touch the file again).
+Optional eyeball that the app rebuilt: `stat -c '%y' /data/compiled/app-<id>.js`
+should be fresh and the file a real bundle, not the compile-failed stub (`<id>`
+from `curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/apps/"
+| python3 -c 'import sys,json;[print(a["id"],a["slug"]) for a in json.load(sys.stdin)]'`).
+This is a nice-to-have, not a gate — the 2-parent commit already tells you the
+resolution stuck.
 
-When the watcher didn't finalize (a merge still in progress — `.git/MERGE_HEAD`
-exists) or the recompile failed (`/data/logs/chat.log` shows `compile failed`),
-finish by hand. Expect to do this regularly:
+If a merge is still in progress (`.git/MERGE_HEAD` exists) or the recompile
+failed (`/data/logs/chat.log` shows `compile failed`), finish by hand:
 
 ```bash
 GIT_CEILING_DIRECTORIES=/data/apps git -C /data/apps/<slug> add -A
