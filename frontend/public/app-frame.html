@@ -169,11 +169,21 @@
     // interactive: a transient unhandled rejection — e.g. an offline
     // fetch/storage save failing at Snake's game-over — would otherwise
     // destroy the whole app to a blank/error screen. So once mounted we
-    // SWALLOW the error and leave the app on screen; only pre-mount errors
-    // still surface the panel. `window.__frameMounted` is set right after
-    // createRoot().render() below.
+    // keep the app on screen and only LOG the error; pre-mount errors
+    // still surface the panel. `window.__frameMounted` is set by a
+    // passive effect after React commits the first render (see
+    // MountSignal in the module script below) — NOT right after
+    // createRoot().render(), because render() only schedules the first
+    // render and a component that throws during it reports the error
+    // asynchronously, after render() returns.
     function handleFrameError(title, detail) {
-      if (window.__frameMounted) return  // app is live — keep it on screen
+      if (window.__frameMounted) {
+        // The browser also logs the uncaught error natively; this line
+        // records why no error panel replaced the working UI.
+        console.error('[moebius-frame] post-mount ' + title +
+          ' (app left on screen): ' + detail)
+        return
+      }
       showErr(title, detail)
     }
     window.addEventListener('error', function(e) {
@@ -217,9 +227,22 @@
     // the ready event but cannot inject a token — their reply has
     // the wrong origin.
     import { createRoot } from 'react-dom/client';
-    import { createElement } from 'react';
+    import { createElement, Fragment, useEffect } from 'react';
 
     let initialized = false;
+
+    // Flips the post-mount error guard (handleFrameError above). Rendered
+    // as the FIRST sibling of the app component, so its passive effect is
+    // the first thing React runs after committing the initial render —
+    // i.e. the app's DOM is actually on screen. A component that throws
+    // DURING its first render aborts the commit, this effect never runs,
+    // and the error panel still shows (the pre-mount path). A throw in
+    // the app's own mount effects happens with committed, visible DOM, so
+    // counting it as post-mount (suppressed + logged) is correct.
+    function MountSignal() {
+      useEffect(() => { window.__frameMounted = true; }, []);
+      return null;
+    }
 
     function applyTheme(css, bg) {
       if (typeof css === 'string' && css.length) {
@@ -300,7 +323,10 @@
           return;
         }
         createRoot(document.getElementById('root')).render(
-          createElement(Component, { appId: _FRAME_APP_ID, token })
+          createElement(Fragment, null,
+            createElement(MountSignal),
+            createElement(Component, { appId: _FRAME_APP_ID, token })
+          )
         );
         // Tell the parent we've kicked off the React render so it
         // can hide the loading overlay. iframe.onLoad alone fires
