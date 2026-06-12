@@ -11,15 +11,21 @@
  * Everything else here is presentation. The graph renderer intentionally follows
  * Quartz's durable shape: d3-force for layout and PixiJS for links, nodes, and
  * labels in one transformed scene. D3/Pixi load the same way Quartz does:
- * pinned global scripts. Markdown rendering still lazy-loads marked + DOMPurify
- * from esm.sh.
+ * pinned global scripts — served same-origin from /vendor because the prod
+ * CSP only allows 'self' + esm.sh for scripts. Markdown rendering still
+ * lazy-loads marked + DOMPurify from esm.sh (which the CSP permits).
  */
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 
 const GRAPH_URL = '/api/storage/shared/memory/graph.json';
 const NOTE_BASE = '/api/storage/shared/memory/';
-const D3_URL = 'https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js';
-const PIXI_URL = 'https://cdn.jsdelivr.net/npm/pixi.js@8.19.0/dist/pixi.min.js';
+// Self-hosted under /vendor (frontend/public/vendor/, precached by sw.js).
+// Prod CSP (script-src 'self' 'unsafe-inline' https://esm.sh) blocks
+// cdn.jsdelivr.net, which silently degraded the graph to the list view.
+// Same dist files the jsdelivr URLs served; both expose classic-script
+// globals (window.d3 / window.PIXI).
+const D3_URL = '/vendor/d3@7.9.0/d3.min.js';
+const PIXI_URL = '/vendor/pixi.js@8.19.0/pixi.min.js';
 const MAX_LOCAL_DEPTH = 4;
 const WIKILINK_RE = /\[\[\s*([^\]|#]+?)\s*(?:#[^\]|]*)?(?:\|\s*([^\]]+?)\s*)?\]\]/g;
 
