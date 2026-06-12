@@ -14,18 +14,22 @@
  *   - Web Push handlers (push, notificationclick). These are
  *     domain-specific behavior that doesn't fit a Workbox recipe.
  *
- * Caching model for `/api/apps/{id}/{frame,module}` (offline-capable apps):
- *   - These ARE cached, by `offlineCapableHandler`, but ONLY for apps the
- *     server marks `X-Mobius-Offline: 1` (offline_capable). Once cached, the
- *     strategy is cache-first in every connectivity state: the cached app opens
- *     immediately and a background fetch refreshes the cache. Freshness comes
- *     from the versioned frame/module URLs (`?v=<app.updated_at>` is part of
- *     the cache key), so an app update naturally becomes a cache miss and loads
- *     from the network on its first open.
+ * Caching model for `/api/apps/{id}/{frame,module}` (ALL installed apps):
+ *   - These ARE cached, by `appCodeHandler`, for EVERY installed app — loading
+ *     speed must not depend on the manifest's offline_capable flag. Once
+ *     cached, the strategy is cache-first in every connectivity state: the
+ *     cached app opens immediately and a background fetch refreshes the cache.
+ *     Freshness comes from the versioned frame/module URLs
+ *     (`?v=<app.updated_at>` is part of the cache key), so an app update
+ *     naturally becomes a cache miss and loads from the network on its first
+ *     open.
  *   - cache:'reload' on the network attempt avoids the 304-no-body trap that
  *     previously left the module uncached (the old "spinner-forever" class).
- *   - Non-offline-capable apps are NEVER cached (no X-Mobius-Offline header) →
- *     always network, never stale.
+ *   - The offline_capable flag (`X-Mobius-Offline: 1` response header) still
+ *     gates the STANDALONE navigation cache + offline write semantics — a
+ *     non-capable app's /apps/<slug>/ page is never stored, so its offline
+ *     open keeps showing the branded offline page exactly as before. Only the
+ *     in-shell read path (frame/module) is flag-independent.
  *   - HTML/shell navigations: StaleWhileRevalidate (instant cached shell);
  *     other `/api/*`: straight to network.
  */
@@ -53,6 +57,8 @@ import {
   isStaleRuntimeCache,
   shouldServeCacheFirst,
   shouldFallBackToCacheOnError,
+  isAppCodeRoute,
+  appCodeStoreAction,
 } from './sw-cache-policy.js'
 
 // LOAD-BEARING: these two calls are NOT injected by vite-plugin-pwa
@@ -272,11 +278,16 @@ registerRoute(
 // are NOT swept on activate; only logout clears them (client.js
 // wipes all mobius-* caches).
 
-// Offline runtime caching for the per-app frame + module and the
-// standalone-app navigation. Only stores responses the server marks
-// offline-capable (X-Mobius-Offline header, set by routes/apps.py +
-// standalone.py for offline_capable apps), so non-capable apps keep
-// their network-only behavior exactly.
+// Runtime caching for the per-app frame + module and the standalone-app
+// navigation, via one shared handler with two storage policies (see
+// appCodeStoreAction in sw-cache-policy.js):
+//   - frame/module (gated=false): EVERY installed app's code is cached, so
+//     every app gets the instant cache-first open. The offline_capable flag
+//     no longer gates the read path.
+//   - standalone navigations (gated=true): only stores responses the server
+//     marks offline-capable (X-Mobius-Offline header, set by routes/apps.py +
+//     standalone.py for offline_capable apps), so non-capable apps keep their
+//     network-only standalone behavior exactly.
 //
 // Why a hand-written handler instead of NetworkFirst + a cacheWillUpdate
 // gate: these routes carry an ETag and `Cache-Control: no-cache`. Once the
@@ -295,8 +306,8 @@ registerRoute(
 // under a token-stripped key; serve the stored copy when the network fails.
 // This makes offline availability a deterministic function of "was it
 // loaded online once," independent of HTTP-cache revalidation state.
-// Offline-capable frame/module strategy: CACHE-FIRST once cached. A cached app
-// is served instantly and revalidated in the background in every connectivity
+// Frame/module strategy: CACHE-FIRST once cached. A cached app is served
+// instantly and revalidated in the background in every connectivity
 // state. This is safe and fresh enough because AppCanvas includes
 // `?v=<app.updated_at>` in the frame URL and the frame forwards that same
 // version into the module URL; an app edit changes the cache key and forces a
@@ -336,7 +347,7 @@ async function boundedFetch(buildRequest) {
   }
 }
 
-function offlineCapableHandler(cacheName) {
+function appCodeHandler(cacheName, { gated }) {
   return async ({ request, event }) => {
     const cache = await caches.open(cacheName)
     // The module URL carries a rotating auth token and a retry `_=` buster;
@@ -361,17 +372,16 @@ function offlineCapableHandler(cacheName) {
           return new Request(request.url, { cache: 'reload', credentials: 'same-origin', signal })
         }
       })
-      if (resp && resp.status === 200) {
-        if (resp.headers.get('X-Mobius-Offline') === '1') {
-          await cache.put(cacheKey, resp.clone())
-        } else {
-          // 200 but no offline header → the app was toggled offline_capable OFF.
-          // Purge the now-stale entry so future opens stop serving it
-          // cache-first (otherwise it would persist forever — cache.put is
-          // skipped for header-less responses, so the old body never gets
-          // overwritten). Self-heals a de-capabled app on the next refresh.
-          await cache.delete(cacheKey)
-        }
+      // Storage policy lives in sw-cache-policy.js so it's unit-tested:
+      // ungated (frame/module) stores every 200; gated (standalone) stores
+      // only X-Mobius-Offline:1 and PURGES a header-less 200 so an app
+      // toggled offline_capable OFF self-heals on the next refresh.
+      if (resp) {
+        const action = appCodeStoreAction(
+          resp.status, resp.headers.get('X-Mobius-Offline'), gated,
+        )
+        if (action === 'store') await cache.put(cacheKey, resp.clone())
+        else if (action === 'purge') await cache.delete(cacheKey)
       }
       return resp
     }
@@ -465,13 +475,15 @@ registerRoute(
   }),
 )
 
-// App frame/module — offline-capable apps only (X-Mobius-Offline:1). Served by
-// offlineCapableHandler: cache-first once cached, with background revalidation.
-// The network attempt uses cache:'reload' to dodge the NetworkFirst+304 trap
-// that once left the module uncached and blanked the in-shell iframe offline.
+// App frame/module — EVERY installed app (ungated; see appCodeStoreAction).
+// Served by appCodeHandler: cache-first once cached, with background
+// revalidation, so any app's second-and-later opens skip the network round
+// trip entirely. The network attempt uses cache:'reload' to dodge the
+// NetworkFirst+304 trap that once left the module uncached and blanked the
+// in-shell iframe offline.
 registerRoute(
-  ({ url }) => /^\/api\/apps\/\d+\/(frame|module)$/.test(url.pathname),
-  offlineCapableHandler(OFFLINE_APPS_CACHE),
+  ({ url }) => isAppCodeRoute(url.pathname),
+  appCodeHandler(OFFLINE_APPS_CACHE, { gated: false }),
 )
 
 // Shell + bare-domain navigations: serve the PRECACHED index.html — the
@@ -512,16 +524,17 @@ registerRoute(new NavigationRoute(
   },
 ))
 
-// Standalone mini-app navigations: stored for offline-capable apps via
-// the same reload-bypass handler — the standalone page carries the same
-// ETag + `Cache-Control: no-cache`, so it had the identical 304-never-
-// cached defect as the frame/module route. A non-capable app caches
+// Standalone mini-app navigations: stored for offline-capable apps ONLY
+// (gated) via the same reload-bypass handler — the standalone page carries
+// the same ETag + `Cache-Control: no-cache`, so it had the identical 304-
+// never-cached defect as the frame/module route. A non-capable app caches
 // nothing → handler rethrows offline → catch handler serves the branded
-// offline page.
+// offline page. This gate is the offline-OPEN guarantee the manifest flag
+// still owns; only the in-shell frame/module read path above is ungated.
 registerRoute(
   ({ request, url }) =>
     request.mode === 'navigate' && url.pathname.startsWith('/apps/'),
-  offlineCapableHandler(STANDALONE_APPS_CACHE),
+  appCodeHandler(STANDALONE_APPS_CACHE, { gated: true }),
 )
 
 // Last resort for any document we still couldn't serve: the cached
@@ -542,20 +555,22 @@ setCatchHandler(async ({ request, url }) => {
   return (await matchPrecache('/offline.html')) || Response.error()
 })
 
-// ── P1-B: precache warming on install ───────────────────────────
+// ── Precache warming ────────────────────────────────────────────
 //
-// Shell.jsx posts `moebius:precache-app` when an offline-capable app is
-// installed or updated, so its frame + module are immediately available for
-// offline use — rather than waiting for the user to open the app once online.
+// Shell.jsx posts `moebius:precache-app` when an app is installed or updated
+// (P1-B), and on shell load for pinned + recently-used apps (idle-scheduled;
+// see lib/appPrecache.js), so frame + module are already cached before the
+// user's first open — the open is then a pure cache read.
 //
 // Message payload:
 //   { type: 'moebius:precache-app', frameUrl: string, moduleUrl: string }
 //
-// Key-normalization mirrors offlineCapableHandler exactly (strips token, _,
+// Key-normalization mirrors appCodeHandler exactly (strips token, _,
 // install query params) so the warmed cache entries are found on the next
-// cache.match(). We only store when the response carries X-Mobius-Offline:1
-// to mirror the live-open gate — if the server flips offline_capable off, the
-// warning entry never lands.
+// cache.match(). Storage follows the UNGATED frame/module policy
+// (appCodeStoreAction with gated=false): any 200 lands, matching the live
+// open path. URLs are validated against isAppCodeRoute so a page message
+// can only prime the frame/module routes, nothing else.
 
 self.addEventListener('message', (event) => {
   const msg = event.data
@@ -580,7 +595,7 @@ self.addEventListener('message', (event) => {
 
   async function warmOne(rawUrl, cacheName) {
     const key = normKey(rawUrl)
-    if (!key) return
+    if (!key || !isAppCodeRoute(new URL(key).pathname)) return
     // Already cached? Skip redundant fetch.
     const existing = await caches.open(cacheName).then(c => c.match(key))
     if (existing) return
@@ -591,7 +606,10 @@ self.addEventListener('message', (event) => {
         return new Request(rawUrl, { cache: 'reload', signal })
       }
     })
-    if (resp && resp.status === 200 && resp.headers.get('X-Mobius-Offline') === '1') {
+    const action = resp && appCodeStoreAction(
+      resp.status, resp.headers.get('X-Mobius-Offline'), false,
+    )
+    if (action === 'store') {
       const cache = await caches.open(cacheName)
       await cache.put(key, resp.clone())
     }

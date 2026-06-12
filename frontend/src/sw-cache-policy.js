@@ -92,7 +92,7 @@ export function isCacheableAppAssetResponse(response) {
   return !ct.includes('text/html')
 }
 
-// PURE: should offlineCapableHandler serve the CACHED copy first (instant) vs go
+// PURE: should appCodeHandler serve the CACHED copy first (instant) vs go
 // to network? If the route is cached, serve it immediately and refresh in the
 // background. Freshness comes from the versioned frame/module URL (`?v=` is part
 // of the cache key): an app update changes the key and naturally becomes a cache
@@ -100,6 +100,34 @@ export function isCacheableAppAssetResponse(response) {
 // cached copy → always network (cold path, nothing to serve).
 export function shouldServeCacheFirst(hasCached) {
   return !!hasCached
+}
+
+// PURE: the per-app code routes the SW serves cache-first — the iframe runtime
+// frame and the compiled module. Kept in lockstep with the registerRoute
+// matcher in sw.js and the server routes in backend/app/routes/apps.py.
+export function isAppCodeRoute(pathname) {
+  return /^\/api\/apps\/\d+\/(frame|module)$/.test(pathname)
+}
+
+// PURE: what to do with a RESOLVED network response on an app-code route.
+// Two cache surfaces share the handler but differ on who may be stored:
+//   - frame/module reads (gated=false): store EVERY 200. Loading speed must
+//     not depend on the manifest's offline_capable flag — the flag still
+//     gates offline WRITE semantics and the standalone-navigation guarantee,
+//     but a cached read path (instant open + background revalidate) is safe
+//     for every installed app because freshness comes from the `?v=` cache
+//     key + the background refresh, not from the flag.
+//   - standalone navigations (gated=true): store only responses the server
+//     marks `X-Mobius-Offline: 1`; a 200 WITHOUT the header purges the entry
+//     so an app toggled offline_capable OFF self-heals on the next refresh
+//     (cache.put is otherwise never called for it, so the stale body would
+//     persist forever).
+// Non-200s (304s, 4xx, 5xx) are never stored — 'ignore' leaves any existing
+// entry untouched; shouldFallBackToCacheOnError decides what the page sees.
+export function appCodeStoreAction(status, offlineHeader, gated) {
+  if (status !== 200) return 'ignore'
+  if (!gated) return 'store'
+  return offlineHeader === '1' ? 'store' : 'purge'
 }
 
 // PURE: on the network path, should a network RESPONSE be replaced by the cached

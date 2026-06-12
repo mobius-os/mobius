@@ -7,6 +7,8 @@ import {
   OFFLINE_APPS_CACHE,
   STANDALONE_APPS_CACHE,
   VENDOR_CACHE,
+  appCodeStoreAction,
+  isAppCodeRoute,
   isCacheableAppAssetResponse,
   isImmutableAppAsset,
   isStaleRuntimeCache,
@@ -60,6 +62,47 @@ test('un-hashed or non-app-asset paths are not immutable', () => {
 const res = (status, type) => ({
   status,
   headers: { get: () => type },
+})
+
+test('app-code route matches frame and module for any app id', () => {
+  assert.equal(isAppCodeRoute('/api/apps/1/frame'), true)
+  assert.equal(isAppCodeRoute('/api/apps/1/module'), true)
+  assert.equal(isAppCodeRoute('/api/apps/4203/module'), true)
+})
+
+test('app-code route rejects everything else', () => {
+  // Other per-app endpoints must keep their network-only behavior.
+  assert.equal(isAppCodeRoute('/api/apps/1/validate'), false)
+  assert.equal(isAppCodeRoute('/api/apps/1'), false)
+  // Non-numeric ids and nested paths never match.
+  assert.equal(isAppCodeRoute('/api/apps/abc/frame'), false)
+  assert.equal(isAppCodeRoute('/api/apps/1/frame/extra'), false)
+  // Standalone navigations go through the gated route, not this one.
+  assert.equal(isAppCodeRoute('/apps/notes/'), false)
+})
+
+test('ungated frame/module reads store every 200', () => {
+  // Loading speed must not depend on the offline_capable flag: a 200
+  // without the X-Mobius-Offline header is stored all the same.
+  assert.equal(appCodeStoreAction(200, '1', false), 'store')
+  assert.equal(appCodeStoreAction(200, null, false), 'store')
+})
+
+test('gated standalone navigations keep the offline_capable contract', () => {
+  assert.equal(appCodeStoreAction(200, '1', true), 'store')
+  // A 200 WITHOUT the header purges: the app was toggled
+  // offline_capable off and the stale entry must self-heal away.
+  assert.equal(appCodeStoreAction(200, null, true), 'purge')
+})
+
+test('non-200 responses are never stored or purged', () => {
+  // 304s have no body; 4xx/5xx must not evict a known-good entry —
+  // shouldFallBackToCacheOnError owns what the page sees instead.
+  for (const gated of [false, true]) {
+    assert.equal(appCodeStoreAction(304, '1', gated), 'ignore')
+    assert.equal(appCodeStoreAction(404, '1', gated), 'ignore')
+    assert.equal(appCodeStoreAction(500, '1', gated), 'ignore')
+  }
 })
 
 test('immutable app-asset cache refuses non-200 and HTML bodies', () => {
