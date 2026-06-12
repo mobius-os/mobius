@@ -620,7 +620,7 @@ window.parent.postMessage({ type: 'moebius:new-chat', draft: 'Hello!' }, window.
 
 ## Token scoping
 
-Mini-apps receive a scoped token (not the owner's full JWT). It CAN access: storage, proxy, app-attributed chats, notifications, push, uploads, and app endpoints. It CANNOT access: auth, settings, or owner-only chat endpoints.
+Mini-apps receive a scoped token (not the owner's full JWT). It CAN access: storage, proxy, app-attributed chats, notifications, push, uploads, app endpoints, and the read-only model list (`GET /api/models`). It CANNOT access: auth, settings, or owner-only chat endpoints.
 
 ---
 
