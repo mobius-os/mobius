@@ -1,6 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { getToken, BASE } from '../../api/client.js'
 import { questionKey } from './questionKey.js'
+import {
+  upsertQuestionItem,
+  attachToolOutput,
+  closeToolLifecycle,
+  closeAllToolLifecycles,
+} from './streamReducers.js'
 
 // Characters revealed per frame at 60fps.
 // 3 chars/frame × 60fps = ~180 chars/sec — fast but smooth.
@@ -69,7 +75,9 @@ const SYSTEM_EVENTS = new Set([
  *                         name onto the matching Skill tool block so
  *                         ToolBlock renders a chip.
  *   question              AskUserQuestion fired
- *                         { question_id, questions: [...] }. Renders a card.
+ *                         { question_id, questions: [...] }. Renders a
+ *                         card, absorbing the call's own tool_start
+ *                         block in place (see streamReducers.js).
  *   queued_turn_starting  Backend about to promote a queued message
  *                         { ts }. Notifies caller via callback.
  *   steered_into_turn     A send was steered into a live provider turn
@@ -112,7 +120,8 @@ const SYSTEM_EVENTS = new Set([
  *     | {type: 'text', content: string}
  *     | {type: 'tool', tool: string, input: string, output: string,
  *        status: 'running' | 'done'}
- *     | {type: 'question', questions: Array<object>}
+ *     | {type: 'question', questions: Array<object>,
+ *        question_id?: string, answers?: object, absorbedTool?: string}
  *     | {type: 'error', message: string}
  *   >,
  *   latestItemsRef: React.MutableRefObject<Array<object>>,
@@ -543,23 +552,13 @@ export default function useStreamConnection(chatId, {
               return updated
             })
           } else if (event.type === 'tool_output') {
-            setStreamItems(prev => {
-              const updated = [...prev]
-              const rev = [...updated].reverse()
-              const ri = rev.findIndex(b => b.type === 'tool' && b.status === 'running')
-              const i = ri === -1 ? -1 : updated.length - 1 - ri
-              if (i !== -1) updated[i] = { ...updated[i], output: event.content }
-              return updated
-            })
+            // Targets the open tool lifecycle — the last running tool
+            // item, or a question card that absorbed its tool block
+            // (the post-answer "answers echo" output is swallowed
+            // there; see streamReducers.js).
+            setStreamItems(prev => attachToolOutput(prev, event.content))
           } else if (event.type === 'tool_end') {
-            setStreamItems(prev => {
-              const updated = [...prev]
-              const rev = [...updated].reverse()
-              const ri = rev.findIndex(b => b.type === 'tool' && b.status === 'running')
-              const i = ri === -1 ? -1 : updated.length - 1 - ri
-              if (i !== -1) updated[i] = { ...updated[i], status: 'done' }
-              return updated
-            })
+            setStreamItems(prev => closeToolLifecycle(prev))
           } else if (event.type === 'skill_loaded') {
             // Skill observability: stamp the loaded skill's name onto
             // the most recent Skill tool block so ToolBlock renders a
@@ -580,35 +579,29 @@ export default function useStreamConnection(chatId, {
             if (questions.length > 0 && questions[0]?.question) {
               flushBuffer()
               // Coalesce by stable identity (question id, falling back
-              // to text). Adjacency-based dedup ("last item is
-              // question?") left phantom cards behind whenever a text
-              // token or tool boundary landed between two partial
-              // deliveries for the same AskUserQuestion call. Mirrors
-              // backend/app/events.py:process_event so the SSE stream
-              // and the persisted message agree on identity.
+              // to text) AND absorb the pending tool item for the same
+              // call. The runner publishes tool_start(AskUserQuestion)
+              // from the assistant tool_use block before can_use_tool
+              // fires this event — same tool use, two wire shapes —
+              // so appending here rendered the call twice (a running
+              // tool block + the card). upsertQuestionItem replaces
+              // the tool item in place (card keeps its position) and
+              // carries already-patched answers on re-delivery so a
+              // catch-up replay can't re-arm an answered card. See
+              // streamReducers.js for the full policy; mirrors
+              // backend/app/events.py:process_event identity keying.
               const incoming = { type: 'question', questions }
               if (event.question_id) incoming.question_id = event.question_id
               onLiveQuestionRef.current?.(event.question_id || null)
-              const key = questionKey(incoming)
-              setStreamItems(prev => {
-                const idx = prev.findIndex(
-                  it => it.type === 'question' && questionKey(it) === key
-                )
-                if (idx !== -1) {
-                  const updated = [...prev]
-                  updated[idx] = incoming
-                  return updated
-                }
-                return [...prev, incoming]
-              })
+              setStreamItems(prev => upsertQuestionItem(prev, incoming))
             }
           } else if (event.type === 'error') {
             flushBuffer()
             setStreamItems(prev => {
-              const updated = prev.map(b =>
-                b.type === 'tool' && b.status === 'running'
-                  ? { ...b, status: 'done' } : b
-              )
+              // A provider error terminates every open tool lifecycle
+              // (running tools flip done; an absorbed question drops
+              // its pending-tool marker — no tool_end is coming).
+              const updated = closeAllToolLifecycles(prev)
               // Use the same `error` block shape the backend
               // persists, so MsgContent renders it identically
               // before and after promote — without this the
