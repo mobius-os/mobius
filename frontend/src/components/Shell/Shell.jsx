@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useReducer, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { Minimize2 } from 'lucide-react'
 import Drawer from '../Drawer/Drawer.jsx'
 import Toast from '../ui/Toast.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
@@ -16,6 +17,7 @@ import useProviderAuthStatus from '../../hooks/useProviderAuthStatus.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import { appQueries, chatQueries, modelQueries, ownerQueries } from '../../hooks/queries.js'
 import { appVersionKey } from '../../lib/appVersion.js'
+import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
 import {
   APP_LRU_STORAGE_KEY, mergeAppLru, parseStoredAppLru, selectAppsToWarm,
 } from '../../lib/appPrecache.js'
@@ -183,6 +185,21 @@ export default function Shell() {
   useEffect(() => {
     if (activeView === 'chat') clearChatAttention(activeChatId)
   }, [activeChatId, activeView, clearChatAttention])
+
+  // Immersive mode (moebius:immersive, .pm/128). The state is the id of
+  // the app holding an immersive request (or null); it's APPLIED — bar
+  // hidden, canvas full-viewport — only while that app is the active
+  // canvas, so switching to chat/settings/another app restores chrome
+  // automatically and switching back re-enters without a re-post. The
+  // request reaches us through AppCanvas, which verifies the message's
+  // event.source against its own iframe before forwarding — the ACTIVE-
+  // iframe-only guarantee lives there. Full contract: lib/immersive.js.
+  const [immersiveAppId, dispatchImmersive] = useReducer(immersiveReducer, null)
+  // Stable identity — AppCanvas's message-listener effect depends on it.
+  const handleImmersive = useCallback((appId, value) => {
+    dispatchImmersive({ type: 'request', appId, value })
+  }, [])
+  const immersiveActive = isImmersiveActive(immersiveAppId, activeView, activeAppId)
 
   // Passive auth-status check. Reads /api/auth/providers/status with
   // a 5-minute TanStack cache + a visibilitychange-driven invalidation.
@@ -998,7 +1015,7 @@ export default function Shell() {
   }, [chats, activeChatId, activeView, chatsQuery.isSuccess, chatsQuery.isFetchedAfterMount])
 
   return (
-    <div className="shell">
+    <div className={`shell${immersiveActive ? ' shell--immersive' : ''}`}>
       {/* inert on the header while the drawer is open so keyboard / AT
           focus cannot reach shell-chrome behind the open drawer. The
           drawer itself gains focus on open (Drawer.jsx focus-management
@@ -1133,6 +1150,7 @@ export default function Shell() {
               onNavPush={appNavPush}
               onNavPop={appNavPop}
               onNavReset={appNavReset}
+              onImmersive={handleImmersive}
             />
           </div>
         ))}
@@ -1140,6 +1158,23 @@ export default function Shell() {
           <SettingsView onThemeChange={loadTheme} />
         )}
       </main>
+      {/* SHELL-provided immersive exit. With the top bar gone the drawer
+          toggle is unreachable, so this floating button is the guaranteed
+          way back — an app can never trap the user in immersive mode.
+          Exit only clears the shell-side request; the app re-enters by
+          posting again (which a mounted app won't do until it remounts),
+          so the user's choice sticks for the rest of the visit. */}
+      {immersiveActive && (
+        <button
+          type="button"
+          className="shell__immersive-exit"
+          aria-label="Exit full screen"
+          inert={drawerOpen ? '' : undefined}
+          onClick={() => dispatchImmersive({ type: 'exit' })}
+        >
+          <Minimize2 size={18} aria-hidden="true" />
+        </button>
+      )}
       <Toast
         message={toast?.message}
         variant={toast?.variant}
