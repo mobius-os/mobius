@@ -51,6 +51,15 @@ import './AppCanvas.css'
 // `onMessage` handler. These wire the iframe's own back-stack into
 // the shell's pushState so device-back unwinds in-app routes first.
 //
+//   4. {type: 'moebius:immersive', value, appId}            frame → parent
+//      The app asks the shell to hide its chrome (top bar) so the canvas
+//      fills the whole viewport — games, primarily. Handled below and
+//      forwarded to Shell via the `onImmersive` callback with THIS
+//      canvas's appId (the payload's appId is ignored — identity comes
+//      from the verified event.source, so a frame can only toggle
+//      immersive for itself). Shell applies it only while this app is
+//      the active canvas; see lib/immersive.js for the state contract.
+//
 // Shell-level messages (handled by Shell.jsx, NOT this file):
 //   - {type: 'moebius:app-error', appId, error, chatId?}    frame → shell
 //   - {type: 'moebius:new-chat', draft?}                    frame → shell
@@ -82,7 +91,7 @@ import './AppCanvas.css'
 // server-side validity window.
 export default function AppCanvas({
   appId, version = 0, appName, offlineCapable = false,
-  onNavPush, onNavPop, onNavReset,
+  onNavPush, onNavPop, onNavReset, onImmersive,
 }) {
   const queryClient = useQueryClient()
   // The app-scoped token is fetched from the server and isn't available
@@ -272,11 +281,19 @@ export default function AppCanvas({
         }
       } else if (msg.type === 'moebius:nav-pop') {
         onNavPop?.(appId)
+      } else if (msg.type === 'moebius:immersive') {
+        // Immersive request/release. Forward with THIS canvas's appId, not
+        // msg.appId — the source check above already proved the message
+        // came from this app's iframe, and trusting the payload instead
+        // would let any frame toggle immersive for a different app.
+        // `=== true` keeps the wire contract strictly boolean (a truthy
+        // garbage value reads as a release, the safe direction).
+        onImmersive?.(appId, msg.value === true)
       }
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
-  }, [appId, onNavPush, onNavPop, queryClient])
+  }, [appId, onNavPush, onNavPop, onImmersive, queryClient])
 
   // Clear this app's pending nav-sentinels when the iframe stops
   // representing the same browsing context. That happens on:
@@ -298,6 +315,19 @@ export default function AppCanvas({
     if (!appId) return
     return () => { onNavReset?.(appId) }
   }, [appId, version, onNavReset])
+
+  // Release any immersive request when the iframe stops representing the
+  // same browsing context (unmount / LRU eviction, appId change, version
+  // remount). The app's own cleanup-post can't cover these: tearing down
+  // an iframe destroys its document without running the app's effect
+  // cleanups, so without this the shell would stay chrome-less with the
+  // requesting app gone. A version remount is also a release — the fresh
+  // mount re-posts if it still wants immersive. Releasing an app that
+  // doesn't hold the slot is a no-op (lib/immersive.js).
+  useEffect(() => {
+    if (!appId) return
+    return () => { onImmersive?.(appId, false) }
+  }, [appId, version, onImmersive])
 
   // Broadcast theme updates to an already-loaded iframe so it can
   // refresh its theme without remounting (and losing app state).

@@ -65,6 +65,49 @@
   color: var(--text); /* CONTRACT: high-contrast text on the opaque --bg of .shell__bar */
 }
 
+/* ── Immersive mode (moebius:immersive, .pm/128) ───── */
+
+/* The active app asked for the full viewport (games). The bar leaves
+   the layout entirely so .shell__content's flex:1 expands to the whole
+   fixed-inset .shell; with viewport-fit=cover + the translucent iOS
+   status bar (index.html) the canvas reaches under the notch. The app
+   owns its own safe-area padding while immersive. */
+.shell--immersive .shell__bar {
+  display: none;
+}
+
+/* Floating exit affordance, provided by the SHELL (never the app) so
+   immersive mode can't trap the user — with the bar hidden this is the
+   only chrome on screen. Safe-area-inset so the notch/punch-hole can't
+   cover it; same z-level as the bar it stands in for (drawer scrim is
+   90 / panel 95, both below). Translucent over arbitrary game pixels —
+   color-mix against --bg keeps it legible on any theme. */
+.shell__immersive-exit {
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 0px) + 10px);
+  left: calc(env(safe-area-inset-left, 0px) + 10px);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid var(--border-light);
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  color: var(--text);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.shell__immersive-exit:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* ── Content ───────────────────────────────────────── */
 
 .shell__content {
