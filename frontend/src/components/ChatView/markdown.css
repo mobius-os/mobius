@@ -154,11 +154,28 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
   margin: 4px 8px;
 }
 
+/* Reserve image height BEFORE the bytes decode so a late <img> load doesn't
+   reflow everything below it (CLS). The frame is an aspect-ratio box: its
+   height is computed from its width and the ratio, so it occupies its final
+   space on the first layout pass — no jump when decode finishes.
+
+   The default ratio (4 / 3) is the pre-load estimate. Chat images are
+   overwhelmingly agent screenshots, which are landscape; a landscape-leaning
+   default keeps the estimate close to reality, so even before onLoad sets the
+   exact `--md-image-ratio` the reserved box is near-final and the on-load
+   delta is small. (A portrait default would reserve a tall box that collapses
+   when a wide screenshot decodes — the original scroll-jump.)
+
+   `max-height` caps the reserved height for extreme tall ratios so one image
+   can't claim a whole viewport; `object-fit: contain` on the inner <img> then
+   letterboxes against the frame background, which is intentional. The cap is
+   in `dvh` (not `vh`) so it tracks the mobile dynamic viewport. */
 .md-image-frame {
   display: block;
   width: min(100%, 520px);
   max-width: 100%;
-  aspect-ratio: var(--md-image-ratio, 9 / 16);
+  aspect-ratio: var(--md-image-ratio, 4 / 3);
+  max-height: min(60dvh, 480px);
   border-radius: 8px;
   background: color-mix(in srgb, var(--surface) 88%, var(--text) 12%);
   overflow: hidden;
