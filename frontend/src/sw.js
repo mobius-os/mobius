@@ -51,6 +51,7 @@ import {
   OFFLINE_APPS_CACHE,
   STANDALONE_APPS_CACHE,
   APP_ASSETS_CACHE,
+  APP_ASSETS_MAX_ENTRIES,
   isCacheableAssetResponse,
   isCacheableAppAssetResponse,
   isImmutableAppAsset,
@@ -60,6 +61,8 @@ import {
   shouldFallBackToCacheOnError,
   isAppCodeRoute,
   appCodeStoreAction,
+  supersededVersionKeys,
+  entriesToTrim,
 } from './sw-cache-policy.js'
 
 // LOAD-BEARING: these two calls are NOT injected by vite-plugin-pwa
@@ -235,6 +238,28 @@ registerRoute(
 // that under the bare URL truncates the asset for every later consumer —
 // CubeRun's `Range: bytes=0-0` probe blacked out the game this way
 // (2026-06-12); the request side is the only place the case is visible.
+// Bounded-growth trim for APP_ASSETS_CACHE. Neither route below carries a
+// Workbox ExpirationPlugin (it's not a dep on these routes), and a single app
+// can be ~19MB of assets, so without a cap the cache grows unbounded across
+// installs and one asset-heavy app could evict the whole origin's quota.
+// cacheDidUpdate fires after each successful write; we then trim the OLDEST
+// entries (cache.keys() is insertion order) down to APP_ASSETS_MAX_ENTRIES via
+// the unit-tested entriesToTrim helper. Best-effort: a trim failure never
+// affects the served response.
+const appAssetsTrimPlugin = {
+  cacheDidUpdate: async ({ cacheName }) => {
+    try {
+      const cache = await caches.open(cacheName)
+      const keys = (await cache.keys()).map(r => r.url)
+      await Promise.all(
+        entriesToTrim(keys, APP_ASSETS_MAX_ENTRIES).map(k => cache.delete(k)),
+      )
+    } catch {
+      // ignore — the cache is over its soft cap for one extra entry at worst.
+    }
+  },
+}
+
 registerRoute(
   ({ url, request }) =>
     url.origin === self.location.origin &&
@@ -242,10 +267,13 @@ registerRoute(
     !isRangeRequest(request),
   new CacheFirst({
     cacheName: APP_ASSETS_CACHE,
-    plugins: [{
-      cacheWillUpdate: async ({ response }) =>
-        isCacheableAppAssetResponse(response) ? response : null,
-    }],
+    plugins: [
+      {
+        cacheWillUpdate: async ({ response }) =>
+          isCacheableAppAssetResponse(response) ? response : null,
+      },
+      appAssetsTrimPlugin,
+    ],
   }),
 )
 registerRoute(
@@ -254,7 +282,10 @@ registerRoute(
     url.pathname.startsWith('/app-assets/') &&
     !isImmutableAppAsset(url.pathname) &&
     !isRangeRequest(request),
-  new StaleWhileRevalidate({ cacheName: APP_ASSETS_CACHE }),
+  new StaleWhileRevalidate({
+    cacheName: APP_ASSETS_CACHE,
+    plugins: [appAssetsTrimPlugin],
+  }),
 )
 
 // /api/proxy — server-side CORS bypass. Only cache asset
@@ -358,6 +389,44 @@ async function boundedFetch(buildRequest) {
   }
 }
 
+// Apply an appCodeStoreAction to the cache, tolerating a failed write. A
+// cache.put can REJECT (QuotaExceededError when the origin is over its storage
+// budget); that must NOT propagate, because the caller has already decided to
+// serve the network response and a store failure is non-fatal — the app still
+// loads online; only the offline copy is missed this turn. We also evict the
+// superseded `?v=` versions of the SAME route on a successful store, so the
+// frame/module cache can't grow one stale pair per app edit. Returns nothing;
+// its rejection is swallowed by callers who run it under event.waitUntil.
+async function applyAppCodeStore(cache, cacheKey, resp, gated) {
+  const action = appCodeStoreAction(
+    resp.status, resp.headers.get('X-Mobius-Offline'), gated,
+  )
+  if (action === 'purge') {
+    await cache.delete(cacheKey)
+    return
+  }
+  if (action !== 'store') return
+  try {
+    await cache.put(cacheKey, resp.clone())
+  } catch {
+    // QuotaExceeded (or any storage failure): the response is already being
+    // served; skip caching this turn rather than letting the open hard-fail.
+    return
+  }
+  // Drop the prior versions of THIS exact route — same pathname, different
+  // `?v=`. Each app edit otherwise leaves its old versioned entry behind
+  // forever (its `?v=` is never requested again), growing the cache without
+  // bound. Best-effort: a failure here never affects the served response.
+  try {
+    const keys = (await cache.keys()).map(r => r.url)
+    await Promise.all(
+      supersededVersionKeys(cacheKey, keys).map(k => cache.delete(k)),
+    )
+  } catch {
+    // ignore — eviction is opportunistic.
+  }
+}
+
 function appCodeHandler(cacheName, { gated }) {
   return async ({ request, event }) => {
     const cache = await caches.open(cacheName)
@@ -375,6 +444,15 @@ function appCodeHandler(cacheName, { gated }) {
     // (see the 304-trap note above). Constructing a Request from a navigate-
     // mode request with an init throws in some engines; the builder falls back
     // to a plain same-origin GET.
+    //
+    // DECOUPLED store-from-serve: revalidate resolves with the network
+    // response UNCONDITIONALLY and returns the store promise separately. An
+    // earlier version awaited cache.put before returning, so a QuotaExceeded
+    // put rejection discarded a perfectly good NETWORK response — the cold
+    // path's catch then missed cache.match and rethrew, hard-failing the app
+    // WHILE ONLINE. The store now runs as its own promise the caller hands to
+    // event.waitUntil with its own .catch, mirroring the background-refresh
+    // branch's tolerance; storage failures never reach the served response.
     const revalidate = async () => {
       const resp = await boundedFetch((signal) => {
         try {
@@ -387,14 +465,18 @@ function appCodeHandler(cacheName, { gated }) {
       // ungated (frame/module) stores every 200; gated (standalone) stores
       // only X-Mobius-Offline:1 and PURGES a header-less 200 so an app
       // toggled offline_capable OFF self-heals on the next refresh.
-      if (resp) {
-        const action = appCodeStoreAction(
-          resp.status, resp.headers.get('X-Mobius-Offline'), gated,
-        )
-        if (action === 'store') await cache.put(cacheKey, resp.clone())
-        else if (action === 'purge') await cache.delete(cacheKey)
-      }
-      return resp
+      const store = resp
+        ? applyAppCodeStore(cache, cacheKey, resp, gated)
+        : Promise.resolve()
+      return { resp, store }
+    }
+
+    // Tie a store promise to the event lifetime so the SW stays alive until
+    // the cache.put finishes; swallow its rejection (already tolerated inside
+    // applyAppCodeStore, but the outer .catch guards the detached fallback).
+    const keepStoreAlive = (store) => {
+      const settled = store.catch(() => {})
+      if (event && typeof event.waitUntil === 'function') event.waitUntil(settled)
     }
 
     const cached = await cache.match(cacheKey)
@@ -403,25 +485,30 @@ function appCodeHandler(cacheName, { gated }) {
     // revalidate keeps the same version fresh, while an app update changes the
     // `?v=` cache key and naturally falls through to the network path below.
     if (shouldServeCacheFirst(!!cached)) {
-      // Background-refresh, but tie it to the fetch event's lifetime so the
-      // browser keeps the SW alive until the fetch + cache.put finish — a bare
+      // Background-refresh, but tie the FETCH + STORE to the fetch event's
+      // lifetime so the browser keeps the SW alive until both finish — a bare
       // detached promise can be cut off when the worker is terminated right
       // after the cached response returns, leaving stale code cached for the
-      // next open. event may be absent in non-FetchEvent
-      // dispatch; fall back to detached then.
-      const refresh = revalidate().catch(() => {})  // rejects harmlessly when offline
+      // next open. event may be absent in non-FetchEvent dispatch; the
+      // .catch keeps a detached promise from surfacing an unhandled rejection.
+      const refresh = revalidate()
+        .then(({ store }) => store)
+        .catch(() => {})  // rejects harmlessly when offline
       if (event && typeof event.waitUntil === 'function') event.waitUntil(refresh)
       return cached
     }
 
     // No cached copy yet: network. On success the body is served on THIS open +
-    // cached for the next open. A transient SERVER error (5xx) must not blank a
-    // cached app if one appeared while we were fetching — fall back to that copy
-    // for those (but NOT 4xx, which are authoritative: a 404 means the app is
-    // gone, a 401/403 is real auth). On a network REJECTION (offline / abort /
-    // DNS), the catch serves any late cache fill too.
+    // cached for the next open. The store runs as its own event-bound promise
+    // so a QuotaExceeded put can't discard this live response. A transient
+    // SERVER error (5xx) must not blank a cached app if one appeared while we
+    // were fetching — fall back to that copy for those (but NOT 4xx, which are
+    // authoritative: a 404 means the app is gone, a 401/403 is real auth). On a
+    // network REJECTION (offline / abort / DNS), the catch serves any late
+    // cache fill too.
     try {
-      const resp = await revalidate()
+      const { resp, store } = await revalidate()
+      keepStoreAlive(store)
       if (resp && shouldFallBackToCacheOnError(resp.status, !!cached)) return cached
       return resp
     } catch (err) {
@@ -608,7 +695,8 @@ self.addEventListener('message', (event) => {
     const key = normKey(rawUrl)
     if (!key || !isAppCodeRoute(new URL(key).pathname)) return
     // Already cached? Skip redundant fetch.
-    const existing = await caches.open(cacheName).then(c => c.match(key))
+    const cache = await caches.open(cacheName)
+    const existing = await cache.match(key)
     if (existing) return
     const resp = await boundedFetch((signal) => {
       try {
@@ -617,13 +705,10 @@ self.addEventListener('message', (event) => {
         return new Request(rawUrl, { cache: 'reload', signal })
       }
     })
-    const action = resp && appCodeStoreAction(
-      resp.status, resp.headers.get('X-Mobius-Offline'), false,
-    )
-    if (action === 'store') {
-      const cache = await caches.open(cacheName)
-      await cache.put(key, resp.clone())
-    }
+    // Same store path as the live open: tolerates a QuotaExceeded put (warming
+    // is best-effort, never fail the install) and evicts the superseded `?v=`
+    // versions of this route. Frame/module warming is always ungated.
+    if (resp) await applyAppCodeStore(cache, key, resp, false)
   }
 
   // Tie the warming to the install event lifetime so the SW stays alive.

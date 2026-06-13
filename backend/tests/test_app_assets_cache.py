@@ -168,6 +168,28 @@ def test_dash_separated_hash_is_immutable_and_short_hex_is_not(
   assert "no-cache" in plain.headers["cache-control"]
 
 
+def test_all_digit_version_segment_is_not_immutable(client, owner_token):
+  # An all-digit run (a version number or timestamp, main.12345678.js) is
+  # reused across re-installs, so it must revalidate, not be pinned behind a
+  # year-long immutable max-age. The hashed-name regex requires at least one
+  # alpha hex char; this guards the all-digit false-positive on the server
+  # side and keeps it in sync with isImmutableAppAsset in sw-cache-policy.js.
+  app = _create_app(client, owner_token)
+  _write_static(app["id"], "main.12345678.js", "console.log('v1')")
+  _write_static(app["id"], "app.20260612.js", "console.log('ts')")
+
+  for name in ("main.12345678.js", "app.20260612.js"):
+    r = client.get(f"/app-assets/cuberun/{name}")
+    assert r.status_code == 200
+    assert "immutable" not in r.headers["cache-control"]
+    assert "no-cache" in r.headers["cache-control"]
+
+  # A genuine all-alpha digest (deadbeef) is still immutable.
+  _write_static(app["id"], "chunk.deadbeef.js", "console.log('hash')")
+  r = client.get("/app-assets/cuberun/chunk.deadbeef.js")
+  assert "immutable" in r.headers["cache-control"]
+
+
 def test_by_id_route_supports_conditional_requests(client, owner_token):
   app = _create_app(client, owner_token)
   _write_static(app["id"], "index.html", "<title>CubeRun</title>")
