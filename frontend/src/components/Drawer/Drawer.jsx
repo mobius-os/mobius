@@ -326,11 +326,17 @@ export default function Drawer({
         onPointerDown={handleOverlayPointerDown}
         onClick={handleOverlayClick}
       />
+      {/* React 19 reflects the boolean `inert` prop to the boolean
+          attribute (present when true, absent when false), so a closed
+          drawer is genuinely inert. The old `!open ? '' : undefined` form
+          was a no-op: React 19 normalizes the known boolean attribute and
+          an empty string serializes as falsy, so the attribute never
+          applied and focus/clicks still reached the off-screen drawer. */}
       <nav
         ref={drawerRef}
         className={`drawer ${open ? 'drawer--open' : ''}`}
         aria-hidden={!open}
-        inert={!open ? '' : undefined}
+        inert={!open}
         tabIndex={-1}
         onTouchStart={onTouchStart}
         onTouchMove={onTouchMove}

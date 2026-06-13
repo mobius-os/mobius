@@ -632,9 +632,9 @@ useEffect(() => {
 ```
 
 - `value: true` hides the top bar while your app is the active canvas; `value: false` (your effect cleanup) restores it. The shell also restores chrome on app switch or unmount on its own, so you can't strand the user — but post the cleanup anyway for the in-place case.
-- While immersive you own safe-area padding: pad HUD/overlay elements with `env(safe-area-inset-*)` so the notch or punch-hole doesn't cover them.
+- While immersive you own safe-area padding: pad HUD/overlay elements so the notch or punch-hole doesn't cover them. **Do NOT use `env(safe-area-inset-*)` — it reads 0 inside the sandboxed iframe** (only the top-level shell resolves viewport-fit insets). The shell forwards the real device insets as CSS variables `--mobius-safe-top/right/bottom/left` on `:root`; pad with those instead, e.g. `padding-top: var(--mobius-safe-top)`. They are 0 while windowed and non-zero only while immersive, so you can reference them unconditionally without double-padding.
 - The shell renders its own floating exit button at the top-left (safe-area inset) while immersive. Don't draw a competing exit control, and keep critical tap targets out of that corner. If the user taps it, the shell stays in normal chrome until your app remounts and posts again — respect that choice; don't re-post on a timer.
-- Standalone opens (`/apps/<slug>/`) have no shell; the message is harmlessly ignored. No flag, no manifest field, no DB column — the postMessage is the whole opt-in.
+- Standalone opens (`/apps/<slug>/`) have no shell; the message is harmlessly ignored. No flag, no manifest field, no DB column — the postMessage is the whole opt-in. (Standalone PWAs reach env() insets natively, so `--mobius-safe-*` defaults to 0 there — pad with `env(safe-area-inset-*)` directly in a standalone-only build if you need it.)
 
 ---
 
