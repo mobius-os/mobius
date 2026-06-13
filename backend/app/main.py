@@ -25,6 +25,7 @@ from sqlalchemy.exc import OperationalError
 
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine, run_migrations
+from app.http_caching import strip_range
 from app import models
 # providers and push are on the agent's write surface; deferred into
 # lifespan with try/except so a SyntaxError in either doesn't prevent
@@ -617,7 +618,17 @@ def _app_source_dir_for_static_asset(
 # changes the bytes ships a different name, so the URL itself is the
 # validator. Mirrored by isImmutableAppAsset in frontend/src/
 # sw-cache-policy.js — keep the two in sync.
-_HASHED_ASSET_NAME = re.compile(r"[.-][0-9a-f]{8,}\.", re.IGNORECASE)
+#
+# The lookahead requires at least one ALPHABETIC hex digit (a-f) so an
+# all-DIGIT segment isn't mistaken for a content hash: a date-stamped name
+# like IMG-20260612.png or report.20260101.html is replaced in place on a
+# re-upload and MUST keep revalidate semantics — marking it immutable would
+# pin a year-stale copy in every client's cache. A real esbuild/Vite hash
+# always mixes in a-f (it's hex of a digest), so this never misfires on a
+# genuine content hash.
+_HASHED_ASSET_NAME = re.compile(
+  r"[.-](?=[0-9a-f]*[a-f])[0-9a-f]{8,}\.", re.IGNORECASE
+)
 
 
 def _client_copy_is_fresh(request: Request, etag: str, mtime: float) -> bool:
@@ -688,23 +699,22 @@ def _serve_app_static_asset(
   }
   if _client_copy_is_fresh(request, etag, stat.st_mtime):
     return Response(status_code=304, headers=headers)
-  if request.method == "HEAD" or hashed:
-    # FileResponse answers HEAD header-only with the true Content-Length,
-    # and gives immutable (hashed-name) files Range/206 support — safe
-    # there because Chromium never revalidates an immutable entry, so the
-    # partial-slice-as-200 trap below can't fire.
-    return FileResponse(str(target), headers=headers)
-  # Revalidating (non-hashed) assets get the full body unconditionally,
-  # ignoring any Range header (RFC 9110 lets a server do that). Serving a
-  # 206 slice of a `no-cache` + ETag asset poisoned Chromium's HTTP cache:
-  # the stored slice revalidated 304 and was then served as a status-200
-  # full response — 1 byte long. CubeRun's `Range: bytes=0-0` probe turned
-  # the game's index.html into the single character '<' for every later
-  # open (the 2026-06-12 black-screen outage).
   media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-  return Response(
-    content=target.read_bytes(), media_type=media_type, headers=headers,
-  )
+  if not hashed:
+    # Revalidating (non-hashed) assets get the full body unconditionally,
+    # ignoring any Range header (RFC 9110 lets a server do that). Serving a
+    # 206 slice of a `no-cache` + ETag asset poisoned Chromium's HTTP cache:
+    # the stored slice revalidated 304 and was then served as a status-200
+    # full response — 1 byte long. CubeRun's `Range: bytes=0-0` probe turned
+    # the game's index.html into the single character '<' for every later
+    # open (the 2026-06-12 black-screen outage). Strip Range so FileResponse
+    # streams the full body off disk (no whole-file read into memory) and
+    # answers HEAD header-only with the true Content-Length.
+    strip_range(request)
+  # Hashed (immutable) files keep Range/206 support for media seeking —
+  # safe because Chromium never revalidates an immutable entry, so the
+  # partial-slice-as-200 trap above can't fire for them.
+  return FileResponse(str(target), media_type=media_type, headers=headers)
 
 
 # HEAD is registered alongside GET because client-side asset probes ("are
@@ -809,6 +819,14 @@ if _static_dir.is_dir():
         if path == "sw.js"
         else None
       )
+      if path == "sw.js":
+        # sw.js is a REVALIDATING response (no-cache + the mtime ETag
+        # FileResponse sets), so it must never answer a 206. A
+        # `Range: bytes=0-0` probe would otherwise let Chromium store the
+        # 1-byte slice and later serve it as a status-200 full body — a
+        # one-byte service worker. Stripping Range keeps the full-body 200
+        # (same class as the /app-assets + /module fix; see http_caching).
+        strip_range(request)
       return FileResponse(str(file), headers=headers)
     # _static_dir resolution is all-or-nothing at startup — when the
     # agent's live build (/data/shell/dist) is selected, any file
