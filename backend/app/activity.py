@@ -70,6 +70,12 @@ RETENTION_DAYS = 90
 _DEBOUNCE_WINDOW_SEC = 60
 _debounce: dict[tuple[int, str], str] = {}
 
+# Same debounce shape for app_error: a render loop or a retrying fetch can
+# throw the identical error many times a second; collapse to one per window
+# per (app_id, message) so one broken app can't flood the 90-day log file.
+_ERROR_DEBOUNCE_WINDOW_SEC = 60
+_error_debounce: dict[tuple[int | None, str], str] = {}
+
 # Per-process write serialization. Holds the lock while we (a) check
 # rotation, (b) write the line, (c) flush. Critical section is small
 # (one file handle open + one line write), so contention is fine.
@@ -247,11 +253,33 @@ def should_emit_storage_write(app_id: int, path: str, now: datetime | None = Non
   return True
 
 
+def should_emit_app_error(
+  app_id: int | None, message: str, now: datetime | None = None
+) -> bool:
+  """Debounce gate for app_error: True at most once per
+  _ERROR_DEBOUNCE_WINDOW_SEC seconds per (app_id, message) — one render
+  loop throwing the same error 60x/sec would otherwise flood the log.
+  Mirrors should_emit_storage_write (in-memory, reset-on-restart)."""
+  now = now or datetime.now(timezone.utc)
+  key = (app_id, message)
+  last_iso = _error_debounce.get(key)
+  if last_iso is not None:
+    try:
+      last = datetime.fromisoformat(last_iso)
+    except ValueError:
+      last = None
+    if last is not None and (now - last).total_seconds() < _ERROR_DEBOUNCE_WINDOW_SEC:
+      return False
+  _error_debounce[key] = now.isoformat(timespec="seconds")
+  return True
+
+
 def _reset_for_tests() -> None:
   """Clears the debounce cache. Called from conftest's fresh_db
   fixture so a debounce entry from a prior test can't suppress a
   later test's emit. Underscore-prefixed: not a public API."""
   _debounce.clear()
+  _error_debounce.clear()
 
 
 def _candidate_files(active: Path) -> list[Path]:

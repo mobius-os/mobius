@@ -37,7 +37,7 @@ from app.routes import (
   debug_router, fs_router, generate_router,
   notifications_router, notify_router, proxy_router, push_router,
   recover_router, self_reminders_router, settings_router,
-  standalone_router, storage_router,
+  client_error_router, standalone_router, storage_router,
   theme_router, uploads_router,
 )
 
@@ -387,6 +387,7 @@ except Exception as _exc:  # pragma: no cover - defensive boot guard
   )
 app.include_router(notify_router)
 app.include_router(proxy_router)
+app.include_router(client_error_router)
 app.include_router(recover_router)
 
 # Recovery chat — frozen, isolated from production chat code so it
