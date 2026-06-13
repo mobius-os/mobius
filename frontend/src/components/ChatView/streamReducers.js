@@ -38,6 +38,40 @@ export function isQuestionTool(tool) {
 }
 
 /**
+ * Indices of redundant AskUserQuestion tool blocks in a PERSISTED
+ * message's `blocks` array — the raw tool twin of a question card that
+ * should not render alongside the card.
+ *
+ * The live stream absorbs the tool twin: upsertQuestionItem REPLACES the
+ * running AskUserQuestion tool item with the question card in place. The
+ * backend persistence path (events.process_event) does NOT — `tool_start`
+ * appends a `tool` block and the later `question` event appends a separate
+ * `question` block, so a reopened chat shows a collapsed "AskUserQuestion"
+ * tool row above the answered card. This computes which tool blocks to skip
+ * at render time so the persisted view matches the live view, with no
+ * backend migration (it fixes already-persisted old chats too).
+ *
+ * A question-tool block is suppressed only when the message also contains
+ * a question block — the card is the canonical rendering of the same call,
+ * so the tool twin is pure noise. Non-question tools (Bash, Grep) and
+ * question-tool blocks in a message with no card (a defensive edge that
+ * shouldn't occur) are left untouched.
+ *
+ * @param {Array<object>} blocks  a persisted message's blocks
+ * @returns {Set<number>} indices into `blocks` to skip when rendering
+ */
+export function suppressedQuestionToolIndices(blocks) {
+  const suppressed = new Set()
+  if (!Array.isArray(blocks)) return suppressed
+  const hasQuestionCard = blocks.some(b => b?.type === 'question')
+  if (!hasQuestionCard) return suppressed
+  blocks.forEach((b, i) => {
+    if (b?.type === 'tool' && isQuestionTool(b.tool)) suppressed.add(i)
+  })
+  return suppressed
+}
+
+/**
  * Applies a `question` event to the stream items.
  *
  * Merge policy, in priority order:

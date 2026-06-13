@@ -20,7 +20,9 @@ import {
   closeToolLifecycle,
   closeAllToolLifecycles,
   isQuestionTool,
+  suppressedQuestionToolIndices,
 } from '../streamReducers.js'
+import { questionKey } from '../questionKey.js'
 
 // The exact item shape useStreamConnection's tool_start handler appends.
 function toolItem(tool, overrides = {}) {
@@ -260,4 +262,119 @@ test('isQuestionTool matches exactly the two question-tool names', () => {
   assert.ok(isQuestionTool('request_user_input'))
   assert.equal(isQuestionTool('Bash'), false)
   assert.equal(isQuestionTool('Skill'), false)
+})
+
+// ---------------------------------------------------------------------------
+// suppressedQuestionToolIndices — persisted-reopen tool-twin suppression
+// (MsgContent renders persisted blocks; the backend keeps the raw
+// AskUserQuestion tool block AND the question card, the live stream
+// absorbs the twin — this helper hides the twin at render time)
+// ---------------------------------------------------------------------------
+
+// The exact persisted shape: events.process_event appends a `tool` block
+// from tool_start, then a separate `question` block from the question event.
+function persistedQuestionBlocks(toolName = 'AskUserQuestion') {
+  return [
+    { type: 'text', content: 'Quick question first.' },
+    { type: 'tool', tool: toolName, input: 'Pick a color', output: '', status: 'done' },
+    { type: 'question', question_id: 'q1', questions: [{ question: 'Pick a color' }],
+      answers: { 'Pick a color': 'A' } },
+    { type: 'text', content: 'A it is.' },
+  ]
+}
+
+test('suppresses the AskUserQuestion tool twin when a question card is present', () => {
+  const blocks = persistedQuestionBlocks()
+  const skip = suppressedQuestionToolIndices(blocks)
+  assert.ok(skip.has(1), 'the tool twin at index 1 is suppressed')
+  assert.equal(skip.size, 1, 'only the tool twin is suppressed')
+  assert.equal(skip.has(2), false, 'the question card itself is never suppressed')
+})
+
+test('suppresses the Codex request_user_input tool twin too', () => {
+  const blocks = persistedQuestionBlocks('request_user_input')
+  const skip = suppressedQuestionToolIndices(blocks)
+  assert.ok(skip.has(1))
+})
+
+test('does NOT suppress a question-tool block when no question card is present', () => {
+  // Defensive edge: a lone AskUserQuestion tool block with no card. Leave
+  // it visible rather than hide a tool the user has no other view into.
+  const blocks = [
+    { type: 'tool', tool: 'AskUserQuestion', input: 'x', output: '', status: 'done' },
+  ]
+  assert.equal(suppressedQuestionToolIndices(blocks).size, 0)
+})
+
+test('does NOT suppress ordinary tool blocks in a question message', () => {
+  const blocks = [
+    { type: 'tool', tool: 'Bash', input: 'ls', output: 'a', status: 'done' },
+    { type: 'tool', tool: 'AskUserQuestion', input: 'Pick', output: '', status: 'done' },
+    { type: 'question', question_id: 'q1', questions: [{ question: 'Pick' }] },
+  ]
+  const skip = suppressedQuestionToolIndices(blocks)
+  assert.equal(skip.has(0), false, 'Bash tool stays visible')
+  assert.ok(skip.has(1), 'AskUserQuestion twin suppressed')
+})
+
+test('suppresses every AskUserQuestion twin when two questions are in one message', () => {
+  const blocks = [
+    { type: 'tool', tool: 'AskUserQuestion', input: 'Q1', output: '', status: 'done' },
+    { type: 'question', question_id: 'q1', questions: [{ question: 'Q1' }] },
+    { type: 'tool', tool: 'AskUserQuestion', input: 'Q2', output: '', status: 'done' },
+    { type: 'question', question_id: 'q2', questions: [{ question: 'Q2' }] },
+  ]
+  const skip = suppressedQuestionToolIndices(blocks)
+  assert.deepEqual([...skip].sort(), [0, 2])
+})
+
+test('suppressedQuestionToolIndices tolerates non-array input', () => {
+  assert.equal(suppressedQuestionToolIndices(undefined).size, 0)
+  assert.equal(suppressedQuestionToolIndices(null).size, 0)
+})
+
+// ---------------------------------------------------------------------------
+// Reconnect answer-survival — the answersByQuestionKey re-arming contract.
+// useStreamConnection keeps a key→answers map (written by
+// patchQuestionAnswers) that outlives the streamItems wipe every reconnect
+// performs; the `question` handler re-arms each incoming event from it
+// before upsertQuestionItem runs. This simulates that exact sequence
+// against the REAL upsertQuestionItem so a regression in the carry breaks.
+// ---------------------------------------------------------------------------
+
+test('a reconnect wipe + catch-up replay keeps the answered state (re-arm path)', () => {
+  // Turn opens, the card arrives and absorbs its tool twin.
+  let items = upsertQuestionItem([toolItem('AskUserQuestion')], questionEvent('q1', 'Pick a color'))
+  // User answers — patchQuestionAnswers records the answer in the map AND
+  // patches the live item.
+  const answersByKey = new Map()
+  const answers = { 'Pick a color': 'A' }
+  answersByKey.set('question_id:q1', answers)
+  items = items.map(it => it.type === 'question' ? { ...it, answers } : it)
+  assert.deepEqual(items[0].answers, answers, 'card answered before reconnect')
+
+  // RECONNECT: every path wipes streamItems before the catch-up burst.
+  items = []
+
+  // Catch-up replays the original question event WITHOUT answers. The hook
+  // re-arms it from the surviving map BEFORE upsertQuestionItem runs.
+  const incoming = { type: 'question', question_id: 'q1', questions:
+    [{ question: 'Pick a color', options: [{ label: 'A' }, { label: 'B' }] }] }
+  const known = answersByKey.get(questionKey(incoming))
+  if (known && !incoming.answers) incoming.answers = known
+  items = upsertQuestionItem(items, incoming)
+
+  assert.equal(items.length, 1, 'one card after replay')
+  assert.deepEqual(items[0].answers, answers,
+    'card stays ANSWERED across the reconnect instead of reverting to pending')
+})
+
+test('without the surviving map, a wiped replay reverts to pending (proves the bug)', () => {
+  // This is the pre-fix behavior: after the wipe upsertQuestionItem has no
+  // prior item to carry answers from, and the replay carries none.
+  let items = []
+  const incoming = questionEvent('q1', 'Pick a color')
+  items = upsertQuestionItem(items, incoming)
+  assert.equal(items[0].answers, undefined,
+    'a bare replay over wiped items has no answers — the exact revert the map fixes')
 })
