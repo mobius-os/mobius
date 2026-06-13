@@ -617,7 +617,15 @@ def _app_source_dir_for_static_asset(
 # changes the bytes ships a different name, so the URL itself is the
 # validator. Mirrored by isImmutableAppAsset in frontend/src/
 # sw-cache-policy.js — keep the two in sync.
-_HASHED_ASSET_NAME = re.compile(r"[.-][0-9a-f]{8,}\.", re.IGNORECASE)
+#
+# The hex run must hold at least one alpha hex char (a-f). An all-digit run
+# is a version number or timestamp (main.12345678.js, app.20260612.js), and
+# those names ARE reused across re-installs; marking them immutable would
+# pin a stale build behind a year-long max-age. The lookahead bounds the run
+# to 8+ hex chars and the body then requires one a-f inside it.
+_HASHED_ASSET_NAME = re.compile(
+  r"[.-](?=[0-9a-f]{8,}\.)[0-9a-f]*[a-f][0-9a-f]*\.", re.IGNORECASE
+)
 
 
 def _client_copy_is_fresh(request: Request, etag: str, mtime: float) -> bool:
