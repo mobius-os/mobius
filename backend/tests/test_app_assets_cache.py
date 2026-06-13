@@ -252,3 +252,157 @@ def test_range_still_works_on_immutable_hashed_assets(client, owner_token):
   assert r.status_code == 206
   assert r.content == b"0123"
   assert r.headers["content-range"] == "bytes 0-3/10"
+
+
+def test_all_digit_name_is_not_immutable(client, owner_token):
+  """A date-stamped, all-digit segment must NOT be treated as a content
+  hash. _HASHED_ASSET_NAME used to match any 8+ hex run, so IMG-20260612.png
+  (replaced in place on re-upload) was served immutable for a year. The
+  lookahead requiring an alphabetic hex digit fixes the false positive while
+  keeping genuine digests (which always mix in a-f) immutable."""
+  app = _create_app(client, owner_token)
+  _write_static(app["id"], "IMG-20260612.png", "img-bytes")
+  _write_static(app["id"], "report.20260101.html", "<p>r</p>")
+  _write_static(app["id"], "bundle.cafe1234.js", "console.log(1)")
+
+  all_digit_png = client.get("/app-assets/cuberun/IMG-20260612.png")
+  assert "immutable" not in all_digit_png.headers["cache-control"]
+  assert "no-cache" in all_digit_png.headers["cache-control"]
+
+  all_digit_html = client.get("/app-assets/cuberun/report.20260101.html")
+  assert "immutable" not in all_digit_html.headers["cache-control"]
+
+  # A delimited digest with at least one a-f char is still immutable.
+  real_hash = client.get("/app-assets/cuberun/bundle.cafe1234.js")
+  assert "immutable" in real_hash.headers["cache-control"]
+
+
+# ---------------------------------------------------------------------------
+# The module + sw.js routes share the /app-assets Range-poisoning class: both
+# serve a revalidating FileResponse (no-cache + stable ETag) that HONORS a
+# `Range` header. A `Range: bytes=0-0` probe yields a 1-byte 206 that Chromium
+# caches and later serves as a status-200 full body — a one-byte module (black
+# mini-app until the next app update) or a one-byte service worker. These tests
+# lock in the structural fix: Range is stripped, so the full-body 200 is the
+# only answer; HEAD is registered so probes don't fall back to ranged GETs.
+# ---------------------------------------------------------------------------
+
+_MODULE_JSX = "export default function App() { return null }"
+
+
+def _create_module_app(client, owner_token, offline=False):
+  r = client.post(
+    "/api/apps/",
+    json={
+      "name": "ModApp",
+      "description": "x",
+      "jsx_source": _MODULE_JSX,
+      "offline_capable": offline,
+    },
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert r.status_code == 201, r.text
+  return r.json()
+
+
+def test_module_range_probe_gets_full_body_200(client, owner_token):
+  app = _create_module_app(client, owner_token)
+  url = f"/api/apps/{app['id']}/module?token={owner_token}"
+
+  full = client.get(url)
+  assert full.status_code == 200
+  body = full.content
+  assert len(body) > 1
+
+  # A bytes=0-0 probe must NOT yield a 1-byte 206 — the poisoning trigger.
+  ranged = client.get(url, headers={"Range": "bytes=0-0"})
+  assert ranged.status_code == 200
+  assert ranged.content == body
+  assert "content-range" not in ranged.headers
+  # Still a revalidating response (so a 304 stays cheap), just never partial.
+  assert "no-cache" in ranged.headers["cache-control"]
+
+
+def test_module_head_is_supported_not_405(client, owner_token):
+  app = _create_module_app(client, owner_token)
+  url = f"/api/apps/{app['id']}/module?token={owner_token}"
+
+  r = client.head(url)
+  # A 405 here pushes client probes into a `Range: bytes=0-0` GET fallback —
+  # exactly the poisoning trigger. HEAD must be registered alongside GET.
+  assert r.status_code == 200
+  assert r.content == b""
+  assert r.headers.get("etag")
+
+
+def test_frame_head_is_supported_not_405(client, owner_token):
+  app = _create_module_app(client, owner_token)
+  r = client.head(f"/api/apps/{app['id']}/frame")
+  assert r.status_code == 200
+  assert r.content == b""
+
+
+def test_sw_js_range_probe_gets_full_body_200(client):
+  """sw.js carries no-cache + the mtime ETag FileResponse sets, so it is
+  the same revalidating Range-poisoning class. A bytes=0-0 probe must get the
+  full body, never a 1-byte 206 that would later serve as a 1-byte SW."""
+  import pytest
+
+  full = client.get("/sw.js")
+  # The catch-all SPA route only exists when a static build is present; a
+  # build without sw.js falls through to the index.html SPA fallback (an
+  # HTMLResponse — text/html, no Last-Modified). Gate on the FileResponse
+  # signature (JS content-type + Last-Modified) so we only assert when the
+  # actual sw.js branch ran. The branch is identical in shape to the
+  # module/asset ones above, which DO run here.
+  ctype = full.headers.get("content-type", "")
+  served_from_file = (
+    full.status_code == 200
+    and "javascript" in ctype
+    and full.headers.get("last-modified") is not None
+  )
+  if not served_from_file:
+    pytest.skip("sw.js not served from this build's static dir")
+  body = full.content
+  assert len(body) > 1
+
+  ranged = client.get("/sw.js", headers={"Range": "bytes=0-0"})
+  assert ranged.status_code == 200
+  assert ranged.content == body
+  assert "content-range" not in ranged.headers
+
+
+def _activity_events():
+  import json
+  from app.config import get_settings
+  path = Path(get_settings().data_dir) / "logs" / "activity.jsonl"
+  if not path.exists():
+    return []
+  return [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
+
+
+def test_frame_head_probe_does_not_log_app_open(client, owner_token):
+  """A HEAD on /frame is an existence probe (the reason HEAD is registered:
+  so probes don't fall back to ranged GETs), not a real open — it must not
+  inflate app_open analytics. A GET still counts."""
+  app = _create_module_app(client, owner_token)
+  app_id = app["id"]
+
+  before = sum(
+    1 for e in _activity_events()
+    if e.get("ev") == "app_open" and e.get("app_id") == app_id
+  )
+
+  client.head(f"/api/apps/{app_id}/frame")
+  after_head = sum(
+    1 for e in _activity_events()
+    if e.get("ev") == "app_open" and e.get("app_id") == app_id
+  )
+  assert after_head == before, "HEAD must not log an app_open"
+
+  client.get(f"/api/apps/{app_id}/frame")
+  after_get = sum(
+    1 for e in _activity_events()
+    if e.get("ev") == "app_open" and e.get("app_id") == app_id
+  )
+  assert after_get == before + 1, "GET must still log app_open"

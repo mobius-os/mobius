@@ -28,6 +28,7 @@ from app.deps import (
   get_current_owner, get_current_owner_or_app, get_principal, Principal,
   get_owner_or_app_with_manage_apps, reject_cross_site, resolve_owner_or_app,
 )
+from app.http_caching import strip_range
 from app.resource_access import live_app, live_app_or_404
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
 
@@ -1316,7 +1317,7 @@ def _frame_etag(app: models.App, frame_path: Path) -> str | None:
   return 'W/"' + "-".join(parts) + '"'
 
 
-@router.get("/{app_id}/frame")
+@router.api_route("/{app_id}/frame", methods=["GET", "HEAD"])
 def get_frame(
   app_id: int,
   request: Request,
@@ -1407,18 +1408,20 @@ def get_frame(
   if app.offline_capable:
     headers["X-Mobius-Offline"] = "1"
 
-  # app_open: emit on the 200 path only — the 304 short-circuit above
-  # already returned for cache-revalidating loads, which would
-  # otherwise double-count every time the iframe checks freshness on
-  # a navigation back. Best-effort: a log failure must not block the
-  # frame response (activity.log_event swallows its own OSError).
-  activity.log_event(
-    "app_open", app_id=app.id, slug=ensure_slug(db, app),
-  )
+  # app_open: emit on the GET 200 path only — the 304 short-circuit above
+  # already returned for cache-revalidating loads (which would otherwise
+  # double-count every freshness check on a navigation back), and a HEAD is
+  # an existence probe, not a real open, so it must not count either. Best-
+  # effort: a log failure must not block the frame response
+  # (activity.log_event swallows its own OSError).
+  if request.method != "HEAD":
+    activity.log_event(
+      "app_open", app_id=app.id, slug=ensure_slug(db, app),
+    )
   return HTMLResponse(html, headers=headers)
 
 
-@router.get("/{app_id}/module")
+@router.api_route("/{app_id}/module", methods=["GET", "HEAD"])
 def get_module(
   app_id: int,
   request: Request,
@@ -1474,6 +1477,12 @@ def get_module(
   # the service worker (Tier 4a).
   if app.offline_capable:
     headers["X-Mobius-Offline"] = "1"
+  # The module is a REVALIDATING response (no-cache + stable ETag), so it
+  # must never answer a 206. A `Range: bytes=0-0` probe of a FileResponse
+  # would otherwise let Chromium store the 1-byte slice and later serve it
+  # as a status-200 full body — a black mini-app until the next app update.
+  # Stripping Range here keeps the streamed full-body 200 (see http_caching).
+  strip_range(request)
   return FileResponse(
     path,
     media_type="application/javascript",

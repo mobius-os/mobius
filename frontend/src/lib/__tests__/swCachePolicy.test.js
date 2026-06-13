@@ -59,6 +59,22 @@ test('un-hashed or non-app-asset paths are not immutable', () => {
   assert.equal(isImmutableAppAsset('/vendor/main.8f3a2b1c.js'), false)
 })
 
+test('all-digit (date-stamp) segments are not mistaken for hashes', () => {
+  // A date-stamped name is replaced in place on re-upload, so marking it
+  // immutable would pin a year-stale copy. The lookahead requiring an
+  // alphabetic hex digit keeps these revalidating.
+  assert.equal(isImmutableAppAsset('/app-assets/cuberun/IMG-20260612.png'), false)
+  assert.equal(
+    isImmutableAppAsset('/app-assets/cuberun/report.20260101.html'),
+    false,
+  )
+  // A delimited digest that mixes in a-f still counts as immutable; the
+  // all-digit gate only rejects segments with no alphabetic hex char.
+  assert.equal(
+    isImmutableAppAsset('/app-assets/cuberun/bundle.cafe1234.js'), true,
+  )
+})
+
 const res = (status, type) => ({
   status,
   headers: { get: () => type },

@@ -94,7 +94,13 @@ export function isRangeRequest(request) {
 // re-install that changes the bytes also changes the name, so the URL is
 // the validator — the server sends `Cache-Control: ... immutable` and the
 // SW may cache it forever. Keep the regex in sync with the backend.
-const HASHED_ASSET_NAME = /[.-][0-9a-f]{8,}\./i
+//
+// The lookahead requires at least one ALPHABETIC hex digit (a-f) so an
+// all-DIGIT segment (a date stamp like IMG-20260612.png) isn't mistaken
+// for a content hash and cached forever — those are replaced in place on
+// re-upload and must keep revalidate semantics. A real digest always mixes
+// in a-f, so this never misfires on a genuine hash.
+const HASHED_ASSET_NAME = /[.-](?=[0-9a-f]*[a-f])[0-9a-f]{8,}\./i
 
 export function isImmutableAppAsset(pathname) {
   if (!pathname.startsWith('/app-assets/')) return false
