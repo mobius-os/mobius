@@ -3,15 +3,18 @@ import assert from 'node:assert/strict'
 
 import {
   APP_ASSETS_CACHE,
+  APP_ASSETS_MAX_ENTRIES,
   ESM_CACHE,
   OFFLINE_APPS_CACHE,
   STANDALONE_APPS_CACHE,
   VENDOR_CACHE,
   appCodeStoreAction,
+  entriesToTrim,
   isAppCodeRoute,
   isCacheableAppAssetResponse,
   isImmutableAppAsset,
   isStaleRuntimeCache,
+  supersededVersionKeys,
 } from '../../sw-cache-policy.js'
 
 test('runtime cache cleanup keeps current cache names', () => {
@@ -42,6 +45,13 @@ test('hashed packaged-app asset names are immutable', () => {
     isImmutableAppAsset('/app-assets/cuberun/chunk-a1b2c3d4e5f6.js'),
     true,
   )
+  // An all-alpha hex digest (deadbeef) is still a content hash.
+  assert.equal(
+    isImmutableAppAsset('/app-assets/cuberun/chunk.deadbeef.js'),
+    true,
+  )
+  // Exactly 8 chars with a single alpha char at the boundary still counts.
+  assert.equal(isImmutableAppAsset('/app-assets/cuberun/x.1234567a.js'), true)
 })
 
 test('un-hashed or non-app-asset paths are not immutable', () => {
@@ -59,20 +69,16 @@ test('un-hashed or non-app-asset paths are not immutable', () => {
   assert.equal(isImmutableAppAsset('/vendor/main.8f3a2b1c.js'), false)
 })
 
-test('all-digit (date-stamp) segments are not mistaken for hashes', () => {
-  // A date-stamped name is replaced in place on re-upload, so marking it
-  // immutable would pin a year-stale copy. The lookahead requiring an
-  // alphabetic hex digit keeps these revalidating.
-  assert.equal(isImmutableAppAsset('/app-assets/cuberun/IMG-20260612.png'), false)
-  assert.equal(
-    isImmutableAppAsset('/app-assets/cuberun/report.20260101.html'),
-    false,
-  )
-  // A delimited digest that mixes in a-f still counts as immutable; the
-  // all-digit gate only rejects segments with no alphabetic hex char.
-  assert.equal(
-    isImmutableAppAsset('/app-assets/cuberun/bundle.cafe1234.js'), true,
-  )
+test('all-digit version segments are NOT immutable (alpha-hex required)', () => {
+  // The all-digit false-positive: a version number or timestamp in the
+  // filename is reused across re-installs, so it must revalidate — caching
+  // it forever pins a stale build. >=1 alpha hex char (a-f) is required.
+  assert.equal(isImmutableAppAsset('/app-assets/cuberun/main.12345678.js'), false)
+  assert.equal(isImmutableAppAsset('/app-assets/cuberun/app.20260612.js'), false)
+  assert.equal(isImmutableAppAsset('/app-assets/cuberun/logo.00000000.png'), false)
+  assert.equal(isImmutableAppAsset('/app-assets/cuberun/v1.99999999.css'), false)
+  // A 7-char hex run is too short even WITH an alpha char.
+  assert.equal(isImmutableAppAsset('/app-assets/cuberun/x.123456a.js'), false)
 })
 
 const res = (status, type) => ({
@@ -135,4 +141,84 @@ test('immutable app-asset cache refuses non-200 and HTML bodies', () => {
     isCacheableAppAssetResponse(res(304, 'application/octet-stream')), false,
   )
   assert.equal(isCacheableAppAssetResponse(null), false)
+})
+
+const O = 'https://app.example.com'
+
+test('supersededVersionKeys evicts prior versions of the same route', () => {
+  const stored = `${O}/api/apps/7/module?v=200`
+  const keys = [
+    `${O}/api/apps/7/module?v=100`,   // older version of THIS route → evict
+    `${O}/api/apps/7/module?v=150`,   // another older version → evict
+    stored,                           // the just-stored key → keep
+    `${O}/api/apps/7/frame?v=100`,    // different route type → keep
+    `${O}/api/apps/8/module?v=100`,   // different app id → keep
+  ]
+  const out = supersededVersionKeys(stored, keys)
+  assert.deepEqual(out.sort(), [
+    `${O}/api/apps/7/module?v=100`,
+    `${O}/api/apps/7/module?v=150`,
+  ].sort())
+})
+
+test('supersededVersionKeys never evicts the stored key itself', () => {
+  const stored = `${O}/api/apps/7/module?v=200`
+  assert.deepEqual(supersededVersionKeys(stored, [stored]), [])
+})
+
+test('supersededVersionKeys treats a missing v as a distinct version', () => {
+  // A legacy un-versioned entry for the same route is also superseded.
+  const stored = `${O}/api/apps/7/module?v=200`
+  assert.deepEqual(
+    supersededVersionKeys(stored, [`${O}/api/apps/7/module`]),
+    [`${O}/api/apps/7/module`],
+  )
+  // Conversely, storing the un-versioned key evicts the versioned ones.
+  const storedBare = `${O}/api/apps/7/module`
+  assert.deepEqual(
+    supersededVersionKeys(storedBare, [`${O}/api/apps/7/module?v=200`]),
+    [`${O}/api/apps/7/module?v=200`],
+  )
+})
+
+test('supersededVersionKeys ignores a different origin', () => {
+  const stored = `${O}/api/apps/7/module?v=200`
+  const other = 'https://evil.example.com/api/apps/7/module?v=100'
+  assert.deepEqual(supersededVersionKeys(stored, [other]), [])
+})
+
+test('supersededVersionKeys is robust to bad inputs', () => {
+  // A non-URL stored key returns nothing rather than throwing.
+  assert.deepEqual(supersededVersionKeys('not a url', []), [])
+  // A non-URL entry in the list is skipped, not fatal.
+  const stored = `${O}/api/apps/7/module?v=200`
+  assert.deepEqual(
+    supersededVersionKeys(stored, ['::::', `${O}/api/apps/7/module?v=1`]),
+    [`${O}/api/apps/7/module?v=1`],
+  )
+  assert.deepEqual(supersededVersionKeys(stored, undefined), [])
+})
+
+test('entriesToTrim returns the oldest keys over the cap', () => {
+  const keys = ['a', 'b', 'c', 'd', 'e']
+  // Oldest-first (insertion order): trimming to 3 drops the first two.
+  assert.deepEqual(entriesToTrim(keys, 3), ['a', 'b'])
+})
+
+test('entriesToTrim returns nothing at or under the cap', () => {
+  assert.deepEqual(entriesToTrim(['a', 'b'], 3), [])
+  assert.deepEqual(entriesToTrim(['a', 'b', 'c'], 3), [])
+  assert.deepEqual(entriesToTrim([], 3), [])
+})
+
+test('entriesToTrim guards a non-positive cap and missing list', () => {
+  // A zero/negative cap is treated as "no trim" rather than wiping everything.
+  assert.deepEqual(entriesToTrim(['a', 'b'], 0), [])
+  assert.deepEqual(entriesToTrim(['a', 'b'], -1), [])
+  assert.deepEqual(entriesToTrim(undefined, 3), [])
+})
+
+test('APP_ASSETS_MAX_ENTRIES is a sane positive cap', () => {
+  assert.equal(typeof APP_ASSETS_MAX_ENTRIES, 'number')
+  assert.ok(APP_ASSETS_MAX_ENTRIES > 0)
 })
