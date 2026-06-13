@@ -2,21 +2,19 @@
 # preview_app.sh — screenshot a mini-app rendered inside the
 # authenticated Möbius shell.
 #
-# Direct app-frame URLs (/api/apps/{id}/frame?token=...) used to
-# work as standalone preview targets, but the frame now waits for
-# a parent-shell `moebius:frame-init` postMessage before
-# initializing. Screenshotting the bare frame URL gives you a blank
-# page saying "No init message from parent shell."
+# Thin wrapper around agent-screenshot.sh (the general authenticated-
+# screenshot helper). Kept for its historical signature so recovery.md
+# and existing callers keep working:
 #
-# This helper takes the working path: sign in via localStorage,
-# navigate to /app/<id> in the authenticated shell, dismiss the
-# install banner, wait for first render, screenshot.
-#
-# Usage:
 #   preview_app.sh <app_id> [output_path]
 #   defaults: output_path=/data/chats/$CHAT_ID/generated/app-<id>.png
 #
-# Prints the output path on stdout.
+# Maps to the in-shell app route /app/<id>. The bare app-frame URL
+# can't be screenshotted directly — the frame waits for the parent
+# shell's `moebius:frame-init` postMessage before initializing — so we
+# go through /app/<id> in the authenticated shell. For the STANDALONE
+# PWA page of an app, call agent-screenshot.sh /apps/<slug>/ directly.
+# All auth/viewport/banner handling lives in agent-screenshot.sh.
 
 set -euo pipefail
 
@@ -28,39 +26,6 @@ if [ -z "$APP_ID" ]; then
 fi
 
 OUT="${2:-/data/chats/${CHAT_ID:-unknown}/generated/app-${APP_ID}.png}"
-mkdir -p "$(dirname "$OUT")"
 
-if [ -z "${AGENT_TOKEN:-}" ] || [ -z "${API_BASE_URL:-}" ]; then
-  echo "preview_app.sh: AGENT_TOKEN and API_BASE_URL must be set" >&2
-  exit 1
-fi
-
-if ! command -v agent-browser >/dev/null 2>&1; then
-  echo "preview_app.sh: agent-browser not on PATH" >&2
-  exit 1
-fi
-
-# Match the partner's viewport (set by chat.py from the React
-# shell's per-turn payload). Screenshots require those values.
-if [ -z "${VIEWPORT_WIDTH:-}" ] || [ -z "${VIEWPORT_HEIGHT:-}" ]; then
-  echo "preview_app.sh: VIEWPORT_WIDTH and VIEWPORT_HEIGHT must be set" >&2
-  exit 1
-fi
-VW="$VIEWPORT_WIDTH"
-VH="$VIEWPORT_HEIGHT"
-agent-browser set viewport "$VW" "$VH" >/dev/null
-
-# Same auth dance as preview_shell.sh: load origin, write token to
-# localStorage, navigate to the in-shell app route.
-agent-browser open "${API_BASE_URL}/" >/dev/null
-agent-browser eval "localStorage.setItem('token', '${AGENT_TOKEN}')" >/dev/null
-agent-browser open "${API_BASE_URL}/app/${APP_ID}" >/dev/null
-agent-browser wait 1500 >/dev/null
-
-# Dismiss the install banner so it doesn't cover the bottom of the
-# app while we screenshot.
-agent-browser find text "Not now" click >/dev/null 2>&1 || true
-agent-browser wait 300 >/dev/null
-
-agent-browser screenshot "$OUT" >/dev/null
-echo "$OUT"
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "${DIR}/agent-screenshot.sh" "/app/${APP_ID}" "${OUT}"

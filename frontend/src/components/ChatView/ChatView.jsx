@@ -1573,7 +1573,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             // Chips pre-fill the composer (never auto-send) — max 4 rendered.
             Array.isArray(quickActions) && quickActions.length > 0 ? (
               <div className="chat__empty chat__empty--embed chat__empty--chips">
-                <p className="chat__empty-sub">How can I help?</p>
                 <div className="chat__quick-actions" role="list">
                   {quickActions.slice(0, 4).map((action, i) => (
                     <button
@@ -1589,9 +1588,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                 </div>
               </div>
             ) : (
-              <div className="chat__empty chat__empty--embed">
-                <p className="chat__empty-sub">How can I help?</p>
-              </div>
+              // Embedded chat with no quick-action chips: render nothing. The
+              // embed peeks past the collapsed pill, and any greeting text
+              // leaks into the app surface. The empty composer is enough.
+              <div className="chat__empty chat__empty--embed" />
             )
           ) : (
             <div className="chat__empty">
