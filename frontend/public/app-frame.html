@@ -292,11 +292,49 @@
       }
     }
 
+    // Report uncaught APP errors to the activity log so the nightly Dreaming
+    // digest sees them. These fire in THIS iframe's window, not the shell's,
+    // so the shell's errorLog can't catch them. POSTs with the app token ->
+    // app_error attributed to this app_id. Client-side debounce mirrors the
+    // server's so a render loop can't storm the network.
+    let _reportToken = null;
+    const _reportSeen = new Map();
+    function reportAppError(where, message, stack) {
+      if (!_reportToken || !message) return;
+      const key = String(message).slice(0, 200);
+      const now = Date.now();
+      const last = _reportSeen.get(key);
+      if (last && now - last < 60000) return;
+      _reportSeen.set(key, now);
+      try {
+        fetch('/api/client-error', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _reportToken },
+          body: JSON.stringify({
+            message: String(message).slice(0, 2000),
+            where: where,
+            stack: stack ? String(stack).slice(0, 8000) : undefined,
+            url: location.href,
+          }),
+          keepalive: true,
+        }).catch(function () {});
+      } catch (e) {}
+    }
+    window.addEventListener('error', function (e) {
+      if (!e.error && !e.message) return;
+      reportAppError('app:window.onerror', e.message, e.error && e.error.stack);
+    });
+    window.addEventListener('unhandledrejection', function (e) {
+      const r = e.reason;
+      reportAppError('app:unhandledrejection', (r && r.message) || String(r), r && r.stack);
+    });
+
     async function loadModule(token) {
       if (!token) {
         showErr('Configuration error', 'No token received from parent.');
         return;
       }
+      _reportToken = token;
       try {
         // Expose window.mobius BEFORE importing/rendering the app, so the
         // component sees it on mount — mirrors the standalone host
