@@ -2,7 +2,16 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no" />
+  <!-- viewport-fit=cover makes the iframe's layout viewport extend UNDER the
+       notch/punch-hole so an immersive app's background paints full-bleed (the
+       safe-rect-only default left a strip of shell colour above the app), and
+       it makes env(safe-area-inset-*) resolve to the real device insets inside
+       this document. Apps may now pad controls with env() directly OR with the
+       shell-forwarded --mobius-safe-* vars (which still cover the case where an
+       app wants insets only while immersive). Folded into _frame_etag via
+       sha256(app-frame.html), so installed PWAs revalidate the frame on the
+       next open and purge the stale safe-rect-only frame from the SW cache. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <meta name="referrer" content="no-referrer">
   <script type="importmap">
   {

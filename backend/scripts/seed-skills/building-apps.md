@@ -620,7 +620,7 @@ window.parent.postMessage({ type: 'moebius:new-chat', draft: 'Hello!' }, window.
 
 ## Immersive mode — full-screen apps (games)
 
-The shell's top bar takes ~58px a game wants back. An app can ask the shell to hide its chrome and hand over the full viewport — including under the iPhone notch (the shell ships `viewport-fit=cover` and a translucent status bar):
+The shell's top bar takes ~58px a game wants back. An app can ask the shell to hide its chrome and hand over the full viewport. Your background goes full-bleed automatically — it paints under the iPhone notch / Android punch-hole edge to edge (the iframe ships `viewport-fit=cover`, so its layout viewport extends under the cutout and there's no shell-coloured strip above your app):
 
 ```jsx
 useEffect(() => {
@@ -632,9 +632,11 @@ useEffect(() => {
 ```
 
 - `value: true` hides the top bar while your app is the active canvas; `value: false` (your effect cleanup) restores it. The shell also restores chrome on app switch or unmount on its own, so you can't strand the user — but post the cleanup anyway for the in-place case.
-- While immersive you own safe-area padding: pad HUD/overlay elements so the notch or punch-hole doesn't cover them. **Do NOT use `env(safe-area-inset-*)` — it reads 0 inside the sandboxed iframe** (only the top-level shell resolves viewport-fit insets). The shell forwards the real device insets as CSS variables `--mobius-safe-top/right/bottom/left` on `:root`; pad with those instead, e.g. `padding-top: var(--mobius-safe-top)`. They are 0 while windowed and non-zero only while immersive, so you can reference them unconditionally without double-padding.
+- The background bleeds full-screen, but **keep your controls clear of the cutout**: pad HUD / score / buttons so the notch or punch-hole doesn't cover them. Two equivalent ways, pick either:
+  - `env(safe-area-inset-*)` works directly — the iframe's `viewport-fit=cover` makes it resolve to the real device insets (e.g. `padding-top: max(12px, env(safe-area-inset-top))`). This matches how a standalone PWA pads, so the same code works in both contexts.
+  - `--mobius-safe-top/right/bottom/left` CSS variables on `:root` — the shell forwards the real insets and **zeroes them while your app is windowed**, so a control padded with `padding-top: var(--mobius-safe-top)` clears the notch immersive and sits flush when not. Use these when you want inset padding *only* while immersive; use `env()` when you want it always. They also re-forward on rotation, so a landscape flip (cutout moves to a side) re-pads correctly.
 - The shell renders its own floating exit button at the top-left (safe-area inset) while immersive. Don't draw a competing exit control, and keep critical tap targets out of that corner. If the user taps it, the shell stays in normal chrome until your app remounts and posts again — respect that choice; don't re-post on a timer.
-- Standalone opens (`/apps/<slug>/`) have no shell; the message is harmlessly ignored. No flag, no manifest field, no DB column — the postMessage is the whole opt-in. (Standalone PWAs reach env() insets natively, so `--mobius-safe-*` defaults to 0 there — pad with `env(safe-area-inset-*)` directly in a standalone-only build if you need it.)
+- Standalone opens (`/apps/<slug>/`) have no shell; the message is harmlessly ignored. No flag, no manifest field, no DB column — the postMessage is the whole opt-in. `env(safe-area-inset-*)` resolves natively in a standalone PWA (and now in-shell too), so a build that pads with `env()` is portable across both; `--mobius-safe-*` stays 0 in standalone (no shell to forward them).
 
 ---
 
