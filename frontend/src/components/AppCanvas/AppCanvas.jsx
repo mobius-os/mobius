@@ -419,8 +419,10 @@ export default function AppCanvas({
   // probe element and posts them; the frame applies them to :root as
   // --mobius-safe-*. Only non-zero while THIS app is immersive — a windowed
   // app's chrome already owns the inset padding, so it must receive zeros and
-  // not double-pad. Sent on iframe load (sendInsets in onLoad) and whenever
-  // the immersive verdict flips.
+  // not double-pad. Sent on iframe load (sendInsets in onLoad), whenever the
+  // immersive verdict flips, and on resize/orientationchange while immersive
+  // (a rotation moves the cutout, so the cached insets would otherwise go
+  // stale — see the geometry-change effect below).
   function sendInsets() {
     if (!iframeRef.current?.contentWindow) return
     const insets = immersive ? readDeviceInsets() : zeroInsets()
@@ -433,6 +435,26 @@ export default function AppCanvas({
   useEffect(() => {
     if (!loadedRef.current) return
     sendInsets()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [immersive])
+
+  // Re-forward insets on viewport geometry change WHILE immersive. Rotating the
+  // device or a window resize moves the notch/home-indicator (landscape puts
+  // the cutout on a side, so top→0 and left/right gain the inset), but the
+  // effect above only fires on the immersive FLIP — without this the app keeps
+  // padding for the pre-rotation orientation and a control slides under the
+  // cutout. Windowed apps receive zeros and don't change on resize, so the
+  // listener is only attached while immersive (and torn down on exit). The
+  // probe element resolves the fresh env() values after layout settles.
+  useEffect(() => {
+    if (!immersive) return
+    function onGeometryChange() { sendInsets() }
+    window.addEventListener('resize', onGeometryChange)
+    window.addEventListener('orientationchange', onGeometryChange)
+    return () => {
+      window.removeEventListener('resize', onGeometryChange)
+      window.removeEventListener('orientationchange', onGeometryChange)
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [immersive])
 
