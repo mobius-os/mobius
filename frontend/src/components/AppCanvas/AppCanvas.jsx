@@ -4,6 +4,7 @@ import { api, getToken } from '../../api/client.js'
 import { appQueries, themeQueries } from '../../hooks/queries.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import { liveAppToken, resolveLatchedToken } from '../../lib/appToken.js'
+import { readSafeAreaInsets, zeroInsets } from '../../lib/safeAreaInsets.js'
 import { WifiOff } from 'lucide-react'
 import './AppCanvas.css'
 
@@ -60,6 +61,18 @@ import './AppCanvas.css'
 //      immersive for itself). Shell applies it only while this app is
 //      the active canvas; see lib/immersive.js for the state contract.
 //
+//   5. {type: 'moebius:frame-insets', insets}              parent → frame
+//      The device safe-area insets ({top,right,bottom,left} px strings),
+//      forwarded so an immersive (full-bleed, under-the-notch) app can pad
+//      away from the notch/home-indicator. env(safe-area-inset-*) reads 0
+//      inside the sandboxed iframe (only the top-level document resolves
+//      viewport-fit insets), so the shell reads the REAL values off a probe
+//      element and posts them; the frame applies them as
+//      --mobius-safe-{top,right,bottom,left} on :root. Non-zero only while
+//      THIS app is immersive (the `immersive` prop); zeros otherwise, so a
+//      windowed app whose chrome already owns the inset padding can't
+//      double-pad. See lib/safeAreaInsets.js for the read contract.
+//
 // Shell-level messages (handled by Shell.jsx, NOT this file):
 //   - {type: 'moebius:app-error', appId, error, chatId?}    frame → shell
 //   - {type: 'moebius:new-chat', draft?}                    frame → shell
@@ -78,6 +91,33 @@ import './AppCanvas.css'
 // frame/module after an app update.
 // =================================================================
 
+// One shared off-screen probe whose four padding sides are set to
+// env(safe-area-inset-*); getComputedStyle resolves each env() to a concrete
+// px value on the top-level document (the iframe can't — see
+// lib/safeAreaInsets.js). Created lazily and reused across every AppCanvas
+// instance so the immersive passthrough doesn't churn a DOM node per app.
+// During SSR / a non-DOM test env (no document) we return zeros — the helper
+// is only meaningfully invoked client-side from the iframe onLoad / immersive
+// effect, so the probe is never needed before the DOM exists.
+let _insetProbe = null
+function readDeviceInsets() {
+  if (typeof document === 'undefined') return zeroInsets()
+  if (!_insetProbe) {
+    _insetProbe = document.createElement('div')
+    _insetProbe.setAttribute('aria-hidden', 'true')
+    _insetProbe.style.cssText = [
+      'position:fixed', 'top:0', 'left:0',
+      'width:0', 'height:0', 'visibility:hidden', 'pointer-events:none',
+      'padding-top:env(safe-area-inset-top)',
+      'padding-right:env(safe-area-inset-right)',
+      'padding-bottom:env(safe-area-inset-bottom)',
+      'padding-left:env(safe-area-inset-left)',
+    ].join(';')
+    document.body.appendChild(_insetProbe)
+  }
+  return readSafeAreaInsets(getComputedStyle(_insetProbe))
+}
+
 // `version` is bumped by Shell when an `app_updated` event arrives
 // for this app, busting the iframe cache and forcing a fresh frame
 // load (the frame HTML includes the theme CSS, so it needs to refetch
@@ -91,6 +131,7 @@ import './AppCanvas.css'
 // server-side validity window.
 export default function AppCanvas({
   appId, version = 0, appName, offlineCapable = false,
+  immersive = false,
   onNavPush, onNavPop, onNavReset, onImmersive,
 }) {
   const queryClient = useQueryClient()
@@ -371,6 +412,30 @@ export default function AppCanvas({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [online])
 
+  // ── Immersive safe-area passthrough (.pm/128 follow-up) ──────────
+  // Forward the device safe-area insets so an immersive (full-bleed) app can
+  // pad away from the notch/home-indicator. env(safe-area-inset-*) reads 0
+  // inside the sandboxed iframe, so the shell reads the real values off a
+  // probe element and posts them; the frame applies them to :root as
+  // --mobius-safe-*. Only non-zero while THIS app is immersive — a windowed
+  // app's chrome already owns the inset padding, so it must receive zeros and
+  // not double-pad. Sent on iframe load (sendInsets in onLoad) and whenever
+  // the immersive verdict flips.
+  function sendInsets() {
+    if (!iframeRef.current?.contentWindow) return
+    const insets = immersive ? readDeviceInsets() : zeroInsets()
+    iframeRef.current.contentWindow.postMessage(
+      { type: 'moebius:frame-insets', insets },
+      window.location.origin,
+    )
+  }
+
+  useEffect(() => {
+    if (!loadedRef.current) return
+    sendInsets()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [immersive])
+
   if (!appId) {
     return (
       <div className="canvas canvas--empty">
@@ -435,6 +500,7 @@ export default function AppCanvas({
           loadedRef.current = true
           sendInit()
           sendOnlineStatus()
+          sendInsets()
         }}
       />
       {!loaded && (
