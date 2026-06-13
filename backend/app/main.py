@@ -482,8 +482,11 @@ def unknown_api(path: str):
 
   The SPA catch-all below intentionally serves index.html for client routes,
   but `/api/*` misses are not client routes. Keeping this explicit makes
-  removed backend surfaces, such as the old `/api/ai`, disappear cleanly for
-  every HTTP method.
+  removed backend surfaces disappear cleanly for every HTTP method. The
+  prime example is the old `/api/ai` provider proxy, dropped 2026-06-05
+  once apps moved to reaching models through the agent (`window.mobius.chat`,
+  or a bundled server-side script run via `/api/apps/{id}/run-job`) rather
+  than a synchronous in-backend completion endpoint.
   """
   raise HTTPException(status_code=404, detail="Not found.")
 
