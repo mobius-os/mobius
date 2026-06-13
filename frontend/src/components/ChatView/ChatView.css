@@ -294,6 +294,24 @@
   contain-intrinsic-size: auto 120px;
 }
 
+/* Exempt image-bearing messages from content-visibility skipping. The 120px
+   intrinsic-size estimate is fine for text/tool blocks but wildly wrong for a
+   message holding an agent screenshot (the `.md-image-frame` aspect-ratio box
+   reserves hundreds of px). When such a message is off-screen, the browser
+   lays it out at the 120px guess; scrolling it into view re-measures it to its
+   true height and shifts everything below — and because `.chat__scroll` has
+   `overflow-anchor: none` (intentional, for the spacer contract) the browser
+   does NOT compensate, so the shift is a visible scroll jump. Rendering these
+   few image messages eagerly keeps their height correct at all times. The
+   `.md-image-frame` reservation (markdown.css) handles the decode-time jump;
+   this handles the scroll-into-view jump. `:has()` is supported on every
+   browser this PWA targets. */
+.chat__msg:has(.md-image-frame),
+.chat__msg:has(.chat__attach-images) {
+  content-visibility: visible;
+  contain-intrinsic-size: auto none;
+}
+
 .chat__msg--user { align-items: flex-end; }
 .chat__msg--assistant { align-items: flex-start; }
 
