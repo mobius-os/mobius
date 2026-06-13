@@ -102,3 +102,67 @@ def test_app_token_can_update_own_schedule_only(client, auth, monkeypatch):
     headers=app_auth,
   )
   assert r.status_code == 403
+
+
+def _make_icon_app(client, auth, db):
+  """An app row whose `icon_png` is a large (512px) PNG, so a ?size= variant
+  is provably smaller. Returns the app id."""
+  import io
+  from PIL import Image
+  from app import models
+  r = client.post("/api/apps/", json={
+    "name": "Iconic",
+    "description": "test",
+    "jsx_source": "export default function App() { return <div/> }",
+  }, headers=auth)
+  assert r.status_code == 201, r.text
+  app_id = r.json()["id"]
+  buf = io.BytesIO()
+  # RGBA with varied pixels so optimize=True can't collapse it to a few bytes.
+  img = Image.new("RGBA", (512, 512))
+  img.putdata([
+    ((x * 7) % 256, (y * 5) % 256, (x + y) % 256, 255)
+    for y in range(512) for x in range(512)
+  ])
+  img.save(buf, format="PNG")
+  row = db.query(models.App).filter(models.App.id == app_id).first()
+  row.icon_png = buf.getvalue()
+  db.commit()
+  return app_id
+
+
+def test_get_icon_size_returns_smaller_cached_variant(client, auth, db):
+  """?size= serves a Pillow-downscaled PNG (fewer bytes) with the size folded
+  into the ETag and a long cache header; default (no size) is unchanged."""
+  app_id = _make_icon_app(client, auth, db)
+
+  full = client.get(f"/api/apps/{app_id}/icon")
+  assert full.status_code == 200
+  assert full.headers["Cache-Control"] == "public, max-age=3600"
+  full_etag = full.headers["ETag"]
+
+  small = client.get(f"/api/apps/{app_id}/icon", params={"size": 64})
+  assert small.status_code == 200
+  assert small.headers["Content-Type"] == "image/png"
+  assert small.headers["Cache-Control"] == "public, max-age=3600"
+  # The downscaled variant is strictly smaller than the full-res icon.
+  assert len(small.content) < len(full.content)
+  # Its ETag folds the size in, so it caches independently of the full-res one.
+  assert small.headers["ETag"] != full_etag
+  assert small.headers["ETag"].endswith('-64"')
+
+  # The variant ETag round-trips to a 304 with the same cache header.
+  again = client.get(
+    f"/api/apps/{app_id}/icon",
+    params={"size": 64},
+    headers={"If-None-Match": small.headers["ETag"]},
+  )
+  assert again.status_code == 304
+  assert again.headers["Cache-Control"] == "public, max-age=3600"
+
+
+def test_get_icon_rejects_unsupported_size(client, auth, db):
+  """An unsupported ?size= is a 400 so the variant cache can't be flooded."""
+  app_id = _make_icon_app(client, auth, db)
+  r = client.get(f"/api/apps/{app_id}/icon", params={"size": 999})
+  assert r.status_code == 400
