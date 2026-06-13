@@ -38,6 +38,12 @@
       --danger: #f87171; --green: #6ee7b7;
       --font: 'Inter', system-ui, sans-serif;
       --mono: 'JetBrains Mono', ui-monospace, monospace;
+      /* Immersive safe-area insets, forwarded from the shell via
+         moebius:frame-insets (env(safe-area-inset-*) reads 0 inside this
+         sandboxed iframe). Default 0 so apps can reference them before the
+         first message and while windowed; non-zero only while immersive. */
+      --mobius-safe-top: 0px; --mobius-safe-right: 0px;
+      --mobius-safe-bottom: 0px; --mobius-safe-left: 0px;
     }
     /* No grey/blue tap-flash on any interactive element across mini-apps (mobile). */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
@@ -244,6 +250,24 @@
       return null;
     }
 
+    // Immersive safe-area passthrough. env(safe-area-inset-*) reads 0 inside
+    // this sandboxed iframe (only the top-level document resolves
+    // viewport-fit insets), so the parent shell reads the device's real
+    // insets off a probe element and posts them. We expose them as
+    // --mobius-safe-{top,right,bottom,left} on :root; an immersive app pads
+    // with these instead of env(). The parent posts zeros whenever the app is
+    // NOT immersive (its chrome owns the inset padding then), so apps can
+    // unconditionally reference the vars and get 0 when windowed. Documented
+    // for app authors in the building-apps skill.
+    function applyInsets(insets) {
+      if (!insets || typeof insets !== 'object') return;
+      var root = document.documentElement.style;
+      root.setProperty('--mobius-safe-top', insets.top || '0px');
+      root.setProperty('--mobius-safe-right', insets.right || '0px');
+      root.setProperty('--mobius-safe-bottom', insets.bottom || '0px');
+      root.setProperty('--mobius-safe-left', insets.left || '0px');
+    }
+
     function applyTheme(css, bg) {
       if (typeof css === 'string' && css.length) {
         let el = document.getElementById('moebius-theme');
@@ -282,7 +306,22 @@
         // /module route ignores v (its ETag keys on app.updated_at), but the SW
         // offline handler keeps v in its cache key (it strips token, _ and install but keeps v), so
         // an app update changes the key and forces a fresh fetch.
-        const url = `/api/apps/${_FRAME_APP_ID}/module?token=${encodeURIComponent(token)}&v=${encodeURIComponent(frameVersion)}`;
+        const moduleUrl = (retry) => {
+          // `_=<retry>` is the per-attempt cache-buster. A failed dynamic
+          // import() (or a failed module response) is cached by Chromium per
+          // exact URL, so re-importing the SAME url after a transient network
+          // blip resolves to the cached failure with no new fetch — the retry
+          // below would be a no-op. A fresh `_` each attempt makes the URL
+          // distinct so the browser actually re-fetches. The server /module
+          // route reads only `token` from the query (ETag keys on
+          // app.updated_at), so it ignores `_`; and the SW offline handler
+          // already STRIPS `_` from its cache key (appCodeHandler), so the
+          // buster never poisons the offline cache. retry 0 = first attempt
+          // (no buster), so the cold-start URL is unchanged.
+          const base = `/api/apps/${_FRAME_APP_ID}/module?token=${encodeURIComponent(token)}&v=${encodeURIComponent(frameVersion)}`;
+          return retry ? `${base}&_=${retry}` : base;
+        };
+        const url = moduleUrl(0);
         // Dynamic import() can't set request headers, so the token is a query
         // param. An expired or revoked token causes the server to 401, which the
         // browser surfaces as a network-error on import() (CORS/opaque failure),
@@ -334,7 +373,10 @@
             throw importErr;
           }
           await new Promise((r) => setTimeout(r, IMPORT_RETRY_DELAY_MS));
-          mod = await import(url);  // a second failure falls through to showErr
+          // Cache-bust the retry (moduleUrl(1)) so Chromium re-fetches rather
+          // than resolving the cached import() failure for the original url.
+          // A second failure falls through to showErr.
+          mod = await import(moduleUrl(1));
         }
         const Component = mod.default;
         if (!Component) {
@@ -367,6 +409,10 @@
       if (!msg || typeof msg !== 'object') return;
       if (msg.type === 'moebius:frame-theme') {
         applyTheme(msg.themeCss, msg.bg);
+        return;
+      }
+      if (msg.type === 'moebius:frame-insets') {
+        applyInsets(msg.insets);
         return;
       }
       if (msg.type === 'moebius:frame-init' && !initialized) {

@@ -1019,8 +1019,12 @@ export default function Shell() {
       {/* inert on the header while the drawer is open so keyboard / AT
           focus cannot reach shell-chrome behind the open drawer. The
           drawer itself gains focus on open (Drawer.jsx focus-management
-          effect) and restores it here on close. */}
-      <header className="shell__bar" inert={drawerOpen ? '' : undefined}>
+          effect) and restores it here on close. React 19 reflects the
+          boolean `inert` prop to the boolean attribute (present when true,
+          absent when false); the old `drawerOpen ? '' : undefined` form was
+          a no-op because React 19 normalizes the known boolean attribute and
+          an empty string serializes as falsy, so it never applied. */}
+      <header className="shell__bar" inert={drawerOpen}>
         {/* The brand area (logo + wordmark) below is the drawer toggle: it is
             a role=button with aria-label + aria-expanded + Enter/Space
             handling, so it serves touch, pointer, keyboard, and AT alike. A
@@ -1076,8 +1080,10 @@ export default function Shell() {
       {/* inert on the main content while the drawer is open — mirrors
           the drawer's own inert-when-closed contract, but inverted.
           Prevents pointer / keyboard events from reaching the chat or
-          app canvas while the drawer is overlaid in front of it. */}
-      <main className="shell__content" inert={drawerOpen ? '' : undefined}>
+          app canvas while the drawer is overlaid in front of it. Boolean
+          prop form — see the header's inert note for why the old
+          `? '' : undefined` form was a React 19 no-op. */}
+      <main className="shell__content" inert={drawerOpen}>
         {/* Single-mount ChatView, keyed by activeChatId. Switching
             chats unmounts and remounts; ChatView's hide-then-reveal
             scroll-restore (visibility:hidden until lazy renderers
@@ -1147,6 +1153,12 @@ export default function Shell() {
               version={versionForApp(id)}
               appName={apps.find(a => String(a.id) === String(id))?.name}
               offlineCapable={!!apps.find(a => String(a.id) === String(id))?.offline_capable}
+              // Immersive is APPLIED only while this app is the active holder
+              // (immersiveActive already requires the canvas view + active
+              // app). Only then does the iframe receive the real safe-area
+              // insets to pad under the notch; every other (cached, hidden)
+              // iframe gets zeros so it never double-pads behind the chrome.
+              immersive={immersiveActive && String(immersiveAppId) === String(id)}
               onNavPush={appNavPush}
               onNavPop={appNavPop}
               onNavReset={appNavReset}
@@ -1169,7 +1181,7 @@ export default function Shell() {
           type="button"
           className="shell__immersive-exit"
           aria-label="Exit full screen"
-          inert={drawerOpen ? '' : undefined}
+          inert={drawerOpen}
           onClick={() => dispatchImmersive({ type: 'exit' })}
         >
           <Minimize2 size={18} aria-hidden="true" />
