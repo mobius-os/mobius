@@ -100,7 +100,22 @@ Iterate on details freely (different library, CSS tweaks, polish). But **do not 
 
 ### 5. Test visually with agent-browser
 
-`agent-browser` is a CLI wrapping a headless Chromium with a persistent session — your visual testing tool. Seeing the app as it renders beats trusting the code for anything visual. Core moves: `open <url>`, `set viewport "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT"` (required; use the actual app viewport), `snapshot` (a11y tree with `@eN` refs), `click/fill/type @eN`, `screenshot <path>`, `wait` (on a signal — `wait @eN` / `--text` / `--fn` / `--url` — not a guessed duration), `batch "cmd1" "cmd2"` (ordered, fewer round-trips), `diff snapshot` / `diff screenshot --baseline <before>.png`.
+`agent-browser` is a CLI wrapping a headless Chromium with a persistent session — your visual testing tool. Seeing the app as it renders beats trusting the code for anything visual.
+
+**To screenshot any Möbius page, use the authenticated helper — never `agent-browser open` it directly.** Your browser starts with an empty `localStorage`, so opening a Möbius URL lands on the login wall and every screenshot is the password form, not the page you meant to capture. The helper writes your scoped token into `localStorage` first, then navigates:
+
+```bash
+bash "$SCRIPTS_DIR/agent-screenshot.sh" <route> <out.png>
+# /                → the shell      /chat/<id>     → a chat
+# /app/<id>        → a mini-app in the shell (numeric id)
+# /apps/<slug>/    → a mini-app's standalone PWA page (by slug)
+```
+
+`preview_app.sh <id>` and `preview_shell.sh [chat_id]` are thin wrappers over it for those two common cases. Use the helper, then `Read`/`view_image` the PNG (step 6).
+
+Raw `agent-browser open <url>` is for **non-Möbius pages only** (an external site you're scraping or sanity-checking) — it has no auth dance, so it shows the login wall for any Möbius route.
+
+Core moves once a page is open: `set viewport "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT"` (the helper sets this for you; needed when driving raw), `snapshot` (a11y tree with `@eN` refs), `click/fill/type @eN`, `screenshot <path>`, `wait` (on a signal — `wait @eN` / `--text` / `--fn` / `--url` — not a guessed duration), `batch "cmd1" "cmd2"` (ordered, fewer round-trips), `diff snapshot` / `diff screenshot --baseline <before>.png`.
 
 Two gotchas every session:
 

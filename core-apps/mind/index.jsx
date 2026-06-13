@@ -530,7 +530,7 @@ export default function App({ appId, token }) {
           {/* The app's own glossy icon as the brand mark; falls back to the
               accent dot if this install has no custom icon (the route 404s). */}
           <img
-            src={`/api/apps/${appId}/icon`}
+            src={`/api/apps/${appId}/icon?size=64`}
             alt=""
             width={28}
             height={28}
@@ -543,7 +543,6 @@ export default function App({ appId, token }) {
           />
           <span style={{ ...S.brandDot, display: 'none' }}><span style={S.brandDotCore} /></span>
           <div style={{ minWidth: 0 }}>
-            <div style={S.title}>Mind</div>
             <div style={S.subtitle}>
               {status === 'ready'
                 ? `${counts.note + counts.moc} notes · ${graph.edges.length} links`
@@ -1143,16 +1142,14 @@ async function createMindGraphScene({
       const isHover = hover === node.id;
       const isSelected = selected === node.id;
       const isHub = node.type === 'moc';
-      const glowR = r * (isHover || isSelected ? 3.8 : 2.45);
 
+      // A node is a flat colored disc with a thin ring — no glow halo, no
+      // specular highlight dot (owner asked to simplify: the color carries the
+      // identity, the ring carries hover/selected emphasis).
       gfx.clear();
       gfx.position.set(node.x, node.y);
-      gfx.circle(0, 0, glowR);
-      gfx.fill({ color, alpha: (isHub ? 0.18 : 0.12) * (0.35 + 0.65 * f) });
       gfx.circle(0, 0, r);
       gfx.fill({ color, alpha: 0.18 + 0.82 * f });
-      gfx.circle(-r * 0.25, -r * 0.3, Math.max(1.5, r * 0.28));
-      gfx.fill({ color: 0xffffff, alpha: 0.18 * f });
       gfx.circle(0, 0, r);
       gfx.stroke({
         width: isHover || isSelected || isHub ? 1.4 / scale : 0.85 / scale,
@@ -1691,7 +1688,6 @@ const S = {
   brandIcon: {
     width: 28, height: 28, borderRadius: 7, flexShrink: 0, display: 'block',
   },
-  title: { fontSize: 16, fontWeight: 700, lineHeight: 1.05, letterSpacing: '-0.015em' },
   subtitle: {
     fontSize: 11.5, color: 'var(--muted)', marginTop: 2, whiteSpace: 'nowrap',
     overflow: 'hidden', textOverflow: 'ellipsis', fontVariantNumeric: 'tabular-nums',
