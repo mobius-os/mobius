@@ -24,6 +24,18 @@ export const STANDALONE_APPS_CACHE = 'mobius-standalone-v2'
 // document (black screen). isRangeRequest below is the structural guard.
 export const APP_ASSETS_CACHE = 'mobius-app-assets-v2'
 
+// Bounded cap for APP_ASSETS_CACHE. A single packaged app can be ~19MB of
+// models/textures (CubeRun); without a cap the immutable half grows without
+// bound as apps are installed/re-installed, and one asset-heavy app could
+// evict the whole origin's quota. There is no Workbox ExpirationPlugin on the
+// /app-assets routes (they're plain CacheFirst/SWR with only a content-type
+// guard), so the trim is manual: a documented entry-count ceiling enforced
+// after each store via entriesToTrim() below (oldest-first FIFO — cache.keys()
+// returns entries in insertion order). 600 entries is generous headroom for a
+// handful of asset-heavy apps while still bounding a runaway; bump it here if a
+// legitimately huge app needs more, rather than removing the ceiling.
+export const APP_ASSETS_MAX_ENTRIES = 600
+
 const KEEP_RUNTIME_CACHES = new Set([
   VENDOR_CACHE,
   ESM_CACHE,
@@ -94,7 +106,18 @@ export function isRangeRequest(request) {
 // re-install that changes the bytes also changes the name, so the URL is
 // the validator — the server sends `Cache-Control: ... immutable` and the
 // SW may cache it forever. Keep the regex in sync with the backend.
-const HASHED_ASSET_NAME = /[.-][0-9a-f]{8,}\./i
+//
+// The hex run must contain at least one ALPHA hex char (a-f). An all-digit
+// run is NOT a content hash — it's a version number or a timestamp
+// (`main.12345678.js`, `app.20260612.js`), and those names ARE reused
+// across re-installs. Treating them as immutable would cache-first a stale
+// build forever (nothing busts an /app-assets URL once cached, and the
+// server would send `immutable` so the browser never revalidates either).
+// A real digest contains a-f with overwhelming probability, so the alpha
+// requirement keeps true hashes in while letting decimal versions
+// revalidate. The lookahead bounds the run to 8+ hex chars; the body then
+// requires one a-f somewhere inside it.
+const HASHED_ASSET_NAME = /[.-](?=[0-9a-f]{8,}\.)[0-9a-f]*[a-f][0-9a-f]*\./i
 
 export function isImmutableAppAsset(pathname) {
   if (!pathname.startsWith('/app-assets/')) return false
@@ -162,4 +185,65 @@ export function appCodeStoreAction(status, offlineHeader, gated) {
 // failed HTTP responses. Exported pure so the rule is unit-tested.
 export function shouldFallBackToCacheOnError(status, hasCached) {
   return hasCached && status >= 500
+}
+
+// PURE: given the cache key just stored (`storedKey`) and the cache's
+// current key list (`existingKeys`), return the SUPERSEDED keys to evict —
+// the ones that address the SAME app-code route (same origin + same
+// `/api/apps/<id>/<frame|module>` pathname) but carry a DIFFERENT `?v=`
+// version than the one we just stored.
+//
+// Why this is precise (not a heuristic): AppCanvas pins the frame/module
+// URL with `?v=<app.updated_at>`, and that `?v=` is part of the cache key
+// (token/`_`/`install` are stripped, but `v` is kept — it's the freshness
+// discriminator). So every edit of an app leaves a fresh entry behind under
+// a new `?v=` while the OLD versioned entry lingers, unreachable forever
+// (its `?v=` will never be requested again) — unbounded growth of one
+// frame/module pair per edit. Matching on pathname + a differing `v`
+// evicts exactly the prior versions of THIS route and nothing else: a
+// different app id, a different route type (frame vs module), or the
+// just-stored key itself are all left untouched.
+//
+// Robust to keys that don't parse as URLs (returned as-is from cache.keys()
+// in odd engines) — those are simply skipped rather than throwing.
+export function supersededVersionKeys(storedKey, existingKeys) {
+  let stored
+  try {
+    stored = new URL(storedKey)
+  } catch {
+    return []
+  }
+  const storedV = stored.searchParams.get('v')
+  const out = []
+  for (const k of existingKeys || []) {
+    if (k === storedKey) continue
+    let u
+    try {
+      u = new URL(k)
+    } catch {
+      continue
+    }
+    if (u.origin !== stored.origin) continue
+    if (u.pathname !== stored.pathname) continue
+    // Same route, different version → a superseded prior edit. (A null `v`
+    // on either side still counts as "different" when the other has one,
+    // so an un-versioned legacy entry is also cleaned up.)
+    if (u.searchParams.get('v') !== storedV) out.push(k)
+  }
+  return out
+}
+
+// PURE: given the cache's current key list (`existingKeys`, in cache.keys()
+// insertion order — oldest first) and a `max` entry ceiling, return the
+// OLDEST keys to delete so the count drops to `max`. Empty when already at or
+// under the ceiling. This is the manual LRU/FIFO trim for APP_ASSETS_CACHE
+// (see APP_ASSETS_MAX_ENTRIES) — keep the cache bounded without depending on
+// Workbox's ExpirationPlugin, which isn't wired onto the /app-assets routes.
+// FIFO (not true LRU) is acceptable here: immutable hashed assets are stable
+// per release and a re-install ships new names, so eviction order rarely
+// matters and oldest-first is the cheap, predictable choice.
+export function entriesToTrim(existingKeys, max) {
+  const keys = existingKeys || []
+  if (!(max > 0) || keys.length <= max) return []
+  return keys.slice(0, keys.length - max)
 }
