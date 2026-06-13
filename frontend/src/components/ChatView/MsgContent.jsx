@@ -5,6 +5,7 @@ import QuestionCard from './QuestionCard.jsx'
 import Attachments from './Attachments.jsx'
 import { compactionToolBlock } from './compactionToolBlock.js'
 import { questionKey } from './questionKey.js'
+import { suppressedQuestionToolIndices } from './streamReducers.js'
 
 
 function stripAugmentation(text) {
@@ -59,10 +60,17 @@ function MsgContentInner({
   }
 
   if (msg.blocks && msg.blocks.length > 0) {
+    // The persisted transcript keeps the raw AskUserQuestion tool block
+    // AND the question card (backend events.process_event appends both);
+    // the live stream absorbs the tool twin into the card. Skip the twin
+    // here so a reopened chat matches the live view — render-time, so it
+    // also cleans up already-persisted old chats with no backend migration.
+    const skipToolIdx = suppressedQuestionToolIndices(msg.blocks)
     return (
       <>
         {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
         {msg.blocks.map((block, i) => {
+          if (skipToolIdx.has(i)) return null
           if (block.type === 'text') {
             const text = msg.role === 'user'
               ? stripAugmentation(block.content) : block.content
