@@ -347,6 +347,9 @@ export default function useStreamConnection(chatId, {
     setStreamItems([])
     textBufferRef.current = ''
     lastGoodItemsRef.current = []
+    // Answers belong to the chat we're leaving; carrying them into the next
+    // chat could re-arm a same-keyed question with a foreign answer.
+    answersByQuestionKeyRef.current.clear()
   }, [chatId, disconnect])
 
   useEffect(() => {
@@ -381,6 +384,18 @@ export default function useStreamConnection(chatId, {
   // canceled or reordered items locally in the meantime.
   const queuedContinuationTsRef = useRef(null)
   const queuedContinuationMessageRef = useRef(null)
+
+  // Answers the user submitted this turn, keyed by questionKey. The SSE
+  // catch-up burst re-emits the original `question` event WITHOUT answers
+  // (they live in chat.messages, not in the per-turn event stream), and
+  // every reconnect path wipes streamItems before that replay — so
+  // upsertQuestionItem's prev-item answer-carry has nothing to carry from
+  // and the replayed card renders back to PENDING, visibly reverting the
+  // user's answer mid-turn. This ref outlives the wipe: patchQuestionAnswers
+  // records the answer here, and the `question` handler re-arms each incoming
+  // event from it before upserting. Cleared on chatId change and at turn
+  // `done` (the answer is durable in the promoted message by then).
+  const answersByQuestionKeyRef = useRef(new Map())
 
   const connectToStream = useCallback(async (resetState = false) => {
     disconnect()
@@ -592,6 +607,15 @@ export default function useStreamConnection(chatId, {
               // backend/app/events.py:process_event identity keying.
               const incoming = { type: 'question', questions }
               if (event.question_id) incoming.question_id = event.question_id
+              // Re-arm the replayed event with any answer the user already
+              // submitted this turn. After a reconnect wipe upsertQuestionItem
+              // has no prior item to carry answers from; this ref does, and it
+              // outlived the wipe — so a catch-up replay re-renders the card
+              // as ANSWERED instead of reverting it to pending.
+              const knownAnswers = answersByQuestionKeyRef.current.get(
+                questionKey(incoming)
+              )
+              if (knownAnswers && !incoming.answers) incoming.answers = knownAnswers
               onLiveQuestionRef.current?.(event.question_id || null)
               setStreamItems(prev => upsertQuestionItem(prev, incoming))
             }
@@ -670,6 +694,11 @@ export default function useStreamConnection(chatId, {
             queuedContinuationRef.current = false
             queuedContinuationTsRef.current = null
             queuedContinuationMessageRef.current = null
+            // The turn is done — its answers are durable in the promoted
+            // message now, so drop the reconnect-survival cache before the
+            // next turn (a queued continuation streams on the same hook and
+            // must not inherit a stale answer for a re-used question key).
+            answersByQuestionKeyRef.current.clear()
             // Delay onStreamEnd by one frame so the React render
             // triggered by setIsStreaming(false) above completes before
             // ChatView promotes streamItems to messages.  latestItemsRef
@@ -952,14 +981,21 @@ export default function useStreamConnection(chatId, {
   // answered state only lands on messages[-1] (which may be the user message,
   // not the assistant), so the card never visually transitions to answered.
   function patchQuestionAnswers(questionId, answers) {
+    const key = questionId ? `question_id:${questionId}` : null
+    // Record the answer keyed by stable identity BEFORE touching streamItems,
+    // so a later reconnect's catch-up replay (which wipes streamItems first)
+    // can re-arm the replayed question event instead of reverting the card to
+    // pending. When the questionId is known we record under that key directly;
+    // an id-less (text-keyed) question is recorded from the matched item below.
+    if (key) answersByQuestionKeyRef.current.set(key, answers)
     setStreamItems(prev => {
-      const key = questionId ? `question_id:${questionId}` : null
       return prev.map(it => {
         if (it.type !== 'question') return it
         // When we have a questionId, match by id; otherwise patch the
         // first question item (mirrors the single-question-per-turn norm).
         const itKey = questionKey(it)
         if (key ? itKey === key : true) {
+          if (!key) answersByQuestionKeyRef.current.set(itKey, answers)
           return { ...it, answers }
         }
         return it
