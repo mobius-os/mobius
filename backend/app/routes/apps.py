@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import io
 import json
 import logging
 import os
@@ -987,8 +988,44 @@ async def update_icon(
   return Response(status_code=204)
 
 
+def _downscale_icon(png: bytes, size: int) -> bytes:
+  """A `size`x`size` PNG downscale of `png`, preserving the install-time
+  palette/alpha handling (`install._process_icon` already normalized the
+  stored bytes to RGB/RGBA, so a plain LANCZOS resize keeps transparency).
+
+  Only ever downscales: a request for a larger box than the stored icon
+  returns the original bytes rather than upscaling a blurrier copy. Any
+  decode/encode failure falls back to the full-res bytes — a malformed
+  stored icon should still render, just uncompressed."""
+  try:
+    from PIL import Image
+    img = Image.open(io.BytesIO(png))
+    img.load()
+    if img.width <= size and img.height <= size:
+      return png
+    img = img.resize((size, size), Image.LANCZOS)
+    out = io.BytesIO()
+    img.save(out, format="PNG", optimize=True)
+    return out.getvalue()
+  except Exception:
+    return png
+
+
+# The downscale sizes the icon route will serve. The editor apps render the
+# icon as a 28px top-bar logo, so 64 covers HiDPI; the store grid + drawer
+# want crisper thumbnails, so 128 is the other supported step. Anything else
+# is rejected so the variant cache (keyed on size) can't be flooded with
+# arbitrary dimensions.
+_ICON_SIZES = frozenset((64, 128))
+
+
 @router.get("/{app_id}/icon")
-def get_icon(app_id: int, request: Request, db: Session = Depends(get_db)):
+def get_icon(
+  app_id: int,
+  request: Request,
+  db: Session = Depends(get_db),
+  size: int | None = None,
+):
   """Public read of an app's icon PNG, so a mini-app can render its own logo
   with a plain `<img src="/api/apps/<id>/icon">` (e.g. as its file-drawer
   toggle, mirroring the shell's logo). Public + by-id on purpose: the embedded
@@ -1001,20 +1038,25 @@ def get_icon(app_id: int, request: Request, db: Session = Depends(get_db)):
   the old `Cache-Control: no-cache` made every grid open re-download ~4MB.
   ETag on `updated_at` (same validator family as /module) + a 1h max-age:
   repeat opens are free, and an app update advances the validator so the
-  next revalidation picks up the new icon within the hour."""
+  next revalidation picks up the new icon within the hour.
+
+  `?size=` (64 or 128) returns a Pillow-downscaled variant — a full-res
+  PNG is wasted bytes when the caller renders it as a 28px top-bar logo or
+  a grid thumbnail. The ETag folds the size in so the 64px and the full-res
+  responses cache independently; no `size` keeps the original full-res
+  bytes (unchanged for existing callers)."""
+  if size is not None and size not in _ICON_SIZES:
+    raise HTTPException(400, f"size must be one of {sorted(_ICON_SIZES)}.")
   app = live_app(db, app_id, populate=True)
   if app is None or not app.icon_png:
     raise HTTPException(404, "No icon set.")
-  etag = f'W/"{int(app.updated_at.timestamp() * 1e6) if app.updated_at else 0}"'
+  ts_us = int(app.updated_at.timestamp() * 1e6) if app.updated_at else 0
+  etag = f'W/"{ts_us}-{size}"' if size else f'W/"{ts_us}"'
+  headers = {"ETag": etag, "Cache-Control": "public, max-age=3600"}
   if request.headers.get("if-none-match") == etag:
-    return Response(status_code=304, headers={
-      "ETag": etag, "Cache-Control": "public, max-age=3600",
-    })
-  return Response(
-    content=app.icon_png,
-    media_type="image/png",
-    headers={"ETag": etag, "Cache-Control": "public, max-age=3600"},
-  )
+    return Response(status_code=304, headers=headers)
+  content = _downscale_icon(app.icon_png, size) if size else app.icon_png
+  return Response(content=content, media_type="image/png", headers=headers)
 
 
 @router.delete(
@@ -1142,6 +1184,39 @@ async def recover_app(
   return {"ok": True}
 
 
+def _manifest_job_name(source_dir: Path) -> str | None:
+  """The job script the app's `mobius.json` declares under `schedule.job`.
+
+  This is the source of truth for which script a run-job (and the cron
+  schedule) should invoke. The legacy probe below only guesses by filename,
+  so when an app renames its job (e.g. tandem's `job.sh` -> `generate.sh`)
+  a stale sibling left in the tree shadows the new script. Reading the
+  manifest immunizes every app against that race: the declared script wins
+  regardless of what else happens to sit in the directory.
+
+  Returns the bare filename only when the manifest names a job that is a
+  simple filename with no path separators (the same shape `install._validate_manifest`
+  enforces) AND that file actually exists on disk — a manifest that points
+  at a since-deleted script should fall through to the legacy probe rather
+  than 400. Any read/parse error is non-fatal: older apps have no manifest
+  on disk, and the probe is the fallback for them.
+  """
+  manifest_path = source_dir / "mobius.json"
+  try:
+    manifest = json.loads(manifest_path.read_text())
+  except (OSError, ValueError):
+    return None
+  if not isinstance(manifest, dict):
+    return None
+  sched = manifest.get("schedule")
+  if not isinstance(sched, dict):
+    return None
+  job = sched.get("job")
+  if not isinstance(job, str) or "/" in job or "\\" in job or not job.strip():
+    return None
+  return job if (source_dir / job).is_file() else None
+
+
 @router.post(
   "/{app_id}/run-job",
   status_code=202,
@@ -1163,10 +1238,12 @@ def run_app_job(
 
   The job script lives at `<source_dir>/<job_name>` where source_dir
   is the app's on-disk source tree (per the install-from-manifest
-  layout in `app.install`) and job_name comes from the manifest's
-  `schedule.job` field (default "fetch.sh"). Both candidates are
-  tried so apps installed before the manifest convention solidified
-  still work.
+  layout in `app.install`). The manifest's `schedule.job` is the
+  source of truth and is tried FIRST — the legacy filename probe
+  (fetch.sh / job.sh / build.sh) only runs when no manifest declares
+  a job, so a stale sibling script can't shadow the script the app
+  actually ships (tandem's old job.sh once won over its new
+  generate.sh because the probe order, not the manifest, decided).
 
   Authorized for the owner OR for an app-scoped token whose `app_id`
   matches the path — the News "run now" button fires from inside the
@@ -1189,15 +1266,21 @@ def run_app_job(
       status_code=400, detail="App has no source_dir; cannot locate job.",
     )
   source_dir = Path(app.source_dir)
-  # Try the conventional names: fetch.sh (app-news convention),
-  # job.sh (install-from-manifest default), build.sh (LaTeX/pipeline apps).
-  # First hit wins; order is the priority order.
+  # The manifest's schedule.job wins. The legacy probe (fetch.sh
+  # app-news convention, job.sh install-from-manifest default,
+  # build.sh LaTeX/pipeline apps) is the fallback for apps installed
+  # before the manifest convention solidified — first hit wins, in
+  # priority order.
   job_path = None
-  for candidate in ("fetch.sh", "job.sh", "build.sh"):
-    p = source_dir / candidate
-    if p.is_file():
-      job_path = p
-      break
+  manifest_job = _manifest_job_name(source_dir)
+  if manifest_job is not None:
+    job_path = source_dir / manifest_job
+  else:
+    for candidate in ("fetch.sh", "job.sh", "build.sh"):
+      p = source_dir / candidate
+      if p.is_file():
+        job_path = p
+        break
   if job_path is None:
     raise HTTPException(
       status_code=400,
