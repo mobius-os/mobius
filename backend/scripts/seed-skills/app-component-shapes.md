@@ -118,6 +118,11 @@ chrome of its own) must inset its content for the notch and home indicator:
 env(safe-area-inset-bottom) env(safe-area-inset-left)`. A normal root whose
 header and bottom sheet already handle their own edges (below) does NOT need
 this — only add safe-area on the surface that actually touches an edge.
+`env(safe-area-inset-*)` resolves correctly both in-shell and standalone (the
+iframe ships `viewport-fit=cover`). For an app that goes **immersive** (hides
+shell chrome — see building-apps.md), the background already bleeds full-screen;
+pad controls with `env()` or the shell's `--mobius-safe-*` vars (the latter are
+0 while windowed, so use them when you want inset padding only while immersive).
 
 ---
 
