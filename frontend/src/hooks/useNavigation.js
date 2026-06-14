@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { navState, isMobiusNavState } from '../lib/navHistory.js'
 
 const ACTIVE_CHAT_KEY = 'moebius_active_chat'
+const ACTIVE_VIEW_KEY = 'moebius_active_view'
+const ACTIVE_APP_KEY = 'moebius_active_app'
 
 const MAX_APP_SENTINELS = 20
 
@@ -54,6 +57,33 @@ const deepLink = (() => {
   return null
 })()
 
+// Cold-restore of the active view/app (mirror of moebius_active_chat) so a
+// COLD relaunch of the shell PWA lands on the app the user was viewing
+// instead of defaulting to a chat. Only the canvas needs an explicit
+// signal (chat is the default). shellReload / deepLink (an explicit
+// destination for THIS load) take precedence — see below.
+const restored = (() => {
+  try {
+    const view = localStorage.getItem(ACTIVE_VIEW_KEY)
+    const app = localStorage.getItem(ACTIVE_APP_KEY)
+    if (view === 'canvas' && app) {
+      const id = parseInt(app, 10)
+      if (Number.isFinite(id)) return { view: 'canvas', appId: id }
+    }
+  } catch { /* storage unavailable */ }
+  return null
+})()
+
+// The app id cold-restored to the canvas (null unless the storage-restore
+// — not shellReload/deepLink — drove it). The restore is OPTIMISTIC: this
+// hook can't see the apps list, so Shell validates this id against the
+// live /api/apps list ONCE and demotes a restored-but-uninstalled canvas
+// to chat. See docs/navigation.md.
+export const coldRestoredCanvasAppId =
+  (!shellReload?.activeView && !deepLink?.view && restored?.view === 'canvas')
+    ? restored.appId
+    : null
+
 /**
  * Navigation: drawer-as-virtual-route + custom navStack.
  *
@@ -89,10 +119,12 @@ const deepLink = (() => {
  */
 export default function useNavigation() {
   const [activeView, setActiveView] = useState(
-    shellReload?.activeView || deepLink?.view || 'chat'
+    shellReload?.activeView || deepLink?.view || restored?.view || 'chat'
   )
   const [activeAppId, setActiveAppId] = useState(
-    shellReload?.activeAppId || deepLink?.appId || null
+    shellReload?.activeAppId || deepLink?.appId
+      || (restored?.view === 'canvas' ? restored.appId : null)
+      || null
   )
   const [activeChatId, setActiveChatId] = useState(
     () => shellReload?.activeChatId || deepLink?.chatId || localStorage.getItem(ACTIVE_CHAT_KEY) || null
@@ -121,7 +153,7 @@ export default function useNavigation() {
   const appSentinelCountsRef = useRef(new Map())
 
   function openDrawer() {
-    history.pushState(null, '')
+    history.pushState(navState('drawer'), '')
     drawerPushedRef.current = true
     setDrawerOpen(true)
   }
@@ -175,7 +207,7 @@ export default function useNavigation() {
     if (current >= MAX_APP_SENTINELS) {
       return false
     }
-    try { history.pushState(null, '') } catch { return false }
+    try { history.pushState(navState('app'), '') } catch { return false }
     m.set(appId, current + 1)
     return true
   }, [])
@@ -246,7 +278,7 @@ export default function useNavigation() {
     if (drawerPushedRef.current) {
       drawerPushedRef.current = false
     } else {
-      try { history.pushState(null, '') } catch { /* ignore */ }
+      try { history.pushState(navState('nav'), '') } catch { /* ignore */ }
     }
     navStackRef.current.push({
       view: activeViewRef.current,
@@ -274,7 +306,7 @@ export default function useNavigation() {
     // start_url is /shell/ would land at /shell/ → 308 → /shell/ →
     // SPA mount → rewrite back to / → Chromium sees "page outside
     // scope" and may refuse the next manifest update in-place.
-    history.replaceState(null, '', '/shell/')
+    history.replaceState(navState('base'), '', '/shell/')
 
     function handleBack() {
       backFiredRef.current = true
@@ -347,6 +379,10 @@ export default function useNavigation() {
       function onNavigate(e) {
         if (e.navigationType !== 'traverse') return
         if (!e.canIntercept) return
+        // Phantom-entry guard: ignore a traversal landing on an UNTAGGED
+        // entry — one a sandboxed app/preview iframe pushed onto the shared
+        // session history. Treating it as our sentinel over-pops navStack.
+        if (!isMobiusNavState(e.destination.getState())) return
         // Nothing to go back to — let the browser handle it (exits PWA).
         // Check every back-target source: navStack (shell-level), open
         // drawer, OR any app's pending sentinels (sentinels for an
@@ -364,6 +400,10 @@ export default function useNavigation() {
 
     // popstate fallback (Safari, older Chrome).
     function onPopState() {
+      // Phantom-entry guard: a pop landing on an UNTAGGED entry is a
+      // phantom pushed onto the shared session history by a sandboxed
+      // app/preview iframe, not one of our sentinels — ignore it.
+      if (!isMobiusNavState(history.state)) return
       if (navStackRef.current.length === 0
             && !drawerOpenRef.current
             && !_anyAppHasSentinels(appSentinelCountsRef.current)) return
@@ -384,6 +424,21 @@ export default function useNavigation() {
   useEffect(() => {
     if (activeChatId) localStorage.setItem(ACTIVE_CHAT_KEY, activeChatId)
   }, [activeChatId])
+
+  // Persist active view + app (mirror of active chat) so a cold relaunch
+  // of the shell PWA restores the app the user was on. See docs/navigation.md.
+  useEffect(() => {
+    try { localStorage.setItem(ACTIVE_VIEW_KEY, activeView) } catch { /* ignore */ }
+  }, [activeView])
+  useEffect(() => {
+    try {
+      if (activeView === 'canvas' && activeAppId != null) {
+        localStorage.setItem(ACTIVE_APP_KEY, String(activeAppId))
+      } else if (activeView !== 'canvas') {
+        localStorage.removeItem(ACTIVE_APP_KEY)
+      }
+    } catch { /* ignore */ }
+  }, [activeView, activeAppId])
 
   return {
     activeView,
