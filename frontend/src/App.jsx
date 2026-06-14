@@ -33,6 +33,22 @@ function isEmbedRoute() {
   }
 }
 
+// Validate a ?return= target: same-origin in-app path only. Rejects
+// backslashes (browsers normalize '/\\evil' to '//evil' -> open redirect),
+// absolute/cross-origin URLs, and protocol-relative '//'. Returns the safe
+// path+query+hash, or null.
+function safeReturnPath(raw) {
+  if (!raw) return null
+  if (!raw.startsWith('/')) return null            // absolute in-app path only
+  if (raw.includes('\\') || /%5c/i.test(raw)) return null  // (encoded) backslash -> // -> open redirect
+  let u
+  try { u = new URL(raw, window.location.origin) } catch { return null }
+  if (u.origin !== window.location.origin) return null
+  if (!u.pathname.startsWith('/') || u.pathname.startsWith('//')) return null
+  if (decodeURIComponent(u.pathname).includes('\\')) return null  // belt-and-suspenders
+  return u.pathname + u.search + u.hash
+}
+
 export default function App() {
   return (
     <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
@@ -61,6 +77,23 @@ function AppRoot() {
   const setupStatusQuery = setupQueries.status.useQuery({ enabled: !hasToken })
   // Stable across renders — we only need the value captured on mount.
   const [initialSetupStep] = useState(resumeStep || 'account')
+
+  // Honor a ?return= target. An installed standalone app (its own PWA,
+  // often a SEPARATE storage partition with no token) redirects here for
+  // auth; bounce straight back to it instead of mounting the shell over a
+  // restored chat. One-shot sessionStorage guard prevents a cross-partition
+  // redirect loop. Same-origin in-app paths only (no open-redirect).
+  useEffect(() => {
+    let ret
+    try { ret = safeReturnPath(new URLSearchParams(window.location.search).get('return')) } catch { return }
+    if (!ret) { try { sessionStorage.removeItem('mobius_return_bounced') } catch { /* ignore */ } return }
+    if (!hasToken) return  // no token: the login path honors return post-login
+    // Target-scoped one-shot: only suppress a repeat bounce to the SAME
+    // target (a cross-partition loop), not future legit returns this tab.
+    if (sessionStorage.getItem('mobius_return_bounced') === ret) return
+    try { sessionStorage.setItem('mobius_return_bounced', ret) } catch { /* ignore */ }
+    window.location.replace(ret)
+  }, [hasToken])
 
   useEffect(() => {
     // shell-reload: skip splash entirely, go straight to shell.
@@ -100,7 +133,12 @@ function AppRoot() {
       }}
     />
   )
-  if (status === 'login') return <LoginForm onLogin={() => setStatus('shell')} />
+  if (status === 'login') return <LoginForm onLogin={() => {
+    let ret
+    try { ret = safeReturnPath(new URLSearchParams(window.location.search).get('return')) } catch { /* ignore */ }
+    if (ret) { window.location.replace(ret); return }
+    setStatus('shell')
+  }} />
   return <Shell />
 }
 

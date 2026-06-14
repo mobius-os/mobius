@@ -10,7 +10,8 @@ import SettingsView from '../SettingsView/SettingsView.jsx'
 import WalkthroughOverlay from '../Walkthrough/WalkthroughOverlay.jsx'
 import { api, BASE } from '../../api/client.js'
 import usePushSubscription from '../../hooks/usePushSubscription.js'
-import useNavigation from '../../hooks/useNavigation.js'
+import useNavigation, { coldRestoredCanvasAppId } from '../../hooks/useNavigation.js'
+import { navState } from '../../lib/navHistory.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import useTheme from '../../hooks/useTheme.js'
 import useProviderAuthStatus from '../../hooks/useProviderAuthStatus.js'
@@ -76,7 +77,9 @@ export default function Shell() {
   // to keep memory predictable on phones (each Three.js / WebGL app
   // can hold tens of MB).
   const APP_CACHE_MAX = 4
-  const [appCache, setAppCache] = useState([])
+  const [appCache, setAppCache] = useState(
+    () => (coldRestoredCanvasAppId != null ? [coldRestoredCanvasAppId] : [])
+  )
   // Ids ever observed PRESENT in a fetched /api/apps list. The eviction
   // effect below treats an app as uninstalled only on a genuine
   // present→absent transition (it was here, now it's gone), never on a
@@ -325,6 +328,30 @@ export default function Shell() {
   }, [apps, appsLiveFetched, appCache, activeView, activeAppId,
       navStackRef, setActiveAppId, setActiveView])
 
+  // One-shot: a cold-restored canvas (moebius_active_app) is OPTIMISTIC —
+  // useNavigation can't see the apps list. Once the live list lands, if the
+  // restored app is gone (uninstalled since), demote the canvas to chat.
+  // The present->absent eviction effect above can't cover this: a restored
+  // id was never 'seen present' this session. See docs/navigation.md.
+  const coldRestoreCheckedRef = useRef(false)
+  useEffect(() => {
+    if (!appsLiveFetched || coldRestoreCheckedRef.current) return
+    coldRestoreCheckedRef.current = true
+    if (coldRestoredCanvasAppId == null) return
+    const live = new Set(apps.map(a => a.id))
+    if (live.has(coldRestoredCanvasAppId)) return
+    // Restored app is gone (uninstalled since): evict the seeded iframe so
+    // it can't sit stuck-mounted (the present->absent eviction above never
+    // fires for an id that was never seen present this session), and demote
+    // the canvas to chat if we're sitting on it.
+    setAppCache(prev => prev.filter(id => id !== coldRestoredCanvasAppId))
+    if (activeView === 'canvas'
+        && Number(activeAppId) === Number(coldRestoredCanvasAppId)) {
+      setActiveAppId(null)
+      setActiveView('chat')
+    }
+  }, [appsLiveFetched, apps, activeView, activeAppId, setActiveAppId, setActiveView])
+
   // Warm the SW app-code cache once per shell load for the apps the user
   // is most likely to open next — pinned + most-recent (the persisted
   // LRU) — so the first app-open of the session is served from cache.
@@ -564,7 +591,7 @@ export default function Shell() {
       // the installed PWA's declared scope — writing `/` here would
       // briefly put the page out of scope and Chromium can refuse the
       // next manifest update in-place.
-      window.history.replaceState(null, '', '/shell/')
+      window.history.replaceState(navState('base'), '', '/shell/')
       document.body.style.transition = 'opacity 0.2s ease'
       document.body.style.opacity = '0'
       setTimeout(() => window.location.reload(), 220)
@@ -836,7 +863,7 @@ export default function Shell() {
     // sentinel so back returns to the previous view rather than
     // exiting the PWA.
     if (draft || forceNew || drawerPushedRef.current) {
-      if (!drawerPushedRef.current) history.pushState(null, '')
+      if (!drawerPushedRef.current) history.pushState(navState('nav'), '')
       drawerPushedRef.current = false
       navStackRef.current.push({
         view: activeViewRef.current,
