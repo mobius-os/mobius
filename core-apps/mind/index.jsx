@@ -532,8 +532,8 @@ export default function App({ appId, token }) {
           <img
             src={`/api/apps/${appId}/icon?size=64`}
             alt=""
-            width={28}
-            height={28}
+            width={26}
+            height={26}
             style={S.brandIcon}
             onError={(e) => {
               e.currentTarget.style.display = 'none'
@@ -1686,7 +1686,7 @@ const S = {
     boxShadow: '0 0 6px rgba(255,255,255,0.7)',
   },
   brandIcon: {
-    width: 28, height: 28, borderRadius: 7, flexShrink: 0, display: 'block',
+    width: 26, height: 26, borderRadius: 6, objectFit: 'cover', flexShrink: 0, display: 'block',
   },
   subtitle: {
     fontSize: 11.5, color: 'var(--muted)', marginTop: 2, whiteSpace: 'nowrap',
