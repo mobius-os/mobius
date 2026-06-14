@@ -68,7 +68,10 @@ agent-browser set viewport "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT" >/dev/null
 # Both the shell and the standalone /apps/<slug>/ page read the owner
 # JWT from localStorage['token'] on the same origin.
 agent-browser open "${API_BASE_URL}/" >/dev/null
-agent-browser eval "localStorage.setItem('token', '${AGENT_TOKEN}')" >/dev/null
+# Seed the token via stdin (eval --stdin), never argv: the JWT must not
+# appear in /proc/<pid>/cmdline. python reads it from the env (not argv)
+# and JSON-encodes it so any character is a safe JS string literal.
+AGENT_TOKEN="$AGENT_TOKEN" python3 -c 'import json,os; print("localStorage.setItem(\"token\", "+json.dumps(os.environ["AGENT_TOKEN"])+")")' | agent-browser eval --stdin >/dev/null
 
 # Now navigate to the actual target route, authenticated.
 agent-browser open "${API_BASE_URL}${ROUTE}" >/dev/null
