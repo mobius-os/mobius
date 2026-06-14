@@ -198,3 +198,43 @@ test('clear resets state and ref synchronously', () => {
   result.current.clear()
   assert.deepEqual(result.current.pendingMessagesRef.current, [])
 })
+
+test('stop-timeout: restoring the local snapshot preserves the queue that a server refetch would drop', () => {
+  // Regression lock-in for the Stop queued-message-drop bug.
+  //
+  // handleStop snapshots the queue, clear()s it, then POSTs /chat/stop.
+  // On an SDK interrupt TIMEOUT (stopped===false) the backend has
+  // ALREADY cleared persisted chat.pending_messages — so the old code's
+  // recovery (refetch /chats/<id> → hydrate(data.pending_messages))
+  // hydrated [] and the queued text vanished. The fix restores from the
+  // LOCAL snapshot (via doSend's queue path, which re-adds to the tray
+  // and re-persists server-side) instead of trusting the now-empty
+  // server view. This test pins the hook-level invariant the fix leans
+  // on: after a Stop-clear, hydrating the empty server response WIPES the
+  // queue, while re-adding the snapshot KEEPS it.
+  const { result } = renderHook(usePendingQueue)
+  const snapshot = [
+    fixtureMsg({ cid: 'q1', ts: 11, content: 'first queued' }),
+    fixtureMsg({ cid: 'q2', ts: 22, content: 'second queued' }),
+  ]
+  for (const m of snapshot) result.current.add(m)
+  // Stop's synchronous pre-await clear.
+  result.current.clear()
+  assert.deepEqual(result.current.pendingMessagesRef.current, [])
+
+  // What the OLD recovery did on a stop timeout: hydrate the server's
+  // (now empty) pending → the queued text is lost.
+  result.current.hydrate([])
+  assert.deepEqual(
+    result.current.pendingMessagesRef.current, [],
+    'hydrating the empty server response on a stop timeout drops the queue',
+  )
+
+  // What the FIX does: restore the local snapshot so the queued text
+  // survives and reappears in the tray.
+  for (const m of snapshot) result.current.add(m)
+  const restored = result.current.pendingMessagesRef.current
+  assert.equal(restored.length, 2, 'both queued messages are restored')
+  assert.equal(restored[0].content, 'first queued')
+  assert.equal(restored[1].content, 'second queued')
+})
