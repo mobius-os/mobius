@@ -28,6 +28,7 @@ it in PROVIDERS. SDK-backed providers implement just `check_auth` +
 import asyncio
 import json
 import logging
+import os
 import shutil
 import time
 from dataclasses import dataclass
@@ -583,6 +584,127 @@ def _merge_live_with_known(
   return entries
 
 
+# Claude CLI OAuth constants — the registry path refreshes an expired
+# access token itself rather than 401ing. Duplicated from routes/auth.py
+# (and recover_oauth.py) on purpose, the same way recover_oauth duplicates
+# them: providers.py is a low-level adapter module that must not import a
+# route module, and these are public Anthropic values that change rarely.
+# Keep in sync with routes/auth._CLAUDE_CLIENT_ID / _TOKEN_URL if Anthropic
+# ever rotates them.
+_CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+_CLAUDE_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+# Refresh when fewer than this many ms remain on the access token, so a
+# token that expires mid-flight doesn't 401. 60s comfortably covers the
+# 10s request timeout plus clock skew.
+_CLAUDE_TOKEN_REFRESH_MARGIN_MS = 60_000
+
+
+def _read_claude_oauth(data_dir: str) -> tuple[Path, dict]:
+  """Returns (credentials path, claudeAiOauth dict). Raises when the file
+  is missing or has no claudeAiOauth block."""
+  creds_path = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
+  if not creds_path.exists():
+    raise RuntimeError("claude credentials missing")
+  raw = json.loads(creds_path.read_text())
+  oauth = raw.get("claudeAiOauth")
+  if not isinstance(oauth, dict):
+    raise RuntimeError("claude credentials malformed")
+  return creds_path, oauth
+
+
+def _write_claude_oauth(creds_path: Path, oauth: dict) -> None:
+  """Persists a refreshed claudeAiOauth block back to the credentials file
+  in the CLI's expected shape and 0600 perms (atomic tmp+rename so a crash
+  mid-write can't leave a truncated file the chat path then reads).
+
+  Writing it back is the point of refreshing here: the chat runner and the
+  CLI read the same file, so a refresh on the registry path also un-expires
+  the token for everyone else, instead of each caller re-refreshing."""
+  payload = {"claudeAiOauth": oauth}
+  tmp = creds_path.with_suffix(creds_path.suffix + ".tmp")
+  fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+  try:
+    with os.fdopen(fd, "w") as f:
+      json.dump(payload, f)
+    os.replace(tmp, creds_path)
+  except Exception:
+    tmp.unlink(missing_ok=True)
+    raise
+
+
+async def _refresh_claude_access_token(oauth: dict) -> dict:
+  """Exchanges the stored refresh token for a fresh access token.
+
+  Returns the new claudeAiOauth dict (accessToken/refreshToken/expiresAt/
+  scopes preserved). Raises when there's no refresh token or the token
+  endpoint rejects the exchange — the caller then falls back to
+  KNOWN_MODELS, same as any other registry-fetch failure.
+
+  Anthropic's OAuth refresh-token grant rotates the refresh token, so we
+  persist whatever the endpoint returns (a stale refresh token would fail
+  the NEXT refresh)."""
+  import httpx  # local import — only the registry path needs it
+
+  refresh_token = oauth.get("refreshToken")
+  if not refresh_token:
+    raise RuntimeError("claude credentials have no refresh token")
+  async with httpx.AsyncClient(timeout=10.0) as client:
+    resp = await client.post(
+      _CLAUDE_OAUTH_TOKEN_URL,
+      json={
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": _CLAUDE_OAUTH_CLIENT_ID,
+      },
+      headers={"Content-Type": "application/json"},
+    )
+    resp.raise_for_status()
+    data = resp.json()
+  for field in ("access_token", "refresh_token", "expires_in"):
+    if field not in data:
+      raise RuntimeError(f"refresh response missing '{field}'")
+  refreshed = dict(oauth)
+  refreshed["accessToken"] = data["access_token"]
+  refreshed["refreshToken"] = data["refresh_token"]
+  refreshed["expiresAt"] = int(time.time() * 1000) + data["expires_in"] * 1000
+  if data.get("scope"):
+    refreshed["scopes"] = data["scope"].split()
+  return refreshed
+
+
+async def _claude_access_token(data_dir: str) -> str:
+  """Returns a non-expired Claude OAuth access token, refreshing it when the
+  stored one has expired (or is within the refresh margin).
+
+  The 401 root cause this fixes: the registry call read `accessToken`
+  verbatim and never checked `expiresAt`, so once the CLI's access token
+  expired EVERY /v1/models call 401'd and the picker silently fell back to
+  the static KNOWN_MODELS list forever (the CLI refreshes its own token for
+  chat turns, but that refresh never ran for this out-of-band httpx call).
+  We now refresh the same way the CLI does — refresh-token grant against the
+  OAuth token endpoint — and write the result back so the file stays the
+  single source of truth."""
+  creds_path, oauth = _read_claude_oauth(data_dir)
+  token = oauth.get("accessToken")
+  expires_at = oauth.get("expiresAt")
+  expired = (
+    not token
+    or not isinstance(expires_at, (int, float))
+    or expires_at - time.time() * 1000 < _CLAUDE_TOKEN_REFRESH_MARGIN_MS
+  )
+  if not expired:
+    return token
+  refreshed = await _refresh_claude_access_token(oauth)
+  try:
+    _write_claude_oauth(creds_path, refreshed)
+  except OSError as exc:
+    # The refresh succeeded but persistence failed (read-only fs, perms).
+    # The token in hand is still valid for this call; log and use it rather
+    # than fall back to the stale KNOWN_MODELS list. Next call re-refreshes.
+    log.warning("could not persist refreshed claude token: %s", exc)
+  return refreshed["accessToken"]
+
+
 async def _fetch_claude_models(data_dir: str) -> list[str]:
   """Calls Anthropic's /v1/models with the stored OAuth access token.
 
@@ -591,17 +713,14 @@ async def _fetch_claude_models(data_dir: str) -> list[str]:
   user:inference scope which the models endpoint accepts. We use
   httpx (already a requirement) instead of pulling the `anthropic`
   SDK to keep dependency surface flat.
+
+  The access token is refreshed in `_claude_access_token` when expired —
+  without that, an expired CLI token 401s here and the picker is stuck on
+  the static KNOWN_MODELS fallback until the container restarts.
   """
   import httpx  # local import — only the registry path needs it
 
-  creds_path = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
-  if not creds_path.exists():
-    raise RuntimeError("claude credentials missing")
-  raw = json.loads(creds_path.read_text())
-  oauth = raw.get("claudeAiOauth") or {}
-  token = oauth.get("accessToken")
-  if not token:
-    raise RuntimeError("claude credentials malformed")
+  token = await _claude_access_token(data_dir)
   headers = {
     "Authorization": f"Bearer {token}",
     "anthropic-version": "2023-06-01",

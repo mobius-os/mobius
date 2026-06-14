@@ -105,6 +105,20 @@
               }
             })
           })
+          // Poll for a new SW whenever the PWA returns to the foreground.
+          // The explicit `shell_rebuilt` SSE event (Shell.jsx) handles a
+          // PWA with a LIVE connection, but a backgrounded/reopened install
+          // may have dropped its EventSource and would otherwise keep
+          // running the old shell until a hard reload. reg.update() re-fetches
+          // sw.js; if the deploy shipped a new one, the `updatefound` watchdog
+          // above takes over and soft-reloads once it activates. Cheap (one
+          // conditional GET, server sends 304 when unchanged) and only on
+          // visible, so it's not a polling loop.
+          document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') {
+              reg.update().catch(() => {})
+            }
+          })
         }).catch(() => {})
       }
       // Request persistent storage so cached app modules and offline

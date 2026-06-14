@@ -282,6 +282,40 @@ ready_code() {
   docker exec "$CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/ready'" 2>/dev/null || echo "000"
 }
 
+# Tell already-open PWAs to reload after a successful shell rebuild.
+#
+# deploy-prod.sh shadows /data/shell/dist and the new SW skipWaiting/
+# clientsClaim, but a PWA that was already open never learns a fresh
+# bundle exists — it keeps running the old shell until the user closes
+# and reopens it. The Shell's system-event stream already handles a
+# `shell_rebuilt` event (frontend/src/components/Shell/Shell.jsx — it
+# fades out and reloads), and POST /api/notify already broadcasts that
+# event type to every open Shell's /api/events/system subscription. The
+# only missing link is firing it; deploy never did. We fire it here,
+# AFTER the post-restart readiness gate, so open PWAs auto-reload onto
+# the new bundle.
+#
+# Auth: /api/notify requires an owner JWT. The entrypoint mints a full
+# owner-scoped service token at /data/service-token.txt (90-day, carries
+# the owner's token_epoch) for exactly this kind of in-container call —
+# `get_current_owner` accepts it. A docker-exec curl sends no
+# Sec-Fetch-Site / Origin, so reject_cross_site passes it through.
+#
+# Best-effort: a failure here must not fail an otherwise-healthy deploy —
+# the worst case is the pre-fix behaviour (open PWAs reload on next
+# manual open). We log a warning and continue.
+broadcast_shell_rebuilt() {
+  docker exec "$CONTAINER" sh -c '
+    tok=$(cat /data/service-token.txt 2>/dev/null) || exit 1
+    [ -n "$tok" ] || exit 1
+    curl -fsS -o /dev/null \
+      -X POST "'"${INTERNAL_BASE}"'/api/notify" \
+      -H "Authorization: Bearer $tok" \
+      -H "Content-Type: application/json" \
+      -d "{\"type\":\"shell_rebuilt\"}"
+  ' 2>/dev/null
+}
+
 # Docker's restart counter for the live container, as an integer. This is the
 # real "is the new image actually crash-looping?" signal: the preflight already
 # proved the image BOOTS in a scratch box, so during cutover a climbing
@@ -812,6 +846,18 @@ if [ -n "$PUBLIC_URL" ]; then
     fail "internal is healthy but public reverse-proxy returned non-200; check Caddy."
     exit 1
   fi
+fi
+
+# Tell open PWAs to reload onto the freshly-rebuilt shell. Only now —
+# the deploy is verified healthy (bundle rotated + /api/health + /api/ready
+# + public reachability all green), so a reload lands on a known-good build.
+# Best-effort: never fails the deploy.
+step "[4b/4] notify open shells to reload"
+if broadcast_shell_rebuilt; then
+  ok "broadcast shell_rebuilt — open PWAs will reload onto the new bundle"
+else
+  warn "could not broadcast shell_rebuilt (no service token, or /api/notify"
+  warn "unreachable). Deploy is healthy; open PWAs reload on next manual open."
 fi
 
 # Reclaim the image this deploy superseded. A cutover leaves the prior `latest`
