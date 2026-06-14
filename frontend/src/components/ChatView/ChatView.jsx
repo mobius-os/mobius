@@ -1407,22 +1407,33 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         }
       } catch { /* network error during stop is non-critical */ }
       if (!stoppedCleanly) {
-        // Restore the queued messages we optimistically cleared, so
-        // the user can hit Stop again or wait + retry without losing
-        // their drafts. Don't disconnect — the runner may still be
-        // streaming. We have `queuedTexts` + `combinedAttachments`
-        // but their original `ts` ids; safest is just a refetch so
-        // the user sees authoritative server state.
+        // The SDK interrupt timed out (handle.stop()'s 2s bound — see
+        // claude_sdk_runner.stop): the runner is still alive and the
+        // backend left the registry entry + broadcast intact for the
+        // runner's own teardown. We must NOT disconnect or start a
+        // second concurrent run. But the backend ALREADY cleared
+        // persisted chat.pending_messages, so a refetch returns [] and
+        // re-queueing from authoritative server state would silently
+        // drop the queued text (the "Stop ate my message" bug). Restore
+        // from the LOCAL snapshot instead, via the same doSend re-send
+        // path the clean branch uses — because the stream is still
+        // attached (isStreamingRef true), doSend takes its QUEUE PATH:
+        // it re-POSTs the combined turn into the backend pending queue
+        // (re-persisting what Stop cleared) AND re-shows it in the tray.
+        // No fresh run starts, no duplicate. When the delayed interrupt
+        // finally lands, the runner finalizes the broadcast cleanly
+        // (generation was bumped → no auto-promote) and the now-
+        // re-persisted queue drains on the next turn boundary; if the
+        // turn had already ended by the time doSend ran, isStreamingRef
+        // is false and the empty-queue snapshot fresh-sends it as the
+        // follow-up turn — doSend self-routes correctly either way.
+        // The 2s timeout is NOT surfaced as a user-facing error; only a
+        // genuine re-queue POST failure (doSend's catch) shows a block.
         if (combined) {
-          try {
-            const res = await apiFetch(`/chats/${chatId}?limit=1`)
-            const data = await res.json()
-            pendingQueue.hydrate(data.pending_messages || [])
-          } catch {
-            // Refetch failed — restore the local snapshot so the user
-            // can still see and re-send what was in the queue before Stop.
-            pendingQueue.hydrate(queuedSnapshot)
-          }
+          doSend(combined, {
+            pin: false,
+            attachments: combinedAttachments.length > 0 ? combinedAttachments : undefined,
+          })
         }
         return
       }
