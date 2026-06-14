@@ -302,6 +302,30 @@ async def test_notify_endpoint_reaches_system_broadcast(client, auth):
     sb.unsubscribe(q)
 
 
+@pytest.mark.asyncio
+async def test_notify_shell_rebuilt_reaches_system_broadcast(client, auth):
+  """POST /api/notify {shell_rebuilt} must land on the SystemBroadcast.
+
+  This is the exact channel deploy-prod.sh's post-deploy broadcast hits:
+  the script mints a service-token-authed POST so already-open PWAs reload
+  onto the freshly-rebuilt shell. Shell.jsx subscribes to /api/events/system
+  (which streams the SystemBroadcast) and reloads on `shell_rebuilt`. Before
+  the deploy script fired this event, an already-open PWA never learned a new
+  bundle existed. This test guards the backend half of that wiring: the
+  event type is accepted (not rejected by the validator) AND it reaches the
+  Shell-level broadcast even with no chat active.
+  """
+  sb = get_system_broadcast()
+  q = sb.subscribe()
+  try:
+    r = client.post("/api/notify", headers=auth, json={"type": "shell_rebuilt"})
+    assert r.status_code == 204, r.text
+    event = await asyncio.wait_for(q.get(), timeout=1.0)
+    assert event["type"] == "shell_rebuilt"
+  finally:
+    sb.unsubscribe(q)
+
+
 def test_notify_rejects_cross_site_request(client, auth):
   cross = client.post(
     "/api/notify",
