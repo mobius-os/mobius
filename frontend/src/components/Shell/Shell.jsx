@@ -263,8 +263,16 @@ export default function Shell() {
         staleTime: 5 * 60_000,
       })
       const version = appVersionKey(app.updated_at)
+      // Mirror AppCanvas exactly: fold the frame-file content rev
+      // (meta[mobius-frame-rev]) into `?v=` so the SW pre-warms the SAME
+      // cache key the open path opens. Without it a frame-file redeploy
+      // leaves the pre-warm a miss on first open (AppCanvas still loads
+      // correctly via its own revved URL).
+      const frameRev =
+        (typeof document !== 'undefined' &&
+          document.querySelector('meta[name="mobius-frame-rev"]')?.content) || ''
       const frameUrl =
-        `${BASE}/api/apps/${app.id}/frame?v=${encodeURIComponent(version)}`
+        `${BASE}/api/apps/${app.id}/frame?v=${encodeURIComponent(version)}${frameRev ? '-' + frameRev : ''}`
       const moduleUrl =
         `${BASE}/api/apps/${app.id}/module?v=${encodeURIComponent(version)}`
         + `&token=${encodeURIComponent(token)}`
