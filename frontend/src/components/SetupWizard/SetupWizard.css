@@ -55,7 +55,7 @@
 .setup__input {
   width: 100%;
   box-sizing: border-box;
-  background: var(--bg, #0c0f14);
+  background: var(--bg, #0d0d0d);
   border: 1px solid var(--border, #252b36);
   border-radius: 6px;
   color: var(--text, #d4d4d8);
@@ -217,7 +217,7 @@
 }
 
 .setup__auth-help-cmd {
-  background: var(--bg, #0c0f14);
+  background: var(--bg, #0d0d0d);
   border: 1px solid var(--border, #252b36);
   border-radius: 4px;
   padding: 8px 10px;

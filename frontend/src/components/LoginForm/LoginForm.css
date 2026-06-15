@@ -54,7 +54,7 @@
 }
 
 .login__input {
-  background: var(--bg, #0c0f14);
+  background: var(--bg, #0d0d0d);
   border: 1px solid var(--border, #252b36);
   border-radius: 6px;
   color: var(--text, #d4d4d8);
@@ -102,7 +102,7 @@
 
 .login__hint code {
   font-family: monospace;
-  background: var(--bg, #0c0f14);
+  background: var(--bg, #0d0d0d);
   border-radius: 3px;
   padding: 1px 4px;
 }

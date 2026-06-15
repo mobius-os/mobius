@@ -37,16 +37,23 @@
   }
   </script>
   <style>
-    /* Fallback defaults — overridden by server-injected theme from theme.py. */
+    /* Fallback defaults — overridden by server-injected theme from theme.py.
+       These MUST mirror theme.py's DEFAULT_THEME token-for-token: AppCanvas
+       sends frame-init with no themeCss while the theme query is still
+       resolving, so the app mounts/paints on THIS :root until a later
+       frame-theme repaints. If these drift from DEFAULT_THEME the default
+       theme shows a visible flash (the stale pre-2026-05 blue palette did
+       exactly that). Keep in sync with backend/app/theme.py. */
     :root {
-      --bg: #0c0f14; --surface: #14181f; --surface2: #1a1f28;
-      --border: #252b36; --border-light: #1c2029;
-      --text: #d4d4d8; --muted: #52525b;
-      --accent: #a78bfa; --accent-hover: #c4b5fd;
-      --accent-dim: rgba(167, 139, 250, 0.1);
-      --danger: #f87171; --green: #6ee7b7;
-      --font: 'Inter', system-ui, sans-serif;
-      --mono: 'JetBrains Mono', ui-monospace, monospace;
+      --bg: #0d0d0d; --surface: #171717; --surface2: #212121;
+      --border: #2a2a2a; --border-light: #1f1f1f;
+      --text: #ececec; --muted: #a8a8a8;
+      --accent: #8b6cf7; --accent-hover: #7c5ce6;
+      --accent-dim: rgba(139, 108, 247, 0.14);
+      --accent-fg: #ffffff;
+      --danger: #f87171; --green: #10b981;
+      --font: 'Inter', system-ui, -apple-system, sans-serif;
+      --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
       /* Immersive safe-area insets, forwarded from the shell via
          moebius:frame-insets (env(safe-area-inset-*) reads 0 inside this
          sandboxed iframe). Default 0 so apps can reference them before the
