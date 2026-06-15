@@ -226,6 +226,42 @@ test('toggleTheme dark → light swaps structural colors but preserves accent', 
     'custom --accent must survive the mode toggle')
 })
 
+test('REGRESSION — toggling an accent-stripped theme restores the missing tokens', async () => {
+  // The prod "light mode completely broken" bug: a prior toggle had
+  // re-persisted theme.css with ONLY structural tokens (no --accent /
+  // --accent-hover / --accent-dim / --danger / --green), because the
+  // old `{ ...meta.colors, ...swapped }` build dropped any token the
+  // input lacked. Each subsequent toggle degraded it further. The fix
+  // spreads the full base palette first, so a toggle always re-emits a
+  // COMPLETE theme. This is the lock-in.
+  const STRIPPED_LIGHT = `:root {
+  --bg: #f0eeeb;
+  --surface: #ffffff;
+  --surface2: #e8e6e2;
+  --border: #d4d1cc;
+  --border-light: #e2dfdb;
+  --text: #1c1b1a;
+  --muted: #6b6864;
+  --font: 'Inter', system-ui, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 15px;
+  color-scheme: light;
+}
+`
+  const qc = makeQueryClient()
+  const api = makeApi(STRIPPED_LIGHT)
+  await themeService.toggleTheme(qc, 'light', api)
+  const putCall = api.calls.find(c => c[0] === 'putThemeCss')
+  assert.ok(putCall, 'putThemeCss must have been called')
+  const newCss = putCall[1]
+  for (const token of ['--accent:', '--accent-hover:', '--accent-dim:', '--danger:', '--green:']) {
+    assert.ok(newCss.includes(token),
+      `toggling a stripped theme must restore ${token} from the base palette; got:\n${newCss}`)
+  }
+  // And the structural swap still happened (light -> dark bg).
+  assert.ok(newCss.includes('--bg: #0d0d0d'), 'structural --bg must swap to dark')
+})
+
 test('toggleTheme returns {newMode, newCss, newBg} for caller convenience', async () => {
   const qc = makeQueryClient()
   const api = makeApi(DARK_CSS)

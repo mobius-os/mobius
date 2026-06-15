@@ -76,12 +76,32 @@ DEFAULT_THEME = """\
 
 
 def get_theme_css(data_dir: str) -> str:
-  """Returns the active theme CSS — user override or default."""
+  """Returns the active EFFECTIVE theme CSS — the user override (or the
+  built-in default), always augmented so every core variable the shell
+  relies on is present.
+
+  The `_ensure_core_vars` augment is what makes a partial theme.css
+  safe: a file defining only --bg/--text still resolves --accent /
+  --surface / --danger to readable defaults instead of dropping every
+  CSS property that references them. Augmenting HERE — at the single
+  effective-theme getter — means every consumer gets a complete theme:
+  the SPA's `GET /api/theme` fetch, the app-frame iframe, and the
+  server-rendered <style> block alike.
+
+  Historically the augment ran ONLY at HTML-render time
+  (`inject_theme_into_html`); the SPA then re-fetched the RAW override
+  via /api/theme and applied it LAST in the cascade, nullifying the
+  server-augmented block. That was the "light mode completely broken"
+  bug once a light/dark toggle had stripped theme.css down to its
+  structural tokens (no --accent/--danger/--green). The raw,
+  un-augmented override is still available verbatim at
+  /api/storage/shared/theme.css for editors that want the source.
+  """
   theme_path = Path(data_dir) / "shared" / "theme.css"
   if theme_path.exists():
     content = theme_path.read_text(encoding="utf-8").strip()
     if content:
-      return content
+      return _ensure_core_vars(content)
   return DEFAULT_THEME
 
 
@@ -224,20 +244,22 @@ def _is_safe_import_url(url: str) -> bool:
 # =============================================================
 # `_ensure_core_vars` (below) appends a `:root { ... }` block to
 # any theme that omits one of the variables listed in `_CORE_VARS`.
-# The augmentation is SILENT — there is no log line, no header
-# comment in the original theme, and `GET /api/theme` still
-# returns the agent-authored source. What gets shipped to the
-# browser is `<style>{augmented_css}</style>` injected by
-# `inject_theme_into_html` below.
+# It is applied inside `get_theme_css`, so the EFFECTIVE theme is
+# complete for every consumer — `GET /api/theme`, the app-frame
+# iframe, and the server-rendered `<style>` block all see it. The
+# augmentation is purely additive: the agent's CSS is never
+# rewritten, only gap-filled. The raw, un-augmented override is
+# still readable verbatim at `/api/storage/shared/theme.css` for
+# editors that want the source.
 #
 # Why this matters for debugging: a partial theme "works" not
-# because it's complete, but because the server filled the gap.
-# If a debugger looks at `theme.css` and sees only --bg / --text
-# defined, the shell's surfaces are STILL rendering correctly
-# because `--surface`, `--border`, etc. were silently injected
-# at HTML-render time. To inspect what the browser actually
-# received, look at the `<style>` block in the served HTML (or
-# DevTools → Sources → the inline style tag), not at `theme.css`.
+# because it's complete, but because `get_theme_css` filled the gap.
+# If a debugger looks at `theme.css` on disk and sees only --bg /
+# --text defined, the shell's surfaces are STILL rendering correctly
+# because `--surface`, `--border`, --accent, etc. were injected by
+# the getter. To inspect the on-disk source, read the storage file;
+# to see what the browser received, read `GET /api/theme` or the
+# served `<style>` block.
 #
 # Variables augmented when missing (full list lives in
 # `_CORE_VARS`):
