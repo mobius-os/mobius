@@ -29,6 +29,15 @@ RUNTIME_LIBS: tuple[str, ...] = (
   "@codemirror/lang-markdown",
   "@lezer/highlight",
   "katex",
+  # d3-geo (Atlas globe), marked + dompurify (Notes markdown preview) — moved
+  # off esm.sh to /vendor so those apps are offline-deterministic. The importmap
+  # (app-frame.html) resolves them at runtime; externalizing here is what makes
+  # `import('d3-geo')` / `import('marked')` / `import('dompurify')` compile
+  # instead of esbuild trying to bundle the bare specifier. test_runtime_libs.py
+  # locks this list to the importmap.
+  "d3-geo",
+  "marked",
+  "dompurify",
 )
 
 
