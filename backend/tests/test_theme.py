@@ -205,6 +205,55 @@ def test_get_theme_css_augments_accent_stripped_override(tmp_path):
     assert token in out, f"{token} must be filled by get_theme_css; got:\n{out}"
 
 
+def test_ensure_core_vars_fills_light_theme_with_light_defaults():
+  """A partial LIGHT theme.css (light --bg, but missing structural
+  tokens) must be gap-filled with LIGHT defaults, not the DARK palette
+  from DEFAULT_THEME. The bug: _ensure_core_vars sourced every default
+  from DEFAULT_THEME (dark), so a hand-written / toggle-stripped light
+  theme got --surface2:#212121 + --border-light:#1f1f1f injected in a
+  cascade-winning :root block — dark surfaces in light mode."""
+  # Light --bg + --text only; every other structural token is missing
+  # and must be filled from the LIGHT palette.
+  css = ":root {\n  --bg: #f0eeeb;\n  --text: #1c1b1a;\n}\n"
+  out = _ensure_core_vars(css)
+  # Mode-dependent structural defaults must be the LIGHT values.
+  assert "--surface: #ffffff" in out
+  assert "--surface2: #e8e6e2" in out
+  assert "--border: #d4d1cc" in out
+  assert "--border-light: #e2dfdb" in out
+  assert "--muted: #6b6864" in out
+  # The DARK structural literals must NOT leak in.
+  assert "#212121" not in out  # dark --surface2
+  assert "#1f1f1f" not in out  # dark --border-light
+  assert "#171717" not in out  # dark --surface
+  # Mode-agnostic brand accent stays the shared purple in either mode.
+  assert "--accent: #8b6cf7" in out
+
+
+def test_ensure_core_vars_dark_theme_unchanged_by_mode_awareness():
+  """A partial DARK theme still gets DARK defaults — the mode-aware
+  branch must not regress the original behavior. A dark --bg infers
+  'dark', so missing structural vars come from DEFAULT_THEME."""
+  css = ":root {\n  --bg: #0d0d0d;\n  --text: #ececec;\n}\n"
+  out = _ensure_core_vars(css)
+  assert "--surface: #171717" in out
+  assert "--surface2: #212121" in out
+  assert "--border-light: #1f1f1f" in out
+  # No light-mode value leaked into a dark theme.
+  assert "#ffffff" not in out  # light --surface
+  assert "#e8e6e2" not in out  # light --surface2
+
+
+def test_ensure_core_vars_missing_bg_defaults_to_dark():
+  """A theme with no --bg at all (can't infer mode) defaults to DARK
+  defaults — the historical behavior, preserved so existing themes are
+  unaffected."""
+  css = ":root {\n  --accent: #ff00aa;\n}\n"
+  out = _ensure_core_vars(css)
+  assert "--surface2: #212121" in out  # dark default
+  assert "--bg: #0d0d0d" in out
+
+
 def test_api_theme_returns_default_when_override_is_empty(client, auth):
   """Empty theme.css → endpoint falls back to DEFAULT_THEME."""
   import os

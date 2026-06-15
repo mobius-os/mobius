@@ -285,6 +285,53 @@ _CORE_VARS = {
 }
 
 
+# Light-mode defaults for the structural + status vars whose correct
+# value DEPENDS on mode. DEFAULT_THEME is the DARK palette, so filling a
+# partial LIGHT theme.css from it injected dark surfaces/borders
+# (--surface2:#212121, --border-light:#1f1f1f) appended in a cascade-
+# winning :root block — "dark surfaces in light mode". These values
+# mirror the frontend LIGHT_COLORS in frontend/src/theme.js so the
+# server-augmented light theme matches what a client-side toggle
+# produces. --accent/--accent-hover and --font/--mono are mode-agnostic
+# (the brand purple + typography are shared), so they stay sourced from
+# DEFAULT_THEME for both modes.
+_LIGHT_DEFAULTS = {
+  "--bg": "#f0eeeb",
+  "--surface": "#ffffff",
+  "--surface2": "#e8e6e2",
+  "--border": "#d4d1cc",
+  "--border-light": "#e2dfdb",
+  "--text": "#1c1b1a",
+  "--muted": "#6b6864",
+  "--accent-dim": "rgba(139, 108, 247, 0.08)",
+  "--danger": "#ef4444",
+  "--green": "#059669",
+}
+
+
+def _infer_theme_mode(css: str) -> str:
+  """Return 'light' or 'dark' for a theme's CSS by --bg luminance,
+  mirroring the frontend themeService._inferThemeMode so server-side
+  augmentation and a client-side toggle agree on mode from the same
+  signal. A missing/unparseable --bg defaults to 'dark' (the historical
+  behavior — DEFAULT_THEME is dark — so existing dark themes are
+  unaffected)."""
+  m = re.search(r"--bg:\s*(#[0-9a-fA-F]{3,8})", css)
+  if not m:
+    return "dark"
+  raw = m.group(1)[1:]
+  if len(raw) == 3:
+    raw = "".join(c * 2 for c in raw)
+  raw = raw[:6]
+  try:
+    r = int(raw[0:2], 16)
+    g = int(raw[2:4], 16)
+    b = int(raw[4:6], 16)
+  except ValueError:
+    return "dark"
+  return "dark" if (r + g + b) / 3 < 128 else "light"
+
+
 def _ensure_core_vars(css: str) -> str:
   """Append a `:root` block with default values for any core
   variable the theme omitted.
@@ -306,11 +353,17 @@ def _ensure_core_vars(css: str) -> str:
   missing = _CORE_VARS - defined
   if not missing:
     return css
+  # Source defaults from DEFAULT_THEME (the DARK palette), then override
+  # mode-dependent vars with their LIGHT values when the theme's own --bg
+  # reads as light. Without this a partial light theme.css got dark
+  # surfaces/borders injected in a cascade-winning :root block.
   defaults: dict[str, str] = {}
   for line in DEFAULT_THEME.splitlines():
     m = re.match(r"\s*(--[\w-]+)\s*:\s*([^;]+);", line)
     if m:
       defaults[m.group(1)] = m.group(2).strip()
+  if _infer_theme_mode(css) == "light":
+    defaults.update(_LIGHT_DEFAULTS)
   injected = "\n".join(
     f"  {name}: {defaults[name]};"
     for name in sorted(missing)
