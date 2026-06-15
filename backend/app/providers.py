@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import shutil
+import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -614,18 +615,37 @@ def _read_claude_oauth(data_dir: str) -> tuple[Path, dict]:
 
 def _write_claude_oauth(creds_path: Path, oauth: dict) -> None:
   """Persists a refreshed claudeAiOauth block back to the credentials file
-  in the CLI's expected shape and 0600 perms (atomic tmp+rename so a crash
-  mid-write can't leave a truncated file the chat path then reads).
+  in the CLI's expected shape (atomic tmp+rename so a crash mid-write can't
+  leave a truncated file the chat path then reads).
 
   Writing it back is the point of refreshing here: the chat runner and the
   CLI read the same file, so a refresh on the registry path also un-expires
-  the token for everyone else, instead of each caller re-refreshing."""
-  payload = {"claudeAiOauth": oauth}
+  the token for everyone else, instead of each caller re-refreshing.
+
+  Read-modify-write the WHOLE file and replace only the claudeAiOauth block:
+  the host CLI's .credentials.json (shipped into the container via the
+  documented `docker cp ~/.claude/.credentials.json` dev workflow) also
+  carries mcpOAuth and organizationUuid. Rewriting just {"claudeAiOauth": …}
+  would drop those sibling keys on the first registry-path refresh, which is
+  what 'the file stays the single source of truth' is meant to prevent. The
+  file mode is preserved (the CLI writes 0600); we mirror it on the tmp file
+  and default to 0600 when the source is gone."""
+  try:
+    raw = json.loads(creds_path.read_text())
+    if not isinstance(raw, dict):
+      raw = {}
+  except (OSError, ValueError):
+    raw = {}
+  raw["claudeAiOauth"] = oauth
+  try:
+    mode = stat.S_IMODE(creds_path.stat().st_mode)
+  except OSError:
+    mode = 0o600
   tmp = creds_path.with_suffix(creds_path.suffix + ".tmp")
-  fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+  fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
   try:
     with os.fdopen(fd, "w") as f:
-      json.dump(payload, f)
+      json.dump(raw, f)
     os.replace(tmp, creds_path)
   except Exception:
     tmp.unlink(missing_ok=True)

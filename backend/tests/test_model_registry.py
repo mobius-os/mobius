@@ -16,6 +16,7 @@ Two gaps this guards:
 """
 
 import json
+import stat
 import time
 
 import httpx
@@ -28,19 +29,37 @@ from app import providers
 
 
 def test_known_models_fallback_lists_current_claude_and_codex():
-  """The static fallback (used on any live-fetch failure) must include the
-  current top-of-list model for each provider, so a container that can't
-  reach the live endpoint still offers today's defaults."""
+  """The static fallback (used on any live-fetch failure) must include each
+  current canonical model id, so a container that can't reach the live
+  endpoint still offers today's models — not a stale snapshot.
+
+  These assert PRESENCE of the known-current ids rather than freezing an
+  exact list: the registry is meant to grow (new dated aliases get appended
+  as Anthropic ships them), and an exact-match would force a test edit on
+  every additive bump. But a missing or renamed CANONICAL id (e.g. a typo'd
+  Opus suffix or a dropped default) is a real regression the prefix-only
+  checks would have waved through, so each current id is named explicitly."""
   claude = providers.KNOWN_MODELS["claude"]
   codex = providers.KNOWN_MODELS["codex"]
-  # Current Claude family (Opus/Sonnet/Haiku 4.x, dateless pinned ids).
-  assert "claude-opus-4-8" in claude
+  # Current Claude family — each canonical id must be present by name. The
+  # dated Haiku/Sonnet/Opus ids are the literal entries in KNOWN_MODELS;
+  # asserting them by name catches a wrong date suffix that a startswith
+  # check would miss.
+  for model_id in (
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-opus-4-5-20251001",
+    "claude-sonnet-4-6",
+    "claude-sonnet-4-7-20251215",
+    "claude-sonnet-4-5-20251001",
+    "claude-haiku-4-5-20251001",
+  ):
+    assert model_id in claude, f"{model_id} missing from KNOWN_MODELS[claude]"
   assert claude[0] == "claude-opus-4-8", "Opus 4.8 must be the default"
-  assert any(m.startswith("claude-sonnet-4") for m in claude)
-  assert any(m.startswith("claude-haiku-4") for m in claude)
-  # Current Codex family (gpt-5.x).
-  assert "gpt-5.5" in codex
-  assert "gpt-5.4" in codex
+  # Current Codex family — each canonical id present by name.
+  for model_id in ("gpt-5.5", "gpt-5.4"):
+    assert model_id in codex, f"{model_id} missing from KNOWN_MODELS[codex]"
   assert codex[0] == "gpt-5.5", "gpt-5.5 must be the Codex default"
 
 
@@ -133,6 +152,54 @@ async def test_expired_token_is_refreshed_and_persisted(tmp_path, monkeypatch):
   assert saved["accessToken"] == "new-access-tok"
   assert saved["refreshToken"] == "refresh-tok-B"
   assert saved["expiresAt"] > int(time.time() * 1000)
+
+
+@pytest.mark.asyncio
+async def test_refresh_preserves_sibling_credential_keys(tmp_path, monkeypatch):
+  """A registry-path refresh must NOT drop other top-level keys in the
+  credentials file. The host CLI's .credentials.json — shipped into the
+  container via `docker cp ~/.claude/.credentials.json` — carries mcpOAuth
+  (MCP server OAuth) and organizationUuid alongside claudeAiOauth. The write
+  is read-modify-write, replacing only claudeAiOauth, so those survive."""
+  past = int(time.time() * 1000) - 1000
+  cli = tmp_path / "cli-auth" / "claude"
+  cli.mkdir(parents=True, exist_ok=True)
+  creds_path = cli / ".credentials.json"
+  creds_path.write_text(json.dumps({
+    "claudeAiOauth": {
+      "accessToken": "stale-tok",
+      "refreshToken": "refresh-tok-A",
+      "expiresAt": past,
+      "scopes": ["user:inference"],
+    },
+    "mcpOAuth": {"some-server": {"accessToken": "mcp-tok", "expiresAt": 123}},
+    "organizationUuid": "org-1234-abcd",
+  }))
+  creds_path.chmod(0o600)
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, json={
+      "access_token": "new-access-tok",
+      "refresh_token": "refresh-tok-B",
+      "expires_in": 3600,
+    })
+
+  _install_mock_transport(monkeypatch, handler)
+
+  token = await providers._claude_access_token(str(tmp_path))
+  assert token == "new-access-tok"
+
+  saved = json.loads(creds_path.read_text())
+  # The refreshed block landed.
+  assert saved["claudeAiOauth"]["accessToken"] == "new-access-tok"
+  assert saved["claudeAiOauth"]["refreshToken"] == "refresh-tok-B"
+  # The sibling keys survived the refresh+persist round-trip.
+  assert saved["mcpOAuth"] == {
+    "some-server": {"accessToken": "mcp-tok", "expiresAt": 123}
+  }
+  assert saved["organizationUuid"] == "org-1234-abcd"
+  # The 0600 file mode is preserved across the atomic rewrite.
+  assert stat.S_IMODE(creds_path.stat().st_mode) == 0o600
 
 
 @pytest.mark.asyncio
