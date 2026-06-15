@@ -266,6 +266,26 @@ test('hydrate([]) PRESERVES an optimistic entry whose POST is still in flight', 
   assert.equal(list[0].content, 're-queued combined')
 })
 
+test('a server-CONFIRMED `s-<ts>` add is DROPPED by a later hydrate([])', () => {
+  // Convergent re-audit regression. The fresh-send queued path
+  // (ChatView ~1131) add()s an ALREADY-server-confirmed entry with cid
+  // `s-<ts>` (the server handed back the ts) and, when result.started
+  // is false, returns WITHOUT swapOptimisticTs/clearInFlight. If add()
+  // marked every cid in-flight, this server row would survive a later
+  // normal hydrate([]) — e.g. the continues:false error-clear refetch
+  // (ChatView ~488-493) — leaving a phantom queued message in the tray
+  // that the authoritative server list intentionally removed. In-flight
+  // protection is OPTIMISTIC-only: the `s-` prefix marks server-origin
+  // cids, so they are NOT preserved and hydrate is free to drop them.
+  const { result } = renderHook(usePendingQueue)
+  result.current.add(fixtureMsg({ cid: 's-123', ts: 123, content: 'server-confirmed' }))
+  result.current.hydrate([])
+  assert.deepEqual(
+    result.current.pendingMessagesRef.current, [],
+    'a server-confirmed s-<ts> entry the server omits is dropped by hydrate, not resurrected',
+  )
+})
+
 test('an in-flight entry survives hydrate regardless of POST-vs-fetch ordering', () => {
   // The race is symmetric — the fix must hold whichever lands first.
   //
