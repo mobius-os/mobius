@@ -8,6 +8,7 @@ from app.theme import (
   inject_theme_into_html,
   extract_imports,
   _ensure_core_vars,
+  get_theme_css,
   snapshot_theme_if_present,
   reset_theme_override,
 )
@@ -151,8 +152,12 @@ def test_api_theme_returns_default_when_no_override(client, auth):
   assert body["bg"] == "#0d0d0d"
 
 
-def test_api_theme_returns_user_override_when_present(client, auth):
-  """User-written theme.css → endpoint returns it verbatim."""
+def test_api_theme_returns_user_override_augmented(client, auth):
+  """User-written theme.css → endpoint returns it, AUGMENTED with any
+  core vars it omitted. The effective theme is always complete so the
+  SPA's last-wins client re-apply can't drop accents (the "light mode
+  completely broken" regression). The override is preserved verbatim
+  inside the augmented CSS."""
   import os
   data_dir = os.environ["DATA_DIR"]
   shared = os.path.join(data_dir, "shared")
@@ -164,10 +169,40 @@ def test_api_theme_returns_user_override_when_present(client, auth):
     res = client.get("/api/theme", headers=auth)
     assert res.status_code == 200
     body = res.json()
-    assert body["css"] == custom
+    # The override is preserved verbatim...
+    assert "--bg: #ff0000" in body["css"]
+    assert "--accent: #00ff00" in body["css"]
+    # ...and the omitted core vars are filled so nothing renders invisibly.
+    assert "--surface:" in body["css"]
+    assert "--text:" in body["css"]
+    assert "--danger:" in body["css"]
     assert body["bg"] == "#ff0000"
   finally:
     os.remove(os.path.join(shared, "theme.css"))
+
+
+def test_get_theme_css_augments_accent_stripped_override(tmp_path):
+  """The "light mode completely broken" regression: a theme.css that a
+  prior light/dark toggle stripped down to ONLY structural tokens (no
+  --accent/--accent-hover/--accent-dim/--danger/--green) must come back
+  from get_theme_css with those filled. Otherwise the SPA fetches the
+  raw incomplete CSS from /api/theme, applies it last in the cascade,
+  and every `var(--accent)` reference resolves to nothing."""
+  shared = tmp_path / "shared"
+  shared.mkdir()
+  (shared / "theme.css").write_text(
+    ":root {\n"
+    "  --bg: #f0eeeb;\n  --surface: #ffffff;\n  --surface2: #e8e6e2;\n"
+    "  --border: #d4d1cc;\n  --border-light: #e2dfdb;\n"
+    "  --text: #1c1b1a;\n  --muted: #6b6864;\n"
+    "  color-scheme: light;\n}\n"
+  )
+  out = get_theme_css(str(tmp_path))
+  assert "--bg: #f0eeeb" in out  # the override's structural tokens survive
+  for token in (
+    "--accent:", "--accent-hover:", "--accent-dim:", "--danger:", "--green:",
+  ):
+    assert token in out, f"{token} must be filled by get_theme_css; got:\n{out}"
 
 
 def test_api_theme_returns_default_when_override_is_empty(client, auth):
@@ -201,9 +236,9 @@ def test_api_theme_reset_via_delete(client, auth):
   )
   assert res.status_code in (200, 201, 204)
 
-  # Verify endpoint returns the override.
+  # Verify endpoint returns the override (augmented; preserved verbatim).
   body = client.get("/api/theme", headers=auth).json()
-  assert body["css"] == custom
+  assert "--bg: #123456" in body["css"]
 
   # Reset by deleting.
   res = client.delete("/api/storage/shared/theme.css", headers=auth)

@@ -217,7 +217,15 @@ export async function toggleTheme(queryClient, currentMode, api) {
   for (const k of STRUCTURAL_KEYS) {
     if (base[k]) swapped[k] = base[k]
   }
-  const colors = { ...meta.colors, ...swapped }
+  // Spread the full base palette FIRST so any token missing from the
+  // persisted file (e.g. --accent/--danger/--green after a prior
+  // toggle stripped them) is restored with the new mode's value;
+  // meta.colors then preserves the user's customisations (their
+  // purple accent survives), and swapped applies the structural
+  // mode-swap last. Without the base spread, a toggle re-persisted
+  // whatever was already missing — degrading theme.css on every swap
+  // until light mode rendered with no accents at all.
+  const colors = { ...base, ...meta.colors, ...swapped }
   const newCss = buildThemeCss(colors, meta, newMode)
 
   // Extract NEW bg from the built CSS, not from old meta.
