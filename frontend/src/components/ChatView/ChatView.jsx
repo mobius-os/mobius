@@ -16,6 +16,7 @@ import StreamingMessage from './StreamingMessage.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
 import MsgContent from './MsgContent.jsx'
 import { questionKey } from './questionKey.js'
+import { resolveStopResend } from './resolveStopResend.js'
 import './ChatView.css'
 
 
@@ -415,11 +416,17 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         ...(existing || {}),
         pending_question_id: data.pending_question_id || null,
       }))
-      // Sync pending queue from server. usePendingQueue.hydrate
-      // preserves the client-side cid for any entry whose ts already
-      // exists locally (so QueuedMessages's expanded state doesn't
-      // remount under a fresh `s-${ts}` key) and stamps a stable
-      // s-prefixed cid on previously-unseen server entries.
+      // Reconcile the pending queue against server state. hydrate is a
+      // MERGE: it preserves the client-side cid for any entry whose ts
+      // already exists locally (so QueuedMessages's expanded state
+      // doesn't remount under a fresh `s-${ts}` key), stamps a stable
+      // s-prefixed cid on previously-unseen server entries, AND keeps any
+      // optimistic-only entry whose own POST is still in flight (the
+      // server hasn't seen it yet). The last clause is what stops a
+      // reconcile-fetch — e.g. onStreamEnd's continues:false refetch
+      // racing a Stop-timeout resend's queueOnly POST — from dropping a
+      // just-re-queued message that is persisted server-side but not yet
+      // visible to this read.
       pendingQueue.hydrate(data.pending_messages || [])
     } catch { /* network error — silent, user can retry */ }
   }, [chatId, commitMessages, pendingQueue, queryClient])
@@ -1050,6 +1057,19 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           // is currently last.
           bridgeHook.markBridged()
         }
+        // Invariant: every observable queue-path status must resolve
+        // the optimistic entry's in-flight flag. queued/steered/started
+        // each clear it above (swapOptimisticTs / cancelByCid). Any
+        // other status — e.g. streamSend's `not_steered` — leaves the
+        // entry as an ordinary queued row, so clear the flag here or it
+        // leaks forever and a later hydrate would wrongly preserve it.
+        if (
+          result?.status !== 'queued'
+          && result?.status !== 'steered'
+          && result?.status !== 'started'
+        ) {
+          pendingQueue.clearInFlight(queuedMsg.cid)
+        }
       } catch (err) {
         // Roll back optimistic + restore input.
         pendingQueue.cancelByCid(queuedMsg.cid)
@@ -1406,23 +1426,59 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           } catch { /* non-JSON body — assume legacy success */ }
         }
       } catch { /* network error during stop is non-critical */ }
+
+      // Resolve WHAT to resend from the queued snapshot + the set the
+      // backend reports it actually cleared, via the SHARED, pure
+      // resolveStopResend — ONE code path for both the clean-stop and
+      // the timeout branch so they can't drift. The timeout branch used
+      // to ignore clearedPendingTs and re-send the full snapshot
+      // unconditionally, which double-sent a message the natural turn-end
+      // drain had already consumed (cleared set []). The full contract +
+      // its tests live in resolveStopResend.js.
+      const resolveResend = (cleared) => resolveStopResend(
+        queuedSnapshot, cleared,
+        { text: combined, attachments: combinedAttachments },
+      )
+
       if (!stoppedCleanly) {
-        // Restore the queued messages we optimistically cleared, so
-        // the user can hit Stop again or wait + retry without losing
-        // their drafts. Don't disconnect — the runner may still be
-        // streaming. We have `queuedTexts` + `combinedAttachments`
-        // but their original `ts` ids; safest is just a refetch so
-        // the user sees authoritative server state.
-        if (combined) {
-          try {
-            const res = await apiFetch(`/chats/${chatId}?limit=1`)
-            const data = await res.json()
-            pendingQueue.hydrate(data.pending_messages || [])
-          } catch {
-            // Refetch failed — restore the local snapshot so the user
-            // can still see and re-send what was in the queue before Stop.
-            pendingQueue.hydrate(queuedSnapshot)
-          }
+        // The SDK interrupt timed out (handle.stop()'s 2s bound — see
+        // claude_sdk_runner.stop): the runner is still alive and the
+        // backend left the registry entry + broadcast intact for the
+        // runner's own teardown. We must NOT disconnect or start a
+        // second concurrent run. The backend ALREADY cleared persisted
+        // chat.pending_messages, so a refetch returns [] and re-queueing
+        // from authoritative server state would silently drop the queued
+        // text (the "Stop ate my message" bug). Restore from the LOCAL
+        // snapshot instead, via the same doSend re-send path — and
+        // narrowed by clearedPendingTs through the SHARED resolveResend
+        // (above) so a queued message the natural turn-end drain already
+        // consumed (cleared set []) is NOT re-sent here: re-sending it
+        // would duplicate the message and risk a duplicate follow-up run.
+        // Because the stream is still attached (isStreamingRef true),
+        // doSend takes its QUEUE PATH: it re-POSTs the combined turn into
+        // the backend pending queue (re-persisting what Stop cleared) AND
+        // re-shows it in the tray. No fresh run starts, no duplicate.
+        //
+        // Recovery contract (corrected): the re-persisted queue is NOT
+        // auto-drained "on the next turn boundary". Stop already bumped
+        // the run generation, so when the timed-out runner finally
+        // finalizes, its terminal drain recomputes we_own_gen == false
+        // and returns STALE_NO_ACTION — it promotes nothing and schedules
+        // no continuation. The message sits in chat.pending_messages with
+        // the run marker cleared and no live runner; it self-heals on the
+        // NEXT user interaction (the not-is_chat_running stale-pending
+        // drain) or a reconcile, not via the dying runner. The re-POST is
+        // re-shown in the tray so the user sees it is still queued.
+        //
+        // The 2s timeout is NOT surfaced as a user-facing error; only a
+        // genuine re-queue POST failure (doSend's catch) shows a block.
+        const { text: resendText, attachments: resendAttachments } =
+          resolveResend(clearedPendingTs)
+        if (resendText) {
+          doSend(resendText, {
+            pin: false,
+            attachments: resendAttachments.length > 0 ? resendAttachments : undefined,
+          })
         }
         return
       }
@@ -1430,7 +1486,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       promoteStreamToMessages()
       setSending(false)
       // Sync sendingRef to the just-committed state so the synchronous
-      // doSend(combined) call below reads the post-stop value.
+      // doSend(resendText) call below reads the post-stop value.
       // setSending(false) queues a render — the next render will write
       // sendingRef via the top-of-component mirror, but until then the
       // ref still holds the pre-stop `true`. We need the value RIGHT
@@ -1441,45 +1497,13 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       // pending + fetchGen were cleared/bumped BEFORE the await above.
       onStreamEnd?.({ continues: false })
 
-      // Resend the queued work as ONE fresh turn — but ONLY the messages the
-      // backend confirms it cleared (clearedPendingTs). Default to the full
-      // combined text; narrow to the cleared subset only when we can match
-      // EVERY cleared ts in the local snapshot.
-      let resendText = combined
-      let resendAttachments = combinedAttachments
-      if (Array.isArray(clearedPendingTs)) {
-        const clearedSet = new Set(clearedPendingTs)
-        const toResend = queuedSnapshot.filter(
-          m => m.ts != null && clearedSet.has(m.ts),
-        )
-        // Narrow to the cleared subset only when it accounts for every ts the
-        // backend cleared. The race-closure case lands here too: when the
-        // turn-end drain already promoted the queued message,
-        // clearedPendingTs is [], toResend is [], 0 === 0, so resendText
-        // becomes '' and nothing is re-sent (no double-send). But if some
-        // cleared ts did NOT match — the snapshot still holds an OPTIMISTIC ts
-        // for a message whose queue-POST was in flight when Stop was pressed —
-        // we must NOT drop it: fall back to the full combined text (a visible
-        // resend beats a silent loss). The backend drain promotes the queue
-        // all-or-nothing, so a non-empty clearedPendingTs means none were
-        // promoted and resending all of combined can't double-send.
-        if (toResend.length === clearedPendingTs.length) {
-          resendText = toResend
-            .map(m => (m.content || '').trim())
-            .filter(Boolean)
-            .join('\n\n')
-          const seen = new Set()
-          resendAttachments = []
-          for (const m of toResend) {
-            for (const a of (m.attachments || [])) {
-              if (a && a.name && !seen.has(a.name)) {
-                seen.add(a.name)
-                resendAttachments.push(a)
-              }
-            }
-          }
-        }
-      }
+      // Resend the queued work as ONE fresh turn — but ONLY the messages
+      // the backend confirms it cleared. Same SHARED resolveResend the
+      // timeout branch uses, so the two paths can't drift: empty cleared
+      // set → nothing re-sent (the natural-finish-races-Stop double-send,
+      // PM 115), exact match → that subset, partial/legacy → full combined.
+      const { text: resendText, attachments: resendAttachments } =
+        resolveResend(clearedPendingTs)
 
       if (resendText) {
         // doSend's guard reads sendingRef/isStreamingRef (just synced to false

@@ -145,9 +145,16 @@ test('cancelByCid removes the matching entry (pre-swap rollback path)', () => {
   assert.equal(result.current.pendingMessagesRef.current[0].cid, 'optimistic-y')
 })
 
-test('hydrate replaces wholesale; ref updates synchronously', () => {
+test('hydrate replaces a RESOLVED local entry with server state; ref updates synchronously', () => {
+  // hydrate is a merge, not a wholesale replace, but it only PRESERVES
+  // entries whose POST is still in flight (see the in-flight tests
+  // below). A local entry whose round-trip already resolved — here,
+  // swapped to a server ts the server no longer lists — is authoritative
+  // server state's to drop. swapOptimisticTs clears the in-flight flag,
+  // so this `local` entry is not preserved and the server list wins.
   const { result } = renderHook(usePendingQueue)
   result.current.add(fixtureMsg({ cid: 'local', ts: 1 }))
+  result.current.swapOptimisticTs('local', 1)
   result.current.hydrate([
     { role: 'user', content: 'srv', ts: 50 },
     { role: 'user', content: 'srv2', ts: 60 },
@@ -197,4 +204,155 @@ test('clear resets state and ref synchronously', () => {
   result.current.add(fixtureMsg({ ts: 2 }))
   result.current.clear()
   assert.deepEqual(result.current.pendingMessagesRef.current, [])
+})
+
+test('stop-timeout: restoring the local snapshot preserves the queue that a server refetch would drop', () => {
+  // Regression lock-in for the Stop queued-message-drop bug.
+  //
+  // handleStop snapshots the queue, clear()s it, then POSTs /chat/stop.
+  // On an SDK interrupt TIMEOUT (stopped===false) the backend has
+  // ALREADY cleared persisted chat.pending_messages — so the old code's
+  // recovery (refetch /chats/<id> → hydrate(data.pending_messages))
+  // hydrated [] and the queued text vanished. The fix restores from the
+  // LOCAL snapshot (via doSend's queue path, which re-adds to the tray
+  // and re-persists server-side) instead of trusting the now-empty
+  // server view. This test pins the hook-level invariant the fix leans
+  // on: after a Stop-clear, hydrating the empty server response WIPES the
+  // queue, while re-adding the snapshot KEEPS it.
+  const { result } = renderHook(usePendingQueue)
+  const snapshot = [
+    fixtureMsg({ cid: 'q1', ts: 11, content: 'first queued' }),
+    fixtureMsg({ cid: 'q2', ts: 22, content: 'second queued' }),
+  ]
+  for (const m of snapshot) result.current.add(m)
+  // Stop's synchronous pre-await clear.
+  result.current.clear()
+  assert.deepEqual(result.current.pendingMessagesRef.current, [])
+
+  // What the OLD recovery did on a stop timeout: hydrate the server's
+  // (now empty) pending → the queued text is lost.
+  result.current.hydrate([])
+  assert.deepEqual(
+    result.current.pendingMessagesRef.current, [],
+    'hydrating the empty server response on a stop timeout drops the queue',
+  )
+
+  // What the FIX does: restore the local snapshot so the queued text
+  // survives and reappears in the tray.
+  for (const m of snapshot) result.current.add(m)
+  const restored = result.current.pendingMessagesRef.current
+  assert.equal(restored.length, 2, 'both queued messages are restored')
+  assert.equal(restored[0].content, 'first queued')
+  assert.equal(restored[1].content, 'second queued')
+})
+
+test('hydrate([]) PRESERVES an optimistic entry whose POST is still in flight', () => {
+  // The structural root-cause fix (audit HIGH, fix B). A reconcile-fetch
+  // that lands while an optimistic entry's persistence POST is still in
+  // flight must NOT drop it: the server simply hasn't seen the write yet
+  // (it is racing this read), so an empty server list does not mean the
+  // entry was removed. This is the exact ordering of the Stop-timeout
+  // resend racing onStreamEnd's fetchMessages({force:true})→hydrate([]).
+  const { result } = renderHook(usePendingQueue)
+  // doSend's queue path: add() marks the cid in-flight; the await on the
+  // POST has not resolved (no swapOptimisticTs yet).
+  result.current.add(fixtureMsg({ cid: 'inflight-1', ts: 777, content: 're-queued combined' }))
+  // onStreamEnd's continues:false refetch reconciles against a server
+  // list that does NOT yet contain the racing write.
+  result.current.hydrate([])
+  const list = result.current.pendingMessagesRef.current
+  assert.equal(list.length, 1, 'the in-flight optimistic entry survives hydrate([])')
+  assert.equal(list[0].cid, 'inflight-1')
+  assert.equal(list[0].content, 're-queued combined')
+})
+
+test('a server-CONFIRMED `s-<ts>` add is DROPPED by a later hydrate([])', () => {
+  // Convergent re-audit regression. The fresh-send queued path
+  // (ChatView ~1131) add()s an ALREADY-server-confirmed entry with cid
+  // `s-<ts>` (the server handed back the ts) and, when result.started
+  // is false, returns WITHOUT swapOptimisticTs/clearInFlight. If add()
+  // marked every cid in-flight, this server row would survive a later
+  // normal hydrate([]) — e.g. the continues:false error-clear refetch
+  // (ChatView ~488-493) — leaving a phantom queued message in the tray
+  // that the authoritative server list intentionally removed. In-flight
+  // protection is OPTIMISTIC-only: the `s-` prefix marks server-origin
+  // cids, so they are NOT preserved and hydrate is free to drop them.
+  const { result } = renderHook(usePendingQueue)
+  result.current.add(fixtureMsg({ cid: 's-123', ts: 123, content: 'server-confirmed' }))
+  result.current.hydrate([])
+  assert.deepEqual(
+    result.current.pendingMessagesRef.current, [],
+    'a server-confirmed s-<ts> entry the server omits is dropped by hydrate, not resurrected',
+  )
+})
+
+test('an in-flight entry survives hydrate regardless of POST-vs-fetch ordering', () => {
+  // The race is symmetric — the fix must hold whichever lands first.
+  //
+  // Ordering A: fetch (hydrate) wins, THEN the POST commits.
+  const a = renderHook(usePendingQueue)
+  a.result.current.add(fixtureMsg({ cid: 'race-a', ts: 500, content: 'combined' }))
+  a.result.current.hydrate([])                       // refetch wins first
+  assert.equal(a.result.current.pendingMessagesRef.current.length, 1,
+    'entry survives the reconcile that ran before the POST committed')
+  a.result.current.swapOptimisticTs('race-a', 9001)  // POST then commits
+  const afterA = a.result.current.pendingMessagesRef.current
+  assert.equal(afterA.length, 1)
+  assert.equal(afterA[0].cid, 'race-a', 'cid stays stable through the swap')
+  assert.equal(afterA[0].ts, 9001, 'server ts promoted in')
+
+  // Ordering B: the POST commits FIRST (entry now has a server ts and is
+  // no longer in-flight), THEN a reconcile carrying that ts arrives.
+  const b = renderHook(usePendingQueue)
+  b.result.current.add(fixtureMsg({ cid: 'race-b', ts: 600, content: 'combined' }))
+  b.result.current.swapOptimisticTs('race-b', 9002)  // POST commits first
+  b.result.current.hydrate([{ role: 'user', content: 'combined', ts: 9002 }])
+  const afterB = b.result.current.pendingMessagesRef.current
+  assert.equal(afterB.length, 1, 'no duplicate when the server now lists the entry')
+  assert.equal(afterB[0].cid, 'race-b', 'reconcile reuses the local cid by matching ts')
+})
+
+test('swapOptimisticTs clears in-flight so a later hydrate treats the entry as server state', () => {
+  // Once the POST commits the entry is no longer in-flight; if the server
+  // later DROPS it (e.g. it was consumed into a turn), a reconcile must be
+  // free to remove it — preservation is only for the racing-write window.
+  const { result } = renderHook(usePendingQueue)
+  result.current.add(fixtureMsg({ cid: 'committed', ts: 700 }))
+  result.current.swapOptimisticTs('committed', 8001)   // POST committed
+  result.current.hydrate([])                            // server no longer lists it
+  assert.deepEqual(result.current.pendingMessagesRef.current, [],
+    'a committed (not in-flight) entry the server omits is dropped by hydrate')
+})
+
+test('a cancelled entry does NOT resurrect on a later hydrate', () => {
+  // DELETE /pending → cancelByCid/cancelByTs removes the entry AND clears
+  // its in-flight mark, so a subsequent reconcile must not bring it back.
+  const byCid = renderHook(usePendingQueue)
+  byCid.result.current.add(fixtureMsg({ cid: 'cancel-cid', ts: 800 }))
+  byCid.result.current.cancelByCid('cancel-cid')
+  byCid.result.current.hydrate([])
+  assert.deepEqual(byCid.result.current.pendingMessagesRef.current, [],
+    'cancelByCid entry stays gone across hydrate')
+
+  const byTs = renderHook(usePendingQueue)
+  byTs.result.current.add(fixtureMsg({ cid: 'cancel-ts', ts: 801 }))
+  byTs.result.current.cancelByTs(801)
+  byTs.result.current.hydrate([])
+  assert.deepEqual(byTs.result.current.pendingMessagesRef.current, [],
+    'cancelByTs entry stays gone across hydrate')
+})
+
+test('a promoted entry does NOT resurrect on a later hydrate', () => {
+  // Promotion consumes the entry into the active turn and clears its
+  // in-flight mark; a reconcile must not re-add it to the tray.
+  const { result } = renderHook(usePendingQueue)
+  result.current.add(fixtureMsg({ cid: 'promote-me', ts: 900 }))
+  result.current.add(fixtureMsg({ cid: 'keep-me', ts: 901 }))
+  result.current.promoteManyByTs([900])
+  result.current.hydrate([])
+  assert.deepEqual(
+    result.current.pendingMessagesRef.current.map(m => m.cid),
+    ['keep-me'],
+    'the promoted entry is not resurrected; the still-in-flight sibling survives',
+  )
 })
