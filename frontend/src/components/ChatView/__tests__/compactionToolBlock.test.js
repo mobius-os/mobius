@@ -1,58 +1,55 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { compactionToolBlock } from '../compactionToolBlock.js'
+import { compactionBrief } from '../compactionToolBlock.js'
 
-test('compactionToolBlock renders legacy text compactions as CompactChat tool output', () => {
-  const block = compactionToolBlock({
+// The reframe (feedback item E) replaced the generic CompactChat tool block
+// with CompactionCard. The load-bearing contract these tests guard is that
+// the portable briefing TEXT still resolves from a stored compaction message
+// — the same text chat.py's `_latest_compaction_brief` replays into the next
+// provider. compactionBrief is what CompactionCard renders, so asserting its
+// output keeps the briefing visible across the reframe and across legacy
+// message shapes.
+
+test('compactionBrief reads the plain-text content first', () => {
+  const brief = compactionBrief({
     role: 'assistant',
     kind: 'compaction',
     content: 'Goal: keep context. Next: continue.',
     blocks: [{ type: 'text', content: 'fallback summary' }],
-  }, 'chat-123')
-
-  assert.deepEqual(block, {
-    type: 'tool',
-    tool: 'CompactChat',
-    input: 'POST /api/chats/chat-123/compact',
-    output: 'Goal: keep context. Next: continue.',
-    status: 'done',
-    defaultOpen: true,
   })
+
+  assert.equal(brief, 'Goal: keep context. Next: continue.')
 })
 
-test('compactionToolBlock falls back to the legacy text block when content is absent', () => {
-  const block = compactionToolBlock({
+test('compactionBrief falls back to a legacy CompactChat tool block output', () => {
+  const brief = compactionBrief({
     role: 'assistant',
     kind: 'compaction',
-    blocks: [{ type: 'text', content: 'Summary from the old block.' }],
-  }, 'chat-abc')
-
-  assert.equal(block.output, 'Summary from the old block.')
-  assert.equal(block.defaultOpen, true)
-})
-
-test('compactionToolBlock preserves stored tool blocks and forces them open', () => {
-  const block = compactionToolBlock({
-    role: 'assistant',
-    kind: 'compaction',
-    content: 'stored summary',
     blocks: [{
       type: 'tool',
       tool: 'CompactChat',
       input: 'POST /api/chats/chat-123/compact',
-      output: 'stored summary',
+      output: 'stored summary from the old tool block',
       status: 'done',
       defaultOpen: false,
     }],
-  }, 'chat-123')
-
-  assert.deepEqual(block, {
-    type: 'tool',
-    tool: 'CompactChat',
-    input: 'POST /api/chats/chat-123/compact',
-    output: 'stored summary',
-    status: 'done',
-    defaultOpen: true,
   })
+
+  assert.equal(brief, 'stored summary from the old tool block')
+})
+
+test('compactionBrief falls back to a legacy text block when content is absent', () => {
+  const brief = compactionBrief({
+    role: 'assistant',
+    kind: 'compaction',
+    blocks: [{ type: 'text', content: 'Summary from the old block.' }],
+  })
+
+  assert.equal(brief, 'Summary from the old block.')
+})
+
+test('compactionBrief returns empty string when there is nothing to show', () => {
+  assert.equal(compactionBrief({ role: 'assistant', kind: 'compaction' }), '')
+  assert.equal(compactionBrief({ kind: 'compaction', content: '   ' }), '')
 })
