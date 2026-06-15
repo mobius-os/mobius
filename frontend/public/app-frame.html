@@ -284,6 +284,26 @@
       root.setProperty('--mobius-safe-left', insets.left || '0px');
     }
 
+    // Infer 'dark'|'light' from the active --bg luminance, matching the
+    // shell's themeService._inferThemeMode so the iframe and the shell
+    // agree on mode from the same signal. Reads `bg` first (cheap), then
+    // falls back to parsing --bg out of the CSS. Returns null if neither
+    // resolves to a usable hex.
+    function inferThemeMode(css, bg) {
+      var hex = (typeof bg === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(bg)) ? bg : null;
+      if (!hex && typeof css === 'string') {
+        var m = css.match(/--bg:\s*(#[0-9a-fA-F]{3,8})/);
+        if (m) hex = m[1];
+      }
+      if (!hex) return null;
+      var raw = hex.slice(1);
+      var x = raw.length === 3 ? raw.replace(/(.)/g, '$1$1') : raw.slice(0, 6);
+      var r = parseInt(x.slice(0, 2), 16);
+      var g = parseInt(x.slice(2, 4), 16);
+      var b = parseInt(x.slice(4, 6), 16);
+      return (r + g + b) / 3 < 128 ? 'dark' : 'light';
+    }
+
     function applyTheme(css, bg) {
       if (typeof css === 'string' && css.length) {
         let el = document.getElementById('moebius-theme');
@@ -297,6 +317,16 @@
       if (typeof bg === 'string' && bg.length) {
         document.body.style.background = bg;
       }
+      // Keep <html data-theme> in sync on every live theme swap, not just
+      // the SSR first paint. apps-sdk-ui scopes its design tokens under
+      // :where([data-theme="dark"|"light"]); a mini-app already mounted in
+      // dark mode that receives a `moebius:frame-theme` light update would
+      // otherwise keep data-theme="dark" and render SDK surfaces (Menu,
+      // elevated panels) with the wrong-mode tokens. The injected CSS vars
+      // (--bg etc.) DO switch via the style block above, but data-theme-
+      // scoped SDK tokens only switch with this attribute.
+      var mode = inferThemeMode(css, bg);
+      if (mode) document.documentElement.setAttribute('data-theme', mode);
     }
 
     // Report uncaught APP errors to the activity log so the nightly Dreaming
