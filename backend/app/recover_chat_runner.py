@@ -405,10 +405,16 @@ def _system_prompt(chat_id: str | None = None) -> str:
     "5. After the partner confirms the fix, append a Lesson to "
     "/data/shared/memory/inbox.md describing what went wrong "
     "and how to avoid it.\n\n"
-    "If you cannot fix it from here, tell the user: \"Open "
-    "/recover in a new tab; click 'Restore backend' (or 'Restore "
-    "shell' / 'Restore scripts') — this copies the baked sources "
-    "back over the live ones and restarts the server.\""
+    "If you cannot fix the problem in place, restore from the baked "
+    "image source yourself — you have Bash with write access. Run "
+    "`sh /app/scripts/recovery_restore.sh <mode>`; modes are "
+    "shell-dist, shell-src, backend, scripts, platform, and "
+    "platform-baked (run the script with no argument to see what "
+    "each does). There is no Restore button in the /recover "
+    "dashboard, so the agent invoking the script is the only restore "
+    "path. After a backend/scripts/platform restore, tell the user "
+    "to click the **Restart server** button at the top of this page "
+    "so uvicorn reloads the restored code."
   )
 
 
