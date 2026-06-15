@@ -1057,6 +1057,19 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           // is currently last.
           bridgeHook.markBridged()
         }
+        // Invariant: every observable queue-path status must resolve
+        // the optimistic entry's in-flight flag. queued/steered/started
+        // each clear it above (swapOptimisticTs / cancelByCid). Any
+        // other status — e.g. streamSend's `not_steered` — leaves the
+        // entry as an ordinary queued row, so clear the flag here or it
+        // leaks forever and a later hydrate would wrongly preserve it.
+        if (
+          result?.status !== 'queued'
+          && result?.status !== 'steered'
+          && result?.status !== 'started'
+        ) {
+          pendingQueue.clearInFlight(queuedMsg.cid)
+        }
       } catch (err) {
         // Roll back optimistic + restore input.
         pendingQueue.cancelByCid(queuedMsg.cid)

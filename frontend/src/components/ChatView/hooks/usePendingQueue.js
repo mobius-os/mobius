@@ -103,10 +103,19 @@ export default function usePendingQueue() {
   }, [])
 
   const add = useCallback((msg) => {
-    // The optimistic add is the start of the persistence round-trip:
-    // the POST is in flight until swapOptimisticTs / cancel / promote
-    // resolves it. Mark the cid so a concurrent hydrate keeps it.
-    if (msg.cid != null) inFlightCidsRef.current.add(msg.cid)
+    // In-flight protection is ONLY for OPTIMISTIC entries — a local
+    // write racing the reconcile read. add() is also used on the
+    // fresh-send queued path for an already-server-CONFIRMED entry
+    // (cid `s-<ts>`, the server already handed back the ts); that
+    // entry's authority is the server list, so it must NOT get
+    // hydrate's keep-it protection — otherwise a later normal
+    // hydrate that legitimately drops it (the server cleared the
+    // queue) would resurrect a phantom row. The `s-` prefix reliably
+    // marks server-origin cids; only non-`s-` (optimistic) cids are
+    // tracked in-flight.
+    if (msg.cid != null && !String(msg.cid).startsWith('s-')) {
+      inFlightCidsRef.current.add(msg.cid)
+    }
     apply(prev => [
       ...prev,
       { ...msg, position: msg.position ?? prev.length + 1 },
@@ -290,10 +299,12 @@ export default function usePendingQueue() {
   }, [])
 
   // Explicit in-flight controls. add() already marks an optimistic
-  // entry in-flight and the resolve paths clear it, so callers rarely
-  // need these — they exist so a caller that adds an entry through a
-  // non-standard path (or wants to assert the contract) can manage the
-  // flag directly.
+  // entry in-flight and the standard resolve paths clear it, so most
+  // callers never touch these. clearInFlight has one production caller:
+  // doSend's queue-path fallthrough, which resolves the flag for a
+  // terminal streamSend status (e.g. `not_steered`) that no swap or
+  // cancel covers. markInFlight remains available for a caller that
+  // adds an entry through a non-standard path.
   const markInFlight = useCallback((cid) => {
     if (cid != null) inFlightCidsRef.current.add(cid)
   }, [])
