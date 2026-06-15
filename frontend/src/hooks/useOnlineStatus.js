@@ -24,23 +24,35 @@ import { resolveOnline } from '../lib/onlineStatus.js'
 // hint and the next probe confirms), but RECOVERY to online only ever comes
 // from a successful probe — never from navigator.onLine going true.
 //
+// The probe verdict is HYSTERETIC (see lib/onlineStatus.js): recovery to
+// online is fast (one good probe clears offline) but demotion to offline is
+// debounced (a streak of failed probes is required before flipping the banner,
+// unless navigator.onLine itself reads false or the window `offline` event
+// fires). This is what kills the spurious offline banner from one slow probe
+// on a cold radio.
+//
 // Re-probes on: window online/offline events, tab becoming visible, and a
 // periodic interval while visible. Used by the chat composer (chat is
 // online-only) and the shell's global offline indicator.
 
 const HEALTH_URL = '/api/health'
-// 2s, not 4s. Online, /api/health answers in tens of ms, so 2s is a generous
-// margin. The timeout only bites in the pathological Android case where an
-// offline fetch hangs PENDING instead of failing fast (stale radio state) —
-// there it caps how long an offline-capable mini-app waits for `online` to
-// resolve false before it mounts with the owner token. The frame/module route
-// itself is cache-first once warmed; this probe is now the remaining offline
-// auth boundary. NOTE: we
+// 3s, not 2s. Online, /api/health answers in tens of ms, so 3s is a generous
+// margin that also gives a COLD radio (first request after the screen wakes,
+// or a backgrounded mobile tab returning to foreground) room to answer before
+// we abort. An aborted probe counts as a failure, and while the failure-streak
+// debounce (lib/onlineStatus.js) already prevents one slow probe from flipping
+// the banner, widening the window means fewer cold-radio probes get aborted in
+// the first place — belt and suspenders against the spurious-offline flap. The
+// timeout only bites in the pathological Android case where an offline fetch
+// hangs PENDING instead of failing fast (stale radio state) — there it caps how
+// long an offline-capable mini-app waits for `online` to resolve false before
+// it mounts with the owner token. The frame/module route itself is cache-first
+// once warmed; this probe is now the remaining offline auth boundary. NOTE: we
 // deliberately do NOT mount with the owner JWT BEFORE `online` resolves — that
 // would put the long-lived owner JWT in the module URL during what might be a
 // genuine online session (access-log exposure). Capping the probe is the safe
 // lever; the JWT-in-URL boundary stays intact.
-const PROBE_TIMEOUT_MS = 2000
+const PROBE_TIMEOUT_MS = 3000
 // Periodic re-probe while the tab is visible. Connectivity can change
 // without any window event firing (captive portal, flaky mobile data), so
 // we poll, but only when visible to avoid waking a backgrounded tab.
@@ -96,11 +108,22 @@ export default function useOnlineStatus() {
   useEffect(() => {
     let cancelled = false
     let inflight = false
-    // Consecutive successful probes — held across check() calls so resolveOnline
-    // can require a STREAK before promoting to online when navigator.onLine is
-    // stale-false. A one-shot Android offline false-positive (streak 1) stays
-    // offline; a genuine reconnect (repeated successes) promotes on the 2nd.
-    let successStreak = 0
+    // Caller-held connectivity state threaded through resolveOnline between
+    // check() calls. The streaks give the verdict its hysteresis:
+    //   • successStreak — consecutive successful probes; gates promotion to
+    //     online when navigator.onLine is stale-false (one Android offline
+    //     false-positive stays offline; a real reconnect promotes on the 2nd).
+    //   • failureStreak — consecutive failed probes; gates demotion to offline
+    //     when navigator.onLine still reads online (one slow/aborted probe does
+    //     not flip the banner; only a sustained failure does).
+    //   • online — the current verdict, threaded so a sub-threshold probe holds
+    //     the prior value instead of guessing.
+    // Seeded from the same navigator.onLine asymmetry as the React state above.
+    let connState = {
+      successStreak: 0,
+      failureStreak: 0,
+      online: typeof navigator === 'undefined' ? true : navigator.onLine !== false,
+    }
 
     // Compatibility: older service workers used this verdict to decide whether
     // offline-capable app code should go cache-first. Current SWs serve cached,
@@ -116,6 +139,7 @@ export default function useOnlineStatus() {
     }
 
     function publish(next) {
+      connState = { ...connState, online: next }
       setOnline(next)
       postToSW(next)
     }
@@ -128,8 +152,8 @@ export default function useOnlineStatus() {
         const reachable = await probeReachable()
         if (cancelled) return
         const navOnLine = typeof navigator !== 'undefined' ? navigator.onLine : true
-        const res = resolveOnline(reachable, navOnLine, successStreak)
-        successStreak = res.successStreak
+        const res = resolveOnline(reachable, navOnLine, connState)
+        connState = res
         publish(res.online)
       } finally {
         inflight = false
@@ -137,9 +161,13 @@ export default function useOnlineStatus() {
     }
 
     // A definite offline event is trustworthy — reflect it immediately
-    // without waiting for a probe to time out.
+    // without waiting for a probe to time out. Reset the streaks so the next
+    // probe starts the hysteresis from a clean slate.
     const onOffline = () => {
-      if (!cancelled) { successStreak = 0; publish(false) }
+      if (!cancelled) {
+        connState = { successStreak: 0, failureStreak: 0, online: false }
+        publish(false)
+      }
     }
     const onOnline = () => { check() }
     const onVisible = () => {
