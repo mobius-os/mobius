@@ -27,11 +27,13 @@ import './ProviderAuth.css'
  *                     /settings POST in-flight).
  *   badge           — optional small label rendered next to the name
  *                     (e.g. "Recommended for personal use" in setup).
+ *   version         — optional installed CLI/SDK version, shown inline
+ *                     next to the name when the provider is connected.
  */
 export default function ProviderRow({
   id, name, connected, expanded, onToggleExpand, children,
   showRadio = true, isDefault = false, onSelect, disabled = false,
-  badge,
+  badge, version,
 }) {
   // Settings page (showRadio=false): the main row is INFORMATIONAL
   // only — clicking it does nothing. The user must explicitly tap
@@ -48,6 +50,28 @@ export default function ProviderRow({
         : 'Tap to set up authentication')
     : undefined
 
+  // Name + (when connected) the installed CLI/SDK version inline +
+  // status badge. Extracted so the clickable (setup/radio) and static
+  // (settings) row variants render it identically.
+  const info = (
+    <span className="provider-row__info">
+      <span className="provider-row__name-line">
+        <span className="provider-row__name">{name}</span>
+        {connected && version && (
+          <span className="provider-row__version" title="Installed CLI version">
+            {version}
+          </span>
+        )}
+      </span>
+      {badge && (
+        <span className="provider-row__badge">{badge}</span>
+      )}
+      <StatusDot color={connected ? '--green' : '--muted'}>
+        {connected ? 'Connected' : 'Not connected'}
+      </StatusDot>
+    </span>
+  )
+
   return (
     <div className={`provider-row${showRadio && isDefault ? ' provider-row--default' : ''}`}>
       {rowIsClickable ? (
@@ -63,27 +87,11 @@ export default function ProviderRow({
               {isDefault && <span className="provider-row__radio-dot" />}
             </span>
           )}
-          <span className="provider-row__info">
-            <span className="provider-row__name">{name}</span>
-            {badge && (
-              <span className="provider-row__badge">{badge}</span>
-            )}
-            <StatusDot color={connected ? '--green' : '--muted'}>
-              {connected ? 'Connected' : 'Not connected'}
-            </StatusDot>
-          </span>
+          {info}
         </button>
       ) : (
         <div className="provider-row__main provider-row__main--static">
-          <span className="provider-row__info">
-            <span className="provider-row__name">{name}</span>
-            {badge && (
-              <span className="provider-row__badge">{badge}</span>
-            )}
-            <StatusDot color={connected ? '--green' : '--muted'}>
-              {connected ? 'Connected' : 'Not connected'}
-            </StatusDot>
-          </span>
+          {info}
         </div>
       )}
       <button

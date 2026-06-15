@@ -206,6 +206,7 @@ export default function SettingsView({ onThemeChange }) {
                 name="OpenAI Codex"
                 showRadio={false}
                 connected={codexAuthenticated}
+                version={codexVersion}
                 expanded={expandedAuth === 'codex'}
                 onToggleExpand={toggleCodexAuth}
               >
@@ -217,6 +218,7 @@ export default function SettingsView({ onThemeChange }) {
                 name="Claude Code"
                 showRadio={false}
                 connected={claudeAuthenticated}
+                version={claudeVersion}
                 expanded={expandedAuth === 'claude'}
                 onToggleExpand={toggleClaudeAuth}
               >
@@ -228,27 +230,6 @@ export default function SettingsView({ onThemeChange }) {
               </ProviderRow>
             </div>
           )}
-        </section>
-
-        <section className="settings__section">
-          <h2 className="settings__section-title">Runtime</h2>
-          <p className="settings__subtext">
-            Installed CLI versions.
-          </p>
-          <div className="settings__versions">
-            <div className="settings__row">
-              <span className="settings__label">Claude Code</span>
-              <span className="settings__version">
-                {claudeVersion || 'Not installed'}
-              </span>
-            </div>
-            <div className="settings__row">
-              <span className="settings__label">OpenAI Codex</span>
-              <span className="settings__version">
-                {codexVersion || 'Not installed'}
-              </span>
-            </div>
-          </div>
         </section>
 
         <section className="settings__section">
