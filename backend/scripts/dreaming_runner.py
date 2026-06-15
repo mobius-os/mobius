@@ -151,26 +151,39 @@ def steering_message(
 
   Pure crossing detector: fires when the (prev_turn, turn] step
   crosses a threshold from `steering_thresholds`. The skill tells the
-  agent to bail to the brief by turn 40, but the agent cannot observe
-  its own turn count — the runner counts assistant turns and speaks
-  the number into the session at the right moments. When a single
-  step crosses both thresholds, only the sterner message is returned
-  (two back-to-back budget warnings would dilute each other).
+  agent to bail by turn 40 to the night's TWO floor deliverables — a
+  drained memory inbox and a shipped brief, in that order — but the
+  agent cannot observe its own turn count, so the runner counts
+  assistant turns and speaks the number into the session at the right
+  moments. Both messages protect the inbox drain (phase 3a): the
+  graph froze for days when the old steering said "phases 1-5 are
+  over" and the agent skipped consolidation entirely. The drain is
+  cheap and should already be done by these thresholds if the night
+  was ordered right; the steering is the backstop for a night that
+  ran long before reaching it. When a single step crosses both
+  thresholds, only the sterner message is returned (two back-to-back
+  budget warnings would dilute each other).
   """
   soft, hard = steering_thresholds(max_turns)
   if prev_turn < hard <= turn:
     return (
       f"TURN BUDGET: you are at turn {turn} of {max_turns} and almost "
-      "out. Write a MINIMAL brief NOW — a heading and a few honest "
-      "lines on what was done and what was cut off — save it to the "
-      "reports dir, open the morning chat, and stop. Skip everything "
-      "else."
+      "out. Two floor deliverables, in order: if the memory inbox "
+      "isn't drained yet, fold each remaining inbox.md line into the "
+      "graph, empty the inbox, and commit (be quick) — THEN write a "
+      "MINIMAL brief (a heading and a few honest lines on what was "
+      "done and what was cut off), save it to the reports dir, open "
+      "the morning chat, and stop. Skip everything else."
     )
   if prev_turn < soft <= turn:
     return (
       f"TURN BUDGET: you are at turn {turn} of {max_turns}. STOP "
-      "investigating now. Write the brief and open the morning chat "
-      "immediately — phases 1-5 are over."
+      "open-ended investigation now. If you haven't drained the "
+      "memory inbox yet (phase 3a), do that minimal drain FIRST and "
+      "commit it — it is the night's other non-negotiable deliverable "
+      "and must not be skipped. Then write the brief and open the "
+      "morning chat. The deeper Mind reorg, remaining app triage, and "
+      "research are over."
     )
   return None
 
@@ -424,8 +437,11 @@ def build_goal(settings: dict) -> str:
     f"  - prev-report.html      yesterday's brief (don't repeat yourself)",
     "",
     "Follow your skill (your system prompt) for the full procedure. "
-    "The brief is the deliverable — at turn 40 cut any unfinished phase "
-    "and jump to phase 6 so the partner always wakes to something.",
+    "Two floor deliverables: drain the memory inbox (phase 3a) EARLY "
+    "— before app triage — then ship the brief (phase 6). At turn 40 "
+    "cut any unfinished deep work; if the inbox still has lines, do "
+    "the minimal drain first, then the brief, so the partner wakes to "
+    "something and the graph never freezes.",
     "",
     f"Your working directory is {DATA_DIR}. You have a real token "
     "($AGENT_TOKEN / $SERVICE_TOKEN) and full tools — no sandbox. "
