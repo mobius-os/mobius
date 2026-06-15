@@ -6,6 +6,20 @@ Mini-apps are JSX components in sandboxed iframes. Each gets `appId` and `token`
 
 ---
 
+## Start minimal — a functional core, designed to grow
+
+**Default to the smallest app that fully nails the core use case: a minimal set of functional features and a minimal, clean UI — then hand it back for the partner to expand on.** A first build is a starting point, not a finished product. Ship the feature that makes the app worth opening (the habit tracker tracks habits; the notes app captures and lists notes), styled to the design conventions, and stop there. The partner drives what comes next over the iterate turns — richer views, more entry types, automation — and you add it when they ask. Building takes three turns (propose → build → iterate); the iterate turns are where richness accrues, not the first build.
+
+This is a default, **not a ceiling**. Möbius apps are low-floor / high-ceiling: a small first cut keeps the floor low and reversible (less surface to break, easy to reshape), and the architecture here — split-on-concept modules, scoped CSS, a storage layer — exists so that ceiling stays open. Build for the expansion you can't see yet; don't wall it off with a sprawling v1.
+
+So don't over-build, and don't artificially under-build either:
+
+- **The default is minimal-functional.** When the request is broad or vague ("make me a notes app"), build the clean core and let the partner pull it richer. Resist gold-plating a v1 with features nobody asked for — every speculative screen is more to get wrong and more to undo.
+- **Build richer when the request clearly warrants it.** If the partner spells out scope ("a reading tracker with covers, a star rating, a yearly goal, and a stats page"), build *that* — don't strip a detailed ask back to a toy to satisfy "minimal." Minimal-first governs your default for an under-specified request; it never overrides an explicit one.
+- **When unsure which it is, the clarify turn decides.** That's what the propose step is for — name the minimal core you'd ship and ask whether they want more, rather than guessing big and over-building.
+
+---
+
 ## Before building: check existing apps
 
 Default to checking what already exists before creating a new one:
