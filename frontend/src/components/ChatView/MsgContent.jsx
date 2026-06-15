@@ -3,7 +3,7 @@ import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ToolBlock from './ToolBlock.jsx'
 import QuestionCard from './QuestionCard.jsx'
 import Attachments from './Attachments.jsx'
-import { compactionToolBlock } from './compactionToolBlock.js'
+import CompactionCard from './CompactionCard.jsx'
 import { questionKey } from './questionKey.js'
 import { suppressedQuestionToolIndices } from './streamReducers.js'
 
@@ -52,9 +52,12 @@ function MsgContentInner({
   const isQuestionAnswerable = (block) =>
     blockAnswerable(block, { msg, isLastMsg, liveQuestionId, onQuestionAnswer })
   if (msg.kind === 'compaction') {
+    // Render the compaction as its own labeled card rather than the generic
+    // ToolBlock — see CompactionCard. The stored `content` is untouched, so
+    // chat.py's `_latest_compaction_brief` still replays the same text.
     return (
       <div className="chat__tools">
-        <ToolBlock t={compactionToolBlock(msg, chatId)} />
+        <CompactionCard msg={msg} />
       </div>
     )
   }
