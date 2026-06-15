@@ -137,6 +137,22 @@ SINCE="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%
 curl -s "${auth[@]}" "$API_BASE_URL/api/admin/activity?since=$SINCE" \
   >"$INPUTS/activity.jsonl" 2>>"$LOG" || true
 
+# changed-since-last-run.txt — files changed in /data since the agent's last SUCCESSFUL
+# nightly run. The marker records the HEAD that run ENDED at, so this diff is the DAY's
+# work and naturally excludes the agent's own prior-night commits (no exclude-own-commits
+# machinery needed). Diff-from-marker (not a fixed window) catches every committer; the
+# agent is trusted to skip unchanged items. No marker yet -> a note; fall back to the 24h
+# slices. Pathspecs (drop binary/DB/log/cache churn) come from the module (single source).
+MARKER="$DATA_DIR/apps/dreaming/last-run.json"
+LAST_SHA="$(PYTHONPATH=/app python3 -c "from app import dreaming_checkpoint as dc; m=dc.read_marker('$MARKER') or {}; print((m.get('repos') or {}).get('data',''))" 2>/dev/null)"
+if [ -n "$LAST_SHA" ] && git -C "$DATA_DIR" cat-file -e "${LAST_SHA}^{commit}" 2>/dev/null; then
+  mapfile -t _ps < <(PYTHONPATH=/app python3 -c "from app import dreaming_checkpoint as dc; print(chr(10).join(dc.EXCLUDE_PATHSPECS))" 2>/dev/null)
+  git -C "$DATA_DIR" diff --name-only "$LAST_SHA"..HEAD -- "${_ps[@]}" \
+    >"$INPUTS/changed-since-last-run.txt" 2>>"$LOG" || true
+else
+  echo "(no prior marker — first tracked run; use the 24h slices below)" >"$INPUTS/changed-since-last-run.txt"
+fi
+
 # chats.md — recent chats list (titles + ids + provider), so the agent
 # knows which sessions to fork-and-interview without re-deriving the list.
 python3 - "$API_BASE_URL" "$SERVICE_TOKEN" >"$INPUTS/chats.md" 2>>"$LOG" <<'PY' || true
@@ -480,6 +496,25 @@ fi
 
 # --- emit cron_outcome ------------------------------------------------
 emit_outcome "$RC"
+
+# --- advance the last-run marker (success only) -----------------------
+# Record the /data HEAD the agent ended at, so next night's diff-from-marker is the DAY's
+# new work and skips tonight's own commits. ONLY on a clean run (rc 0) — a failed/killed
+# night leaves the marker so its window is re-reviewed (re-reading is cheap; missing isn't).
+if [[ "$RC" == "0" ]]; then
+  _head="$(git -C "$DATA_DIR" rev-parse HEAD 2>/dev/null || true)"
+  [ -n "$_head" ] && PYTHONPATH=/app python3 -c "from app import dreaming_checkpoint as dc; import datetime; dc.write_marker('$MARKER', {'repos': {'data': '$_head'}, 'ts': datetime.datetime.now(datetime.timezone.utc).isoformat()})" >>"$LOG" 2>&1 || true
+fi
+
+# --- failure push (card 125) ------------------------------------------
+# A failed/killed night must actively reach the owner (not just sit in the activity log),
+# so they don't wake to nothing. rc 5 is a benign no-overlap skip — don't alarm on it.
+if [[ "$RC" != "0" && "$RC" != "5" ]]; then
+  curl -s "${auth[@]}" -X POST "$API_BASE_URL/api/notifications/send" \
+    -H "Content-Type: application/json" \
+    -d "{\"title\":\"Dreaming run failed\",\"body\":\"Last night ended rc=$RC — no morning brief. See /data/cron-logs.\"}" \
+    >>"$LOG" 2>&1 || true
+fi
 
 log "done (rc=$RC)"
 exit "$RC"
