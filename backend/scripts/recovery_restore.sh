@@ -1,9 +1,10 @@
 #!/bin/sh
 # Recovery restore — copies baked sources back over the live ones.
 #
-# Run from the recovery chat (POST /recover/restore) or directly via
-# `docker exec`. Each mode is idempotent: re-running is safe and
-# produces the same result.
+# Invoked by the recovery chat agent via Bash (it has filesystem write
+# access), or directly via `docker exec`. There is no HTTP route that
+# runs this — the agent runs the script itself. Each mode is
+# idempotent: re-running is safe and produces the same result.
 #
 # Modes:
 #   shell-dist      Restore the prebuilt frontend bundle (fast; no
