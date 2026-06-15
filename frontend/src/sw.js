@@ -122,6 +122,20 @@ const VENDORED_DATE_FNS = [
   { url: '/vendor/date-fns@4.3.0/date-fns.mjs', revision: null },
 ]
 
+// Self-hosted d3-geo (Atlas globe) + marked & DOMPurify (Notes markdown
+// preview) — same precache rationale as React above. These were the last three
+// libs Atlas/Notes still pulled from esm.sh; left to the runtime CacheFirst
+// /vendor route they'd only warm on the first ONLINE open, so an installed PWA
+// opening Atlas/Notes offline the first time would import-fail (the globe or the
+// note-card previews). Precaching makes them install-time offline-guaranteed.
+// Bumping a version here means bumping it in app-frame.html's import map + the
+// Dockerfile vendor step in lockstep.
+const VENDORED_ATLAS_NOTES = [
+  { url: '/vendor/d3-geo@3/d3-geo.mjs', revision: null },
+  { url: '/vendor/marked@14.1.4/marked.mjs', revision: null },
+  { url: '/vendor/dompurify@3.1.7/dompurify.mjs', revision: null },
+]
+
 // Self-hosted CodeMirror 6 — same precache rationale as React above. The
 // Notes / LaTeX / Editor / Web Studio apps STATICALLY import @codemirror/* +
 // @lezer/highlight + the `codemirror` meta-package at module top via the
@@ -169,6 +183,7 @@ precacheAndRoute([
   ...VENDORED_CODEMIRROR,
   ...VENDORED_RECHARTS,
   ...VENDORED_DATE_FNS,
+  ...VENDORED_ATLAS_NOTES,
   ...VENDORED_MIND_GRAPH,
 ])
 cleanupOutdatedCaches()

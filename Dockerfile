@@ -255,6 +255,44 @@ RUN mkdir -p /tmp/datefns-install && cd /tmp/datefns-install \
          /app/static/vendor/date-fns@4.3.0 "$(command -v esbuild)" \
     && cd / && rm -rf /tmp/datefns-install /tmp/build-date-fns-vendor.mjs
 
+# d3-geo — self-hosted for the mini-app import map. The Atlas globe imports
+# d3-geo; serving from esm.sh meant an offline-capable globe app depended on a
+# third-party CDN fetch before the projection could render. Pure-JS, no peer
+# deps; a simple bundle suffices (same shape as date-fns).
+COPY backend/scripts/build-d3-geo-vendor.mjs /tmp/build-d3-geo-vendor.mjs
+RUN mkdir -p /tmp/d3geo-install && cd /tmp/d3geo-install \
+    && npm init -y >/dev/null \
+    && npm install --no-audit --no-fund --silent d3-geo@3 \
+    && mkdir -p /app/static/vendor/d3-geo@3 \
+    && node /tmp/build-d3-geo-vendor.mjs /tmp/d3geo-install \
+         /app/static/vendor/d3-geo@3 "$(command -v esbuild)" \
+    && cd / && rm -rf /tmp/d3geo-install /tmp/build-d3-geo-vendor.mjs
+
+# marked — self-hosted for the mini-app import map. The Notes app imports marked
+# to render markdown note-card previews; serving from esm.sh meant offline
+# previews depended on a third-party CDN. Pure-JS, no peer deps.
+COPY backend/scripts/build-marked-vendor.mjs /tmp/build-marked-vendor.mjs
+RUN mkdir -p /tmp/marked-install && cd /tmp/marked-install \
+    && npm init -y >/dev/null \
+    && npm install --no-audit --no-fund --silent marked@14.1.4 \
+    && mkdir -p /app/static/vendor/marked@14.1.4 \
+    && node /tmp/build-marked-vendor.mjs /tmp/marked-install \
+         /app/static/vendor/marked@14.1.4 "$(command -v esbuild)" \
+    && cd / && rm -rf /tmp/marked-install /tmp/build-marked-vendor.mjs
+
+# DOMPurify — self-hosted for the mini-app import map. The Notes preview
+# sanitizes markdown-derived HTML with DOMPurify before injecting it; serving
+# from esm.sh meant sanitization (on the render path) depended on a third-party
+# CDN. Pure-JS, no peer deps; binds to the DOM at runtime in the browser frame.
+COPY backend/scripts/build-dompurify-vendor.mjs /tmp/build-dompurify-vendor.mjs
+RUN mkdir -p /tmp/dompurify-install && cd /tmp/dompurify-install \
+    && npm init -y >/dev/null \
+    && npm install --no-audit --no-fund --silent dompurify@3.1.7 \
+    && mkdir -p /app/static/vendor/dompurify@3.1.7 \
+    && node /tmp/build-dompurify-vendor.mjs /tmp/dompurify-install \
+         /app/static/vendor/dompurify@3.1.7 "$(command -v esbuild)" \
+    && cd / && rm -rf /tmp/dompurify-install /tmp/build-dompurify-vendor.mjs
+
 # Full frontend source so the agent can edit and rebuild the shell.
 # /app/shell-src/ is the read-only reference (originals for recovery).
 # On first boot, entrypoint copies to /data/shell/ if it doesn't exist.
