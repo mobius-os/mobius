@@ -488,7 +488,10 @@ export default function AppCanvas({
   // URL because offline-capable apps are also cached by the service worker:
   // without a versioned cache key, a cold/unknown-connectivity SW can serve
   // a stale frame/module even after the backend updated the app.
-  const src = `${api.apps.frameUrl(appId)}?v=${encodeURIComponent(version)}`
+  const frameRev =
+    (typeof document !== 'undefined' &&
+      document.querySelector('meta[name="mobius-frame-rev"]')?.content) || ''
+  const src = `${api.apps.frameUrl(appId)}?v=${encodeURIComponent(version)}${frameRev ? '-' + frameRev : ''}`
 
   // The iframe key intentionally OMITS `token` — the token may
   // refresh (after staleTime) but the iframe should keep its in-app

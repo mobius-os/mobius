@@ -6,6 +6,7 @@ used.  The shell's index.css and app-frame.html should NOT define
 their own :root variables — they come from here.
 """
 
+import hashlib
 import re
 import shutil
 import time
@@ -301,6 +302,27 @@ def _ensure_core_vars(css: str) -> str:
   )
 
 
+def frame_content_rev(data_dir: str) -> str:
+  """Short content hash of the shared app-frame.html, injected into
+  index.html as `<meta name="mobius-frame-rev">` so AppCanvas can fold it into
+  the frame URL's `?v=` cache-buster. `app.updated_at` (the rest of `?v=`)
+  only advances on an app EDIT, not when the shared app-frame.html is
+  REDEPLOYED — so without this rev the service worker keeps serving the stale
+  frame until a 2nd-open background revalidate. Mirrors the content hash in
+  routes/apps.py `_frame_etag`, which the SW cache KEY (unlike the HTTP ETag)
+  ignores. Keep the path candidates in sync with the `/frame` route.
+  """
+  candidates = [
+    Path(data_dir) / "shell" / "public" / "app-frame.html",
+    Path(__file__).resolve().parents[2] / "frontend" / "public" / "app-frame.html",
+    Path("/app/app-frame.html"),
+  ]
+  frame_path = next((p for p in candidates if p.exists()), None)
+  if frame_path is None:
+    return ""
+  return hashlib.sha256(frame_path.read_bytes()).hexdigest()[:16]
+
+
 def inject_theme_into_html(html: str, data_dir: str) -> str:
   """Inject the active theme CSS and background color into an HTML string.
 
@@ -332,8 +354,13 @@ def inject_theme_into_html(html: str, data_dir: str) -> str:
   )
   css = _ensure_core_vars(css)
   safe_css = _escape_for_style_tag(css)
+  rev = frame_content_rev(data_dir)
+  rev_meta = (
+    f'<meta name="mobius-frame-rev" content="{html_escape(rev, quote=True)}">\n'
+    if rev else ""
+  )
   html = html.replace(
-    "</head>", f"{link_tags}<style>{safe_css}</style>\n</head>"
+    "</head>", f"{link_tags}<style>{safe_css}</style>\n{rev_meta}</head>"
   )
   html = html.replace("background:#0d0d0d", f"background:{bg}")
   html = html.replace('content="#0d0d0d"', f'content="{bg}"')
