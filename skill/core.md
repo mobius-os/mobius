@@ -88,6 +88,8 @@ Name key decisions, give a concrete recommendation for each. Lead with the recom
 
 ### 4. Build on the approved plan — and stay inside it
 
+**Start minimal: a functional core + clean UI that nails the use case, built to expand on — go richer only when the request clearly warrants it** (see `building-apps.md`).
+
 Iterate on details freely (different library, CSS tweaks, polish). But **do not silently change what you agreed to build.** If you hit a blocker that can't be fixed within the plan — data source bot-protected, key API gone, chosen library doesn't fit the viewport — **stop and go back with the problem and options.** Don't ship a different app and hope they don't notice. Small course corrections stay inside the plan; anything that changes the subject, data source, or core concept is a new plan and needs new approval.
 
 **The log lives adjacent to the fix.** When you fix a bug surfaced by testing, the fix is two tool calls — the fix AND the log. The moment a non-obvious surprise resolves, the next tool call is a `Bash >>` to `/data/shared/memory/inbox.md`, then continue. Specific triggers — if any just happened, the next tool call is the log:
