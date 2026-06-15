@@ -320,9 +320,20 @@ def _infer_theme_mode(css: str) -> str:
   if not m:
     return "dark"
   raw = m.group(1)[1:]
-  if len(raw) == 3:
-    raw = "".join(c * 2 for c in raw)
-  raw = raw[:6]
+  # Normalize any valid CSS hex length to a 6-digit RRGGBB before reading
+  # luminance. The short forms carry one nibble per channel, so the three
+  # RGB nibbles each double (#RGB -> #RRGGBB, #RGBA -> RGB + dropped alpha);
+  # the long forms already use byte-pairs, so the leading six characters are
+  # RGB and a trailing alpha byte is dropped. Alpha never changes the
+  # dark-vs-light direction, and dropping it keeps this in step with the
+  # frontend themeService._inferThemeMode (whose slice(0, 6) classifies
+  # #ffff / #ffffffff as light). Without this a 4- or 8-digit --bg fell
+  # through to the dark default and injected dark structural vars into a
+  # light theme.
+  if len(raw) in (3, 4):
+    raw = "".join(c * 2 for c in raw[:3])
+  else:
+    raw = raw[:6]
   try:
     r = int(raw[0:2], 16)
     g = int(raw[2:4], 16)

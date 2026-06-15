@@ -244,6 +244,46 @@ def test_ensure_core_vars_dark_theme_unchanged_by_mode_awareness():
   assert "#e8e6e2" not in out  # light --surface2
 
 
+def test_ensure_core_vars_light_4digit_rgba_bg():
+  """A 4-digit #RGBA light --bg (#ffff = opaque white) must infer LIGHT.
+  The previous _infer_theme_mode only expanded 3-digit hex, so a valid
+  4-digit value parsed as garbage, fell to the dark default, and injected
+  the DARK palette into a light theme — diverging from the frontend, which
+  classifies #ffff as light."""
+  css = ":root {\n  --bg: #ffff;\n  --text: #1c1b1a;\n}\n"
+  out = _ensure_core_vars(css)
+  # LIGHT structural defaults must be injected.
+  assert "--surface: #ffffff" in out
+  assert "--surface2: #e8e6e2" in out
+  # The DARK structural literals must NOT leak in.
+  assert "#212121" not in out  # dark --surface2
+  assert "#171717" not in out  # dark --surface
+
+
+def test_ensure_core_vars_light_8digit_rrggbbaa_bg():
+  """An 8-digit #RRGGBBAA light --bg (#ffffffff = opaque white) must infer
+  LIGHT — the leading six hex chars are RGB and the trailing alpha byte is
+  dropped, matching the frontend's slice(0, 6)."""
+  css = ":root {\n  --bg: #ffffffff;\n  --text: #1c1b1a;\n}\n"
+  out = _ensure_core_vars(css)
+  assert "--surface: #ffffff" in out
+  assert "--surface2: #e8e6e2" in out
+  assert "#212121" not in out  # dark --surface2
+  assert "#171717" not in out  # dark --surface
+
+
+def test_ensure_core_vars_dark_4digit_rgba_bg():
+  """A 4-digit #RGBA DARK --bg (#000f = opaque black) must still infer
+  DARK — the alpha nibble is dropped and the RGB nibbles read as black."""
+  css = ":root {\n  --bg: #000f;\n  --text: #ececec;\n}\n"
+  out = _ensure_core_vars(css)
+  assert "--surface: #171717" in out
+  assert "--surface2: #212121" in out
+  # No light-mode value leaked into a dark theme.
+  assert "#ffffff" not in out  # light --surface
+  assert "#e8e6e2" not in out  # light --surface2
+
+
 def test_ensure_core_vars_missing_bg_defaults_to_dark():
   """A theme with no --bg at all (can't infer mode) defaults to DARK
   defaults — the historical behavior, preserved so existing themes are
