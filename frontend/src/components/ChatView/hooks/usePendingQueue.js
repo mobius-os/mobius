@@ -33,6 +33,16 @@ import { useState, useRef, useCallback } from 'react'
  * overwriting the just-promoted partial. R1 in _034-design.md
  * spells out the failure mode.
  *
+ * Reconcile contract: hydrate() is a MERGE, not a wholesale replace.
+ * It must never drop an optimistic-only entry whose own persistence
+ * POST has not yet committed — that write is racing the reconcile
+ * read, so the server simply hasn't seen the entry, and dropping it
+ * is the persist-but-vanish clobber race. Each optimistic entry is
+ * tracked in-flight from its add() until its round-trip resolves
+ * (swap to a server ts, cancel, promote, or clear); hydrate preserves
+ * an in-flight entry the server list omits, and only an entry that is
+ * NOT in flight (server-confirmed or genuinely cancelled) is dropped.
+ *
  * The `setPendingMessages` setter is intentionally NOT exposed —
  * the five named operations cover every call site enumerated in
  * the design and forcing them through the API is the encapsulation.
@@ -47,7 +57,9 @@ import { useState, useRef, useCallback } from 'react'
  *   promoteManyByTs: (tsList: number[]) => PendingMsg | null,
  *   cancelByTs: (ts: number) => void,
  *   cancelByCid: (cid: string) => void,
- *   hydrate: (serverList: Array<{ts: number, content: string, role?: string, attachments?: Array, position?: number}>) => void,
+ *   hydrate: (serverList: Array<{ts: number, content: string, role?: string, attachments?: Array, position?: number}>) => void, // MERGE: server list + any in-flight optimistic-only entry the server hasn't seen yet
+ *   markInFlight: (cid: string) => void,
+ *   clearInFlight: (cid: string) => void,
  *   clear: () => void,
  * }}
  *
@@ -64,6 +76,20 @@ export default function usePendingQueue() {
   const [pendingMessages, setPendingMessages] = useState([])
   const pendingMessagesRef = useRef([])
   const consumedServerTsRef = useRef(new Set())
+  // Cids of optimistic entries whose persistence POST is still in
+  // flight (added locally, server ts not yet confirmed). hydrate()
+  // consults this so a reconcile-fetch that lands while the POST is
+  // unresolved does NOT wipe the entry: an optimistic-only message
+  // (cid present, no matching server ts) whose own POST hasn't
+  // committed must survive a hydrate, because the server simply
+  // hasn't seen it yet — dropping it is the reconcile-clobber race
+  // (a Stop-timeout resend racing onStreamEnd's fetchMessages was one
+  // way to hit it). `add` enters a cid here; every path that resolves
+  // the optimistic round-trip — swap to a server ts, cancel, promote,
+  // or a wholesale clear — removes it. An entry NOT in this set is
+  // either already server-confirmed or genuinely gone, so hydrate is
+  // free to drop it (a cancelled message must not resurrect).
+  const inFlightCidsRef = useRef(new Set())
 
   // Internal helper: synchronously update both the ref and React
   // state. Every public operation funnels through this so the
@@ -77,6 +103,10 @@ export default function usePendingQueue() {
   }, [])
 
   const add = useCallback((msg) => {
+    // The optimistic add is the start of the persistence round-trip:
+    // the POST is in flight until swapOptimisticTs / cancel / promote
+    // resolves it. Mark the cid so a concurrent hydrate keeps it.
+    if (msg.cid != null) inFlightCidsRef.current.add(msg.cid)
     apply(prev => [
       ...prev,
       { ...msg, position: msg.position ?? prev.length + 1 },
@@ -84,6 +114,10 @@ export default function usePendingQueue() {
   }, [apply])
 
   const swapOptimisticTs = useCallback((cid, serverTs, position) => {
+    // The server acknowledged the POST (it handed back a ts): the
+    // optimistic round-trip is resolved, so the entry no longer needs
+    // hydrate's in-flight protection regardless of which branch runs.
+    inFlightCidsRef.current.delete(cid)
     if (serverTs != null && consumedServerTsRef.current.has(serverTs)) {
       consumedServerTsRef.current.delete(serverTs)
       apply(prev => prev.filter(m => m.cid !== cid))
@@ -104,6 +138,7 @@ export default function usePendingQueue() {
       : (current.length > 0 ? 0 : -1)
     if (idx < 0) return null
     const promoted = current[idx]
+    if (promoted.cid != null) inFlightCidsRef.current.delete(promoted.cid)
     const rest = current.filter((_, i) => i !== idx)
     pendingMessagesRef.current = rest
     setPendingMessages(rest)
@@ -119,6 +154,9 @@ export default function usePendingQueue() {
     if (idx < 0) return null
     const promotedGroup = current.slice(idx)
     const kept = current.slice(0, idx)
+    for (const m of promotedGroup) {
+      if (m.cid != null) inFlightCidsRef.current.delete(m.cid)
+    }
     const first = promotedGroup[0]
     const attachments = []
     const seenAttachments = new Set()
@@ -157,6 +195,9 @@ export default function usePendingQueue() {
     const promotedGroup = current.filter(m => wanted.has(m.ts))
     if (promotedGroup.length === 0) return null
     const kept = current.filter(m => !wanted.has(m.ts))
+    for (const m of promotedGroup) {
+      if (m.cid != null) inFlightCidsRef.current.delete(m.cid)
+    }
     const first = promotedGroup[0]
     const attachments = []
     const seenAttachments = new Set()
@@ -187,38 +228,78 @@ export default function usePendingQueue() {
   }, [])
 
   const cancelByTs = useCallback((ts) => {
+    // A cancelled entry is genuinely gone; drop its in-flight mark so
+    // it cannot resurrect on the next hydrate.
+    for (const m of pendingMessagesRef.current) {
+      if (m.ts === ts && m.cid != null) inFlightCidsRef.current.delete(m.cid)
+    }
     apply(prev => prev.filter(m => m.ts !== ts))
   }, [apply])
 
   const cancelByCid = useCallback((cid) => {
+    inFlightCidsRef.current.delete(cid)
     apply(prev => prev.filter(m => m.cid !== cid))
   }, [apply])
 
-  // Replace the queue wholesale from authoritative server state.
-  // Preserves the client-side cid when an existing local entry shares
-  // a ts with the server entry — keeps QueuedMessages's expanded
-  // state from remounting. Also handles the swap race (R2 in
-  // _034-design.md): a hydrate landing concurrently with an
-  // optimistic add whose ts the server just claimed should still
-  // resolve to the OPTIMISTIC entry's cid (so its React key doesn't
-  // flip), not a fresh `s-${ts}` cid.
+  // Reconcile the queue against authoritative server state WITHOUT
+  // clobbering an optimistic entry whose own POST is still in flight.
+  //
+  // The server list is authoritative for everything it has SEEN, but
+  // an optimistic-only entry (a local cid with no matching server ts)
+  // whose persistence POST has not yet committed is invisible to the
+  // server precisely because its write is racing this read — it is
+  // not "removed", it is "not yet there". Replacing the tray wholesale
+  // with the server list would drop it, persist-but-vanish; that is
+  // the reconcile-clobber race (e.g. a Stop-timeout resend's queueOnly
+  // POST racing onStreamEnd's fetchMessages → hydrate). So we keep any
+  // local entry that is (a) still flagged in-flight AND (b) absent from
+  // the server list, appending it after the reconciled server entries.
+  // Once its POST lands, swapOptimisticTs clears the flag and a later
+  // hydrate treats it as ordinary server state. An entry NOT flagged
+  // in-flight (server-confirmed, or cancelled via DELETE /pending) is
+  // dropped as before — a cancelled message must not resurrect.
+  //
+  // cid handling is unchanged: reuse the local cid when a server entry
+  // shares its ts (keeps QueuedMessages from remounting; R2 in
+  // _034-design.md — the swap race), else mint `s-${ts}`.
   const hydrate = useCallback((serverList) => {
     const localByTs = new Map(
       (pendingMessagesRef.current || []).map(m => [m.ts, m.cid])
     )
-    const next = (serverList || []).map(m => ({
+    const serverTsSet = new Set((serverList || []).map(m => m.ts))
+    const reconciled = (serverList || []).map(m => ({
       ...m,
       cid: localByTs.get(m.ts) || `s-${m.ts}`,
       queued: true,
     }))
+    const preserved = (pendingMessagesRef.current || []).filter(m =>
+      m.cid != null
+      && inFlightCidsRef.current.has(m.cid)
+      && !serverTsSet.has(m.ts),
+    )
+    const next = [...reconciled, ...preserved]
     pendingMessagesRef.current = next
     setPendingMessages(next)
   }, [])
 
   const clear = useCallback(() => {
     consumedServerTsRef.current.clear()
+    inFlightCidsRef.current.clear()
     pendingMessagesRef.current = []
     setPendingMessages([])
+  }, [])
+
+  // Explicit in-flight controls. add() already marks an optimistic
+  // entry in-flight and the resolve paths clear it, so callers rarely
+  // need these — they exist so a caller that adds an entry through a
+  // non-standard path (or wants to assert the contract) can manage the
+  // flag directly.
+  const markInFlight = useCallback((cid) => {
+    if (cid != null) inFlightCidsRef.current.add(cid)
+  }, [])
+
+  const clearInFlight = useCallback((cid) => {
+    inFlightCidsRef.current.delete(cid)
   }, [])
 
   return {
@@ -233,5 +314,7 @@ export default function usePendingQueue() {
     cancelByCid,
     hydrate,
     clear,
+    markInFlight,
+    clearInFlight,
   }
 }
