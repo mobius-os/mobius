@@ -509,10 +509,19 @@ fi
 # --- failure push (card 125) ------------------------------------------
 # A failed/killed night must actively reach the owner (not just sit in the activity log),
 # so they don't wake to nothing. rc 5 is a benign no-overlap skip — don't alarm on it.
+# The body is honest about whether a brief actually landed: a non-zero main run can still
+# leave a brief behind (the runner's guaranteed-brief fallback rescues one), so "no morning
+# brief" would cry wolf on a rescued night. Check the brief file the agent writes to the
+# app's numeric storage dir before wording the push.
 if [[ "$RC" != "0" && "$RC" != "5" ]]; then
+  if [[ -f "$DATA_DIR/apps/$APP_ID/reports/$DATE.html" ]]; then
+    PUSH_BODY="Last night ended rc=$RC but a recovery brief was salvaged — open Dreaming. See /data/cron-logs."
+  else
+    PUSH_BODY="Last night ended rc=$RC — no morning brief. See /data/cron-logs."
+  fi
   curl -s "${auth[@]}" -X POST "$API_BASE_URL/api/notifications/send" \
     -H "Content-Type: application/json" \
-    -d "{\"title\":\"Dreaming run failed\",\"body\":\"Last night ended rc=$RC — no morning brief. See /data/cron-logs.\"}" \
+    -d "$(python3 -c 'import json,sys; print(json.dumps({"title":"Dreaming run failed","body":sys.argv[1]}))' "$PUSH_BODY")" \
     >>"$LOG" 2>&1 || true
 fi
 

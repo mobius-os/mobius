@@ -45,9 +45,24 @@ def test_steering_message_fires_exactly_at_each_threshold():
   assert [turn for turn, _ in msgs] == [35, 45]
   soft_msg, hard_msg = msgs[0][1], msgs[1][1]
   assert "turn 35 of 60" in soft_msg
-  assert "STOP investigating" in soft_msg
+  assert "STOP open-ended investigation" in soft_msg
   assert "turn 45 of 60" in hard_msg
   assert "MINIMAL brief" in hard_msg
+
+
+def test_steering_messages_both_protect_the_inbox_drain():
+  # The graph froze for days when the old soft message said "phases
+  # 1-5 are over" and the agent skipped consolidation. Both steering
+  # messages must now name the inbox drain as a floor deliverable so
+  # the runner never authorizes skipping it.
+  soft = dr.steering_message(34, 35, 60)
+  hard = dr.steering_message(44, 45, 60)
+  assert soft is not None and hard is not None
+  for msg in (soft, hard):
+    assert "inbox" in msg
+  # The soft message must not regress to "phases 1-5 are over" — that
+  # exact phrasing is what told the agent consolidation was done.
+  assert "phases 1-5 are over" not in soft
 
 
 def test_steering_message_double_cross_returns_only_the_stern_one():

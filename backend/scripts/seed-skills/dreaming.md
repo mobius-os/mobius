@@ -15,12 +15,15 @@ This skill is itself agent-editable (it lives under `/data/shared/skills/`). Whe
 - **Anti-noise is the whole game.** Every item that reaches the brief MUST carry **trigger** (what you observed), **why** (why it matters to the partner), and **next-action** (the one concrete thing — ideally a tap). An item without all three is noise; drop it or keep digging until it has them. A short brief the partner reads fully beats a long one they skim.
 - **Leverage the other skills — don't reinvent them.** `Read /data/shared/skills/<name>.md` and follow it for the work it owns: `building-apps.md` for any app fix/feature, `theming.md` for shell/visual work, `cron.md` for scheduled jobs, `notifications.md` for the morning push, `images.md` for any brief illustration, and `/data/shared/skills/mind.md` for the Mind heavy-lift. This skill orchestrates; those skills hold the per-task contracts.
 - **Time-box and bail safely.** If you're running long, finish the current chunk, commit it, skip ahead to "Write the brief + open the morning chat" — a partial-but-shipped brief beats a perfect one that never posts. Note in the brief what you skipped.
+- **Two deliverables are non-negotiable, in this order: drain the memory inbox, then write the brief.** The inbox drain (phase 3, step 2 — folding each `inbox.md` line into the graph) is the one piece of Mind work that *cannot* be deferred: lines left un-folded accumulate every night, and the daytime agent's read-traces silently rot. Do it EARLY (right after the interviews that feed it — see the phase order), not last, so a long night can't starve it. Everything else in phase 3 (the read-trace diff, merges, pruning, the broader reorg) is deferrable to a quieter night and may be cut when the budget is tight; the inbox drain is not. Treat "inbox drained + brief shipped" as the floor for every night, the same way the brief alone used to be.
 
 ---
 
 ## The run, in order
 
 Work through these as one multi-turn goal. Earlier phases feed later ones — the interviews surface what to fix, the fixes inform the brief. Don't skip the interviews to get to the fun parts; they are the point.
+
+**Run the memory inbox drain (phase 3, step 2) BEFORE app triage (phase 4).** App triage is the open-ended turn sink — chasing one app's bug can eat the whole budget — so it must come after the load-bearing graph work, never before it. The order that protects the graph is: interviews (1) → skill edits (2) → **drain the inbox + the rest of the cheap Mind upkeep you can finish now** (3) → app triage (4) → research (5) → brief (6). Do NOT dive into an interesting app bug at turn 5 and leave the inbox for "later" — later never comes, which is how the graph froze for days while the inbox self-reported "drained." If a digest error tempts you into an app early, note it and come back to it in phase 4.
 
 ### 1. INTROSPECTION — interview every agent that worked today (adaptive depth)
 
@@ -90,6 +93,8 @@ The interviews just told you where the skills failed today's agents. Act on it.
 
 The daytime agent does only light, obvious upkeep and drops raw lines into `inbox.md`. The reorg is explicitly yours. `Read /data/shared/skills/mind.md` first — it owns the inclusion bar, atomicity, anti-orphan, and the structure rules (split/inline/promote/redirect, with the thresholds the linter warns on); this section is just the dreaming-specific *order of operations*.
 
+**Do the inbox drain (step 2) FIRST, and reserve turns for it.** The steps below are written in a logical order, but their *priority under a tight budget* is the inverse: the inbox drain is the non-deferrable floor (see the contract), so spend your reserved Mind turns on it before anything else in this phase, then `pm-commit 'memory: drained inbox'` so it's banked even if the night is cut short. The read-trace diff (step 1) and the broader reorg (steps 3–6) are the *deep* work — valuable on a quiet night, the first thing to cut on a busy one. If you can only do one Mind thing tonight, drain the inbox.
+
 1. **Diff the read-traces — find what WOULD have helped.** Each chat leaves `/data/shared/memory/read-trace/<chat_id>.json`: `nodes_injected` (what the platform showed the agent for free) and `nodes_read` (what it went and dug for). For each substantive chat from the interviews, do a **deeper memory search than the day agent did** — start at the index and descend the maps that chat's topic touches, past where the trace shows the agent stopped. Then diff: what existed in the graph that would have helped, but was never injected or read? Reorganize so it would have been: add a `[[link]]` with a reason from where the agent *did* look, lift the missed note's summary into its parent map (or the index), reduce the depth to it. The interviews' "what did you wish you'd remembered" answers are the same gap seen from the agent's side — cross-check them against the trace. This diff is the engine that makes the graph serve tomorrow's agents better than today's; don't skip it on user-active nights.
 2. **Drain the inbox.** Turn each `inbox.md` line into a proper note (frontmatter, ≥1 map link, lateral `[[links]]` with reasons) or fold it into an existing note. Drop lines that don't clear the inclusion bar. Empty the inbox when done. When a line carries a chat-id tag (`[chat:<id>]`), carry those ids into the note's `source:` frontmatter list so the origin is traceable. **Place each new fact per mind.md's structure rules:** split a note that's outgrown ~30 prose lines (the parent keeps a 3-5 sentence summary of each child), inline a parent that's become a thin pass-through, promote a ~5-link note to a map, and leave a `type: redirect` stub at any slug you move or rename.
 3. **Merge + supersede.** Collapse near-duplicates the daytime agent left for you (the *judgment* merges it wasn't allowed to make). When two notes disagree, newer wins — supersede, don't silently delete: `as-of:` dates on time-sensitive claims, `supersedes:` on the replacement, a redirect or one-line banner on the replaced (mind.md's structure rules).
@@ -137,18 +142,21 @@ Commit each fix on its own: `pm-commit 'app(<slug>): <what and why>'`.
 
 ### Turn-budget guide
 
-The whole run — interviews, skill edits, Mind consolidation, app triage, research, brief + morning chat — must fit within 60 turns. **The brief is the deliverable, not the work that precedes it.** Phases eat turns fast; here is a guide for a typical night (cron-only nights front-load phases 3–4 and skip or shorten 1):
+The whole run — interviews, skill edits, Mind consolidation, app triage, research, brief + morning chat — must fit within 60 turns. **The brief is the deliverable, not the work that precedes it.** Phases eat turns fast; here is a guide for a typical night (cron-only nights front-load the Mind work and skip or shorten 1):
 
 | Phase | Turns | Notes |
 |---|---|---|
-| 1. Interviews | ≤15 | Light pass on cron-only nights (≤5) |
+| 1. Interviews | ≤12 | Light pass on cron-only nights (≤5) |
 | 2. Skill edits | ≤5 | Only confirmed gaps from interviews |
-| 3. Mind consolidation | ≤10 | Read-trace diff + inbox drain + recent-chats + prune; skip the broader reorg unless one change is obvious |
-| 4. App triage + fixes | ≤15 | Digest-first; skip apps with 0 opens |
+| 3a. **Inbox drain (reserved)** | ≤5 | **Non-negotiable — do this BEFORE phase 4, commit it.** Fold every `inbox.md` line into the graph + empty it. This slice is reserved: never spend it on app triage. |
+| 3b. Deeper Mind reorg | ≤7 | Read-trace diff + merges + prune + recent-chats; deferrable — cut first when tight |
+| 4. App triage + fixes | ≤13 | Digest-first; skip apps with 0 opens |
 | 5. Research | ≤5 | Only if a clear topic cleared the bar; otherwise skip |
 | 6. Brief + morning chat | ≤10 | Hard stop at 10 — never let this exceed budget |
 
-**At turn 40, stop any phase still in progress, commit what's done, and jump straight to phase 6.** A partial night with a brief beats a complete night where the brief never ships. Note in the brief what you skipped.
+The slices sum to ≤57 of the 60-turn budget, leaving a small margin; they are a guide, not a hard meter (you can't see your own turn count — the runner speaks it to you when you near the budget). The discipline that matters: **phase 3a (the inbox drain) is reserved and runs before phase 4**, so app triage — the phase most likely to overrun — can never starve it.
+
+**At turn 40, stop any phase still in progress, commit what's done, and jump to phase 6 — UNLESS the inbox isn't yet drained, in which case do the minimal drain first (fold each line, empty the inbox, commit), then the brief.** Both are the floor; the brief alone is not enough if the inbox is still full. A partial night that drained the inbox and shipped a brief beats a "complete" night that did neither. Note in the brief what you skipped. (If you ordered the night correctly, phase 3a finished long before turn 40 and this clause is moot — it's the backstop for a night that ran long on interviews or an app bug.)
 
 ### 5. RESEARCH tailored to the partner's known interests
 
