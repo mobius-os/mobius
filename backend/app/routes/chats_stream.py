@@ -400,21 +400,12 @@ async def send_message(
         detail="The question is no longer accepting answers.",
       )
 
-  # Record the user turn ONCE here — the single choke point past the
-  # answer-delivery returns above and before the queue/steer/initial
-  # branching below — so every genuine user send is counted exactly once
-  # regardless of which path stores it (initial start, queue append, or
-  # steer). Skip force_steer: that is Stop's queue-collapse re-send of
-  # messages already counted when first queued. app_id is set for
-  # app-attributed (window.mobius.chat) sends, null for the owner.
-  # Best-effort, metadata only — never the message text.
-  #
-  # Semantics: this counts a validated user-turn ARRIVAL (before the durable
-  # store), which is the right signal for "did the partner engage today" that
-  # the dreaming digest wants. A rare failed store (503 / queue error) can
-  # overcount by one — acceptable here; this is a usage signal, NOT a billing
-  # counter. Emitting per-store-path instead would re-introduce the multi-path
-  # over/under-count hazard the single choke point avoids.
+  # One choke point for every genuine user send (initial / queued / steered all
+  # pass here, after the answer-delivery returns above). Skip force_steer —
+  # Stop's queue-collapse re-send of already-counted messages. Counts a turn
+  # ARRIVAL, not a durable commit (a rare failed store can overcount by one) —
+  # fine for a usage signal, not a billing counter. app_id = the originating
+  # app for window.mobius.chat sends, null for the owner; metadata only.
   if not body.force_steer:
     activity.log_event(
       "chat_sent",
