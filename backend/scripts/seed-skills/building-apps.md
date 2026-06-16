@@ -6,6 +6,17 @@ Mini-apps are JSX components in sandboxed iframes. Each gets `appId` and `token`
 
 ---
 
+## Which path: a local app or a shareable catalog app
+
+Two shapes of app ship through different entry points — pick before you start:
+
+- **A local app for this instance** (the common case, and what you build when the partner asks for "an app"): write `index.jsx` under `/data/apps/<slug>/` and run `register_app.py` once (see *Lifecycle* below). There is **no `mobius.json`** on this path — the manifest is only for catalog apps, and `register_app.py` never reads one.
+- **A shareable catalog app** (packaged so other instances can install it from a store or repo): author a `mobius.json` manifest plus `index.jsx`, then install with `POST /api/apps/install` and the manifest URL (see *Packaging / wrapping* above).
+
+When unsure, you want the local path.
+
+---
+
 ## Start minimal — a functional core, designed to grow
 
 **Default to the smallest app that fully nails the core use case: a minimal set of functional features and a minimal, clean UI — then hand it back for the partner to expand on.** A first build is a starting point, not a finished product. Ship the feature that makes the app worth opening (the habit tracker tracks habits; the notes app captures and lists notes), styled to the design conventions, and stop there. The partner drives what comes next over the iterate turns — richer views, more entry types, automation — and you add it when they ask. Building takes three turns (propose → build → iterate); the iterate turns are where richness accrues, not the first build.

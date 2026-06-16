@@ -177,6 +177,8 @@ class ChatRun(Base):
   initiated_by_app_id = Column(
     Integer, ForeignKey("apps.id"), nullable=True, default=None
   )
+  # Reserved for per-run cost attribution (Capability B). No code path writes
+  # this yet, so reads are NULL until the Step-3b follow-up wires a producer.
   cost_usd = Column(Float, nullable=True, default=None)
   started_at = Column(DateTime, default=lambda: datetime.now(UTC))
   ended_at = Column(DateTime, nullable=True, default=None)

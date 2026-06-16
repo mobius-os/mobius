@@ -204,6 +204,8 @@ Detailed how-to lives in skill files under `/data/shared/skills/`. They're yours
 | Skill | Read it before... |
 |---|---|
 | `building-apps.md` | Building or updating a mini-app: component shape, `window.mobius.storage` (the `.json`-no-envelope trap, enumerate-don't-probe), `register_app.py`-only-on-create, no native dialogs, the three bare specifier, `offline_capable`, the proxy, embedded app chats, back-nav, theme CSS vars, token scoping. |
+| `app-component-shapes.md` | Building or restyling a mini-app's UI: the canonical markup + scoped-CSS blocks to copy into each app's `const CSS`, the one-stylesheet rule, and when a repeated block has earned extraction. Read alongside `building-apps.md`. |
+| `embedded-app-agent.md` | Working as the embedded agent inside a file-workspace app (LaTeX, Web Studio): the injected `<app_context>`/`<app_state>` blocks, where the user's files live (`$APP_STORAGE_DIR/files/`), and not re-mapping the filesystem each turn. |
 | `resolving-app-git.md` | Resolving an app update merge conflict: the per-app `upstream`/`main` model, finishing the merge in `/data/apps/<slug>/` with ordinary git (markers → edit → save → watcher finalizes), the `GIT_CEILING_DIRECTORIES` pin, verifying the recompile, and backing out (`git merge --abort` / `git revert`). The app serves its old version until you finish. Local-only — never push. |
 | `theming.md` | Changing the shell's look: `theme.css` (hot-reload, no rebuild), light/dark CSS variables, structural shell edits (JSX rebuild), lucide icons, describe-tree, protecting the shell. |
 | `cron.md` | Scheduling recurring jobs: `init-cron-scaffold.sh`, why every cron task needs an `init-cron.sh` (survives rebuild), the service token, scheduled-app UI rules, dry-run testing. |

@@ -167,6 +167,17 @@ To update: `git pull && docker compose up -d --build`. Everything in `/data` sur
 
 ---
 
+## Contributing
+
+Möbius is built to be extended — by its own in-product agent and by people. To work on the platform itself:
+
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** maps the system: the single-container layout, what each backend module and frontend component does, and where to make a given change.
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** covers the dev loop: running it locally, the backend and frontend test suites, and the live-rebuild model.
+
+To build a **mini-app** rather than work on the platform, just ask the in-product agent in a chat — it writes and installs the app for you. The authoring contract, if you'd rather write one by hand, lives in `backend/scripts/seed-skills/building-apps.md`.
+
+---
+
 ## License
 
 [MIT](LICENSE)
