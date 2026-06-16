@@ -372,7 +372,7 @@ fi
 # a digest-first orientation so it doesn't burn turns re-reading raw events.
 # Graceful on API errors: a failed app-read records has_signals:false and
 # an error note rather than aborting the whole step.
-PYTHONPATH=/app APP_ID_FOR_DIGEST="$APP_ID" python3 - "$API_BASE_URL" "$SERVICE_TOKEN" "$INPUTS" \
+PYTHONPATH=/app python3 - "$API_BASE_URL" "$SERVICE_TOKEN" "$INPUTS" \
   >"$INPUTS/per-app-digest.json" 2>>"$LOG" <<'PY' || true
 import json, os, sys, urllib.request, urllib.error, datetime
 
@@ -513,11 +513,10 @@ for app in apps:
         "opens_24h":   opens_24h,
         "has_signals": has_signals,
         "signal_counts": signal_counts,
-        # last_5_errors = errors the app EXPLICITLY reported via signal('error').
+        # Two error channels, kept separate: last_5_errors = signalled
+        # (signal('error')); app_errors_24h/recent_app_errors = uncaught
+        # (activity app_error) — the primary crash signal, fires without a call.
         "last_5_errors": last_5_errors[-5:],
-        # app_errors_24h / recent_app_errors = UNCAUGHT errors the browser
-        # caught (activity.jsonl app_error events) — fire even with no
-        # signal('error') call, so this is the primary crash signal.
         "app_errors_24h": app_err.get("count", 0),
         "recent_app_errors": app_err.get("recent", []),
     }

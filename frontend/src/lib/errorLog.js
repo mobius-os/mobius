@@ -24,9 +24,9 @@ const _reportSeen = new Map()
 
 /**
  * POST one shell error to /api/client-error → an `app_error` activity event
- * (the owner JWT carries no app_id, so it's attributed as a shell error).
- * Standalone + swallow-all + keepalive so it survives a white-screen/reload and
- * can never itself throw or trigger a logout. No-op before login (no token).
+ * (the owner JWT carries no app_id, so it reads as a shell error). No-op
+ * before login (no token); debounced per message. (See the file header for
+ * why this is standalone + keepalive + swallow-all.)
  */
 function postClientError(record) {
   let token
