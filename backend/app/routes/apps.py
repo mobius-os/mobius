@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy.orm import Session
 
-from app import activity, app_git, fs_locks, models, schemas
+from app import activity, app_git, fs_locks, models, schemas, theme
 from app.storage_io import read_capped_body
 from app.broadcast import get_system_broadcast
 from app.compiler import compile_jsx, recompile_app_bundle
@@ -1375,9 +1375,12 @@ def _not_modified_if_match(
   return None
 
 
-def _frame_etag(app: models.App, frame_path: Path) -> str | None:
+def _frame_etag(
+  app: models.App, frame_path: Path, theme_token: str = ""
+) -> str | None:
   """Validator for the `/frame` response, combining the app's
-  `updated_at` with the shared runtime-frame file's mtime.
+  `updated_at` with the shared runtime-frame file's content and the
+  active theme.
 
   Unlike the per-app module, the frame serves `app-frame.html` — the
   importmap + runtime shell — which changes INDEPENDENTLY of any app
@@ -1392,7 +1395,15 @@ def _frame_etag(app: models.App, frame_path: Path) -> str | None:
   Content hash, not mtime: `cp`, bind-mounts, and backup/restore rewrite
   mtimes independently of content, which risks UNDER-invalidation (a
   real content change that keeps its mtime) — the precise failure mode
-  here. The frame file is small, so hashing per request is cheap."""
+  here. The frame file is small, so hashing per request is cheap.
+
+  `theme_token` folds the active theme in. The frame is now served with
+  the theme pre-injected into its <style> + `data-theme` (so light mode
+  paints light from the first byte instead of flashing the dark fallback
+  — see get_frame). That makes the response vary by theme, so the
+  validator must too: without it a cached frame keeps the old theme after
+  a light/dark toggle (a 304 against an unchanged validator), which is the
+  same stale-frame trap the content hash closes for code changes."""
   parts: list[str] = []
   if app.updated_at:
     parts.append(str(int(app.updated_at.timestamp() * 1_000_000)))
@@ -1400,6 +1411,8 @@ def _frame_etag(app: models.App, frame_path: Path) -> str | None:
     parts.append(hashlib.sha256(frame_path.read_bytes()).hexdigest()[:16])
   except OSError:
     pass
+  if theme_token:
+    parts.append(theme_token)
   if not parts:
     return None
   return 'W/"' + "-".join(parts) + '"'
@@ -1463,7 +1476,18 @@ def get_frame(
   if frame_path is None:
     raise HTTPException(status_code=404, detail="Frame not found.")
 
-  etag = _frame_etag(app, frame_path)
+  # The active theme is pre-injected into the served frame (below), so the
+  # response varies by theme — fold it into the validator so a cached frame
+  # revalidates after a light/dark toggle. Token is a hash of the effective
+  # theme CSS plus the mode; cheap, and the same signal the injection uses.
+  data_dir = get_settings().data_dir
+  theme_css = theme.get_theme_css(data_dir)
+  theme_mode = theme.get_theme_mode(data_dir)
+  theme_token = hashlib.sha256(
+    f"{theme_mode}:{theme_css}".encode("utf-8")
+  ).hexdigest()[:16]
+
+  etag = _frame_etag(app, frame_path, theme_token)
   if etag:
     not_modified = _not_modified_if_match(request, etag, app.offline_capable)
     if not_modified is not None:
@@ -1471,10 +1495,7 @@ def get_frame(
 
   html = frame_path.read_text(encoding="utf-8")
 
-  # Per-app server-side substitutions. The TOKEN (per-session) and
-  # THEME (per-user-edit) are intentionally NOT substituted
-  # server-side — the parent shell sends them via postMessage after
-  # iframe load.
+  # Per-app server-side substitution of the app/chat ids the runtime needs.
   html = html.replace(
     "var _FRAME_APP_ID = 'unknown'",
     f"var _FRAME_APP_ID = {json.dumps(str(app_id))}",
@@ -1483,6 +1504,19 @@ def get_frame(
     "var _FRAME_CHAT_ID = ''",
     f"var _FRAME_CHAT_ID = {json.dumps(app.chat_id or '')}",
   )
+
+  # Pre-inject the active theme so the frame paints the RIGHT palette from
+  # the first byte. The frame still carries a hardcoded fallback :root and
+  # the parent shell still posts moebius:frame-init/-theme afterward — but
+  # in light mode the served HTML used to ship ONLY the DARK fallback, so an
+  # app opened on a dark background and either flashed to light when
+  # frame-init landed or (when the theme query was unresolved at init time —
+  # offline / slow) STAYED dark against the light shell, which the owner saw
+  # as "opening an app changes the background". Injecting the real theme's
+  # <style> after the fallback :root (it wins by source order) and
+  # data-theme on <html> closes both windows for every app. The postMessage
+  # path remains the mechanism for LIVE theme swaps without a reload.
+  html = theme.inject_theme_into_html(html, data_dir)
 
   headers = {"Cache-Control": "no-cache"}
   if etag:

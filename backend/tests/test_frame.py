@@ -144,6 +144,85 @@ def test_frame_etag_changes_after_app_update(client, auth, db):
   assert r2.headers["etag"] != old_etag
 
 
+def test_frame_paints_light_theme_from_first_byte(client, auth):
+  """In light mode the SERVED frame already carries the light theme — its
+  injected <style> sets --bg to the light value and <html> gets
+  data-theme="light".
+
+  Regression test for the "opening an app changes the background" bug: the
+  frame's hardcoded :root fallback is dark, and the theme used to reach the
+  frame ONLY via a post-load postMessage. In light mode that meant the
+  served HTML painted dark until (or unless) frame-init landed — a dark panel
+  against the light shell. Server-injecting the theme closes that window.
+  """
+  import pathlib
+
+  from app.config import get_settings
+
+  data_dir = pathlib.Path(get_settings().data_dir)
+  shared = data_dir / "shared"
+  shared.mkdir(parents=True, exist_ok=True)
+  (shared / "theme.css").write_text(":root { --bg: #f0eeeb; --text: #1c1b1a; }")
+  (shared / "theme-mode").write_text('"light"')
+  try:
+    r = client.post("/api/apps/", json={
+      "name": "light-frame-test",
+      "description": "test",
+      "jsx_source": "export default function App() { return <div>hi</div> }",
+    }, headers=auth)
+    app_id = r.json()["id"]
+
+    html = client.get(f"/api/apps/{app_id}/frame").text
+    # The injected light theme is present from the first byte (no postMessage).
+    assert 'data-theme="light"' in html
+    assert "#f0eeeb" in html
+  finally:
+    (shared / "theme.css").unlink(missing_ok=True)
+    (shared / "theme-mode").unlink(missing_ok=True)
+
+
+def test_frame_etag_varies_by_theme(client, auth):
+  """The frame ETag must change when the active theme changes, so a cached
+  frame revalidates after a light/dark toggle instead of 304-ing against a
+  stale validator and running the wrong-theme frame forever (the same trap
+  the frame content hash closes for code edits)."""
+  import pathlib
+
+  from app.config import get_settings
+
+  data_dir = pathlib.Path(get_settings().data_dir)
+  shared = data_dir / "shared"
+  shared.mkdir(parents=True, exist_ok=True)
+
+  r = client.post("/api/apps/", json={
+    "name": "theme-etag-test",
+    "description": "test",
+    "jsx_source": "export default function App() { return <div>hi</div> }",
+  }, headers=auth)
+  app_id = r.json()["id"]
+
+  # Default (dark) theme.
+  (shared / "theme.css").unlink(missing_ok=True)
+  (shared / "theme-mode").unlink(missing_ok=True)
+  dark_etag = client.get(f"/api/apps/{app_id}/frame").headers["etag"]
+
+  # Switch to light — same app, same frame file, only the theme changed.
+  (shared / "theme.css").write_text(":root { --bg: #f0eeeb; --text: #1c1b1a; }")
+  (shared / "theme-mode").write_text('"light"')
+  try:
+    light_etag = client.get(f"/api/apps/{app_id}/frame").headers["etag"]
+    assert light_etag != dark_etag
+    # A request carrying the stale dark validator must NOT 304.
+    r2 = client.get(
+      f"/api/apps/{app_id}/frame",
+      headers={"If-None-Match": dark_etag},
+    )
+    assert r2.status_code == 200
+  finally:
+    (shared / "theme.css").unlink(missing_ok=True)
+    (shared / "theme-mode").unlink(missing_ok=True)
+
+
 def test_module_returns_etag(client, auth):
   """The module endpoint uses the same ETag scheme as the frame, so
   the iframe's dynamic `import()` revalidates with `If-None-Match`."""
