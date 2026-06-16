@@ -1,29 +1,39 @@
 """Append-only JSONL platform-activity log.
 
-Records four event types (app_open, app_install, storage_write,
-cron_outcome) so introspective mini-apps and cron agents can see what
-the user did over a window without scraping chat.log or guessing from
-mtime traces.
+Records platform events so introspective mini-apps and cron agents
+(notably the nightly Dreaming agent) can see what the owner did over a
+window without scraping chat.log or guessing from mtime traces.
 
-Schema (one JSON object per line, no trailing version field — if we
-ever break compatibility we write a new file activity.v2.jsonl and
+Event vocabulary (one JSON object per line, no trailing version field —
+if we ever break compatibility we write a new file activity.v2.jsonl and
 read both):
 
-  {"ev":"app_open",      "ts":"<ISO8601>", "app_id":<int>, "slug":"<str>"}
-  {"ev":"app_install",   "ts":"<ISO8601>", "app_id":<int>, "slug":"<str>",
-                         "source":"bootstrap|store|url"}
-  {"ev":"storage_write", "ts":"<ISO8601>", "app_id":<int>, "path":"<str>",
-                         "size_delta":<int>}
-  {"ev":"cron_outcome",  "ts":"<ISO8601>", "app_id":<int>, "job":"<str>",
-                         "exit_code":<int>, "duration_ms":<int>}
-  {"ev":"skill_loaded",  "ts":"<ISO8601>", "chat_id":"<str>", "skill":"<str>"}
+  {"ev":"app_open",       "ts", "app_id", "slug"}
+  {"ev":"app_install",    "ts", "app_id", "slug", "source":"bootstrap|store|url"}
+  {"ev":"app_uninstall",  "ts", "app_id", "slug"}   # logical (tombstone) delete
+  {"ev":"storage_write",  "ts", "app_id", "path", "size_delta"}  # delete = negative delta
+  {"ev":"cron_outcome",   "ts", "app_id", "job", "exit_code", "duration_ms"}
+  {"ev":"skill_loaded",   "ts", "chat_id", "skill"}
+  {"ev":"memory_load",    "ts", "source", "paths", "mode"}
+  {"ev":"app_error",      "ts", "app_id"?, "message", "where"?, "stack"?, "url"?}
+  {"ev":"chat_sent",      "ts", "chat_id", "provider", "app_id"?}  # one per user turn
+  {"ev":"chat_created",   "ts", "chat_id"}
+  {"ev":"provider_switch","ts", "chat_id", "provider", "from_provider"}
+  {"ev":"chat_log_read",  "ts", "app_id", "scope", "count"}  # app read redacted logs
+  {"ev":"slug_collision", "ts", "requested_slug", "assigned_slug", "source"}
 
-`app_id` may be 0 / null for platform-level events (the bootstrap
-store install does not have a numeric id at the moment it fires, etc).
+`app_id` may be 0 / null for platform-level events (the bootstrap store
+install has no numeric id when it fires; an `app_error` with NO `app_id`
+is a SHELL error, not an app's — that null is the shell/app discriminator).
 
 `skill_loaded` is chat-scoped (carries `chat_id`, not `app_id`): it
 records each time the agent invokes the Skill tool, so "most-used
 skills" can be aggregated from the log. See `most_used_skills`.
+
+Deliberately NOT recorded: navigation / drawer / scroll / click and
+per-token chat deltas — high-frequency, low-signal UI noise that would
+drown the events that matter against the 90-day retention. `app_open`
+already captures which apps got used; `chat_sent` captures user turns.
 
 Rotation: weekly. On each write we check the active file's mtime; if
 older than 7 days we rename it to activity.YYYY-WW.jsonl and start a

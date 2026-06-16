@@ -222,6 +222,36 @@ def test_read_events_filters_by_app_id():
   assert events[0]["app_id"] == 2
 
 
+# --- new event emits fire from their routes (#4 instrumentation) ----------
+
+
+def test_create_chat_emits_chat_created(client, auth):
+  """POST /api/chats records a chat_created event carrying the new chat id."""
+  res = client.post("/api/chats", headers=auth, json={})
+  assert res.status_code in (200, 201)
+  chat_id = res.json()["id"]
+  created = [e for e in _read_lines() if e["ev"] == "chat_created"]
+  assert len(created) == 1
+  assert created[0]["chat_id"] == chat_id
+
+
+def test_delete_app_emits_app_uninstall(client, auth):
+  """DELETE /api/apps/{id} records an app_uninstall event (the missing half
+  of the install/uninstall pair the churn digest needs)."""
+  src = "export default function App(){ return null }"
+  made = client.post(
+    "/api/apps/", headers=auth,
+    json={"name": "Churn Test", "description": "x", "jsx_source": src},
+  )
+  assert made.status_code in (200, 201), made.text
+  app_id = made.json()["id"]
+  res = client.delete(f"/api/apps/{app_id}", headers=auth)
+  assert res.status_code in (200, 204)
+  uninstalls = [e for e in _read_lines() if e["ev"] == "app_uninstall"]
+  assert len(uninstalls) == 1
+  assert uninstalls[0]["app_id"] == app_id
+
+
 def test_read_events_spans_rotated_archives():
   """Cross-week read: events that landed in an archive BEFORE the most
   recent rotation must still appear in a window that covers them.

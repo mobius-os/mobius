@@ -322,7 +322,9 @@ useEffect(() => {
 }, [])
 ```
 
-Signals land in `signals.jsonl` in the app's own storage path, readable by Dreaming via the storage API. Dreaming's nightly `per-app-digest.json` counts signal names within 24h and surfaces the last 5 error messages — it does not read the raw file. The raw file is only read for the digest build; nothing else touches it.
+Signals land in `signals.jsonl` in the app's own storage path, readable by Dreaming via the storage API. Dreaming's nightly `per-app-digest.json` counts signal names within 24h and surfaces the last 5 error messages (`last_5_errors`) — it does not read the raw file. The raw file is only read for the digest build; nothing else touches it.
+
+**You don't have to catch everything yourself.** Uncaught errors — a thrown exception your code didn't handle, an unhandled promise rejection — are captured automatically: the app frame POSTs them to the platform, which records an `app_error` event that surfaces in the SAME digest as `app_errors_24h` + `recent_app_errors`. So `signal('error', …)` is for adding *semantic* context to a failure you DID catch (which operation, what the user was doing); the automatic capture is the safety net for the ones you didn't. Both reach Dreaming.
 
 ---
 

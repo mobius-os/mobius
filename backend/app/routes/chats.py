@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app import auth, models, questions
+from app import activity, auth, models, questions
 from app.config import get_settings
 from app.chat import (
   _clear_run_status,
@@ -291,6 +291,7 @@ def create_chat(
   db.add(chat)
   db.commit()
   db.refresh(chat)
+  activity.log_event("chat_created", chat_id=chat.id)
   return {"id": chat.id, "title": chat.title, "messages": chat.messages}
 
 
@@ -426,6 +427,9 @@ async def patch_chat(
             "codex" if current_provider == "claude" else "claude"
           )
 
+    # Capture the provider BEFORE any mutation so provider_switch logs the
+    # real transition, and only when it actually changes (see after the commit).
+    prev_provider = chat.provider
     if target_provider is not None and target_provider in ("claude", "codex"):
       # Reject a switch to a disconnected provider — the picker may
       # have raced ahead of /auth/providers/status, or the user may
@@ -458,6 +462,17 @@ async def patch_chat(
 
     db.commit()
     db.refresh(chat)
+    # Record a real provider switch (Claude <-> Codex) once, after this first
+    # commit — NOT after the owner-provider mirror commit below, which would
+    # double-log. Model/effort tweaks within a provider are deliberately not
+    # logged here (high-frequency picker noise the digest doesn't need).
+    if target_provider is not None and chat.provider != prev_provider:
+      activity.log_event(
+        "provider_switch",
+        chat_id=chat.id,
+        provider=chat.provider,
+        from_provider=prev_provider,
+      )
     data_dir = get_app_settings().data_dir
 
     # Mirror the new pick to the global default immediately. New

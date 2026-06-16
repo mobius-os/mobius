@@ -33,6 +33,9 @@ HEARTBEAT="$DATA_DIR/cron-logs/dreaming.heartbeat"
 TOKEN_FILE="$DATA_DIR/service-token.txt"
 DATE="$(date +%F)"
 INPUTS="$DATA_DIR/apps/dreaming/inputs"
+# Wall-clock start, captured BEFORE any early exit (lock / token / app-id) so
+# emit_outcome can always record how long the night ran (duration_ms).
+START_EPOCH="$(date +%s)"
 RUNNER="${DREAMING_RUNNER:-/app/scripts/dreaming_runner.py}"
 # Wall-clock cap for the whole night. Generous (the agent does real,
 # multi-phase work) but bounded so a wedged run can't hold the lock past
@@ -56,11 +59,15 @@ log() { echo "[$(date -Iseconds)] dreaming: $*" >>"$LOG"; }
 emit_outcome() {
   local exit_code="$1"
   [[ -r "$TOKEN_FILE" ]] || return 0
-  local token ts payload
+  local token ts payload dur_ms
   token="$(cat "$TOKEN_FILE")"
   ts="$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")"
-  payload="$(printf '{"ev":"cron_outcome","ts":"%s","app_id":%s,"job":"dreaming","exit_code":%s}' \
-    "$ts" "${APP_ID:-0}" "$exit_code")"
+  # How long the night ran, in ms (second-resolution clock x1000 — finer
+  # precision isn't meaningful for a multi-minute nightly run). Lets the next
+  # run's self-history flag a near-timeout night, not just pass/fail.
+  dur_ms=$(( ( $(date +%s) - START_EPOCH ) * 1000 ))
+  payload="$(printf '{"ev":"cron_outcome","ts":"%s","app_id":%s,"job":"dreaming","exit_code":%s,"duration_ms":%s}' \
+    "$ts" "${APP_ID:-0}" "$exit_code" "$dur_ms")"
   # The activity log is the PRIMARY liveness signal the next night's run
   # reads, so a dropped emit is invisible there (only this .log file keeps
   # it). Retry a transient API blip (restart/overload) with backoff before
@@ -152,6 +159,64 @@ if [ -n "$LAST_SHA" ] && git -C "$DATA_DIR" cat-file -e "${LAST_SHA}^{commit}" 2
 else
   echo "(no prior marker — first tracked run; use the 24h slices below)" >"$INPUTS/changed-since-last-run.txt"
 fi
+
+# dreaming-run-history.txt — the agent's OWN track record, so it can reflect on
+# recurring failures (e.g. repeated max_turns deaths) instead of dreaming with
+# amnesia each night. Three best-effort sources: the cron_outcome ledger (this
+# skill's exit codes over ~14 nights), recent WARN/ERROR/steering lines from
+# its own dreaming.log, and its last self-edits to this skill. All wrapped so a
+# failed source degrades to a note rather than aborting.
+HIST="$INPUTS/dreaming-run-history.txt"
+SINCE_14D="$(date -u -d '14 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$SINCE")"
+curl -s "${auth[@]}" "$API_BASE_URL/api/admin/activity?since=$SINCE_14D" \
+  >"$INPUTS/.activity-14d.jsonl" 2>>"$LOG" || true
+{
+  echo "# Your own recent runs — read this BEFORE deciding what to improve tonight."
+  echo
+  echo "## Outcomes (last ~14 nights, from cron_outcome activity events)"
+  # Heredoc reads the staged file via argv (a heredoc IS stdin, so it can't also
+  # consume a pipe) — lets the program use any quoting freely.
+  python3 - "$INPUTS/.activity-14d.jsonl" <<'PY' 2>>"$LOG" || echo "(outcome history unavailable)"
+import sys, json
+legend = {0: "success", 2: "agent run error / max_turns (instant ~0s = wrapper config, e.g. missing app-id)",
+          3: "token missing", 5: "skipped (overlap)", 124: "wall-clock timeout"}
+rows = []
+try:
+    with open(sys.argv[1]) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except Exception:
+                continue
+            if ev.get("ev") == "cron_outcome" and ev.get("job") == "dreaming":
+                rows.append(ev)
+except Exception:
+    pass
+if not rows:
+    print("(no prior cron_outcome events yet — first tracked nights)")
+for ev in rows[-14:]:
+    code = ev.get("exit_code")
+    ts = (ev.get("ts") or "")[:19]
+    dur = ev.get("duration_ms")
+    dur_s = "  %ds" % round(dur / 1000) if isinstance(dur, (int, float)) else ""
+    print("%s  exit=%s  %s%s" % (ts, code, legend.get(code, "agent error"), dur_s))
+PY
+  echo
+  echo "## Recent friction (WARN/ERROR/steering from your dreaming.log, last 40)"
+  if [ -s "$LOG" ]; then
+    grep -aE 'WARN|ERROR|error_max_turns|injected turn-budget|run ended in error' \
+      "$LOG" 2>/dev/null | tail -40 || true
+  else
+    echo "(no dreaming.log yet)"
+  fi
+  echo
+  echo "## Your last 10 edits to THIS skill (git log -- shared/skills/dreaming.md)"
+  git -C "$DATA_DIR" log --oneline -10 -- shared/skills/dreaming.md 2>>"$LOG" || echo "(no history)"
+} >"$HIST" 2>>"$LOG" || true
+rm -f "$INPUTS/.activity-14d.jsonl"
 
 # chats.md — recent chats list (titles + ids + provider), so the agent
 # knows which sessions to fork-and-interview without re-deriving the list.
@@ -294,17 +359,31 @@ fi
 
 # per-app-digest.json — compact per-app analytics summary the Dreaming
 # agent uses to triage which apps need attention tonight. Produced from
-# two sources:
+# THREE sources:
 #   - activity.jsonl ON DISK (already staged above) for opens_24h counts
+#   - activity.jsonl app_error events for UNCAUGHT crashes (app_errors_24h +
+#     recent_app_errors per app; shell_errors_24h for owner-shell errors) —
+#     these fire even when the app never called signal('error')
 #   - each app's signals.jsonl read via the storage API for signal counts,
-#     last-5-error messages, and the has_signals flag
-# ~2–3 KB for 12 apps vs 10–100 KB of raw log; gives the agent a
-# digest-first orientation so it doesn't burn turns re-reading raw events.
+#     last-5-error messages (EXPLICIT signal('error') calls), and has_signals
+# The two error channels are kept as SEPARATE fields on purpose: last_5_errors
+# is what an app explicitly reported; recent_app_errors is what the browser
+# caught uncaught. ~2–3 KB for 12 apps vs 10–100 KB of raw log; gives the agent
+# a digest-first orientation so it doesn't burn turns re-reading raw events.
 # Graceful on API errors: a failed app-read records has_signals:false and
 # an error note rather than aborting the whole step.
-APP_ID_FOR_DIGEST="$APP_ID" python3 - "$API_BASE_URL" "$SERVICE_TOKEN" "$INPUTS" \
+PYTHONPATH=/app APP_ID_FOR_DIGEST="$APP_ID" python3 - "$API_BASE_URL" "$SERVICE_TOKEN" "$INPUTS" \
   >"$INPUTS/per-app-digest.json" 2>>"$LOG" <<'PY' || true
 import json, os, sys, urllib.request, urllib.error, datetime
+
+# app_error classification lives in app.dreaming_digest (unit-tested). Import
+# defensively: if PYTHONPATH=/app is somehow unavailable (an older instance),
+# the digest still builds, just without the uncaught-error fields.
+try:
+    from app import dreaming_digest
+    _summarize_app_errors = dreaming_digest.summarize_app_errors
+except Exception:
+    _summarize_app_errors = None
 
 base    = sys.argv[1].rstrip("/")
 token   = sys.argv[2]
@@ -334,9 +413,13 @@ def storage_get_text(app_id, path, timeout=15):
     except Exception:
         return None
 
-# --- opens_24h: count app_open events in the already-staged activity.jsonl ---
+# --- scan the already-staged 24h activity.jsonl ONCE for two things:
+#     app_open counts (opens_24h) and app_error events (uncaught crashes).
+#     Kept as two independent accumulators so the signals.jsonl channel below
+#     can't corrupt them. ---
 activity_path = os.path.join(inp_dir, "activity.jsonl")
-opens_by_app = {}   # app_id (str) -> count
+opens_by_app = {}        # app_id (str) -> count
+app_error_events = []    # raw app_error rows, classified after the loop
 if os.path.exists(activity_path):
     with open(activity_path) as f:
         for line in f:
@@ -347,11 +430,21 @@ if os.path.exists(activity_path):
                 ev = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if ev.get("ev") != "app_open":
-                continue
-            aid = str(ev.get("app_id", ""))
-            if aid:
-                opens_by_app[aid] = opens_by_app.get(aid, 0) + 1
+            kind = ev.get("ev")
+            if kind == "app_open":
+                aid = str(ev.get("app_id", ""))
+                if aid:
+                    opens_by_app[aid] = opens_by_app.get(aid, 0) + 1
+            elif kind == "app_error":
+                app_error_events.append(ev)
+
+# Classify the uncaught errors (the staged file is already the 24h window, so
+# no extra time filtering is needed). Shell errors (no app_id) bucket separately.
+err_summary = (
+    _summarize_app_errors(app_error_events)
+    if _summarize_app_errors
+    else {"by_app": {}, "shell": {"count": 0, "recent": []}}
+)
 
 # --- fetch app list ---
 try:
@@ -412,6 +505,7 @@ for app in apps:
     except Exception as e:
         signals_error = str(e)[:200]
 
+    app_err = err_summary["by_app"].get(app_id, {})
     entry = {
         "app_id":      app_id,
         "slug":        slug,
@@ -419,13 +513,26 @@ for app in apps:
         "opens_24h":   opens_24h,
         "has_signals": has_signals,
         "signal_counts": signal_counts,
+        # last_5_errors = errors the app EXPLICITLY reported via signal('error').
         "last_5_errors": last_5_errors[-5:],
+        # app_errors_24h / recent_app_errors = UNCAUGHT errors the browser
+        # caught (activity.jsonl app_error events) — fire even with no
+        # signal('error') call, so this is the primary crash signal.
+        "app_errors_24h": app_err.get("count", 0),
+        "recent_app_errors": app_err.get("recent", []),
     }
     if signals_error:
         entry["signals_read_error"] = signals_error
     digests.append(entry)
 
-print(json.dumps({"generated_at": now_utc.isoformat(), "apps": digests}, indent=2))
+print(json.dumps({
+    "generated_at": now_utc.isoformat(),
+    "apps": digests,
+    # Owner-shell errors (app_error with no app_id) have no per-app home;
+    # surface them at the top level so they aren't lost.
+    "shell_errors_24h": err_summary["shell"]["count"],
+    "recent_shell_errors": err_summary["shell"]["recent"],
+}, indent=2))
 PY
 
 # Record the app id where the runner's goal message and the agent can
