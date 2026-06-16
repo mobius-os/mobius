@@ -40,13 +40,23 @@
   }
   </script>
   <style>
-    /* Fallback defaults — overridden by server-injected theme from theme.py.
-       These MUST mirror theme.py's DEFAULT_THEME token-for-token: AppCanvas
-       sends frame-init with no themeCss while the theme query is still
-       resolving, so the app mounts/paints on THIS :root until a later
-       frame-theme repaints. If these drift from DEFAULT_THEME the default
-       theme shows a visible flash (the stale pre-2026-05 blue palette did
-       exactly that). Keep in sync with backend/app/theme.py. */
+    /* Fallback defaults — the server pre-injects the active theme's <style>
+       AFTER this block (get_frame -> theme.inject_theme_into_html), so the
+       injected theme wins by source order and the frame paints the right
+       palette from the first byte. This :root only shows if that injection
+       is somehow absent (a frame served without the theme step, or a raw
+       file open). It MUST mirror theme.py's DEFAULT_THEME token-for-token so
+       that bare-default case matches the dark default; if these drift, the
+       no-injection fallback flashes (the stale pre-2026-05 blue palette did
+       exactly that). Keep in sync with backend/app/theme.py DEFAULT_THEME.
+
+       The prefers-color-scheme override below makes even THAT fallback
+       mode-aware: before injection landed, a light-mode user opening an app
+       got the dark fallback against the light shell (the "opening an app
+       changes the background" bug). Server injection is the real fix; this
+       is defense in depth so a light-preference device never paints the dark
+       fallback if injection is bypassed. The injected theme still overrides
+       both blocks. */
     :root {
       --bg: #0d0d0d; --surface: #171717; --surface2: #212121;
       --border: #2a2a2a; --border-light: #1f1f1f;
@@ -63,6 +73,20 @@
          first message and while windowed; non-zero only while immersive. */
       --mobius-safe-top: 0px; --mobius-safe-right: 0px;
       --mobius-safe-bottom: 0px; --mobius-safe-left: 0px;
+    }
+    /* Mode-aware fallback (defense in depth — see the :root comment). Only the
+       mode-dependent structural + status vars switch; the brand accent and
+       typography are shared across modes and stay sourced from the :root
+       above. Mirrors theme.py's _LIGHT_DEFAULTS + frontend LIGHT_COLORS. The
+       server-injected theme overrides this whenever present. */
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f0eeeb; --surface: #ffffff; --surface2: #e8e6e2;
+        --border: #d4d1cc; --border-light: #e2dfdb;
+        --text: #1c1b1a; --muted: #6b6864;
+        --accent-dim: rgba(139, 108, 247, 0.08);
+        --danger: #ef4444; --green: #059669;
+      }
     }
     /* No grey/blue tap-flash on any interactive element across mini-apps (mobile). */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
