@@ -4,6 +4,7 @@ import { api, getToken } from '../../api/client.js'
 import { appQueries, themeQueries } from '../../hooks/queries.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import { liveAppToken, resolveLatchedToken } from '../../lib/appToken.js'
+import { getEffectiveTheme } from '../../lib/themeService.js'
 import { readSafeAreaInsets, zeroInsets } from '../../lib/safeAreaInsets.js'
 import { WifiOff } from 'lucide-react'
 import './AppCanvas.css'
@@ -222,12 +223,23 @@ export default function AppCanvas({
     // message (the effect below + the theme-broadcast effect) repaints it.
     const iframe = iframeRef.current
     if (!iframe || !iframe.contentWindow) return
+    // Send the CURRENTLY-APPLIED shell theme, not the `/api/theme`
+    // query result. getEffectiveTheme() reads what the shell already
+    // painted onto its own DOM (the `<style id="mobius-theme">` block
+    // + data-theme), which is present even when the theme query is
+    // unresolved (cold offline reopen) — whereas `theme?.css` is
+    // `undefined` there, and an `undefined` themeCss makes the frame's
+    // applyTheme() a no-op so a stale/dark-injected cached frame STAYS
+    // dark. Posting the effective theme on every mount repaints the
+    // frame to the shell's current theme, correcting any stale
+    // server-injection in the cached frame, online OR offline.
+    const eff = getEffectiveTheme()
     iframe.contentWindow.postMessage(
       {
         type: 'moebius:frame-init',
         token,
-        themeCss: theme?.css,
-        bg: theme?.bg,
+        themeCss: eff?.css ?? theme?.css,
+        bg: eff?.bg ?? theme?.bg,
       },
       window.location.origin,
     )
@@ -372,13 +384,22 @@ export default function AppCanvas({
 
   // Broadcast theme updates to an already-loaded iframe so it can
   // refresh its theme without remounting (and losing app state).
+  // The query result (`theme?.css`) is the TRIGGER — a toggle bumps
+  // it — but the PAYLOAD is the effective applied theme read back
+  // from the shell's DOM. By the time this effect runs, useTheme's
+  // own effect has already called applyThemeToDom for the new value,
+  // so getEffectiveTheme() returns the just-applied theme. Sourcing
+  // the payload from the DOM keeps this path identical to sendInit
+  // and never posts an undefined css (which would no-op the frame's
+  // applyTheme and leave a live frame on its old theme offline).
   useEffect(() => {
     if (!loadedRef.current || !iframeRef.current || !theme) return
+    const eff = getEffectiveTheme()
     iframeRef.current.contentWindow?.postMessage(
       {
         type: 'moebius:frame-theme',
-        themeCss: theme.css,
-        bg: theme.bg,
+        themeCss: eff?.css ?? theme.css,
+        bg: eff?.bg ?? theme.bg,
       },
       window.location.origin,
     )
