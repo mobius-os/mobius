@@ -239,3 +239,23 @@ test('persistTheme swallows notify.send failures (best-effort)', async () => {
   // Should not throw.
   await themeService.persistTheme(':root {}', 'light', api)
 })
+
+test('getEffectiveTheme reads back the applied LIGHT theme (offline-safe iframe source)', () => {
+  themeService.applyThemeToDom(':root { --bg: #f0eeeb; }', '#f0eeeb')
+  const eff = themeService.getEffectiveTheme()
+  assert.ok(eff, 'returns the applied theme')
+  assert.equal(eff.css, ':root { --bg: #f0eeeb; }')
+  assert.equal(eff.bg, '#f0eeeb')
+  assert.equal(eff.mode, 'light')
+})
+
+test('getEffectiveTheme reflects a DARK theme via data-theme', () => {
+  themeService.applyThemeToDom(':root { --bg: #0d0d0d; }', '#0d0d0d')
+  const eff = themeService.getEffectiveTheme()
+  assert.equal(eff.bg, '#0d0d0d')
+  assert.equal(eff.mode, 'dark')
+})
+
+test('getEffectiveTheme returns null when no theme has been applied', () => {
+  assert.equal(themeService.getEffectiveTheme(), null)
+})

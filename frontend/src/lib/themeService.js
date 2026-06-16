@@ -132,6 +132,43 @@ function _inferThemeMode(cssBody, bg) {
 }
 
 /**
+ * Read the theme the shell has ALREADY APPLIED to its own DOM —
+ * what the user currently sees — as `{ css, bg, mode }`.
+ *
+ * This is the offline-safe source of truth for propagating the
+ * theme into mini-app iframes. `applyThemeToDom` injects the
+ * effective CSS into `<style id="mobius-theme">`, sets
+ * `document.body.style.background`, and `data-theme` on
+ * `<html>`. Those are present whenever a theme has been applied —
+ * including cold offline reopens — unlike the `/api/theme` React
+ * Query result (`theme?.css`), which is `undefined` until the
+ * network query resolves. AppCanvas posts THIS into the frame so a
+ * cached frame (whose server-injected theme may be stale/dark from
+ * a pre-toggle fetch) repaints to the current theme on mount,
+ * online or offline, with no refetch.
+ *
+ * Returns `null` when no theme block has been injected yet (very
+ * early boot, before `useTheme`'s first applyThemeToDom) — callers
+ * fall back to whatever they have.
+ */
+export function getEffectiveTheme() {
+  if (typeof document === 'undefined') return null
+  const el = document.getElementById(STYLE_ID)
+  const css = el?.textContent || ''
+  if (!css) return null
+  // body.style.background is the inline value applyThemeToDom set
+  // from the theme's --bg; only trust it if it's a clean hex (the
+  // same constraint applyThemeToDom + the frame's applyTheme use).
+  const rawBg = (document.body?.style?.background || '').trim()
+  const bg = HEX_RE.test(rawBg) ? rawBg : undefined
+  // Prefer the attribute the shell already set (authoritative);
+  // fall back to inferring from the CSS body if absent.
+  const mode = document.documentElement.getAttribute('data-theme')
+    || _inferThemeMode(css, bg)
+  return { css, bg, mode }
+}
+
+/**
  * Persist a theme (CSS + mode) to the server's shared storage and
  * notify active broadcasts via the SSE channel so live agents pick
  * up the change.
