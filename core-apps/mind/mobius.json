@@ -17,17 +17,5 @@
   "permissions": {
     "cross_app_access": "none",
     "share_with_apps": "none"
-  },
-  "runtime": {
-    "imports": [
-      "react",
-      "react-dom"
-    ],
-    "esm_deps": [
-      "d3",
-      "pixi.js",
-      "marked",
-      "dompurify"
-    ]
   }
 }

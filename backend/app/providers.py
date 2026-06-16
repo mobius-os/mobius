@@ -8,11 +8,14 @@ only the identity + auth surface, not a polymorphic command shape:
     `build_env` (for `CLAUDE_CONFIG_DIR` + `AGENT_BROWSER_SESSION`)
     and then drives the Anthropic Agent SDK directly. There is no
     argv to build and no stdout to parse on this path.
-  * `CodexProvider` — everything-shaper for the subprocess (app-server)
-    path. Codex still spawns `codex_appserver_runner.py` for per-token
-    streaming, so it owns `check_auth`, `build_env`, plus `build`
-    (argv + env for the runner) and `parse_line` (decode the runner's
-    JSON event lines).
+  * `CodexProvider` — identity/auth/env shaper. Like Claude, live Codex
+    chat turns now run through the Agent SDK: `chat.py` dispatches to
+    `codex_sdk_runner.run_codex_sdk_turn`, never to `build` / `parse_line`.
+    The app-server subprocess methods (`build` spawns
+    `codex_appserver_runner.py`, `parse_line` decodes its lines) are
+    retained but are NOT on the live chat path. The translator module
+    `codex_appserver.py` does still have live consumers — the SDK runner
+    reuses its event-classification and bash-extraction helpers.
 
 `BaseProvider` carries only the common surface (`check_auth`,
 `build_env`, and the `name`/`cli_cmd`/`auth_dir` identifiers).
@@ -21,8 +24,9 @@ has no use for them — putting them on the base class would be
 fictional polymorphism that `NotImplementedError`s on Claude.
 
 Adding a new provider means writing a new class here and registering
-it in PROVIDERS. SDK-backed providers implement just `check_auth` +
-`build_env`; subprocess-backed providers add `build` + `parse_line`.
+it in PROVIDERS. Both live providers are SDK-backed and implement just
+`check_auth` + `build_env`; the legacy subprocess surface (`build` +
+`parse_line`) lives on `CodexProvider` alone.
 """
 
 import asyncio
@@ -224,9 +228,8 @@ def effective_agent_settings(
 def get_skill_path() -> Path | None:
   """Resolves the agent skill file location. Single source of truth.
 
-  The Codex `build()` (which still spawns the app-server runner) and
-  the SDK runners (`claude_sdk_runner.py`, `codex_sdk_runner.py`) all
-  call this. The path is independent of `data_dir` — the skill is part
+  The legacy Codex `build()` and the SDK runners
+  (`claude_sdk_runner.py`, `codex_sdk_runner.py`) all call this. The path is independent of `data_dir` — the skill is part
   of the deployment, not per-instance state, so resolution checks the
   baked container path first and falls back to the in-repo path for
   local development. Returns None if neither exists (callers handle
