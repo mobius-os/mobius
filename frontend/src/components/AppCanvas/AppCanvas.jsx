@@ -384,22 +384,22 @@ export default function AppCanvas({
 
   // Broadcast theme updates to an already-loaded iframe so it can
   // refresh its theme without remounting (and losing app state).
-  // The query result (`theme?.css`) is the TRIGGER — a toggle bumps
-  // it — but the PAYLOAD is the effective applied theme read back
-  // from the shell's DOM. By the time this effect runs, useTheme's
-  // own effect has already called applyThemeToDom for the new value,
-  // so getEffectiveTheme() returns the just-applied theme. Sourcing
-  // the payload from the DOM keeps this path identical to sendInit
-  // and never posts an undefined css (which would no-op the frame's
-  // applyTheme and leave a live frame on its old theme offline).
+  // Prefer the query result (`theme.css`): it is this effect's trigger
+  // and is guaranteed fresh here. useTheme's applyThemeToDom and this
+  // broadcast are both passive effects with no guaranteed ordering, so
+  // on an SSE/agent refetch getEffectiveTheme() may still read the
+  // PRE-change DOM — using it first would broadcast a stale css. Fall
+  // back to the applied-DOM theme only when theme.css is absent
+  // (offline/unresolved), where it is the offline-safe source (the
+  // toggle path applies it before invalidating, so the DOM is fresh).
   useEffect(() => {
     if (!loadedRef.current || !iframeRef.current || !theme) return
     const eff = getEffectiveTheme()
     iframeRef.current.contentWindow?.postMessage(
       {
         type: 'moebius:frame-theme',
-        themeCss: eff?.css ?? theme.css,
-        bg: eff?.bg ?? theme.bg,
+        themeCss: theme.css ?? eff?.css,
+        bg: theme.bg ?? eff?.bg,
       },
       window.location.origin,
     )
