@@ -59,6 +59,25 @@ except Exception:
 ' "$1" 2>/dev/null
 }
 
+# app_manifest_url <slug> -> echoes the app's manifest_url (empty if none or
+# not registered). A non-empty manifest_url means the app was installed from
+# the catalog/store and owns its own update lifecycle — baked-sync must not
+# clobber its working tree. Same argv-not-stdin program form as has_app.
+app_manifest_url() {
+  echo "$apps_json" | python3 -c '
+import json, sys
+slug = sys.argv[1]
+try:
+    apps = json.load(sys.stdin)
+    apps = apps if isinstance(apps, list) else apps.get("apps", [])
+    for a in apps:
+        if a.get("slug") == slug or a.get("name","").lower().replace(" ","-") == slug:
+            print(a.get("manifest_url") or ""); break
+except Exception:
+    pass
+' "$1" 2>/dev/null
+}
+
 # sync_core_app <slug> <Name> <description> ; echoes the app id.
 #
 # register_app.py is create-OR-update (it PATCHes jsx_source when an app of
@@ -80,6 +99,19 @@ sync_core_app() {
   baked_hash="$(sha256sum "$src" 2>/dev/null | cut -d' ' -f1)"
   live_hash="$(cat "$hashfile" 2>/dev/null || echo none)"
   existing_id="$(has_app "$slug")"
+  # Store-managed apps (installed from the catalog, carrying a manifest_url)
+  # own their update lifecycle via the store — the owner re-installs from the
+  # manifest. Baked-sync must NOT cp baked source over a store-installed
+  # working tree (that regressed prod Mind: served a stale baked vX over the
+  # store-installed vY). Skip the JSX sync for them entirely, keeping baked-
+  # sync a FIRST-INSTALL-ONLY fallback for instances that never reached the
+  # catalog. Platform machinery copied OUTSIDE this function (e.g. the dreaming
+  # cron scripts) is separate and still runs.
+  if [[ -n "$existing_id" && -n "$(app_manifest_url "$slug")" ]]; then
+    log "$slug is store-managed (manifest_url set) — leaving its UI to the store (id=$existing_id)"
+    echo "$existing_id"
+    return
+  fi
   if [[ -n "$existing_id" && "$baked_hash" == "$live_hash" ]]; then
     log "$slug unchanged since last sync (id=$existing_id)"
     echo "$existing_id"

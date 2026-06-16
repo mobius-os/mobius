@@ -36,8 +36,14 @@ from app.deps import get_current_owner, reject_cross_site
 # the schema). Read endpoint doesn't filter on this — old log lines
 # survive a future schema bump.
 _KNOWN_EVENTS = {
-  "app_open", "app_install", "storage_write", "cron_outcome",
-  "memory_load", "skill_loaded",
+  "app_open", "app_install", "app_uninstall", "storage_write",
+  "cron_outcome", "memory_load", "skill_loaded",
+  # In-process emitters (Python `log_event`, never POSTed to /emit) — listed
+  # so the vocabulary lives in one place and a future cron-emit can use them.
+  # The allowlist gates the WRITE/emit endpoint only; the read endpoint
+  # surfaces every event regardless.
+  "app_error", "chat_sent", "chat_created", "provider_switch",
+  "chat_log_read", "slug_collision",
 }
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])

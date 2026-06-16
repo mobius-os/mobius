@@ -1099,8 +1099,13 @@ async def delete_app(
     # platform-dependent aware/naive round-trip mismatch.
     app.deleted_at = now_naive_utc()
     app_name = app.name
+    app_slug = app.slug
     app_source_dir = app.source_dir
     db.commit()
+    # Logical uninstall — pairs with the app_install event so churn analysis
+    # (and the nightly digest) sees removals, not just installs. Best-effort,
+    # after the tombstone commit.
+    activity.log_event("app_uninstall", app_id=app_id, slug=app_slug)
 
     # The Shell refetches /api/apps/ and the now-tombstoned app drops out
     # (list_apps filters deleted_at IS NULL).

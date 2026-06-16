@@ -1,13 +1,59 @@
-// Minimal client-side error telemetry. There is no remote sink (Möbius is
-// single-owner + self-hosted), but a broken state must be DIAGNOSABLE rather
-// than a silent white screen — in the spirit of the recovery-over-prevention
-// model. We keep a small ring buffer of the most recent errors in
-// sessionStorage so the recovery surface (and the owner) can answer "what
-// just broke?" instead of guessing. A real POST /api/debug/client-error sink
-// can hook recordClientError later without touching any caller.
+// Minimal client-side error telemetry. A broken state must be DIAGNOSABLE
+// rather than a silent white screen — in the spirit of the recovery-over-
+// prevention model. recordClientError does three things, each best-effort and
+// non-throwing: logs to console for live devtools, keeps a small ring buffer
+// of recent errors in sessionStorage (so the recovery surface + the owner can
+// answer "what just broke?"), and POSTs to /api/client-error so uncaught SHELL
+// errors land in the activity log as `app_error` events (no app_id == shell;
+// the nightly Dreaming digest reads these). The POST is standalone here — no
+// api/client.js import — so this leaf logger can never cause an import cycle
+// or route through apiFetch's 401-reload path, and a failed report can never
+// itself throw.
 
 const RING_KEY = 'mobius:error-log' // ring buffer of the last MAX errors
 const MAX = 10
+
+// Deployment-prefix-aware base, mirroring api/client.js (kept inline so this
+// leaf module imports nothing). Empty string at the root, e.g. "/proxy/8001".
+const BASE = (import.meta.env?.BASE_URL || '/').replace(/\/$/, '')
+
+// Per-message 60s debounce so a render loop can't storm the network before the
+// server's own debounce collapses the duplicates. Mirrors app-frame.html's
+// reportAppError for the in-iframe path.
+const _reportSeen = new Map()
+
+/**
+ * POST one shell error to /api/client-error → an `app_error` activity event
+ * (the owner JWT carries no app_id, so it's attributed as a shell error).
+ * Standalone + swallow-all + keepalive so it survives a white-screen/reload and
+ * can never itself throw or trigger a logout. No-op before login (no token).
+ */
+function postClientError(record) {
+  let token
+  try { token = localStorage.getItem('token') } catch { token = null }
+  if (!token || !record.message) return
+  const key = String(record.message).slice(0, 200)
+  const now = Date.now()
+  const last = _reportSeen.get(key)
+  if (last && now - last < 60000) return
+  _reportSeen.set(key, now)
+  try {
+    const detail = record.stack || record.componentStack
+    fetch(`${BASE}/api/client-error`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        message: String(record.message).slice(0, 2000),
+        where: record.where,
+        stack: detail ? String(detail).slice(0, 8000) : undefined,
+        url: (typeof location !== 'undefined') ? location.href : undefined,
+      }),
+      keepalive: true,
+    }).catch(() => {})
+  } catch {
+    /* never throw from the error path */
+  }
+}
 
 /**
  * Records one client error: console for live devtools, plus a persisted ring
@@ -31,6 +77,10 @@ export function recordClientError({ where, message, error, stack, componentStack
   } catch {
     /* storage full/disabled — the console line above is the fallback */
   }
+  // Additive remote sink: surface uncaught shell errors in the activity log.
+  // After the console + ring writes so the diagnosable-locally behavior is
+  // untouched even if the POST path is a no-op (pre-login) or fails.
+  postClientError(record)
 }
 
 /** Returns the recent-error ring (oldest first), or [] if unreadable. */

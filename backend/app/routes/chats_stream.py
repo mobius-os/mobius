@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.responses import Response
 from sqlalchemy.orm import Session
 
-from app import models, questions, schemas
+from app import activity, models, questions, schemas
 from app.broadcast import create_broadcast, get_broadcast, get_system_broadcast
 from app.chat import (
   _schedule_continuation,
@@ -399,6 +399,29 @@ async def send_message(
         status_code=410,
         detail="The question is no longer accepting answers.",
       )
+
+  # Record the user turn ONCE here — the single choke point past the
+  # answer-delivery returns above and before the queue/steer/initial
+  # branching below — so every genuine user send is counted exactly once
+  # regardless of which path stores it (initial start, queue append, or
+  # steer). Skip force_steer: that is Stop's queue-collapse re-send of
+  # messages already counted when first queued. app_id is set for
+  # app-attributed (window.mobius.chat) sends, null for the owner.
+  # Best-effort, metadata only — never the message text.
+  #
+  # Semantics: this counts a validated user-turn ARRIVAL (before the durable
+  # store), which is the right signal for "did the partner engage today" that
+  # the dreaming digest wants. A rare failed store (503 / queue error) can
+  # overcount by one — acceptable here; this is a usage signal, NOT a billing
+  # counter. Emitting per-store-path instead would re-introduce the multi-path
+  # over/under-count hazard the single choke point avoids.
+  if not body.force_steer:
+    activity.log_event(
+      "chat_sent",
+      chat_id=chat_id,
+      provider=(chat.provider or "claude"),
+      app_id=principal.app_id,
+    )
 
   # Local helper used by both code paths below: coerces the chat's
   # JSON-column settings to a plain dict (defends against the
