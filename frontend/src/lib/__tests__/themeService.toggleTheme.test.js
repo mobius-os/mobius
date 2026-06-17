@@ -32,7 +32,13 @@ function makeDomStub() {
   // Light/dark mode support added documentElement.setAttribute and the
   // status-bar meta lookup — same drift fix as themeService.test.js.
   const statusBar = { content: 'black', getAttribute: (k) => statusBar[k], setAttribute: (k, v) => { statusBar[k] = v } }
-  const documentElement = { _attrs: {}, getAttribute: (k) => documentElement._attrs[k], setAttribute: (k, v) => { documentElement._attrs[k] = v } }
+  const documentElement = {
+    _attrs: {},
+    getAttribute: (k) => documentElement._attrs[k],
+    setAttribute: (k, v) => { documentElement._attrs[k] = v },
+    // applyThemeToDom now syncs the inline --bg (BUG 2); capture it.
+    style: { _props: {}, setProperty(name, value) { this._props[name] = value }, getPropertyValue(name) { return this._props[name] } },
+  }
   const body = { style: {} }
   function makeNode(tag) {
     return {
@@ -135,9 +141,21 @@ function makeApi(initialCss = DARK_CSS) {
 let dom
 let themeService
 
+// applyThemeToDom (called inside toggleTheme) now writes
+// localStorage['mobius-theme-bg'] (BUG 2). Stub it so the calls don't throw.
+function makeLocalStorageStub() {
+  const map = new Map()
+  return {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => { map.set(k, String(v)) },
+    removeItem: (k) => { map.delete(k) },
+  }
+}
+
 beforeEach(async () => {
   dom = makeDomStub()
   globalThis.document = dom.document
+  globalThis.localStorage = makeLocalStorageStub()
   const url = new URL('../themeService.js', import.meta.url).href
     + `?t=${Math.random()}`
   themeService = await import(url)
@@ -335,4 +353,93 @@ test('iframe-propagation contract — invalidation triggers AppCanvas-style post
   assert.equal(postedMessages.length, 1,
     'AppCanvas-style subscriber must observe the ["theme"] invalidation and postMessage exactly once')
   assert.equal(postedMessages[0].type, 'moebius:frame-theme')
+})
+
+
+// --- BUG 1: toggle direction must come from the VISIBLE (DOM) mode ---
+// SettingsView.toggleTheme used to derive direction from its optimistic
+// `lightMode` state, which mirrors themeModeQuery.data and LAGS the painted
+// theme through the SW. When it lagged, the toggle computed the wrong
+// direction and applyThemeToDom got handed the already-current CSS → a
+// no-op repaint that left the UI stuck. The fix reads the direction from
+// getEffectiveTheme().mode (the <html data-theme> applyThemeToDom last
+// painted). These tests lock in that the effective DOM mode is the
+// authoritative, always-current source a correct toggle must key off — so
+// a lagging `lightMode` can never send the toggle the wrong way.
+
+test('BUG 1 — getEffectiveTheme().mode reflects the PAINTED theme, not a lagging state', async () => {
+  // Paint dark, then light, via the real apply path (what the user sees).
+  themeService.applyThemeToDom(':root { --bg: #0d0d0d; }', '#0d0d0d')
+  assert.equal(themeService.getEffectiveTheme().mode, 'dark')
+  themeService.applyThemeToDom(':root { --bg: #f0eeeb; }', '#f0eeeb')
+  // The visible mode is now light. A lagging `lightMode=false` (dark)
+  // would disagree — but the toggle keys off THIS, which is correct.
+  assert.equal(themeService.getEffectiveTheme().mode, 'light',
+    'effective mode must follow the painted theme so toggle direction is right')
+})
+
+test('BUG 1 — direction derived from effective DOM mode toggles correctly even when lightMode lags', async () => {
+  // Simulate SettingsView.toggleTheme's NEW direction logic against a
+  // VISIBLE light theme while the optimistic `lightMode` still says dark
+  // (the lag that caused the stuck-on-dark bug).
+  themeService.applyThemeToDom(':root { --bg: #f0eeeb; }', '#f0eeeb')  // user sees LIGHT
+  const laggingLightMode = false  // stale: still thinks we're dark
+
+  // OLD (buggy) logic: newMode = !lightMode -> dark; currentMode -> 'light'
+  // by coincidence here, but the general failure is direction off the lag.
+  // NEW logic mirrors SettingsView: derive from the effective DOM mode.
+  const eff = themeService.getEffectiveTheme()
+  const currentMode = eff?.mode === 'light' || eff?.mode === 'dark'
+    ? eff.mode
+    : (laggingLightMode ? 'light' : 'dark')
+  assert.equal(currentMode, 'light',
+    'currentMode must be read from the VISIBLE theme (light), ignoring the lagging state')
+
+  // Toggling from the visible light theme must persist DARK and repaint dark.
+  const qc = makeQueryClient()
+  const LIGHT_CSS = DARK_CSS
+    .replace('--bg: #0d0f14', '--bg: #f0eeeb')
+    .replace('color-scheme: dark', 'color-scheme: light')
+  const api = makeApi(LIGHT_CSS)
+  const result = await themeService.toggleTheme(qc, currentMode, api)
+  assert.equal(result.newMode, 'dark',
+    'toggling away from the visible LIGHT theme must go DARK (not stay/flip wrong)')
+  assert.equal(dom.document.body.style.background, '#0d0d0d',
+    'the DOM must repaint to the new dark bg (no stuck no-op)')
+  assert.equal(themeService.getEffectiveTheme().mode, 'dark',
+    'after the toggle the visible mode is dark')
+})
+
+test('BUG 1 — repeated toggles driven by effective mode never get stuck', async () => {
+  // The owner's exact failure: dark -> light -> dark -> light rapidly.
+  // Each toggle re-reads the effective DOM mode, so direction is always
+  // right and the paint always changes.
+  let css = DARK_CSS  // start dark
+  const seen = []
+  for (let i = 0; i < 4; i++) {
+    const eff = themeService.getEffectiveTheme()
+    // First iteration: nothing painted yet, fall back to known dark start.
+    const currentMode = eff?.mode === 'light' || eff?.mode === 'dark'
+      ? eff.mode
+      : 'dark'
+    const qc = makeQueryClient()
+    const api = makeApi(css)
+    const result = await themeService.toggleTheme(qc, currentMode, api)
+    css = api.calls.find(c => c[0] === 'putThemeCss')[1]  // new persisted css
+    seen.push(themeService.getEffectiveTheme().mode)
+  }
+  // Strictly alternating, never stuck.
+  assert.deepEqual(seen, ['light', 'dark', 'light', 'dark'],
+    `repeated toggles must strictly alternate; got ${seen.join(', ')}`)
+})
+
+test('BUG 2 — toggleTheme keeps the inline --bg in lockstep with the painted theme', async () => {
+  // toggleTheme -> applyThemeToDom must overwrite any stale inline --bg.
+  dom.documentElement.style.setProperty('--bg', '#deadbe')  // stale splash value
+  const qc = makeQueryClient()
+  const api = makeApi(DARK_CSS)  // dark -> light
+  await themeService.toggleTheme(qc, 'dark', api)
+  assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#f0eeeb',
+    'inline --bg must track the toggled-to light bg, not the stale splash value')
+  assert.equal(localStorage.getItem('mobius-theme-bg'), '#f0eeeb')
 })
