@@ -31,6 +31,11 @@
   display: flex;
   flex-direction: column;
   transform: translateX(-100%);
+  /* Promote the panel to its own compositor layer so the slide
+     animates on the GPU. Without this the close frame shared the
+     main thread with the synchronous Navigation-API state write in
+     handleBack, and the first frame of the close stuttered. */
+  will-change: transform;
   /* Use the apps-sdk-ui motion tokens so all platform transitions
      read as part of the same design system. --cubic-move is the
      ease curve the SDK uses for sliding panels. */
