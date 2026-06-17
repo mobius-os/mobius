@@ -33,3 +33,39 @@ def test_build_sha_reads_env(monkeypatch):
   # (pydantic-settings binds it case-insensitively, no prefix).
   monkeypatch.setenv("BUILD_SHA", "abc123def")
   assert Settings(**_KW).build_sha == "abc123def"
+
+
+def _marker_path():
+  """The served-shell build marker entrypoint.sh / deploy-prod.sh stamp.
+
+  Derived from the live settings' data_dir (the test conftest points
+  DATA_DIR at a tempdir), so the test reads exactly what the endpoint does.
+  """
+  from pathlib import Path
+
+  from app.config import get_settings
+
+  return Path(get_settings().data_dir) / "shell" / ".image-build-sha"
+
+
+def test_version_shell_sha_unknown_without_marker(client):
+  # No /data/shell/.image-build-sha (a plain instance or one predating the
+  # marker) ⇒ shell_sha falls back to "unknown" rather than erroring.
+  marker = _marker_path()
+  marker.unlink(missing_ok=True)
+  body = client.get("/api/version").json()
+  assert body["shell_sha"] == "unknown"
+
+
+def test_version_shell_sha_reflects_marker(client):
+  # The endpoint surfaces the served-shell build identity stamped by the
+  # entrypoint's image-update refresh / deploy-prod, so a client can compare
+  # it against `sha` to detect a served UI that lags the installed image.
+  marker = _marker_path()
+  marker.parent.mkdir(parents=True, exist_ok=True)
+  marker.write_text("deadbeefcafe\n", encoding="utf-8")
+  try:
+    body = client.get("/api/version").json()
+    assert body["shell_sha"] == "deadbeefcafe"
+  finally:
+    marker.unlink(missing_ok=True)

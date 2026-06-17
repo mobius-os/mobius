@@ -515,6 +515,52 @@ if [ ! -d /data/shell/src ]; then
   chown -R mobius:mobius /data/shell
   # record a hash of the origin so we can detect upstream updates
   find /app/shell-src/src -type f | sort | xargs md5sum | md5sum | cut -d' ' -f1 > /data/shell/.origin-hash
+  # Stamp the image's build identity so a later image pull can tell the
+  # served /data/shell/dist is stale (see the image-update refresh below).
+  echo "${BUILD_SHA:-unknown}" > /data/shell/.image-build-sha
+  chown mobius:mobius /data/shell/.image-build-sha
+fi
+
+# --- deliver a pulled image's new shell bundle (self-host update path) ---
+# A self-hoster updates by `docker compose pull && up -d`. The new image
+# carries a fresh baked Vite build at /app/static, but the persisted
+# /data/shell/dist (whatever was last built) MASKS it — main.py picks the
+# live /data/shell/dist over the baked /app/static at startup. The
+# first-boot seed above runs only once, and the upstream-change detector
+# below only writes a diff; neither re-serves the new bundle. So without
+# this step a pulled image silently keeps serving the OLD UI/CLI shell.
+#
+# deploy-prod.sh already refreshes dist on the owner's prod, so this stays
+# a no-op there: it stamps .image-build-sha on every refresh, and a deploy
+# that rebuilt dist from this image leaves the marker matching BUILD_SHA.
+# We only act when the image is NEWER than what we last served.
+#
+# Detection: compare the image's baked BUILD_SHA against the stamped
+# marker. We skip when BUILD_SHA is unset/"unknown" (a plain `docker
+# compose up` that did not pass the build-arg) so local dev instances do
+# not churn dist on every boot.
+#
+# Preserving user edits: we refresh ONLY /data/shell/dist (the served
+# build), copied from the new image's baked /app/static (a complete build
+# incl. /vendor). We do NOT touch /data/shell/src — a user who customized
+# the shell source keeps it; their edits just are not reflected in the
+# served bundle until they rebuild (npx vite build / rebuild_shell.sh).
+# This is the minimum that makes a pull deliver the new baked UI while
+# leaving customization reversible: a user-built dist is regenerable from
+# their src, so refreshing it is safe.
+_baked_sha="${BUILD_SHA:-unknown}"
+if [ -d /data/shell/src ] && [ "$_baked_sha" != "unknown" ]; then
+  _stamped_sha=""
+  [ -f /data/shell/.image-build-sha ] && _stamped_sha=$(cat /data/shell/.image-build-sha)
+  if [ "$_baked_sha" != "$_stamped_sha" ] && [ -f /app/static/index.html ]; then
+    echo "Image build ${_baked_sha} differs from last-served ${_stamped_sha:-<none>}; refreshing /data/shell/dist from the new baked bundle."
+    rm -rf /data/shell/dist
+    cp -a /app/static /data/shell/dist
+    chown -R mobius:mobius /data/shell/dist
+    echo "$_baked_sha" > /data/shell/.image-build-sha
+    chown mobius:mobius /data/shell/.image-build-sha
+    echo "Served shell bundle refreshed to image build ${_baked_sha}."
+  fi
 fi
 
 # --- enforce protected file permissions ---
