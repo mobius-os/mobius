@@ -12,6 +12,7 @@ import shutil
 import time
 from html import escape as html_escape
 from pathlib import Path
+from typing import NamedTuple
 
 # Matches @import url('...') or @import url("...") statements.
 _IMPORT_RE = re.compile(
@@ -398,18 +399,102 @@ def frame_content_rev(data_dir: str) -> str:
   routes/apps.py `_frame_etag`, which the SW cache KEY (unlike the HTTP ETag)
   ignores. Keep the path candidates in sync with the `/frame` route.
   """
-  candidates = [
-    Path(data_dir) / "shell" / "public" / "app-frame.html",
-    Path(__file__).resolve().parents[2] / "frontend" / "public" / "app-frame.html",
-    Path("/app/app-frame.html"),
-  ]
-  frame_path = next((p for p in candidates if p.exists()), None)
+  frame_path = _resolve_frame_path(data_dir)
   if frame_path is None:
     return ""
   return hashlib.sha256(frame_path.read_bytes()).hexdigest()[:16]
 
 
-def inject_theme_into_html(html: str, data_dir: str) -> str:
+class EffectiveTheme(NamedTuple):
+  """The bundle of theme facts a single page render needs, computed from
+  one read each of theme.css + theme-mode + one hash of app-frame.html.
+
+  Produced by `load_effective_theme` and threaded into both
+  `inject_theme_into_html` and the `/frame` ETag so a request resolves the
+  theme ONCE instead of `inject_theme_into_html` + `get_bg_color` +
+  `get_theme_mode` + `frame_content_rev` each re-reading the same files.
+  `css` is the effective (core-var-augmented) CSS; `bg` is its --bg; `mode`
+  is "dark"/"light"; `rev` is the app-frame.html content hash.
+  """
+
+  css: str
+  bg: str
+  mode: str
+  rev: str
+
+
+# mtime+size-keyed memo for load_effective_theme. Keyed on the
+# (mtime_ns, size) of theme.css + theme-mode + the resolved app-frame.html
+# path, so a write to any of them changes the key and misses (recomputes)
+# exactly once. stat() is cheap; the saved work is the theme.css read +
+# _ensure_core_vars regex pass + the app-frame.html hash. Stale-key
+# tolerance: stat granularity means a sub-tick write that preserves size
+# could in theory under-invalidate, but theme writes go through the storage
+# layer (which rewrites the whole file → mtime advances), so this matches
+# the existing content-hash freshness model used by _frame_etag.
+_EFFECTIVE_THEME_MEMO: dict[str, tuple[tuple, EffectiveTheme]] = {}
+
+
+def _stat_key(path: Path) -> tuple[int, int]:
+  """(mtime_ns, size) for a file, or (0, 0) if it's missing."""
+  try:
+    st = path.stat()
+    return (st.st_mtime_ns, st.st_size)
+  except OSError:
+    return (0, 0)
+
+
+def load_effective_theme(data_dir: str) -> EffectiveTheme:
+  """Resolve the active theme in a single pass: read theme.css + theme-mode
+  once and hash app-frame.html once, returning the (css, bg, mode, rev)
+  bundle every page render needs.
+
+  Memoized on the stat-key of the three source files (see
+  `_EFFECTIVE_THEME_MEMO`): a theme write changes the key and recomputes
+  once, then subsequent requests hit the memo. Behavior is identical to
+  calling get_theme_css / get_bg_color / get_theme_mode / frame_content_rev
+  separately — this just avoids re-reading the same files 4x per request.
+  """
+  base = Path(data_dir) / "shared"
+  theme_path = base / "theme.css"
+  mode_path = base / "theme-mode"
+  frame_path = _resolve_frame_path(data_dir)
+  key = (
+    _stat_key(theme_path),
+    _stat_key(mode_path),
+    _stat_key(frame_path) if frame_path else (0, 0),
+  )
+  cached = _EFFECTIVE_THEME_MEMO.get(data_dir)
+  if cached is not None and cached[0] == key:
+    return cached[1]
+
+  css = get_theme_css(data_dir)
+  m = re.search(r"--bg:\s*(#[0-9a-fA-F]{3,8})", css)
+  bg = m.group(1) if m else "#0d0d0d"
+  mode = get_theme_mode(data_dir)
+  rev = (
+    hashlib.sha256(frame_path.read_bytes()).hexdigest()[:16]
+    if frame_path else ""
+  )
+  bundle = EffectiveTheme(css=css, bg=bg, mode=mode, rev=rev)
+  _EFFECTIVE_THEME_MEMO[data_dir] = (key, bundle)
+  return bundle
+
+
+def _resolve_frame_path(data_dir: str) -> Path | None:
+  """First existing app-frame.html among the agent-editable, dev, and
+  baked-in locations — the same candidate list frame_content_rev uses."""
+  candidates = [
+    Path(data_dir) / "shell" / "public" / "app-frame.html",
+    Path(__file__).resolve().parents[2] / "frontend" / "public" / "app-frame.html",
+    Path("/app/app-frame.html"),
+  ]
+  return next((p for p in candidates if p.exists()), None)
+
+
+def inject_theme_into_html(
+  html: str, data_dir: str, bundle: "EffectiveTheme | None" = None
+) -> str:
   """Inject the active theme CSS and background color into an HTML string.
 
   Replaces the </head> tag with a <style> block containing the theme CSS,
@@ -428,29 +513,47 @@ def inject_theme_into_html(html: str, data_dir: str) -> str:
   partial theme can't render shell text invisibly. Otherwise the
   theme is passed through verbatim — the agent has full creative
   freedom.
+
+  `bundle`: pass a precomputed `load_effective_theme(data_dir)` to skip the
+  per-call file reads (the `/frame` route does this so the ETag and the
+  injection resolve the theme from one read). When omitted it's computed
+  here, so existing callers are unaffected.
   """
-  css = get_theme_css(data_dir)
-  bg = get_bg_color(data_dir)
-  mode = get_theme_mode(data_dir)
+  if bundle is None:
+    bundle = load_effective_theme(data_dir)
+  css = bundle.css
+  bg = bundle.bg
+  mode = bundle.mode
+  rev = bundle.rev
   imports, css = extract_imports(css)
   safe_imports = [u for u in imports if _is_safe_import_url(u)]
   link_tags = "".join(
     f'<link rel="stylesheet" href="{html_escape(url, quote=True)}">\n'
     for url in safe_imports
   )
-  css = _ensure_core_vars(css)
   safe_css = _escape_for_style_tag(css)
-  rev = frame_content_rev(data_dir)
+  # Pin the iframe's native color-scheme to the SHELL mode, not the OS
+  # `prefers-color-scheme`. Without this the browser picks form-control /
+  # scrollbar / canvas defaults from the OS preference, so a dark-mode shell
+  # on a light-OS device flashes a light canvas (and light scrollbars/native
+  # widgets) inside the app frame. `data-theme` below covers shell CSS, but
+  # `color-scheme` is what drives the UA-native surfaces — emit it explicitly
+  # so they match the injected mode. Prepended to the injected <style> so it's
+  # part of the first-paint block. `_escape_for_style_tag` already ran on the
+  # theme CSS; `mode` is a fixed "dark"/"light" literal, so this prefix is
+  # safe to concatenate after escaping.
+  scheme_css = f":root{{color-scheme:{mode}}}\n"
   rev_meta = (
     f'<meta name="mobius-frame-rev" content="{html_escape(rev, quote=True)}">\n'
     if rev else ""
   )
   html = html.replace(
-    "</head>", f"{link_tags}<style>{safe_css}</style>\n{rev_meta}</head>"
+    "</head>",
+    f"{link_tags}<style>{scheme_css}{safe_css}</style>\n{rev_meta}</head>",
   )
   html = html.replace("background:#0d0d0d", f"background:{bg}")
   html = html.replace('content="#0d0d0d"', f'content="{bg}"')
-  # `data-theme` on <html> activates the right `color-scheme` from
+  # `data-theme` on <html> activates the right shell `color-scheme` from
   # the very first paint. Without it, light-mode users see a flash of
   # dark-themed native widgets (scrollbars, autofill, date pickers)
   # before `applyThemeToDom` runs from the React effect.

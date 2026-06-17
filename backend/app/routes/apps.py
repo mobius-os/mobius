@@ -1481,10 +1481,12 @@ def get_frame(
   # revalidates after a light/dark toggle. Token is a hash of the effective
   # theme CSS plus the mode; cheap, and the same signal the injection uses.
   data_dir = get_settings().data_dir
-  theme_css = theme.get_theme_css(data_dir)
-  theme_mode = theme.get_theme_mode(data_dir)
+  # Resolve the active theme ONCE (single read of theme.css + theme-mode +
+  # one app-frame hash, memoized) and thread the same bundle into both the
+  # ETag token and the injection below — they used to each re-read the theme.
+  theme_bundle = theme.load_effective_theme(data_dir)
   theme_token = hashlib.sha256(
-    f"{theme_mode}:{theme_css}".encode("utf-8")
+    f"{theme_bundle.mode}:{theme_bundle.css}".encode("utf-8")
   ).hexdigest()[:16]
 
   etag = _frame_etag(app, frame_path, theme_token)
@@ -1516,7 +1518,7 @@ def get_frame(
   # <style> after the fallback :root (it wins by source order) and
   # data-theme on <html> closes both windows for every app. The postMessage
   # path remains the mechanism for LIVE theme swaps without a reload.
-  html = theme.inject_theme_into_html(html, data_dir)
+  html = theme.inject_theme_into_html(html, data_dir, bundle=theme_bundle)
 
   headers = {"Cache-Control": "no-cache"}
   if etag:
