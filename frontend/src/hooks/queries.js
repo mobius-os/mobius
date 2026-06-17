@@ -72,6 +72,12 @@ function useSettingsQuery() {
   return useQuery({
     queryKey: settingsKey,
     queryFn: fetchSettings,
+    // Settings is persisted to IndexedDB (see queryClient.js) and the
+    // panel paints from that cache on open. A 5-minute staleTime stops
+    // the remount-on-open from refetching synchronously — the cached
+    // provider config + CLI versions render instantly, and a background
+    // revalidation only repaints if something actually changed.
+    staleTime: 5 * 60_000,
   })
 }
 
@@ -131,6 +137,11 @@ function useClaudeProviderStatusQuery() {
   return useQuery({
     queryKey: providerClaudeStatusKey,
     queryFn: fetchClaudeProviderStatus,
+    // Persisted alongside ['settings'] so the Settings panel's Claude
+    // row paints its connected state from disk on open. The 5-minute
+    // staleTime keeps the open from refetching synchronously; explicit
+    // invalidation (onClaudeAuthDone) still flips it after a re-auth.
+    staleTime: 5 * 60_000,
   })
 }
 

@@ -10,6 +10,7 @@ owner-scoped surface = define a sub-router in this file and
 """
 
 import logging
+import re
 import shutil
 import subprocess
 from datetime import UTC, datetime
@@ -40,6 +41,54 @@ logger = logging.getLogger(__name__)
 # settings request. `--version` is a near-instant probe; two seconds is
 # generous headroom.
 _VERSION_TIMEOUT = 2.0
+
+# Release dates for the pinned CLI versions, keyed by bare semver.
+#
+# The Dockerfile is the source of truth for WHICH versions ship
+# (`npm install -g @anthropic-ai/claude-code@<v>` /
+# `@openai/codex@<v>`); this map carries the release date for each so
+# the Settings row can read "2.1.173 (2026-06-11)" instead of the raw
+# CLI banner. Keep this in lockstep with the Dockerfile pins: when you
+# bump a pin, add the new version's npm publish date here. An unknown
+# version (anything not pinned, e.g. a hand-upgraded dev container)
+# falls back to the bare version — the row is never blocked on a
+# missing date.
+_CLI_RELEASE_DATES = {
+  # @anthropic-ai/claude-code
+  "2.1.173": "2026-06-11",
+  # @openai/codex
+  "0.134.0": "2026-05-26",
+}
+
+# Bare semver inside a CLI's `--version` banner. Tolerant of both
+# shapes the pinned CLIs print:
+#   claude → "2.1.173 (Claude Code)"   → captures "2.1.173"
+#   codex  → "codex-cli 0.134.0"       → captures "0.134.0"
+# The trailing \S* keeps a pre-release/build suffix (e.g. "1.0.0-rc.1")
+# attached to the version while still dropping the surrounding prose.
+_SEMVER_RE = re.compile(r"\d+\.\d+\.\d+\S*")
+
+
+def _format_cli_version(raw: str | None) -> str | None:
+  """Normalize a CLI `--version` banner to "<version> (<date>)".
+
+  Parses the bare semver out of the banner (dropping the codex-cli
+  prefix and the "(Claude Code)" suffix), then appends the pinned
+  release date from `_CLI_RELEASE_DATES`. Falls back to the bare
+  version when the date is unknown, and passes None straight through
+  (CLI absent / unresponsive) — the date lookup never blocks the row.
+  """
+  if raw is None:
+    return None
+  match = _SEMVER_RE.search(raw)
+  # No recognizable semver (unexpected banner shape) → surface the raw
+  # string rather than dropping the row entirely.
+  if match is None:
+    return raw
+  version = match.group(0)
+  date = _CLI_RELEASE_DATES.get(version)
+  return f"{version} ({date})" if date else version
+
 
 # Outer composer — this is what routes/__init__.py picks up. The
 # real surfaces live on the three child surfaces below.
@@ -93,8 +142,8 @@ def get_settings_view(
     "codex_authenticated": codex_creds.exists(),
     "provider": owner.provider or "claude",
     "skills_enabled": providers.skills_enabled(data_dir),
-    "claude_version": _cli_version("claude"),
-    "codex_version": _cli_version("codex"),
+    "claude_version": _format_cli_version(_cli_version("claude")),
+    "codex_version": _format_cli_version(_cli_version("codex")),
   }
 
 

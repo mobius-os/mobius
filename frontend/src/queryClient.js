@@ -50,9 +50,31 @@ export const persistOptions = {
   maxAge: 24 * 60 * 60 * 1000,
   buster: 'v1',
   dehydrateOptions: {
-    shouldDehydrateQuery: (query) => {
-      const k = query.queryKey[0]
-      return k === 'chats' || k === 'chat-messages' || k === 'theme' || k === 'apps'
-    },
+    shouldDehydrateQuery: (query) => shouldPersistQueryKey(query.queryKey),
   },
+}
+
+// Decide whether a query's cache entry is mirrored to IndexedDB.
+//
+// Top-level domains (chats, messages, theme, apps) match on the first
+// key segment. The Settings view's provider/CLI-version/status queries
+// are persisted too so the panel paints from disk on open instead of
+// flashing an empty providers list while the live probe revalidates:
+//   - ['settings']                          → provider config + CLI versions
+//   - ['auth','provider','claude-status']   → Claude connected state
+//   - ['auth','providers','status']         → all-providers connected state
+// Matched by full key, not by ['auth'] alone, so the short-lived
+// setup-status query (['auth','setup','status']) is NOT persisted.
+const PERSISTED_FULL_KEYS = new Set([
+  JSON.stringify(['settings']),
+  JSON.stringify(['auth', 'provider', 'claude-status']),
+  JSON.stringify(['auth', 'providers', 'status']),
+])
+
+export function shouldPersistQueryKey(queryKey) {
+  const head = queryKey[0]
+  if (head === 'chats' || head === 'chat-messages' || head === 'theme' || head === 'apps') {
+    return true
+  }
+  return PERSISTED_FULL_KEYS.has(JSON.stringify(queryKey))
 }
