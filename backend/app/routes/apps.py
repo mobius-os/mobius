@@ -1376,7 +1376,10 @@ def _not_modified_if_match(
 
 
 def _frame_etag(
-  app: models.App, frame_path: Path, theme_token: str = ""
+  app: models.App,
+  frame_path: Path,
+  theme_token: str = "",
+  frame_rev: str | None = None,
 ) -> str | None:
   """Validator for the `/frame` response, combining the app's
   `updated_at` with the shared runtime-frame file's content and the
@@ -1403,14 +1406,26 @@ def _frame_etag(
   — see get_frame). That makes the response vary by theme, so the
   validator must too: without it a cached frame keeps the old theme after
   a light/dark toggle (a 304 against an unchanged validator), which is the
-  same stale-frame trap the content hash closes for code changes."""
+  same stale-frame trap the content hash closes for code changes.
+
+  `frame_rev`: the app-frame.html content hash, already computed once by
+  `load_effective_theme` for the same request. Pass it so the frame file
+  isn't hashed a SECOND time here — the theme bundle and this ETag share
+  one read (both resolve the same candidate list, so the hash is identical;
+  see get_frame). When omitted (None), the hash is computed from
+  `frame_path` as before, so standalone callers and the unit tests are
+  unaffected. An empty rev means the frame was unresolvable — no content
+  part, matching the old read-failure fall-through."""
   parts: list[str] = []
   if app.updated_at:
     parts.append(str(int(app.updated_at.timestamp() * 1_000_000)))
-  try:
-    parts.append(hashlib.sha256(frame_path.read_bytes()).hexdigest()[:16])
-  except OSError:
-    pass
+  if frame_rev is None:
+    try:
+      parts.append(hashlib.sha256(frame_path.read_bytes()).hexdigest()[:16])
+    except OSError:
+      pass
+  elif frame_rev:
+    parts.append(frame_rev)
   if theme_token:
     parts.append(theme_token)
   if not parts:
@@ -1489,7 +1504,10 @@ def get_frame(
     f"{theme_bundle.mode}:{theme_bundle.css}".encode("utf-8")
   ).hexdigest()[:16]
 
-  etag = _frame_etag(app, frame_path, theme_token)
+  # Reuse the app-frame.html hash the bundle already computed (bundle.rev)
+  # instead of re-hashing the same file here — same candidate list, same
+  # bytes, so the ETag is byte-identical, just one read instead of two.
+  etag = _frame_etag(app, frame_path, theme_token, frame_rev=theme_bundle.rev)
   if etag:
     not_modified = _not_modified_if_match(request, etag, app.offline_capable)
     if not_modified is not None:
