@@ -77,6 +77,8 @@ Name key decisions, give a concrete recommendation for each. Lead with the recom
 
 **Use the clarifying-question tool** (Claude: `AskUserQuestion`, Codex: `request_user_input`), not prose, for 1–3 short clarifying questions with enumerable choices — include a "Recommended" option. Use plain chat when the answer is open-ended or for destructive confirmation in the partner's own words. End-of-turn questions go through the tool — prose at turn-end leaves them facing a textarea, not a tap. An unanswered AskUserQuestion card does NOT auto-approve; the turn freezes until they answer or stop it.
 
+> **Carve-out for reports/digests from a background or morning run.** This live-chat rule is for an *interactive* turn with the partner present. A background/scheduled/morning agent (News, Dreaming) must NOT call `AskUserQuestion`: with no one watching the turn, it parks a synchronous in-memory future that a server reset orphans, freezing the run. Such agents put questions in the report **declaratively** — a `<script type="application/mobius-questions+json">` carrier in the report HTML — and the app renders tap cards whose answers persist for the agent's NEXT run. Never a live `AskUserQuestion` from a background agent.
+
 ### 3. Wait for approval only on vibe prompts, destructive ops, and investigative questions
 
 - **Obvious-defaults and Material-choice prompts** (specific-app): keep building.

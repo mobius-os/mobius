@@ -125,6 +125,73 @@ export function hardenReportHtml(html) {
   return `<!doctype html><html><head>${inject}</head><body>${body}</body></html>`
 }
 
+// Validate + coerce the in-report question carrier's questions array into
+// the exact shape the native card consumes: [{ question, header,
+// multiSelect, options:[{label, description}] }]. Anything malformed is
+// dropped, not repaired. Caps at 3 questions and 6 options each.
+export function sanitizeQuestions(arr) {
+  if (!Array.isArray(arr)) return []
+  const out = []
+  for (const raw of arr) {
+    if (out.length >= 3) break
+    if (!raw || typeof raw !== 'object') continue
+    const question = typeof raw.question === 'string' ? raw.question.trim() : ''
+    if (!question) continue
+    const opts = Array.isArray(raw.options) ? raw.options : []
+    const options = []
+    for (const o of opts) {
+      if (options.length >= 6) break
+      const label = o && typeof o.label === 'string' ? o.label.trim() : ''
+      if (!label) continue
+      const description = o && typeof o.description === 'string' ? o.description.trim() : ''
+      options.push(description ? { label, description } : { label })
+    }
+    if (options.length === 0) continue
+    out.push({
+      question,
+      header: typeof raw.header === 'string' ? raw.header.trim() : '',
+      multiSelect: raw.multiSelect === true,
+      options,
+    })
+  }
+  return out
+}
+
+// Pull the agent's declarative in-report questions out of the RAW brief
+// HTML, returning the HTML with the carrier removed so it never reaches the
+// sandboxed iframe. The brief agent emits ONE inert JSON carrier:
+//
+//   <section class="report-questions" data-report-questions>
+//     <h2>…</h2><p class="rq-note">…</p>
+//     <script type="application/mobius-questions+json">{ … }</script>
+//   </section>
+//
+// Regex-based (no DOMParser) so it's identical to the news app's copy and
+// safe to run before hardenReportHtml. Returns { html, questions }: html
+// with the carrier stripped; questions = a validated array (the EXACT shell
+// QuestionCard shape) or [] when absent/malformed. Never throws — the brief
+// is the floor, a bad carrier just means no cards.
+export function extractReportQuestions(html) {
+  const empty = { html: typeof html === 'string' ? html : '', questions: [] }
+  if (typeof html !== 'string') return empty
+  const scriptRe = /<script\b[^>]*type=["']application\/mobius-questions\+json["'][^>]*>([\s\S]*?)<\/script>/i
+  const m = html.match(scriptRe)
+  let questions = []
+  if (m) {
+    try {
+      const parsed = JSON.parse(m[1].trim())
+      questions = sanitizeQuestions(parsed && parsed.questions)
+    } catch {
+      questions = []
+    }
+  }
+  let out = html
+  const sectionRe = /<(section|div)\b[^>]*\bdata-report-questions\b[^>]*>[\s\S]*?<\/\1>/i
+  if (sectionRe.test(out)) out = out.replace(sectionRe, '')
+  else if (m) out = out.replace(scriptRe, '')
+  return { html: out, questions }
+}
+
 // "0 6 * * *" -> "06:00" for the <input type="time"> value.
 function hourToTimeValue(hour) {
   return `${String(hour).padStart(2, '0')}:00`
@@ -516,6 +583,47 @@ const S = {
     color: 'var(--text)', padding: '9px 12px', fontSize: '12.5px', fontWeight: 700, cursor: 'pointer',
   },
 
+  // In-brief question cards. The agent embeds these declaratively in the
+  // brief HTML (a JSON carrier inside an inert <script>); the app renders
+  // them natively here so the partner taps an answer that's saved for the
+  // NEXT run — never a live agent the way a background AskUserQuestion would
+  // park a server-orphaned future. Shape mirrors the shell's QuestionCard.
+  rqCard: {
+    margin: '14px 16px 18px', padding: '16px', borderRadius: '14px',
+    border: `1px solid ${ACCENT}`, background: ACCENT_DIM,
+  },
+  rqTitle: { fontSize: '14.5px', fontWeight: 750, color: 'var(--text)', margin: '0 0 4px' },
+  rqNote: { fontSize: '12px', color: 'var(--muted)', margin: '0 0 14px', lineHeight: 1.5 },
+  rqQ: (first) => ({
+    marginTop: first ? 0 : '16px', paddingTop: first ? 0 : '16px',
+    borderTop: first ? 'none' : '1px solid var(--border)',
+  }),
+  rqHeader: {
+    fontSize: '11px', fontWeight: 600, textTransform: 'uppercase',
+    letterSpacing: '0.5px', color: ACCENT, marginBottom: '4px',
+  },
+  rqText: { fontSize: '14px', marginBottom: '6px', color: 'var(--text)' },
+  rqHint: { fontSize: '11px', color: 'var(--muted)', marginBottom: '8px' },
+  rqOpts: { display: 'flex', flexWrap: 'wrap', gap: '6px' },
+  rqOpt: (on, dim) => ({
+    display: 'inline-flex', alignItems: 'center', gap: '7px',
+    padding: '8px 13px', minHeight: '38px', borderRadius: '9px',
+    border: `1px solid ${on ? ACCENT : 'var(--border)'}`,
+    background: on ? ACCENT : 'var(--surface)',
+    color: on ? 'var(--bg)' : 'var(--text)',
+    opacity: dim ? 0.4 : 1,
+    fontSize: '13px', cursor: 'pointer', boxSizing: 'border-box',
+    fontFamily: 'var(--font)', touchAction: 'manipulation', userSelect: 'none',
+  }),
+  rqSubmit: (enabled) => ({
+    display: 'block', width: '100%', marginTop: '14px', minHeight: '44px',
+    padding: '11px', borderRadius: '11px', border: 'none',
+    background: ACCENT, color: 'var(--bg)', fontSize: '14px', fontWeight: 700,
+    cursor: enabled ? 'pointer' : 'default', opacity: enabled ? 1 : 0.4,
+    fontFamily: 'var(--font)', touchAction: 'manipulation',
+  }),
+  rqDone: { marginTop: '14px', fontSize: '12.5px', color: 'var(--muted)', lineHeight: 1.5 },
+
   // Settings
   settingsWrap: { maxWidth: '580px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '22px' },
   settingsCard: {
@@ -876,6 +984,110 @@ function FeedbackLauncher({ dateStr, chatId }) {
   )
 }
 
+// Native tap-card UI for the brief's in-report questions. Mirrors the shell
+// QuestionCard's shape ({question, header, multiSelect, options:[{label,
+// description}]}) but is a single-file, install-safe copy — no sibling
+// imports, no streaming/answeredMap plumbing. Collects an answer per
+// question; on submit calls onAnswer({ "<question text>": "<chosen
+// label(s)>" }) and flips to a local "answered" state. The caller persists
+// the answers for the NEXT run (not a live agent) — the note copy says so.
+function ReportQuestions({ questions, onAnswer }) {
+  const [picks, setPicks] = useState({})
+  const [answered, setAnswered] = useState(false)
+
+  if (!Array.isArray(questions) || questions.length === 0) return null
+
+  const allAnswered = questions.every((q) => {
+    const p = picks[q.question]
+    return q.multiSelect ? Array.isArray(p) && p.length > 0 : !!p
+  })
+
+  const choose = (q, label) => {
+    if (answered) return
+    setPicks((prev) => {
+      if (q.multiSelect) {
+        const cur = Array.isArray(prev[q.question]) ? prev[q.question] : []
+        const next = cur.includes(label) ? cur.filter((l) => l !== label) : [...cur, label]
+        return { ...prev, [q.question]: next }
+      }
+      return { ...prev, [q.question]: label }
+    })
+  }
+
+  const submit = () => {
+    if (!allAnswered || answered) return
+    const answers = {}
+    for (const q of questions) {
+      const p = picks[q.question]
+      answers[q.question] = Array.isArray(p) ? p.join(', ') : (p || '')
+    }
+    setAnswered(true)
+    onAnswer?.(answers)
+  }
+
+  return (
+    <div style={S.rqCard}>
+      <p style={S.rqTitle}>A few questions for tomorrow night</p>
+      <p style={S.rqNote}>
+        Your answers guide my next run — they won’t change this brief.
+      </p>
+      {questions.map((q, qi) => {
+        const isMulti = q.multiSelect
+        const cur = picks[q.question]
+        const selected = (label) =>
+          isMulti ? (Array.isArray(cur) && cur.includes(label)) : cur === label
+        return (
+          <div key={qi} style={S.rqQ(qi === 0)}>
+            {q.header && <div style={S.rqHeader}>{q.header}</div>}
+            <div style={S.rqText}>{q.question}</div>
+            {!answered && (
+              <div style={S.rqHint}>{isMulti ? 'Select all that apply' : 'Choose one'}</div>
+            )}
+            <div
+              style={S.rqOpts}
+              role={isMulti ? 'group' : 'radiogroup'}
+              aria-label={q.question}
+            >
+              {q.options.map((opt, oi) => {
+                const on = selected(opt.label)
+                const dim = answered && !on
+                return (
+                  <button
+                    key={oi}
+                    type="button"
+                    role={isMulti ? 'checkbox' : 'radio'}
+                    aria-checked={on}
+                    className="dreaming-pressable"
+                    style={S.rqOpt(on, dim)}
+                    onClick={answered ? undefined : () => choose(q, opt.label)}
+                    disabled={answered}
+                    title={opt.description || ''}
+                  >
+                    {opt.label}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        )
+      })}
+      {answered ? (
+        <div style={S.rqDone}>Saved — I’ll use this for tomorrow night’s dream.</div>
+      ) : (
+        <button
+          type="button"
+          className="dreaming-pressable"
+          style={S.rqSubmit(allAnswered)}
+          onClick={submit}
+          disabled={!allAnswered}
+        >
+          Save for next time
+        </button>
+      )}
+    </div>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Report detail — the brief + chat split view.
 //
@@ -891,6 +1103,10 @@ function FeedbackLauncher({ dateStr, chatId }) {
 
 function ReportDetail({ dateStr, storage, online, onBack }) {
   const [state, setState] = useState({ phase: 'loading', html: '' })
+  // The agent's in-report questions, extracted from the raw brief HTML and
+  // rendered as native tap cards below the iframe. The carrier is stripped
+  // from the HTML before hardenReportHtml so it never reaches the iframe.
+  const [questions, setQuestions] = useState([])
   const [chatId, setChatId] = useState(undefined) // undefined=resolving, null=none, string=id
   const [briefHeight, setBriefHeight] = useState(360)
   const iframeRef = useRef(null)
@@ -899,12 +1115,21 @@ function ReportDetail({ dateStr, storage, online, onBack }) {
   useEffect(() => {
     let cancelled = false
     setState({ phase: 'loading', html: '' })
+    setQuestions([])
     setChatId(undefined)
     setBriefHeight(360)
     ;(async () => {
       const res = await storage.getReportHtml(`${dateStr}.html`)
       if (cancelled) return
-      if (res.data != null) setState({ phase: 'ready', html: hardenReportHtml(res.data) })
+      if (res.data != null) {
+        // Extract the question carrier from the RAW HTML before hardening —
+        // hardenReportHtml/the sandbox would otherwise carry an inert script
+        // into the iframe (and the partner can't answer there). Strip it,
+        // harden the remainder, render the questions natively below.
+        const { html: cleaned, questions: qs } = extractReportQuestions(res.data)
+        setQuestions(qs)
+        setState({ phase: 'ready', html: hardenReportHtml(cleaned) })
+      }
       else if (res.notFound) setState({ phase: 'missing', html: '' })
       else setState({ phase: 'error', html: '' })
     })()
@@ -953,6 +1178,14 @@ function ReportDetail({ dateStr, storage, online, onBack }) {
         </div>
       </div>
 
+      {/* Feedback launcher sits at the TOP of the brief now — the open-ended
+          escape hatch is reachable without scrolling the whole read. It stays
+          gated on chatId (undefined while the meta read resolves) so a fast
+          tap can't open a blank new chat instead of the morning one. */}
+      {state.phase === 'ready' && chatId !== undefined && (
+        <FeedbackLauncher dateStr={dateStr} chatId={chatId} />
+      )}
+
       {state.phase === 'loading' && (
         <div style={S.briefLoading}>
           <span style={S.spinner} aria-hidden="true" />
@@ -993,11 +1226,35 @@ function ReportDetail({ dateStr, storage, online, onBack }) {
             />
           </div>
 
+          {/* In-brief question cards render BETWEEN the read and the morning
+              chat. The carrier was extracted from the raw HTML and stripped
+              before srcDoc, so these taps are the interactive surface. Answers
+              persist to question-answers/<date>.json for the NEXT run — no
+              live agent waits (a background AskUserQuestion would park a future
+              a server reset orphans). */}
+          {questions.length > 0 && (
+            <ReportQuestions
+              questions={questions}
+              onAnswer={(answers) => {
+                const body = {
+                  report_date: dateStr,
+                  answered_at: new Date().toISOString(),
+                  answers,
+                  questions,
+                }
+                // Bare object on a .json path → stored as-is (no envelope).
+                // putJSON routes through the offline runtime, so a tap made
+                // offline queues and drains on reconnect.
+                Promise.resolve(storage.putJSON(`question-answers/${dateStr}.json`, body)).catch(() => {})
+              }}
+            />
+          )}
+
           <div style={S.chatPanel}>
             <div style={S.chatHeader}>
               <span style={S.chatHeaderDot} aria-hidden="true" />
               <span style={S.chatHeaderText}>Morning conversation</span>
-              {chatId && <span style={S.chatHeaderHint}>tap a card or reply below</span>}
+              {chatId && <span style={S.chatHeaderHint}>reply below</span>}
             </div>
             {chatId === undefined ? (
               <div style={S.chatResolving}>
@@ -1009,14 +1266,13 @@ function ReportDetail({ dateStr, storage, online, onBack }) {
                 <span aria-hidden="true" style={{ fontSize: '15px', lineHeight: 1.2 }}>🌙</span>
                 <span>
                   No conversation was opened for this brief — it’s a read-only
-                  morning note. When a brief has questions for you, the chat
-                  appears here so you can answer with a tap.
+                  morning note. Any questions appear as tap cards in the brief
+                  above; open Dreaming inside Möbius to reply here.
                 </span>
               </div>
             ) : (
               <MorningChat chatId={chatId} />
             )}
-            <FeedbackLauncher dateStr={dateStr} chatId={chatId} />
           </div>
         </div>
       )}

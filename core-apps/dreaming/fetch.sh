@@ -357,6 +357,52 @@ if [[ -n "$PREV" ]]; then
     >"$INPUTS/prev-report.html" 2>>"$LOG" || true
 fi
 
+# prev-question-answers.json — the partner's taps on the in-brief question
+# cards a recent brief offered. The app saved them to
+# question-answers/<date>.json (bare object). No live agent waited; they are
+# read HERE, on the next run, so the agent can ACT on them in phase 2. Stage
+# the single most recent answer file (filenames are <report_date>.json,
+# ISO-sortable).
+PREV_QA="$(API_BASE_URL="$API_BASE_URL" APP_ID="$APP_ID" SERVICE_TOKEN="$SERVICE_TOKEN" python3 - <<'PY' 2>>"$LOG"
+import json, os, sys, urllib.parse, urllib.request
+
+base = os.environ["API_BASE_URL"].rstrip("/")
+app_id = os.environ["APP_ID"]
+token = os.environ["SERVICE_TOKEN"]
+headers = {"Authorization": f"Bearer {token}"}
+cursor = None
+seen = set()
+files = []
+
+try:
+    for _ in range(50):
+        url = f"{base}/api/storage/apps-list/{app_id}/question-answers/"
+        if cursor:
+            url += "?" + urllib.parse.urlencode({"cursor": cursor})
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        for entry in data.get("entries", []):
+            name = entry.get("name")
+            if entry.get("type") == "file" and isinstance(name, str) and name.endswith(".json"):
+                files.append(name)
+        nxt = data.get("next_cursor")
+        if not nxt or nxt in seen:
+            break
+        seen.add(nxt)
+        cursor = nxt
+    print(sorted(files)[-1] if files else "")
+except Exception as exc:
+    # dir-not-created-yet (404) and any error both degrade to "no answers".
+    print("", file=sys.stderr)
+    print("")
+PY
+)"
+if [[ -n "$PREV_QA" ]]; then
+  curl -s "${auth[@]}" "$API_BASE_URL/api/storage/apps/$APP_ID/question-answers/$PREV_QA" \
+    >"$INPUTS/prev-question-answers.json" 2>>"$LOG" || true
+fi
+
 # per-app-digest.json — compact per-app analytics summary the Dreaming
 # agent uses to triage which apps need attention tonight. Produced from
 # THREE sources:
