@@ -11,7 +11,7 @@ import WalkthroughOverlay from '../Walkthrough/WalkthroughOverlay.jsx'
 import { api, BASE } from '../../api/client.js'
 import usePushSubscription from '../../hooks/usePushSubscription.js'
 import useNavigation, { coldRestoredCanvasAppId } from '../../hooks/useNavigation.js'
-import { navState } from '../../lib/navHistory.js'
+import { pushNavEntry, replaceNavEntry } from '../../lib/navHistory.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import useTheme from '../../hooks/useTheme.js'
 import useProviderAuthStatus from '../../hooks/useProviderAuthStatus.js'
@@ -599,7 +599,7 @@ export default function Shell() {
       // the installed PWA's declared scope — writing `/` here would
       // briefly put the page out of scope and Chromium can refuse the
       // next manifest update in-place.
-      window.history.replaceState(navState('base'), '', '/shell/')
+      replaceNavEntry('base', '/shell/')
       document.body.style.transition = 'opacity 0.2s ease'
       document.body.style.opacity = '0'
       setTimeout(() => window.location.reload(), 220)
@@ -871,7 +871,7 @@ export default function Shell() {
     // sentinel so back returns to the previous view rather than
     // exiting the PWA.
     if (draft || forceNew || drawerPushedRef.current) {
-      if (!drawerPushedRef.current) history.pushState(navState('nav'), '')
+      if (!drawerPushedRef.current) pushNavEntry('nav')
       drawerPushedRef.current = false
       navStackRef.current.push({
         view: activeViewRef.current,

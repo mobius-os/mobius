@@ -1,5 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { navState, isMobiusNavState } from '../lib/navHistory.js'
+import {
+  isMobiusNavState,
+  pushNavEntry,
+  replaceNavEntry,
+} from '../lib/navHistory.js'
 
 const ACTIVE_CHAT_KEY = 'moebius_active_chat'
 const ACTIVE_VIEW_KEY = 'moebius_active_view'
@@ -153,7 +157,7 @@ export default function useNavigation() {
   const appSentinelCountsRef = useRef(new Map())
 
   function openDrawer() {
-    history.pushState(navState('drawer'), '')
+    pushNavEntry('drawer')
     drawerPushedRef.current = true
     setDrawerOpen(true)
   }
@@ -207,7 +211,7 @@ export default function useNavigation() {
     if (current >= MAX_APP_SENTINELS) {
       return false
     }
-    try { history.pushState(navState('app'), '') } catch { return false }
+    try { pushNavEntry('app') } catch { return false }
     m.set(appId, current + 1)
     return true
   }, [])
@@ -278,7 +282,7 @@ export default function useNavigation() {
     if (drawerPushedRef.current) {
       drawerPushedRef.current = false
     } else {
-      try { history.pushState(navState('nav'), '') } catch { /* ignore */ }
+      try { pushNavEntry('nav') } catch { /* ignore */ }
     }
     navStackRef.current.push({
       view: activeViewRef.current,
@@ -306,7 +310,7 @@ export default function useNavigation() {
     // start_url is /shell/ would land at /shell/ → 308 → /shell/ →
     // SPA mount → rewrite back to / → Chromium sees "page outside
     // scope" and may refuse the next manifest update in-place.
-    history.replaceState(navState('base'), '', '/shell/')
+    replaceNavEntry('base', '/shell/')
 
     function handleBack() {
       backFiredRef.current = true
