@@ -278,38 +278,24 @@
   display: flex;
   flex-direction: column;
   max-width: 100%;
-  /* Long chats have no virtualization (ChatView renders every message;
-     useScrollMode anchors by element offsets). Without a rendering hint
-     the browser keeps the whole conversation live during scroll — every
-     highlight.js block, KaTeX formula, and image, even far off-screen —
-     which produces stuttery scrolling on phone-sized viewports.
-     content-visibility skips render work for off-screen messages. The
-     `auto` keyword in contain-intrinsic-size makes the browser remember
-     each message's real size once rendered, so offsetTop/offsetHeight
-     reads in useScrollMode (spacer math, PIN_USER_MSG, ANCHOR_AT) stay
-     exact for everything that has been on screen; 120px is only the
-     pre-first-render estimate. Off-screen estimate error is absorbed by
-     the existing reveal-window re-anchoring in useScrollMode. */
-  content-visibility: auto;
-  contain-intrinsic-size: auto 120px;
-}
-
-/* Exempt image-bearing messages from content-visibility skipping. The 120px
-   intrinsic-size estimate is fine for text/tool blocks but wildly wrong for a
-   message holding an agent screenshot (the `.md-image-frame` aspect-ratio box
-   reserves hundreds of px). When such a message is off-screen, the browser
-   lays it out at the 120px guess; scrolling it into view re-measures it to its
-   true height and shifts everything below — and because `.chat__scroll` has
-   `overflow-anchor: none` (intentional, for the spacer contract) the browser
-   does NOT compensate, so the shift is a visible scroll jump. Rendering these
-   few image messages eagerly keeps their height correct at all times. The
-   `.md-image-frame` reservation (markdown.css) handles the decode-time jump;
-   this handles the scroll-into-view jump. `:has()` is supported on every
-   browser this PWA targets. */
-.chat__msg:has(.md-image-frame),
-.chat__msg:has(.chat__attach-images) {
-  content-visibility: visible;
-  contain-intrinsic-size: auto none;
+  /* No content-visibility/contain-intrinsic-size here. It was added as a
+     phone-scroll perf hint (skip render work for off-screen messages), but
+     `content-visibility: auto` makes this scroll container's scrollHeight
+     volatile: the browser collapses off-screen messages to the
+     contain-intrinsic-size estimate on its own async relevance passes, and
+     when the collapse coincides with the post-send re-render it shrinks the
+     scroll range below the PIN_USER_MSG target. The browser then CLAMPS the
+     scroll position to the smaller max — a clamp that bypasses our JS (no
+     scrollTop setter call), so applyMode can't re-assert the pin without the
+     mid-stream jitter the design forbids (useScrollMode never re-applies
+     PIN_USER_MSG). The net effect was the 2nd-send pin landing mid-viewport
+     instead of flush at the top (tests/second-send-pin + spacer tests 2/3/10/26).
+     ChatView has no virtualizer, but the message-level React.memo + lazy
+     highlight.js/KaTeX already bound per-message render cost; the pin
+     contract (a non-negotiable chat-UX invariant) wins over the scroll hint.
+     A clamp-proof re-introduction would need the scroll range to be stable
+     across the browser's relevance passes, which content-visibility:auto
+     inherently is not. */
 }
 
 .chat__msg--user { align-items: flex-end; }
