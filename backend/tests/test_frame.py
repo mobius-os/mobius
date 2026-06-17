@@ -176,6 +176,11 @@ def test_frame_paints_light_theme_from_first_byte(client, auth):
     # The injected light theme is present from the first byte (no postMessage).
     assert 'data-theme="light"' in html
     assert "#f0eeeb" in html
+    # The native color-scheme is pinned to the shell mode too, so the
+    # iframe's UA-native surfaces (scrollbars, form controls, canvas)
+    # follow the shell instead of the OS prefers-color-scheme. Mirrors the
+    # dark-branch assertion in test_frame_dark_theme_pins_color_scheme.
+    assert "color-scheme:light" in html
   finally:
     (shared / "theme.css").unlink(missing_ok=True)
     (shared / "theme-mode").unlink(missing_ok=True)

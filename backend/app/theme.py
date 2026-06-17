@@ -130,9 +130,14 @@ def get_theme_mode(data_dir: str) -> str:
   Sourced from `/data/shared/theme-mode` (a JSON-encoded string),
   written by `themeService.toggleTheme` on every mode swap. Falls
   back to "dark" — the historical default — when the file is
-  missing, unreadable, or contains an unrecognized value. Used by
-  the recovery page and any other server-rendered surface that
-  needs to mirror the SPA's theme without re-parsing the CSS.
+  missing, unreadable, or contains an unrecognized value. The dark
+  fallback is intentional and CORRECT: DEFAULT_THEME (served when
+  theme.css is also absent) is the dark palette, so an absent
+  theme-mode yields a dark theme AND a dark injected color-scheme —
+  they agree. Returning "light" here would mismatch the dark default
+  palette. Used by the recovery page and any other server-rendered
+  surface that needs to mirror the SPA's theme without re-parsing the
+  CSS.
   """
   import json
   path = Path(data_dir) / "shared" / "theme-mode"
@@ -538,18 +543,22 @@ def inject_theme_into_html(
   # on a light-OS device flashes a light canvas (and light scrollbars/native
   # widgets) inside the app frame. `data-theme` below covers shell CSS, but
   # `color-scheme` is what drives the UA-native surfaces — emit it explicitly
-  # so they match the injected mode. Prepended to the injected <style> so it's
-  # part of the first-paint block. `_escape_for_style_tag` already ran on the
-  # theme CSS; `mode` is a fixed "dark"/"light" literal, so this prefix is
-  # safe to concatenate after escaping.
-  scheme_css = f":root{{color-scheme:{mode}}}\n"
+  # so they match the injected mode (`mode` always equals the served theme:
+  # both this and `data-theme` read the same bundle, so they can never
+  # disagree). APPENDED after the (agent-authored) theme CSS so the
+  # shell-mode color-scheme wins by source order even if an app declares its
+  # own equal-specificity `:root{color-scheme:...}` — a prepended rule would
+  # lose the cascade tie to later app CSS. `_escape_for_style_tag` already
+  # ran on the theme CSS; `mode` is a fixed "dark"/"light" literal, so this
+  # suffix is safe to concatenate after escaping.
+  scheme_css = f"\n:root{{color-scheme:{mode}}}"
   rev_meta = (
     f'<meta name="mobius-frame-rev" content="{html_escape(rev, quote=True)}">\n'
     if rev else ""
   )
   html = html.replace(
     "</head>",
-    f"{link_tags}<style>{scheme_css}{safe_css}</style>\n{rev_meta}</head>",
+    f"{link_tags}<style>{safe_css}{scheme_css}</style>\n{rev_meta}</head>",
   )
   html = html.replace("background:#0d0d0d", f"background:{bg}")
   html = html.replace('content="#0d0d0d"', f'content="{bg}"')
