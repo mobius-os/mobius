@@ -20,3 +20,34 @@ export function navState(kind) {
 export function isMobiusNavState(state) {
   return !!(state && state.__mobiusNav === true)
 }
+
+// Push/replace a tagged session-history entry, writing the tag to BOTH the
+// classic History API AND the Navigation API entry.
+//
+// The classic History store and the Navigation API store are INDEPENDENT:
+// `history.pushState(state, '')` writes only the classic store, and the
+// Navigation API's `e.destination.getState()` is blind to it (returns
+// undefined). On a Navigation-API browser (modern Chrome, the installed PWA)
+// the back/drawer handler's phantom guard reads `e.destination.getState()`,
+// so a tag written ONLY via the classic API leaves every shell entry looking
+// untagged → the guard suppresses every traversal → the drawer never closes
+// and back-nav is dead. Mirroring the tag into the Navigation API entry via
+// `navigation.updateCurrentEntry({ state })` makes `getState()` return the
+// tag for the shell's own entries, so the guard passes them. Genuine phantom
+// iframe entries are written to NEITHER store, so they stay untagged in both
+// and the guard still suppresses them — phantom protection is preserved.
+export function pushNavEntry(kind) {
+  history.pushState(navState(kind), '')
+  if (typeof navigation !== 'undefined' && navigation.updateCurrentEntry) {
+    navigation.updateCurrentEntry({ state: navState(kind) })
+  }
+}
+
+// url defaults to '' (current URL preserved). The base-entry call passes
+// '/shell/' to reset a deep-link path to the manifest scope.
+export function replaceNavEntry(kind, url = '') {
+  history.replaceState(navState(kind), '', url)
+  if (typeof navigation !== 'undefined' && navigation.updateCurrentEntry) {
+    navigation.updateCurrentEntry({ state: navState(kind) })
+  }
+}

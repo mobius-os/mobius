@@ -45,6 +45,38 @@ export default defineConfig({
         // don't bloat the install-time payload.
         globPatterns: ['**/*.{js,css,html,svg,png,ico,webmanifest}'],
         globIgnores: ['vendor/**', 'app-frame.html'],
+        // ROOT FIX for stale installed PWAs: give EVERY precache
+        // entry a real content-hash revision.
+        //
+        // vite-plugin-pwa defaults `dontCacheBustURLsMatching` to
+        // `/^assets\//`. Workbox computes a content hash for every
+        // file, then that default nulls the revision for anything
+        // under `assets/` on the theory that "the Vite hash in the
+        // filename IS the cache key, so a revision is redundant."
+        // That theory holds ONLY while a content change always moves
+        // the filename. It breaks the moment content changes WITHOUT
+        // the filename moving — a rebuild that re-emits the same hash
+        // (the change was already baked in earlier, or a chunk got
+        // reused). Then the precache entry stays
+        // `{revision:null,url:"assets/index-<hash>.js"}`, Workbox
+        // sees no change, and the installed PWA serves stale code
+        // forever. That is the "light mode still broken after the
+        // server was fixed" failure, previously worked around by
+        // bumping a SHELL_BUILD constant to force a filename move.
+        //
+        // Pointing `dontCacheBustURLsMatching` at a regex that can
+        // never match a real precache URL disables the null-out, so
+        // Workbox keeps the content hash it already computed for
+        // every entry. Behavior:
+        //   - content changes (any file) → new hash → SW refetches.
+        //   - file unchanged → identical hash → no refetch (so a
+        //     deploy does not needlessly re-download everything).
+        //   - filename-hashed assets get the same hash whether keyed
+        //     by name or by revision; the revision is now the
+        //     authoritative busting signal regardless of the name.
+        // \0 (NUL) cannot appear in a generated asset path, so this
+        // matches nothing while staying a valid RegExp.
+        dontCacheBustURLsMatching: /\0/,
         // Defensive: keep bundles within the cap so a future
         // big-dep bump fails the build loudly instead of silently
         // skipping precache.
