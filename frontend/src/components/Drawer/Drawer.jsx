@@ -254,15 +254,35 @@ export default function Drawer({
   // without easing.
   const drawerRef = useRef(null)
   const dragStart = useRef(null) // { x, y } or null
+  // True once a touch gesture has moved past the tap/swipe threshold.
+  // React's onTouch* handlers are passive, so preventDefault() in
+  // onTouchMove is a no-op and a horizontal drag still emits a synthetic
+  // click that lands on whatever row the finger lifted over — selecting
+  // a chat/app the user only meant to swipe past. We can't cancel the
+  // touch, but we CAN swallow the click it produces: on touchend after a
+  // real swipe, install a one-shot capture-phase click listener on the
+  // <nav> that eats the very next click, then removes itself. A genuine
+  // tap never crosses the threshold, so its click passes through and the
+  // row still selects.
+  const swipingRef = useRef(false)
+  // Movement (px) beyond which a gesture is a swipe, not a tap.
+  const SWIPE_THRESHOLD = 10
 
   function onTouchStart(e) {
     if (!open || e.touches.length !== 1) return
+    swipingRef.current = false
     dragStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY }
   }
   function onTouchMove(e) {
     if (!dragStart.current || e.touches.length !== 1) return
     const dx = e.touches[0].clientX - dragStart.current.x
     const dy = e.touches[0].clientY - dragStart.current.y
+    // Any movement past the threshold (in either axis) means this is a
+    // drag, not a tap — mark it so touchend can suppress the trailing
+    // click even on a scroll/vertical pan that lifted over a row.
+    if (Math.abs(dx) > SWIPE_THRESHOLD || Math.abs(dy) > SWIPE_THRESHOLD) {
+      swipingRef.current = true
+    }
     if (dx < 0 && Math.abs(dx) > Math.abs(dy) * 1.15) {
       const el = drawerRef.current
       if (!el) return
@@ -304,7 +324,14 @@ export default function Drawer({
         el.style.transform = ''
       }
     }
+    const wasSwiping = swipingRef.current
+    swipingRef.current = false
     dragStart.current = null
+    // A real swipe (drag past the threshold) still emits a synthetic
+    // click on the row the finger lifted over. Eat it so the swipe
+    // doesn't double as a row selection. A genuine tap never set
+    // wasSwiping, so its click passes through untouched.
+    if (wasSwiping) suppressNextClick()
     if (shouldClose) onClose?.()
   }
   // touchcancel positions are unreliable across browsers (clientX
@@ -316,7 +343,40 @@ export default function Drawer({
       el.classList.remove('drawer--dragging')
       el.style.transform = ''
     }
+    const wasSwiping = swipingRef.current
+    swipingRef.current = false
     dragStart.current = null
+    // Mirror touchend: if the cancelled gesture had already become a
+    // swipe, the browser may still deliver a click — suppress it too.
+    if (wasSwiping) suppressNextClick()
+  }
+
+  // Install a one-shot capture-phase click listener on the drawer <nav>
+  // that swallows the very next click, then removes itself. This is the
+  // reliable way to neutralize the synthetic click a touch-drag emits:
+  // React's touch handlers are passive, so preventDefault() in
+  // onTouchMove can't stop the gesture from producing a click. Capturing
+  // on the <nav> intercepts the click before it reaches any row handler.
+  // We also arm a short fallback timeout to drop the listener if no click
+  // ever arrives (e.g. the lift was outside any clickable target), so a
+  // later legitimate tap is never eaten by a stale suppressor.
+  function suppressNextClick() {
+    const el = drawerRef.current
+    if (!el) return
+    let cleared = false
+    const onClickCapture = (ev) => {
+      ev.stopPropagation()
+      ev.preventDefault()
+      clear()
+    }
+    function clear() {
+      if (cleared) return
+      cleared = true
+      el.removeEventListener('click', onClickCapture, true)
+      clearTimeout(timer)
+    }
+    el.addEventListener('click', onClickCapture, true)
+    const timer = setTimeout(clear, 400)
   }
 
   return (

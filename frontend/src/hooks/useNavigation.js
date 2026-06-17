@@ -315,6 +315,22 @@ export default function useNavigation() {
     function handleBack() {
       backFiredRef.current = true
       setTimeout(() => { backFiredRef.current = false }, 400)
+      // Defer the React state flip that toggles the .drawer--open class
+      // (and thus starts the CSS close transition) to the next animation
+      // frame. handleBack runs inside the Navigation-API intercept
+      // handler, where the synchronous traversal commit + the tagged
+      // pushNavEntry/updateCurrentEntry mirror write contend with the
+      // first frame of the slide. Flipping the class one frame later lets
+      // that synchronous work settle first, so the close starts crisp
+      // instead of stuttering on the opening frame. The ref is cleared
+      // synchronously (it gates nothing visual); only the setState waits.
+      const closeDrawerNextFrame = () => {
+        if (typeof requestAnimationFrame === 'function') {
+          requestAnimationFrame(() => setDrawerOpen(false))
+        } else {
+          setDrawerOpen(false)
+        }
+      }
       // Drawer-first: if the drawer is open AND its sentinel is the
       // entry being consumed by this back, treat the event as just a
       // drawer-close — don't pop navStack. Catches both real
@@ -325,7 +341,7 @@ export default function useNavigation() {
       if (drawerOpenRef.current && drawerPushedRef.current) {
         drawerPushedRef.current = false
         drawerOpenRef.current = false
-        setDrawerOpen(false)
+        closeDrawerNextFrame()
         return
       }
       // App-sentinel-first: if the active mini-app has pending
