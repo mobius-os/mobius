@@ -47,7 +47,10 @@ export default function useTheme() {
     const newUrl = window.location.pathname
       + (search ? `?${search}` : '')
       + window.location.hash
-    try { window.history.replaceState(null, '', newUrl) } catch {}
+    // Preserve the nav-state sentinel (window.history.state) while stripping
+    // the ?reset-theme param: passing null untags this entry on the
+    // popstate-fallback path (Safari), re-breaking the drawer/back guard.
+    try { window.history.replaceState(window.history.state, '', newUrl) } catch {}
     // Fire-and-forget: the server rename is the persistence step;
     // the React-Query invalidation fetches the fresh defaults.
     // Errors here are non-fatal — the user can retry by reloading
