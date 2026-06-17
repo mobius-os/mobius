@@ -16,11 +16,11 @@
  *      `max-height` cap bounds extreme tall ratios; `object-fit: contain`
  *      letterboxes inside the reserved box.
  *
- *   2. `.chat__msg` uses `content-visibility: auto` with a 120px intrinsic-size
- *      estimate. That estimate is wildly wrong for a message holding a
- *      screenshot, so image-bearing messages are exempted — they render
- *      eagerly and keep their true height at all times, avoiding the
- *      scroll-into-view re-measure jump.
+ *   2. `.chat__msg` deliberately does NOT use `content-visibility: auto`. It
+ *      was added as a phone-scroll perf hint (2459dff) but collapses off-screen
+ *      message height, so the programmatic PIN_USER_MSG scroll write is clamped
+ *      and 2nd+ sends land mid-screen instead of pinned to top. The pin is a
+ *      non-negotiable invariant; the perf hint stays out (guard below).
  *
  * These are CSS-shape assertions (no DOM/layout engine). They pin the
  * load-bearing declarations so a future edit that re-introduces the jump
@@ -88,25 +88,18 @@ describe('.md-image-frame reserves height before image decode', () => {
   })
 })
 
-describe('image-bearing messages are exempt from content-visibility skipping', () => {
-  test('base .chat__msg still skips off-screen render work (perf intact)', () => {
-    const body = ruleBody(chatViewCss, '.chat__msg {')
-    assert.match(body, /content-visibility:\s*auto/,
-      'text/tool messages must keep content-visibility: auto')
-    assert.match(body, /contain-intrinsic-size:\s*auto\s+120px/,
-      'base intrinsic-size estimate stays 120px for non-image messages')
-  })
-
-  test('messages containing a markdown image opt out of the 120px estimate', () => {
-    assert.match(chatViewCss, /\.chat__msg:has\(\.md-image-frame\)/,
-      'image-bearing messages must be selected via :has(.md-image-frame)')
-    const body = ruleBody(chatViewCss, '.chat__msg:has(.md-image-frame)')
-    assert.match(body, /content-visibility:\s*visible/,
-      'image-bearing messages must render eagerly (no off-screen 120px guess)')
-  })
-
-  test('messages containing an attachment thumbnail strip also opt out', () => {
-    assert.match(chatViewCss, /\.chat__msg:has\(\.chat__attach-images\)/,
-      'attachment-bearing messages must also opt out via :has(.chat__attach-images)')
+describe('chat messages must NOT use content-visibility (it clamps the pin-scroll)', () => {
+  // content-visibility: auto collapses an off-screen message's rendered height
+  // to the contain-intrinsic-size estimate, so the synchronous PIN_USER_MSG
+  // scroll write (useScrollMode) is clamped and the 2nd+ user message lands
+  // mid-screen instead of pinned to the top. Added as a phone-scroll perf hint
+  // (2459dff), it regressed the pin both times it was present. The pin is a
+  // non-negotiable chat-UX invariant (CLAUDE.md), so the hint stays out.
+  test('ChatView.css declares no content-visibility on chat messages', () => {
+    // strip CSS comments so the prose explaining the removal does not count
+    const cssNoComments = chatViewCss.replace(/\/\*[\s\S]*?\*\//g, '')
+    assert.doesNotMatch(cssNoComments, /content-visibility/,
+      'content-visibility on .chat__msg clamps the pin-scroll so 2nd+ sends are ' +
+      'no longer pinned to top — do not re-add it (see useScrollMode PIN_USER_MSG)')
   })
 })
