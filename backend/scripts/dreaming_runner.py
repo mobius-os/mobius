@@ -442,6 +442,11 @@ def build_goal(settings: dict) -> str:
     "  - activity.jsonl        last 24h of raw platform events",
     "  - chats.md              recent chats list (fork + interview these)",
     "  - prev-report.html      yesterday's brief (don't repeat yourself)",
+    "  - prev-question-answers.json  the partner's taps on a recent brief's",
+    "                          question cards — saved for THIS run (no live",
+    "                          agent waited). Read in phase 0; ACT on each in",
+    "                          phase 2 (build the pick, drop the declines).",
+    "                          Absent on first runs / when nothing was asked.",
     "",
     "Follow your skill (your system prompt) for the full procedure. "
     "Two floor deliverables: drain the memory inbox (phase 3a) EARLY "

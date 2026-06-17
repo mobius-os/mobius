@@ -29,6 +29,8 @@ Work through these as one multi-turn goal. Earlier phases feed later ones — th
 
 Read `inputs/dreaming-run-history.txt`: your own recent exit codes (+ durations), `dreaming.log` friction, and recent self-edits to this skill. If a failure or friction **recurs across nights**, that's tonight's first thing to fix — carry it into phase 2. One read, one decision; don't let it grow (the brief is still the floor). Absent, or a first tracked run → note it and move on.
 
+Also read `inputs/prev-question-answers.json` here (present when the partner tapped a recent brief's question cards). Those answers were saved for THIS run — no live agent waited on them. Note each decision now and **act on it in phase 2**: build the feature they picked, apply the fix they approved, drop the declines. Absent on first runs or when no questions were asked → move on.
+
 ### 1. INTROSPECTION — interview every agent that worked today (adaptive depth)
 
 **Adaptive rule.** Before starting interviews, check whether today had any user chat activity. Read `activity.jsonl` (already staged in `inputs/`) and count `ev == "chat_sent"` events — one per user turn, the real "did the partner chat today" signal (`app_open` tracks app usage, not chatting; a chat row with a human turn still counts too). If **tonight is a cron-only night** (no user chat activity, only background jobs ran), do a **light pass** on phase 1 — scan the cron session jsonls for any unexpected errors, but spend the saved turns on phases 3–4 (Mind consolidation and app improvement), where the value compounds. A quiet night is a good night to deepen the graph and fix the apps the partner uses every day. Write one sentence in the brief noting it was a cron-only night.
@@ -227,21 +229,32 @@ Be ruthless below the lede: a section with nothing that clears the trigger/why/n
 
 **Honor the brief-style setting.** If `/data/apps/dreaming/settings.json` has a `verbosity` value, let it set how much prose you write: `terse` = TL;DR plus keypoints plus only the must-act items, everything else dropped entirely; `standard` = the default above; `chatty` = the partner has opted into more narrative, so the lead paragraphs *inside* the collapsed items may run longer (the TL;DR cap and collapsed-by-default details still hold). Absent or unrecognized → treat as `standard`.
 
-**Put the questions IN the brief, too.** The decisions also live in the morning chat as tappable cards (below), but the partner asked to see them in the report itself. After §4 (or as the close of §4), include a clearly-styled questions block the app recognizes: a `<section class="brief-questions">` (or a `<div class="brief-questions">`) with an `<h2>` like "A few questions for you" and an `<ol>`/`<ul>` listing each question in plain language. The app styles `.brief-questions` as a distinct card so it stands out at the end of the read. Keep it to the same 2–4 decisions you'll render as cards. End the block with a short `<p class="q-note">` pointing the partner to the chat below ("Answer these with a tap in the conversation below"). This is a *read-only* echo — the static page still can't collect answers; the morning chat does (next).
+**Put the questions IN the brief as tappable cards — the in-report contract.** The partner answers your decisions by tapping cards rendered *in the brief itself*, and those answers are saved for your **NEXT run** — not collected by a live agent. This is the durable replacement for the old "post AskUserQuestion cards in a morning chat" flow: a background/morning agent that calls `AskUserQuestion` parks a synchronous in-memory future that a server reset orphans, freezing the night. Instead, **emit the questions declaratively inside the brief HTML** and let the app render the cards.
+
+Append ONE carrier as a sibling AFTER `</article>` (or after your brief's root element). The carrier is a `<section data-report-questions>` whose payload is an inert JSON `<script>` — the brief iframe is sandboxed (null origin) so the script never executes; it's just a data carrier the **Dreaming app** extracts, strips, and re-renders as native tap cards below the read:
+
+```html
+<section class="report-questions" data-report-questions>
+  <h2>A few questions for tomorrow night</h2>
+  <p class="rq-note">Your answers guide my next run — they won't change this brief.</p>
+  <script type="application/mobius-questions+json">
+  {"version":1,"questions":[
+    {"question":"Plain-language decision?","header":"Short label","multiSelect":false,
+     "options":[{"label":"Option A","description":"what this means"},{"label":"Option B"}]}
+  ]}
+  </script>
+</section>
+```
+
+The `questions` array is the EXACT shell QuestionCard shape: `{question, header, multiSelect, options:[{label, description}]}`. Keep it to **2–4 enumerable decisions** (the ranked-feature picks, a security fix awaiting approval, a "should I build X" from the interviews); `header` is a 1–2 word category; set `multiSelect` only when more than one answer makes sense. The JSON must be valid — a malformed carrier is silently dropped, so the brief still ships. **Say plainly in the brief that these guide tomorrow night, not tonight** — there is no live agent waiting, so don't write "answer below and I'll act now." When the partner taps an answer, the app saves it to `question-answers/<date>.json`; your **next run's** `fetch.sh` stages it at `inputs/prev-question-answers.json` and you act on it in phase 2.
 
 > **Always ship a brief — never end the night with nothing.** If the template can't be read for any reason, do NOT abandon phase 6: hand-write a minimal self-contained HTML brief (a heading + the five sections as `<h2>`/`<p>`) straight to `/data/apps/$APP_ID/reports/<date>.html` (the numeric storage dir above, NOT the slug dir). A plain brief the partner can read beats a perfect one that never posts. The morning chat (below) is the action surface either way, so even a bare brief plus the chat is a complete deliverable.
 
-> The brief is a **static, sandboxed page with no JS** — it can't host the chat or interactive cards. The questions live in the morning chat (below), and the **Dreaming app renders the brief with the morning chat shown below it.** Design the brief to stand alone as a read; the chat is the action surface. (Note for the Dreaming-UI agent: render `reports/<date>.html` in the app, then mount the morning chat thread underneath it.)
+> The brief is a **static, sandboxed page with no JS** — it can't run logic, but it CAN carry the declarative question payload (above) for the app to hydrate. The **Dreaming app** renders the brief, lifts the carrier out, and shows native tap cards plus the morning chat below it. Design the brief to stand alone as a read; the tap cards collect the structured decisions, and the morning chat (below) is the **open-ended escape hatch** — where the partner says anything the cards didn't cover. (Note for the Dreaming-UI agent: extract the carrier from `reports/<date>.html`, strip it before the iframe, render the cards + the morning chat underneath.)
 
-**Open the morning chat and post the summary + questions as cards.**
+**Open the morning chat as the open-ended escape hatch.**
 
-This is a hard deliverable, not decorative copy. A brief may contain a
-"questions for you" section, but those questions count as **asked** only
-after the chat exists, the opener message is sent, and the `.meta.json`
-link is written. If any of those steps fails, state that plainly in the
-brief ("I prepared questions but could not open the morning chat") and
-do not write "I asked" or "answer below." Static HTML cannot collect
-answers.
+The structured decisions ride in the brief as tap cards (the carrier above) — answers saved for your next run. The morning chat is the *complementary* surface: an open-ended conversation where the partner can say anything the cards didn't cover, and where they land from the morning push. It is a hard deliverable: create the chat, send the opener, write the `.meta.json` link, fire the push, write `state.json`. **Do NOT call `AskUserQuestion` from this background run** — a background/morning agent that does parks a synchronous future a server reset orphans (that footgun is exactly why questions moved into the brief carrier). The opener is plain prose pointing at the brief; the tap cards live in the brief, not the chat.
 
 1. Create the chat — **app-attributed, owned by the Dreaming app** (`POST /api/app-chats` with a Dreaming app token). An app-attributed chat lives inside the app — rendered under the brief — and stays out of the partner's drawer history (`GET /api/chats` hides `created_by_app_id` chats by default), which is exactly where this conversation belongs. Do NOT create it with `POST /api/chats` + `$AGENT_TOKEN`: that makes an owner chat that clutters the chat list next to the partner's own conversations. Mint the app token with the same numeric `$APP_ID` as the brief, then create:
    ```bash
@@ -258,15 +271,15 @@ answers.
    printf '{"chat_id": "%s"}' "$MORNING_CHAT" > /data/apps/$APP_ID/reports/$(date +%Y-%m-%d).meta.json
    ```
    (Bare JSON object, no envelope — the app reads it as-is. Without it the brief renders but the morning chat stays unlinked.)
-2. Seed the chat by sending it a message that becomes the partner-facing opener — a **short** summary (3–5 lines, partner-facing register: what you did and what's new, no file paths or IDs), a link to the brief, and an instruction to render your questions as `AskUserQuestion` cards so the partner answers with a tap:
+2. Seed the chat by sending it a message that becomes the partner-facing opener — a **short** summary (3–5 lines, partner-facing register: what you did and what's new, no file paths or IDs), a link to the brief, and a pointer to the tap cards. **Plain prose only — do NOT instruct it to render `AskUserQuestion` cards** (that would fire the background-future footgun). Point at the brief, where the tap cards live, and note that the answers shape tomorrow night:
    ```bash
    curl -s -X POST "$API_BASE_URL/api/chats/$MORNING_CHAT/messages" \
      -H "Authorization: Bearer $AGENT_TOKEN" -H "Content-Type: application/json" \
      -d "$(python3 -c 'import json,sys; print(json.dumps({"content": sys.argv[1]}))' \
-       'Good morning. Overnight I <2-3 line summary>. Full brief: /app/dreaming (today'\''s brief). I have a few decisions for you — render them as AskUserQuestion cards so I can tap-answer: <each question + its options, one Recommended each>.')"
+       'Good morning. Overnight I <2-3 line summary>. Full brief: /app/dreaming (today'\''s brief) — it has a few tap-to-answer questions at the end; your picks guide tomorrow night, not today. Anything else on your mind, just tell me here.')"
    ```
-   That spawns the morning-chat agent, which renders the questions as tappable cards (a static brief can't). Keep it to **2–4 questions** — the ranked-feature picks, any security fix awaiting approval, any "should I build X" from the interviews. Each question gets enumerable options with one marked Recommended (per the clarifying-question rules in `core.md`). Open-ended asks stay as prose; only enumerable decisions become cards.
-3. Fire the morning push so the partner sees it (follow `notifications.md`): title like "Your morning brief is ready", body the one-line headline, `target: "/shell/?chat=$MORNING_CHAT"` so the tap lands on the questions **inside the PWA** (the bare `/chat/<id>` form opens a browser tab on a cold tap — see `notifications.md`).
+   The structured decisions are the carrier cards in the brief (above) — **2–4 enumerable decisions**, the ranked-feature picks, any security fix awaiting approval, any "should I build X" from the interviews. The morning chat stays open-ended: it's where the partner adds context the cards can't capture.
+3. Fire the morning push so the partner sees it (follow `notifications.md`): title like "Your morning brief is ready", body the one-line headline, `target: "/shell/?chat=$MORNING_CHAT"` so the tap lands **inside the PWA** (the bare `/chat/<id>` form opens a browser tab on a cold tap — see `notifications.md`). The brief (with its tap cards) is one tap away via the link in the opener.
 4. **Write the app's header state** — the streak count + one-line summary the Dreaming app shows up top. Without this, `state.json` never exists and the streak/summary stay permanently blank. Same numeric `$APP_ID` storage dir as the brief:
    ```bash
    python3 - "$APP_ID" "<one-line headline>" <<'PY'
@@ -288,12 +301,13 @@ Commit the brief + run artifacts: `pm-commit 'dreaming: brief + morning chat for
 
 ---
 
-## The morning follow-up — act on the answers AND learn from them
+## Acting on the answers — the second half of the loop, one night later
 
-When the partner answers your cards in the morning chat, that's the second half of the loop, and the most valuable signal you get. **Act on the answers, then learn from them.**
+The partner's taps on a brief's question cards don't reach a live agent — they're saved and surface at the **start of your NEXT run** as `inputs/prev-question-answers.json` (staged by `fetch.sh`). You read it in **phase 0** and **act on it in phase 2**. This is the most valuable signal you get; treat it as a first-class input, not an afterthought.
 
-- **Act.** Each answer is a decision: build the feature they picked, apply the security fix they approved, drop the ones they declined. Treat a card answer as approval for exactly what it offered — nothing more. Build/iterate following `building-apps.md`; this is normal daytime work now, with the partner awake.
-- **Learn — update Mind.** Their pick is a fact about them (a confirmed preference, a priority, a thing they don't care about). Record it (`about-the-user`) so future briefs propose better and waste fewer of their taps. A declined suggestion is as informative as an accepted one — note *why* if they said.
-- **Learn — update the skills, including this one.** If the partner consistently declines a *kind* of suggestion, or always wants more/less detail, or a question landed wrong, that's a dreaming-skill edit: change what you prioritize, prune, or how you phrase the next brief's questions. `pm-commit` it. The answers to tonight's questions shape how you dream tomorrow night — that's the whole point of editing your own skill.
+- **Act.** Each answer is a decision: build the feature they picked, apply the security fix they approved, drop the ones they declined. Treat a card answer as approval for exactly what it offered — nothing more. Build/iterate following `building-apps.md`. Don't re-ask a question they already answered — `prev-question-answers.json` is the record of what's settled.
+- **Learn — update Mind.** Their pick is a fact about them (a confirmed preference, a priority, a thing they don't care about). Record it (`about-the-user`) so future briefs propose better and waste fewer of their taps. A declined suggestion is as informative as an accepted one.
+- **Learn — update the skills, including this one.** If the partner consistently declines a *kind* of suggestion, or always wants more/less detail, or a question landed wrong, that's a dreaming-skill edit: change what you prioritize, prune, or how you phrase the next brief's questions. `pm-commit` it.
 
-The morning chat is not a one-way report. It's where the partner steers the next night's dream, and where you close the loop by encoding what they told you.
+The open-ended morning chat is the other steering surface — anything the partner types there (this run or the last) is live context to fold in. Between the carrier answers and the chat, the partner steers the next night's dream; you close the loop by acting and by encoding what they told you.
+
