@@ -1,6 +1,41 @@
 <!doctype html>
 <html lang="en">
 <head>
+      <script>
+        // Pre-paint fallback-mode gate. The frame is SAME-ORIGIN (sandbox
+        // allow-same-origin), so it reads the shell's localStorage. useTheme +
+        // themeService write 'mobius-theme-bg' (HEX-guarded) on every theme
+        // apply, so a dark-shell owner stores #0d0d0d and a light-shell owner
+        // #f0eeeb. We classify that bg by luminance (mirrors
+        // themeService._inferThemeMode / theme._infer_theme_mode: average RGB
+        // < 128 => dark) and tag <html data-fallback-mode>. The light fallback
+        // CSS below is gated on data-fallback-mode="light", so a stale/
+        // uninjected frame follows the OWNER's persisted mode, never the OS
+        // prefers-color-scheme. No key / malformed / unreadable => attribute
+        // stays unset => the dark :root default wins (the historical safe
+        // default, matching theme.get_theme_mode's dark fallback). Server
+        // injection still overrides everything (its <style> + data-theme +
+        // :root{color-scheme} are appended at the document head's end). Runs synchronously
+        // before <style> parses, so there is no wrong-mode flash.
+        try {
+          var __bg = localStorage.getItem('mobius-theme-bg')
+          if (__bg && /^#[0-9a-fA-F]{3,8}$/.test(__bg)) {
+            var __h = __bg.slice(1)
+            if (__h.length === 3 || __h.length === 4) {
+              __h = __h[0]+__h[0]+__h[1]+__h[1]+__h[2]+__h[2]
+            } else {
+              __h = __h.slice(0, 6)
+            }
+            var __r = parseInt(__h.slice(0, 2), 16)
+            var __g = parseInt(__h.slice(2, 4), 16)
+            var __b = parseInt(__h.slice(4, 6), 16)
+            if (__r === __r && __g === __g && __b === __b) {  // not NaN
+              document.documentElement.setAttribute(
+                'data-fallback-mode', (__r + __g + __b) / 3 < 128 ? 'dark' : 'light')
+            }
+          }
+        } catch (e) {}
+      </script>
   <meta charset="UTF-8" />
   <!-- viewport-fit=cover makes the iframe's layout viewport extend UNDER the
        notch/punch-hole so an immersive app's background paints full-bleed (the
@@ -74,19 +109,19 @@
       --mobius-safe-top: 0px; --mobius-safe-right: 0px;
       --mobius-safe-bottom: 0px; --mobius-safe-left: 0px;
     }
-    /* Mode-aware fallback (defense in depth — see the :root comment). Only the
-       mode-dependent structural + status vars switch; the brand accent and
-       typography are shared across modes and stay sourced from the :root
-       above. Mirrors theme.py's _LIGHT_DEFAULTS + frontend LIGHT_COLORS. The
-       server-injected theme overrides this whenever present. */
-    @media (prefers-color-scheme: light) {
-      :root {
-        --bg: #f0eeeb; --surface: #ffffff; --surface2: #e8e6e2;
-        --border: #d4d1cc; --border-light: #e2dfdb;
-        --text: #1c1b1a; --muted: #6b6864;
-        --accent-dim: rgba(139, 108, 247, 0.08);
-        --danger: #ef4444; --green: #059669;
-      }
+    /* Mode-aware fallback (defense in depth). Gated on data-fallback-mode="light" via :where() (zero added specificity, so a server-injected :root or a live theme-swap still wins by source order),
+       set by the pre-paint <head> script from the owner's persisted
+       localStorage['mobius-theme-bg'] — NOT on OS prefers-color-scheme. A
+       dark-shell owner on a light-OS device therefore keeps the dark :root
+       default; light only appears from a positive owner signal (this attribute)
+       or from server injection (which overrides both blocks). No signal => dark
+       default. Mirrors theme.py's _LIGHT_DEFAULTS + frontend LIGHT_COLORS. */
+    :root:where([data-fallback-mode="light"]) {
+      --bg: #f0eeeb; --surface: #ffffff; --surface2: #e8e6e2;
+      --border: #d4d1cc; --border-light: #e2dfdb;
+      --text: #1c1b1a; --muted: #6b6864;
+      --accent-dim: rgba(139, 108, 247, 0.08);
+      --danger: #ef4444; --green: #059669;
     }
     /* No grey/blue tap-flash on any interactive element across mini-apps (mobile). */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
@@ -413,10 +448,26 @@
           rt.init({ appId: _FRAME_APP_ID, getToken: async () => token });
         } catch (e) {}
         const frameVersion = new URLSearchParams(window.location.search).get('v') || '0';
-        // &v=frameVersion is REQUIRED as the SW offline cache-buster: the server
-        // /module route ignores v (its ETag keys on app.updated_at), but the SW
-        // offline handler keeps v in its cache key (it strips token, _ and install but keeps v), so
-        // an app update changes the key and forces a fresh fetch.
+        // &v on the module URL is the SW offline cache-buster: the server /module
+        // route ignores v (its ETag keys on app.updated_at), but the SW offline
+        // handler keeps v in its cache key (it strips token, _ and install but
+        // keeps v), so an app update (updated_at advances) changes the key and
+        // forces a fresh fetch.
+        //
+        // The frame's own ?v is `<updated_at>-<frameRev>` (frameRev = the shared
+        // app-frame.html content hash, theme.frame_content_rev, exactly 16 hex).
+        // The MODULE must key only on `<updated_at>`: the module bytes don't
+        // change when the shared frame file is redeployed, so folding frameRev
+        // into the module key would bust EVERY installed app's (<=1MB) module
+        // cache on any frame-only edit — the "slow apps after a shell deploy"
+        // regression. Stripping the 16-hex suffix also realigns this key with
+        // the precache path (Shell.jsx warms `?v=<updated_at>` with no frameRev);
+        // before this they mismatched and every precache warm was a miss here.
+        // The canonical rule is moduleVersionKey() in src/lib/appVersion.js (unit
+        // tested); kept inline here because this static template can't import it.
+        // updated_at never ends in `-<16 lowercase hex>` (digit-only microseconds,
+        // space before the time), so the anchored strip can't shorten it.
+        const moduleVersion = frameVersion.replace(/-[0-9a-f]{16}$/, '');
         const moduleUrl = (retry) => {
           // `_=<retry>` is the per-attempt cache-buster. A failed dynamic
           // import() (or a failed module response) is cached by Chromium per
@@ -429,7 +480,7 @@
           // already STRIPS `_` from its cache key (appCodeHandler), so the
           // buster never poisons the offline cache. retry 0 = first attempt
           // (no buster), so the cold-start URL is unchanged.
-          const base = `/api/apps/${_FRAME_APP_ID}/module?token=${encodeURIComponent(token)}&v=${encodeURIComponent(frameVersion)}`;
+          const base = `/api/apps/${_FRAME_APP_ID}/module?token=${encodeURIComponent(token)}&v=${encodeURIComponent(moduleVersion)}`;
           return retry ? `${base}&_=${retry}` : base;
         };
         const url = moduleUrl(0);
