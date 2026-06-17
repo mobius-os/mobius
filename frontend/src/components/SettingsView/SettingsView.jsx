@@ -56,7 +56,14 @@ export default function SettingsView({ onThemeChange }) {
   const claudeVersion = settingsQuery.data?.claude_version
   const codexVersion = settingsQuery.data?.codex_version
   const claudeAuthenticated = !!claudeStatusQuery.data?.authenticated
-  const providerLoaded = settingsQuery.isFetched && claudeStatusQuery.isFetched
+  // Render the moment cached data is present rather than waiting for a
+  // fresh fetch to resolve. Both queries are persisted to IndexedDB and
+  // hydrate before the network round-trip (see queryClient.js), so on a
+  // re-open `data` is already populated while `isFetched` is still false
+  // for this mount — gating on `isFetched` reintroduced the open-time
+  // flash this fix removes. We paint from the cache and let the
+  // background revalidation update the rows only if something changed.
+  const providerLoaded = settingsQuery.data !== undefined && claudeStatusQuery.data !== undefined
 
   // Stable identity-preserving callbacks: passing fresh arrow
   // functions in JSX re-mounted ProviderRow's event handlers every
