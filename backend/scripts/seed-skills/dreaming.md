@@ -67,18 +67,28 @@ find /data/cli-auth/claude/projects -name '*.jsonl' -mmin -1440 2>/dev/null
 
 The directory name is the cwd with `/` → `-` (e.g. `-data-apps-news-2` == `/data/apps/news-2`); the file stem is the session id.
 
+**Triage before forking — most rows aren't worth a fork.** An app's "open agent chat" button creates an empty stub (title set, `messages='[]'`, `session_id` NULL) that looks interview-worthy but holds nothing. One DB query — `select id, length(messages), coalesce(session_id,'') from chats where id in (…)` — drops every row with `length(messages) <= 2`, plus any chat a prior run already covered whose `updated_at` hasn't moved. Don't pad thin coverage; on a quiet day most of the list drops and the saved budget goes to apps + Mind + the brief.
+
 **Interview each one — fork, don't touch the original.**
 
 - Chats: `/data/apps/dreaming/fork-chat.sh <chat_id> "<interview>"` (looks up provider + session, forks a throwaway copy, prints the answer to stdout). The original transcript is never modified.
 - App subagent runs: `bash "$SCRIPTS_DIR/fork-session.sh" <session_id> <cwd> "<interview>"`.
 
+**Time-box each fork to ≤3 min (`timeout 150`), and fall back to the transcript when it comes back empty.** Long chats run past the harness limit and return nothing; a `claude --resume` of an aged-off session jsonl exits 0 with *no output at all* (Claude Code prunes jsonls aggressively). After a fork, check `[ -s <out> ]` — if it's empty, or the provider is out of credits / erroring, read the chat's `messages` JSON straight from the DB and synthesize from that. Forks are a convenience; the transcript is always there.
+
 **What to ask** (specialize per chat — read what the agent actually did first, then ask about *that*; a generic template gets shallow answers):
 
-1. **What happened** — what did you build/change/decide, in one paragraph.
+1. **What happened — with proof.** What did you build/change/decide, in one paragraph — and *cite the evidence* so it's verifiable, not testimony: the file path(s) plus a unique token from the diff I can `grep`, the commit (`git log` / `pm-commit`), the files and tools you touched. "I fixed X" is a rumor; "I fixed X in `apps/foo/index.jsx` — grep `clampScrollTargetToView`" is checkable in one command.
 2. **What to prepare for the partner** — what should the morning brief flag? Open loops, decisions awaiting them, anything that'll surprise them when they open the app.
 3. **What was hard** — where did you get stuck, retry, or work around something? What cost you turns?
 4. **Skills** — which skill did you lean on, did it hold up, and what one edit would have saved you time? (This feeds phase 2.)
 5. **Mind** — what did you wish you'd remembered, or what would have been worth recording? Any note that misled you? (This feeds phase 3, where you cross-check the answer against the chat's read-trace.)
+
+**Interviews are testimony, not ground truth — verify before you act.** A forked agent missing recent state will confidently invent a plausible cause, or report a fix that never landed. The proof you asked for in Q1 is what makes verification cheap: `Grep` for the cited token. If it isn't there, the interview confabulated — fall back to the raw record (the cron session `.jsonl`, or the chat's `messages` JSON in the DB) and trust *that*. Treat mismatches as the default expectation, not the exception. Two traps make a sincere "I fixed it" false even when the agent is honest:
+- **Real but already gone.** Edits under `/app` (backend Python, baked shell-src) are **wiped on every container restart** — `/app` is re-baked from `/app/*-baked`. A claimed fix whose file mtime predates the last boot (`stat -c %Y /app/app-baked` vs the file) no longer exists.
+- **Never landed.** `/data/shell` is a **gitlink/submodule** with no per-file history in `/data` git, so a claimed shell edit that left no newer mtime, no `grep` hit, and no backup file simply didn't happen — the agent's working memory was confident; the filesystem is the truth.
+
+For either, confirm the change is actually on disk before treating the bug as fixed; if it isn't, put the bug back on the brief as open and don't auto-reapply a backend/shell behavior change overnight (that waits for a tap).
 
 **Cross-check skill usage against the log.** Beyond what each agent says it used, read the objective record: query `GET $API_BASE_URL/api/admin/activity/skills?since=<24h-ago-ISO>` with `$AGENT_TOKEN` for a ready-ranked `{"skills":[{"skill","count"}]}` (or read the raw `skill_loaded` lines from the absolute path `/data/apps/dreaming/inputs/activity.jsonl`). Fold the most-used Claude-loaded skills into the brief's "what I learned": which skills the platform actually leaned on, whether a heavily-used skill is the one agents complained about (a fix-priority signal), and which skills never load (dead weight). If `skills_enabled` is off, or the night was Codex-only, no skill loads are recorded and this section is correctly empty.
 
@@ -92,6 +102,7 @@ The interviews just told you where the skills failed today's agents. Act on it.
 - **Edit THIS skill (`/data/shared/skills/dreaming.md`) too.** Dreaming is a skill like any other, and you're the agent best placed to improve it. If a phase wasted time, a question got shallow answers, the brief was too long, or you found a better order — change the rule and commit it. Adapt what you prioritize, what you stop doing, how you phrase the interviews. This is the loop that makes each night's dreaming better than the last.
 - **Act on your own run-history (`inputs/dreaming-run-history.txt`), not just the interviews.** A failure or friction that recurs across nights (e.g. repeated `exit=2` max_turns nights) is a real signal: if the cause is in this skill, make the smallest durable fix and commit it; if it's code you can't change here — the runner's `max_turns`, the wrapper, the timeout — put a one-line proposal in the brief instead (a daytime `/app` edit doesn't survive a container rebake). Skim your recent self-edits first so you don't re-add a rule a past night removed.
 - Bar for a skill edit: it must help **any** future run, not just tonight. A one-off quirk goes to Mind (phase 3) or nowhere; a reusable procedure goes to a skill. (Same split the daytime agent uses: general technique → skill; fact about the partner → memory.)
+- **Keep the edit general and de-dated — the incident goes to Mind, not the skill.** When tonight's failure earns a skill edit, write the durable *rule plus the check that proves it* ("verify a claimed shell edit landed: `grep` the diff token, `stat` the mtime"), never the story of tonight ("on <date>, agent X claimed a fix that…"). If the incident itself is worth keeping, it's a Mind note you `[[link]]` — the skill stays a clean ruleset a future run reads cold. A skill that accretes dated anecdotes gets longer and slower to read every night, which is exactly the noise this phase exists to remove.
 - Don't rewrite a skill wholesale on one night's evidence. Surgical edits, each tied to an observed failure.
 
 ### 3. CONSOLIDATE + CLEAN the Mind graph — the heavy work the daytime defers
