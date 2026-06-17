@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import ChatView from '../ChatView/ChatView.jsx'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
+import useTheme from '../../hooks/useTheme.js'
 import {
   INIT, READY, MESSAGE_SENT, TURN_DONE, ERROR,
   CONTEXT_REQUEST, CONTEXT_RESPONSE,
@@ -63,6 +64,18 @@ function readPickerFromUrl() {
 }
 
 export default function ChatEmbed() {
+  // Self-theme on mount. The embed branch (App.jsx) renders OUTSIDE
+  // Shell, which is the only other useTheme() caller — so without this
+  // the embed inherits no theme and paints with the unstyled default
+  // tokens (black-on-black in dark, black composer in light). useTheme
+  // reads the persisted theme via React Query (hydrated from IndexedDB,
+  // refetched from /api/theme) and runs applyThemeToDom, so the embed
+  // matches the owner's theme in BOTH modes and live-updates when the
+  // theme query is invalidated (e.g. agent ships a new theme.css). The
+  // server already injects the initial theme block into the served HTML;
+  // this is what keeps the embed correct when the SW serves the
+  // non-injected precache, and what makes light/dark toggles propagate.
+  useTheme()
   // chatId is normally fixed for the life of this document (the runtime
   // helper navigates the iframe to change it, which remounts us). INIT
   // may still supply one if the helper opened us before lazy-create

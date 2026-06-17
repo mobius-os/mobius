@@ -617,9 +617,21 @@ registerRoute(
 // watchdog showed "Shell failed to load". createHandlerBoundToURL resolves the
 // precached index.html, which Workbox keeps in lockstep with the precached
 // bundle (shared revision manifest + cleanupOutdatedCaches), so HTML and bundle
-// can never disagree. Theme still applies client-side from
-// localStorage('mobius-theme-bg') before first paint, so the cached
-// (non-theme-injected) HTML renders correctly with no server round-trip.
+// can never disagree. For the FULL shell, the cached (non-theme-injected)
+// HTML renders correctly because Shell mounts useTheme(), which reapplies
+// the persisted theme client-side after first paint.
+//
+// `/shell/embed/*` is the exception, and the second reason for this denylist.
+// The embed branch (App.jsx) renders ChatEmbed OUTSIDE Shell. Before ChatEmbed
+// gained its own useTheme() call it had NO client-side theme apply at all, so
+// it depended entirely on the server-injected theme block in the served HTML —
+// which the precached index.html does NOT carry. Serving the embed from the
+// frozen precache stripped its theme (black-on-black / black composer). Even
+// with ChatEmbed.useTheme() now reapplying client-side, the embed must still
+// reach the server so its FIRST paint already carries the injected theme (no
+// unthemed flash) and so it tracks server-side theme.css changes. So deny
+// `/shell/embed/*` here and let it hit the network like `/recover`.
+//
 // `/recover*` is server-rendered (routes/recover.py) and is the safety net
 // when the shell itself is broken — it MUST reach the network/server, never the
 // precached shell. Without this denylist entry the installed PWA served the
@@ -632,6 +644,7 @@ registerRoute(new NavigationRoute(
       /^\/app-assets\//,
       /^\/apps\//,
       /^\/recover(\/|$)/,
+      /^\/shell\/embed(\/|$)/,
       /^\/(?!(?:shell|apps|recover)(?:\/|$))[A-Za-z0-9_-]+(?:\/(?:index\.html)?)?$/,
     ],
   },
