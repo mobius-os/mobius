@@ -81,8 +81,29 @@ export default function SettingsView({ onThemeChange }) {
 
   async function toggleTheme() {
     if (themeSwitching) return
-    const newMode = !lightMode
-    setLightMode(newMode)
+
+    // Derive the direction from what the user ACTUALLY SEES, not from
+    // the optimistic `lightMode` state. `lightMode` mirrors
+    // themeModeQuery.data, which resolves async through the SW and
+    // LAGS the painted theme; trusting it computed the toggle in the
+    // wrong direction (e.g. after a dark→light toggle, a follow-up
+    // light→dark would re-derive 'light' from the stale state and
+    // hand applyThemeToDom the already-current CSS → no-op repaint,
+    // leaving the UI stuck). getEffectiveTheme().mode reads
+    // <html data-theme> — the authoritative value applyThemeToDom
+    // last painted — so the direction is always relative to the
+    // visible theme. Fall back to `lightMode` only at very early boot
+    // before any theme has been applied (mode === null).
+    const eff = themeService.getEffectiveTheme()
+    const currentMode = eff?.mode === 'light' || eff?.mode === 'dark'
+      ? eff.mode
+      : (lightMode ? 'light' : 'dark')
+    const newMode = currentMode === 'light' ? 'dark' : 'light'
+
+    // Keep the optimistic switch UI in sync with the direction we
+    // just derived from the visible theme (so the knob reflects the
+    // target, not a flip of the stale state).
+    setLightMode(newMode === 'light')
     setThemeSwitching(true)
     setThemeError('')
 
@@ -93,11 +114,10 @@ export default function SettingsView({ onThemeChange }) {
     // theme queries; AppCanvas's useEffect picks that up and
     // postMessages `moebius:frame-theme` to live iframes.
     try {
-      const currentMode = newMode ? 'dark' : 'light'  // opposite of newMode
       await themeService.toggleTheme(queryClient, currentMode, api)
       onThemeChange?.()
     } catch {
-      setLightMode(!newMode)
+      setLightMode(currentMode === 'light')
       setThemeError(
         'Could not save theme. Check your connection and try again.',
       )

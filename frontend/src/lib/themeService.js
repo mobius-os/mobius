@@ -85,6 +85,16 @@ export function applyThemeToDom(css, bg) {
     document.body.style.background = bg
     const meta = document.querySelector('meta[name="theme-color"]')
     if (meta) meta.setAttribute('content', bg)
+    // Keep the INLINE --bg on <html> in lockstep with the theme we
+    // just painted. index.html's splash script sets this inline var
+    // from localStorage['mobius-theme-bg'] before first paint; an
+    // inline style on documentElement beats `:root{}` in the cascade,
+    // so a stale value here pins the wrong background even after the
+    // <style id="mobius-theme"> block updates. Re-set it (not remove)
+    // so the no-flash-on-load benefit survives, and write the same
+    // key back so the NEXT cold-boot splash reads the current bg.
+    document.documentElement.style.setProperty('--bg', bg)
+    try { localStorage.setItem('mobius-theme-bg', bg) } catch {}
   }
 
   // Tell the apps-sdk-ui design system which mode we're in. SDK
