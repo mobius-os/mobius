@@ -56,14 +56,31 @@ export default function SettingsView({ onThemeChange }) {
   const claudeVersion = settingsQuery.data?.claude_version
   const codexVersion = settingsQuery.data?.codex_version
   const claudeAuthenticated = !!claudeStatusQuery.data?.authenticated
-  // Render the moment cached data is present rather than waiting for a
-  // fresh fetch to resolve. Both queries are persisted to IndexedDB and
-  // hydrate before the network round-trip (see queryClient.js), so on a
-  // re-open `data` is already populated while `isFetched` is still false
-  // for this mount — gating on `isFetched` reintroduced the open-time
-  // flash this fix removes. We paint from the cache and let the
-  // background revalidation update the rows only if something changed.
-  const providerLoaded = settingsQuery.data !== undefined && claudeStatusQuery.data !== undefined
+  // Three-state gate for the AI-providers section, in priority order:
+  //
+  //   READY   — at least the cached data is present (data !== undefined).
+  //             Both queries are persisted to IndexedDB and hydrate
+  //             before the network round-trip (see queryClient.js), so on
+  //             a re-open we paint from disk instantly and let the
+  //             background revalidation update the rows only if something
+  //             changed. This is why we gate on `data`, not `isFetched`:
+  //             `isFetched` is still false on this mount even when the
+  //             cache already holds a value, and gating on it reintroduced
+  //             the open-time flash this fix removes.
+  //   ERROR   — no data at all AND the fetch failed. A first-ever open
+  //             with no persisted cache that errors must say so, not
+  //             render the section blank with no indication.
+  //   LOADING — no data yet and no error: the initial in-flight fetch.
+  const providerReady = settingsQuery.data !== undefined && claudeStatusQuery.data !== undefined
+  const providerError =
+    !providerReady && (settingsQuery.isError || claudeStatusQuery.isError)
+  const providerErrorMsg =
+    settingsQuery.error?.message || claudeStatusQuery.error?.message ||
+    'Could not load provider settings.'
+  const retryProviders = useCallback(() => {
+    settingsQuery.refetch()
+    claudeStatusQuery.refetch()
+  }, [settingsQuery, claudeStatusQuery])
 
   // Stable identity-preserving callbacks: passing fresh arrow
   // functions in JSX re-mounted ProviderRow's event handlers every
@@ -226,7 +243,7 @@ export default function SettingsView({ onThemeChange }) {
         <section className="settings__section">
           <h2 className="settings__section-title">AI providers</h2>
 
-          {providerLoaded && (
+          {providerReady ? (
             <div className="settings__providers">
               <ProviderRow
                 id="codex"
@@ -255,6 +272,31 @@ export default function SettingsView({ onThemeChange }) {
                   onDone={onClaudeAuthDone}
                 />
               </ProviderRow>
+            </div>
+          ) : providerError ? (
+            // First-ever open with no persisted cache and the fetch
+            // failed. Surface the error + a retry rather than rendering
+            // the section blank — a silent empty section reads as "no
+            // providers", which is wrong.
+            <Alert
+              color="danger"
+              variant="soft"
+              description={providerErrorMsg}
+              actions={
+                <button
+                  className="settings__btn settings__btn--outline settings__btn--sm"
+                  type="button"
+                  onClick={retryProviders}
+                >
+                  Retry
+                </button>
+              }
+            />
+          ) : (
+            // Loading: no cached data yet and no error — the initial
+            // in-flight fetch. Show a neutral notice instead of nothing.
+            <div className="settings__notice" role="status">
+              Loading providers…
             </div>
           )}
         </section>
