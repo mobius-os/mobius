@@ -82,8 +82,14 @@ function makeDomStub() {
 // assert BOTH theme keys were invalidated.
 function makeQueryClient() {
   const invalidated = []
+  const setData = []  // [queryKey, value] pairs from setQueryData
   return {
     invalidated,
+    setData,
+    // toggleTheme seeds the theme query cache with the new {css,bg} so the
+    // post-invalidate refetch / useTheme re-apply can't repaint a stale
+    // SWR value over the toggle's correct paint.
+    setQueryData: (queryKey, value) => { setData.push([queryKey, value]); return value },
     invalidateQueries: (opts) => {
       invalidated.push(opts.queryKey)
       return Promise.resolve()
@@ -203,6 +209,10 @@ test('toggleTheme persists css + mode before invalidating', async () => {
   const events = []
   const qc = {
     invalidated: [],
+    setQueryData: (queryKey, value) => {
+      events.push(['setQueryData', JSON.stringify(queryKey)])
+      return value
+    },
     invalidateQueries: (opts) => {
       events.push(['invalidate', JSON.stringify(opts.queryKey)])
       qc.invalidated.push(opts.queryKey)
@@ -442,4 +452,46 @@ test('BUG 2 — toggleTheme keeps the inline --bg in lockstep with the painted t
   assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#f0eeeb',
     'inline --bg must track the toggled-to light bg, not the stale splash value')
   assert.equal(localStorage.getItem('mobius-theme-bg'), '#f0eeeb')
+})
+
+
+// --- REVERT RACE: toggle must not be clobbered by a stale /api/theme re-apply ---
+// Reproduced in-browser: after a toggle, themeQueries.invalidate triggers a
+// refetch whose StaleWhileRevalidate response is the PRE-toggle theme;
+// useTheme's apply effect then repaints that stale theme OVER the toggle's
+// correct paint, snapping the UI back (the owner's "stuck/reverts" symptom).
+// The fix seeds the theme query cache with the NEW {css,bg} via setQueryData
+// (and refreshes the SW cache) so the re-apply is correct, not a regression.
+
+test('REVERT RACE — toggleTheme seeds the theme query cache with the NEW theme', async () => {
+  const qc = makeQueryClient()
+  const api = makeApi(DARK_CSS)  // dark -> light
+  const result = await themeService.toggleTheme(qc, 'dark', api)
+  // setQueryData(['theme'], {css,bg}) must have fired with the NEW light theme.
+  const themeSet = qc.setData.find(([k]) => JSON.stringify(k) === '["theme"]')
+  assert.ok(themeSet, 'toggleTheme must seed the ["theme"] query cache so a stale SWR re-apply cannot clobber it')
+  assert.equal(themeSet[1].bg, '#f0eeeb',
+    `seeded bg must be the NEW light bg, not the stale dark one. Got ${themeSet[1].bg}`)
+  assert.equal(themeSet[1].css, result.newCss,
+    'seeded css must equal the freshly-built/applied css')
+})
+
+test('REVERT RACE — query cache is seeded BEFORE the invalidate refetch', async () => {
+  // setQueryData must land before invalidateQueries: invalidate kicks off the
+  // refetch whose result useTheme re-applies; the cache must already hold the
+  // new theme so that re-apply is a no-op rather than a stale revert.
+  const events = []
+  const qc = {
+    setData: [],
+    setQueryData: (queryKey, value) => { events.push('setQueryData'); qc.setData.push([queryKey, value]); return value },
+    invalidated: [],
+    invalidateQueries: (opts) => { events.push('invalidate'); qc.invalidated.push(opts.queryKey); return Promise.resolve() },
+  }
+  const api = makeApi(DARK_CSS)
+  await themeService.toggleTheme(qc, 'dark', api)
+  const setIdx = events.indexOf('setQueryData')
+  const invIdx = events.indexOf('invalidate')
+  assert.ok(setIdx >= 0 && invIdx >= 0, 'both setQueryData and invalidate must fire')
+  assert.ok(setIdx < invIdx,
+    `setQueryData must precede invalidate so the refetch/re-apply sees the new theme; got ${events.join(' -> ')}`)
 })

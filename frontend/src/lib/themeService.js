@@ -215,6 +215,35 @@ const STRUCTURAL_KEYS = [
   '--muted',
 ]
 
+// The shell's service worker serves `/api/theme` StaleWhileRevalidate from
+// the `mobius-shell-data` cache (see sw.js). Right after a toggle,
+// `themeQueries.invalidate` triggers a refetch whose SWR response is the
+// PRE-toggle (stale) theme — and `useTheme`'s apply effect then repaints
+// that stale theme OVER the toggle's correct optimistic paint, snapping
+// the UI back to the old mode (the "stuck on dark / reverts" symptom).
+// We just persisted the authoritative new theme, so overwrite the cached
+// `/api/theme` body with it: the SWR serve is now correct and the re-apply
+// is a no-op instead of a regression. Best-effort — no SW / no Cache
+// Storage (tests, SSR, private mode) just skips this; the optimistic paint
+// + the eventual network revalidation still converge.
+const SHELL_DATA_CACHE = 'mobius-shell-data'
+
+async function _refreshThemeSwCache(css, bg) {
+  if (typeof caches === 'undefined' || typeof Response === 'undefined') return
+  try {
+    const cache = await caches.open(SHELL_DATA_CACHE)
+    const url = new URL('/api/theme', self?.location?.origin || window.location.origin).href
+    const body = JSON.stringify({ css, bg })
+    await cache.put(url, new Response(body, {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+  } catch {
+    // Cache write failed (quota, opaque origin, no SW). Non-fatal: the
+    // optimistic DOM paint already reflects the new theme.
+  }
+}
+
 /**
  * Toggle between dark and light: fetch the current CSS, swap
  * structural color vars for the opposite mode, apply to the DOM,
@@ -286,6 +315,14 @@ export async function toggleTheme(queryClient, currentMode, api) {
   applyThemeToDom(newCss, newBg)
   try {
     await persistTheme(newCss, newMode, api)
+    // Make the post-toggle refetch resolve to the NEW theme, not the stale
+    // SWR-cached one — otherwise useTheme's apply effect would repaint the
+    // old theme over this toggle's correct paint (the revert/stuck bug).
+    // setQueryData updates the in-memory cache immediately; the SW cache
+    // refresh keeps the SWR network revalidation from re-introducing stale
+    // data on the next read.
+    queryClient.setQueryData(themeQueries.keys.all, { css: newCss, bg: newBg })
+    await _refreshThemeSwCache(newCss, newBg)
     themeQueries.invalidate(queryClient)
     themeQueries.mode.invalidate(queryClient)
   } catch (err) {
