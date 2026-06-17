@@ -310,4 +310,3 @@ The partner's taps on a brief's question cards don't reach a live agent — they
 - **Learn — update the skills, including this one.** If the partner consistently declines a *kind* of suggestion, or always wants more/less detail, or a question landed wrong, that's a dreaming-skill edit: change what you prioritize, prune, or how you phrase the next brief's questions. `pm-commit` it.
 
 The open-ended morning chat is the other steering surface — anything the partner types there (this run or the last) is live context to fold in. Between the carrier answers and the chat, the partner steers the next night's dream; you close the loop by acting and by encoding what they told you.
-
