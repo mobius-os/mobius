@@ -181,6 +181,41 @@ def test_frame_paints_light_theme_from_first_byte(client, auth):
     (shared / "theme-mode").unlink(missing_ok=True)
 
 
+def test_frame_dark_theme_pins_color_scheme(client, auth):
+  """A dark-mode served frame carries BOTH data-theme="dark" and an explicit
+  dark color-scheme, so the iframe's native widgets / scrollbars / canvas
+  follow the shell mode regardless of the OS prefers-color-scheme.
+
+  Regression test for "Notes content-area flashes a light canvas in dark
+  mode": data-theme drives shell CSS, but the UA-native color-scheme came
+  from the OS preference until we injected an explicit :root{color-scheme}.
+  """
+  import pathlib
+
+  from app.config import get_settings
+
+  data_dir = pathlib.Path(get_settings().data_dir)
+  shared = data_dir / "shared"
+  shared.mkdir(parents=True, exist_ok=True)
+  (shared / "theme.css").write_text(":root { --bg: #0d0d0d; --text: #ececec; }")
+  (shared / "theme-mode").write_text('"dark"')
+  try:
+    r = client.post("/api/apps/", json={
+      "name": "dark-scheme-test",
+      "description": "test",
+      "jsx_source": "export default function App() { return <div>hi</div> }",
+    }, headers=auth)
+    app_id = r.json()["id"]
+
+    html = client.get(f"/api/apps/{app_id}/frame").text
+    assert 'data-theme="dark"' in html
+    # The explicit native color-scheme is injected from the first byte.
+    assert "color-scheme:dark" in html
+  finally:
+    (shared / "theme.css").unlink(missing_ok=True)
+    (shared / "theme-mode").unlink(missing_ok=True)
+
+
 def test_frame_etag_varies_by_theme(client, auth):
   """The frame ETag must change when the active theme changes, so a cached
   frame revalidates after a light/dark toggle instead of 304-ing against a
