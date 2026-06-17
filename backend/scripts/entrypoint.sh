@@ -535,10 +535,29 @@ fi
 # that rebuilt dist from this image leaves the marker matching BUILD_SHA.
 # We only act when the image is NEWER than what we last served.
 #
-# Detection: compare the image's baked BUILD_SHA against the stamped
-# marker. We skip when BUILD_SHA is unset/"unknown" (a plain `docker
-# compose up` that did not pass the build-arg) so local dev instances do
-# not churn dist on every boot.
+# Detection: two signals, OR'd, so the refresh fires on every real update
+# path — not just the one that happens to carry a build-arg.
+#   1. BUILD_SHA marker (fast path): the baked BUILD_SHA differs from the
+#      stamped .image-build-sha. This is what deploy-prod.sh leverages to
+#      stay a no-op (it stamps the marker to match BUILD_SHA after it
+#      rebuilds dist itself), and it short-circuits the content compare
+#      when present.
+#   2. Bundle-content compare (fallback, the self-host path): the baked
+#      image's served entry bundle differs from the one in /data/shell/dist.
+#      Vite content-hashes the entry as `assets/index-<hash>.js` and names
+#      it in index.html, so a changed frontend ⇒ a changed filename and an
+#      unchanged image ⇒ the identical filename. This is the signal that
+#      makes the DOCUMENTED self-host update (`git pull && docker compose up
+#      -d --build`, which does NOT set BUILD_SHA → baked sha is "unknown")
+#      actually deliver the new bundle. docker-compose.yml defaults
+#      BUILD_SHA to "unknown", so gating on the marker alone left this path
+#      silently stale — the exact bug this block exists to fix.
+# Either signal is sufficient; the content compare is authoritative for
+# "is the served bundle actually the baked one", independent of BUILD_SHA.
+#
+# A plain re-`up` of the SAME image is a no-op: same baked bundle filename
+# ⇒ no content diff, and (when set) same BUILD_SHA ⇒ no marker diff. So
+# local dev instances and ordinary restarts don't churn dist on every boot.
 #
 # Preserving user edits: we refresh ONLY /data/shell/dist (the served
 # build), copied from the new image's baked /app/static (a complete build
@@ -548,18 +567,73 @@ fi
 # This is the minimum that makes a pull deliver the new baked UI while
 # leaving customization reversible: a user-built dist is regenerable from
 # their src, so refreshing it is safe.
+
+# Extract the content-hashed Vite entry bundle name (assets/index-<hash>.js)
+# from an index.html. Empty if the file is missing or has no such tag — the
+# same `index-[A-Za-z0-9_-]+\.js` shape scripts/bundle-info.sh keys on.
+_shell_bundle_id() {
+  [ -f "$1" ] || return 0
+  grep -oE 'index-[A-Za-z0-9_-]+\.js' "$1" 2>/dev/null | head -n1
+}
+
 _baked_sha="${BUILD_SHA:-unknown}"
-if [ -d /data/shell/src ] && [ "$_baked_sha" != "unknown" ]; then
+if [ -d /data/shell/src ] && [ -f /app/static/index.html ]; then
   _stamped_sha=""
   [ -f /data/shell/.image-build-sha ] && _stamped_sha=$(cat /data/shell/.image-build-sha)
-  if [ "$_baked_sha" != "$_stamped_sha" ] && [ -f /app/static/index.html ]; then
-    echo "Image build ${_baked_sha} differs from last-served ${_stamped_sha:-<none>}; refreshing /data/shell/dist from the new baked bundle."
-    rm -rf /data/shell/dist
-    cp -a /app/static /data/shell/dist
-    chown -R mobius:mobius /data/shell/dist
-    echo "$_baked_sha" > /data/shell/.image-build-sha
-    chown mobius:mobius /data/shell/.image-build-sha
-    echo "Served shell bundle refreshed to image build ${_baked_sha}."
+
+  # Signal 1: a known BUILD_SHA that differs from what we last stamped.
+  _sha_newer=""
+  if [ "$_baked_sha" != "unknown" ] && [ "$_baked_sha" != "$_stamped_sha" ]; then
+    _sha_newer="yes"
+  fi
+
+  # Signal 2: the baked entry bundle differs from the one served from dist.
+  # When dist is absent/incomplete (no index.html), the served id is empty
+  # and any non-empty baked id counts as "newer" — first real seed of dist.
+  _baked_bundle=$(_shell_bundle_id /app/static/index.html)
+  _served_bundle=$(_shell_bundle_id /data/shell/dist/index.html)
+  _bundle_newer=""
+  if [ -n "$_baked_bundle" ] && [ "$_baked_bundle" != "$_served_bundle" ]; then
+    _bundle_newer="yes"
+  fi
+
+  if [ -n "$_sha_newer" ] || [ -n "$_bundle_newer" ]; then
+    echo "New shell bundle detected (build ${_baked_sha}, baked=${_baked_bundle:-<none>} served=${_served_bundle:-<none>}); refreshing /data/shell/dist from the baked image."
+    # Lock + atomic swap. Two containers sharing /data (or a restart
+    # mid-copy) must never see a half-copied or nested dist: we copy into a
+    # sibling temp dir then rename() it over the old one (atomic on the same
+    # filesystem). The flock serializes concurrent refreshers so only one
+    # builds the temp dir + renames at a time. flock is guarded by
+    # command -v so a stripped image without util-linux still refreshes
+    # (unlocked) rather than failing to boot.
+    _refresh_dist() {
+      _new=/data/shell/.dist.new
+      _old=/data/shell/.dist.old
+      rm -rf "$_new" "$_old"
+      # cp the directory CONTENTS into a fresh dir, so the result is
+      # /data/shell/.dist.new/{index.html,assets,...} — never a nested
+      # .dist.new/static. -a preserves the complete baked build incl /vendor.
+      mkdir -p "$_new"
+      cp -a /app/static/. "$_new/"
+      chown -R mobius:mobius "$_new"
+      # Atomic-ish swap: move the live dist aside, rename the new one in,
+      # then drop the old. If dist is absent the first mv is a harmless
+      # no-op (guarded). A reader between the two renames sees either the
+      # complete old dist or the complete new one — never a partial tree.
+      [ -e /data/shell/dist ] && mv -f /data/shell/dist "$_old"
+      mv -f "$_new" /data/shell/dist
+      rm -rf "$_old"
+      echo "$_baked_sha" > /data/shell/.image-build-sha
+      chown mobius:mobius /data/shell/.image-build-sha
+      echo "Served shell bundle refreshed to ${_baked_bundle:-<none>} (build ${_baked_sha})."
+    }
+    if command -v flock >/dev/null 2>&1; then
+      _lock=/data/shell/.dist-refresh.lock
+      ( flock 9; _refresh_dist ) 9>"$_lock"
+      chown mobius:mobius "$_lock" 2>/dev/null || true
+    else
+      _refresh_dist
+    fi
   fi
 fi
 
