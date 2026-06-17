@@ -704,6 +704,15 @@ docker exec "$CONTAINER" rm -rf /data/shell/dist
 intent "docker exec ${CONTAINER} bash /app/scripts/rebuild_shell.sh"
 docker exec "$CONTAINER" bash /app/scripts/rebuild_shell.sh
 
+# Stamp /data/shell/.image-build-sha with the SHA we just deployed so the
+# entrypoint's self-host image-update detector (entrypoint.sh) sees the
+# marker already matching this image's BUILD_SHA on the next boot and stays
+# a no-op — it must not overwrite the dist this deploy just rebuilt+verified
+# from /data/shell/src. Without the stamp a later recreate would see
+# BUILD_SHA != stale-marker and re-copy /app/static over the deploy's build.
+intent "docker exec ${CONTAINER} sh -c 'printf %s \"\$BUILD_SHA\" > /data/shell/.image-build-sha'"
+docker exec "$CONTAINER" sh -c 'printf %s "${BUILD_SHA:-unknown}" > /data/shell/.image-build-sha' || true
+
 # ── step 3b: sync /data/platform from the new baked floor ──────────────
 # The backend serves from /data/platform (the agent-editable, git-tracked
 # platform layer), which persists across image deploys BY DESIGN. A deploy

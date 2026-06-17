@@ -462,15 +462,32 @@ def ready(response: Response):
 
 @app.get("/api/version")
 def version():
-  """Returns the git commit the running image was built from.
+  """Returns the build identity the running image was built from.
 
-  Baked at `docker build` time via the `BUILD_SHA` build-arg (Dockerfile +
-  deploy-prod.sh); "unknown" for a local `docker compose up` that didn't pass
-  it. Lets a deploy verify the SERVED backend matches the intended commit —
-  the backend analogue of the frontend bundle-hash check (bundle-info.sh /
-  verify-fresh.sh, which only see the shell bundle, not the backend).
+  - ``sha``: the git commit baked at `docker build` time via the `BUILD_SHA`
+    build-arg (Dockerfile + deploy-prod.sh); "unknown" for a local
+    `docker compose up` that didn't pass it. Lets a deploy verify the SERVED
+    backend matches the intended commit — the backend analogue of the
+    frontend bundle-hash check (bundle-info.sh / verify-fresh.sh, which only
+    see the shell bundle, not the backend).
+  - ``shell_sha``: the image-build-sha of the shell bundle currently served
+    from /data/shell/dist, stamped by entrypoint.sh / deploy-prod.sh when
+    that dist was last refreshed from a baked image. A client compares it to
+    ``sha`` to detect a stale served UI (shell_sha != sha ⇒ a newer image is
+    installed but its UI isn't being served yet), and polls ``sha`` itself to
+    detect that a newer image/build went live. "unknown" before any stamped
+    refresh (e.g. an instance predating this marker).
+
+  A full GitHub-release check + one-click update is a follow-up; this exposes
+  the local build identity cleanly so the image-pull path is self-verifying.
   """
-  return {"sha": get_settings().build_sha}
+  settings = get_settings()
+  marker = Path(settings.data_dir) / "shell" / ".image-build-sha"
+  try:
+    shell_sha = marker.read_text(encoding="utf-8").strip() or "unknown"
+  except OSError:
+    shell_sha = "unknown"
+  return {"sha": settings.build_sha, "shell_sha": shell_sha}
 
 
 @app.api_route(
