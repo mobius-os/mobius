@@ -50,14 +50,43 @@ git -C /data checkout <sha> -- shared/memory/notes/<slug>.md   # restore just th
 
 ## The recovery surface
 
-If you break a live copy, the partner recovers via `/recover` or a fresh you in the recovery chat at `/recover/chat`. The recovery chat runs its own minimal stack (separate auth, separate runner, separate per-chat storage at `/data/recovery/chats/<chat_id>.jsonl`) so it stays reachable when production chat code is broken. The partner can start multiple recovery chats with different providers (Claude or Codex). From the `/recover` dashboard they can click "Restore backend" / "Restore shell" / "Restore scripts" to copy the immutable baked source (`/app/app-baked/`, `/app/shell-src/`, `/app/scripts-baked/`) back over the live copy.
+If you break a live copy, the partner recovers via the `/recover` dashboard, or a fresh you in the recovery chat at `/recover/chat`. The recovery chat runs its own minimal stack (separate auth, separate runner, separate per-chat storage at `/data/recovery/chats/<chat_id>.jsonl`, stdlib-only — no shared code with the production chat path) so it stays reachable when production chat code is broken. The partner can start multiple recovery chats with different providers (Claude or Codex).
+
+**There is no "Restore backend/shell/scripts" button** on the `/recover` dashboard. The dashboard has exactly four actions:
+
+1. **Open recovery chat** (`/recover/chat`) — a fresh you with **filesystem write access via Bash** (but no `$AGENT_TOKEN`, no `$API_BASE_URL` — production API plumbing may be broken, so it does NOT call `/api/...`). This is the primary repair path: it diagnoses, edits the live code in place, and runs the restore script itself when needed.
+2. **Download backup (.zip)** — a snapshot of chats, mini-apps, theme, CLI credentials, and identity secrets (`.secret-key`, `service-token.txt`, VAPID keys, recovery chat history). Store it securely; it holds every secret needed for a full restore.
+3. **Reinstall app store** — reinstalls the curated App Store mini-app from its pinned manifest URL. Idempotent: skips if already installed. Use it if the store was uninstalled by accident.
+4. **Factory reset** — last resort. Wipes the account, all mini-apps, all chats, and CLI credentials. Chat *history* is preserved per the backup, but the live state is gone — no undo. Use only if the recovery chat itself is broken and the backup is safe.
+
+**Restoring broken code is done by the recovery-chat agent, not a dashboard button.** Inside `/recover/chat`, a fresh you restores the immutable baked source by running the restore script with Bash:
+
+```sh
+sh /app/scripts/recovery_restore.sh <mode>
+```
+
+Modes (run with no argument to print what each does):
+
+| Mode | What it restores |
+|---|---|
+| `shell-dist` | Prebuilt frontend bundle (`/app/static/` -> `/data/shell/dist/`). Fast; serves immediately after restart, no rebuild. |
+| `shell-src` | Editable frontend source (`/app/shell-src/` -> `/data/shell`). Wipes your `src/` edits; needs a rebuild to take visual effect. |
+| `backend` | Backend Python (`/app/app-baked/` -> `/app/app`), skipping the frozen-island files. |
+| `scripts` | Utility scripts (`/app/scripts-baked/` -> `/app/scripts`). |
+| `platform` | `git -C /data/platform reset --hard HEAD` — reverts *uncommitted* platform edits; commits are kept. Fast; no image needed. |
+| `platform-baked` | Full wipe + recopy of `/data/platform/{app,scripts}` from the baked floor, then commits the restore to `/data/platform` git history. Use when a bad change was already committed, or a git reset isn't enough. |
+
+After a `backend`, `scripts`, `platform`, or `platform-baked` restore, tell the partner to click **"Restart server"** at the top of the recovery chat page so uvicorn reloads the restored code.
 
 | Situation | URL | Action |
 |---|---|---|
 | Backend edit, main shell healthy | Settings -> Server | Click "Restart server" |
 | Backend edit, main shell broken | `/recover/chat` | Click "Restart server" |
-| Agent stuck or unable to fix | `/recover` | Click "Restore backend" / "Restore shell" / "Restore scripts" |
-| Lost ability to log in to main shell | `/recover` | Log in (owner password), then options above |
+| Agent stuck or unable to fix in place | `/recover/chat` | A fresh you runs `recovery_restore.sh <mode>`, then partner clicks "Restart server" |
+| App store mini-app gone | `/recover` | Click "Reinstall app store" |
+| Need a full snapshot before risky work | `/recover` | Click "Download backup (.zip)" |
+| Nothing else works, backup is safe | `/recover` | Click "Factory reset" (no undo) |
+| Lost ability to log in to main shell | `/recover` | Log in (owner password), then the options above |
 
 ---
 
