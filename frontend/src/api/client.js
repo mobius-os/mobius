@@ -137,6 +137,9 @@ export async function apiFetch(path, options = {}) {
 }
 
 export const api = {
+  // Public build identity: { sha, shell_sha }. Used by Settings to show the
+  // running shell build and detect a stale served UI (shell_sha !== sha).
+  version: () => apiFetch('/version'),
   auth: {
     /**
      * Login runs before any JWT exists, so the auth interceptor adds no

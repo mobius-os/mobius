@@ -2,10 +2,57 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
-import { webcrypto } from 'node:crypto'
+import { webcrypto, createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { resolve as pathResolve } from 'node:path'
 
 if (!globalThis.crypto) {
   globalThis.crypto = webcrypto
+}
+
+// Stamp `<meta name="mobius-frame-rev">` into the BUILT index.html so the
+// SW-precached shell carries the app-frame content rev.
+//
+// Why this is needed: installed PWAs load the SW-precached STATIC index.html
+// (sw.js NavigationRoute → createHandlerBoundToURL('/index.html')). That static
+// file never passed through the server, so it lacked the meta that
+// backend/app/theme.py `inject_theme_into_html` injects only at request time
+// for the server-rendered shell. AppCanvas/Shell read the rev from that meta
+// and fold it into the app-frame URL as `?v=<updated_at>-<frameRev>`; with no
+// meta the suffix was empty, the cache-first app-frame cache key never rotated
+// when app-frame.html/theme changed, and installed PWAs were served a stale
+// pre-injection frame forever (un-gated light @media flipping --bg on a light
+// OS).
+//
+// The rev MUST match backend `theme.frame_content_rev`: sha256 of the
+// app-frame.html bytes, first 16 hex chars. The build's source for that file is
+// `public/app-frame.html` (Vite copies it verbatim to dist/app-frame.html), the
+// same bytes that deploy to /data/shell/dist — so the build-time stamp and the
+// server's runtime hash agree. Done in transformIndexHtml so the emitted
+// dist/index.html already carries the meta BEFORE VitePWA computes its precache
+// revision, keeping the precached copy and its revision in lockstep.
+function stampFrameRev() {
+  return {
+    name: 'mobius-stamp-frame-rev',
+    transformIndexHtml: {
+      order: 'pre',
+      handler(html) {
+        const framePath = pathResolve(__dirname, 'public', 'app-frame.html')
+        const bytes = readFileSync(framePath)
+        const rev = createHash('sha256').update(bytes).digest('hex').slice(0, 16)
+        return {
+          html,
+          tags: [
+            {
+              tag: 'meta',
+              attrs: { name: 'mobius-frame-rev', content: rev },
+              injectTo: 'head',
+            },
+          ],
+        }
+      },
+    },
+  }
 }
 
 // Service-worker integration uses `injectManifest` rather than the
@@ -19,6 +66,10 @@ if (!globalThis.crypto) {
 // on activate by `cleanupOutdatedCaches`, no manual bumps.
 export default defineConfig({
   plugins: [
+    // Stamp the app-frame content rev into dist/index.html so the
+    // SW-precached shell can rotate the app-frame cache key (see the
+    // stampFrameRev definition above).
+    stampFrameRev(),
     // Tailwind v4 — required by @openai/apps-sdk-ui so its
     // `@theme static {}` token blocks resolve. Without this plugin
     // SDK design tokens (--radius-full, --color-ring, etc.) parse

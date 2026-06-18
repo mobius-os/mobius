@@ -197,6 +197,13 @@
   --color-ring: var(--accent);
 }
 
+/* Top-align a row whose label spans two lines (label + subtext), so the
+   trailing button sits level with the first line rather than centered
+   against the taller text block (e.g. the Shell version row). */
+.settings__row--top {
+  align-items: flex-start;
+}
+
 /* Tailwind v4's Preflight resets button backgrounds in the base
    layer, which fights the SDK Switch's component-layer
    `background: var(--switch-track-color-*)` rules and leaves the
