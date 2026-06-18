@@ -193,8 +193,24 @@ async function _refreshThemeSwCache(css, bg) {
 export async function toggleTheme(queryClient, currentMode, api) {
   const newMode = currentMode === 'dark' ? 'light' : 'dark'
 
-  const themeRes = await api.storage.shared.getThemeCss()
-  const currentCss = themeRes.ok ? await themeRes.text() : ''
+  // Swap relative to the css the user is CURRENTLY looking at, read
+  // SYNCHRONOUSLY from the React Query cache (useTheme's /api/theme result —
+  // the full css WITH @import font lines, unlike the DOM <style> whose
+  // @imports applyTheme has hoisted to <link>). Reading it sync means the
+  // applyThemeToDom below runs on THIS tick, so the recolor — including the
+  // toggle control itself, whose track is var(--accent)/var(--border) —
+  // lands immediately instead of after a storage round-trip. The old
+  // `await getThemeCss()` gated the optimistic paint behind a fetch: the knob
+  // slid at once but every color lagged a frame, so the control the user was
+  // looking at recolored last (owner feedback).
+  const cached = queryClient.getQueryData(themeQueries.keys.all)
+  let currentCss = typeof cached?.css === 'string' ? cached.css : ''
+  if (!currentCss) {
+    // Cold cache (very early boot, before useTheme's first fetch resolved):
+    // fall back to the authoritative persisted css.
+    const themeRes = await api.storage.shared.getThemeCss()
+    currentCss = themeRes.ok ? await themeRes.text() : ''
+  }
   const meta = parseThemeMeta(currentCss)
 
   // Pre-toggle bg, captured from the last persisted CSS — the
