@@ -32,7 +32,7 @@ from pathlib import Path
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILLS = DATA_DIR / "shared" / "skills"
 VERSION_FILE = SKILLS / ".seed-version"
-SEED_VERSION = "5"  # bump when the baked seed skills change (v2: added dreaming.md; v3: const-CSS styling standard in building-apps.md + new app-component-shapes.md; v4: added embedded-app-agent.md; v5: SyncPill v2 silent-when-healthy)
+SEED_VERSION = "6"  # bump when the baked seed skills change (v2: added dreaming.md; v3: const-CSS styling standard in building-apps.md + new app-component-shapes.md; v4: added embedded-app-agent.md; v5: SyncPill v2 silent-when-healthy; v6: recovery.md matches the actual /recover dashboard — four real actions, restore via recovery_restore.sh not a button)
 
 _SEED_CANDIDATES = [
   Path("/app/scripts/seed-skills"),
