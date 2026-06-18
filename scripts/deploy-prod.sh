@@ -18,6 +18,9 @@
 #   scripts/deploy-prod.sh --yes            # don't prompt before `docker compose build`
 #   scripts/deploy-prod.sh --target=test    # redirect to mobius-test (port 8001) instead of prod
 #   scripts/deploy-prod.sh --check          # verify-only: bundle hash, internal health, public health
+#   scripts/deploy-prod.sh --allow-unpushed # emergency hotfix: deploy a commit not yet on origin/main
+#                                           # (downgrades the default refusal + dirty-tree abort to a warning;
+#                                           #  push it to main ASAP or the next deploy-from-main reverts it)
 #
 # Env knobs (seconds; both default 120):
 #   PREFLIGHT_WAIT_SECONDS  how long the scratch-container preflight waits for boot
@@ -36,6 +39,13 @@ TARGET="prod"
 SKIP_BUILD=0
 ASSUME_YES=0
 CHECK_ONLY=0
+# Default-refuse to deploy a commit that isn't on origin/main: a deploy from an
+# unpushed commit ships code the next deploy-from-main silently REVERTS (the
+# "deployed-but-unpushed → reverted" class — see push-deploy-to-main lesson).
+# The escape hatch (--allow-unpushed / ALLOW_UNPUSHED=1) downgrades the abort to
+# a loud warning for a deliberate emergency hotfix: empower with an explicit
+# override, safe-by-default — not a hard wall.
+ALLOW_UNPUSHED="${ALLOW_UNPUSHED:-0}"
 BUILT_THIS_RUN=0  # set to 1 once we actually build, so the verify step only
                   # compares the served SHA when THIS run produced the image
 PREFLIGHT_WAIT_SECONDS="${PREFLIGHT_WAIT_SECONDS:-120}"
@@ -79,6 +89,7 @@ for arg in "$@"; do
     --skip-build)  SKIP_BUILD=1 ;;
     -y|--yes)      ASSUME_YES=1 ;;
     --check)       CHECK_ONLY=1 ;;
+    --allow-unpushed) ALLOW_UNPUSHED=1 ;;
     -h|--help)
       sed -n '1,/^set -euo pipefail/p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
@@ -509,14 +520,61 @@ if [ "$TARGET" = "prod" ]; then
     confirm_yes "deploy prod from this worktree anyway?" || { fail "aborted — use the main checkout"; exit 1; }
   fi
   if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-    git -C "$REPO_ROOT" fetch origin main -q 2>/dev/null || true
+    # Pull origin/main forward so the ancestor + tip comparisons below see the
+    # real remote state, not a stale local ref. `fetch origin` (not `origin
+    # main`) so origin/main updates even on a worktree whose upstream tracks a
+    # different branch; best-effort — an offline fetch leaves the prior ref.
+    git -C "$REPO_ROOT" fetch origin -q 2>/dev/null || true
+
+    # ── unpushed-commit guard (the headline structural fix) ───────────────
+    # You can only deploy code that is ALREADY on origin/main. A deploy from a
+    # commit that isn't on origin/main ships code the NEXT deploy-from-main
+    # silently REVERTS — the "deployed-but-unpushed → reverted" class. Assert
+    # HEAD is contained in (an ancestor of) origin/main and refuse otherwise.
+    # `--allow-unpushed` / ALLOW_UNPUSHED=1 is the documented escape hatch for a
+    # deliberate emergency hotfix: it downgrades the abort to a loud warning
+    # (safe-by-default, with an explicit override — not a hard wall).
     head_sha=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "")
     main_sha=$(git -C "$REPO_ROOT" rev-parse origin/main 2>/dev/null || echo "")
+    if [ -z "$main_sha" ]; then
+      warn "couldn't resolve origin/main (no network/remote?) — skipping the"
+      warn "unpushed-commit guard; confirm you're on current, pushed main."
+    elif ! git -C "$REPO_ROOT" merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
+      if [ "$ALLOW_UNPUSHED" = "1" ]; then
+        warn "HEAD $(git -C "$REPO_ROOT" rev-parse --short HEAD) is NOT on origin/main — deploying anyway (--allow-unpushed)."
+        warn "PUSH IT to main ASAP: the next deploy-from-main will REVERT this prod build until you do."
+      else
+        fail "HEAD $(git -C "$REPO_ROOT" rev-parse --short HEAD) is not on origin/main (not an ancestor of $(git -C "$REPO_ROOT" rev-parse --short origin/main))."
+        fail "Deploying an unpushed commit means the NEXT deploy-from-main silently REVERTS it"
+        fail "(the deployed-but-unpushed → reverted class). Push it first:"
+        fail "    git push origin HEAD:main"
+        fail "then re-run. For a deliberate emergency hotfix, pass --allow-unpushed (or ALLOW_UNPUSHED=1)"
+        fail "and push to main immediately after."
+        exit 1
+      fi
+    fi
+
+    # ── clean-tree guard ──────────────────────────────────────────────────
+    # deploy-prod builds from the CHECKOUT (docker's build context = the working
+    # tree, not HEAD), so uncommitted changes ship code that is on NO commit at
+    # all — strictly worse than an unpushed commit (it can't even be pushed as
+    # is). Refuse a dirty tree unless the same override is set.
+    if ! { git -C "$REPO_ROOT" diff --quiet && git -C "$REPO_ROOT" diff --cached --quiet; } 2>/dev/null; then
+      if [ "$ALLOW_UNPUSHED" = "1" ]; then
+        warn "working tree is DIRTY — deploying uncommitted changes anyway (--allow-unpushed)."
+        warn "These changes are on no commit; commit + push to main ASAP."
+      else
+        fail "working tree is dirty — deploy-prod builds from the checkout, so this would"
+        fail "ship uncommitted code that is on no commit (the next deploy reverts it)."
+        fail "Commit + push to main first, or pass --allow-unpushed for an emergency hotfix."
+        exit 1
+      fi
+    fi
+
+    # Existing on-main-but-different / unresolvable-origin advisory (kept).
     if [ -n "$head_sha" ] && [ -n "$main_sha" ] && [ "$head_sha" != "$main_sha" ]; then
       warn "HEAD $(git -C "$REPO_ROOT" rev-parse --short HEAD) != origin/main $(git -C "$REPO_ROOT" rev-parse --short origin/main 2>/dev/null) — you may deploy non-main code."
       confirm_yes "deploy this non-main checkout to prod?" || { fail "aborted"; exit 1; }
-    elif [ -z "$main_sha" ]; then
-      warn "couldn't resolve origin/main (no network/remote?) — skipping the non-main check; confirm you're on current main."
     fi
   fi
 fi
@@ -818,6 +876,32 @@ else
   # --skip-build: we didn't build, so don't compare against a possibly stale,
   # shell-inherited BUILD_SHA — just report what's serving.
   info "backend sha: ${served:-<none>} (no build this run; not compared)"
+fi
+
+# ── served-sha == origin/main assertion (prod only) ────────────────────
+# The pre-flight guard refused to BUILD an unpushed commit, but assert the same
+# invariant on the OTHER end too: what's actually SERVING must equal origin/main's
+# tip. They can drift even past the pre-flight — e.g. a sibling pushed a newer
+# main mid-deploy, or this deploy ran with --allow-unpushed. If the served sha
+# isn't origin/main's tip, the operator must push (or pull+redeploy) or the next
+# deploy-from-main reverts what's live. Warn loudly; never FAIL an
+# already-succeeded deploy (the code IS serving and healthy — this is a
+# push-hygiene nudge, not a runtime fault). prod-only: the test container has no
+# origin/main contract.
+if [ "$TARGET" = "prod" ] && git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  origin_main_sha=$(git -C "$REPO_ROOT" rev-parse origin/main 2>/dev/null || echo "")
+  served_clean="${served%-dirty}"  # the build stamps -dirty on an unclean tree
+  if [ -z "$origin_main_sha" ]; then
+    warn "could not resolve origin/main — skipping the served-sha==origin/main check."
+  elif [ -z "$served_clean" ] || [ "$served_clean" = "unknown" ]; then
+    info "served sha unknown — cannot compare to origin/main (provenance stamp missing)."
+  elif [ "$served_clean" = "$origin_main_sha" ]; then
+    ok "served sha == origin/main tip (${origin_main_sha:0:18}…) — prod is on pushed main"
+  else
+    warn "served sha ${served_clean:0:18}… != origin/main tip ${origin_main_sha:0:18}…"
+    warn "what's LIVE is not origin/main's tip. PUSH it (git push origin HEAD:main) or the"
+    warn "next deploy-from-main will REVERT this build. Deploy itself is healthy."
+  fi
 fi
 
 # Internal /api/health (we already checked this twice during waits, but
