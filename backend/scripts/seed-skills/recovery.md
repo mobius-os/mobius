@@ -122,7 +122,7 @@ their mind.
 ## File locations
 
 - **Uploaded files:** `/data/chats/{chat_id}/uploads/`
-- **Generated images:** `/data/chats/{chat_id}/generated/`
+- **Chat media (screenshots + generated):** `/data/chats/{chat_id}/media/` — the old `generated/` path is still served for embeds in pre-`media/` messages.
 - **Per-app storage (numeric id):** `/data/apps/{app_id}/<path>` — what `PUT /api/storage/apps/{app_id}/...` writes to, keyed by the numeric DB id.
 - **Per-app source (slug):** `/data/apps/{slug}/` — where app source lives, keyed by slug. `index.jsx` is the entrypoint and can import sibling `.js`, `.jsx`, `.ts`, or `.tsx` modules. NOT the same dir as storage; the slug tree and the numeric-id tree are separate.
 - **Shared storage (cross-app):** `/data/shared/<path>` — what `PUT /api/storage/shared/...` writes to; used for theme.css, agent-settings.json, the memory graph, etc.
