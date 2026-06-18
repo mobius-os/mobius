@@ -4,7 +4,8 @@ import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { TextLink } from '@openai/apps-sdk-ui/components/TextLink'
 import { api } from '../../api/client.js'
-import { authQueries, settingsQueries, themeQueries } from '../../hooks/queries.js'
+import { authQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
+import { SHELL_BUILD } from '../../lib/buildInfo.js'
 import * as themeService from '../../lib/themeService.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
@@ -19,6 +20,7 @@ export default function SettingsView({ onThemeChange }) {
   const settingsQuery = settingsQueries.owner.useQuery()
   const claudeStatusQuery = authQueries.provider.claudeStatus.useQuery()
   const themeModeQuery = themeQueries.mode.useQuery()
+  const versionQuery = versionQueries.current.useQuery()
   const [geminiKey, setGeminiKey] = useState('')
   const [saving, setSaving] = useState(false)
   const [status, setStatus] = useState(null)
@@ -38,6 +40,9 @@ export default function SettingsView({ onThemeChange }) {
   const [themeError, setThemeError] = useState('')
   const [restartPhase, setRestartPhase] = useState('idle')
   const [restartError, setRestartError] = useState('')
+  // 'idle' | 'checking' | 'checked' — the "Check for updates" button asks the
+  // service worker to re-check for a new shell build and re-reads /api/version.
+  const [updatePhase, setUpdatePhase] = useState('idle')
 
   useEffect(() => {
     // Mirror the full query value so a cache invalidation that
@@ -235,6 +240,42 @@ export default function SettingsView({ onThemeChange }) {
     }
   }
 
+  // Ask the service worker to re-check for a newer shell build and re-read the
+  // live build identity. `registration.update()` forces a fresh fetch of
+  // /sw.js (which is served `no-cache`); if a new bundle is live the SW
+  // installs it in the background and our update flow (skipWaiting +
+  // clientsClaim) activates it. We also re-fetch /api/version so the
+  // shell_sha !== sha notice reflects the current server state.
+  async function checkForUpdates() {
+    if (updatePhase === 'checking') return
+    setUpdatePhase('checking')
+    try {
+      if ('serviceWorker' in navigator) {
+        const reg = await navigator.serviceWorker.getRegistration()
+        if (reg) await reg.update()
+      }
+      await versionQueries.current.invalidate(queryClient)
+      await versionQuery.refetch()
+    } catch {
+      // A failed SW update check or refetch is non-fatal — fall through to
+      // 'checked' so the row still shows the latest known state.
+    } finally {
+      setUpdatePhase('checked')
+    }
+  }
+
+  const version = versionQuery.data
+  // shell_sha is the build the SERVED UI came from; sha is the running image.
+  // A mismatch means a newer image is installed but its UI isn't being served
+  // to this client yet — reloading picks it up.
+  const newerBuildInstalled =
+    !!version &&
+    version.shell_sha &&
+    version.sha &&
+    version.shell_sha !== 'unknown' &&
+    version.sha !== 'unknown' &&
+    version.shell_sha !== version.sha
+
   return (
     <div className="settings">
       <div className="settings__content">
@@ -385,6 +426,35 @@ export default function SettingsView({ onThemeChange }) {
               variant="soft"
               description={restartError}
             />
+          )}
+
+          <div className="settings__row settings__row--top">
+            <div>
+              <span className="settings__label">Shell version</span>
+              <p className="settings__subtext settings__subtext--tight">
+                {SHELL_BUILD}
+                {version?.sha && version.sha !== 'unknown'
+                  ? ` · ${version.sha.slice(0, 7)}`
+                  : ''}
+              </p>
+            </div>
+            <button
+              className="settings__btn settings__btn--outline settings__btn--sm"
+              type="button"
+              onClick={checkForUpdates}
+              disabled={updatePhase === 'checking'}
+            >
+              {updatePhase === 'checking'
+                ? 'Checking…'
+                : updatePhase === 'checked'
+                  ? 'Up to date'
+                  : 'Check for updates'}
+            </button>
+          </div>
+          {newerBuildInstalled && (
+            <div className="settings__notice" role="status">
+              A newer build is installed — reload to use it.
+            </div>
           )}
         </section>
 

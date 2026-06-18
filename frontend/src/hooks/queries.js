@@ -21,6 +21,7 @@ const providersStatusKey = ['auth', 'providers', 'status']
 const modelRegistryKey = ['models', 'registry']
 const modelPrefsKey = ['owner', 'model-prefs']
 const walkthroughKey = ['owner', 'walkthrough']
+const versionKey = ['version']
 
 async function fetchTheme() {
   const res = await api.theme.get()
@@ -237,6 +238,31 @@ function useWalkthroughQuery({ enabled = true } = {}) {
     // a sibling tab marks completion while this tab is open.
     staleTime: 24 * 60 * 60_000,
   })
+}
+
+async function fetchVersion() {
+  const res = await api.version()
+  return jsonOrThrow(res, 'version fetch failed:')
+}
+
+function useVersionQuery({ enabled = true } = {}) {
+  return useQuery({
+    queryKey: versionKey,
+    queryFn: fetchVersion,
+    enabled,
+    // staleTime 0 so the "Check for updates" path always re-reads the live
+    // build identity rather than a stale cached value.
+    staleTime: 0,
+  })
+}
+
+export const versionQueries = {
+  current: {
+    key: versionKey,
+    fetch: fetchVersion,
+    useQuery: useVersionQuery,
+    invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: versionKey }),
+  },
 }
 
 export const themeQueries = {

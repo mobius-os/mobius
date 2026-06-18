@@ -17,4 +17,4 @@
 // new precache URL the SW needs to see to refetch. This is the honest,
 // minimal lever for "rotate the bundle so every PWA refetches": no random
 // strings, just a human-readable record of why the bundle moved.
-export const SHELL_BUILD = '2026-06-15-light-mode-batch'
+export const SHELL_BUILD = '2026-06-18-r2-frame-cache'

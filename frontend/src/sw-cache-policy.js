@@ -14,7 +14,14 @@
 // names are stable so vendor/esm aren't re-fetched every release.
 export const VENDOR_CACHE = 'mobius-vendor-v2'
 export const ESM_CACHE = 'mobius-esm-v2'
-export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v2'
+// Bumped -v2 → -v3 (2026-06-18): a one-time eviction of app-frame entries
+// cached under the pre-fix, un-revved key (`?v=<updated_at>` with NO
+// `-<frameRev>` suffix, because the SW-precached index.html lacked the
+// mobius-frame-rev meta). Those stale frames carried the pre-injection
+// app-frame.html (un-gated light @media flipping --bg on a light OS). Renaming
+// the cache makes isStaleRuntimeCache delete the old `-v2` cache on the next
+// activate so the next open re-warms under the correct revved key.
+export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v3'
 export const STANDALONE_APPS_CACHE = 'mobius-standalone-v2'
 // app-assets bumped to -v2 ONCE (2026-06-12) to evict entries poisoned by
 // ranged-request bodies: CubeRun's probe GET with `Range: bytes=0-0` came

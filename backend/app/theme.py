@@ -19,6 +19,19 @@ _IMPORT_RE = re.compile(
   r"""@import\s+url\(\s*['"]([^'"]+)['"]\s*\)\s*;[^\S\n]*\n?""",
 )
 
+# Matches an existing `<meta name="mobius-frame-rev" ...>` tag (any attribute
+# order/spacing) so inject_theme_into_html can REPLACE it rather than append a
+# duplicate. The built index.html now ships this meta (stamped by the Vite
+# `stampFrameRev` plugin so the SW-precached shell carries it); the
+# server-rendered online path re-injects the runtime-computed rev, and without
+# this strip both tags would coexist. The value is identical either way (same
+# app-frame bytes → same hash), so this is purely about avoiding a duplicate
+# tag.
+_FRAME_REV_META_RE = re.compile(
+  r"""<meta\s+[^>]*name=["']mobius-frame-rev["'][^>]*>\s*""",
+  re.IGNORECASE,
+)
+
 DEFAULT_THEME = """\
 :root {
   /* Opaque fill colors — set by many shell components as solid
@@ -556,6 +569,11 @@ def inject_theme_into_html(
     f'<meta name="mobius-frame-rev" content="{html_escape(rev, quote=True)}">\n'
     if rev else ""
   )
+  # The built index.html already carries a `mobius-frame-rev` meta (stamped at
+  # build time so the SW-precached shell has it). Strip any existing tag before
+  # injecting the runtime value so the server-rendered shell ends up with
+  # exactly one (same value either way — same app-frame bytes → same hash).
+  html = _FRAME_REV_META_RE.sub("", html)
   html = html.replace(
     "</head>",
     f"{link_tags}<style>{safe_css}{scheme_css}</style>\n{rev_meta}</head>",

@@ -32,6 +32,9 @@ test('runtime cache cleanup keeps current cache names', () => {
 test('runtime cache cleanup evicts old offline app caches', () => {
   assert.equal(isStaleRuntimeCache('mobius-offline-apps'), true)
   assert.equal(isStaleRuntimeCache('mobius-offline-apps-v1'), true)
+  // v2 superseded by the -v3 bump (frame-rev cache-key fix). Must be evicted on
+  // activate so installed PWAs drop frames cached under the pre-fix un-revved key.
+  assert.equal(isStaleRuntimeCache('mobius-offline-apps-v2'), true)
   assert.equal(isStaleRuntimeCache('mobius-standalone'), true)
   assert.equal(isStaleRuntimeCache('mobius-standalone-v1'), true)
 })
