@@ -11,6 +11,7 @@ from app.theme import (
   get_theme_css,
   snapshot_theme_if_present,
   reset_theme_override,
+  EffectiveTheme,
 )
 
 
@@ -134,6 +135,54 @@ def test_inject_theme_no_imports_no_link_tags(tmp_path):
 
   assert '<link rel="stylesheet"' not in result
   assert "--bg" in result
+
+
+def test_inject_theme_frame_rev_single_meta(tmp_path):
+  """A vite-stamped index.html already carries a build-time
+  `<meta name="mobius-frame-rev">`. The online server-render path
+  re-injects the runtime-computed rev, so inject_theme_into_html must
+  STRIP the pre-existing meta before adding its own — otherwise the
+  served head ends up with two frame-rev metas (AppCanvas folds the rev
+  into the frame URL's `?v=` cache-buster, and two tags is ambiguous).
+
+  This was the one review gap: the strip-then-reinject path had no test
+  pinning that exactly ONE meta (and exactly ONE injected <style>)
+  survives. We pass an explicit bundle with a known non-empty rev so the
+  assertion doesn't depend on resolving a real app-frame.html on disk.
+  """
+  shared = tmp_path / "shared"
+  shared.mkdir()
+  (shared / "theme.css").write_text(":root { --bg: #1a1a1a; }")
+
+  bundle = EffectiveTheme(
+    css=":root { --bg: #1a1a1a; }",
+    bg="#1a1a1a",
+    mode="dark",
+    rev="abc123def4567890",
+  )
+  # index.html ALREADY stamped with a (different) build-time frame-rev,
+  # mimicking the vite stampFrameRev plugin's output in dist/index.html.
+  html = (
+    '<html lang="en"><head><title>Test</title>'
+    '<meta name="mobius-frame-rev" content="deadbeefdeadbeef">'
+    '</head><body style="margin:0;background:#0d0d0d"></body></html>'
+  )
+  result = inject_theme_into_html(html, str(tmp_path), bundle=bundle)
+
+  # Exactly one frame-rev meta survives — the runtime rev replaced the
+  # build-stamped one rather than duplicating it.
+  assert result.count("mobius-frame-rev") == 1, (
+    f"expected exactly one frame-rev meta, got "
+    f"{result.count('mobius-frame-rev')}:\n{result}"
+  )
+  # And it carries the RUNTIME rev, not the stale build-time stamp.
+  assert "abc123def4567890" in result
+  assert "deadbeefdeadbeef" not in result
+  # The strip-then-reinject must not duplicate the injected <style> either.
+  assert result.count("<style>") == 1, (
+    f"expected exactly one injected <style>, got "
+    f"{result.count('<style>')}:\n{result}"
+  )
 
 
 # /api/theme endpoint tests --------------------------------------------------
