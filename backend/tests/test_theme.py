@@ -5,7 +5,7 @@ os.environ.setdefault("DATA_DIR", "/tmp/mobius_test")
 os.environ.setdefault("FRONTEND_ORIGIN", "http://localhost:5173")
 
 from app.theme import (
-  inject_theme_into_html,
+  theme_data,
   extract_imports,
   _ensure_core_vars,
   get_theme_css,
@@ -35,23 +35,6 @@ def test_extract_imports_no_imports():
   imports, remaining = extract_imports(css)
   assert imports == []
   assert remaining == css
-
-
-def test_inject_theme_adds_link_tags_for_imports(tmp_path):
-  theme_css = (
-    "@import url('https://fonts.googleapis.com/css2?family=Poppins');\n"
-    ":root { --font: 'Poppins', sans-serif; }\n"
-  )
-  shared = tmp_path / "shared"
-  shared.mkdir()
-  (shared / "theme.css").write_text(theme_css)
-
-  html = '<html><head><title>Test</title></head><body style="margin:0;background:#0c0f14"></body></html>'
-  result = inject_theme_into_html(html, str(tmp_path))
-
-  assert '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Poppins">' in result
-  assert "@import" not in result
-  assert "--font" in result
 
 
 def test_ensure_core_vars_injects_missing():
@@ -122,67 +105,6 @@ input:focus-visible { outline: 2px solid red; }
   out = _ensure_core_vars(css)
   # Output is byte-identical because all core vars are defined.
   assert out == css
-
-
-def test_inject_theme_no_imports_no_link_tags(tmp_path):
-  theme_css = ":root { --bg: #1a1a1a; }"
-  shared = tmp_path / "shared"
-  shared.mkdir()
-  (shared / "theme.css").write_text(theme_css)
-
-  html = '<html><head><title>Test</title></head><body style="margin:0;background:#0c0f14"></body></html>'
-  result = inject_theme_into_html(html, str(tmp_path))
-
-  assert '<link rel="stylesheet"' not in result
-  assert "--bg" in result
-
-
-def test_inject_theme_frame_rev_single_meta(tmp_path):
-  """A vite-stamped index.html already carries a build-time
-  `<meta name="mobius-frame-rev">`. The online server-render path
-  re-injects the runtime-computed rev, so inject_theme_into_html must
-  STRIP the pre-existing meta before adding its own — otherwise the
-  served head ends up with two frame-rev metas (AppCanvas folds the rev
-  into the frame URL's `?v=` cache-buster, and two tags is ambiguous).
-
-  This was the one review gap: the strip-then-reinject path had no test
-  pinning that exactly ONE meta (and exactly ONE injected <style>)
-  survives. We pass an explicit bundle with a known non-empty rev so the
-  assertion doesn't depend on resolving a real app-frame.html on disk.
-  """
-  shared = tmp_path / "shared"
-  shared.mkdir()
-  (shared / "theme.css").write_text(":root { --bg: #1a1a1a; }")
-
-  bundle = EffectiveTheme(
-    css=":root { --bg: #1a1a1a; }",
-    bg="#1a1a1a",
-    mode="dark",
-    rev="abc123def4567890",
-  )
-  # index.html ALREADY stamped with a (different) build-time frame-rev,
-  # mimicking the vite stampFrameRev plugin's output in dist/index.html.
-  html = (
-    '<html lang="en"><head><title>Test</title>'
-    '<meta name="mobius-frame-rev" content="deadbeefdeadbeef">'
-    '</head><body style="margin:0;background:#0d0d0d"></body></html>'
-  )
-  result = inject_theme_into_html(html, str(tmp_path), bundle=bundle)
-
-  # Exactly one frame-rev meta survives — the runtime rev replaced the
-  # build-stamped one rather than duplicating it.
-  assert result.count("mobius-frame-rev") == 1, (
-    f"expected exactly one frame-rev meta, got "
-    f"{result.count('mobius-frame-rev')}:\n{result}"
-  )
-  # And it carries the RUNTIME rev, not the stale build-time stamp.
-  assert "abc123def4567890" in result
-  assert "deadbeefdeadbeef" not in result
-  # The strip-then-reinject must not duplicate the injected <style> either.
-  assert result.count("<style>") == 1, (
-    f"expected exactly one injected <style>, got "
-    f"{result.count('<style>')}:\n{result}"
-  )
 
 
 # /api/theme endpoint tests --------------------------------------------------
@@ -393,114 +315,68 @@ def test_api_theme_requires_auth(client):
   assert res.status_code == 401
 
 
-# Security tests for inject_theme_into_html ---------------------------------
+# theme_data() — the theme-as-data bundle the JSON slot serializes -----------
+# Replaces the old inject_theme_into_html <style> path. theme_data returns
+# the effective {css, bg, mode}; main.py serializes it into the page's
+# __mobius-theme__ slot (slot-XSS escaping is covered in
+# test_index_theme_slot.py against the real GET / path).
 
-def test_inject_theme_escapes_style_breakout(tmp_path):
-  """A theme.css with `</style><script>...` cannot break out of the
-  <style> block. The HTML parser ends a style block on the first
-  literal `</`; any user-controlled CSS containing `</style>` would
-  otherwise produce sibling tags in the head, allowing script
-  injection. We escape `</` to `<\\/` which the CSS parser ignores
-  but the HTML parser doesn't recognize as a closing tag.
-
-  Stored-XSS regression guard for owner-controlled theme CSS.
-  """
-  malicious = "</style><script>window.__pwned=1</script><style>"
+def test_theme_data_returns_default_bundle(tmp_path):
+  """No theme.css → theme_data returns DEFAULT_THEME css, default --bg, dark."""
+  from app.theme import DEFAULT_THEME
   shared = tmp_path / "shared"
   shared.mkdir()
-  (shared / "theme.css").write_text(malicious)
-
-  html = '<html><head></head><body style="margin:0;background:#0c0f14"></body></html>'
-  result = inject_theme_into_html(html, str(tmp_path))
-  head = result.split("</head>")[0]
-
-  # The only `</style>` in the head must be our own wrapper close —
-  # anything else means the user-controlled CSS broke out.
-  closes = head.count("</style>")
-  assert closes == 1, f"unexpected </style> count in head: {closes}"
-  # No `</script>` either: verifies the secondary close doesn't appear
-  # outside <style>. (`<script>` text inside <style> is inert.)
-  assert "</script>" not in head
-  # Crucial: parse the head as HTML and verify no <script> tag exists.
-  # Use stdlib HTMLParser; if the parser sees a <script> as a real
-  # tag in the head, that's a breakout.
-  from html.parser import HTMLParser
-
-  class TagFinder(HTMLParser):
-    def __init__(self):
-      super().__init__()
-      self.tags = []
-
-    def handle_starttag(self, tag, attrs):
-      self.tags.append(tag)
-
-  parser = TagFinder()
-  parser.feed(head + "</head>")
-  assert "script" not in parser.tags, f"script tag injected: {parser.tags}"
+  d = theme_data(str(tmp_path))
+  assert d == {"css": DEFAULT_THEME, "bg": "#0d0d0d", "mode": "dark"}
 
 
-def test_inject_theme_filters_unsafe_import_urls(tmp_path):
-  """@import url('javascript:...') and data: URIs must not produce a
-  <link> tag in the rendered HTML. http(s) only."""
-  hostile = (
-    "@import url('javascript:alert(1)');\n"
-    "@import url('data:text/css,body{}');\n"
-    "@import url('https://fonts.googleapis.com/css?family=Inter');\n"
-    ":root { --bg: #1a1a1a; }\n"
-  )
+def test_theme_data_returns_light_override(tmp_path):
+  """A light theme.css → theme_data reports its --bg and infers light mode
+  (no theme-mode file needed; get_theme_mode falls back to dark, but the
+  bundle's mode comes from theme-mode while bg comes from the css). Here we
+  assert the css is augmented + the bg is the override's --bg."""
   shared = tmp_path / "shared"
   shared.mkdir()
-  (shared / "theme.css").write_text(hostile)
-
-  html = '<html><head></head><body style="margin:0;background:#0c0f14"></body></html>'
-  result = inject_theme_into_html(html, str(tmp_path))
-
-  # No <link> tag pointing at a non-http(s) URL.
-  assert 'href="javascript:' not in result
-  assert "href='javascript:" not in result
-  assert 'href="data:' not in result
-  assert "href='data:" not in result
-  # The legitimate https URL DOES produce a <link> tag.
-  assert 'fonts.googleapis.com' in result
+  (shared / "theme.css").write_text(":root { --bg: #f0eeeb; --text: #1c1b1a; }")
+  d = theme_data(str(tmp_path))
+  assert d["bg"] == "#f0eeeb"
+  assert "--bg: #f0eeeb" in d["css"]
+  # mode comes from the theme-mode file (absent → dark default); bg-derived
+  # mode is the client's job. Server bundle mode is dark when no theme-mode.
+  assert d["mode"] == "dark"
 
 
-def test_inject_theme_quotes_in_import_urls_dont_inject_attrs(tmp_path):
-  """A `"` in a font URL must not break out of the <link href="..."> attr.
-  Even if our regex captures part of the URL, html.escape() with
-  quote=True ensures the value is attribute-safe."""
-  # Construct a URL that includes a literal `"` followed by attribute-
-  # injection-shaped text. The `extract_imports` regex's `[^'"]+` may
-  # truncate such URLs — verifying the behavior either way.
-  tricky = (
-    "@import url('https://example.com/x.css?\"onload=alert(1)');\n"
-    ":root { --bg: #abcdef; }\n"
-  )
+def test_theme_data_mode_from_theme_mode_file(tmp_path):
+  """theme_data's mode reflects /data/shared/theme-mode (light)."""
+  import json as _json
   shared = tmp_path / "shared"
   shared.mkdir()
-  (shared / "theme.css").write_text(tricky)
+  (shared / "theme.css").write_text(":root { --bg: #f0eeeb; }")
+  (shared / "theme-mode").write_text(_json.dumps("light"))
+  d = theme_data(str(tmp_path))
+  assert d["mode"] == "light"
+  assert d["bg"] == "#f0eeeb"
 
-  html = '<html><head></head><body style="margin:0;background:#0c0f14"></body></html>'
-  result = inject_theme_into_html(html, str(tmp_path))
 
-  # Critical property: any <link> tag's href attribute is properly
-  # quoted. Parse the head and check.
-  from html.parser import HTMLParser
+def test_theme_data_accepts_precomputed_bundle(tmp_path):
+  """Passing a bundle skips the file reads and returns its fields verbatim."""
+  bundle = EffectiveTheme(css=":root{--bg:#123456;}", bg="#123456", mode="dark", rev="x")
+  d = theme_data(str(tmp_path), bundle=bundle)
+  assert d == {"css": ":root{--bg:#123456;}", "bg": "#123456", "mode": "dark"}
 
-  class LinkAttrChecker(HTMLParser):
-    def __init__(self):
-      super().__init__()
-      self.bad = False
 
-    def handle_starttag(self, tag, attrs):
-      if tag == "link":
-        # Any attr name not in the expected set means injection.
-        for name, _ in attrs:
-          if name not in ("rel", "href"):
-            self.bad = True
-
-  parser = LinkAttrChecker()
-  parser.feed(result.split("</head>")[0] + "</head>")
-  assert not parser.bad, "extra attributes injected into <link>"
+def test_theme_data_passes_css_verbatim_no_style_escape(tmp_path):
+  """Unlike the old injection, theme_data does NOT </style>-escape the css —
+  the client injects it via <style>.textContent (never reparsed), so the css
+  is the effective css verbatim. (The slot's own </script> breakout is
+  escaped by main.py's serializer, covered in test_index_theme_slot.py.)"""
+  shared = tmp_path / "shared"
+  shared.mkdir()
+  css = ":root { --bg: #0d0d0d; content: '</style>'; }"
+  (shared / "theme.css").write_text(css)
+  d = theme_data(str(tmp_path))
+  # The </style> survives verbatim in the css value (augment may append vars).
+  assert "</style>" in d["css"]
 
 
 # Recovery affordance tests ------------------------------------------------

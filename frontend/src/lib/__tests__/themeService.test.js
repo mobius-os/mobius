@@ -37,7 +37,9 @@ function makeDomStub() {
     _attrs: {},
     getAttribute: (k) => documentElement._attrs[k],
     setAttribute: (k, v) => { documentElement._attrs[k] = v },
-    style: { _props: {}, setProperty(name, value) { this._props[name] = value }, getPropertyValue(name) { return this._props[name] } },
+    // colorScheme captured so the delegation tests can assert applyThemeToDom
+    // now sets documentElement.style.colorScheme via the shared library.
+    style: { _props: {}, colorScheme: '', setProperty(name, value) { this._props[name] = value }, getPropertyValue(name) { return this._props[name] } },
   }
 
   function makeNode(tag) {
@@ -324,4 +326,27 @@ test('applyThemeToDom dark→light then light→dark leaves a consistent inline 
   themeService.applyThemeToDom(':root { --bg: #f0eeeb; }', '#f0eeeb')  // back to light
   assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#f0eeeb')
   assert.equal(localStorage.getItem('mobius-theme-bg'), '#f0eeeb')
+})
+
+
+// --- DELEGATION: applyThemeToDom now delegates to the shared library ---
+// (src/lib/applyTheme.js). These assert the contract that moved with the
+// delegation: BOTH localStorage keys are written, and color-scheme is set.
+
+test('applyThemeToDom (delegated) writes BOTH mobius-theme and mobius-theme-bg', () => {
+  themeService.applyThemeToDom(':root { --bg: #f0eeeb; }', '#f0eeeb')
+  assert.deepEqual(
+    JSON.parse(localStorage.getItem('mobius-theme')),
+    { bg: '#f0eeeb', mode: 'light' },
+    'the new {bg,mode} key the pre-paint IIFE + resolveTheme read',
+  )
+  assert.equal(localStorage.getItem('mobius-theme-bg'), '#f0eeeb',
+    'the legacy bare-hex key (one-cycle compat with the old splash script)')
+})
+
+test('applyThemeToDom (delegated) sets documentElement.style.colorScheme', () => {
+  themeService.applyThemeToDom(':root { --bg: #0d0d0d; }', '#0d0d0d')
+  assert.equal(dom.documentElement.style.colorScheme, 'dark')
+  themeService.applyThemeToDom(':root { --bg: #f0eeeb; }', '#f0eeeb')
+  assert.equal(dom.documentElement.style.colorScheme, 'light')
 })

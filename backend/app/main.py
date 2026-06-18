@@ -796,7 +796,7 @@ if _static_dir.is_dir():
       name="assets",
     )
 
-  from app.theme import get_bg_color, inject_theme_into_html
+  from app.theme import get_bg_color, theme_data
 
   @app.get("/{path:path}")
   async def spa_fallback(request: Request, path: str):
@@ -868,11 +868,33 @@ if _static_dir.is_dir():
     # routes get the HTML fallback.
     if _is_static_asset_path(path):
       raise HTTPException(status_code=404, detail="Not found.")
-    # Always inject theme CSS (default or override) so colors are
-    # consistent from the first paint.
+    # Theme-as-data: serialize the effective theme into the page's
+    # `__mobius-theme__` JSON slot so the client's pre-paint script can
+    # paint it flash-free (src/lib/applyTheme.js). The server no longer
+    # injects a <style> block — it hands the client DATA, not pre-rendered
+    # HTML, so there is exactly one theme <style> (the client's).
+    #
+    # Slot-injection security: the payload is owner-controlled CSS embedded
+    # inside `<script type="application/json">`. The HTML parser ends that
+    # script element at the first literal `</`, so an embedded `</script>`
+    # (or `</`-anything) in the theme CSS would break out of the slot.
+    # Escaping `</` -> `<\/` defuses that (JSON treats `\/` as `/`, so the
+    # parsed value is identical). U+2028/U+2029 are valid in JSON strings
+    # but are JS line terminators inside a <script>, so they must be
+    # `\u`-escaped too. This is the mandatory slot-XSS defense.
+    import json
     from fastapi.responses import HTMLResponse
     html = (_static_dir / "index.html").read_text(encoding="utf-8")
-    html = inject_theme_into_html(html, settings.data_dir)
+    payload = (
+      json.dumps(theme_data(settings.data_dir))
+      .replace("</", "<\\/")
+      .replace("\u2028", "\\u2028")
+      .replace("\u2029", "\\u2029")
+    )
+    html = html.replace(
+      '<script type="application/json" id="__mobius-theme__"></script>',
+      f'<script type="application/json" id="__mobius-theme__">{payload}</script>',
+    )
     # index.html MUST be served with `Cache-Control: no-cache` so the
     # browser revalidates on every page load. Without it, the browser
     # heuristically caches HTML for hours and the user's PWA keeps

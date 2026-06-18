@@ -1378,7 +1378,7 @@ def _not_modified_if_match(
 def _frame_etag(
   app: models.App,
   frame_path: Path,
-  theme_token: str = "",
+  theme_token: str | None = "",
   frame_rev: str | None = None,
 ) -> str | None:
   """Validator for the `/frame` response, combining the app's
@@ -1400,13 +1400,13 @@ def _frame_etag(
   real content change that keeps its mtime) — the precise failure mode
   here. The frame file is small, so hashing per request is cheap.
 
-  `theme_token` folds the active theme in. The frame is now served with
-  the theme pre-injected into its <style> + `data-theme` (so light mode
-  paints light from the first byte instead of flashing the dark fallback
-  — see get_frame). That makes the response vary by theme, so the
-  validator must too: without it a cached frame keeps the old theme after
-  a light/dark toggle (a 304 against an unchanged validator), which is the
-  same stale-frame trap the content hash closes for code changes.
+  `theme_token` is VESTIGIAL since theme-as-data: the frame no longer has
+  the theme server-injected (the client paints it from the __mobius-theme__
+  slot + localStorage), so the served frame bytes don't vary by theme and a
+  light/dark toggle no longer needs to bust the frame cache. get_frame now
+  passes theme_token=None; the parameter is kept (defaulting to "") only so
+  any other caller/test stays source-compatible. When non-empty it still
+  folds into the validator.
 
   `frame_rev`: the app-frame.html content hash, already computed once by
   `load_effective_theme` for the same request. Pass it so the frame file
@@ -1491,23 +1491,16 @@ def get_frame(
   if frame_path is None:
     raise HTTPException(status_code=404, detail="Frame not found.")
 
-  # The active theme is pre-injected into the served frame (below), so the
-  # response varies by theme — fold it into the validator so a cached frame
-  # revalidates after a light/dark toggle. Token is a hash of the effective
-  # theme CSS plus the mode; cheap, and the same signal the injection uses.
-  data_dir = get_settings().data_dir
-  # Resolve the active theme ONCE (single read of theme.css + theme-mode +
-  # one app-frame hash, memoized) and thread the same bundle into both the
-  # ETag token and the injection below — they used to each re-read the theme.
-  theme_bundle = theme.load_effective_theme(data_dir)
-  theme_token = hashlib.sha256(
-    f"{theme_bundle.mode}:{theme_bundle.css}".encode("utf-8")
-  ).hexdigest()[:16]
-
-  # Reuse the app-frame.html hash the bundle already computed (bundle.rev)
-  # instead of re-hashing the same file here — same candidate list, same
-  # bytes, so the ETag is byte-identical, just one read instead of two.
-  etag = _frame_etag(app, frame_path, theme_token, frame_rev=theme_bundle.rev)
+  # The frame is no longer theme-varying: theme-as-data moved theming to the
+  # client (the frame's pre-paint IIFE reads the __mobius-theme__ slot +
+  # localStorage and paints flash-free; the server no longer injects a
+  # <style>). So the validator keys only on app.updated_at + the
+  # app-frame.html content hash — NOT the theme. A light/dark toggle no
+  # longer needs to bust the frame cache, because the served frame bytes
+  # don't change with the theme. Compute the frame content hash directly
+  # (theme-independent) and pass theme_token=None.
+  frame_rev = theme.frame_content_rev(get_settings().data_dir)
+  etag = _frame_etag(app, frame_path, theme_token=None, frame_rev=frame_rev)
   if etag:
     not_modified = _not_modified_if_match(request, etag, app.offline_capable)
     if not_modified is not None:
@@ -1525,18 +1518,13 @@ def get_frame(
     f"var _FRAME_CHAT_ID = {json.dumps(app.chat_id or '')}",
   )
 
-  # Pre-inject the active theme so the frame paints the RIGHT palette from
-  # the first byte. The frame still carries a hardcoded fallback :root and
-  # the parent shell still posts moebius:frame-init/-theme afterward — but
-  # in light mode the served HTML used to ship ONLY the DARK fallback, so an
-  # app opened on a dark background and either flashed to light when
-  # frame-init landed or (when the theme query was unresolved at init time —
-  # offline / slow) STAYED dark against the light shell, which the owner saw
-  # as "opening an app changes the background". Injecting the real theme's
-  # <style> after the fallback :root (it wins by source order) and
-  # data-theme on <html> closes both windows for every app. The postMessage
-  # path remains the mechanism for LIVE theme swaps without a reload.
-  html = theme.inject_theme_into_html(html, data_dir, bundle=theme_bundle)
+  # Theme-as-data: the frame no longer has the theme server-injected. Its
+  # pre-paint IIFE reads the __mobius-theme__ slot (when the server fills
+  # one) and the shell's same-origin localStorage to paint --bg / data-theme
+  # / color-scheme flash-free from the fallback :root + the persisted owner
+  # mode. The parent shell still posts moebius:frame-init/-theme for LIVE
+  # swaps without a reload. Removing the injection means the served frame
+  # bytes are theme-independent (so the ETag no longer folds the theme).
 
   headers = {"Cache-Control": "no-cache"}
   if etag:

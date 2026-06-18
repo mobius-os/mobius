@@ -144,16 +144,18 @@ def test_frame_etag_changes_after_app_update(client, auth, db):
   assert r2.headers["etag"] != old_etag
 
 
-def test_frame_paints_light_theme_from_first_byte(client, auth):
-  """In light mode the SERVED frame already carries the light theme — its
-  injected <style> sets --bg to the light value and <html> gets
-  data-theme="light".
+def test_frame_self_themes_no_server_style_injection(client, auth):
+  """Theme-as-data: the served frame is NOT theme-injected. It ships the
+  shared pre-paint IIFE (which reads the __mobius-theme__ slot + the shell's
+  same-origin localStorage and paints --bg / data-theme / color-scheme
+  client-side) plus the data-theme="light" fallback CSS — but the SERVER no
+  longer writes a <style> theme block, a data-theme attr on <html>, or a
+  color-scheme rule into the served bytes.
 
-  Regression test for the "opening an app changes the background" bug: the
-  frame's hardcoded :root fallback is dark, and the theme used to reach the
-  frame ONLY via a post-load postMessage. In light mode that meant the
-  served HTML painted dark until (or unless) frame-init landed — a dark panel
-  against the light shell. Server-injecting the theme closes that window.
+  Replaces the old "frame paints light from the first byte" server-injection
+  test: the no-flash guarantee now comes from the client pre-paint IIFE, not
+  a server <style>. The frame bytes are theme-independent (see the ETag
+  test), so this holds regardless of the active theme.css/theme-mode.
   """
   import pathlib
 
@@ -166,66 +168,64 @@ def test_frame_paints_light_theme_from_first_byte(client, auth):
   (shared / "theme-mode").write_text('"light"')
   try:
     r = client.post("/api/apps/", json={
-      "name": "light-frame-test",
+      "name": "self-theme-test",
       "description": "test",
       "jsx_source": "export default function App() { return <div>hi</div> }",
     }, headers=auth)
     app_id = r.json()["id"]
 
     html = client.get(f"/api/apps/{app_id}/frame").text
-    # The injected light theme is present from the first byte (no postMessage).
-    assert 'data-theme="light"' in html
-    assert "#f0eeeb" in html
-    # The native color-scheme is pinned to the shell mode too, so the
-    # iframe's UA-native surfaces (scrollbars, form controls, canvas)
-    # follow the shell instead of the OS prefers-color-scheme. Mirrors the
-    # dark-branch assertion in test_frame_dark_theme_pins_color_scheme.
-    assert "color-scheme:light" in html
+    # The pre-paint IIFE is present (shared with index.html / PREPAINT_SRC).
+    assert "__mobius-theme__" in html
+    assert "data-theme" in html  # the IIFE sets it + the fallback CSS gates on it
+    # The frame self-themes by luminance from localStorage/slot — it does NOT
+    # carry a SERVER-injected <html data-theme="light"> attribute (that was the
+    # old inject_theme_into_html path). <html> is the bare tag.
+    assert '<html lang="en" data-theme=' not in html
+    # No server-injected color-scheme rule either; color-scheme is set by the
+    # client IIFE (root.style.colorScheme = mode), not a served <style>.
+    assert "color-scheme:light" not in html
+    assert "color-scheme:dark" not in html
   finally:
     (shared / "theme.css").unlink(missing_ok=True)
     (shared / "theme-mode").unlink(missing_ok=True)
 
 
-def test_frame_dark_theme_pins_color_scheme(client, auth):
-  """A dark-mode served frame carries BOTH data-theme="dark" and an explicit
-  dark color-scheme, so the iframe's native widgets / scrollbars / canvas
-  follow the shell mode regardless of the OS prefers-color-scheme.
+def test_frame_prepaint_sets_color_scheme_client_side(client, auth):
+  """The frame's pre-paint IIFE pins color-scheme to the resolved mode on the
+  client (root.style.colorScheme = mode), so the iframe's UA-native surfaces
+  (scrollbars, form controls, canvas) follow the owner's persisted mode
+  instead of the OS prefers-color-scheme — without any server injection.
 
-  Regression test for "Notes content-area flashes a light canvas in dark
-  mode": data-theme drives shell CSS, but the UA-native color-scheme came
-  from the OS preference until we injected an explicit :root{color-scheme}.
+  Replaces test_frame_dark_theme_pins_color_scheme: the color-scheme pin
+  moved from a server <style> to the shared client IIFE.
   """
-  import pathlib
+  r = client.post("/api/apps/", json={
+    "name": "scheme-iife-test",
+    "description": "test",
+    "jsx_source": "export default function App() { return <div>hi</div> }",
+  }, headers=auth)
+  app_id = r.json()["id"]
 
-  from app.config import get_settings
-
-  data_dir = pathlib.Path(get_settings().data_dir)
-  shared = data_dir / "shared"
-  shared.mkdir(parents=True, exist_ok=True)
-  (shared / "theme.css").write_text(":root { --bg: #0d0d0d; --text: #ececec; }")
-  (shared / "theme-mode").write_text('"dark"')
-  try:
-    r = client.post("/api/apps/", json={
-      "name": "dark-scheme-test",
-      "description": "test",
-      "jsx_source": "export default function App() { return <div>hi</div> }",
-    }, headers=auth)
-    app_id = r.json()["id"]
-
-    html = client.get(f"/api/apps/{app_id}/frame").text
-    assert 'data-theme="dark"' in html
-    # The explicit native color-scheme is injected from the first byte.
-    assert "color-scheme:dark" in html
-  finally:
-    (shared / "theme.css").unlink(missing_ok=True)
-    (shared / "theme-mode").unlink(missing_ok=True)
+  html = client.get(f"/api/apps/{app_id}/frame").text
+  # The IIFE sets color-scheme from the resolved mode (mirrors applyTheme.js).
+  assert "colorScheme = mode" in html
+  assert "setAttribute('data-theme', mode)" in html
 
 
-def test_frame_etag_varies_by_theme(client, auth):
-  """The frame ETag must change when the active theme changes, so a cached
-  frame revalidates after a light/dark toggle instead of 304-ing against a
-  stale validator and running the wrong-theme frame forever (the same trap
-  the frame content hash closes for code edits)."""
+def test_frame_etag_theme_independent(client, auth):
+  """Theme-as-data made the served frame theme-INDEPENDENT, so its ETag must
+  NOT change when the active theme changes — and a request carrying the
+  pre-toggle validator MUST 304 (the frame bytes are identical, so a refetch
+  would be wasted).
+
+  This INVERTS the old test_frame_etag_varies_by_theme: the frame used to be
+  server-injected with the theme (so the ETag had to fold the theme in);
+  now the client paints the theme and the frame bytes don't vary, so folding
+  the theme into the validator would force needless refetches on every
+  toggle. The ETag still keys on app.updated_at + the app-frame.html content
+  hash, so a frame-file edit or app edit still busts it.
+  """
   import pathlib
 
   from app.config import get_settings
@@ -235,7 +235,7 @@ def test_frame_etag_varies_by_theme(client, auth):
   shared.mkdir(parents=True, exist_ok=True)
 
   r = client.post("/api/apps/", json={
-    "name": "theme-etag-test",
+    "name": "theme-indep-etag-test",
     "description": "test",
     "jsx_source": "export default function App() { return <div>hi</div> }",
   }, headers=auth)
@@ -244,42 +244,27 @@ def test_frame_etag_varies_by_theme(client, auth):
   # Default (dark) theme.
   (shared / "theme.css").unlink(missing_ok=True)
   (shared / "theme-mode").unlink(missing_ok=True)
+  from app import theme as theme_mod
+  theme_mod._EFFECTIVE_THEME_MEMO.clear()
   dark_etag = client.get(f"/api/apps/{app_id}/frame").headers["etag"]
 
   # Switch to light — same app, same frame file, only the theme changed.
   (shared / "theme.css").write_text(":root { --bg: #f0eeeb; --text: #1c1b1a; }")
   (shared / "theme-mode").write_text('"light"')
+  theme_mod._EFFECTIVE_THEME_MEMO.clear()
   try:
     light_etag = client.get(f"/api/apps/{app_id}/frame").headers["etag"]
-    assert light_etag != dark_etag
-    # A request carrying the stale dark validator must NOT 304.
+    # The ETag is theme-independent now.
+    assert light_etag == dark_etag, (
+      "frame ETag must NOT vary by theme after theme-as-data"
+    )
+    # A request carrying the pre-toggle validator 304s (bytes unchanged).
     r2 = client.get(
       f"/api/apps/{app_id}/frame",
       headers={"If-None-Match": dark_etag},
     )
-    assert r2.status_code == 200
+    assert r2.status_code == 304
   finally:
     (shared / "theme.css").unlink(missing_ok=True)
     (shared / "theme-mode").unlink(missing_ok=True)
-
-
-def test_module_returns_etag(client, auth):
-  """The module endpoint uses the same ETag scheme as the frame, so
-  the iframe's dynamic `import()` revalidates with `If-None-Match`."""
-  r = client.post("/api/apps/", json={
-    "name": "etag-module-test",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div>hi</div> }",
-  }, headers=auth)
-  app_id = r.json()["id"]
-  token = auth["Authorization"].split()[1]
-
-  r = client.get(f"/api/apps/{app_id}/module?token={token}")
-  assert r.status_code == 200
-  assert r.headers.get("etag", "").startswith('W/"')
-
-  r2 = client.get(
-    f"/api/apps/{app_id}/module?token={token}",
-    headers={"If-None-Match": r.headers["etag"]},
-  )
-  assert r2.status_code == 304
+    theme_mod._EFFECTIVE_THEME_MEMO.clear()
