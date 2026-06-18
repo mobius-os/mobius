@@ -1,5 +1,6 @@
 import { DARK_COLORS, LIGHT_COLORS, parseThemeMeta, buildThemeCss } from '../theme.js'
 import { themeQueries } from '../hooks/queries.js'
+import { applyTheme, inferMode, HEX_RE } from './applyTheme.js'
 
 /**
  * Owns the theme lifecycle: read, transform, apply (DOM + body bg
@@ -28,117 +29,28 @@ import { themeQueries } from '../hooks/queries.js'
  * toggleTheme.
  */
 
-// `bg` from /api/theme is constrained server-side to a hex color
-// via the regex in theme.py:get_bg_color. We re-validate here so a
-// future server-side change can't slip something dangerous into
-// body.style.background or the meta theme-color tag.
-const HEX_RE = /^#[0-9a-fA-F]{3,8}$/
-
+// HEX_RE + the applier live in ./applyTheme.js now (the single source
+// of truth shared with the app-frame's pre-paint IIFE). `bg` is still
+// re-validated against HEX_RE wherever it is read back so a future
+// server-side change can't slip a CSS expression into the DOM.
 const STYLE_ID = 'mobius-theme'
-const FONT_LINK_ATTR = 'data-theme-font'
 
 /**
- * Apply a theme CSS string (and optional bg color) to the DOM:
- *   - Strip `@import url(...)` lines from the CSS body and inject
- *     them as `<link>` tags so fonts load reliably (we mirror the
- *     server-side allowlist in theme.py:_is_safe_import_url so a
- *     `javascript:` URL slipped in here can't become a stylesheet
- *     link element).
- *   - Inject the remaining CSS into a single `<style id="mobius-theme">`
- *     re-appended to the end of `<head>` so it wins the cascade
- *     over the server-injected initial theme block.
- *   - Update `document.body.style.background` and the
- *     `<meta name="theme-color">` tag.
+ * Apply a theme CSS string (and optional bg color) to the DOM.
  *
- * Lifted verbatim from useTheme.js's inline applyThemeToDom so
- * SettingsView's toggleTheme can call the same code path instead
- * of duplicating the DOM mutations inline.
+ * Thin delegate to the shared library `applyTheme` (src/lib/applyTheme.js),
+ * which is the single source of truth for the DOM mutations (strip+link
+ * @import fonts, inject <style id="mobius-theme"> last in <head>, mirror bg
+ * onto body / meta theme-color / inline --bg, set data-theme + color-scheme +
+ * iOS status bar from the mode) AND for persisting {bg,mode} + the legacy
+ * mobius-theme-bg key. The same library code paints the app-frame's pre-paint
+ * IIFE, so the shell and the iframe can never drift.
+ *
+ * Kept as a named export so existing callers (useTheme's apply effect,
+ * toggleTheme below, tests) don't have to change their call shape.
  */
 export function applyThemeToDom(css, bg) {
-  document.querySelectorAll(`link[${FONT_LINK_ATTR}]`).forEach(l => l.remove())
-
-  const imports = []
-  const cssBody = css.replace(
-    /@import\s+url\(\s*['"]([^'"]+)['"]\s*\)\s*;[^\S\n]*\n?/g,
-    (_, url) => { imports.push(url); return '' }
-  )
-  imports.filter(url => /^https?:\/\//i.test(url)).forEach(url => {
-    const link = document.createElement('link')
-    link.rel = 'stylesheet'
-    link.href = url
-    link.dataset.themeFont = '1'
-    document.head.appendChild(link)
-  })
-
-  let el = document.getElementById(STYLE_ID)
-  if (!el) {
-    el = document.createElement('style')
-    el.id = STYLE_ID
-  }
-  // Always re-append so this style block is the LAST <head> child
-  // and wins the cascade over the server-injected initial theme
-  // block. appendChild on an already-attached node moves it; cheap.
-  document.head.appendChild(el)
-  el.textContent = cssBody
-
-  if (bg && HEX_RE.test(bg)) {
-    document.body.style.background = bg
-    const meta = document.querySelector('meta[name="theme-color"]')
-    if (meta) meta.setAttribute('content', bg)
-    // Keep the INLINE --bg on <html> in lockstep with the theme we
-    // just painted. index.html's splash script sets this inline var
-    // from localStorage['mobius-theme-bg'] before first paint; an
-    // inline style on documentElement beats `:root{}` in the cascade,
-    // so a stale value here pins the wrong background even after the
-    // <style id="mobius-theme"> block updates. Re-set it (not remove)
-    // so the no-flash-on-load benefit survives, and write the same
-    // key back so the NEXT cold-boot splash reads the current bg.
-    document.documentElement.style.setProperty('--bg', bg)
-    try { localStorage.setItem('mobius-theme-bg', bg) } catch {}
-  }
-
-  // Tell the apps-sdk-ui design system which mode we're in. SDK
-  // tokens like --color-surface-elevated, --color-text, --color-bg
-  // are scoped under `:where([data-theme="dark"|"light"])` blocks;
-  // without this attribute the SDK defaults to LIGHT tokens, which
-  // make the SDK Menu render a white panel on top of our dark
-  // shell. Mode is inferred from --bg luminance — light backgrounds
-  // mean light mode regardless of how the user got there.
-  const mode = _inferThemeMode(cssBody, bg)
-  if (mode) {
-    document.documentElement.setAttribute('data-theme', mode)
-    // iOS status bar — without this it stays "black" regardless of
-    // the active theme. `default` paints a white bar with dark
-    // glyphs (right for light mode), `black` is opaque dark (right
-    // for dark mode). Only matters when installed as a PWA.
-    const sb = document.querySelector(
-      'meta[name="apple-mobile-web-app-status-bar-style"]'
-    )
-    if (sb) sb.setAttribute('content', mode === 'light' ? 'default' : 'black')
-  }
-}
-
-/** Returns 'dark' if the active --bg is dark, 'light' otherwise.
- *  Reads from the bg arg first (cheap) and falls back to parsing
- *  the CSS body. Returns null if neither resolves to a usable hex. */
-function _inferThemeMode(cssBody, bg) {
-  let hex = (bg && HEX_RE.test(bg)) ? bg : null
-  if (!hex) {
-    const m = cssBody.match(/--bg:\s*(#[0-9a-fA-F]{3,8})/)
-    if (m) hex = m[1]
-  }
-  if (!hex) return null
-  // Quick luminance check: drop the # and average the RGB octets.
-  // 128 splits dark/light cleanly enough — exact perceptual lum
-  // isn't needed here, just dark-vs-light direction.
-  const raw = hex.slice(1)
-  const expanded = raw.length === 3
-    ? raw.split('').map(c => c + c).join('')
-    : raw.slice(0, 6)
-  const r = parseInt(expanded.slice(0, 2), 16)
-  const g = parseInt(expanded.slice(2, 4), 16)
-  const b = parseInt(expanded.slice(4, 6), 16)
-  return (r + g + b) / 3 < 128 ? 'dark' : 'light'
+  applyTheme({ css, bg })
 }
 
 /**
@@ -171,10 +83,13 @@ export function getEffectiveTheme() {
   // same constraint applyThemeToDom + the frame's applyTheme use).
   const rawBg = (document.body?.style?.background || '').trim()
   const bg = HEX_RE.test(rawBg) ? rawBg : undefined
-  // Prefer the attribute the shell already set (authoritative);
-  // fall back to inferring from the CSS body if absent.
+  // Prefer the attribute the shell already set (authoritative); fall back
+  // to inferring from the bg, or from the --bg parsed out of the CSS body
+  // when the inline bg is absent. inferMode is bg-only, so parse the CSS
+  // fallback here (mirrors the old _inferThemeMode's css-parse branch).
+  const cssBg = bg || css.match(/--bg:\s*(#[0-9a-fA-F]{3,8})/)?.[1]
   const mode = document.documentElement.getAttribute('data-theme')
-    || _inferThemeMode(css, bg)
+    || inferMode(cssBg)
   return { css, bg, mode }
 }
 

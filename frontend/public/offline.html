@@ -37,11 +37,20 @@
   <button onclick="location.reload()">Try again</button>
   <script>
     // Match the owner's theme background if the shell persisted it on a
-    // previous online visit (see useTheme). Best-effort; falls back to
-    // the inline default above.
+    // previous online visit (applyTheme writes both keys). Prefer the
+    // newer mobius-theme ({bg,mode}); fall back to the legacy
+    // mobius-theme-bg bare hex. Best-effort; the inline default above
+    // stays if neither is present.
     try {
-      var bg = localStorage.getItem('mobius-theme-bg');
-      if (bg) document.documentElement.style.setProperty('--bg', bg);
+      var bg = null;
+      try {
+        var raw = localStorage.getItem('mobius-theme');
+        if (raw) { var p = JSON.parse(raw); if (p && p.bg) bg = p.bg; }
+      } catch (e) {}
+      if (!bg) bg = localStorage.getItem('mobius-theme-bg');
+      if (bg && /^#[0-9a-fA-F]{3,8}$/.test(bg)) {
+        document.documentElement.style.setProperty('--bg', bg);
+      }
     } catch (e) {}
   </script>
 </body>

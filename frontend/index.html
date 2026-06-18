@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
-    <!-- Server replaces this with the active theme's --bg color on every request. -->
+    <!-- Default theme-color; applyTheme updates this to the active theme's --bg. -->
     <meta name="theme-color" content="#0d0d0d" />
     <meta name="description" content="AI-powered personal app platform." />
     <!-- iOS PWA: hides Safari UI chrome when launched from home screen -->
@@ -30,29 +30,108 @@
     <script defer src="/vendor/katex@0.17.0/katex.min.js"></script>
     <title>Möbius</title>
     <link rel="manifest" href="/manifest.webmanifest" />
+    <!-- Theme-as-data: the server serializes the effective theme
+         ({css,bg,mode}) into this slot on every request. The pre-paint
+         script below reads it (falling back to persisted localStorage,
+         then the dark default) and paints --bg / data-theme / color-scheme
+         BEFORE first paint, so there is no wrong-mode flash. The full
+         applyTheme (fonts, meta, persistence) runs once the module loads.
+         The slot is empty in the SW-cached (offline) index.html, so the
+         pre-paint script falls through to localStorage there. -->
+    <script type="application/json" id="__mobius-theme__"></script>
+    <script>(function () {
+  try {
+    var HEX = /^#[0-9a-fA-F]{3,8}$/;
+    var root = document.documentElement;
+    function infer(bg) {
+      if (!bg || !HEX.test(bg)) return null;
+      var raw = bg.slice(1);
+      var x = raw.length === 3 || raw.length === 4
+        ? raw.slice(0, 3).replace(/(.)/g, '$1$1')
+        : raw.slice(0, 6);
+      var r = parseInt(x.slice(0, 2), 16);
+      var g = parseInt(x.slice(2, 4), 16);
+      var b = parseInt(x.slice(4, 6), 16);
+      if (r !== r || g !== g || b !== b) return null;
+      return (r + g + b) / 3 < 128 ? 'dark' : 'light';
+    }
+    var css, bg, mode;
+    try {
+      var slot = document.getElementById('__mobius-theme__');
+      var txt = slot && slot.textContent && slot.textContent.trim();
+      if (txt) {
+        var d = JSON.parse(txt);
+        if (typeof d.css === 'string') css = d.css;
+        if (d.bg && HEX.test(d.bg)) bg = d.bg;
+        mode = d.mode || infer(bg);
+      }
+    } catch (e) {}
+    if (!bg) {
+      try {
+        var raw = localStorage.getItem('mobius-theme');
+        if (raw) {
+          var p = JSON.parse(raw);
+          if (p.bg && HEX.test(p.bg)) { bg = p.bg; mode = mode || p.mode || infer(p.bg); }
+        }
+      } catch (e) {}
+    }
+    if (!bg) {
+      try {
+        var legacy = localStorage.getItem('mobius-theme-bg');
+        if (legacy && HEX.test(legacy)) { bg = legacy; mode = mode || infer(legacy); }
+      } catch (e) {}
+    }
+    if (!bg) bg = '#0d0d0d';
+    if (!mode) mode = 'dark';
+    if (css) {
+      // Match applyTheme.js: pull CSS @import-url rules out of the body and
+      // re-inject only the http(s) ones as <link data-theme-font> (a
+      // javascript:/data: URL must not become active CSS), so the pre-painted
+      // <style> never carries a raw rule the live applier would re-strip.
+      var fontUrls = [];
+      css = css.replace(
+        /@import\s+url\(\s*['"]([^'"]+)['"]\s*\)\s*;[^\S\n]*\n?/g,
+        function (_, url) { fontUrls.push(url); return ''; }
+      );
+      for (var i = 0; i < fontUrls.length; i++) {
+        if (/^https?:\/\//i.test(fontUrls[i])) {
+          var link = document.createElement('link');
+          link.rel = 'stylesheet';
+          link.href = fontUrls[i];
+          link.setAttribute('data-theme-font', '1');
+          document.head.appendChild(link);
+        }
+      }
+      var el = document.getElementById('mobius-theme');
+      if (!el) {
+        el = document.createElement('style');
+        el.id = 'mobius-theme';
+        document.head.appendChild(el);
+      }
+      el.textContent = css;
+    }
+    root.style.setProperty('--bg', bg);
+    root.setAttribute('data-theme', mode);
+    root.style.colorScheme = mode;
+    // Persist the resolved theme so a frame whose pre-paint runs AFTER the
+    // shell's (a brand-new device, server slot already consumed, no prior
+    // localStorage) reads the correct {bg,mode} instead of defaulting to dark.
+    // Idempotent when the frame's own pre-paint re-runs it.
+    try {
+      localStorage.setItem('mobius-theme', JSON.stringify({ bg: bg, mode: mode }));
+      localStorage.setItem('mobius-theme-bg', bg);
+    } catch (e) {}
+  } catch (e) {}
+})();</script>
   </head>
-  <!-- Server replaces background:#0d0d0d with the active theme color. -->
-  <body style="margin:0;background:#0d0d0d">
-    <!-- Server replaces background:#0d0d0d with the active theme's --bg color. -->
-    <div id="splash" style="position:fixed;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;background:#0d0d0d;z-index:9999;transition:opacity .3s ease;contain:strict">
+  <!-- Theme bg comes from var(--bg), set by the pre-paint script above. -->
+  <body style="margin:0;background:var(--bg,#0d0d0d)">
+    <!-- Theme bg comes from var(--bg), set by the pre-paint script above. -->
+    <div id="splash" style="position:fixed;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;background:var(--bg,#0d0d0d);z-index:9999;transition:opacity .3s ease;contain:strict">
       <img src="/moebius.png" width="56" height="56" alt="" style="opacity:.4;will-change:opacity" />
     </div>
     <div id="root"></div>
     <script>
-      // Apply the persisted theme background before first paint so a
-      // cold-offline shell boot (served from the SW's cached, NOT
-      // theme-injected, index.html) matches the owner's theme instead
-      // of flashing the default. useTheme writes this key on every
-      // successful theme load. Best-effort; default stays if absent.
-      try {
-        var __bg = localStorage.getItem('mobius-theme-bg')
-        if (__bg) {
-          document.documentElement.style.setProperty('--bg', __bg)
-          document.body.style.background = __bg
-          var sp = document.getElementById('splash')
-          if (sp) sp.style.background = __bg
-        }
-      } catch (e) {}
       // Hide splash immediately on refresh (user already logged in).
       if (localStorage.getItem('token')) {
         var s = document.getElementById('splash')

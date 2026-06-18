@@ -53,3 +53,6 @@ demo-logs/
 .pm/
 AGENTS.md
 CLAUDE.md
+
+# Baked Vite build output (created by the image build / test conftest stub)
+backend/static/

@@ -1,9 +1,13 @@
 """Single source of truth for the default theme.
 
-Both the shell (index.html) and the app-frame inject theme CSS from
-/data/shared/theme.css.  When no theme.css exists, this default is
-used.  The shell's index.css and app-frame.html should NOT define
-their own :root variables — they come from here.
+Theme-as-data handoff: the server serializes the effective theme
+({css,bg,mode}, see `theme_data`) into the page's
+`<script type="application/json" id="__mobius-theme__">` slot, and the
+CLIENT paints it (src/lib/applyTheme.js). The server no longer injects a
+`<style>` block into the served HTML. The default below is used when no
+`/data/shared/theme.css` exists; the shell's index.css and
+app-frame.html should NOT define their own :root variables — they come
+from here.
 """
 
 import hashlib
@@ -17,19 +21,6 @@ from typing import NamedTuple
 # Matches @import url('...') or @import url("...") statements.
 _IMPORT_RE = re.compile(
   r"""@import\s+url\(\s*['"]([^'"]+)['"]\s*\)\s*;[^\S\n]*\n?""",
-)
-
-# Matches an existing `<meta name="mobius-frame-rev" ...>` tag (any attribute
-# order/spacing) so inject_theme_into_html can REPLACE it rather than append a
-# duplicate. The built index.html now ships this meta (stamped by the Vite
-# `stampFrameRev` plugin so the SW-precached shell carries it); the
-# server-rendered online path re-injects the runtime-computed rev, and without
-# this strip both tags would coexist. The value is identical either way (same
-# app-frame bytes → same hash), so this is purely about avoiding a duplicate
-# tag.
-_FRAME_REV_META_RE = re.compile(
-  r"""<meta\s+[^>]*name=["']mobius-frame-rev["'][^>]*>\s*""",
-  re.IGNORECASE,
 )
 
 DEFAULT_THEME = """\
@@ -100,10 +91,10 @@ def get_theme_css(data_dir: str) -> str:
   CSS property that references them. Augmenting HERE — at the single
   effective-theme getter — means every consumer gets a complete theme:
   the SPA's `GET /api/theme` fetch, the app-frame iframe, and the
-  server-rendered <style> block alike.
+  `__mobius-theme__` data slot alike.
 
-  Historically the augment ran ONLY at HTML-render time
-  (`inject_theme_into_html`); the SPA then re-fetched the RAW override
+  Historically the augment ran ONLY at HTML-render time (the old
+  server-side `<style>` injection); the SPA then re-fetched the RAW override
   via /api/theme and applied it LAST in the cascade, nullifying the
   server-augmented block. That was the "light mode completely broken"
   bug once a light/dark toggle had stripped theme.css down to its
@@ -249,6 +240,13 @@ def _escape_for_style_tag(css: str) -> str:
   semantically identical: replace `</` with `<\\/` inside the embedded
   block. Browsers parse `<\\/style>` as text inside the <style>, never
   as a closing tag.
+
+  RETAINED after theme-as-data: the server no longer injects a <style>
+  block (the client paints theme.css into <style id="mobius-theme">), so
+  the stored-XSS surface moved to the client. This stays as the canonical
+  CSS `</`-escaper — the JSON-slot serializer in main.py applies an
+  equivalent `</` -> `<\\/` escape to keep embedded `</script>` from
+  breaking out of the slot's <script type="application/json"> wrapper.
   """
   return css.replace("</", "<\\/")
 
@@ -427,10 +425,10 @@ class EffectiveTheme(NamedTuple):
   """The bundle of theme facts a single page render needs, computed from
   one read each of theme.css + theme-mode + one hash of app-frame.html.
 
-  Produced by `load_effective_theme` and threaded into both
-  `inject_theme_into_html` and the `/frame` ETag so a request resolves the
-  theme ONCE instead of `inject_theme_into_html` + `get_bg_color` +
-  `get_theme_mode` + `frame_content_rev` each re-reading the same files.
+  Produced by `load_effective_theme` and threaded into both `theme_data`
+  (the JSON-slot bundle) and the `/frame` ETag so a request resolves the
+  theme ONCE instead of `theme_data` + `get_bg_color` + `get_theme_mode` +
+  `frame_content_rev` each re-reading the same files.
   `css` is the effective (core-var-augmented) CSS; `bg` is its --bg; `mode`
   is "dark"/"light"; `rev` is the app-frame.html content hash.
   """
@@ -510,82 +508,33 @@ def _resolve_frame_path(data_dir: str) -> Path | None:
   return next((p for p in candidates if p.exists()), None)
 
 
-def inject_theme_into_html(
-  html: str, data_dir: str, bundle: "EffectiveTheme | None" = None
-) -> str:
-  """Inject the active theme CSS and background color into an HTML string.
+def theme_data(data_dir: str, bundle: "EffectiveTheme | None" = None) -> dict:
+  """The effective theme as the client-paintable data bundle:
+  `{"css": ..., "bg": ..., "mode": ...}`.
 
-  Replaces the </head> tag with a <style> block containing the theme CSS,
-  and replaces the default #0d0d0d background color placeholder with the
-  active theme's --bg color. Used by both the SPA fallback and the
-  app-frame endpoint.
+  This is the theme-as-data handoff. `main.py` serializes this dict into
+  the page's `<script type="application/json" id="__mobius-theme__">`
+  slot (with a `</`-escape + U+2028/U+2029 escape so embedded CSS
+  containing `</script>` can't break out of the slot), and the client's
+  pre-paint script + `applyTheme` read it back. It replaces the old
+  server-side `<style>` injection (`inject_theme_into_html`, removed):
+  the server now hands the client DATA, not pre-rendered HTML, so the
+  client owns the cascade and there is exactly one theme `<style>` block
+  (the client's `<style id="mobius-theme">`).
 
-  Security: the theme CSS is owner-controlled via the storage API but
-  the agent (running autonomously) writes it. We escape `</` sequences
-  to defend against `</style><script>...` breakouts even from agent-
-  authored CSS, and restrict @import URLs to http(s) schemes to block
-  `javascript:` / `data:` URIs in font import declarations.
+  `css` is the effective (core-var-augmented) CSS — the same value the
+  old injection used and that `GET /api/theme` returns. It is passed
+  through VERBATIM (no `</style>` escaping here): the client injects it
+  via `<style>`.textContent, which the HTML parser never reparses, so the
+  `</style>`-breakout vector that `_escape_for_style_tag` guarded against
+  at server-render time no longer applies. The slot's own breakout vector
+  (an embedded `</script>`) is closed by the JSON serializer's escape in
+  `main.py`.
 
-  Core variables: `_ensure_core_vars` appends defaults for any
-  variable the shell relies on that the theme didn't define, so a
-  partial theme can't render shell text invisibly. Otherwise the
-  theme is passed through verbatim — the agent has full creative
-  freedom.
-
-  `bundle`: pass a precomputed `load_effective_theme(data_dir)` to skip the
-  per-call file reads (the `/frame` route does this so the ETag and the
-  injection resolve the theme from one read). When omitted it's computed
-  here, so existing callers are unaffected.
+  `bundle`: pass a precomputed `load_effective_theme(data_dir)` to skip
+  the per-call file reads (the `/frame` route resolves the bundle once
+  for its ETag and can thread it here). When omitted it's computed.
   """
   if bundle is None:
     bundle = load_effective_theme(data_dir)
-  css = bundle.css
-  bg = bundle.bg
-  mode = bundle.mode
-  rev = bundle.rev
-  imports, css = extract_imports(css)
-  safe_imports = [u for u in imports if _is_safe_import_url(u)]
-  link_tags = "".join(
-    f'<link rel="stylesheet" href="{html_escape(url, quote=True)}">\n'
-    for url in safe_imports
-  )
-  safe_css = _escape_for_style_tag(css)
-  # Pin the iframe's native color-scheme to the SHELL mode, not the OS
-  # `prefers-color-scheme`. Without this the browser picks form-control /
-  # scrollbar / canvas defaults from the OS preference, so a dark-mode shell
-  # on a light-OS device flashes a light canvas (and light scrollbars/native
-  # widgets) inside the app frame. `data-theme` below covers shell CSS, but
-  # `color-scheme` is what drives the UA-native surfaces — emit it explicitly
-  # so they match the injected mode (`mode` always equals the served theme:
-  # both this and `data-theme` read the same bundle, so they can never
-  # disagree). APPENDED after the (agent-authored) theme CSS so the
-  # shell-mode color-scheme wins by source order even if an app declares its
-  # own equal-specificity `:root{color-scheme:...}` — a prepended rule would
-  # lose the cascade tie to later app CSS. `_escape_for_style_tag` already
-  # ran on the theme CSS; `mode` is a fixed "dark"/"light" literal, so this
-  # suffix is safe to concatenate after escaping.
-  scheme_css = f"\n:root{{color-scheme:{mode}}}"
-  rev_meta = (
-    f'<meta name="mobius-frame-rev" content="{html_escape(rev, quote=True)}">\n'
-    if rev else ""
-  )
-  # The built index.html already carries a `mobius-frame-rev` meta (stamped at
-  # build time so the SW-precached shell has it). Strip any existing tag before
-  # injecting the runtime value so the server-rendered shell ends up with
-  # exactly one (same value either way — same app-frame bytes → same hash).
-  html = _FRAME_REV_META_RE.sub("", html)
-  html = html.replace(
-    "</head>",
-    f"{link_tags}<style>{safe_css}{scheme_css}</style>\n{rev_meta}</head>",
-  )
-  html = html.replace("background:#0d0d0d", f"background:{bg}")
-  html = html.replace('content="#0d0d0d"', f'content="{bg}"')
-  # `data-theme` on <html> activates the right shell `color-scheme` from
-  # the very first paint. Without it, light-mode users see a flash of
-  # dark-themed native widgets (scrollbars, autofill, date pickers)
-  # before `applyThemeToDom` runs from the React effect.
-  html = html.replace(
-    '<html lang="en">',
-    f'<html lang="en" data-theme="{mode}">',
-  )
-  return html
+  return {"css": bundle.css, "bg": bundle.bg, "mode": bundle.mode}

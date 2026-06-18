@@ -14,15 +14,16 @@ if (!globalThis.crypto) {
 // SW-precached shell carries the app-frame content rev.
 //
 // Why this is needed: installed PWAs load the SW-precached STATIC index.html
-// (sw.js NavigationRoute → createHandlerBoundToURL('/index.html')). That static
-// file never passed through the server, so it lacked the meta that
-// backend/app/theme.py `inject_theme_into_html` injects only at request time
-// for the server-rendered shell. AppCanvas/Shell read the rev from that meta
-// and fold it into the app-frame URL as `?v=<updated_at>-<frameRev>`; with no
-// meta the suffix was empty, the cache-first app-frame cache key never rotated
-// when app-frame.html/theme changed, and installed PWAs were served a stale
-// pre-injection frame forever (un-gated light @media flipping --bg on a light
-// OS).
+// (sw.js NavigationRoute → createHandlerBoundToURL('/index.html')). AppCanvas/
+// Shell read the app-frame rev from this meta and fold it into the app-frame
+// URL as `?v=<updated_at>-<frameRev>`; with no meta the suffix was empty, the
+// cache-first app-frame cache key never rotated when app-frame.html changed,
+// and installed PWAs were served a stale frame forever. The build stamps it
+// here so BOTH the precached static index.html and the server-rendered shell
+// (which serves this same built file) carry it — the server no longer injects
+// a runtime meta (theme-as-data removed inject_theme_into_html), and it doesn't
+// need to: the build's app-frame.html bytes equal the deployed ones, so the
+// build-time stamp already matches `theme.frame_content_rev`.
 //
 // The rev MUST match backend `theme.frame_content_rev`: sha256 of the
 // app-frame.html bytes, first 16 hex chars. The build's source for that file is

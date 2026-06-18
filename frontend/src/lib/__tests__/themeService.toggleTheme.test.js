@@ -451,7 +451,14 @@ test('BUG 2 — toggleTheme keeps the inline --bg in lockstep with the painted t
   await themeService.toggleTheme(qc, 'dark', api)
   assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#f0eeeb',
     'inline --bg must track the toggled-to light bg, not the stale splash value')
+  // Delegation: applyThemeToDom (now via the shared library) persists BOTH
+  // the legacy bare-hex key AND the new {bg,mode} key the pre-paint IIFE reads.
   assert.equal(localStorage.getItem('mobius-theme-bg'), '#f0eeeb')
+  assert.deepEqual(
+    JSON.parse(localStorage.getItem('mobius-theme')),
+    { bg: '#f0eeeb', mode: 'light' },
+    'toggle must persist the new {bg,mode} key so the next cold boot resolves light',
+  )
 })
 
 

@@ -13,6 +13,27 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_tmp}/test.db"
 os.environ["DATA_DIR"] = _tmp
 os.environ["FRONTEND_ORIGIN"] = "http://localhost:5173"
 
+# Ensure the baked static dir exists with an index.html carrying the
+# __mobius-theme__ slot BEFORE importing app.main — main.py registers the SPA
+# fallback route (which GET / hits) only when the static dir is present at
+# import. In production this dir is the Vite build baked into the image; in
+# dev/test it's absent, so test_index_theme_slot.py (which exercises the
+# theme-as-data JSON slot through the real GET / path) needs this stub. Only
+# created when missing, so a real build is never clobbered.
+from pathlib import Path as _Path
+
+_static = _Path(__file__).resolve().parents[1] / "static"
+if not (_static / "index.html").is_file():
+  (_static / "assets").mkdir(parents=True, exist_ok=True)
+  (_static / "index.html").write_text(
+    "<!doctype html><html lang=\"en\"><head>"
+    "<meta name=\"theme-color\" content=\"#0d0d0d\" />"
+    "<script type=\"application/json\" id=\"__mobius-theme__\"></script>"
+    "</head><body style=\"margin:0;background:var(--bg,#0d0d0d)\">"
+    "<div id=\"root\"></div></body></html>",
+    encoding="utf-8",
+  )
+
 from app.database import Base, engine
 from app.main import app
 from app.routes import auth as auth_module

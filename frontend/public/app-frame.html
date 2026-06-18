@@ -1,41 +1,98 @@
 <!doctype html>
 <html lang="en">
 <head>
-      <script>
-        // Pre-paint fallback-mode gate. The frame is SAME-ORIGIN (sandbox
-        // allow-same-origin), so it reads the shell's localStorage. useTheme +
-        // themeService write 'mobius-theme-bg' (HEX-guarded) on every theme
-        // apply, so a dark-shell owner stores #0d0d0d and a light-shell owner
-        // #f0eeeb. We classify that bg by luminance (mirrors
-        // themeService._inferThemeMode / theme._infer_theme_mode: average RGB
-        // < 128 => dark) and tag <html data-fallback-mode>. The light fallback
-        // CSS below is gated on data-fallback-mode="light", so a stale/
-        // uninjected frame follows the OWNER's persisted mode, never the OS
-        // prefers-color-scheme. No key / malformed / unreadable => attribute
-        // stays unset => the dark :root default wins (the historical safe
-        // default, matching theme.get_theme_mode's dark fallback). Server
-        // injection still overrides everything (its <style> + data-theme +
-        // :root{color-scheme} are appended at the document head's end). Runs synchronously
-        // before <style> parses, so there is no wrong-mode flash.
-        try {
-          var __bg = localStorage.getItem('mobius-theme-bg')
-          if (__bg && /^#[0-9a-fA-F]{3,8}$/.test(__bg)) {
-            var __h = __bg.slice(1)
-            if (__h.length === 3 || __h.length === 4) {
-              __h = __h[0]+__h[0]+__h[1]+__h[1]+__h[2]+__h[2]
-            } else {
-              __h = __h.slice(0, 6)
-            }
-            var __r = parseInt(__h.slice(0, 2), 16)
-            var __g = parseInt(__h.slice(2, 4), 16)
-            var __b = parseInt(__h.slice(4, 6), 16)
-            if (__r === __r && __g === __g && __b === __b) {  // not NaN
-              document.documentElement.setAttribute(
-                'data-fallback-mode', (__r + __g + __b) / 3 < 128 ? 'dark' : 'light')
-            }
-          }
-        } catch (e) {}
-      </script>
+      <!-- Pre-paint theme: identical IIFE to index.html (PREPAINT_SRC in
+           src/lib/applyTheme.js). The frame is SAME-ORIGIN, so it reads the
+           shell's localStorage; it also reads its own __mobius-theme__ slot
+           when the server fills one. Resolves {css,bg,mode} (slot ->
+           mobius-theme -> mobius-theme-bg -> dark default) and paints --bg /
+           data-theme / color-scheme before <style> parses, so a stale/
+           uninjected frame follows the OWNER's persisted mode with no flash.
+           applyTheme.prepaint.test.js pins this byte-identical to index.html. -->
+      <script>(function () {
+  try {
+    var HEX = /^#[0-9a-fA-F]{3,8}$/;
+    var root = document.documentElement;
+    function infer(bg) {
+      if (!bg || !HEX.test(bg)) return null;
+      var raw = bg.slice(1);
+      var x = raw.length === 3 || raw.length === 4
+        ? raw.slice(0, 3).replace(/(.)/g, '$1$1')
+        : raw.slice(0, 6);
+      var r = parseInt(x.slice(0, 2), 16);
+      var g = parseInt(x.slice(2, 4), 16);
+      var b = parseInt(x.slice(4, 6), 16);
+      if (r !== r || g !== g || b !== b) return null;
+      return (r + g + b) / 3 < 128 ? 'dark' : 'light';
+    }
+    var css, bg, mode;
+    try {
+      var slot = document.getElementById('__mobius-theme__');
+      var txt = slot && slot.textContent && slot.textContent.trim();
+      if (txt) {
+        var d = JSON.parse(txt);
+        if (typeof d.css === 'string') css = d.css;
+        if (d.bg && HEX.test(d.bg)) bg = d.bg;
+        mode = d.mode || infer(bg);
+      }
+    } catch (e) {}
+    if (!bg) {
+      try {
+        var raw = localStorage.getItem('mobius-theme');
+        if (raw) {
+          var p = JSON.parse(raw);
+          if (p.bg && HEX.test(p.bg)) { bg = p.bg; mode = mode || p.mode || infer(p.bg); }
+        }
+      } catch (e) {}
+    }
+    if (!bg) {
+      try {
+        var legacy = localStorage.getItem('mobius-theme-bg');
+        if (legacy && HEX.test(legacy)) { bg = legacy; mode = mode || infer(legacy); }
+      } catch (e) {}
+    }
+    if (!bg) bg = '#0d0d0d';
+    if (!mode) mode = 'dark';
+    if (css) {
+      // Match applyTheme.js: pull CSS @import-url rules out of the body and
+      // re-inject only the http(s) ones as <link data-theme-font> (a
+      // javascript:/data: URL must not become active CSS), so the pre-painted
+      // <style> never carries a raw rule the live applier would re-strip.
+      var fontUrls = [];
+      css = css.replace(
+        /@import\s+url\(\s*['"]([^'"]+)['"]\s*\)\s*;[^\S\n]*\n?/g,
+        function (_, url) { fontUrls.push(url); return ''; }
+      );
+      for (var i = 0; i < fontUrls.length; i++) {
+        if (/^https?:\/\//i.test(fontUrls[i])) {
+          var link = document.createElement('link');
+          link.rel = 'stylesheet';
+          link.href = fontUrls[i];
+          link.setAttribute('data-theme-font', '1');
+          document.head.appendChild(link);
+        }
+      }
+      var el = document.getElementById('mobius-theme');
+      if (!el) {
+        el = document.createElement('style');
+        el.id = 'mobius-theme';
+        document.head.appendChild(el);
+      }
+      el.textContent = css;
+    }
+    root.style.setProperty('--bg', bg);
+    root.setAttribute('data-theme', mode);
+    root.style.colorScheme = mode;
+    // Persist the resolved theme so a frame whose pre-paint runs AFTER the
+    // shell's (a brand-new device, server slot already consumed, no prior
+    // localStorage) reads the correct {bg,mode} instead of defaulting to dark.
+    // Idempotent when the frame's own pre-paint re-runs it.
+    try {
+      localStorage.setItem('mobius-theme', JSON.stringify({ bg: bg, mode: mode }));
+      localStorage.setItem('mobius-theme-bg', bg);
+    } catch (e) {}
+  } catch (e) {}
+})();</script>
   <meta charset="UTF-8" />
   <!-- viewport-fit=cover makes the iframe's layout viewport extend UNDER the
        notch/punch-hole so an immersive app's background paints full-bleed (the
@@ -75,15 +132,17 @@
   }
   </script>
   <style>
-    /* Fallback defaults — the server pre-injects the active theme's <style>
-       AFTER this block (get_frame -> theme.inject_theme_into_html), so the
-       injected theme wins by source order and the frame paints the right
-       palette from the first byte. This :root only shows if that injection
-       is somehow absent (a frame served without the theme step, or a raw
-       file open). It MUST mirror theme.py's DEFAULT_THEME token-for-token so
-       that bare-default case matches the dark default; if these drift, the
-       no-injection fallback flashes (the stale pre-2026-05 blue palette did
-       exactly that). Keep in sync with backend/app/theme.py DEFAULT_THEME.
+    /* Fallback defaults — the frame self-themes via the pre-paint IIFE in
+       <head> (which reads the __mobius-theme__ slot + the shell's same-origin
+       localStorage and sets --bg / data-theme / color-scheme before this
+       <style> parses), plus the live moebius:frame-theme postMessage. This
+       :root is the no-signal floor: it shows when there is no slot, no
+       persisted owner mode, and no postMessage yet (a raw file open, or a
+       first paint before any owner signal). It MUST mirror theme.py's
+       DEFAULT_THEME token-for-token so that bare-default case matches the dark
+       default; if these drift, the no-signal fallback flashes (the stale
+       pre-2026-05 blue palette did exactly that). Keep in sync with
+       backend/app/theme.py DEFAULT_THEME.
 
        The prefers-color-scheme override below makes even THAT fallback
        mode-aware: before injection landed, a light-mode user opening an app
@@ -109,14 +168,14 @@
       --mobius-safe-top: 0px; --mobius-safe-right: 0px;
       --mobius-safe-bottom: 0px; --mobius-safe-left: 0px;
     }
-    /* Mode-aware fallback (defense in depth). Gated on data-fallback-mode="light" via :where() (zero added specificity, so a server-injected :root or a live theme-swap still wins by source order),
-       set by the pre-paint <head> script from the owner's persisted
+    /* Mode-aware fallback (defense in depth). Gated on data-theme="light" via :where() (zero added specificity, so a server-injected :root or a live theme-swap still wins by source order),
+       set by the pre-paint <head> script (shared IIFE) from the owner's persisted
        localStorage['mobius-theme-bg'] — NOT on OS prefers-color-scheme. A
        dark-shell owner on a light-OS device therefore keeps the dark :root
        default; light only appears from a positive owner signal (this attribute)
-       or from server injection (which overrides both blocks). No signal => dark
+       or from the server-filled __mobius-theme__ slot. No signal => dark
        default. Mirrors theme.py's _LIGHT_DEFAULTS + frontend LIGHT_COLORS. */
-    :root:where([data-fallback-mode="light"]) {
+    :root:where([data-theme="light"]) {
       --bg: #f0eeeb; --surface: #ffffff; --surface2: #e8e6e2;
       --border: #d4d1cc; --border-light: #e2dfdb;
       --text: #1c1b1a; --muted: #6b6864;
@@ -145,7 +204,7 @@
     *::-webkit-scrollbar { width: 0; height: 0; }
     html, body, #root { height: 100%; }
     body {
-      background: var(--bg);
+      background: var(--bg, #0d0d0d);
       color: var(--text);
       font-family: var(--font);
       font-size: 14px;
@@ -346,12 +405,16 @@
       root.setProperty('--mobius-safe-left', insets.left || '0px');
     }
 
-    // Infer 'dark'|'light' from the active --bg luminance, matching the
-    // shell's themeService._inferThemeMode so the iframe and the shell
-    // agree on mode from the same signal. Reads `bg` first (cheap), then
-    // falls back to parsing --bg out of the CSS. Returns null if neither
-    // resolves to a usable hex.
-    function inferThemeMode(css, bg) {
+    // applyTheme mirrors the shell's src/lib/applyTheme.js so the iframe and
+    // the shell paint a live theme swap identically. The frame can't import
+    // the library (it's a raw HTML module that only loads /vendor), so the
+    // logic is inlined; the pre-paint IIFE in <head> (PREPAINT_SRC) is the
+    // shared first-paint half, and this is the postMessage live-swap half.
+    //
+    // Mode: from the bg's --bg luminance (bg arg first, then parsed out of
+    // the CSS). Mirrors applyTheme.js inferMode. Returns null if no hex
+    // resolves, so a css-only swap with no bg keeps the current mode.
+    function inferMode(css, bg) {
       var hex = (typeof bg === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(bg)) ? bg : null;
       if (!hex && typeof css === 'string') {
         var m = css.match(/--bg:\s*(#[0-9a-fA-F]{3,8})/);
@@ -359,36 +422,71 @@
       }
       if (!hex) return null;
       var raw = hex.slice(1);
-      var x = raw.length === 3 ? raw.replace(/(.)/g, '$1$1') : raw.slice(0, 6);
+      var x = raw.length === 3 || raw.length === 4
+        ? raw.slice(0, 3).replace(/(.)/g, '$1$1')
+        : raw.slice(0, 6);
       var r = parseInt(x.slice(0, 2), 16);
       var g = parseInt(x.slice(2, 4), 16);
       var b = parseInt(x.slice(4, 6), 16);
+      if (r !== r || g !== g || b !== b) return null;
       return (r + g + b) / 3 < 128 ? 'dark' : 'light';
     }
 
+    // bg is re-validated as hex here (mirrors applyTheme.js HEX_RE) so a future
+    // upstream change can't slip a CSS expression into body.style.background or
+    // --bg; the @import stripping mirrors the library's allowlist so a
+    // javascript:/data: @import in a live swap never becomes active CSS.
+    var HEX = /^#[0-9a-fA-F]{3,8}$/;
     function applyTheme(css, bg) {
       if (typeof css === 'string' && css.length) {
-        let el = document.getElementById('moebius-theme');
+        // Same @import allowlist as applyTheme.js + the pre-paint IIFE: strip
+        // @import url('X'); out of the body and re-inject only the http(s)
+        // ones as <link data-theme-font> (a javascript:/data: URL must not
+        // become active CSS). Remove prior font links first so a swap doesn't
+        // stack stale ones.
+        var links = document.querySelectorAll('link[data-theme-font]');
+        for (var li = 0; li < links.length; li++) links[li].remove();
+        var fontUrls = [];
+        css = css.replace(
+          /@import\s+url\(\s*['"]([^'"]+)['"]\s*\)\s*;[^\S\n]*\n?/g,
+          function (_, url) { fontUrls.push(url); return ''; }
+        );
+        for (var fi = 0; fi < fontUrls.length; fi++) {
+          if (/^https?:\/\//i.test(fontUrls[fi])) {
+            var link = document.createElement('link');
+            link.rel = 'stylesheet';
+            link.href = fontUrls[fi];
+            link.setAttribute('data-theme-font', '1');
+            document.head.appendChild(link);
+          }
+        }
+        // Reuse the SAME style id the pre-paint IIFE wrote ('mobius-theme'),
+        // so a live swap REPLACES the pre-painted block instead of stacking a
+        // second one. (The id was 'moebius-theme' before theme-as-data; the
+        // pre-paint script now owns 'mobius-theme', so they must agree.)
+        let el = document.getElementById('mobius-theme');
         if (!el) {
           el = document.createElement('style');
-          el.id = 'moebius-theme';
+          el.id = 'mobius-theme';
           document.head.appendChild(el);
         }
         el.textContent = css;
       }
-      if (typeof bg === 'string' && bg.length) {
+      if (typeof bg === 'string' && HEX.test(bg)) {
         document.body.style.background = bg;
+        document.documentElement.style.setProperty('--bg', bg);
       }
-      // Keep <html data-theme> in sync on every live theme swap, not just
-      // the SSR first paint. apps-sdk-ui scopes its design tokens under
-      // :where([data-theme="dark"|"light"]); a mini-app already mounted in
-      // dark mode that receives a `moebius:frame-theme` light update would
-      // otherwise keep data-theme="dark" and render SDK surfaces (Menu,
-      // elevated panels) with the wrong-mode tokens. The injected CSS vars
-      // (--bg etc.) DO switch via the style block above, but data-theme-
-      // scoped SDK tokens only switch with this attribute.
-      var mode = inferThemeMode(css, bg);
-      if (mode) document.documentElement.setAttribute('data-theme', mode);
+      // Keep <html data-theme> + color-scheme in sync on every live swap, not
+      // just first paint. apps-sdk-ui scopes its tokens under
+      // :where([data-theme="dark"|"light"]); without flipping data-theme an
+      // app mounted dark that receives a light swap keeps the wrong-mode SDK
+      // tokens. color-scheme drives UA-native widgets (scrollbars, form
+      // controls) — both mirror applyTheme.js.
+      var mode = inferMode(css, bg);
+      if (mode) {
+        document.documentElement.setAttribute('data-theme', mode);
+        document.documentElement.style.colorScheme = mode;
+      }
     }
 
     // Report uncaught APP errors to the activity log so the nightly Dreaming
