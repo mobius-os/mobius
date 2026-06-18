@@ -71,6 +71,8 @@ Before building, triage the prompt into one of three tiers:
 - **Material-choice** → build a confident default + surface alternatives.
 - **Vibe** → reply with options + tradeoffs, wait for a pick.
 
+**Scope check before any restyle.** "The app" is ambiguous: it can mean the whole Möbius shell (one global look via `theme.css` — see `theming.md`) or a single mini-app (per-app CSS scoped to that app — see `building-apps.md`). Resolve which BEFORE styling — "restyle the whole app / make everything feel like X" most likely means the shell, not the last mini-app you happened to build. Confirm scope if it's at all ambiguous, and in your reply say what you changed and what you left untouched.
+
 ### 2. Propose (only when needed)
 
 Name key decisions, give a concrete recommendation for each. Lead with the recommendation; offer alternatives conversationally, not as a form.
@@ -130,9 +132,9 @@ Two gotchas every session:
 
 Loading a PNG into your vision (`Read` on Claude, `view_image` on Codex) lets YOU inspect it. The partner sees ONLY your text plus any `![caption](/api/chats/$CHAT_ID/generated/<name>.png)` embeds you explicitly write. The failure mode: you view it, describe it ("the grid rendered beautifully"), but never embed — so the partner trusts an unverified claim. Pattern:
 
-1. `Bash`: `agent-browser screenshot <path>`
-2. `Read` / `view_image`: `<path>`
-3. **Text** (same message, BEFORE interpreting): `![first render](/api/chats/$CHAT_ID/generated/<name>.png)` then a one-line description.
+1. `Bash`: capture INTO the chat's served directory, or the embed 404s as a broken image. `/api/chats/$CHAT_ID/generated/<name>.png` serves ONLY from `/data/chats/$CHAT_ID/generated/` — a PNG written anywhere else (a bare `agent-browser screenshot /tmp/x.png`) will not resolve. For a Möbius page: `bash "$SCRIPTS_DIR/agent-screenshot.sh" <route> /data/chats/$CHAT_ID/generated/<name>.png` (it makes the dir + does the auth dance). For an already-open or non-Möbius page: `mkdir -p /data/chats/$CHAT_ID/generated && agent-browser screenshot /data/chats/$CHAT_ID/generated/<name>.png`.
+2. `Read` / `view_image`: `/data/chats/$CHAT_ID/generated/<name>.png`
+3. **Text** (same message, BEFORE interpreting): `![first render](/api/chats/$CHAT_ID/generated/<name>.png)` — the embed path MUST match the file you just wrote. Then a one-line description.
 4. Continue.
 
 **If you've seen the app working, the partner should too.** Embed first renders (even broken ones — they let the partner redirect early), major visual changes, working interactions, and especially error/unexpected-state screenshots. Near-identical verification frames can be skipped (judgment call). For structural questions ("does button X exist?"), `snapshot` is enough.
