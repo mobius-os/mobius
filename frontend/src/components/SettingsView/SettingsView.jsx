@@ -43,6 +43,15 @@ export default function SettingsView({ onThemeChange }) {
   // 'idle' | 'checking' | 'checked' — the "Check for updates" button asks the
   // service worker to re-check for a new shell build and re-reads /api/version.
   const [updatePhase, setUpdatePhase] = useState('idle')
+  // The LIVE frame revision the SW is actually serving: vite's stampFrameRev
+  // wrote `<meta name="mobius-frame-rev">` into the BUILT index.html this
+  // document was loaded from. Reading it here (once, on mount) makes the
+  // shell↔frame delivery layer observable — a stale-cached shell shows an old
+  // rev even when /api/version's backend SHA looks current. '' if absent.
+  const [frameRev, setFrameRev] = useState('')
+  useEffect(() => {
+    setFrameRev(document.querySelector('meta[name="mobius-frame-rev"]')?.content || '')
+  }, [])
 
   useEffect(() => {
     // Mirror the full query value so a cache invalidation that
@@ -265,6 +274,18 @@ export default function SettingsView({ onThemeChange }) {
   }
 
   const version = versionQuery.data
+  // The short SHA of the SHELL BUILD the served UI came from — shell_sha
+  // (the served bundle's image-build SHA) is the truthful one; fall back to
+  // sha (the running image) and finally 'unknown'. First 7 chars, matching
+  // how the Shell version row truncates sha.
+  const shellBuildSha = (() => {
+    const raw = version?.shell_sha && version.shell_sha !== 'unknown'
+      ? version.shell_sha
+      : version?.sha && version.sha !== 'unknown'
+        ? version.sha
+        : null
+    return raw ? raw.slice(0, 7) : 'unknown'
+  })()
   // shell_sha is the build the SERVED UI came from; sha is the running image.
   // A mismatch means a newer image is installed but its UI isn't being served
   // to this client yet — reloading picks it up.
@@ -450,6 +471,25 @@ export default function SettingsView({ onThemeChange }) {
                   ? 'Up to date'
                   : 'Check for updates'}
             </button>
+          </div>
+          {/* Delivery observability: the live shell-build SHA and frame
+              revision the client is ACTUALLY running, so "deployed" can be
+              checked against "reached the owner" instead of hoped. */}
+          <div className="settings__row settings__row--top">
+            <div>
+              <span className="settings__label">Shell build</span>
+              <p className="settings__subtext settings__subtext--tight">
+                {shellBuildSha}
+              </p>
+            </div>
+          </div>
+          <div className="settings__row settings__row--top">
+            <div>
+              <span className="settings__label">Frame revision</span>
+              <p className="settings__subtext settings__subtext--tight">
+                {frameRev || '—'}
+              </p>
+            </div>
           </div>
           {newerBuildInstalled && (
             <div className="settings__notice" role="status">

@@ -145,9 +145,16 @@ export function applyTheme(theme, { doc = globalThis.document, store = globalThi
     doc.querySelectorAll(`link[${FONT_LINK_ATTR}]`).forEach(l => l.remove())
 
     const imports = []
+    // Cover all four CSS @import spellings: url('X')/url("X") (quoted),
+    // url(X) (bare, unquoted), and "X"/'X' (no url()). The old regex only
+    // saw quoted url(), so a bare or no-url() import slipped past the http(s)
+    // allowlist unmatched. The url group excludes ) and whitespace; the
+    // bare-quoted group runs to its closing quote. A single trailing `;` is
+    // required, so an @import-looking substring inside a quoted value (e.g.
+    // a `content:` string) isn't matched as a real rule.
     const cssBody = css.replace(
-      /@import\s+url\(\s*['"]([^'"]+)['"]\s*\)\s*;[^\S\n]*\n?/g,
-      (_, url) => { imports.push(url); return '' }
+      /@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^"'()\s]+))\s*\)|"([^"]*)"|'([^']*)')\s*;[^\S\n]*\n?/g,
+      (m, u1, u2, u3, q1, q2) => { imports.push(u1 ?? u2 ?? u3 ?? q1 ?? q2); return '' }
     )
     imports.filter(url => /^https?:\/\//i.test(url)).forEach(url => {
       const link = doc.createElement('link')
@@ -263,9 +270,17 @@ export const PREPAINT_SRC = `(function () {
       // javascript:/data: URL must not become active CSS), so the pre-painted
       // <style> never carries a raw rule the live applier would re-strip.
       var fontUrls = [];
+      // Cover all four @import-rule forms (quoted url(), bare url(), and
+      // no-url() "X"/'X') so the http(s) allowlist below can't be bypassed by
+      // a syntax the quoted-url-only regex didn't see. Backslashes are DOUBLED
+      // here because this is a template literal — the evaluated string carries
+      // single backslashes (see applyTheme.prepaint.test.js byte-equality).
       css = css.replace(
-        /@import\\s+url\\(\\s*['"]([^'"]+)['"]\\s*\\)\\s*;[^\\S\\n]*\\n?/g,
-        function (_, url) { fontUrls.push(url); return ''; }
+        /@import\\s+(?:url\\(\\s*(?:"([^"]*)"|'([^']*)'|([^"'()\\s]+))\\s*\\)|"([^"]*)"|'([^']*)')\\s*;[^\\S\\n]*\\n?/g,
+        function (m, u1, u2, u3, q1, q2) {
+          fontUrls.push(u1 !== undefined ? u1 : u2 !== undefined ? u2 : u3 !== undefined ? u3 : q1 !== undefined ? q1 : q2);
+          return '';
+        }
       );
       for (var i = 0; i < fontUrls.length; i++) {
         if (/^https?:\\/\\//i.test(fontUrls[i])) {

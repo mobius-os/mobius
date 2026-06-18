@@ -89,9 +89,17 @@
       // javascript:/data: URL must not become active CSS), so the pre-painted
       // <style> never carries a raw rule the live applier would re-strip.
       var fontUrls = [];
+      // Cover all four @import-rule forms (quoted url(), bare url(), and
+      // no-url() "X"/'X') so the http(s) allowlist below can't be bypassed by
+      // a syntax the quoted-url-only regex didn't see. Backslashes are DOUBLED
+      // here because this is a template literal — the evaluated string carries
+      // single backslashes (see applyTheme.prepaint.test.js byte-equality).
       css = css.replace(
-        /@import\s+url\(\s*['"]([^'"]+)['"]\s*\)\s*;[^\S\n]*\n?/g,
-        function (_, url) { fontUrls.push(url); return ''; }
+        /@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^"'()\s]+))\s*\)|"([^"]*)"|'([^']*)')\s*;[^\S\n]*\n?/g,
+        function (m, u1, u2, u3, q1, q2) {
+          fontUrls.push(u1 !== undefined ? u1 : u2 !== undefined ? u2 : u3 !== undefined ? u3 : q1 !== undefined ? q1 : q2);
+          return '';
+        }
       );
       for (var i = 0; i < fontUrls.length; i++) {
         if (/^https?:\/\//i.test(fontUrls[i])) {
