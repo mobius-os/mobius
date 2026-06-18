@@ -14,7 +14,11 @@
 set -euo pipefail
 
 CHAT_ID="${1:-${CHAT_ID:-}}"
-OUT="${2:-/tmp/shell-preview.png}"
+# Default into the chat's served media dir so the shot can be embedded; fall
+# back to /tmp only when there's no chat to attach it to.
+if [ -n "${2:-}" ]; then OUT="$2"
+elif [ -n "${CHAT_ID}" ]; then OUT="/data/chats/${CHAT_ID}/media/shell.png"
+else OUT="/tmp/shell-preview.png"; fi
 
 if [ -n "${CHAT_ID}" ]; then
   ROUTE="/chat/${CHAT_ID}"

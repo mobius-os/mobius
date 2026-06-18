@@ -7,7 +7,7 @@
 # and existing callers keep working:
 #
 #   preview_app.sh <app_id> [output_path]
-#   defaults: output_path=/data/chats/$CHAT_ID/generated/app-<id>.png
+#   defaults: output_path=/data/chats/$CHAT_ID/media/app-<id>.png
 #
 # Maps to the in-shell app route /app/<id>. The bare app-frame URL
 # can't be screenshotted directly — the frame waits for the parent
@@ -25,7 +25,7 @@ if [ -z "$APP_ID" ]; then
   exit 1
 fi
 
-OUT="${2:-/data/chats/${CHAT_ID:-unknown}/generated/app-${APP_ID}.png}"
+OUT="${2:-/data/chats/${CHAT_ID:-unknown}/media/app-${APP_ID}.png}"
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec "${DIR}/agent-screenshot.sh" "/app/${APP_ID}" "${OUT}"

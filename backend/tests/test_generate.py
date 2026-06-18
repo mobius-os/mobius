@@ -69,11 +69,11 @@ def test_generate_image_returns_url(client, db, auth, chat):
   assert res.status_code == 200
   body = res.json()
   assert "url" in body
-  assert f"/api/chats/{chat.id}/generated/" in body["url"]
+  assert f"/api/chats/{chat.id}/media/" in body["url"]
 
 
-def test_serve_generated_image(client, db, auth, chat):
-  """GET /api/chats/{id}/generated/{filename} serves the saved file.
+def test_serve_media_image(client, db, auth, chat):
+  """GET /api/chats/{id}/media/{filename} serves the saved file.
 
   Uses a media token on ?token= (owner JWTs are rejected on that path).
   """
@@ -97,19 +97,39 @@ def test_serve_generated_image(client, db, auth, chat):
     )
 
   url = gen_res.json()["url"]
+  assert f"/api/chats/{chat.id}/media/" in url
   filename = url.split("/")[-1].split("?")[0]
 
-  media_token_r = client.post(
-    f"/api/chats/{chat.id}/media-token",
-    headers=auth,
-  )
-  media_token = media_token_r.json()["token"]
+  media_token = client.post(
+    f"/api/chats/{chat.id}/media-token", headers=auth,
+  ).json()["token"]
   serve_res = client.get(
-    f"/api/chats/{chat.id}/generated/{filename}",
+    f"/api/chats/{chat.id}/media/{filename}",
     params={"token": media_token},
   )
   assert serve_res.status_code == 200
   assert serve_res.content == b"fake-png-bytes"
+
+
+def test_serve_generated_alias_backcompat(client, db, auth, chat):
+  """Legacy: a file under the old generated/ dir still serves via
+  /api/chats/{id}/generated/ so embeds in pre-media/ messages keep working."""
+  from app.config import get_settings
+  gen_dir = (
+    pathlib.Path(get_settings().data_dir) / "chats" / chat.id / "generated"
+  )
+  gen_dir.mkdir(parents=True, exist_ok=True)
+  (gen_dir / "old.png").write_bytes(b"legacy-bytes")
+
+  media_token = client.post(
+    f"/api/chats/{chat.id}/media-token", headers=auth,
+  ).json()["token"]
+  serve_res = client.get(
+    f"/api/chats/{chat.id}/generated/old.png",
+    params={"token": media_token},
+  )
+  assert serve_res.status_code == 200
+  assert serve_res.content == b"legacy-bytes"
 
 
 def test_generate_rejects_non_uuid_chat_id(client, auth):
@@ -134,7 +154,7 @@ def test_serve_generated_rejects_non_uuid_chat_id(client, auth):
 
 
 def test_generate_image_dir_cap_enforced(client, db, auth, chat, monkeypatch):
-  """generate-image must return 413 when the per-chat generated dir is full (Task 8)."""
+  """generate-image must return 413 when the per-chat media dir is full (Task 8)."""
   import sys
   _set_gemini_key(client, auth)
 
@@ -145,14 +165,14 @@ def test_generate_image_dir_cap_enforced(client, db, auth, chat, monkeypatch):
   # Patch the cap to a tiny value so the test doesn't write a real 100 MB.
   for mod in list(sys.modules.values()):
     if getattr(mod, "__name__", "") == "app.routes.generate":
-      monkeypatch.setattr(mod, "_MAX_CHAT_GENERATED_BYTES", 1, raising=False)
+      monkeypatch.setattr(mod, "_MAX_CHAT_MEDIA_BYTES", 1, raising=False)
   ep = next(
     (r.endpoint for r in client.app.routes
      if getattr(r, "path", None) == "/api/chats/{chat_id}/generate-image"),
     None,
   )
   if ep is not None:
-    monkeypatch.setitem(ep.__globals__, "_MAX_CHAT_GENERATED_BYTES", 1)
+    monkeypatch.setitem(ep.__globals__, "_MAX_CHAT_MEDIA_BYTES", 1)
 
   with patch("app.routes.generate.httpx.AsyncClient") as MockClient:
     instance = AsyncMock()

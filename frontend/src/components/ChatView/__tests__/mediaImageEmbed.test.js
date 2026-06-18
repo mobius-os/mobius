@@ -36,7 +36,7 @@ import assert from 'node:assert/strict'
 // Copy of MEDIA_PATH_RE as declared in InlineContent.jsx.
 // Any change to the source must be reflected here (the test documents the
 // contract, not the implementation — we verify the shape is correct).
-const MEDIA_PATH_RE = /^(?:.*)?\/api\/chats\/([^/]+)\/(?:uploads|generated)\//
+const MEDIA_PATH_RE = /^(?:.*)?\/api\/chats\/([^/]+)\/(?:uploads|media|generated)\//
 
 function getMediaChatId(src) {
   const m = src.match(MEDIA_PATH_RE)
@@ -111,6 +111,11 @@ describe('MEDIA_PATH_RE regex', () => {
   test('matches a root-relative /api/chats/<id>/uploads/ path', () => {
     const src = '/api/chats/abc-123/uploads/file.jpg'
     assert.ok(MEDIA_PATH_RE.test(src), 'root-relative uploads path must match')
+  })
+
+  test('matches a root-relative /api/chats/<id>/media/ path', () => {
+    const src = '/api/chats/abc-123/media/shot.png'
+    assert.ok(MEDIA_PATH_RE.test(src), 'root-relative media path must match')
   })
 
   test('matches an absolute https://host/api/chats/<id>/generated/ path', () => {
@@ -333,7 +338,9 @@ describe('regex and extraction consistency', () => {
   const CASES = [
     ['/api/chats/abc/generated/img.png', 'abc'],
     ['/api/chats/abc/uploads/file.pdf', 'abc'],
+    ['/api/chats/abc/media/shot.png', 'abc'],
     ['https://h.example.com/api/chats/uuid-here/generated/x.png', 'uuid-here'],
+    ['https://h.example.com/api/chats/uuid-here/media/x.png', 'uuid-here'],
     ['https://h.example.com/api/chats/uuid-here/uploads/x.png', 'uuid-here'],
   ]
 

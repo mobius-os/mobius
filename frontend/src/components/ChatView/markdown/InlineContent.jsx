@@ -100,12 +100,12 @@ function safeLinkHref(href) {
   return safeUrl(href, SAFE_LINK_PROTOCOLS)
 }
 
-// Matches /api/chats/<chat_id>/uploads/<file> and /api/chats/<chat_id>/generated/<file>.
-// These paths require a short-lived media token on ?token=; the owner JWT must not
-// appear there (it would leak into access logs, history, Referer). Other /api/ paths
-// that appear in markdown images (rare) still get the owner token in the URL, but
-// the primary media-serve paths are hardened.
-const MEDIA_PATH_RE = /^(?:.*)?\/api\/chats\/([^/]+)\/(?:uploads|generated)\//
+// Matches /api/chats/<chat_id>/{uploads,media,generated}/<file> (generated is the
+// legacy alias of media). These paths require a short-lived media token on ?token=;
+// the owner JWT must not appear there (it would leak into access logs, history,
+// Referer). Other /api/ paths that appear in markdown images (rare) still get the
+// owner token in the URL, but the primary media-serve paths are hardened.
+const MEDIA_PATH_RE = /^(?:.*)?\/api\/chats\/([^/]+)\/(?:uploads|media|generated)\//
 
 function getMediaChatId(src) {
   const m = src.match(MEDIA_PATH_RE)

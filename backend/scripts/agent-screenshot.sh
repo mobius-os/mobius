@@ -30,10 +30,21 @@ set -euo pipefail
 ROUTE="${1:-}"
 OUT="${2:-}"
 
-if [ -z "$ROUTE" ] || [ -z "$OUT" ]; then
-  echo "agent-screenshot.sh: route and out.png required" >&2
-  echo "Usage: agent-screenshot.sh <route> <out.png>" >&2
+if [ -z "$ROUTE" ]; then
+  echo "agent-screenshot.sh: route required" >&2
+  echo "Usage: agent-screenshot.sh <route> [out.png]" >&2
   exit 1
+fi
+
+# Default the output INTO the chat's served media dir, so the shot can be
+# embedded — ![](/api/chats/$CHAT_ID/media/<name>) — with no copy step. A shot
+# written elsewhere (e.g. /tmp) is viewable by the agent but 404s if embedded.
+if [ -z "$OUT" ]; then
+  if [ -z "${CHAT_ID:-}" ]; then
+    echo "agent-screenshot.sh: no out.png given and CHAT_ID unset" >&2
+    exit 1
+  fi
+  OUT="/data/chats/${CHAT_ID}/media/shot-$(date +%s%N).png"
 fi
 
 # Route must be path-absolute so it appends cleanly to the origin.

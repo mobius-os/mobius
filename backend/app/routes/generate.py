@@ -30,7 +30,7 @@ from app.storage_io import app_dir_usage
 # Per-chat total cap for generated images. Each image is ~100-500 KB
 # for flash-model output; 100 MB accommodates hundreds of generations
 # while bounding the blast radius on the memory-tight host.
-_MAX_CHAT_GENERATED_BYTES = 100 * 1024 * 1024  # 100 MB per chat generated dir
+_MAX_CHAT_MEDIA_BYTES = 100 * 1024 * 1024  # 100 MB per chat media dir
 
 # Chat IDs are UUID4 hex strings (32 hex chars, no dashes) produced by
 # str(uuid.uuid4()) — 36 chars with dashes.  Both shapes are accepted
@@ -172,25 +172,34 @@ async def generate_image(
   )
 
   settings = get_settings()
-  gen_dir = Path(settings.data_dir) / "chats" / chat_id / "generated"
-  gen_dir.mkdir(parents=True, exist_ok=True)
+  # One dir holds all agent-attached chat media (generated images AND
+  # screenshots). The older `generated/` path is still served for embeds in
+  # pre-`media/` messages — see the legacy alias route below.
+  media_dir = Path(settings.data_dir) / "chats" / chat_id / "media"
+  media_dir.mkdir(parents=True, exist_ok=True)
 
   # Enforce per-chat directory total before writing. Each Gemini image
   # is typically a few hundred KB, so 100 MB supports many generations
   # while preventing a runaway chat from filling the host disk.
-  dir_used = app_dir_usage(gen_dir)
-  if dir_used + len(image_bytes) > _MAX_CHAT_GENERATED_BYTES:
+  # Count both the new media/ dir and the legacy generated/ dir (old chats may
+  # still hold images there) so the per-chat cap covers all served media, not a
+  # fresh allowance per directory.
+  gen_dir = Path(settings.data_dir) / "chats" / chat_id / "generated"
+  dir_used = app_dir_usage(media_dir) + (
+    app_dir_usage(gen_dir) if gen_dir.exists() else 0
+  )
+  if dir_used + len(image_bytes) > _MAX_CHAT_MEDIA_BYTES:
     raise HTTPException(
       status_code=413,
       detail=(
-        f"This chat's generated images directory is full "
-        f"({_MAX_CHAT_GENERATED_BYTES // (1024 * 1024)} MB limit per chat). "
+        f"This chat's media directory is full "
+        f"({_MAX_CHAT_MEDIA_BYTES // (1024 * 1024)} MB limit per chat). "
         f"The agent can delete old images to free space."
       ),
     )
 
   filename = f"{uuid.uuid4().hex}.png"
-  (gen_dir / filename).write_bytes(image_bytes)
+  (media_dir / filename).write_bytes(image_bytes)
 
   record = {
     "filename": filename,
@@ -201,21 +210,16 @@ async def generate_image(
   db.commit()
 
   return {
-    "url": f"/api/chats/{chat_id}/generated/{filename}",
+    "url": f"/api/chats/{chat_id}/media/{filename}",
     "model": model_used,
   }
 
 
-@router.get("/{chat_id}/generated/{filename}")
-def serve_generated_image(
-  chat_id: str,
-  filename: str = FastPath(...),
-  token_src: TokenSource = Depends(get_auth_token_source),
-  db: Session = Depends(get_db),
-):
-  """Serves a generated image. Accepts JWT from header or media token on ?token=.
+def _serve_chat_image(chat_id, filename, subdir, token_src, db):
+  """Common auth + path-validation + FileResponse for a chat media file.
 
-  Owner-only. The token can come from two sources:
+  `subdir` is "media" (current) or "generated" (legacy alias kept so embeds in
+  old messages still resolve). Owner-only. The token can come from two sources:
   - Authorization header: any valid owner JWT (full-session auth).
   - ?token= query param: ONLY a short-lived media-scoped token minted by
     POST /api/chats/{id}/media-token. Owner JWTs are explicitly rejected on
@@ -229,10 +233,33 @@ def serve_generated_image(
   )
 
   settings = get_settings()
-  gen_dir = Path(settings.data_dir) / "chats" / chat_id / "generated"
-  file_path = validate_path_within_base(filename, gen_dir)
+  base = Path(settings.data_dir) / "chats" / chat_id / subdir
+  file_path = validate_path_within_base(filename, base)
 
   if not file_path.exists():
     raise HTTPException(status_code=404, detail="Image not found.")
 
   return FileResponse(str(file_path), media_type="image/png")
+
+
+@router.get("/{chat_id}/media/{filename}")
+def serve_chat_media(
+  chat_id: str,
+  filename: str = FastPath(...),
+  token_src: TokenSource = Depends(get_auth_token_source),
+  db: Session = Depends(get_db),
+):
+  """Serves an agent-attached chat image — screenshots and generated images."""
+  return _serve_chat_image(chat_id, filename, "media", token_src, db)
+
+
+@router.get("/{chat_id}/generated/{filename}")
+def serve_generated_image(
+  chat_id: str,
+  filename: str = FastPath(...),
+  token_src: TokenSource = Depends(get_auth_token_source),
+  db: Session = Depends(get_db),
+):
+  """Legacy alias: serves media written under the old `generated/` dir, so
+  embeds in pre-`media/` messages keep rendering."""
+  return _serve_chat_image(chat_id, filename, "generated", token_src, db)
