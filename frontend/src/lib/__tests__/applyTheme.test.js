@@ -156,6 +156,45 @@ test('applyTheme rejects javascript:/data: @import URLs (allowlist)', () => {
   assert.equal(dom.fontLinks.length, 0)
 })
 
+// All four CSS @import spellings must be stripped from the body and only the
+// http(s) ones re-injected as <link> — the broadened allowlist closes the
+// bare-url() / no-url() bypass the quoted-url-only regex had.
+test('applyTheme allowlists a bare url() @import (one <link>)', () => {
+  applyTheme({ css: '@import url(https://a.example/x.css);:root{}', bg: '#000000' }, ctx())
+  assert.equal(dom.fontLinks.length, 1)
+  assert.equal(dom.fontLinks[0].href, 'https://a.example/x.css')
+  assert.ok(!dom.styleNodes.get('mobius-theme').textContent.includes('@import'))
+})
+
+test('applyTheme allowlists a no-url() quoted @import (one <link>)', () => {
+  applyTheme({ css: '@import "https://b.example/y.css";:root{}', bg: '#000000' }, ctx())
+  assert.equal(dom.fontLinks.length, 1)
+  assert.equal(dom.fontLinks[0].href, 'https://b.example/y.css')
+  assert.ok(!dom.styleNodes.get('mobius-theme').textContent.includes('@import'))
+})
+
+test('applyTheme drops a bare url(data:) @import (no <link>, stripped from body)', () => {
+  applyTheme({ css: '@import url(data:text/css,x);:root{}', bg: '#000000' }, ctx())
+  assert.equal(dom.fontLinks.length, 0)
+  assert.ok(!dom.styleNodes.get('mobius-theme').textContent.includes('@import'))
+})
+
+test('applyTheme drops a no-url() "javascript:" @import (no <link>, stripped)', () => {
+  applyTheme({ css: '@import "javascript:alert(1)";:root{}', bg: '#000000' }, ctx())
+  assert.equal(dom.fontLinks.length, 0)
+  assert.ok(!dom.styleNodes.get('mobius-theme').textContent.includes('@import'))
+})
+
+test('applyTheme handles all four @import spellings in one CSS body', () => {
+  // quoted url(), bare url(), no-url() quoted, and a bare url(data:) that the
+  // allowlist must drop — all stripped from the body, only the http(s) ones
+  // become <link>.
+  applyTheme({ css: "@import url('https://q.example/a.css');@import url(https://b.example/b.css);@import \"https://c.example/c.css\";@import url(data:text/css,x);:root{}", bg: '#000000' }, ctx())
+  const hrefs = dom.fontLinks.map(l => l.href).sort()
+  assert.deepEqual(hrefs, ['https://b.example/b.css', 'https://c.example/c.css', 'https://q.example/a.css'])
+  assert.ok(!dom.styleNodes.get('mobius-theme').textContent.includes('@import'))
+})
+
 test('applyTheme removes prior font links before adding new ones', () => {
   applyTheme({ css: "@import url('https://a.example/x.css');:root{}", bg: '#000000' }, ctx())
   applyTheme({ css: "@import url('https://b.example/y.css');:root{}", bg: '#000000' }, ctx())

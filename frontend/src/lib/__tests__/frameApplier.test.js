@@ -58,7 +58,10 @@ test('frame live applier source keeps the HEX check', () => {
 
 test('frame live applier source keeps the http(s) @import allowlist', () => {
   assert.match(FRAME_HTML, /\/\^https\?:\\?\/\\?\/\/i\.test\(fontUrls/)
-  assert.match(FRAME_HTML, /@import\\s\+url/)
+  // The regex now opens a non-capturing alternation over all four @import
+  // spellings (url()/bare/no-url()), so `url` no longer follows `@import\s+`
+  // directly — guard the broadened opener instead.
+  assert.match(FRAME_HTML, /@import\\s\+\(\?:url/)
 })
 
 // --- Behavioral test: extract + eval the live applier ------------------
@@ -136,6 +139,42 @@ test('frame live applier converts an http(s) @import to a <link>', () => {
   applyTheme("@import url('https://fonts.example/x.css');:root{--bg:#000000;}", '#000000')
   assert.equal(dom.fontLinks.length, 1)
   assert.equal(dom.fontLinks[0].href, 'https://fonts.example/x.css')
+})
+
+// The broadened regex must cover every @import spelling — bare url(), no-url()
+// "X", quoted url() — and still gate each on the http(s) allowlist.
+test('frame live applier allowlists a bare url() @import', () => {
+  const dom = makeFrameDom()
+  const applyTheme = loadLiveApplyTheme(dom)
+  applyTheme('@import url(https://a.example/x.css);:root{--bg:#000000;}', '#000000')
+  assert.equal(dom.fontLinks.length, 1)
+  assert.equal(dom.fontLinks[0].href, 'https://a.example/x.css')
+  assert.ok(!dom.styleNodes.get('mobius-theme').textContent.includes('@import'))
+})
+
+test('frame live applier allowlists a no-url() quoted @import', () => {
+  const dom = makeFrameDom()
+  const applyTheme = loadLiveApplyTheme(dom)
+  applyTheme('@import "https://b.example/y.css";:root{--bg:#000000;}', '#000000')
+  assert.equal(dom.fontLinks.length, 1)
+  assert.equal(dom.fontLinks[0].href, 'https://b.example/y.css')
+  assert.ok(!dom.styleNodes.get('mobius-theme').textContent.includes('@import'))
+})
+
+test('frame live applier drops a bare url(data:) @import (no <link>)', () => {
+  const dom = makeFrameDom()
+  const applyTheme = loadLiveApplyTheme(dom)
+  applyTheme('@import url(data:text/css,x);:root{--bg:#000000;}', '#000000')
+  assert.equal(dom.fontLinks.length, 0)
+  assert.ok(!dom.styleNodes.get('mobius-theme').textContent.includes('@import'))
+})
+
+test('frame live applier drops a no-url() "javascript:" @import (no <link>)', () => {
+  const dom = makeFrameDom()
+  const applyTheme = loadLiveApplyTheme(dom)
+  applyTheme('@import "javascript:alert(1)";:root{--bg:#000000;}', '#000000')
+  assert.equal(dom.fontLinks.length, 0)
+  assert.ok(!dom.styleNodes.get('mobius-theme').textContent.includes('@import'))
 })
 
 test('frame live applier ignores a non-hex bg', () => {
