@@ -132,6 +132,24 @@ test('applyTheme injects CSS into <style id="mobius-theme">', () => {
   assert.equal(el.textContent, ':root { --bg: #123456; }')
 })
 
+test('applyTheme honors an explicit mode over inferring from bg (stale-SWR divergence fix)', () => {
+  // A DARK bg paired with an explicit LIGHT mode — the shape a stale
+  // /api/theme revalidation can feed the apply effect. The explicit mode must
+  // win; otherwise data-theme/color-scheme stick dark while the toggle knob
+  // (its own source) says light — the owner-reported "dark toggle on, light
+  // UI" divergence. Now that /api/theme carries mode, the paint follows it.
+  applyTheme({ css: ':root{--bg:#0d0d0d;}', bg: '#0d0d0d', mode: 'light' }, ctx())
+  assert.equal(dom.document.documentElement.getAttribute('data-theme'), 'light')
+  assert.equal(dom.document.documentElement.style.colorScheme, 'light')
+  // Converse: explicit dark over a light bg.
+  applyTheme({ css: ':root{--bg:#f0eeeb;}', bg: '#f0eeeb', mode: 'dark' }, ctx())
+  assert.equal(dom.document.documentElement.getAttribute('data-theme'), 'dark')
+  assert.equal(dom.document.documentElement.style.colorScheme, 'dark')
+  // No explicit mode → still infers from bg (backward-compatible).
+  applyTheme({ css: ':root{--bg:#0d0d0d;}', bg: '#0d0d0d' }, ctx())
+  assert.equal(dom.document.documentElement.getAttribute('data-theme'), 'dark')
+})
+
 test('applyTheme re-appends the style node so it wins the cascade', () => {
   applyTheme({ css: ':root { --bg: #111; }', bg: '#111111' }, ctx())
   const first = dom.styleNodes.get('mobius-theme')
