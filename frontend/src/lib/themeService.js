@@ -49,8 +49,8 @@ const STYLE_ID = 'mobius-theme'
  * Kept as a named export so existing callers (useTheme's apply effect,
  * toggleTheme below, tests) don't have to change their call shape.
  */
-export function applyThemeToDom(css, bg) {
-  applyTheme({ css, bg })
+export function applyThemeToDom(css, bg, mode) {
+  applyTheme({ css, bg, mode })
 }
 
 /**
@@ -143,12 +143,12 @@ const STRUCTURAL_KEYS = [
 // + the eventual network revalidation still converge.
 const SHELL_DATA_CACHE = 'mobius-shell-data'
 
-async function _refreshThemeSwCache(css, bg) {
+async function _refreshThemeSwCache(css, bg, mode) {
   if (typeof caches === 'undefined' || typeof Response === 'undefined') return
   try {
     const cache = await caches.open(SHELL_DATA_CACHE)
     const url = new URL('/api/theme', self?.location?.origin || window.location.origin).href
-    const body = JSON.stringify({ css, bg })
+    const body = JSON.stringify({ css, bg, mode })
     await cache.put(url, new Response(body, {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
@@ -252,8 +252,8 @@ export async function toggleTheme(queryClient, currentMode, api) {
     // setQueryData updates the in-memory cache immediately; the SW cache
     // refresh keeps the SWR network revalidation from re-introducing stale
     // data on the next read.
-    queryClient.setQueryData(themeQueries.keys.all, { css: newCss, bg: newBg })
-    await _refreshThemeSwCache(newCss, newBg)
+    queryClient.setQueryData(themeQueries.keys.all, { css: newCss, bg: newBg, mode: newMode })
+    await _refreshThemeSwCache(newCss, newBg, newMode)
     themeQueries.invalidate(queryClient)
     themeQueries.mode.invalidate(queryClient)
   } catch (err) {

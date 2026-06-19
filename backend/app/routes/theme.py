@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends
 from app import models
 from app.config import Settings, get_settings
 from app.deps import get_current_owner, reject_cross_site
-from app.theme import get_theme_css, get_bg_color, reset_theme_override
+from app.theme import theme_data, reset_theme_override
 
 
 router = APIRouter(prefix="/api/theme", tags=["theme"])
@@ -30,10 +30,12 @@ def get_theme(
 ):
   """Returns the effective theme: user's `theme.css` if non-empty,
   otherwise the built-in default. Always returns valid CSS."""
-  return {
-    "css": get_theme_css(settings.data_dir),
-    "bg": get_bg_color(settings.data_dir),
-  }
+  # Include `mode` so the client paints data-theme/color-scheme from the
+  # AUTHORITATIVE persisted mode, not inferMode(bg). Without it, a stale
+  # while-revalidate /api/theme body repaints a mode inferred from the (stale)
+  # bg, which diverges from — and sticks against — the toggle knob's separate
+  # theme-mode source (owner-reported "dark toggle on, light UI" bug).
+  return theme_data(settings.data_dir)
 
 
 @router.post("/reset", dependencies=[Depends(reject_cross_site)])
