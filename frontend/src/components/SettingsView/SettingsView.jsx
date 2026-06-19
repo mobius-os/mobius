@@ -449,18 +449,26 @@ export default function SettingsView({ onThemeChange }) {
             />
           )}
 
+          {/* One line carries every delivery signal — the human build
+              marker, the served image SHA, and the live frame revision the
+              client is ACTUALLY running — so "deployed" can be checked against
+              "reached me" without a redundant second sha row. */}
           <div className="settings__row settings__row--top">
             <div>
               <span className="settings__label">Shell version</span>
               <p className="settings__subtext settings__subtext--tight">
                 {SHELL_BUILD}
-                {version?.sha && version.sha !== 'unknown'
-                  ? ` · ${version.sha.slice(0, 7)}`
-                  : ''}
+                {shellBuildSha !== 'unknown' ? ` · ${shellBuildSha}` : ''}
+                {frameRev ? ` · frame ${frameRev.slice(0, 8)}` : ''}
               </p>
             </div>
+          </div>
+          {/* "Check for updates" rides its own row so the long label never
+              competes with the (also long) build string for width on a phone —
+              the shared row wrapped it to two cramped lines. */}
+          <div className="settings__action-row">
             <button
-              className="settings__btn settings__btn--outline settings__btn--sm"
+              className="settings__btn settings__btn--outline settings__btn--sm settings__btn--nowrap"
               type="button"
               onClick={checkForUpdates}
               disabled={updatePhase === 'checking'}
@@ -471,25 +479,6 @@ export default function SettingsView({ onThemeChange }) {
                   ? 'Up to date'
                   : 'Check for updates'}
             </button>
-          </div>
-          {/* Delivery observability: the live shell-build SHA and frame
-              revision the client is ACTUALLY running, so "deployed" can be
-              checked against "reached the owner" instead of hoped. */}
-          <div className="settings__row settings__row--top">
-            <div>
-              <span className="settings__label">Shell build</span>
-              <p className="settings__subtext settings__subtext--tight">
-                {shellBuildSha}
-              </p>
-            </div>
-          </div>
-          <div className="settings__row settings__row--top">
-            <div>
-              <span className="settings__label">Frame revision</span>
-              <p className="settings__subtext settings__subtext--tight">
-                {frameRev || '—'}
-              </p>
-            </div>
           </div>
           {newerBuildInstalled && (
             <div className="settings__notice" role="status">
