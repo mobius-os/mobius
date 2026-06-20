@@ -1,0 +1,426 @@
+{
+  "timestamp": "20260620-121209",
+  "llm_path": "echo $PROMPT | claude -p",
+  "capture": {
+    "cases": [
+      {
+        "id": "s1-sysdesign",
+        "blind_spot": "fact_in_question",
+        "precision": 1.0,
+        "recall": 0.5,
+        "f1": 0.667,
+        "gold_facts": [
+          "The user is preparing for system-design interviews.",
+          "The user has a backend background in Go and Postgres."
+        ],
+        "extracted": [
+          "- Has a backend engineering background working with Go and Postgres."
+        ],
+        "num_gold": 2,
+        "recall_hits": 1
+      },
+      {
+        "id": "s1-espresso",
+        "blind_spot": "fact_in_question",
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "gold_facts": [
+          "The user makes espresso at home."
+        ],
+        "extracted": [
+          "The user makes espresso at home (has a home espresso setup)."
+        ],
+        "num_gold": 1,
+        "recall_hits": 1
+      },
+      {
+        "id": "s1-personal",
+        "blind_spot": "direct",
+        "precision": 0.4,
+        "recall": 1.0,
+        "f1": 0.571,
+        "gold_facts": [
+          "The user has a border collie named Pixel.",
+          "The user is an early riser.",
+          "The user prefers concise answers.",
+          "The user prefers metric units.",
+          "The user reads a lot of sci-fi."
+        ],
+        "extracted": [
+          "- Has a border collie named Pixel",
+          "- Is an early riser",
+          "- Prefers concise answers",
+          "- Prefers metric units",
+          "- Reads a lot of sci-fi"
+        ],
+        "num_gold": 5,
+        "recall_hits": 5
+      },
+      {
+        "id": "s1-coffee",
+        "blind_spot": "direct",
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "gold_facts": [
+          "The user prefers light Ethiopian coffee roast over dark roasts."
+        ],
+        "extracted": [
+          "- Prefers light Ethiopian roast coffee over the dark roasts they used to drink."
+        ],
+        "num_gold": 1,
+        "recall_hits": 1
+      },
+      {
+        "id": "s1-vegetarian",
+        "blind_spot": "fact_in_question",
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "gold_facts": [
+          "The user is vegetarian."
+        ],
+        "extracted": [
+          "The user is vegetarian."
+        ],
+        "num_gold": 1,
+        "recall_hits": 1
+      },
+      {
+        "id": "s1-terse",
+        "blind_spot": "pref_aimed_at_agent",
+        "precision": 0.0,
+        "recall": 1.0,
+        "f1": 0.0,
+        "gold_facts": [
+          "The user prefers short, to-the-point answers without preamble."
+        ],
+        "extracted": [
+          "- Prefers short answers \u2014 skip the preamble and get straight to the point."
+        ],
+        "num_gold": 1,
+        "recall_hits": 1
+      },
+      {
+        "id": "s1-typehints",
+        "blind_spot": "pref_aimed_at_agent",
+        "precision": 0.5,
+        "recall": 1.0,
+        "f1": 0.667,
+        "gold_facts": [
+          "The user wants type hints in code.",
+          "The user wants minimal comments in code."
+        ],
+        "extracted": [
+          "- Wants all code written for them to include type hints.",
+          "- Wants comments kept minimal in code written for them."
+        ],
+        "num_gold": 2,
+        "recall_hits": 2
+      },
+      {
+        "id": "s1-schedule",
+        "blind_spot": "direct",
+        "precision": 0.5,
+        "recall": 1.0,
+        "f1": 0.667,
+        "gold_facts": [
+          "The user can only take calls after 16:00 on weekdays.",
+          "The user picks up their kids in the afternoon."
+        ],
+        "extracted": [
+          "- Can only do calls after 4pm on weekdays",
+          "- Picks up their kids in the afternoon (has children)"
+        ],
+        "num_gold": 2,
+        "recall_hits": 2
+      },
+      {
+        "id": "s1-berlin",
+        "blind_spot": "fact_in_question",
+        "precision": 0.5,
+        "recall": 1.0,
+        "f1": 0.667,
+        "gold_facts": [
+          "The user is based in Berlin."
+        ],
+        "extracted": [
+          "- The user is based in Berlin.",
+          "- The user has daily standups (part of their regular work routine)."
+        ],
+        "num_gold": 1,
+        "recall_hits": 1
+      },
+      {
+        "id": "s1-linux",
+        "blind_spot": "fact_in_question",
+        "precision": 0.0,
+        "recall": 1.0,
+        "f1": 0.0,
+        "gold_facts": [
+          "The user is mostly on Linux."
+        ],
+        "extracted": [
+          "The user primarily uses Linux."
+        ],
+        "num_gold": 1,
+        "recall_hits": 1
+      },
+      {
+        "id": "s1-knee",
+        "blind_spot": "fact_in_question",
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "gold_facts": [
+          "The user has a bad left knee.",
+          "The user needs low-impact workouts."
+        ],
+        "extracted": [
+          "Has a bad left knee and needs to avoid high-impact exercise."
+        ],
+        "num_gold": 2,
+        "recall_hits": 2
+      },
+      {
+        "id": "s1-astronomy",
+        "blind_spot": "fact_in_question",
+        "precision": 0.0,
+        "recall": 1.0,
+        "f1": 0.0,
+        "gold_facts": [
+          "The user is into astronomy and stargazing."
+        ],
+        "extracted": [
+          "- I'm really into astronomy and stargazing."
+        ],
+        "num_gold": 1,
+        "recall_hits": 1
+      },
+      {
+        "id": "s2-datascientist",
+        "blind_spot": "direct",
+        "precision": 0.0,
+        "recall": 1.0,
+        "f1": 0.0,
+        "gold_facts": [
+          "The user is a data scientist.",
+          "The user works mostly in Python and R."
+        ],
+        "extracted": [
+          "- I'm a data scientist.",
+          "- I mostly work in Python and R."
+        ],
+        "num_gold": 2,
+        "recall_hits": 2
+      },
+      {
+        "id": "s2-loudspace",
+        "blind_spot": "fact_in_question",
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "gold_facts": [
+          "The user works in a co-working space that gets loud."
+        ],
+        "extracted": [
+          "The only durable first-person fact stated is that the user works in a co-working space. Everything else \u2014 wanting a noise-cancelling headphone recommendation, the space being loud in the afternoons \u2014 is a one-off request or transient context tied to this specific question, not a lasting fact about the user."
+        ],
+        "num_gold": 1,
+        "recall_hits": 1
+      },
+      {
+        "id": "s2-formula",
+        "blind_spot": "pref_aimed_at_agent",
+        "precision": 0.0,
+        "recall": 1.0,
+        "f1": 0.0,
+        "gold_facts": [
+          "The user wants the formula shown when a stats concept is explained, not just the intuition."
+        ],
+        "extracted": [
+          "- When explaining a stats concept to me, always show the formula, not just the intuition."
+        ],
+        "num_gold": 1,
+        "recall_hits": 1
+      },
+      {
+        "id": "s2-rtopython",
+        "blind_spot": "update_supersede",
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "gold_facts": [
+          "The user no longer uses R and is now Python-only."
+        ],
+        "extracted": [
+          "- I have moved off R (no longer use it).",
+          "- I work almost exclusively in Python now."
+        ],
+        "num_gold": 1,
+        "recall_hits": 0
+      },
+      {
+        "id": "s2-bouldering",
+        "blind_spot": "direct",
+        "precision": 1.0,
+        "recall": 0.5,
+        "f1": 0.667,
+        "gold_facts": [
+          "The user is into bouldering.",
+          "The user recently started outdoor/real-rock bouldering."
+        ],
+        "extracted": [
+          "The user is into bouldering (recently picked it up as a hobby)."
+        ],
+        "num_gold": 2,
+        "recall_hits": 1
+      },
+      {
+        "id": "s2-glutenfree",
+        "blind_spot": "fact_in_question",
+        "precision": 0.0,
+        "recall": 1.0,
+        "f1": 0.0,
+        "gold_facts": [
+          "The user is gluten-free."
+        ],
+        "extracted": [
+          "- I'm gluten-free (avoid wheat/gluten)."
+        ],
+        "num_gold": 1,
+        "recall_hits": 1
+      }
+    ],
+    "overall_precision": 0.494,
+    "overall_recall": 0.889,
+    "overall_f1": 0.495,
+    "per_blind_spot_recall": {
+      "fact_in_question": 0.944,
+      "direct": 0.9,
+      "pref_aimed_at_agent": 1.0,
+      "update_supersede": 0.0
+    }
+  },
+  "e2e": {
+    "cases": [
+      {
+        "id": "e2e-sam",
+        "persona": "data scientist (Sam)",
+        "notes_extracted": 6,
+        "questions": [
+          {
+            "question": "What language should you default to in code examples for me?",
+            "gold_answer": "Python",
+            "should_abstain": false,
+            "type": "supersede",
+            "v2_answer": "Python. Your facts state you code in Python only (you've moved off R, which is now superseded), so I'll default to Python for all code examples.",
+            "v2_correct": true,
+            "nomemory_answer": "Nothing in the context I have \u2014 the project instructions, the environment details, or any memory \u2014 specifies a preferred language for code examples. If you have a default in mind (Python, TypeScript, ",
+            "nomemory_correct": true,
+            "flatinbox_answer": "You initially said you work in Python and R, but then updated that: \"I've moved off R, I'm basically Python-only now.\" So code examples should default to Python.",
+            "flatinbox_correct": true
+          },
+          {
+            "question": "When suggesting food or recipes, what dietary constraint must you respect?",
+            "gold_answer": "gluten-free",
+            "should_abstain": false,
+            "type": "fact_in_question recall",
+            "v2_answer": "Gluten-free \u2014 the user eats no wheat/gluten, so any food or recipe suggestions must be gluten-free.",
+            "v2_correct": true,
+            "nomemory_answer": "There's nothing in my memory or the provided context about your dietary constraints or food preferences. If you let me know (e.g. vegetarian, allergies, halal/kosher, etc.), I can record it and respec",
+            "nomemory_correct": false,
+            "flatinbox_answer": "Gluten-free \u2014 no wheat or gluten. The user stated they're gluten-free when asking for weekday lunch suggestions, so any food or recipe I suggest must avoid wheat/gluten.",
+            "flatinbox_correct": true
+          },
+          {
+            "question": "How should you explain a statistics concept to me?",
+            "gold_answer": "show the formula, not just the intuition",
+            "should_abstain": false,
+            "type": "pref_aimed recall",
+            "v2_answer": "(Supporting context, if useful: you're a data scientist who codes in Python, so worked examples can lean on Python.)",
+            "v2_correct": false,
+            "nomemory_answer": "I have no prior information about you or any recorded preference for how you'd like statistics concepts explained \u2014 nothing in my memory or this session establishes that.\n\nIf you'd like, tell me your ",
+            "nomemory_correct": false,
+            "flatinbox_answer": "When you explain a statistics concept to me, always show the formula \u2014 not just the intuition.",
+            "flatinbox_correct": true
+          },
+          {
+            "question": "What pet does the user have?",
+            "gold_answer": "(none stated)",
+            "should_abstain": true,
+            "type": "abstention \u2014 Sam never mentioned a pet",
+            "v2_answer": "The provided facts cover the user's profession (data scientist), coding language (Python), a preference for seeing statistical formulas, their hobby (bouldering), and a dietary need (gluten-free) \u2014 bu",
+            "v2_correct": false,
+            "nomemory_answer": "The user context I have covers their email, their work on the M\u00f6bius project, and engineering processes \u2014 but nothing about a pet.",
+            "nomemory_correct": false,
+            "flatinbox_answer": "The transcript covers the user's work (data scientist, Python \u2014 having moved off R), a request for the stats-formula preference, bouldering as a new hobby, and a gluten-free lunch request. No pet is m",
+            "flatinbox_correct": false
+          }
+        ],
+        "v2_accuracy": 0.5,
+        "nomemory_accuracy": 0.25,
+        "flatinbox_accuracy": 0.75
+      },
+      {
+        "id": "e2e-alex-prefs",
+        "persona": "backend engineer (Alex), conversational facts",
+        "notes_extracted": 5,
+        "questions": [
+          {
+            "question": "What dietary preference should you respect when suggesting meals?",
+            "gold_answer": "vegetarian",
+            "should_abstain": false,
+            "type": "fact_in_question recall",
+            "v2_answer": "Vegetarian \u2014 no meat.",
+            "v2_correct": true,
+            "nomemory_answer": "I don't know / not stated. Nothing in the available context or my memory mentions a dietary preference for you. If you'd like me to respect one (vegetarian, vegan, allergies, etc.), tell me and I can ",
+            "nomemory_correct": true,
+            "flatinbox_answer": "Vegetarian \u2014 no meat.",
+            "flatinbox_correct": true
+          },
+          {
+            "question": "How long should your answers be for me?",
+            "gold_answer": "short/terse, skip the preamble",
+            "should_abstain": false,
+            "type": "pref_aimed recall",
+            "v2_answer": "Wait \u2014 that's wrong, let me re-check.\n\nShort, with no preamble \u2014 just the point.",
+            "v2_correct": false,
+            "nomemory_answer": "I have no stored information about your preferred answer length. If you have a preference (e.g., brief and direct, or thorough and detailed), tell me and I'll follow it \u2014 and I can save it to memory s",
+            "nomemory_correct": false,
+            "flatinbox_answer": "Short \u2014 skip the preamble and just give the point.",
+            "flatinbox_correct": true
+          },
+          {
+            "question": "What OS am I on?",
+            "gold_answer": "Linux",
+            "should_abstain": false,
+            "type": "fact_in_question recall",
+            "v2_answer": "Wait \u2014 actually it is stated: you're **mostly on Linux**.",
+            "v2_correct": true,
+            "nomemory_answer": "You're on **Linux** \u2014 specifically kernel version `Linux 6.8.0-124-generic` (per the environment info for this session).",
+            "nomemory_correct": true,
+            "flatinbox_answer": "Linux \u2014 you mentioned you're on Linux mostly.",
+            "flatinbox_correct": true
+          },
+          {
+            "question": "What should you account for in workout suggestions?",
+            "gold_answer": "a bad left knee \u2014 keep it low-impact",
+            "should_abstain": false,
+            "type": "fact_in_question recall",
+            "v2_answer": "Account for the user's bad left knee \u2014 keep suggestions low-impact, nothing high-impact.",
+            "v2_correct": true,
+            "nomemory_answer": "Nothing in my available context about this user mentions workouts, fitness, exercise, injuries, equipment, or related preferences. I have no basis to say what should be accounted for in workout sugges",
+            "nomemory_correct": false,
+            "flatinbox_answer": "A bad left knee \u2014 keep workouts low-impact (nothing high-impact).",
+            "flatinbox_correct": true
+          }
+        ],
+        "v2_accuracy": 0.75,
+        "nomemory_accuracy": 0.5,
+        "flatinbox_accuracy": 1.0
+      }
+    ]
+  }
+}
