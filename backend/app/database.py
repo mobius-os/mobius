@@ -76,6 +76,14 @@ def run_migrations(eng) -> None:
   if "apps" not in tables:
     return  # fresh install — create_all handles it
   apps_cols = {c["name"] for c in inspector.get_columns("apps")}
+  if "chats" in tables:
+    chats_cols = {c["name"] for c in inspector.get_columns("chats")}
+    if "title_locked" not in chats_cols:
+      with eng.connect() as conn:
+        conn.execute(text(
+          "ALTER TABLE chats ADD COLUMN title_locked BOOLEAN NOT NULL DEFAULT 0"
+        ))
+        conn.commit()
   if "chat_id" not in apps_cols:
     with eng.connect() as conn:
       conn.execute(text("ALTER TABLE apps ADD COLUMN chat_id VARCHAR(64) NULL"))

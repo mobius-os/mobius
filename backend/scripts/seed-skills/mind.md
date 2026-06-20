@@ -144,7 +144,12 @@ maintain `chats/$CHAT_ID/index.md`:
   learns which chats relate.
 
 **Keep the displayed name in sync** with the one-liner so the partner sees it:
-`curl -s -X PUT "$API_BASE_URL/api/chats/$CHAT_ID" -H "Authorization: Bearer $AGENT_TOKEN" -H 'Content-Type: application/json' -d '{"title":"<one-line summary>"}'`.
+`curl -s -X PATCH "$API_BASE_URL/api/chats/$CHAT_ID" -H "Authorization: Bearer $AGENT_TOKEN" -H 'Content-Type: application/json' -d '{"title":"<one-line summary>","by_agent":true}'`.
+The `by_agent: true` is load-bearing: it makes your sync DEFER to the owner — if
+they have manually renamed the chat the backend keeps their name; if they clear
+it, the name drops to the first message and you re-derive it next turn. Never
+PUT/PATCH the title without `by_agent` (that would read as a manual rename and
+lock it).
 
 Fallback is free: if you never write this file (an error on the first turn), the
 name stays the partner's initial message — the existing default. And the nightly

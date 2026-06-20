@@ -73,6 +73,11 @@ class Chat(Base):
 
   id = Column(String(64), primary_key=True)
   title = Column(String(256), nullable=False, default="New chat")
+  # Naming precedence: user > agent > first-message. `title_locked` flips true
+  # when the OWNER manually renames; the agent's title-sync (PATCH by_agent=true)
+  # then never overwrites it. A clear-title PATCH resets it to false so the name
+  # drops back to the agent summary / first message and gets re-derived.
+  title_locked = Column(Boolean, nullable=False, default=False)
   messages = Column(JSON, nullable=False, default=list)
   pending_messages = Column(JSON, nullable=False, default=list)
   uploads = Column(JSON, nullable=False, default=list)
