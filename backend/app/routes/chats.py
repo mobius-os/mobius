@@ -343,6 +343,21 @@ async def update_chat(
   return {"ok": True}
 
 
+def _first_message_title(chat) -> str:
+  """The 'first message' fallback name: the first user message's text trimmed
+  to a sane length (mirrors the StartTurn initial-title behavior)."""
+  for m in (chat.messages or []):
+    if not isinstance(m, dict) or m.get("role") != "user":
+      continue
+    c = m.get("content")
+    if isinstance(c, list):
+      c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
+    c = (c or "").strip()
+    if c:
+      return c[:80]
+  return ""
+
+
 @router.patch("/{chat_id}", dependencies=[Depends(reject_cross_site)])
 async def patch_chat(
   body: ChatPatch,
@@ -374,12 +389,21 @@ async def patch_chat(
   async with get_queue_lock(chat_id):
     chat = get_active_chat_or_404(db, chat_id)
 
-    # Drawer rename. Trim + reject empty so a stray blur on an empty
-    # input can't silently blank a chat's title.
-    if body.title is not None:
+    # Naming precedence (user > agent > first-message). A clear resets the name;
+    # a manual rename locks it; an agent by_agent sync only fills the name when
+    # it isn't locked, so it can never clobber a name the owner chose.
+    if body.clear_title:
+      chat.title = _first_message_title(chat) or "New chat"
+      chat.title_locked = False
+    elif body.title is not None:
       new_title = body.title.strip()
       if new_title:
-        chat.title = new_title
+        if body.by_agent:
+          if not chat.title_locked:
+            chat.title = new_title
+        else:
+          chat.title = new_title
+          chat.title_locked = True
 
     # Drawer pin toggle. We stamp the time on pin so the pinned group
     # sorts newest-pinned-first within itself.

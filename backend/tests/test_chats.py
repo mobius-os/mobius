@@ -93,3 +93,37 @@ def test_update_icon_rejects_cross_site_request(client, auth):
     headers={**auth, "Sec-Fetch-Site": "cross-site"},
   )
   assert cross.status_code == 403
+
+
+def test_chat_title_naming_precedence(client, auth, db, chat):
+  """user > agent > first-message: a manual rename locks the name (the agent's
+  by_agent sync can't clobber it); clear unlocks + falls back to the first
+  message; the agent can fill the name again once it's unlocked."""
+  from app import models
+  cid = chat.id
+  chat.messages = [{"role": "user", "content": "help me dial in espresso"}]
+  chat.title = "help me dial in espresso"
+  db.commit()
+
+  def patch(payload):
+    return client.patch(f"/api/chats/{cid}", json=payload, headers=auth)
+
+  def current():
+    db.expire_all()
+    return db.query(models.Chat).filter_by(id=cid).first()
+
+  # 1) agent fills the name when not locked
+  assert patch({"title": "Espresso shot dial-in", "by_agent": True}).status_code == 200
+  c = current(); assert c.title == "Espresso shot dial-in" and c.title_locked is False
+  # 2) a manual (user) rename locks it
+  assert patch({"title": "Coffee help"}).status_code == 200
+  c = current(); assert c.title == "Coffee help" and c.title_locked is True
+  # 3) the agent can NOT overwrite a locked name
+  patch({"title": "Something else", "by_agent": True})
+  assert current().title == "Coffee help"
+  # 4) clear unlocks + falls back to the first message
+  assert patch({"clear_title": True}).status_code == 200
+  c = current(); assert c.title == "help me dial in espresso" and c.title_locked is False
+  # 5) the agent can fill again once unlocked
+  patch({"title": "Espresso dial-in", "by_agent": True})
+  assert current().title == "Espresso dial-in"

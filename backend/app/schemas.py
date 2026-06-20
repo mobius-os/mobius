@@ -251,6 +251,11 @@ class ChatPatch(BaseModel):
   title: str | None = Field(default=None, max_length=500)
   # Drawer pin toggle. True sets pinned_at = now, False clears it.
   pinned: bool | None = None
+  # Naming precedence. by_agent marks an AGENT title-sync — it fills the name
+  # only when the owner hasn't locked it via a manual rename. clear_title resets
+  # the name (unlock + drop to the first-message default; re-derived next turn).
+  by_agent: bool = False
+  clear_title: bool = False
 
   @field_validator("provider")
   @classmethod
