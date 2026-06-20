@@ -47,42 +47,6 @@ def test_empty_when_nothing_present(tmp_path):
 # --- graph mode --------------------------------------------------------
 
 
-def test_graph_mode_injects_index_hot_notes_and_inbox(tmp_path):
-  root = _graph(tmp_path)
-  (root / "index.md").write_text("# Home\n\n- [[working]]\n")
-  (root / "notes" / "aaa.md").write_text(_note(importance=5, title="hot"))
-  (root / "notes" / "bbb.md").write_text(_note(importance=1, title="cold"))
-  (root / "inbox.md").write_text("- saw the user do X today")
-  (root / ".ready").write_text("")
-
-  block = memory.build_memory_block(tmp_path)
-  assert block.mode == "graph"
-  assert "# Home" in block.text
-  assert "notes/aaa.md" in block.text  # path marker present
-  assert "saw the user do X" in block.text  # inbox tail injected
-  assert "index.md" in block.loaded
-  assert "notes/aaa.md" in block.loaded
-  assert "inbox.md" in block.loaded
-
-
-def test_hot_notes_selected_by_score_rendered_in_path_order(tmp_path):
-  root = _graph(tmp_path)
-  (root / "index.md").write_text("# Home")
-  # zzz is hottest by importance, but rendered order must be path-sorted.
-  (root / "notes" / "zzz.md").write_text(_note(importance=5, title="z"))
-  (root / "notes" / "aaa.md").write_text(_note(importance=4, title="a"))
-  (root / "notes" / "mmm.md").write_text(_note(importance=3, title="m"))
-  (root / ".ready").write_text("")
-
-  block = memory.build_memory_block(tmp_path, max_notes=2)
-  # max_notes=2 selects the two highest scores (zzz=5, aaa=4); mmm excluded.
-  assert "notes/zzz.md" in block.text
-  assert "notes/aaa.md" in block.text
-  assert "notes/mmm.md" not in block.text
-  # Rendered path order: aaa before zzz (stable across score changes).
-  assert block.text.index("notes/aaa.md") < block.text.index("notes/zzz.md")
-
-
 def test_budget_skips_hot_notes_when_index_fills_it(tmp_path):
   root = _graph(tmp_path)
   big_index = "# Home\n" + ("x" * 5000)
@@ -145,26 +109,6 @@ def test_empty_published_graph_is_empty(tmp_path):
 # --- recent-chats queue --------------------------------------------------
 
 
-def test_recent_chats_injected_after_index_before_hot_notes(tmp_path):
-  root = _graph(tmp_path)
-  (root / "index.md").write_text("# Home")
-  (root / "recent-chats.md").write_text(
-    "- [chat:c1] 2026-06-10 — built the Habits app\n"
-  )
-  (root / "notes" / "hot.md").write_text(_note(importance=5, title="hot"))
-  (root / ".ready").write_text("")
-
-  block = memory.build_memory_block(tmp_path)
-  assert "recent-chats.md" in block.loaded
-  assert "built the Habits app" in block.text
-  # Position: index first, then recent chats, then hot notes.
-  assert (
-    block.text.index("# Home")
-    < block.text.index("recent-chats.md")
-    < block.text.index("notes/hot.md")
-  )
-
-
 def test_recent_chats_truncates_oldest_first_when_tight(tmp_path):
   # 40 entries at ~40 bytes each ≈ 1.6 KB; a budget that fits the index
   # plus only part of the queue must keep the NEWEST tail and drop the
@@ -198,21 +142,6 @@ def test_recent_chats_not_counted_as_usage(tmp_path):
   memory.record_usage(tmp_path, ["recent-chats.md", "notes/a.md"])
   # The queue is a buffer, not a graph node — no phantom id accrues.
   assert memory.load_usage(tmp_path) == {"a": 1}
-
-
-def test_redirect_stub_excluded_from_hot_notes(tmp_path):
-  root = _graph(tmp_path)
-  (root / "index.md").write_text("# Home")
-  (root / "notes" / "moved.md").write_text(
-    "---\ntitle: Old slug\ntype: redirect\ntarget: new-slug\n"
-    "importance: 5\n---\nThis content has moved to [[new-slug]].\n"
-  )
-  (root / "notes" / "real.md").write_text(_note(importance=1, title="real"))
-  (root / ".ready").write_text("")
-  block = memory.build_memory_block(tmp_path, max_notes=1)
-  # Even at importance 5, the stub never wins an injection slot.
-  assert "notes/real.md" in block.loaded
-  assert "notes/moved.md" not in block.loaded
 
 
 # --- frontmatter parsing ----------------------------------------------
@@ -284,20 +213,6 @@ def test_usage_counter_accrues_and_merges_into_graph(tmp_path):
   # The MOC exposes its breadth: 2 member notes.
   assert by_id["topic"]["children_count"] == 2
   assert set(by_id["topic"]["children"]) == {"a", "b"}
-
-
-def test_hot_note_selection_reflects_live_usage(tmp_path):
-  """Live usage breaks the tie between equal-importance notes, so a note the
-  agent keeps loading rises into the injected hot set even with a 0 baseline."""
-  root = _g(tmp_path)
-  (root / ".ready").write_text("")
-  (root / "index.md").write_text("# Home")
-  (root / "notes" / "low.md").write_text(_note(importance=1, title="Low", mocs=[]))
-  (root / "notes" / "high.md").write_text(_note(importance=1, title="High", mocs=[]))
-  memory.record_usage(tmp_path, ["notes/high.md"] * 3)
-  block = memory.build_memory_block(tmp_path, max_notes=1)
-  assert "notes/high.md" in block.loaded
-  assert "notes/low.md" not in block.loaded
 
 
 def test_build_graph_flags_dangling_link_and_orphan(tmp_path):
@@ -522,3 +437,42 @@ def test_seed_graph_lints_clean_under_new_warnings():
   res = memory_graph.build_graph(root=seed)
   assert not res.errors
   assert not res.problems, res.problems
+
+
+def test_graph_mode_injects_router_recency_inbox_no_notes(tmp_path):
+  # v2: build_memory_block injects the router (index) + recency + inbox, and NO
+  # notes — the agent traverses from the router's scent lines on demand.
+  root = _graph(tmp_path)
+  (root / "index.md").write_text("# Home\n\n- [[working]]\n")
+  (root / "notes" / "aaa.md").write_text(_note(title="a"))
+  (root / "notes" / "bbb.md").write_text(_note(title="b"))
+  (root / "inbox.md").write_text("- saw the user do X today")
+  (root / ".ready").write_text("")
+
+  block = memory.build_memory_block(tmp_path)
+  assert block.mode == "graph"
+  assert "# Home" in block.text
+  assert "saw the user do X" in block.text
+  assert "index.md" in block.loaded
+  assert "inbox.md" in block.loaded
+  assert not any(x.startswith("notes/") for x in block.loaded)
+  assert "notes/" not in block.text
+
+
+def test_recent_chats_injected_after_index_before_inbox_v2(tmp_path):
+  root = _graph(tmp_path)
+  (root / "index.md").write_text("# Home")
+  (root / "recent-chats.md").write_text(
+    "- [chat:c1] 2026-06-10 — built the Habits app\n"
+  )
+  (root / "inbox.md").write_text("- a fresh observation")
+  (root / ".ready").write_text("")
+
+  block = memory.build_memory_block(tmp_path)
+  assert "recent-chats.md" in block.loaded
+  assert "built the Habits app" in block.text
+  assert (
+    block.text.index("# Home")
+    < block.text.index("recent-chats.md")
+    < block.text.index("inbox.md")
+  )

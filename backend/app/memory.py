@@ -278,11 +278,11 @@ def build_memory_block(
 ) -> MemoryBlock:
   """Assembles the injected memory context from the knowledge graph.
 
-  `index.md` (full, capped to the budget) + the `recent-chats.md` queue
-  (truncated oldest-first when tight) + hot notes (selected by score,
-  rendered in path order, until the byte budget is consumed) + the `inbox.md`
-  tail. Each included file is fenced with a `<<< path >>>` marker so the agent
-  knows what a `[[link]]` resolves to.
+  `index.md` (the router, full, capped to the budget) + the `recent-chats.md`
+  queue (truncated oldest-first when tight) + the `inbox.md` tail. v2 injects
+  NO notes — the agent traverses from the router's scent lines on demand
+  (router -> one-hop; no importance/usage ranking). Each included file is fenced
+  with a `<<< path >>>` marker so the agent knows what a `[[link]]` resolves to.
 
   Returns an empty block when the graph is not yet published (`.ready` absent)
   or is empty — the agent then has no injected memory for this turn but can
@@ -353,18 +353,12 @@ def _build_graph_block(
       loaded.append("recent-chats.md")
       used += len(chunk.encode("utf-8")) + 2
 
-  # Hot notes fill the remaining budget. Skip entirely if the index already
-  # consumed it (Codex review P3 — oversized index).
-  for fp, text in _select_hot_notes(root / "notes", max_notes):
-    body = text.strip()
-    rel = f"notes/{fp.name}"
-    chunk = f"<<< {rel} >>>\n{body}"
-    cost = len(chunk.encode("utf-8")) + 2
-    if used + cost > budget_bytes:
-      continue
-    parts.append(chunk)
-    loaded.append(rel)
-    used += cost
+  # v2: inject NO notes here. Retrieval is router -> traverse: the agent reads
+  # the router (index.md) scent lines, decides which topics the live question
+  # touches, and `Read`s those notes (and their one-hop `see also` targets) on
+  # demand. No scored hot-note selection, no importance/usage ranking — recall
+  # is conditioned on the question, not a fixed bundle. (`max_notes` is retained
+  # in the signature for caller/back-compat; it no longer selects notes.)
 
   inbox = _read(root / "inbox.md").strip()
   if inbox:
