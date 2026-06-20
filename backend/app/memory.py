@@ -208,19 +208,6 @@ def parse_frontmatter(text: str) -> dict[str, object]:
   return out
 
 
-def _note_score(fm: dict[str, object]) -> tuple[int, int]:
-  """Selection key: importance (1-5, author/dreaming-set) dominates, then
-  access_count (how often the note was loaded — the MDL hotness signal).
-  Missing fields score 0 so an unannotated note sorts last but is still
-  eligible."""
-  imp = fm.get("importance")
-  acc = fm.get("access_count")
-  return (
-    imp if isinstance(imp, int) else 0,
-    acc if isinstance(acc, int) else 0,
-  )
-
-
 def _read(path: Path) -> str:
   try:
     return path.read_text(encoding="utf-8")

@@ -27,6 +27,8 @@ below). Don't try to do Dreaming's work mid-chat.
   inbox.md            persistent buffer for the day's raw observations.
   mocs/<slug>.md      topic maps (hubs): curated [[links]] under ## sections.
   notes/<slug>.md     atomic notes: ONE fact each, with YAML frontmatter.
+  chats/<id>/index.md per-chat summary node (type: chat) — the chat's name +
+                      growing summary + cross-chat links. See "Chat notes" below.
   read-trace/<id>.json  what each chat was shown and Read (platform-written;
                       the nightly pass diffs it — never edit it yourself).
   graph.json          generated index for the Mind viewer (rebuild after edits).
@@ -37,7 +39,7 @@ A note's frontmatter:
 ```yaml
 ---
 title: User prefers minimal git commits   # the specific claim, not a topic
-type: fact               # fact | hub | moc | bootstrap — a small fixed enum
+type: fact               # fact | hub | moc | bootstrap | chat — a small fixed enum
 description: squashes; few PRs; dislikes noisy history   # the SCENT LINE
 tags: [workflow]         # cross-cutting status/filter only, not topical
 mocs: [about-the-user]   # >=1 — the maps this note belongs to (anti-orphan)
@@ -126,6 +128,29 @@ direct `see also` targets — one hop). Recall is conditioned on the question, n
 a fixed bundle. So the work that makes recall good is **a sharp scent line per
 note + good typed links** (the nightly pass maintains these) — never tuning a
 score.
+
+## Chat notes — chats are memory too (`type: chat`)
+
+Every chat is itself a memory node. For the chat you're in (its id is `$CHAT_ID`),
+maintain `chats/$CHAT_ID/index.md`:
+
+- `type: chat`, with a one-line `description:` that IS the chat's name — the gist
+  in the partner's words ("dialing in a sour espresso shot", not "chat 12").
+- A body that is a **growing summary** of what the chat is about and what it
+  produced (an app built, a decision made, a preference learned). Update it as the
+  chat evolves, not only at the end.
+- **Cross-chat links.** When this chat pulls information from another chat, record
+  it in the body — `see also [[chats/<other-id>]] — <why>`. That is how the graph
+  learns which chats relate.
+
+**Keep the displayed name in sync** with the one-liner so the partner sees it:
+`curl -s -X PUT "$API_BASE_URL/api/chats/$CHAT_ID" -H "Authorization: Bearer $AGENT_TOKEN" -H 'Content-Type: application/json' -d '{"title":"<one-line summary>"}'`.
+
+Fallback is free: if you never write this file (an error on the first turn), the
+name stays the partner's initial message — the existing default. And the nightly
+pass is the backstop — it gives every substantive chat a good summary + links even
+when the daytime agent didn't (the same daytime-best-effort / night-is-the-system-
+of-record split as fact capture).
 
 ## The daytime contract (light consistency)
 
