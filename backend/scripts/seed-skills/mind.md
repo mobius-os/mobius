@@ -37,11 +37,9 @@ A note's frontmatter:
 ```yaml
 ---
 title: User prefers minimal git commits   # the specific claim, not a topic
-type: note
-importance: 3            # 1-5; how much it should shape future behavior
-access_count: 0          # bumped by the nightly pass from how often it loads
-last_accessed: null
-tags: [user-pref]        # cross-cutting status/filter only, not topical
+type: fact               # fact | hub | moc | bootstrap — a small fixed enum
+description: squashes; few PRs; dislikes noisy history   # the SCENT LINE
+tags: [workflow]         # cross-cutting status/filter only, not topical
 mocs: [about-the-user]   # >=1 — the maps this note belongs to (anti-orphan)
 created: 2026-06-02
 updated: 2026-06-02
@@ -52,6 +50,14 @@ Link related notes inline with [[another-slug]] and a reason.
 
 Filename stem = the note's `id` (the slug other notes `[[link]]` to).
 
+**`description` is the scent line — the highest-leverage field.** It is the one
+line the router (`index.md`) shows for this note so a reader decides *open or
+skip without opening it*. Write it as the gist in the user's words, not a label.
+**There is no `importance` and no `access_count` — v2 does NOT rank or score
+notes.** Recall is by relevance to the live question (router → traverse, below),
+never by a hotness number. (`type` is OKF-aligned, so the whole graph is a
+portable OKF bundle — it opens in Obsidian and any future tool.)
+
 Optional frontmatter, when it applies: `as-of: YYYY-MM-DD` (the claim is
 time-sensitive — date it), `supersedes: [old-slug]` (this note replaces an
 older one), `source: [chat:abc123]` (where the fact came from). A moved or
@@ -60,8 +66,8 @@ rules below.
 
 ## Reading — descend until you have enough
 
-Each session opens with the index, the recent-chats queue, and the hottest
-notes already injected. When that's not enough, read **iteratively, by
+Each session opens with the router index, the recent-chats queue, and the
+inbox tail already injected. When that's not enough, read **iteratively, by
 depth** — navigate, don't grep:
 
 1. Start at `index.md`; pick the most relevant map by its one-line entry
@@ -83,13 +89,6 @@ The platform records what you were shown and what you `Read` into
 `read-trace/<chat>.json`. The nightly pass diffs that trace against the
 graph to find what *would* have helped you, then reorganizes so next time
 it's nearer the surface. You don't maintain the trace — just read normally.
-
-**`usage.json` sidecar (do not hand-edit).** Live loads are tracked
-automatically in `shared/memory/usage.json` — the platform increments a counter
-each time a note is injected. The effective `access_count` = frontmatter
-baseline + sidecar count. Do NOT bump `access_count` by hand to reflect loads
-(it double-counts) and do NOT delete `usage.json` during tidy passes (you'd
-erase the real load history).
 
 ## What to record — the inclusion bar
 
@@ -117,13 +116,16 @@ Default to recording **nothing**. "Store only the future-useful" means
 aggressively dropping one-off trivia. When unsure, prefer a cheap inbox line
 over a full note — the nightly pass decides if it's worth promoting.
 
-## What importance buys
+## How recall works — router, then traverse (no ranking)
 
-`importance 5` notes are injected every session. The injection budget is roughly
-the top 12 notes by (importance, then load count) within 25 KB — treat 4–5 as
-a scarce slot. If more than ~10 notes sit at importance ≥ 4, the nightly
-Dreaming pass demotes the least-loaded ones to free room for notes that are
-actually being used.
+There is no injected "top-N by importance." Each session injects the **router**
+(`index.md` — one scent line per topic), the recent-chats queue, and the inbox
+tail. You then **traverse on demand**: read the router's scent lines, pick the
+topics the live conversation actually touches, and `Read` those notes (and their
+direct `see also` targets — one hop). Recall is conditioned on the question, not
+a fixed bundle. So the work that makes recall good is **a sharp scent line per
+note + good typed links** (the nightly pass maintains these) — never tuning a
+score.
 
 ## The daytime contract (light consistency)
 
@@ -149,7 +151,7 @@ these is deferred to Dreaming.
    (a confirmed user preference, a root-caused bug + fix), write the note
    directly: create `notes/<slug>.md` with frontmatter, link it into a map,
    and re-run the indexer (below). Do this when the fact is important enough
-   (`importance >= 4`) that waiting for the nightly pass would lose value.
+   clearly durable that waiting for the nightly pass would lose value.
 
 3. **Light upkeep as you pass through.** When you're already editing a note and
    the tidy-up is small and obviously correct, do it inline:

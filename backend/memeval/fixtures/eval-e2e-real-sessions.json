@@ -1,0 +1,31 @@
+{
+  "_doc": "Real E2E-eval cases from the two memv2 sessions. After a session's transcripts are consolidated, a FRESH chat (sealed answerer, sees only what retrieval returns) should answer these about the user. Compared vs no-memory + flat-inbox baselines. The 'sam-lang' question tests SUPERSEDE: correct answer is Python-only, NOT 'Python and R'.",
+  "e2e_cases": [
+    {"id":"e2e-sam","persona":"data scientist (Sam)",
+     "transcripts":[
+       {"role":"user","text":"Bit about me for context: I'm a data scientist, I mostly work in Python and R."},
+       {"role":"user","text":"When you explain a stats concept to me, always show the formula, not just the intuition."},
+       {"role":"user","text":"Update from what I said earlier — I've moved off R, I'm basically Python-only now."},
+       {"role":"user","text":"Got really into bouldering recently, did my first outdoor session on real rock last weekend."},
+       {"role":"user","text":"Can you suggest a few quick weekday lunches? I'm gluten-free so nothing with wheat."}],
+     "questions":[
+       {"text":"What language should you default to in code examples for me?","gold_answer":"Python","should_abstain":false,"gold_fact_strings":["The user is now Python-only (moved off R)."],"tests":"supersede"},
+       {"text":"When suggesting food or recipes, what dietary constraint must you respect?","gold_answer":"gluten-free","should_abstain":false,"gold_fact_strings":["The user is gluten-free."],"tests":"fact_in_question recall"},
+       {"text":"How should you explain a statistics concept to me?","gold_answer":"show the formula, not just the intuition","should_abstain":false,"gold_fact_strings":["The user wants the formula shown, not just intuition."],"tests":"pref_aimed recall"},
+       {"text":"What pet does the user have?","gold_answer":"(none stated)","should_abstain":true,"gold_fact_strings":[],"tests":"abstention — Sam never mentioned a pet"}]
+    },
+    {"id":"e2e-alex-prefs","persona":"backend engineer (Alex), conversational facts",
+     "transcripts":[
+       {"role":"user","text":"Quick one, what's a good high-protein dinner? I'm vegetarian so no meat please."},
+       {"role":"user","text":"Side note for our chats: I prefer short answers, skip the preamble and just give me the point."},
+       {"role":"user","text":"What's a good lightweight code editor you'd recommend? I'm on Linux mostly."},
+       {"role":"user","text":"Can you suggest a workout split? Heads up I've got a bad left knee so nothing high-impact."},
+       {"role":"user","text":"Whenever you write code for me, always include type hints and keep comments minimal."}],
+     "questions":[
+       {"text":"What dietary preference should you respect when suggesting meals?","gold_answer":"vegetarian","should_abstain":false,"gold_fact_strings":["The user is vegetarian."],"tests":"fact_in_question recall"},
+       {"text":"How long should your answers be for me?","gold_answer":"short/terse, skip the preamble","should_abstain":false,"gold_fact_strings":["The user prefers terse answers."],"tests":"pref_aimed recall"},
+       {"text":"What OS am I on?","gold_answer":"Linux","should_abstain":false,"gold_fact_strings":["The user is on Linux."],"tests":"fact_in_question recall"},
+       {"text":"What should you account for in workout suggestions?","gold_answer":"a bad left knee — keep it low-impact","should_abstain":false,"gold_fact_strings":["The user has a bad left knee."],"tests":"fact_in_question recall"}]
+    }
+  ]
+}
