@@ -223,40 +223,6 @@ def _truncate_bytes(text: str, limit: int) -> str:
   return raw[:limit].decode("utf-8", errors="ignore")
 
 
-def _select_hot_notes(
-  notes_dir: Path, max_notes: int
-) -> list[tuple[Path, str]]:
-  """Returns up to `max_notes` (path, full_text) pairs SELECTED by score but
-  SORTED by path, so the rendered order is stable across nightly score
-  changes."""
-  candidates: list[tuple[tuple[int, int], Path, str]] = []
-  try:
-    files = sorted(notes_dir.glob("*.md"))
-  except OSError:
-    return []
-  # Live usage (notes_dir is <memory>/notes, so the sidecar is one level up).
-  # Effective hotness = frontmatter access_count baseline + live load count,
-  # so a note the agent keeps loading rises even if its seed baseline is 0.
-  usage = _read_usage_file(notes_dir.parent / "usage.json")
-  for fp in files:
-    text = _read(fp)
-    if not text.strip():
-      continue
-    fm = parse_frontmatter(text)
-    # Redirect stubs are forwarding pointers left behind by a move/rename
-    # (see memory_graph.py) — pure noise in the injected block.
-    if fm.get("type") == "redirect":
-      continue
-    imp, base_acc = _note_score(fm)
-    score = (imp, base_acc + usage.get(fp.stem, 0))
-    candidates.append((score, fp, text))
-  # Select the top-N by score (descending), then re-sort the winners by path.
-  candidates.sort(key=lambda c: c[0], reverse=True)
-  winners = candidates[:max_notes]
-  winners.sort(key=lambda c: c[1].name)
-  return [(fp, text) for _, fp, text in winners]
-
-
 def build_memory_block(
   data_dir: str | Path,
   *,
