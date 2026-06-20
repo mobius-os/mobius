@@ -2,9 +2,10 @@
 
 Möbius gives the agent its long-term memory by prepending a block to the
 FIRST user message of a session (see `chat.py`). This module builds a
-*progressive-disclosure* block: a small always-loaded index (the root "Home"
-MOC) plus the highest-value notes, with everything else left on disk for the
-agent to `Read` on demand by following `[[wikilinks]]`.
+*progressive-disclosure* block: the router index (the root "Home" MOC) + the
+recent-chats queue + the inbox tail. Notes are NOT injected (v2: no scored
+selection) — the agent traverses from the router's scent lines on demand by
+following `[[wikilinks]]`.
 
 Layout under `<data_dir>/shared/memory/` (the "graph"):
 
@@ -17,8 +18,9 @@ Layout under `<data_dir>/shared/memory/` (the "graph"):
                         are visible next session. Consolidated into notes by
                         the nightly "dreaming" pass, then truncated.
   mocs/<topic>.md       topic hubs (curated [[links]]); read on demand.
-  notes/<slug>.md       atomic notes (one fact each) with YAML frontmatter
-                        carrying `importance` (1-5) and `access_count`.
+  notes/<slug>.md       atomic notes (one fact each) with OKF frontmatter
+                        (type, title, description=scent line); read on demand.
+  chats/<id>/index.md   per-chat summary node (type: chat); read on demand.
   read-trace/<id>.json  per-chat record of which nodes were injected/read,
                         written by chat.py + the SDK runner (memory_trace.py);
                         the dreaming pass diffs it against the graph.
@@ -33,10 +35,9 @@ previously published graph in place rather than exposing a half-built one.
 trivially unit-testable; the caller in `chat.py` owns the activity emit and
 the surrounding `<agent_experience>` envelope.
 
-Selection vs. rendering order: hot notes are *selected* by score (importance,
-then access_count) but *rendered* in stable path order, so a nightly
-access_count change can't reorder the cached first-message prefix and bust
-prompt-cache reuse.
+Prompt-cache stability: the block is index + recency + inbox in a fixed order
+and injects no notes, so a nightly consolidation can't reorder the cached
+first-message prefix and bust prompt-cache reuse.
 """
 
 from __future__ import annotations
@@ -90,15 +91,15 @@ def is_graph_ready(data_dir: str | Path) -> bool:
 
 # ─── Usage tracking (the "access_count" / Mind "Used" signal) ───────────
 #
-# access_count is meant to be "how often a note was loaded" (the hotness
-# signal _note_score reads), but nothing ever incremented it — so every
-# note read 0 and the Mind app's "Used" column was uniformly zero. We track
+# access_count is "how often a note was loaded" — a usage signal for the Mind
+# app's "Used" column. v2 retrieval no longer RANKS by it (injection is
+# router->traverse); it survives only as viewer/analytics signal. We track
 # it in a sidecar counter (`usage.json`) rather than rewriting note
 # frontmatter on the hot path: a counter bump is cheap and churns no git
 # history. `build_memory_block` returns `loaded`; the injection site calls
-# `record_usage(loaded)`. `load_usage` feeds both hot-note selection and the
-# graph builder, so the effective access_count = frontmatter baseline + live
-# usage. Keyed by node id (a note's slug), matching graph.json.
+# `record_usage(loaded)`. `load_usage` feeds the graph builder (the Mind
+# viewer's "Used" column), so the effective access_count = frontmatter baseline
+# + live usage. Keyed by node id (a note's slug), matching graph.json.
 def _usage_path(data_dir: str | Path) -> Path:
   return memory_dir(data_dir) / "usage.json"
 
