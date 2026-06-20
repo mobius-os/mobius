@@ -196,7 +196,9 @@ export function applyTheme(theme, { doc = globalThis.document, store = globalThi
 
   // Persist for the next boot: the new {bg,mode} key the pre-paint IIFE +
   // resolveTheme read, and the legacy bare-hex key for one-cycle compat.
-  if (bg && HEX_RE.test(bg)) {
+  // Persist only from the top-level shell — the same-origin app-frame shares
+  // this store and must not clobber the shell-owned theme key.
+  if (bg && HEX_RE.test(bg) && (typeof window === 'undefined' || window.parent === window)) {
     try {
       store.setItem(STORE_KEY, JSON.stringify({ bg, mode: mode || DEFAULT_MODE }))
       store.setItem(STORE_BG_KEY, bg)
@@ -302,13 +304,15 @@ export const PREPAINT_SRC = `(function () {
     root.style.setProperty('--bg', bg);
     root.setAttribute('data-theme', mode);
     root.style.colorScheme = mode;
-    // Persist the resolved theme so a frame whose pre-paint runs AFTER the
-    // shell's (a brand-new device, server slot already consumed, no prior
-    // localStorage) reads the correct {bg,mode} instead of defaulting to dark.
-    // Idempotent when the frame's own pre-paint re-runs it.
+    // Persist (TOP-LEVEL SHELL ONLY) so a frame's pre-paint can read the
+    // correct {bg,mode}. The same-origin app-frame shares this localStorage but
+    // has an EMPTY slot, so it must NOT write — else it clobbers the owner's
+    // real theme with the dark default and the shell re-reads it (drawer bleed).
     try {
-      localStorage.setItem('mobius-theme', JSON.stringify({ bg: bg, mode: mode }));
-      localStorage.setItem('mobius-theme-bg', bg);
+      if (window.parent === window) {
+        localStorage.setItem('mobius-theme', JSON.stringify({ bg: bg, mode: mode }));
+        localStorage.setItem('mobius-theme-bg', bg);
+      }
     } catch (e) {}
   } catch (e) {}
 })();`

@@ -266,6 +266,26 @@ test('applyTheme persists both mobius-theme and mobius-theme-bg', () => {
   assert.equal(store.getItem('mobius-theme-bg'), '#f0eeeb')
 })
 
+test('applyTheme does NOT persist inside an iframe (window.parent !== window) — the drawer-bleed fix', () => {
+  // The app-frame is a SAME-ORIGIN iframe sharing localStorage with the shell.
+  // With its empty theme slot it would resolve the dark default and clobber the
+  // owner's real theme in the shared key, which the shell re-reads at boot
+  // (recoloring the drawer). Only the top-level shell may persist.
+  const saved = Object.getOwnPropertyDescriptor(globalThis, 'window')
+  try {
+    globalThis.window = { parent: {} }              // iframe: parent is the shell, not self
+    applyTheme({ css: ':root{--bg:#0d0d0d;}', bg: '#0d0d0d', mode: 'dark' }, ctx())
+    assert.equal(store.getItem('mobius-theme'), null, 'iframe must NOT write the shared theme key')
+    assert.equal(store.getItem('mobius-theme-bg'), null)
+    const top = {}; top.parent = top               // top-level shell: parent === self
+    globalThis.window = top
+    applyTheme({ css: ':root{--bg:#f0eeeb;}', bg: '#f0eeeb', mode: 'light' }, ctx())
+    assert.equal(store.getItem('mobius-theme-bg'), '#f0eeeb', 'top-level shell persists')
+  } finally {
+    if (saved) Object.defineProperty(globalThis, 'window', saved); else delete globalThis.window
+  }
+})
+
 // --- resolveTheme: precedence -----------------------------------------
 
 test('resolveTheme: 1) JSON slot wins', () => {
