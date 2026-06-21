@@ -436,9 +436,9 @@ forms, most apps. Nothing here can collapse or crush a child.
 
 Content flows and the iframe scrolls. Want a header that stays put? Put
 `position: sticky; top: 0` on it — local and visible, no layout magic. `position:
-relative` is there so an absolute scrim/sheet anchors to the root; center an empty
-state with its own `min-height` + `display: flex` (the flex `margin: auto` trick
-needs AppShell's flex parent).
+relative` is there so an absolute scrim/sheet anchors to the root. The `.ma-empty`
+block self-centers on a flow Root on its own; for a reading column (prose,
+changelog, FAQ) cap an inner page wrapper at `max-width: 680px; margin: 0 auto`.
 
 **`mobius-ui:AppShell` (opt-in — pinned header + independent scroll).** For
 list/tool apps where a fixed header (or a fixed footer/input) stays put while a
@@ -451,13 +451,46 @@ FILL and scroll — a `mobius-ui:ChatEmbed`, a split pane — needs `flex: 1;
 min-height: 0` instead; give it its own rule AFTER the blanket one, or place it
 outside `.ma-scroll`.) The canonical skeleton below is an AppShell app.
 
-### Canonical single-file app skeleton
+### The default Root skeleton (content, readers, forms)
+
+Most apps are this — content flows, the iframe scrolls. Compose the `mobius-ui:Root`
+block with a header (`position: sticky; top: 0` to pin it, or plain flow to let it
+scroll away), a flow body, and the shared `Empty`/`Card` blocks. The Root-specific
+CSS is tiny; copy the rest from [app-component-shapes.md](app-component-shapes.md):
+
+```jsx
+const CSS = `
+/* mobius-ui:Root — app-owned; a future-library candidate (no sync owed). */
+.ma-root { box-sizing: border-box; position: relative; min-height: 100dvh; overflow-x: clip;
+  background: var(--bg); color: var(--text); font-family: var(--font); }
+/* /mobius-ui:Root */
+.ma-page { max-width: 680px; margin: 0 auto; padding: 20px 16px 48px; }   /* reading column */
+.ma-header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 11px;
+  padding: 12px 16px; background: var(--surface); border-bottom: 1px solid var(--border); }
+/* + mobius-ui:Card, mobius-ui:Empty, mobius-ui:Focus, mobius-ui:ReducedMotion (copy from the catalog) */
+`
+export default function Reader({ appId, token }) {
+  const [items, setItems] = useState([])
+  useEffect(() => window.mobius.storage.subscribe('items.json', (v) => setItems(v || [])), [])
+  return (
+    <div className="ma-root">
+      <style>{CSS}</style>
+      <header className="ma-header">…</header>
+      {items.length === 0
+        ? <div className="ma-empty">…</div>
+        : <div className="ma-page">{items.map((it) => <div key={it.id} className="ma-card">…</div>)}</div>}
+    </div>
+  )
+}
+```
+
+Need chrome that stays put while a body scrolls under it (a list with a fixed
+search bar, a chat composer)? That's **AppShell** — the skeleton below.
+
+### The AppShell skeleton (opt-in — pinned chrome + independent scroll)
 
 This is the **AppShell** shape — a list/tool app (header + independently-scrolling
-list + sheet). For the DEFAULT **Root** shape, compose the `mobius-ui:Root` block
-above with a `position: sticky; top: 0` header and a plain-flow body — no
-`.ma-scroll`, no `min-height: 0`, no `flex-shrink` — and the self-centering
-`.ma-empty` handles the empty state.
+list + sheet).
 It shows: ``const CSS`` rendered via
 `<style>{CSS}</style>`, fenced shared blocks, theme tokens, 44px controls, a
 header with a mark + title + subtitle, a list with a 3-part empty state, and a
@@ -477,8 +510,9 @@ const CSS = `
    crushed to its min-content height by flex-shrink. */
 .ma-root { position: relative; display: flex; flex-direction: column; height: 100%;
   overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--font); }
-.ma-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px 32px;
-  display: flex; flex-direction: column; gap: 8px; }
+.ma-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 14px 16px 32px;
+  display: flex; flex-direction: column; gap: 8px;
+  word-break: break-word; overflow-wrap: anywhere; }
 .ma-scroll > * { flex-shrink: 0; }
 /* /mobius-ui:AppShell */
 
@@ -495,10 +529,11 @@ const CSS = `
 /* /mobius-ui:Header */
 
 /* mobius-ui:Empty — app-owned; a future-library candidate (no sync owed). */
-.ma-empty {  /* self-centers on a flow Root (no flex parent needed); also fine inside AppShell */
+.ma-empty {  /* centers in normal flow (a flow Root). Inside AppShell it's a direct .ma-root flex
+                child, so flex:1 0 auto fills the column and centers instead of top-pinning. */
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  text-align: center; gap: 8px; min-height: 60dvh; max-width: 440px; margin: 0 auto;
-  padding: 48px 24px; color: var(--muted); }
+  text-align: center; gap: 8px; flex: 1 0 auto; min-height: 60dvh; max-width: 440px;
+  margin: 0 auto; padding: 48px 24px; color: var(--muted); }
 .ma-empty-mark { width: 64px; height: 64px; margin-bottom: 10px; border-radius: 18px; display: flex;
   align-items: center; justify-content: center; font-size: 30px;
   background: color-mix(in srgb, var(--accent) 14%, transparent); }
