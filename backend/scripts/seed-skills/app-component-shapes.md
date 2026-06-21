@@ -71,14 +71,13 @@ finds the kin. Until then, owning your fork is correct. This is the platform's
   so they silently no-op. Use the bottom-sheet (§3).
 - The app-frame already injects a global reset + the theme `:root`. **Do not
   redeclare a reset.**
-- **Keep copies in sync with fence comments.** Wrap each shared block in an
-  IDENTICAL versioned marker, so a `grep` finds every app on a given shape
-  and a future extraction is mechanical:
-  `/* mobius-ui:Header — app-owned; a future-library candidate (no sync owed). */`
-  … `/* /mobius-ui:Header */`. Keep the class names + markup inside a fence
-  identical across apps; diverge the *shape* when you must, never *rename*
-  shared classes gratuitously. Keep blocks in a stable order: root → header →
-  list/feed → cards → empty → sheet → buttons/inputs → animations/scrollbar.
+- **Fence comments are harvest markers, not a sync contract.** Wrap each shared
+  block in its `/* mobius-ui:Name */` … `/* /mobius-ui:Name */` marker so a
+  `grep` finds every app on a shape when it's time to harvest a real library.
+  Your per-app prefix means class names legitimately differ — keep the kebab
+  ROLE suffix + markup recognizable and diverge the shape whenever your app needs
+  to; you owe no identical-name obligation. A rough block order reads well:
+  root → header → list → cards → empty → sheet → buttons/inputs → animations.
 
 `app-latex` and `mind` are the cleanest on-standard references.
 
@@ -115,9 +114,10 @@ scrolls; nothing here can crush or collapse a child.
 /* /mobius-ui:Root */
 ```
 
-Pin a header with `position: sticky; top: 0`. Center an empty state with its own
-`min-height` + `display: flex` (the flex `margin: auto` trick needs AppShell's
-flex parent).
+Pin a header with `position: sticky; top: 0` (omit it for a header that scrolls
+away). For a reading column (prose, a changelog, an FAQ), cap an inner page
+wrapper at `max-width: 680px; margin: 0 auto`. The `.ma-empty` block self-centers
+here on its own.
 
 **Opt-in — `mobius-ui:AppShell` (pinned header + independent scroll).** For lists
 / feeds / a fixed input bar: a flex column whose body scrolls under a fixed header.
@@ -288,10 +288,11 @@ scrim itself, being full-bleed, does not.
 
 ```css
 /* mobius-ui:Empty — app-owned; a future-library candidate (no sync owed). */
-.ma-empty {  /* self-centers on a flow Root (no flex parent needed); also fine inside AppShell */
+.ma-empty {  /* centers in normal flow (a flow Root). Inside AppShell it's a direct .ma-root flex
+                child, so flex:1 0 auto fills the column and centers instead of top-pinning. */
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  text-align: center; gap: 8px; min-height: 60dvh; max-width: 440px; margin: 0 auto;
-  padding: 48px 24px; color: var(--muted);
+  text-align: center; gap: 8px; flex: 1 0 auto; min-height: 60dvh; max-width: 440px;
+  margin: 0 auto; padding: 48px 24px; color: var(--muted);
 }
 .ma-empty-mark {
   width: 64px; height: 64px; margin-bottom: 10px; border-radius: 18px;
@@ -524,6 +525,19 @@ section for the one-call helper (`persist` + `onTurnDone`).
 .ma-toast.is-success { border-color: var(--green); }
 .ma-toast.is-error { border-color: var(--danger); }
 /* /mobius-ui:Toast */
+
+/* mobius-ui:Disclosure — app-owned; a future-library candidate (no sync owed).
+   A <details>/<summary> accordion item: <summary> IS the control (it carries the
+   44px tap-target + focus-ring, not a child button). This is the flex-crush-safe
+   accordion the AppShell crush note points to — a native <details> needs no
+   flex-shrink workaround in flow, and gets flex-shrink:0 inside .ma-scroll. */
+.ma-disc { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.ma-disc[open] { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.ma-disc > summary { list-style: none; cursor: pointer; min-height: 44px; display: flex;
+  align-items: center; gap: 12px; padding: 12px 16px; font-size: 15px; font-weight: 650; color: var(--text); }
+.ma-disc > summary::-webkit-details-marker { display: none; }
+.ma-disc-body { padding: 0 16px 14px; font-size: 14px; line-height: 1.6; color: var(--muted); }
+/* /mobius-ui:Disclosure */
 
 /* mobius-ui:SectionHead — app-owned; a future-library candidate (no sync owed). */
 .ma-section-head { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; }
