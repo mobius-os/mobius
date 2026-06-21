@@ -401,7 +401,7 @@ restyling UI and **copy the blocks you need**. The rules behind those shapes:
 - **Keep copies consistent with fence comments.** Each shared block is wrapped
   in an IDENTICAL versioned marker across apps, so divergence is visible and a
   future extraction into a real library is a `grep`-and-move:
-  `/* mobius-ui:Header v1 — keep in sync; library candidate. */` … `/* /mobius-ui:Header */`.
+  `/* mobius-ui:Header — app-owned; a future-library candidate (no sync owed). */` … `/* /mobius-ui:Header */`.
   Keep the class names + markup inside a fence identical across apps; diverge
   the *shape* when your app genuinely needs to, but never *rename* a shared
   class for no reason (that breaks the extraction seam). We're not building the
@@ -422,15 +422,20 @@ which it uses by the fence name, so the choice is explicit and greppable.
 **`mobius-ui:Root` (default — lightweight flow).** For content: reports, readers,
 forms, most apps. Nothing here can collapse or crush a child.
 
-```jsx
-/* mobius-ui:Root v1 — keep in sync; library candidate. */
-.ma-root { box-sizing: border-box; min-height: 100dvh;
+```css
+/* mobius-ui:Root — your app's own copy; a future-library candidate, no sync owed. */
+.ma-root { box-sizing: border-box; position: relative; min-height: 100dvh;
+  overflow-x: clip;  /* clip, NOT hidden: stops x-bleed without turning the root into a
+                        scroll container, which would break a position:sticky header */
   background: var(--bg); color: var(--text); font-family: var(--font); }
 /* /mobius-ui:Root */
 ```
 
 Content flows and the iframe scrolls. Want a header that stays put? Put
-`position: sticky; top: 0` on it — local and visible, no layout magic.
+`position: sticky; top: 0` on it — local and visible, no layout magic. `position:
+relative` is there so an absolute scrim/sheet anchors to the root; center an empty
+state with its own `min-height` + `display: flex` (the flex `margin: auto` trick
+needs AppShell's flex parent).
 
 **`mobius-ui:AppShell` (opt-in — pinned header + independent scroll).** For
 list/tool apps where a fixed header (or a fixed footer/input) stays put while a
@@ -456,7 +461,7 @@ prefix (here `ma-`). Then fill in the domain logic.
 import { useState, useEffect } from 'react'
 
 const CSS = `
-/* mobius-ui:AppShell v1 — keep in sync; library candidate.
+/* mobius-ui:AppShell — app-owned; a future-library candidate (no sync owed).
    EXPLICIT opt-in: pinned header + an independently scrolling body. For a
    content-only app, prefer the lightweight mobius-ui:Root instead.
    GOTCHA: keep the ".ma-scroll > *" flex-shrink:0 rule below — without it a
@@ -469,7 +474,7 @@ const CSS = `
 .ma-scroll > * { flex-shrink: 0; }
 /* /mobius-ui:AppShell */
 
-/* mobius-ui:Header v1 — keep in sync; library candidate. */
+/* mobius-ui:Header — app-owned; a future-library candidate (no sync owed). */
 .ma-header { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between;
   gap: 12px; min-height: 48px; padding: 12px 16px; background: var(--surface);
   border-bottom: 1px solid var(--border); }
@@ -481,7 +486,7 @@ const CSS = `
 .ma-subtitle { display: block; margin-top: 2px; font-size: 12px; color: var(--muted); }
 /* /mobius-ui:Header */
 
-/* mobius-ui:Empty v1 — keep in sync; library candidate. */
+/* mobius-ui:Empty — app-owned; a future-library candidate (no sync owed). */
 .ma-empty { display: flex; flex-direction: column; align-items: center; text-align: center;
   gap: 8px; margin: auto; padding: 48px 24px; color: var(--muted); }
 .ma-empty-mark { width: 64px; height: 64px; margin-bottom: 10px; border-radius: 18px; display: flex;
@@ -491,12 +496,12 @@ const CSS = `
 .ma-empty-text { margin: 0; font-size: 14px; line-height: 1.6; }
 /* /mobius-ui:Empty */
 
-/* mobius-ui:Card v1 — keep in sync; library candidate. */
+/* mobius-ui:Card — app-owned; a future-library candidate (no sync owed). */
 .ma-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
   padding: 14px 16px; }
 /* /mobius-ui:Card */
 
-/* mobius-ui:Button v1 — keep in sync; library candidate. */
+/* mobius-ui:Button — app-owned; a future-library candidate (no sync owed). */
 .ma-btn { display: inline-flex; align-items: center; justify-content: center; min-height: 44px;
   padding: 10px 16px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface);
   color: var(--text); font-family: var(--font); font-size: 14px; font-weight: 600; cursor: pointer;
@@ -507,14 +512,14 @@ const CSS = `
 .ma-btn-secondary { background: var(--surface2, var(--surface)); }
 /* /mobius-ui:Button */
 
-/* mobius-ui:Input v1 — keep in sync; library candidate. */
+/* mobius-ui:Input — app-owned; a future-library candidate (no sync owed). */
 .ma-input { display: block; width: 100%; box-sizing: border-box; min-height: 44px; padding: 11px 12px;
   background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px;
   outline: none; font-family: var(--font); font-size: 16px; }
 .ma-input:focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 /* /mobius-ui:Input */
 
-/* mobius-ui:Sheet v1 — keep in sync; library candidate. */
+/* mobius-ui:Sheet — app-owned; a future-library candidate (no sync owed). */
 .ma-scrim { position: absolute; inset: 0; z-index: 100; display: flex; align-items: flex-end;
   justify-content: center; padding: 16px; background: rgba(0,0,0,0.5); }
 .ma-sheet { width: 100%; max-width: 480px; padding: 24px; background: var(--surface);

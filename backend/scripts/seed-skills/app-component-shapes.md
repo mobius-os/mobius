@@ -67,7 +67,7 @@ match). Until then, consistent copies are correct. This is the platform's
 - **Keep copies in sync with fence comments.** Wrap each shared block in an
   IDENTICAL versioned marker, so a `grep` finds every app on a given shape
   and a future extraction is mechanical:
-  `/* mobius-ui:Header v1 — keep in sync; library candidate. Diverge below the marker only. */`
+  `/* mobius-ui:Header — app-owned; a future-library candidate (no sync owed). */`
   … `/* /mobius-ui:Header */`. Keep the class names + markup inside a fence
   identical across apps; diverge the *shape* when you must, never *rename*
   shared classes gratuitously. Keep blocks in a stable order: root → header →
@@ -77,7 +77,43 @@ match). Until then, consistent copies are correct. This is the platform's
 
 ---
 
-## 1. App shell root (`ma-root`)
+## 1. Root layout — default `Root`, or `AppShell` when you need it
+
+Two shapes. **Default to the lightweight Root**; reach for **AppShell** only when
+a fixed header/footer must stay put while a body scrolls under it. Each app OWNS
+its copy — fork and comment it; the `mobius-ui:*` fences only mark blocks a future
+shared library could be harvested from. No sync owed.
+
+**Default — `mobius-ui:Root` (lightweight flow).** Content flows, the iframe
+scrolls; nothing here can crush or collapse a child.
+
+```jsx
+<div className="ma-root">
+  <style>{CSS}</style>
+  {/* your content; sheets/toasts render last */}
+</div>
+```
+
+```css
+/* mobius-ui:Root — app-owned; a future-library candidate (no sync owed). */
+.ma-root {
+  box-sizing: border-box;
+  position: relative;        /* anchor for absolute scrims / sheets / toasts */
+  min-height: 100dvh;
+  overflow-x: clip;          /* clip, NOT hidden: stops x-bleed without making the root a
+                                scroll container, which would break a position:sticky header */
+  background: var(--bg); color: var(--text); font-family: var(--font);
+  -webkit-font-smoothing: antialiased;
+}
+/* /mobius-ui:Root */
+```
+
+Pin a header with `position: sticky; top: 0`. Center an empty state with its own
+`min-height` + `display: flex` (the flex `margin: auto` trick needs AppShell's
+flex parent).
+
+**Opt-in — `mobius-ui:AppShell` (pinned header + independent scroll).** For lists
+/ feeds / a fixed input bar: a flex column whose body scrolls under a fixed header.
 
 ```jsx
 <div className="ma-root">
@@ -89,9 +125,9 @@ match). Until then, consistent copies are correct. This is the platform's
 ```
 
 ```css
-/* mobius-ui:Root v1 — keep in sync; library candidate. Diverge below the marker only. */
+/* mobius-ui:AppShell — app-owned; a future-library candidate (no sync owed). */
 .ma-root {
-  position: relative;        /* anchor for scrims / sheets / toasts (they're absolute, not fixed) */
+  position: relative;        /* anchor for scrims / sheets / toasts (absolute, not fixed) */
   display: flex; flex-direction: column;
   height: 100%; width: 100%; max-width: 100%;
   overflow: hidden;          /* inner .ma-scroll owns vertical scroll */
@@ -104,11 +140,14 @@ match). Until then, consistent copies are correct. This is the platform's
   padding: 14px 16px 32px;
   word-break: break-word; overflow-wrap: anywhere;
 }
-/* /mobius-ui:Root */
+.ma-scroll > * { flex-shrink: 0; }  /* keep children at natural height — without this a
+                                       child with small min-content (details/summary/img/
+                                       canvas) is crushed by flex-shrink */
+/* /mobius-ui:AppShell */
 ```
 
-Diverge on padding, a desktop `max-width` cap, or (rarely, for a full-bleed
-canvas like a map) `position: fixed; inset: 0`. `min-height: 0` on the scroll
+Diverge on padding, a desktop `max-width` cap, or (rarely, for a full-bleed canvas
+like a map) `position: fixed; inset: 0`. On AppShell, `min-height: 0` on the scroll
 child is non-negotiable.
 
 **Safe area:** a full-bleed root (one that paints to the device edges — a
@@ -142,7 +181,7 @@ pad controls with `env()` or the shell's `--mobius-safe-*` vars (the latter are
 ```
 
 ```css
-/* mobius-ui:Header v1 — keep in sync; library candidate. Diverge below the marker only. */
+/* mobius-ui:Header — app-owned; a future-library candidate (no sync owed). */
 .ma-header {
   flex: 0 0 auto;
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -200,7 +239,7 @@ as the floor). Only the header that actually sits at the top edge needs this.
 ```
 
 ```css
-/* mobius-ui:Sheet v1 — keep in sync; library candidate. Diverge below the marker only. */
+/* mobius-ui:Sheet — app-owned; a future-library candidate (no sync owed). */
 .ma-scrim {
   position: absolute; inset: 0; z-index: 100;   /* absolute → stays inside the app, never over shell chrome */
   display: flex; align-items: flex-end; justify-content: center;  /* bottom sheet; center is a variant */
@@ -241,7 +280,7 @@ scrim itself, being full-bleed, does not.
 ```
 
 ```css
-/* mobius-ui:Empty v1 — keep in sync; library candidate. Diverge below the marker only. */
+/* mobius-ui:Empty — app-owned; a future-library candidate (no sync owed). */
 .ma-empty {
   display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px;
   max-width: 440px; margin: 0 auto; padding: 48px 24px; color: var(--muted);
@@ -276,7 +315,7 @@ the title/text scale.
 ```
 
 ```css
-/* mobius-ui:Card v1 — keep in sync; library candidate. Diverge below the marker only. */
+/* mobius-ui:Card — app-owned; a future-library candidate (no sync owed). */
 .ma-card {
   display: flex; align-items: center; gap: 14px; width: 100%; min-height: 44px;
   padding: 15px 16px; text-align: left;
@@ -314,7 +353,7 @@ Static container cards drop the `button` pseudo-states + chevron. State
 ```
 
 ```css
-/* mobius-ui:Button v1 — keep in sync; library candidate. Diverge below the marker only. */
+/* mobius-ui:Button — app-owned; a future-library candidate (no sync owed). */
 .ma-btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   min-height: 44px; padding: 10px 16px; border-radius: 10px;
@@ -352,7 +391,7 @@ A full-width form-submit adds `width: 100%` via a `.ma-btn-block` modifier.
 ```
 
 ```css
-/* mobius-ui:Input v1 — keep in sync; library candidate. Diverge below the marker only. */
+/* mobius-ui:Input — app-owned; a future-library candidate (no sync owed). */
 .ma-input, .ma-textarea {
   display: block; width: 100%; box-sizing: border-box; min-height: 44px; padding: 11px 12px;
   background: var(--surface); color: var(--text); border: 1px solid var(--border);
@@ -383,7 +422,7 @@ A full-width form-submit adds `width: 100%` via a `.ma-btn-block` modifier.
 ```
 
 ```css
-/* mobius-ui:Segmented v1 — keep in sync; library candidate. Diverge below the marker only. */
+/* mobius-ui:Segmented — app-owned; a future-library candidate (no sync owed). */
 .ma-seg {
   display: inline-flex; gap: 2px; padding: 3px;
   background: var(--surface2, var(--surface)); border: 1px solid var(--border); border-radius: 10px;
@@ -414,7 +453,7 @@ and the iframe fills it. See the [building-apps.md] "Agent-powered mini-apps"
 section for the one-call helper (`persist` + `onTurnDone`).
 
 ```css
-/* mobius-ui:ChatEmbed v1 — keep in sync; library candidate. Diverge below the marker only. */
+/* mobius-ui:ChatEmbed — app-owned; a future-library candidate (no sync owed). */
 .ma-chat-embed {
   flex: 1 1 auto; min-height: 0;   /* the flexbox-overflow fix — lets the iframe scroll internally */
   overflow: hidden; background: var(--bg);
@@ -579,7 +618,7 @@ split.destroy()
 ```
 
 ```css
-/* mobius-ui:ChatSplit v1 — keep in sync; library candidate. Diverge below the marker only. */
+/* mobius-ui:ChatSplit — app-owned; a future-library candidate (no sync owed). */
 .ma-root--split {
   position: relative;
   overflow: hidden;
