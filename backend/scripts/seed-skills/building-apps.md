@@ -413,9 +413,39 @@ restyling UI and **copy the blocks you need**. The rules behind those shapes:
   it IS editable, ship a `sync-cron.sh` that actually rewrites the crontab (see
   `cron.md`). Lead with the cadence either way.
 
+### Root layout — pick the lightest that works
+
+Two blessed root shapes. **Default to the lightweight one**; reach for the shell
+only when you actually need an independently-scrolling region. An app declares
+which it uses by the fence name, so the choice is explicit and greppable.
+
+**`mobius-ui:Root` (default — lightweight flow).** For content: reports, readers,
+forms, most apps. Nothing here can collapse or crush a child.
+
+```jsx
+/* mobius-ui:Root v1 — keep in sync; library candidate. */
+.ma-root { box-sizing: border-box; min-height: 100dvh;
+  background: var(--bg); color: var(--text); font-family: var(--font); }
+/* /mobius-ui:Root */
+```
+
+Content flows and the iframe scrolls. Want a header that stays put? Put
+`position: sticky; top: 0` on it — local and visible, no layout magic.
+
+**`mobius-ui:AppShell` (opt-in — pinned header + independent scroll).** For
+list/tool apps where a fixed header (or a fixed footer/input) stays put while a
+body scrolls under it. It's `flex` with a `flex: 1; overflow-y: auto` scroll
+region — powerful, but it has one sharp edge: **a scroll child with small
+min-content (`<details>`, `<summary>`, `<img>`, `<canvas>`) gets crushed to its
+min-content height by flex-shrink.** The `.ma-scroll > * { flex-shrink: 0 }` line
+in the skeleton prevents that — keep it. The canonical skeleton below is an
+AppShell app.
+
 ### Canonical single-file app skeleton
 
-Start every new app from this shape: ``const CSS`` rendered via
+This is the **AppShell** shape — a list/tool app (header + scrolling list +
+sheet); a content-only app uses the lightweight `mobius-ui:Root` above instead.
+It shows: ``const CSS`` rendered via
 `<style>{CSS}</style>`, fenced shared blocks, theme tokens, 44px controls, a
 header with a mark + title + subtitle, a list with a 3-part empty state, and a
 bottom-sheet. Copy more blocks (cards, segmented control, offline pill) from
@@ -426,12 +456,18 @@ prefix (here `ma-`). Then fill in the domain logic.
 import { useState, useEffect } from 'react'
 
 const CSS = `
-/* mobius-ui:Root v1 — keep in sync; library candidate. */
+/* mobius-ui:AppShell v1 — keep in sync; library candidate.
+   EXPLICIT opt-in: pinned header + an independently scrolling body. For a
+   content-only app, prefer the lightweight mobius-ui:Root instead.
+   GOTCHA: keep the ".ma-scroll > *" flex-shrink:0 rule below — without it a
+   scroll child with small min-content (details, summary, img, canvas) is
+   crushed to its min-content height by flex-shrink. */
 .ma-root { position: relative; display: flex; flex-direction: column; height: 100%;
   overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--font); }
 .ma-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px 32px;
   display: flex; flex-direction: column; gap: 8px; }
-/* /mobius-ui:Root */
+.ma-scroll > * { flex-shrink: 0; }
+/* /mobius-ui:AppShell */
 
 /* mobius-ui:Header v1 — keep in sync; library candidate. */
 .ma-header { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between;
