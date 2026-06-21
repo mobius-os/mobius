@@ -363,6 +363,11 @@ restyling UI and **copy the blocks you need**. The rules behind those shapes:
   The app runs in its own iframe, so the `<style>` is scoped to your app
   automatically; no CSS Modules, no BEM. (`app-latex` and `mind` are the
   cleanest references — both already do exactly this.)
+- **GOTCHA — the stylesheet is a JS template literal.** A literal backtick, or a
+  `${` sequence, anywhere in the CSS (inside an `url("data:image/svg+xml,…")`, a
+  `content:` string, or even a comment) closes the literal or is read as JS
+  interpolation and breaks the esbuild compile. Keep backticks out of CSS, escape
+  `${` as `\${`, and use single/double quotes inside `url()` / `content:`.
 - **Naming.** A short per-app class prefix (`mg-` mind, `cb-` atlas, a 2–3-char
   mnemonic for yours) + semantic kebab roles (`ma-header`, `ma-sheet`,
   `ma-btn`). States via REAL pseudo-classes (`:hover`, `:disabled`,
@@ -398,15 +403,13 @@ restyling UI and **copy the blocks you need**. The rules behind those shapes:
   pill (no counts, no timestamps); an error the owner must act on may surface,
   plainly worded. See the SyncPill shape in
   [app-component-shapes.md](app-component-shapes.md).
-- **Keep copies consistent with fence comments.** Each shared block is wrapped
-  in an IDENTICAL versioned marker across apps, so divergence is visible and a
-  future extraction into a real library is a `grep`-and-move:
-  `/* mobius-ui:Header — app-owned; a future-library candidate (no sync owed). */` … `/* /mobius-ui:Header */`.
-  Keep the class names + markup inside a fence identical across apps; diverge
-  the *shape* when your app genuinely needs to, but never *rename* a shared
-  class for no reason (that breaks the extraction seam). We're not building the
-  shared library yet — consistent copies are correct until ~3 apps prove a
-  block identical, at which point the lift is mechanical.
+- **Fence comments mark future-library candidates — you own the copy.** Wrap a
+  shared block in its `/* mobius-ui:Name */` … `/* /mobius-ui:Name */` marker so a
+  future `grep` can find kin and harvest a real library later. But your per-app
+  prefix REPLACES the `ma-` placeholder, so class names legitimately differ per
+  app — that's fork-and-own working, not drift. Keep the kebab ROLE suffix
+  (`-card`, `-header`, `-sheet`) and the markup recognizable; you owe no
+  identical-name obligation, and you diverge the shape whenever your app needs to.
 - **Scheduled apps — never a dead time-picker.** If the cron cadence is NOT
   user-editable, show it in words ("Updates daily") plus "ask the Möbius agent
   to reschedule" — don't render a picker that writes a file nothing reads. If
@@ -443,13 +446,18 @@ body scrolls under it. It's `flex` with a `flex: 1; overflow-y: auto` scroll
 region — powerful, but it has one sharp edge: **a scroll child with small
 min-content (`<details>`, `<summary>`, `<img>`, `<canvas>`) gets crushed to its
 min-content height by flex-shrink.** The `.ma-scroll > * { flex-shrink: 0 }` line
-in the skeleton prevents that — keep it. The canonical skeleton below is an
-AppShell app.
+in the skeleton prevents that — keep it. (EXCEPTION: a child that must itself
+FILL and scroll — a `mobius-ui:ChatEmbed`, a split pane — needs `flex: 1;
+min-height: 0` instead; give it its own rule AFTER the blanket one, or place it
+outside `.ma-scroll`.) The canonical skeleton below is an AppShell app.
 
 ### Canonical single-file app skeleton
 
-This is the **AppShell** shape — a list/tool app (header + scrolling list +
-sheet); a content-only app uses the lightweight `mobius-ui:Root` above instead.
+This is the **AppShell** shape — a list/tool app (header + independently-scrolling
+list + sheet). For the DEFAULT **Root** shape, compose the `mobius-ui:Root` block
+above with a `position: sticky; top: 0` header and a plain-flow body — no
+`.ma-scroll`, no `min-height: 0`, no `flex-shrink` — and the self-centering
+`.ma-empty` handles the empty state.
 It shows: ``const CSS`` rendered via
 `<style>{CSS}</style>`, fenced shared blocks, theme tokens, 44px controls, a
 header with a mark + title + subtitle, a list with a 3-part empty state, and a
@@ -487,8 +495,10 @@ const CSS = `
 /* /mobius-ui:Header */
 
 /* mobius-ui:Empty — app-owned; a future-library candidate (no sync owed). */
-.ma-empty { display: flex; flex-direction: column; align-items: center; text-align: center;
-  gap: 8px; margin: auto; padding: 48px 24px; color: var(--muted); }
+.ma-empty {  /* self-centers on a flow Root (no flex parent needed); also fine inside AppShell */
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center; gap: 8px; min-height: 60dvh; max-width: 440px; margin: 0 auto;
+  padding: 48px 24px; color: var(--muted); }
 .ma-empty-mark { width: 64px; height: 64px; margin-bottom: 10px; border-radius: 18px; display: flex;
   align-items: center; justify-content: center; font-size: 30px;
   background: color-mix(in srgb, var(--accent) 14%, transparent); }
