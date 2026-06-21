@@ -29,7 +29,9 @@
 
 ## What is Möbius?
 
-Möbius is a personal AI agent you self-host. Chat sits on one side, a full-screen canvas on the other. Describe what you want and the coding agent builds it — a small app that runs in your browser and persists next to the chat. The agent is not limited to apps: it can also edit the interface it runs inside, the theme, the layout, the features in the shell, by editing the source and rebuilding live.
+A Möbius strip is a surface with no inside or outside and no beginning or end. That is the idea behind Möbius, a self-improving personal AI agent you self-host where the agent, the server it runs on, and the apps it builds loop back into one system that works to be as useful to you as it can.
+
+Chat sits on one side, a full-screen canvas on the other. Describe what you want and the coding agent builds it — a small app that runs in your browser and persists next to the chat. The agent is not limited to apps: it can also edit the interface it runs inside, the theme, the layout, the features in the shell, by editing the source and rebuilding live.
 
 The unusual design decisions worth knowing upfront:
 
@@ -118,6 +120,8 @@ The nightly loop is the same reflect-and-refactor cycle the developers run by ha
 ---
 
 ## How the agent itself gets better
+
+Fully recursive self-improvement — a system that rewrites itself unattended and just gets better — is not here yet; a person stays in the loop at every turn. What works today is the half in front of it: an agent and a human improving that agent together, faster and more durably than either manages alone.
 
 Möbius improves through a self-improvement harness run during development. An outer agent watches the inner one build, asks it _why_ it made each decision (with the transcript still in context), and rewrites its instructions between sessions. A few things that surprised us running that loop:
 
