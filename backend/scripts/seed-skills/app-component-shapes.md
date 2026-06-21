@@ -1,18 +1,21 @@
 # Mini-app component shapes
 
 The canonical shape for every recurring piece of mini-app UI — markup +
-scoped CSS — so each app holds its OWN copy of a consistent block. Copy the
-block you need into your app's `const CSS`, keep the class names + structure
-identical, and diverge only where your app genuinely needs to. `Read` this
-when building or restyling any app's UI, alongside [building-apps.md].
+scoped CSS — so each app holds its OWN copy of a block. Copy the block you need
+into your app's `const CSS`, apply your per-app prefix, keep the kebab ROLE
+suffix + structure recognizable, and diverge the shape wherever your app needs
+to. This catalog is a starting set, not a closed enum — if your app needs a
+shape that isn't here, build it in the same idiom (scoped CSS, theme tokens, a
+fence) and own it. `Read` this when building or restyling any app's UI,
+alongside [building-apps.md].
 
 Why copies and not a shared library yet: a shared component freezes an API
-before the shapes have proven stable, and then any app that needs something
-the component didn't anticipate hits a wall. Copies let each app diverge its
-own CSS freely — full CSS power, no permission, no blast radius. When ~3 apps
-carry a byte-identical fenced block, that block has earned extraction into a
-real `@mobius/ui` and the lift is mechanical (the names + markup already
-match). Until then, consistent copies are correct. This is the platform's
+before the shapes have proven stable, and then any app that needs something it
+didn't anticipate hits a wall. Copies let each app diverge its own CSS freely —
+full CSS power, no permission, no blast radius. When ~3 apps carry the same
+fenced block (same role + structure, just a different prefix), it has earned
+extraction into a real `@mobius/ui` you import — a `grep` of the fence names
+finds the kin. Until then, owning your fork is correct. This is the platform's
 "code empowers the agent; it does not police it," in CSS form.
 
 ## The rules (read once, then copy blocks)
@@ -25,6 +28,10 @@ match). Until then, consistent copies are correct. This is the platform's
   queries, `@keyframes`, or pseudo-elements — that's the friction wall this
   avoids. The app runs in its own iframe, so the `<style>` is automatically
   scoped to your app; no CSS Modules, no hashing, no BEM-for-isolation.
+- **GOTCHA — the CSS is a JS template literal.** A literal backtick or a `${`
+  anywhere in the CSS (an `url("data:image/svg+xml,…")`, a `content:` string, a
+  comment) breaks the esbuild compile. Keep backticks out of CSS, escape `${` as
+  `\${`, and quote inside `url()` / `content:`.
 - **Naming:** a short per-app prefix on every class (`mg-` mind, `cb-` atlas,
   a 2–3-char mnemonic for yours — `ma-` is the placeholder below) + semantic
   kebab role names (`ma-header`, `ma-sheet`, `ma-card`, `ma-btn`). States use
@@ -281,9 +288,10 @@ scrim itself, being full-bleed, does not.
 
 ```css
 /* mobius-ui:Empty — app-owned; a future-library candidate (no sync owed). */
-.ma-empty {
-  display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px;
-  max-width: 440px; margin: 0 auto; padding: 48px 24px; color: var(--muted);
+.ma-empty {  /* self-centers on a flow Root (no flex parent needed); also fine inside AppShell */
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center; gap: 8px; min-height: 60dvh; max-width: 440px; margin: 0 auto;
+  padding: 48px 24px; color: var(--muted);
 }
 .ma-empty-mark {
   width: 64px; height: 64px; margin-bottom: 10px; border-radius: 18px;
@@ -469,7 +477,7 @@ section for the one-call helper (`persist` + `onTurnDone`).
 ## 10. Smaller recurring blocks
 
 ```css
-/* mobius-ui:Focus v1 — keep in sync; library candidate. Required once per app. */
+/* mobius-ui:Focus — app-owned; a future-library candidate (no sync owed). Required once per app. */
 /* A visible keyboard-focus ring on every interactive control (WCAG 2.4.7).
    :focus-visible only shows for keyboard nav, so mouse/touch taps stay clean.
    Per-control shapes (.ma-btn, .ma-card) already carry their own ring; this is
@@ -485,7 +493,7 @@ section for the one-call helper (`persist` + `onTurnDone`).
    :focus-visible style already exists to replace it. */
 /* /mobius-ui:Focus */
 
-/* mobius-ui:ReducedMotion v1 — keep in sync; library candidate. Required once per app. */
+/* mobius-ui:ReducedMotion — app-owned; a future-library candidate (no sync owed). Required once per app. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
@@ -496,7 +504,7 @@ section for the one-call helper (`persist` + `onTurnDone`).
 }
 /* /mobius-ui:ReducedMotion */
 
-/* mobius-ui:Spinner v1 — keep in sync; library candidate. */
+/* mobius-ui:Spinner — app-owned; a future-library candidate (no sync owed). */
 @keyframes ma-spin { to { transform: rotate(360deg); } }
 .ma-spinner {
   width: 26px; height: 26px; border-radius: 50%;
@@ -506,7 +514,7 @@ section for the one-call helper (`persist` + `onTurnDone`).
 @media (prefers-reduced-motion: reduce) { .ma-spinner { animation: none; } }   /* mandatory */
 /* /mobius-ui:Spinner */
 
-/* mobius-ui:Toast v1 — keep in sync; library candidate. */
+/* mobius-ui:Toast — app-owned; a future-library candidate (no sync owed). */
 .ma-toast {
   position: absolute; left: 16px; right: 16px; bottom: 16px; z-index: 200;   /* absolute → inside the app */
   display: flex; align-items: center; gap: 12px; padding: 12px 16px;
@@ -517,7 +525,7 @@ section for the one-call helper (`persist` + `onTurnDone`).
 .ma-toast.is-error { border-color: var(--danger); }
 /* /mobius-ui:Toast */
 
-/* mobius-ui:SectionHead v1 — keep in sync; library candidate. */
+/* mobius-ui:SectionHead — app-owned; a future-library candidate (no sync owed). */
 .ma-section-head { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; }
 .ma-section-icon {
   width: 30px; height: 30px; flex: 0 0 auto; border-radius: 9px;
@@ -527,7 +535,7 @@ section for the one-call helper (`persist` + `onTurnDone`).
 .ma-section-label { margin: 0; font-size: 14.5px; font-weight: 700; letter-spacing: -0.01em; }
 /* /mobius-ui:SectionHead */
 
-/* mobius-ui:Scrollskin v1 — keep in sync; library candidate. Add the `ma-scroll` class to a scroller. */
+/* mobius-ui:Scrollskin — app-owned; a future-library candidate (no sync owed). Add the ma-scroll class to a scroller. */
 .ma-scroll::-webkit-scrollbar { width: 9px; height: 9px; }
 .ma-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; border: 2px solid transparent; background-clip: padding-box; }
 .ma-scroll::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: padding-box; }
@@ -551,7 +559,7 @@ error/conflict the owner must act on (`.is-error`), plainly worded
 ```
 
 ```css
-/* mobius-ui:SyncPill v2 — keep in sync; library candidate. SILENT WHEN HEALTHY:
+/* mobius-ui:SyncPill — app-owned; a future-library candidate (no sync owed). SILENT WHEN HEALTHY:
    not mounted while online (never "Saving" / pending counts); plain "Offline"
    when offline; .is-error only for a failure the owner can act on. */
 .ma-sync-pill {
@@ -571,7 +579,7 @@ mechanics, with an `aria-label`.
 
 ---
 
-## 9. ChatSplit — embedded chat panel with pill ↔ split ↔ full state machine
+## 11. ChatSplit — embedded chat panel with pill ↔ split ↔ full state machine
 
 `window.mobius.split(opts)` owns the drag handle, state machine, and
 `sessionStorage` persistence. Your mount element needs CSS that reads the two
