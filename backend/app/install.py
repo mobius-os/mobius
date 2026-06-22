@@ -1270,7 +1270,7 @@ async def install_from_manifest(
         # Non-behavioral telemetry: the install still succeeds under the
         # suffixed slug, but a collision means two apps now share a stem
         # (user-built vs store, or two store apps). Logging requested-vs-
-        # assigned makes that observable to the dreaming agent / store UI
+        # assigned makes that observable to the reflection agent / store UI
         # without a DB rename. Best-effort like every activity emit.
         activity.log_event(
           "slug_collision",
@@ -1651,7 +1651,7 @@ async def install_from_manifest(
     # in the activity log reflects when the install actually landed,
     # not when we entered the install pipeline. mode="update" still
     # emits an event — re-installs of the same manifest_url are
-    # meaningful platform signals for the dreaming agent.
+    # meaningful platform signals for the reflection agent.
     activity.log_event(
       "app_install",
       app_id=app.id,

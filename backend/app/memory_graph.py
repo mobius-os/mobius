@@ -2,7 +2,7 @@
 
 This is the derived view over `<data_dir>/shared/memory/` — distinct from
 `memory.py`, which assembles the *injected* block. The viewer mini-app reads
-the `graph.json` this produces; the nightly "dreaming" pass and the agent
+the `graph.json` this produces; the nightly "reflection" pass and the agent
 regenerate it after editing notes. It is also the lint authority: a publish
 step (bootstrap or nightly consolidation) calls `build_graph`, and refuses to
 mark the graph `.ready` if `problems` contains an error (Codex review R7).
@@ -15,12 +15,12 @@ or a redirect's forward to its target. The graph is "healthy" when, from
 with no dangling links and no orphans.
 
 Beyond the publish-blocking errors, the lint emits WARNINGS that encode the
-graph's structure rules (mind.md owns the prose; the thresholds live here):
+graph's structure rules (memory.md owns the prose; the thresholds live here):
 a MOC over 15 children, a bare `[[slug]]` MOC entry with no one-line
 description, a note body over ~30 prose lines (split candidate), a note
 with 5+ outbound links (MOC-promotion candidate), redirect chains and
 orphaned stubs, and malformed `as-of:`/`supersedes:`/`source:` fields.
-Warnings never block `.ready` — they are the nightly Dreaming pass's
+Warnings never block `.ready` — they are the nightly Reflection pass's
 reorganization worklist.
 """
 
@@ -45,7 +45,7 @@ _AS_OF_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 ROOT_ID = "index"
 
-# Structure-rule thresholds (the prose rules live in mind.md; Dreaming acts
+# Structure-rule thresholds (the prose rules live in memory.md; Reflection acts
 # on the warnings these produce).
 MOC_CHILDREN_CAP = 15
 NOTE_PROSE_LINE_CAP = 30
@@ -166,7 +166,7 @@ def build_graph(
       node["target"] = target.strip() if isinstance(target, str) else ""
     # Staleness/supersession metadata: tolerated on any node, validated in
     # the shape-lint pass below, surfaced in graph.json for the viewer and
-    # the Dreaming staleness sweep.
+    # the Reflection staleness sweep.
     for fm_key, node_key in (
       ("as-of", "as_of"), ("supersedes", "supersedes"), ("source", "source"),
     ):
@@ -194,7 +194,7 @@ def build_graph(
       add_node(fp, ntype)
 
   # Per-node shape lint (warnings only — never blocks a publish). These
-  # encode the structure rules the Dreaming pass enforces: every MOC entry
+  # encode the structure rules the Reflection pass enforces: every MOC entry
   # carries a one-line description, a note over ~30 prose lines is a split
   # candidate, a note with 5+ outbound links is doing a MOC's job, and
   # time-sensitive metadata must be well-formed enough to act on.
@@ -300,7 +300,7 @@ def build_graph(
   # Redirect resolution. Every stub must terminate at a real, non-redirect
   # node: a missing target or a cycle never resolves (error — any link
   # routed through the stub dead-ends). A chain that does resolve but takes
-  # more than one hop is legal yet flagged for Dreaming to collapse
+  # more than one hop is legal yet flagged for Reflection to collapse
   # (A -> B -> C becomes A -> C, Wikipedia's double-redirect bot rule).
   redirects = {
     sid: node.get("target") or ""
@@ -336,7 +336,7 @@ def build_graph(
       cur = redirects[cur]
 
   # A stub nothing points at anymore has served its purpose: every inbound
-  # link to the old slug has been updated, so Dreaming can purge it.
+  # link to the old slug has been updated, so Reflection can purge it.
   inbound = {e["target"] for e in res.edges}
   for sid in redirects:
     if sid not in inbound:
@@ -375,7 +375,7 @@ def build_graph(
       )
 
   # Breadth metadata + live usage. children_count lets the agent (and the
-  # Mind app) see a map's breadth at a glance — "this MOC has N members, fan
+  # Memory app) see a map's breadth at a glance — "this MOC has N members, fan
   # out and read them" — without parsing the body. A MOC's children are the
   # notes that declare it (membership edges); the root index's children are
   # the MOCs it links to (body links). access_count merges the live usage

@@ -22,7 +22,7 @@ Layout under `<data_dir>/shared/memory/` (the "graph"):
                         (type, title, description=scent line); read on demand.
   read-trace/<id>.json  per-chat record of which nodes were injected/read,
                         written by chat.py + the SDK runner (memory_trace.py);
-                        the dreaming pass diffs it against the graph.
+                        the reflection pass diffs it against the graph.
   .ready                sentinel: present iff a validated graph is published.
 
 The `.ready` sentinel — not the mere existence of `index.md` — gates graph
@@ -85,15 +85,15 @@ def is_graph_ready(data_dir: str | Path) -> bool:
   return (memory_dir(data_dir) / ".ready").is_file()
 
 
-# ─── Usage tracking (the "access_count" / Mind "Used" signal) ───────────
+# ─── Usage tracking (the "access_count" / Memory "Used" signal) ───────────
 #
-# access_count is "how often a note was loaded" — a usage signal for the Mind
+# access_count is "how often a note was loaded" — a usage signal for the Memory
 # app's "Used" column. v2 retrieval no longer RANKS by it (injection is
 # router->traverse); it survives only as viewer/analytics signal. We track
 # it in a sidecar counter (`usage.json`) rather than rewriting note
 # frontmatter on the hot path: a counter bump is cheap and churns no git
 # history. `build_memory_block` returns `loaded`; the injection site calls
-# `record_usage(loaded)`. `load_usage` feeds the graph builder (the Mind
+# `record_usage(loaded)`. `load_usage` feeds the graph builder (the Memory
 # viewer's "Used" column), so the effective access_count = frontmatter baseline
 # + live usage. Keyed by node id (a note's slug), matching graph.json.
 def _usage_path(data_dir: str | Path) -> Path:

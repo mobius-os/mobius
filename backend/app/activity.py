@@ -1,7 +1,7 @@
 """Append-only JSONL platform-activity log.
 
 Records platform events so introspective mini-apps and cron agents
-(notably the nightly Dreaming agent) can see what the owner did over a
+(notably the nightly Reflection agent) can see what the owner did over a
 window without scraping chat.log or guessing from mtime traces.
 
 Event vocabulary (one JSON object per line, no trailing version field —
@@ -302,7 +302,7 @@ def _candidate_files(active: Path) -> list[Path]:
   (the emitter appends with `ts=now()`), and archives are themselves
   ordered by when they rotated. Yielding files oldest→newest keeps
   the merged stream in roughly ascending ts so consumers that scan
-  forward (the dreaming agent's "since X" window) see the natural
+  forward (the reflection agent's "since X" window) see the natural
   shape.
 
   No window-based pruning happens here. With 90-day retention and
@@ -327,7 +327,7 @@ def _candidate_files(active: Path) -> list[Path]:
     # A stat failure on one file would crash the whole read.
     # Fall back to name-sort: archive names contain the ISO year +
     # week so lexicographic order tracks chronological order well
-    # enough for the dreaming-agent use case.
+    # enough for the reflection-agent use case.
     archives.sort(key=lambda p: p.name)
   result = list(archives)
   if active.exists():
@@ -423,7 +423,7 @@ def read_events(
   rotated archive (activity.YYYY-W##.jsonl) whose `ts` falls in
   [since, until] and (if `app_id` is given) whose `app_id` matches.
 
-  Cross-file reads matter for the dreaming-agent's "since 24h ago"
+  Cross-file reads matter for the reflection-agent's "since 24h ago"
   window: a Monday-6am-UTC run lands after the Sunday-night rotation,
   so the active file holds only ~6 hours of Monday events; the prior
   ~18 hours live in last week's archive. Reading the active file

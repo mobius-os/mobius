@@ -5,7 +5,7 @@
 // of recent errors in sessionStorage (so the recovery surface + the owner can
 // answer "what just broke?"), and POSTs to /api/client-error so uncaught SHELL
 // errors land in the activity log as `app_error` events (no app_id == shell;
-// the nightly Dreaming digest reads these). The POST is standalone here — no
+// the nightly Reflection digest reads these). The POST is standalone here — no
 // api/client.js import — so this leaf logger can never cause an import cycle
 // or route through apiFetch's 401-reload path, and a failed report can never
 // itself throw.

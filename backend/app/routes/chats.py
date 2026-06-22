@@ -225,7 +225,7 @@ def list_chats(
   q = db.query(models.Chat).filter(models.Chat.deleted_at.is_(None))
   if not include_app_chats:
     # Drawer history is the owner's browse list. App-attributed chats are
-    # still real chats the owner can open directly and the dreaming agent
+    # still real chats the owner can open directly and the reflection agent
     # can interview, but the drawer should not mix embedded app panels into
     # the owner's own conversation history.
     q = q.filter(models.Chat.created_by_app_id.is_(None))
@@ -816,7 +816,7 @@ def create_app_chat(
   hidden from the owner's drawer history (`GET /api/chats` excludes
   `created_by_app_id` rows unless `include_app_chats=1`), so an app's own
   conversations don't clutter the chat list; the owner can still open one
-  directly by id, and the dreaming agent reads them via the opt-in. This is
+  directly by id, and the reflection agent reads them via the opt-in. This is
   the surface that unblocks an in-iframe app's chat panel, which the default
   `/api/chats` list intentionally omits.
 

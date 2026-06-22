@@ -2182,11 +2182,11 @@ async def _run_chat_impl(
         "memory_load", source="injected", paths=block.loaded, mode=block.mode
       )
       # Persist the load into the usage counter so access_count actually
-      # accrues (it was always 0 before — the Mind app's "Used" column read
+      # accrues (it was always 0 before — the Memory app's "Used" column read
       # a counter nothing incremented). Feeds hot-note selection + graph.json.
       memory.record_usage(settings.data_dir, block.loaded)
       # Per-chat read-trace: record which nodes this chat's agent got for
-      # free, so the nightly Dreaming pass can diff "what was seen" against
+      # free, so the nightly Reflection pass can diff "what was seen" against
       # "what a deeper search would have surfaced" and reorganize the graph
       # accordingly. Fire-and-forget — never blocks or fails the turn.
       memory_trace.record_injected(settings.data_dir, chat_id, block.loaded)

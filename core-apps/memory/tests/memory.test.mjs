@@ -96,7 +96,7 @@ test('renderWikiLinks replaces slugs with note titles and keeps aliases', () => 
   ])
   assert.equal(
     out,
-    'See [Alpha Beta](#mind-node-abc) and [custom label](#mind-node-def) and [missing](#mind-node-missing).',
+    'See [Alpha Beta](#memory-node-abc) and [custom label](#memory-node-def) and [missing](#memory-node-missing).',
   )
 })
 
@@ -221,8 +221,8 @@ test('neutralizeMemoryMarkdown leaves wikilink syntax for renderWikiLinks', () =
   const out = renderWikiLinks(neutralizeMemoryMarkdown(md), [
     { id: 'some-note', title: 'Some Note' },
   ])
-  assert.ok(out.includes('[Some Note](#mind-node-some-note)'))
-  assert.ok(out.includes('[alias](#mind-node-other)'))
+  assert.ok(out.includes('[Some Note](#memory-node-some-note)'))
+  assert.ok(out.includes('[alias](#memory-node-other)'))
   assert.ok(!out.includes('https://evil.test'))
 })
 
@@ -233,6 +233,6 @@ test('memory sanitizer forbids network-bearing tags and attributes', () => {
   assert.ok(MEMORY_SANITIZE_OPTIONS.FORBID_ATTR.includes('src'))
   assert.ok(MEMORY_SANITIZE_OPTIONS.FORBID_ATTR.includes('srcset'))
   // href is deliberately NOT forbidden — wikilink anchors need it; the
-  // restrictNoteHtml pass strips every non-#mind-node- href instead.
+  // restrictNoteHtml pass strips every non-#memory-node- href instead.
   assert.ok(!MEMORY_SANITIZE_OPTIONS.FORBID_ATTR.includes('href'))
 })

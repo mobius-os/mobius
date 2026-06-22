@@ -1,9 +1,9 @@
-"""Dreaming's last-run marker — the one bookmark for "what to review tonight".
+"""Reflection's last-run marker — the one bookmark for "what to review tonight".
 
 DELIBERATELY NOT an exactly-once engine (an earlier fence/cursor/ledger version was scrapped
-after an adversarial philosophy review). Per the Dreaming design
-(docs/superpowers/specs/2026-06-02-knowledge-graph-and-dreaming-design.md) + Möbius's
-"code empowers the agent; it does not police it": Dreaming is a once-a-night, single-owner,
+after an adversarial philosophy review). Per the Reflection design
+(docs/superpowers/specs/2026-06-02-knowledge-graph-and-reflection-design.md) + Möbius's
+"code empowers the agent; it does not police it": Reflection is a once-a-night, single-owner,
 single-process LLM job whose safety is good instructions + git-reversibility + infra guards
 (flock / timeout / outcome-log). So we record the HEAD it last SUCCESSFULLY reviewed, hand the
 agent the diff since then, and TRUST the agent to skip its own commits and already-seen chats.

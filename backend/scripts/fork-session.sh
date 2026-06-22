@@ -3,7 +3,7 @@
 #
 # Forks a raw CLI session by id and interviews it — for app subagent runs (cron
 # jobs like news/gym) whose sessions are NOT rows in the chats table. The
-# Dreaming agent finds these under
+# Reflection agent finds these under
 # /data/cli-auth/claude/projects/<encoded-cwd>/<session_id>.jsonl, decodes the
 # cwd (the dir name is the cwd with '/' -> '-', e.g. -data-apps-news-2 ==
 # /data/apps/news-2), and forks with that cwd so --resume locates the session.

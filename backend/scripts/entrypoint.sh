@@ -749,7 +749,7 @@ python3 /app/scripts/init_agent_context.py
 python3 /app/scripts/init_memory_graph.py
 
 # Bootstrap the agent-editable skills layer (/data/shared/skills/). CREATE-IF-
-# ABSENT like the graph — the agent (and the nightly Dreaming agent) improve
+# ABSENT like the graph — the agent (and the nightly Reflection agent) improve
 # these skills, so a reseed must not clobber their edits. The system prompt
 # (skill/core.md) points at these.
 python3 /app/scripts/init_skills.py
@@ -976,7 +976,7 @@ fi
 # failures that look like generic CLI crashes.
 umask 022
 
-# Install the core apps (memory-graph + dreaming) + the nightly dreaming
+# Install the core apps (memory-graph + reflection) + the nightly reflection
 # cron once the server is healthy. Backgrounded so it doesn't block boot;
 # polls /api/health itself; idempotent; non-fatal. Runs as mobius so the
 # registered app files are mobius-owned.

@@ -18,5 +18,5 @@ belongs. Add a note here only when the fact is specific to *this* deployment.
 
 ## Notes
 
-- [[a-nightly-dreaming-pass-exists]] — the overnight pass consolidates the
+- [[a-nightly-reflection-pass-exists]] — the overnight pass consolidates the
   graph, fixes apps, and writes a morning brief; overnight changes are normal.

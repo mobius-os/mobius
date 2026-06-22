@@ -2,7 +2,7 @@
 
 Closes the gap where uncaught client/app JS errors were captured only in the
 browser (errorLog.js ring buffer) and never reached the activity log, so the
-nightly Dreaming digest's last_5_errors stayed empty for ~every app.
+nightly Reflection digest's last_5_errors stayed empty for ~every app.
 """
 import json
 from pathlib import Path

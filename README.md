@@ -48,10 +48,10 @@ The unusual design decisions worth knowing upfront:
 Möbius ships with a curated app store. Tap to install; each app is yours to use, edit, or rebuild.
 
 <p align="center">
-  <img src="assets/screenshots/store-catalog.png" width="720" alt="The Möbius app store: News, Workout, Atlas, Mind, LaTeX, and Dreaming, each with its own icon and a one-line description." />
+  <img src="assets/screenshots/store-catalog.png" width="720" alt="The Möbius app store: News, Workout, Atlas, Memory, LaTeX, and Reflection, each with its own icon and a one-line description." />
 </p>
 
-<sub>Twelve starter apps ship in the catalog. <strong>News</strong> writes a morning digest on a schedule. <strong>Workout</strong> logs training in plain language, on-device. <strong>Atlas</strong> is a 3D globe of where you have been. <strong>Mind</strong> is a browsable graph of everything the agent has learned. <strong>LaTeX</strong> is an Overleaf-style editor with a real engine. <strong>Dreaming</strong> runs the self-improvement loop overnight.</sub>
+<sub>Twelve starter apps ship in the catalog. <strong>News</strong> writes a morning digest on a schedule. <strong>Workout</strong> logs training in plain language, on-device. <strong>Atlas</strong> is a 3D globe of where you have been. <strong>Memory</strong> is a browsable graph of everything the agent has learned. <strong>LaTeX</strong> is an Overleaf-style editor with a real engine. <strong>Reflection</strong> runs the self-improvement loop overnight.</sub>
 
 Every app is a public repo with a `mobius.json` and an `index.jsx`, open under [github.com/mobius-os](https://github.com/mobius-os). Installing means pasting a URL. Updating means pasting the same URL again — it patches the code and keeps your data. There is no submission queue.
 
@@ -109,11 +109,11 @@ The whole starter catalog under [github.com/mobius-os](https://github.com/mobius
 
 ## It improves itself for you
 
-The agent keeps a **Mind** — a knowledge graph of everything it has learned, separate from your chat transcripts. Notes link to related notes, the important ones are indexed, and the whole thing loads into the agent's context at the start of each session. Instead of re-reading ten old conversations to remember a gotcha, it reads one note.
+The agent keeps a **Memory** — a knowledge graph of everything it has learned, separate from your chat transcripts. Notes link to related notes, the important ones are indexed, and the whole thing loads into the agent's context at the start of each session. Instead of re-reading ten old conversations to remember a gotcha, it reads one note.
 
-Every night the **Dreaming** agent wakes up and tends it. It merges duplicate notes, drops stale ones, surfaces patterns that span multiple builds, and looks for things worth suggesting to you in the morning. It also audits your instance — scheduled jobs that have been failing quietly, apps whose data is growing in ways that will bite later, theme rules that hurt contrast. It commits its changes to the same git history everything else uses, so a bad night's reorganization is recoverable.
+Every night the **Reflection** agent wakes up and tends it. It merges duplicate notes, drops stale ones, surfaces patterns that span multiple builds, and looks for things worth suggesting to you in the morning. It also audits your instance — scheduled jobs that have been failing quietly, apps whose data is growing in ways that will bite later, theme rules that hurt contrast. It commits its changes to the same git history everything else uses, so a bad night's reorganization is recoverable.
 
-The nightly loop is the same reflect-and-refactor cycle the developers run by hand when improving the agent. Dreaming is that loop, scheduled, on your instance.
+The nightly loop is the same reflect-and-refactor cycle the developers run by hand when improving the agent. Reflection is that loop, scheduled, on your instance.
 
 ---
 

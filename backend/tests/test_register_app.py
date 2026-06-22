@@ -1,6 +1,6 @@
 """register_app.py decides create-vs-update by a stable key.
 
-Feature 097: a core app renamed in place (Memory Graph -> Mind, same
+Feature 097: a core app renamed in place (Memory Graph -> Memory, same
 /data/apps/<slug>/ source dir) must UPDATE its existing row, not create a
 duplicate. Matching on the display name regressed here because the name is
 exactly the field a rename changes; matching on source_dir (stable across a
@@ -27,11 +27,11 @@ def test_rename_matches_existing_by_source_dir():
   """A renamed app (same source_dir, new name) resolves to the SAME row."""
   mod = _load_module()
   apps = [
-    {"id": 7, "name": "Memory Graph", "source_dir": "/data/apps/mind"},
+    {"id": 7, "name": "Memory Graph", "source_dir": "/data/apps/memory"},
   ]
-  # The app was renamed to "Mind" but its source dir is unchanged.
+  # The app was renamed to "Memory" but its source dir is unchanged.
   existing = mod._find_existing(
-    apps, source_dir="/data/apps/mind", name="Mind",
+    apps, source_dir="/data/apps/memory", name="Memory",
   )
   assert existing is not None, (
     "rename must match the existing row by source_dir, not create a duplicate"
@@ -43,7 +43,7 @@ def test_first_install_finds_no_match():
   """A genuinely new app (no row shares its source_dir) creates."""
   mod = _load_module()
   apps = [
-    {"id": 7, "name": "Memory Graph", "source_dir": "/data/apps/mind"},
+    {"id": 7, "name": "Memory Graph", "source_dir": "/data/apps/memory"},
   ]
   existing = mod._find_existing(
     apps, source_dir="/data/apps/notes", name="Notes",

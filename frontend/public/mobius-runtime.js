@@ -922,7 +922,7 @@ export function makeStorage({ appId, getToken }) {
 
 // ── App analytics: window.mobius.signal() (design §3) ──────────────
 //
-// Fire-and-forget telemetry for Dreaming. Buffers events in memory and
+// Fire-and-forget telemetry for Reflection. Buffers events in memory and
 // debounce-flushes them to `signals.jsonl` in the app's own storage
 // path, overwriting the full file on each flush (avoids read-append
 // races). On first signal of a session the existing signals.jsonl is

@@ -32,7 +32,7 @@ finds the kin. Until then, owning your fork is correct. This is the platform's
   anywhere in the CSS (an `url("data:image/svg+xml,…")`, a `content:` string, a
   comment) breaks the esbuild compile. Keep backticks out of CSS, escape `${` as
   `\${`, and quote inside `url()` / `content:`.
-- **Naming:** a short per-app prefix on every class (`mg-` mind, `cb-` atlas,
+- **Naming:** a short per-app prefix on every class (`mg-` memory, `cb-` atlas,
   a 2–3-char mnemonic for yours — `ma-` is the placeholder below) + semantic
   kebab role names (`ma-header`, `ma-sheet`, `ma-card`, `ma-btn`). States use
   REAL pseudo-classes (`.ma-btn:hover`, `:disabled`, `:focus-visible`).
@@ -79,7 +79,7 @@ finds the kin. Until then, owning your fork is correct. This is the platform's
   to; you owe no identical-name obligation. A rough block order reads well:
   root → header → list → cards → empty → sheet → buttons/inputs → animations.
 
-`app-latex` and `mind` are the cleanest on-standard references.
+`app-latex` and `memory` are the cleanest on-standard references.
 
 ---
 
@@ -286,7 +286,7 @@ scrim itself, being full-bleed, does not.
 <div className="ma-empty">
   <div className="ma-empty-mark" aria-hidden="true">🌙</div>
   <div className="ma-empty-title">No briefs yet</div>
-  <p className="ma-empty-text">Dreaming runs overnight. Your first morning brief will be waiting here.</p>
+  <p className="ma-empty-text">Reflection runs overnight. Your first morning brief will be waiting here.</p>
 </div>
 ```
 

@@ -2,7 +2,7 @@
 
 The shell's errorLog.js (and the in-iframe runtime reporter) POST here so
 uncaught errors reach the activity log as `app_error` events, where the
-nightly Dreaming digest surfaces them per app. An app-scoped token attributes
+nightly Reflection digest surfaces them per app. An app-scoped token attributes
 the error to its `app_id` automatically; the owner JWT (a shell-level error)
 records no `app_id`. Errors are sidecar telemetry — never load-bearing — so
 this route mirrors activity.log_event's swallow-don't-propagate contract.

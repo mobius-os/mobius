@@ -8,7 +8,7 @@
 # cron entry's command in this script. Resulting crontab line shape:
 #   <schedule>  /app/scripts/cron-emit.sh <app_id> /data/apps/<slug>/job.sh
 # Each run then emits one `cron_outcome` event into
-# /data/logs/activity.jsonl. The dreaming agent reads from that log
+# /data/logs/activity.jsonl. The reflection agent reads from that log
 # to see which scheduled jobs ran in the last 24h and how they
 # finished.
 #

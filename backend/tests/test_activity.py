@@ -255,7 +255,7 @@ def test_delete_app_emits_app_uninstall(client, auth):
 def test_read_events_spans_rotated_archives():
   """Cross-week read: events that landed in an archive BEFORE the most
   recent rotation must still appear in a window that covers them.
-  The dreaming agent runs at 6am Monday with a 24h window; if Sunday's
+  The reflection agent runs at 6am Monday with a 24h window; if Sunday's
   rotation already pushed Sunday-evening events into an archive, those
   would silently vanish from the read response."""
   active = _activity_path()
@@ -744,7 +744,7 @@ def test_storage_delete_emits_storage_write_with_negative_delta(client, auth):
 
 def test_shared_storage_put_emits_storage_write(client, auth):
   """Shared writes (theme.css, agent-experience.md, etc.) emit too —
-  the dreaming agent treats those as platform activity. app_id=0 +
+  the reflection agent treats those as platform activity. app_id=0 +
   scope='shared' is the documented sentinel for platform-level events."""
   r = client.put(
     "/api/storage/shared/agent-experience.md",

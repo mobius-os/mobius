@@ -7,16 +7,16 @@ tags: [meta]
 
 How this knowledge graph works and how you grow it. The full rules — the
 inclusion bar, atomicity, anti-orphan, and the light-by-day / heavy-by-night
-split — live in the **Mind skill** at `/data/shared/skills/mind.md`. `Read` it
+split — live in the **Memory skill** at `/data/shared/skills/memory.md`. `Read` it
 before you record, link, or tidy notes.
 
 ## The system
 
 - [[how-the-memory-graph-works]] — the format, the inbox, and the daytime vs.
   nightly split in one note. (Also the canonical example of the note shape.)
-- [[memory-is-visible-to-the-partner]] — the Mind app shows every note to the
+- [[memory-is-visible-to-the-partner]] — the Memory app shows every note to the
   partner; write as if you'd stand behind it when quoted back.
-- [[a-nightly-dreaming-pass-exists]] — the overnight pass consolidates the
+- [[a-nightly-reflection-pass-exists]] — the overnight pass consolidates the
   graph and fixes apps; defer heavy reorganizing to it.
 
 ## The short version
@@ -25,11 +25,11 @@ before you record, link, or tidy notes.
   (preferences, interests, personality, a hard-won bug + root cause) — not
   everything, and not generic app/platform how-to (that's a skill now). Default
   to recording nothing.
-- **Day-to-day**, append a quick line to `inbox.md`; the nightly dreaming pass
+- **Day-to-day**, append a quick line to `inbox.md`; the nightly reflection pass
   consolidates it into proper notes. When you already know the clean fact,
   write the note directly under `notes/` and link it into a map.
 - **One idea per note.** Title it as the specific claim. Link every note into
   at least one map ([[index]] → maps → notes). No orphans.
 - **Tidy lightly by day** (drop stale, collapse obvious dupes, newer wins);
   **defer the reorg** (merges that need judgment, promote-to-MOC, restructuring)
-  to the nightly dreaming pass.
+  to the nightly reflection pass.

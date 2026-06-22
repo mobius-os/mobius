@@ -37,7 +37,7 @@ SQLAlchemy `create_all` only CREATEs missing tables; it never adds a column to a
 pm-commit 'one-line what and why'
 ```
 
-It stages, unstages a runtime-state denylist (profiles, compiled, logs, generated), then commits; it refuses (exit 2) if >50 files stage after filtering. Re-run with `--allow-broad` only after confirming the staged set is what you meant. The memory graph under `shared/memory/` and your editable skills under `shared/skills/` are tracked here, so this history is your undo for a bad consolidation or a skill edit you regret. The nightly Dreaming pass also takes a pre-run snapshot before it touches anything.
+It stages, unstages a runtime-state denylist (profiles, compiled, logs, generated), then commits; it refuses (exit 2) if >50 files stage after filtering. Re-run with `--allow-broad` only after confirming the staged set is what you meant. The memory graph under `shared/memory/` and your editable skills under `shared/skills/` are tracked here, so this history is your undo for a bad consolidation or a skill edit you regret. The nightly Reflection pass also takes a pre-run snapshot before it touches anything.
 
 To actually roll one back, find the commit that last had the good version and restore just that path:
 

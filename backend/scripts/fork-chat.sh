@@ -2,7 +2,7 @@
 # fork-chat.sh <chat_id> "<interview prompt>"
 #
 # Forks a past chat into a THROWAWAY copy and interviews the agent that did the
-# work, so the nightly Dreaming agent can ask it what happened, what to prepare
+# work, so the nightly Reflection agent can ask it what happened, what to prepare
 # for the user, what was hard, how well it used its skills, and how the
 # knowledge graph could improve. Prints the agent's answer to stdout.
 #
@@ -16,7 +16,7 @@
 # `session-env/<id>` dir but no transcript) or one the CLI's ~30-day cleanup
 # deleted. `--resume` against a missing transcript dies "No conversation
 # found", which (piped to /dev/null) used to make this script silently print
-# nothing — so Dreaming's interviews quietly failed for most older chats.
+# nothing — so Reflection's interviews quietly failed for most older chats.
 # Instead we check the transcript exists; when it doesn't, we reseed a fresh
 # same-provider session from the chat's stored transcript so the interview
 # still runs. Continuity then comes from the DB, not a byte-exact fork.

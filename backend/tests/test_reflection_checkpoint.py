@@ -1,12 +1,12 @@
-"""Dreaming last-run marker — a simple bookmark, NOT an exactly-once engine.
+"""Reflection last-run marker — a simple bookmark, NOT an exactly-once engine.
 
 The agent is the dedupe layer (it skips its own commits + unchanged chats); this just
 records the last successfully-reviewed HEAD and tolerates a bad/absent marker by
-bootstrapping. See app/dreaming_checkpoint.py for the philosophy.
+bootstrapping. See app/reflection_checkpoint.py for the philosophy.
 """
 import pytest
 
-from app import dreaming_checkpoint as dc
+from app import reflection_checkpoint as dc
 
 
 def test_marker_write_then_read_roundtrips(tmp_path):

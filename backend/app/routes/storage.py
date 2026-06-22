@@ -770,7 +770,7 @@ async def write_shared_file(
   agent's write, since the write itself is the recovery target.
 
   Also emits a `storage_write` activity event with `app_id=0` and
-  `scope="shared"` so the dreaming agent sees theme + experience-file
+  `scope="shared"` so the reflection agent sees theme + experience-file
   edits as platform activity. Per-app writes already emit; without
   this branch shared/* changes were invisible.
   """
@@ -833,7 +833,7 @@ def delete_shared_file(
   """Deletes a file from the shared data directory. 404 if missing.
 
   Emits a `storage_write` event with negative size_delta so the
-  dreaming agent sees shared-file removals symmetrically with
+  reflection agent sees shared-file removals symmetrically with
   creations / updates.
   """
   base = Path(get_settings().data_dir) / "shared"

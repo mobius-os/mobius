@@ -252,7 +252,7 @@ def _skill_file_read_name(
   The match is purely lexical (normpath, no filesystem access) and
   returns "" for anything that isn't a direct skill-file read. A
   relative path is resolved against the turn's cwd: the agent runs
-  with cwd=/data, so `shared/skills/mind.md` is the same load.
+  with cwd=/data, so `shared/skills/memory.md` is the same load.
   """
   if tool_name != "Read" or not isinstance(input_data, dict):
     return ""
@@ -348,7 +348,7 @@ def observe_memory_node_read(
 
   Mirrors `observe_skill_file_read`: called from `can_use_tool` on
   every non-question tool, filters down to note/MOC reads, and merges
-  the slug into this chat's read-trace file so the nightly Dreaming
+  the slug into this chat's read-trace file so the nightly Reflection
   pass can see what the agent went looking for. Never raises — a full
   disk or broken trace file must not block or fail the Read being
   intercepted."""

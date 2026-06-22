@@ -1,4 +1,4 @@
-"""Dreaming-run reliability: turn countdown + guaranteed-brief fallback.
+"""Reflection-run reliability: turn countdown + guaranteed-brief fallback.
 
 Three of four prod nights died at max_turns (rc=2, subtype
 error_max_turns) with NO brief. The skill's "bail to the brief by turn
@@ -14,7 +14,7 @@ from datetime import date
 
 import pytest
 
-import scripts.dreaming_runner as dr
+import scripts.reflection_runner as dr
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +174,7 @@ def test_todays_brief_path_resolves_from_staged_app_id(
   tmp_path, monkeypatch,
 ):
   monkeypatch.setattr(dr, "DATA_DIR", tmp_path)
-  inputs = tmp_path / "apps" / "dreaming" / "inputs"
+  inputs = tmp_path / "apps" / "reflection" / "inputs"
   inputs.mkdir(parents=True)
   (inputs / "app_id").write_text("46\n")
   expected = (
@@ -189,7 +189,7 @@ def test_todays_brief_path_none_when_unstaged_or_blank(
 ):
   monkeypatch.setattr(dr, "DATA_DIR", tmp_path)
   assert dr.todays_brief_path() is None
-  inputs = tmp_path / "apps" / "dreaming" / "inputs"
+  inputs = tmp_path / "apps" / "reflection" / "inputs"
   inputs.mkdir(parents=True)
   (inputs / "app_id").write_text("  \n")
   assert dr.todays_brief_path() is None
@@ -214,7 +214,7 @@ def test_fallback_goal_points_at_artifacts_and_notes_cutoff(
 # ---------------------------------------------------------------------------
 
 def _stage_app_id(tmp_path, app_id="46"):
-  inputs = tmp_path / "apps" / "dreaming" / "inputs"
+  inputs = tmp_path / "apps" / "reflection" / "inputs"
   inputs.mkdir(parents=True, exist_ok=True)
   (inputs / "app_id").write_text(app_id)
 
@@ -354,7 +354,7 @@ async def test_fallback_crash_is_swallowed(tmp_path, monkeypatch):
 def test_seed_skill_morning_chat_is_app_attributed():
   """The morning chat must ride the app-attributed chat contract.
 
-  The conversation about a brief lives inside the Dreaming app,
+  The conversation about a brief lives inside the Reflection app,
   embedded under the brief. Creating it owner-side (`POST
   /api/chats` with the service token) leaves created_by_app_id
   NULL, so it lands in the owner's drawer history next to their own
@@ -366,7 +366,7 @@ def test_seed_skill_morning_chat_is_app_attributed():
   from pathlib import Path
 
   seed = (
-    Path(dr.__file__).resolve().parent / "seed-skills" / "dreaming.md"
+    Path(dr.__file__).resolve().parent / "seed-skills" / "reflection.md"
   ).read_text(encoding="utf-8")
   assert "/api/app-chats" in seed
   assert "/api/auth/app-token" in seed

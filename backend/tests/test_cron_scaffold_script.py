@@ -16,7 +16,7 @@ def test_init_cron_scaffold_does_not_splice_existing_crontab_into_comments(
   later replayed as shell code.
   """
   app_base = tmp_path / "apps"
-  app_dir = app_base / "dreaming"
+  app_dir = app_base / "reflection"
   app_dir.mkdir(parents=True)
 
   state = tmp_path / "crontab.txt"
@@ -48,7 +48,7 @@ def test_init_cron_scaffold_does_not_splice_existing_crontab_into_comments(
   script = Path(__file__).parents[1] / "scripts" / "init-cron-scaffold.sh"
 
   result = subprocess.run(
-    [str(script), "dreaming", "0 6 * * *", "fetch.sh", "46"],
+    [str(script), "reflection", "0 6 * * *", "fetch.sh", "46"],
     text=True,
     capture_output=True,
     env=env,

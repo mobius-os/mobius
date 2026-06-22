@@ -500,7 +500,7 @@ async def providers_models(
   preferences are still honored so app pickers match the chat picker.
 
   Accepts owner OR app-scoped tokens — mini-app Settings tabs (news
-  picker, Dreaming Settings, recovery chat picker) need this list to
+  picker, Reflection Settings, recovery chat picker) need this list to
   render real choices. Rejecting app tokens here was the silent reason
   those pickers fell back to FALLBACK_GROUPS (one model per provider).
   This is a read; no state changes and no cross-app concerns — the

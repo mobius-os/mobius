@@ -92,7 +92,7 @@ def test_providers_models_requires_auth(client):
 
 def test_providers_models_accepts_app_token(client, auth):
   """App-scoped JWTs (minted for the news Settings tab, the future
-  Dreaming Settings tab, recovery chat picker) must read the full
+  Reflection Settings tab, recovery chat picker) must read the full
   model list — otherwise the picker silently falls back to one model
   per provider. The endpoint is read-only and the same list is
   already visible to every running mini-app via the CLI runtime,

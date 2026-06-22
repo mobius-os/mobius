@@ -83,9 +83,9 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | File | Role |
 |------|------|
 | `memory.py` | `build_memory_block()` — assembles the agent's injected memory block from the knowledge graph (graph mode, ~25KB budget) |
-| `memory_graph.py` | Builds + lints the knowledge-graph index (`graph.json`) for the Mind viewer |
-| `memory_trace.py` | Persists per-chat read traces of the memory graph for the nightly dreaming pass |
-| `dreaming_checkpoint.py` | Dreaming's last-run marker (what to review tonight) |
+| `memory_graph.py` | Builds + lints the knowledge-graph index (`graph.json`) for the Memory viewer |
+| `memory_trace.py` | Persists per-chat read traces of the memory graph for the nightly reflection pass |
+| `reflection_checkpoint.py` | Reflection's last-run marker (what to review tonight) |
 | `activity.py` | Append-only JSONL platform-activity log (app_open, app_install, storage_write, …) |
 | `self_reminders.py` | Agent self-scheduling: append-only store of relational check-ins |
 | `theme.py` | Theme CSS management and HTML injection |
@@ -233,7 +233,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 
 ## In-product agent context — three layers
 
-The in-product agent is a first-class reader of this code, and its behavior is governed by three layers, not one. (1) **Constitution** — `skill/core.md`, the owner-curated system prompt, baked to `/app/skill/core.md`; `chat.py` reads it into `system_prompt` (the Claude SDK receives it on every turn; the Codex SDK uses it as base instructions only when starting a new thread, i.e. `session_id is None`). `providers.get_skill_path()` resolves `core.md` only (there is no `agent-skill.md` fallback). (2) **Skills** — `/data/shared/skills/*.md` (building-apps, theming, cron, notifications, recovery, mind, dreaming, …), seeded create-if-absent by `backend/scripts/init_skills.py` from `backend/scripts/seed-skills/`; the agent `Read`s the relevant one on demand and may edit them. (3) **Memory** — the knowledge graph under `/data/shared/memory/` (`index.md` + `mocs/` + `notes/` + `graph.json` + `.ready`), injected progressive-disclosure by `backend/app/memory.py` into the first user message as an `<agent_experience>` block (not the system prompt, so static content caches), indexed by `memory_graph.py`, and viewed through the Mind mini-app. To change agent behavior, edit `skill/core.md` and the seeds — not code-level validators (see the design philosophy above).
+The in-product agent is a first-class reader of this code, and its behavior is governed by three layers, not one. (1) **Constitution** — `skill/core.md`, the owner-curated system prompt, baked to `/app/skill/core.md`; `chat.py` reads it into `system_prompt` (the Claude SDK receives it on every turn; the Codex SDK uses it as base instructions only when starting a new thread, i.e. `session_id is None`). `providers.get_skill_path()` resolves `core.md` only (there is no `agent-skill.md` fallback). (2) **Skills** — `/data/shared/skills/*.md` (building-apps, theming, cron, notifications, recovery, memory, reflection, …), seeded create-if-absent by `backend/scripts/init_skills.py` from `backend/scripts/seed-skills/`; the agent `Read`s the relevant one on demand and may edit them. (3) **Memory** — the knowledge graph under `/data/shared/memory/` (`index.md` + `mocs/` + `notes/` + `graph.json` + `.ready`), injected progressive-disclosure by `backend/app/memory.py` into the first user message as an `<agent_experience>` block (not the system prompt, so static content caches), indexed by `memory_graph.py`, and viewed through the Memory mini-app. To change agent behavior, edit `skill/core.md` and the seeds — not code-level validators (see the design philosophy above).
 
 ## Data layout (`/data/` volume)
 

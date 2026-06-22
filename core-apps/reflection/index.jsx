@@ -1,6 +1,6 @@
-/* Dreaming — the nightly morning-brief viewer.
+/* Reflection — the nightly morning-brief viewer.
  *
- * Lists the dated reports the dreaming agent leaves overnight, tracks a
+ * Lists the dated reports the reflection agent leaves overnight, tracks a
  * streak, and lets the owner set the run hour and model. Opening a brief
  * shows TWO things stacked: the brief HTML up top (a sandboxed iframe —
  * the agent's static page) and, beneath it, the MORNING CHAT the nightly
@@ -19,7 +19,7 @@
  *    hardenReportHtml injects a CSP + a minimal height-reporter snippet.
  *
  * Brief↔chat link: the nightly run creates the morning chat app-attributed
- * (`POST /api/app-chats` with a Dreaming app token, title "Morning brief —
+ * (`POST /api/app-chats` with a Reflection app token, title "Morning brief —
  * <date>") so the conversation lives HERE, under its brief, and stays out of
  * the owner's drawer history (`GET /api/chats` hides `created_by_app_id`
  * chats by default). The run SHOULD write a sibling
@@ -103,7 +103,7 @@ const REPORT_HEIGHT_SCRIPT = `<script>
   function emit(){
     var h=Math.max(document.body?document.body.scrollHeight:0,
                    document.documentElement.scrollHeight);
-    if(h>0)parent.postMessage({type:'dreaming:brief-height',height:h},'*');
+    if(h>0)parent.postMessage({type:'reflection:brief-height',height:h},'*');
   }
   if(document.readyState==='loading'){
     document.addEventListener('DOMContentLoaded',emit);
@@ -308,30 +308,30 @@ function dayOfMonth(dateStr) {
 // states feel alive rather than static.
 // ---------------------------------------------------------------------------
 
-const ACCENT = '#7c6cf0'        // dreaming's own violet
+const ACCENT = '#7c6cf0'        // reflection's own violet
 const ACCENT_2 = '#a78bfa'      // lighter companion for gradients/glows
 const ACCENT_DIM = 'rgba(124,108,240,0.13)'
 const ACCENT_DIM_2 = 'rgba(167,139,250,0.10)'
 
 const KEYFRAMES = `
-@keyframes dreaming-drift {
+@keyframes reflection-drift {
   0%   { transform: translateY(0) rotate(0deg); opacity: .85; }
   50%  { transform: translateY(-6px) rotate(4deg); opacity: 1; }
   100% { transform: translateY(0) rotate(0deg); opacity: .85; }
 }
-@keyframes dreaming-shimmer {
+@keyframes reflection-shimmer {
   0%   { background-position: -180% 0; }
   100% { background-position: 180% 0; }
 }
-@keyframes dreaming-rise {
+@keyframes reflection-rise {
   from { opacity: 0; transform: translateY(8px); }
   to   { opacity: 1; transform: translateY(0); }
 }
-@keyframes dreaming-pulse {
+@keyframes reflection-pulse {
   0%, 100% { opacity: .55; }
   50%      { opacity: 1; }
 }
-@keyframes dreaming-spin {
+@keyframes reflection-spin {
   to { transform: rotate(360deg); }
 }
 `
@@ -339,26 +339,26 @@ const KEYFRAMES = `
 // Inject the keyframes + a couple of structural rules once. CSS-in-JS can't
 // express @keyframes or :hover/:focus inline, so a single scoped <style> tag
 // carries them. Idempotent — keyed by id so a remount doesn't duplicate it.
-function useDreamingStyles() {
+function useReflectionStyles() {
   useEffect(() => {
-    const id = 'dreaming-keyframes'
+    const id = 'reflection-keyframes'
     if (document.getElementById(id)) return
     const el = document.createElement('style')
     el.id = id
     el.textContent = KEYFRAMES + `
-      .dreaming-card { transition: border-color .16s ease, transform .12s ease, box-shadow .16s ease, background .16s ease; }
-      .dreaming-card:hover { border-color: ${ACCENT}; box-shadow: 0 6px 22px -12px ${ACCENT}; }
-      .dreaming-card:active { transform: scale(.992); }
-      .dreaming-card:focus-visible { outline: 2px solid ${ACCENT}; outline-offset: 2px; }
-      .dreaming-pressable { transition: background .14s ease, border-color .14s ease, transform .1s ease, color .14s ease; }
-      .dreaming-pressable:active { transform: scale(.97); }
-      .dreaming-pressable:focus-visible { outline: 2px solid ${ACCENT}; outline-offset: 2px; }
-      .dreaming-rise { animation: dreaming-rise .32s cubic-bezier(.22,.61,.36,1) both; }
-      .dreaming-scroll::-webkit-scrollbar { width: 9px; height: 9px; }
-      .dreaming-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; border: 2px solid transparent; background-clip: padding-box; }
-      .dreaming-scroll::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: padding-box; }
+      .reflection-card { transition: border-color .16s ease, transform .12s ease, box-shadow .16s ease, background .16s ease; }
+      .reflection-card:hover { border-color: ${ACCENT}; box-shadow: 0 6px 22px -12px ${ACCENT}; }
+      .reflection-card:active { transform: scale(.992); }
+      .reflection-card:focus-visible { outline: 2px solid ${ACCENT}; outline-offset: 2px; }
+      .reflection-pressable { transition: background .14s ease, border-color .14s ease, transform .1s ease, color .14s ease; }
+      .reflection-pressable:active { transform: scale(.97); }
+      .reflection-pressable:focus-visible { outline: 2px solid ${ACCENT}; outline-offset: 2px; }
+      .reflection-rise { animation: reflection-rise .32s cubic-bezier(.22,.61,.36,1) both; }
+      .reflection-scroll::-webkit-scrollbar { width: 9px; height: 9px; }
+      .reflection-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; border: 2px solid transparent; background-clip: padding-box; }
+      .reflection-scroll::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: padding-box; }
       @media (prefers-reduced-motion: reduce) {
-        .dreaming-rise, [class^="dreaming-"] { animation: none !important; }
+        .reflection-rise, [class^="reflection-"] { animation: none !important; }
       }
     `
     document.head.appendChild(el)
@@ -392,7 +392,7 @@ const S = {
     background: `linear-gradient(135deg, ${ACCENT} 0%, ${ACCENT_2} 100%)`,
     boxShadow: `0 4px 16px -6px ${ACCENT}`,
   },
-  moon: { fontSize: '18px', lineHeight: 1, animation: 'dreaming-drift 6s ease-in-out infinite' },
+  moon: { fontSize: '18px', lineHeight: 1, animation: 'reflection-drift 6s ease-in-out infinite' },
   titleStack: { display: 'flex', flexDirection: 'column', minWidth: 0, lineHeight: 1.15 },
   title: {
     fontSize: '21px', fontWeight: 750, letterSpacing: '-0.5px', margin: 0,
@@ -481,14 +481,14 @@ const S = {
     background: `linear-gradient(160deg, ${ACCENT_DIM} 0%, ${ACCENT_DIM_2} 100%)`,
     border: '1px solid var(--border)',
   },
-  emptyMoon: { fontSize: '34px', animation: 'dreaming-drift 6s ease-in-out infinite' },
+  emptyMoon: { fontSize: '34px', animation: 'reflection-drift 6s ease-in-out infinite' },
   emptyTitle: { fontSize: '17px', fontWeight: 700, color: 'var(--text)', letterSpacing: '-0.2px', marginBottom: '8px' },
 
   loadingWrap: { textAlign: 'center', padding: '64px 24px', color: 'var(--muted)', fontSize: '13px' },
   spinner: {
     width: '26px', height: '26px', borderRadius: '50%', margin: '0 auto 14px',
     border: `2.5px solid ${ACCENT_DIM}`, borderTopColor: ACCENT,
-    animation: 'dreaming-spin 0.8s linear infinite',
+    animation: 'reflection-spin 0.8s linear infinite',
   },
 
   errorBox: {
@@ -812,7 +812,7 @@ function makeStorage(appId, token) {
 }
 
 // ---------------------------------------------------------------------------
-// Tiny offline snapshot. Dreaming reads via direct fetch (text bodies +
+// Tiny offline snapshot. Reflection reads via direct fetch (text bodies +
 // apps-list), neither of which the platform read-cache covers, so we keep our
 // own localStorage snapshot: the dates list, the streak, and the latest
 // summary. This is read-only mirror state — only the cron writes reports, so
@@ -822,7 +822,7 @@ function makeStorage(appId, token) {
 // ---------------------------------------------------------------------------
 
 const CACHE_VERSION = 1
-function cacheKey(appId) { return `dreaming:${appId}:list:v${CACHE_VERSION}` }
+function cacheKey(appId) { return `reflection:${appId}:list:v${CACHE_VERSION}` }
 
 function readCache(appId) {
   try {
@@ -935,7 +935,7 @@ function MorningChat({ chatId }) {
         <span aria-hidden="true" style={{ fontSize: '15px', lineHeight: 1.2 }}>💬</span>
         <span>
           The conversation about this brief isn’t available in this view.
-          Open the Dreaming app inside Möbius to reply.
+          Open the Reflection app inside Möbius to reply.
         </span>
       </div>
     )
@@ -960,7 +960,7 @@ function FeedbackLauncher({ dateStr, chatId }) {
     // itself is already on screen (and, when we continue the morning chat,
     // in the conversation), so echoing an excerpt back is just noise.
     const draft = [
-      `Feedback on the Dreaming brief for ${dateStr}:`,
+      `Feedback on the Reflection brief for ${dateStr}:`,
       '',
       'My feedback:',
     ].join('\n')
@@ -977,7 +977,7 @@ function FeedbackLauncher({ dateStr, chatId }) {
   }
   return (
     <div style={S.feedbackRow}>
-      <button style={S.feedbackBtn} className="dreaming-pressable" onClick={openFeedbackChat}>
+      <button style={S.feedbackBtn} className="reflection-pressable" onClick={openFeedbackChat}>
         Give feedback on this brief
       </button>
     </div>
@@ -1057,7 +1057,7 @@ function ReportQuestions({ questions, onAnswer }) {
                     type="button"
                     role={isMulti ? 'checkbox' : 'radio'}
                     aria-checked={on}
-                    className="dreaming-pressable"
+                    className="reflection-pressable"
                     style={S.rqOpt(on, dim)}
                     onClick={answered ? undefined : () => choose(q, opt.label)}
                     disabled={answered}
@@ -1076,7 +1076,7 @@ function ReportQuestions({ questions, onAnswer }) {
       ) : (
         <button
           type="button"
-          className="dreaming-pressable"
+          className="reflection-pressable"
           style={S.rqSubmit(allAnswered)}
           onClick={submit}
           disabled={!allAnswered}
@@ -1147,7 +1147,7 @@ function ReportDetail({ dateStr, storage, online, onBack }) {
   // passively via postMessage instead.
   useEffect(() => {
     const onMessage = (ev) => {
-      if (!ev.data || ev.data.type !== 'dreaming:brief-height') return
+      if (!ev.data || ev.data.type !== 'reflection:brief-height') return
       const h = Number(ev.data.height)
       if (Number.isFinite(h) && h > 0) {
         setBriefHeight(Math.min(Math.max(h, 200), 100000))
@@ -1164,10 +1164,10 @@ function ReportDetail({ dateStr, storage, online, onBack }) {
   }, [])
 
   return (
-    <div style={S.detail} className="dreaming-rise">
+    <div style={S.detail} className="reflection-rise">
       <div style={S.detailBar}>
         <button
-          style={S.backBtn} className="dreaming-pressable"
+          style={S.backBtn} className="reflection-pressable"
           onClick={onBack} aria-label="Back to reports"
         >
           <span aria-hidden="true" style={{ fontSize: '16px' }}>‹</span> Briefs
@@ -1208,7 +1208,7 @@ function ReportDetail({ dateStr, storage, online, onBack }) {
       )}
 
       {state.phase === 'ready' && (
-        <div style={S.splitBody} className="dreaming-scroll">
+        <div style={S.splitBody} className="reflection-scroll">
           <div style={S.briefPanel}>
             <iframe
               ref={iframeRef}
@@ -1267,7 +1267,7 @@ function ReportDetail({ dateStr, storage, online, onBack }) {
                 <span>
                   No conversation was opened for this brief — it’s a read-only
                   morning note. Any questions appear as tap cards in the brief
-                  above; open Dreaming inside Möbius to reply here.
+                  above; open Reflection inside Möbius to reply here.
                 </span>
               </div>
             ) : (
@@ -1359,7 +1359,7 @@ function ReportsList({ appId, storage, online, onOpen }) {
             : 'You’re offline and there’s nothing cached yet.'}
         </span>
         {online && (
-          <button style={S.retryBtn} className="dreaming-pressable" onClick={() => setReloadKey((k) => k + 1)}>
+          <button style={S.retryBtn} className="reflection-pressable" onClick={() => setReloadKey((k) => k + 1)}>
             Try again
           </button>
         )}
@@ -1374,15 +1374,15 @@ function ReportsList({ appId, storage, online, onOpen }) {
           <span style={S.emptyMoon} aria-hidden="true">🌙</span>
         </div>
         <div style={S.emptyTitle}>No briefs yet</div>
-        Dreaming runs overnight — consolidating what the day’s agents learned,
-        tidying your Mind, and tending your apps. Your first morning brief will
+        Reflection runs overnight — consolidating what the day’s agents learned,
+        tidying your Memory, and tending your apps. Your first morning brief will
         be waiting right here.
       </div>
     )
   }
 
   return (
-    <div className="dreaming-rise">
+    <div className="reflection-rise">
       <StreakBar streak={streak} />
       {!online && (
         <div style={S.offlineBanner}>
@@ -1396,7 +1396,7 @@ function ReportsList({ appId, storage, online, onOpen }) {
           <button
             key={d}
             style={S.card(i === 0)}
-            className="dreaming-card"
+            className="reflection-card"
             onClick={() => onOpen(d)}
           >
             <div style={S.dateTile(i === 0)} aria-hidden="true">
@@ -1427,7 +1427,7 @@ function StreakBar({ streak }) {
   return (
     <div style={{ maxWidth: '660px', margin: '0 auto 16px', display: 'flex' }}>
       <span style={{ ...S.streakBadge(false), padding: '7px 13px', fontSize: '13px' }}>
-        <span aria-hidden="true" style={{ animation: 'dreaming-drift 4s ease-in-out infinite' }}>🔥</span>
+        <span aria-hidden="true" style={{ animation: 'reflection-drift 4s ease-in-out infinite' }}>🔥</span>
         <strong style={{ fontWeight: 750 }}>{streak}</strong>
         <span style={{ fontWeight: 550 }}>
           {streak === 1 ? 'morning in a row' : 'mornings in a row'}
@@ -1563,14 +1563,14 @@ function SettingsTab({ appId, storage, online, token }) {
   }
 
   return (
-    <div style={S.settingsWrap} className="dreaming-rise">
+    <div style={S.settingsWrap} className="reflection-rise">
       <div style={S.settingsCard}>
         <div style={S.sectionHead}>
           <span style={S.sectionIcon} aria-hidden="true">⏰</span>
           <h2 style={S.sectionLabel}>When to dream</h2>
         </div>
         <p style={S.note}>
-          Pick the hour your morning brief should be ready. Dreaming writes it
+          Pick the hour your morning brief should be ready. Reflection writes it
           overnight so it’s waiting when you wake.
         </p>
         {cronIsCustom ? (
@@ -1607,7 +1607,7 @@ function SettingsTab({ appId, storage, online, token }) {
         <div style={S.scheduleHint}>
           <span aria-hidden="true">💡</span>
           <span>
-            Schedule changes take effect after the dreaming agent re-installs
+            Schedule changes take effect after the reflection agent re-installs
             its overnight job — usually by the next run. The app saves your
             preference; the agent picks it up from there.
           </span>
@@ -1620,7 +1620,7 @@ function SettingsTab({ appId, storage, online, token }) {
           <h2 style={S.sectionLabel}>Nightly model</h2>
         </div>
         <p style={S.note}>
-          The model Dreaming uses for the overnight pass. It runs its own
+          The model Reflection uses for the overnight pass. It runs its own
           procedure with the default skill.
         </p>
         {modelGroups === null ? (
@@ -1628,7 +1628,7 @@ function SettingsTab({ appId, storage, online, token }) {
         ) : modelGroups.length === 0 ? (
           // Models API unavailable — fall back to letting the CLI choose.
           <div style={S.note}>
-            Model list unavailable. Dreaming will use the CLI's default model
+            Model list unavailable. Reflection will use the CLI's default model
             for your account.
           </div>
         ) : (
@@ -1645,7 +1645,7 @@ function SettingsTab({ appId, storage, online, token }) {
                   setModel(nextModel)
                 }
               }}
-              aria-label="Dreaming model"
+              aria-label="Reflection model"
             >
               <option value={`${provider}\t`}>Provider default</option>
               {modelGroups.map((group) => {
@@ -1681,7 +1681,7 @@ function SettingsTab({ appId, storage, online, token }) {
       </div>
 
       <div style={S.saveRow}>
-        <button style={S.saveBtn(saving)} className="dreaming-pressable" onClick={save} disabled={saving}>
+        <button style={S.saveBtn(saving)} className="reflection-pressable" onClick={save} disabled={saving}>
           {saving ? 'Saving…' : 'Save settings'}
         </button>
         {toast && <span style={S.toast}>{toast}</span>}
@@ -1696,7 +1696,7 @@ function SettingsTab({ appId, storage, online, token }) {
 // ---------------------------------------------------------------------------
 
 export default function App({ appId, token }) {
-  useDreamingStyles()
+  useReflectionStyles()
   const [tab, setTab] = useState('reports')
   const [openDate, setOpenDate] = useState(null)
   const online = useOnline()
@@ -1729,7 +1729,7 @@ export default function App({ appId, token }) {
     try { detailNavRef.current?.close?.() } catch {}
     detailNavRef.current = null
     if (window.mobius?.nav?.open) {
-      const handle = window.mobius.nav.open('dreaming-report', () => {
+      const handle = window.mobius.nav.open('reflection-report', () => {
         detailNavRef.current = null
         setOpenDate(null)
       })
@@ -1753,7 +1753,7 @@ export default function App({ appId, token }) {
             <span style={S.moon}>🌙</span>
           </span>
           <div style={S.titleStack}>
-            <h1 style={S.title}>Dreaming</h1>
+            <h1 style={S.title}>Reflection</h1>
             <span style={S.subtitle}>your overnight brief</span>
           </div>
         </div>
@@ -1775,7 +1775,7 @@ export default function App({ appId, token }) {
         </div>
       </div>
       <div style={S.divider} />
-      <div style={{ ...S.scroll }} className="dreaming-scroll">
+      <div style={{ ...S.scroll }} className="reflection-scroll">
         {tab === 'reports' ? (
           <>
             <ReportsList

@@ -1,15 +1,15 @@
 <!doctype html>
 <!--
-  Möbius — Dreaming morning-brief template.
+  Möbius — Reflection morning-brief template.
 
-  This is the page the nightly Dreaming agent fills and the Dreaming app renders.
+  This is the page the nightly Reflection agent fills and the Reflection app renders.
   It is INTENTIONALLY self-contained and offline-safe: a single inline <style>,
   ZERO external URLs (no fonts, no CDN, no images-by-URL), a system-font stack,
   design-token CSS variables, a real type scale, prefers-color-scheme dark+light,
   and @media print. No JavaScript — this page renders inside a sandboxed iframe
   with no script, so it must NOT host the morning chat or any interactive card.
 
-  The chat lives BELOW this brief: the Dreaming app renders this static page, then
+  The chat lives BELOW this brief: the Reflection app renders this static page, then
   mounts the morning-chat thread underneath it. Keep this page a clean READ. The
   structured decisions ride in the brief as a declarative question carrier (the
   data-report-questions section near the end) — the app lifts that out and renders
@@ -80,7 +80,7 @@
     --border:   #e4e1dc;
     --border-2: #d6d2cc;
 
-    /* Committed accent — a deep aurora indigo→violet, the Dreaming hue. */
+    /* Committed accent — a deep aurora indigo→violet, the Reflection hue. */
     --accent:        #6d5ef0;
     --accent-press:  #5a4cd6;
     --accent-tint:   #ece9fd;
@@ -380,7 +380,7 @@
      section before rendering this iframe (it re-renders the questions as
      native tap cards OUTSIDE the frame), so these rules normally never apply
      — they're a graceful fallback only if the brief is ever viewed raw,
-     outside the Dreaming app. */
+     outside the Reflection app. */
   .report-questions {
     margin-top: var(--sp-5);
     padding: var(--sp-4) var(--sp-5);
@@ -519,7 +519,7 @@
         <path d="M4 12c0-3.2 3-5 6.2-3.4C13 10 11 14 13.8 15.4 17 17 20 15.2 20 12s-3-5-6.2-3.4C11 10 13 14 10.2 15.4 7 17 4 15.2 4 12Z"
               stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
       </svg>
-      Möbius · Dreaming
+      Möbius · Reflection
     </span>
     <span class="dateline">{{DATE_LONG}} · while you slept</span>
     <h1>{{TITLE}}</h1>
@@ -639,7 +639,7 @@
         <li><span class="label">{{LEDGER_LABEL_1}}</span><span class="val">{{LEDGER_VAL_1}}</span></li>
         <li><span class="label">Chats &amp; subagent runs interviewed</span><span class="val">{{N_INTERVIEWED}}</span></li>
         <li><span class="label">Skills improved</span><span class="val">{{N_SKILLS}}</span></li>
-        <li><span class="label">Mind: notes merged / pruned / added</span><span class="val">{{N_MIND}}</span></li>
+        <li><span class="label">Memory: notes merged / pruned / added</span><span class="val">{{N_MEMORY}}</span></li>
         <li><span class="label">App fixes applied</span><span class="val">{{N_APPFIX}}</span></li>
         <li><span class="label">Security findings (surfaced)</span><span class="val">{{N_SEC}}</span></li>
         <!-- /repeatable -->
@@ -668,7 +668,7 @@
   </div>
 
   <footer>
-    <span>Möbius · Dreaming run {{RUN_ID}}</span>
+    <span>Möbius · Reflection run {{RUN_ID}}</span>
     <span>{{DATE}}</span>
   </footer>
 
