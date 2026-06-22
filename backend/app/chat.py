@@ -2352,6 +2352,14 @@ async def _run_chat_impl(
       _publish_chat_run_finished(chat_id)
     db.close()
     return disposition
+  # Refresh provider credentials before the turn if they can go stale
+  # mid-run. For Claude this hands the CLI an already-fresh OAuth token so
+  # it never refreshes (and races the rotating single-use refresh token)
+  # during the turn — the fix for the intermittent first-send 401. No-op
+  # for providers that manage their own auth (Codex). Best effort by
+  # contract — it never blocks the turn.
+  await provider.ensure_auth(settings.data_dir)
+
   data_dir = Path(settings.data_dir)
   cwd = str(data_dir) if data_dir.exists() else str(Path.cwd())
 

@@ -16,6 +16,7 @@ from typing import Literal
 
 EventType = Literal[
   "text",
+  "text_boundary",
   "tool_start",
   "tool_input",
   "tool_output",
@@ -66,8 +67,14 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
 
   if event_type == "text":
     content = event.get("content", "")
-    # Append to last text block or create new one.
+    # Append to last text block or create new one. A preceding internal
+    # text_boundary marker means the provider started a new assistant
+    # message item without a visible tool block; replace the marker with
+    # the real text block instead of concatenating into the prior text.
     if (assistant_blocks
+        and assistant_blocks[-1].get("type") == "text_boundary"):
+      assistant_blocks[-1] = {"type": "text", "content": content}
+    elif (assistant_blocks
         and assistant_blocks[-1].get("type") == "text"):
       assistant_blocks[-1]["content"] += content
     else:
@@ -75,6 +82,20 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
         {"type": "text", "content": content}
       )
     return True
+
+  if event_type == "text_boundary":
+    # Provider streams can contain multiple assistant message items separated
+    # by hidden/internal work that Möbius does not render as a tool block.
+    # Preserve that provider boundary explicitly so later text starts a fresh
+    # paragraph instead of becoming `previous.next`. The marker is internal:
+    # build_assistant_message ignores it and finalize_blocks removes any
+    # trailing boundary that never received text.
+    if (assistant_blocks
+        and assistant_blocks[-1].get("type") == "text"
+        and assistant_blocks[-1].get("content")):
+      assistant_blocks.append({"type": "text_boundary"})
+      return True
+    return False
 
   if event_type == "tool_start":
     assistant_blocks.append({
@@ -355,7 +376,11 @@ def build_assistant_message(
 
 
 def finalize_blocks(assistant_blocks: list) -> None:
-  """Force-completes any tool blocks still marked as running."""
+  """Force-completes running tools and removes unused internal markers."""
+  assistant_blocks[:] = [
+    blk for blk in assistant_blocks
+    if blk.get("type") != "text_boundary"
+  ]
   for blk in assistant_blocks:
     if (blk.get("type") == "tool"
         and blk.get("status") == "running"):

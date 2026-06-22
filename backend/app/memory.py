@@ -221,6 +221,41 @@ def _note_score(fm: dict[str, object]) -> tuple[int, int]:
   )
 
 
+_FLOOR_CATEGORIES = ("user_model", "active_project")
+
+
+def _frontmatter_mentions(fm: dict[str, object], key: str, needle: str) -> bool:
+  value = fm.get(key)
+  if isinstance(value, list):
+    return any(str(item) == needle for item in value)
+  if isinstance(value, str):
+    return needle in value
+  return False
+
+
+def _note_floor_category(fm: dict[str, object]) -> str | None:
+  """Returns the protected memory lane a note belongs to, if any.
+
+  This is intentionally broad enough to cover both current `mocs: [...]`
+  frontmatter and older live notes that used `maps: [[...]]`.
+  """
+  if (
+    _frontmatter_mentions(fm, "mocs", "about-the-user")
+    or _frontmatter_mentions(fm, "maps", "about-the-user")
+    or _frontmatter_mentions(fm, "tags", "user")
+    or _frontmatter_mentions(fm, "tags", "user-pref")
+  ):
+    return "user_model"
+  if (
+    _frontmatter_mentions(fm, "mocs", "building-mobius-apps")
+    or _frontmatter_mentions(fm, "maps", "building-mobius-apps")
+    or _frontmatter_mentions(fm, "tags", "project")
+    or _frontmatter_mentions(fm, "tags", "app")
+  ):
+    return "active_project"
+  return None
+
+
 def _read(path: Path) -> str:
   try:
     return path.read_text(encoding="utf-8")
@@ -242,7 +277,7 @@ def _select_hot_notes(
   """Returns up to `max_notes` (path, full_text) pairs SELECTED by score but
   SORTED by path, so the rendered order is stable across nightly score
   changes."""
-  candidates: list[tuple[tuple[int, int], Path, str]] = []
+  candidates: list[tuple[tuple[int, int], Path, str, dict[str, object]]] = []
   try:
     files = sorted(notes_dir.glob("*.md"))
   except OSError:
@@ -262,12 +297,45 @@ def _select_hot_notes(
       continue
     imp, base_acc = _note_score(fm)
     score = (imp, base_acc + usage.get(fp.stem, 0))
-    candidates.append((score, fp, text))
-  # Select the top-N by score (descending), then re-sort the winners by path.
+    candidates.append((score, fp, text, fm))
+  # Select the top-N by score (descending). Protect the best user-model and
+  # active-project notes from being crowded out by platform/meta hotness: this
+  # is still value-ranked (best note per lane wins), but it prevents a mature
+  # instance from silently opening a session with zero user/project context.
   candidates.sort(key=lambda c: c[0], reverse=True)
-  winners = candidates[:max_notes]
-  winners.sort(key=lambda c: c[1].name)
-  return [(fp, text) for _, fp, text in winners]
+  if max_notes <= 0:
+    return []
+  winners_by_path = {cand[1]: cand for cand in candidates[:max_notes]}
+  floor_paths: list[Path] = []
+  for category in _FLOOR_CATEGORIES:
+    if len(floor_paths) >= max_notes:
+      break
+    floor = next(
+      (cand for cand in candidates if _note_floor_category(cand[3]) == category),
+      None,
+    )
+    if floor is None:
+      continue
+    fp = floor[1]
+    if fp not in floor_paths:
+      floor_paths.append(fp)
+    winners_by_path[fp] = floor
+
+  protected = set(floor_paths)
+  while len(winners_by_path) > max_notes:
+    removable = [cand for fp, cand in winners_by_path.items() if fp not in protected]
+    if not removable:
+      break
+    victim = min(removable, key=lambda c: (c[0][0], c[0][1], c[1].name))
+    winners_by_path.pop(victim[1], None)
+
+  # Render protected floors first so a tight byte budget cannot be consumed by
+  # lower-value notes that sort earlier by filename. Render the rest by path to
+  # preserve the stable prompt-cache-friendly order for the common case.
+  floor_winners = [winners_by_path[fp] for fp in floor_paths if fp in winners_by_path]
+  rest = [cand for fp, cand in winners_by_path.items() if fp not in protected]
+  rest.sort(key=lambda c: c[1].name)
+  return [(fp, text) for _, fp, text, _ in [*floor_winners, *rest]]
 
 
 def build_memory_block(
