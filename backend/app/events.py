@@ -368,10 +368,16 @@ def build_assistant_message(
     b["content"] for b in assistant_blocks
     if b.get("type") == "text" and b.get("content")
   ])
+  # Drop the internal `text_boundary` marker from the persisted blocks. It is
+  # a live-stream-only signal (the frontend's forceNewTextBlock) and is never
+  # a renderable block; the throttled mid-turn PersistTranscript path writes
+  # `blocks` as-is (only the terminal finalize_blocks strips it), so without
+  # this a mid-turn snapshot could carry the marker into Chat.messages. Filter
+  # a copy so the live broadcast still receives the marker.
   return {
     "role": "assistant",
     "content": all_text,
-    "blocks": assistant_blocks,
+    "blocks": [b for b in assistant_blocks if b.get("type") != "text_boundary"],
   }
 
 

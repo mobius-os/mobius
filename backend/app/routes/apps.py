@@ -929,14 +929,15 @@ async def update_app(
     get_system_broadcast().publish(
       {"type": "app_updated", "appId": str(app.id)}
     )
-    # Fire the chat-scoped `app_built` onto the owning chat's stream so the
-    # in-chat "Open <App>" CTA appears for the turn that built/edited it. The
-    # global `app_updated` above busts caches everywhere but never reaches the
-    # chat-scoped CTA gate. No-ops when the chat has no live broadcast (e.g.
-    # an out-of-band edit), so it never plants a spurious CTA. app_watcher
-    # emits the same event on a file-write recompile; the client upsert is
-    # idempotent (deduped by appId), so a double-emit is harmless.
-    publish_app_built_to_owning_chat(db, str(app.id))
+    # Fire the chat-scoped `app_built` CTA ONLY on a real rebuild. A
+    # metadata-only PATCH (pin/rename/share toggles — `jsx_source is None`)
+    # still reaches here (it commits fields without recompiling), and emitting
+    # then would plant an "Open <App>" card on whatever turn the owning chat
+    # happens to be streaming — a correct link in the wrong turn. Gate on
+    # jsx_source so only an actual edit surfaces the CTA. The helper still
+    # no-ops without a live broadcast, and the client upsert dedupes by appId.
+    if body.jsx_source is not None:
+      publish_app_built_to_owning_chat(db, str(app.id))
   return app
 
 
