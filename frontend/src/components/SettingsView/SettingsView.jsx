@@ -43,16 +43,6 @@ export default function SettingsView({ onThemeChange }) {
   // 'idle' | 'checking' | 'checked' — the "Check for updates" button asks the
   // service worker to re-check for a new shell build and re-reads /api/version.
   const [updatePhase, setUpdatePhase] = useState('idle')
-  // The LIVE frame revision the SW is actually serving: vite's stampFrameRev
-  // wrote `<meta name="mobius-frame-rev">` into the BUILT index.html this
-  // document was loaded from. Reading it here (once, on mount) makes the
-  // shell↔frame delivery layer observable — a stale-cached shell shows an old
-  // rev even when /api/version's backend SHA looks current. '' if absent.
-  const [frameRev, setFrameRev] = useState('')
-  useEffect(() => {
-    setFrameRev(document.querySelector('meta[name="mobius-frame-rev"]')?.content || '')
-  }, [])
-
   useEffect(() => {
     // Mirror the full query value so a cache invalidation that
     // resolves to 'dark' actually flips the knob back. The earlier
@@ -273,6 +263,15 @@ export default function SettingsView({ onThemeChange }) {
     }
   }
 
+  // The "Update" action reuses checkForUpdates so the SW pulls the newest shell
+  // build before we reload to activate it — one source of truth for "ask the SW
+  // + re-read /api/version", rather than a bare reload that could race a
+  // not-yet-installed bundle.
+  async function applyUpdate() {
+    await checkForUpdates()
+    window.location.reload()
+  }
+
   const version = versionQuery.data
   // The short SHA of the SHELL BUILD the served UI came from — shell_sha
   // (the served bundle's image-build SHA) is the truthful one; fall back to
@@ -443,12 +442,23 @@ export default function SettingsView({ onThemeChange }) {
               <button
                 className="settings__btn settings__btn--sm settings__btn--nowrap"
                 type="button"
-                onClick={() => window.location.reload()}
+                onClick={applyUpdate}
+                disabled={updatePhase === 'checking'}
               >
-                Update
+                {updatePhase === 'checking' ? 'Updating…' : 'Update'}
               </button>
             ) : (
-              <StatusDot color="--green">Up to date</StatusDot>
+              <div className="settings__app-status">
+                <StatusDot color="--green">Up to date</StatusDot>
+                <button
+                  className="settings__btn settings__btn--outline settings__btn--sm"
+                  type="button"
+                  onClick={checkForUpdates}
+                  disabled={updatePhase === 'checking'}
+                >
+                  {updatePhase === 'checking' ? 'Checking…' : 'Check'}
+                </button>
+              </div>
             )}
           </div>
         </section>
