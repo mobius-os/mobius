@@ -1,7 +1,7 @@
 #!/bin/bash
-# install-core-apps.sh — installs Möbius's two CORE apps (Mind, the
-# memory-graph viewer; and Dreaming, the nightly brief) from baked source,
-# plus the nightly dreaming cron. Idempotent + deploy-aware: registers a
+# install-core-apps.sh — installs Möbius's two CORE apps (Memory, the
+# memory-graph viewer; and Reflection, the nightly brief) from baked source,
+# plus the nightly reflection cron. Idempotent + deploy-aware: registers a
 # missing app, and re-syncs an existing app's UI from baked source only when
 # the baked jsx changed since the last sync (see sync_core_app).
 #
@@ -10,8 +10,8 @@
 # same path register_app.py / the agent use. The service token at
 # /data/service-token.txt is the owner JWT, so it authorizes registration.
 #
-# Core-app source is baked at /app/core-apps/<slug>/. The dreaming app also
-# ships prompt.md + fetch.sh, which are copied to /data/apps/dreaming/ so the
+# Core-app source is baked at /app/core-apps/<slug>/. The reflection app also
+# ships prompt.md + fetch.sh, which are copied to /data/apps/reflection/ so the
 # cron can run them.
 set -uo pipefail
 
@@ -84,7 +84,7 @@ except Exception:
 # the same name exists), so calling it always re-syncs the baked UI. But we
 # gate that on the baked source actually having CHANGED since the last sync:
 # core apps are platform-owned, yet the agent may still improve a core app's
-# UI (e.g. the Dreaming brief renderer), and Möbius treats agent edits as
+# UI (e.g. the Reflection brief renderer), and Möbius treats agent edits as
 # first-class. The hash sentinel means a platform DEPLOY (new baked jsx)
 # propagates on the next boot, while an ordinary restart leaves any
 # post-deploy agent edits untouched. First boot after this mechanism ships
@@ -102,10 +102,10 @@ sync_core_app() {
   # Store-managed apps (installed from the catalog, carrying a manifest_url)
   # own their update lifecycle via the store — the owner re-installs from the
   # manifest. Baked-sync must NOT cp baked source over a store-installed
-  # working tree (that regressed prod Mind: served a stale baked vX over the
+  # working tree (that regressed prod Memory: served a stale baked vX over the
   # store-installed vY). Skip the JSX sync for them entirely, keeping baked-
   # sync a FIRST-INSTALL-ONLY fallback for instances that never reached the
-  # catalog. Platform machinery copied OUTSIDE this function (e.g. the dreaming
+  # catalog. Platform machinery copied OUTSIDE this function (e.g. the reflection
   # cron scripts) is separate and still runs.
   if [[ -n "$existing_id" && -n "$(app_manifest_url "$slug")" ]]; then
     log "$slug is store-managed (manifest_url set) — leaving its UI to the store (id=$existing_id)"
@@ -137,22 +137,22 @@ except Exception: print("")')"
   echo "${id:-$existing_id}"
 }
 
-# --- Mind -------------------------------------------------------------
-# offline_capable stays FALSE (the app default; not PATCHed here). Mind reads
+# --- Memory -------------------------------------------------------------
+# offline_capable stays FALSE (the app default; not PATCHed here). Memory reads
 # the live shared graph at /data/shared/memory/graph.json + per-note markdown;
 # offline support would need those cached/synced, not just the JSX. The store
-# manifest (app-mind/mobius.json) declares false to match — keep all three
+# manifest (app-memory/mobius.json) declares false to match — keep all three
 # (manifest, schema default, this script) in agreement if that ever changes.
-mg_id="$(sync_core_app mind "Mind" "What Möbius knows about you — an Obsidian-style graph of its memory it grows over time.")"
+mg_id="$(sync_core_app memory "Memory" "What Möbius knows about you — an Obsidian-style graph of its memory it grows over time.")"
 # Set the app icon (kg-t1: glossy infinity-as-graph, the owner's pick). Raw PNG
 # bytes; the route downscales + stores. Idempotent — fine to re-PUT each boot.
-if [[ -n "$mg_id" && -f "$CORE_SRC/mind/icon.png" ]]; then
-  curl -s -X PUT -H "Authorization: Bearer $TOKEN" --data-binary @"$CORE_SRC/mind/icon.png" \
-    "$API_BASE_URL/api/apps/$mg_id/icon" -o /dev/null -w 'mind icon: HTTP %{http_code}\n' >>"$LOG" 2>&1 || true
+if [[ -n "$mg_id" && -f "$CORE_SRC/memory/icon.png" ]]; then
+  curl -s -X PUT -H "Authorization: Bearer $TOKEN" --data-binary @"$CORE_SRC/memory/icon.png" \
+    "$API_BASE_URL/api/apps/$mg_id/icon" -o /dev/null -w 'memory icon: HTTP %{http_code}\n' >>"$LOG" 2>&1 || true
 fi
 
-# Migration (kg-t1 rename): Mind supersedes the old "Memory Graph" viewer. On
-# instances that had the predecessor, install-core-apps registers Mind as a NEW
+# Migration (kg-t1 rename): Memory supersedes the old "Memory Graph" viewer. On
+# instances that had the predecessor, install-core-apps registers Memory as a NEW
 # app and would otherwise leave both in the drawer. Soft-archive the old one by
 # renaming (it owns no unique data — it read the shared graph — so we keep the
 # row for audit/recovery rather than hard-deleting). Idempotent + a no-op on
@@ -162,36 +162,36 @@ if [[ -n "$mg_id" ]]; then
   if [[ -n "$old_mg_id" && "$old_mg_id" != "$mg_id" ]]; then
     if curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
       -d '{"name":"Memory Graph (archived)"}' "$API_BASE_URL/api/apps/$old_mg_id" >>"$LOG" 2>&1; then
-      log "archived predecessor Memory Graph app (id=$old_mg_id; superseded by Mind id=$mg_id)"
+      log "archived predecessor Memory Graph app (id=$old_mg_id; superseded by Memory id=$mg_id)"
     else
       log "WARN failed to archive old Memory Graph app (id=$old_mg_id) — drawer may show both"
     fi
   fi
 fi
 
-# --- dreaming ---------------------------------------------------------
-dr_id="$(sync_core_app dreaming "Dreaming" "Your nightly morning brief — Möbius works while you sleep and reports back.")"
+# --- reflection ---------------------------------------------------------
+dr_id="$(sync_core_app reflection "Reflection" "Your nightly morning brief — Möbius works while you sleep and reports back.")"
 
-# Ship the dreaming cron machinery + install the schedule (idempotent).
+# Ship the reflection cron machinery + install the schedule (idempotent).
 # fetch.sh + the fork helpers are platform machinery (a thin runner wrapper
 # and the introspection utilities) — always re-copied from baked source, no
-# version gate: the agent edits the dreaming SKILL, not these.
+# version gate: the agent edits the reflection SKILL, not these.
 if [[ -n "$dr_id" ]]; then
-  mkdir -p "$DATA_DIR/apps/dreaming"
-  cp "$CORE_SRC/dreaming/fetch.sh" "$DATA_DIR/apps/dreaming/fetch.sh"
-  # Introspection helpers the Dreaming agent calls to fork + interview chats
+  mkdir -p "$DATA_DIR/apps/reflection"
+  cp "$CORE_SRC/reflection/fetch.sh" "$DATA_DIR/apps/reflection/fetch.sh"
+  # Introspection helpers the Reflection agent calls to fork + interview chats
   # and app subagent runs (the heart of the nightly loop).
-  cp /app/scripts/fork-chat.sh "$DATA_DIR/apps/dreaming/fork-chat.sh" 2>/dev/null || true
-  cp /app/scripts/fork-session.sh "$DATA_DIR/apps/dreaming/fork-session.sh" 2>/dev/null || true
-  chmod +x "$DATA_DIR/apps/dreaming/fetch.sh" \
-    "$DATA_DIR/apps/dreaming/fork-chat.sh" "$DATA_DIR/apps/dreaming/fork-session.sh" 2>/dev/null || true
+  cp /app/scripts/fork-chat.sh "$DATA_DIR/apps/reflection/fork-chat.sh" 2>/dev/null || true
+  cp /app/scripts/fork-session.sh "$DATA_DIR/apps/reflection/fork-session.sh" 2>/dev/null || true
+  chmod +x "$DATA_DIR/apps/reflection/fetch.sh" \
+    "$DATA_DIR/apps/reflection/fork-chat.sh" "$DATA_DIR/apps/reflection/fork-session.sh" 2>/dev/null || true
   # offline_capable: the report viewer just reads cached HTML.
   curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
     -d '{"offline_capable": true}' "$API_BASE_URL/api/apps/$dr_id" >>"$LOG" 2>&1 || true
   # Install the nightly cron pointing at fetch.sh with the app id as $1.
-  bash /app/scripts/init-cron-scaffold.sh dreaming "0 6 * * *" fetch.sh "$dr_id" >>"$LOG" 2>&1 \
-    && log "installed dreaming cron (0 6 * * *, app_id=$dr_id)" \
-    || log "WARN dreaming cron install failed (see log)"
+  bash /app/scripts/init-cron-scaffold.sh reflection "0 6 * * *" fetch.sh "$dr_id" >>"$LOG" 2>&1 \
+    && log "installed reflection cron (0 6 * * *, app_id=$dr_id)" \
+    || log "WARN reflection cron install failed (see log)"
 fi
 
-log "done (mind=$mg_id dreaming=$dr_id)"
+log "done (memory=$mg_id reflection=$dr_id)"

@@ -1,6 +1,6 @@
 """Persists per-chat read traces of the memory graph for the nightly pass.
 
-The Dreaming consolidation diff — "what did today's agents actually see
+The Reflection consolidation diff — "what did today's agents actually see
 vs. what WOULD have helped them" — needs the read side of that diff
 recorded somewhere durable. Two signals feed it:
 
@@ -15,7 +15,7 @@ Both merge into `<data_dir>/shared/memory/read-trace/<chat_id>.json`:
    "nodes_injected": ["<node id>", ...], "nodes_read": ["<node id>", ...],
    "updated": "<ISO8601>"}
 
-Node ids match `graph.json` ids (a file's slug), so Dreaming can diff a
+Node ids match `graph.json` ids (a file's slug), so Reflection can diff a
 trace directly against the graph without re-deriving the mapping. The
 two lists stay separate on purpose: `nodes_injected` is what the platform
 pushed at the agent for free; `nodes_read` is what the agent went and dug
@@ -24,7 +24,7 @@ for — the second is the stronger relevance signal.
 Every write here is FIRE-AND-FORGET: a trace failure must never block,
 slow, or fail the turn that produced it, so all public functions swallow
 their own errors. The directory is bounded by `prune_traces` (14 days),
-called from the boot init and by the Dreaming skill.
+called from the boot init and by the Reflection skill.
 """
 
 from __future__ import annotations

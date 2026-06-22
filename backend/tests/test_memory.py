@@ -189,7 +189,7 @@ def test_build_graph_healthy(tmp_path):
 
 
 def test_usage_counter_accrues_and_merges_into_graph(tmp_path):
-  """The Mind 'Used' column read access_count, which nothing incremented —
+  """The Memory 'Used' column read access_count, which nothing incremented —
   so it was always 0. record_usage now accrues loads into usage.json, and
   build_graph merges them onto the frontmatter baseline. Also exercises the
   new children_count breadth metadata on a MOC."""

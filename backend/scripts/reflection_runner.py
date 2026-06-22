@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Standalone multi-turn runner for the nightly Dreaming pass.
+"""Standalone multi-turn runner for the nightly Reflection pass.
 
 This is the autonomous, unattended cousin of `app.claude_sdk_runner`.
-It runs ONE goal-driven Dreaming session: the dreaming skill becomes
-the system prompt, a short "dreaming goal" becomes the first user
+It runs ONE goal-driven Reflection session: the reflection skill becomes
+the system prompt, a short "reflection goal" becomes the first user
 message, and the SDK drives a long multi-turn loop with the FULL tool
 surface (Bash, Read, Write, Edit, WebSearch, agent-browser, ...) until
 the goal loop ends.
@@ -14,21 +14,21 @@ Why this is its own runner (not `run_claude_sdk_turn`):
     SSE wire, no `ChatBroadcast`, no `AskUserQuestion` round-trip. The
     production runner's whole control surface (pending-questions
     registry, Stop handle, per-token broadcast events, persistence
-    actor) exists to serve a live chat. Dreaming has none of that — it
+    actor) exists to serve a live chat. Reflection has none of that — it
     streams to a log file and returns when done. Reusing the chat
     runner would mean stubbing every one of those collaborators.
   - **Isolation, like recovery.** `recover_chat_runner.py` is
     deliberately kept off the production chat path so a broken chat
-    stack can't take down recovery. Dreaming follows the same instinct
+    stack can't take down recovery. Reflection follows the same instinct
     for the opposite reason: a long autonomous run that forks chats,
-    rewrites the Mind graph, and edits skills should not share mutable
+    rewrites the Memory graph, and edits skills should not share mutable
     state (registries, the writer actor, active-client maps) with the
     daytime chat path it may be operating on while the partner sleeps.
-  - **No tool gating, no sandbox.** The v1 Dreaming agent ran
+  - **No tool gating, no sandbox.** The v1 Reflection agent ran
     token-less and Bash-less against a staging copy. This runner is the
     opposite: full capability, instructed (not policed) by the skill,
     per Möbius's "code empowers the agent; it does not police it." The
-    wrapper (`core-apps/dreaming/fetch.sh`) owns no-overlap + timeout +
+    wrapper (`core-apps/reflection/fetch.sh`) owns no-overlap + timeout +
     the activity emit; the SKILL owns what the agent does.
 
 The SDK call mirrors `app.claude_sdk_runner._run_once`: same
@@ -41,7 +41,7 @@ deliberate and all in service of "autonomous":
     callback, no keepalive hook. Every tool auto-runs; there is no
     user to approve anything.
   - `max_turns` is high (default 60) so the multi-phase run
-    (interviews → skill edits → Mind consolidation → app fixes →
+    (interviews → skill edits → Memory consolidation → app fixes →
     research → brief + morning chat) fits in one goal loop.
   - We loop on `client.receive_response()` exactly once: the SDK's
     own `max_turns` is the multi-turn budget, and a single
@@ -69,7 +69,7 @@ died at `max_turns` (subtype error_max_turns) with NO brief:
     behind. The rescue never spawns another rescue.
 
 Importability: every heavyweight import (the SDK) is inside `run()`,
-so `import backend.scripts.dreaming_runner` (and `py_compile`) works
+so `import backend.scripts.reflection_runner` (and `py_compile`) works
 in any environment, including one without `claude-agent-sdk`
 installed. The module-level surface is stdlib only.
 """
@@ -85,16 +85,16 @@ import sys
 from pathlib import Path
 
 # --- Fixed locations (the container's data layout) -------------------
-# These are intentionally hard-coded rather than env-derived: Dreaming
+# These are intentionally hard-coded rather than env-derived: Reflection
 # runs from cron with a near-empty environment, and the wrapper exports
 # only the few vars the agent's own shell needs (SERVICE_TOKEN,
 # API_BASE_URL, CLAUDE_CONFIG_DIR). The runner's own paths are a
 # deployment constant, not per-instance state — same posture as
 # recover_chat_runner.py's module-level Path constants.
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
-SKILL_PATH = DATA_DIR / "shared" / "skills" / "dreaming.md"
-SETTINGS_PATH = DATA_DIR / "apps" / "dreaming" / "settings.json"
-LOG_PATH = DATA_DIR / "cron-logs" / "dreaming.log"
+SKILL_PATH = DATA_DIR / "shared" / "skills" / "reflection.md"
+SETTINGS_PATH = DATA_DIR / "apps" / "reflection" / "settings.json"
+LOG_PATH = DATA_DIR / "cron-logs" / "reflection.log"
 CLAUDE_CONFIG_DIR = DATA_DIR / "cli-auth" / "claude"
 CODEX_HOME = DATA_DIR / "cli-auth" / "codex"
 CLI_PATH = "/usr/local/bin/claude"
@@ -106,20 +106,20 @@ PM_COMMIT = "/app/scripts/pm-commit"
 # the /app path fails ("result error: error") even though the file is
 # world-readable — which is exactly what stranded the 2026-06-03 run in phase 6.
 # Seed a copy into the agent's own domain each run and point the skill there.
-BAKED_BRIEF_TEMPLATE = Path("/app/scripts/dreaming-brief-template.html")
-BRIEF_TEMPLATE_DEST = DATA_DIR / "apps" / "dreaming" / "dreaming-brief-template.html"
+BAKED_BRIEF_TEMPLATE = Path("/app/scripts/reflection-brief-template.html")
+BRIEF_TEMPLATE_DEST = DATA_DIR / "apps" / "reflection" / "reflection-brief-template.html"
 
 # Multi-turn budget for the whole nightly goal loop. High because one
-# Dreaming run spans many phases (interviews, skill edits, graph
+# Reflection run spans many phases (interviews, skill edits, graph
 # consolidation, app fixes, research, brief + morning chat), each
 # costing several tool turns. The wrapper's `timeout` is the real
 # wall-clock bound; this is the SDK-side ceiling so a wedged loop can't
 # spin forever even if the timeout were removed.
 DEFAULT_MAX_TURNS = 60
 
-# Default provider/model when settings.json doesn't pin one. Dreaming
+# Default provider/model when settings.json doesn't pin one. Reflection
 # defaults to Claude (the production default provider); the owner can
-# override per-instance via /data/apps/dreaming/settings.json without
+# override per-instance via /data/apps/reflection/settings.json without
 # touching code.
 DEFAULT_PROVIDER = "claude"
 
@@ -182,7 +182,7 @@ def steering_message(
       "memory inbox yet (phase 3a), do that minimal drain FIRST and "
       "commit it — it is the night's other non-negotiable deliverable "
       "and must not be skipped. Then write the brief and open the "
-      "morning chat. The deeper Mind reorg, remaining app triage, and "
+      "morning chat. The deeper Memory reorg, remaining app triage, and "
       "research are over."
     )
   return None
@@ -191,14 +191,14 @@ def steering_message(
 def todays_brief_path() -> Path | None:
   """Returns tonight's expected brief path, or None when unknowable.
 
-  The brief lands in the Dreaming app's NUMERIC storage dir
+  The brief lands in the Reflection app's NUMERIC storage dir
   (`/data/apps/<id>/reports/<date>.html`); the numeric id is staged
   by fetch.sh at inputs/app_id before the runner starts. A missing or
   empty stage means the path can't be resolved here — callers treat
   that as "assume no brief" and let the rescue agent resolve the id
   itself.
   """
-  app_id_file = DATA_DIR / "apps" / "dreaming" / "inputs" / "app_id"
+  app_id_file = DATA_DIR / "apps" / "reflection" / "inputs" / "app_id"
   try:
     app_id = app_id_file.read_text(encoding="utf-8").strip()
   except OSError:
@@ -232,10 +232,10 @@ def build_fallback_goal() -> str:
   """Builds the goal message for the guaranteed-brief rescue pass."""
   from datetime import date
   today = date.today().isoformat()
-  runs_dir = DATA_DIR / "apps" / "dreaming" / "runs" / today
-  inputs_dir = DATA_DIR / "apps" / "dreaming" / "inputs"
+  runs_dir = DATA_DIR / "apps" / "reflection" / "runs" / today
+  inputs_dir = DATA_DIR / "apps" / "reflection" / "inputs"
   return "\n".join([
-    f"The main Dreaming run of {today} was CUT OFF (turn budget or "
+    f"The main Reflection run of {today} was CUT OFF (turn budget or "
     "crash) before it could deliver the brief. You are a short rescue "
     f"pass with roughly {FALLBACK_MAX_TURNS} turns and ONE goal: the "
     "partner must not wake to nothing.",
@@ -258,11 +258,11 @@ def build_fallback_goal() -> str:
 
 
 def _safety_snapshot(label: str) -> None:
-  """Best-effort git snapshot of /data BEFORE Dreaming mutates anything.
+  """Best-effort git snapshot of /data BEFORE Reflection mutates anything.
 
   The nightly run consolidates the memory graph, rewrites skills, and fixes
   apps — destructive overwrites of agent-owned files under /data/shared that
-  the "git is the undo" contract (mind.md) promises are recoverable. Until now
+  the "git is the undo" contract (memory.md) promises are recoverable. Until now
   that promise rested entirely on the agent's own `pm-commit` discipline
   MID-run, so a consolidation that overwrote a note before the first commit had
   no pre-state restore point beyond LAST night's. Committing the current tree as
@@ -292,7 +292,7 @@ def _safety_snapshot(label: str) -> None:
 
 
 def _log(message: str) -> None:
-  """Appends one timestamped line to the dreaming log.
+  """Appends one timestamped line to the reflection log.
 
   Uses a bare append (not the logging module) so this works before
   any handler is configured and stays readable interleaved with the
@@ -304,15 +304,15 @@ def _log(message: str) -> None:
     stamp = datetime.now(timezone.utc).isoformat()
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with LOG_PATH.open("a", encoding="utf-8") as fh:
-      fh.write(f"[{stamp}] dreaming_runner: {message}\n")
+      fh.write(f"[{stamp}] reflection_runner: {message}\n")
   except OSError:
     pass
 
 
 def load_skill() -> str:
-  """Returns the dreaming skill text used as the system prompt.
+  """Returns the reflection skill text used as the system prompt.
 
-  The agent-editable skill at /data/shared/skills/dreaming.md is the
+  The agent-editable skill at /data/shared/skills/reflection.md is the
   source of truth (it can rewrite itself between runs). If it is
   missing — a fresh instance whose init_skills.py hasn't run, or a
   removed file — fall back to the baked seed so the run still has a
@@ -328,8 +328,8 @@ def load_skill() -> str:
     except OSError:
       pass
   for fallback in (
-    Path("/app/scripts/seed-skills/dreaming.md"),
-    Path(__file__).resolve().parent / "seed-skills" / "dreaming.md",
+    Path("/app/scripts/seed-skills/reflection.md"),
+    Path(__file__).resolve().parent / "seed-skills" / "reflection.md",
   ):
     if fallback.is_file():
       try:
@@ -337,7 +337,7 @@ def load_skill() -> str:
       except OSError:
         continue
   raise FileNotFoundError(
-    f"dreaming skill not found at {SKILL_PATH} or any baked fallback"
+    f"reflection skill not found at {SKILL_PATH} or any baked fallback"
   )
 
 
@@ -352,7 +352,7 @@ def seed_brief_template() -> None:
   """
   src = BAKED_BRIEF_TEMPLATE
   if not src.is_file():
-    src = Path(__file__).resolve().parent / "dreaming-brief-template.html"
+    src = Path(__file__).resolve().parent / "reflection-brief-template.html"
   if not src.is_file():
     _log("brief template not found in image — phase 6 will use the fallback")
     return
@@ -364,9 +364,9 @@ def seed_brief_template() -> None:
 
 
 def load_settings() -> dict:
-  """Reads /data/apps/dreaming/settings.json, tolerating absence/corruption.
+  """Reads /data/apps/reflection/settings.json, tolerating absence/corruption.
 
-  This is the SAME file the Dreaming mini-app writes (cron hour,
+  This is the SAME file the Reflection mini-app writes (cron hour,
   exclude_apps). Provider/model selection adds two optional
   keys — `provider` ("claude" | "codex") and `model` (a provider model
   id) — so the owner can steer which agent dreams without a code
@@ -414,7 +414,7 @@ def _resolve_model(settings: dict) -> tuple[str, str | None, str | None]:
 
 
 def build_goal(settings: dict) -> str:
-  """Builds the first user message — the 'dreaming goal' that kicks off the loop.
+  """Builds the first user message — the 'reflection goal' that kicks off the loop.
 
   The skill (system prompt) holds the full procedure; this message is
   the GO signal plus the run-specific context pointers the agent needs:
@@ -425,12 +425,12 @@ def build_goal(settings: dict) -> str:
   from datetime import date
   today = date.today().isoformat()
   exclude = settings.get("exclude_apps") or []
-  inputs_dir = DATA_DIR / "apps" / "dreaming" / "inputs"
+  inputs_dir = DATA_DIR / "apps" / "reflection" / "inputs"
   lines = [
-    f"It is the night of {today}. Begin tonight's Dreaming run.",
+    f"It is the night of {today}. Begin tonight's Reflection run.",
     "",
     f"Staged context is under {inputs_dir}/ — start here:",
-    "  - dreaming-run-history.txt  YOUR OWN recent runs (exit codes, log",
+    "  - reflection-run-history.txt  YOUR OWN recent runs (exit codes, log",
     "                          friction, your last skill edits) — read FIRST; a",
     "                          recurring failure across nights is tonight's",
     "                          first fix (phase 0 / phase 2).",
@@ -481,12 +481,12 @@ def build_env() -> dict[str, str]:
   env["CODEX_HOME"] = str(CODEX_HOME)
   # A stable agent-browser profile for the night so repeated screenshots
   # warm one cache instead of cold-starting Chromium each time. Keyed to
-  # "dreaming" so it never collides with a per-chat profile.
+  # "reflection" so it never collides with a per-chat profile.
   env.setdefault(
     "AGENT_BROWSER_PROFILE",
-    str(DATA_DIR / "agent-browser-profiles" / "dreaming"),
+    str(DATA_DIR / "agent-browser-profiles" / "reflection"),
   )
-  env.setdefault("AGENT_BROWSER_SESSION", "dreaming")
+  env.setdefault("AGENT_BROWSER_SESSION", "reflection")
   return env
 
 
@@ -613,7 +613,7 @@ async def _drain_session(
       # is_error covers a hard failure AND the max_turns cap (subtype
       # error_max_turns). A night that ended in error must NOT report
       # success — otherwise cron_outcome records exit 0 and both the
-      # next run and the Dreaming app believe a brief was produced
+      # next run and the Reflection app believe a brief was produced
       # when none was.
       if getattr(sdk_msg, "is_error", False):
         result_error = True
@@ -677,7 +677,7 @@ async def _run_claude_session(
       return 2
     return 0
   except Exception as exc:  # noqa: BLE001 — top-level guard for cron
-    _log(f"ERROR dreaming run crashed: {exc!r}")
+    _log(f"ERROR reflection run crashed: {exc!r}")
     return 1
   finally:
     try:
@@ -697,8 +697,8 @@ async def _run_codex_session(
 ) -> int:
   """Runs one Codex SDK goal loop and returns a process exit code.
 
-  Codex can run the same Dreaming skill through the app-server SDK
-  path. The normal chat runner publishes SSE; Dreaming swaps in a
+  Codex can run the same Reflection skill through the app-server SDK
+  path. The normal chat runner publishes SSE; Reflection swaps in a
   log-only broadcast so unattended runs still leave a useful trace.
   Codex has no max_turns option — the wrapper's wall-clock timeout is
   its hard bound, and the goal text carries any turn guidance.
@@ -710,7 +710,7 @@ async def _run_codex_session(
       session_id=None,
       base_env=env,
       cwd=str(DATA_DIR),
-      chat_id="dreaming-nightly",
+      chat_id="reflection-nightly",
       bc=_LogBroadcast(log_fh),
       pending_questions={},
       db=None,
@@ -791,7 +791,7 @@ async def _maybe_write_fallback_brief(
 
 
 async def run() -> int:
-  """Runs the whole Dreaming session and returns a process exit code.
+  """Runs the whole Reflection session and returns a process exit code.
 
   Returns 0 on a clean run (the SDK reached a terminal result, error
   or not — an agent that decides "quiet night, nothing to do" is a
@@ -827,7 +827,7 @@ async def run() -> int:
   # memory / rewrites skills, so "git is the undo" holds even if tonight's run
   # overwrites a note before its own first pm-commit. Best-effort; never blocks.
   from datetime import date
-  _safety_snapshot(f"dreaming: pre-run safety snapshot {date.today().isoformat()}")
+  _safety_snapshot(f"reflection: pre-run safety snapshot {date.today().isoformat()}")
 
   try:
     if provider == "codex":

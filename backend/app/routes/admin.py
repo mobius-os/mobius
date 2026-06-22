@@ -1,7 +1,7 @@
 """Admin / introspection endpoints (service-token-gated).
 
 Today this is just the activity-log read endpoint feeding introspective
-mini-apps (the curated `app-dreaming` cron agent in particular). If
+mini-apps (the curated `app-reflection` cron agent in particular). If
 more admin surfaces show up they belong here too — keep them all behind
 `get_current_owner`, which rejects app-scoped JWTs so a compromised
 mini-app can't pivot to the cross-app event feed.

@@ -23,12 +23,12 @@ The research protocol was excellent but heavy. We deliberately CUT, for v2.0:
 | `derivation-hashing` of MOCs | Same; clever but premature for a graph of <50 notes | Future exp. #3 — the smallest-experiment is already specified |
 | `entity_keys` synonym index + embedding sweeps | Adds an embedding pipeline; not needed at our scale | Future exp. #2 |
 | embedding recall-floor for retrieval | We have no scale problem yet | Future exp. #4 |
-| a hard server-side validator/gate | Violates "code doesn't police" | A LINT the dreaming agent *runs as a tool*, never a gate |
+| a hard server-side validator/gate | Violates "code doesn't police" | A LINT the reflection agent *runs as a tool*, never a gate |
 
 **What we KEEP (because it's instruction-shaped, not code-shaped):** the consolidation
 *decision protocol*, hub-promotion, supersede-not-delete, the orphan-avoidance gate,
 bootstrap retirement, MOC growth-at-the-squeeze-point. These become **guidance the
-dreaming agent reads and applies with judgment** — the agent IS the product. Git is the
+reflection agent reads and applies with judgment** — the agent IS the product. Git is the
 undo for every bad call.
 
 Net: v2.0 is mostly *removing* code (the scored selector) and *adding instructions*.
@@ -44,7 +44,7 @@ opens in Obsidian; their parser/viewer work on it). Conventions:
   `description`, `tags`, `timestamp`. **`description` is the scent line** (OKF already
   defines `description` as the index/search snippet — reuse it, don't invent a field).
 - **`type` is a small pinned enum** (`fact`, `hub`, `moc`, `bootstrap`) — NOT OKF's
-  free-string. Dreaming normalises stragglers. (Pinning the enum is the one place we're
+  free-string. Reflection normalises stragglers. (Pinning the enum is the one place we're
   stricter than OKF, on purpose: stops 30 near-synonym types.)
 - **Links: relative markdown links, the relationship TYPED IN PROSE** —
   `see also for units: [units preference](../hubs/units.md)`. Stays OKF-conformant
@@ -52,7 +52,7 @@ opens in Obsidian; their parser/viewer work on it). Conventions:
   because OKF's shipped viewer rejects `/`-absolute.
 - **`index.md` per directory = the MOC / router.** Top-level `index.md` = the root
   router. (Confirms the owner's guess: OKF's per-dir `index.md` *is* the MOC.)
-- **`log.md`** (newest-first, ISO-date) = the dreaming/consolidation audit trail. New
+- **`log.md`** (newest-first, ISO-date) = the reflection/consolidation audit trail. New
   surface we were missing; free from OKF.
 - **`# Citations`** section in a note = provenance (which chat/source; "user stated on
   <date>").
@@ -82,7 +82,7 @@ own words: decouple capture from the build pipeline.
   tools, which is exactly where it's currently missed" — naming it is what makes a future
   agent catch it.
 - **Daytime MUST NOT** decide add-vs-merge, resolve entities, write typed links, or touch
-  notes/MOCs. All structure is deferred to dreaming (avoids the MemGPT "hurried myopic
+  notes/MOCs. All structure is deferred to reflection (avoids the MemGPT "hurried myopic
   edit" failure). Capture is the Generative-Agents memory stream: append now, structure
   at night.
 
@@ -104,9 +104,9 @@ This is mostly *deleting* today's scored selector.
 - Budget governs the always-loaded layer (router + recency + inbox), not total notes —
   the graph can grow unbounded; only the router competes for the injection budget.
 
-## 4. Consolidation — the dreaming skill (judgment, not hashes)
+## 4. Consolidation — the reflection skill (judgment, not hashes)
 
-`dreaming.md` gains a "consolidate the inbox" protocol the agent follows with judgment.
+`reflection.md` gains a "consolidate the inbox" protocol the agent follows with judgment.
 For each inbox line, pick exactly one:
 
 - **drop** — already known, or not reducible to one durable fact.
@@ -130,14 +130,14 @@ Growth + upkeep (also judgment):
   assemble the MOC and repoint the router line at it.
 - **Promote to a hub** at fan-in ≥3.
 - **Retire the bootstrap note (F5):** if the graph holds real user notes, archive
-  `this-instance-is-fresh` and drop its router line. (The note already says to; dreaming
+  `this-instance-is-fresh` and drop its router line. (The note already says to; reflection
   just never did it.)
-- **Run a light LINT as a TOOL** (not a gate): a small script the dreaming agent invokes
+- **Run a light LINT as a TOOL** (not a gate): a small script the reflection agent invokes
   to list dangling links + orphan notes (notes with no inbound link) + router lines whose
   target is gone. The agent fixes what it surfaces. Cheap grep, files-only.
 - Write a `log.md` line for the night; `pm-commit` so the consolidation is reversible.
 
-Dreaming may **fire early** when the inbox gets heavy (salience as a *consolidation
+Reflection may **fire early** when the inbox gets heavy (salience as a *consolidation
 trigger only* — never at retrieval). Owner decision (see §6).
 
 ## 5. Transferable subgraphs — honest stance (future)
@@ -159,14 +159,14 @@ Both preserve **no ranking of retrieval outputs**:
 
 ## 7. Build order (vertical slices, each tested live on mobius-test-memv2)
 
-1. **Capture reflex** (core.md + mind.md) — fixes the proven gap; lowest risk. Test: fresh
+1. **Capture reflex** (core.md + memory.md) — fixes the proven gap; lowest risk. Test: fresh
    chats sharing personal facts → confirm they land in `inbox.md` on no-tool turns.
 2. **Retrieval simplification** (memory.py) — delete the scored selector; inject
    router+recency+inbox. Test: `build_memory_block` returns router+recency; full suite still
    compiles/serves.
-3. **Consolidation protocol + F5** (dreaming.md) + **seed-memory** (router-format
+3. **Consolidation protocol + F5** (reflection.md) + **seed-memory** (router-format
    `index.md`, note frontmatter w/ `description` scent, bootstrap-with-retirement). Test:
-   run a real dreaming pass on memv2's existing RICH inbox → inspect the graph it builds
+   run a real reflection pass on memv2's existing RICH inbox → inspect the graph it builds
    (decision-table behaviour, a hub, the bootstrap retired) + the `log.md`.
 4. **Lint tool** (a small script in the agent's toolbox) — dangling/orphan/router check.
 
@@ -198,19 +198,19 @@ Each has a smallest files-only experiment specified in `build-and-maintain-proto
 
 **THE KEY LEARNING: a pure daytime prompt-reflex is inherently unreliable for facts-in-questions** — the agent's "just answer efficiently" drive overrides it, with high run-to-run variance. **Do NOT chase a perfect daytime reflex.** The robust design is two-layer:
 - **Daytime reflex = cheap, best-effort, same-day hint.** Keep the improved wording (it reliably catches *explicit* disclosures + makes them available before the nightly pass). Accept that it misses subtle ones.
-- **Dreaming-reads-TRANSCRIPTS = the reliable capture.** Proven in session-memdata: dreaming extracted the full user model from the day's chat transcripts even when the inbox held only 2 lines. So consolidation's input is the day's transcripts + the inbox, and the inbox is an optimization, not the source of truth. This matches the build-and-maintain "daytime stays dumb; dreaming owns judgment" spine and OKF's `conversation_learner` (LLM-judge over trajectories).
+- **Reflection-reads-TRANSCRIPTS = the reliable capture.** Proven in session-memdata: reflection extracted the full user model from the day's chat transcripts even when the inbox held only 2 lines. So consolidation's input is the day's transcripts + the inbox, and the inbox is an optimization, not the source of truth. This matches the build-and-maintain "daytime stays dumb; reflection owns judgment" spine and OKF's `conversation_learner` (LLM-judge over trajectories).
 
-Implication for §2/§4: stop treating the inbox as the capture mechanism. The inbox is a best-effort fast-path; **dreaming must read the day's transcripts as its primary capture source.** (This also removes the pressure to over-engineer the daytime prompt — philosophy-aligned: the cheap reflex empowers, the nightly judgment guarantees.)
+Implication for §2/§4: stop treating the inbox as the capture mechanism. The inbox is a best-effort fast-path; **reflection must read the day's transcripts as its primary capture source.** (This also removes the pressure to over-engineer the daytime prompt — philosophy-aligned: the cheap reflex empowers, the nightly judgment guarantees.)
 
 ## 10. Refinements folded in from the adversarial review (Codex)
 
 Cheap, philosophy-aligned safety the simplification can keep without the hashing machinery:
-- **`title:` is the hand-maintained canonical claim key.** Before creating a new note, dreaming greps normalized titles for overlap (instruction). The lint reports duplicate normalized `title:` values (a grep, not a gate). Recovers most dedup safety without `claim_key`/`value_hash`.
-- **Stale-scent-line guard via git, no hashing:** during dreaming, if a note linked from an `index.md` has a commit newer than that `index.md`'s last commit, re-read the note and refresh/confirm its router scent line before committing. A `git log` comparison — closes the #2 "lying scent line misroutes the agent" failure as an instruction, not code.
+- **`title:` is the hand-maintained canonical claim key.** Before creating a new note, reflection greps normalized titles for overlap (instruction). The lint reports duplicate normalized `title:` values (a grep, not a gate). Recovers most dedup safety without `claim_key`/`value_hash`.
+- **Stale-scent-line guard via git, no hashing:** during reflection, if a note linked from an `index.md` has a commit newer than that `index.md`'s last commit, re-read the note and refresh/confirm its router scent line before committing. A `git log` comparison — closes the #2 "lying scent line misroutes the agent" failure as an instruction, not code.
 - **Flag (don't fix yet):** entity-resolution surface-form drift ("Memv2" vs "memory v2") silently forks hubs and suppresses fan-in promotion — highest long-term rot risk, but not catastrophic <50 notes. The title-grep above is a partial guard; the full embedding entity-sweep stays deferred (experiment #2) until the graph is large enough to need it.
 
 **Slice-1 capture reflex — VALIDATED across two sessions (2026-06-20).** Session 2 (fresh
 persona) captured 5/6 incl. both previously-failing blind spots (fact-in-question, preference-
 aimed-at-agent), plus auto cross-linking + a supersession flag. The improved wording
 (revealed-not-said + 2 named blind spots + end-of-turn test) generalizes. Daytime reflex is a
-solid best-effort hint; dreaming-reads-transcripts remains the reliable backstop. Done.
+solid best-effort hint; reflection-reads-transcripts remains the reliable backstop. Done.

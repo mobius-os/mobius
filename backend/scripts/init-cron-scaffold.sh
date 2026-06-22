@@ -15,7 +15,7 @@
 #
 # Example:
 #   init-cron-scaffold.sh news "*/10 * * * *"             # runs job.sh
-#   init-cron-scaffold.sh dreaming "0 6 * * *" fetch.sh   # runs fetch.sh
+#   init-cron-scaffold.sh reflection "0 6 * * *" fetch.sh   # runs fetch.sh
 #   init-cron-scaffold.sh news "0 9 * * *" fetch.sh 12    # runs: fetch.sh 12
 #
 # The optional job filename (default job.sh) is the script the crontab

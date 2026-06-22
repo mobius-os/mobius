@@ -5,7 +5,7 @@ type: moc
 # Memory
 
 This is your **Home** map — the root of your knowledge graph at
-`/data/shared/memory/`, surfaced as the **Mind** app. It is injected at the start
+`/data/shared/memory/`, surfaced as the **Memory** app. It is injected at the start
 of each session. Everything below is reachable from here; follow a wiki-link by
 `Read`-ing `notes/<slug>.md` or `mocs/<slug>.md` when you need the detail.
 
@@ -13,11 +13,11 @@ You record what is **useful for the future and specific to this user/instance** 
 durable facts about the partner (preferences, interests, personality), and
 hard-won bugs you hit *here* — not everything, and not generic app/platform
 how-to (that's a **skill** now, under `/data/shared/skills/`). See
-[[how-the-memory-graph-works]] and the Mind skill (`/data/shared/skills/mind.md`)
+[[how-the-memory-graph-works]] and the Memory skill (`/data/shared/skills/memory.md`)
 for the rules.
 
 This graph starts almost empty by design — a scaffold of maps with no facts yet.
-It **grows through use**, and the nightly **Dreaming** pass curates it.
+It **grows through use**, and the nightly **Reflection** pass curates it.
 
 ## Maps
 
@@ -34,9 +34,9 @@ It **grows through use**, and the nightly **Dreaming** pass curates it.
 
 - [[this-instance-is-fresh]] — you know nothing durable about this partner yet;
   weight observation extra in early chats.
-- [[memory-is-visible-to-the-partner]] — the Mind app shows every note to the
+- [[memory-is-visible-to-the-partner]] — the Memory app shows every note to the
   partner; write as if you'd stand behind it when quoted back.
-- [[a-nightly-dreaming-pass-exists]] — the overnight pass drains the inbox,
+- [[a-nightly-reflection-pass-exists]] — the overnight pass drains the inbox,
   consolidates the graph, and fixes apps; defer heavy reorganizing to it.
 
 ## Recent chats
@@ -44,9 +44,9 @@ It **grows through use**, and the nightly **Dreaming** pass curates it.
 The last ~10 chats live in `recent-chats.md` (also injected) — one line per
 chat: the chat id, date, and a 1-2 sentence summary. The summaries usually
 suffice; fetch a full transcript with `GET /api/chats/<id>` when a specific
-exchange matters. The nightly dreaming pass maintains the queue.
+exchange matters. The nightly reflection pass maintains the queue.
 
 ## Inbox
 
 Raw same-day observations live in `inbox.md` (also injected). The nightly
-dreaming pass folds them into notes here, then clears the inbox.
+reflection pass folds them into notes here, then clears the inbox.

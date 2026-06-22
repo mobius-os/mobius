@@ -19,4 +19,4 @@ highest-value facts.
 states a preference, names a project, or reacts to your register, record it
 (inbox line minimum; a user-prefers-* note when clean). Don't interrogate;
 notice. This note is scaffolding: once about-the-user holds a handful of real
-notes, the nightly Dreaming pass should delete it.
+notes, the nightly Reflection pass should delete it.

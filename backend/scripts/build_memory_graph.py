@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Rebuilds /data/shared/memory/graph.json and lints the knowledge graph.
 
-The agent (and the nightly dreaming pass) run this after editing notes so the
+The agent (and the nightly reflection pass) run this after editing notes so the
 graph viewer stays current. Exits non-zero with a problem report if the graph
 has ERROR-severity issues (duplicate ids, dangling MOC links, missing index)
 so a publish step can abort and keep the last-known-good graph.
@@ -9,7 +9,7 @@ so a publish step can abort and keep the last-known-good graph.
 Usage: python3 /app/scripts/build_memory_graph.py [DATA_DIR]
        python3 /app/scripts/build_memory_graph.py --root /path/to/memory
        (DATA_DIR defaults to $DATA_DIR or /data; --root points at a bare
-        memory dir, used by the dreaming wrapper to lint a staging tree.)
+        memory dir, used by the reflection wrapper to lint a staging tree.)
 """
 
 import os

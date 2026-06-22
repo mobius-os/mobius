@@ -12,7 +12,7 @@ every learned note (Codex review R1). So:
     injector keeps the legacy flat-file fallback (review R2).
   - subsequent boots (graph present): leave the agent's notes untouched; only
     ensure inbox.md exists and re-publish `.ready` if a prior boot crashed
-    mid-publish. Seed-version migrations for existing instances are a dreaming
+    mid-publish. Seed-version migrations for existing instances are a reflection
     task, not a boot-time overwrite.
 
 This is pure file I/O (no agent process). Run from entrypoint after
@@ -45,7 +45,7 @@ SEED_VERSION = "3"  # bump when the seed graph's authored content changes
 INBOX_HEADER = (
   "# Inbox\n\n"
   "Raw, unconsolidated observations land here during the day (your skill's\n"
-  "append recipe writes to this file). The nightly dreaming pass folds these\n"
+  "append recipe writes to this file). The nightly reflection pass folds these\n"
   "into atomic notes under `notes/` and then truncates this file. Anything\n"
   "here is recalled next session, so nothing is lost before consolidation.\n\n"
 )
@@ -58,7 +58,7 @@ RECENT_CHATS_HEADER = (
   "A fixed-size queue of the last chats — at most 10 entries, oldest first,\n"
   "one line each:\n\n"
   "`- [chat:<id>] <YYYY-MM-DD> — <1-2 sentence summary>`\n\n"
-  "The nightly Dreaming pass maintains it: appends the day's chats from its\n"
+  "The nightly Reflection pass maintains it: appends the day's chats from its\n"
   "interviews and evicts the oldest beyond 10. Don't grow it by hand during\n"
   "the day. The summaries are usually enough to recall what recently\n"
   "happened; when a specific exchange matters, fetch the full transcript\n"
@@ -125,7 +125,7 @@ def _publish_from_staging() -> bool:
 def init() -> None:
   MEMORY.parent.mkdir(parents=True, exist_ok=True)
   # Cheap boot-time sweep of stale per-chat read-traces. The nightly
-  # Dreaming pass prunes too, but a long-idle or dreaming-less instance
+  # Reflection pass prunes too, but a long-idle or reflection-less instance
   # shouldn't accumulate one file per chat forever. Best-effort by
   # construction (prune_traces never raises).
   pruned = prune_traces(DATA_DIR)

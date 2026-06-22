@@ -157,7 +157,7 @@ const VENDORED_CODEMIRROR = [
   `${CODEMIRROR_VENDOR}/lezer-highlight.mjs`,
 ].map(url => ({ url, revision: null }))
 
-// Self-hosted d3 + PixiJS for the Mind graph — same precache rationale as
+// Self-hosted d3 + PixiJS for the Memory graph — same precache rationale as
 // React above. Unlike the importmap libs these are CLASSIC script-tag loads
 // (the app's loadScriptOnce expects window.d3 / window.PIXI globals); they
 // were previously fetched from cdn.jsdelivr.net, which the prod CSP
@@ -166,8 +166,8 @@ const VENDORED_CODEMIRROR = [
 // committed at frontend/public/vendor/ (Vite copies public/ verbatim, so no
 // Dockerfile npm-install step); the version in the path is the cache-bust.
 // Bumping a version here means bumping the dir under frontend/public/vendor/
-// + the D3_URL / PIXI_URL constants in core-apps/mind/index.jsx in lockstep.
-const VENDORED_MIND_GRAPH = [
+// + the D3_URL / PIXI_URL constants in core-apps/memory/index.jsx in lockstep.
+const VENDORED_MEMORY_GRAPH = [
   '/vendor/d3@7.9.0/d3.min.js',
   '/vendor/pixi.js@8.19.0/pixi.min.js',
 ].map(url => ({ url, revision: null }))
@@ -184,7 +184,7 @@ precacheAndRoute([
   ...VENDORED_RECHARTS,
   ...VENDORED_DATE_FNS,
   ...VENDORED_ATLAS_NOTES,
-  ...VENDORED_MIND_GRAPH,
+  ...VENDORED_MEMORY_GRAPH,
 ])
 cleanupOutdatedCaches()
 

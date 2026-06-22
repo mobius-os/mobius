@@ -1,25 +1,25 @@
 #!/bin/bash
-# fetch.sh — the nightly "dreaming" wrapper. Thin by design: it owns
+# fetch.sh — the nightly "reflection" wrapper. Thin by design: it owns
 # only the OPERATIONAL concerns of an unattended cron run — no overlap,
 # a wall-clock timeout, liveness heartbeats, an outcome event — and then
 # hands the night to the agent.
 #
-# Unlike v1, this wrapper is NOT a security boundary. The Dreaming agent
+# Unlike v1, this wrapper is NOT a security boundary. The Reflection agent
 # runs with FULL tools and a REAL token (no staging tree, no
 # Bash-less/token-less envelope, no graph validation gate). It forks
-# chats, consolidates the Mind graph, edits skills, fixes apps, writes
+# chats, consolidates the Memory graph, edits skills, fixes apps, writes
 # the brief to reports/<date>.html via the storage API, opens the
 # morning chat, and commits — all itself, instructed by its skill
-# (/data/shared/skills/dreaming.md), per Möbius's "code empowers the
+# (/data/shared/skills/reflection.md), per Möbius's "code empowers the
 # agent; it does not police it." Reversibility comes from git, not from
 # walls. So this file gathers a little read-only context for the agent,
 # exports the few env vars its shell needs, runs the runner under a lock
 # + timeout, and records how the night finished.
 #
-# Invoked by cron as: /data/apps/dreaming/fetch.sh <app_id>
+# Invoked by cron as: /data/apps/reflection/fetch.sh <app_id>
 # (the app id arrives as $1, per the cron-scaffold convention).
 #
-# DREAMING_DRY=1 skips the real agent run (records a dry outcome) so the
+# REFLECTION_DRY=1 skips the real agent run (records a dry outcome) so the
 # plumbing — lock, inputs, env, heartbeat, cron_outcome — can be smoke-
 # tested without spending a nightly run.
 set -uo pipefail
@@ -27,20 +27,20 @@ set -uo pipefail
 APP_ID="${1:-}"
 API_BASE_URL="${API_BASE_URL:-http://localhost:8000}"
 DATA_DIR="${DATA_DIR:-/data}"
-LOG="$DATA_DIR/cron-logs/dreaming.log"
-LOCK="$DATA_DIR/cron-logs/dreaming.lock"
-HEARTBEAT="$DATA_DIR/cron-logs/dreaming.heartbeat"
+LOG="$DATA_DIR/cron-logs/reflection.log"
+LOCK="$DATA_DIR/cron-logs/reflection.lock"
+HEARTBEAT="$DATA_DIR/cron-logs/reflection.heartbeat"
 TOKEN_FILE="$DATA_DIR/service-token.txt"
 DATE="$(date +%F)"
-INPUTS="$DATA_DIR/apps/dreaming/inputs"
+INPUTS="$DATA_DIR/apps/reflection/inputs"
 # Wall-clock start, captured BEFORE any early exit (lock / token / app-id) so
 # emit_outcome can always record how long the night ran (duration_ms).
 START_EPOCH="$(date +%s)"
-RUNNER="${DREAMING_RUNNER:-/app/scripts/dreaming_runner.py}"
+RUNNER="${REFLECTION_RUNNER:-/app/scripts/reflection_runner.py}"
 # Wall-clock cap for the whole night. Generous (the agent does real,
 # multi-phase work) but bounded so a wedged run can't hold the lock past
 # the next night's schedule. Overridable for tests.
-RUN_TIMEOUT="${DREAMING_TIMEOUT:-7200}"
+RUN_TIMEOUT="${REFLECTION_TIMEOUT:-7200}"
 
 # CLI credentials the spawned claude/codex binary reads. Exported (not
 # just set) so the runner and any subprocess it forks inherit them.
@@ -49,10 +49,10 @@ export CODEX_HOME="${CODEX_HOME:-$DATA_DIR/cli-auth/codex}"
 export API_BASE_URL DATA_DIR
 
 mkdir -p "$DATA_DIR/cron-logs" "$INPUTS"
-log() { echo "[$(date -Iseconds)] dreaming: $*" >>"$LOG"; }
+log() { echo "[$(date -Iseconds)] reflection: $*" >>"$LOG"; }
 
 # emit_outcome <exit_code> — one cron_outcome activity event recording
-# how the night finished, so the next night's agent (and the Dreaming
+# how the night finished, so the next night's agent (and the Reflection
 # app) can see the run history. Routed through the API so one process
 # owns the activity-log file handle. Defined early because the token
 # guard below emits a failure outcome before the main run.
@@ -66,7 +66,7 @@ emit_outcome() {
   # precision isn't meaningful for a multi-minute nightly run). Lets the next
   # run's self-history flag a near-timeout night, not just pass/fail.
   dur_ms=$(( ( $(date +%s) - START_EPOCH ) * 1000 ))
-  payload="$(printf '{"ev":"cron_outcome","ts":"%s","app_id":%s,"job":"dreaming","exit_code":%s,"duration_ms":%s}' \
+  payload="$(printf '{"ev":"cron_outcome","ts":"%s","app_id":%s,"job":"reflection","exit_code":%s,"duration_ms":%s}' \
     "$ts" "${APP_ID:-0}" "$exit_code" "$dur_ms")"
   # The activity log is the PRIMARY liveness signal the next night's run
   # reads, so a dropped emit is invisible there (only this .log file keeps
@@ -92,13 +92,13 @@ emit_outcome() {
 # fd 9 holds the lock for the life of this process; flock -n fails fast
 # if a prior night is still running (a long run that overran its window).
 # Exit-code legend (recorded as the cron_outcome exit_code, so the next
-# run + the Dreaming app can tell a real success from a no-op):
+# run + the Reflection app can tell a real success from a no-op):
 #   0  success           3  service token missing
 #   2  app id missing    5  skipped (a prior run still holds the lock)
 #   124 wall-clock timeout    other  agent run error
 exec 9>"$LOCK"
 if ! flock -n 9; then
-  log "another dreaming run holds the lock; skipping this night (exit 5)"
+  log "another reflection run holds the lock; skipping this night (exit 5)"
   emit_outcome 5
   exit 5
 fi
@@ -129,7 +129,7 @@ if [[ -z "$APP_ID" ]]; then
   exit 2
 fi
 
-log "start (app_id=$APP_ID date=$DATE dry=${DREAMING_DRY:-0} timeout=${RUN_TIMEOUT}s)"
+log "start (app_id=$APP_ID date=$DATE dry=${REFLECTION_DRY:-0} timeout=${RUN_TIMEOUT}s)"
 
 # --- gather read-only inputs for the agent ----------------------------
 # The agent reads these from inputs/ as its starting context. It can (and
@@ -150,23 +150,23 @@ curl -s "${auth[@]}" "$API_BASE_URL/api/admin/activity?since=$SINCE" \
 # machinery needed). Diff-from-marker (not a fixed window) catches every committer; the
 # agent is trusted to skip unchanged items. No marker yet -> a note; fall back to the 24h
 # slices. Pathspecs (drop binary/DB/log/cache churn) come from the module (single source).
-MARKER="$DATA_DIR/apps/dreaming/last-run.json"
-LAST_SHA="$(PYTHONPATH=/app python3 -c "from app import dreaming_checkpoint as dc; m=dc.read_marker('$MARKER') or {}; print((m.get('repos') or {}).get('data',''))" 2>/dev/null)"
+MARKER="$DATA_DIR/apps/reflection/last-run.json"
+LAST_SHA="$(PYTHONPATH=/app python3 -c "from app import reflection_checkpoint as dc; m=dc.read_marker('$MARKER') or {}; print((m.get('repos') or {}).get('data',''))" 2>/dev/null)"
 if [ -n "$LAST_SHA" ] && git -C "$DATA_DIR" cat-file -e "${LAST_SHA}^{commit}" 2>/dev/null; then
-  mapfile -t _ps < <(PYTHONPATH=/app python3 -c "from app import dreaming_checkpoint as dc; print(chr(10).join(dc.EXCLUDE_PATHSPECS))" 2>/dev/null)
+  mapfile -t _ps < <(PYTHONPATH=/app python3 -c "from app import reflection_checkpoint as dc; print(chr(10).join(dc.EXCLUDE_PATHSPECS))" 2>/dev/null)
   git -C "$DATA_DIR" diff --name-only "$LAST_SHA"..HEAD -- "${_ps[@]}" \
     >"$INPUTS/changed-since-last-run.txt" 2>>"$LOG" || true
 else
   echo "(no prior marker — first tracked run; use the 24h slices below)" >"$INPUTS/changed-since-last-run.txt"
 fi
 
-# dreaming-run-history.txt — the agent's OWN track record, so it can reflect on
-# recurring failures (e.g. repeated max_turns deaths) instead of dreaming with
+# reflection-run-history.txt — the agent's OWN track record, so it can reflect on
+# recurring failures (e.g. repeated max_turns deaths) instead of reflection with
 # amnesia each night. Three best-effort sources: the cron_outcome ledger (this
 # skill's exit codes over ~14 nights), recent WARN/ERROR/steering lines from
-# its own dreaming.log, and its last self-edits to this skill. All wrapped so a
+# its own reflection.log, and its last self-edits to this skill. All wrapped so a
 # failed source degrades to a note rather than aborting.
-HIST="$INPUTS/dreaming-run-history.txt"
+HIST="$INPUTS/reflection-run-history.txt"
 SINCE_14D="$(date -u -d '14 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$SINCE")"
 curl -s "${auth[@]}" "$API_BASE_URL/api/admin/activity?since=$SINCE_14D" \
   >"$INPUTS/.activity-14d.jsonl" 2>>"$LOG" || true
@@ -191,7 +191,7 @@ try:
                 ev = json.loads(line)
             except Exception:
                 continue
-            if ev.get("ev") == "cron_outcome" and ev.get("job") == "dreaming":
+            if ev.get("ev") == "cron_outcome" and ev.get("job") == "reflection":
                 rows.append(ev)
 except Exception:
     pass
@@ -205,16 +205,16 @@ for ev in rows[-14:]:
     print("%s  exit=%s  %s%s" % (ts, code, legend.get(code, "agent error"), dur_s))
 PY
   echo
-  echo "## Recent friction (WARN/ERROR/steering from your dreaming.log, last 40)"
+  echo "## Recent friction (WARN/ERROR/steering from your reflection.log, last 40)"
   if [ -s "$LOG" ]; then
     grep -aE 'WARN|ERROR|error_max_turns|injected turn-budget|run ended in error' \
       "$LOG" 2>/dev/null | tail -40 || true
   else
-    echo "(no dreaming.log yet)"
+    echo "(no reflection.log yet)"
   fi
   echo
-  echo "## Your last 10 edits to THIS skill (git log -- shared/skills/dreaming.md)"
-  git -C "$DATA_DIR" log --oneline -10 -- shared/skills/dreaming.md 2>>"$LOG" || echo "(no history)"
+  echo "## Your last 10 edits to THIS skill (git log -- shared/skills/reflection.md)"
+  git -C "$DATA_DIR" log --oneline -10 -- shared/skills/reflection.md 2>>"$LOG" || echo "(no history)"
 } >"$HIST" 2>>"$LOG" || true
 rm -f "$INPUTS/.activity-14d.jsonl"
 
@@ -229,7 +229,7 @@ def get(path):
         return json.load(r)
 print("# Recent chats (fork + interview the ones with activity)\n")
 print("# `[app]` rows are app-driven chats (created_by_app_id set): hidden from")
-print("# the user's drawer but yours to read for the Mind graph. `updated` is the")
+print("# the user's drawer but yours to read for the Memory graph. `updated` is the")
 print("# cadence signal — interview the most recently/often active first.\n")
 try:
     # include_app_chats=1 surfaces app-created chats too — they're excluded from
@@ -250,7 +250,7 @@ except Exception as e:
 PY
 
 # app-feedback.md — cross-app feedback forms written under
-# shared/app-feedback/<app-slug>/. Dreaming can use these as durable
+# shared/app-feedback/<app-slug>/. Reflection can use these as durable
 # product/editorial signals without needing to know each app's numeric id.
 python3 - "$API_BASE_URL" "$SERVICE_TOKEN" >"$INPUTS/app-feedback.md" 2>>"$LOG" <<'PY' || true
 import json, sys, urllib.parse, urllib.request
@@ -403,7 +403,7 @@ if [[ -n "$PREV_QA" ]]; then
     >"$INPUTS/prev-question-answers.json" 2>>"$LOG" || true
 fi
 
-# per-app-digest.json — compact per-app analytics summary the Dreaming
+# per-app-digest.json — compact per-app analytics summary the Reflection
 # agent uses to triage which apps need attention tonight. Produced from
 # THREE sources:
 #   - activity.jsonl ON DISK (already staged above) for opens_24h counts
@@ -422,12 +422,12 @@ PYTHONPATH=/app python3 - "$API_BASE_URL" "$SERVICE_TOKEN" "$INPUTS" \
   >"$INPUTS/per-app-digest.json" 2>>"$LOG" <<'PY' || true
 import json, os, sys, urllib.request, urllib.error, datetime
 
-# app_error classification lives in app.dreaming_digest (unit-tested). Import
+# app_error classification lives in app.reflection_digest (unit-tested). Import
 # defensively: if PYTHONPATH=/app is somehow unavailable (an older instance),
 # the digest still builds, just without the uncaught-error fields.
 try:
-    from app import dreaming_digest
-    _summarize_app_errors = dreaming_digest.summarize_app_errors
+    from app import reflection_digest
+    _summarize_app_errors = reflection_digest.summarize_app_errors
 except Exception:
     _summarize_app_errors = None
 
@@ -587,7 +587,7 @@ log "gathered inputs (activity, chats, app-feedback, prev-report, per-app-digest
 
 # --- heartbeat: prove liveness while the long run is in flight --------
 # A background loop touches the heartbeat file every 60s. A monitor (or a
-# morning glance) can `stat` it to tell "still dreaming" from "wedged".
+# morning glance) can `stat` it to tell "still reflection" from "wedged".
 # Killed in the cleanup trap below.
 #
 # fd 9 (the flock handle) is CLOSED in the child (`9>&-`) so the lock is
@@ -613,12 +613,12 @@ cleanup() {
 trap cleanup EXIT
 
 # --- run the agent: full tools, real token, no sandbox ----------------
-# The runner loads the dreaming skill as the system prompt, sends the
+# The runner loads the reflection skill as the system prompt, sends the
 # goal as the first user message, and drives the multi-turn loop. `timeout`
 # bounds wall-clock; --signal=TERM gives the run a chance to flush before
 # SIGKILL (--kill-after). The runner streams its own trace into $LOG.
 RC=0
-if [[ "${DREAMING_DRY:-0}" == "1" ]]; then
+if [[ "${REFLECTION_DRY:-0}" == "1" ]]; then
   log "DRY run: skipping agent; recording dry outcome"
   RC=0
 elif [[ ! -r "$RUNNER" ]]; then
@@ -642,7 +642,7 @@ fi
 # 50-file guard keep this honest; --allow-broad because a full night can
 # legitimately touch many files (skills, memory notes, app sources).
 if command -v pm-commit >/dev/null 2>&1; then
-  ( cd "$DATA_DIR" && pm-commit --allow-broad "dreaming: nightly safety-net commit $DATE" \
+  ( cd "$DATA_DIR" && pm-commit --allow-broad "reflection: nightly safety-net commit $DATE" \
       >>"$LOG" 2>&1 ) || true
 fi
 
@@ -655,7 +655,7 @@ emit_outcome "$RC"
 # night leaves the marker so its window is re-reviewed (re-reading is cheap; missing isn't).
 if [[ "$RC" == "0" ]]; then
   _head="$(git -C "$DATA_DIR" rev-parse HEAD 2>/dev/null || true)"
-  [ -n "$_head" ] && PYTHONPATH=/app python3 -c "from app import dreaming_checkpoint as dc; import datetime; dc.write_marker('$MARKER', {'repos': {'data': '$_head'}, 'ts': datetime.datetime.now(datetime.timezone.utc).isoformat()})" >>"$LOG" 2>&1 || true
+  [ -n "$_head" ] && PYTHONPATH=/app python3 -c "from app import reflection_checkpoint as dc; import datetime; dc.write_marker('$MARKER', {'repos': {'data': '$_head'}, 'ts': datetime.datetime.now(datetime.timezone.utc).isoformat()})" >>"$LOG" 2>&1 || true
 fi
 
 # --- failure push (card 125) ------------------------------------------
@@ -667,13 +667,13 @@ fi
 # app's numeric storage dir before wording the push.
 if [[ "$RC" != "0" && "$RC" != "5" ]]; then
   if [[ -f "$DATA_DIR/apps/$APP_ID/reports/$DATE.html" ]]; then
-    PUSH_BODY="Last night ended rc=$RC but a recovery brief was salvaged — open Dreaming. See /data/cron-logs."
+    PUSH_BODY="Last night ended rc=$RC but a recovery brief was salvaged — open Reflection. See /data/cron-logs."
   else
     PUSH_BODY="Last night ended rc=$RC — no morning brief. See /data/cron-logs."
   fi
   curl -s "${auth[@]}" -X POST "$API_BASE_URL/api/notifications/send" \
     -H "Content-Type: application/json" \
-    -d "$(python3 -c 'import json,sys; print(json.dumps({"title":"Dreaming run failed","body":sys.argv[1]}))' "$PUSH_BODY")" \
+    -d "$(python3 -c 'import json,sys; print(json.dumps({"title":"Reflection run failed","body":sys.argv[1]}))' "$PUSH_BODY")" \
     >>"$LOG" 2>&1 || true
 fi
 

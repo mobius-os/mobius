@@ -609,8 +609,8 @@ def _skills_dir() -> str:
 def test_skill_file_read_name_matches_absolute_skill_path():
   from app.claude_sdk_runner import _skill_file_read_name
 
-  path = os.path.join(_skills_dir(), "mind.md")
-  assert _skill_file_read_name("Read", {"file_path": path}, "/data") == "mind"
+  path = os.path.join(_skills_dir(), "memory.md")
+  assert _skill_file_read_name("Read", {"file_path": path}, "/data") == "memory"
 
 
 def test_skill_file_read_name_resolves_relative_against_cwd():
@@ -627,10 +627,10 @@ def test_skill_file_read_name_resolves_relative_against_cwd():
 def test_skill_file_read_name_normalizes_dot_segments():
   from app.claude_sdk_runner import _skill_file_read_name
 
-  path = os.path.join(_skills_dir(), "..", "skills", "dreaming.md")
+  path = os.path.join(_skills_dir(), "..", "skills", "reflection.md")
   assert (
     _skill_file_read_name("Read", {"file_path": path}, "/data")
-    == "dreaming"
+    == "reflection"
   )
 
 
@@ -640,13 +640,13 @@ def test_skill_file_read_name_rejects_non_matches():
   skills = _skills_dir()
   cases = [
     # A non-Read tool never matches, even on a skill path.
-    ("Bash", {"file_path": os.path.join(skills, "mind.md")}),
+    ("Bash", {"file_path": os.path.join(skills, "memory.md")}),
     # Only .md files in the skills dir are skills.
     ("Read", {"file_path": os.path.join(skills, "notes.txt")}),
     # Same-suffix path under a DIFFERENT root is not a skill load.
-    ("Read", {"file_path": "/somewhere/else/shared/skills/mind.md"}),
+    ("Read", {"file_path": "/somewhere/else/shared/skills/memory.md"}),
     # Nested subdirectories are not skill files.
-    ("Read", {"file_path": os.path.join(skills, "deeper", "mind.md")}),
+    ("Read", {"file_path": os.path.join(skills, "deeper", "memory.md")}),
     ("Read", {}),
     ("Read", {"file_path": "   "}),
     ("Read", "not a dict"),
@@ -665,12 +665,12 @@ def test_observe_skill_file_read_publishes_chip_and_activity(monkeypatch):
     lambda chat_id, skill, ts=None: logged.append((chat_id, skill)),
   )
   bus = _Bus()
-  path = os.path.join(_skills_dir(), "mind.md")
+  path = os.path.join(_skills_dir(), "memory.md")
   observe_skill_file_read(
     "Read", {"file_path": path}, bc=bus, chat_id="chat-7", cwd="/data",
   )
-  assert bus.events == [{"type": "skill_loaded", "skill": "mind"}]
-  assert logged == [("chat-7", "mind")]
+  assert bus.events == [{"type": "skill_loaded", "skill": "memory"}]
+  assert logged == [("chat-7", "memory")]
 
 
 def test_observe_skill_file_read_never_raises(monkeypatch):
@@ -681,7 +681,7 @@ def test_observe_skill_file_read_never_raises(monkeypatch):
     def publish(self, event):
       raise RuntimeError("wire down")
 
-  path = os.path.join(_skills_dir(), "mind.md")
+  path = os.path.join(_skills_dir(), "memory.md")
   observe_skill_file_read(
     "Read", {"file_path": path}, bc=_ExplodingBus(), chat_id="c",
     cwd="/data",

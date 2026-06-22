@@ -281,20 +281,20 @@ The extension picks the form (same `.json`-no-envelope rule as above).
 When an app asks the partner for feedback that another agent should notice, write it twice:
 
 - Local app storage: `feedback/<id>.json` via `window.mobius.storage`, so the app owns its audit trail and offline/read-your-writes behavior.
-- Shared storage: `app-feedback/<app-slug>/<id>.json` via `PUT /api/storage/shared/...`, best-effort and honestly surfaced if it fails, so Dreaming and future cross-app agents can enumerate it without knowing the app's numeric id.
+- Shared storage: `app-feedback/<app-slug>/<id>.json` via `PUT /api/storage/shared/...`, best-effort and honestly surfaced if it fails, so Reflection and future cross-app agents can enumerate it without knowing the app's numeric id.
 
 Use a small structured object: `app`, `kind`, `created_at`, `signal`, `text`, and domain context such as `report_date`, `article_headlines`, `source_id`, or `screen`. Keep one record per file. Consumers must enumerate `shared-list/app-feedback/` and app subfolders; do not probe guessed ids.
 
 ---
 
-## App analytics — emit signals for Dreaming
+## App analytics — emit signals for Reflection
 
-`window.mobius.signal(name, payload?)` is the lightweight analytics hook every app should use. It feeds Dreaming's nightly digest so the agent knows which apps the partner actually used, what errors hit, and where to focus improvement work. Calling it costs nothing at runtime: fire-and-forget, never throws, buffers in memory and flushes at most once per 5 seconds to `signals.jsonl` in the app's own storage.
+`window.mobius.signal(name, payload?)` is the lightweight analytics hook every app should use. It feeds Reflection's nightly digest so the agent knows which apps the partner actually used, what errors hit, and where to focus improvement work. Calling it costs nothing at runtime: fire-and-forget, never throws, buffers in memory and flushes at most once per 5 seconds to `signals.jsonl` in the app's own storage.
 
 **Every app must emit at minimum:**
 
 ```jsx
-// When the component mounts and data has loaded — lets Dreaming count real opens
+// When the component mounts and data has loaded — lets Reflection count real opens
 // (distinct from the platform's own app_open event, which fires on iframe load)
 window.mobius.signal('app_ready', { item_count: items.length })
 
@@ -304,7 +304,7 @@ window.mobius.signal('item_created', { type: 'note' })   // type = your domain n
 // When the user deletes a record
 window.mobius.signal('item_deleted')
 
-// In error boundaries and catch blocks — the message field is what Dreaming reads
+// In error boundaries and catch blocks — the message field is what Reflection reads
 window.mobius.signal('error', { message: err.message, source: 'save' })
 ```
 
@@ -333,9 +333,9 @@ useEffect(() => {
 }, [])
 ```
 
-Signals land in `signals.jsonl` in the app's own storage path, readable by Dreaming via the storage API. Dreaming's nightly `per-app-digest.json` counts signal names within 24h and surfaces the last 5 error messages (`last_5_errors`) — it does not read the raw file. The raw file is only read for the digest build; nothing else touches it.
+Signals land in `signals.jsonl` in the app's own storage path, readable by Reflection via the storage API. Reflection's nightly `per-app-digest.json` counts signal names within 24h and surfaces the last 5 error messages (`last_5_errors`) — it does not read the raw file. The raw file is only read for the digest build; nothing else touches it.
 
-**You don't have to catch everything yourself.** Uncaught errors — a thrown exception your code didn't handle, an unhandled promise rejection — are captured automatically: the app frame POSTs them to the platform, which records an `app_error` event that surfaces in the SAME digest as `app_errors_24h` + `recent_app_errors`. So `signal('error', …)` is for adding *semantic* context to a failure you DID catch (which operation, what the user was doing); the automatic capture is the safety net for the ones you didn't. Both reach Dreaming.
+**You don't have to catch everything yourself.** Uncaught errors — a thrown exception your code didn't handle, an unhandled promise rejection — are captured automatically: the app frame POSTs them to the platform, which records an `app_error` event that surfaces in the SAME digest as `app_errors_24h` + `recent_app_errors`. So `signal('error', …)` is for adding *semantic* context to a failure you DID catch (which operation, what the user was doing); the automatic capture is the safety net for the ones you didn't. Both reach Reflection.
 
 ---
 
@@ -361,14 +361,14 @@ restyling UI and **copy the blocks you need**. The rules behind those shapes:
   express `:hover`/`:focus`/`:active`, media queries, `@keyframes`, or
   pseudo-elements — that's the friction wall that stops an app from growing.
   The app runs in its own iframe, so the `<style>` is scoped to your app
-  automatically; no CSS Modules, no BEM. (`app-latex` and `mind` are the
+  automatically; no CSS Modules, no BEM. (`app-latex` and `memory` are the
   cleanest references — both already do exactly this.)
 - **GOTCHA — the stylesheet is a JS template literal.** A literal backtick, or a
   `${` sequence, anywhere in the CSS (inside an `url("data:image/svg+xml,…")`, a
   `content:` string, or even a comment) closes the literal or is read as JS
   interpolation and breaks the esbuild compile. Keep backticks out of CSS, escape
   `${` as `\${`, and use single/double quotes inside `url()` / `content:`.
-- **Naming.** A short per-app class prefix (`mg-` mind, `cb-` atlas, a 2–3-char
+- **Naming.** A short per-app class prefix (`mg-` memory, `cb-` atlas, a 2–3-char
   mnemonic for yours) + semantic kebab roles (`ma-header`, `ma-sheet`,
   `ma-btn`). States via REAL pseudo-classes (`:hover`, `:disabled`,
   `:focus-visible`). App-driven state CSS can't read uses an `is-`/`has-`

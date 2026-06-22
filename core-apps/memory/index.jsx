@@ -1,4 +1,4 @@
-/* Mind — an Obsidian-style force-directed view of the agent's knowledge.
+/* Memory — an Obsidian-style force-directed view of the agent's knowledge.
  *
  * Data contract (unchanged, load-bearing):
  *   GET /api/storage/shared/memory/graph.json  → { nodes, edges, problems }
@@ -113,7 +113,7 @@ export function renderWikiLinks(md, nodes = []) {
     const slug = String(rawSlug || '').trim();
     if (!slug) return _;
     const label = String(rawAlias || '').trim() || titles[slug] || slug;
-    return `[${escapeMarkdownLinkText(label)}](#mind-node-${encodeURIComponent(slug)})`;
+    return `[${escapeMarkdownLinkText(label)}](#memory-node-${encodeURIComponent(slug)})`;
   });
 }
 
@@ -398,12 +398,12 @@ export default function App({ appId, token }) {
   const noteHtml = useMemo(() => {
     if (noteState.status !== 'ready') return '';
     // Plain markdown links/images are neutralized BEFORE wikilink expansion:
-    // notes can carry dreaming-agent web-research content, so remote URLs are
+    // notes can carry reflection-agent web-research content, so remote URLs are
     // dropped (their label text survives). Wikilinks expand after, so the only
-    // live anchors are the #mind-node- fragments this app generates itself.
+    // live anchors are the #memory-node- fragments this app generates itself.
     const linkedMd = renderWikiLinks(neutralizeMemoryMarkdown(noteState.md), graph?.nodes || []);
     // Require BOTH the renderer AND the sanitizer before producing HTML — never
-    // render un-sanitized markup. Notes can contain dreaming-agent web-research
+    // render un-sanitized markup. Notes can contain reflection-agent web-research
     // content, so DOMPurify (a real HTML-parser sanitizer) is the right tool;
     // a regex net is routinely bypassed.
     if (marked && purify) {
@@ -416,10 +416,10 @@ export default function App({ appId, token }) {
   }, [noteState, marked, purify, graph]);
 
   const onNoteClick = useCallback((e) => {
-    const a = e.target?.closest?.('a[href^="#mind-node-"]');
+    const a = e.target?.closest?.('a[href^="#memory-node-"]');
     if (!a) return;
     e.preventDefault();
-    const slug = decodeURIComponent(a.getAttribute('href').replace('#mind-node-', ''));
+    const slug = decodeURIComponent(a.getAttribute('href').replace('#memory-node-', ''));
     const node = nodesById.get(slug);
     if (node) {
       setSelected(node);
@@ -436,7 +436,7 @@ export default function App({ appId, token }) {
     if (!node) return;
     if (!selected && window.mobius?.nav?.open) {
       try { panelNavRef.current?.close?.(); } catch {}
-      const handle = window.mobius.nav.open('mind-note', () => {
+      const handle = window.mobius.nav.open('memory-note', () => {
         panelNavRef.current = null;
         setSelected(null);
         setHoverId(null);
@@ -619,7 +619,7 @@ export default function App({ appId, token }) {
         {status === 'empty' && (
           <div style={S.center}>
             <EmptyConstellation />
-            <div style={S.centerTitle}>Mind is just getting to know you</div>
+            <div style={S.centerTitle}>Memory is just getting to know you</div>
             <div style={S.centerText}>
               It fills in as you use Möbius — every chat, app, and habit leaves a
               trace here. Come back once you've given it something to remember.
@@ -630,7 +630,7 @@ export default function App({ appId, token }) {
         {status === 'ready' && view === 'graph' && (
           <div ref={wrapRef} style={S.graphWrap} className="mg-graph">
             {graphRuntime && dims.w > 0 && dims.h > 0 ? (
-              <MindGraphRenderer
+              <MemoryGraphRenderer
                 runtime={graphRuntime}
                 graphData={fgData}
                 width={dims.w}
@@ -835,7 +835,7 @@ export default function App({ appId, token }) {
               ) : (
                 <div ref={localWrapRef} style={S.localGraphWrap} className="mg-local-graph">
                   {graphRuntime && localDims.w > 0 && localDims.h > 0 && localGraphData.nodes.length > 0 ? (
-                    <MindGraphRenderer
+                    <MemoryGraphRenderer
                       runtime={graphRuntime}
                       graphData={localGraphData}
                       width={localDims.w}
@@ -888,7 +888,7 @@ function Th({ label, subLabel, active, dir, onClick, align }) {
   );
 }
 
-function MindGraphRenderer({
+function MemoryGraphRenderer({
   runtime,
   graphData,
   width,
@@ -925,7 +925,7 @@ function MindGraphRenderer({
     let cleanup = () => {};
     host.replaceChildren();
 
-    createMindGraphScene({
+    createMemoryGraphScene({
       host,
       runtime,
       graphData,
@@ -941,7 +941,7 @@ function MindGraphRenderer({
         cleanup = nextCleanup || cleanup;
       }
     }).catch((err) => {
-      console.error('[Mind] Graph renderer failed', err);
+      console.error('[Memory] Graph renderer failed', err);
       if (!disposed) host.textContent = 'Graph could not render.';
     });
 
@@ -957,12 +957,12 @@ function MindGraphRenderer({
       ref={hostRef}
       style={S.pixiGraph}
       className="mg-pixi-graph"
-      aria-label={mode === 'local' ? 'Local note graph' : 'Mind graph'}
+      aria-label={mode === 'local' ? 'Local note graph' : 'Memory graph'}
     />
   );
 }
 
-async function createMindGraphScene({
+async function createMemoryGraphScene({
   host,
   runtime,
   graphData,
@@ -1290,7 +1290,7 @@ async function createMindGraphScene({
     } catch (err) {
       if (!renderErrorLogged) {
         renderErrorLogged = true;
-        console.warn('[Mind] Skipped a bad render frame', err);
+        console.warn('[Memory] Skipped a bad render frame', err);
       }
     }
     rafId = requestAnimationFrame(frame);
@@ -1572,7 +1572,7 @@ export function safeMemoryPath(path) {
 // but form-action is NOT covered by default-src and test instances run without
 // the Caddy CSP entirely — so the app forbids these itself). href is the one
 // URL attribute left allowed, because wikilink anchors need it;
-// restrictNoteHtml then drops every href that isn't a #mind-node- fragment.
+// restrictNoteHtml then drops every href that isn't a #memory-node- fragment.
 export const MEMORY_SANITIZE_OPTIONS = {
   USE_PROFILES: { html: true },
   FORBID_TAGS: ['img', 'picture', 'source', 'video', 'audio', 'iframe', 'object', 'embed', 'form', 'input', 'button'],
@@ -1590,13 +1590,13 @@ export function neutralizeMemoryMarkdown(md) {
 }
 
 // Post-sanitize pass over already-DOMPurify-clean HTML: strip every anchor
-// href except the #mind-node- fragments renderWikiLinks generates. Removal
+// href except the #memory-node- fragments renderWikiLinks generates. Removal
 // only — it cannot introduce markup the sanitizer didn't already allow.
 function restrictNoteHtml(html) {
   const tpl = document.createElement('template');
   tpl.innerHTML = html;
   for (const a of tpl.content.querySelectorAll('a[href]')) {
-    if (!a.getAttribute('href').startsWith('#mind-node-')) a.removeAttribute('href');
+    if (!a.getAttribute('href').startsWith('#memory-node-')) a.removeAttribute('href');
   }
   return tpl.innerHTML;
 }
@@ -1987,7 +1987,7 @@ const CSS = `
 .mg-scrim { animation: mg-scrim-in 0.2s ease; }
 .mg-local-graph { cursor: grab; background: var(--bg); }
 .mg-local-graph:active { cursor: grabbing; }
-.mg-md a[href^="#mind-node-"] {
+.mg-md a[href^="#memory-node-"] {
   border: 1px solid var(--accent-dim, rgba(167,139,250,0.35));
   background: var(--accent-dim, rgba(167,139,250,0.12));
   border-radius: 6px;

@@ -1,10 +1,10 @@
-"""Tests for the Dreaming digest's app_error classification (#1A).
+"""Tests for the Reflection digest's app_error classification (#1A).
 
 Locks in: app_error events from activity.jsonl bucket per-app + shell;
 stacks are dropped; shell == no app_id; recent window is capped.
 """
 
-from app.dreaming_digest import summarize_app_errors
+from app.reflection_digest import summarize_app_errors
 
 
 def _err(app_id=None, message="boom", where="render", ts="2026-06-16T00:00:00", stack=None):

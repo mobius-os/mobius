@@ -685,18 +685,18 @@ def test_run_codex_sdk_turn_stream_exhaustion_relies_on_sdk_terminal_contract(
 
 def test_skill_names_in_command_extracts_and_dedupes():
   cmd = (
-    "cat /data/shared/skills/mind.md && "
+    "cat /data/shared/skills/memory.md && "
     "sed -n 1,40p /data/shared/skills/building-apps.md; "
-    "cat /data/shared/skills/mind.md"
+    "cat /data/shared/skills/memory.md"
   )
   names = codex_sdk_runner._skill_names_in_command(cmd, "/data")
-  assert names == ["mind", "building-apps"]
+  assert names == ["memory", "building-apps"]
 
 
 def test_skill_names_in_command_ignores_other_paths():
   fn = codex_sdk_runner._skill_names_in_command
   assert fn("cat /data/shared/memory/index.md", "/data") == []
-  assert fn("cat /elsewhere/shared/skills/mind.md", "/data") == []
+  assert fn("cat /elsewhere/shared/skills/memory.md", "/data") == []
   assert fn("cat /data/shared/skills/notes.txt", "/data") == []
   assert fn("", "/data") == []
 
@@ -755,6 +755,6 @@ def test_observe_skill_reads_never_raises(monkeypatch):
   sdk = {"CommandExecutionThreadItem": _Cmd}
   skills = os.path.join(get_settings().data_dir, "shared", "skills")
   codex_sdk_runner._observe_skill_reads(
-    _Cmd(f"cat {skills}/mind.md"), sdk, bc=_ExplodingBus(),
+    _Cmd(f"cat {skills}/memory.md"), sdk, bc=_ExplodingBus(),
     chat_id="cx-2",
   )

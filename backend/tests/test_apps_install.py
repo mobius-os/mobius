@@ -472,7 +472,7 @@ def test_register_cron_passes_job_name_to_scaffold(tmp_path):
   here, so _register_cron only installs the crontab entry."""
   from app import install
 
-  app_dir = tmp_path / "dreaming"
+  app_dir = tmp_path / "reflection"
   app_dir.mkdir()
   job_path = app_dir / "fetch.sh"
   fake_scaffold = tmp_path / "init-cron-scaffold.sh"
@@ -483,13 +483,13 @@ def test_register_cron_passes_job_name_to_scaffold(tmp_path):
   with patch("app.install.CRON_SCAFFOLD", fake_scaffold), \
        patch("app.install.subprocess.run") as mock_run:
     mock_run.return_value = MagicMock(returncode=0, stderr="")
-    install._register_cron("dreaming", "0 6 * * *", job_path, 42)
+    install._register_cron("reflection", "0 6 * * *", job_path, 42)
 
   # 5th arg is the app id — so a reusable fetch.sh that reads "$1" fires
   # from cron, not just from the run-job endpoint. Regression for news-2:
   # a bundled fetch.sh requires its id and exits 2 without it.
   assert mock_run.call_args.args[0] == [
-    str(fake_scaffold), "dreaming", "0 6 * * *", "fetch.sh", "42",
+    str(fake_scaffold), "reflection", "0 6 * * *", "fetch.sh", "42",
   ]
 
 
@@ -2727,9 +2727,9 @@ def test_rename_adopts_predecessor_row_and_moves_source_dir(
 def test_legacy_slug_adoption_of_no_manifest_url_row(
   client, auth, db, bypass_url_validation,
 ):
-  """(b) a baked/register_app predecessor (slug='dreaming-old',
-  manifest_url=None) is ADOPTED by a catalog manifest id='dreaming' that
-  declares previous_id='dreaming-old': same numeric id, manifest_url now set,
+  """(b) a baked/register_app predecessor (slug='reflection-old',
+  manifest_url=None) is ADOPTED by a catalog manifest id='reflection' that
+  declares previous_id='reflection-old': same numeric id, manifest_url now set,
   source moved to the new slug, NO duplicate.
 
   Legacy adoption is opt-in via `previous_id` BY DESIGN. A baked predecessor
@@ -2740,15 +2740,15 @@ def test_legacy_slug_adoption_of_no_manifest_url_row(
   manifest declaring previous_id is the author's explicit takeover intent."""
   from app import models
   data_dir = Path(get_settings().data_dir)
-  src_dir = data_dir / "apps" / "dreaming-old"
+  src_dir = data_dir / "apps" / "reflection-old"
   src_dir.mkdir(parents=True, exist_ok=True)
   (src_dir / "index.jsx").write_text(JSX)
   app = models.App(
-    name="Dreaming",
+    name="Reflection",
     description="baked predecessor",
     jsx_source=JSX,
     source_dir=str(src_dir),
-    slug="dreaming-old",
+    slug="reflection-old",
     manifest_url=None,
     cross_app_access="none",
     share_with_apps="none",
@@ -2758,22 +2758,22 @@ def test_legacy_slug_adoption_of_no_manifest_url_row(
   db.commit()
   baked_id = app.id
 
-  base = "https://catalog.test/dreaming/"
+  base = "https://catalog.test/reflection/"
   r = _install_simple(
     client, auth, base,
-    _simple_manifest("dreaming", version="2.0.0", previous_id="dreaming-old"),
+    _simple_manifest("reflection", version="2.0.0", previous_id="reflection-old"),
   )
   assert r.status_code == 201, r.text
   payload = r.json()
   assert payload["mode"] == "update"
   assert payload["id"] == baked_id        # adopted the baked row
-  assert payload["slug"] == "dreaming"    # migrated to the new id's slug
-  canonical = base.rstrip("/") + "#manifest-id=dreaming"
+  assert payload["slug"] == "reflection"    # migrated to the new id's slug
+  canonical = base.rstrip("/") + "#manifest-id=reflection"
   assert payload["manifest_url"] == canonical
 
   # Source moved to the new slug; the old baked dir is gone.
-  assert (data_dir / "apps" / "dreaming" / "index.jsx").exists()
-  assert not (data_dir / "apps" / "dreaming-old").exists()
+  assert (data_dir / "apps" / "reflection" / "index.jsx").exists()
+  assert not (data_dir / "apps" / "reflection-old").exists()
 
   listed = client.get("/api/apps/", headers=auth).json()
   assert len(listed) == 1                  # no duplicate

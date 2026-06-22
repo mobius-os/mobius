@@ -1,21 +1,21 @@
-# Mind Graph Renderer Notes
+# Memory Graph Renderer Notes
 
 Last checked: 2026-06-05.
 
 ## Current choice
 
-Mind now uses a Mobius-owned `MindGraphRenderer` inside
-`core-apps/mind/index.jsx`. It follows the Quartz rendering architecture:
+Memory now uses a Mobius-owned `MemoryGraphRenderer` inside
+`core-apps/memory/index.jsx`. It follows the Quartz rendering architecture:
 `d3-force` owns layout, while PixiJS renders links, nodes, and labels in one
 transformed scene.
 
 This replaced the previous `react-force-graph-2d` bridge and its DOM label
-overlay. That bridge was useful for proving the Mind data contract and panel UX,
+overlay. That bridge was useful for proving the Memory data contract and panel UX,
 but synchronizing labels outside the graph scene was the wrong long-term shape:
 it introduced jitter, density tuning work, and a fragile dependency on
 screen-coordinate polling.
 
-The current renderer is the right ownership boundary for Mind: React owns data
+The current renderer is the right ownership boundary for Memory: React owns data
 loading, markdown, mini-app navigation, and mobile layout; the graph renderer
 owns force layout, zoom/pan/drag, hit testing, hover focus, and label placement.
 
@@ -48,7 +48,7 @@ Useful links:
 
 ## Implemented path
 
-`MindGraphRenderer` ports/adapts Quartz's D3 + Pixi pattern while preserving
+`MemoryGraphRenderer` ports/adapts Quartz's D3 + Pixi pattern while preserving
 Mobius-specific behavior:
 
 - input is the existing `/api/storage/shared/memory/graph.json` data contract
@@ -64,17 +64,17 @@ site-generator assumptions into the mini-app runtime.
 
 Remaining hardening candidates:
 
-- move `MindGraphRenderer` into its own source module if/when core apps support
+- move `MemoryGraphRenderer` into its own source module if/when core apps support
   multi-file entries cleanly
 - add persisted node positions if the graph grows enough that deterministic
   seeded starts feel too mobile between reloads
 - add radial/MOC-group layout tuning for larger global graphs
 - add a tiny renderer perf probe around frame time and visible node count before
-  Mind becomes a central navigation surface for hundreds of notes
+  Memory becomes a central navigation surface for hundreds of notes
 
 ## Other upgrade candidates
 
-If Mind needs tens of thousands of visible nodes, revisit renderer choice:
+If Memory needs tens of thousands of visible nodes, revisit renderer choice:
 
 - `sigma.js` + `graphology`: strongest general candidate for large interactive
   readable graphs. It is WebGL-first, targets thousands of nodes and edges, and
@@ -84,7 +84,7 @@ If Mind needs tens of thousands of visible nodes, revisit renderer choice:
   rendering on the GPU and targets hundreds of thousands of points/links, but it
   is a bigger dependency and a less Obsidian-like note-graph UI out of the box.
   Repo: https://github.com/cosmosgl/graph
-- Quartz graph: best UX/architecture fit for Obsidian-style Mind browsing, but
+- Quartz graph: best UX/architecture fit for Obsidian-style Memory browsing, but
   it should be ported as a Mobius renderer module rather than vendored
   wholesale.
 

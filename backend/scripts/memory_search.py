@@ -8,7 +8,7 @@ calls it via ONE Bash line early in a chat, and it spawns a SEPARATE, read-only
 `claude` subagent whose entire job is to walk the graph deeply for the parts
 this conversation actually touches, then hand back the relevant memories.
 
-It is the *recall* arm of the chat-centric memory model (see mind.md): the
+It is the *recall* arm of the chat-centric memory model (see memory.md): the
 per-chat note is what the agent WRITES every turn; this is how it READS the
 rest of the graph on demand. The main agent integrates the printed result into
 its own reasoning — it does not narrate this call to the partner.
@@ -18,7 +18,7 @@ Two things make it more than "just ask claude in a subprocess":
   - Read tracking. It runs the subagent with `--output-format stream-json` and
     records every memory node the subagent actually `Read` into the chat's
     read-trace (`nodes_read`), reusing `app.memory_trace`. That is the exact
-    signal the nightly Dreaming pass diffs to learn which notes should sit
+    signal the nightly Reflection pass diffs to learn which notes should sit
     nearer the surface next time.
   - A search methodology, not a conversation. The `--append-system-prompt`
     below is the subagent's whole identity: descend past the router into the
@@ -37,7 +37,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Hard-coded paths rather than env-derived: like the dreaming runner this can
+# Hard-coded paths rather than env-derived: like the reflection runner this can
 # be invoked from a near-empty environment, and the only var that matters to
 # the spawned CLI (CLAUDE_CONFIG_DIR) is set explicitly below.
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))

@@ -9,7 +9,7 @@ mocs: [maintaining-memory]
 created: 2026-06-10
 updated: 2026-06-10
 ---
-The graph is not private — the Mind app renders every note/map to the partner,
+The graph is not private — the Memory app renders every note/map to the partner,
 each with a "Discuss in a new chat" button.
 
 **Why:** memory written as if unobserved drifts into shorthand the partner will
