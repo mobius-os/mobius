@@ -12,8 +12,8 @@ before you record, link, or tidy notes.
 
 ## The system
 
-- [[how-the-memory-graph-works]] — the format, the inbox, and the daytime vs.
-  nightly split in one note. (Also the canonical example of the note shape.)
+- [[how-the-memory-graph-works]] — the format, the per-chat note, and the
+  daytime vs. nightly split in one note. (Also the canonical note-shape example.)
 - [[memory-is-visible-to-the-partner]] — the Memory app shows every note to the
   partner; write as if you'd stand behind it when quoted back.
 - [[a-nightly-reflection-pass-exists]] — the overnight pass consolidates the
@@ -25,9 +25,10 @@ before you record, link, or tidy notes.
   (preferences, interests, personality, a hard-won bug + root cause) — not
   everything, and not generic app/platform how-to (that's a skill now). Default
   to recording nothing.
-- **Day-to-day**, append a quick line to `inbox.md`; the nightly reflection pass
-  consolidates it into proper notes. When you already know the clean fact,
-  write the note directly under `notes/` and link it into a map.
+- **Day-to-day**, keep this chat's note current (`chats/<id>/index.md`); the
+  nightly reflection pass consolidates the day's notes into proper notes. When
+  you already know a clean fact, you may write the note directly under `notes/`
+  and link it into a map.
 - **One idea per note.** Title it as the specific claim. Link every note into
   at least one map ([[index]] → maps → notes). No orphans.
 - **Tidy lightly by day** (drop stale, collapse obvious dupes, newer wins);
