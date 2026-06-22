@@ -390,6 +390,21 @@ async def send_message(
           )
         if not pending.future.done():
           pending.future.set_result(body.answers)
+        # Tell every connected client (and the catch-up replay) the question
+        # is answered. Without this, an already-open stream — or any client
+        # that reconnects mid-turn — never learns the answer: the live
+        # AskUserQuestion card stays pending/blank even though the DB block
+        # carries the answers, because the persisted answered block is
+        # suppressed while a same-id streaming card is still in flight. The
+        # event rides the broadcast's event_log, so catch-up replay sees it
+        # too (this closes the navigate-away-and-back blank-card bug).
+        bc = get_broadcast(chat_id)
+        if bc is not None:
+          bc.publish({
+            "type": "answers_applied",
+            "question_id": body.question_id or pending.question_id,
+            "answers": body.answers,
+          })
         return _answer_delivered_response(chat_id)
       # No pending question (Stop cancelled it, or stale UI). Falling
       # through would land the answer text as a new turn prompt (e.g.

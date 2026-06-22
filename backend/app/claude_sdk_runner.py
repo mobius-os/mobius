@@ -59,6 +59,7 @@ import inspect
 import json
 import logging
 import os
+from collections import deque
 from typing import Any
 from uuid import uuid4
 
@@ -542,6 +543,20 @@ def dispatch_sdk_message(
         return current_session_id, None
       _emit_unknown(bc, f"stream:content_block_delta:{delta_type}", delta)
       return current_session_id, None
+    if event_type == "content_block_start":
+      # A new assistant content block is starting. When it is a TEXT
+      # block, emit a provider boundary so the reducer (events.py) starts
+      # a fresh paragraph instead of concatenating into the prior text —
+      # the Claude analog of the Codex AgentMessageThreadItem boundary.
+      # The reducer self-guards (it only inserts a marker when the prior
+      # block is non-empty text), so emitting on every text block-start
+      # is safe: it only takes effect on the consecutive-text case, e.g.
+      # text resuming after an AskUserQuestion answer, which otherwise
+      # glued together as "answer1.answer2" with no separator.
+      cb = event.get("content_block") or {}
+      if isinstance(cb, dict) and cb.get("type") == "text":
+        bc.publish({"type": "text_boundary"})
+        return current_session_id, None
     _emit_unknown(bc, f"stream:{event_type}", event)
     return current_session_id, None
 
@@ -871,6 +886,19 @@ async def run_claude_sdk_turn(
     # Observability (the skill_loaded event + activity log) lives in the
     # tool-use dispatch and works whenever a skill loads, independent of
     # this flag.
+    # Capture the CLI subprocess's stderr. The SDK transport only pipes
+    # stderr when a callback is registered; without one, a CLI that dies
+    # before emitting a structured result surfaces the SDK's generic
+    # placeholder ("Command failed ... Check stderr output for details")
+    # with zero diagnostic content. Bounded so a chatty CLI can't balloon
+    # memory; each line truncated. Used only to enrich an opaque failure
+    # (see the except below).
+    stderr_tail: deque[str] = deque(maxlen=50)
+
+    def _capture_stderr(line: str) -> None:
+      if line:
+        stderr_tail.append(line.rstrip("\n")[:500])
+
     options_kwargs = {
       "system_prompt": skill_text,
       "resume": session_id if session_id is not None else None,
@@ -882,6 +910,7 @@ async def run_claude_sdk_turn(
       "include_partial_messages": True,
       "can_use_tool": can_use_tool,
       "cli_path": "/usr/local/bin/claude",
+      "stderr": _capture_stderr,
       "hooks": {
         "PreToolUse": [
           HookMatcher(matcher=None, hooks=[keepalive_hook]),
@@ -964,11 +993,27 @@ async def run_claude_sdk_turn(
         "error": None,
       }
     except Exception as exc:
+      msg = str(exc)
+      # The SDK raises this generic placeholder when the CLI dies before a
+      # structured result (early resume failure, auth, crash, OOM/SIGTERM
+      # kill). Splice in the captured stderr tail ONLY then — gating on the
+      # placeholder keeps _should_retry_without_model's text matching intact
+      # for real structured errors. Empty tail means the process was killed
+      # before writing stderr (the OOM/timeout case).
+      if "Check stderr output for details" in msg:
+        tail = "\n".join(stderr_tail).strip()
+        if tail:
+          msg = f"{msg}\nstderr (tail):\n{tail}"
+        else:
+          msg = (
+            f"{msg}\n(no stderr captured — the CLI was likely killed "
+            "before writing output, e.g. OOM or timeout)"
+          )
       return {
         "session_id": current_session_id,
         "cost_usd": None,
         "usage": None,
-        "error": str(exc),
+        "error": msg,
       }
     finally:
       current_handle = registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK)

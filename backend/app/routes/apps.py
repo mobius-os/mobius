@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from app import activity, app_git, fs_locks, icon_cache, models, schemas, theme
 from app.storage_io import read_capped_body
 from app.broadcast import get_system_broadcast
+from app.routes.notify import publish_app_built_to_owning_chat
 from app.compiler import compile_jsx, recompile_app_bundle
 from app.config import get_settings
 from app.database import get_db
@@ -824,6 +825,14 @@ async def create_app(
     get_system_broadcast().publish(
       {"type": "app_updated", "appId": str(app.id)}
     )
+    # Fire the chat-scoped `app_built` onto the owning chat's stream so the
+    # in-chat "Open <App>" CTA appears for the turn that built/edited it. The
+    # global `app_updated` above busts caches everywhere but never reaches the
+    # chat-scoped CTA gate. No-ops when the chat has no live broadcast (e.g.
+    # an out-of-band edit), so it never plants a spurious CTA. app_watcher
+    # emits the same event on a file-write recompile; the client upsert is
+    # idempotent (deduped by appId), so a double-emit is harmless.
+    publish_app_built_to_owning_chat(db, str(app.id))
   return app
 
 
@@ -920,6 +929,14 @@ async def update_app(
     get_system_broadcast().publish(
       {"type": "app_updated", "appId": str(app.id)}
     )
+    # Fire the chat-scoped `app_built` onto the owning chat's stream so the
+    # in-chat "Open <App>" CTA appears for the turn that built/edited it. The
+    # global `app_updated` above busts caches everywhere but never reaches the
+    # chat-scoped CTA gate. No-ops when the chat has no live broadcast (e.g.
+    # an out-of-band edit), so it never plants a spurious CTA. app_watcher
+    # emits the same event on a file-write recompile; the client upsert is
+    # idempotent (deduped by appId), so a double-emit is harmless.
+    publish_app_built_to_owning_chat(db, str(app.id))
   return app
 
 
