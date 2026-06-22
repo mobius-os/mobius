@@ -423,10 +423,40 @@ export default function SettingsView({ onThemeChange }) {
         </section>
 
         <section className="settings__section settings__section--compact">
-          <div className="settings__row">
+          <h2 className="settings__section-title">App</h2>
+          {/* Version + update state in ONE calm row. The old toggling
+              "Check for updates" button (idle → Checking… → Up to date) mutated
+              its own label and shifted the layout on every tap — the disliked
+              UX. The version query already knows whether a newer build is
+              waiting, so we surface a single clear "Update" action ONLY when one
+              is, and otherwise a quiet status. Nothing here changes width/height
+              on interaction. */}
+          <div className="settings__row settings__row--top">
             <div>
-              <span className="settings__label">Server</span>
+              <span className="settings__label">Möbius</span>
+              <p className="settings__subtext settings__subtext--tight">
+                {SHELL_BUILD}
+                {shellBuildSha !== 'unknown' ? ` · ${shellBuildSha}` : ''}
+              </p>
             </div>
+            {newerBuildInstalled ? (
+              <button
+                className="settings__btn settings__btn--sm settings__btn--nowrap"
+                type="button"
+                onClick={() => window.location.reload()}
+              >
+                Update
+              </button>
+            ) : (
+              <StatusDot color="--green">Up to date</StatusDot>
+            )}
+          </div>
+        </section>
+
+        <section className="settings__section settings__section--compact">
+          <h2 className="settings__section-title">Server</h2>
+          <div className="settings__row">
+            <span className="settings__label">Restart</span>
             <button
               className="settings__btn settings__btn--outline settings__btn--sm"
               type="button"
@@ -448,46 +478,6 @@ export default function SettingsView({ onThemeChange }) {
               description={restartError}
             />
           )}
-
-          {/* One line carries every delivery signal — the human build
-              marker, the served image SHA, and the live frame revision the
-              client is ACTUALLY running — so "deployed" can be checked against
-              "reached me" without a redundant second sha row. */}
-          <div className="settings__row settings__row--top">
-            <div>
-              <span className="settings__label">Shell version</span>
-              <p className="settings__subtext settings__subtext--tight">
-                {SHELL_BUILD}
-                {shellBuildSha !== 'unknown' ? ` · ${shellBuildSha}` : ''}
-                {frameRev ? ` · frame ${frameRev.slice(0, 8)}` : ''}
-              </p>
-            </div>
-          </div>
-          {/* "Check for updates" rides its own row so the long label never
-              competes with the (also long) build string for width on a phone —
-              the shared row wrapped it to two cramped lines. */}
-          <div className="settings__action-row">
-            <button
-              className="settings__btn settings__btn--outline settings__btn--sm settings__btn--nowrap"
-              type="button"
-              onClick={checkForUpdates}
-              disabled={updatePhase === 'checking'}
-            >
-              {updatePhase === 'checking'
-                ? 'Checking…'
-                : updatePhase === 'checked'
-                  ? 'Up to date'
-                  : 'Check for updates'}
-            </button>
-          </div>
-          {newerBuildInstalled && (
-            <div className="settings__notice" role="status">
-              A newer build is installed — reload to use it.
-            </div>
-          )}
-        </section>
-
-        <section className="settings__section settings__section--compact">
           <div className="settings__row">
             <span className="settings__label">Recovery</span>
             <a className="settings__btn settings__btn--outline settings__btn--sm" href="/recover" target="_blank" rel="noopener noreferrer">
