@@ -246,6 +246,11 @@ export default function useScrollMode({
   // to null and `maybeApplyMode()` would re-write scrollTop with the
   // same mode it already applied, visibly snapping the viewport.
   const lastAppliedModeRef = useRef(null)
+  // The pinned message's offsetTop at the last PIN_USER_MSG apply. The RO
+  // re-pins when this shifts (content ABOVE the message grew — an image
+  // finished loading, an error/question card rendered), which the identity
+  // gate above otherwise misses. Stays null when no pin is active.
+  const lastPinTopRef = useRef(null)
 
   // Persist mode on every chatId change so the next mount restores.
   // (Layout effect can't easily handle persistence because it runs
@@ -325,6 +330,16 @@ export default function useScrollMode({
       if (modeRef.current !== lastAppliedModeRef.current) {
         applyMode(scrollEl, modeRef.current)
         lastAppliedModeRef.current = modeRef.current
+        // Record the pin baseline (or clear it) so the RO's re-pin-on-shift
+        // check below has a reference offsetTop for this pin.
+        if (modeRef.current.kind === 'PIN_USER_MSG') {
+          const el = scrollEl.querySelector(
+            `.chat__msg--user[data-ts="${modeRef.current.ts}"]`,
+          )
+          lastPinTopRef.current = el ? el.offsetTop : null
+        } else {
+          lastPinTopRef.current = null
+        }
       }
     }
 
@@ -395,6 +410,23 @@ export default function useScrollMode({
       if (k === 'FOLLOW_BOTTOM'
           || (k === 'ANCHOR_AT' && !revealedOnce)) {
         applyMode(scrollEl, modeRef.current)
+      } else if (k === 'PIN_USER_MSG') {
+        // Re-pin ONLY when the pinned message's offsetTop SHIFTED since the
+        // last apply — i.e. content ABOVE it grew (a prior turn's image
+        // finished loading, an error/question card rendered). That is the
+        // user-reported "first send works, a later send drifts off the top"
+        // bug. Streaming content BELOW the message leaves offsetTop unchanged,
+        // so this is a no-op during streaming (it does NOT reintroduce the
+        // May-2026 jitter where re-pinning every RO firing yanked the view),
+        // and a user scroll flips the mode away from PIN_USER_MSG so it never
+        // fights manual scrolling.
+        const el = scrollEl.querySelector(
+          `.chat__msg--user[data-ts="${modeRef.current.ts}"]`,
+        )
+        if (el && el.offsetTop !== lastPinTopRef.current) {
+          applyMode(scrollEl, modeRef.current)
+          lastPinTopRef.current = el.offsetTop
+        }
       }
       requestRevealOnQuiet()  // each RO firing pushes the reveal back
     })
