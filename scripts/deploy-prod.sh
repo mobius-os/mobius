@@ -753,6 +753,25 @@ step "[3/4] refresh /data/shell/ from new image's /app/shell-src"
 # node_modules sub-tree entirely. We're about to rebuild from scratch
 # anyway — clear everything in /data/shell. /app/static/ remains as the
 # baked fallback if anything goes wrong.
+# Snapshot live shell edits before the wholesale clear erases them. The
+# in-product agent edits /data/shell/src in place, but src is NOT tracked in
+# /data's git (only shell/dist + shell/node_modules are gitignored — src is
+# simply never `git add`ed), so without this every agent UI fix is silently
+# lost on the next deploy. This is exactly how the text_boundary / scroll /
+# app-CTA work drifted unrecoverably out of origin/main. Snapshot to a
+# timestamped tarball OUTSIDE /data/shell (so the rm can't eat it) whenever
+# src differs from the image's baked /app/shell-src. Best effort — never
+# blocks the deploy; recover later by diffing the tarball into frontend/src.
+if docker exec "$CONTAINER" sh -c 'test -d /data/shell/src' 2>/dev/null \
+   && ! docker exec "$CONTAINER" sh -c 'diff -rq /app/shell-src/src /data/shell/src >/dev/null 2>&1'; then
+  shell_snap="/data/shell-src-predeploy-$(date +%Y%m%d-%H%M%S).tar.gz"
+  warn "/data/shell/src differs from the baked shell (live agent edits and/or a"
+  warn "prior frontend deploy) — snapshotting to ${shell_snap} before refresh."
+  intent "docker exec ${CONTAINER} sh -c \"tar czf '${shell_snap}' -C /data/shell src\""
+  docker exec "$CONTAINER" sh -c "tar czf '${shell_snap}' -C /data/shell src 2>/dev/null" \
+    && info "shell snapshot saved (recover: docker cp ${CONTAINER}:${shell_snap} . then diff into frontend/src)" \
+    || warn "shell snapshot failed — proceeding; agent shell edits may be unrecoverable after this."
+fi
 intent "docker exec ${CONTAINER} sh -c 'rm -rf /data/shell/* /data/shell/.[!.]* 2>/dev/null; true'"
 docker exec "$CONTAINER" sh -c 'rm -rf /data/shell/* /data/shell/.[!.]* 2>/dev/null; true'
 intent "docker exec ${CONTAINER} cp -a /app/shell-src/. /data/shell/"

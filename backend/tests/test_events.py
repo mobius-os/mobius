@@ -302,3 +302,26 @@ def test_process_error_event_coalesces_duplicates():
 def test_immediate_save_types_are_event_types():
   """_IMMEDIATE_SAVE_TYPES stays a subset of the exported vocabulary."""
   assert _ChatEventSink._IMMEDIATE_SAVE_TYPES <= set(get_args(EventType))
+
+
+def test_both_runners_emit_text_boundary():
+  """Both SDK runners must emit `text_boundary` so a stream with multiple
+  assistant message items renders as separate paragraphs on EITHER provider.
+
+  This guards the provider-asymmetric half-fix class: `text_boundary` shipped
+  for the Codex runner but not the Claude runner for a while, so Claude text
+  resuming after an AskUserQuestion glued together as "answer1.answer2". A
+  source-level check is intentional — it catches the omission without driving
+  each SDK end-to-end.
+  """
+  from pathlib import Path
+
+  app_dir = Path(__file__).resolve().parents[1] / "app"
+  for runner in ("claude_sdk_runner.py", "codex_sdk_runner.py"):
+    src = (app_dir / runner).read_text()
+    assert '"text_boundary"' in src, (
+      f"{runner} never publishes a text_boundary event — consecutive "
+      f"assistant message items will concatenate without a paragraph break "
+      f"on this provider. Keep the streaming event vocabulary symmetric "
+      f"across runners (see events.process_event)."
+    )
