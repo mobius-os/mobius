@@ -115,9 +115,10 @@ scrolls; nothing here can crush or collapse a child.
 ```
 
 Pin a header with `position: sticky; top: 0` (omit it for a header that scrolls
-away). For a reading column (prose, a changelog, an FAQ), cap an inner page
-wrapper at `max-width: 680px; margin: 0 auto`. The `.ma-empty` block self-centers
-here on its own.
+away). For a reading column (prose, a changelog, an FAQ) cap an inner wrapper at
+`max-width: 680px; margin: 0 auto`; for an FAQ/accordion add the `mobius-ui:Disclosure`
+block (§10) — a native `<details>` flows fine in a Root, no AppShell needed. The
+`.ma-empty` block centers per its own note.
 
 **Opt-in — `mobius-ui:AppShell` (pinned header + independent scroll).** For lists
 / feeds / a fixed input bar: a flex column whose body scrolls under a fixed header.
@@ -188,7 +189,10 @@ pad controls with `env()` or the shell's `--mobius-safe-*` vars (the latter are
 ```
 
 ```css
-/* mobius-ui:Header — app-owned; a future-library candidate (no sync owed). */
+/* mobius-ui:Header — app-owned; a future-library candidate (no sync owed).
+   PINNING DIFFERS BY ROOT: in AppShell keep "flex: 0 0 auto" (the flex column holds it,
+   .ma-scroll scrolls under it); in a flow Root use "position: sticky; top: 0" instead,
+   or drop both for a header that scrolls away. */
 .ma-header {
   flex: 0 0 auto;
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -288,8 +292,9 @@ scrim itself, being full-bleed, does not.
 
 ```css
 /* mobius-ui:Empty — app-owned; a future-library candidate (no sync owed). */
-.ma-empty {  /* centers in normal flow (a flow Root). Inside AppShell it's a direct .ma-root flex
-                child, so flex:1 0 auto fills the column and centers instead of top-pinning. */
+.ma-empty {  /* AppShell (flex column): flex:1 0 auto fills below the header + centers. Flow Root
+                (block — flex is inert): centers within its min-height box, so it sits in the upper
+                viewport; bump min-height toward 100dvh for a full-screen header-less empty. */
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   text-align: center; gap: 8px; flex: 1 0 auto; min-height: 60dvh; max-width: 440px;
   margin: 0 auto; padding: 48px 24px; color: var(--muted);

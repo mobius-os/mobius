@@ -196,10 +196,10 @@ imports `index.jsx`):
   CSS = \`...\``), NOT a sibling `.css` import — esbuild emits a `.css` import
   as a separate artifact the single-module serving path won't deliver, so the
   app loads unstyled. A `.js` CSS string is just JS and serves fine.
-- **Put every `mobius-ui:` fenced block in one `ui/Chrome.jsx`** so the shared,
-  library-candidate components are in one place per app. When ~3 apps carry the
-  same fenced block, extraction is `grep -rl 'mobius-ui:'` + move + import — the
-  copy-then-extract discipline, applied within and across apps.
+- **You MAY gather chrome blocks into one `ui/Chrome.jsx`** once chrome is clearly
+  its own concept in the app — until then colocate each fenced block where it's
+  used (see the next bullet). Either way, `grep -rl 'mobius-ui:'` finds every copy
+  when it's time to harvest a real library.
 - Don't pre-abstract. Colocate first; split when a real second concept appears.
   An over-split trivial app is as hard to read as an over-grown one.
 
@@ -466,7 +466,7 @@ const CSS = `
 /* /mobius-ui:Root */
 .ma-page { max-width: 680px; margin: 0 auto; padding: 20px 16px 48px; }   /* reading column */
 .ma-header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 11px;
-  padding: 12px 16px; background: var(--surface); border-bottom: 1px solid var(--border); }
+  padding: max(12px, env(safe-area-inset-top)) 16px 12px; background: var(--surface); border-bottom: 1px solid var(--border); }
 /* + mobius-ui:Card, mobius-ui:Empty, mobius-ui:Focus, mobius-ui:ReducedMotion (copy from the catalog) */
 `
 export default function Reader({ appId, token }) {
