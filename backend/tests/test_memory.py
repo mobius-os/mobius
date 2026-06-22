@@ -1,6 +1,7 @@
 """Knowledge-graph memory: injection assembly (memory.py) + indexer lint
 (memory_graph.py). Fully isolated via tmp_path — no global DATA_DIR."""
 
+import os
 from pathlib import Path
 
 from app import memory, memory_graph
@@ -61,24 +62,26 @@ def test_budget_skips_hot_notes_when_index_fills_it(tmp_path):
   assert "notes/n.md" not in block.loaded
 
 
-def test_budget_skips_inbox_when_index_fills_it(tmp_path):
-  # A large index can leave no room for the inbox tail. The inbox chunk's
-  # header+marker+separator are NOT covered by INBOX_TAIL_BYTES, so without
-  # an explicit budget check the chunk would push the block past
-  # budget_bytes. Assert it is dropped, keeping the block within budget.
+def test_budget_skips_chat_note_when_index_fills_it(tmp_path):
+  # A large index can leave no room for a chat-note chunk. Without the budget
+  # check the chunk would push the block past budget_bytes; assert it is
+  # dropped, keeping the block within budget. (There is no inbox in v2 — the
+  # per-chat notes are what gets injected after the index.)
   root = _graph(tmp_path)
-  # Index nearly fills the 4000-byte budget (but isn't itself truncated),
-  # leaving no room for even a tiny inbox chunk + its marker + separator.
   big_index = "# Home\n" + ("x" * 3990)
   (root / "index.md").write_text(big_index)
-  (root / "inbox.md").write_text("- a fresh observation worth keeping")
+  d = root / "chats" / "c1"
+  d.mkdir(parents=True)
+  (d / "index.md").write_text(
+    "---\ntype: chat\ndescription: x\n---\n## Summary\na fresh observation worth keeping"
+  )
   (root / ".ready").write_text("")
 
   block = memory.build_memory_block(tmp_path, budget_bytes=4000)
   assert block.mode == "graph"
   assert "[index truncated" not in block.text  # index itself fits
-  assert "fresh observation" not in block.text  # no room left for inbox
-  assert "inbox.md" not in block.loaded
+  assert "fresh observation" not in block.text  # no room left for the chat note
+  assert "chats/c1/index.md" not in block.loaded
   assert len(block.text.encode("utf-8")) <= 4000
 
 
@@ -106,35 +109,47 @@ def test_empty_published_graph_is_empty(tmp_path):
   assert block.text == ""
 
 
-# --- recent-chats queue --------------------------------------------------
+# --- recent chat notes (injected after the index) ------------------------
 
 
-def test_recent_chats_truncates_oldest_first_when_tight(tmp_path):
-  # 40 entries at ~40 bytes each ≈ 1.6 KB; a budget that fits the index
-  # plus only part of the queue must keep the NEWEST tail and drop the
-  # oldest entries behind the omission marker.
+def test_chat_notes_injected_newest_first_budget_guarded(tmp_path):
+  # The most-recently-modified chat notes are injected newest-first; a tight
+  # budget keeps the newest and drops the oldest (the budget guard stops before
+  # overflow). There is no recent-chats queue and no inbox in v2.
   root = _graph(tmp_path)
   (root / "index.md").write_text("# Home")
-  lines = [f"- [chat:c{i:02d}] 2026-06-01 — summary {i:02d}" for i in range(40)]
-  (root / "recent-chats.md").write_text("\n".join(lines))
+  for i in range(6):
+    d = root / "chats" / f"c{i:02d}"
+    d.mkdir(parents=True)
+    (d / "index.md").write_text(
+      f"---\ntype: chat\ndescription: chat {i:02d}\n---\n## Summary\n"
+      f"summary body {i:02d} " + ("x" * 120)
+    )
+    os.utime(d / "index.md", (1000 + i, 1000 + i))  # higher i = newer
   (root / ".ready").write_text("")
 
   block = memory.build_memory_block(tmp_path, budget_bytes=600)
-  assert "recent-chats.md" in block.loaded
-  assert "[older recent-chats entries omitted]" in block.text
-  assert "summary 39" in block.text  # newest survives
-  assert "summary 00" not in block.text  # oldest evicted
+  assert "summary body 05" in block.text  # newest survives
+  assert "summary body 00" not in block.text  # oldest dropped by budget
+  assert "chats/c05/index.md" in block.loaded
+  assert "chats/c00/index.md" not in block.loaded
+  # newest-first ordering in the injected text
+  assert block.text.index("summary body 05") < block.text.index("summary body 04")
   assert len(block.text.encode("utf-8")) <= 600
 
 
-def test_recent_chats_skipped_when_no_room(tmp_path):
+def test_chat_note_skipped_when_no_room(tmp_path):
   root = _graph(tmp_path)
   (root / "index.md").write_text("# Home\n" + "x" * 580)
-  (root / "recent-chats.md").write_text("- [chat:c1] 2026-06-10 — summary")
+  d = root / "chats" / "c1"
+  d.mkdir(parents=True)
+  (d / "index.md").write_text(
+    "---\ntype: chat\ndescription: x\n---\n## Summary\nsummary"
+  )
   (root / ".ready").write_text("")
 
   block = memory.build_memory_block(tmp_path, budget_bytes=600)
-  assert "recent-chats.md" not in block.loaded
+  assert "chats/c1/index.md" not in block.loaded
   assert len(block.text.encode("utf-8")) <= 600
 
 
@@ -439,40 +454,46 @@ def test_seed_graph_lints_clean_under_new_warnings():
   assert not res.problems, res.problems
 
 
-def test_graph_mode_injects_router_recency_inbox_no_notes(tmp_path):
-  # v2: build_memory_block injects the router (index) + recency + inbox, and NO
-  # notes — the agent traverses from the router's scent lines on demand.
+def test_graph_mode_injects_router_and_chat_notes_not_inbox_or_notes(tmp_path):
+  # v2: build_memory_block injects the router (index) + the recent chat NOTES,
+  # and NOT the deeper graph (notes/) — the agent traverses on demand. There is
+  # no inbox in the chat-centric model, so a stray inbox.md is never injected.
   root = _graph(tmp_path)
   (root / "index.md").write_text("# Home\n\n- [[working]]\n")
   (root / "notes" / "aaa.md").write_text(_note(title="a"))
   (root / "notes" / "bbb.md").write_text(_note(title="b"))
-  (root / "inbox.md").write_text("- saw the user do X today")
+  d = root / "chats" / "c1"
+  d.mkdir(parents=True)
+  (d / "index.md").write_text(
+    "---\ntype: chat\ndescription: built habits\n---\n## Summary\nbuilt the Habits app"
+  )
+  (root / "inbox.md").write_text("- legacy inbox line")  # must be ignored
   (root / ".ready").write_text("")
 
   block = memory.build_memory_block(tmp_path)
   assert block.mode == "graph"
   assert "# Home" in block.text
-  assert "saw the user do X" in block.text
+  assert "built the Habits app" in block.text  # the chat note is injected
+  assert "chats/c1/index.md" in block.loaded
   assert "index.md" in block.loaded
-  assert "inbox.md" in block.loaded
+  assert "inbox.md" not in block.loaded  # no inbox in v2
+  assert "legacy inbox line" not in block.text
   assert not any(x.startswith("notes/") for x in block.loaded)
   assert "notes/" not in block.text
 
 
-def test_recent_chats_injected_after_index_before_inbox_v2(tmp_path):
+def test_chat_notes_injected_after_index(tmp_path):
   root = _graph(tmp_path)
   (root / "index.md").write_text("# Home")
-  (root / "recent-chats.md").write_text(
-    "- [chat:c1] 2026-06-10 — built the Habits app\n"
+  d = root / "chats" / "c1"
+  d.mkdir(parents=True)
+  (d / "index.md").write_text(
+    "---\ntype: chat\ndescription: habits\n---\n## Summary\nbuilt the Habits app"
   )
-  (root / "inbox.md").write_text("- a fresh observation")
   (root / ".ready").write_text("")
 
   block = memory.build_memory_block(tmp_path)
-  assert "recent-chats.md" in block.loaded
+  assert "chats/c1/index.md" in block.loaded
   assert "built the Habits app" in block.text
-  assert (
-    block.text.index("# Home")
-    < block.text.index("recent-chats.md")
-    < block.text.index("inbox.md")
-  )
+  # the chat note is injected after the router index
+  assert block.text.index("# Home") < block.text.index("built the Habits app")
