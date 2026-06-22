@@ -69,8 +69,14 @@ rules below.
 ## Reading — descend until you have enough
 
 Each session opens with the router index plus the full summaries of the ~10
-most-recently-updated chat notes already injected. When that's not enough, read
-**iteratively, by depth** — navigate, don't grep:
+most-recently-updated chat notes already injected. When that's not enough, the
+**memory-search subagent is the primary way to go deeper** — `core.md` has the
+agent run `memory_search.py "<request>" "$CHAT_ID"` early in a chat, which
+spawns a read-only subagent that traverses the graph for what the conversation
+touches and returns the relevant facts (recording its reads to the trace). Reach
+for that first; it reads more thoroughly than a busy main agent tends to.
+
+You can also read **iteratively, by depth** yourself — navigate, don't grep:
 
 1. Start at `index.md`; pick the most relevant map by its one-line entry
    descriptions.
