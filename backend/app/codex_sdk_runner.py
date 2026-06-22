@@ -199,6 +199,7 @@ def _sdk_imports() -> dict[str, Any]:
   from openai_codex.types import ReasoningEffort, SandboxMode
   from openai_codex.generated.v2_all import (
     AgentMessageDeltaNotification,
+    AgentMessageThreadItem,
     CommandExecutionOutputDeltaNotification,
     CommandExecutionThreadItem,
     ContextCompactedNotification,
@@ -218,6 +219,7 @@ def _sdk_imports() -> dict[str, Any]:
 
   return {
     "AgentMessageDeltaNotification": AgentMessageDeltaNotification,
+    "AgentMessageThreadItem": AgentMessageThreadItem,
     "ApprovalMode": ApprovalMode,
     "AppServerConfig": AppServerConfig,
     "AsyncCodex": AsyncCodex,
@@ -964,6 +966,9 @@ async def run_codex_sdk_turn(
 
         if isinstance(payload, sdk["ItemStartedNotification"]):
           item = payload.item.root if hasattr(payload.item, "root") else payload.item
+          if isinstance(item, sdk["AgentMessageThreadItem"]):
+            bc.publish({"type": "text_boundary"})
+            continue
           event = _tool_start_event(item, sdk)
           if event is not None:
             bc.publish(event)

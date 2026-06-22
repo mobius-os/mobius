@@ -220,13 +220,19 @@ class AgentSettingsOverride(BaseModel):
   #     low, medium, high, xhigh.
   #   Claude `EffortLevel` (claude-agent-sdk): low, medium, high,
   #     xhigh, max (xhigh + max are Opus-tier only).
+  # Plus one Möbius-only Claude tier: `ultracode` — the Claude Code
+  # CLI's ultracode mode (xhigh effort + dynamic multi-agent Workflow
+  # orchestration). It is NOT an SDK EffortLevel; `claude_sdk_runner`
+  # translates it to `--effort xhigh` + the CLI's ultracode keyword
+  # trigger. Accepted here so the PATCH round-trips; the runner owns
+  # the translation.
   # The picker enforces per-provider scoping. Runners forward the
   # value as-is to the SDK; a model/effort mismatch (e.g. `max` on a
   # non-Opus Claude) surfaces as a 400 at turn time, not at PATCH.
   # Acceptable per the platform's "reversibility over prevention"
   # philosophy.
   effort: Literal[
-    "none", "minimal", "low", "medium", "high", "xhigh", "max"
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultracode"
   ] | None = None
   # Per-provider memory of the last-picked effort. The enums are
   # NOT comparable across providers — Codex `medium` is roughly

@@ -152,3 +152,57 @@ test('Second send through full SSE flow: new user msg pins to viewport top', asy
   expect(afterSecond.lastUserVisualTop).toBeGreaterThanOrEqual(-50)
   expect(afterSecond.lastUserVisualTop).toBeLessThanOrEqual(afterSecond.clientH / 3)
 })
+
+test('Pin HOLDS when content above the pinned message grows after send (late image/error/question layout)', async ({ page }) => {
+  // The user-reported "first send works, subsequent can fail" bug. On a later
+  // send the message pins to the top, but then content ABOVE it grows — a
+  // prior turn's image finishes loading, or an error/question card renders —
+  // shifting the pinned message's offsetTop with no user action. The
+  // May-2026 identity-gate (useScrollMode `maybeApplyMode`, commit 47ed8b4)
+  // re-applies a mode only when the mode OBJECT changes, so the steady-state
+  // PIN_USER_MSG is never re-pinned and the message drifts off the top. This
+  // reproduces it by growing content above the pinned message after the pin.
+  const events = [
+    { type: 'catch_up_done' },
+    { type: 'text', content: 'Agent response paragraph. '.repeat(60) },
+    { type: 'done' },
+  ]
+  await setupWithSSE(page, events)
+  await newChat(page)
+
+  await sendMessage(page, 'First user message')
+  await waitStreamDone(page)
+  await sendMessage(page, 'Second user message')
+  await page.evaluate(() => new Promise(r =>
+    requestAnimationFrame(() => requestAnimationFrame(r))
+  ))
+
+  const pinned = await measure(page)
+  expect(pinned.lastUserText).toBe('Second user message')
+  // Precondition: it IS pinned to the top right after send.
+  expect(pinned.lastUserVisualTop).toBeLessThanOrEqual(pinned.clientH / 3)
+
+  // Simulate late content growth ABOVE the pinned message (image load /
+  // error / question card rendering in an earlier turn) — no user action.
+  await page.evaluate(() => {
+    const list = document.querySelector('.chat__list')
+    const firstMsg = list?.querySelector('.chat__msg')
+    if (firstMsg) {
+      const grow = document.createElement('div')
+      grow.style.height = '500px'
+      grow.setAttribute('data-test-late-grow', '1')
+      firstMsg.appendChild(grow)
+    }
+  })
+  // Let the ResizeObserver fire + any re-pin settle.
+  await page.evaluate(() => new Promise(r =>
+    requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 150)))
+  ))
+
+  const afterGrow = await measure(page)
+  // The pinned message must STILL be near the top. Without the
+  // re-pin-on-offsetTop-change fix, lastUserVisualTop drifts down by ~500px.
+  expect(afterGrow.lastUserText).toBe('Second user message')
+  expect(afterGrow.lastUserVisualTop).toBeGreaterThanOrEqual(-50)
+  expect(afterGrow.lastUserVisualTop).toBeLessThanOrEqual(afterGrow.clientH / 3)
+})

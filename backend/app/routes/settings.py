@@ -9,6 +9,8 @@ owner-scoped surface = define a sub-router in this file and
 `outer_router.include_router(...)` it below.
 """
 
+import functools
+import json
 import logging
 import re
 import shutil
@@ -42,23 +44,29 @@ logger = logging.getLogger(__name__)
 # generous headroom.
 _VERSION_TIMEOUT = 2.0
 
-# Release dates for the pinned CLI versions, keyed by bare semver.
+# Release dates for the installed CLI versions, keyed by bare semver, so the
+# Settings row can read "2.1.183 (2026-06-19)" instead of the raw CLI banner.
 #
-# The Dockerfile is the source of truth for WHICH versions ship
-# (`npm install -g @anthropic-ai/claude-code@<v>` /
-# `@openai/codex@<v>`); this map carries the release date for each so
-# the Settings row can read "2.1.173 (2026-06-11)" instead of the raw
-# CLI banner. Keep this in lockstep with the Dockerfile pins: when you
-# bump a pin, add the new version's npm publish date here. An unknown
-# version (anything not pinned, e.g. a hand-upgraded dev container)
-# falls back to the bare version — the row is never blocked on a
-# missing date.
-_CLI_RELEASE_DATES = {
-  # @anthropic-ai/claude-code
-  "2.1.173": "2026-06-11",
-  # @openai/codex
-  "0.134.0": "2026-05-26",
-}
+# Captured at image-build time by the Dockerfile (`npm view <pkg>@<v> time`,
+# right after the global installs) into the JSON file below — keyed by the
+# versions actually installed. A CLI pin bump therefore refreshes the date
+# automatically, with no hand-maintained map to keep in lockstep and no test
+# to satisfy. Read once and cached; every failure mode (the file absent on a
+# dev checkout, or a build that couldn't reach the npm registry) degrades to
+# an empty map, and the row then shows the bare version — never an error.
+_CLI_RELEASE_DATES_PATH = "/app/cli-release-dates.json"
+
+
+@functools.lru_cache(maxsize=1)
+def _cli_release_dates() -> dict[str, str]:
+  try:
+    with open(_CLI_RELEASE_DATES_PATH) as f:
+      data = json.load(f)
+    if isinstance(data, dict):
+      return {str(k): str(v) for k, v in data.items()}
+  except (OSError, ValueError):
+    pass
+  return {}
 
 # Bare semver inside a CLI's `--version` banner. Tolerant of both
 # shapes the pinned CLIs print:
@@ -73,8 +81,8 @@ def _format_cli_version(raw: str | None) -> str | None:
   """Normalize a CLI `--version` banner to "<version> (<date>)".
 
   Parses the bare semver out of the banner (dropping the codex-cli
-  prefix and the "(Claude Code)" suffix), then appends the pinned
-  release date from `_CLI_RELEASE_DATES`. Falls back to the bare
+  prefix and the "(Claude Code)" suffix), then appends the build-captured
+  release date from `_cli_release_dates()`. Falls back to the bare
   version when the date is unknown, and passes None straight through
   (CLI absent / unresponsive) — the date lookup never blocks the row.
   """
@@ -86,7 +94,7 @@ def _format_cli_version(raw: str | None) -> str | None:
   if match is None:
     return raw
   version = match.group(0)
-  date = _CLI_RELEASE_DATES.get(version)
+  date = _cli_release_dates().get(version)
   return f"{version} ({date})" if date else version
 
 

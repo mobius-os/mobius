@@ -539,8 +539,9 @@ async def providers_models(
 # process, parses the URL and one-time code from stdout, returns them
 # to the frontend, then a background watcher awaits completion.
 
-import re
 from pathlib import Path
+
+from app.codex_login_parse import banner_has_code, parse_login_banner
 
 _codex_login_procs: dict[str, asyncio.subprocess.Process] = {}
 _codex_login_status: dict[str, str] = {}  # "complete" | "failed"
@@ -598,9 +599,7 @@ async def codex_login_start(
         if not line:
           break
         output += line.decode("utf-8", errors="replace")
-        if "code" in output.lower() and re.search(
-          r'[A-Z0-9]{4,}-[A-Z0-9]{4,}', output
-        ):
+        if banner_has_code(output):
           break
   except asyncio.TimeoutError:
     proc.kill()
@@ -611,15 +610,8 @@ async def codex_login_start(
     log.warning("codex login timed out, output: %s", output[:500])
     raise HTTPException(500, "Codex login timed out")
 
-  # Strip ANSI escape sequences before parsing — CLI output often
-  # wraps URLs in color codes (e.g. \x1b[4mhttps://...\x1b[0m)
-  # which end up as garbage in the captured URL.
-  clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', output)
-
-  # Parse URL and code from the cleaned output.
-  url_match = re.search(r'(https://[^\s<>"\']+)', clean)
-  code_match = re.search(r'([A-Z0-9]{4,}-[A-Z0-9]{4,})', clean)
-  if not url_match or not code_match:
+  parsed = parse_login_banner(output)
+  if parsed is None:
     proc.kill()
     try:
       await asyncio.wait_for(proc.wait(), timeout=2.0)
@@ -635,10 +627,7 @@ async def codex_login_start(
   _codex_login_status.pop("result", None)
   asyncio.create_task(_watch_codex_login(proc))
 
-  # Trim trailing punctuation that may have been captured from the
-  # CLI's sentence formatting (e.g. "Visit https://example.com.").
-  parsed_url = url_match.group(1).rstrip('.,;:!?')
-  return {"url": parsed_url, "code": code_match.group(1)}
+  return parsed
 
 
 @router.get("/provider/codex/status")
