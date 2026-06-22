@@ -2,13 +2,12 @@
  *
  * Lists the dated reports the reflection agent leaves overnight, tracks a
  * streak, and lets the owner set the run hour and model. Opening a brief
- * shows TWO things stacked: the brief HTML up top (a sandboxed iframe —
- * the agent's static page) and, beneath it, the MORNING CHAT the nightly
- * run opened — the conversation about that brief, live, with a real
- * composer and tappable AskUserQuestion cards. The brief is the read; the
- * chat is where the partner steers the next night.
+ * shows the brief HTML (a sandboxed iframe — the agent's static page), the
+ * in-brief question cards (tap to answer — saved for the NEXT run), and a
+ * "Discuss this brief" launcher. The brief is the read; the launcher is where
+ * the partner steers the next night.
  *
- * Data contract (unchanged, load-bearing):
+ * Data contract (load-bearing):
  *  - List reports:  GET /api/storage/apps-list/{appId}/reports/   (cursor-paged)
  *  - Read a brief:  GET /api/storage/apps/{appId}/reports/<date>.html  (TEXT)
  *  - settings.json / state.json: JSON via the same storage base.
@@ -18,18 +17,20 @@
  *    run for the sole purpose of reporting content height via postMessage.
  *    hardenReportHtml injects a CSP + a minimal height-reporter snippet.
  *
- * Brief↔chat link: the nightly run creates the morning chat app-attributed
- * (`POST /api/app-chats` with a Reflection app token, title "Morning brief —
- * <date>") so the conversation lives HERE, under its brief, and stays out of
- * the owner's drawer history (`GET /api/chats` hides `created_by_app_id`
- * chats by default). The run SHOULD write a sibling
- * `reports/<date>.meta.json` = { "chat_id": "<id>" } so the date maps to a
- * chat without guessing. The app reads that meta with its app token; when a
- * chat_id resolves it mounts the real ChatView via `window.mobius.chat({
- * mount, chatId })` (the embed runs in the shell origin with the owner JWT,
- * which can always read/post an app's chats — and still renders legacy
- * owner-created morning chats through the same path). No chat_id (or no
- * `window.mobius.chat`) → the brief stands alone, gracefully.
+ * Brief↔chat link: the conversation about a brief is created ON TAP (not
+ * overnight). "Discuss this brief" POSTs /api/app-chats with the app token
+ * and the brief's `report_date`; the backend's app-context seam injects the
+ * stripped brief into the agent's FIRST turn, so the chat opens with the
+ * brief already in context. `createReportChat` dedups against a sibling
+ * `reports/<date>.meta.json` = { "chat_id": "<id>" } — the first tap writes
+ * it, later taps reopen the same chat. The chat is app-attributed (it carries
+ * `created_by_app_id`), so the owner's drawer history hides it (`GET
+ * /api/chats` excludes those rows by default); the full-screen ChatView opens
+ * via the shell's `moebius:open-chat` route, which needs no runtime helper.
+ *
+ * The in-brief question cards are a SEPARATE flow: their answers persist to
+ * question-answers/<date>.json for the next nightly run and never reach the
+ * chat. That flow is unchanged.
  */
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 
@@ -563,25 +564,23 @@ const S = {
   },
   chatHeaderText: { fontSize: '13px', fontWeight: 700, letterSpacing: '-0.1px' },
   chatHeaderHint: { fontSize: '11.5px', color: 'var(--muted)', fontWeight: 500, marginLeft: 'auto' },
-  chatMount: { width: '100%', flex: 1, minHeight: '420px' },
-  chatResolving: {
-    padding: '20px 16px 28px', display: 'flex', alignItems: 'center', gap: '10px',
-    color: 'var(--muted)', fontSize: '12.5px',
+  // Discuss-this-brief launcher (replaces the old inline morning-chat embed).
+  discussWrap: {
+    margin: '4px 16px 22px', padding: '16px', borderRadius: '14px',
+    background: 'var(--surface)', border: '1px solid var(--border)',
+    display: 'flex', flexDirection: 'column', gap: '12px', alignItems: 'flex-start',
   },
-  noChatNote: {
-    margin: '14px 16px 22px', padding: '14px 16px', borderRadius: '13px',
-    background: 'var(--surface)', border: '1px dashed var(--border)',
-    color: 'var(--muted)', fontSize: '12.5px', lineHeight: 1.55,
-    display: 'flex', alignItems: 'flex-start', gap: '10px',
+  discussNote: {
+    fontSize: '13px', color: 'var(--muted)', lineHeight: 1.55, margin: 0,
   },
-  feedbackRow: {
-    borderTop: '1px solid var(--border)', padding: '14px 16px 18px',
-    display: 'flex', justifyContent: 'flex-end',
-  },
-  feedbackBtn: {
-    border: '1px solid var(--border)', borderRadius: '10px', background: 'var(--surface2)',
-    color: 'var(--text)', padding: '9px 12px', fontSize: '12.5px', fontWeight: 700, cursor: 'pointer',
-  },
+  discussBtn: (busy) => ({
+    minHeight: '44px', padding: '11px 18px', borderRadius: '11px', border: 'none',
+    background: busy ? 'var(--surface2)' : ACCENT,
+    color: busy ? 'var(--muted)' : '#fff',
+    fontSize: '14px', fontWeight: 700, cursor: busy ? 'default' : 'pointer',
+    fontFamily: 'var(--font)', boxShadow: busy ? 'none' : `0 6px 18px -8px ${ACCENT}`,
+    touchAction: 'manipulation',
+  }),
 
   // In-brief question cards. The agent embeds these declaratively in the
   // brief HTML (a JSON carrier inside an inert <script>); the app renders
@@ -756,12 +755,12 @@ function makeStorage(appId, token) {
     }
   }
 
-  // Resolve the morning chat for a report date. The cron SHOULD write a
-  // sibling `reports/<date>.meta.json` = { "chat_id": "<id>" } when it opens
-  // the morning chat; this reads it (with the app token, same as every other
-  // read). Returns the chat_id string, or null when there's no meta yet (the
-  // brief then stands alone). A network error is swallowed to null too — the
-  // brief is still readable; the chat just doesn't mount this open.
+  // Resolve the chat for a report date, if one was already opened. The link
+  // lives in a sibling `reports/<date>.meta.json` = { "chat_id": "<id>" }
+  // (written by `createReportChat` the first time the partner taps "Discuss
+  // this brief"). Read with the app token, same as every other read. Returns
+  // the chat_id string, or null when no chat has been opened for this date.
+  // A network error is swallowed to null too — the brief is still readable.
   async function getReportChatId(dateStr) {
     try {
       const r = await fetch(`${base}/reports/${dateStr}.meta.json`, { headers })
@@ -769,6 +768,42 @@ function makeStorage(appId, token) {
       const data = await r.json()
       const id = data && (data.chat_id ?? data.chatId ?? data.morning_chat)
       return typeof id === 'string' && id.trim() ? id.trim() : null
+    } catch {
+      return null
+    }
+  }
+
+  // Open (or reopen) the chat about a brief. Dedup first: if a chat was
+  // already created for this date, return its id so a second tap reopens the
+  // same conversation instead of spawning a fresh empty one. Otherwise POST
+  // /api/app-chats with the app token (which carries this app's app_id, the
+  // contract the endpoint requires) and pass `report_date` so the agent's
+  // FIRST turn gets the brief injected as context — no bespoke plumbing, the
+  // existing app-context seam does it. After creating, write the chat_id back
+  // to the meta sibling so the dedup holds next time. Returns the chat_id, or
+  // null when the create failed (the caller surfaces a gentle error).
+  async function createReportChat(dateStr) {
+    const existing = await getReportChatId(dateStr)
+    if (existing) return existing
+    try {
+      const r = await fetch('/api/app-chats', {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: `Brief — ${dateStr}`,
+          report_date: dateStr,
+          report_kind: 'reflection',
+        }),
+      })
+      if (!r.ok) return null
+      const data = await r.json()
+      const id = data && typeof data.id === 'string' ? data.id.trim() : ''
+      if (!id) return null
+      // Persist the link so the next open dedups to this same chat. Bare
+      // object on a .json path → stored as-is (no envelope). Best-effort:
+      // a failed write just means the next tap creates a fresh chat.
+      try { await putJSON(`reports/${dateStr}.meta.json`, { chat_id: id }) } catch {}
+      return id
     } catch {
       return null
     }
@@ -808,7 +843,10 @@ function makeStorage(appId, token) {
     return { dates: out }
   }
 
-  return { getJSON, putJSON, getReportHtml, getReportChatId, listReportDates }
+  return {
+    getJSON, putJSON, getReportHtml, getReportChatId,
+    createReportChat, listReportDates,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -882,104 +920,78 @@ function useOnline() {
 }
 
 // ---------------------------------------------------------------------------
-// Morning chat embed. `window.mobius.chat({ mount, chatId })` mounts the real
-// ChatView (composer + live SSE + tappable AskUserQuestion cards) inside a
-// nested same-origin iframe that runs in the SHELL origin — so it carries the
-// owner JWT and can read/post the morning chat the nightly run opened. The
-// chat is app-attributed (created via /api/app-chats), so the drawer's chat
-// list hides it and THIS embed is its home surface; the owner JWT still
-// drives it (the owner can always read/post an app's chats), and legacy
-// owner-created morning chats render through the same path.
-//
-// We MUST pass an existing chatId. The runtime can lazy-create a chat when
-// none is given, but that would make a brand-new empty chat, not find the
-// morning one — so a null chatId here renders nothing (the caller shows its
-// own "no chat" note). The handle is torn down on unmount / date change so we
-// never leak the nested iframe.
+// Discuss-this-brief launcher. The conversation about a brief is no longer
+// pre-created overnight or mounted inline — the partner opens it on tap. On
+// click we POST /api/app-chats (app token) with the brief's `report_date`,
+// so the agent's FIRST turn gets the stripped brief injected as context via
+// the existing app-context seam (no bespoke plumbing). `createReportChat`
+// dedups against reports/<date>.meta.json, so a second tap reopens the same
+// chat instead of spawning a new empty one. We then hand the chat to the
+// shell with `moebius:open-chat`, which opens the full-screen ChatView via
+// the shell's navTo — a route that exists independently of any runtime
+// helper. The launcher uses the date of the brief CURRENTLY being viewed.
 // ---------------------------------------------------------------------------
 
-function MorningChat({ chatId }) {
-  const mountRef = useRef(null)
-  const [phase, setPhase] = useState('mounting') // mounting | live | unavailable
+function DiscussBrief({ dateStr, storage, chatId, online }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
 
-  useEffect(() => {
-    const mount = mountRef.current
-    if (!mount || !chatId) { setPhase('unavailable'); return undefined }
-    if (!window.mobius || typeof window.mobius.chat !== 'function') {
-      // Running outside the shell embed (e.g. standalone) — no chat bridge.
-      setPhase('unavailable')
-      return undefined
+  const open = useCallback(async () => {
+    if (busy) return
+    // If a chat already exists for this date, skip the create round-trip and
+    // reopen it straight away.
+    if (chatId) {
+      window.parent.postMessage(
+        { type: 'moebius:open-chat', chatId },
+        window.location.origin,
+      )
+      return
     }
-    let handle = null
-    let cancelled = false
-    setPhase('mounting')
-    Promise.resolve(window.mobius.chat({ mount, chatId }))
-      .then((h) => {
-        if (cancelled) { try { h && h.destroy && h.destroy() } catch {} return }
-        handle = h
-        setPhase('live')
-      })
-      .catch(() => { if (!cancelled) setPhase('unavailable') })
-    return () => {
-      cancelled = true
-      try { handle && handle.destroy && handle.destroy() } catch {}
-      // Belt-and-suspenders: the runtime appends one iframe to `mount`; clear
-      // any leftover node so a fast date switch can't stack two embeds.
-      if (mount) { try { mount.replaceChildren() } catch {} }
+    if (!online) {
+      setError('You’re offline — reconnect to start the conversation.')
+      return
     }
-  }, [chatId])
-
-  if (phase === 'unavailable') {
-    return (
-      <div style={S.noChatNote}>
-        <span aria-hidden="true" style={{ fontSize: '15px', lineHeight: 1.2 }}>💬</span>
-        <span>
-          The conversation about this brief isn’t available in this view.
-          Open the Reflection app inside Möbius to reply.
-        </span>
-      </div>
-    )
-  }
-
-  return (
-    <div style={{ position: 'relative' }}>
-      {phase === 'mounting' && (
-        <div style={S.chatResolving}>
-          <span style={{ ...S.spinner, width: '16px', height: '16px', margin: 0, borderWidth: '2px' }} aria-hidden="true" />
-          Opening the conversation…
-        </div>
-      )}
-      <div ref={mountRef} style={{ ...S.chatMount, display: phase === 'live' ? 'block' : 'none' }} />
-    </div>
-  )
-}
-
-function FeedbackLauncher({ dateStr, chatId }) {
-  const openFeedbackChat = () => {
-    // Keep the draft to a one-line header + the partner's entry. The brief
-    // itself is already on screen (and, when we continue the morning chat,
-    // in the conversation), so echoing an excerpt back is just noise.
-    const draft = [
-      `Feedback on the Reflection brief for ${dateStr}:`,
-      '',
-      'My feedback:',
-    ].join('\n')
-    // Prefer continuing the morning chat the nightly run opened — it already
-    // holds the brief and the agent's overnight work, so the partner lands
-    // in-context and can inspect it before replying. Fall back to a fresh
-    // chat only when no morning chat was linked for this date.
+    setBusy(true)
+    setError('')
+    const id = await storage.createReportChat(dateStr)
+    setBusy(false)
+    if (!id) {
+      setError('Couldn’t open the conversation just now — try again.')
+      return
+    }
     window.parent.postMessage(
-      chatId
-        ? { type: 'moebius:open-chat', chatId, draft }
-        : { type: 'moebius:new-chat', draft },
+      { type: 'moebius:open-chat', chatId: id },
       window.location.origin,
     )
-  }
+  }, [busy, chatId, online, storage, dateStr])
+
   return (
-    <div style={S.feedbackRow}>
-      <button style={S.feedbackBtn} className="reflection-pressable" onClick={openFeedbackChat}>
-        Give feedback on this brief
-      </button>
+    <div style={S.chatPanel}>
+      <div style={S.chatHeader}>
+        <span style={S.chatHeaderDot} aria-hidden="true" />
+        <span style={S.chatHeaderText}>Talk it over</span>
+        <span style={S.chatHeaderHint}>opens a full chat</span>
+      </div>
+      <div style={S.discussWrap}>
+        <p style={S.discussNote}>
+          {chatId
+            ? 'You’ve already started a conversation about this brief — pick up where you left off.'
+            : 'Open a chat about this brief. I’ll already have it in front of me, so you can ask, push back, or change direction.'}
+        </p>
+        <button
+          style={S.discussBtn(busy)}
+          className="reflection-pressable"
+          onClick={open}
+          disabled={busy}
+        >
+          {busy
+            ? 'Opening…'
+            : chatId
+              ? 'Reopen the conversation'
+              : 'Discuss this brief'}
+        </button>
+        {error && <span style={S.errorToast}>{error}</span>}
+      </div>
     </div>
   )
 }
@@ -1178,14 +1190,6 @@ function ReportDetail({ dateStr, storage, online, onBack }) {
         </div>
       </div>
 
-      {/* Feedback launcher sits at the TOP of the brief now — the open-ended
-          escape hatch is reachable without scrolling the whole read. It stays
-          gated on chatId (undefined while the meta read resolves) so a fast
-          tap can't open a blank new chat instead of the morning one. */}
-      {state.phase === 'ready' && chatId !== undefined && (
-        <FeedbackLauncher dateStr={dateStr} chatId={chatId} />
-      )}
-
       {state.phase === 'loading' && (
         <div style={S.briefLoading}>
           <span style={S.spinner} aria-hidden="true" />
@@ -1226,12 +1230,14 @@ function ReportDetail({ dateStr, storage, online, onBack }) {
             />
           </div>
 
-          {/* In-brief question cards render BETWEEN the read and the morning
-              chat. The carrier was extracted from the raw HTML and stripped
-              before srcDoc, so these taps are the interactive surface. Answers
-              persist to question-answers/<date>.json for the NEXT run — no
-              live agent waits (a background AskUserQuestion would park a future
-              a server reset orphans). */}
+          {/* In-brief question cards render BETWEEN the read and the
+              discuss-this-brief launcher. The carrier was extracted from the
+              raw HTML and stripped before srcDoc, so these taps are the
+              interactive surface. Answers persist to
+              question-answers/<date>.json for the NEXT run — no live agent
+              waits (a background AskUserQuestion would park a future a server
+              reset orphans). This flow is UNCHANGED and SEPARATE from the
+              discuss-brief chat below. */}
           {questions.length > 0 && (
             <ReportQuestions
               questions={questions}
@@ -1250,30 +1256,16 @@ function ReportDetail({ dateStr, storage, online, onBack }) {
             />
           )}
 
-          <div style={S.chatPanel}>
-            <div style={S.chatHeader}>
-              <span style={S.chatHeaderDot} aria-hidden="true" />
-              <span style={S.chatHeaderText}>Morning conversation</span>
-              {chatId && <span style={S.chatHeaderHint}>reply below</span>}
-            </div>
-            {chatId === undefined ? (
-              <div style={S.chatResolving}>
-                <span style={{ ...S.spinner, width: '16px', height: '16px', margin: 0, borderWidth: '2px' }} aria-hidden="true" />
-                Finding the conversation…
-              </div>
-            ) : chatId === null ? (
-              <div style={S.noChatNote}>
-                <span aria-hidden="true" style={{ fontSize: '15px', lineHeight: 1.2 }}>🌙</span>
-                <span>
-                  No conversation was opened for this brief — it’s a read-only
-                  morning note. Any questions appear as tap cards in the brief
-                  above; open Reflection inside Möbius to reply here.
-                </span>
-              </div>
-            ) : (
-              <MorningChat chatId={chatId} />
-            )}
-          </div>
+          {/* The discuss-this-brief launcher opens a full-screen chat with the
+              brief already injected as context. chatId (undefined while the
+              meta read resolves) lets a second open reuse the existing chat
+              rather than spawning a new one. */}
+          <DiscussBrief
+            dateStr={dateStr}
+            storage={storage}
+            chatId={chatId || null}
+            online={online}
+          />
         </div>
       )}
     </div>
