@@ -49,8 +49,8 @@ const STYLE_ID = 'mobius-theme'
  * Kept as a named export so existing callers (useTheme's apply effect,
  * toggleTheme below, tests) don't have to change their call shape.
  */
-export function applyThemeToDom(css, bg) {
-  applyTheme({ css, bg })
+export function applyThemeToDom(css, bg, mode) {
+  applyTheme({ css, bg, mode })
 }
 
 /**
@@ -143,12 +143,12 @@ const STRUCTURAL_KEYS = [
 // + the eventual network revalidation still converge.
 const SHELL_DATA_CACHE = 'mobius-shell-data'
 
-async function _refreshThemeSwCache(css, bg) {
+async function _refreshThemeSwCache(css, bg, mode) {
   if (typeof caches === 'undefined' || typeof Response === 'undefined') return
   try {
     const cache = await caches.open(SHELL_DATA_CACHE)
     const url = new URL('/api/theme', self?.location?.origin || window.location.origin).href
-    const body = JSON.stringify({ css, bg })
+    const body = JSON.stringify({ css, bg, mode })
     await cache.put(url, new Response(body, {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
@@ -193,8 +193,24 @@ async function _refreshThemeSwCache(css, bg) {
 export async function toggleTheme(queryClient, currentMode, api) {
   const newMode = currentMode === 'dark' ? 'light' : 'dark'
 
-  const themeRes = await api.storage.shared.getThemeCss()
-  const currentCss = themeRes.ok ? await themeRes.text() : ''
+  // Swap relative to the css the user is CURRENTLY looking at, read
+  // SYNCHRONOUSLY from the React Query cache (useTheme's /api/theme result —
+  // the full css WITH @import font lines, unlike the DOM <style> whose
+  // @imports applyTheme has hoisted to <link>). Reading it sync means the
+  // applyThemeToDom below runs on THIS tick, so the recolor — including the
+  // toggle control itself, whose track is var(--accent)/var(--border) —
+  // lands immediately instead of after a storage round-trip. The old
+  // `await getThemeCss()` gated the optimistic paint behind a fetch: the knob
+  // slid at once but every color lagged a frame, so the control the user was
+  // looking at recolored last (owner feedback).
+  const cached = queryClient.getQueryData(themeQueries.keys.all)
+  let currentCss = typeof cached?.css === 'string' ? cached.css : ''
+  if (!currentCss) {
+    // Cold cache (very early boot, before useTheme's first fetch resolved):
+    // fall back to the authoritative persisted css.
+    const themeRes = await api.storage.shared.getThemeCss()
+    currentCss = themeRes.ok ? await themeRes.text() : ''
+  }
   const meta = parseThemeMeta(currentCss)
 
   // Pre-toggle bg, captured from the last persisted CSS — the
@@ -236,8 +252,8 @@ export async function toggleTheme(queryClient, currentMode, api) {
     // setQueryData updates the in-memory cache immediately; the SW cache
     // refresh keeps the SWR network revalidation from re-introducing stale
     // data on the next read.
-    queryClient.setQueryData(themeQueries.keys.all, { css: newCss, bg: newBg })
-    await _refreshThemeSwCache(newCss, newBg)
+    queryClient.setQueryData(themeQueries.keys.all, { css: newCss, bg: newBg, mode: newMode })
+    await _refreshThemeSwCache(newCss, newBg, newMode)
     themeQueries.invalidate(queryClient)
     themeQueries.mode.invalidate(queryClient)
   } catch (err) {

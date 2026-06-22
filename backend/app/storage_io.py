@@ -33,6 +33,17 @@ MAX_STORAGE_BYTES = 50 * 1024 * 1024
 MAX_APP_STORAGE_BYTES = 1024 * 1024 * 1024
 
 
+def file_version_token(file_path: Path) -> str:
+  """Returns an opaque version token for a storage file.
+
+  The storage route computes this only for callers that opt into CAS/version
+  headers. mtime_ns + size is cheap, stable enough under the per-app write
+  lock, and changes after atomic_write's os.replace() installs the new inode.
+  """
+  st = file_path.stat()
+  return f'"{st.st_mtime_ns:x}-{st.st_size:x}"'
+
+
 def atomic_write(file_path: Path, content: str | bytes) -> None:
   """Writes content to file_path atomically — no torn or interleaved reads.
 

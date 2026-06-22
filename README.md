@@ -29,7 +29,9 @@
 
 ## What is Möbius?
 
-Möbius is a personal AI agent you self-host. Chat sits on one side, a full-screen canvas on the other. Describe what you want and the coding agent builds it — a small app that runs in your browser and persists next to the chat. The agent is not limited to apps: it can also edit the interface it runs inside, the theme, the layout, the features in the shell, by editing the source and rebuilding live.
+A Möbius strip is a surface with no inside or outside and no beginning or end. That is the idea behind Möbius, a self-improving personal AI agent you self-host where the agent, the server it runs on, and the apps it builds loop back into one system that works to be as useful to you as it can.
+
+Chat sits on one side, a full-screen canvas on the other. Describe what you want and the coding agent builds it — a small app that runs in your browser and persists next to the chat. The agent is not limited to apps: it can also edit the interface it runs inside, the theme, the layout, the features in the shell, by editing the source and rebuilding live.
 
 The unusual design decisions worth knowing upfront:
 
@@ -51,7 +53,7 @@ Möbius ships with a curated app store. Tap to install; each app is yours to use
   <img src="assets/screenshots/store-catalog.png" width="720" alt="The Möbius app store: News, Workout, Atlas, Memory, LaTeX, and Reflection, each with its own icon and a one-line description." />
 </p>
 
-<sub>Twelve starter apps ship in the catalog. <strong>News</strong> writes a morning digest on a schedule. <strong>Workout</strong> logs training in plain language, on-device. <strong>Atlas</strong> is a 3D globe of where you have been. <strong>Memory</strong> is a browsable graph of everything the agent has learned. <strong>LaTeX</strong> is an Overleaf-style editor with a real engine. <strong>Reflection</strong> runs the self-improvement loop overnight.</sub>
+<sub>A curated starter pack ships in the catalog. <strong>News</strong> writes a morning digest on a schedule. <strong>Workout</strong> logs training in plain language, on-device. <strong>Atlas</strong> is a 3D globe of where you have been. <strong>Memory</strong> is a browsable graph of everything the agent has learned. <strong>LaTeX</strong> is an Overleaf-style editor with a real engine. <strong>Reflection</strong> reviews the day's work and leaves a one-page morning brief.</sub>
 
 Every app is a public repo with a `mobius.json` and an `index.jsx`, open under [github.com/mobius-os](https://github.com/mobius-os). Installing means pasting a URL. Updating means pasting the same URL again — it patches the code and keeps your data. There is no submission queue.
 
@@ -118,6 +120,8 @@ The nightly loop is the same reflect-and-refactor cycle the developers run by ha
 ---
 
 ## How the agent itself gets better
+
+Fully recursive self-improvement — a system that rewrites itself unattended and just gets better — is not here yet; a person stays in the loop at every turn. What works today is the half in front of it: an agent and a human improving that agent together, faster and more durably than either manages alone.
 
 Möbius improves through a self-improvement harness run during development. An outer agent watches the inner one build, asks it _why_ it made each decision (with the transcript still in context), and rewrites its instructions between sessions. A few things that surprised us running that loop:
 

@@ -241,3 +241,11 @@
 /* Provider rows + .settings__providers wrapper styles live in
    ../ProviderAuth/ProviderAuth.css since the component is shared
    between SettingsView and SetupWizard. */
+
+/* A lone right-aligned action (e.g. "Check for updates") on its own row, so a
+   long label never shares a flex row with long info text and wraps/cramps. */
+/* App row "Up to date" status + the manual Check affordance share one trailing
+   cluster so re-checking for a shell update stays reachable (the calm redesign
+   had orphaned checkForUpdates) without shifting the row layout. */
+.settings__app-status { display: inline-flex; align-items: center; gap: 10px; }
+.settings__btn--nowrap { white-space: nowrap; }

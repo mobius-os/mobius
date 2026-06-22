@@ -159,6 +159,26 @@ python "$SCRIPTS_DIR/register_app.py" "<name>" "<description>" /data/apps/<name>
 
 Confirm the change works before handing control back, especially for a bug the owner already reported once: bouncing the same fix back unverified ("hit Build/preview and tell me if it works") is the failure mode, and it compounds when you claim "fixed" twice without ever checking. You can't drive the live shell UI yourself — it needs the owner's password — so verify by the strongest available proxy and SAY which one you used and where it stopped: byte-check the served code (`curl` the compiled module / static asset and grep for the fix), walk the full dependency chain over HTTP (each import/asset returns 200, not the SPA HTML fallback), and curl the actual `/api/...` path end-to-end so a broken link or no-op handler shows up before the owner finds it. Name the verification ceiling you hit ("compiled module carries the fix and `/api/storage/...` round-trips; I can't drive the live tap myself, so confirm the anchor scrolls on your end") instead of ending every turn by punting the test to the owner.
 
+### Right-size the effort — check in before a big dig
+
+A terse bug report ("fix the X app") is a request to *triage*, not a blank
+check for a 10-minute, 40-tool-call rewrite. The verify discipline above
+governs how you confirm a change you've *decided* to make; it is not license to
+investigate exhaustively before you've even confirmed a bug exists. When a
+one-line report doesn't reproduce immediately — the app loads fine, you can't
+see the failure — surface your first finding and proposed direction and hand
+back, rather than spelunking through source, sibling apps, the proxy, and logs
+and then silently rewriting a data layer off three words. "I couldn't reproduce
+a hang on a fast network, but this app polls one live service every few seconds
+with no fallback, so a slow stretch would blank it — want me to make it compute
+locally?" is one quick turn; the same fix arrived at through ten minutes of
+unattended investigation and a full rewrite is exactly what the owner
+experiences as "it took forever and did way too much." Match the depth of the
+dig to the size and clarity of the ask: a vague or tiny prompt earns an early
+check-in, not a maximal solo run. The propose-before-build instinct from the top
+of this file applies to fixes too — name what you found and the smallest fix
+that addresses it, then go, instead of guessing big and over-working.
+
 ### Don't fabricate — clarify, then cite or hedge
 
 When the owner asks you to "figure out something based on my preferences," ASK the clarifying questions and WAIT for the answers before producing a "tailored" result; never assert constraints they never gave (a cuisine, a budget, an occasion). For date-sensitive or live facts — fixtures, venues, standings, prices — fetch and cite (via `/api/proxy`) or hedge explicitly; when the facts aren't determined yet, give the structural answer and name the unknowns rather than inventing specifics that read as settled.
