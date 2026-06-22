@@ -20,15 +20,15 @@ below). Don't try to do Dreaming's work mid-chat.
 
 ```
 /data/shared/memory/
-  index.md            root "Home" map. Injected every session. Keep it tiny.
-  recent-chats.md     fixed queue of the last ~10 chats (id + date + 1-2
-                      sentence summary). Injected after the index; the
-                      nightly pass maintains it — don't grow it by hand.
-  inbox.md            persistent buffer for the day's raw observations.
+  index.md            root "Home" map (the router). Injected every session,
+                      followed by the full summaries of the ~10 most-recently-
+                      updated chat notes. Keep it tiny.
+  chats/<id>/index.md THE per-chat note (type: chat) — the chat's name + a
+                      GROWING summary + the user's facts & intent + cross-chat
+                      links. The primary memory carrier; you maintain the
+                      current chat's note every turn. See "Chat notes" below.
   mocs/<slug>.md      topic maps (hubs): curated [[links]] under ## sections.
   notes/<slug>.md     atomic notes: ONE fact each, with YAML frontmatter.
-  chats/<id>/index.md per-chat summary node (type: chat) — the chat's name +
-                      growing summary + cross-chat links. See "Chat notes" below.
   read-trace/<id>.json  what each chat was shown and Read (platform-written;
                       the nightly pass diffs it — never edit it yourself).
   graph.json          generated index for the Mind viewer (rebuild after edits).
@@ -68,9 +68,9 @@ rules below.
 
 ## Reading — descend until you have enough
 
-Each session opens with the router index, the recent-chats queue, and the
-inbox tail already injected. When that's not enough, read **iteratively, by
-depth** — navigate, don't grep:
+Each session opens with the router index plus the full summaries of the ~10
+most-recently-updated chat notes already injected. When that's not enough, read
+**iteratively, by depth** — navigate, don't grep:
 
 1. Start at `index.md`; pick the most relevant map by its one-line entry
    descriptions.
@@ -83,7 +83,7 @@ depth** — navigate, don't grep:
 
 The descriptions and parent summaries exist precisely so you can orient
 without opening everything — a whole-graph sweep is the failure mode this
-layout prevents. For "what happened recently," the recent-chats summaries
+layout prevents. For "what happened recently," the injected chat summaries
 are usually enough; fetch a full transcript (`GET /api/chats/<id>`) only
 when a specific exchange matters.
 
@@ -115,36 +115,49 @@ learn a new general technique, improve a skill; if you learn something about the
 skill; when it only matters *here*, it's memory.
 
 Default to recording **nothing**. "Store only the future-useful" means
-aggressively dropping one-off trivia. When unsure, prefer a cheap inbox line
-over a full note — the nightly pass decides if it's worth promoting.
+aggressively dropping one-off trivia. When something durable does surface
+mid-chat, its default home is **this chat's note** (the `## Facts & intent`
+section, below) — not a new standalone note. The nightly pass decides what is
+worth promoting from the chat notes into the wider graph.
 
 ## How recall works — router, then traverse (no ranking)
 
 There is no injected "top-N by importance." Each session injects the **router**
-(`index.md` — one scent line per topic), the recent-chats queue, and the inbox
-tail. You then **traverse on demand**: read the router's scent lines, pick the
-topics the live conversation actually touches, and `Read` those notes (and their
-direct `see also` targets — one hop). Recall is conditioned on the question, not
-a fixed bundle. So the work that makes recall good is **a sharp scent line per
-note + good typed links** (the nightly pass maintains these) — never tuning a
-score.
+(`index.md` — one scent line per topic) plus the **full summaries of the ~10
+most-recently-updated chat notes**. You then **traverse on demand**: read the
+router's scent lines, pick the topics the live conversation actually touches,
+and `Read` those notes (and their direct `see also` targets — one hop). Recall
+is conditioned on the question, not a fixed bundle. So the work that makes
+recall good is **a sharp scent line per note + good typed links** (the nightly
+pass maintains these) — never tuning a score.
 
-## Chat notes — chats are memory too (`type: chat`)
+## Chat notes — the per-chat note is the primary carrier (`type: chat`)
 
-Every chat is itself a memory node. For the chat you're in (its id is `$CHAT_ID`),
-maintain `chats/$CHAT_ID/index.md`:
+Every chat is a memory node, and **its note is where memory lives by day** —
+there is no shared inbox. For the chat you're in (its id is `$CHAT_ID`),
+maintain `chats/$CHAT_ID/index.md` **every turn**:
 
 - `type: chat`, with a one-line `description:` that IS the chat's name — the gist
   in the partner's words ("dialing in a sour espresso shot", not "chat 12").
-- A body that is a **growing summary** of what the chat is about and what it
-  produced (an app built, a decision made, a preference learned). Update it as the
-  chat evolves, not only at the end.
-- **Cross-chat links.** When this chat pulls information from another chat, record
-  it in the body — `see also [[chats/<other-id>]] — <why>`. That is how the graph
+- `## Summary` — a **growing**, few-paragraph summary of what the chat is about
+  and what it has produced (an app built, a decision made, a preference learned),
+  recency-biased for long chats.
+- `## Facts & intent` — the durable facts this chat surfaced about the partner
+  or the instance, plus the partner's underlying intent (the bullet list the
+  inclusion bar above would have you keep).
+- **Cross-chat links** in the body: when this chat pulls information from
+  another, record `see also [[chats/<other-id>]] — <why>`. That is how the graph
   learns which chats relate.
 
-**Keep the displayed name in sync** with the one-liner so the partner sees it:
-`curl -s -X PATCH "$API_BASE_URL/api/chats/$CHAT_ID" -H "Authorization: Bearer $AGENT_TOKEN" -H 'Content-Type: application/json' -d '{"title":"<one-line summary>","by_agent":true}'`.
+**Grow, never shrink.** Each turn, `Read` the note and then `Write` a *larger*
+version — fold in the new turn's information and reorganize for coherence, but
+**never delete** what's there. (Dreaming consolidates and prunes later; it can
+only do that if the daytime note kept everything.) This is the opposite of an
+atomic note's one-claim discipline — the chat note is *meant* to accumulate.
+
+**Re-propose the name each turn**, so the partner sees the gist evolve. Sync the
+displayed title to the `description`:
+`curl -s -X PATCH "$API_BASE_URL/api/chats/$CHAT_ID" -H "Authorization: Bearer $AGENT_TOKEN" -H 'Content-Type: application/json' -d '{"title":"<one-line gist>","by_agent":true}'`.
 The `by_agent: true` is load-bearing: it makes your sync DEFER to the owner — if
 they have manually renamed the chat the backend keeps their name; if they clear
 it, the name drops to the first message and you re-derive it next turn. Never
@@ -162,20 +175,16 @@ of-record split as fact capture).
 Day-to-day you have a few low-effort moves, in order of effort. Anything past
 these is deferred to Dreaming.
 
-1. **Quick observation → inbox.** When you notice something durable mid-task,
-   append one line and move on — same recipe as the old experience log:
-   ```bash
-   echo '- [chat:<id>] <terse durable observation, with file paths / package names>' \
-     >> /data/shared/memory/inbox.md
-   ```
-   Carry the source chat id (`[chat:<id>]`) so consolidated notes can record
-   where a fact came from. When promoting an inbox line to a proper note, carry
-   those ids into the note's optional `source:` frontmatter list:
+1. **Maintain this chat's note (every turn) — the primary move.** Keep
+   `chats/$CHAT_ID/index.md` growing (summary + `## Facts & intent`) and
+   re-propose the name, per "Chat notes" above. Everything durable you notice
+   mid-task lands here first; you don't break flow to author a perfect standalone
+   note. The nightly Dreaming pass reads these chat notes and promotes what
+   deserves to be a `note`/`moc` in the wider graph, carrying the source chat id
+   into the new note's optional `source:` frontmatter list:
    ```yaml
    source: [chat:abc123, chat:def456]
    ```
-   This is the default — don't break flow to author a perfect note. The nightly
-   Dreaming pass turns inbox lines into proper notes.
 
 2. **Clean fact → note.** When you already know the durable fact cleanly
    (a confirmed user preference, a root-caused bug + fix), write the note
@@ -201,7 +210,7 @@ cluster of notes to a new MOC, splitting one MOC into sub-MOCs, and *judgment*
 merges of near-duplicates that aren't identical. Keeping rewrites off the live
 loop is deliberate — Dreaming has the whole day's activity in view and a lint
 gate; mid-chat you have neither. If you find yourself moving more than a note or
-two, stop and drop an inbox line for Dreaming instead.
+two, stop and capture the intent in this chat's note for Dreaming instead.
 
 ## One note or a line? (atomicity)
 
@@ -310,4 +319,4 @@ Then commit: `pm-commit 'memory: <what changed>'`.
 From `index.md`, every map is reachable, and from every map every note is
 reachable. Zero orphans, zero dangling links. The nightly Dreaming pass asserts
 this and does the heavy curation; your job by day is to keep it true with light
-touches and feed Dreaming clean inbox lines.
+touches and feed Dreaming clean, growing chat notes.
