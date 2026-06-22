@@ -207,7 +207,10 @@ def test_fallback_goal_points_at_artifacts_and_notes_cutoff(
   assert "git -C" in goal
   assert f"reports/{today}.html" in goal
   assert "CUT OFF" in goal
-  assert "morning chat" in goal
+  # The brief is the rescue's ONLY deliverable; the conversation about it is
+  # opened by the partner on tap, so the rescue must NOT create a chat.
+  assert "morning chat" not in goal
+  assert "do not create a chat" in goal.lower()
   assert "Do NOT restart" in goal
 
 
@@ -511,27 +514,30 @@ async def test_fallback_auth_rc_unstaged_app_id_falls_back_to_cli(
 
 
 # ---------------------------------------------------------------------------
-# Morning-chat creation contract (seed skill)
+# Brief-chat contract (seed skill)
 # ---------------------------------------------------------------------------
 
-def test_seed_skill_morning_chat_is_app_attributed():
-  """The morning chat must ride the app-attributed chat contract.
+def test_seed_skill_does_not_create_a_morning_chat():
+  """The nightly run must NOT pre-create a chat about the brief.
 
-  The conversation about a brief lives inside the Reflection app,
-  embedded under the brief. Creating it owner-side (`POST
-  /api/chats` with the service token) leaves created_by_app_id
-  NULL, so it lands in the owner's drawer history next to their own
-  conversations — the clutter the contract exists to prevent. The
-  seed must instruct the app-attributed create (mint an app token,
-  POST /api/app-chats); the owner token stays correct for the later
-  sends, since the owner can always drive an app's chats.
+  The conversation about a brief is now opened by the partner on tap
+  in the Reflection app — which POSTs /api/app-chats with the brief's
+  `report_date`, and the backend injects the brief into the new chat's
+  first turn via the app-context seam. So the nightly skill's job ends
+  at the brief: it must NOT mint an app token, POST /api/app-chats,
+  write a chat-link meta.json, or send an opener. The skill must say so
+  explicitly, and the old create recipes must be gone.
   """
   from pathlib import Path
 
   seed = (
     Path(dr.__file__).resolve().parent / "seed-skills" / "reflection.md"
   ).read_text(encoding="utf-8")
-  assert "/api/app-chats" in seed
-  assert "/api/auth/app-token" in seed
-  # The owner-create recipe must not come back for the morning chat.
+  # The skill must instruct the agent NOT to create the chat.
+  assert "Do NOT create a morning chat" in seed
+  # The nightly run no longer runs the create recipes.
+  assert "/api/auth/app-token" not in seed
+  assert 'POST "$API_BASE_URL/api/app-chats"' not in seed
+  assert "$MORNING_CHAT" not in seed
+  # The owner-create recipe must not be present either.
   assert 'POST "$API_BASE_URL/api/chats"' not in seed

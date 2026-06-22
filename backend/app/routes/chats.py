@@ -2,12 +2,13 @@
 
 import json
 import logging
+import re
 import shutil
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app import activity, auth, models, questions
@@ -751,11 +752,33 @@ async def compact_chat(
   }
 
 
+# An app that opens a chat ABOUT one of its dated reports passes the report's
+# date here; chat.py reads it back from agent_settings_json on the first turn
+# and injects the stripped brief as context. Validated strictly as an ISO
+# calendar date at the boundary because it becomes a path component
+# downstream (data/apps/<id>/reports/<date>.html).
+_REPORT_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
 class AppChatCreate(BaseModel):
   title: str | None = None
   system_prompt: str | None = Field(default=None, max_length=20000)
   model: str | None = Field(default=None, max_length=256)
   provider: str | None = None
+  report_date: str | None = None
+  report_kind: str | None = Field(default=None, max_length=64)
+
+  @field_validator("report_date")
+  @classmethod
+  def _validate_report_date(cls, value: str | None) -> str | None:
+    if value is None:
+      return None
+    value = value.strip()
+    if not value:
+      return None
+    if not _REPORT_DATE_RE.match(value):
+      raise ValueError("report_date must be an ISO date (YYYY-MM-DD)")
+    return value
 
 
 class AppChatPatch(BaseModel):
@@ -769,6 +792,8 @@ def _merge_app_chat_settings(
   *,
   system_prompt: str | None = None,
   model: str | None = None,
+  report_date: str | None = None,
+  report_kind: str | None = None,
 ) -> None:
   """Merge app-supplied runtime metadata into Chat.agent_settings_json."""
   from sqlalchemy.orm.attributes import flag_modified
@@ -786,6 +811,21 @@ def _merge_app_chat_settings(
       settings["model"] = value
     else:
       settings.pop("model", None)
+  # report_date is already ISO-validated by AppChatCreate; chat.py reads it
+  # on the first turn to inject the brief this chat is about. report_kind is
+  # a free-form tag (e.g. "reflection") that travels alongside it.
+  if report_date is not None:
+    value = report_date.strip()
+    if value:
+      settings["report_date"] = value
+    else:
+      settings.pop("report_date", None)
+  if report_kind is not None:
+    value = report_kind.strip()
+    if value:
+      settings["report_kind"] = value
+    else:
+      settings.pop("report_kind", None)
   chat.agent_settings_json = settings or None
   if settings:
     flag_modified(chat, "agent_settings_json")
@@ -849,6 +889,8 @@ def create_app_chat(
     chat,
     system_prompt=body.system_prompt,
     model=body.model,
+    report_date=body.report_date,
+    report_kind=body.report_kind,
   )
   db.add(chat)
   db.commit()

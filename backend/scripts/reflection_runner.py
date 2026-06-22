@@ -42,7 +42,9 @@ deliberate and all in service of "autonomous":
     user to approve anything.
   - `max_turns` is high (default 60) so the multi-phase run
     (interviews → skill edits → Memory consolidation → app fixes →
-    research → brief + morning chat) fits in one goal loop.
+    research → brief) fits in one goal loop. The brief is the night's
+    one deliverable; the conversation about it is opened by the partner
+    on tap in the Reflection app, not by this run.
   - We loop on `client.receive_response()` exactly once: the SDK's
     own `max_turns` is the multi-turn budget, and a single
     `query(goal)` + drain runs the whole autonomous session. The
@@ -65,8 +67,8 @@ died at `max_turns` (subtype error_max_turns) with NO brief:
   - **Guaranteed-brief fallback.** When the main session still ends
     in error and tonight's brief file is missing, `run()` spawns ONE
     short rescue session (`FALLBACK_MAX_TURNS`) whose only goal is a
-    minimal brief + morning chat from whatever the cut-off run left
-    behind. The rescue never spawns another rescue.
+    minimal brief from whatever the cut-off run left behind. The
+    rescue never spawns another rescue.
 
 Importability: every heavyweight import (the SDK) is inside `run()`,
 so `import backend.scripts.reflection_runner` (and `py_compile`) works
@@ -111,10 +113,10 @@ BRIEF_TEMPLATE_DEST = DATA_DIR / "apps" / "reflection" / "reflection-brief-templ
 
 # Multi-turn budget for the whole nightly goal loop. High because one
 # Reflection run spans many phases (interviews, skill edits, graph
-# consolidation, app fixes, research, brief + morning chat), each
-# costing several tool turns. The wrapper's `timeout` is the real
-# wall-clock bound; this is the SDK-side ceiling so a wedged loop can't
-# spin forever even if the timeout were removed.
+# consolidation, app fixes, research, brief), each costing several tool
+# turns. The wrapper's `timeout` is the real wall-clock bound; this is the
+# SDK-side ceiling so a wedged loop can't spin forever even if the timeout
+# were removed.
 DEFAULT_MAX_TURNS = 60
 
 # Default provider/model when settings.json doesn't pin one. Reflection
@@ -125,7 +127,7 @@ DEFAULT_PROVIDER = "claude"
 
 # Turn budget for the guaranteed-brief rescue session. Small on
 # purpose: read the cut-off run's leavings, write a minimal brief,
-# open the morning chat, commit — no investigation.
+# commit — no investigation, no chat (the partner opens that on tap).
 FALLBACK_MAX_TURNS = 12
 
 # Distinct exit code for a CLI auth failure (a 401 / expired credential),
@@ -208,8 +210,8 @@ def steering_message(
       "isn't drained yet, fold each remaining inbox.md line into the "
       "graph, empty the inbox, and commit (be quick) — THEN write a "
       "MINIMAL brief (a heading and a few honest lines on what was "
-      "done and what was cut off), save it to the reports dir, open "
-      "the morning chat, and stop. Skip everything else."
+      "done and what was cut off), save it to the reports dir, and "
+      "stop. Skip everything else."
     )
   if prev_turn < soft <= turn:
     return (
@@ -217,9 +219,8 @@ def steering_message(
       "open-ended investigation now. If you haven't drained the "
       "memory inbox yet (phase 3a), do that minimal drain FIRST and "
       "commit it — it is the night's other non-negotiable deliverable "
-      "and must not be skipped. Then write the brief and open the "
-      "morning chat. The deeper Memory reorg, remaining app triage, and "
-      "research are over."
+      "and must not be skipped. Then write the brief. The deeper "
+      "Memory reorg, remaining app triage, and research are over."
     )
   return None
 
@@ -284,11 +285,9 @@ def build_fallback_goal() -> str:
     "few honest paragraphs covering what got done and what was cut "
     f"off mid-flight — to {DATA_DIR}/apps/$APP_ID/reports/{today}.html, "
     f"where APP_ID is the number in {inputs_dir}/app_id (mkdir -p the "
-    "reports dir first).",
-    "3. Open the morning chat per your skill's phase 6 with a 2-3 "
-    "line summary, note that tonight's run was cut off, and write the "
-    "reports meta.json chat link.",
-    "4. Commit with pm-commit and stop. The brief file is the one "
+    "reports dir first). The partner opens the conversation about the "
+    "brief on tap in the Reflection app — you do NOT create a chat.",
+    "3. Commit with pm-commit and stop. The brief file is the one "
     "non-negotiable deliverable; skip anything that threatens it.",
   ])
 
@@ -850,8 +849,8 @@ async def _maybe_write_fallback_brief(
   Three of four prod nights died at max_turns (subtype
   error_max_turns) with NO brief — the partner woke to nothing. When
   the main session ends non-zero and tonight's brief file is missing,
-  spawn one short rescue session whose only goal is a minimal brief +
-  morning chat built from whatever the cut-off run left behind.
+  spawn one short rescue session whose only goal is a minimal brief
+  built from whatever the cut-off run left behind.
 
   Auth-failure case (rc == AUTH_FAILURE_RC): the night died because
   the CLI couldn't authenticate (a 401). Spawning another CLI session

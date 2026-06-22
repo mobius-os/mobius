@@ -1,6 +1,6 @@
 # Reflection — the nightly run
 
-Your goal and how-to for the nightly pass: interview every agent that worked today, improve your skills from what you learn (including THIS skill), consolidate the Memory graph, fix and harden the apps, research what the partner cares about, then write a brief and open a morning chat. This file is the source of truth for the reflection run. You can edit it — adapt how you dream as you learn what's worth doing.
+Your goal and how-to for the nightly pass: interview every agent that worked today, improve your skills from what you learn (including THIS skill), consolidate the Memory graph, fix and harden the apps, research what the partner cares about, then write a brief. (The conversation about the brief is opened by the partner on tap in the Reflection app — you don't create a chat.) This file is the source of truth for the reflection run. You can edit it — adapt how you dream as you learn what's worth doing.
 
 You run unattended, overnight, with **full tools and a real token** — no sandbox. The partner is asleep; you have time the daytime agent never does. Use it to do the heavy, deferred work and to leave the platform a little better than you found it. Then hand the partner a short, honest brief and a few questions over morning coffee.
 
@@ -14,7 +14,7 @@ This skill is itself agent-editable (it lives under `/data/shared/skills/`). Whe
 - **Commit as you go.** After each discrete chunk — a skill edit, a graph consolidation, an app fix — `pm-commit '<area>: <what and why>'`. One green-on-green sweep is hard to undo; small commits are easy.
 - **Anti-noise is the whole game.** Every item that reaches the brief MUST carry **trigger** (what you observed), **why** (why it matters to the partner), and **next-action** (the one concrete thing — ideally a tap). An item without all three is noise; drop it or keep digging until it has them. A short brief the partner reads fully beats a long one they skim.
 - **Leverage the other skills — don't reinvent them.** `Read /data/shared/skills/<name>.md` and follow it for the work it owns: `building-apps.md` for any app fix/feature, `theming.md` for shell/visual work, `cron.md` for scheduled jobs, `notifications.md` for the morning push, `images.md` for any brief illustration, and `/data/shared/skills/memory.md` for the Memory heavy-lift. This skill orchestrates; those skills hold the per-task contracts.
-- **Time-box and bail safely.** If you're running long, finish the current chunk, commit it, skip ahead to "Write the brief + open the morning chat" — a partial-but-shipped brief beats a perfect one that never posts. Note in the brief what you skipped.
+- **Time-box and bail safely.** If you're running long, finish the current chunk, commit it, skip ahead to "Write the brief" — a partial-but-shipped brief beats a perfect one that never posts. Note in the brief what you skipped.
 - **Two deliverables are non-negotiable, in this order: consolidate the day's chat notes, then write the brief.** The consolidation (phase 3, step 2 — folding each substantive chat note's durable facts into the graph) is the one piece of Memory work that *cannot* be deferred: notes left un-consolidated pile up every night, and the daytime agent's read-traces silently rot. Do it EARLY (right after the interviews that feed it — see the phase order), not last, so a long night can't starve it. Everything else in phase 3 (the read-trace diff, merges, pruning, the broader reorg) is deferrable to a quieter night and may be cut when the budget is tight; the consolidation is not. Treat "chat notes consolidated + brief shipped" as the floor for every night, the same way the brief alone used to be.
 
 ---
@@ -168,7 +168,7 @@ Commit each fix on its own: `pm-commit 'app(<slug>): <what and why>'`.
 
 ### Turn-budget guide
 
-The whole run — interviews, skill edits, Memory consolidation, app triage, research, brief + morning chat — must fit within 60 turns. **The brief is the deliverable, not the work that precedes it.** Phases eat turns fast; here is a guide for a typical night (cron-only nights front-load the Memory work and skip or shorten 1):
+The whole run — interviews, skill edits, Memory consolidation, app triage, research, brief — must fit within 60 turns. **The brief is the deliverable, not the work that precedes it.** Phases eat turns fast; here is a guide for a typical night (cron-only nights front-load the Memory work and skip or shorten 1):
 
 | Phase | Turns | Notes |
 |---|---|---|
@@ -178,7 +178,7 @@ The whole run — interviews, skill edits, Memory consolidation, app triage, res
 | 3b. Deeper Memory reorg | ≤7 | Read-trace diff + merges + prune + chat-note enrichment; deferrable — cut first when tight |
 | 4. App triage + fixes | ≤13 | Digest-first; skip apps with 0 opens |
 | 5. Research | ≤5 | Only if a clear topic cleared the bar; otherwise skip |
-| 6. Brief + morning chat | ≤10 | Hard stop at 10 — never let this exceed budget |
+| 6. Brief | ≤10 | Hard stop at 10 — never let this exceed budget |
 
 The slices sum to ≤57 of the 60-turn budget, leaving a small margin; they are a guide, not a hard meter (you can't see your own turn count — the runner speaks it to you when you near the budget). The discipline that matters: **phase 3a (the chat-note consolidation) is reserved and runs before phase 4**, so app triage — the phase most likely to overrun — can never starve it.
 
@@ -188,9 +188,9 @@ The slices sum to ≤57 of the 60-turn budget, leaving a small margin; they are 
 
 Use Memory's model of the partner (their recurring interests, projects they care about, things they asked you to watch) to do a little homework they'll value. **Predictable-only** — research topics the partner has actually signalled interest in, not whatever's trending. Web-search, read a couple of sources, distill to a few lines with the source named. The bar is the anti-noise bar: trigger (why this topic, tied to a known interest), why (what's new/relevant), next-action (a link, a thing to try, a decision). One or two genuinely-useful findings beat ten generic headlines. If nothing clears the bar tonight, research nothing — an empty research section is honest.
 
-### 6. WRITE the brief + OPEN the morning chat
+### 6. WRITE the brief
 
-Two artifacts: the static **brief** (an HTML page) and a **morning chat** (where the questions live as tappable cards).
+One artifact: the static **brief** (an HTML page). The partner opens a conversation about it on tap in the Reflection app — you do **not** create a chat. Your job tonight ends when the brief (with its optional question-cards carrier) is written and committed.
 
 **Fill the brief template.** Read `/data/apps/reflection/reflection-brief-template.html` (the runner seeds it there before every run — it lives under `/data` because your Read tool is scoped to that tree and can't reach `/app/scripts`), copy it to tonight's run dir, and fill the five sections — exec-summary → what-I-did → what-I-learned → what-needs-your-input → details. Every item carries trigger/why/next-action. Keep the exec-summary to the 3–5 things that matter; everything else lives inside collapsed `<details>` items (the shape contract below). The **what-I-did** section always ends with one memory-hygiene line: "Memory: N notes created, N merged, N pruned." (Use 0 for unchanged categories — the count matters less than the habit of including it.) **Do not summarize the partner's own Mobius interactions back to them.** Use chat/interview facts only as evidence for what *you* did, what *you* learned, what changed in the platform, and what needs a decision. If a sentence reads like a recap of the partner's day ("you discussed X, then Y"), delete it or turn it into an outcome ("I fixed/propose/learned X because today's agents hit Y"). **Save the finished brief to `/data/apps/$APP_ID/reports/<date>.html`** — first `APP_ID="$(cat /data/apps/reflection/inputs/app_id)"` and `mkdir -p /data/apps/$APP_ID/reports`. `$APP_ID` is the Reflection app's **numeric** id: the app lists + renders its briefs from its numeric storage dir (`/api/storage/apps/<id>/...` → `/data/apps/<id>/reports/`), **NOT** the `reflection` slug dir (which holds the app's *source*, not its *storage*) — write to the slug dir and the app shows "No briefs yet" forever. `<date>` is `YYYY-MM-DD`. If a brief item benefits from one illustration, follow `images.md`; don't decorate for its own sake.
 
@@ -256,39 +256,16 @@ Append ONE carrier as a sibling AFTER `</article>` (or after your brief's root e
 
 The `questions` array is the EXACT shell QuestionCard shape: `{question, header, multiSelect, options:[{label, description}]}`. Keep it to **2–4 enumerable decisions** (the ranked-feature picks, a security fix awaiting approval, a "should I build X" from the interviews); `header` is a 1–2 word category; set `multiSelect` only when more than one answer makes sense. The JSON must be valid — a malformed carrier is silently dropped, so the brief still ships. **Say plainly in the brief that these guide tomorrow night, not tonight** — there is no live agent waiting, so don't write "answer below and I'll act now." When the partner taps an answer, the app saves it to `question-answers/<date>.json`; your **next run's** `fetch.sh` stages it at `inputs/prev-question-answers.json` and you act on it in phase 2.
 
-> **Always ship a brief — never end the night with nothing.** If the template can't be read for any reason, do NOT abandon phase 6: hand-write a minimal self-contained HTML brief (a heading + the five sections as `<h2>`/`<p>`) straight to `/data/apps/$APP_ID/reports/<date>.html` (the numeric storage dir above, NOT the slug dir). A plain brief the partner can read beats a perfect one that never posts. The morning chat (below) is the action surface either way, so even a bare brief plus the chat is a complete deliverable.
+> **Always ship a brief — never end the night with nothing.** If the template can't be read for any reason, do NOT abandon phase 6: hand-write a minimal self-contained HTML brief (a heading + the five sections as `<h2>`/`<p>`) straight to `/data/apps/$APP_ID/reports/<date>.html` (the numeric storage dir above, NOT the slug dir). A plain brief the partner can read beats a perfect one that never posts.
 
-> The brief is a **static, sandboxed page with no JS** — it can't run logic, but it CAN carry the declarative question payload (above) for the app to hydrate. The **Reflection app** renders the brief, lifts the carrier out, and shows native tap cards plus the morning chat below it. Design the brief to stand alone as a read; the tap cards collect the structured decisions, and the morning chat (below) is the **open-ended escape hatch** — where the partner says anything the cards didn't cover. (Note for the Reflection-UI agent: extract the carrier from `reports/<date>.html`, strip it before the iframe, render the cards + the morning chat underneath.)
+> The brief is a **static, sandboxed page with no JS** — it can't run logic, but it CAN carry the declarative question payload (above) for the app to hydrate. The **Reflection app** renders the brief, lifts the carrier out, and shows native tap cards. Design the brief to stand alone as a read; the tap cards collect the structured decisions. The partner taps "Discuss this brief" in the app to open an open-ended conversation when they want one — that chat is created on tap, NOT by you. (Note for the Reflection-UI agent: extract the carrier from `reports/<date>.html`, strip it before the iframe, render the cards underneath, and offer the discuss-this-brief launcher.)
 
-**Open the morning chat as the open-ended escape hatch.**
+**Do NOT create a morning chat.** The conversation about a brief is opened by the partner on tap in the Reflection app — when they do, the backend injects this brief into the new chat's first turn automatically (the app passes `report_date`, and the app-context seam hands you the brief as context). You no longer create a chat, write a `.meta.json` chat link, or send an opener. **Never call `AskUserQuestion` from this background run** — the structured decisions are the carrier cards in the brief (above); the open-ended chat is the partner's escape hatch, opened later.
 
-The structured decisions ride in the brief as tap cards (the carrier above) — answers saved for your next run. The morning chat is the *complementary* surface: an open-ended conversation where the partner can say anything the cards didn't cover, and where they land from the morning push. It is a hard deliverable: create the chat, send the opener, write the `.meta.json` link, fire the push, write `state.json`. **Do NOT call `AskUserQuestion` from this background run** — a background/morning agent that does parks a synchronous future a server reset orphans (that footgun is exactly why questions moved into the brief carrier). The opener is plain prose pointing at the brief; the tap cards live in the brief, not the chat.
+After the brief is written, two cheap closing steps remain:
 
-1. Create the chat — **app-attributed, owned by the Reflection app** (`POST /api/app-chats` with a Reflection app token). An app-attributed chat lives inside the app — rendered under the brief — and stays out of the partner's drawer history (`GET /api/chats` hides `created_by_app_id` chats by default), which is exactly where this conversation belongs. Do NOT create it with `POST /api/chats` + `$AGENT_TOKEN`: that makes an owner chat that clutters the chat list next to the partner's own conversations. Mint the app token with the same numeric `$APP_ID` as the brief, then create:
-   ```bash
-   APP_TOKEN=$(curl -s -X POST "$API_BASE_URL/api/auth/app-token" \
-     -H "Authorization: Bearer $AGENT_TOKEN" -H "Content-Type: application/json" \
-     -d "{\"app_id\": $APP_ID}" \
-     | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
-   curl -s -X POST "$API_BASE_URL/api/app-chats" \
-     -H "Authorization: Bearer $APP_TOKEN" -H "Content-Type: application/json" \
-     -d "{\"title\": \"Morning brief — $(date +%Y-%m-%d)\"}"
-   ```
-   (`$APP_TOKEN` is only for this create; every later call below keeps using `$AGENT_TOKEN` — the owner token can always read, send to, and stream an app's chats, and the push deep-link still opens the chat by id.) Capture the returned `id` as `$MORNING_CHAT`, then **write the brief↔chat link** the app needs to wire the date to its conversation — a sibling file next to the brief (same numeric `$APP_ID` storage dir as the brief above, NOT the slug dir):
-   ```bash
-   printf '{"chat_id": "%s"}' "$MORNING_CHAT" > /data/apps/$APP_ID/reports/$(date +%Y-%m-%d).meta.json
-   ```
-   (Bare JSON object, no envelope — the app reads it as-is. Without it the brief renders but the morning chat stays unlinked.)
-2. Seed the chat by sending it a message that becomes the partner-facing opener — a **short** summary (3–5 lines, partner-facing register: what you did and what's new, no file paths or IDs), a link to the brief, and a pointer to the tap cards. **Plain prose only — do NOT instruct it to render `AskUserQuestion` cards** (that would fire the background-future footgun). Point at the brief, where the tap cards live, and note that the answers shape tomorrow night:
-   ```bash
-   curl -s -X POST "$API_BASE_URL/api/chats/$MORNING_CHAT/messages" \
-     -H "Authorization: Bearer $AGENT_TOKEN" -H "Content-Type: application/json" \
-     -d "$(python3 -c 'import json,sys; print(json.dumps({"content": sys.argv[1]}))' \
-       'Good morning. Overnight I <2-3 line summary>. Full brief: /app/reflection (today'\''s brief) — it has a few tap-to-answer questions at the end; your picks guide tomorrow night, not today. Anything else on your mind, just tell me here.')"
-   ```
-   The structured decisions are the carrier cards in the brief (above) — **2–4 enumerable decisions**, the ranked-feature picks, any security fix awaiting approval, any "should I build X" from the interviews. The morning chat stays open-ended: it's where the partner adds context the cards can't capture.
-3. Fire the morning push so the partner sees it (follow `notifications.md`): title like "Your morning brief is ready", body the one-line headline, `target: "/shell/?chat=$MORNING_CHAT"` so the tap lands **inside the PWA** (the bare `/chat/<id>` form opens a browser tab on a cold tap — see `notifications.md`). The brief (with its tap cards) is one tap away via the link in the opener.
-4. **Write the app's header state** — the streak count + one-line summary the Reflection app shows up top. Without this, `state.json` never exists and the streak/summary stay permanently blank. Same numeric `$APP_ID` storage dir as the brief:
+1. Fire the morning push so the partner sees the brief is ready (follow `notifications.md`): title like "Your morning brief is ready", body the one-line headline, `target: "/shell/?app=$APP_ID"` so the tap lands **inside the PWA** on the Reflection app (the bare `/app/...` form opens a browser tab on a cold tap — see `notifications.md`). The brief and its tap cards are right there; the discuss-this-brief launcher is one tap away.
+2. **Write the app's header state** — the streak count + one-line summary the Reflection app shows up top. Without this, `state.json` never exists and the streak/summary stay permanently blank. Same numeric `$APP_ID` storage dir as the brief:
    ```bash
    python3 - "$APP_ID" "<one-line headline>" <<'PY'
    import json, os, sys, datetime
@@ -305,7 +282,7 @@ The structured decisions ride in the brief as tap cards (the carrier above) — 
    ```
    (Bare JSON object, no envelope. `<one-line headline>` is the exec-summary's single most important line.)
 
-Commit the brief + run artifacts: `pm-commit 'reflection: brief + morning chat for <date>'`.
+Commit the brief + run artifacts: `pm-commit 'reflection: brief for <date>'`.
 
 ---
 
@@ -317,4 +294,4 @@ The partner's taps on a brief's question cards don't reach a live agent — they
 - **Learn — update Memory.** Their pick is a fact about them (a confirmed preference, a priority, a thing they don't care about). Record it (`about-the-user`) so future briefs propose better and waste fewer of their taps. A declined suggestion is as informative as an accepted one.
 - **Learn — update the skills, including this one.** If the partner consistently declines a *kind* of suggestion, or always wants more/less detail, or a question landed wrong, that's a reflection-skill edit: change what you prioritize, prune, or how you phrase the next brief's questions. `pm-commit` it.
 
-The open-ended morning chat is the other steering surface — anything the partner types there (this run or the last) is live context to fold in. Between the carrier answers and the chat, the partner steers the next night's dream; you close the loop by acting and by encoding what they told you.
+The discuss-this-brief chats are the other steering surface — anything the partner says in a conversation they opened about a brief (this run's or an earlier one's) is live context to fold in; surface those chats in your phase-1 interviews like any other. Between the carrier answers and those chats, the partner steers the next night's dream; you close the loop by acting and by encoding what they told you.

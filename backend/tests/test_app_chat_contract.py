@@ -87,6 +87,48 @@ def test_app_chat_create_and_patch_store_custom_system_prompt(
   assert "model" not in row.agent_settings_json
 
 
+def test_app_chat_create_stores_report_date_and_kind(client, owner_token, db):
+  """An app opening a chat about one of its reports stores the link.
+
+  The Reflection app POSTs report_date + report_kind when the partner taps
+  "Discuss this brief"; chat.py reads report_date back from
+  agent_settings_json on the first turn to inject the brief as context.
+  """
+  app_id, app_token = _make_app(client, owner_token, "report-chatter")
+
+  r = client.post(
+    "/api/app-chats",
+    json={
+      "title": "Brief — 2026-06-22",
+      "report_date": "2026-06-22",
+      "report_kind": "reflection",
+    },
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert r.status_code == 201, r.text
+  chat_id = r.json()["id"]
+  row = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+  assert row.created_by_app_id == app_id
+  assert row.agent_settings_json["report_date"] == "2026-06-22"
+  assert row.agent_settings_json["report_kind"] == "reflection"
+
+
+def test_app_chat_create_rejects_malformed_report_date(client, owner_token):
+  """report_date is a path component downstream, so it's strictly ISO.
+
+  A non-ISO value (separator swap, traversal attempt, garbage) is rejected
+  at the schema boundary with a 422 rather than stored.
+  """
+  _, app_token = _make_app(client, owner_token, "bad-date")
+  for bad in ("2026/06/22", "2026-6-2", "../../etc/passwd", "today"):
+    r = client.post(
+      "/api/app-chats",
+      json={"title": "x", "report_date": bad},
+      headers={"Authorization": f"Bearer {app_token}"},
+    )
+    assert r.status_code == 422, f"{bad!r} should be rejected: {r.text}"
+
+
 def test_app_chat_patch_can_set_provider_before_assistant_turns(
   client, owner_token, db
 ):
