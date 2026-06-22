@@ -1,26 +1,25 @@
 """Assembles the agent's injected memory block from the knowledge graph.
 
 Möbius gives the agent its long-term memory by prepending a block to the
-FIRST user message of a session (see `chat.py`). This module builds a
-*progressive-disclosure* block: the router index (the root "Home" MOC) + the
-recent-chats queue + the inbox tail. Notes are NOT injected (v2: no scored
-selection) — the agent traverses from the router's scent lines on demand by
-following `[[wikilinks]]`.
+FIRST user message of a session (see `chat.py`). This module builds the block:
+the router index (the root "Home" MOC) + the full summaries of the ~10
+most-recently-modified per-chat notes. The deeper graph (mocs/, notes/) is NOT
+injected — it is read on demand by the memory-search subagent (and by the agent
+following `[[wikilinks]]`).
 
 Layout under `<data_dir>/shared/memory/` (the "graph"):
 
   index.md              root MOC-of-MOCs. Always injected in full.
-  recent-chats.md       fixed-size queue of the last ~10 chats (one line per
-                        chat: id + date + summary), maintained by the nightly
-                        "dreaming" pass; injected right after the index.
-  inbox.md              persistent append-only buffer for the day's raw
-                        observations; injected as a tail so same-day learnings
-                        are visible next session. Consolidated into notes by
-                        the nightly "dreaming" pass, then truncated.
+  chats/<id>/index.md   per-chat note (type: chat): the agent's GROWING summary
+                        of one chat — durable facts + intent + a running summary
+                        (+ the gist that IS the chat name). The most-recently-
+                        modified ~10 are injected in full after the index. This
+                        is the PRIMARY day-time memory carrier (there is no
+                        shared inbox); the nightly pass consolidates them into
+                        notes/.
   mocs/<topic>.md       topic hubs (curated [[links]]); read on demand.
   notes/<slug>.md       atomic notes (one fact each) with OKF frontmatter
                         (type, title, description=scent line); read on demand.
-  chats/<id>/index.md   per-chat summary node (type: chat); read on demand.
   read-trace/<id>.json  per-chat record of which nodes were injected/read,
                         written by chat.py + the SDK runner (memory_trace.py);
                         the dreaming pass diffs it against the graph.
@@ -35,9 +34,9 @@ previously published graph in place rather than exposing a half-built one.
 trivially unit-testable; the caller in `chat.py` owns the activity emit and
 the surrounding `<agent_experience>` envelope.
 
-Prompt-cache stability: the block is index + recency + inbox in a fixed order
-and injects no notes, so a nightly consolidation can't reorder the cached
-first-message prefix and bust prompt-cache reuse.
+Prompt-cache stability: the block is the index + the recent chat summaries in a
+fixed (newest-first) order and injects no mocs/notes, so a nightly consolidation
+can't reorder the cached first-message prefix and bust prompt-cache reuse.
 """
 
 from __future__ import annotations
@@ -54,14 +53,11 @@ log = logging.getLogger("mobius.memory")
 # disk for on-demand Read.
 DEFAULT_BUDGET_BYTES = 25_000
 DEFAULT_MAX_NOTES = 12
-# The inbox can grow unbounded between nightly consolidations; only its tail
-# is injected so a busy day can't crowd out the index + hot notes.
-INBOX_TAIL_BYTES = 6_000
-# The recent-chats queue is dreaming-maintained at ~10 one-line entries, so
-# this cap should never bind in practice; it bounds the damage if the file
-# is ever grown by hand. The queue is chronological (oldest first), so any
-# truncation keeps the newest TAIL.
-RECENT_CHATS_TAIL_BYTES = 4_000
+# How many recent per-chat notes to inject at session start. Each is the
+# agent's growing summary of one chat (durable facts + intent + a running
+# summary); the most-recently-modified ones open a fresh session with recent
+# conversational context. Replaces the old recent-chats queue + inbox tail.
+RECENT_CHAT_NOTES = 10
 
 
 @dataclass
@@ -110,6 +106,10 @@ def _loaded_path_to_id(rel: str) -> str | None:
   (rolling buffers aren't graph nodes — counting them would invent phantom
   ids in usage.json and the read-trace)."""
   import os
+  # Per-chat note: chats/<id>/index.md is keyed by the chat, not the basename
+  # (which is "index.md" and would collide with the root router index).
+  if rel.startswith("chats/") and rel.endswith("/index.md"):
+    return "chat:" + rel.split("/")[1]
   name = os.path.basename(rel)
   if name in ("inbox.md", "recent-chats.md"):
     return None
@@ -232,11 +232,11 @@ def build_memory_block(
 ) -> MemoryBlock:
   """Assembles the injected memory context from the knowledge graph.
 
-  `index.md` (the router, full, capped to the budget) + the `recent-chats.md`
-  queue (truncated oldest-first when tight) + the `inbox.md` tail. v2 injects
-  NO notes — the agent traverses from the router's scent lines on demand
-  (router -> one-hop; no importance/usage ranking). Each included file is fenced
-  with a `<<< path >>>` marker so the agent knows what a `[[link]]` resolves to.
+  `index.md` (the router, full, capped to the budget) + the full summaries of
+  the ~10 most-recently-modified `chats/<id>/index.md` notes (newest first,
+  budget-guarded). NO mocs/notes are injected — the deeper graph is read on
+  demand by the memory-search subagent. Each included file is fenced with a
+  `<<< path >>>` marker so the agent knows what a `[[link]]` resolves to.
 
   Returns an empty block when the graph is not yet published (`.ready` absent)
   or is empty — the agent then has no injected memory for this turn but can
@@ -253,6 +253,18 @@ def build_memory_block(
   if is_graph_ready(data_dir):
     return _build_graph_block(root, budget_bytes, max_notes)
   return MemoryBlock(text="", loaded=[], mode="empty")
+
+
+def _recent_chat_notes(root: Path, limit: int) -> list[Path]:
+  """The per-chat note files (`chats/<id>/index.md`), most-recently-modified
+  first, capped at `limit`. These are the growing chat summaries injected at
+  session start. Tolerates a missing `chats/` dir (returns [])."""
+  chats = root / "chats"
+  if not chats.is_dir():
+    return []
+  notes = [p for p in chats.glob("*/index.md") if p.is_file()]
+  notes.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+  return notes[:limit]
 
 
 def _build_graph_block(
@@ -281,58 +293,25 @@ def _build_graph_block(
     loaded.append("index.md")
     used += len(index.encode("utf-8"))
 
-  # The recent-chats queue rides right after the index, before hot notes:
-  # "what just happened" is orientation, like the index, and must not lose
-  # its slot to a fat note. The queue is chronological (oldest first), so
-  # when the remaining budget is tight it is truncated OLDEST-FIRST — the
-  # newest tail survives.
-  recent = _read(root / "recent-chats.md").strip()
-  if recent:
-    marker = "<<< recent-chats.md (last chats — oldest first) >>>\n"
-    omitted = "[older recent-chats entries omitted]\n"
-    overhead = len(marker.encode("utf-8")) + 2
-    room = min(RECENT_CHATS_TAIL_BYTES, budget_bytes - used - overhead)
-    body = recent
-    if len(body.encode("utf-8")) > room:
-      tail_room = room - len(omitted.encode("utf-8"))
-      if tail_room > 0:
-        body = omitted + body.encode("utf-8")[-tail_room:].decode(
-          "utf-8", errors="ignore"
-        )
-      else:
-        body = ""
-    if body:
-      chunk = marker + body
-      parts.append(chunk)
-      loaded.append("recent-chats.md")
-      used += len(chunk.encode("utf-8")) + 2
-
-  # v2: inject NO notes here. Retrieval is router -> traverse: the agent reads
-  # the router (index.md) scent lines, decides which topics the live question
-  # touches, and `Read`s those notes (and their one-hop `see also` targets) on
-  # demand. No scored hot-note selection, no importance/usage ranking — recall
-  # is conditioned on the question, not a fixed bundle. (`max_notes` is retained
-  # in the signature for caller/back-compat; it no longer selects notes.)
-
-  inbox = _read(root / "inbox.md").strip()
-  if inbox:
-    tail = _truncate_bytes(inbox, INBOX_TAIL_BYTES)
-    if tail != inbox:
-      # Keep the most recent observations, not the oldest.
-      tail = inbox.encode("utf-8")[-INBOX_TAIL_BYTES:].decode(
-        "utf-8", errors="ignore"
-      )
-      tail = "[older inbox entries omitted]\n" + tail
-    inbox_chunk = f"<<< inbox.md (recent, unconsolidated) >>>\n{tail}"
-    # Budget the inbox like the hot notes above (+2 is the "\n\n"
-    # separator). INBOX_TAIL_BYTES caps only the tail body, not the
-    # header+marker+separator, so the chunk could still push the block
-    # past budget_bytes when a large index leaves little room — this
-    # check keeps build_memory_block within its ~budget_bytes contract.
-    if used + len(inbox_chunk.encode("utf-8")) + 2 <= budget_bytes:
-      parts.append(inbox_chunk)
-      loaded.append("inbox.md")
-      used += len(inbox_chunk.encode("utf-8")) + 2
+  # Recent chat NOTES — the growing per-chat summaries that ARE the day's
+  # memory (there is no shared inbox). The most-recently-modified chats are
+  # injected in full, newest first, so a new session opens with recent
+  # conversational context: the durable facts + intent + the running summary
+  # the agent maintains in each chat's `chats/<id>/index.md`. The nightly pass
+  # consolidates these into the graph. The deeper graph (notes/, mocs/) is NOT
+  # injected — it is read on demand by the memory-search subagent. A budget
+  # guard stops injection before the block exceeds budget_bytes.
+  for note in _recent_chat_notes(root, RECENT_CHAT_NOTES):
+    body = _read(note).strip()
+    if not body:
+      continue
+    rel = f"chats/{note.parent.name}/index.md"
+    chunk = f"<<< {rel} (recent chat summary) >>>\n{body}"
+    if used + len(chunk.encode("utf-8")) + 2 > budget_bytes:
+      break
+    parts.append(chunk)
+    loaded.append(rel)
+    used += len(chunk.encode("utf-8")) + 2
 
   if not parts:
     return MemoryBlock(text="", loaded=[], mode="empty")
