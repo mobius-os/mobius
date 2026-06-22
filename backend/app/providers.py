@@ -277,6 +277,15 @@ class BaseProvider:
     """Returns an error message if not authenticated, None if ok."""
     return None
 
+  async def ensure_auth(self, data_dir: str) -> None:
+    """Pre-turn auth preparation hook. No-op by default.
+
+    Providers whose runtime reads a credential file that can go stale
+    mid-turn override this to refresh it before the turn starts. Best
+    effort by contract — a failure here must never block the turn.
+    """
+    return None
+
   def build_env(
     self,
     base_env: dict[str, str],
@@ -317,6 +326,35 @@ class ClaudeProvider(BaseProvider):
       )
     return None
 
+  async def ensure_auth(self, data_dir: str) -> None:
+    """Refresh the Claude OAuth token before a chat turn, if expired.
+
+    The intermittent "401 Invalid authentication credentials" on a fresh
+    chat send had two compounding causes: (1) the chat preflight only
+    checked the credentials file *exists*, never its `expiresAt`, so an
+    expired token reached the CLI; (2) the CLI then refreshes mid-turn,
+    and because Anthropic rotates the single-use refresh token, a
+    concurrent model-registry refresh could consume the token out from
+    under the CLI → 401. Refreshing here (sharing `_claude_refresh_lock`
+    with the registry path) serializes the two in-process refreshers and
+    removes the at-spawn-expired case by handing the CLI a fresh token. It
+    does NOT cover a turn that outlives the token: the token is only
+    refreshed within the 60s margin, so a multi-minute build can still cross
+    an expiry mid-turn, and the CLI's own refresh then runs outside this
+    lock by design (raise `_CLAUDE_TOKEN_REFRESH_MARGIN_MS` above the longest
+    expected turn to close that remainder too).
+
+    Best effort by the BaseProvider contract: if the refresh endpoint is
+    briefly unreachable we log and proceed — the CLI can still attempt its
+    own refresh, and a genuinely dead refresh token surfaces through the
+    normal turn-error path (which prompts the user to reconnect) rather
+    than blocking every turn here.
+    """
+    try:
+      await _claude_access_token(data_dir)
+    except Exception as exc:  # noqa: BLE001 - best-effort; never block a turn
+      log.warning("claude pre-turn token refresh failed: %s", exc)
+
   def build_env(
     self,
     base_env: dict[str, str],
@@ -335,6 +373,19 @@ class ClaudeProvider(BaseProvider):
     # block.
     if chat_id:
       env["AGENT_BROWSER_SESSION"] = f"chat-{chat_id}"
+    # The in-product agent reaches Codex for ensemble / "use codex" work via
+    # the Agent tool's `codex:codex-rescue` subagent — the codex plugin's
+    # companion broker shells out to `codex exec`, and that codex process
+    # inherits THIS environment. The codex CLI reads its credentials from
+    # CODEX_HOME, which otherwise only CodexProvider.build_env sets; a Claude
+    # turn left CODEX_HOME unset, so the spawned codex fell back to the empty
+    # default config and died "401 Invalid authentication credentials" —
+    # which is why "leverage codex subagents" failed in-product. Point it at
+    # the shared codex auth dir (only when codex is actually connected) so
+    # cross-provider codex calls authenticate.
+    codex_auth = Path(data_dir) / "cli-auth" / "codex" / "auth.json"
+    if codex_auth.exists():
+      env["CODEX_HOME"] = str(codex_auth.parent)
     return env
 
 
@@ -602,6 +653,15 @@ _CLAUDE_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 # 10s request timeout plus clock skew.
 _CLAUDE_TOKEN_REFRESH_MARGIN_MS = 60_000
 
+# Serializes Claude OAuth refreshes within this process. Anthropic rotates
+# the single-use refresh token on every grant, so two concurrent refreshes
+# of the same .credentials.json (the chat pre-turn refresh + the model-
+# registry fetch) would consume each other's token and 401. A single
+# uvicorn worker runs the app, so an in-process lock is the right scope; the
+# chat CLI is kept off the refresh path entirely by ensure_auth handing it
+# an already-fresh token before the turn.
+_claude_refresh_lock = asyncio.Lock()
+
 
 def _read_claude_oauth(data_dir: str) -> tuple[Path, dict]:
   """Returns (credentials path, claudeAiOauth dict). Raises when the file
@@ -707,25 +767,39 @@ async def _claude_access_token(data_dir: str) -> str:
   We now refresh the same way the CLI does — refresh-token grant against the
   OAuth token endpoint — and write the result back so the file stays the
   single source of truth."""
+  def _token_if_fresh(oauth: dict) -> str | None:
+    token = oauth.get("accessToken")
+    expires_at = oauth.get("expiresAt")
+    if (
+      token
+      and isinstance(expires_at, (int, float))
+      and expires_at - time.time() * 1000 >= _CLAUDE_TOKEN_REFRESH_MARGIN_MS
+    ):
+      return token
+    return None
+
   creds_path, oauth = _read_claude_oauth(data_dir)
-  token = oauth.get("accessToken")
-  expires_at = oauth.get("expiresAt")
-  expired = (
-    not token
-    or not isinstance(expires_at, (int, float))
-    or expires_at - time.time() * 1000 < _CLAUDE_TOKEN_REFRESH_MARGIN_MS
-  )
-  if not expired:
-    return token
-  refreshed = await _refresh_claude_access_token(oauth)
-  try:
-    _write_claude_oauth(creds_path, refreshed)
-  except OSError as exc:
-    # The refresh succeeded but persistence failed (read-only fs, perms).
-    # The token in hand is still valid for this call; log and use it rather
-    # than fall back to the stale KNOWN_MODELS list. Next call re-refreshes.
-    log.warning("could not persist refreshed claude token: %s", exc)
-  return refreshed["accessToken"]
+  fresh = _token_if_fresh(oauth)
+  if fresh:
+    return fresh
+  async with _claude_refresh_lock:
+    # Re-read under the lock: a coroutine that refreshed while we waited
+    # already wrote a fresh token, so reusing it avoids burning a second
+    # single-use rotation (the race this lock exists to close).
+    creds_path, oauth = _read_claude_oauth(data_dir)
+    fresh = _token_if_fresh(oauth)
+    if fresh:
+      return fresh
+    refreshed = await _refresh_claude_access_token(oauth)
+    try:
+      _write_claude_oauth(creds_path, refreshed)
+    except OSError as exc:
+      # The refresh succeeded but persistence failed (read-only fs, perms).
+      # The token in hand is still valid for this call; log and use it
+      # rather than fall back to the stale KNOWN_MODELS list. Next call
+      # re-refreshes.
+      log.warning("could not persist refreshed claude token: %s", exc)
+    return refreshed["accessToken"]
 
 
 async def _fetch_claude_models(data_dir: str) -> list[str]:

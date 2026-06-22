@@ -2644,6 +2644,14 @@ async def _run_chat_impl(
       "chat start chat_id=%s provider=%s session=%s msg_len=%d sdk=claude",
       chat_id, provider.name, session_id or "new", len(user_message),
     )
+    # Refresh the OAuth token before the turn so the CLI starts with a fresh
+    # token instead of refreshing at spawn — the at-spawn-expired case that
+    # raced the rotating single-use refresh token against the model-registry
+    # path and surfaced as the intermittent first-send "401 Invalid
+    # authentication credentials". Best effort: a refresh failure never aborts
+    # the turn, but this does add the refresh round-trip to turn-start latency
+    # (bounded by the 10s httpx timeout in _refresh_claude_access_token).
+    await provider.ensure_auth(settings.data_dir)
     sdk_env = provider.build_env(
       base_env=base_env,
       data_dir=settings.data_dir,

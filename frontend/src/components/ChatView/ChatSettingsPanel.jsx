@@ -130,6 +130,17 @@ function OpenAILogo() {
  *    xhigh / max (xhigh + max are Opus-tier only). Anthropic's
  *    legacy `thinking.budget_tokens` integer is deprecated on Opus
  *    4.7 — the discrete enum is the supported knob.
+ *  - `ultracode` is a Möbius-exposed 6th Claude tier, NOT an SDK
+ *    `EffortLevel`. It is the Claude Code CLI's ultracode mode:
+ *    `xhigh` effort PLUS dynamic multi-agent Workflow-tool
+ *    orchestration. The CLI's `--effort` flag rejects "ultracode"
+ *    (it only accepts the five enum values), so the runner maps it
+ *    to `--effort xhigh` and arms the orchestration via the CLI's
+ *    "ultracode" keyword trigger (see `claude_sdk_runner.py`). It is
+ *    model-gated to ultracode-capable (Opus-tier) models and the
+ *    keyword trigger no-ops gracefully on older CLIs / lesser models,
+ *    leaving plain xhigh effort. Rendered as the rightmost (most
+ *    capable) stop even though its raw effort is xhigh, not max.
  *
  *  Both are rendered as a horizontal stepper-slider in
  *  ChatSettingsPanel: a single track with N stops, the selected
@@ -163,6 +174,10 @@ const PROVIDER_INFO = {
       { value: 'high', label: 'High' },
       { value: 'xhigh', label: 'Extra high' },
       { value: 'max', label: 'Max' },
+      // Möbius tier (not an SDK EffortLevel) — see the PROVIDER_INFO
+      // docstring above. The runner maps it to `--effort xhigh` plus the
+      // CLI ultracode keyword trigger (multi-agent Workflow orchestration).
+      { value: 'ultracode', label: 'Ultracode' },
     ],
   },
 }

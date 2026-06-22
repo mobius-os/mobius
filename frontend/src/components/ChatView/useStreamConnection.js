@@ -63,6 +63,9 @@ const SYSTEM_EVENTS = new Set([
  *
  *   text                  Streamed assistant token chunk
  *                         { content }. Buffered + drained by rAF.
+ *   text_boundary         Next text starts a fresh assistant block.
+ *                         Used when the provider starts a new assistant
+ *                         message item without a visible tool between them.
  *   tool_start            Tool invocation began
  *                         { tool, input? }. Appends a tool block
  *                         with status='running'.
@@ -241,6 +244,25 @@ export default function useStreamConnection(chatId, {
   const textBufferRef = useRef('')
   const rafRef = useRef(null)
   const drainingRef = useRef(false)
+  // Set by `text_boundary`: the next text chunk must create a new text item
+  // instead of appending to the previous text item. This preserves provider
+  // assistant-message boundaries even when the separator was hidden/internal
+  // work rather than a visible tool block.
+  const forceNewTextBlockRef = useRef(false)
+
+  function appendTextChunk(prev, chunk) {
+    const updated = [...prev]
+    const last = updated[updated.length - 1]
+    if (last?.type === 'text' && !forceNewTextBlockRef.current) {
+      updated[updated.length - 1] = {
+        ...last, content: last.content + chunk,
+      }
+    } else {
+      updated.push({ type: 'text', content: chunk })
+    }
+    forceNewTextBlockRef.current = false
+    return updated
+  }
 
   // Drain the text buffer character-by-character.
   const startDraining = useCallback(() => {
@@ -257,18 +279,7 @@ export default function useStreamConnection(chatId, {
       const chunk = buf.slice(0, CHARS_PER_FRAME)
       textBufferRef.current = buf.slice(CHARS_PER_FRAME)
 
-      setStreamItems(prev => {
-        const updated = [...prev]
-        const last = updated[updated.length - 1]
-        if (last?.type === 'text') {
-          updated[updated.length - 1] = {
-            ...last, content: last.content + chunk,
-          }
-        } else {
-          updated.push({ type: 'text', content: chunk })
-        }
-        return updated
-      })
+      setStreamItems(prev => appendTextChunk(prev, chunk))
 
       rafRef.current = requestAnimationFrame(drain)
     }
@@ -292,18 +303,7 @@ export default function useStreamConnection(chatId, {
     if (!remaining) return
     textBufferRef.current = ''
 
-    setStreamItems(prev => {
-      const updated = [...prev]
-      const last = updated[updated.length - 1]
-      if (last?.type === 'text') {
-        updated[updated.length - 1] = {
-          ...last, content: last.content + remaining,
-        }
-      } else {
-        updated.push({ type: 'text', content: remaining })
-      }
-      return updated
-    })
+    setStreamItems(prev => appendTextChunk(prev, remaining))
   }, [])
 
   const disconnect = useCallback(({ clearStreaming = false } = {}) => {
@@ -346,6 +346,7 @@ export default function useStreamConnection(chatId, {
     disconnect()
     setStreamItems([])
     textBufferRef.current = ''
+    forceNewTextBlockRef.current = false
     lastGoodItemsRef.current = []
     // Answers belong to the chat we're leaving; carrying them into the next
     // chat could re-arm a same-keyed question with a foreign answer.
@@ -410,6 +411,7 @@ export default function useStreamConnection(chatId, {
       catchUpStartedRef.current = false
       setStreamItems([])
       textBufferRef.current = ''
+      forceNewTextBlockRef.current = false
     }
 
     const controller = new AbortController()
@@ -468,6 +470,7 @@ export default function useStreamConnection(chatId, {
         setIsStreaming(false)
         setStreamItems([])
         textBufferRef.current = ''
+        forceNewTextBlockRef.current = false
         // The chat may have finished while we were offline — re-fetch
         // messages from the DB so the component shows the final state.
         // Let ChatView clear its `sending` state, then force a refresh
@@ -525,22 +528,14 @@ export default function useStreamConnection(chatId, {
             continue
           }
 
-          if (event.type === 'text') {
+          if (event.type === 'text_boundary') {
+            flushBuffer()
+            forceNewTextBlockRef.current = true
+          } else if (event.type === 'text') {
             const content = event.content || ''
             if (isCatchUp) {
               // Catch-up burst: apply immediately, no typewriter.
-              setStreamItems(prev => {
-                const updated = [...prev]
-                const last = updated[updated.length - 1]
-                if (last?.type === 'text') {
-                  updated[updated.length - 1] = {
-                    ...last, content: last.content + content,
-                  }
-                } else {
-                  updated.push({ type: 'text', content })
-                }
-                return updated
-              })
+              setStreamItems(prev => appendTextChunk(prev, content))
             } else {
               // Live streaming: buffer for typewriter reveal.
               textBufferRef.current += content
@@ -619,6 +614,20 @@ export default function useStreamConnection(chatId, {
               onLiveQuestionRef.current?.(event.question_id || null)
               setStreamItems(prev => upsertQuestionItem(prev, incoming))
             }
+          } else if (event.type === 'answers_applied') {
+            // The question was answered (by this tab, another tab, or the
+            // in-process answer delivery). Patch the in-flight card to
+            // answered and record the answer so a later catch-up replay
+            // re-arms it instead of reverting to pending. Without this, an
+            // already-connected stream — or a navigate-away-and-back — left
+            // the card blank even though the DB block carries the answers,
+            // because the persisted answered block is suppressed while a
+            // same-id streaming card is still in flight.
+            if (event.question_id || event.answers) {
+              patchQuestionAnswers(
+                event.question_id || null, event.answers || {},
+              )
+            }
           } else if (event.type === 'error') {
             flushBuffer()
             setStreamItems(prev => {
@@ -667,6 +676,7 @@ export default function useStreamConnection(chatId, {
               // assistant after Q2. (setStreamItems clears latestItemsRef
               // synchronously too, so a later promote can't resurrect A1.)
               setStreamItems([])
+              forceNewTextBlockRef.current = false
             } else {
               onSteeredIntoTurnRef.current?.({
                 ts: event.ts ?? null,
@@ -895,6 +905,7 @@ export default function useStreamConnection(chatId, {
         justSentAtRef.current = Date.now()
         setStreamItems([])
         textBufferRef.current = ''
+        forceNewTextBlockRef.current = false
         setIsStreaming(true)
         setConnectionError(null)
       }

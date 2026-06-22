@@ -33,7 +33,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import secrets
 import sqlite3
 import threading
@@ -49,6 +48,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from app import recover_auth
+from app.codex_login_parse import banner_has_code, parse_login_banner
 
 log = logging.getLogger("moebius.recover_oauth")
 
@@ -423,9 +423,7 @@ async def codex_start(
         if not line:
           break
         output += line.decode("utf-8", errors="replace")
-        if "code" in output.lower() and re.search(
-          r'[A-Z0-9]{4,}-[A-Z0-9]{4,}', output
-        ):
+        if banner_has_code(output):
           break
   except asyncio.TimeoutError:
     # Cleanup the registry entry — no watcher to do it for us yet.
@@ -438,11 +436,8 @@ async def codex_start(
     log.warning("Recovery: codex login timed out, output: %s", output[:500])
     raise HTTPException(500, "Codex login timed out")
 
-  clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', output)
-
-  url_match = re.search(r'(https://[^\s<>"\']+)', clean)
-  code_match = re.search(r'([A-Z0-9]{4,}-[A-Z0-9]{4,})', clean)
-  if not url_match or not code_match:
+  parsed = parse_login_banner(output)
+  if parsed is None:
     # Same cleanup as the timeout branch — no watcher yet.
     _codex_login_procs.pop("active", None)
     proc.kill()
@@ -460,8 +455,7 @@ async def codex_start(
   # that we know parsing succeeded.
   asyncio.create_task(_watch_codex_login(proc))
 
-  parsed_url = url_match.group(1).rstrip('.,;:!?')
-  return {"url": parsed_url, "code": code_match.group(1)}
+  return parsed
 
 
 @router.get("/recover/provider/codex/status")

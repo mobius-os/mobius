@@ -302,3 +302,63 @@ def test_process_error_event_coalesces_duplicates():
 def test_immediate_save_types_are_event_types():
   """_IMMEDIATE_SAVE_TYPES stays a subset of the exported vocabulary."""
   assert _ChatEventSink._IMMEDIATE_SAVE_TYPES <= set(get_args(EventType))
+
+
+def test_both_runners_emit_text_boundary():
+  """Both SDK runners must emit `text_boundary` so a stream with multiple
+  assistant message items renders as separate paragraphs on EITHER provider.
+
+  This guards the provider-asymmetric half-fix class: `text_boundary` shipped
+  for the Codex runner but not the Claude runner for a while, so Claude text
+  resuming after an AskUserQuestion glued together as "answer1.answer2". A
+  source-level check is intentional — it catches the omission without driving
+  each SDK end-to-end.
+  """
+  from pathlib import Path
+
+  app_dir = Path(__file__).resolve().parents[1] / "app"
+  for runner in ("claude_sdk_runner.py", "codex_sdk_runner.py"):
+    src = (app_dir / runner).read_text()
+    assert '"text_boundary"' in src, (
+      f"{runner} never publishes a text_boundary event — consecutive "
+      f"assistant message items will concatenate without a paragraph break "
+      f"on this provider. Keep the streaming event vocabulary symmetric "
+      f"across runners (see events.process_event)."
+    )
+
+
+def test_text_boundary_reducer_splits_consecutive_text():
+  """A text_boundary between two text chunks yields TWO text blocks (so the
+  post-AskUserQuestion 'answer1' / 'answer2' no longer glue as 'answer1answer2')."""
+  blocks = []
+  process_event({"type": "text", "content": "answer1"}, blocks)
+  process_event({"type": "text_boundary"}, blocks)
+  process_event({"type": "text", "content": "answer2"}, blocks)
+  text_blocks = [b for b in blocks if b.get("type") == "text"]
+  assert [b["content"] for b in text_blocks] == ["answer1", "answer2"]
+  # the marker was consumed (replaced by the second text), not left behind
+  assert all(b.get("type") != "text_boundary" for b in blocks)
+
+
+def test_text_boundary_on_empty_is_noop():
+  """A leading boundary (no prior non-empty text) does nothing — guards the
+  first-block case so a turn never opens with a stray marker."""
+  blocks = []
+  changed = process_event({"type": "text_boundary"}, blocks)
+  assert changed is False
+  assert blocks == []
+
+
+def test_text_boundary_marker_never_persists():
+  """A DANGLING boundary (marker, no following text) is stripped from both the
+  mid-turn snapshot (build_assistant_message) and the finalized blocks
+  (finalize_blocks) — it is a live-stream-only signal, never a stored block."""
+  blocks = []
+  process_event({"type": "text", "content": "x"}, blocks)
+  process_event({"type": "text_boundary"}, blocks)
+  assert blocks[-1] == {"type": "text_boundary"}  # present mid-stream
+  msg = build_assistant_message(blocks)
+  assert all(b.get("type") != "text_boundary" for b in msg["blocks"])
+  assert msg["content"] == "x"
+  finalize_blocks(blocks)
+  assert all(b.get("type") != "text_boundary" for b in blocks)
