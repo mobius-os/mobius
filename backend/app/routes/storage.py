@@ -53,6 +53,7 @@ from app import storage_io
 from app.storage_io import (
   app_dir_usage,
   atomic_write,
+  file_version_token,
   delete_content_type,
   delete_content_type_tree,
   move_content_type,
@@ -465,6 +466,7 @@ async def _decode_write_body(
 def read_app_file(
   app_id: int,
   path: str,
+  request: Request,
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
@@ -479,7 +481,10 @@ def read_app_file(
   if not file_path.is_file():
     raise HTTPException(status_code=404, detail="File not found.")
   stored = read_content_type(data_dir, Path("apps") / str(app_id), path)
-  return _serve_file(file_path, stored)
+  response = _serve_file(file_path, stored)
+  if request.headers.get("x-mobius-version") == "1":
+    response.headers["ETag"] = file_version_token(file_path)
+  return response
 
 
 class _MoveBody(BaseModel):
@@ -627,6 +632,10 @@ async def write_app_file(
   new_size = len(
     content.encode("utf-8") if isinstance(content, str) else content
   )
+  if_match = request.headers.get("if-match")
+  if_none_match = request.headers.get("if-none-match")
+  wants_cas = if_match is not None or if_none_match is not None
+  new_version = None
   # Serialize the write against this app's uninstall AND re-verify, under the
   # lock, that this is still the SAME app (its token_nonce is unchanged). A
   # write that paused to read its body could otherwise land after an
@@ -640,6 +649,12 @@ async def write_app_file(
     # surface as an opaque 500; reject it explicitly.
     if file_path.is_dir():
       raise HTTPException(status_code=400, detail="Destination is a directory.")
+    if if_none_match is not None and if_none_match.strip() == "*":
+      if file_path.exists():
+        raise HTTPException(status_code=412, detail="Storage precondition failed.")
+    elif if_match is not None:
+      if not file_path.is_file() or file_version_token(file_path) != if_match.strip():
+        raise HTTPException(status_code=412, detail="Storage precondition failed.")
     # Snapshot the pre-write size for size_delta. A missing file is zero; a
     # stat failure (race with delete) is also zero — best-effort, not
     # load-bearing.
@@ -667,6 +682,8 @@ async def write_app_file(
         ),
       )
     atomic_write(file_path, content)
+    if wants_cas:
+      new_version = file_version_token(file_path)
     # Record (or clear) the served MIME sidecar so a cold read of an
     # extensionless or custom-MIME blob returns the app's declared type.
     # Inside the lock so the sidecar can't outlive a racing delete.
@@ -686,7 +703,10 @@ async def write_app_file(
       path=path,
       size_delta=after_size - before_size,
     )
-  return Response(status_code=204)
+  response = Response(status_code=204)
+  if new_version is not None:
+    response.headers["ETag"] = new_version
+  return response
 
 
 @router.delete(

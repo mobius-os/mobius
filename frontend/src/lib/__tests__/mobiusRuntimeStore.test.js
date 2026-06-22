@@ -35,6 +35,40 @@ async function newStorage(appId = '1') {
   return makeStorage({ appId, getToken: async () => 'test-token' })
 }
 
+async function runtimeExports() {
+  return import('../../../public/mobius-runtime.js')
+}
+
+async function renderUseDocument(storage, path, opts) {
+  const stateSlots = []
+  const refSlots = []
+  const effects = []
+  let stateIndex = 0
+  let refIndex = 0
+  const React = {
+    useState(init) {
+      const i = stateIndex++
+      if (!(i in stateSlots)) stateSlots[i] = typeof init === 'function' ? init() : init
+      const setState = (next) => {
+        stateSlots[i] = typeof next === 'function' ? next(stateSlots[i]) : next
+      }
+      return [stateSlots[i], setState]
+    },
+    useRef(init) {
+      const i = refIndex++
+      if (!(i in refSlots)) refSlots[i] = { current: init }
+      return refSlots[i]
+    },
+    useCallback(fn) { return fn },
+    useEffect(fn) { effects.push(fn) },
+  }
+  const { createUseDocument } = await runtimeExports()
+  const useDocument = createUseDocument(storage, React)
+  const handle = useDocument(path, opts)
+  const cleanups = effects.map((fn) => fn()).filter(Boolean)
+  return { handle, state: () => stateSlots[0], cleanup: () => cleanups.forEach((fn) => fn()) }
+}
+
 // ── Read-through cache: write/read online, read offline ────────────────────
 
 test('a value written online is readable offline (write-through mirror)', async () => {
@@ -362,4 +396,127 @@ test('deleting the mobius-outbox DB (logout) purges the cache mirror too', async
   const s2 = await newStorage()
   server.setOnline(false)
   assert.equal(await s2.get('cached.json'), null)
+})
+
+
+test('legacy set() keeps an exact {synced}/{queued} shape over a dead-lettered write', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+
+  server.forceWrite('legacy.json', 413)
+  const r = await s.set('legacy.json', { too: 'large' })
+  assert.deepEqual(Object.keys(r), ['synced'])
+  assert.deepEqual(r, { synced: true })
+  assert.equal(await s.pendingCount(), 0)
+})
+
+test('durableWrite resolves synced only after an accepted server write', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+
+  const r = await s.durableWrite('durable.json', { ok: true })
+  assert.equal(r.durability, 'synced')
+  assert.equal(r.path, 'durable.json')
+  assert.equal(typeof r.writeId, 'string')
+  assert.deepEqual(server.serverValue('durable.json'), { ok: true })
+})
+
+test('durableWrite resolves queued when the write is durably outboxed offline', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.setOnline(false)
+
+  const r = await s.durableWrite('queued.json', { offline: true })
+  assert.equal(r.durability, 'queued')
+  assert.equal(await s.pendingCount(), 1)
+  assert.equal(server.serverHas('queued.json'), false)
+})
+
+test('durableWrite rejects with DurableWriteError on fatal dead-letter status', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  const { DurableWriteError } = await runtimeExports()
+
+  server.forceWrite('refused.json', 413)
+  await assert.rejects(
+    () => s.durableWrite('refused.json', { bad: true }),
+    (err) => err instanceof DurableWriteError &&
+      err.code === 'dead_letter' &&
+      err.status === 413 &&
+      err.path === 'refused.json' &&
+      err.retryable === false,
+  )
+  assert.equal(await s.pendingCount(), 0)
+})
+
+test('412 CAS conflict is retryable and does not emit dead-letter', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  const { DurableWriteError } = await runtimeExports()
+  const deadLetters = []
+  const unsub = s.onDeadLetter((dl) => deadLetters.push(dl))
+
+  server.forceWrite('conflict.json', 412)
+  await assert.rejects(
+    () => s.durableWrite('conflict.json', { stale: true }, { ifMatch: '"old"' }),
+    (err) => err instanceof DurableWriteError &&
+      err.code === 'conflict' &&
+      err.status === 412 &&
+      err.retryable === true,
+  )
+  await tick(10)
+  assert.equal(await s.pendingCount(), 0)
+  assert.deepEqual(deadLetters, [])
+  unsub()
+})
+
+test('onDeadLetter replays an offline-queued write later refused on drain', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.setOnline(false)
+  const queued = await s.durableWrite('later-refused.json', { bad: true })
+  assert.equal(queued.durability, 'queued')
+
+  server.forceWrite('later-refused.json', 413)
+  server.setOnline(true)
+  s._drain()
+  await waitFor(async () => (await s.pendingCount()) === 0)
+
+  const seen = []
+  const unsub = s.onDeadLetter((dl) => seen.push(dl))
+  await waitFor(() => seen.length === 1)
+  assert.equal(seen[0].path, 'later-refused.json')
+  assert.equal(seen[0].status, 413)
+  assert.deepEqual(seen[0].refusedValue, { bad: true })
+  unsub()
+})
+
+test('useDocument serializes updates and reconciles item ids by content identity', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.seed('doc.json', [{ text: 'server' }])
+
+  const doc = await renderUseDocument(s, 'doc.json', {
+    initial: [{ id: 'local-stable', text: 'server' }],
+    identity: (item) => item.text,
+    mode: 'lww',
+  })
+  await waitFor(() => doc.state().status === 'ready')
+  assert.deepEqual(doc.state().value, [{ id: 'local-stable', text: 'server' }])
+
+  const order = []
+  const p1 = doc.handle.update((items) => {
+    order.push('first')
+    return [...items, { id: 'a', text: 'a' }]
+  })
+  const p2 = doc.handle.update((items) => {
+    order.push('second')
+    return [...items, { id: 'b', text: 'b' }]
+  })
+  await Promise.all([p1, p2])
+
+  assert.deepEqual(order, ['first', 'second'])
+  assert.deepEqual(server.serverValue('doc.json').map((item) => item.text), ['server', 'a', 'b'])
+  assert.equal(server.serverValue('doc.json')[0].id, 'local-stable')
+  doc.cleanup()
 })
