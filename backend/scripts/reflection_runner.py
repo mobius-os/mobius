@@ -128,6 +128,42 @@ DEFAULT_PROVIDER = "claude"
 # open the morning chat, commit — no investigation.
 FALLBACK_MAX_TURNS = 12
 
+# Distinct exit code for a CLI auth failure (a 401 / expired credential),
+# separate from the generic error-result rc=2. The CLI mislabels a 401
+# ResultMessage as subtype="success" while setting is_error=True, so the
+# only reliable signal is the error/result STRING — `_is_auth_failure`
+# matches it. The auth rc lets the guaranteed-brief layer skip the LLM
+# rescue (which would just 401 again and burn the budget) and have the
+# Python runner write a static brief itself, so a brief lands even when
+# the model is unreachable.
+AUTH_FAILURE_RC = 3
+
+# Substrings that mark a result/error string as a CLI authentication
+# failure. Matched case-insensitively against the ResultMessage's
+# error/result text. Confirmed from prod logs (401 on an expired CLI
+# credential surfaces these phrasings).
+_AUTH_FAILURE_MARKERS = (
+  "401",
+  "invalid authentication credentials",
+  "failed to authenticate",
+  "authentication_error",
+  "oauth token has expired",
+)
+
+
+def _is_auth_failure(text: str | None) -> bool:
+  """True when a result/error string names a CLI authentication failure.
+
+  The CLI returns a ResultMessage with is_error=True but a misleading
+  subtype="success" on a 401, so subtype is useless for routing. The
+  error/result STRING is the only honest signal — match the known 401
+  phrasings (see `_AUTH_FAILURE_MARKERS`) case-insensitively.
+  """
+  if not text:
+    return False
+  low = text.lower()
+  return any(marker in low for marker in _AUTH_FAILURE_MARKERS)
+
 
 def steering_thresholds(max_turns: int) -> tuple[int, int]:
   """Returns the (soft, hard) turn counts that trigger budget steering.
@@ -255,6 +291,46 @@ def build_fallback_goal() -> str:
     "4. Commit with pm-commit and stop. The brief file is the one "
     "non-negotiable deliverable; skip anything that threatens it.",
   ])
+
+
+def write_static_auth_failure_brief(brief_path: Path) -> bool:
+  """Writes a minimal self-contained HTML brief without the CLI.
+
+  The guaranteed-brief layer's whole point is "the partner never wakes
+  to nothing." When the night failed because the CLI couldn't
+  authenticate (a 401), spawning a rescue CLI session would just 401
+  again and burn the budget — defeating the guarantee exactly when it
+  matters. So the Python runner writes the brief ITSELF: a heading and
+  one honest line that tonight's reflection couldn't run, valid
+  standalone HTML with no template dependency. Returns True on success;
+  any OS error is logged and swallowed (the night's exit code is the
+  record, and a failed write must never crash the run).
+  """
+  from datetime import date
+  today = date.today().isoformat()
+  html = (
+    "<!DOCTYPE html>\n"
+    '<html lang="en">\n'
+    "<head>\n"
+    '  <meta charset="utf-8">\n'
+    '  <meta name="viewport" content="width=device-width, '
+    'initial-scale=1">\n'
+    f"  <title>Reflection — {today}</title>\n"
+    "</head>\n"
+    "<body>\n"
+    f"  <h1>Reflection — {today}</h1>\n"
+    "  <p>Tonight's reflection couldn't run — the CLI failed to "
+    "authenticate; I'll resume tomorrow.</p>\n"
+    "</body>\n"
+    "</html>\n"
+  )
+  try:
+    brief_path.parent.mkdir(parents=True, exist_ok=True)
+    brief_path.write_text(html, encoding="utf-8")
+    return True
+  except OSError as exc:
+    _log(f"ERROR could not write static auth-failure brief: {exc!r}")
+    return False
 
 
 def _safety_snapshot(label: str) -> None:
@@ -570,7 +646,7 @@ class _LogBroadcast:
 
 async def _drain_session(
   client, log_fh, *, max_turns: int, countdown: bool,
-) -> tuple[bool, bool]:
+) -> tuple[bool, bool, bool]:
   """Drains one SDK response stream to its terminal result.
 
   Counts assistant turns and, when `countdown` is on, injects the
@@ -582,11 +658,18 @@ async def _drain_session(
   against test fakes; `_drain_message` already imported the real
   types for log formatting.
 
-  Returns (saw_result, result_error).
+  Returns (saw_result, result_error, auth_failure). `auth_failure` is
+  True when the terminal error result names a CLI authentication
+  failure (a 401 / expired credential) — see `_is_auth_failure`. The
+  CLI mislabels a 401 as subtype="success" while setting
+  is_error=True, so the error/result STRING is the only honest signal;
+  we capture it both to set this flag and to name the failure in the
+  log (the bare "subtype=success" line otherwise hides a 401).
   """
   turns_seen = 0
   saw_result = False
   result_error = False
+  auth_failure = False
   async for sdk_msg in client.receive_response():
     if log_fh is not None:
       _drain_message(sdk_msg, log_fh)
@@ -617,11 +700,24 @@ async def _drain_session(
       # when none was.
       if getattr(sdk_msg, "is_error", False):
         result_error = True
+        err_text = (
+          sdk_msg.result
+          if isinstance(getattr(sdk_msg, "result", None), str)
+          else None
+        )
+        if _is_auth_failure(err_text):
+          auth_failure = True
+        # Log the captured error string alongside the subtype. A 401
+        # arrives as subtype="success" (the CLI mislabels it), so the
+        # old "(subtype=success)" line hid the real cause; naming the
+        # error string lets a future 401 be diagnosed at a glance.
         _log(
           "WARN run ended in error "
-          f"(subtype={getattr(sdk_msg, 'subtype', '?')})"
+          f"(subtype={getattr(sdk_msg, 'subtype', '?')}; "
+          f"auth_failure={auth_failure}) result error: "
+          f"{err_text or '(none)'}"
         )
-  return saw_result, result_error
+  return saw_result, result_error, auth_failure
 
 
 async def _run_claude_session(
@@ -667,12 +763,17 @@ async def _run_claude_session(
       return 1
 
     await client.query(goal)
-    saw_result, result_error = await _drain_session(
+    saw_result, result_error, auth_failure = await _drain_session(
       client, log_fh, max_turns=max_turns, countdown=countdown,
     )
     if not saw_result:
       _log("WARN stream ended without a terminal ResultMessage")
       return 2
+    if auth_failure:
+      # Distinct from the generic error rc=2: the guaranteed-brief
+      # layer must NOT spawn another CLI session (it would just 401
+      # again) — it writes a static brief itself instead.
+      return AUTH_FAILURE_RC
     if result_error:
       return 2
     return 0
@@ -752,6 +853,14 @@ async def _maybe_write_fallback_brief(
   spawn one short rescue session whose only goal is a minimal brief +
   morning chat built from whatever the cut-off run left behind.
 
+  Auth-failure case (rc == AUTH_FAILURE_RC): the night died because
+  the CLI couldn't authenticate (a 401). Spawning another CLI session
+  would just 401 again, defeating the guarantee exactly when it's
+  needed — so the Python runner writes a minimal static brief ITSELF
+  (no CLI) and stops. When the brief path can't be resolved (app id
+  unstaged), there's nowhere to write, so fall through to the normal
+  rescue as a last resort.
+
   Recursion guard: this helper is called exactly once, from run(),
   after the MAIN session only. The rescue session it spawns goes
   through the plain session helpers (countdown off, no further
@@ -763,6 +872,20 @@ async def _maybe_write_fallback_brief(
   try:
     brief = todays_brief_path()
     if not fallback_needed(rc, brief):
+      return
+    if rc == AUTH_FAILURE_RC and brief is not None:
+      # The model is unreachable — do NOT spawn another CLI session.
+      # Write the static brief directly so the partner still wakes to
+      # something honest about why the night didn't run.
+      _log(
+        f"main run failed auth (rc={rc}) with no brief at {brief} — "
+        "writing static auth-failure brief without the CLI"
+      )
+      wrote = write_static_auth_failure_brief(brief)
+      _log(
+        "guaranteed-brief fallback finished (static auth brief) "
+        f"brief_written={'yes' if wrote else 'no'}"
+      )
       return
     _log(
       f"main run failed (rc={rc}) with no brief at "
@@ -797,12 +920,15 @@ async def run() -> int:
   or not — an agent that decides "quiet night, nothing to do" is a
   success), 1 on an infrastructure failure (skill missing, SDK couldn't
   start, an unexpected exception), 2 when the goal loop ended in an
-  error result (including the max_turns cap). The wrapper maps the
-  exit code into the `cron_outcome` event, so this is the one signal
-  the activity log records about whether the night ran. A non-zero
-  night additionally triggers the guaranteed-brief fallback (which
-  never changes the exit code — it rescues the deliverable, not the
-  record).
+  error result (including the max_turns cap), and AUTH_FAILURE_RC (3)
+  when the goal loop ended because the CLI couldn't authenticate (a
+  401). The wrapper maps the exit code into the `cron_outcome` event,
+  so this is the one signal the activity log records about whether the
+  night ran. A non-zero night additionally triggers the guaranteed-
+  brief fallback (which never changes the exit code — it rescues the
+  deliverable, not the record); the auth-failure rc routes that
+  fallback to a CLI-free static brief instead of another doomed CLI
+  rescue.
   """
   settings = load_settings()
   provider, model, effort = _resolve_model(settings)
