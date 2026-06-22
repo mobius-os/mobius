@@ -1252,7 +1252,7 @@ export function createUseDocument(storage, reactProvider = null) {
   return function useDocument(path, opts = {}) {
     const React = reactProvider || (typeof window !== 'undefined' ? window.React : null)
     if (!React || !React.useCallback || !React.useEffect || !React.useRef || !React.useState) {
-      throw new Error('window.mobius.useDocument requires React on window.React')
+      throw new Error('useDocument needs React — bind it via window.mobius.createUseDocument(React)')
     }
     const initialOpt = Object.prototype.hasOwnProperty.call(opts, 'initial') ? opts.initial : null
     const initialValue = typeof initialOpt === 'function' ? initialOpt() : initialOpt
@@ -2340,7 +2340,6 @@ if (typeof window !== 'undefined') {
 
 export function init({ appId, getToken }) {
   const storage = makeStorage({ appId, getToken })
-  const useDocument = createUseDocument(storage)
   window.mobius = {
     appId,
     // Returns the probed reachability verdict (not raw navigator.onLine).
@@ -2360,7 +2359,13 @@ export function init({ appId, getToken }) {
     DurableWriteError,
     durableWrite: storage.durableWrite,
     onDeadLetter: storage.onDeadLetter,
-    useDocument,
+    // useDocument is a React hook, so it must run on the APP's React instance.
+    // The runtime is deliberately React-free (and headless-testable), and no
+    // host sets window.React, so a self-binding window.mobius.useDocument would
+    // throw. Expose the factory instead: apps bind it once at module top with
+    // the React they already import — `const useDocument =
+    // window.mobius.createUseDocument(React)`.
+    createUseDocument: (React) => createUseDocument(storage, React),
     signal: makeSignal(appId, storage),
     chat: makeChat({ appId, getToken, storage }),
     nav: makeNav(),

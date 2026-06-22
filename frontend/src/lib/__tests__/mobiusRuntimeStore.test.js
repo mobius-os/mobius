@@ -491,6 +491,18 @@ test('onDeadLetter replays an offline-queued write later refused on drain', asyn
   unsub()
 })
 
+test('useDocument factory requires an explicit React (window.mobius.createUseDocument binding) — no window.React fallback', async () => {
+  freshEnv()
+  const s = await newStorage()
+  const { createUseDocument } = await runtimeExports()
+  // window.mobius exposes `createUseDocument: (React) => createUseDocument(storage, React)`,
+  // so apps bind their OWN imported React. Called without one (and no host sets a
+  // window.React global), the returned hook must throw a guiding error rather than
+  // silently lean on an absent global — the bug the exposure fix closed.
+  const useDocNoReact = createUseDocument(s)
+  assert.throws(() => useDocNoReact('x.json', {}), /createUseDocument\(React\)/)
+})
+
 test('useDocument serializes updates and reconciles item ids by content identity', async () => {
   const { server } = freshEnv()
   const s = await newStorage()
