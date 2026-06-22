@@ -90,9 +90,10 @@ class AssistantMessage:
 
 
 class ResultMessage:
-  def __init__(self, is_error=False, subtype="success"):
+  def __init__(self, is_error=False, subtype="success", result=None):
     self.is_error = is_error
     self.subtype = subtype
+    self.result = result
 
 
 class _FakeClient:
@@ -114,11 +115,12 @@ async def test_drain_session_injects_steering_at_both_thresholds():
     ResultMessage(is_error=True, subtype="error_max_turns")
   ]
   client = _FakeClient(msgs)
-  saw_result, result_error = await dr._drain_session(
+  saw_result, result_error, auth_failure = await dr._drain_session(
     client, None, max_turns=60, countdown=True,
   )
   assert saw_result is True
   assert result_error is True
+  assert auth_failure is False
   assert len(client.queries) == 2
   assert "turn 35 of 60" in client.queries[0]
   assert "turn 45 of 60" in client.queries[1]
@@ -128,10 +130,10 @@ async def test_drain_session_injects_steering_at_both_thresholds():
 async def test_drain_session_countdown_off_never_queries():
   msgs = [AssistantMessage() for _ in range(50)] + [ResultMessage()]
   client = _FakeClient(msgs)
-  saw_result, result_error = await dr._drain_session(
+  saw_result, result_error, auth_failure = await dr._drain_session(
     client, None, max_turns=60, countdown=False,
   )
-  assert (saw_result, result_error) == (True, False)
+  assert (saw_result, result_error, auth_failure) == (True, False, False)
   assert client.queries == []
 
 
@@ -145,10 +147,10 @@ async def test_drain_session_swallows_steering_injection_failure():
 
   msgs = [AssistantMessage() for _ in range(36)] + [ResultMessage()]
   client = _BrokenStdin(msgs)
-  saw_result, result_error = await dr._drain_session(
+  saw_result, result_error, auth_failure = await dr._drain_session(
     client, None, max_turns=60, countdown=True,
   )
-  assert (saw_result, result_error) == (True, False)
+  assert (saw_result, result_error, auth_failure) == (True, False, False)
 
 
 # ---------------------------------------------------------------------------
@@ -345,6 +347,167 @@ async def test_fallback_crash_is_swallowed(tmp_path, monkeypatch):
     2, provider="claude", skill_text="s", env={}, model=None,
     effort=None, log_fh=None,
   )
+
+
+# ---------------------------------------------------------------------------
+# Auth-failure handling — a 401 must not burn a doomed CLI rescue
+# ---------------------------------------------------------------------------
+
+def test_is_auth_failure_matches_known_401_phrasings():
+  assert dr._is_auth_failure("API Error: 401 Unauthorized")
+  assert dr._is_auth_failure("Invalid authentication credentials")
+  assert dr._is_auth_failure("Failed to authenticate with the API")
+  assert dr._is_auth_failure("authentication_error: bad token")
+  assert dr._is_auth_failure("OAuth token has expired")
+  # Case-insensitive.
+  assert dr._is_auth_failure("FAILED TO AUTHENTICATE")
+  # A non-auth error and the empty cases do NOT match.
+  assert not dr._is_auth_failure("error_max_turns")
+  assert not dr._is_auth_failure("")
+  assert not dr._is_auth_failure(None)
+
+
+@pytest.mark.asyncio
+async def test_drain_session_flags_auth_failure_on_401():
+  # The CLI mislabels a 401 as subtype="success" while is_error=True —
+  # the error STRING is the only honest signal, so the drain must read
+  # it and set the auth_failure flag.
+  msgs = [AssistantMessage()] + [
+    ResultMessage(
+      is_error=True,
+      subtype="success",
+      result="API Error: 401 Invalid authentication credentials",
+    )
+  ]
+  client = _FakeClient(msgs)
+  saw_result, result_error, auth_failure = await dr._drain_session(
+    client, None, max_turns=60, countdown=False,
+  )
+  assert (saw_result, result_error, auth_failure) == (True, True, True)
+
+
+@pytest.mark.asyncio
+async def test_drain_session_non_auth_error_does_not_flag_auth():
+  msgs = [AssistantMessage()] + [
+    ResultMessage(is_error=True, subtype="error_max_turns", result=None)
+  ]
+  client = _FakeClient(msgs)
+  saw_result, result_error, auth_failure = await dr._drain_session(
+    client, None, max_turns=60, countdown=False,
+  )
+  assert (saw_result, result_error, auth_failure) == (True, True, False)
+
+
+def test_write_static_auth_failure_brief_lands_valid_html(tmp_path):
+  brief = tmp_path / "apps" / "46" / "reports" / "2026-06-22.html"
+  assert dr.write_static_auth_failure_brief(brief) is True
+  assert brief.is_file()
+  html = brief.read_text(encoding="utf-8")
+  assert html.startswith("<!DOCTYPE html>")
+  assert "</html>" in html
+  assert "failed to authenticate" in html
+  assert "resume tomorrow" in html
+
+
+@pytest.mark.asyncio
+async def test_run_claude_session_returns_auth_rc_on_401(monkeypatch):
+  """A 401 result must surface as AUTH_FAILURE_RC, not the generic 2.
+
+  This is the core of the fix: the rc carries the auth distinction out
+  to the guaranteed-brief layer so it can skip the doomed CLI rescue.
+  """
+  class _FakeAuthClient:
+    def __init__(self, options):
+      self.queries = []
+
+    async def connect(self):
+      pass
+
+    async def query(self, text):
+      self.queries.append(text)
+
+    async def receive_response(self):
+      yield AssistantMessage()
+      yield ResultMessage(
+        is_error=True,
+        subtype="success",
+        result="API Error: 401 Invalid authentication credentials",
+      )
+
+    async def disconnect(self):
+      pass
+
+  # Stub the SDK so the import inside _run_claude_session resolves to
+  # our fakes — no real claude-agent-sdk needed.
+  import sys
+  import types
+
+  fake_sdk = types.ModuleType("claude_agent_sdk")
+  fake_sdk.ClaudeAgentOptions = lambda **kw: kw
+  fake_sdk.ClaudeSDKClient = _FakeAuthClient
+  monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+
+  rc = await dr._run_claude_session(
+    goal="g", skill_text="s", env={}, model=None, effort=None,
+    max_turns=60, log_fh=None, countdown=False,
+  )
+  assert rc == dr.AUTH_FAILURE_RC
+
+
+@pytest.mark.asyncio
+async def test_fallback_writes_static_brief_without_cli_on_auth_rc(
+  tmp_path, monkeypatch,
+):
+  """On the auth rc, the runner writes the static brief ITSELF.
+
+  No second CLI session may be spawned (it would just 401 again), and
+  the brief must land on disk so the partner wakes to something.
+  """
+  monkeypatch.setattr(dr, "DATA_DIR", tmp_path)
+  _stage_app_id(tmp_path)
+
+  async def explode(**kwargs):
+    raise AssertionError("auth-failure rescue must NOT spawn a CLI session")
+
+  monkeypatch.setattr(dr, "_run_claude_session", explode)
+  monkeypatch.setattr(dr, "_run_codex_session", explode)
+
+  await dr._maybe_write_fallback_brief(
+    dr.AUTH_FAILURE_RC, provider="claude", skill_text="s", env={},
+    model=None, effort=None, log_fh=None,
+  )
+
+  brief = (
+    tmp_path / "apps" / "46" / "reports"
+    / f"{date.today().isoformat()}.html"
+  )
+  assert brief.is_file()
+  html = brief.read_text(encoding="utf-8")
+  assert "failed to authenticate" in html
+  assert html.strip().endswith("</html>")
+
+
+@pytest.mark.asyncio
+async def test_fallback_auth_rc_unstaged_app_id_falls_back_to_cli(
+  tmp_path, monkeypatch,
+):
+  """When the brief path can't be resolved on an auth night, there's
+  nowhere to write the static brief — fall through to the normal CLI
+  rescue as a last resort rather than silently skipping the night."""
+  monkeypatch.setattr(dr, "DATA_DIR", tmp_path)  # app_id unstaged
+
+  calls = []
+
+  async def fake_claude_session(**kwargs):
+    calls.append(kwargs)
+    return 0
+
+  monkeypatch.setattr(dr, "_run_claude_session", fake_claude_session)
+  await dr._maybe_write_fallback_brief(
+    dr.AUTH_FAILURE_RC, provider="claude", skill_text="s", env={},
+    model=None, effort=None, log_fh=None,
+  )
+  assert len(calls) == 1
 
 
 # ---------------------------------------------------------------------------
