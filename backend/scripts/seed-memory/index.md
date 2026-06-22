@@ -36,17 +36,13 @@ It **grows through use**, and the nightly **Reflection** pass curates it.
   weight observation extra in early chats.
 - [[memory-is-visible-to-the-partner]] — the Memory app shows every note to the
   partner; write as if you'd stand behind it when quoted back.
-- [[a-nightly-reflection-pass-exists]] — the overnight pass drains the inbox,
-  consolidates the graph, and fixes apps; defer heavy reorganizing to it.
+- [[a-nightly-reflection-pass-exists]] — the overnight pass consolidates the
+  chat notes into the graph and fixes apps; defer heavy reorganizing to it.
 
 ## Recent chats
 
-The last ~10 chats live in `recent-chats.md` (also injected) — one line per
-chat: the chat id, date, and a 1-2 sentence summary. The summaries usually
-suffice; fetch a full transcript with `GET /api/chats/<id>` when a specific
-exchange matters. The nightly reflection pass maintains the queue.
-
-## Inbox
-
-Raw same-day observations live in `inbox.md` (also injected). The nightly
-reflection pass folds them into notes here, then clears the inbox.
+Each chat keeps its own note (`chats/<id>/index.md`: a growing summary + the
+facts it surfaced). The ~10 most-recently-touched are injected at session start,
+so recent context is already in front of you; fetch a full transcript with
+`GET /api/chats/<id>` when a specific exchange matters. There is no separate
+recent-chats queue and no inbox — the chat note IS the daytime capture surface.

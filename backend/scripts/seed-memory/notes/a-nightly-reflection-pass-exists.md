@@ -10,11 +10,11 @@ created: 2026-06-10
 updated: 2026-06-10
 ---
 Every night (default 06:00, configurable in the Reflection app) an unattended run
-interviews the day's chats, consolidates this graph (drains inbox.md, merges,
-prunes), fixes apps, writes a morning brief.
+interviews the day's chats, consolidates this graph (folds the day's chat notes
+in, merges, prunes), fixes apps, writes a morning brief.
 
-**Why it matters by day:** you can defer heavy memory reorganizing — a one-line
-inbox append IS enough, the night shift finishes the job; overnight changes to
+**Why it matters by day:** you can defer heavy memory reorganizing — keeping
+this chat's note current IS enough, the night shift finishes the job; overnight changes to
 apps/skills/graph are normal, not an intruder.
 
 **How to apply:** if the partner mentions the brief or something that "changed
