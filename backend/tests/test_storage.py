@@ -1082,3 +1082,55 @@ def test_delete_folder_rejects_traversal(client, auth, owner_token):
     f"/api/storage/apps/{app_id}/folder/%2e%2e/%2e%2e/etc", headers=auth,
   )
   assert r.status_code == 400
+
+
+
+def test_app_storage_version_header_is_gated(client, auth, owner_token):
+  app_id = _make_app(client, owner_token)
+  assert client.put(
+    f"/api/storage/apps/{app_id}/cas.json", json={"v": 1}, headers=auth,
+  ).status_code == 204
+
+  plain = client.get(f"/api/storage/apps/{app_id}/cas.json", headers=auth)
+  assert plain.status_code == 200
+  assert "etag" not in {k.lower() for k in plain.headers.keys()}
+
+  versioned = client.get(
+    f"/api/storage/apps/{app_id}/cas.json",
+    headers={**auth, "X-Mobius-Version": "1"},
+  )
+  assert versioned.status_code == 200
+  assert versioned.headers.get("etag")
+
+
+def test_app_storage_if_match_conflict_412_and_unconditional_put_unchanged(client, auth, owner_token):
+  app_id = _make_app(client, owner_token)
+  path = f"/api/storage/apps/{app_id}/cas-write.json"
+  assert client.put(path, json={"v": 1}, headers=auth).status_code == 204
+  version = client.get(path, headers={**auth, "X-Mobius-Version": "1"}).headers["etag"]
+
+  ok = client.put(path, json={"v": 2}, headers={**auth, "If-Match": version})
+  assert ok.status_code == 204
+  assert ok.headers.get("etag")
+
+  stale = client.put(path, json={"v": 3}, headers={**auth, "If-Match": version})
+  assert stale.status_code == 412
+  assert client.get(path, headers=auth).json() == {"v": 2}
+
+  unconditional = client.put(path, json={"v": 4}, headers=auth)
+  assert unconditional.status_code == 204
+  assert "etag" not in {k.lower() for k in unconditional.headers.keys()}
+  assert client.get(path, headers=auth).json() == {"v": 4}
+
+
+def test_app_storage_if_none_match_create_if_absent(client, auth, owner_token):
+  app_id = _make_app(client, owner_token)
+  path = f"/api/storage/apps/{app_id}/created-once.json"
+
+  first = client.put(path, json={"v": 1}, headers={**auth, "If-None-Match": "*"})
+  assert first.status_code == 204
+  assert first.headers.get("etag")
+
+  second = client.put(path, json={"v": 2}, headers={**auth, "If-None-Match": "*"})
+  assert second.status_code == 412
+  assert client.get(path, headers=auth).json() == {"v": 1}

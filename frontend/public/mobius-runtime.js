@@ -60,7 +60,9 @@ const STORE = 'ops'
 // Read-through mirror of last-known server values, so get() works offline.
 // Keyed by `${appId}:${path}` (one shared DB across all apps, like the outbox).
 const CACHE_STORE = 'cache'
-const DB_VERSION = 2
+const OUTCOME_STORE = 'write_outcomes'
+const DB_VERSION = 3
+const MAX_WRITE_OUTCOMES = 200
 
 // Per-blob ceiling for setBlob: rejected BEFORE any IDB/outbox/network write, so
 // neither the local mirror nor the offline outbox ever holds an over-cap binary
@@ -97,6 +99,19 @@ function fetchBounded(url, init) {
   return fetch(url, opts).finally(() => { if (timer) clearTimeout(timer) })
 }
 
+export class DurableWriteError extends Error {
+  constructor(message, fields = {}) {
+    super(message)
+    this.name = 'DurableWriteError'
+    this.code = fields.code || 'dead_letter'
+    this.status = fields.status
+    this.path = fields.path
+    this.writeId = fields.writeId
+    this.refusedValue = fields.refusedValue
+    this.retryable = fields.retryable === true
+  }
+}
+
 function openDb() {
   return new Promise((resolve, reject) => {
     let settled = false
@@ -112,6 +127,9 @@ function openDb() {
       // and gain the cache store on the version bump.
       if (!db.objectStoreNames.contains(CACHE_STORE)) {
         db.createObjectStore(CACHE_STORE, { keyPath: 'key' })
+      }
+      if (!db.objectStoreNames.contains(OUTCOME_STORE)) {
+        db.createObjectStore(OUTCOME_STORE, { keyPath: 'key' })
       }
     }
     req.onsuccess = () => {
@@ -156,6 +174,21 @@ async function withStore(storeName, mode, fn) {
   })
 }
 
+async function withStores(storeNames, mode, fn) {
+  const db = await openDb()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeNames, mode)
+    const stores = {}
+    for (const name of storeNames) stores[name] = tx.objectStore(name)
+    const box = {}
+    fn(stores, box)
+    const done = () => { try { db.close() } catch (e) {} }
+    tx.oncomplete = () => { done(); resolve(box.value) }
+    tx.onerror = () => { done(); reject(tx.error) }
+    tx.onabort = () => { done(); reject(tx.error) }
+  })
+}
+
 // Exported so the stateful offline core (per-path serialization, the
 // read-through cache, subscribe() fan-out, and the drain's poison-op
 // dead-letter + reconcile) is unit-testable headless — driven by
@@ -163,6 +196,112 @@ async function withStore(storeName, mode, fn) {
 // (mobiusRuntimeStore.test.js), the same way overlayPending exposes the
 // PURE read-your-writes logic. `init()` is the only production caller.
 export function makeStorage({ appId, getToken }) {
+  const deadLetterListeners = new Set()
+
+  function outcomeKey(writeId) { return appId + ':' + String(writeId) }
+
+  function outcomeFromOp(op, state, extra = {}) {
+    const writeId = op.ver || op.seq
+    return {
+      key: outcomeKey(writeId),
+      appId,
+      state,
+      path: op.path,
+      seq: op.seq,
+      ver: op.ver || null,
+      writeId,
+      method: op.method,
+      kind: op.kind || 'json',
+      status: extra.status,
+      version: extra.version,
+      refusedValue: op.method === 'DELETE' ? null : op.data,
+      ts: Date.now(),
+      consumed: false,
+    }
+  }
+
+  function putOutcomeInStore(store, outcome) {
+    store.put(outcome)
+    const seen = []
+    store.openCursor().onsuccess = (e) => {
+      const cursor = e.target.result
+      if (cursor) {
+        const v = cursor.value
+        if (v && v.appId === appId) seen.push({ key: v.key, ts: v.ts || 0 })
+        cursor.continue()
+        return
+      }
+      if (seen.length <= MAX_WRITE_OUTCOMES) return
+      seen.sort((a, b) => a.ts - b.ts)
+      for (const old of seen.slice(0, seen.length - MAX_WRITE_OUTCOMES)) {
+        store.delete(old.key)
+      }
+    }
+  }
+
+  function recordWriteOutcome(outcome) {
+    return withStore(OUTCOME_STORE, 'readwrite', (store) => {
+      putOutcomeInStore(store, outcome)
+    })
+  }
+
+  function getWriteOutcome(writeId) {
+    if (writeId == null) return Promise.resolve(null)
+    return withStore(OUTCOME_STORE, 'readonly', (store, box) => {
+      const r = store.get(outcomeKey(writeId))
+      r.onsuccess = () => { box.value = r.result || null }
+    })
+  }
+
+  function markOutcomeConsumed(key) {
+    if (!key) return Promise.resolve()
+    return withStore(OUTCOME_STORE, 'readwrite', (store) => {
+      const r = store.get(key)
+      r.onsuccess = () => {
+        const rec = r.result
+        if (rec) store.put({ ...rec, consumed: true })
+      }
+    })
+  }
+
+  function dispatchDeadLetter(rec) {
+    const payload = {
+      path: rec.path,
+      status: rec.status,
+      refusedValue: rec.refusedValue,
+      writeId: rec.writeId,
+      ts: rec.ts,
+    }
+    for (const cb of [...deadLetterListeners]) {
+      try { cb(payload) } catch (e) {}
+    }
+    if (deadLetterListeners.size > 0) markOutcomeConsumed(rec.key).catch(() => {})
+  }
+
+  function replayDeadLetters(cb) {
+    withStore(OUTCOME_STORE, 'readwrite', (store) => {
+      store.openCursor().onsuccess = (e) => {
+        const cursor = e.target.result
+        if (!cursor) return
+        const rec = cursor.value
+        if (rec && rec.appId === appId && rec.state === 'rejected' && !rec.consumed) {
+          try {
+            cb({ path: rec.path, status: rec.status, refusedValue: rec.refusedValue, writeId: rec.writeId, ts: rec.ts })
+            cursor.update({ ...rec, consumed: true })
+          } catch (err) {}
+        }
+        cursor.continue()
+      }
+    }).catch(() => {})
+  }
+
+  function onDeadLetter(cb) {
+    if (typeof cb !== 'function') return () => {}
+    deadLetterListeners.add(cb)
+    replayDeadLetters(cb)
+    return () => { deadLetterListeners.delete(cb) }
+  }
+
   // Drop every queued op for this app + path in one transaction, then run
   // `after(store)` (if given) inside the SAME transaction. Used to enforce
   // last-write-wins at path granularity: a newer write for a path
@@ -172,15 +311,20 @@ export function makeStorage({ appId, getToken }) {
   // plain fields. Doing the purge and the follow-up add in one tx keeps
   // the coalesce atomic — no window where the path has zero ops queued.
   function purgePath(path, after) {
-    return withStore(STORE, 'readwrite', (store) => {
+    return withStores([STORE, OUTCOME_STORE], 'readwrite', (stores, box) => {
+      const store = stores[STORE]
+      const outcomeStore = stores[OUTCOME_STORE]
       store.openCursor().onsuccess = (e) => {
         const cursor = e.target.result
         if (!cursor) {
-          if (after) after(store)
+          if (after) after(store, box)
           return
         }
         const v = cursor.value
-        if (v.appId === appId && v.path === path) cursor.delete()
+        if (v.appId === appId && v.path === path) {
+          putOutcomeInStore(outcomeStore, outcomeFromOp(v, 'superseded'))
+          cursor.delete()
+        }
         cursor.continue()
       }
     })
@@ -191,8 +335,10 @@ export function makeStorage({ appId, getToken }) {
   // when the queue drains. (FIFO ordering across DIFFERENT paths is
   // still preserved — drainInner walks `seq` in order.)
   function enqueue(op) {
-    return purgePath(op.path, (store) => {
-      store.add({ ...op, appId, ts: Date.now() })
+    return purgePath(op.path, (store, box) => {
+      const queued = { ...op, appId, ts: Date.now() }
+      const r = store.add(queued)
+      r.onsuccess = () => { box.value = { ...queued, seq: r.result } }
     })
   }
 
@@ -441,6 +587,8 @@ export function makeStorage({ appId, getToken }) {
     const url = `/api/storage/apps/${appId}/${op.path}`
     const init = { method: op.method, headers: { Authorization: `Bearer ${token}` } }
     if (op.method === 'PUT') {
+      if (op.ifMatch) init.headers['If-Match'] = op.ifMatch
+      if (op.ifNoneMatch) init.headers['If-None-Match'] = '*'
       // Branch by kind: blob/text send raw bytes/text with their real
       // Content-Type (the backend stores raw bytes for non-JSON types and raw
       // UTF-8 for text/*); json keeps the exact old wire shape.
@@ -454,14 +602,20 @@ export function makeStorage({ appId, getToken }) {
       }
     }
     const res = await fetch(url, init)   // network failure throws -> transient
-    if (op.method === 'DELETE' && res.status === 404) return  // already absent
-    if (res.ok) return
+    const version = res.headers && typeof res.headers.get === 'function'
+      ? (res.headers.get('ETag') || res.headers.get('etag') || undefined)
+      : undefined
+    if (op.method === 'DELETE' && res.status === 404) return { version }  // already absent
+    if (res.ok) return { version }
     // Classify so one bad op can't wedge the queue (drainInner reads
     // err.fatal): 401 auth / 408 timeout / 429 rate-limit / 5xx / network
-    // are transient (keep + retry); any other 4xx is fatal (drop poison op).
+    // are transient (keep + retry); 412 is a CAS conflict handled by the
+    // bounded durableWrite/useDocument retry path; any other 4xx is fatal.
     const err = new Error(`HTTP ${res.status}`)
+    err.status = res.status
+    err.conflict = res.status === 412 && (op.ifMatch || op.ifNoneMatch)
     err.fatal = res.status >= 400 && res.status < 500 &&
-      ![401, 408, 429].includes(res.status)
+      ![401, 408, 429].includes(res.status) && !err.conflict
     throw err
   }
 
@@ -470,16 +624,26 @@ export function makeStorage({ appId, getToken }) {
     const ops = await listOps()           // FIFO by seq
     for (const op of ops) {
       try {
-        await send(op)
+        const sent = await send(op)
+        await recordWriteOutcome(outcomeFromOp(op, 'confirmed', { version: sent && sent.version }))
         await deleteOp(op.seq)
       } catch (e) {
+        if (e && e.conflict) {
+          const conflict = outcomeFromOp(op, 'conflict', { status: e.status })
+          await recordWriteOutcome(conflict)
+          await deleteOp(op.seq)
+          continue
+        }
         if (e && e.fatal) {
           // Poison op — a malformed/forbidden request that will never
           // succeed on replay. Drop it (dead-letter) and keep draining
           // so it can't head-of-line-block every later write forever.
           // eslint-disable-next-line no-console
           console.warn('mobius: dropping un-syncable write', op.method, op.path, e.message)
+          const rejected = outcomeFromOp(op, 'rejected', { status: e.status })
+          await recordWriteOutcome(rejected)
           await deleteOp(op.seq)
+          dispatchDeadLetter(rejected)
           // The optimistic mirror still holds the value the server REFUSED.
           // Re-sync it to the authoritative value — KIND-AWARE (fetchValue with
           // op.kind so a rejected blob/text path is re-read correctly, not via
@@ -581,15 +745,16 @@ export function makeStorage({ appId, getToken }) {
   // Writers: the LOCAL mutation runs under the path lock (ordered vs reads + other
   // writes); the server drain runs in settle() OUTSIDE that lock (deadlock-safe).
   function set(path, data) {
-    return withPathLock(path, () => writeLocal(path, data, 'json', null)).then(() => settle(path))
+    return withPathLock(path, () => writeLocal(path, data, 'json', null))
+      .then((op) => settle(path, op.writeId, true))
   }
   async function setText(path, text, opts) {
     if (typeof text !== 'string') {
       throw new Error('mobius.storage.setText: value must be a string')
     }
     const ct = (opts && opts.contentType) || 'text/plain;charset=utf-8'
-    await withPathLock(path, () => writeLocal(path, text, 'text', ct))
-    return settle(path)
+    const op = await withPathLock(path, () => writeLocal(path, text, 'text', ct))
+    return settle(path, op.writeId, true)
   }
   // setBlob guards BEFORE any lock/IDB/network: reject a non-Blob, an over-cap
   // blob, or a browser that can't store Blobs in IDB — so neither the mirror nor
@@ -608,11 +773,12 @@ export function makeStorage({ appId, getToken }) {
       throw new Error('mobius.storage.setBlob: this browser cannot store Blobs offline')
     }
     const ct = (opts && opts.contentType) || blob.type || 'application/octet-stream'
-    await withPathLock(path, () => writeLocal(path, blob, 'blob', ct))
-    return settle(path)
+    const op = await withPathLock(path, () => writeLocal(path, blob, 'blob', ct))
+    return settle(path, op.writeId, true)
   }
   function remove(path) {
-    return withPathLock(path, () => removeLocal(path)).then(() => settle(path))
+    return withPathLock(path, () => removeLocal(path))
+      .then((op) => settle(path, op.writeId, true))
   }
 
   // Page the server's authoritative listing of the immediate children under
@@ -732,16 +898,25 @@ export function makeStorage({ appId, getToken }) {
   // Fetch the authoritative server value for a path. 404 → null (known-absent);
   // any other non-OK → throw (transient/auth — the caller keeps the mirror).
   // Bounded so a stale-`true` navigator.onLine (Android offline) can't hang it.
-  async function fetchValue(path, kind = 'json') {
+  async function fetchValueWithVersion(path, kind = 'json', wantVersion = false) {
     const token = await getToken()
-    const res = await fetchBounded(`/api/storage/apps/${appId}/${path}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-    if (res.status === 404) return null
+    const headers = { Authorization: `Bearer ${token}` }
+    if (wantVersion) headers['X-Mobius-Version'] = '1'
+    const res = await fetchBounded(`/api/storage/apps/${appId}/${path}`, { headers })
+    const version = res.headers && typeof res.headers.get === 'function'
+      ? (res.headers.get('ETag') || res.headers.get('etag') || undefined)
+      : undefined
+    if (res.status === 404) return { value: null, version: undefined }
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    if (kind === 'blob') return await res.blob()
-    if (kind === 'text') return await res.text()
-    return await res.json()
+    let value
+    if (kind === 'blob') value = await res.blob()
+    else if (kind === 'text') value = await res.text()
+    else value = await res.json()
+    return { value, version }
+  }
+
+  async function fetchValue(path, kind = 'json') {
+    return (await fetchValueWithVersion(path, kind, false)).value
   }
 
   // Background refresh after a cache-first json/text get() (blobs never
@@ -837,17 +1012,28 @@ export function makeStorage({ appId, getToken }) {
   // fails (IDB error) restore the EXACT prior record (not a lossy tombstone) so
   // the mirror never shows a value with no outbox op + no server write (a
   // "ghost") and never loses the previously-stored value.
-  async function writeLocal(path, data, kind, contentType) {
+  async function writeLocal(path, data, kind, contentType, opts = {}) {
     const prev = await cacheGet(path)
     const ver = nextVer()                 // same nonce on the mirror + the op, for the reconcile CAS
     await cachePut(path, data, kind, contentType, ver)
+    let queued
     try {
-      await enqueue({ method: 'PUT', path, data, kind, contentType, ver })
+      queued = await enqueue({
+        method: 'PUT',
+        path,
+        data,
+        kind,
+        contentType,
+        ver,
+        ifMatch: opts.ifMatch || null,
+        ifNoneMatch: opts.ifNoneMatch === true,
+      })
     } catch (e) {
       try { await restoreCache(path, prev) } catch (_) {}
       throw e
     }
     notify(path, data)
+    return { path, writeId: ver, ver, seq: queued && queued.seq }
   }
 
   async function removeLocal(path) {
@@ -858,13 +1044,15 @@ export function makeStorage({ appId, getToken }) {
     const kind = prev ? prev.kind : null
     const ver = nextVer()
     await cacheDelete(path, kind, ver)
+    let queued
     try {
-      await enqueue({ method: 'DELETE', path, kind: kind || 'json', ver })
+      queued = await enqueue({ method: 'DELETE', path, kind: kind || 'json', ver })
     } catch (e) {
       try { await restoreCache(path, prev) } catch (_) {}
       throw e
     }
     notify(path, null)
+    return { path, writeId: ver, ver, seq: queued && queued.seq }
   }
 
   // Drain OUTSIDE the path lock, then report whether the path's op survived
@@ -872,10 +1060,100 @@ export function makeStorage({ appId, getToken }) {
   // drain; sent → synced). NOTE: a fatal-rejected write is dead-lettered (op
   // removed), so it reports {synced} though the server refused it — no consumer
   // reads this flag, and the dead-letter reconcile re-syncs the mirror.
-  async function settle(path) {
+  async function settle(path, writeId, legacyShape = false) {
     await drainNow()
-    const stillQueued = (await listOps()).some((op) => op.path === path)
-    return stillQueued ? { queued: true } : { synced: true }
+    const outcome = writeId ? await getWriteOutcome(writeId) : null
+    const ops = await listOps()
+    const stillQueued = writeId
+      ? ops.some((op) => op.ver === writeId || op.seq === writeId)
+      : ops.some((op) => op.path === path)
+    if (legacyShape) return stillQueued ? { queued: true } : { synced: true }
+    if (outcome && (outcome.state === 'rejected' || outcome.state === 'conflict')) {
+      return {
+        rejected: true,
+        status: outcome.status,
+        path: outcome.path,
+        writeId: outcome.writeId,
+        refusedValue: outcome.refusedValue,
+      }
+    }
+    if (outcome && outcome.state === 'superseded') {
+      return { superseded: true, path: outcome.path, writeId: outcome.writeId }
+    }
+    if (stillQueued) return { queued: true, path, writeId }
+    return { synced: true, path, writeId, version: outcome && outcome.version }
+  }
+
+  function throwIfAborted(signal) {
+    if (signal && signal.aborted) {
+      const err = new Error('The operation was aborted')
+      err.name = 'AbortError'
+      throw err
+    }
+  }
+
+  function normalizeDurableKind(value, opts) {
+    if (opts && opts.kind) return opts.kind
+    if (value instanceof Blob) return 'blob'
+    if (typeof value === 'string') return 'text'
+    return 'json'
+  }
+
+  async function durableWrite(path, value, opts = {}) {
+    throwIfAborted(opts.signal)
+    const kind = normalizeDurableKind(value, opts)
+    let contentType = null
+    if (kind === 'text') contentType = opts.contentType || 'text/plain;charset=utf-8'
+    if (kind === 'blob') {
+      if (!(value instanceof Blob)) throw new Error('mobius.storage.durableWrite: blob writes require a Blob or File value')
+      contentType = opts.contentType || value.type || 'application/octet-stream'
+    }
+    const op = await withPathLock(path, () => writeLocal(path, value, kind, contentType, {
+      ifMatch: opts.ifMatch,
+      ifNoneMatch: opts.ifNoneMatch,
+    }))
+    throwIfAborted(opts.signal)
+    const result = await settle(path, op.writeId, false)
+    throwIfAborted(opts.signal)
+    if (result.rejected) {
+      const code = result.status === 412 ? 'conflict' : 'dead_letter'
+      throw new DurableWriteError(`mobius.storage.durableWrite: ${path} rejected (${result.status})`, {
+        code,
+        status: result.status,
+        path,
+        writeId: op.writeId,
+        refusedValue: result.refusedValue,
+        retryable: code === 'conflict',
+      })
+    }
+    if (result.superseded) {
+      throw new DurableWriteError(`mobius.storage.durableWrite: ${path} was superseded`, {
+        code: 'superseded',
+        path,
+        writeId: op.writeId,
+        retryable: false,
+      })
+    }
+    return {
+      durability: result.queued ? 'queued' : 'synced',
+      path,
+      writeId: op.writeId,
+      ...(result.version ? { version: result.version } : {}),
+    }
+  }
+
+  async function getWithVersion(path, kind = 'json') {
+    return withPathLock(path, async () => {
+      const { value, version } = await fetchValueWithVersion(path, kind, true)
+      const ct = kind === 'blob'
+        ? (value instanceof Blob ? value.type : null)
+        : (kind === 'text' ? 'text/plain;charset=utf-8' : null)
+      await cachePut(path, value, kind, ct)
+      return {
+        value: finalizeRead(await effectiveValue(path, value), kind, ct, path),
+        version,
+      }
+    })
   }
 
   // Subscribe to local changes for a path: cb(value) fires immediately with the
@@ -907,6 +1185,8 @@ export function makeStorage({ appId, getToken }) {
   return {
     get, getText, getBlob,
     set, setText, setBlob,
+    durableWrite,
+    onDeadLetter,
     remove,
     list: listInner,
     subscribe(path, cb) { return subscribeWith(path, cb, get) },
@@ -917,6 +1197,171 @@ export function makeStorage({ appId, getToken }) {
     },
     _drain: drain,
     _notify: notify,
+    _getWithVersion: getWithVersion,
+  }
+}
+
+function stableStringify(value) {
+  if (value == null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']'
+  const keys = Object.keys(value).sort()
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableStringify(value[k])).join(',') + '}'
+}
+
+function defaultIdentity(item) {
+  if (item && typeof item === 'object') {
+    if (item.clientKey != null) return String(item.clientKey)
+    if (item.key != null) return String(item.key)
+    if (item.id != null) return String(item.id)
+  }
+  return stableStringify(item)
+}
+
+function reconcileIdentity(current, incoming, identity = defaultIdentity) {
+  if (!Array.isArray(incoming) || !Array.isArray(current)) return incoming
+  const localByIdentity = new Map()
+  for (const item of current) localByIdentity.set(identity(item), item)
+  return incoming.map((item) => {
+    const local = localByIdentity.get(identity(item))
+    if (!local || !item || typeof item !== 'object' || typeof local !== 'object') return item
+    if (!Object.prototype.hasOwnProperty.call(local, 'id')) return item
+    return { ...item, id: local.id }
+  })
+}
+
+function defaultDocumentMerge(base, mine, theirs, identity = defaultIdentity) {
+  if (!Array.isArray(mine) || !Array.isArray(theirs)) return mine
+  const merged = []
+  const seen = new Set()
+  for (const item of theirs) {
+    const key = identity(item)
+    if (seen.has(key)) continue
+    seen.add(key)
+    merged.push(item)
+  }
+  for (const item of mine) {
+    const key = identity(item)
+    if (seen.has(key)) continue
+    seen.add(key)
+    merged.push(item)
+  }
+  return reconcileIdentity(mine, merged, identity)
+}
+
+export function createUseDocument(storage, reactProvider = null) {
+  return function useDocument(path, opts = {}) {
+    const React = reactProvider || (typeof window !== 'undefined' ? window.React : null)
+    if (!React || !React.useCallback || !React.useEffect || !React.useRef || !React.useState) {
+      throw new Error('window.mobius.useDocument requires React on window.React')
+    }
+    const initialOpt = Object.prototype.hasOwnProperty.call(opts, 'initial') ? opts.initial : null
+    const initialValue = typeof initialOpt === 'function' ? initialOpt() : initialOpt
+    const identity = opts.identity || defaultIdentity
+    const merge = opts.merge || ((base, mine, theirs) => defaultDocumentMerge(base, mine, theirs, identity))
+    const mode = opts.mode || 'cas'
+    const maxRetries = opts.maxRetries == null ? 3 : opts.maxRetries
+    const [state, setState] = React.useState(() => ({ value: initialValue, status: 'loading', lastError: null }))
+    const valueRef = React.useRef(initialValue)
+    const baseRef = React.useRef(null)
+    const versionRef = React.useRef(null)
+    const chainRef = React.useRef(Promise.resolve())
+    const optsRef = React.useRef(opts)
+    optsRef.current = opts
+
+    const setValue = React.useCallback((value, status = 'ready', lastError = null) => {
+      valueRef.current = value
+      setState({ value, status, lastError })
+    }, [])
+
+    const refresh = React.useCallback(async () => {
+      try {
+        const loaded = storage._getWithVersion
+          ? await storage._getWithVersion(path, 'json')
+          : { value: await storage.get(path), version: undefined }
+        const next = loaded.value == null ? initialValue : loaded.value
+        const reconciled = reconcileIdentity(valueRef.current, next, identity)
+        baseRef.current = reconciled
+        versionRef.current = loaded.version || null
+        setValue(reconciled, 'ready', null)
+        return reconciled
+      } catch (e) {
+        setState((prev) => ({ ...prev, status: 'error', lastError: e }))
+        if (optsRef.current && typeof optsRef.current.onError === 'function') {
+          optsRef.current.onError(e, { path, phase: 'refresh' })
+        }
+        throw e
+      }
+    }, [path, initialValue, identity, setValue])
+
+    React.useEffect(() => {
+      let alive = true
+      refresh().catch(() => {})
+      const unsub = storage.subscribe(path, (next) => {
+        if (!alive) return
+        const value = next == null ? initialValue : reconcileIdentity(valueRef.current, next, identity)
+        baseRef.current = value
+        setValue(value, 'ready', null)
+      })
+      return () => { alive = false; if (unsub) unsub() }
+    }, [path, initialValue, identity, refresh, setValue])
+
+    const update = React.useCallback((fn) => {
+      const run = async () => {
+        let attempt = 0
+        const previous = valueRef.current
+        const mine = fn(previous)
+        setValue(mine, 'saving', null)
+        for (;;) {
+          const base = baseRef.current
+          let theirs = base
+          let version = versionRef.current
+          if (mode === 'cas' && storage._getWithVersion) {
+            const loaded = await storage._getWithVersion(path, 'json')
+            theirs = loaded.value == null ? initialValue : loaded.value
+            version = loaded.version || null
+          } else if (mode === 'lww') {
+            try { theirs = (await storage.get(path)) ?? initialValue } catch (e) {}
+          }
+          const merged = merge(base, mine, theirs == null ? initialValue : theirs)
+          const reconciled = reconcileIdentity(mine, merged, identity)
+          try {
+            const result = await storage.durableWrite(path, reconciled, {
+              kind: 'json',
+              ...(mode === 'cas' && version ? { ifMatch: version } : {}),
+              ...(mode === 'cas' && !version ? { ifNoneMatch: true } : {}),
+            })
+            baseRef.current = reconciled
+            versionRef.current = result.version || version || null
+            setValue(reconciled, result.durability === 'queued' ? 'saving' : 'ready', null)
+            return result
+          } catch (e) {
+            if (e && e.code === 'conflict' && mode === 'cas' && attempt < maxRetries) {
+              attempt += 1
+              continue
+            }
+            setState({ value: valueRef.current, status: 'error', lastError: e })
+            if (optsRef.current && typeof optsRef.current.onError === 'function') {
+              optsRef.current.onError(e, { path, phase: 'update' })
+            }
+            throw e
+          }
+        }
+      }
+      const next = chainRef.current.then(run, run)
+      chainRef.current = next.then(() => {}, () => {})
+      return next
+    }, [path, initialValue, identity, merge, mode, maxRetries, setValue])
+
+    const setDoc = React.useCallback((next) => update(() => next), [update])
+
+    return {
+      value: state.value,
+      status: state.status,
+      lastError: state.lastError,
+      update,
+      set: setDoc,
+      refresh,
+    }
   }
 }
 
@@ -1895,6 +2340,7 @@ if (typeof window !== 'undefined') {
 
 export function init({ appId, getToken }) {
   const storage = makeStorage({ appId, getToken })
+  const useDocument = createUseDocument(storage)
   window.mobius = {
     appId,
     // Returns the probed reachability verdict (not raw navigator.onLine).
@@ -1911,6 +2357,10 @@ export function init({ appId, getToken }) {
       return () => { _onlineListeners.delete(cb) }
     },
     storage,
+    DurableWriteError,
+    durableWrite: storage.durableWrite,
+    onDeadLetter: storage.onDeadLetter,
+    useDocument,
     signal: makeSignal(appId, storage),
     chat: makeChat({ appId, getToken, storage }),
     nav: makeNav(),
