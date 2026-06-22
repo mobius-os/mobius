@@ -2078,6 +2078,9 @@ async def run_chat(
   # (which `_run_chat_impl` doesn't catch) leaves the marker set for
   # reconciliation rather than silently wiping it — the safe default.
   disposition = chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
+  # Snapshot the chat-note mtime before the turn so the turn-end guarantee can
+  # tell whether the agent maintained it this turn (see _ensure_chat_note).
+  _note_mtime_before = _chat_note_mtime(get_settings().data_dir, chat_id)
   try:
     disposition = await _run_chat_impl(
       messages, chat_id=chat_id, session_id=session_id,
@@ -2161,6 +2164,19 @@ async def run_chat(
       _get_logger().debug(
         "terminal disposition chat_id=%s %s", chat_id, disposition.value,
       )
+    # Turn-end chat-note guarantee: if the chat SETTLED (no pending follow-up)
+    # and the agent left its note untouched this turn, write it via the
+    # tool-free summarizer. Runs AFTER the reply is sent → no user-facing
+    # latency; gated to EMPTY_TERMINAL_CLEARED so a multi-turn continuation
+    # ensures once, at rest; best-effort (a failure never affects the turn).
+    try:
+      _s = get_settings()
+      if _should_ensure_chat_note(
+        _s, chat_id, disposition, _s.data_dir, _note_mtime_before
+      ):
+        await _ensure_chat_note(_s.data_dir, chat_id)
+    except Exception:
+      _get_logger().debug("chat-note guarantee skipped", exc_info=True)
 
 
 def _is_substantive_request(text: str) -> bool:
@@ -2213,6 +2229,71 @@ async def _auto_search_memory(
   except Exception:
     log.debug("auto memory-search failed", exc_info=True)
   return None
+
+
+def _chat_note_mtime(data_dir: str, chat_id: str) -> float:
+  """mtime of the chat's memory note, or 0.0 if it doesn't exist. Used to tell
+  whether the agent maintained the note during a turn (before vs after)."""
+  if not chat_id:
+    return 0.0
+  try:
+    return (
+      Path(data_dir) / "shared" / "memory" / "chats" / chat_id / "index.md"
+    ).stat().st_mtime
+  except OSError:
+    return 0.0
+
+
+def _should_ensure_chat_note(
+  settings,
+  chat_id: str,
+  disposition: "chat_queue.TerminalDisposition",
+  data_dir: str,
+  note_mtime_before: float,
+) -> bool:
+  """Whether the turn-end note guarantee should fire. True iff the feature is
+  on, this is a real chat, the chat SETTLED (no pending follow-up so it ensures
+  once, at rest — not on a continuation or a failed/stale turn), and the agent
+  left the note untouched this turn (its mtime did not advance)."""
+  return bool(
+    getattr(settings, "ensure_chat_note", False)
+    and chat_id
+    and disposition == chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
+    and _chat_note_mtime(data_dir, chat_id) <= note_mtime_before
+  )
+
+
+async def _ensure_chat_note(data_dir: str, chat_id: str) -> None:
+  """Turn-end backstop: write the chat's memory note when the agent skipped it.
+
+  Spawns the TOOL-FREE summarizer (scripts/chat_note.py) — it reads the chat's
+  transcript and writes chats/<id>/index.md (+ syncs the title); the subagent
+  has no tools, this script does the privileged write. Best-effort + bounded: it
+  runs AFTER the reply is sent, so it never adds user-facing latency, and any
+  failure/timeout is swallowed — a missing note must never break the turn. The
+  caller gates this on `ensure_chat_note` + the note being untouched this turn."""
+  log = _get_logger()
+  script = Path(__file__).parent.parent / "scripts" / "chat_note.py"
+  if not script.exists() or not chat_id:
+    return
+  proc = None
+  try:
+    proc = await asyncio.create_subprocess_exec(
+      "python3", str(script), chat_id,
+      stdout=asyncio.subprocess.DEVNULL,
+      stderr=asyncio.subprocess.DEVNULL,
+      env=dict(os.environ),
+    )
+    await asyncio.wait_for(proc.communicate(), timeout=150)
+  except asyncio.TimeoutError:
+    log.info("ensure_chat_note timed out for chat %s", chat_id)
+    if proc is not None:
+      try:
+        proc.kill()
+      except ProcessLookupError:
+        pass
+  except Exception:
+    log.debug("ensure_chat_note failed", exc_info=True)
 
 
 async def _run_chat_impl(
