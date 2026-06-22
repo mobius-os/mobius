@@ -55,7 +55,7 @@ _VERSION_TIMEOUT = 2.0
 # missing date.
 _CLI_RELEASE_DATES = {
   # @anthropic-ai/claude-code
-  "2.1.173": "2026-06-11",
+  "2.1.183": "2026-06-19",
   # @openai/codex
   "0.134.0": "2026-05-26",
 }
