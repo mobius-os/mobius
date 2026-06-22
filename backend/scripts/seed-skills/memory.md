@@ -55,10 +55,13 @@ Filename stem = the note's `id` (the slug other notes `[[link]]` to).
 **`description` is the scent line — the highest-leverage field.** It is the one
 line the router (`index.md`) shows for this note so a reader decides *open or
 skip without opening it*. Write it as the gist in the user's words, not a label.
-**There is no `importance` and no `access_count` — v2 does NOT rank or score
-notes.** Recall is by relevance to the live question (router → traverse, below),
-never by a hotness number. (`type` is OKF-aligned, so the whole graph is a
-portable OKF bundle — it opens in Obsidian and any future tool.)
+**Recall does NOT rank or score notes.** It is by relevance to the live question
+(router → traverse, below), never by a hotness number. `importance` in older
+seed notes is vestigial — nothing ranks by it. `access_count` (tracked in a
+`usage.json` sidecar) survives ONLY as the Memory app's "Used" display column;
+it does not influence what gets injected or recalled. (`type` is OKF-aligned, so
+the whole graph is a portable OKF bundle — it opens in Obsidian and any future
+tool.)
 
 Optional frontmatter, when it applies: `as-of: YYYY-MM-DD` (the claim is
 time-sensitive — date it), `supersedes: [old-slug]` (this note replaces an
