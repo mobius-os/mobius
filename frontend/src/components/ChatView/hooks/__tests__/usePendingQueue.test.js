@@ -342,6 +342,36 @@ test('a cancelled entry does NOT resurrect on a later hydrate', () => {
     'cancelByTs entry stays gone across hydrate')
 })
 
+test('serverTs gate: optimistic add starts unconfirmed; swap/hydrate/s-cid confirm it', () => {
+  // The steer (fast-forward) feature only converts SERVER-confirmed queued
+  // messages — force_steer matches against chat.pending_messages[].ts, so an
+  // optimistic Date.now() ts would not match. usePendingQueue stamps
+  // `serverTs` true on exactly the paths that produce a real server ts:
+  // a server-origin `s-` add, a swapOptimisticTs ack, or a hydrate.
+  const { result } = renderHook(usePendingQueue)
+
+  // Optimistic add: NOT yet server-confirmed (ts is a client value).
+  result.current.add(fixtureMsg({ cid: 'opt-1', ts: 111 }))
+  assert.equal(result.current.pendingMessagesRef.current[0].serverTs, false,
+    'an optimistic add is not server-confirmed until its POST acks')
+
+  // The POST acks → swapOptimisticTs promotes the server ts + confirms.
+  result.current.swapOptimisticTs('opt-1', 222)
+  assert.equal(result.current.pendingMessagesRef.current[0].serverTs, true,
+    'swapOptimisticTs confirms the entry')
+
+  // Fresh-send queued path add()s an already-confirmed `s-<ts>` entry.
+  result.current.add(fixtureMsg({ cid: 's-333', ts: 333 }))
+  assert.equal(
+    result.current.pendingMessagesRef.current.find(m => m.cid === 's-333').serverTs,
+    true, 'a server-origin s-<ts> add is confirmed by construction')
+
+  // Hydrate yields server state — every reconciled entry is confirmed.
+  result.current.hydrate([{ role: 'user', content: 'srv', ts: 444 }])
+  assert.equal(result.current.pendingMessagesRef.current[0].serverTs, true,
+    'hydrated entries are server-confirmed')
+})
+
 test('a promoted entry does NOT resurrect on a later hydrate', () => {
   // Promotion consumes the entry into the active turn and clears its
   // in-flight mark; a reconcile must not re-add it to the tray.
