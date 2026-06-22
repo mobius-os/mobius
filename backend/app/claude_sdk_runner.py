@@ -385,7 +385,20 @@ def _result_error_message(result: ResultMessage) -> str:
   if isinstance(result.result, str) and result.result.strip():
     return result.result.strip()
   if result.errors:
-    return "\n".join(err for err in result.errors if err).strip()
+    # The bundled CLI attaches an internal `[ede_diagnostic] ...
+    # stop_reason=tool_use/null` entry whenever its end-of-turn
+    # validator trips — which it does on a Möbius-initiated interrupt
+    # (the message list ends on a synthetic user-interrupt entry), not
+    # only on real failures. Surfacing that raw string renders a scary
+    # red error block for what was a clean Stop, eroding trust. Filter
+    # ede entries out (mirroring the CLI's own diagnostic filter); if
+    # that leaves nothing, fall through to the friendly message below.
+    visible = [
+      err for err in result.errors
+      if err and not err.lstrip().startswith("[ede_diagnostic]")
+    ]
+    if visible:
+      return "\n".join(visible).strip()
   if result.subtype == "error_during_execution":
     return "Execution interrupted."
   return "Claude SDK turn failed."
@@ -634,6 +647,26 @@ def dispatch_sdk_message(
   return current_session_id, None
 
 
+# Appended to a turn's prompt when the owner picks the "ultracode" effort
+# tier. "ultracode" is not an SDK EffortLevel — it is the Claude Code CLI's
+# ultracode mode (xhigh effort + dynamic multi-agent Workflow orchestration).
+# The SDK only exposes effort as `--effort <value>` and that flag rejects
+# "ultracode", so the effort knob is set to xhigh separately and the
+# orchestration is armed via the CLI's documented "ultracode" keyword
+# trigger: a turn whose prompt contains the word opts that turn into the
+# Workflow tool. The trigger is default-on, model-gated to ultracode-capable
+# (Opus-tier) models, and a graceful no-op on older CLIs or lesser models —
+# in which case the turn simply runs at xhigh with no orchestration. The
+# literal token "ultracode" below is what arms it; keep it in the text.
+_ULTRACODE_TRIGGER = (
+  "\n\n<system-reminder>Ultracode mode is enabled for this turn: you are "
+  "running at xhigh effort with the Workflow tool available for dynamic "
+  "multi-agent orchestration. For substantial multi-step work, decompose it "
+  "and use the Workflow tool; answer trivial turns directly. (The ultracode "
+  "keyword in this reminder is what arms the mode.)</system-reminder>"
+)
+
+
 async def run_claude_sdk_turn(
   user_message: str,
   session_id: str | None,
@@ -807,6 +840,13 @@ async def run_claude_sdk_turn(
   # exactly the "apply on next turn" semantics the slash picker promises.
   _model = (agent_settings or {}).get("model") or None
   _effort = (agent_settings or {}).get("effort") or None
+  # The "ultracode" tier maps to xhigh effort for the SDK flag (which only
+  # accepts low/medium/high/xhigh/max) and arms the Workflow-tool
+  # orchestration via the keyword trigger appended to this turn's prompt.
+  _ultracode = _effort == "ultracode"
+  if _ultracode:
+    _effort = "xhigh"
+  turn_message = user_message + _ULTRACODE_TRIGGER if _ultracode else user_message
   # Cross-provider mismatch defense (mirrors codex_sdk_runner).
   # Chats persisted before the snapshot logic learned to
   # provider-validate (see chat.py snapshot-on-first-send and
@@ -873,7 +913,7 @@ async def run_claude_sdk_turn(
           "cost_usd": None,
           "error": "connect timeout",
         }
-      await client.query(user_message)
+      await client.query(turn_message)
 
       while True:
         async for sdk_msg in client.receive_response():

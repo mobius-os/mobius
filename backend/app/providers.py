@@ -335,6 +335,19 @@ class ClaudeProvider(BaseProvider):
     # block.
     if chat_id:
       env["AGENT_BROWSER_SESSION"] = f"chat-{chat_id}"
+    # The in-product agent reaches Codex for ensemble / "use codex" work via
+    # the Agent tool's `codex:codex-rescue` subagent — the codex plugin's
+    # companion broker shells out to `codex exec`, and that codex process
+    # inherits THIS environment. The codex CLI reads its credentials from
+    # CODEX_HOME, which otherwise only CodexProvider.build_env sets; a Claude
+    # turn left CODEX_HOME unset, so the spawned codex fell back to the empty
+    # default config and died "401 Invalid authentication credentials" —
+    # which is why "leverage codex subagents" failed in-product. Point it at
+    # the shared codex auth dir (only when codex is actually connected) so
+    # cross-provider codex calls authenticate.
+    codex_auth = Path(data_dir) / "cli-auth" / "codex" / "auth.json"
+    if codex_auth.exists():
+      env["CODEX_HOME"] = str(codex_auth.parent)
     return env
 
 
