@@ -38,6 +38,20 @@ class Settings(BaseSettings):
   # so a deploy can verify the SERVED backend matches the intended commit.
   build_sha: str = "unknown"
 
+  # Auto memory-search: on a substantive FIRST message of a chat, the platform
+  # runs the memory-search subagent (scripts/memory_search.py) and injects its
+  # result into the <agent_experience> block — so deep recall happens without
+  # the agent remembering to call it (it empirically routes around the
+  # instruction). OFF by default: it adds the search's latency (up to the
+  # timeout) to the first reply and spends tokens, so it's an owner opt-in.
+  auto_memory_search: bool = False
+  # Seconds to wait for the auto-search before proceeding without it. A miss
+  # never fails the turn — the agent just gets the normal injected block. The
+  # subagent traversal takes ~35-45s, so this is the dead latency added to the
+  # FIRST reply when the flag is on; that latency (vs the agent narrating while
+  # it runs its own search) is the main reason this path is off by default.
+  auto_memory_search_timeout: int = 60
+
   model_config = SettingsConfigDict(env_file=".env")
 
   @model_validator(mode="after")
