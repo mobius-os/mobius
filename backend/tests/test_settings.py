@@ -106,7 +106,8 @@ def test_get_settings_surfaces_cli_versions(client, auth, monkeypatch):
   The shell-out is mocked so the assertion is deterministic. The route
   passes each raw `--version` banner through `_format_cli_version`,
   which strips the codex-cli prefix / "(Claude Code)" suffix and
-  appends the pinned release date from `_CLI_RELEASE_DATES`.
+  appends the build-captured release date from `_cli_release_dates()`
+  (here stubbed, since the build-written JSON only exists in the image).
   """
   from app.routes import settings as settings_route
 
@@ -114,25 +115,35 @@ def test_get_settings_surfaces_cli_versions(client, auth, monkeypatch):
   monkeypatch.setattr(
     settings_route, "_cli_version", lambda cmd: versions[cmd],
   )
+  monkeypatch.setattr(
+    settings_route, "_cli_release_dates",
+    lambda: {"2.1.173": "2026-06-11", "0.134.0": "2026-05-26"},
+  )
   body = client.get("/api/settings", headers=auth).json()
   assert body["claude_version"] == "2.1.173 (2026-06-11)"
   assert body["codex_version"] == "0.134.0 (2026-05-26)"
 
 
-def test_format_cli_version_parses_claude_banner():
+def test_format_cli_version_parses_claude_banner(monkeypatch):
   """The Claude banner "<v> (Claude Code)" → "<v> (<date>)"."""
   from app.routes import settings as settings_route
 
+  monkeypatch.setattr(
+    settings_route, "_cli_release_dates", lambda: {"2.1.173": "2026-06-11"},
+  )
   assert (
     settings_route._format_cli_version("2.1.173 (Claude Code)")
     == "2.1.173 (2026-06-11)"
   )
 
 
-def test_format_cli_version_parses_codex_banner():
+def test_format_cli_version_parses_codex_banner(monkeypatch):
   """The Codex banner "codex-cli <v>" → "<v> (<date>)" (prefix dropped)."""
   from app.routes import settings as settings_route
 
+  monkeypatch.setattr(
+    settings_route, "_cli_release_dates", lambda: {"0.134.0": "2026-05-26"},
+  )
   assert (
     settings_route._format_cli_version("codex-cli 0.134.0")
     == "0.134.0 (2026-05-26)"
@@ -172,28 +183,6 @@ def test_format_cli_version_unrecognized_banner_surfaces_raw():
   from app.routes import settings as settings_route
 
   assert settings_route._format_cli_version("unknown build") == "unknown build"
-
-
-def test_release_dates_cover_dockerfile_pins():
-  """The `_CLI_RELEASE_DATES` map must carry a date for every CLI
-  version pinned in the Dockerfile — otherwise the Settings row
-  silently degrades to a bare version after a routine pin bump.
-
-  Source of truth is the Dockerfile `npm install -g ...@<v>` lines;
-  this asserts the map stays in lockstep with them.
-  """
-  from app.routes import settings as settings_route
-
-  dockerfile = Path(__file__).resolve().parents[2] / "Dockerfile"
-  text = dockerfile.read_text()
-  for pkg in ("@anthropic-ai/claude-code", "@openai/codex"):
-    m = re.search(rf"{re.escape(pkg)}@(\d+\.\d+\.\d+\S*)", text)
-    assert m, f"could not find pinned version for {pkg} in Dockerfile"
-    pinned = m.group(1)
-    assert pinned in settings_route._CLI_RELEASE_DATES, (
-      f"{pkg}@{pinned} is pinned in the Dockerfile but missing from "
-      f"_CLI_RELEASE_DATES — add its release date"
-    )
 
 
 def test_get_settings_cli_missing_degrades_to_null(client, auth, monkeypatch):
