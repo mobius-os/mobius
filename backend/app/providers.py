@@ -336,8 +336,13 @@ class ClaudeProvider(BaseProvider):
     and because Anthropic rotates the single-use refresh token, a
     concurrent model-registry refresh could consume the token out from
     under the CLI → 401. Refreshing here (sharing `_claude_refresh_lock`
-    with the registry path) hands the CLI an already-fresh, long-lived
-    token so it never refreshes during the turn, closing the race.
+    with the registry path) serializes the two in-process refreshers and
+    removes the at-spawn-expired case by handing the CLI a fresh token. It
+    does NOT cover a turn that outlives the token: the token is only
+    refreshed within the 60s margin, so a multi-minute build can still cross
+    an expiry mid-turn, and the CLI's own refresh then runs outside this
+    lock by design (raise `_CLAUDE_TOKEN_REFRESH_MARGIN_MS` above the longest
+    expected turn to close that remainder too).
 
     Best effort by the BaseProvider contract: if the refresh endpoint is
     briefly unreachable we log and proceed — the CLI can still attempt its

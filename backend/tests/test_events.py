@@ -325,3 +325,40 @@ def test_both_runners_emit_text_boundary():
       f"on this provider. Keep the streaming event vocabulary symmetric "
       f"across runners (see events.process_event)."
     )
+
+
+def test_text_boundary_reducer_splits_consecutive_text():
+  """A text_boundary between two text chunks yields TWO text blocks (so the
+  post-AskUserQuestion 'answer1' / 'answer2' no longer glue as 'answer1answer2')."""
+  blocks = []
+  process_event({"type": "text", "content": "answer1"}, blocks)
+  process_event({"type": "text_boundary"}, blocks)
+  process_event({"type": "text", "content": "answer2"}, blocks)
+  text_blocks = [b for b in blocks if b.get("type") == "text"]
+  assert [b["content"] for b in text_blocks] == ["answer1", "answer2"]
+  # the marker was consumed (replaced by the second text), not left behind
+  assert all(b.get("type") != "text_boundary" for b in blocks)
+
+
+def test_text_boundary_on_empty_is_noop():
+  """A leading boundary (no prior non-empty text) does nothing — guards the
+  first-block case so a turn never opens with a stray marker."""
+  blocks = []
+  changed = process_event({"type": "text_boundary"}, blocks)
+  assert changed is False
+  assert blocks == []
+
+
+def test_text_boundary_marker_never_persists():
+  """A DANGLING boundary (marker, no following text) is stripped from both the
+  mid-turn snapshot (build_assistant_message) and the finalized blocks
+  (finalize_blocks) — it is a live-stream-only signal, never a stored block."""
+  blocks = []
+  process_event({"type": "text", "content": "x"}, blocks)
+  process_event({"type": "text_boundary"}, blocks)
+  assert blocks[-1] == {"type": "text_boundary"}  # present mid-stream
+  msg = build_assistant_message(blocks)
+  assert all(b.get("type") != "text_boundary" for b in msg["blocks"])
+  assert msg["content"] == "x"
+  finalize_blocks(blocks)
+  assert all(b.get("type") != "text_boundary" for b in blocks)

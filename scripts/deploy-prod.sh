@@ -764,11 +764,15 @@ step "[3/4] refresh /data/shell/ from new image's /app/shell-src"
 # blocks the deploy; recover later by diffing the tarball into frontend/src.
 if docker exec "$CONTAINER" sh -c 'test -d /data/shell/src' 2>/dev/null \
    && ! docker exec "$CONTAINER" sh -c 'diff -rq /app/shell-src/src /data/shell/src >/dev/null 2>&1'; then
-  shell_snap="/data/shell-src-predeploy-$(date +%Y%m%d-%H%M%S).tar.gz"
+  # Write under /data/backups/ (gitignored, so nightly pm-commit/dreaming
+  # `git add -A` never commits a ~360KB blob into /data history) and run as
+  # `mobius` (NOT bare docker exec → root, which would poison the mobius-owned
+  # /data tree). Keep only the last 5 so they can't accumulate on the host.
+  shell_snap="/data/backups/shell-src-predeploy-$(date +%Y%m%d-%H%M%S).tar.gz"
   warn "/data/shell/src differs from the baked shell (live agent edits and/or a"
   warn "prior frontend deploy) — snapshotting to ${shell_snap} before refresh."
-  intent "docker exec ${CONTAINER} sh -c \"tar czf '${shell_snap}' -C /data/shell src\""
-  docker exec "$CONTAINER" sh -c "tar czf '${shell_snap}' -C /data/shell src 2>/dev/null" \
+  intent "docker exec -u mobius ${CONTAINER} sh -c \"mkdir -p /data/backups; tar czf '${shell_snap}' -C /data/shell src; ls -1t /data/backups/shell-src-predeploy-*.tar.gz | tail -n +6 | xargs -r rm -f\""
+  docker exec -u mobius "$CONTAINER" sh -c "mkdir -p /data/backups && tar czf '${shell_snap}' -C /data/shell src 2>/dev/null && ls -1t /data/backups/shell-src-predeploy-*.tar.gz | tail -n +6 | xargs -r rm -f" \
     && info "shell snapshot saved (recover: docker cp ${CONTAINER}:${shell_snap} . then diff into frontend/src)" \
     || warn "shell snapshot failed — proceeding; agent shell edits may be unrecoverable after this."
 fi

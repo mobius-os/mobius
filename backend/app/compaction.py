@@ -111,6 +111,12 @@ async def summarize_chat(
   auth_error = provider.check_auth(data_dir)
   if auth_error is not None:
     raise CompactionError(auth_error)
+  # Refresh the OAuth token before spawning the summarize CLI, exactly as the
+  # live chat path does (chat.py). The summarize turn is a full CLI subprocess
+  # too, so without this it can hand an at-spawn-expired token to the CLI and
+  # 401 — the same intermittent failure ensure_auth fixes for chat turns.
+  # Best effort: a refresh blip must not block compaction.
+  await provider.ensure_auth(data_dir)
 
   summary = await _run_summarize_turn(
     _SUMMARIZE_PROMPT + transcript, data_dir=data_dir
