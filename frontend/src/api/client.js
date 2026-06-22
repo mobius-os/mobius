@@ -269,6 +269,11 @@ export const api = {
   admin: {
     restart: () => apiFetch('/admin/restart', { method: 'POST' }),
   },
+  platform: {
+    status: () => apiFetch('/platform/status'),
+    apply: () => apiFetch('/platform/apply', { method: 'POST' }),
+    restart: () => apiFetch('/platform/restart', { method: 'POST' }),
+  },
   push: {
     vapidKey: () => apiFetch('/push/vapid-key'),
     subscribe: (payload) => apiFetch('/push/subscribe', {

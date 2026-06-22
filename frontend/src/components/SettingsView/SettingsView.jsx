@@ -40,6 +40,12 @@ export default function SettingsView({ onThemeChange }) {
   const [themeError, setThemeError] = useState('')
   const [restartPhase, setRestartPhase] = useState('idle')
   const [restartError, setRestartError] = useState('')
+  // Platform self-update (backend/frontend/libraries/recovery as one release).
+  // Distinct from the shell "App" row above, which only refreshes the PWA
+  // bundle. 'idle' | 'applying' | 'restarting'.
+  const [platform, setPlatform] = useState(null)
+  const [platformPhase, setPlatformPhase] = useState('idle')
+  const [platformError, setPlatformError] = useState('')
   // 'idle' | 'checking' | 'checked' — the "Check for updates" button asks the
   // service worker to re-check for a new shell build and re-reads /api/version.
   const [updatePhase, setUpdatePhase] = useState('idle')
@@ -272,6 +278,83 @@ export default function SettingsView({ onThemeChange }) {
     window.location.reload()
   }
 
+  // Platform self-update: read availability once on mount so Settings can show
+  // "new update available" without a polling daemon.
+  const refreshPlatform = useCallback(async () => {
+    try {
+      const res = await api.platform.status()
+      if (res.ok) setPlatform(await res.json())
+    } catch {
+      // A status hiccup just leaves the section hidden — never blocks Settings.
+    }
+  }, [])
+  useEffect(() => { refreshPlatform() }, [refreshPlatform])
+
+  // Press Update -> merge the baked platform release into the live backend.
+  // Clean -> the row flips to "restart needed"; conflict -> an agent chat opens.
+  async function applyPlatformUpdate() {
+    if (platformPhase !== 'idle') return
+    setPlatformError('')
+    setPlatformPhase('applying')
+    try {
+      const res = await api.platform.apply()
+      if (!res.ok) {
+        let detail = ''
+        try { detail = (await res.json())?.detail || '' } catch {}
+        setPlatformError(detail ? `Update failed: ${detail}` : 'Update failed — the instance is unchanged.')
+        return
+      }
+      await refreshPlatform()
+    } catch {
+      setPlatformError('Update failed — the instance is unchanged.')
+    } finally {
+      setPlatformPhase('idle')
+    }
+  }
+
+  // Poll /api/health until the worker is back, then reload. Shared by the
+  // platform restart-to-finish flow (reuses restartPollRef + its unmount clear).
+  function pollHealthThenReload(onTimeout) {
+    const POLL_INTERVAL_MS = 1500
+    const POLL_MAX = 30
+    let attempts = 0
+    restartPollRef.current = setInterval(async () => {
+      attempts += 1
+      try {
+        const probe = await fetch('/api/health', { cache: 'no-store' })
+        if (probe.ok) {
+          clearInterval(restartPollRef.current)
+          restartPollRef.current = null
+          window.location.reload()
+          return
+        }
+      } catch {
+        // still down — keep polling
+      }
+      if (attempts >= POLL_MAX) {
+        clearInterval(restartPollRef.current)
+        restartPollRef.current = null
+        onTimeout()
+      }
+    }, POLL_INTERVAL_MS)
+  }
+
+  // The owner's explicit confirmation that finishes a platform update: clicking
+  // this IS the confirm — nothing restarts on its own.
+  async function restartToFinish() {
+    if (platformPhase === 'restarting') return
+    setPlatformError('')
+    setPlatformPhase('restarting')
+    try {
+      await api.platform.restart()
+      pollHealthThenReload(() =>
+        setPlatformError("Server hasn't come back yet — check the container."))
+    } catch {
+      setPlatformError('Restart signal failed.')
+      setPlatformPhase('idle')
+    }
+  }
+
   const version = versionQuery.data
   // The short SHA of the SHELL BUILD the served UI came from — shell_sha
   // (the served bundle's image-build SHA) is the truthful one; fall back to
@@ -462,6 +545,51 @@ export default function SettingsView({ onThemeChange }) {
             )}
           </div>
         </section>
+
+        {platform && (platform.available || platform.needs_restart || platform.state === 'conflict') && (
+          <section className="settings__section settings__section--compact">
+            <h2 className="settings__section-title">Platform</h2>
+            <div className="settings__row settings__row--top">
+              <div>
+                <span className="settings__label">Update</span>
+                <p className="settings__subtext settings__subtext--tight">
+                  {platform.state === 'conflict'
+                    ? 'Resolving an update conflict in a chat'
+                    : platform.needs_restart
+                      ? 'A server restart is needed to finish'
+                      : 'New update available'}
+                </p>
+              </div>
+              {platform.needs_restart ? (
+                <button
+                  className="settings__btn settings__btn--sm settings__btn--nowrap"
+                  type="button"
+                  onClick={restartToFinish}
+                  disabled={platformPhase === 'restarting'}
+                >
+                  {platformPhase === 'restarting' ? 'Restarting…' : 'Restart to finish'}
+                </button>
+              ) : platform.state === 'conflict' ? null : (
+                <button
+                  className="settings__btn settings__btn--sm settings__btn--nowrap"
+                  type="button"
+                  onClick={applyPlatformUpdate}
+                  disabled={platformPhase === 'applying'}
+                >
+                  {platformPhase === 'applying' ? 'Updating…' : 'Update'}
+                </button>
+              )}
+            </div>
+            {platformPhase === 'restarting' && (
+              <div className="settings__notice" role="status">
+                Restart signal sent. The page will reload shortly.
+              </div>
+            )}
+            {platformError && (
+              <Alert color="danger" variant="soft" description={platformError} />
+            )}
+          </section>
+        )}
 
         <section className="settings__section settings__section--compact">
           <h2 className="settings__section-title">Server</h2>

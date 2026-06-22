@@ -379,6 +379,68 @@ def test_merge_clean_returns_merged_bytes(tmp_path):
   assert "line E UPSTREAM" in merged
 
 
+def test_merge_clean_exposes_full_merged_tree(tmp_path):
+  """A clean merge exposes the merged tree oid; read_merged_tree reads the
+  whole tree back and index.jsx matches merged_bytes (fast path and tree
+  agree)."""
+  repo = tmp_path / "app"
+  base = "line A\nline B\nline C\nline D\nline E\n"
+  _install(repo, base.encode())
+  _write(repo, "line A LOCAL\nline B\nline C\nline D\nline E\n")
+  app_git.commit_local(repo, "local edit A")
+  app_git.record_upstream(
+    repo,
+    b"line A\nline B\nline C\nline D\nline E UPSTREAM\n",
+    "https://x/mobius.json",
+    "2.0.0",
+  )
+
+  result = app_git.merge_upstream(repo)
+  assert result.status == "clean"
+  assert result.merged_tree_oid
+  tree = app_git.read_merged_tree(repo, result.merged_tree_oid)
+  # The whole tree comes back (index.jsx plus the repo's tracked .gitignore),
+  # not just the entry file — that is the point of read_merged_tree.
+  assert "index.jsx" in tree
+  assert tree["index.jsx"] == result.merged_bytes
+  assert b"line A LOCAL" in tree["index.jsx"]
+  assert b"line E UPSTREAM" in tree["index.jsx"]
+
+
+def test_read_merged_tree_returns_every_file_in_a_multi_file_tree(tmp_path):
+  """read_merged_tree reads ALL files of a multi-file tree (the platform
+  case), at any depth — pinned via a hand-built tree so the reader holds
+  independent of the single-entry-file record path."""
+  repo = tmp_path / "app"
+  app_git.ensure_repo(repo)
+
+  def _blob(content: bytes) -> str:
+    return subprocess.run(
+      ["git", "-C", str(repo), "hash-object", "-w", "--stdin"],
+      input=content, capture_output=True, check=True,
+    ).stdout.decode().strip()
+
+  scratch = dict(os.environ)
+  scratch["GIT_INDEX_FILE"] = str(repo / ".git" / "scratch-index")
+  expected = {
+    "index.jsx": b"entry\n",
+    "lib/util.js": b"util\n",
+    "backend/main.py": b"backend\n",
+  }
+  for path, content in expected.items():
+    subprocess.run(
+      ["git", "-C", str(repo), "update-index", "--add", "--cacheinfo",
+       f"100644,{_blob(content)},{path}"],
+      env=scratch, capture_output=True, check=True,
+    )
+  tree_oid = subprocess.run(
+    ["git", "-C", str(repo), "write-tree"],
+    env=scratch, capture_output=True, check=True,
+  ).stdout.decode().strip()
+
+  assert app_git.read_merged_tree(repo, tree_oid) == expected
+
+
 def test_merge_conflict_names_paths_and_leaves_worktree_intact(tmp_path):
   """Install v1, then local + upstream v2 BOTH edit the same line →
   conflict. The verdict names index.jsx and the working tree is NOT
