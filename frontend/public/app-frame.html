@@ -213,6 +213,10 @@
     html, body, * { scrollbar-width: none; -ms-overflow-style: none; }
     *::-webkit-scrollbar { width: 0; height: 0; }
     html, body, #root { height: 100%; }
+    /* html must be opaque too (body already is): an inner scroller overscrolling
+       on Android otherwise reveals the transparent root as a warm color-scheme
+       tint behind app content. Same theme token, so no visible change otherwise. */
+    html { background: var(--bg, #0d0d0d); }
     body {
       background: var(--bg, #0d0d0d);
       color: var(--text);
