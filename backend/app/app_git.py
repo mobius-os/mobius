@@ -119,11 +119,18 @@ class MergeResult:
   edited `fetch.sh`/`build.sh` survives a clean update instead of being
   overwritten by the bundled copy. It is None when no `job_name` was
   requested, or when the job is not present in the merged tree.
+
+  `merged_tree_oid` is the oid of the full merged tree on a clean merge
+  (None on conflict). `merged_bytes`/`merged_job` are the single-entry
+  fast path; pass this oid to `read_merged_tree` to materialise EVERY
+  merged file — needed for a multi-file source (the platform layer, or a
+  multi-file app) where one entry file is not the whole tree.
   """
   status: str
   conflict_paths: list[str] = field(default_factory=list)
   merged_bytes: bytes | None = None
   merged_job: bytes | None = None
+  merged_tree_oid: str | None = None
 
 
 def _git_env(repo: Path | str) -> dict:
@@ -538,7 +545,36 @@ def merge_upstream(
     merged_job = job.stdout if job.returncode == 0 else None
   return MergeResult(
     status="clean", merged_bytes=merged_bytes, merged_job=merged_job,
+    merged_tree_oid=tree_oid,
   )
+
+
+def read_merged_tree(source_dir: str | Path, tree_oid: str) -> dict[str, bytes]:
+  """Read EVERY file of a merged tree oid into {repo_relative_path: bytes}.
+
+  `merge_upstream` hands back the single entry file in `merged_bytes` for
+  the app fast path. The platform layer (and any multi-file app) needs the
+  WHOLE merged tree written back, not just one file, so the caller passes
+  `MergeResult.merged_tree_oid` here to materialise all of it. Paths are
+  repo-relative POSIX; bytes are read binary-faithful (no text decode).
+  `-z` keeps paths NUL-separated so names with spaces or newlines survive.
+  """
+  repo = Path(source_dir)
+  listing = subprocess.run(
+    ["git", "-C", str(repo), "ls-tree", "-r", "-z", "--name-only", tree_oid],
+    capture_output=True, timeout=_GIT_TIMEOUT, check=True, env=_git_env(repo),
+  )
+  files: dict[str, bytes] = {}
+  for rel in listing.stdout.decode().split("\0"):
+    if not rel:
+      continue
+    blob = subprocess.run(
+      ["git", "-C", str(repo), "cat-file", "-p", f"{tree_oid}:{rel}"],
+      capture_output=True, timeout=_GIT_TIMEOUT, check=False, env=_git_env(repo),
+    )
+    if blob.returncode == 0:
+      files[rel] = blob.stdout
+  return files
 
 
 def start_conflict_merge(source_dir: str | Path) -> list[str]:

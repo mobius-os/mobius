@@ -74,6 +74,7 @@ theme_router = _load("theme")
 self_reminders_router = _load("self_reminders")
 standalone_router = _load("standalone")
 client_error_router = _load("client_error")
+platform_router = _load("platform")
 
 __all__ = [
   "admin_router",
@@ -98,4 +99,5 @@ __all__ = [
   "self_reminders_router",
   "standalone_router",
   "client_error_router",
+  "platform_router",
 ]
