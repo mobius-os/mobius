@@ -742,6 +742,15 @@ fi
 # Publish the per-deploy upstream-diff file (/data/shared/upstream-diff.txt).
 python3 /app/scripts/init_agent_context.py
 
+# One-time idempotent app-rename migration (mind->memory, dreaming->reflection)
+# for EXISTING instances. MUST run before init_skills (it renames the
+# agent-edited skill file in place) and install-core-apps (it renames the app
+# slug in place), so neither reseeds a fresh file nor registers a duplicate.
+# Preserves each app's numeric id, so reports/storage are untouched. No-op on a
+# fresh instance or one already migrated. Runs as mobius (writes /data + the
+# mobius crontab; as root it would poison /data ownership + target root's crontab).
+su -s /bin/sh mobius -c "bash /app/scripts/migrate-app-rename.sh" 2>&1 || true
+
 # Bootstrap the knowledge graph (/data/shared/memory/). CREATE-IF-ABSENT:
 # unlike the flat experience file above, the graph is the agent's persistent
 # memory and must never be reseeded over learned notes. Writes the `.ready`
