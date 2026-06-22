@@ -43,7 +43,6 @@ export default function SettingsView({ onThemeChange }) {
   // 'idle' | 'checking' | 'checked' — the "Check for updates" button asks the
   // service worker to re-check for a new shell build and re-reads /api/version.
   const [updatePhase, setUpdatePhase] = useState('idle')
-
   useEffect(() => {
     // Mirror the full query value so a cache invalidation that
     // resolves to 'dark' actually flips the knob back. The earlier
@@ -264,7 +263,28 @@ export default function SettingsView({ onThemeChange }) {
     }
   }
 
+  // The "Update" action reuses checkForUpdates so the SW pulls the newest shell
+  // build before we reload to activate it — one source of truth for "ask the SW
+  // + re-read /api/version", rather than a bare reload that could race a
+  // not-yet-installed bundle.
+  async function applyUpdate() {
+    await checkForUpdates()
+    window.location.reload()
+  }
+
   const version = versionQuery.data
+  // The short SHA of the SHELL BUILD the served UI came from — shell_sha
+  // (the served bundle's image-build SHA) is the truthful one; fall back to
+  // sha (the running image) and finally 'unknown'. First 7 chars, matching
+  // how the Shell version row truncates sha.
+  const shellBuildSha = (() => {
+    const raw = version?.shell_sha && version.shell_sha !== 'unknown'
+      ? version.shell_sha
+      : version?.sha && version.sha !== 'unknown'
+        ? version.sha
+        : null
+    return raw ? raw.slice(0, 7) : 'unknown'
+  })()
   // shell_sha is the build the SERVED UI came from; sha is the running image.
   // A mismatch means a newer image is installed but its UI isn't being served
   // to this client yet — reloading picks it up.
@@ -402,10 +422,51 @@ export default function SettingsView({ onThemeChange }) {
         </section>
 
         <section className="settings__section settings__section--compact">
-          <div className="settings__row">
+          <h2 className="settings__section-title">App</h2>
+          {/* Version + update state in ONE calm row. The old toggling
+              "Check for updates" button (idle → Checking… → Up to date) mutated
+              its own label and shifted the layout on every tap — the disliked
+              UX. The version query already knows whether a newer build is
+              waiting, so we surface a single clear "Update" action ONLY when one
+              is, and otherwise a quiet status. Nothing here changes width/height
+              on interaction. */}
+          <div className="settings__row settings__row--top">
             <div>
-              <span className="settings__label">Server</span>
+              <span className="settings__label">Möbius</span>
+              <p className="settings__subtext settings__subtext--tight">
+                {SHELL_BUILD}
+                {shellBuildSha !== 'unknown' ? ` · ${shellBuildSha}` : ''}
+              </p>
             </div>
+            {newerBuildInstalled ? (
+              <button
+                className="settings__btn settings__btn--sm settings__btn--nowrap"
+                type="button"
+                onClick={applyUpdate}
+                disabled={updatePhase === 'checking'}
+              >
+                {updatePhase === 'checking' ? 'Updating…' : 'Update'}
+              </button>
+            ) : (
+              <div className="settings__app-status">
+                <StatusDot color="--green">Up to date</StatusDot>
+                <button
+                  className="settings__btn settings__btn--outline settings__btn--sm"
+                  type="button"
+                  onClick={checkForUpdates}
+                  disabled={updatePhase === 'checking'}
+                >
+                  {updatePhase === 'checking' ? 'Checking…' : 'Check'}
+                </button>
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section className="settings__section settings__section--compact">
+          <h2 className="settings__section-title">Server</h2>
+          <div className="settings__row">
+            <span className="settings__label">Restart</span>
             <button
               className="settings__btn settings__btn--outline settings__btn--sm"
               type="button"
@@ -427,38 +488,6 @@ export default function SettingsView({ onThemeChange }) {
               description={restartError}
             />
           )}
-
-          <div className="settings__row settings__row--top">
-            <div>
-              <span className="settings__label">Shell version</span>
-              <p className="settings__subtext settings__subtext--tight">
-                {SHELL_BUILD}
-                {version?.sha && version.sha !== 'unknown'
-                  ? ` · ${version.sha.slice(0, 7)}`
-                  : ''}
-              </p>
-            </div>
-            <button
-              className="settings__btn settings__btn--outline settings__btn--sm"
-              type="button"
-              onClick={checkForUpdates}
-              disabled={updatePhase === 'checking'}
-            >
-              {updatePhase === 'checking'
-                ? 'Checking…'
-                : updatePhase === 'checked'
-                  ? 'Up to date'
-                  : 'Check for updates'}
-            </button>
-          </div>
-          {newerBuildInstalled && (
-            <div className="settings__notice" role="status">
-              A newer build is installed — reload to use it.
-            </div>
-          )}
-        </section>
-
-        <section className="settings__section settings__section--compact">
           <div className="settings__row">
             <span className="settings__label">Recovery</span>
             <a className="settings__btn settings__btn--outline settings__btn--sm" href="/recover" target="_blank" rel="noopener noreferrer">

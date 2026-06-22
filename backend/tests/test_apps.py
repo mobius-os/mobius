@@ -135,16 +135,17 @@ def test_get_icon_size_returns_smaller_cached_variant(client, auth, db):
   """?size= serves a Pillow-downscaled PNG (fewer bytes) with the size folded
   into the ETag and a long cache header; default (no size) is unchanged."""
   app_id = _make_icon_app(client, auth, db)
+  _CC = "public, max-age=3600, stale-while-revalidate=86400"
 
   full = client.get(f"/api/apps/{app_id}/icon")
   assert full.status_code == 200
-  assert full.headers["Cache-Control"] == "public, max-age=3600"
+  assert full.headers["Cache-Control"] == _CC
   full_etag = full.headers["ETag"]
 
   small = client.get(f"/api/apps/{app_id}/icon", params={"size": 64})
   assert small.status_code == 200
   assert small.headers["Content-Type"] == "image/png"
-  assert small.headers["Cache-Control"] == "public, max-age=3600"
+  assert small.headers["Cache-Control"] == _CC
   # The downscaled variant is strictly smaller than the full-res icon.
   assert len(small.content) < len(full.content)
   # Its ETag folds the size in, so it caches independently of the full-res one.
@@ -158,7 +159,7 @@ def test_get_icon_size_returns_smaller_cached_variant(client, auth, db):
     headers={"If-None-Match": small.headers["ETag"]},
   )
   assert again.status_code == 304
-  assert again.headers["Cache-Control"] == "public, max-age=3600"
+  assert again.headers["Cache-Control"] == _CC
 
 
 def test_get_icon_rejects_unsupported_size(client, auth, db):
@@ -166,3 +167,59 @@ def test_get_icon_rejects_unsupported_size(client, auth, db):
   app_id = _make_icon_app(client, auth, db)
   r = client.get(f"/api/apps/{app_id}/icon", params={"size": 999})
   assert r.status_code == 400
+
+
+def test_get_icon_variant_is_byte_identical_and_cached_on_disk(client, auth, db):
+  """A ?size= variant is deterministic: two fetches return identical bytes, and
+  the second is served from the icon_cache (RAM/disk) rather than recomputed.
+  Asserting on the on-disk cache file proves the downscale is memoized, not
+  re-run per request — the fix for the staggered icon trickle."""
+  from app import icon_cache
+  from app.config import get_settings
+  import pathlib
+
+  app_id = _make_icon_app(client, auth, db)
+
+  first = client.get(f"/api/apps/{app_id}/icon", params={"size": 128})
+  assert first.status_code == 200
+  second = client.get(f"/api/apps/{app_id}/icon", params={"size": 128})
+  assert second.status_code == 200
+  # Deterministic render → byte-identical across requests.
+  assert first.content == second.content
+
+  # The downscaled bytes were written to the on-disk cache and match the
+  # response body exactly (so a warm hit serves these bytes with no Pillow).
+  cache_dir = pathlib.Path(get_settings().data_dir) / "compiled" / "icons"
+  files = list(cache_dir.glob(f"{app_id}-embed-128-*"))
+  assert files, f"expected a cached icon variant under {cache_dir}"
+  assert files[0].read_bytes() == first.content
+
+
+def test_get_icon_variant_cache_busts_on_app_update(client, auth, db):
+  """Changing the stored icon advances app.updated_at, which changes the cache
+  key — so the new icon is served, never the stale cached variant."""
+  import io
+  from PIL import Image
+  from app import models
+
+  app_id = _make_icon_app(client, auth, db)
+  before = client.get(f"/api/apps/{app_id}/icon", params={"size": 64})
+  assert before.status_code == 200
+
+  # Replace the stored icon with a visibly different image and bump updated_at
+  # the way a real icon upload does.
+  buf = io.BytesIO()
+  img = Image.new("RGBA", (512, 512))
+  img.putdata([
+    ((x * 3) % 256, (y * 11) % 256, (x * y) % 256, 255)
+    for y in range(512) for x in range(512)
+  ])
+  img.save(buf, format="PNG")
+  row = db.query(models.App).filter(models.App.id == app_id).first()
+  row.icon_png = buf.getvalue()
+  row.updated_at = row.updated_at.replace(microsecond=(row.updated_at.microsecond + 1) % 1000000)
+  db.commit()
+
+  after = client.get(f"/api/apps/{app_id}/icon", params={"size": 64})
+  assert after.status_code == 200
+  assert after.content != before.content, "stale cached variant served after update"

@@ -27,11 +27,12 @@ import io
 import json
 import re
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
-from app import models, runtime_libs
+from app import icon_cache, models, runtime_libs
 from app.database import get_db
 
 router = APIRouter(tags=["standalone"])
@@ -111,12 +112,22 @@ def _dominant_opaque_color(icon_png: bytes | None, fallback: str = "#0c0f14") ->
     return fallback
 
 
-def _app_background_color(app: models.App) -> str:
-  """Color shared by manifest splash, icon compositing, and loading shell."""
-  for value in (app.background_color, app.theme_color):
+def _resolve_bg_hex(
+  background_color: str | None, theme_color: str | None, icon_png: bytes | None
+) -> str:
+  """The background-color resolution as a pure function of its inputs (no ORM
+  row), so it can run on a worker thread off the request's DB session. Prefers
+  an explicit `background_color`/`theme_color`, else samples the icon's
+  dominant opaque color."""
+  for value in (background_color, theme_color):
     if isinstance(value, str) and re.match(r"^#[0-9a-fA-F]{6}$", value.strip()):
       return value.strip().lower()
-  return _dominant_opaque_color(app.icon_png)
+  return _dominant_opaque_color(icon_png)
+
+
+def _app_background_color(app: models.App) -> str:
+  """Color shared by manifest splash, icon compositing, and loading shell."""
+  return _resolve_bg_hex(app.background_color, app.theme_color, app.icon_png)
 
 
 def _app_theme_color(app: models.App) -> str:
@@ -250,27 +261,20 @@ def standalone_manifest(slug: str, db: Session = Depends(get_db)):
 _ICON_NAME = re.compile(r"^icon-(\d+)\.png$")
 
 
-@router.get("/apps/{slug}/{icon_name}")
-def standalone_icon(
-  slug: str, icon_name: str, db: Session = Depends(get_db),
-):
-  """Serves the per-app icon at the requested size.
+def _render_standalone_icon(
+  icon_png: bytes | None, name: str, slug: str, bg_hex: str, size: int
+) -> bytes:
+  """The CPU-bound render for one standalone-icon variant: resize +
+  background-composite the uploaded PNG, or draw the generated letter icon.
+  Pure function of its arguments (all folded — via `updated_at` — into the
+  cache key), so memoizing its output is safe.
 
-  Two paths: user-uploaded `app.icon_png` is resized on the fly via
-  Pillow; missing upload falls back to the auto-generated letter
-  icon. Cached for 5 minutes so the home-screen install request and
-  the splash screen request don't both regenerate.
-  """
-  m = _ICON_NAME.match(icon_name)
-  if not m:
-    raise HTTPException(status_code=404, detail="Not found.")
-  size = int(m.group(1))
-  if size < 16 or size > 1024:
-    raise HTTPException(status_code=400, detail="Invalid icon size.")
-  app = _get_app_by_slug(db, slug)
-  if app.icon_png:
+  Takes plain primitives, not the live ORM row, so it can run on a worker
+  thread without that thread touching the request's DB session (the caller
+  snapshots `app.icon_png` / `app.name` / the background color first)."""
+  if icon_png:
     from PIL import Image
-    img = Image.open(io.BytesIO(app.icon_png))
+    img = Image.open(io.BytesIO(icon_png))
     if img.mode not in ("RGB", "RGBA"):
       img = img.convert("RGBA" if "A" in img.mode else "RGB")
     img = img.resize((size, size), Image.LANCZOS)
@@ -282,7 +286,6 @@ def standalone_icon(
     # background_color CSS frequently shows a halo around the icon
     # edges on iOS. Server-side composite eliminates the variability.
     if img.mode == "RGBA":
-      bg_hex = _app_background_color(app)
       r = int(bg_hex[1:3], 16)
       g = int(bg_hex[3:5], 16)
       b = int(bg_hex[5:7], 16)
@@ -291,14 +294,78 @@ def standalone_icon(
       img = bg_layer
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
-    body = buf.getvalue()
+    return buf.getvalue()
+  return _generate_icon_png(name, slug, size=size)
+
+
+# The sizes the manifest + install shell actually request (192/512 manifest,
+# 180 apple-touch). Only these get the disk+LRU cache, so a request for an
+# arbitrary off-manifest size can't flood the cache directory — it is rendered
+# uncached and served with the same headers.
+_CACHED_STANDALONE_SIZES = frozenset((180, 192, 512))
+
+
+@router.get("/apps/{slug}/{icon_name}")
+async def standalone_icon(
+  slug: str, icon_name: str, request: Request, db: Session = Depends(get_db),
+):
+  """Serves the per-app icon at the requested size.
+
+  Two paths: user-uploaded `app.icon_png` is resized + background-composited
+  on the fly via Pillow; a missing upload falls back to the auto-generated
+  letter icon. Both renders are memoized in `icon_cache` keyed on the app's
+  `updated_at` (which a name / icon / background change bumps), so the
+  home-screen install request and the splash-screen request — and every later
+  open — reuse one render instead of each re-running Pillow. The render runs
+  off the threadpool on a cold miss (this handler is async), so concurrent
+  icon fetches don't serialize through a synchronous resize.
+
+  A strong-ish `ETag` on `updated_at`+size gives the browser a 304 path, and
+  `max-age` + `stale-while-revalidate` keep warm opens free; an icon change
+  advances the validator so a stale icon is never pinned.
+  """
+  m = _ICON_NAME.match(icon_name)
+  if not m:
+    raise HTTPException(status_code=404, detail="Not found.")
+  size = int(m.group(1))
+  if size < 16 or size > 1024:
+    raise HTTPException(status_code=400, detail="Invalid icon size.")
+  app = _get_app_by_slug(db, slug)
+  ts_us = int(app.updated_at.timestamp() * 1e6) if app.updated_at else 0
+  etag = f'W/"{ts_us}-{size}"'
+  headers = {
+    "ETag": etag,
+    "Cache-Control": "public, max-age=3600, stale-while-revalidate=86400",
+  }
+  if request.headers.get("if-none-match") == etag:
+    return Response(status_code=304, headers=headers)
+
+  # Snapshot every value the render reads off the live ORM row HERE, on the
+  # request thread, so the worker thread never touches the DB session. The
+  # background color (which may itself decode the icon for dominant-color
+  # sampling) is resolved INSIDE `_compute` from these snapshots, so its cost
+  # lands on the cold miss only — a warm hit skips it.
+  app_id = app.id
+  icon_png = app.icon_png
+  name = app.name
+  app_slug = app.slug or slug
+  bg_inputs = (app.background_color, app.theme_color)
+
+  def _compute() -> bytes:
+    bg_hex = _resolve_bg_hex(bg_inputs[0], bg_inputs[1], icon_png)
+    return _render_standalone_icon(icon_png, name, app_slug, bg_hex, size)
+
+  if size in _CACHED_STANDALONE_SIZES:
+    body = await icon_cache.get_or_compute(
+      app_id=app_id,
+      updated_us=ts_us,
+      kind="standalone",
+      size=size,
+      compute=_compute,
+    )
   else:
-    body = _generate_icon_png(app.name, app.slug or slug, size=size)
-  return Response(
-    content=body,
-    media_type="image/png",
-    headers={"Cache-Control": "public, max-age=300"},
-  )
+    body = await run_in_threadpool(_compute)
+  return Response(content=body, media_type="image/png", headers=headers)
 
 
 @router.get("/apps/{slug}/", response_class=HTMLResponse)

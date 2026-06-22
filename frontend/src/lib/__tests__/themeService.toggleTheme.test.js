@@ -80,16 +80,21 @@ function makeDomStub() {
 
 // Mock queryClient — records every invalidateQueries call so we can
 // assert BOTH theme keys were invalidated.
-function makeQueryClient() {
+function makeQueryClient(seedCache) {
   const invalidated = []
   const setData = []  // [queryKey, value] pairs from setQueryData
+  // Mirror the real cache: getQueryData reads the seeded / last-set value.
+  // Default cold (undefined) so existing tests still exercise toggleTheme's
+  // getThemeCss fallback; a warm seed exercises the synchronous-swap path.
+  let cache = seedCache
   return {
     invalidated,
     setData,
+    getQueryData: () => cache,
     // toggleTheme seeds the theme query cache with the new {css,bg} so the
     // post-invalidate refetch / useTheme re-apply can't repaint a stale
     // SWR value over the toggle's correct paint.
-    setQueryData: (queryKey, value) => { setData.push([queryKey, value]); return value },
+    setQueryData: (queryKey, value) => { setData.push([queryKey, value]); cache = value; return value },
     invalidateQueries: (opts) => {
       invalidated.push(opts.queryKey)
       return Promise.resolve()
@@ -121,10 +126,13 @@ function makeApi(initialCss = DARK_CSS) {
   return {
     calls,
     storage: { shared: {
-      getThemeCss: () => Promise.resolve({
-        ok: true,
-        text: () => Promise.resolve(currentCss),
-      }),
+      getThemeCss: () => {
+        calls.push(['getThemeCss'])
+        return Promise.resolve({
+          ok: true,
+          text: () => Promise.resolve(currentCss),
+        })
+      },
       putThemeCss: (content) => {
         calls.push(['putThemeCss', content])
         currentCss = content
@@ -202,6 +210,31 @@ test('SHIP-BLOCKER #2 — newBg is extracted from BUILT css, not stale meta', as
   assert.equal(dom.meta.content, '#f0eeeb')
 })
 
+test('I4 — warm cache: toggleTheme paints WITHOUT awaiting getThemeCss (instant recolor)', async () => {
+  // Owner-reported lag: applyThemeToDom was gated behind `await getThemeCss()`,
+  // so the toggle (and page) recolored a frame after the knob slid. With the
+  // theme query cache warm (normal once useTheme has run), the swap source is
+  // read synchronously and getThemeCss is never hit — the repaint lands on the
+  // click tick.
+  const qc = makeQueryClient({ css: DARK_CSS, bg: '#0d0f14' })
+  const api = makeApi(DARK_CSS)
+  const result = await themeService.toggleTheme(qc, 'dark', api)
+  assert.ok(!api.calls.some(c => c[0] === 'getThemeCss'),
+    `getThemeCss must NOT be fetched when the theme cache is warm (it gates the optimistic paint). Got: ${api.calls.map(c=>c[0]).join(', ')}`)
+  assert.equal(result.newMode, 'light')
+  assert.equal(dom.document.body.style.background, '#f0eeeb')
+  assert.ok(api.calls.some(c => c[0] === 'putThemeCss'), 'still persists the new css')
+})
+
+test('I4 — cold cache: toggleTheme falls back to fetching the persisted css', async () => {
+  const qc = makeQueryClient()  // cold (no seed)
+  const api = makeApi(DARK_CSS)
+  const result = await themeService.toggleTheme(qc, 'dark', api)
+  assert.ok(api.calls.some(c => c[0] === 'getThemeCss'),
+    'cold cache MUST fall back to fetching the persisted css as the swap source')
+  assert.equal(result.newMode, 'light')
+})
+
 test('toggleTheme persists css + mode before invalidating', async () => {
   // Order matters: if invalidation fires before persist resolves,
   // a refetch could read the OLD css from the server and apply
@@ -209,6 +242,7 @@ test('toggleTheme persists css + mode before invalidating', async () => {
   const events = []
   const qc = {
     invalidated: [],
+    getQueryData: () => undefined,
     setQueryData: (queryKey, value) => {
       events.push(['setQueryData', JSON.stringify(queryKey)])
       return value
@@ -490,6 +524,7 @@ test('REVERT RACE — query cache is seeded BEFORE the invalidate refetch', asyn
   const events = []
   const qc = {
     setData: [],
+    getQueryData: () => undefined,
     setQueryData: (queryKey, value) => { events.push('setQueryData'); qc.setData.push([queryKey, value]); return value },
     invalidated: [],
     invalidateQueries: (opts) => { events.push('invalidate'); qc.invalidated.push(opts.queryKey); return Promise.resolve() },

@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy.orm import Session
 
-from app import activity, app_git, fs_locks, models, schemas, theme
+from app import activity, app_git, fs_locks, icon_cache, models, schemas, theme
 from app.storage_io import read_capped_body
 from app.broadcast import get_system_broadcast
 from app.compiler import compile_jsx, recompile_app_bundle
@@ -1020,7 +1020,7 @@ _ICON_SIZES = frozenset((64, 128))
 
 
 @router.get("/{app_id}/icon")
-def get_icon(
+async def get_icon(
   app_id: int,
   request: Request,
   db: Session = Depends(get_db),
@@ -1044,7 +1044,17 @@ def get_icon(
   PNG is wasted bytes when the caller renders it as a 28px top-bar logo or
   a grid thumbnail. The ETag folds the size in so the 64px and the full-res
   responses cache independently; no `size` keeps the original full-res
-  bytes (unchanged for existing callers)."""
+  bytes (unchanged for existing callers).
+
+  The downscale is memoized in `icon_cache` keyed on the same
+  `(app_id, updated_at, size)` the ETag uses, so a warm hit returns bytes
+  with no Pillow work, and a cold miss runs the LANCZOS resize off the
+  threadpool (this handler is async) — concurrent icon requests no longer
+  serialize through a synchronous resize, which was the staggered trickle a
+  mini-app saw when its logo and the grid thumbnails all rendered at once.
+  The handler is async + `stale-while-revalidate`, so even a revalidation
+  that does miss the browser cache is served instantly from the prior bytes
+  while the conditional request resolves."""
   if size is not None and size not in _ICON_SIZES:
     raise HTTPException(400, f"size must be one of {sorted(_ICON_SIZES)}.")
   app = live_app(db, app_id, populate=True)
@@ -1052,10 +1062,23 @@ def get_icon(
     raise HTTPException(404, "No icon set.")
   ts_us = int(app.updated_at.timestamp() * 1e6) if app.updated_at else 0
   etag = f'W/"{ts_us}-{size}"' if size else f'W/"{ts_us}"'
-  headers = {"ETag": etag, "Cache-Control": "public, max-age=3600"}
+  headers = {
+    "ETag": etag,
+    "Cache-Control": "public, max-age=3600, stale-while-revalidate=86400",
+  }
   if request.headers.get("if-none-match") == etag:
     return Response(status_code=304, headers=headers)
-  content = _downscale_icon(app.icon_png, size) if size else app.icon_png
+  if size:
+    icon_png = app.icon_png
+    content = await icon_cache.get_or_compute(
+      app_id=app_id,
+      updated_us=ts_us,
+      kind="embed",
+      size=size,
+      compute=lambda: _downscale_icon(icon_png, size),
+    )
+  else:
+    content = app.icon_png
   return Response(content=content, media_type="image/png", headers=headers)
 
 

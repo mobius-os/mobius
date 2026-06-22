@@ -132,6 +132,24 @@ test('applyTheme injects CSS into <style id="mobius-theme">', () => {
   assert.equal(el.textContent, ':root { --bg: #123456; }')
 })
 
+test('applyTheme honors an explicit mode over inferring from bg (stale-SWR divergence fix)', () => {
+  // A DARK bg paired with an explicit LIGHT mode — the shape a stale
+  // /api/theme revalidation can feed the apply effect. The explicit mode must
+  // win; otherwise data-theme/color-scheme stick dark while the toggle knob
+  // (its own source) says light — the owner-reported "dark toggle on, light
+  // UI" divergence. Now that /api/theme carries mode, the paint follows it.
+  applyTheme({ css: ':root{--bg:#0d0d0d;}', bg: '#0d0d0d', mode: 'light' }, ctx())
+  assert.equal(dom.document.documentElement.getAttribute('data-theme'), 'light')
+  assert.equal(dom.document.documentElement.style.colorScheme, 'light')
+  // Converse: explicit dark over a light bg.
+  applyTheme({ css: ':root{--bg:#f0eeeb;}', bg: '#f0eeeb', mode: 'dark' }, ctx())
+  assert.equal(dom.document.documentElement.getAttribute('data-theme'), 'dark')
+  assert.equal(dom.document.documentElement.style.colorScheme, 'dark')
+  // No explicit mode → still infers from bg (backward-compatible).
+  applyTheme({ css: ':root{--bg:#0d0d0d;}', bg: '#0d0d0d' }, ctx())
+  assert.equal(dom.document.documentElement.getAttribute('data-theme'), 'dark')
+})
+
 test('applyTheme re-appends the style node so it wins the cascade', () => {
   applyTheme({ css: ':root { --bg: #111; }', bg: '#111111' }, ctx())
   const first = dom.styleNodes.get('mobius-theme')
@@ -154,6 +172,45 @@ test('applyTheme strips @import and converts safe ones to <link>', () => {
 test('applyTheme rejects javascript:/data: @import URLs (allowlist)', () => {
   applyTheme({ css: "@import url('javascript:alert(1)');@import url('data:text/css,x');:root{}", bg: '#000000' }, ctx())
   assert.equal(dom.fontLinks.length, 0)
+})
+
+// All four CSS @import spellings must be stripped from the body and only the
+// http(s) ones re-injected as <link> — the broadened allowlist closes the
+// bare-url() / no-url() bypass the quoted-url-only regex had.
+test('applyTheme allowlists a bare url() @import (one <link>)', () => {
+  applyTheme({ css: '@import url(https://a.example/x.css);:root{}', bg: '#000000' }, ctx())
+  assert.equal(dom.fontLinks.length, 1)
+  assert.equal(dom.fontLinks[0].href, 'https://a.example/x.css')
+  assert.ok(!dom.styleNodes.get('mobius-theme').textContent.includes('@import'))
+})
+
+test('applyTheme allowlists a no-url() quoted @import (one <link>)', () => {
+  applyTheme({ css: '@import "https://b.example/y.css";:root{}', bg: '#000000' }, ctx())
+  assert.equal(dom.fontLinks.length, 1)
+  assert.equal(dom.fontLinks[0].href, 'https://b.example/y.css')
+  assert.ok(!dom.styleNodes.get('mobius-theme').textContent.includes('@import'))
+})
+
+test('applyTheme drops a bare url(data:) @import (no <link>, stripped from body)', () => {
+  applyTheme({ css: '@import url(data:text/css,x);:root{}', bg: '#000000' }, ctx())
+  assert.equal(dom.fontLinks.length, 0)
+  assert.ok(!dom.styleNodes.get('mobius-theme').textContent.includes('@import'))
+})
+
+test('applyTheme drops a no-url() "javascript:" @import (no <link>, stripped)', () => {
+  applyTheme({ css: '@import "javascript:alert(1)";:root{}', bg: '#000000' }, ctx())
+  assert.equal(dom.fontLinks.length, 0)
+  assert.ok(!dom.styleNodes.get('mobius-theme').textContent.includes('@import'))
+})
+
+test('applyTheme handles all four @import spellings in one CSS body', () => {
+  // quoted url(), bare url(), no-url() quoted, and a bare url(data:) that the
+  // allowlist must drop — all stripped from the body, only the http(s) ones
+  // become <link>.
+  applyTheme({ css: "@import url('https://q.example/a.css');@import url(https://b.example/b.css);@import \"https://c.example/c.css\";@import url(data:text/css,x);:root{}", bg: '#000000' }, ctx())
+  const hrefs = dom.fontLinks.map(l => l.href).sort()
+  assert.deepEqual(hrefs, ['https://b.example/b.css', 'https://c.example/c.css', 'https://q.example/a.css'])
+  assert.ok(!dom.styleNodes.get('mobius-theme').textContent.includes('@import'))
 })
 
 test('applyTheme removes prior font links before adding new ones', () => {
@@ -207,6 +264,26 @@ test('applyTheme persists both mobius-theme and mobius-theme-bg', () => {
   applyTheme({ css: ':root{--bg:#f0eeeb;}', bg: '#f0eeeb' }, ctx())
   assert.deepEqual(JSON.parse(store.getItem('mobius-theme')), { bg: '#f0eeeb', mode: 'light' })
   assert.equal(store.getItem('mobius-theme-bg'), '#f0eeeb')
+})
+
+test('applyTheme does NOT persist inside an iframe (window.parent !== window) — the drawer-bleed fix', () => {
+  // The app-frame is a SAME-ORIGIN iframe sharing localStorage with the shell.
+  // With its empty theme slot it would resolve the dark default and clobber the
+  // owner's real theme in the shared key, which the shell re-reads at boot
+  // (recoloring the drawer). Only the top-level shell may persist.
+  const saved = Object.getOwnPropertyDescriptor(globalThis, 'window')
+  try {
+    globalThis.window = { parent: {} }              // iframe: parent is the shell, not self
+    applyTheme({ css: ':root{--bg:#0d0d0d;}', bg: '#0d0d0d', mode: 'dark' }, ctx())
+    assert.equal(store.getItem('mobius-theme'), null, 'iframe must NOT write the shared theme key')
+    assert.equal(store.getItem('mobius-theme-bg'), null)
+    const top = {}; top.parent = top               // top-level shell: parent === self
+    globalThis.window = top
+    applyTheme({ css: ':root{--bg:#f0eeeb;}', bg: '#f0eeeb', mode: 'light' }, ctx())
+    assert.equal(store.getItem('mobius-theme-bg'), '#f0eeeb', 'top-level shell persists')
+  } finally {
+    if (saved) Object.defineProperty(globalThis, 'window', saved); else delete globalThis.window
+  }
 })
 
 // --- resolveTheme: precedence -----------------------------------------
