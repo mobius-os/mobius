@@ -52,6 +52,14 @@ class Settings(BaseSettings):
   # it runs its own search) is the main reason this path is off by default.
   auto_memory_search_timeout: int = 60
 
+  # Ensure every settled chat has a current per-chat memory note. The agent is
+  # told to maintain chats/<id>/index.md every turn but does so VARIABLY; when a
+  # turn settles and the agent left the note untouched, the platform fires a
+  # tool-free summarizer (scripts/chat_note.py) to write it. ON by default: it
+  # runs at TURN-END (after the reply is sent → no user-facing latency) and only
+  # when the agent skipped the note, so the cost is bounded to the skipped turns.
+  ensure_chat_note: bool = True
+
   model_config = SettingsConfigDict(env_file=".env")
 
   @model_validator(mode="after")
