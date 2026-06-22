@@ -88,6 +88,23 @@ RUN pip install --no-cache-dir --no-deps \
       'openai-codex @ git+https://github.com/openai/codex.git@a75c443fdb64db48c3cf4bdb247c7ee52c0144c9#subdirectory=sdk/python' \
     && pip install --no-cache-dir 'openai-codex-cli-bin==0.134.0'
 
+# Capture each installed agent CLI's npm publish date into a small JSON the
+# Settings row reads (routes/settings._cli_release_dates), keyed by the
+# version actually installed above. Done at build time so a CLI pin bump
+# refreshes the date automatically — no hand-maintained map, no test to
+# satisfy. Best effort: if the npm registry is unreachable the file is left
+# empty and the Settings row simply shows the bare version, never an error.
+RUN node -e "const cp=require('child_process'),fs=require('fs');\
+const want=['@anthropic-ai/claude-code','@openai/codex'];\
+let installed={};\
+try{installed=(JSON.parse(cp.execSync('npm ls -g --depth=0 --json',{stdio:['ignore','pipe','ignore']}).toString()).dependencies)||{};}catch(e){}\
+const out={};\
+for(const name of want){const v=installed[name]&&installed[name].version;if(!v)continue;\
+try{const t=JSON.parse(cp.execSync('npm view '+name+'@'+v+' time --json',{stdio:['ignore','pipe','ignore']}).toString());if(t&&t[v])out[v]=String(t[v]).slice(0,10);}catch(e){}}\
+fs.writeFileSync('/app/cli-release-dates.json',JSON.stringify(out));\
+console.log('cli-release-dates.json:',JSON.stringify(out));" \
+    || echo '{}' > /app/cli-release-dates.json
+
 COPY backend/app ./app/
 COPY backend/scripts ./scripts/
 COPY skill/ ./skill/
