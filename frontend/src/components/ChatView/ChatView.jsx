@@ -1522,6 +1522,110 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     }
   }
 
+  // Re-entry guard for handleSteer, peer of handlingStopRef. Two rapid
+  // taps on the fast-forward button would otherwise both snapshot the
+  // same queue and both POST a force_steer for the same ts → the second
+  // POST's consume_pending_ts no longer matches pending (the first
+  // already consumed them) and comes back not_steered, but the optimistic
+  // double-fire is still wasteful. Synchronous flip at entry, cleared in
+  // finally.
+  const handlingSteerRef = useRef(false)
+
+  // STEER (fast-forward): inject the queued messages into the LIVE turn
+  // at the next natural boundary, instead of hard-stopping (handleStop)
+  // or waiting for turn-end (the default queue drain). Mirrors handleStop's
+  // structure — re-entry guard, snapshot-before-await — but never
+  // interrupts the running turn. The backend force-steers (bypassing the
+  // steer_enabled opt-in) for BOTH providers; on success the steered
+  // message lands in the transcript and renders inline via the
+  // `steered_into_turn` SSE event (onSteeredIntoTurn above), so we just
+  // drop those rows from the local tray.
+  async function handleSteer() {
+    if (handlingSteerRef.current) return
+    handlingSteerRef.current = true
+    try {
+      const snapshot = pendingQueue.pendingMessagesRef.current
+      // Only entries with a real numeric SERVER ts can be force-steered:
+      // _force_steer_matches_pending compares consume_pending_ts against
+      // chat.pending_messages[].ts, so an optimistic-only entry whose
+      // queue-POST hasn't been server-acked (its ts is a client Date.now(),
+      // not the server's) would make the match fail. We take the
+      // simpler-correct option: only steer when EVERY queued entry is
+      // serverTs-confirmed (usePendingQueue sets that flag on the
+      // server-origin / swapOptimisticTs / hydrate paths). The button gate
+      // (canSteer below) keeps the fast-forward hidden until then, so this
+      // is belt-and-suspenders — if a stray optimistic entry slips in, bail
+      // and leave the queue intact (it drains at turn-end as usual).
+      const allServerConfirmed = snapshot.length > 0 && snapshot.every(
+        m => typeof m.ts === 'number' && m.serverTs === true,
+      )
+      if (!allServerConfirmed) return
+
+      // Build content EXACTLY as the backend expects: the non-empty
+      // trimmed contents joined by "\n\n", in pending order. This must
+      // byte-match _force_steer_matches_pending's `expected` or the
+      // request is rejected (not_steered). consume_pending_ts is every
+      // snapshot entry's ts (the backend selects pending rows by this set
+      // and rebuilds the same join over them).
+      const steerTexts = snapshot
+        .map(m => (m.content || '').trim())
+        .filter(Boolean)
+      const content = steerTexts.join('\n\n')
+      const consumePendingTs = snapshot.map(m => m.ts)
+      // De-dupe attachments by name, exactly like handleStop/resolveStopResend.
+      const seenNames = new Set()
+      const attachments = []
+      for (const m of snapshot) {
+        for (const a of (m.attachments || [])) {
+          if (a && a.name && !seenNames.has(a.name)) {
+            seenNames.add(a.name)
+            attachments.push(a)
+          }
+        }
+      }
+      if (!content) return
+
+      try {
+        const result = await streamSend(content, attachments, {
+          forceSteer: true,
+          consumePendingTs,
+        })
+        if (result?.status === 'steered') {
+          // The steered rows now render inline (onSteeredIntoTurn promotes
+          // them from the SSE event + transcript). Drop them from the local
+          // tray. Reconcile against the server's authoritative remaining
+          // queue when present, else remove exactly the steered ts.
+          if (Array.isArray(result.pending_messages)) {
+            pendingQueue.hydrate(result.pending_messages)
+          } else {
+            for (const ts of consumePendingTs) pendingQueue.cancelByTs(ts)
+          }
+        }
+        // not_steered (the turn closed between the gate and the POST) or any
+        // other status: leave the queue intact. The backend kept the
+        // messages queued and they drain at turn-end — surface nothing
+        // scary, the tray simply stays until the natural drain.
+      } catch {
+        // Network/POST error — leave the queue intact for the turn-end drain.
+      }
+    } finally {
+      handlingSteerRef.current = false
+    }
+  }
+
+  // Whether the fast-forward (steer) affordance can fire right now: a turn
+  // is streaming, there is at least one queued message, and every queued
+  // entry is serverTs-confirmed (see allServerConfirmed in handleSteer for
+  // why optimistic-only entries can't be force-steered). When false but
+  // messages ARE queued, the bar keeps the Stop button — the user can still
+  // hard-stop, and can clear the queue via the tray's X (which reverts to
+  // plain Stop once empty). Stop is never silently removed.
+  const canSteer = sending
+    && pendingQueue.pendingMessages.length > 0
+    && pendingQueue.pendingMessages.every(
+      m => typeof m.ts === 'number' && m.serverTs === true,
+    )
+
   const hasMore = offset > 0
   // Empty-state is the "I have nothing to show because nothing happened
   // yet" view. If the initial chat fetch errored, we have no idea
@@ -1790,6 +1894,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           listeningRef={listeningRef}
           onToggleVoice={toggleVoice}
           onStop={handleStop}
+          onSteer={handleSteer}
+          canSteer={canSteer}
           offline={!online}
           pendingFiles={pendingFiles}
           onAddFiles={addFiles}
