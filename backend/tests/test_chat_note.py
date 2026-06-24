@@ -147,6 +147,34 @@ def test_clean_note_output_preserves_human_label_inside_body():
   assert cleaned.endswith("- intent: debug")
 
 
+def test_sync_title_only_patches_from_note_without_summarizing(tmp_path, monkeypatch):
+  # --sync-title reads the note's gist and PATCHes the title, NO summarizer run.
+  cn = _load_chat_note()
+  mem = tmp_path / "shared" / "memory"
+  monkeypatch.setattr(cn, "MEMORY_DIR", mem)
+  patched = {}
+  monkeypatch.setattr(cn, "_patch_title",
+                      lambda cid, desc: patched.update(cid=cid, desc=desc))
+  note = mem / "chats" / "c9" / "index.md"
+  note.parent.mkdir(parents=True)
+  note.write_text("---\ntype: chat\ndescription: building a brew timer\n---\n## Summary\nx")
+  monkeypatch.setattr(cn.sys, "argv", ["chat_note.py", "c9", "--sync-title"])
+  assert cn.run() == 0
+  assert patched == {"cid": "c9", "desc": "building a brew timer"}
+  # the note is untouched (the summarizer never ran)
+  assert "building a brew timer" in note.read_text()
+
+
+def test_sync_title_only_noop_when_note_absent(tmp_path, monkeypatch):
+  cn = _load_chat_note()
+  monkeypatch.setattr(cn, "MEMORY_DIR", tmp_path / "shared" / "memory")
+  called = []
+  monkeypatch.setattr(cn, "_patch_title", lambda *a: called.append(a))
+  monkeypatch.setattr(cn.sys, "argv", ["chat_note.py", "nope", "--sync-title"])
+  assert cn.run() == 0
+  assert called == []
+
+
 def test_clean_note_output_preserves_horizontal_rule_in_body():
   # A bare `---` horizontal rule in the body is NOT a repeated frontmatter
   # block (its next line isn't a frontmatter key) — content after it stays.
