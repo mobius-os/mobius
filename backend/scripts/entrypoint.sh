@@ -265,6 +265,14 @@ else
   chown -R mobius:mobius /app/app /app/scripts 2>/dev/null || true
 fi
 
+# Record which source uvicorn will actually serve from, so GET /api/version can
+# report the SERVED backend (not just the image build_sha — they disagree when
+# /data/platform diverged or a deploy skipped the platform sync). World-readable
+# so mobius (which runs uvicorn) reads it; rewritten every boot.
+if [ "$_use_platform" -eq 1 ]; then echo platform > /tmp/serving-source
+else echo baked > /tmp/serving-source; fi
+chmod 644 /tmp/serving-source 2>/dev/null || true
+
 # -----------------------------------------------------------------------
 # PHASE 2: Git tracking for /data/platform
 #

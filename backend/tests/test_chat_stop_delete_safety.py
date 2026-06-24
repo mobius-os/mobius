@@ -57,3 +57,39 @@ def test_stop_chat_for_timeout_leaves_chat_running():
   assert handle.stop_calls == 1
   # The handle was NOT unregistered — is_alive reports True.
   assert registry.is_alive(chat_id) is True
+
+
+def test_stop_on_orphaned_run_after_restart_succeeds(client, auth, db):
+  """Stop on an orphaned run — run_status stuck 'running' with an EMPTY
+  registry (the exact shape a prior restart leaves: the in-memory registry
+  is gone but the durable marker survives) — must succeed gracefully: clear
+  the stuck marker + the queue, return success, NOT error or strand the chat.
+
+  This is the no-handles arm of stop_chat_for: with no live handle there is
+  no runner teardown to defer to, so the marker is cleared immediately."""
+  from datetime import UTC, datetime
+
+  from app import models
+
+  chat_id = "orphan-after-restart"
+  c = models.Chat(
+    id=chat_id, title="t",
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending_messages=[{"role": "user", "content": "queued", "ts": 2}],
+    run_status="running",
+    run_started_at=datetime.now(UTC),
+  )
+  db.add(c)
+  db.commit()
+  # No registry handle — exactly the post-restart orphan shape.
+  assert chat_mod.is_chat_running(chat_id) is False
+
+  r = client.post("/api/chat/stop", json={"chat_id": chat_id}, headers=auth)
+  assert r.status_code == 200, r.text
+  assert r.json()["stopped"] is True, "Stop on an orphan must report success"
+
+  db.expire_all()
+  row = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+  assert row.run_status is None, "the orphaned 'running' marker must be cleared"
+  assert row.run_started_at is None
+  assert chat_mod.is_chat_running(chat_id) is False

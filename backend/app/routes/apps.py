@@ -17,6 +17,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import activity, app_git, fs_locks, icon_cache, models, schemas, theme
@@ -1735,3 +1736,102 @@ async def validate_app(
     "valid": len(issues) == 0,
     "issues": issues,
   }
+
+
+
+# ---- Publish a project's built static site (feature 136) ----------------
+_PUBLISH_PROJECT_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_PUBLISH_TOKEN_RE = re.compile(r"^[a-f0-9]{16,64}$")
+
+
+class PublishRequest(BaseModel):
+  project_id: str | None = None
+
+
+def _publish_paths(settings, app, project_id: str | None):
+  storage = Path(settings.data_dir) / "apps" / str(app.id)
+  base = storage / "projects" / project_id if project_id else storage
+  return base / "build" / "site", base / "build" / "publish-token.txt"
+
+
+@router.post("/{app_id}/publish", dependencies=[Depends(reject_cross_site)])
+async def publish_app_site(
+  app_id: int,
+  body: PublishRequest,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Publish a project's built static site to a stable token URL.
+
+  Snapshots <storage>/[projects/<pid>/]build/site/ to
+  <data_dir>/published/<token>/ and returns /sites/<token>/. The token is
+  stable per project (kept in the project's build/ dir) so re-publishing
+  updates the SAME URL. Owner or the app's own token only.
+  """
+  if principal.app_id is not None and principal.app_id != app_id:
+    raise HTTPException(403, "An app may only publish its own site.")
+  project_id = (body.project_id or "").strip() or None
+  if project_id is not None and not _PUBLISH_PROJECT_RE.match(project_id):
+    raise HTTPException(422, "invalid project_id")
+  app = live_app_or_404(db, app_id)
+  settings = get_settings()
+  site_dir, token_file = _publish_paths(settings, app, project_id)
+  if not site_dir.is_dir() or not any(site_dir.iterdir()):
+    raise HTTPException(400, "No built site to publish — build the project first.")
+  token = None
+  try:
+    existing = token_file.read_text(encoding="utf-8").strip()
+    if _PUBLISH_TOKEN_RE.match(existing):
+      token = existing
+  except OSError:
+    pass
+  if not token:
+    token = uuid.uuid4().hex
+    token_file.parent.mkdir(parents=True, exist_ok=True)
+    token_file.write_text(token, encoding="utf-8")
+  dest = Path(settings.data_dir) / "published" / token
+
+  def _snapshot():
+    # Fail closed on symlinks: copytree would otherwise follow a symlink in the
+    # (app-controlled) build output and copy its TARGET into the PUBLIC snapshot,
+    # exposing arbitrary files at /sites/<token>/. Reject any symlink, and copy
+    # with symlinks=True as defense in depth (the serve route's resolve() then
+    # confines anything that slips through).
+    if site_dir.is_symlink() or any(p.is_symlink() for p in site_dir.rglob("*")):
+      raise HTTPException(400, "Built site contains symlinks; refusing to publish.")
+    if dest.exists():
+      shutil.rmtree(dest, ignore_errors=True)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(site_dir, dest, symlinks=True)
+
+  await asyncio.to_thread(_snapshot)
+  return {"token": token, "url": f"/sites/{token}/"}
+
+
+@router.delete("/{app_id}/publish", dependencies=[Depends(reject_cross_site)])
+async def unpublish_app_site(
+  app_id: int,
+  project_id: str | None = None,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Take a published site down: remove its snapshot + the stored token."""
+  if principal.app_id is not None and principal.app_id != app_id:
+    raise HTTPException(403, "An app may only unpublish its own site.")
+  if project_id and not _PUBLISH_PROJECT_RE.match(project_id):
+    raise HTTPException(422, "invalid project_id")
+  app = live_app_or_404(db, app_id)
+  settings = get_settings()
+  _site, token_file = _publish_paths(settings, app, project_id or None)
+  try:
+    token = token_file.read_text(encoding="utf-8").strip()
+  except OSError:
+    return {"ok": True}
+  if _PUBLISH_TOKEN_RE.match(token or ""):
+    dest = Path(settings.data_dir) / "published" / token
+    await asyncio.to_thread(shutil.rmtree, dest, ignore_errors=True)
+  try:
+    token_file.unlink()
+  except OSError:
+    pass
+  return {"ok": True}

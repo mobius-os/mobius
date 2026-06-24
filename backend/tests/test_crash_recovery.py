@@ -35,8 +35,9 @@ def test_run_status_column_defaults_none(db, chat):
 
 def test_startup_reconciles_stale_running_chats(db):
   """A chat marked running with an empty registry is stale (its process
-  died mid-turn) and must be reconciled: marker cleared, pending
-  dropped, transcript resolved."""
+  died mid-turn) and must be reconciled: marker cleared, transcript
+  resolved, and the queue PRESERVED so a restart doesn't discard the
+  user's queued messages (owner-reported bug)."""
   _make_chat(
     db, "stale",
     run_status="running",
@@ -52,7 +53,13 @@ def test_startup_reconciles_stale_running_chats(db):
   row = db.query(models.Chat).filter(models.Chat.id == "stale").first()
   assert row.run_status is None, "stale running marker must be cleared"
   assert row.run_started_at is None
-  assert row.pending_messages == [], "stranded queued messages must be dropped"
+  # The queue is PRESERVED across the restart — clearing only the run
+  # marker drops the chat into the markerless-queue state that self-heals
+  # on the next user POST's stale-pending drain. It is NOT re-run as part
+  # of the interrupted turn (whose own message is already in `messages`).
+  assert row.pending_messages == [
+    {"role": "user", "content": "and another", "ts": 1}
+  ], "queued messages must survive a restart (not be dropped)"
   # The interrupted turn is surfaced as an assistant message so the
   # user's send isn't left unanswered.
   assert row.messages[-1]["role"] == "assistant"
@@ -60,8 +67,10 @@ def test_startup_reconciles_stale_running_chats(db):
   assert err_blocks, "an interrupted-turn error block must be appended"
   # `message` is the field MsgContent.jsx + events.process_event read.
   assert "interrupted" in err_blocks[0]["message"].lower()
-  # The dropped-queue count is surfaced to the user.
+  # The still-queued count is surfaced to the user (not "cleared").
   assert "1 queued message" in err_blocks[0]["message"]
+  assert "still queued" in err_blocks[0]["message"]
+  assert "cleared" not in err_blocks[0]["message"]
 
 
 def test_reconcile_finalizes_running_tool_block(db):
@@ -256,3 +265,55 @@ def test_reconcile_warns_on_markerless_pending_queue_but_leaves_it(db, caplog):
   assert any(
     "markerless pending queue" in r.getMessage() for r in caplog.records
   ), "an accumulating markerless queue must be surfaced as a warning"
+
+
+def test_reconcile_preserved_queue_drains_on_next_post(db):
+  """End-to-end of the owner-reported fix: a restart preserves the queue
+  (reconcile leaves pending_messages set + run_status=None), and the
+  preserved queue then drains via the same promote path the next user
+  POST's stale-pending self-heal runs. This proves the queue isn't just
+  retained but is actually recoverable — the user's queued work survives
+  a restart and gets answered on the next interaction."""
+  import asyncio
+
+  from app import chat_queue
+
+  _make_chat(
+    db, "restart-then-drain",
+    run_status="running",
+    run_started_at=datetime.now(UTC),
+    session_id="sess-restart",
+    messages=[{"role": "user", "content": "the interrupted turn", "ts": 1}],
+    pending_messages=[
+      {"role": "user", "content": "queued one", "ts": 2},
+      {"role": "user", "content": "queued two", "ts": 3},
+    ],
+  )
+
+  # 1. Restart reconciliation: marker cleared, queue PRESERVED.
+  chat_mod.reconcile_interrupted_chats(db)
+  db.expire_all()
+  row = db.query(models.Chat).filter(
+    models.Chat.id == "restart-then-drain"
+  ).first()
+  assert row.run_status is None
+  assert [m["content"] for m in row.pending_messages] == [
+    "queued one", "queued two"
+  ], "the queue must survive the restart"
+
+  # 2. The next POST's stale-pending self-heal drains the head (here the
+  #    whole queue, collapsed) — the same promote path send_message runs
+  #    when `not is_chat_running and chat.pending_messages`.
+  async def go():
+    return await chat_queue.promote_pending_messages_locked(
+      db, "restart-then-drain", "rt-restart",
+    )
+
+  next_msgs, promoted, sid = asyncio.run(go())
+  assert promoted is not None
+  assert promoted["content"] == "queued one\nqueued two", (
+    "the preserved queue collapses + promotes on the next interaction"
+  )
+  assert sid == "sess-restart", "the session resumes (no context loss)"
+  db.refresh(row)
+  assert row.pending_messages == [], "the queue drained, nothing lost"

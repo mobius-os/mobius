@@ -24,6 +24,7 @@
 #   scripts/deploy-prod.sh --allow-stale    # deliberate rollback: deploy a prod checkout BEHIND origin/main
 #                                           # (bypasses the behind-origin/main hard block — only for an
 #                                           #  intentional rollback to an older main; you are reverting newer work)
+#   scripts/deploy-prod.sh --force-now      # skip the owner-presence gate (deploy even mid-conversation)
 #
 # Env knobs (seconds; both default 120):
 #   PREFLIGHT_WAIT_SECONDS  how long the scratch-container preflight waits for boot
@@ -41,6 +42,11 @@ set -euo pipefail
 TARGET="prod"
 SKIP_BUILD=0
 ASSUME_YES=0
+# Owner-presence gate: before a prod recreate/restart (which 502s any live turn
+# and can drop the owner's in-flight message), wait for an active turn to finish.
+# --force-now / FORCE_NOW=1 skips it; PRESENCE_WAIT_SECONDS caps the wait.
+FORCE_NOW="${FORCE_NOW:-0}"
+PRESENCE_WAIT_SECONDS="${PRESENCE_WAIT_SECONDS:-90}"
 CHECK_ONLY=0
 # Default-refuse to deploy a commit that isn't on origin/main: a deploy from an
 # unpushed commit ships code the next deploy-from-main silently REVERTS (the
@@ -83,7 +89,7 @@ CRASH_RESTART_THRESHOLD="${CRASH_RESTART_THRESHOLD:-2}"
 # health probe is skipped entirely, and the deploy false-fails into an instant
 # rollback that looks like a boot failure. Reject anything that isn't a bare
 # positive integer up front, where the operator can see and fix it (card 116).
-for _knob in PREFLIGHT_WAIT_SECONDS CUTOVER_WAIT_SECONDS; do
+for _knob in PREFLIGHT_WAIT_SECONDS CUTOVER_WAIT_SECONDS PRESENCE_WAIT_SECONDS; do
   case "${!_knob}" in
     ''|*[!0-9]*|0)
       printf 'deploy-prod: %s=%q must be a positive integer (seconds)\n' \
@@ -102,6 +108,7 @@ for arg in "$@"; do
     --check)       CHECK_ONLY=1 ;;
     --allow-unpushed) ALLOW_UNPUSHED=1 ;;
     --allow-stale) ALLOW_STALE=1 ;;
+    --force-now)   FORCE_NOW=1 ;;
     -h|--help)
       sed -n '1,/^set -euo pipefail/p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
@@ -183,6 +190,52 @@ confirm_yes() {
     ''|y|yes) return 0 ;;
     *)        return 1 ;;
   esac
+}
+
+# Is the owner mid-conversation? True iff /api/debug/status shows any SDK client,
+# SDK session, starting chat, or running broadcast. Probed from INSIDE the
+# container (:8000 isn't host-published) with the owner service token, bounded by
+# `timeout` + curl --max-time so a hung backend can NEVER wedge the deploy. Any
+# probe failure — unreachable, slow, OR auth (a stale service-token after a
+# token-epoch revocation returns 401 with no fields) — returns "not in flight":
+# the gate is politeness (durable replay is the real guarantee), so it fails open
+# rather than block on an unverifiable probe.
+owner_turn_in_flight() {
+  timeout 6 docker exec "$CONTAINER" sh -c '
+    tok=$(cat /data/service-token.txt 2>/dev/null) || exit 1
+    curl -s --connect-timeout 1 --max-time 3 -H "Authorization: Bearer $tok" http://localhost:8000/api/debug/status 2>/dev/null
+  ' 2>/dev/null | python3 -c '
+import sys, json
+try:
+  d = json.load(sys.stdin)
+except Exception:
+  sys.exit(1)
+n = (len(d.get("active_sdk_clients") or [])
+     + len(d.get("active_sdk_sessions") or [])
+     + len(d.get("starting") or [])
+     + sum(1 for b in (d.get("broadcasts") or []) if isinstance(b, dict) and b.get("running")))
+sys.exit(0 if n > 0 else 1)
+' 2>/dev/null
+}
+
+# Defer a disruptive prod action until the owner's live turn finishes. Advisory:
+# waits up to PRESENCE_WAIT_SECONDS, then aborts with a clear --force-now hint —
+# never an irreversible block ("code empowers, does not police").
+presence_gate() {
+  [ "$TARGET" = "prod" ] || return 0
+  if [ "$FORCE_NOW" = "1" ]; then warn "--force-now: skipping owner-presence gate before $1"; return 0; fi
+  local waited=0
+  while owner_turn_in_flight; do
+    if [ "$waited" -ge "$PRESENCE_WAIT_SECONDS" ]; then
+      warn "owner still has a live turn after ${PRESENCE_WAIT_SECONDS}s — $1 would 502 it (and may drop the in-flight message)."
+      warn "Wait for the turn to finish, or re-run with --force-now to proceed anyway."
+      fail "deferred: $1 (owner turn in flight)"; exit 1
+    fi
+    [ "$waited" = 0 ] && info "owner has a live turn — deferring $1 up to ${PRESENCE_WAIT_SECONDS}s for it to finish…"
+    sleep 5; waited=$((waited + 5))
+  done
+  [ "$waited" -gt 0 ] && ok "owner turn finished — proceeding with $1"
+  return 0
 }
 
 source_env_file() {
@@ -291,6 +344,15 @@ served_bundle() {
 served_sha() {
   docker exec "$CONTAINER" sh -c "curl -fsS '${INTERNAL_BASE}/api/version' 2>/dev/null" \
     | sed -n 's/.*"sha":"\([^"]*\)".*/\1/p' \
+    | head -n1 || true
+}
+
+# A single field from /api/version (string OR bool). Used to verify the SERVED
+# /data/platform identity (serving_source / platform_dirty) — distinct from the
+# IMAGE build sha above (`sha`), which they can disagree with. Empty if missing.
+served_version_field() {  # $1 = json key
+  docker exec "$CONTAINER" sh -c "curl -fsS '${INTERNAL_BASE}/api/version' 2>/dev/null" \
+    | sed -n "s/.*\"$1\":\"\{0,1\}\([^\",}]*\)\"\{0,1\}.*/\1/p" \
     | head -n1 || true
 }
 
@@ -441,6 +503,12 @@ fi
 # digest looks unchanged. A tag-succeeds-then-recreate-fails path can leave
 # the tag pointing at the old image while the broken container still runs —
 # hence the loud failure message for manual follow-up.
+#
+# Deliberately NOT presence-gated: rollback only fires when the cutover already
+# FAILED its health probe, i.e. prod is broken and serving nothing. Waiting for
+# an owner turn to drain there would prolong an outage; restoring the last-good
+# image immediately is the correct emergency action. presence_gate() guards the
+# routine cutover/restart paths, never this recovery path.
 attempt_rollback() {
   if [ -z "$PREV_IMAGE" ] || [ -z "$IMAGE_TAG" ]; then
     fail "no previous image captured — cannot auto-roll back; recover ${CONTAINER} manually."
@@ -795,6 +863,7 @@ fi
 
 # ── step 2: recreate container with the new image ──────────────────────
 step "[2/4] docker compose up -d (recreates ${CONTAINER})"
+presence_gate "cutover (recreate ${CONTAINER})"
 if external_prod_caddy_running; then
   info "external deploy-caddy-1 owns ports 80/443; updating app service only"
   docker rm -f "${CONTAINER}-caddy-1" >/dev/null 2>&1 || true
@@ -935,6 +1004,7 @@ esac
 # main.py resolves _static_dir at module load time, so the freshly
 # rebuilt /data/shell/dist isn't actually served until uvicorn
 # restarts. See "Shell rebuild + static-dir resolution" in CLAUDE.md.
+presence_gate "post-shell restart of ${CONTAINER}"
 intent "docker restart ${CONTAINER}  # so main.py re-resolves _static_dir"
 docker restart "$CONTAINER" >/dev/null
 info "waiting up to ${CUTOVER_WAIT_SECONDS}s for ${INTERNAL_BASE}/api/health after restart"
@@ -999,6 +1069,80 @@ else
   # --skip-build: we didn't build, so don't compare against a possibly stale,
   # shell-inherited BUILD_SHA — just report what's serving.
   info "backend sha: ${served:-<none>} (no build this run; not compared)"
+fi
+
+# ── served PLATFORM identity check ─────────────────────────────────────
+# The backend-sha block above reads the `sha` field = settings.build_sha = the
+# IMAGE build sha, which advances on EVERY recreate regardless of whether
+# /data/platform actually synced. That is the false-green this whole step-3b
+# dance exists to close: a container on the new image can still SERVE the
+# previous deploy's Python out of /data/platform. So consume the SERVED-platform
+# identity (_served_platform_identity → serving_source / platform_dirty /
+# baked_sha in /api/version) and assert it matches the step-3b sync decision.
+# Warn-only, never fail: the process is already health-+ready-checked above, and
+# (like the origin/main check below) this is a "what's live isn't what you think"
+# nudge, not a runtime fault.
+if [ "$BUILT_THIS_RUN" = "1" ]; then
+  serving_source=$(served_version_field serving_source)
+  platform_dirty=$(served_version_field platform_dirty)
+  baked_served=$(served_version_field baked_sha)
+  # served_version_field returns EMPTY on a failed/unreachable /api/version probe
+  # and the literal "null" for a JSON null field — normalize both so neither is
+  # mistaken for a real value. An empty serving_source means we could not read the
+  # served identity AT ALL; we must not then print a green "verified" (that was a
+  # false-green: an unreachable probe falling through every guard into the ok arm).
+  case "$baked_served" in null|unknown) baked_served="" ;; esac
+  if [ -z "$serving_source" ] || [ "$serving_source" = "unknown" ]; then
+    warn "could not read the served-platform identity from ${INTERNAL_BASE}/api/version"
+    warn "(probe failed, or this image predates the serving-source stamp) — the served"
+    warn "backend was NOT provenance-verified. If this was a platform-affecting deploy,"
+    warn "confirm what's serving by hand."
+  else
+    case "$platform_state" in
+      clean|missing)
+        # We fast-forwarded /data/platform to the new baked floor (clean) or the
+        # entrypoint created it fresh from that floor (missing). Either way the
+        # served platform MUST now be the floor: source=platform, not dirty, and
+        # the stamped .baked-sha == the commit just built (recovery_restore.sh
+        # stamps it; settings.build_sha and .baked-sha are both the BUILD_SHA arg).
+        if [ "$serving_source" = "baked" ]; then
+          warn "served platform: serving_source=baked — the backend is serving the"
+          warn "image floor, NOT /data/platform. The platform symlink didn't take, so"
+          warn "the served Python may not be this build. Investigate the entrypoint."
+        elif [ -n "$baked_served" ] && [ "$baked_served" != "$BUILD_SHA" ]; then
+          warn "served platform .baked-sha ${baked_served:0:18}… != built ${BUILD_SHA:0:18}…"
+          warn "the /data/platform sync didn't reach the served process — prod is"
+          warn "serving a STALE backend floor. Re-run the platform-baked restore."
+        elif [ "$platform_dirty" = "true" ]; then
+          warn "served platform reports dirty after a clean fast-forward — unexpected"
+          warn "uncommitted edits in /data/platform (a sibling mid-write?). Investigate."
+        elif [ -z "$baked_served" ]; then
+          # source=platform + clean, but .baked-sha is unstamped (e.g. BUILD_SHA was
+          # unknown at the restore) — we know WHERE it serves from but can't compare
+          # the sha, so don't claim a match we didn't make.
+          ok "served platform: source=platform, clean (baked-sha unstamped — not compared)"
+        else
+          ok "served platform: source=platform, baked-sha matches build, clean"
+        fi
+        ;;
+      diverged)
+        if [ "$serving_source" = "baked" ]; then
+          # platform_state=diverged but the container is serving the BAKED floor:
+          # the agent's diverged tree failed the entrypoint's boot sanity check
+          # (e.g. a syntax error in app/) and was bypassed. Truthful + actionable —
+          # prod is on the floor and the agent's edits are NOT live.
+          warn "served platform: /data/platform is DIVERGED but the container fell back"
+          warn "to the baked floor (serving_source=baked) — the agent's edits failed the"
+          warn "boot sanity check and are NOT live. Fix or discard them in /data/platform."
+        else
+          # The diverged tree IS serving (source=platform). Expected — we preserved
+          # agent edits at step 3b (the reversibility contract). Report, don't fault.
+          info "served platform: diverged (agent edits preserved by design) — NOT on the"
+          info "new baked floor. Ask the in-product agent to merge /app/app-baked when ready."
+        fi
+        ;;
+    esac
+  fi
 fi
 
 # ── served-sha == origin/main assertion (prod only) ────────────────────

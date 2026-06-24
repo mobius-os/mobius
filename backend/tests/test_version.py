@@ -69,3 +69,98 @@ def test_version_shell_sha_reflects_marker(client):
     assert body["shell_sha"] == "deadbeefcafe"
   finally:
     marker.unlink(missing_ok=True)
+
+
+# ── served-platform identity ────────────────────────────────────────────
+# The `sha` field is the IMAGE build sha, which advances on every recreate
+# whether or not /data/platform synced. deploy-prod.sh's verify block now
+# consumes these four fields to catch the "deployed but never served" false-
+# green (a new image still serving the previous deploy's /data/platform Python).
+# These pin the field shapes the deploy keys on: string serving_source, the
+# .baked-sha passthrough, and platform_sha/platform_dirty only when serving
+# from the platform layer.
+
+_SENTINEL = "/tmp/serving-source"
+
+
+def _baked_sha_path():
+  from pathlib import Path
+
+  from app.config import get_settings
+
+  return Path(get_settings().data_dir) / "platform" / ".baked-sha"
+
+
+def test_version_always_includes_served_platform_keys(client):
+  # The deploy reads these unconditionally; a missing key would make the
+  # extractor return empty and silently disable the served-platform assertion.
+  body = client.get("/api/version").json()
+  for key in ("serving_source", "platform_sha", "platform_dirty", "baked_sha"):
+    assert key in body
+
+
+def test_served_platform_degrades_when_unstamped(client):
+  # No sentinel + no .baked-sha (a plain instance) ⇒ everything degrades to a
+  # serializable default rather than raising or 500-ing the endpoint.
+  import os
+
+  baked = _baked_sha_path()
+  baked.unlink(missing_ok=True)
+  existed = os.path.exists(_SENTINEL)
+  prior = None
+  if existed:
+    with open(_SENTINEL, encoding="utf-8") as fh:
+      prior = fh.read()
+    os.remove(_SENTINEL)
+  try:
+    body = client.get("/api/version").json()
+    assert body["serving_source"] == "unknown"
+    assert body["platform_sha"] is None
+    assert body["platform_dirty"] is None
+    assert body["baked_sha"] is None
+  finally:
+    if prior is not None:
+      with open(_SENTINEL, "w", encoding="utf-8") as fh:
+        fh.write(prior)
+
+
+def test_served_platform_baked_sha_reflects_file(client):
+  # recovery_restore.sh stamps .baked-sha = BUILD_SHA on a platform-baked
+  # restore; the deploy compares this to the commit it just built.
+  baked = _baked_sha_path()
+  baked.parent.mkdir(parents=True, exist_ok=True)
+  baked.write_text("abc123def456\n", encoding="utf-8")
+  try:
+    body = client.get("/api/version").json()
+    assert body["baked_sha"] == "abc123def456"
+  finally:
+    baked.unlink(missing_ok=True)
+
+
+def test_served_platform_source_reflects_sentinel(client):
+  # The entrypoint writes /tmp/serving-source = platform|baked at boot. When it
+  # says "baked" (image floor, not /data/platform), the git-derived platform_sha
+  # / platform_dirty stay None — they're only meaningful for the platform layer.
+  import os
+
+  existed = os.path.exists(_SENTINEL)
+  prior = None
+  if existed:
+    with open(_SENTINEL, encoding="utf-8") as fh:
+      prior = fh.read()
+  try:
+    with open(_SENTINEL, "w", encoding="utf-8") as fh:
+      fh.write("baked\n")
+    body = client.get("/api/version").json()
+    assert body["serving_source"] == "baked"
+    assert body["platform_sha"] is None
+    assert body["platform_dirty"] is None
+  finally:
+    if prior is not None:
+      with open(_SENTINEL, "w", encoding="utf-8") as fh:
+        fh.write(prior)
+    else:
+      try:
+        os.remove(_SENTINEL)
+      except OSError:
+        pass
