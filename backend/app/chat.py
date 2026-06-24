@@ -2207,6 +2207,7 @@ async def _auto_search_memory(
   # The script imports app.memory_trace / app.memory — put the package root on
   # the path so it resolves the same way the server process does.
   env["PYTHONPATH"] = str(Path(__file__).parent.parent)
+  env["DATA_DIR"] = data_dir  # pin to the gate's tree (see _ensure_chat_note)
   proc = None
   try:
     proc = await asyncio.create_subprocess_exec(
@@ -2277,12 +2278,16 @@ async def _ensure_chat_note(data_dir: str, chat_id: str) -> None:
   if not script.exists() or not chat_id:
     return
   proc = None
+  # Pin the subprocess to the SAME data tree the gate (_chat_note_mtime) checked,
+  # so a non-default settings.data_dir doesn't read one tree and write another.
+  env = dict(os.environ)
+  env["DATA_DIR"] = data_dir
   try:
     proc = await asyncio.create_subprocess_exec(
       "python3", str(script), chat_id,
       stdout=asyncio.subprocess.DEVNULL,
       stderr=asyncio.subprocess.DEVNULL,
-      env=dict(os.environ),
+      env=env,
     )
     await asyncio.wait_for(proc.communicate(), timeout=150)
   except asyncio.TimeoutError:

@@ -130,3 +130,33 @@ def test_clean_note_output_trims_phantom_turn_and_repeat():
   assert cleaned.count("## Summary") == 1
   assert cleaned.endswith("- intent: quick lookup")
   assert cn._looks_like_note(cleaned)
+
+
+def test_clean_note_output_preserves_human_label_inside_body():
+  # A `Human:`-prefixed line in the MIDDLE of the note (a quoted log line) is
+  # real content, not a hallucinated trailing turn — must survive.
+  cn = _load_chat_note()
+  note = (
+    "---\ntype: chat\ndescription: support log\n---\n"
+    "## Summary\nThe partner quoted a log line:\n"
+    "Human: where did my data go\n"
+    "and we traced it.\n\n## Facts & intent\n- intent: debug"
+  )
+  cleaned = cn._clean_note_output(note)
+  assert "Human: where did my data go" in cleaned
+  assert cleaned.endswith("- intent: debug")
+
+
+def test_clean_note_output_preserves_horizontal_rule_in_body():
+  # A bare `---` horizontal rule in the body is NOT a repeated frontmatter
+  # block (its next line isn't a frontmatter key) — content after it stays.
+  cn = _load_chat_note()
+  note = (
+    "---\ntype: chat\ndescription: design notes\n---\n"
+    "## Summary\nfirst part\n\n---\n\nsecond part\n\n"
+    "## Facts & intent\n- intent: design"
+  )
+  cleaned = cn._clean_note_output(note)
+  assert "second part" in cleaned
+  assert "## Facts & intent" in cleaned
+  assert cleaned.endswith("- intent: design")
