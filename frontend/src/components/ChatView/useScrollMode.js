@@ -411,21 +411,50 @@ export default function useScrollMode({
           || (k === 'ANCHOR_AT' && !revealedOnce)) {
         applyMode(scrollEl, modeRef.current)
       } else if (k === 'PIN_USER_MSG') {
-        // Re-pin ONLY when the pinned message's offsetTop SHIFTED since the
-        // last apply — i.e. content ABOVE it grew (a prior turn's image
-        // finished loading, an error/question card rendered). That is the
-        // user-reported "first send works, a later send drifts off the top"
-        // bug. Streaming content BELOW the message leaves offsetTop unchanged,
-        // so this is a no-op during streaming (it does NOT reintroduce the
-        // May-2026 jitter where re-pinning every RO firing yanked the view),
-        // and a user scroll flips the mode away from PIN_USER_MSG so it never
-        // fights manual scrolling.
+        // Re-pin in two cases, both of which leave the message off its
+        // intended top position with no user action:
+        //
+        //   (a) offsetTop SHIFTED since the last apply — content ABOVE the
+        //       message grew (a prior turn's image finished loading, an
+        //       error/question card rendered). The pin target moved; the
+        //       view didn't follow.
+        //
+        //   (b) scrollTop was CLAMPED below the pin target during a layout
+        //       settle — the spacer shrank / scrollHeight dropped between
+        //       the initial apply and now, so the browser clamped the
+        //       scroll position down, leaving the message a chunk BELOW the
+        //       top (the owner-reported "sent it and it only went halfway").
+        //       This is the clamp-fix obligation in CLAUDE.md "Chat UX"
+        //       constraint #2 — already honored for FOLLOW_BOTTOM/ANCHOR_AT,
+        //       missing here. We only act when the target is now reachable
+        //       (scrollHeight grew back enough); re-applying then lands the
+        //       message at the top instead of futilely re-clamping.
+        //
+        // Neither case fights the user: a manual scroll flips the mode away
+        // from PIN_USER_MSG, and streaming content BELOW the message with a
+        // tall-enough scrollHeight already keeps the pin satisfied (no
+        // clamp, no offsetTop shift) — so this stays a no-op there and does
+        // NOT reintroduce the May-2026 re-pin-every-RO-firing jitter.
         const el = scrollEl.querySelector(
           `.chat__msg--user[data-ts="${modeRef.current.ts}"]`,
         )
-        if (el && el.offsetTop !== lastPinTopRef.current) {
-          applyMode(scrollEl, modeRef.current)
-          lastPinTopRef.current = el.offsetTop
+        if (el) {
+          const target = Math.max(0, el.offsetTop - PIN_OFFSET)
+          const maxScrollTop = scrollEl.scrollHeight - scrollEl.clientHeight
+          // Reachability is measured against the TARGET, not "is there any
+          // more room than now". If we gated on `maxScrollTop >= scrollTop`,
+          // a layout still growing toward the target (scrollHeight climbing
+          // as content streams in below) would re-pin stepwise on every RO
+          // firing — clamp to the current max, fire again, clamp a little
+          // higher — reintroducing the May-2026 stutter. Gating on the
+          // target means we re-pin exactly once, when the settled layout
+          // can actually hold the message at the top.
+          const clampedShort = scrollEl.scrollTop < target - 1
+            && maxScrollTop >= target - 1
+          if (el.offsetTop !== lastPinTopRef.current || clampedShort) {
+            applyMode(scrollEl, modeRef.current)
+            lastPinTopRef.current = el.offsetTop
+          }
         }
       }
       requestRevealOnQuiet()  // each RO firing pushes the reveal back
