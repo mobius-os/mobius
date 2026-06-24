@@ -117,6 +117,26 @@ def _looks_like_note(text: str) -> bool:
   return t.startswith("---") and "## Summary" in t
 
 
+def _clean_note_output(text: str) -> str:
+  """Trim model cruft after the note. The summarizer sometimes keeps generating
+  past the note — a hallucinated `Human:`/`Assistant:` turn, or a SECOND
+  frontmatter block repeating the note. Keep only the first complete note: stop
+  at a chat-turn label or at the opening `---` of a repeat (the 3rd `---`, after
+  the first note's open + close)."""
+  out: list[str] = []
+  fences = 0
+  for ln in text.lstrip().splitlines():
+    s = ln.strip()
+    if s.startswith("Human:") or s.startswith("Assistant:"):
+      break
+    if s == "---":
+      fences += 1
+      if fences >= 3:  # 1=open, 2=close of THIS note; 3=open of a repeat
+        break
+    out.append(ln)
+  return "\n".join(out).rstrip()
+
+
 def _build_prompt(transcript: str, existing: str) -> str:
   parts = ["The chat transcript:\n\n", transcript or "(empty)"]
   if existing.strip():
@@ -187,7 +207,7 @@ def run() -> int:
     )
   except (subprocess.TimeoutExpired, OSError):
     return 0
-  out = (proc.stdout or "").strip()
+  out = _clean_note_output(proc.stdout or "")
   if not _looks_like_note(out):
     # The model didn't return a well-formed note — leave any existing note
     # untouched rather than overwriting it with garbage.
