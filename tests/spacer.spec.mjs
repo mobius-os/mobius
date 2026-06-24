@@ -965,35 +965,59 @@ test.describe('Scroll edge cases', () => {
     expect(afterGap).toBeLessThan(50)
   })
 
-  test('26. Second send after scroll-up on first response', async ({ page }) => {
-    await setup(page)
+  test('26. Second send while scrolled up (reading) does NOT pin to the top', async ({ page }) => {
+    // Under the send rule, a second send while the user is scrolled up
+    // (reading, possibly with something queued) must NOT pin to the top —
+    // the reader stays where they were; the message just appends. Pre-rule
+    // this test asserted the opposite (a scroll-up second send still
+    // pinned); the owner reversed that: don't yank a reader.
+    //
+    // Uses the REAL SSE path (not injectContent) so the long first
+    // response PERSISTS across the second send — DOM-injected content
+    // evaporates on React's re-render, collapsing the chat to a
+    // fits-the-viewport state that (correctly) pins, which can't
+    // represent a scrolled-up-in-overflow send. The scroll-position
+    // preservation invariant is asserted in send-rule.spec.mjs; here the
+    // spacer-spec lock-in is "no pin when scrolled up".
+    const events = [
+      { type: 'catch_up_done' },
+      { type: 'text', content: 'First response paragraph. '.repeat(120) },
+      { type: 'done' },
+    ]
+    await setupWithSSE(page, events)
     await newChat(page)
+
     await sendMessage(page, 'First message')
-
-    // Fill viewport with first response content.
-    await injectContent(page, 'First response content. ', 80)
-
-    // Scroll up to read.
-    await page.evaluate(() => {
-      const s = document.querySelector('.chat__scroll')
-      if (s) s.scrollTop = Math.max(0, s.scrollHeight / 3)
-    })
-    await page.evaluate(() => new Promise(r => setTimeout(r, 200)))
-
-    // Stop the first "streaming" so we can send again.
-    await page.evaluate(() =>
-      document.querySelector('.chat__stop')?.click()
-    )
     await page.waitForFunction(
       () => !document.querySelector('.chat__stop'),
-      { timeout: 3000 }
+      { timeout: 10000 }
     )
-    await page.evaluate(() => new Promise(r =>
-      requestAnimationFrame(() => requestAnimationFrame(r))
-    ))
+    await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
 
-    // Send second message.
+    // Overflowing content confirmed, then scroll up to read via a real
+    // gesture (pointerdown + scroll inside the gesture window) → ANCHOR_AT.
+    const overflow = await measure(page)
+    expect(overflow.scrollH).toBeGreaterThan(overflow.clientH)
+    await page.evaluate(() => {
+      const s = document.querySelector('.chat__scroll')
+      if (!s) return
+      s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+      s.scrollTop = Math.max(0, Math.floor(s.scrollHeight / 3))
+    })
+    // Close the 250ms gesture window so ANCHOR_AT is the settled mode.
+    await page.evaluate(() => new Promise(r => setTimeout(r, 350)))
+
+    const before = await measure(page)
+    const savedTop = before.scrollTop
+    expect(savedTop).toBeGreaterThan(20)
+    const gapBefore = before.scrollH - before.scrollTop - before.clientH
+    expect(gapBefore).toBeGreaterThan(50)
+
+    // Send the second message while scrolled up.
     await sendMessage(page, 'Second message')
+    await page.evaluate(() => new Promise(r =>
+      requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 120)))
+    ))
 
     const userMsgs = await page.evaluate(() => {
       const msgs = document.querySelectorAll('.chat__text--user')
@@ -1001,15 +1025,11 @@ test.describe('Scroll edge cases', () => {
     })
     expect(userMsgs).toContain('Second message')
 
-    // Poll for the PIN_USER_MSG to settle. A single measure() races
-    // React's layout effect under heavy parallel suite load and
-    // flaked once in CI; the condition itself is stable but takes
-    // 1-2 RAFs after the new user message commits to be in place.
-    // Poll keeps the assertion tight without an arbitrary sleep.
-    await expect.poll(
-      async () => (await measure(page)).userVisualTop,
-      { timeout: 2000, intervals: [50, 100, 200] },
-    ).toBeLessThan(50)
+    // CRITICAL: NOT pinned — the message is not flush at the top, and the
+    // scroll did not jump there. The reader stays put.
+    const after = await measure(page)
+    expect(after.userVisualTop).toBeGreaterThan(50)
+    expect(Math.abs(after.scrollTop - savedTop)).toBeLessThanOrEqual(8)
   })
 
   test('27. Viewport resize cycles do not engage auto-follow on streaming chat', async ({ page }) => {

@@ -70,6 +70,30 @@ async function sendMessage(page, text) {
   ))
 }
 
+/** Engage FOLLOW_BOTTOM via a real gesture (pointerdown + scroll to the
+ *  bottom inside the 250ms gesture window) — the send rule pins a
+ *  subsequent send only when the user is at the bottom (following) or it
+ *  is the first message. Mirrors spacer.spec.mjs tests 18/24. */
+async function gestureToBottom(page) {
+  await page.evaluate(() => {
+    const s = document.querySelector('.chat__scroll')
+    if (s) s.scrollTop = s.scrollHeight
+  })
+  await page.evaluate(() => new Promise(r => setTimeout(r, 150)))
+  await page.evaluate(() => {
+    const s = document.querySelector('.chat__scroll')
+    if (!s) return
+    s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+    s.scrollTop = Math.max(0, s.scrollTop - 1)
+    s.scrollTop = s.scrollHeight
+  })
+  // Let the 250ms gesture window close before the next send. Otherwise the
+  // send's programmatic pin-scroll fires inside the window and the hook's
+  // gesture-gated onScroll misreads it as a user gesture, flipping the
+  // mode away from PIN — a test-timing artifact, not real-user behavior.
+  await page.evaluate(() => new Promise(r => setTimeout(r, 350)))
+}
+
 async function waitStreamDone(page) {
   await page.waitForFunction(
     () => !document.querySelector('.chat__stop'),
@@ -119,15 +143,13 @@ test('Second send through full SSE flow: new user msg pins to viewport top', asy
   await sendMessage(page, 'First user message')
   await waitStreamDone(page)
 
-  // Scroll somewhere in the middle of the response (simulating the
-  // user reading) before sending the next message. This tests the
-  // bug shape the user reported: scroll-state-from-prior-response
-  // must NOT prevent the second send from pinning.
-  await page.evaluate(() => {
-    const s = document.querySelector('.chat__scroll')
-    if (s) s.scrollTop = Math.floor(s.scrollHeight / 2)
-  })
-  await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
+  // The send rule pins a subsequent send only when the user is at the
+  // bottom (following). Engage FOLLOW_BOTTOM with a real gesture before
+  // the second send so this still asserts the pin under the new rule —
+  // this is the "user is following the stream and sends again" case,
+  // which the owner wants to keep pinning. (A scrolled-up send is the
+  // opposite case, covered by send-rule.spec.mjs.)
+  await gestureToBottom(page)
 
   // Send 2.
   await sendMessage(page, 'Second user message')
@@ -172,6 +194,10 @@ test('Pin HOLDS when content above the pinned message grows after send (late ima
 
   await sendMessage(page, 'First user message')
   await waitStreamDone(page)
+  // Be at the bottom (following) so the second send pins under the rule —
+  // this test is about the pin HOLDING through later content growth, so
+  // it must legitimately pin first.
+  await gestureToBottom(page)
   await sendMessage(page, 'Second user message')
   await page.evaluate(() => new Promise(r =>
     requestAnimationFrame(() => requestAnimationFrame(r))
