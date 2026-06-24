@@ -37,6 +37,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+# This script imports app.memory / app.memory_trace (server-only helpers) to map
+# Read paths to graph node ids and record the read-trace — but it is invoked from
+# ARBITRARY cwds: the chat agent runs it from /data, the reflection runner too,
+# neither with PYTHONPATH set. Without the package root on sys.path the first
+# `from app.memory import ...` (in the read-tracking loop) raises
+# ModuleNotFoundError and the subagent's whole synthesis is lost — the recall arm
+# silently fails and the agent falls back to shallow injected context. Put the
+# script's grandparent (/app, which holds the `app` package) on sys.path so those
+# imports resolve regardless of cwd. (chat.py's auto-search sets PYTHONPATH=/app;
+# the agent's own Bash invocation does not — this covers both.)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 # Hard-coded paths rather than env-derived: like the reflection runner this can
 # be invoked from a near-empty environment, and the only var that matters to
 # the spawned CLI (CLAUDE_CONFIG_DIR) is set explicitly below.

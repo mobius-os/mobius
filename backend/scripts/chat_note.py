@@ -229,10 +229,29 @@ def _patch_title(chat_id: str, description: str) -> None:
 
 
 def run() -> int:
-  if len(sys.argv) < 2 or not sys.argv[1].strip():
-    sys.stderr.write("usage: chat_note.py <chat_id>\n")
+  args = [a for a in sys.argv[1:] if a.strip()]
+  sync_title_only = "--sync-title" in args
+  args = [a for a in args if a != "--sync-title"]
+  if not args:
+    sys.stderr.write("usage: chat_note.py <chat_id> [--sync-title]\n")
     return 2
-  chat_id = sys.argv[1].strip()
+  chat_id = args[0].strip()
+
+  # --sync-title: NO summarizer (no LLM, no tools). Just sync the chat TITLE to
+  # the note's existing gist. The turn-end title guarantee calls this when the
+  # AGENT wrote its own note (so the summarizer must NOT run + clobber it) but may
+  # have skipped the title PATCH — so the chat keeps its first-message name even
+  # though the note has a perfectly good gist. by_agent:true defers to a manual
+  # rename. Cheap + idempotent.
+  if sync_title_only:
+    try:
+      text = _note_path(chat_id).read_text(encoding="utf-8")
+    except OSError:
+      return 0
+    m = re.search(r"^description:\s*(.+)$", text, re.MULTILINE)
+    if m:
+      _patch_title(chat_id, m.group(1).strip())
+    return 0
 
   transcript = _read_transcript(chat_id)
   if not transcript:

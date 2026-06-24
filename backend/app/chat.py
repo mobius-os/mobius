@@ -2175,6 +2175,16 @@ async def run_chat(
         _s, chat_id, disposition, _s.data_dir, _note_mtime_before
       ):
         await _ensure_chat_note(_s.data_dir, chat_id)
+      elif (
+        chat_id
+        and disposition == chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
+      ):
+        # The agent wrote (or already had) its own note this turn, so the
+        # summarizer backstop deferred — but the agent may have skipped syncing
+        # the title to the note's gist (it did on the brew-timer build). Sync it
+        # from the note (no LLM) so the chat name is the gist, not the first
+        # message. by_agent:true defers to a manual rename.
+        await _sync_chat_title(_s.data_dir, chat_id)
     except Exception:
       _get_logger().debug("chat-note guarantee skipped", exc_info=True)
 
@@ -2299,6 +2309,40 @@ async def _ensure_chat_note(data_dir: str, chat_id: str) -> None:
         pass
   except Exception:
     log.debug("ensure_chat_note failed", exc_info=True)
+
+
+async def _sync_chat_title(data_dir: str, chat_id: str) -> None:
+  """Turn-end title guarantee: sync the chat's title to its note's gist.
+
+  Fires when the AGENT wrote its own note this turn (so the summarizer backstop
+  deferred) but may have skipped the title PATCH. Spawns `chat_note.py
+  --sync-title` — NO LLM, no tools: it just reads the note's `description:` and
+  PATCHes the title (`by_agent:true`, so a manual rename wins). Best-effort +
+  bounded; a failure never affects the turn. A no-op when the note is absent or
+  has no description (e.g. the agent never wrote one)."""
+  log = _get_logger()
+  script = Path(__file__).parent.parent / "scripts" / "chat_note.py"
+  if not script.exists() or not chat_id:
+    return
+  env = dict(os.environ)
+  env["DATA_DIR"] = data_dir
+  proc = None
+  try:
+    proc = await asyncio.create_subprocess_exec(
+      "python3", str(script), chat_id, "--sync-title",
+      stdout=asyncio.subprocess.DEVNULL,
+      stderr=asyncio.subprocess.DEVNULL,
+      env=env,
+    )
+    await asyncio.wait_for(proc.communicate(), timeout=20)
+  except asyncio.TimeoutError:
+    if proc is not None:
+      try:
+        proc.kill()
+      except ProcessLookupError:
+        pass
+  except Exception:
+    log.debug("sync_chat_title failed", exc_info=True)
 
 
 async def _run_chat_impl(
