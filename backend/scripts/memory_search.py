@@ -74,7 +74,11 @@ How to search:
      & plans" — not just the top. The request can touch a section far down a map.
   3. Open the actual notes/ and read their CONTENT. A map's one-line description
      is a SCENT, not a fact — if it smells relevant, OPEN the note before you
-     rely on it. Follow [[wiki-links]] one hop to related notes.
+     rely on it. Follow [[wiki-links]] toward related notes — INCLUDING cross-chat
+     links (`[[chats/<id>]]`). A concept that recurs across several chats is the
+     highest-value connection: when a note or chat links to another, open it and
+     pull the thread. (If a depth/breadth hint was given it bounds how far you
+     fan — but finding the answer always wins over the numbers.)
   4. Before finalizing, Grep notes/ for the request's key nouns (the domain, the
      activity, "schema"/"data model", etc.) and open any hit you missed — EVERY
      time, not only when the router looks thin. Maps under-link; this catches
@@ -108,13 +112,32 @@ labelled "inferred". Invent nothing. Edit nothing — you are strictly read-only
 """
 
 
-def build_prompt(query: str) -> str:
+def _hints_clause(max_depth: int | None, max_breadth: int | None) -> str:
+  """A SOFT traversal budget the caller may pass. Finding the useful information
+  is always the goal — these only shape effort (a quick shallow lookup vs a deep
+  dig). Empty when no hints were given (the default deep traversal)."""
+  if not max_depth and not max_breadth:
+    return ""
+  parts = []
+  if max_breadth:
+    parts.append(f"open about {max_breadth} map(s)/note(s) at each level")
+  if max_depth:
+    parts.append(f"descend about {max_depth} hop(s) from the router")
+  return (
+    "\n\nTraversal hint (SOFT — finding the useful information is the goal; "
+    "exceed these freely whenever a clearly-relevant thread needs it): "
+    + "; ".join(parts)
+    + "."
+  )
+
+
+def build_prompt(query: str, hints: str = "") -> str:
   return (
     "The partner's current request / focus in this chat is:\n\n"
     f"{query}\n\n"
     "Search the knowledge graph (the current directory) for everything "
     "relevant and report the relevant facts with their source note slugs, "
-    "exactly as your instructions specify."
+    "exactly as your instructions specify." + hints
   )
 
 
@@ -131,12 +154,40 @@ def _path_to_node_id(file_path: str) -> str | None:
   return _loaded_path_to_id(str(rel))
 
 
+def _parse_args(argv: list[str]) -> tuple[list[str], int | None, int | None]:
+  """Pull optional --max-depth / --max-breadth out of argv; the rest is
+  positional (query, then optional chat_id). Hints are soft (see _hints_clause)."""
+  positional: list[str] = []
+  max_depth = max_breadth = None
+  i = 0
+  while i < len(argv):
+    a = argv[i]
+    if a in ("--max-depth", "--max-breadth") and i + 1 < len(argv):
+      try:
+        n: int | None = int(argv[i + 1])
+      except ValueError:
+        n = None
+      if a == "--max-depth":
+        max_depth = n
+      else:
+        max_breadth = n
+      i += 2
+      continue
+    positional.append(a)
+    i += 1
+  return positional, max_depth, max_breadth
+
+
 def run() -> int:
-  if len(sys.argv) < 2 or not sys.argv[1].strip():
-    sys.stderr.write('usage: memory_search.py "<request>" [chat_id]\n')
+  positional, max_depth, max_breadth = _parse_args(sys.argv[1:])
+  if not positional or not positional[0].strip():
+    sys.stderr.write(
+      'usage: memory_search.py "<request>" [chat_id] '
+      "[--max-depth N] [--max-breadth N]\n"
+    )
     return 2
-  query = sys.argv[1]
-  chat_id = sys.argv[2] if len(sys.argv) > 2 else ""
+  query = positional[0]
+  chat_id = positional[1] if len(positional) > 1 else ""
 
   env = dict(os.environ)
   env["CLAUDE_CONFIG_DIR"] = str(CLAUDE_CONFIG_DIR)
@@ -144,7 +195,7 @@ def run() -> int:
   cmd = [
     CLI_PATH,
     "-p",
-    build_prompt(query),
+    build_prompt(query, _hints_clause(max_depth, max_breadth)),
     "--output-format",
     "stream-json",
     "--verbose",

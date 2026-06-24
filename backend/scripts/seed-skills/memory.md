@@ -154,9 +154,16 @@ maintain `chats/$CHAT_ID/index.md` **every turn**:
 - `## Facts & intent` — the durable facts this chat surfaced about the partner
   or the instance, plus the partner's underlying intent (the bullet list the
   inclusion bar above would have you keep).
-- **Cross-chat links** in the body: when this chat pulls information from
-  another, record `see also [[chats/<other-id>]] — <why>`. That is how the graph
-  learns which chats relate.
+- **Connections** — keep this chat's links into the rest of the graph current,
+  two ways. Inline `[[wiki-links]]` where a fact references another note. AND a
+  short `## Related` section at the foot listing the few **most relevant** linked
+  notes/chats with a reason — `- [[chats/<other-id>]] — <why it connects>`,
+  `- [[notes/<slug>]] — <why>`. When a concept recurs across several chats, that
+  recurring thread is the highest-value connection: surface it here. **Curate this
+  set** — keep the handful a future reader would actually follow, not every passing
+  mention. (Curating `## Related` doesn't violate grow-never-shrink: it is an index
+  of pointers, not facts — the facts themselves live in the linked notes/chats and
+  in this note's growing Summary, so a dropped pointer loses nothing.)
 
 **Grow, never shrink.** Each turn, `Read` the note and then `Write` a *larger*
 version — fold in the new turn's information and reorganize for coherence, but
