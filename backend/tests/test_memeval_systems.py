@@ -6,6 +6,7 @@ from memeval.systems import (
   FixedBundleBaselineSystem,
   FlatInboxSystem,
   NoMemorySystem,
+  ProductionInjectionSystem,
   V2RouterOneHopSystem,
 )
 
@@ -45,6 +46,37 @@ def test_v2_router_selects_matching_note_and_one_hop_see_also(tmp_path: Path):
 def test_v2_router_abstention_query_selects_nothing(tmp_path: Path):
   tree = write_corpus(RETRIEVAL_CASES[0], tmp_path)
   res = V2RouterOneHopSystem(tree).retrieve("what is my blood type?")
+  assert res.context == ""
+  assert res.selected_node_ids == []
+
+
+def test_production_injection_exercises_the_real_build_memory_block(tmp_path: Path):
+  # The chat-centric short-term arm: the router index + the recent per-chat
+  # notes are injected by the live app.memory.build_memory_block. This drives
+  # the actual production code path, not a self-contained reimplementation.
+  mem = tmp_path / "shared" / "memory"
+  (mem / "chats" / "c1").mkdir(parents=True)
+  (mem / "index.md").write_text("# Home\n\n- cooking router scent\n", encoding="utf-8")
+  (mem / "chats" / "c1" / "index.md").write_text(
+    "---\ntype: chat\ndescription: cake chat\n---\n"
+    "## Summary\nUser wants cake recipes in grams.\n",
+    encoding="utf-8",
+  )
+  (mem / ".ready").write_text("", encoding="utf-8")
+  res = ProductionInjectionSystem(tmp_path).retrieve("cups or grams?")
+  # Query-independent: it injects the index + recent chat note regardless of query.
+  assert "index" in res.selected_node_ids
+  assert "chat:c1" in res.selected_node_ids
+  assert "cake recipes in grams" in res.context
+
+
+def test_production_injection_empty_without_ready_sentinel(tmp_path: Path):
+  # No `.ready` -> graph mode is gated off -> an empty block (the agent reads
+  # the graph on demand instead). Lock in the gate the live model relies on.
+  mem = tmp_path / "shared" / "memory"
+  mem.mkdir(parents=True)
+  (mem / "index.md").write_text("# Home\n", encoding="utf-8")
+  res = ProductionInjectionSystem(tmp_path).retrieve("anything")
   assert res.context == ""
   assert res.selected_node_ids == []
 
