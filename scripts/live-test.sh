@@ -37,10 +37,24 @@ BASE_URL="http://${TEST_HOST}:${TEST_PORT}"
 # agent-browser sees the docker host via the bridge gateway, not localhost.
 BROWSER_URL="${BROWSER_URL:-http://172.17.0.1:${TEST_PORT}/}"
 
-PROJECT_DIR="/home/hmzmrzx/projects/mobius"
+# Default to THIS script's checkout so a per-slug worktree session tests ITS
+# own source — not a hardcoded main checkout (which silently built the main
+# tree from a worktree). Override with MOBIUS_PROJECT_DIR.
+PROJECT_DIR="${MOBIUS_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-/tmp/mobius-live-test}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASS="${ADMIN_PASS:-admin}"
+
+# Per-session container/project/volume isolation. Defaults match the canonical
+# mobius-test; in an isolated per-slug session pass MOBIUS_CONTAINER (+ matching
+# MOBIUS_IMAGE) so this script's `docker rm -f` / `docker volume rm` can NEVER
+# destroy a sibling's container or volume. scripts/mobius-session.sh exports
+# MOBIUS_CONTAINER/MOBIUS_IMAGE; docker-compose.test.yml interpolates them.
+CTR="${MOBIUS_CONTAINER:-mobius-test}"
+PROJ="${MOBIUS_PROJECT:-${CTR}}"
+VOL="${PROJ}_test_data"
+export MOBIUS_CONTAINER="${CTR}"
+export MOBIUS_IMAGE="${MOBIUS_IMAGE:-${CTR}:ci}"
 
 export PATH="/home/hmzmrzx/projects/node_modules/.bin:${PATH}"
 # Chrome in this environment cannot use unprivileged user namespaces
@@ -91,22 +105,22 @@ shot() {
 # Drain chat.log from inside the container to a file we can grep.
 capture_chatlog() {
   local out="${ARTIFACTS_DIR}/chat.log.snapshot"
-  docker exec mobius-test cat /data/logs/chat.log > "${out}" 2>/dev/null || true
+  docker exec "${CTR}" cat /data/logs/chat.log > "${out}" 2>/dev/null || true
   echo "${out}"
 }
 
 # ---- 0. Bring up mobius-test (clean volume) ---------------------------------
 bring_up_test_container() {
   log "Building mobius-test image..."
-  (cd "${PROJECT_DIR}" && docker compose -p mobius-test \
+  (cd "${PROJECT_DIR}" && docker compose -p "${PROJ}" \
      -f docker-compose.test.yml build) || { fail "build failed"; exit 1; }
 
   log "Removing previous mobius-test container + volume..."
-  docker rm -f mobius-test >/dev/null 2>&1 || true
-  docker volume rm mobius-test_test_data >/dev/null 2>&1 || true
+  docker rm -f "${CTR}" >/dev/null 2>&1 || true
+  docker volume rm "${VOL}" >/dev/null 2>&1 || true
 
   log "Starting fresh mobius-test..."
-  (cd "${PROJECT_DIR}" && docker compose -p mobius-test \
+  (cd "${PROJECT_DIR}" && docker compose -p "${PROJ}" \
      -f docker-compose.test.yml up -d) || { fail "up failed"; exit 1; }
 
   log "Waiting for /api/health on ${BASE_URL}..."
@@ -125,11 +139,11 @@ setup_owner_and_creds() {
     -d "{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PASS}\"}" >/dev/null
 
   log "Copying Claude CLI credentials from host..."
-  docker exec mobius-test mkdir -p /data/cli-auth/claude
+  docker exec "${CTR}" mkdir -p /data/cli-auth/claude
   docker cp "${HOME}/.claude/.credentials.json" \
-    mobius-test:/data/cli-auth/claude/.credentials.json
+    "${CTR}":/data/cli-auth/claude/.credentials.json
   docker cp "${HOME}/.claude.json" \
-    mobius-test:/data/cli-auth/claude/.claude.json
+    "${CTR}":/data/cli-auth/claude/.claude.json
 
   # Codex creds (for flow4 provider switching). Read from the HOST
   # (~/.codex/auth.json — the default CODEX_HOME). We deliberately
@@ -139,15 +153,15 @@ setup_owner_and_creds() {
   # contract documented in scripts/live-test.README.md.
   log "Copying Codex CLI credentials from host ~/.codex/ (if present)..."
   if [ -f "${HOME}/.codex/auth.json" ]; then
-    docker exec mobius-test mkdir -p /data/cli-auth/codex
+    docker exec "${CTR}" mkdir -p /data/cli-auth/codex
     docker cp "${HOME}/.codex/auth.json" \
-      mobius-test:/data/cli-auth/codex/auth.json
+      "${CTR}":/data/cli-auth/codex/auth.json
     log "  Codex creds copied from host."
   else
     log "  WARN: host has no ~/.codex/auth.json — flow4 codex check will be skipped."
   fi
 
-  docker exec -u root mobius-test chown -R mobius:mobius /data/cli-auth
+  docker exec -u root "${CTR}" chown -R mobius:mobius /data/cli-auth
 }
 
 fetch_token() {
@@ -446,7 +460,7 @@ flow_4_provider_switch() {
   if [[ "${codex_line}" == *"provider=Codex"* ]]; then
     pass "flow4 codex chat used Codex provider"
   else
-    if docker exec mobius-test test -f /data/cli-auth/codex/auth.json 2>/dev/null; then
+    if docker exec "${CTR}" test -f /data/cli-auth/codex/auth.json 2>/dev/null; then
       fail "flow4 codex chat did NOT log provider=Codex (CLI authed but no chat.log entry — see ${snap})"
     else
       pass "flow4 codex test skipped (no codex creds on this host — ~/.codex/auth.json missing)"
