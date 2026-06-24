@@ -21,6 +21,9 @@
 #   scripts/deploy-prod.sh --allow-unpushed # emergency hotfix: deploy a commit not yet on origin/main
 #                                           # (downgrades the default refusal + dirty-tree abort to a warning;
 #                                           #  push it to main ASAP or the next deploy-from-main reverts it)
+#   scripts/deploy-prod.sh --allow-stale    # deliberate rollback: deploy a prod checkout BEHIND origin/main
+#                                           # (bypasses the behind-origin/main hard block — only for an
+#                                           #  intentional rollback to an older main; you are reverting newer work)
 #
 # Env knobs (seconds; both default 120):
 #   PREFLIGHT_WAIT_SECONDS  how long the scratch-container preflight waits for boot
@@ -46,6 +49,14 @@ CHECK_ONLY=0
 # a loud warning for a deliberate emergency hotfix: empower with an explicit
 # override, safe-by-default — not a hard wall.
 ALLOW_UNPUSHED="${ALLOW_UNPUSHED:-0}"
+# The mirror-image refusal: deploy-prod builds from the WORKING TREE, so a
+# checkout that is BEHIND origin/main bakes a STALE image and silently REVERTS
+# everyone's pushed work (the served frontend regresses to an old bundle). This
+# is the recurring "sibling deployed from a stale checkout" prod incident. We
+# HARD-BLOCK a strictly-behind checkout (exit 2). --allow-stale / ALLOW_STALE=1
+# is the escape hatch for a DELIBERATE rollback to an older main — same
+# empower-with-an-explicit-override shape as --allow-unpushed.
+ALLOW_STALE="${ALLOW_STALE:-0}"
 BUILT_THIS_RUN=0  # set to 1 once we actually build, so the verify step only
                   # compares the served SHA when THIS run produced the image
 PREFLIGHT_WAIT_SECONDS="${PREFLIGHT_WAIT_SECONDS:-120}"
@@ -90,6 +101,7 @@ for arg in "$@"; do
     -y|--yes)      ASSUME_YES=1 ;;
     --check)       CHECK_ONLY=1 ;;
     --allow-unpushed) ALLOW_UNPUSHED=1 ;;
+    --allow-stale) ALLOW_STALE=1 ;;
     -h|--help)
       sed -n '1,/^set -euo pipefail/p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
@@ -524,7 +536,11 @@ if [ "$TARGET" = "prod" ]; then
     # real remote state, not a stale local ref. `fetch origin` (not `origin
     # main`) so origin/main updates even on a worktree whose upstream tracks a
     # different branch; best-effort — an offline fetch leaves the prior ref.
-    git -C "$REPO_ROOT" fetch origin -q 2>/dev/null || true
+    # Record whether the fetch actually succeeded: the behind-origin/main guard
+    # below trusts origin/main as fresh only when it did; on a failed fetch the
+    # local ref may be stale, so the guard warns rather than silently trusting it.
+    fetch_ok=0
+    if git -C "$REPO_ROOT" fetch origin -q 2>/dev/null; then fetch_ok=1; fi
 
     # ── unpushed-commit guard (the headline structural fix) ───────────────
     # You can only deploy code that is ALREADY on origin/main. A deploy from a
@@ -552,6 +568,69 @@ if [ "$TARGET" = "prod" ]; then
         fail "and push to main immediately after."
         exit 1
       fi
+    fi
+
+    # ── behind-origin/main guard (the mirror-image structural fix) ────────
+    # The unpushed guard above refuses a checkout that is AHEAD of / DIVERGED
+    # from origin/main. This refuses the OPPOSITE failure: a checkout that is
+    # strictly BEHIND origin/main. deploy-prod builds from the WORKING TREE, so
+    # a behind checkout bakes a STALE image — it lacks commits that ARE on main,
+    # so the deploy silently REVERTS everyone's pushed work (served frontend
+    # regresses to an old bundle). This is the recurring "sibling deployed from
+    # a stale checkout" prod incident, and the single most common cause of it.
+    #
+    # Condition is STRICTLY BEHIND, not merely "not an ancestor": HEAD IS an
+    # ancestor of origin/main AND origin/main is NOT an ancestor of HEAD. We
+    # require BOTH so the guard never fires on a DIVERGED checkout — diverged is
+    # owned by the unpushed guard above (exit 1, with its own --allow-unpushed
+    # messaging). A bare `! is-ancestor origin/main HEAD` would also catch
+    # diverged, which collides with the unpushed guard when the operator passed
+    # --allow-unpushed (it warns-and-continues on diverged, then we'd wrongly
+    # relabel it "behind"). The two-sided test keeps the guards disjoint:
+    #   HEAD==main          → both ancestor checks true  → PASS (no-op)
+    #   HEAD ahead/unpushed → origin/main IS ancestor    → PASS (unpushed concern)
+    #   strictly behind     → only HEAD-is-ancestor true → BLOCK
+    #   diverged            → HEAD-is-ancestor false     → PASS here (unpushed owns)
+    # We hard-block (exit 2, distinct from the unpushed guard's exit 1 so callers
+    # can tell the two apart). --allow-stale / ALLOW_STALE=1 is the escape hatch
+    # for a DELIBERATE rollback to an older main. prod-only: scoped to
+    # TARGET==prod by the enclosing `if`; the test target deploys throwaway
+    # checkouts. main_sha empty (origin/main unresolvable) means the block above
+    # already warned + skipped, so this only runs when origin/main is known.
+    # NOTE: this verifies against the LOCAL origin/main ref, which is only
+    # trustworthy when the pre-guard fetch (line ~539) actually SUCCEEDED. We
+    # therefore HARD-BLOCK only when fetch_ok=1 — a failed fetch (offline /
+    # remote down) leaves a possibly-stale cached ref, and the offline-is-a-
+    # warning contract says we must NOT hard-block an offline deploy. When the
+    # fetch failed we only WARN that staleness is unverified (the elif below),
+    # accepting that a checkout matching a stale ref then deploys — the
+    # alternative, blocking every offline deploy, is what we were told not to do.
+    # main_sha empty (origin/main unresolvable at all) means the unpushed-guard
+    # block above already warned + skipped.
+    if [ -n "$main_sha" ] && [ "$fetch_ok" = "1" ] &&
+       git -C "$REPO_ROOT" merge-base --is-ancestor HEAD origin/main 2>/dev/null &&
+       ! git -C "$REPO_ROOT" merge-base --is-ancestor origin/main HEAD 2>/dev/null; then
+      behind_count=$(git -C "$REPO_ROOT" rev-list --count HEAD..origin/main 2>/dev/null || echo "?")
+      if [ "$ALLOW_STALE" = "1" ]; then
+        warn "checkout is BEHIND origin/main by ${behind_count} commit(s) — deploying anyway (--allow-stale)."
+        warn "this is a ROLLBACK: you are reverting newer pushed work. Confirm that's intended."
+      else
+        fail "checkout is BEHIND origin/main: HEAD $(git -C "$REPO_ROOT" rev-parse --short HEAD) is missing ${behind_count} commit(s) that are on origin/main $(git -C "$REPO_ROOT" rev-parse --short origin/main)."
+        fail "deploy-prod builds from the working tree, so deploying this STALE checkout"
+        fail "would bake an old image and silently REVERT everyone's pushed work."
+        fail "Bring the checkout current first, then re-run:"
+        fail "    git fetch && git rebase origin/main      # (or: git pull --ff-only)"
+        fail "For a DELIBERATE rollback to an older main, pass --allow-stale (or ALLOW_STALE=1)."
+        exit 2
+      fi
+    elif [ -n "$main_sha" ] && [ "$fetch_ok" != "1" ]; then
+      # Origin/main resolved from a CACHED ref but the pre-guard fetch failed, so
+      # the ref may be stale: a checkout that matches it could still be behind the
+      # TRUE remote. Don't hard-block an offline deploy (offline-is-a-warning
+      # contract) — make the unverified staleness explicit instead.
+      warn "could not fetch origin (offline?) — the behind-origin/main staleness check"
+      warn "is UNVERIFIED (ran against a possibly-stale cached origin/main ref)."
+      warn "Confirm you're current with the true remote before trusting this deploy."
     fi
 
     # ── clean-tree guard ──────────────────────────────────────────────────
