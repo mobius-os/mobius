@@ -70,6 +70,10 @@ Rules:
 - GROW, never shrink: if a current note is given, fold the new transcript content
   INTO it and reorganize for coherence — keep everything that's still true, add
   what's new. Never drop facts (the nightly pass consolidates later).
+- PRESERVE connections: if the current note has any `[[wiki-links]]`, `see also
+  [[chats/<id>]]` lines, or a `## Related` section, keep them VERBATIM — they are
+  this chat's links into the graph. You have no tools and can't see the graph, so
+  never invent new links, but never drop the ones already there.
 - Only durable, future-useful, partner-specific content. Skip transient chatter.
 - Output ONLY the note markdown, starting with the `---` frontmatter line.
 """
