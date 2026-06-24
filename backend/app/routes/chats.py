@@ -596,6 +596,54 @@ def get_chat(
   }
 
 
+@router.get("/{chat_id}/agent-context")
+def get_chat_agent_context(
+  chat_id: str,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Returns the assembled agent context for a chat — read-only observability.
+
+  Exposes exactly what the agent is told, reconstructed the way run_chat
+  assembles it but WITHOUT running a turn: the static system prompt (the
+  core.md/skill constitution, or this chat's custom override) plus the
+  first-turn injected blocks — the knowledge-graph memory block, the embedded
+  <app_context>, the <app_report> brief, and any compaction summary. Lets the
+  owner answer "what does the agent actually know here?", most useful for
+  embedded-app chats (Latex/News/Reflection) where the app context + report
+  data travel in the prompt rather than the visible message. Owner-only; the
+  prompt holds instructions + memory, no secrets, but it is still the owner's
+  instance. All the underlying builders are pure/read-only.
+  """
+  from app import memory
+  from app.chat import (
+    _build_app_context,
+    _build_app_report_block,
+    _chat_settings_dict,
+    _custom_system_prompt,
+    _latest_compaction_brief,
+    _read_skill_text,
+  )
+
+  chat = get_active_chat_or_404(db, chat_id)
+  data_dir = get_settings().data_dir
+  overrides = _chat_settings_dict(chat)
+  custom = _custom_system_prompt(overrides)
+  system_prompt = custom or _read_skill_text()
+  app_context_block, _env = _build_app_context(db, chat_id, data_dir)
+  app_report_block = _build_app_report_block(db, chat_id, data_dir)
+  compaction_brief = _latest_compaction_brief(chat)
+  memory_block = memory.build_memory_block(data_dir).text or None
+  return {
+    "system_prompt": system_prompt,
+    "system_prompt_source": "custom" if custom else "skill",
+    "memory_block": memory_block,
+    "app_context": app_context_block,
+    "app_report": app_report_block,
+    "compaction_brief": compaction_brief,
+  }
+
+
 @router.delete(
   "/{chat_id}", status_code=204, dependencies=[Depends(reject_cross_site)],
 )
@@ -758,6 +806,9 @@ async def compact_chat(
 # calendar date at the boundary because it becomes a path component
 # downstream (data/apps/<id>/reports/<date>.html).
 _REPORT_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# A project_id is used directly as a storage path component, so it must be a
+# safe slug — alphanumerics, dash, underscore only; no separators or traversal.
+_PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 class AppChatCreate(BaseModel):
@@ -767,6 +818,19 @@ class AppChatCreate(BaseModel):
   provider: str | None = None
   report_date: str | None = None
   report_kind: str | None = Field(default=None, max_length=64)
+  project_id: str | None = Field(default=None, max_length=64)
+
+  @field_validator("project_id")
+  @classmethod
+  def _validate_project_id(cls, value: str | None) -> str | None:
+    if value is None:
+      return None
+    value = value.strip()
+    if not value:
+      return None
+    if not _PROJECT_ID_RE.match(value):
+      raise ValueError("project_id must be a slug ([A-Za-z0-9_-], <=64 chars)")
+    return value
 
   @field_validator("report_date")
   @classmethod
@@ -794,6 +858,7 @@ def _merge_app_chat_settings(
   model: str | None = None,
   report_date: str | None = None,
   report_kind: str | None = None,
+  project_id: str | None = None,
 ) -> None:
   """Merge app-supplied runtime metadata into Chat.agent_settings_json."""
   from sqlalchemy.orm.attributes import flag_modified
@@ -826,6 +891,15 @@ def _merge_app_chat_settings(
       settings["report_kind"] = value
     else:
       settings.pop("report_kind", None)
+  # project_id (already slug-validated by AppChatCreate) scopes an embedded
+  # app chat to ONE of the app's projects: chat.py reads it to point the
+  # injected <app_context> at projects/<project_id>/ instead of the app root.
+  if project_id is not None:
+    value = project_id.strip()
+    if value:
+      settings["project_id"] = value
+    else:
+      settings.pop("project_id", None)
   chat.agent_settings_json = settings or None
   if settings:
     flag_modified(chat, "agent_settings_json")
@@ -891,6 +965,7 @@ def create_app_chat(
     model=body.model,
     report_date=body.report_date,
     report_kind=body.report_kind,
+    project_id=body.project_id,
   )
   db.add(chat)
   db.commit()
