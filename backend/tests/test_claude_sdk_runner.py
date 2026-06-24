@@ -76,8 +76,11 @@ def _stream_delta(delta_type: str, **fields: Any) -> StreamEvent:
 
 
 @pytest.mark.asyncio
-async def test_steer_into_active_turn_sets_mailbox_and_interrupts():
-  """A registered Claude handle records steer text and interrupts live IO."""
+async def test_steer_into_active_turn_buffers_without_interrupting():
+  """A registered Claude handle BUFFERS steer text + flags the request,
+  but does NOT interrupt mid-token. The cut happens at the next
+  content-block boundary in the runner loop (see the boundary tests
+  below), so `steer()` itself never touches live IO."""
   calls = []
 
   class _Client:
@@ -89,13 +92,17 @@ async def test_steer_into_active_turn_sets_mailbox_and_interrupts():
   try:
     assert await steer_into_active_turn("claude-steer", "use blue") is True
     assert handle.pending_steer == ["use blue"]
-    assert calls == ["interrupt"]
+    assert handle._steer_requested is True
+    # Buffering must NOT interrupt — the old behavior cut mid-token and
+    # lost in-flight text; the boundary-fire design defers the cut.
+    assert calls == []
     # A second rapid steer must QUEUE behind the first (FIFO), not overwrite it
     # — both texts are already persisted to the transcript, so both must reach
     # Claude when the runner drains the mailbox.
     assert await steer_into_active_turn("claude-steer", "and bold") is True
     assert handle.pending_steer == ["use blue", "and bold"]
-    assert calls == ["interrupt", "interrupt"]
+    assert handle._steer_requested is True
+    assert calls == []
   finally:
     registry.unregister("claude-steer", handle.kind)
 
@@ -119,8 +126,14 @@ async def test_steer_into_active_turn_missing_or_finished_is_false():
 
 
 @pytest.mark.asyncio
-async def test_interrupt_and_resteer_loop_requeries_same_client(monkeypatch):
-  """A steer-triggered interrupt result is drained, then re-queried."""
+async def test_resteer_requeries_when_terminal_precedes_boundary(monkeypatch):
+  """A steer buffered after a StreamEvent (no AssistantMessage boundary)
+  before a natural ResultMessage still re-queries on the SAME client.
+
+  This is edge (a) of the boundary design: a very short turn whose
+  ResultMessage arrives before any completed content block. The boundary
+  cut never fires (interrupts == 0), but the existing pending_steer →
+  requery path on the terminal result MUST still deliver the steer."""
   from app import claude_sdk_runner
 
   class _FakeClient:
@@ -196,7 +209,9 @@ async def test_interrupt_and_resteer_loop_requeries_same_client(monkeypatch):
   )
 
   client = clients[0]
-  assert client.interrupts == 1
+  # No AssistantMessage boundary preceded the terminal ResultMessage, so
+  # the boundary cut never fired — the steer rode the natural terminal.
+  assert client.interrupts == 0
   assert client.disconnected is True
   assert client.queries[0] == "start task"
   assert client.queries[1].startswith(
@@ -209,6 +224,333 @@ async def test_interrupt_and_resteer_loop_requeries_same_client(monkeypatch):
     {"type": "text", "content": "working"},
     {"type": "text", "content": "blue done"},
   ]
+
+
+def _assistant_text(text: str, session_id: str = "sess-1") -> AssistantMessage:
+  """A completed assistant TEXT block — the clean boundary the runner
+  cuts a buffered steer on. (TextBlock is the snapshot of streamed
+  text_delta; dispatch leaves it silent, but the AssistantMessage itself
+  is the boundary signal the runner watches for.)"""
+  return AssistantMessage(
+    content=[TextBlock(text=text)],
+    model="claude-opus",
+    session_id=session_id,
+  )
+
+
+def _success_result(
+  session_id: str = "sess-1", cost: float = 0.02,
+) -> ResultMessage:
+  return ResultMessage(
+    subtype="success",
+    duration_ms=20,
+    duration_api_ms=15,
+    is_error=False,
+    num_turns=1,
+    session_id=session_id,
+    stop_reason="end_turn",
+    total_cost_usd=cost,
+    usage={"input_tokens": 3, "output_tokens": 4},
+  )
+
+
+def _interrupt_result(session_id: str = "sess-1") -> ResultMessage:
+  """The terminal an SDK interrupt produces — error_during_execution."""
+  return ResultMessage(
+    subtype="error_during_execution",
+    duration_ms=10,
+    duration_api_ms=5,
+    is_error=True,
+    num_turns=1,
+    session_id=session_id,
+    stop_reason="interrupt",
+    total_cost_usd=0.01,
+    usage={"input_tokens": 1, "output_tokens": 2},
+  )
+
+
+@pytest.mark.asyncio
+async def test_steer_fires_at_assistant_boundary_not_on_deltas(monkeypatch):
+  """THE core contract: a steer requested mid-turn does NOT interrupt
+  while token deltas (StreamEvent) stream — it waits for the next
+  COMPLETED content block (an AssistantMessage), interrupts exactly once
+  THERE, then re-queries exactly once on the same client.
+
+  The fake stream records the interrupt-call count at the moment each
+  message is dispatched, so the test can assert interrupt fired AFTER the
+  AssistantMessage and NOT on any preceding StreamEvent delta."""
+  from app import claude_sdk_runner
+
+  # (message_label, interrupts_observed_when_this_message_was_yielded)
+  interrupt_trace: list[tuple[str, int]] = []
+
+  class _FakeClient:
+    def __init__(self, options):
+      del options
+      self.queries: list[str] = []
+      self.interrupts = 0
+      self.disconnected = False
+
+    async def connect(self):
+      return None
+
+    async def query(self, message):
+      self.queries.append(message)
+
+    async def interrupt(self):
+      self.interrupts += 1
+
+    async def disconnect(self):
+      self.disconnected = True
+
+    async def receive_response(self):
+      if len(self.queries) == 1:
+        # First turn: deltas stream, the user steers mid-block, MORE
+        # deltas stream (interrupt must NOT have fired yet), then a
+        # COMPLETED text block arrives — that is where the cut fires.
+        yield _stream_delta("text_delta", text="thinking ")
+        interrupt_trace.append(("delta-1", self.interrupts))
+        assert await steer_into_active_turn("boundary-chat", "use blue") \
+          is True
+        yield _stream_delta("text_delta", text="about it")
+        interrupt_trace.append(("delta-2-after-steer", self.interrupts))
+        # The completed block — boundary. The runner interrupts right
+        # after dispatching THIS message.
+        yield _assistant_text("thinking about it")
+        interrupt_trace.append(("assistant-boundary", self.interrupts))
+        # The interrupt's terminal result. The runner's drain-then-
+        # requery path delivers the buffered steer here.
+        yield _interrupt_result()
+        return
+      # Second (re-queried) turn completes normally.
+      yield _stream_delta("text_delta", text="blue done")
+      yield _success_result()
+
+  clients: list[_FakeClient] = []
+
+  def _factory(options):
+    c = _FakeClient(options)
+    clients.append(c)
+    return c
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _factory)
+
+  bus = _ChatBus()
+  result = await run_claude_sdk_turn(
+    "start task",
+    session_id=None,
+    base_env={},
+    cwd="/tmp",
+    chat_id="boundary-chat",
+    skill_text="system",
+    bc=bus,
+    pending_questions={},
+    db=None,
+  )
+
+  client = clients[0]
+  trace = dict(interrupt_trace)
+  # No interrupt while deltas were streaming — the half-sentence was NOT
+  # cut mid-token (this is the whole point of the change).
+  assert trace["delta-1"] == 0
+  assert trace["delta-2-after-steer"] == 0
+  # The interrupt fired AT the AssistantMessage boundary, exactly once.
+  assert client.interrupts == 1
+  # Exactly one re-query with the buffered steer (no double).
+  assert client.queries[0] == "start task"
+  assert len(client.queries) == 2
+  assert client.queries[1].startswith(
+    "The user added this while you were working."
+  )
+  assert "use blue" in client.queries[1]
+  assert result["error"] is None
+  assert result["cost_usd"] == 0.02
+  # The finished sentence the user saw before the cut, then the steered
+  # continuation — in order, each emitted once.
+  assert [e for e in bus.events if e["type"] == "text"] == [
+    {"type": "text", "content": "thinking "},
+    {"type": "text", "content": "about it"},
+    {"type": "text", "content": "blue done"},
+  ]
+
+
+@pytest.mark.asyncio
+async def test_steer_interrupts_once_despite_multiple_boundaries(monkeypatch):
+  """A second AssistantMessage arriving in the drain window (after the
+  boundary interrupt, before its terminal ResultMessage) must NOT fire a
+  SECOND interrupt. `_interrupt_in_flight` guards the single cut. Two
+  buffered steers must both ride the single requery (FIFO, exactly once)."""
+  from app import claude_sdk_runner
+
+  class _FakeClient:
+    def __init__(self, options):
+      del options
+      self.queries: list[str] = []
+      self.interrupts = 0
+      self.disconnected = False
+
+    async def connect(self):
+      return None
+
+    async def query(self, message):
+      self.queries.append(message)
+
+    async def interrupt(self):
+      self.interrupts += 1
+
+    async def disconnect(self):
+      self.disconnected = True
+
+    async def receive_response(self):
+      if len(self.queries) == 1:
+        # Two rapid steers buffer before any boundary.
+        assert await steer_into_active_turn("multi-chat", "use blue") is True
+        assert await steer_into_active_turn("multi-chat", "and bold") is True
+        # First completed block — the single boundary cut fires here.
+        yield _assistant_text("first block")
+        # The SDK may still emit a trailing completed block in the drain
+        # window before the interrupt's terminal lands. It must NOT cause
+        # a second interrupt.
+        yield _assistant_text("straggler block")
+        yield _interrupt_result()
+        return
+      yield _stream_delta("text_delta", text="done")
+      yield _success_result()
+
+  clients: list[_FakeClient] = []
+
+  def _factory(options):
+    c = _FakeClient(options)
+    clients.append(c)
+    return c
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _factory)
+
+  bus = _ChatBus()
+  result = await run_claude_sdk_turn(
+    "start task",
+    session_id=None,
+    base_env={},
+    cwd="/tmp",
+    chat_id="multi-chat",
+    skill_text="system",
+    bc=bus,
+    pending_questions={},
+    db=None,
+  )
+
+  client = clients[0]
+  # Exactly one interrupt despite two AssistantMessage boundaries in the
+  # drain window — the in-flight guard held.
+  assert client.interrupts == 1
+  # Exactly one requery, carrying BOTH buffered steers in FIFO order.
+  assert len(client.queries) == 2
+  assert "use blue" in client.queries[1]
+  assert "and bold" in client.queries[1]
+  assert client.queries[1].index("use blue") < client.queries[1].index(
+    "and bold"
+  )
+  assert result["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_steer_after_assistant_boundary_already_passed(monkeypatch):
+  """A steer buffered AFTER the only AssistantMessage already streamed,
+  with a fresh boundary still to come, fires the cut on that next
+  boundary — proving the flag (not a one-time event) drives the cut."""
+  from app import claude_sdk_runner
+
+  class _FakeClient:
+    def __init__(self, options):
+      del options
+      self.queries: list[str] = []
+      self.interrupts = 0
+      self.disconnected = False
+
+    async def connect(self):
+      return None
+
+    async def query(self, message):
+      self.queries.append(message)
+
+    async def interrupt(self):
+      self.interrupts += 1
+
+    async def disconnect(self):
+      self.disconnected = True
+
+    async def receive_response(self):
+      if len(self.queries) == 1:
+        yield _assistant_text("first block")
+        # Steer arrives only now — no boundary cut yet because the flag
+        # is checked when a message is dispatched, and the next message
+        # is the boundary we cut on.
+        assert await steer_into_active_turn("late-chat", "pivot") is True
+        yield _assistant_text("second block")
+        yield _interrupt_result()
+        return
+      yield _stream_delta("text_delta", text="pivoted")
+      yield _success_result()
+
+  clients: list[_FakeClient] = []
+
+  def _factory(options):
+    c = _FakeClient(options)
+    clients.append(c)
+    return c
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _factory)
+
+  bus = _ChatBus()
+  result = await run_claude_sdk_turn(
+    "start task",
+    session_id=None,
+    base_env={},
+    cwd="/tmp",
+    chat_id="late-chat",
+    skill_text="system",
+    bc=bus,
+    pending_questions={},
+    db=None,
+  )
+
+  client = clients[0]
+  assert client.interrupts == 1
+  assert len(client.queries) == 2
+  assert "pivot" in client.queries[1]
+  assert result["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_stop_drops_buffered_steer_and_clears_flags(monkeypatch):
+  """Stop is the hard immediate-cut path: it must drop a buffered steer
+  (no boundary cut, no requery for abandoned work) and clear both steer
+  flags. Distinct from steer's deferred boundary cut."""
+  del monkeypatch  # this handle-level test needs no SDK patching
+
+  calls: list[str] = []
+
+  class _Client:
+    async def interrupt(self):
+      calls.append("interrupt")
+
+  handle = ActiveClaudeClient(_Client(), chat_id="stop-chat")
+  registry.register(handle)
+  try:
+    # Buffer a steer, then Stop.
+    assert await steer_into_active_turn("stop-chat", "use blue") is True
+    assert handle.pending_steer == ["use blue"]
+    assert handle._steer_requested is True
+
+    # mark_finished so interrupt()'s _finished wait returns immediately.
+    handle.mark_finished()
+    await handle.interrupt()
+
+    assert calls == ["interrupt"]
+    assert handle.pending_steer == []
+    assert handle._steer_requested is False
+  finally:
+    registry.unregister("stop-chat", handle.kind)
 
 
 def test_run_claude_sdk_turn_persists_session_id_before_terminal_result(
