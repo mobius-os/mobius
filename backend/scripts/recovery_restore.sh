@@ -121,12 +121,21 @@ if [ "$MODE" = "platform-baked" ]; then
       fi
     done < /app/protected-files.txt
   fi
-  # Commit the restore to /data/platform git history.
+  # Commit the restore to /data/platform git history, and STAMP the baked floor
+  # (.baked-sha + a baked-<sha> tag) in the SAME commit so /api/version + the
+  # store read accurate right after a deploy instead of "update available" until
+  # a manual tag (138). Kept under the "restore: platform-baked" subject so the
+  # deploy's step-3b baseline diff still classifies it a system commit. Done as
+  # mobius so the .git refs stay mobius-owned; BUILD_SHA is expanded by THIS
+  # (root) shell because `su` resets the environment.
   if [ -d /data/platform/.git ]; then
-    su -s /bin/sh mobius -c '
+    _bsha="${BUILD_SHA:-unknown}"
+    su -s /bin/sh mobius -c "
+      if [ '$_bsha' != 'unknown' ]; then printf '%s' '$_bsha' > /data/platform/.baked-sha; fi
       git -C /data/platform add -A
-      git -C /data/platform commit -m "restore: platform-baked restore from baked floor" 2>/dev/null || true
-    '
+      git -C /data/platform commit -m 'restore: platform-baked restore from baked floor' 2>/dev/null || true
+      if [ '$_bsha' != 'unknown' ]; then git -C /data/platform tag -f 'baked-$_bsha' HEAD 2>/dev/null || true; fi
+    "
   fi
   echo "Restore complete: /data/platform (platform-baked)"
   exit 0
