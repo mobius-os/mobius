@@ -1792,10 +1792,17 @@ async def publish_app_site(
   dest = Path(settings.data_dir) / "published" / token
 
   def _snapshot():
+    # Fail closed on symlinks: copytree would otherwise follow a symlink in the
+    # (app-controlled) build output and copy its TARGET into the PUBLIC snapshot,
+    # exposing arbitrary files at /sites/<token>/. Reject any symlink, and copy
+    # with symlinks=True as defense in depth (the serve route's resolve() then
+    # confines anything that slips through).
+    if site_dir.is_symlink() or any(p.is_symlink() for p in site_dir.rglob("*")):
+      raise HTTPException(400, "Built site contains symlinks; refusing to publish.")
     if dest.exists():
       shutil.rmtree(dest, ignore_errors=True)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(site_dir, dest)
+    shutil.copytree(site_dir, dest, symlinks=True)
 
   await asyncio.to_thread(_snapshot)
   return {"token": token, "url": f"/sites/{token}/"}
