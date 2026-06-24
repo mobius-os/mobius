@@ -1614,6 +1614,16 @@ export function appChatMetadataBody(opts = {}, { includeProvider = true } = {}) 
     const provider = opts.provider == null ? '' : String(opts.provider).trim()
     if (provider) body.provider = provider
   }
+  // projectId scopes an embedded app chat to ONE of the app's projects
+  // (feature 135): the backend stores it in agent_settings_json and points the
+  // injected <app_context> at projects/<id>/. Meaningful only at create; the
+  // PATCH path ignores it (AppChatPatch has no project_id), so it's harmless to
+  // forward in both. Apps pair it with a per-project persist key
+  // (e.g. persist: 'projects/<id>/chat_id.json') for create-once-per-project.
+  if (hasOwn(opts, 'projectId')) {
+    const pid = opts.projectId == null ? '' : String(opts.projectId).trim()
+    if (pid) body.project_id = pid
+  }
   return body
 }
 
