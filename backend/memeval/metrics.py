@@ -46,6 +46,31 @@ def count_tokens(text: str) -> int:
   return len(text.split())
 
 
+def evidence_recall(context: str, gold_fact_strings: list[str]) -> float:
+  """Fraction of gold fact strings actually present in the retrieved context.
+
+  Where `node_recall` asks "did the right NODE surface," this asks the stricter
+  question "is the answering FACT actually in the bytes the answerer can see."
+  The right file can surface with the needle buried, paraphrased away, or
+  truncated out — `node_recall` says 1.0 and the answerer still can't answer.
+  Matching is normalized (casefold + whitespace-collapsed) substring; no gold
+  facts means there is nothing to recall, so trivially 1.0.
+  """
+  if not gold_fact_strings:
+    return 1.0
+  haystack = _normalize(context)
+  hit = sum(1 for fact in gold_fact_strings if _normalize(fact) in haystack)
+  return hit / len(gold_fact_strings)
+
+
+def evidence_present(context: str, gold_fact_strings: list[str]) -> bool:
+  """True iff EVERY gold fact string is present in the context (recall == 1.0).
+
+  The boolean sibling of `evidence_recall` for the common single-fact case where
+  "did the evidence land at all" reads cleaner than a fraction."""
+  return evidence_recall(context, gold_fact_strings) >= 1.0
+
+
 def fact_precision(predicted: list[str], gold: list[str]) -> float:
   pred_set = {_normalize(fact) for fact in predicted if _normalize(fact)}
   gold_set = {_normalize(fact) for fact in gold if _normalize(fact)}

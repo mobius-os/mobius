@@ -2,6 +2,8 @@ from memeval.metrics import (
   abstention_correct,
   answer_match,
   count_tokens,
+  evidence_present,
+  evidence_recall,
   exact_answer_accuracy,
   fact_f1,
   fact_precision,
@@ -42,6 +44,32 @@ def test_abstention_correct():
 def test_count_tokens_is_monotonic():
   assert count_tokens("") == 0
   assert count_tokens("a b c") < count_tokens("a b c d e f")
+
+
+def test_evidence_recall_is_normalised_substring():
+  ctx = "<<< chats/c1/index.md >>>\nThe user PREFERS  metric units.\n"
+  # Normalised match: casefold + whitespace-collapsed, so the buried fact counts.
+  assert evidence_recall(ctx, ["the user prefers metric units"]) == 1.0
+  # Two golds, one present -> 0.5 (the right node can surface with one fact buried).
+  assert evidence_recall(ctx, ["the user prefers metric units", "Pixel has epilepsy"]) == 0.5
+  assert evidence_recall(ctx, ["Pixel has epilepsy"]) == 0.0
+  # No gold facts -> nothing to recall, trivially satisfied.
+  assert evidence_recall("", []) == 1.0
+
+
+def test_evidence_present_is_all_or_nothing():
+  ctx = "The user prefers metric units."
+  assert evidence_present(ctx, ["the user prefers metric units"])
+  assert not evidence_present(ctx, ["the user prefers metric units", "missing fact"])
+  assert evidence_present(ctx, [])
+
+
+def test_evidence_recall_catches_node_recall_blind_spot():
+  # node_recall says the file surfaced; evidence_recall says the FACT is missing.
+  surfaced_node = ["notes/units.md"]
+  assert node_recall(surfaced_node, ["notes/units.md"]) == 1.0
+  buried_context = "<<< notes/units.md >>>\n(see linked hub for the detail)\n"
+  assert evidence_recall(buried_context, ["the user prefers metric units"]) == 0.0
 
 
 def test_fact_set_metrics_are_normalised():

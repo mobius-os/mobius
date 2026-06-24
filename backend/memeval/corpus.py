@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import shutil
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from textwrap import dedent
 
@@ -34,6 +34,15 @@ class RetrievalCase:
   gold_node_ids: list[str]
   gold_answer: str
   should_abstain: bool
+  # Which memory tier is expected to answer this case. "short" = the fact lives
+  # in a recently-touched per-chat note that session-start injection
+  # (`ProductionInjectionSystem`, the recent-`RECENT_CHAT_NOTES` window) sees
+  # for free; "long" = the fact has aged past that window or lives only in the
+  # graph (`notes/`/`mocs/`) and is reachable only by the memory-search arm.
+  # The runner splits node/evidence recall by this tier so a short-only system
+  # visibly FAILS the long cases a search system recovers.
+  tier: str = "short"
+  gold_fact_strings: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -81,6 +90,48 @@ def write_corpus(fixture: object, tmp_dir: str | Path) -> Path:
     raise TypeError(f"Unsupported corpus fixture: {type(fixture)!r}")
   (target / ".ready").write_text("", encoding="utf-8")
   return target
+
+
+def make_chat_tree(
+    notes: Mapping[str, str],
+    *,
+    mtimes: Mapping[str, float] | None = None,
+    extra: Mapping[str, str] | None = None,
+    index: str | None = None,
+    target_dir: str | Path,
+) -> Path:
+  """Materialise a chat-centric memory tree with CONTROLLED note mtimes.
+
+  This is the fixture for the short-vs-long tier split. `notes` maps a chat id to
+  its `chats/<id>/index.md` BODY; each lands at `chats/<id>/index.md`. `mtimes`
+  maps a chat id to a wall-clock `st_mtime` (seconds) — set some recent and some
+  old so that, when sorted newest-first, only the recent ones fall inside the
+  `RECENT_CHAT_NOTES` window that session-start injection sees. Chats with no
+  explicit mtime get the current time. `extra` adds arbitrary files (the
+  long-tail facts that live only in `notes/`/`mocs/`, reachable by the search arm
+  but NOT by injection). `index` overrides the root router `index.md`. Writes
+  `.ready` so the real `build_memory_block` treats the tree as published.
+
+  Returns the tree root (the `shared/memory/` dir analogue — pass its PARENT to
+  `ProductionInjectionSystem`, or this dir directly to a search system).
+  """
+  root = Path(target_dir)
+  root.mkdir(parents=True, exist_ok=True)
+  router = index if index is not None else "# Memory router\n"
+  (root / "index.md").write_text(dedent(router).lstrip("\n").rstrip() + "\n", encoding="utf-8")
+  mtimes = mtimes or {}
+  for chat_id, body in notes.items():
+    note = root / "chats" / chat_id / "index.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text(dedent(body).lstrip("\n").rstrip() + "\n", encoding="utf-8")
+    if chat_id in mtimes:
+      ts = float(mtimes[chat_id])
+      import os
+      os.utime(note, (ts, ts))
+  if extra:
+    _write_mapping(extra, root)
+  (root / ".ready").write_text("", encoding="utf-8")
+  return root
 
 
 def load_corpus() -> dict[str, list[object]]:
@@ -330,7 +381,10 @@ E2E_CASES = [
         text="what to avoid for Pixel enrichment?",
         gold_answer="flashing-light toys",
         should_abstain=False,
-        gold_fact_strings=["Pixel should avoid flashing-light toys."],
+        # The verbatim evidence span in the tree note — evidence_recall is a
+        # normalized SUBSTRING check, so a paraphrase would (correctly) score 0
+        # even though the right node surfaced.
+        gold_fact_strings=["Avoid flashing-light toys for Pixel enrichment."],
       )
     ],
   ),

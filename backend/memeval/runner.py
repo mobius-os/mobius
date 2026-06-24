@@ -27,6 +27,7 @@ from memeval.metrics import (
   abstention_correct,
   answer_match,
   count_tokens,
+  evidence_recall,
   fact_f1,
   fact_precision,
   fact_recall,
@@ -98,35 +99,124 @@ def run_retrieval_eval(
   abstain_hits: list[float] = []
   tokens: list[int] = []
   details: list[dict] = []
+  # Recall split by tier so a short-only system FAILS the long cases a search
+  # system recovers. node_recall = right node surfaced; evidence_recall = the
+  # answering fact is actually in the context (a node can surface with the
+  # needle buried).
+  by_tier: dict[str, dict[str, list[float]]] = {}
   with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
     for case in cases:
       case_system = _system_for_case(system, case, root / case.id)
       res = case_system.retrieve(case.query)
       out = answerer.answer(context=res.context, query=case.query)
-      recalls.append(node_recall(res.selected_node_ids, case.gold_node_ids))
+      nr = node_recall(res.selected_node_ids, case.gold_node_ids)
+      er = evidence_recall(res.context, case.gold_fact_strings)
+      recalls.append(nr)
       precisions.append(node_precision(res.selected_node_ids, case.gold_node_ids))
       tokens.append(count_tokens(res.context))
+      tier = by_tier.setdefault(case.tier, {"node": [], "evidence": []})
+      tier["node"].append(nr)
+      tier["evidence"].append(er)
       if case.should_abstain:
         abstain_hits.append(float(abstention_correct(out, should_abstain=True)))
       else:
         answer_hits.append(float(answer_match(out, case.gold_answer)))
       details.append({
         "id": case.id,
+        "tier": case.tier,
         "selected_node_ids": res.selected_node_ids,
         "answer": out,
+        "node_recall": nr,
+        "evidence_recall": er,
       })
+  metrics = {
+    "mean_node_recall": _mean(recalls),
+    "mean_node_precision": _mean(precisions),
+    "answer_accuracy": _mean(answer_hits) if answer_hits else 0.0,
+    "abstention_accuracy": _mean(abstain_hits) if abstain_hits else 1.0,
+    "mean_context_tokens": _mean(tokens),
+  }
+  for tier, vals in by_tier.items():
+    metrics[f"node_recall_{tier}"] = _mean(vals["node"])
+    metrics[f"evidence_recall_{tier}"] = _mean(vals["evidence"])
+  return EvalReport(n=len(cases), metrics=metrics, details=details)
+
+
+def run_retrieval_eval_with_reflection(
+    cases: list[RetrievalCase],
+    system: MemorySystem,
+    answerer: Answerer,
+    reflect_fn: Callable[[Path], None],
+) -> EvalReport:
+  """Score retrieval, run reflection IN THE MIDDLE, score again — the before/
+  after harness. For each case: materialise the tree ONCE, score node/evidence
+  recall (BEFORE), call `reflect_fn(tree_dir)` to mutate that same tree, then
+  re-score on the mutated tree (AFTER). Reports `node_recall_before` /
+  `node_recall_after` / `node_recall_delta` and the same for `evidence_recall`.
+
+  `reflect_fn` is injectable: `reflection_stage.pure_consolidation` (offline,
+  deterministic) for unit tests, `reflection_stage.live_reflection` for the real
+  eval. The tree must persist across both passes, so this does NOT reuse
+  `run_retrieval_eval`'s per-case temp dirs.
+  """
+  nr_before: list[float] = []
+  nr_after: list[float] = []
+  er_before: list[float] = []
+  er_after: list[float] = []
+  details: list[dict] = []
+  with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    for case in cases:
+      tree_dir = write_corpus(case, root / case.id)
+      before = _score_case(system, case, answerer, tree_dir)
+      reflect_fn(tree_dir)
+      after = _score_case(system, case, answerer, tree_dir)
+      nr_before.append(before["node_recall"])
+      nr_after.append(after["node_recall"])
+      er_before.append(before["evidence_recall"])
+      er_after.append(after["evidence_recall"])
+      details.append({
+        "id": case.id,
+        "tier": case.tier,
+        "before": before,
+        "after": after,
+      })
+  nr_b, nr_a = _mean(nr_before), _mean(nr_after)
+  er_b, er_a = _mean(er_before), _mean(er_after)
   return EvalReport(
     n=len(cases),
     metrics={
-      "mean_node_recall": _mean(recalls),
-      "mean_node_precision": _mean(precisions),
-      "answer_accuracy": _mean(answer_hits) if answer_hits else 0.0,
-      "abstention_accuracy": _mean(abstain_hits) if abstain_hits else 1.0,
-      "mean_context_tokens": _mean(tokens),
+      "node_recall_before": nr_b,
+      "node_recall_after": nr_a,
+      "node_recall_delta": nr_a - nr_b,
+      "evidence_recall_before": er_b,
+      "evidence_recall_after": er_a,
+      "evidence_recall_delta": er_a - er_b,
     },
     details=details,
   )
+
+
+def _score_case(
+    system: MemorySystem,
+    case: RetrievalCase,
+    answerer: Answerer,
+    tree_dir: Path,
+) -> dict:
+  """Retrieve + score one case against an ALREADY-MATERIALISED tree (no write).
+  Used by the before/after harness, where the same tree is scored twice across a
+  reflection mutation."""
+  factory = getattr(system, "for_tree", None)
+  case_system = factory(tree_dir) if callable(factory) else system
+  res = case_system.retrieve(case.query)
+  out = answerer.answer(context=res.context, query=case.query)
+  return {
+    "node_recall": node_recall(res.selected_node_ids, case.gold_node_ids),
+    "evidence_recall": evidence_recall(res.context, case.gold_fact_strings),
+    "selected_node_ids": res.selected_node_ids,
+    "answer": out,
+  }
 
 
 def run_consolidation_eval(fixtures: list[ConsolidationFixture]) -> EvalReport:
@@ -151,11 +241,25 @@ def run_consolidation_eval(fixtures: list[ConsolidationFixture]) -> EvalReport:
 def run_e2e_eval(
     cases: list[E2ECase], system: MemorySystem, answerer: Answerer
 ) -> EvalReport:
-  retrieval_cases: list[RetrievalCase] = []
-  for case in cases:
-    for i, question in enumerate(case.questions):
-      retrieval_cases.append(
-        RetrievalCase(
+  """Retrieve → answer per question, scoring answer/abstention AND evidence.
+
+  `evidence_recall` (RIGHT-INFO recall) is the gap `node_recall` cannot see: the
+  right file can surface with the answering fact buried or truncated out. So this
+  pairs each question's `gold_fact_strings` with the bytes the answerer actually
+  received and reports the mean fraction present. Each question's context is
+  scored directly here (rather than via `run_retrieval_eval`) precisely because
+  the gold facts have to travel alongside the retrieved context.
+  """
+  answer_hits: list[float] = []
+  abstain_hits: list[float] = []
+  tokens: list[int] = []
+  evidence_recalls: list[float] = []
+  details: list[dict] = []
+  with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    for case in cases:
+      for i, question in enumerate(case.questions):
+        rcase = RetrievalCase(
           id=f"{case.id}:{i}",
           memory_tree=case.memory_tree,
           query=question.text,
@@ -163,8 +267,34 @@ def run_e2e_eval(
           gold_answer=question.gold_answer,
           should_abstain=question.should_abstain,
         )
-      )
-  return run_retrieval_eval(retrieval_cases, system, answerer)
+        case_system = _system_for_case(system, rcase, root / rcase.id)
+        res = case_system.retrieve(question.text)
+        out = answerer.answer(context=res.context, query=question.text)
+        tokens.append(count_tokens(res.context))
+        ev = evidence_recall(res.context, question.gold_fact_strings)
+        evidence_recalls.append(ev)
+        if question.should_abstain:
+          abstain_hits.append(
+            float(abstention_correct(out, should_abstain=True))
+          )
+        else:
+          answer_hits.append(float(answer_match(out, question.gold_answer)))
+        details.append({
+          "id": rcase.id,
+          "selected_node_ids": res.selected_node_ids,
+          "answer": out,
+          "evidence_recall": ev,
+        })
+  return EvalReport(
+    n=len(details),
+    metrics={
+      "answer_accuracy": _mean(answer_hits) if answer_hits else 0.0,
+      "abstention_accuracy": _mean(abstain_hits) if abstain_hits else 1.0,
+      "evidence_recall": _mean(evidence_recalls),
+      "mean_context_tokens": _mean(tokens),
+    },
+    details=details,
+  )
 
 
 def run_eval(corpus, system: MemorySystem, answerer: Answerer) -> EvalReport:

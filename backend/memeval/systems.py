@@ -1,7 +1,9 @@
 """Offline memory systems under test."""
 from __future__ import annotations
 
+import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -62,6 +64,137 @@ class FlatInboxSystem:
       context=_join_files(files, tree),
       selected_node_ids=[_node_id(tree, path) for path in files],
     )
+
+
+class ProductionInjectionSystem:
+  """Exercises the REAL session-start injection (`app.memory.build_memory_block`).
+
+  Unlike the self-contained baselines above, this drives the actual production
+  code path: the router `index.md` (full, budget-capped) plus the ~10
+  most-recently-modified `chats/<id>/index.md` per-chat notes — Mobius's
+  SHORT-TERM memory. It is query-INDEPENDENT (the injected block is the same
+  regardless of the query); beating it is the bar for any query-relevant
+  retrieval. The deeper graph (`mocs/`, `notes/`) is NOT injected here — that is
+  the LONG-TERM arm, reached on demand by the memory-search subagent.
+
+  `data_dir` is the instance root (the parent of `shared/memory/`), not the
+  memory tree itself, matching `build_memory_block`'s contract. `selected_node_ids`
+  are the graph node ids (`index`, `chat:<id>`) so they line up with the
+  read-trace / `usage.json` keying.
+  """
+
+  def __init__(self, data_dir: str | Path | None = None):
+    self._data_dir = Path(data_dir) if data_dir is not None else None
+
+  def for_tree(self, data_dir: str | Path) -> "ProductionInjectionSystem":
+    return type(self)(data_dir)
+
+  def retrieve(self, query: str) -> RetrievalResult:
+    from app.memory import _loaded_path_to_id, build_memory_block
+    data_dir = _require_tree(self._data_dir)
+    block = build_memory_block(data_dir)
+    ids = [i for i in (_loaded_path_to_id(p) for p in block.loaded) if i]
+    return RetrievalResult(context=block.text, selected_node_ids=ids)
+
+
+class MemorySearchSystem:
+  """The LONG-TERM arm: the deeper graph reached on demand by memory-search.
+
+  Where `ProductionInjectionSystem` only sees the recently-touched per-chat notes
+  (short-term, injected at session start), this represents the recall arm that
+  the real platform fires for facts living in `notes/`/`mocs/` or in chat notes
+  that have aged past the `RECENT_CHAT_NOTES` window. The real arm is the
+  read-only `claude` subagent in `backend/scripts/memory_search.py`; that shells
+  the CLI, so it is LIVE-GATED here exactly like `run_live_eval.py`:
+
+  - Unit tests pass an injectable `search_fn(query) -> str` and drive it with a
+    DETERMINISTIC stub — never shelling out, fully offline in `wt-pytest`.
+  - Only `MemorySearchSystem.live(...)` (or `live=True`, requiring the
+    `MEMEVAL_LIVE=1` env to actually invoke) runs the real subagent.
+
+  `selected_node_ids` is whatever the search result reports as its sources (the
+  stub returns them explicitly); the live path parses the subagent's read-trace.
+  """
+
+  def __init__(
+      self,
+      search_fn: Callable[[str], "SearchResult | str"],
+      *,
+      tree_dir: str | Path | None = None,
+  ):
+    self._search_fn = search_fn
+    self._tree_dir = Path(tree_dir) if tree_dir is not None else None
+
+  def for_tree(self, tree_dir: str | Path) -> "MemorySearchSystem":
+    return type(self)(self._search_fn, tree_dir=tree_dir)
+
+  @classmethod
+  def live(
+      cls,
+      *,
+      tree_dir: str | Path | None = None,
+      timeout: int = 180,
+  ) -> "MemorySearchSystem":
+    """The REAL memory-search subagent. Refuses to run unless `MEMEVAL_LIVE=1`
+    is set in the env (mirrors `run_live_eval.py`'s gate) so a unit-test run can
+    never accidentally shell `claude`."""
+    def _live_search(query: str) -> "SearchResult":
+      if os.environ.get("MEMEVAL_LIVE") != "1":
+        raise RuntimeError(
+          "MemorySearchSystem.live requires MEMEVAL_LIVE=1 (it shells the real "
+          "memory_search.py subagent). Unit tests must pass a deterministic "
+          "search_fn instead."
+        )
+      return _run_real_memory_search(query, tree_dir=tree_dir, timeout=timeout)
+
+    return cls(_live_search, tree_dir=tree_dir)
+
+  def retrieve(self, query: str) -> RetrievalResult:
+    result = self._search_fn(query)
+    if isinstance(result, SearchResult):
+      return RetrievalResult(
+        context=result.context, selected_node_ids=list(result.node_ids)
+      )
+    # A bare string is treated as the synthesized context with no node ids.
+    return RetrievalResult(context=str(result), selected_node_ids=[])
+
+
+@dataclass
+class SearchResult:
+  """What a `search_fn` returns: the synthesized memory context plus the node
+  ids it sourced from (so the runner can score `node_recall` for the long arm)."""
+
+  context: str
+  node_ids: list[str]
+
+
+def _run_real_memory_search(
+    query: str, *, tree_dir: str | Path | None, timeout: int
+) -> SearchResult:
+  """Shell the real `backend/scripts/memory_search.py` against a tree. LIVE only
+  — gated by `MemorySearchSystem.live`. Stdout is the synthesis; the node ids
+  come from the `read N node(s): ...` stderr line the subagent prints."""
+  import subprocess
+
+  script = Path(__file__).resolve().parents[1] / "scripts" / "memory_search.py"
+  data_dir = Path(tree_dir).parent.parent if tree_dir is not None else Path("/data")
+  env = dict(os.environ, DATA_DIR=str(data_dir))
+  proc = subprocess.run(
+    ["python3", str(script), query[:600]],
+    capture_output=True,
+    text=True,
+    timeout=timeout,
+    env=env,
+  )
+  context = proc.stdout.strip()
+  node_ids: list[str] = []
+  marker = "read "
+  for line in proc.stderr.splitlines():
+    if "node(s):" in line:
+      after = line.split("node(s):", 1)[1].strip()
+      if after and after != "(none)":
+        node_ids = [nid.strip() for nid in after.split(",") if nid.strip()]
+  return SearchResult(context=context, node_ids=node_ids)
 
 
 class V2RouterOneHopSystem:

@@ -75,3 +75,16 @@ def test_run_e2e_eval_compares_systems_with_stub_answerer():
   none = run_e2e_eval(E2E_CASES, NoMemorySystem(), answerer)
   assert routed.answer_accuracy == 1.0
   assert none.answer_accuracy == 0.0
+
+
+def test_run_e2e_eval_reports_evidence_recall_from_gold_fact_strings():
+  # E2EQuestion.gold_fact_strings is now wired through: the router surfaces the
+  # node AND the fact, so evidence_recall is 1.0; NoMemory has empty context so
+  # the answering fact is absent -> evidence_recall 0.0. This is the RIGHT-INFO
+  # signal node_recall alone can't give for the e2e cases.
+  answerer = DeterministicStubAnswerer(fixed_answer="stub")
+  routed = run_e2e_eval(E2E_CASES, V2RouterOneHopSystem(), answerer)
+  none = run_e2e_eval(E2E_CASES, NoMemorySystem(), answerer)
+  assert "evidence_recall" in routed.metrics
+  assert routed.metrics["evidence_recall"] == 1.0
+  assert none.metrics["evidence_recall"] == 0.0
