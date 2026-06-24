@@ -74,6 +74,29 @@ async function sendMessage(page, text) {
     requestAnimationFrame(() => requestAnimationFrame(r))))
 }
 
+/** Engage FOLLOW_BOTTOM via a real gesture so a subsequent send pins
+ *  under the send rule (the clamp-fix only matters on a legitimate pin).
+ *  Mirrors spacer.spec.mjs tests 18/24. */
+async function gestureToBottom(page) {
+  await page.evaluate(() => {
+    const s = document.querySelector('.chat__scroll')
+    if (s) s.scrollTop = s.scrollHeight
+  })
+  await page.evaluate(() => new Promise(r => setTimeout(r, 150)))
+  await page.evaluate(() => {
+    const s = document.querySelector('.chat__scroll')
+    if (!s) return
+    s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+    s.scrollTop = Math.max(0, s.scrollTop - 1)
+    s.scrollTop = s.scrollHeight
+  })
+  // Let the 250ms gesture window close before the next send. Otherwise the
+  // send's programmatic pin-scroll fires inside the window and the hook's
+  // gesture-gated onScroll misreads it as a user gesture, flipping the
+  // mode away from PIN — a test-timing artifact, not real-user behavior.
+  await page.evaluate(() => new Promise(r => setTimeout(r, 350)))
+}
+
 async function waitStreamDone(page) {
   await page.waitForFunction(() => !document.querySelector('.chat__stop'), { timeout: 10000 })
   await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
@@ -109,6 +132,12 @@ test('Deep second send pins flush to top after the post-send layout settle (no h
   ])
   await sendMessage(page, 'First user message')
   await waitStreamDone(page)
+
+  // The send rule pins a subsequent send only when the user is at the
+  // bottom — engage FOLLOW_BOTTOM so the deep second send legitimately
+  // pins (this test exercises the clamp-fix that keeps that pin flush at
+  // the top through the post-send layout settle).
+  await gestureToBottom(page)
 
   // Second response is SHORT — minimal content grows below the pin, so a
   // settle-time scrollTop clamp is NOT masked by content growth.

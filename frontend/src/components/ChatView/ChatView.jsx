@@ -3,7 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { apiFetch, getToken, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
-import useScrollMode from './useScrollMode.js'
+import useScrollMode, { shouldPinSend, anchorModeFromScroll } from './useScrollMode.js'
 import useVoiceInput from './useVoiceInput.js'
 import useFileUpload from './useFileUpload.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
@@ -88,6 +88,24 @@ function findOptimisticUserIndex(messages, ts) {
     if (msg?.role === 'user' && msg.ts === ts) return i
   }
   return -1
+}
+
+/** Settle the scroll mode for a send that did NOT pin (the reader is
+ *  scrolled up, or a caller opted out via pin:false).
+ *
+ *  The only mode that misbehaves on a non-pin send is a STALE
+ *  PIN_USER_MSG left by an earlier send: _computeSpacerH still gates the
+ *  pin-spacer on it and sizes phantom room against the new (unpinned)
+ *  message, shifting the reader. Convert that stale pin into the reader's
+ *  current scroll position (ANCHOR_AT) — that turns the spacer math off
+ *  and keeps them exactly where they were. Any other current mode is
+ *  left untouched: ANCHOR_AT is already the reader's position, and
+ *  FOLLOW_BOTTOM (reachable only via pin:false, e.g. handleStop's
+ *  queue-collapse) must keep following the stream. */
+function settleNonPinMode(modeRef, scrollEl) {
+  if (modeRef.current?.kind !== 'PIN_USER_MSG') return
+  const anchor = anchorModeFromScroll(scrollEl)
+  if (anchor) modeRef.current = anchor
 }
 
 // Exported so sibling components (Shell, etc.) can clean up drafts when a
@@ -469,14 +487,27 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             _consumed_ts: _cts,
             ...msg
           } = promoted
+          // A queued continuation is still a user send becoming the active
+          // turn, so it follows the same send rule (see shouldPinSend):
+          // pin only when first-or-at-bottom. Read the first-user check
+          // before the append. When not pinning, leave the reader where
+          // the previous turn left them — the continuation just appears
+          // below without moving the scroll.
+          const contIsFirstUser = !messagesRef.current.some(
+            m => m.role === 'user' && !m.hidden,
+          )
+          const contWillPin = !!msg.ts && shouldPinSend({
+            scrollEl: scrollRef.current,
+            mode: modeRef.current,
+            isFirstUserMsg: contIsFirstUser,
+          })
           commitMessages(prev => [...prev, msg])
           promotedRef.current = false
-          // A queued continuation is still a user send becoming the
-          // active turn. Treat it like the normal send path so the
-          // consumed queued message lands at the top of the viewport
-          // instead of appearing wherever the previous turn left the
-          // spacer/scroll mode.
-          if (msg.ts) modeRef.current = { kind: 'PIN_USER_MSG', ts: msg.ts }
+          if (contWillPin) {
+            setSpacerActive(true)
+            if (spacerRef.current) spacerRef.current.style.height = '0px'
+            modeRef.current = { kind: 'PIN_USER_MSG', ts: msg.ts }
+          }
         } else {
           // Server's promoted ts isn't in our local queue (cancel raced
           // with promote). Refetch authoritative state.
@@ -987,6 +1018,24 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       const queuedMsg = { role: 'user', content: text, ts: Date.now(), cid, queued: true }
       if (attachments.length > 0) queuedMsg.attachments = attachments
       pendingQueue.add(queuedMsg)
+      // Capture the send rule's inputs AT SEND TIME, before the POST. If
+      // this queued send is promoted into the active turn (the backend
+      // returns started, either as `queued+started` or the `started` race),
+      // it becomes a new visible user message and must follow the same pin
+      // rule as a fresh send. The at-bottom / following decision and the
+      // first-user check must reflect the moment of sending — reading them
+      // AFTER `await streamSend(...)` lets a scroll during the POST flip the
+      // decision. `modeAtSend` lets us detect such a scroll and yield to it
+      // (a user-driven mode change during the await is the newer intent).
+      const queuedIsFirstUser = !messagesRef.current.some(
+        m => m.role === 'user' && !m.hidden,
+      )
+      const queuedModeAtSend = modeRef.current
+      const queuedWillPin = shouldPinSend({
+        scrollEl: scrollRef.current,
+        mode: modeRef.current,
+        isFirstUserMsg: queuedIsFirstUser,
+      })
       setInput('')
       clearFiles()
       if (inputRef.current) {
@@ -1024,6 +1073,25 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             onMessageStartRef.current?.()
             promotedRef.current = false
             setSending(true)
+            // The queued send was promoted straight into the active turn,
+            // so it's a new visible user message and follows the send rule
+            // just like a fresh send. Use the at-send-time decision
+            // (captured before the await) and yield to a user scroll that
+            // changed the mode during the POST. Pin keys to the SERVER ts:
+            // the rendered row carries data-ts from startedMessage.ts, not
+            // the optimistic queuedMsg.ts.
+            const pinStillValid = modeRef.current === queuedModeAtSend
+            if (queuedWillPin && pinStillValid) {
+              setSpacerActive(true)
+              if (spacerRef.current) spacerRef.current.style.height = '0px'
+              modeRef.current = {
+                kind: 'PIN_USER_MSG',
+                ts: startedMessage?.ts ?? queuedMsg.ts,
+              }
+            } else if (pinStillValid) {
+              settleNonPinMode(modeRef, scrollRef.current)
+            }
+            bridgeHook.markBridged()
           }
         }
         // Mid-turn steer: the backend delivered the send into the live
@@ -1042,6 +1110,13 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           pendingQueue.cancelByCid(queuedMsg.cid)
           onMessageStartRef.current?.()
           promotedRef.current = false
+          // Apply the send rule before appending — see shouldPinSend and
+          // the fresh-send path. A message that raced into a started turn
+          // is still a new send becoming the active turn, so it pins only
+          // when first-or-at-bottom. The decision was captured at send
+          // time (before the await): reading scrollRef/modeRef HERE would
+          // let a scroll during the POST flip it. `pinStillValid` yields to
+          // a user-driven mode change that landed during the await.
           const startedMessage = startedMessageFromResponse(result)
           commitMessages(prev => {
             if (startedMessage) return [...prev, startedMessage]
@@ -1049,10 +1124,24 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             return [...prev, msg]
           })
           setSending(true)
-          setSpacerActive(true)
-          if (spacerRef.current) spacerRef.current.style.height = '0px'
-          // New visible user msg → pin it to the top of the viewport.
-          modeRef.current = { kind: 'PIN_USER_MSG', ts: queuedMsg.ts }
+          // New visible user msg → pin to the top only when the rule
+          // allows; otherwise convert any stale pin to the reader's
+          // ANCHOR_AT (see settleNonPinMode) so the reader stays put with
+          // no phantom spacer. Pin keys to the SERVER ts: the rendered row
+          // carries data-ts from startedMessage.ts, so keying to the
+          // optimistic queuedMsg.ts makes applyMode's selector miss and the
+          // pin silently fail.
+          const startedPinStillValid = modeRef.current === queuedModeAtSend
+          if (queuedWillPin && startedPinStillValid) {
+            setSpacerActive(true)
+            if (spacerRef.current) spacerRef.current.style.height = '0px'
+            modeRef.current = {
+              kind: 'PIN_USER_MSG',
+              ts: startedMessage?.ts ?? queuedMsg.ts,
+            }
+          } else if (startedPinStillValid) {
+            settleNonPinMode(modeRef, scrollRef.current)
+          }
           // This is a NEW turn (not the bridge turn from mount).
           // Retire the bridge gate so the upcoming promote appends a
           // fresh assistant instead of replacing whichever message
@@ -1088,6 +1177,21 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     onMessageStartRef.current?.()
     promotedRef.current = false
 
+    // The send rule (see shouldPinSend): pin the new message to the top
+    // only when it is the first message OR the user is at the bottom.
+    // Read both inputs BEFORE the append: `hasPriorVisibleUser` from the
+    // synchronous messagesRef (commitMessages advances it eagerly), and
+    // the at-bottom snapshot from the pre-append scrollHeight. `pin` is
+    // the caller opt-out (handleStop's queue-collapse passes pin:false).
+    const isFirstUserMsg = !messagesRef.current.some(
+      m => m.role === 'user' && !m.hidden,
+    )
+    const willPin = pin && shouldPinSend({
+      scrollEl: scrollRef.current,
+      mode: modeRef.current,
+      isFirstUserMsg,
+    })
+
     const userMsg = { role: 'user', content: text, ts: Date.now() }
     if (attachments.length > 0) userMsg.attachments = attachments
     commitMessages(prev => [...prev, userMsg])
@@ -1100,14 +1204,23 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       inputRef.current.closest('.chat__pill')?.classList.remove('chat__pill--tall')
     }
     setSending(true)
-    setSpacerActive(true)
-    if (spacerRef.current) spacerRef.current.style.height = '0px'
-    // User just sent — pin the new user message to viewport top.
-    // Skip when caller asked us not to pin (e.g. handleStop's
-    // queue-collapse, where the user was reading the partial and
-    // shouldn't be yanked to a synthetic combined message).
-    if (pin) {
+    // Pin to top only when the rule allows. When not pinning the user is
+    // reading (scrolled up) — the send must be a no-op for scroll/spacer,
+    // so leave the spacer state and height alone, BUT convert any stale
+    // PIN_USER_MSG (from an earlier send) into the reader's current
+    // ANCHOR_AT: otherwise _computeSpacerH keeps gating the pin-spacer on
+    // that stale pin and sizes phantom room against THIS new message,
+    // shifting the reader. (Activating/zeroing the spacer on a non-pin was
+    // the latent pin:false leak Codex flagged; the phantom spacer is the
+    // stale-mode follow-on.) The fresh path returns {status:'started'}
+    // with no server message, so the optimistic userMsg.ts is also the
+    // rendered data-ts — keying the pin to it is correct here.
+    if (willPin) {
+      setSpacerActive(true)
+      if (spacerRef.current) spacerRef.current.style.height = '0px'
       modeRef.current = { kind: 'PIN_USER_MSG', ts: userMsg.ts }
+    } else {
+      settleNonPinMode(modeRef, scrollRef.current)
     }
     // Fresh turn — not a bridge from a mounted DB partial.
     bridgeHook.markBridged()
