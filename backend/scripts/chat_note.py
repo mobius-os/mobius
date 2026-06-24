@@ -27,6 +27,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -124,6 +125,31 @@ def _note_mtime(note: Path) -> float:
     return note.stat().st_mtime
   except OSError:
     return 0.0
+
+
+def _atomic_write_text(note: Path, text: str) -> None:
+  """Publish the note atomically: write a temp file in the same dir, then
+  os.replace onto it (a same-filesystem rename is atomic on POSIX). A concurrent
+  reader — build_memory_block injecting the chat-note tree into a turn,
+  reflection's nightly walk, the Memory app reading over the FS API — then sees
+  the whole old note or the whole new one, never a torn half-written file. The
+  temp is dot-prefixed and non-.md so the chats/*/index.md globs never ingest it,
+  and os.replace bumps mtime exactly at visibility, keeping the mtime guard
+  reliable. Raises on failure so the caller's best-effort except returns 0."""
+  note.parent.mkdir(parents=True, exist_ok=True)
+  fd, tmp = tempfile.mkstemp(prefix=f".{note.name}.", suffix=".tmp", dir=str(note.parent))
+  try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+      f.write(text)
+      f.flush()
+      os.fsync(f.fileno())
+    os.replace(tmp, note)
+  except Exception:
+    try:
+      os.unlink(tmp)
+    except OSError:
+      pass
+    raise
 
 
 def _looks_like_note(text: str) -> bool:
@@ -254,10 +280,10 @@ def run() -> int:
   if _note_mtime(note) > existing_mtime:
     return 0
 
-  # Privileged write happens HERE (the subagent had no tools).
+  # Privileged write happens HERE (the subagent had no tools). Atomic so a
+  # concurrent reader never sees a torn note (see _atomic_write_text).
   try:
-    note.parent.mkdir(parents=True, exist_ok=True)
-    note.write_text(out + ("\n" if not out.endswith("\n") else ""), encoding="utf-8")
+    _atomic_write_text(note, out + ("\n" if not out.endswith("\n") else ""))
   except OSError:
     return 0
 
