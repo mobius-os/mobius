@@ -156,17 +156,21 @@ def _path_to_node_id(file_path: str) -> str | None:
 
 def _parse_args(argv: list[str]) -> tuple[list[str], int | None, int | None]:
   """Pull optional --max-depth / --max-breadth out of argv; the rest is
-  positional (query, then optional chat_id). Hints are soft (see _hints_clause)."""
+  positional (query, then optional chat_id). Hints are soft (see _hints_clause).
+  A recognized flag with no value, or a non-integer value, is a usage error —
+  never let it fall through and corrupt the query text."""
   positional: list[str] = []
   max_depth = max_breadth = None
   i = 0
   while i < len(argv):
     a = argv[i]
-    if a in ("--max-depth", "--max-breadth") and i + 1 < len(argv):
+    if a in ("--max-depth", "--max-breadth"):
+      if i + 1 >= len(argv):
+        raise ValueError(f"{a} needs an integer value")
       try:
-        n: int | None = int(argv[i + 1])
+        n = int(argv[i + 1])
       except ValueError:
-        n = None
+        raise ValueError(f"{a} needs an integer value, got {argv[i + 1]!r}")
       if a == "--max-depth":
         max_depth = n
       else:
@@ -179,12 +183,17 @@ def _parse_args(argv: list[str]) -> tuple[list[str], int | None, int | None]:
 
 
 def run() -> int:
-  positional, max_depth, max_breadth = _parse_args(sys.argv[1:])
+  usage = (
+    'usage: memory_search.py "<request>" [chat_id] '
+    "[--max-depth N] [--max-breadth N]\n"
+  )
+  try:
+    positional, max_depth, max_breadth = _parse_args(sys.argv[1:])
+  except ValueError as exc:
+    sys.stderr.write(f"{usage}  ({exc})\n")
+    return 2
   if not positional or not positional[0].strip():
-    sys.stderr.write(
-      'usage: memory_search.py "<request>" [chat_id] '
-      "[--max-depth N] [--max-breadth N]\n"
-    )
+    sys.stderr.write(usage)
     return 2
   query = positional[0]
   chat_id = positional[1] if len(positional) > 1 else ""

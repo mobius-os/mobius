@@ -158,12 +158,15 @@ maintain `chats/$CHAT_ID/index.md` **every turn**:
   two ways. Inline `[[wiki-links]]` where a fact references another note. AND a
   short `## Related` section at the foot listing the few **most relevant** linked
   notes/chats with a reason — `- [[chats/<other-id>]] — <why it connects>`,
-  `- [[notes/<slug>]] — <why>`. When a concept recurs across several chats, that
-  recurring thread is the highest-value connection: surface it here. **Curate this
-  set** — keep the handful a future reader would actually follow, not every passing
-  mention. (Curating `## Related` doesn't violate grow-never-shrink: it is an index
-  of pointers, not facts — the facts themselves live in the linked notes/chats and
-  in this note's growing Summary, so a dropped pointer loses nothing.)
+  `- [[<note-slug>]] — <why>` (notes link by bare slug, chats by `chats/<id>`).
+  When a concept recurs across several chats, that recurring thread is the highest-
+  value connection: surface it here. **Curate this set** — keep the handful a future
+  reader would actually follow, not every passing mention. (This curation exception
+  is scoped to the `## Related` pointer list ONLY: it is an index of pointers, not
+  facts, so replacing a stale pointer with a better one loses nothing — the facts
+  live in the linked notes/chats and in this note's growing Summary. It is NOT
+  license to trim `## Summary`, `## Facts & intent`, or an inline factual `[[link]]`
+  — those still grow-never-shrink.)
 
 **Grow, never shrink.** Each turn, `Read` the note and then `Write` a *larger*
 version — fold in the new turn's information and reorganize for coherence, but
