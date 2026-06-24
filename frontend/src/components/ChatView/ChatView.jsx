@@ -10,6 +10,7 @@ import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import usePendingQueue from './hooks/usePendingQueue.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
 import ChatInputBar from './ChatInputBar.jsx'
+import AgentContextInspector from './AgentContextInspector.jsx'
 import ComposerPopover from './ComposerPopover.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
 import StreamingMessage from './StreamingMessage.jsx'
@@ -178,6 +179,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // read is forward-compat: harmlessly null today, it would pick up a
   // persisted pending_question_id if one is ever added.)
   const [liveQuestionId, setLiveQuestionId] = useState(() => cached?.pending_question_id ?? null)
+  const [showInspector, setShowInspector] = useState(false)
 
   // Mirror `messages` in a ref so commitMessages can compute the next
   // value without putting a side-effect (setQueryData) inside a
@@ -1693,6 +1695,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       >
         {ariaStatus}
       </div>
+      {showInspector && (
+        <AgentContextInspector
+          chatId={chatId}
+          onClose={() => setShowInspector(false)}
+        />
+      )}
       {showEmpty && (
         <div className="chat__empty-wrap">
           {embedded ? (
@@ -1902,37 +1910,52 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           onRemoveFile={removeFile}
           attachTriggerRef={attachTriggerRef}
           leftButtons={
-            <ComposerPopover
-              chatInfo={showPicker ? chatInfo : null}
-              chatId={chatId}
-              onAttachClick={() => attachTriggerRef.current?.()}
-              /* Derive live — `chatInfo.has_assistant_turns` is set
-                 once on mount via the API and never refreshed when
-                 the running turn finishes. Without this OR, sending
-                 a message and getting a reply in the same session
-                 leaves the cross-provider lock disengaged: the user
-                 can flip Claude ↔ Codex mid-chat and lose the
-                 session, which neither SDK can recover from. */
-              hasAssistantTurns={
-                (chatInfo?.has_assistant_turns ?? false)
-                || messages.some(m => m.role === 'assistant')
-              }
-              onChangeChatInfo={({ agent_settings_json, provider, effective }) => {
-                // Merge into chatInfo so the next render reflects the
-                // PATCH without a roundtrip. effective is authoritative
-                // (backend re-merged on top of the current global file).
-                // `provider` only changes when the user picked a new one —
-                // preserve the existing value otherwise so an unrelated
-                // PATCH doesn't wipe it.
-                setChatInfo(prev => prev ? ({
-                  ...prev,
-                  agent_settings_json: agent_settings_json,
-                  provider: provider || prev.provider,
-                  effective: effective || prev.effective,
-                }) : prev)
-              }}
-              onCompactionStored={handleCompactionStored}
-            />
+            <>
+              <ComposerPopover
+                chatInfo={showPicker ? chatInfo : null}
+                chatId={chatId}
+                onAttachClick={() => attachTriggerRef.current?.()}
+                /* Derive live — `chatInfo.has_assistant_turns` is set
+                   once on mount via the API and never refreshed when
+                   the running turn finishes. Without this OR, sending
+                   a message and getting a reply in the same session
+                   leaves the cross-provider lock disengaged: the user
+                   can flip Claude ↔ Codex mid-chat and lose the
+                   session, which neither SDK can recover from. */
+                hasAssistantTurns={
+                  (chatInfo?.has_assistant_turns ?? false)
+                  || messages.some(m => m.role === 'assistant')
+                }
+                onChangeChatInfo={({ agent_settings_json, provider, effective }) => {
+                  // Merge into chatInfo so the next render reflects the
+                  // PATCH without a roundtrip. effective is authoritative
+                  // (backend re-merged on top of the current global file).
+                  // `provider` only changes when the user picked a new one —
+                  // preserve the existing value otherwise so an unrelated
+                  // PATCH doesn't wipe it.
+                  setChatInfo(prev => prev ? ({
+                    ...prev,
+                    agent_settings_json: agent_settings_json,
+                    provider: provider || prev.provider,
+                    effective: effective || prev.effective,
+                  }) : prev)
+                }}
+                onCompactionStored={handleCompactionStored}
+              />
+              <div className="composer-plus">
+                <button
+                  type="button"
+                  className={`chat__plus${showInspector ? ' chat__plus--active' : ''}`}
+                  onPointerDown={(e) => e.preventDefault()}
+                  onClick={() => setShowInspector(open => !open)}
+                  aria-label="Inspect system prompt"
+                  aria-haspopup="dialog"
+                  aria-expanded={showInspector}
+                >
+                  ⓘ
+                </button>
+              </div>
+            </>
           }
         />
       </div>

@@ -81,7 +81,29 @@ import { useState, useRef, useCallback } from 'react'
 export default function usePendingQueue() {
   const [pendingMessages, setPendingMessages] = useState([])
   const pendingMessagesRef = useRef([])
-  const consumedServerTsRef = useRef(new Set())
+  // Deferred-removal guard: `Map<consumedTs, Set<cid>>`. When a started turn
+  // consumes a server ts whose OPTIMISTIC entry is still in flight (its POST
+  // not yet acked, so the entry carries a client ts, not this server ts, and
+  // can't be removed by ts), we record the consumed ts mapped to the set of
+  // in-flight cids that EXIST at that moment — the only cids that could
+  // legitimately resolve to it. swapOptimisticTs removes the entry ONLY when
+  // its cid is in that set.
+  //
+  // Keying by cid (not ts alone) is what makes a server-REISSUED ts safe: when
+  // _ensure_unique_ts frees a ts and hands it to a NEW queued message, that
+  // message's cid was NOT in flight at arm time, so it is absent from the
+  // guard's cid set and its swap is NOT dropped (the "didn't show up as queued"
+  // bug, #4). A bare ts-keyed guard dropped it.
+  //
+  // Bounded so a stale entry can't accumulate:
+  //   - armed only for a consumed ts ABSENT from the list AND only while a cid
+  //     is in flight (see promoteManyByTs);
+  //   - PURGED the moment no optimistic POST is in flight (inFlightCidsRef
+  //     empty) — no pending swap can then match it.
+  // NOT cleared in hydrate: a hydrate can land WHILE a legitimate in-flight
+  // consume is pending (its cid still in flight), and dropping the guard then
+  // would resurrect the consumed message as a visible chip on the next swap.
+  const consumedServerTsRef = useRef(new Map())
   // Cids of optimistic entries whose persistence POST is still in
   // flight (added locally, server ts not yet confirmed). hydrate()
   // consults this so a reconcile-fetch that lands while the POST is
@@ -106,6 +128,23 @@ export default function usePendingQueue() {
       : updater
     pendingMessagesRef.current = next
     setPendingMessages(next)
+  }, [])
+
+  // Resolve a cid out of the deferred-consume guard: evict it from every armed
+  // snapshot (so a later same-cid reuse can't false-match a stale snapshot —
+  // cids are fresh UUIDs in practice, but this keeps the guard exact), drop any
+  // now-empty armed ts, and clear the whole guard once nothing is in flight (no
+  // pending swap can then match it). Call after every path that removes a cid
+  // from inFlightCidsRef.
+  const resolveCidFromGuard = useCallback((cid) => {
+    for (const [ts, cids] of consumedServerTsRef.current) {
+      if (cids.delete(cid) && cids.size === 0) {
+        consumedServerTsRef.current.delete(ts)
+      }
+    }
+    if (inFlightCidsRef.current.size === 0) {
+      consumedServerTsRef.current.clear()
+    }
   }, [])
 
   const add = useCallback((msg) => {
@@ -145,9 +184,16 @@ export default function usePendingQueue() {
     // optimistic round-trip is resolved, so the entry no longer needs
     // hydrate's in-flight protection regardless of which branch runs.
     inFlightCidsRef.current.delete(cid)
-    if (serverTs != null && consumedServerTsRef.current.has(serverTs)) {
+    // Remove the entry ONLY when THIS cid was one of the in-flight cids
+    // recorded when serverTs was consumed (the guard is cid-scoped). A fresh
+    // message that merely got a REISSUED serverTs was not in flight at arm
+    // time, so its cid is absent from the set and it is NOT dropped (bug #4).
+    const armedCids =
+      serverTs != null ? consumedServerTsRef.current.get(serverTs) : undefined
+    if (armedCids && armedCids.has(cid)) {
       consumedServerTsRef.current.delete(serverTs)
       apply(prev => prev.filter(m => m.cid !== cid))
+      resolveCidFromGuard(cid)
       return
     }
     apply(prev => prev.map(m => {
@@ -158,7 +204,8 @@ export default function usePendingQueue() {
       if (position !== undefined) next.position = position
       return next
     }))
-  }, [apply])
+    resolveCidFromGuard(cid)
+  }, [apply, resolveCidFromGuard])
 
   const promoteByTs = useCallback((ts) => {
     const current = pendingMessagesRef.current
@@ -171,8 +218,9 @@ export default function usePendingQueue() {
     const rest = current.filter((_, i) => i !== idx)
     pendingMessagesRef.current = rest
     setPendingMessages(rest)
+    if (promoted.cid != null) resolveCidFromGuard(promoted.cid)
     return promoted
-  }, [])
+  }, [resolveCidFromGuard])
 
   const promoteAll = useCallback((ts) => {
     const current = pendingMessagesRef.current
@@ -213,14 +261,35 @@ export default function usePendingQueue() {
     else delete promoted.attachments
     pendingMessagesRef.current = kept
     setPendingMessages(kept)
+    for (const m of promotedGroup) {
+      if (m.cid != null) resolveCidFromGuard(m.cid)
+    }
     return promoted
-  }, [])
+  }, [resolveCidFromGuard])
 
   const promoteManyByTs = useCallback((tsList) => {
     const wanted = new Set((tsList || []).filter(ts => ts != null))
     if (wanted.size === 0) return null
-    for (const ts of wanted) consumedServerTsRef.current.add(ts)
     const current = pendingMessagesRef.current
+    // Arm the deferred-removal guard ONLY for a consumed ts whose entry is
+    // NOT already in the local list (a present entry is removed directly by ts
+    // via the `kept` filter below, so it needs no swap-time removal), AND only
+    // while an optimistic POST is in flight (otherwise no swap can ever match
+    // it). The guard records the consumed ts → the SNAPSHOT of in-flight cids
+    // at this moment: those are the only cids that could legitimately resolve
+    // to this consumed ts. swapOptimisticTs removes an entry only when its cid
+    // is in that snapshot, so a fresh message later given a REISSUED ts (its
+    // cid was not in flight here) is NOT dropped (bug #4).
+    if (inFlightCidsRef.current.size > 0) {
+      const presentTs = new Set(current.map(m => m.ts))
+      for (const ts of wanted) {
+        if (!presentTs.has(ts)) {
+          // A fresh Set per ts (not a shared reference) so resolveCidFromGuard
+          // can prune one armed ts without aliasing into another.
+          consumedServerTsRef.current.set(ts, new Set(inFlightCidsRef.current))
+        }
+      }
+    }
     const promotedGroup = current.filter(m => wanted.has(m.ts))
     if (promotedGroup.length === 0) return null
     const kept = current.filter(m => !wanted.has(m.ts))
@@ -253,22 +322,35 @@ export default function usePendingQueue() {
     else delete promoted.attachments
     pendingMessagesRef.current = kept
     setPendingMessages(kept)
+    // Resolve the just-promoted (present) cids out of the guard. This is also
+    // the ARM path: it may have armed the guard for a DIFFERENT absent ts whose
+    // optimistic cid is still in flight, so resolveCidFromGuard won't clear the
+    // whole guard (in-flight non-empty) — it only prunes the promoted cids.
+    for (const m of promotedGroup) {
+      if (m.cid != null) resolveCidFromGuard(m.cid)
+    }
     return promoted
-  }, [])
+  }, [resolveCidFromGuard])
 
   const cancelByTs = useCallback((ts) => {
     // A cancelled entry is genuinely gone; drop its in-flight mark so
     // it cannot resurrect on the next hydrate.
+    const cancelledCids = []
     for (const m of pendingMessagesRef.current) {
-      if (m.ts === ts && m.cid != null) inFlightCidsRef.current.delete(m.cid)
+      if (m.ts === ts && m.cid != null) {
+        inFlightCidsRef.current.delete(m.cid)
+        cancelledCids.push(m.cid)
+      }
     }
     apply(prev => prev.filter(m => m.ts !== ts))
-  }, [apply])
+    for (const cid of cancelledCids) resolveCidFromGuard(cid)
+  }, [apply, resolveCidFromGuard])
 
   const cancelByCid = useCallback((cid) => {
     inFlightCidsRef.current.delete(cid)
     apply(prev => prev.filter(m => m.cid !== cid))
-  }, [apply])
+    resolveCidFromGuard(cid)
+  }, [apply, resolveCidFromGuard])
 
   // Reconcile the queue against authoritative server state WITHOUT
   // clobbering an optimistic entry whose own POST is still in flight.
@@ -292,6 +374,13 @@ export default function usePendingQueue() {
   // shares its ts (keeps QueuedMessages from remounting; R2 in
   // _034-design.md — the swap race), else mint `s-${ts}`.
   const hydrate = useCallback((serverList) => {
+    // Deliberately does NOT clear consumedServerTsRef: a hydrate can land
+    // WHILE a legitimate in-flight consume is still pending (its optimistic
+    // cid in flight, its consumed server ts armed). Clearing the guard here
+    // would let that consumed entry resurface as a visible chip when its swap
+    // finally lands. The guard is instead pruned per-cid as each round-trip
+    // resolves and fully cleared the moment nothing is in flight
+    // (resolveCidFromGuard), which is the precise end of any legitimate race.
     const localByTs = new Map(
       (pendingMessagesRef.current || []).map(m => [m.ts, m.cid])
     )
@@ -333,7 +422,8 @@ export default function usePendingQueue() {
 
   const clearInFlight = useCallback((cid) => {
     inFlightCidsRef.current.delete(cid)
-  }, [])
+    resolveCidFromGuard(cid)
+  }, [resolveCidFromGuard])
 
   return {
     pendingMessages,

@@ -826,7 +826,18 @@ export default function useStreamConnection(chatId, {
     // render as if a fresh turn started (no context for what the user
     // is replying to). Keep streamItems intact for the answer path.
     const isAnswerSubmission = !!answers
-    if (!queueOnly && !isAnswerSubmission) {
+    // A force_steer injects into the LIVE turn — it is not a new turn.
+    // The fresh-send reset below (setStreamItems([]) + setIsStreaming +
+    // wantsReconnect) is for STARTING a turn: wiping streamItems here would
+    // discard the pre-steer assistant text the live SSE has already
+    // accumulated, and onSteeredIntoTurn's promoteStreamToMessages reads
+    // exactly that (latestItemsRef) to seal it as its own message — clearing
+    // it first means the pre-steer text is lost and the steered row stacks on
+    // an empty assistant block. The backend returns {status:"steered"} and
+    // the existing SSE keeps streaming the post-steer continuation inline, so
+    // there is no reconnect/replay to set up either. Skip the reset; the live
+    // stream stays attached and the steered message renders inline.
+    if (!queueOnly && !isAnswerSubmission && !forceSteer) {
       wantsReconnectRef.current = true
       justSentAtRef.current = Date.now()
       setStreamItems([])
@@ -910,12 +921,21 @@ export default function useStreamConnection(chatId, {
         setConnectionError(null)
       }
     } catch (err) {
-      // Always reset streaming state on POST failure. The earlier
+      // Reset streaming state on POST failure. The earlier
       // `if (!queueOnly)` guard left the UI stuck on "thinking" dots
       // when a queueOnly send raced the server's `status: 'started'`
       // branch and then the POST itself failed mid-flight.
-      wantsReconnectRef.current = false
-      setIsStreaming(false)
+      //
+      // EXCEPT a force_steer: it never started its own turn (it injects
+      // into the live one), so its POST failure must not tear down the
+      // still-running live stream — flipping isStreaming off here would
+      // kill the live turn's UI even though the backend turn keeps going.
+      // handleSteer's own catch leaves the queue intact for the turn-end
+      // drain; we leave the live stream attached.
+      if (!forceSteer) {
+        wantsReconnectRef.current = false
+        setIsStreaming(false)
+      }
       throw err
     }
 

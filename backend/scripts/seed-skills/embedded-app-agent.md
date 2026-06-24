@@ -29,6 +29,12 @@ written with that `files/` prefix (for example `files/chapter1.tex`,
 root, not under `files/`. Get this prefix right or your edits land in the
 wrong place and the app never sees them.
 
+**Per-project scope.** If the `<app_context>` names an **Active project** (its
+`$APP_STORAGE_DIR` already points at `projects/<project-id>/`), your whole
+workspace IS that one project — every `$APP_STORAGE_DIR/...` path above resolves
+under it, so the same `files/` + control-file rules apply unchanged. Stay inside
+it: never read or write another project's `projects/<other-id>/...`.
+
 ---
 
 ## You edit files in the workspace, you don't just answer in chat
