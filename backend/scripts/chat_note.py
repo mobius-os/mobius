@@ -101,8 +101,13 @@ def _read_transcript(chat_id: str) -> str:
         for b in content
         if isinstance(b, dict) and b.get("type") == "text"
       )
+    elif isinstance(content, str):
+      text = content
     else:
-      text = content or ""
+      # A non-string, non-list content shape (e.g. a bare dict) would crash the
+      # loop and — caught at the top level — silently leave the note stale. Skip
+      # it instead.
+      text = ""
     if text.strip():
       lines.append(f"{role}: {text.strip()}")
   return "\n\n".join(lines)[-MAX_TRANSCRIPT_BYTES:]
@@ -112,6 +117,15 @@ def _note_path(chat_id: str) -> Path:
   return MEMORY_DIR / "chats" / chat_id / "index.md"
 
 
+def _note_mtime(note: Path) -> float:
+  """mtime of the note file, or 0.0 if absent. Used as an optimistic-concurrency
+  token: capture it at read time, re-check before write."""
+  try:
+    return note.stat().st_mtime
+  except OSError:
+    return 0.0
+
+
 def _looks_like_note(text: str) -> bool:
   t = text.lstrip()
   return t.startswith("---") and "## Summary" in t
@@ -119,22 +133,35 @@ def _looks_like_note(text: str) -> bool:
 
 def _clean_note_output(text: str) -> str:
   """Trim model cruft after the note. The summarizer sometimes keeps generating
-  past the note — a hallucinated `Human:`/`Assistant:` turn, or a SECOND
-  frontmatter block repeating the note. Keep only the first complete note: stop
-  at a chat-turn label or at the opening `---` of a repeat (the 3rd `---`, after
-  the first note's open + close)."""
-  out: list[str] = []
+  past the note: a hallucinated chat turn (`Human:`/`Assistant:`) and/or a SECOND
+  frontmatter block repeating the whole note. Cut CONSERVATIVELY so a legitimate
+  note is never truncated (silent content drop is worse than leftover cruft):
+
+  1. Repeated-frontmatter cut — once the first note's frontmatter has closed
+     (>= 2 `---` seen), a `---` line whose next non-empty line is a frontmatter
+     key (`type:`/`description:`) begins a REPEAT, so drop from there. A bare
+     `---` horizontal rule in the body isn't followed by a key, so it's kept.
+  2. Trailing turn-label trim — strip a trailing run of `Human:`/`Assistant:`
+     lines (and surrounding blanks). Trailing-only, so a `Human:`-prefixed line
+     INSIDE the note body (e.g. a quoted log line) is preserved."""
+  lines = text.lstrip().splitlines()
   fences = 0
-  for ln in text.lstrip().splitlines():
-    s = ln.strip()
-    if s.startswith("Human:") or s.startswith("Assistant:"):
-      break
-    if s == "---":
+  cut = len(lines)
+  for i, ln in enumerate(lines):
+    if ln.strip() == "---":
       fences += 1
-      if fences >= 3:  # 1=open, 2=close of THIS note; 3=open of a repeat
-        break
-    out.append(ln)
-  return "\n".join(out).rstrip()
+      if fences >= 2:
+        nxt = next((l.strip() for l in lines[i + 1:] if l.strip()), "")
+        if re.match(r"^(type|description):", nxt):
+          cut = i  # a repeated frontmatter block starts here
+          break
+  lines = lines[:cut]
+  while lines and (
+    not lines[-1].strip()
+    or lines[-1].lstrip().startswith(("Human:", "Assistant:"))
+  ):
+    lines.pop()
+  return "\n".join(lines).rstrip()
 
 
 def _build_prompt(transcript: str, existing: str) -> str:
@@ -182,6 +209,7 @@ def run() -> int:
     return 0  # nothing to summarize yet
   existing = ""
   note = _note_path(chat_id)
+  existing_mtime = _note_mtime(note)  # optimistic-concurrency token
   if note.is_file():
     try:
       existing = note.read_text(encoding="utf-8")
@@ -194,6 +222,12 @@ def run() -> int:
     CLI_PATH,
     "-p",
     _build_prompt(transcript, existing),
+    # ENFORCE the anti-exfil invariant: `--tools ""` disables ALL tools, so a
+    # prompt-injected transcript can't make the summarizer read files or reach
+    # the network. The summarizer only PRODUCES note text; this script does the
+    # privileged writes. (Don't rely on the system-prompt instruction alone.)
+    "--tools",
+    "",
     "--output-format",
     "text",
     "--append-system-prompt",
@@ -211,6 +245,13 @@ def run() -> int:
   if not _looks_like_note(out):
     # The model didn't return a well-formed note — leave any existing note
     # untouched rather than overwriting it with garbage.
+    return 0
+
+  # Race guard: this backstop runs at turn-end AFTER the chat lock is released
+  # (chat.py), so a fresh turn — or its own backstop — can write the note while
+  # this (slower) subprocess is still running its LLM call. If the note advanced
+  # since we read it, a newer writer won; don't clobber it with our stale output.
+  if _note_mtime(note) > existing_mtime:
     return 0
 
   # Privileged write happens HERE (the subagent had no tools).
