@@ -1751,6 +1751,9 @@ def _build_time_context(timezone: str | None, elapsed: str | None = None) -> str
   return f"[Context — current time: {stamp} ({timezone or 'UTC'}){gap}]"
 
 
+_PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
 def _build_app_context(
   db: Session,
   chat_id: str,
@@ -1778,6 +1781,17 @@ def _build_app_context(
     data_root / "apps" / (app.slug or str(app.id))
   )
   storage_dir = data_root / "apps" / str(app.id)
+  # Per-project scoping (feature 135): when this chat carries a project_id in
+  # agent_settings_json (the per-project-chat contract), the agent's workspace
+  # is that ONE project, so point APP_STORAGE_DIR at projects/<project_id>/
+  # rather than the shared app root — its files/, files-index.json, etc. all
+  # resolve under the project.
+  overrides = _chat_settings_dict(chat)
+  project_id = overrides.get("project_id") if isinstance(overrides, dict) else None
+  if not (isinstance(project_id, str) and _PROJECT_ID_RE.match(project_id)):
+    project_id = None
+  if project_id:
+    storage_dir = storage_dir / "projects" / project_id
   primary_file = source_dir / "index.jsx"
   scripts = [
     name for name in ("fetch.sh", "build.sh", "job.sh")
@@ -1794,6 +1808,12 @@ def _build_app_context(
   ]
   if description:
     lines.append(f"Description: {description[:1000]}")
+  if project_id:
+    lines.append(
+      f"Active project: {project_id} — this chat is scoped to ONE of the app's "
+      f"projects; its files live under the App storage directory below "
+      f"(projects/{project_id}/). Treat other projects as out of scope."
+    )
   lines.extend([
     f"Source directory: {source_dir}",
     f"Primary JSX file: {primary_file}",
@@ -1810,6 +1830,8 @@ def _build_app_context(
     "APP_PRIMARY_FILE": str(primary_file),
     "APP_STORAGE_DIR": str(storage_dir),
   }
+  if project_id:
+    env["APP_PROJECT_ID"] = project_id
   return "\n".join(lines), env
 
 
