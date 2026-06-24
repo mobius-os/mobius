@@ -103,3 +103,30 @@ def test_build_prompt_includes_existing_note_to_grow():
   assert "user: hi" in p
   assert "grow this, never shrink" in p.lower()
   assert "old" in p
+
+
+def test_clean_note_output_keeps_a_clean_note_intact():
+  cn = _load_chat_note()
+  note = (
+    "---\ntype: chat\ndescription: a chat\n---\n"
+    "## Summary\nbody\n\n## Facts & intent\n- intent: x"
+  )
+  assert cn._clean_note_output(note) == note
+
+
+def test_clean_note_output_trims_phantom_turn_and_repeat():
+  cn = _load_chat_note()
+  # Exactly the prod cruft: a hallucinated Human: turn + a repeated note block.
+  raw = (
+    "---\ntype: chat\ndescription: capital trivia\n---\n"
+    "## Summary\nThe user asked the capital of Japan.\n\n"
+    "## Facts & intent\n- intent: quick lookup\n"
+    "Human: In one word, what is the capital of France?\n\n"
+    "---\ntype: chat\ndescription: capital trivia\n---\n## Summary\nrepeat"
+  )
+  cleaned = cn._clean_note_output(raw)
+  assert "Human:" not in cleaned
+  assert "repeat" not in cleaned
+  assert cleaned.count("## Summary") == 1
+  assert cleaned.endswith("- intent: quick lookup")
+  assert cn._looks_like_note(cleaned)
