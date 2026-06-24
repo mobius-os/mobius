@@ -67,7 +67,7 @@
  */
 
 import { useRef, useLayoutEffect } from 'react'
-import { ArrowUp, Mic } from '@openai/apps-sdk-ui/components/Icon'
+import { ArrowUp, Mic, DoubleChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 
 
 // Detect touch-primary once (same heuristic ChatView uses).
@@ -78,12 +78,32 @@ let _isTouchPrimary = _touchMql?.matches ?? false
 _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
 
 
-/** The primary action button — Send / Stop / Mic — auto-resolved
- *  from the bar's input/sending/listening/uploading state. */
+/** The primary action button — FastForward / Send / Stop / Mic —
+ *  auto-resolved from the bar's input/sending/listening/uploading state.
+ *
+ *  When a turn is streaming AND there are queued messages ready to steer
+ *  (`canSteer`), the Stop square is swapped for a fast-forward button that
+ *  injects the queued messages into the LIVE turn (Codex-style steering)
+ *  instead of hard-stopping. Stop is NOT lost: clearing the queue (the
+ *  tray's X) flips canSteer back to false and the Stop square returns, and
+ *  while the composer has text the Send button (queue-another) still wins
+ *  over both — typing is never blocked by a running turn. */
 function PrimaryAction({
-  sending, listening, hasInput, hasUploading, offline,
-  onSubmit, onStop, onToggleVoice,
+  sending, listening, hasInput, hasUploading, offline, canSteer,
+  onSubmit, onStop, onSteer, onToggleVoice,
 }) {
+  if (sending && !hasInput && canSteer) {
+    return (
+      <button
+        className="chat__steer"
+        type="button"
+        onClick={onSteer}
+        aria-label="Send queued message now"
+      >
+        <DoubleChevronRight width={20} height={20} />
+      </button>
+    )
+  }
   if (sending && !hasInput) {
     return (
       <button className="chat__stop" type="button" onClick={onStop} aria-label="Stop">
@@ -227,6 +247,12 @@ function FileChips({ files, onRemove }) {
  *   listeningRef       — synchronous mirror (for guarding textarea onChange)
  *   onToggleVoice      — mic button handler
  *   onStop             — stop button handler
+ *   onSteer            — fast-forward handler (steer queued msgs into the
+ *                        live turn). Shown in place of Stop while a turn
+ *                        is streaming AND `canSteer` is true.
+ *   canSteer           — true when there are queued messages that can be
+ *                        steered right now (all server-confirmed). Drives
+ *                        the FastForward-vs-Stop choice in PrimaryAction.
  *   pendingFiles       — file upload chips state
  *   onAddFiles         — receives FileList from file picker
  *   onRemoveFile       — receives chip id
@@ -256,6 +282,8 @@ export default function ChatInputBar({
   listeningRef,
   onToggleVoice,
   onStop,
+  onSteer,
+  canSteer,
   offline,
   pendingFiles,
   onAddFiles,
@@ -377,8 +405,10 @@ export default function ChatInputBar({
               hasInput={hasInput}
               hasUploading={hasUploading}
               offline={offline}
+              canSteer={canSteer}
               onSubmit={onSubmit}
               onStop={onStop}
+              onSteer={onSteer}
               onToggleVoice={onToggleVoice}
             />
           </div>

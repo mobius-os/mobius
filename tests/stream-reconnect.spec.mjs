@@ -534,6 +534,16 @@ test.describe('Stream reconnection', () => {
 
     await setupChat(page)
 
+    // Cancel-queued (DELETE /pending/{ts}) → 200 with an empty queue, so the
+    // tray-X clear below resolves cleanly without an error-path refetch.
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/pending\/[0-9]+$/, route =>
+      route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_messages: [] }),
+      })
+    )
+
     // POST /messages override — registered AFTER setupChat so it wins
     // (Playwright matches most-recently-added first; setupChat's bare-{}
     // mock would otherwise shadow this). First send starts the (stale)
@@ -564,18 +574,33 @@ test.describe('Stream reconnection', () => {
       timeout: 5000,
     })
 
-    // Queue a second message behind the streaming turn so Stop has
-    // something to collapse + resend as a fresh turn.
+    // Queue a second message behind the streaming turn. A server-confirmed
+    // queued message now surfaces the fast-forward (steer) button in place
+    // of Stop (the steer feature — see steer-queued.spec.mjs). This test is
+    // about the STOP disconnect+resend stale-204 guard, so clear the queue
+    // via the tray's cancel-X to revert the primary action to Stop (the
+    // documented hard-stop escape hatch). The DELETE /pending does not hit
+    // /messages, so the post-counter sequence is unchanged: the fresh turn
+    // we send after Stop is POST #3 (status:'started' → real /stream).
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('queued follow-up')
     await expect(page.locator('button[aria-label="Send"]')).toBeVisible()
     await page.locator('button[aria-label="Send"]').click()
+    // Wait for it to land as a server-confirmed queued row, then cancel it.
+    await expect(page.getByRole('button', { name: 'Send queued message now' }))
+      .toBeVisible()
+    await page.locator('.queued__cancel').first().click()
+    await expect(page.locator('.queued__row')).toHaveCount(0)
 
-    // Stop: aborts the parked first stream's controller (a no-op for the
-    // shim), zeroes justSentAtRef, then resends 'queued follow-up' as a
-    // fresh turn whose /stream (request #2) hits the real route above.
+    // Stop: with the queue cleared the primary action is Stop again. Stop
+    // aborts the parked first stream's controller (a no-op for the shim)
+    // and zeroes justSentAtRef.
     await expect(page.locator('button[aria-label="Stop"]')).toBeVisible()
     await page.locator('button[aria-label="Stop"]').click()
+
+    // Send the follow-up as a fresh turn whose /stream (request #2) hits the
+    // real route above — this is the turn the stale 204 must not clobber.
+    await send(page, 'queued follow-up')
 
     // The resent turn's response should stream in and stick.
     await expect(page.locator('.chat__scroll')).toContainText(

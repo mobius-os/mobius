@@ -269,13 +269,38 @@ export default function SettingsView({ onThemeChange }) {
     }
   }
 
+  // Reload onto the FRESH service worker so the new precache — including the
+  // content-hashed /mobius-runtime.js — serves the reloaded page. sw.js calls
+  // skipWaiting() + clientsClaim(), so a newly-installed worker activates on its
+  // own; we just wait for it to take control before reloading, instead of racing
+  // a reload the OLD worker serves with the stale runtime (which leaves
+  // window.mobius missing durableWrite/createUseDocument and breaks migrated
+  // mini-apps until the tab happens to reload onto the new worker).
+  async function reloadOntoFreshSW() {
+    if ('serviceWorker' in navigator) {
+      try {
+        const reg = await navigator.serviceWorker.getRegistration()
+        if (reg) {
+          await reg.update()
+          if (reg.installing || reg.waiting) {
+            await new Promise((resolve) => {
+              navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true })
+              setTimeout(resolve, 5000) // never hang if the worker never swaps
+            })
+          }
+        }
+      } catch { /* fall through to a plain reload */ }
+    }
+    window.location.reload()
+  }
+
   // The "Update" action reuses checkForUpdates so the SW pulls the newest shell
   // build before we reload to activate it — one source of truth for "ask the SW
   // + re-read /api/version", rather than a bare reload that could race a
   // not-yet-installed bundle.
   async function applyUpdate() {
     await checkForUpdates()
-    window.location.reload()
+    await reloadOntoFreshSW()
   }
 
   // Platform self-update: read availability once on mount so Settings can show
@@ -325,7 +350,7 @@ export default function SettingsView({ onThemeChange }) {
         if (probe.ok) {
           clearInterval(restartPollRef.current)
           restartPollRef.current = null
-          window.location.reload()
+          reloadOntoFreshSW()
           return
         }
       } catch {

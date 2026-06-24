@@ -162,22 +162,42 @@ class ActiveClaudeClient:
     # (both are already persisted to the transcript), so a single slot would
     # silently drop the first. The runner drains the whole list on interrupt.
     self.pending_steer: list[str] = []
+    # A steer was requested but not yet cut over. The runner clears the
+    # turn at the NEXT completed content-block boundary (an AssistantMessage)
+    # rather than mid-token, so the user sees the finished sentence/thought
+    # before the steer takes over. Set by `steer()`, consumed by the runner.
+    self._steer_requested = False
+    # One interrupt is in flight: an `interrupt()` has been signalled but the
+    # terminal ResultMessage that ends the interrupted turn has not arrived
+    # yet. Guards the boundary cut so a second steer (or a second
+    # AssistantMessage) in the drain window can't fire a duplicate interrupt
+    # before the SDK has closed the first; the runner clears it on the
+    # terminal result. Stop's hard `interrupt()` does not consult this — Stop
+    # always cuts immediately.
+    self._interrupt_in_flight = False
     self._finished: asyncio.Future[None] = (
       asyncio.get_running_loop().create_future()
     )
 
   async def steer(self, text: str) -> bool:
-    """Interrupts the live response so the runner can re-prompt.
+    """Buffers a steer to cut in at the next content-block boundary.
 
-    Claude's SDK cannot append to an in-flight tool loop. The closest
-    faithful behavior is to record the redirect text, interrupt the
-    current response, drain the interrupt result, then query the same
-    connected client again so session context is preserved.
+    Claude's SDK cannot append to an in-flight tool loop, and the only
+    mid-turn lever is `interrupt()` — but interrupting on the token that
+    happens to be streaming throws away a half-finished sentence or
+    thinking trace. Instead we record the redirect text and FLAG the
+    request; the runner watches its own `receive_response()` loop and
+    interrupts only after the next COMPLETED content block is published
+    (an `AssistantMessage`), so the user sees the finished thought, then
+    the steer takes over. The existing drain-then-requery path on the
+    interrupt's terminal result delivers the buffered text on the same
+    connected client, preserving session context. (Stop is the separate
+    immediate-cut path — see `interrupt()`.)
     """
     if self._finished.done():
       return False
     self.pending_steer.append(text)
-    await self._client.interrupt()
+    self._steer_requested = True
     return True
 
   async def interrupt(self) -> None:
@@ -188,8 +208,14 @@ class ActiveClaudeClient:
     hang Stop indefinitely. `chat.py:stop_chat_for` adds its own 2s
     bound at the call site; this inner timeout protects any other
     direct caller.
+
+    Stop is the hard, immediate-cut path: it drops any buffered steer
+    (clearing `pending_steer` + `_steer_requested` so no boundary cut or
+    requery fires for work the user just abandoned) and interrupts the
+    live turn right now, without waiting for a content-block boundary.
     """
     self.pending_steer = []
+    self._steer_requested = False
     await self._client.interrupt()
     try:
       await asyncio.wait_for(self._finished, timeout=5.0)
@@ -966,10 +992,36 @@ async def run_claude_sdk_turn(
             sdk_msg, bc, current_session_id,
           )
           if terminal is None:
+            # Boundary-fire a buffered steer. `steer()` only flags the
+            # request (it no longer interrupts mid-token); we cut over at
+            # the next COMPLETED content block, which is exactly when an
+            # AssistantMessage is dispatched (the finished text / thinking /
+            # tool_use block was just published to the broadcast). The
+            # `_interrupt_in_flight` guard makes this fire exactly ONCE per
+            # interrupt cycle: a second steer or another AssistantMessage
+            # arriving before the interrupt's terminal ResultMessage closes
+            # the turn must not issue a duplicate interrupt, and a racing
+            # hard Stop (which clears pending_steer) makes the condition
+            # no-op. The buffered text is delivered by the existing
+            # drain-then-requery path below when that terminal arrives.
+            if (
+              isinstance(sdk_msg, AssistantMessage)
+              and active_client._steer_requested
+              and active_client.pending_steer
+              and not active_client._interrupt_in_flight
+              and not active_client._finished.done()
+            ):
+              active_client._steer_requested = False
+              active_client._interrupt_in_flight = True
+              await client.interrupt()
             continue
+          # Terminal result: the interrupt cycle (if any) is closed, so a
+          # fresh boundary cut may fire on a later turn.
+          active_client._interrupt_in_flight = False
           steer_texts = active_client.pending_steer
           if steer_texts:
             active_client.pending_steer = []
+            active_client._steer_requested = False
             await client.query(
               _steer_redirect_message("\n\n".join(steer_texts))
             )
@@ -977,9 +1029,16 @@ async def run_claude_sdk_turn(
           cost_usd = terminal.get("cost_usd")
           return terminal
         else:
+          # The stream ended without a terminal ResultMessage. Any buffered
+          # steer still gets delivered here (the boundary cut may not have
+          # fired — e.g. a tool-only turn with no AssistantMessage text
+          # block — so this is the catch-all that preserves the original
+          # pending_steer→requery contract).
+          active_client._interrupt_in_flight = False
           steer_texts = active_client.pending_steer
           if steer_texts:
             active_client.pending_steer = []
+            active_client._steer_requested = False
             await client.query(
               _steer_redirect_message("\n\n".join(steer_texts))
             )

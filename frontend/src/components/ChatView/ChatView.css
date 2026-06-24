@@ -721,6 +721,7 @@
 .chat__pill--tall { align-items: flex-end; }
 .chat__pill--tall .chat__send,
 .chat__pill--tall .chat__stop,
+.chat__pill--tall .chat__steer,
 .chat__pill--tall .chat__mic { align-self: flex-end; }
 
 /* Focus halo — exact restore of the be32e58 rule that was on the
@@ -815,6 +816,27 @@
   color: #fff;
   background: var(--danger); /* CONTRACT: destructive accent fill */
 }
+
+/* Steer (fast-forward) button — replaces Stop while a turn is streaming
+   and there are queued messages ready to inject into the live turn. Accent
+   fill (not danger red) because this is a forward/primary affordance — it
+   advances the queue into the turn rather than interrupting it. Same 40×40
+   pill geometry as Send/Stop so the slot doesn't reflow on swap. */
+.chat__steer {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent); /* CONTRACT: vivid opaque accent fill */
+  color: #fff;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.08s;
+}
+.chat__steer:hover { background: var(--accent-hover); /* CONTRACT: vivid opaque accent on hover */ }
+.chat__steer:active { transform: scale(0.94); }
 
 /* ── Voice input ──────────────────────────────────── */
 .chat__mic {

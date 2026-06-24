@@ -21,6 +21,12 @@ import { useState, useRef, useCallback } from 'react'
  *                  optimistic-ts -> server-ts swap so QueuedMessages
  *                  doesn't remount under a new key and lose UI state)
  *   - queued:      true (marker)
+ *   - serverTs:    boolean — true once `ts` is the SERVER's (server-origin
+ *                  `s-` cid, swapOptimisticTs ack, or a hydrate). An
+ *                  optimistic add starts false. Read by ChatView's steer
+ *                  gate: force-steer matches the server's
+ *                  chat.pending_messages[].ts, so only a serverTs entry can
+ *                  be steered (an unconfirmed optimistic ts would not match).
  *   - position?:   number (server-assigned)
  *   - attachments?: array
  *
@@ -113,12 +119,24 @@ export default function usePendingQueue() {
     // queue) would resurrect a phantom row. The `s-` prefix reliably
     // marks server-origin cids; only non-`s-` (optimistic) cids are
     // tracked in-flight.
-    if (msg.cid != null && !String(msg.cid).startsWith('s-')) {
+    const isServerOrigin = msg.cid != null && String(msg.cid).startsWith('s-')
+    if (msg.cid != null && !isServerOrigin) {
       inFlightCidsRef.current.add(msg.cid)
     }
     apply(prev => [
       ...prev,
-      { ...msg, position: msg.position ?? prev.length + 1 },
+      {
+        ...msg,
+        position: msg.position ?? prev.length + 1,
+        // serverTs marks an entry whose ts is the SERVER's, not an
+        // optimistic Date.now(). A server-origin cid (`s-<ts>`, fresh-send
+        // queued path) is confirmed by construction; an optimistic add
+        // starts unconfirmed and is promoted by swapOptimisticTs once the
+        // POST acks. The steer gate reads this — force-steer matches the
+        // server's chat.pending_messages[].ts, so an unconfirmed entry
+        // cannot be steered and must keep the queue on the Stop path.
+        serverTs: msg.serverTs === true || isServerOrigin,
+      },
     ])
   }, [apply])
 
@@ -134,7 +152,9 @@ export default function usePendingQueue() {
     }
     apply(prev => prev.map(m => {
       if (m.cid !== cid) return m
-      const next = { ...m, ts: serverTs ?? m.ts }
+      // The POST acked with a real server ts — mark the entry confirmed so
+      // the steer gate (canSteer / handleSteer) treats it as eligible.
+      const next = { ...m, ts: serverTs ?? m.ts, serverTs: serverTs != null || m.serverTs === true }
       if (position !== undefined) next.position = position
       return next
     }))
@@ -280,6 +300,8 @@ export default function usePendingQueue() {
       ...m,
       cid: localByTs.get(m.ts) || `s-${m.ts}`,
       queued: true,
+      // Everything in the server list has a real server ts by definition.
+      serverTs: true,
     }))
     const preserved = (pendingMessagesRef.current || []).filter(m =>
       m.cid != null
