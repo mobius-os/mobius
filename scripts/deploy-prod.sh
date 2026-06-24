@@ -559,7 +559,12 @@ if [ "$TARGET" = "prod" ]; then
     # tree, not HEAD), so uncommitted changes ship code that is on NO commit at
     # all — strictly worse than an unpushed commit (it can't even be pushed as
     # is). Refuse a dirty tree unless the same override is set.
-    if ! { git -C "$REPO_ROOT" diff --quiet && git -C "$REPO_ROOT" diff --cached --quiet; } 2>/dev/null; then
+    # `git status --porcelain` (not `diff --quiet`) so UNTRACKED files also count:
+    # docker's build context includes them, so a stray/sibling untracked file
+    # under a COPYed path (e.g. backend/app) ships to prod exactly like a
+    # modified one. Gitignored files (.env, .pm/, dist) don't show, so this
+    # only trips on genuine would-ship content.
+    if [ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]; then
       if [ "$ALLOW_UNPUSHED" = "1" ]; then
         warn "working tree is DIRTY — deploying uncommitted changes anyway (--allow-unpushed)."
         warn "These changes are on no commit; commit + push to main ASAP."
@@ -809,11 +814,27 @@ docker exec "$CONTAINER" sh -c 'printf %s "${BUILD_SHA:-unknown}" > /data/shell/
 step "[3b/4] sync /data/platform from the new baked floor"
 platform_state=$(docker exec -u mobius "$CONTAINER" bash -c '
   cd /data/platform 2>/dev/null || { echo missing; exit 0; }
+  # Uncommitted agent edits (ignore boot dotfiles + mode-only) => diverged.
   dirty=$(git -c core.fileMode=false status --porcelain | grep -vE "^\?\? \.|\.baked-sha$" || true)
-  agent_commits=$(git log --format="%s" \
-    | grep -cvE "^(init: platform layer|restore: platform|sync: platform)" || true)
-  if [ -n "$dirty" ] || [ "$agent_commits" != "0" ]; then echo diverged
-  else echo clean; fi
+  if [ -n "$dirty" ]; then echo diverged; exit 0; fi
+  # Has the agent COMMITTED content edits since the last baked sync? Decide by
+  # TREE, not by counting commit subjects. The old subject-allowlist
+  # false-positived: a benign "auto: crash-loop restore" or a reconcile
+  # "snapshot:" commit (neither in the allowlist) flipped a baked tree to
+  # "diverged" and silently SKIPPED the backend sync, so prod kept serving the
+  # previous deploy. Instead diff HEAD against the most recent init/restore
+  # baseline restricted to app+scripts: a system commit that restored the baked
+  # floor leaves HEAD byte-identical to that baseline (=> clean), while a real
+  # agent content edit shows a diff (=> diverged). Robust to NEW system-commit
+  # subjects, and still errs toward diverged (never discards) when no baseline
+  # is found.
+  baseline=$(git rev-list --max-count=1 --extended-regexp \
+    --grep="^(init: platform layer|restore: platform|sync: platform)" HEAD 2>/dev/null || true)
+  if [ -n "$baseline" ] && git diff --quiet "$baseline" HEAD -- app scripts 2>/dev/null; then
+    echo clean
+  else
+    echo diverged
+  fi
 ' 2>/dev/null || echo missing)
 case "$platform_state" in
   clean)
