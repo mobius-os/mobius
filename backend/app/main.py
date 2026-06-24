@@ -39,6 +39,7 @@ from app.routes import (
   recover_router, self_reminders_router, settings_router,
   client_error_router, standalone_router, storage_router,
   theme_router, uploads_router, platform_router,
+  published_router,
 )
 
 
@@ -417,6 +418,7 @@ app.include_router(self_reminders_router)
 # (which mounts conditionally below at /{path:path}) so its explicit
 # routes win.
 app.include_router(standalone_router)
+app.include_router(published_router)  # /sites/<token>/ — before the SPA catch-all
 
 
 @app.get("/api/health")
