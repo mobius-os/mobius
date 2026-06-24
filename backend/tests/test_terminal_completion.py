@@ -154,8 +154,8 @@ def test_terminal_finalize_failure_leaves_marker_then_reconcile_repairs(
 ):
   """A forced Finalize ack failure leaves the marker SET (running), drains
   NO queue, schedules NO continuation; a subsequent reconcile-after-restart
-  clears the marker, drops the queued message, and appends an
-  interrupted-turn note."""
+  clears the marker, PRESERVES the queued message (it self-heals on the next
+  send, bug #2), and appends an interrupted-turn note."""
   _seed_owner_and_creds()
   _seed_chat(
     "t2", messages=[{"role": "user", "content": "hi", "ts": 1}],
@@ -193,7 +193,9 @@ def test_terminal_finalize_failure_leaves_marker_then_reconcile_repairs(
   assert "t2" in reconciled
   state = _load("t2")
   assert state["run_status"] is None, "reconcile must clear the marker"
-  assert state["pending_messages"] == [], "reconcile drops the stranded queue"
+  assert [m["content"] for m in state["pending_messages"]] == ["queued"], (
+    "reconcile PRESERVES the queue (bug #2); it drains on the next send"
+  )
   err = [b for b in state["messages"][-1]["blocks"] if b["type"] == "error"]
   assert err and "interrupted" in err[0]["message"].lower()
 
@@ -634,7 +636,9 @@ def test_actor_fatal_leaves_marker_then_reconcile_repairs(monkeypatch):
   assert "t8" in reconciled
   state = _load("t8")
   assert state["run_status"] is None
-  assert state["pending_messages"] == []
+  assert [m["content"] for m in state["pending_messages"]] == ["queued"], (
+    "reconcile PRESERVES the queue (bug #2); it drains on the next send"
+  )
 
 
 # -- 9. post-promote continuation scheduling failure LEAVES marker ---------
@@ -1156,8 +1160,10 @@ def test_malformed_pending_head_leaves_marker_then_reconcile_repairs(monkeypatch
   )
   assert len(state["pending_messages"]) == 1, "the malformed message stays queued"
 
-  # Reconcile-after-restart repairs it: clears the marker, drops the stranded
-  # queue, appends an interrupted-turn note.
+  # Reconcile-after-restart repairs it: clears the marker, PRESERVES the
+  # queue (bug #2 — even a malformed entry is kept reversibly; the user can
+  # cancel it from the tray, and the next-send drain's FAILED_LEAVE_MARKER
+  # path already handles a malformed head), appends an interrupted-turn note.
   chat_mod.registry.reset_for_tests()
   db = SessionLocal()
   try:
@@ -1167,7 +1173,9 @@ def test_malformed_pending_head_leaves_marker_then_reconcile_repairs(monkeypatch
   assert "tb" in reconciled
   state = _load("tb")
   assert state["run_status"] is None
-  assert state["pending_messages"] == []
+  assert len(state["pending_messages"]) == 1, (
+    "reconcile PRESERVES the queue (bug #2), even a malformed head"
+  )
 
 
 # -- 15 (final-review Area 6). reconcile scrubs an orphan question card -----

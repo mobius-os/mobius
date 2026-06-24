@@ -725,13 +725,20 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
       still marked "running" on the last assistant message is forced
       to "done" (server-side truth, not just the client-side mask in
       ChatView), and a short interrupted-turn error block is appended;
-    - drop any stranded ``pending_messages`` (queued sends that would
-      otherwise never drain). They are CLEARED, not auto-resumed: the
-      process most likely died from resource pressure, so re-spawning
-      agent turns during boot risks a crash loop, and there is no live
-      SSE client to receive them. Clearing is the reversible choice —
-      the user resends if they still want the work. The count is noted
-      in the appended error so the surprise is visible;
+    - PRESERVE any stranded ``pending_messages`` so the user's queue
+      survives a restart (the owner-reported "restarting discards queued
+      messages" bug). The interrupted turn's OWN user message is already
+      in ``messages`` (it was committed at turn start); ``pending_messages``
+      holds only the SUBSEQUENT sends the user queued while that turn ran,
+      so preserving them does NOT re-run the interrupted turn — it just
+      keeps the unsent queue. We deliberately do NOT auto-drain it here:
+      clearing only the run marker (below) leaves the chat in the SAME
+      markerless state (``run_status=None`` + non-empty queue) the bottom
+      of this function already documents, which self-heals on the NEXT user
+      POST via the stale-pending drain in ``chats_stream.send_message``
+      (it claims ``mark_starting`` and promotes the head). Auto-promoting
+      at boot is what the crash-loop concern below forbids; a drain gated
+      on an explicit user interaction does not re-spawn turns during boot;
     - clear the durable run marker.
 
   No queue lock is taken: this runs single-threaded at startup before
@@ -745,8 +752,8 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
   gave up — there is no rollback (single-owner makes "leave the marker set"
   sufficient). This recovery covers BOTH outcomes of such a timeout:
     - the commit did NOT land → the queued message is still in
-      `pending_messages`; it is cleared here (with the dropped-count note),
-      and the user resends;
+      `pending_messages`; it is PRESERVED here and drains on the next user
+      POST (the stale-pending self-heal), so the queue survives the restart;
     - the commit DID land after the timeout (a PromotePending that moved
       the head into `messages` + set the marker, but whose continuation was
       never scheduled because the caller had already returned
@@ -807,13 +814,17 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
     if registry.is_alive(chat.id):
       continue
     try:
-      dropped = len(chat.pending_messages or [])
+      queued = len(chat.pending_messages or [])
       msgs = list(chat.messages or [])
       note = "The previous turn was interrupted (the server restarted)."
-      if dropped:
+      if queued:
+        # The queue is PRESERVED across the restart (it is NOT cleared
+        # below); it drains on the next send. Tell the user it is still
+        # queued rather than the old, false "were cleared — resend them".
+        plural = "s" if queued != 1 else ""
         note += (
-          f" {dropped} queued message(s) were cleared — resend them if"
-          " you still need them."
+          f" {queued} queued message{plural} {'are' if queued != 1 else 'is'}"
+          " still queued and will be sent with your next message."
         )
       # `message` (not `content`) is the error-block field the
       # transcript renderer reads — see MsgContent.jsx's error branch
@@ -854,7 +865,11 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
         new_msg["ts"] = _next_message_ts(msgs)
         msgs.append(new_msg)
       chat.messages = msgs
-      chat.pending_messages = []
+      # Preserve chat.pending_messages: clearing the run marker (below)
+      # drops the chat into the markerless-queue state that self-heals on
+      # the next user POST's stale-pending drain. We do NOT auto-drain at
+      # boot — that is the crash-loop hazard. (Owner-reported bug: a
+      # restart used to discard the queue here.)
       chat.run_status = None
       chat.run_started_at = None
       # Close this chat's durable per-run record(s) in the SAME commit (077
@@ -1144,6 +1159,16 @@ async def stop_chat_for(
       # against a reclaimed chat (zombie-run clobber). Leave the registry entry
       # and broadcast intact so the runner's own finally does teardown; the
       # generation guard already protects the transcript from a stale write.
+      # A stop() returning False is ambiguous (wedged-but-alive vs dead), and
+      # the signals that could distinguish them — the handle's `_finished`
+      # future — are corrupted by Stop's own 2s wait_for cancellation AND
+      # resolve before chat.py's final sink save, so there is no safe in-process
+      # "this runner is truly dead" test. A genuinely dead in-process runner is
+      # rare and self-heals on the next restart via reconcile_interrupted_chats
+      # (which clears the stuck marker and preserves the queue). The
+      # orphaned-run-AFTER-RESTART case the user reported has an EMPTY registry
+      # (no handles), so it takes the `not handles` clear below — it never lands
+      # here.
       log.warning(
         "stop_chat_for: handle.stop() timed out for chat %s "
         "(%s) — leaving registry/broadcast for runner teardown",
@@ -1161,10 +1186,12 @@ async def stop_chat_for(
     registry.discard_starting(chat_id)
     return all_stopped, cleared_pending_ts
   # With no active handle there is no runner-side final save left to
-  # await, so clear immediately (via the actor's ClearRunStatus). Active
-  # handles hand this clear back to run_chat's finally block: SDK stop
-  # waiters resolve before chat.py's final sink save, and a
-  # SQLite-blocked commit can exceed Stop's 2s timeout. If the process
+  # await, so clear immediately (via the actor's ClearRunStatus). This is the
+  # path that resolves the orphaned-run-after-restart case (run_status stuck
+  # 'running' with an empty registry): Stop clears the stuck marker + the queue
+  # and returns success. Active handles hand this clear back to run_chat's
+  # finally block: SDK stop waiters resolve before chat.py's final sink save,
+  # and a SQLite-blocked commit can exceed Stop's 2s timeout. If the process
   # dies first, the retained marker lets crash recovery reconcile the
   # interrupted turn.
   if not handles:

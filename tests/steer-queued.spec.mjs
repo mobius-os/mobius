@@ -246,4 +246,104 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     expect(steerPost.consume_pending_ts).toEqual([TS1, TS2])
     expect(steerPost.content).toBe(`${TEXT1}\n\n${TEXT2}`)
   })
+
+  test('a steer does NOT wipe the live stream (pre-steer text survives, no reconnect flash)', async ({ page }) => {
+    // Regression for bug #1: a force_steer must inject into the LIVE turn,
+    // not trigger the fresh-send reset. The old code ran sendMessage's
+    // "new turn" reset (setStreamItems([]) + setIsStreaming + reconnect) for
+    // a force_steer too — which (a) WIPED the pre-steer assistant text the
+    // SSE had already streamed (and which onSteeredIntoTurn's
+    // promoteStreamToMessages reads from latestItemsRef to seal as its own
+    // message, so it was lost), and (b) flapped the live stream. The fix
+    // skips the reset when forceSteer is set. This test pins both:
+    //   - the pre-steer assistant text stays on screen across the steer,
+    //   - no second /stream connection is opened (no reconnect flash),
+    //   - after the steered_into_turn SSE event the steered user row renders
+    //     inline and the pre-steer text is sealed as an assistant message.
+    const QUEUE_TS = 990001
+    const QUEUED_TEXT = 'steer me in'
+    const PRE_STEER = 'thinking out loud before the steer'
+    const POST_STEER = 'continuing after the steered message'
+
+    const messagePosts = []
+    let streamConnections = 0
+
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
+      const req = route.request()
+      let body = {}
+      try { body = JSON.parse(req.postData() || '{}') } catch { /* empty */ }
+      messagePosts.push(body)
+      if (body.force_steer) {
+        return route.fulfill({
+          status: 202,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            status: 'steered', chat_id: 'mock', pending_messages: [],
+          }),
+        })
+      }
+      if (body.content === 'first message') {
+        return route.fulfill({ status: 202, contentType: 'application/json', body: '{}' })
+      }
+      return route.fulfill({
+        status: 202,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'queued', ts: QUEUE_TS, position: 1 }),
+      })
+    })
+
+    // One held-open SSE for the whole turn. It streams the pre-steer text
+    // immediately, then — after a delay timed to land AFTER the steer click
+    // — the steered_into_turn event followed by the post-steer text, all on
+    // the SAME connection. A reconnect (the bug) would open a SECOND /stream;
+    // we assert streamConnections stays 1.
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async (route) => {
+      streamConnections += 1
+      // Deliver the whole sequence as one body, but the steer event + post-
+      // steer text are what onSteeredIntoTurn seals the pre-steer text on.
+      // A small head-start lets the pre-steer text render and the queued
+      // message get steered before the steer event lands.
+      await new Promise(r => setTimeout(r, 200))
+      await route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+        body: sseBody([
+          { type: 'catch_up_done' },
+          { type: 'text', content: PRE_STEER },
+        ]),
+      }).catch(() => {})
+    })
+
+    await setupChat(page)
+    await newChat(page)
+
+    await sendMessage(page, 'first message')
+    await expect(page.locator('.chat__stop')).toBeVisible({ timeout: 5000 })
+    // The pre-steer assistant text streams in.
+    await page.waitForFunction(
+      (t) => document.body.textContent?.includes(t),
+      PRE_STEER, { timeout: 5000 },
+    )
+
+    // Queue + steer.
+    await sendMessage(page, QUEUED_TEXT)
+    const steerBtn = page.getByRole('button', { name: 'Send queued message now' })
+    await expect(steerBtn).toBeVisible({ timeout: 5000 })
+    await steerBtn.click()
+    await expect.poll(
+      () => messagePosts.filter(b => b.force_steer).length, { timeout: 5000 },
+    ).toBe(1)
+
+    // CORE ASSERTION: the pre-steer text is STILL on screen right after the
+    // steer resolved. Before the fix, sendMessage's fresh-send reset cleared
+    // streamItems on the force_steer POST and the text vanished. Poll in the
+    // BROWSER context (page.evaluate), not Node.
+    await expect.poll(
+      () => page.evaluate(t => document.body.textContent?.includes(t), PRE_STEER),
+      { timeout: 2000 },
+    ).toBe(true)
+
+    // No reconnect flash: the live stream was never torn down + reopened.
+    expect(streamConnections).toBe(1)
+  })
 })

@@ -117,6 +117,122 @@ test('swapOptimisticTs removes a chip whose server ts was already consumed', () 
   assert.deepEqual(result.current.pendingMessagesRef.current, [])
 })
 
+test('a REISSUED server ts does not drop a fresh queued message (bug #4)', () => {
+  // Bug #4: the consumed-ts guard used to accumulate forever. promoteManyByTs
+  // armed every consumed ts (including ones for entries already removable by
+  // ts), and the set was never drained. Later, _ensure_unique_ts REISSUES a
+  // freed ts to a NEW queued message (the row holding it was deleted). The
+  // new message's swapOptimisticTs then matched the stale consumed ts and
+  // DROPPED it — "a message didn't show up as queued". The fix arms the guard
+  // only for a consumed ts ABSENT from the list (a genuine in-flight race),
+  // so a normal promote-by-ts of present entries leaves the set empty.
+  const { result } = renderHook(usePendingQueue)
+  // Two confirmed entries get combined + started. The backend's _consumed_ts
+  // carries BOTH ts (10 and 11); both rows are present in the list, so the
+  // promote removes them by ts — and must NOT arm the guard for either.
+  result.current.add(fixtureMsg({ cid: 's-10', ts: 10, serverTs: true, content: 'a' }))
+  result.current.add(fixtureMsg({ cid: 's-11', ts: 11, serverTs: true, content: 'b' }))
+  result.current.promoteManyByTs([10, 11])
+  assert.deepEqual(result.current.pendingMessagesRef.current, [],
+    'both started entries are consumed')
+
+  // Later the user queues a fresh message; the server REISSUES ts 11 (freed
+  // when the old row was promoted). Its POST acks via swapOptimisticTs.
+  result.current.add(fixtureMsg({ cid: 'fresh', ts: 99999, content: 'new one' }))
+  result.current.swapOptimisticTs('fresh', 11, 1)
+
+  const list = result.current.pendingMessagesRef.current
+  assert.equal(list.length, 1, 'the fresh queued message must NOT be dropped')
+  assert.equal(list[0].cid, 'fresh')
+  assert.equal(list[0].ts, 11, 'it takes the reissued server ts')
+  assert.equal(list[0].content, 'new one')
+})
+
+test('promoteManyByTs does not arm the guard when nothing is in flight', () => {
+  // The guard exists only for an OPTIMISTIC entry still in flight whose ts was
+  // consumed before its swap. With nothing in flight, arming would leave a
+  // stale ts that a server-reissued ts later collides with. So a promote with
+  // an empty in-flight set must arm nothing, and a fresh message later given
+  // that ts must survive.
+  const { result } = renderHook(usePendingQueue)
+  result.current.promoteManyByTs([42])  // nothing in flight → arms nothing
+  result.current.add(fixtureMsg({ cid: 'fresh2', ts: 88888, content: 'survivor' }))
+  result.current.swapOptimisticTs('fresh2', 42, 1)
+  const list = result.current.pendingMessagesRef.current
+  assert.equal(list.length, 1, 'no stale guard armed; the reissue is safe')
+  assert.equal(list[0].cid, 'fresh2')
+  assert.equal(list[0].ts, 42)
+})
+
+test('a legitimate in-flight consume survives a hydrate landing mid-race', () => {
+  // The guard MUST hold across a hydrate that lands while the consume is still
+  // in flight (its optimistic cid unresolved). hydrate must not clear the
+  // guard — otherwise the consumed entry resurfaces as a visible chip when its
+  // swap lands. Sequence: optimistic add (in flight) → its server ts gets
+  // consumed by a started turn (promoteManyByTs arms it because the entry is
+  // present with a DIFFERENT client ts) → a hydrate lands mid-race → the swap
+  // finally acks with the consumed server ts and must REMOVE the entry.
+  const { result } = renderHook(usePendingQueue)
+  // Optimistic entry: client ts 555, in flight (cid 'opt', not s-).
+  result.current.add(fixtureMsg({ cid: 'opt', ts: 555, content: 'consumed soon' }))
+  // The started turn consumes its SERVER ts (200) — absent locally (the entry
+  // still shows client ts 555), and a cid is in flight, so the guard arms 200.
+  result.current.promoteManyByTs([200])
+  // A reconcile lands mid-race; the in-flight entry is preserved, the guard
+  // must NOT be cleared.
+  result.current.hydrate([])
+  assert.equal(result.current.pendingMessagesRef.current.length, 1,
+    'the in-flight entry is preserved across the mid-race hydrate')
+  // The POST finally acks with the consumed server ts → the entry is removed
+  // (it was consumed into the started turn), not left as a phantom chip.
+  result.current.swapOptimisticTs('opt', 200, 1)
+  assert.deepEqual(result.current.pendingMessagesRef.current, [],
+    'the consumed entry is removed on swap; it does not resurface')
+})
+
+test('a reissued ts does not drop a fresh message while an UNRELATED entry is in flight', () => {
+  // The cid-scoped guard (Map<ts, Set<cid>>) closes the residual hole a bare
+  // ts-set left: a guard armed for an absent consumed ts while some UNRELATED
+  // optimistic entry is in flight must not drop a DIFFERENT fresh message that
+  // later gets that ts reissued. Only the cids in flight AT ARM TIME may be
+  // removed by the guard.
+  const { result } = renderHook(usePendingQueue)
+  // An unrelated optimistic entry C is in flight (its POST hasn't acked).
+  result.current.add(fixtureMsg({ cid: 'C', ts: 700, content: 'unrelated' }))
+  // A started turn consumes ts 11 — absent locally (no entry has ts 11), and a
+  // cid (C) is in flight, so the guard arms 11 with snapshot {C}.
+  result.current.promoteManyByTs([11])
+  // A fresh message D is queued and the server REISSUES ts 11 to it. D's cid
+  // was NOT in flight when 11 was armed, so the guard must NOT drop it.
+  result.current.add(fixtureMsg({ cid: 'D', ts: 88, content: 'fresh D' }))
+  result.current.swapOptimisticTs('D', 11, 2)
+  const list = result.current.pendingMessagesRef.current
+  const d = list.find(m => m.cid === 'D')
+  assert.ok(d, 'the fresh message D must survive (cid not in the armed snapshot)')
+  assert.equal(d.ts, 11, 'D takes the reissued server ts')
+  // C is still in flight and untouched.
+  assert.ok(list.find(m => m.cid === 'C'), 'the unrelated in-flight entry is untouched')
+})
+
+test('cancelling a cid evicts it from armed guard snapshots (no stale false-drop)', () => {
+  // Defense in depth: a cid removed from flight via cancel must also be evicted
+  // from any armed guard snapshot, so a later reuse of the SAME cid (cids are
+  // fresh UUIDs in practice, so this is belt-and-suspenders) can't false-match
+  // the stale snapshot and drop a fresh message. Sequence: 'X' in flight →
+  // guard armed for absent ts 9 with snapshot {X} → X cancelled → X re-added →
+  // swap X→9 must NOT drop it (the stale {X} snapshot was evicted on cancel).
+  const { result } = renderHook(usePendingQueue)
+  result.current.add(fixtureMsg({ cid: 'X', ts: 300, content: 'first life' }))
+  result.current.promoteManyByTs([9])   // arms guard[9] = {X}
+  result.current.cancelByCid('X')        // X leaves flight → evict from guard[9]
+  result.current.add(fixtureMsg({ cid: 'X', ts: 301, content: 'reused cid' }))
+  result.current.swapOptimisticTs('X', 9, 1)
+  const list = result.current.pendingMessagesRef.current
+  const x = list.find(m => m.cid === 'X')
+  assert.ok(x, 'the re-added X must survive (stale guard snapshot was evicted)')
+  assert.equal(x.ts, 9, 'X takes the server ts via the normal promote path')
+})
+
 test('promoteAll returns null when no matching anchor exists', () => {
   const { result } = renderHook(usePendingQueue)
   result.current.add(fixtureMsg({ ts: 1 }))

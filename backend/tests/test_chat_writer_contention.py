@@ -1014,7 +1014,9 @@ def test_reconciliation_works_independent_of_actor():
   assert "stranded" in reconciled
   chat = _load_chat("stranded")
   assert chat["run_status"] is None
-  assert chat["pending_messages"] == []  # stranded queue cleared
+  # The queue is PRESERVED across the restart (bug #2): clearing the marker
+  # leaves the markerless-queue state that self-heals on the next send.
+  assert [m["content"] for m in chat["pending_messages"]] == ["queued"]
   # The running tool block was force-completed and an error note appended.
   blocks = chat["messages"][-1]["blocks"]
   assert any(b.get("type") == "error" for b in blocks)
