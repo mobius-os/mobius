@@ -89,7 +89,7 @@ CRASH_RESTART_THRESHOLD="${CRASH_RESTART_THRESHOLD:-2}"
 # health probe is skipped entirely, and the deploy false-fails into an instant
 # rollback that looks like a boot failure. Reject anything that isn't a bare
 # positive integer up front, where the operator can see and fix it (card 116).
-for _knob in PREFLIGHT_WAIT_SECONDS CUTOVER_WAIT_SECONDS; do
+for _knob in PREFLIGHT_WAIT_SECONDS CUTOVER_WAIT_SECONDS PRESENCE_WAIT_SECONDS; do
   case "${!_knob}" in
     ''|*[!0-9]*|0)
       printf 'deploy-prod: %s=%q must be a positive integer (seconds)\n' \
@@ -1086,37 +1086,63 @@ if [ "$BUILT_THIS_RUN" = "1" ]; then
   serving_source=$(served_version_field serving_source)
   platform_dirty=$(served_version_field platform_dirty)
   baked_served=$(served_version_field baked_sha)
-  case "$platform_state" in
-    clean|missing)
-      # We fast-forwarded /data/platform to the new baked floor (clean) or the
-      # entrypoint created it fresh from that floor (missing). Either way the
-      # served platform MUST now be the floor: source=platform, not dirty, and
-      # the stamped .baked-sha == the commit just built (recovery_restore.sh
-      # stamps it; settings.build_sha and .baked-sha are both the BUILD_SHA arg).
-      if [ "$serving_source" = "baked" ]; then
-        warn "served platform: serving_source=baked — the backend is serving the"
-        warn "image floor, NOT /data/platform. The platform symlink didn't take, so"
-        warn "the served Python may not be this build. Investigate the entrypoint."
-      elif [ -n "$baked_served" ] && [ "$baked_served" != "unknown" ] \
-           && [ "$baked_served" != "$BUILD_SHA" ]; then
-        warn "served platform .baked-sha ${baked_served:0:18}… != built ${BUILD_SHA:0:18}…"
-        warn "the /data/platform sync didn't reach the served process — prod is"
-        warn "serving a STALE backend floor. Re-run the platform-baked restore."
-      elif [ "$platform_dirty" = "true" ]; then
-        warn "served platform reports dirty after a clean fast-forward — unexpected"
-        warn "uncommitted edits in /data/platform (a sibling mid-write?). Investigate."
-      else
-        ok "served platform: source=${serving_source:-?}, baked-sha matches build, clean"
-      fi
-      ;;
-    diverged)
-      # We deliberately preserved agent edits at step 3b. The served platform is
-      # EXPECTED to be the agent's diverged tree, NOT the new floor — this is the
-      # reversibility contract, already warned about above. Report, don't fault.
-      info "served platform: diverged (agent edits preserved by design) — NOT on the"
-      info "new baked floor. Ask the in-product agent to merge /app/app-baked when ready."
-      ;;
-  esac
+  # served_version_field returns EMPTY on a failed/unreachable /api/version probe
+  # and the literal "null" for a JSON null field — normalize both so neither is
+  # mistaken for a real value. An empty serving_source means we could not read the
+  # served identity AT ALL; we must not then print a green "verified" (that was a
+  # false-green: an unreachable probe falling through every guard into the ok arm).
+  case "$baked_served" in null|unknown) baked_served="" ;; esac
+  if [ -z "$serving_source" ] || [ "$serving_source" = "unknown" ]; then
+    warn "could not read the served-platform identity from ${INTERNAL_BASE}/api/version"
+    warn "(probe failed, or this image predates the serving-source stamp) — the served"
+    warn "backend was NOT provenance-verified. If this was a platform-affecting deploy,"
+    warn "confirm what's serving by hand."
+  else
+    case "$platform_state" in
+      clean|missing)
+        # We fast-forwarded /data/platform to the new baked floor (clean) or the
+        # entrypoint created it fresh from that floor (missing). Either way the
+        # served platform MUST now be the floor: source=platform, not dirty, and
+        # the stamped .baked-sha == the commit just built (recovery_restore.sh
+        # stamps it; settings.build_sha and .baked-sha are both the BUILD_SHA arg).
+        if [ "$serving_source" = "baked" ]; then
+          warn "served platform: serving_source=baked — the backend is serving the"
+          warn "image floor, NOT /data/platform. The platform symlink didn't take, so"
+          warn "the served Python may not be this build. Investigate the entrypoint."
+        elif [ -n "$baked_served" ] && [ "$baked_served" != "$BUILD_SHA" ]; then
+          warn "served platform .baked-sha ${baked_served:0:18}… != built ${BUILD_SHA:0:18}…"
+          warn "the /data/platform sync didn't reach the served process — prod is"
+          warn "serving a STALE backend floor. Re-run the platform-baked restore."
+        elif [ "$platform_dirty" = "true" ]; then
+          warn "served platform reports dirty after a clean fast-forward — unexpected"
+          warn "uncommitted edits in /data/platform (a sibling mid-write?). Investigate."
+        elif [ -z "$baked_served" ]; then
+          # source=platform + clean, but .baked-sha is unstamped (e.g. BUILD_SHA was
+          # unknown at the restore) — we know WHERE it serves from but can't compare
+          # the sha, so don't claim a match we didn't make.
+          ok "served platform: source=platform, clean (baked-sha unstamped — not compared)"
+        else
+          ok "served platform: source=platform, baked-sha matches build, clean"
+        fi
+        ;;
+      diverged)
+        if [ "$serving_source" = "baked" ]; then
+          # platform_state=diverged but the container is serving the BAKED floor:
+          # the agent's diverged tree failed the entrypoint's boot sanity check
+          # (e.g. a syntax error in app/) and was bypassed. Truthful + actionable —
+          # prod is on the floor and the agent's edits are NOT live.
+          warn "served platform: /data/platform is DIVERGED but the container fell back"
+          warn "to the baked floor (serving_source=baked) — the agent's edits failed the"
+          warn "boot sanity check and are NOT live. Fix or discard them in /data/platform."
+        else
+          # The diverged tree IS serving (source=platform). Expected — we preserved
+          # agent edits at step 3b (the reversibility contract). Report, don't fault.
+          info "served platform: diverged (agent edits preserved by design) — NOT on the"
+          info "new baked floor. Ask the in-product agent to merge /app/app-baked when ready."
+        fi
+        ;;
+    esac
+  fi
 fi
 
 # ── served-sha == origin/main assertion (prod only) ────────────────────
