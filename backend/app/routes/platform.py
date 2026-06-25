@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import signal
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
@@ -24,17 +22,11 @@ from app import models, platform_update
 from app.database import get_db
 from app.deps import get_current_owner, reject_cross_site
 from app.platform_update import PlatformApplyResult, PlatformStatus, PlatformUpdateError
+from app.restart_util import restart_this_worker
 
 log = logging.getLogger("mobius.platform")
 
 router = APIRouter(prefix="/api/platform", tags=["platform"])
-
-
-def _sigterm_self_after_response() -> None:
-  """SIGTERM this worker once the response is flushed; docker-compose
-  ``restart: unless-stopped`` reboots the container cleanly (same mechanism as
-  the admin and recovery restart paths)."""
-  os.kill(os.getpid(), signal.SIGTERM)
 
 
 @router.get("/status")
@@ -79,8 +71,8 @@ def restart_platform(
   _: models.Owner = Depends(get_current_owner),
 ) -> JSONResponse:
   """Owner-confirmed restart to finish an update. Sends the response, then
-  SIGTERMs this process so the worker reboots with the new code."""
+  restarts this worker (force-exit fallback) so it reboots with the new code."""
   return JSONResponse(
     {"status": "restarting"},
-    background=BackgroundTask(_sigterm_self_after_response),
+    background=BackgroundTask(restart_this_worker),
   )

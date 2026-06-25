@@ -1034,4 +1034,11 @@ _port=${PORT:-8000}
   exit 1
 ) &
 
-exec su -s /bin/sh mobius -c "umask 022 && cd /app && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"
+# --timeout-graceful-shutdown bounds uvicorn's SIGTERM drain. Without it,
+# uvicorn waits FOREVER for open connections to close on SIGTERM — and the chat
+# SSE stream never closes on its own — so an in-app restart (the Settings
+# Restart button SIGTERMs this worker) hangs the process in shutdown limbo: it
+# stops serving but never exits, tini never exits, and the container never
+# restarts ("pressed Restart, server never came back"). Bounding the drain makes
+# every SIGTERM-based restart reliably cycle the container.
+exec su -s /bin/sh mobius -c "umask 022 && cd /app && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --timeout-graceful-shutdown 10"
