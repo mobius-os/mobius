@@ -65,9 +65,11 @@ tool.)
 
 Optional frontmatter, when it applies: `as-of: YYYY-MM-DD` (the claim is
 time-sensitive — date it), `supersedes: [old-slug]` (this note replaces an
-older one), `source: [chat:abc123]` (where the fact came from). A moved or
-renamed note leaves a `type: redirect` stub behind — see the structure
-rules below.
+older one), `source: [chat:abc123]` (where the fact came from). **`source:` is
+REQUIRED for any fact promoted from a chat** — which is most of them; it's the
+audit trail back to the raw conversation (use `source: legacy` only for a
+seed/non-chat note with genuinely no chat to cite). A moved or renamed note
+leaves a `type: redirect` stub behind — see the structure rules below.
 
 ## Reading — descend until you have enough
 
@@ -159,8 +161,13 @@ maintain `chats/$CHAT_ID/index.md` **every turn**:
   short `## Related` section at the foot listing the few **most relevant** linked
   notes/chats with a reason — `- [[chats/<other-id>]] — <why it connects>`,
   `- [[<note-slug>]] — <why>` (notes link by bare slug, chats by `chats/<id>`).
-  When a concept recurs across several chats, that recurring thread is the highest-
-  value connection: surface it here. **Curate this set** — keep the handful a future
+  **When you link a CHAT for one specific fact, name that fact in the reason** —
+  `[[chats/<id>]] — for their coffee ratio`. You point at the whole chat now only
+  because the fact isn't its own note yet; the nightly pass reads that reason and
+  NARROWS the link to the fact's note once it promotes it (`[[chats/<id>]]` →
+  `[[<the-note>]]`), so a future reader pulls just the fact, not the chat's whole
+  summary. When a concept recurs across several chats, that recurring thread is the
+  highest-value connection: surface it here. **Curate this set** — keep the handful a future
   reader would actually follow, not every passing mention. (This curation exception
   is scoped to the `## Related` pointer list ONLY: it is an index of pointers, not
   facts, so replacing a stale pointer with a better one loses nothing — the facts
@@ -200,7 +207,8 @@ these is deferred to Reflection.
    mid-task lands here first; you don't break flow to author a perfect standalone
    note. The nightly Reflection pass reads these chat notes and promotes what
    deserves to be a `note`/`moc` in the wider graph, carrying the source chat id
-   into the new note's optional `source:` frontmatter list:
+   into the new note's `source:` frontmatter list (required — the provenance/audit
+   trail back to the raw chat):
    ```yaml
    source: [chat:abc123, chat:def456]
    ```
