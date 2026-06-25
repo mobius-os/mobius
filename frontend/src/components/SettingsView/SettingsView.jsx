@@ -639,7 +639,11 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
                 onClick={restartToFinish}
                 disabled={platformPhase === 'restarting'}
               >
-                {platformPhase === 'restarting' ? 'Restarting…' : 'Restart'}
+                {/* "Restart to finish", not bare "Restart" — the Server section's
+                    standalone "Restart" sits in the same view, so the word
+                    "Restart" must mean exactly one thing. This one completes a
+                    pending update; the label says so. */}
+                {platformPhase === 'restarting' ? 'Restarting…' : 'Restart to finish'}
               </button>
             ) : updateAvailable ? (
               <button
