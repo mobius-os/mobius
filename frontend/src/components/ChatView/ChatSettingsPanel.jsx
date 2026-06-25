@@ -292,6 +292,7 @@ export default function ChatSettingsPanel({
   const [manageOpen, setManageOpen] = useState(false)
   const fallbackReqId = useRef(0)
   const latestReqId = reqIdRef || fallbackReqId
+  const pendingSwitchPreviousRef = useRef(null)
   // Synchronous double-click guard: disabled={compacting || saving}
   // only takes effect after React re-renders.
   const providerSwitchInFlightRef = useRef(false)
@@ -345,6 +346,7 @@ export default function ChatSettingsPanel({
   useEffect(() => {
     setDraftProvider(provider || 'claude')
     setPendingSwitch(null)
+    pendingSwitchPreviousRef.current = null
   }, [provider, chatId])
 
   useEffect(() => {
@@ -500,6 +502,13 @@ export default function ChatSettingsPanel({
     if (providerValue !== draftProvider) {
       if (providerSwitchInFlightRef.current) return
       if (hasAssistantTurns) {
+        if (!pendingSwitchPreviousRef.current) {
+          pendingSwitchPreviousRef.current = {
+            provider: draftProvider,
+            model: draftModel,
+            effort: draftEffort,
+          }
+        }
         setError('')
         setPendingSwitch({ model: value, provider: providerValue })
         return
@@ -518,6 +527,7 @@ export default function ChatSettingsPanel({
     draftProvider,
     draftModel,
     hasAssistantTurns,
+    draftEffort,
     patchChat,
     refocusChatInput,
     switchProviderModel,
@@ -530,8 +540,23 @@ export default function ChatSettingsPanel({
       pendingSwitch.model,
       pendingSwitch.provider,
     )
-    if (ok) setPendingSwitch(null)
+    if (ok) {
+      pendingSwitchPreviousRef.current = null
+      setPendingSwitch(null)
+    }
   }, [pendingSwitch, refocusChatInput, switchProviderModel])
+
+  const handleCancelProviderSwitch = useCallback(() => {
+    const previous = pendingSwitchPreviousRef.current
+    if (previous) {
+      setDraftProvider(previous.provider)
+      setDraftModel(previous.model)
+      setDraftEffort(previous.effort)
+    }
+    pendingSwitchPreviousRef.current = null
+    setPendingSwitch(null)
+    refocusChatInput()
+  }, [refocusChatInput])
 
   const isCodex = draftProvider === 'codex'
   const codexSwitchWarning = (
@@ -542,6 +567,8 @@ export default function ChatSettingsPanel({
 
   const connectedSet = connectedProviders ? new Set(connectedProviders) : null
   const hiddenIds = prefs?.hidden_ids || []
+  const selectedProvider = pendingSwitch?.provider ?? draftProvider
+  const selectedModel = pendingSwitch?.model ?? draftModel
 
   // Build the per-provider displayed-models list once per render.
   // Falls back to the bundled CLAUDE_MODELS / CODEX_MODELS until the
@@ -563,19 +590,11 @@ export default function ChatSettingsPanel({
         : PROVIDER_INFO[pid].fallbackModels.map(m => (
           { id: m.value, label: m.label, provider: pid, available: true }
         ))
-      const selectedHere = draftProvider === pid ? draftModel : null
+      const selectedHere = selectedProvider === pid ? selectedModel : null
       out[pid] = resolveDisplayedModels(source, hiddenIds, selectedHere)
     }
     return out
-  }, [registry, hiddenIds, draftModel, draftProvider])
-
-  const pendingProviderInfo = pendingSwitch
-    ? PROVIDER_INFO[pendingSwitch.provider]
-    : null
-  const pendingModel = pendingSwitch
-    ? (displayedByProvider[pendingSwitch.provider] || [])
-      .find(m => m.id === pendingSwitch.model)
-    : null
+  }, [registry, hiddenIds, selectedModel, selectedProvider])
 
   return (
     <div className="csp">
@@ -613,7 +632,8 @@ export default function ChatSettingsPanel({
         const isCrossProvider = hasAssistantTurns && pid !== draftProvider
         const models = displayedByProvider[pid] || []
         return models.map(m => {
-          const isSelected = draftModel === m.id && draftProvider === pid
+          const isPendingRow = pendingSwitch?.model === m.id && pendingSwitch?.provider === pid
+          const isSelected = selectedModel === m.id && selectedProvider === pid
           return (
             <div key={`${pid}-${m.id}`}>
               <button
@@ -632,12 +652,39 @@ export default function ChatSettingsPanel({
                 </span>
                 <span className="csp-row__dot" />
               </button>
-              {isSelected && (
+              {isSelected && !isPendingRow && (
                 <EffortSlider
                   efforts={info.efforts}
                   value={draftEffort}
                   onChange={handleEffortChange}
                 />
+              )}
+              {isPendingRow && (
+                <div className="csp__confirm" role="group" aria-label="Confirm provider switch">
+                  <p className="csp__confirm-copy">
+                    Switching will compact first.
+                  </p>
+                  <div className="csp__confirm-actions">
+                    <button
+                      type="button"
+                      className="csp__confirm-btn csp__confirm-btn--primary"
+                      onPointerDown={(ev) => ev.preventDefault()}
+                      onClick={handleConfirmProviderSwitch}
+                      disabled={saving || compacting}
+                    >
+                      Apply
+                    </button>
+                    <button
+                      type="button"
+                      className="csp__confirm-btn csp__confirm-btn--ghost"
+                      onPointerDown={(ev) => ev.preventDefault()}
+                      onClick={handleCancelProviderSwitch}
+                      disabled={compacting}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
               )}
             </div>
           )
@@ -654,38 +701,8 @@ export default function ChatSettingsPanel({
           + Manage models
         </button>
       )}
-      {(pendingSwitch || codexSwitchWarning || compacting || error) && (
+      {(codexSwitchWarning || compacting || error) && (
         <div className="csp__foot">
-          {pendingSwitch && (
-            <div className="csp__confirm" role="group" aria-label="Confirm provider switch">
-              <p className="csp__confirm-copy">
-                Switch to {pendingModel?.label || pendingSwitch.model} on{' '}
-                {pendingProviderInfo?.label || pendingSwitch.provider}? This
-                will compact the chat first so the new provider has the
-                context.
-              </p>
-              <div className="csp__confirm-actions">
-                <button
-                  type="button"
-                  className="csp__confirm-btn csp__confirm-btn--primary"
-                  onPointerDown={(ev) => ev.preventDefault()}
-                  onClick={handleConfirmProviderSwitch}
-                  disabled={saving || compacting}
-                >
-                  Compact &amp; switch
-                </button>
-                <button
-                  type="button"
-                  className="csp__confirm-btn csp__confirm-btn--ghost"
-                  onPointerDown={(ev) => ev.preventDefault()}
-                  onClick={() => setPendingSwitch(null)}
-                  disabled={compacting}
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
           {compacting && (
             <p className="csp__note">
               Compacting this chat before switching providers…
