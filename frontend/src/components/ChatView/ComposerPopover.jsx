@@ -76,6 +76,7 @@ export default function ComposerPopover({
   // check and passes the result down.
   hasAssistantTurns,
   onCompactionStored,
+  onOpenInspector,
 }) {
   const [open, setOpen] = useState(false)
   const wrapRef = useRef(null)
@@ -132,6 +133,11 @@ export default function ComposerPopover({
       if (el) el.focus({ preventScroll: true })
     }
     onAttachClick()
+  }
+
+  function handleOpenInspector() {
+    setOpen(false)
+    onOpenInspector?.()
   }
 
   return (
@@ -209,6 +215,22 @@ export default function ComposerPopover({
               />
             </div>
           )}
+          <div className="composer-popover__section">
+            <button
+              type="button"
+              className="composer-popover__row"
+              onPointerDown={(e) => e.preventDefault()}
+              onClick={handleOpenInspector}
+            >
+              <span className="composer-popover__row-icon" aria-hidden="true">ⓘ</span>
+              <span className="composer-popover__row-main">
+                <span className="composer-popover__row-title">What the agent knows</span>
+                <span className="composer-popover__row-sub">
+                  Prompt, memory, app context
+                </span>
+              </span>
+            </button>
+          </div>
         </div>
       )}
     </div>
