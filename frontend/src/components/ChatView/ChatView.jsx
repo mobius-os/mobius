@@ -2054,20 +2054,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                   }) : prev)
                 }}
                 onCompactionStored={handleCompactionStored}
+                onOpenInspector={() => setShowInspector(true)}
               />
-              <div className="composer-plus">
-                <button
-                  type="button"
-                  className={`chat__plus${showInspector ? ' chat__plus--active' : ''}`}
-                  onPointerDown={(e) => e.preventDefault()}
-                  onClick={() => setShowInspector(open => !open)}
-                  aria-label="Inspect system prompt"
-                  aria-haspopup="dialog"
-                  aria-expanded={showInspector}
-                >
-                  ⓘ
-                </button>
-              </div>
             </>
           }
         />

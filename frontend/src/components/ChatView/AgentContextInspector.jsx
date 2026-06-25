@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { apiFetch } from '../../api/client.js'
+// Same marked + DOMPurify markdown pipeline used by MsgContent.
+import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 
 
 const CSS = `
@@ -153,16 +155,24 @@ const CSS = `
   margin: 0 12px 12px;
   max-height: min(42vh, 360px);
   overflow: auto;
-  white-space: pre-wrap;
   word-break: break-word;
   border: 1px solid var(--border-light);
   border-radius: 10px;
   padding: 12px;
   background: var(--surface);
   color: var(--text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.55;
+}
+
+.aci-section__content .md-blocks {
+  gap: 0.6rem;
+}
+
+.aci-section__content .md-paragraph,
+.aci-section__content .md-heading {
+  padding-left: 0;
+  padding-right: 0;
 }
 `
 
@@ -177,7 +187,9 @@ function Section({ title, source, children }) {
         <span>{title}</span>
         {source && <span className="aci-section__source">{source}</span>}
       </summary>
-      <pre className="aci-section__content">{children}</pre>
+      <div className="aci-section__content">
+        <StandardMarkdown text={children} />
+      </div>
     </details>
   )
 }
@@ -232,13 +244,17 @@ export default function AgentContextInspector({ chatId, onClose }) {
     return [
       {
         key: 'system_prompt',
-        title: 'System prompt',
+        title: 'System prompt — static (core.md); held constant across turns so the prompt cache keeps hitting',
         value: data.system_prompt,
         source: data.system_prompt_source
           ? `source: ${data.system_prompt_source}`
           : null,
       },
-      { key: 'memory_block', title: 'Memory', value: data.memory_block },
+      {
+        key: 'memory_block',
+        title: 'Memory — recalled knowledge-graph facts, injected into the FIRST user turn (NOT part of the system prompt, so the cache stays warm)',
+        value: data.memory_block,
+      },
       { key: 'app_context', title: 'App context', value: data.app_context },
       { key: 'app_report', title: 'Report', value: data.app_report },
       { key: 'compaction_brief', title: 'Compaction', value: data.compaction_brief },
