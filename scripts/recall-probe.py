@@ -185,6 +185,17 @@ class Probe:
     s = self.api("GET", "/api/debug/status")
     return sum(len(s.get(k, [])) for k in ("active_sdk_clients", "active_sdk_sessions", "starting"))
 
+  def chat_running(self, cid):
+    # True while THIS chat's turn is active. Poll the chat_id specifically —
+    # global busy() never reaches 0 if an UNRELATED turn hangs (a lingering
+    # SDK client), which would make a single-chat poll wait the whole timeout.
+    s = self.api("GET", "/api/debug/status")
+    ids = set()
+    for k in ("active_sdk_clients", "active_sdk_sessions", "starting"):
+      for x in s.get(k, []):
+        ids.add(x.get("chat_id") if isinstance(x, dict) else x)
+    return cid in ids
+
   # --- seed ---
 
   def seed(self):
@@ -280,11 +291,12 @@ class Probe:
     chat = self.api("POST", "/api/chats", {"title": f"probe: {tier}"})
     cid = chat["id"]
     self.api("POST", f"/api/chats/{cid}/messages", {"content": question})
-    # poll until the turn settles; ignore the first couple of idle reads — the
-    # run may not have registered in /api/debug/status yet (startup grace).
+    # poll THIS chat until its turn settles; ignore the first couple of idle
+    # reads — the run may not have registered in /api/debug/status yet (startup
+    # grace). Chat-specific so a lingering unrelated turn can't hang the wait.
     for i in range(MAX_WAIT_S // POLL_INTERVAL_S):
       time.sleep(POLL_INTERVAL_S)
-      if self.busy() == 0 and i > 1:
+      if i > 1 and not self.chat_running(cid):
         break
     msgs = self.api("GET", f"/api/chats/{cid}?limit=40").get("messages", [])
     answer = _assistant_text(msgs)
