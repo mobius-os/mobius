@@ -151,9 +151,13 @@ class Probe:
     self._tok = None
 
   def _guard(self):
-    if "prod" in self.container or self.base.endswith(":8000"):
-      sys.exit("refusing to run against what looks like prod "
-               f"(container={self.container}, base={self.base}) — this WRITES memory.")
+    # This RESETS /data/shared/memory, so positively REQUIRE a test container —
+    # the real prod is named `mobius` on :8000, so a 'prod'-substring check would
+    # miss it; require 'test' in the name + refuse :8000 as belt-and-suspenders.
+    if "test" not in self.container or self.base.endswith(":8000"):
+      sys.exit("refusing: recall-probe RESETS /data/shared/memory and only runs "
+               f"against a TEST container (got container={self.container}, "
+               f"base={self.base}). Name it *test* and use a non-8000 port.")
 
   def dexec(self, *cmd, user="mobius"):
     return subprocess.run(["docker", "exec", "-u", user, self.container, *cmd],

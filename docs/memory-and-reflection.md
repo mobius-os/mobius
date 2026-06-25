@@ -766,6 +766,15 @@ fixed). What's left, ranked by value, with the concrete shape of each fix:
    fit: it's retrieval *infrastructure* injecting DATA scoped to the query — not
    policing — and it preserves the deep path as the high-ceiling option. Measure
    with the `memeval` tiers + a new `FastRecallSystem` and a latency axis.
+   **Two guardrails for whoever builds it** (from the philosophy review): (a)
+   **label the provenance** — the injected block must mark these as "candidate
+   recalls (keyword match)" so a low-confidence keyword hit never masquerades as
+   durable memory (the deep subagent path is agent-*triggered* and visible; an
+   always-on pass is invisible, so labeling matters more, and keep the `True`
+   default the lightest thing that can't surprise); (b) **stay additive, never
+   suppressive** — top-K is a floor (surface these), never a ceiling (only
+   these); the moment it filters notes *out* of the agent's reach it crosses from
+   retrieval into walling. The deep subagent path must always remain open.
 
 2. **Validate reflection's new behaviours are firing.** The recommendations,
    new-app-on-recurring-topic, and non-repetitive-interview rules are written but
