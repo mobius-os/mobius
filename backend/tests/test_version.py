@@ -35,6 +35,17 @@ def test_build_sha_reads_env(monkeypatch):
   assert Settings(**_KW).build_sha == "abc123def"
 
 
+def test_version_exposes_build_date(client, monkeypatch):
+  # The commit date powering the Settings "version · date" line. Always a
+  # string ("unknown" when unstamped); reads BUILD_DATE from the env.
+  body = client.get("/api/version").json()
+  assert isinstance(body.get("build_date"), str) and body["build_date"]
+  monkeypatch.setenv("BUILD_DATE", "2026-06-25")
+  assert Settings(**_KW).build_date == "2026-06-25"
+  monkeypatch.delenv("BUILD_DATE", raising=False)
+  assert Settings(**_KW).build_date == "unknown"
+
+
 def _marker_path():
   """The served-shell build marker entrypoint.sh / deploy-prod.sh stamp.
 

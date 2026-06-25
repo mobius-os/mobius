@@ -12,6 +12,7 @@ services:
       context: .
       args:
         BUILD_SHA: ${BUILD_SHA:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: ${MOBIUS_CONTAINER:-mobius-test}
     init: true
     # `unless-stopped` so the recovery chat's Restart button works in

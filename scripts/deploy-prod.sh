@@ -770,8 +770,10 @@ else
     _sha="${_sha}-dirty"
   fi
   export BUILD_SHA="$_sha"
+  # The commit's date (YYYY-MM-DD) → a human "version · date" line in Settings.
+  export BUILD_DATE="$(git -C "$REPO_ROOT" show -s --format=%cs HEAD 2>/dev/null || echo unknown)"
   BUILT_THIS_RUN=1
-  info "baking BUILD_SHA=${BUILD_SHA:0:18}… into the image"
+  info "baking BUILD_SHA=${BUILD_SHA:0:18}… (${BUILD_DATE}) into the image"
   intent "docker compose ${COMPOSE_ARGS[*]} build"
   if ! confirm_yes "${C_YELLOW}slow step (5-15 min, has OOM'd before).${C_RESET} proceed?"; then
     fail "aborted by user at build step"

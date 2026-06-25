@@ -23,6 +23,7 @@ services:
       context: .
       args:
         BUILD_SHA: ${BUILD_SHA:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: mobius
     init: true
     restart: unless-stopped

@@ -541,6 +541,7 @@ def version():
   except OSError:
     shell_sha = "unknown"
   return {"sha": settings.build_sha, "shell_sha": shell_sha,
+          "build_date": settings.build_date,
           **_served_platform_identity(settings.data_dir)}
 
 

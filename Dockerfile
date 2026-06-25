@@ -333,6 +333,10 @@ RUN chmod +x ./scripts/entrypoint.sh
 # /api/version so a deploy can verify the served backend matches the commit.
 ARG BUILD_SHA=unknown
 ENV BUILD_SHA=${BUILD_SHA}
+# BUILD_DATE is the commit date (YYYY-MM-DD) of BUILD_SHA, stamped by
+# deploy-prod.sh, so Settings can show a human "version · date" line.
+ARG BUILD_DATE=unknown
+ENV BUILD_DATE=${BUILD_DATE}
 
 EXPOSE 8000
 

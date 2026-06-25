@@ -5,7 +5,6 @@ import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { TextLink } from '@openai/apps-sdk-ui/components/TextLink'
 import { api } from '../../api/client.js'
 import { authQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
-import { SHELL_BUILD } from '../../lib/buildInfo.js'
 import * as themeService from '../../lib/themeService.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
@@ -40,6 +39,9 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
   const [themeError, setThemeError] = useState('')
   const [restartPhase, setRestartPhase] = useState('idle')
   const [restartError, setRestartError] = useState('')
+  // A manual restart interrupts any live chat, so it's a deliberate two-step:
+  // the first tap arms the confirm, the second actually restarts.
+  const [restartConfirm, setRestartConfirm] = useState(false)
   // Platform self-update (backend/frontend/libraries/recovery as one release).
   // Distinct from the shell "App" row above, which only refreshes the PWA
   // bundle. 'idle' | 'applying' | 'restarting'.
@@ -237,10 +239,12 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
           restartPollRef.current = null
           setRestartError("Server hasn't come back yet — check the container.")
           setRestartPhase('idle')
+          setRestartConfirm(false)
         }
       }, POLL_INTERVAL_MS)
     } catch (err) {
       setRestartPhase('idle')
+      setRestartConfirm(false)
       setRestartError(err.message || 'Restart request failed.')
     }
   }
@@ -430,6 +434,11 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
         : null
     return raw ? raw.slice(0, 7) : 'unknown'
   })()
+  // The commit date (YYYY-MM-DD) baked at build time, shown next to the sha as
+  // a human "version · date". Null on a dev build that didn't stamp it.
+  const buildDate = version?.build_date && version.build_date !== 'unknown'
+    ? version.build_date
+    : null
   // shell_sha is the build the SERVED UI came from; sha is the running image.
   // A mismatch means a newer image is installed but its UI isn't being served
   // to this client yet — reloading picks it up.
@@ -591,22 +600,27 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
         <section className="settings__section settings__section--compact">
           <h2 className="settings__section-title">Möbius</h2>
           <div className="settings__row settings__row--top">
-            <div className="settings__app-status">
+            <div className="settings__update">
               <StatusDot
                 color={platformConflict || platformRestart || updateAvailable ? '--accent' : '--green'}
               >
                 {platformConflict
-                  ? 'Resolving an update conflict'
+                  ? 'Resolving a conflict'
                   : platformRestart
-                    ? 'Restart to finish updating'
+                    ? 'Restart to finish'
                     : updateAvailable
                       ? 'New update available'
                       : 'Up to date'}
               </StatusDot>
-              <p className="settings__subtext settings__subtext--tight">
-                {SHELL_BUILD}
-                {shellBuildSha !== 'unknown' ? ` · ${shellBuildSha}` : ''}
-              </p>
+              {/* The honest build identity is the short commit sha — the SHELL_BUILD
+                  marker is an internal cache-bust string, and its date is bumped by
+                  hand (so it can lie about when this build shipped). Hidden on a dev
+                  build where no sha is stamped. */}
+              {shellBuildSha !== 'unknown' && (
+                <p className="settings__build">
+                  {shellBuildSha}{buildDate ? ` · ${buildDate}` : ''}
+                </p>
+              )}
             </div>
             {platformConflict ? (
               platform?.conflict_chat_id && onOpenChat ? (
@@ -625,7 +639,7 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
                 onClick={restartToFinish}
                 disabled={platformPhase === 'restarting'}
               >
-                {platformPhase === 'restarting' ? 'Restarting…' : 'Restart to finish'}
+                {platformPhase === 'restarting' ? 'Restarting…' : 'Restart'}
               </button>
             ) : updateAvailable ? (
               <button
@@ -652,15 +666,40 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
           <h2 className="settings__section-title">Server</h2>
           <div className="settings__row">
             <span className="settings__label">Restart</span>
-            <button
-              className="settings__btn settings__btn--outline settings__btn--sm"
-              type="button"
-              onClick={restartServer}
-              disabled={restartPhase === 'restarting'}
-            >
-              {restartPhase === 'restarting' ? 'Restarting…' : 'Restart'}
-            </button>
+            {restartConfirm ? (
+              <div className="settings__confirm">
+                <button
+                  className="settings__btn settings__btn--outline settings__btn--sm"
+                  type="button"
+                  onClick={() => setRestartConfirm(false)}
+                  disabled={restartPhase === 'restarting'}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="settings__btn settings__btn--sm settings__btn--nowrap"
+                  type="button"
+                  onClick={restartServer}
+                  disabled={restartPhase === 'restarting'}
+                >
+                  {restartPhase === 'restarting' ? 'Restarting…' : 'Restart now'}
+                </button>
+              </div>
+            ) : (
+              <button
+                className="settings__btn settings__btn--outline settings__btn--sm"
+                type="button"
+                onClick={() => { setRestartError(''); setRestartConfirm(true) }}
+              >
+                Restart
+              </button>
+            )}
           </div>
+          {restartConfirm && restartPhase !== 'restarting' && (
+            <p className="settings__subtext settings__subtext--tight">
+              Restarting interrupts any chat that's mid-response.
+            </p>
+          )}
           {restartPhase === 'restarting' && (
             <div className="settings__notice" role="status">
               Restart signal sent. The page will reload shortly.
