@@ -15,7 +15,10 @@ from pathlib import Path
 import pytest
 
 from app import models
+from app.config import get_settings
 from app.database import SessionLocal
+from app.install import _manifest_display
+from app.theme import get_bg_color
 
 
 def _create_app(client, owner_token, name):
@@ -93,6 +96,72 @@ def test_manifest_and_loading_shell_use_app_declared_colors(client, owner_token)
   shell = client.get(f"/apps/{app['slug']}/")
   assert shell.status_code == 200
   assert "--bg: #101820;" in shell.text
+
+
+def test_manifest_colors_fall_back_to_theme_not_icon(client, owner_token):
+  """An app that declares no colors gets a status bar matching the owner's
+  live theme `--bg`, not a color sampled from its icon. (Old behavior fell
+  back to the icon's dominant opaque color — `#0c0f14` for the iconless
+  build-path app here — so this locks in the new theme-aware fallback.)"""
+  app = _create_app(client, owner_token, "Plain")
+  theme_bg = get_bg_color(get_settings().data_dir)
+
+  manifest = client.get(f"/apps/{app['slug']}/manifest.json").json()
+  assert manifest["theme_color"] == theme_bg
+  assert manifest["background_color"] == theme_bg
+  assert manifest["theme_color"] != "#0c0f14"
+
+  shell = client.get(f"/apps/{app['slug']}/")
+  assert f"--bg: {theme_bg};" in shell.text
+
+
+def test_manifest_display_defaults_to_standalone(client, owner_token):
+  app = _create_app(client, owner_token, "Plain Display")
+  manifest = client.get(f"/apps/{app['slug']}/manifest.json").json()
+  assert manifest["display"] == "standalone"
+
+
+def test_manifest_display_passthrough(client, owner_token):
+  app = _create_app(client, owner_token, "Fuller")
+  db = SessionLocal()
+  try:
+    row = db.query(models.App).filter(models.App.id == app["id"]).one()
+    row.display = "fullscreen"
+    db.commit()
+  finally:
+    db.close()
+  manifest = client.get(f"/apps/{app['slug']}/manifest.json").json()
+  assert manifest["display"] == "fullscreen"
+
+
+def test_display_migration_adds_column_to_existing_db(tmp_path):
+  """Prod has an existing `apps` table; create_all never ALTERs it, so the
+  `display` column must be added by run_migrations. Build a full schema, drop
+  the column to simulate a pre-display DB, then assert run_migrations re-adds
+  it (the same gate that runs on prod boot)."""
+  from sqlalchemy import create_engine, inspect, text
+  from app.database import Base, run_migrations
+
+  eng = create_engine(f"sqlite:///{tmp_path}/legacy.db")
+  Base.metadata.create_all(bind=eng)
+  with eng.begin() as conn:
+    conn.execute(text("ALTER TABLE apps DROP COLUMN display"))
+  assert "display" not in {c["name"] for c in inspect(eng).get_columns("apps")}
+
+  run_migrations(eng)
+  assert "display" in {c["name"] for c in inspect(eng).get_columns("apps")}
+
+
+def test_manifest_display_validator_coerces():
+  assert _manifest_display("fullscreen") == "fullscreen"
+  assert _manifest_display("  FULLSCREEN ") == "fullscreen"
+  assert _manifest_display("minimal-ui") == "minimal-ui"
+  assert _manifest_display("standalone") == "standalone"
+  # Unknown / non-string drop to None so the manifest serves "standalone".
+  assert _manifest_display("immersive") is None
+  assert _manifest_display("") is None
+  assert _manifest_display(None) is None
+  assert _manifest_display(123) is None
 
 
 def test_top_level_app_slug_redirects_to_standalone_scope(client, owner_token):

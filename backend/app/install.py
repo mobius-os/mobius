@@ -92,6 +92,20 @@ def _manifest_color(value) -> str | None:
   if not _HEX_COLOR_RE.match(value):
     return None
   return value.lower()
+
+
+# Web-manifest `display` values an app may request. Anything else drops to
+# None so the served manifest falls back to "standalone" rather than emitting
+# a bogus mode. "fullscreen" is the one games want (no OS status bar / notch).
+_VALID_DISPLAY = frozenset(("standalone", "fullscreen", "minimal-ui", "browser"))
+
+
+def _manifest_display(value) -> str | None:
+  """Return a safe web-manifest `display` value from mobius.json, or None."""
+  if not isinstance(value, str):
+    return None
+  value = value.strip().lower()
+  return value if value in _VALID_DISPLAY else None
 # Aggregate caps across ALL seeds in one manifest. The per-file cap alone
 # leaves the total unbounded (a manifest can list many seeds), so a small
 # manifest could still force large memory growth holding them all (Codex
@@ -1468,6 +1482,7 @@ async def install_from_manifest(
     app.version = str(manifest.get("version", "")).strip() or None
     app.theme_color = _manifest_color(manifest.get("theme_color"))
     app.background_color = _manifest_color(manifest.get("background_color")) or app.theme_color
+    app.display = _manifest_display(manifest.get("display"))
 
     if existing:
       # Apply the (possibly merged) source AND the new manifest's capability /

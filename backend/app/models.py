@@ -248,6 +248,12 @@ class App(Base):
   # icon. Null falls back to the legacy icon-derived color.
   theme_color = Column(String(16), nullable=True, default=None)
   background_color = Column(String(16), nullable=True, default=None)
+  # Optional manifest-declared PWA display mode (web-manifest `display`:
+  # "standalone" | "fullscreen" | "minimal-ui" | "browser"). Drives the
+  # served per-app manifest's `display`. Null falls back to "standalone".
+  # A game declares "fullscreen" so the installed PWA launches with no OS
+  # status bar and paints under the phone notch/cutout.
+  display = Column(String(16), nullable=True, default=None)
   # User-uploaded icon for the standalone PWA install (PNG bytes).
   # Null means fall back to the auto-generated default (first letter
   # of `name` on a deterministic color). Stored inline because icons
