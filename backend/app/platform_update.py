@@ -99,6 +99,11 @@ class PlatformStatus(TypedDict):
   recorded_upstream_sha: str | None
   seed_required: bool
   conflict_paths: list[str]
+  # The resolver chat opened for an in-progress conflict, so Settings can link
+  # the owner straight to it (a conflict row that names a chat but can't reach
+  # it is a dead end). None unless ``state == "conflict"`` AND the id was
+  # recorded; a conflict flag written before this field existed reads back None.
+  conflict_chat_id: str | None
 
 
 class PlatformApplyResult(TypedDict):
@@ -125,6 +130,42 @@ class BakedFloor:
   build_sha: str
   app_dir: Path = BAKED_APP
   scripts_dir: Path = BAKED_SCRIPTS
+
+
+def _write_conflict_flag(
+  upstream: str | None, paths: list[str], chat_id: str | None = None
+) -> None:
+  """Persist a conflict so Settings keeps surfacing it across reloads.
+
+  Line 0 is the conflicting upstream sha; an optional ``chat:<id>`` line records
+  the resolver chat; the remaining lines are the conflicting paths. The
+  ``chat:`` prefix keeps the format backward compatible — a flag written before
+  the chat id was recorded simply lacks that line and reads back as no chat id.
+  """
+  body = [upstream or ""]
+  if chat_id:
+    body.append(f"chat:{chat_id}")
+  body.extend(paths)
+  CONFLICT_FLAG.write_text("\n".join(body))
+
+
+def _read_conflict_flag() -> dict | None:
+  """Parse :data:`CONFLICT_FLAG` into ``{upstream, chat_id, paths}`` or None."""
+  if not CONFLICT_FLAG.exists():
+    return None
+  lines = CONFLICT_FLAG.read_text().splitlines()
+  upstream = lines[0].strip() if lines else ""
+  chat_id: str | None = None
+  paths: list[str] = []
+  for line in lines[1:]:
+    stripped = line.strip()
+    if not stripped:
+      continue
+    if stripped.startswith("chat:"):
+      chat_id = stripped[len("chat:"):] or None
+    else:
+      paths.append(stripped)
+  return {"upstream": upstream or None, "chat_id": chat_id, "paths": paths}
 
 
 def _git(*args: str, repo: Path = PLATFORM_REPO, check: bool = True):
@@ -251,14 +292,13 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
   has_upstream = _has_branch(UPSTREAM_BRANCH, repo)
 
   if conflict:
-    paths: list[str] = []
-    if CONFLICT_FLAG.exists():
-      paths = [p for p in CONFLICT_FLAG.read_text().splitlines()[1:] if p.strip()]
+    flag = _read_conflict_flag() or {}
+    paths = flag.get("paths") or _unmerged_paths(repo)
     return PlatformStatus(
       state=PlatformUpdateState.CONFLICT.value, available=False,
       needs_restart=restart_needed, current_build_sha=image_sha,
       recorded_upstream_sha=upstream_sha, seed_required=False,
-      conflict_paths=paths or _unmerged_paths(repo),
+      conflict_paths=paths, conflict_chat_id=flag.get("chat_id"),
     )
 
   available = bool(image_sha and upstream_sha and image_sha != upstream_sha)
@@ -276,6 +316,7 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
     state=state.value, available=available, needs_restart=restart_needed,
     current_build_sha=image_sha, recorded_upstream_sha=upstream_sha,
     seed_required=(available and not has_upstream), conflict_paths=[],
+    conflict_chat_id=None,
   )
 
 
@@ -549,8 +590,9 @@ def _apply_sync(repo: Path) -> dict:
     # Do NOT materialise markers programmatically: a plain `git merge` would try
     # to write root-owned protected files and fail. The new code is on
     # `upstream`; the agent reconciles the named non-protected files into `main`
-    # and restarts. Record the conflict so Settings keeps surfacing it.
-    CONFLICT_FLAG.write_text(f"{new_upstream}\n" + "\n".join(verdict.conflict_paths))
+    # and restarts. Record the conflict so Settings keeps surfacing it (the chat
+    # id is stamped in by the async wrapper once the resolver chat is spawned).
+    _write_conflict_flag(new_upstream, verdict.conflict_paths)
     return {"state": "conflict", "conflict_paths": verdict.conflict_paths,
             "upstream_commit": new_upstream, "merge_commit": None}
 
@@ -586,6 +628,18 @@ async def apply_platform_update(
     chat_id: str | None = None
     if outcome["state"] == "conflict":
       chat_id = await spawn_platform_conflict_chat(db, outcome["conflict_paths"])
+      # Stamp the resolver chat into the persisted flag so a Settings reload can
+      # still link straight to it. When the apply BAILED on a pre-existing
+      # conflict, the outcome carries no fresh upstream AND an empty path list
+      # (a flag-only conflict isn't materialised in git, so _unmerged_paths is
+      # []) — fall back to the recorded flag for both so re-stamping the chat id
+      # never clobbers the good upstream/paths already on disk.
+      existing = _read_conflict_flag() or {}
+      _write_conflict_flag(
+        outcome["upstream_commit"] or existing.get("upstream"),
+        outcome["conflict_paths"] or existing.get("paths") or [],
+        chat_id,
+      )
     state = (
       PlatformUpdateState.RESTART_NEEDED
       if outcome["state"] == "restart_needed"

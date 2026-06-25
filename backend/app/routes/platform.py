@@ -55,6 +55,7 @@ async def get_platform_status(
       state=platform_update.PlatformUpdateState.UP_TO_DATE.value,
       available=False, needs_restart=False, current_build_sha=None,
       recorded_upstream_sha=None, seed_required=False, conflict_paths=[],
+      conflict_chat_id=None,
     )
 
 
