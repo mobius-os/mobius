@@ -120,6 +120,8 @@
     }
     root.style.setProperty('--bg', bg);
     root.setAttribute('data-theme', mode);
+    var m = document.querySelector('meta[name="theme-color"]');
+    if (m) m.setAttribute('content', bg);
     root.style.colorScheme = mode;
     // Persist (TOP-LEVEL SHELL ONLY) so a frame's pre-paint can read the
     // correct {bg,mode}. The same-origin app-frame shares this localStorage but
