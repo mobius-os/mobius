@@ -645,6 +645,11 @@ registerRoute(new NavigationRoute(
       /^\/apps\//,
       /^\/recover(\/|$)/,
       /^\/shell\/embed(\/|$)/,
+      // Published Web Studio sites (/sites/<token>/...) are served by the
+      // backend, NOT the SPA shell. Without this the root-scoped SW served the
+      // cached index.html for a published URL, so opening it showed the Möbius
+      // app instead of the built website.
+      /^\/sites(\/|$)/,
       /^\/(?!(?:shell|apps|recover)(?:\/|$))[A-Za-z0-9_-]+(?:\/(?:index\.html)?)?$/,
     ],
   },
