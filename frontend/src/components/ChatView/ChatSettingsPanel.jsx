@@ -517,6 +517,10 @@ export default function ChatSettingsPanel({
       return
     }
     setPendingSwitch(null)
+    // A same-provider pick abandons any pending cross-provider switch — clear the
+    // captured prior selection too, so a later Cancel reverts to THIS choice, not
+    // a stale earlier one (#7 ensemble finding).
+    pendingSwitchPreviousRef.current = null
     const prevModel = draftModel
     setDraftModel(value)
     const outcome = await patchChat({

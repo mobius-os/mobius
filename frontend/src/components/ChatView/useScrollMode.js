@@ -184,13 +184,9 @@ function _computeSpacerH(scrollEl, listEl, lastUserMsgEl, fullViewH, mode) {
   const queuedTrayEl = scrollEl.parentElement?.querySelector('.queued')
   const trayH = _trayMarginBox(queuedTrayEl)
   const viewH = (fullViewH || scrollEl.clientHeight) - trayH
-  const msgH = lastUserMsgEl
-    ? (lastUserMsgEl.getBoundingClientRect?.().height || lastUserMsgEl.offsetHeight || 0)
-    : 0
   const pinTarget = lastUserMsgEl
     ? Math.max(0, lastUserMsgEl.offsetTop - PIN_OFFSET) : 0
-  const viewportReserveFloor = msgH > 0 ? Math.max(0, viewH - msgH) : 0
-  return Math.max(0, viewportReserveFloor, viewH + pinTarget - listEl.offsetHeight)
+  return Math.max(0, viewH + pinTarget - listEl.offsetHeight)
 }
 
 
