@@ -744,3 +744,51 @@ in lockstep with the code. When you change a subsystem:
 > - There is **no `docs/persistence/` directory** in this tree, and **no
 >   `2026-06-02-knowledge-graph-and-reflection-design.md`** spec — only the two
 >   specs listed above. Do not cite either.
+
+## Roadmap — open work toward the vision
+
+The system *recalls the right info* today (short-term from the injected recent
+chats; long-term via the search subagent, now that its `ModuleNotFoundError` is
+fixed). What's left, ranked by value, with the concrete shape of each fix:
+
+1. **Fast, automatic recall (the #1 gap).** Query-aware recall is currently
+   either slow (the `memory_search` LLM subagent, ~40 s, agent-triggered) or
+   absent (the injected block is query-*independent*). `auto_memory_search` (off
+   by default) runs the LLM search on the first message but blocks the reply for
+   up to the timeout. **Fix:** add a FAST, deterministic, query-aware pass that
+   runs automatically on a substantive first message and injects the top-K
+   candidate notes — keyword/BM25 over note bodies + `description:` scent lines,
+   dependency-free, < 1 s — and keep the LLM subagent for the deep contextual
+   digs the agent triggers. Two-tier: fast-deterministic always-on (the low
+   floor), deep-LLM on demand (the high ceiling). It slots in where
+   `_auto_search_memory` is called (`chat.py`), behind a `fast_recall: bool =
+   True` flag; embeddings are a later upgrade (needs a model/API). Philosophy
+   fit: it's retrieval *infrastructure* injecting DATA scoped to the query — not
+   policing — and it preserves the deep path as the high-ceiling option. Measure
+   with the `memeval` tiers + a new `FastRecallSystem` and a latency axis.
+
+2. **Validate reflection's new behaviours are firing.** The recommendations,
+   new-app-on-recurring-topic, and non-repetitive-interview rules are written but
+   were never *observed* firing (the one live night had no recurring-topic
+   signal). **Fix:** a reflection-behaviour scenario — seed a multi-"day"
+   recurring signal (e.g. 4–5 film chats with staggered dates), run reflection,
+   and assert it (a) proposes a new "movie tracker" app OR brings curated film
+   recs in the brief, and (b) doesn't re-ask the same interview questions across
+   days (diff `runs/*/interviews.md`). Extend `scripts/recall-probe.py`'s
+   seed-and-read pattern into a reflection-probe.
+
+3. **Run the harness's reflection-in-the-middle against the REAL runner.** The
+   offline proof uses the deterministic `pure_consolidation` stand-in;
+   `run_retrieval_eval_with_reflection` with `reflect_fn=live_reflection` +
+   `MemorySearchSystem.live` against a seeded container (gated `MEMEVAL_LIVE=1`)
+   would prove the real loop end-to-end. Built, not yet exercised.
+
+4. **Make consolidation incremental / unstarvable.** Tonight's consolidation is
+   still a single nightly LLM pass a long night can starve (the notes-piled-up
+   failure mode). Spread it (a little every night, or a cheap continuous fold)
+   so memory compounds rather than rots.
+
+Infra that now supports this work: `scripts/recall-probe.py` (reproducible recall
+scoreboard reading the session jsonl), the `memeval` tiers + reflection-in-the-
+middle harness, and the `test_memory_search.py` boot smoke-test (guards the
+cwd-import class that silently broke the recall arm).
