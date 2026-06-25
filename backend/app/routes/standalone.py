@@ -33,9 +33,13 @@ from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from app import icon_cache, models, runtime_libs
+from app.config import get_settings
 from app.database import get_db
+from app.theme import get_bg_color
 
 router = APIRouter(tags=["standalone"])
+
+_HEX6 = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
 # A small deterministic palette so the same app name always produces
@@ -126,15 +130,22 @@ def _resolve_bg_hex(
 
 
 def _app_background_color(app: models.App) -> str:
-  """Color shared by manifest splash, icon compositing, and loading shell."""
-  return _resolve_bg_hex(app.background_color, app.theme_color, app.icon_png)
+  """Splash / status-bar / loading-shell background for the served PWA manifest.
+
+  An explicitly declared `background_color`/`theme_color` (from mobius.json)
+  wins; otherwise we fall back to the live Möbius theme `--bg`, so an app that
+  declares no color gets a status bar matching the owner's current theme rather
+  than a color sampled from its icon. (Icon *compositing* still samples the
+  icon — see `_resolve_bg_hex` — because the solid fill behind a transparent
+  icon should match the icon art, not the theme.)"""
+  for value in (app.background_color, app.theme_color):
+    if isinstance(value, str) and _HEX6.match(value.strip()):
+      return value.strip().lower()
+  return get_bg_color(get_settings().data_dir)
 
 
 def _app_theme_color(app: models.App) -> str:
-  if (
-    isinstance(app.theme_color, str)
-    and re.match(r"^#[0-9a-fA-F]{6}$", app.theme_color.strip())
-  ):
+  if isinstance(app.theme_color, str) and _HEX6.match(app.theme_color.strip()):
     return app.theme_color.strip().lower()
   return _app_background_color(app)
 
@@ -207,8 +218,9 @@ def standalone_manifest(slug: str, db: Session = Depends(get_db)):
 
   `id` is the stable install identity (`/apps/<slug>/`). `scope` and
   `start_url` are both `/apps/<slug>/` so the OS treats this as a
-  distinct PWA from Möbius. `display: standalone` removes browser
-  chrome on launch.
+  distinct PWA from Möbius. `display` (from the app's mobius.json,
+  default "standalone") removes browser chrome on launch; "fullscreen"
+  additionally drops the OS status bar so a game covers the notch.
   """
   app = _get_app_by_slug(db, slug)
   base = f"/apps/{slug}/"
@@ -228,7 +240,11 @@ def standalone_manifest(slug: str, db: Session = Depends(get_db)):
       "description": app.description or "",
       "start_url": base,
       "scope": base,
-      "display": "standalone",
+      # Per-app display mode (mobius.json `display`); defaults to
+      # "standalone". Games declare "fullscreen" so the installed PWA
+      # launches with no OS status bar and paints under the notch/cutout
+      # (the standalone <head> already carries viewport-fit=cover).
+      "display": app.display or "standalone",
       "background_color": bg,
       "theme_color": theme,
       "icons": [

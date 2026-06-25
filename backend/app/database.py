@@ -167,6 +167,13 @@ def run_migrations(eng) -> None:
     with eng.connect() as conn:
       conn.execute(text("ALTER TABLE apps ADD COLUMN background_color VARCHAR(16) NULL"))
       conn.commit()
+  if "display" not in apps_cols:
+    # Per-app PWA display mode (web-manifest `display`); see models.App.display.
+    # Additive + nullable: every existing row reads display IS NULL, which the
+    # manifest serves as "standalone" — byte-identical to prior behavior.
+    with eng.connect() as conn:
+      conn.execute(text("ALTER TABLE apps ADD COLUMN display VARCHAR(16) NULL"))
+      conn.commit()
   # Slug column: split into three independent idempotent gates so a
   # crash anywhere in the sequence leaves a recoverable state. The
   # previous shape gated the backfill on "column missing", which

@@ -481,6 +481,7 @@ async def install_app(
     manifest_url=app.manifest_url,
     theme_color=app.theme_color,
     background_color=app.background_color,
+    display=app.display,
     offline_contract=app.offline_contract,
     created_at=app.created_at,
     updated_at=app.updated_at,

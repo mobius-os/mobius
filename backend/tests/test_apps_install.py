@@ -188,6 +188,7 @@ def test_install_fresh_app_writes_everything(client, auth, tmp_path, bypass_url_
     **MANIFEST_NEWS,
     "theme_color": "#223344",
     "background_color": "#101820",
+    "display": "fullscreen",
     "static_assets": {
       "index.html": "build/index.html",
       "static/js/main.js": "build/static/js/main.js",
@@ -215,6 +216,7 @@ def test_install_fresh_app_writes_everything(client, auth, tmp_path, bypass_url_
   assert payload["version"] == "1.0.0"
   assert payload["theme_color"] == "#223344"
   assert payload["background_color"] == "#101820"
+  assert payload["display"] == "fullscreen"
   assert payload["slug"] == "test-news"
   app_id = payload["id"]
 
@@ -242,6 +244,7 @@ def test_install_fresh_app_writes_everything(client, auth, tmp_path, bypass_url_
   row = next(a for a in listed if a["id"] == app_id)
   assert row["theme_color"] == "#223344"
   assert row["background_color"] == "#101820"
+  assert row["display"] == "fullscreen"
 
 
 def test_install_static_site_assets_route_css_fonts_and_chunks(

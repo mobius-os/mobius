@@ -769,7 +769,29 @@ useEffect(() => {
   - `env(safe-area-inset-*)` works directly — the iframe's `viewport-fit=cover` makes it resolve to the real device insets (e.g. `padding-top: max(12px, env(safe-area-inset-top))`). This matches how a standalone PWA pads, so the same code works in both contexts.
   - `--mobius-safe-top/right/bottom/left` CSS variables on `:root` — the shell forwards the real insets and **zeroes them while your app is windowed**, so a control padded with `padding-top: var(--mobius-safe-top)` clears the notch immersive and sits flush when not. Use these when you want inset padding *only* while immersive; use `env()` when you want it always. They also re-forward on rotation, so a landscape flip (cutout moves to a side) re-pads correctly.
 - The shell renders its own floating exit button at the top-left (safe-area inset) while immersive. Don't draw a competing exit control, and keep critical tap targets out of that corner. If the user taps it, the shell stays in normal chrome until your app remounts and posts again — respect that choice; don't re-post on a timer.
-- Standalone opens (`/apps/<slug>/`) have no shell; the message is harmlessly ignored. No flag, no manifest field, no DB column — the postMessage is the whole opt-in. `env(safe-area-inset-*)` resolves natively in a standalone PWA (and now in-shell too), so a build that pads with `env()` is portable across both; `--mobius-safe-*` stays 0 in standalone (no shell to forward them).
+- Standalone opens (`/apps/<slug>/`) have no shell; the message is harmlessly ignored. The postMessage is the whole opt-in for *hiding the Möbius bar* — covering the OS status bar is separate (see below). `env(safe-area-inset-*)` resolves natively in a standalone PWA (and now in-shell too), so a build that pads with `env()` is portable across both; `--mobius-safe-*` stays 0 in standalone (no shell to forward them).
+
+### Covering the notch on Android (the OS status bar)
+
+`viewport-fit=cover` already lets your background paint under the **iOS** notch (its status bar is translucent). On **Android** the OS draws an opaque status bar over the top whenever the PWA is `display: standalone` — so hiding the Möbius toolbar isn't enough to reach the cutout. Two knobs close the gap:
+
+- **Installed standalone PWA** — declare `"display": "fullscreen"` in your `mobius.json`. The installed game then launches with no OS status bar and paints edge-to-edge under the cutout. Valid values: `standalone` (default), `fullscreen`, `minimal-ui`, `browser`.
+- **In-shell (inside Möbius)** — Möbius itself is one `display: standalone` PWA, so the OS status bar can only be dropped at runtime via the Fullscreen API, which the browser grants **only on a user gesture**. Request it on the player's first tap (re-requesting after a system-gesture exit); the shell calls `exitFullscreen()` for you when the game is left:
+
+  ```js
+  // in the game's own entry document — where the tap actually lands
+  window.addEventListener('pointerdown', () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen?.().catch(() => {})
+    }
+  }, { passive: true })
+  ```
+
+  No-op on iOS (no element fullscreen) and redundant in a `display: fullscreen` standalone launch (already fullscreen) — guard with `matchMedia('(display-mode: fullscreen)').matches` to skip it there.
+
+### Splash / status-bar color
+
+Set `"theme_color"` and `"background_color"` (`#rrggbb`) in `mobius.json` to pin the OS splash + status-bar color to your app's own background. Omit them and Möbius defaults the status bar to the owner's current **theme** color (not a color sampled from your icon), so an undeclared app still blends with the platform.
 
 ---
 

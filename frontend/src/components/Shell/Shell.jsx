@@ -204,6 +204,24 @@ export default function Shell() {
   }, [])
   const immersiveActive = isImmersiveActive(immersiveAppId, activeView, activeAppId)
 
+  // Immersive games request OS fullscreen to also drop the Android status bar
+  // and paint under the notch — but ENTER must come from the app, because the
+  // Fullscreen API needs the user gesture, and the gameplay tap lands in the
+  // app's iframe, not here (see the building-apps "immersive" notes). EXIT
+  // needs no gesture, so the shell owns it: when immersive is released (app
+  // switch, exit button, or leaving the canvas) we drop fullscreen from the
+  // top document. Guarded on fullscreenElement so we never call
+  // exitFullscreen() with nothing fullscreen (it would reject). Fullscreen and
+  // immersive are loosely coupled on purpose — a system swipe that exits
+  // fullscreen leaves immersive applied (bar stays hidden); the app re-enters
+  // on the next tap. iOS has no element fullscreen, so this is a no-op there.
+  useEffect(() => {
+    if (immersiveActive) return
+    if (typeof document !== 'undefined' && document.fullscreenElement) {
+      document.exitFullscreen?.().catch(() => {})
+    }
+  }, [immersiveActive])
+
   // Passive auth-status check. Reads /api/auth/providers/status with
   // a 5-minute TanStack cache + a visibilitychange-driven invalidation.
   // Drives the small warning dot on the drawer's Settings row when
