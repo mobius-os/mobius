@@ -15,8 +15,6 @@ principal" — keeping one auth model reduces surface area.
 from __future__ import annotations
 
 import json
-import os
-import signal
 from datetime import datetime, timezone
 from typing import Any
 
@@ -29,6 +27,7 @@ from sqlalchemy.orm import Session
 from app import activity, models
 from app.database import get_db
 from app.deps import get_current_owner, reject_cross_site
+from app.restart_util import restart_this_worker
 
 # Event names the emit endpoint will accept. Restricting at the
 # boundary keeps the file's vocabulary closed (a typo or stray
@@ -47,10 +46,6 @@ _KNOWN_EVENTS = {
 }
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
-
-
-def _sigterm_self_after_response():
-  os.kill(os.getpid(), signal.SIGTERM)
 
 
 def _parse_iso(value: str, label: str) -> datetime:
@@ -229,5 +224,5 @@ def restart_server(
   """
   return JSONResponse(
     {"status": "restarting"},
-    background=BackgroundTask(_sigterm_self_after_response),
+    background=BackgroundTask(restart_this_worker),
   )
