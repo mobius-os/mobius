@@ -15,7 +15,7 @@ import '../ui/StatusDot.css'
 import './SettingsView.css'
 
 
-export default function SettingsView({ onThemeChange }) {
+export default function SettingsView({ onThemeChange, onOpenChat }) {
   const queryClient = useQueryClient()
   const settingsQuery = settingsQueries.owner.useQuery()
   const claudeStatusQuery = authQueries.provider.claudeStatus.useQuery()
@@ -315,6 +315,29 @@ export default function SettingsView({ onThemeChange }) {
   }, [])
   useEffect(() => { refreshPlatform() }, [refreshPlatform])
 
+  // Replaces the old "Check for updates" button: on opening Settings, silently
+  // ask the SW for a newer bundle and re-read /api/version so the Möbius row's
+  // status is current without a label-mutating button. Once per open; never
+  // touches updatePhase, so it can't make the Update button look busy.
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        if ('serviceWorker' in navigator) {
+          const reg = await navigator.serviceWorker.getRegistration()
+          if (reg) await reg.update()
+        }
+        if (cancelled) return
+        await versionQueries.current.invalidate(queryClient)
+        await versionQuery.refetch()
+      } catch {
+        // a refresh hiccup just leaves the last-known status on the row
+      }
+    })()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // Press Update -> merge the baked platform release into the live backend.
   // Clean -> the row flips to "restart needed"; conflict -> an agent chat opens.
   async function applyPlatformUpdate() {
@@ -334,6 +357,20 @@ export default function SettingsView({ onThemeChange }) {
       setPlatformError('Update failed — the instance is unchanged.')
     } finally {
       setPlatformPhase('idle')
+    }
+  }
+
+  // One "Update" button, fanning out behind it. A diverged/updatable backend
+  // overlay merges first (which then asks for a restart, or opens a resolver
+  // chat); otherwise a stale shell bundle reloads onto the fresh SW. A clean
+  // backend merge always marks restart-needed, so we never double-act — the row
+  // advances to "Restart to finish", and that restart reloads onto the fresh
+  // shell too. The owner sees one Möbius update, not a backend-vs-frontend split.
+  async function applyMobiusUpdate() {
+    if (platform?.available) {
+      await applyPlatformUpdate()
+    } else if (newerBuildInstalled) {
+      await applyUpdate()
     }
   }
 
@@ -403,6 +440,16 @@ export default function SettingsView({ onThemeChange }) {
     version.shell_sha !== 'unknown' &&
     version.sha !== 'unknown' &&
     version.shell_sha !== version.sha
+
+  // Derived state for the single "Möbius" update row (see the section below).
+  // updateAvailable folds both signals: a stale shell bundle (newerBuildInstalled)
+  // OR a backend overlay merge (platform.available). conflict/restart come only
+  // from the backend platform flow.
+  const platformConflict = platform?.state === 'conflict'
+  const platformRestart = !!platform?.needs_restart
+  const updateAvailable = !!platform?.available || newerBuildInstalled
+  const mobiusUpdating =
+    platformPhase === 'applying' || updatePhase === 'checking'
 
   return (
     <div className="settings">
@@ -529,92 +576,77 @@ export default function SettingsView({ onThemeChange }) {
           )}
         </section>
 
+        {/* ONE honest "Möbius" update surface. Folds the shell-bundle reload (a
+            newer image's UI not yet served to this client) and the backend
+            platform merge (a newer baked floor, or a diverged overlay) into a
+            single row: one status line, one action. Priority: an in-progress
+            conflict, then a pending restart, then an available update, then up
+            to date. Per-layer mechanics stay invisible (the SW +
+            platform_update.py). We do NOT claim libraries/recovery updated — v1
+            updates the shell + non-protected backend only; the rest rides the
+            image (134 SP3/SP5) — so the copy stays "Möbius is up to date / has
+            an update", never a backend-vs-frontend split. Always renders (it
+            carries the Möbius build identity), so there is no second surface and
+            no label-mutating "Check" button. */}
         <section className="settings__section settings__section--compact">
-          <h2 className="settings__section-title">App</h2>
-          {/* Version + update state in ONE calm row. The old toggling
-              "Check for updates" button (idle → Checking… → Up to date) mutated
-              its own label and shifted the layout on every tap — the disliked
-              UX. The version query already knows whether a newer build is
-              waiting, so we surface a single clear "Update" action ONLY when one
-              is, and otherwise a quiet status. Nothing here changes width/height
-              on interaction. */}
+          <h2 className="settings__section-title">Möbius</h2>
           <div className="settings__row settings__row--top">
-            <div>
-              <span className="settings__label">Möbius</span>
+            <div className="settings__app-status">
+              <StatusDot
+                color={platformConflict || platformRestart || updateAvailable ? '--accent' : '--green'}
+              >
+                {platformConflict
+                  ? 'Resolving an update conflict'
+                  : platformRestart
+                    ? 'Restart to finish updating'
+                    : updateAvailable
+                      ? 'New update available'
+                      : 'Up to date'}
+              </StatusDot>
               <p className="settings__subtext settings__subtext--tight">
                 {SHELL_BUILD}
                 {shellBuildSha !== 'unknown' ? ` · ${shellBuildSha}` : ''}
               </p>
             </div>
-            {newerBuildInstalled ? (
+            {platformConflict ? (
+              platform?.conflict_chat_id && onOpenChat ? (
+                <button
+                  className="settings__btn settings__btn--outline settings__btn--sm settings__btn--nowrap"
+                  type="button"
+                  onClick={() => onOpenChat(platform.conflict_chat_id)}
+                >
+                  Open chat
+                </button>
+              ) : null
+            ) : platformRestart ? (
               <button
                 className="settings__btn settings__btn--sm settings__btn--nowrap"
                 type="button"
-                onClick={applyUpdate}
-                disabled={updatePhase === 'checking'}
+                onClick={restartToFinish}
+                disabled={platformPhase === 'restarting'}
               >
-                {updatePhase === 'checking' ? 'Updating…' : 'Update'}
+                {platformPhase === 'restarting' ? 'Restarting…' : 'Restart to finish'}
               </button>
-            ) : (
-              <div className="settings__app-status">
-                <StatusDot color="--green">Up to date</StatusDot>
-                <button
-                  className="settings__btn settings__btn--outline settings__btn--sm"
-                  type="button"
-                  onClick={checkForUpdates}
-                  disabled={updatePhase === 'checking'}
-                >
-                  {updatePhase === 'checking' ? 'Checking…' : 'Check'}
-                </button>
-              </div>
-            )}
+            ) : updateAvailable ? (
+              <button
+                className="settings__btn settings__btn--sm settings__btn--nowrap"
+                type="button"
+                onClick={applyMobiusUpdate}
+                disabled={mobiusUpdating}
+              >
+                {mobiusUpdating ? 'Updating…' : 'Update'}
+              </button>
+            ) : null}
           </div>
-        </section>
-
-        {platform && (platform.available || platform.needs_restart || platform.state === 'conflict') && (
-          <section className="settings__section settings__section--compact">
-            <h2 className="settings__section-title">Platform</h2>
-            <div className="settings__row settings__row--top">
-              <div>
-                <span className="settings__label">Update</span>
-                <p className="settings__subtext settings__subtext--tight">
-                  {platform.state === 'conflict'
-                    ? 'Resolving an update conflict in a chat'
-                    : platform.needs_restart
-                      ? 'A server restart is needed to finish'
-                      : 'New update available'}
-                </p>
-              </div>
-              {platform.needs_restart ? (
-                <button
-                  className="settings__btn settings__btn--sm settings__btn--nowrap"
-                  type="button"
-                  onClick={restartToFinish}
-                  disabled={platformPhase === 'restarting'}
-                >
-                  {platformPhase === 'restarting' ? 'Restarting…' : 'Restart to finish'}
-                </button>
-              ) : platform.state === 'conflict' ? null : (
-                <button
-                  className="settings__btn settings__btn--sm settings__btn--nowrap"
-                  type="button"
-                  onClick={applyPlatformUpdate}
-                  disabled={platformPhase === 'applying'}
-                >
-                  {platformPhase === 'applying' ? 'Updating…' : 'Update'}
-                </button>
-              )}
+          {platformPhase === 'restarting' && (
+            <div className="settings__notice" role="status">
+              Restart signal sent. The page will reload shortly.
             </div>
-            {platformPhase === 'restarting' && (
-              <div className="settings__notice" role="status">
-                Restart signal sent. The page will reload shortly.
-              </div>
-            )}
-            {platformError && (
-              <Alert color="danger" variant="soft" description={platformError} />
-            )}
-          </section>
-        )}
+          )}
+          {platformError && (
+            <Alert color="danger" variant="soft" description={platformError} />
+          )}
+        </section>
 
         <section className="settings__section settings__section--compact">
           <h2 className="settings__section-title">Server</h2>

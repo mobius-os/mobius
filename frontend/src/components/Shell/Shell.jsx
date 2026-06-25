@@ -1202,7 +1202,7 @@ export default function Shell() {
           </div>
         ))}
         {activeView === 'settings' && (
-          <SettingsView onThemeChange={loadTheme} />
+          <SettingsView onThemeChange={loadTheme} onOpenChat={selectChat} />
         )}
       </main>
       {/* SHELL-provided immersive exit. With the top bar gone the drawer
