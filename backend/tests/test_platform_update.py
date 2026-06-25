@@ -147,6 +147,57 @@ def test_conflict_records_upstream_and_reports_paths(platform_env, monkeypatch):
   assert status["state"] == pu.PlatformUpdateState.CONFLICT.value
 
 
+def test_conflict_flag_roundtrips_chat_id_and_reads_legacy(platform_env):
+  pu._write_conflict_flag("up-sha", ["app/a.py", "app/b.py"], "chat-42")
+  assert pu._read_conflict_flag() == {
+    "upstream": "up-sha", "chat_id": "chat-42",
+    "paths": ["app/a.py", "app/b.py"],
+  }
+  # A flag written before the chat id existed (no `chat:` line) must still
+  # parse: chat_id None, paths intact — the format is backward compatible.
+  pu.CONFLICT_FLAG.write_text("up-sha\napp/a.py\napp/b.py")
+  legacy = pu._read_conflict_flag()
+  assert legacy["chat_id"] is None
+  assert legacy["paths"] == ["app/a.py", "app/b.py"]
+
+
+def test_status_surfaces_conflict_chat_id(platform_env):
+  repo, baked, root = platform_env
+  _init_platform(repo, "sha-old", {"app/server.py": b"x\n"})
+  # The recorded resolver chat must reach the owner from a Settings reload.
+  pu._write_conflict_flag("up-sha", ["app/server.py"], "chat-99")
+  status = pu.platform_status(repo)
+  assert status["state"] == pu.PlatformUpdateState.CONFLICT.value
+  assert status["conflict_chat_id"] == "chat-99"
+  assert any("server.py" in p for p in status["conflict_paths"])
+
+
+def test_status_non_conflict_has_null_chat_id(platform_env, monkeypatch):
+  repo, baked, root = platform_env
+  _init_platform(repo, "sha-old", {"app/server.py": b"x\n"})
+  monkeypatch.setenv("BUILD_SHA", "sha-old")  # up to date, no conflict flag
+  status = pu.platform_status(repo)
+  assert status["conflict_chat_id"] is None
+
+
+def test_restamp_chat_id_preserves_existing_conflict_data(platform_env):
+  # A second apply that BAILS on a pre-existing flag-only conflict carries no
+  # fresh upstream and an empty path list (the conflict isn't materialised in
+  # git, so _unmerged_paths is []). Stamping the resolver chat id must fall back
+  # to the recorded flag for both, never clobbering the good upstream/paths.
+  pu._write_conflict_flag("good-upstream", ["app/a.py", "app/b.py"])
+  existing = pu._read_conflict_flag()
+  pu._write_conflict_flag(
+    None or existing["upstream"],          # outcome.upstream_commit is None
+    [] or existing["paths"] or [],          # outcome.conflict_paths is []
+    "chat-77",
+  )
+  got = pu._read_conflict_flag()
+  assert got["upstream"] == "good-upstream"
+  assert got["paths"] == ["app/a.py", "app/b.py"]
+  assert got["chat_id"] == "chat-77"
+
+
 def test_status_reports_available_when_image_sha_advances(platform_env, monkeypatch):
   repo, baked, root = platform_env
   _init_platform(repo, "sha-old", {"app/server.py": b"x\n"})
