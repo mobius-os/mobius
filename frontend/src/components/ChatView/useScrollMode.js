@@ -81,6 +81,30 @@ function _topmostVisibleMsg(scrollEl) {
 }
 
 
+/** Snapshot the reader's current scroll position as an ANCHOR_AT mode
+ *  (the same {key, offset} the gesture-gated scroll handler stamps when
+ *  the user scrolls up). Returns null when there's no scroll element or
+ *  no anchorable message.
+ *
+ *  Why this exists: a non-pinning send must leave a PIN_USER_MSG behind
+ *  (otherwise _computeSpacerH keeps gating the pin-spacer on the stale
+ *  PIN mode and sizes phantom room against the new, unpinned message —
+ *  the reader then gets shifted by space they're not reading past). The
+ *  send sites call this to convert a stale PIN into the reader's actual
+ *  position, which both flips the spacer math off (mode is no longer
+ *  PIN_USER_MSG) and keeps the reader exactly where they were. */
+export function anchorModeFromScroll(scrollEl) {
+  if (!scrollEl) return null
+  const anchorEl = _topmostVisibleMsg(scrollEl)
+  if (!anchorEl?.dataset?.key) return null
+  return {
+    kind: 'ANCHOR_AT',
+    key: anchorEl.dataset.key,
+    offset: anchorEl.offsetTop - scrollEl.scrollTop,
+  }
+}
+
+
 /** Apply a scroll mode by setting scrollTop. Idempotent — call as
  *  often as layout changes happen. */
 export function applyMode(scrollEl, mode) {
@@ -144,16 +168,65 @@ function _validateSavedMode(saved, messages, scrollEl) {
  *  scrollTop-max equals the PIN target — otherwise the message
  *  lands PIN_OFFSET pixels below the top (visual "extra space" at
  *  the top + phantom over-scroll room at the bottom).
+ *
+ *  Mode-aware: the pin-spacer exists ONLY to give PIN_USER_MSG the
+ *  scroll room to reach the top. Reserving it in any other mode would
+ *  add phantom space below the list that a scrolled-up reader (ANCHOR_AT)
+ *  can be shifted by, and that un-glues an at-bottom follower
+ *  (FOLLOW_BOTTOM) — both are the send-while-not-pinning hazards the
+ *  send rule must avoid. So a non-pin mode reserves nothing; the send
+ *  becomes a true no-op for scroll/spacer.
  */
 const PIN_OFFSET = 4
-function _computeSpacerH(scrollEl, listEl, lastUserMsgEl, fullViewH) {
+function _computeSpacerH(scrollEl, listEl, lastUserMsgEl, fullViewH, mode) {
   if (!scrollEl || !listEl) return 0
+  if (!mode || mode.kind !== 'PIN_USER_MSG') return 0
   const queuedTrayEl = scrollEl.parentElement?.querySelector('.queued')
   const trayH = _trayMarginBox(queuedTrayEl)
   const viewH = (fullViewH || scrollEl.clientHeight) - trayH
   const pinTarget = lastUserMsgEl
     ? Math.max(0, lastUserMsgEl.offsetTop - PIN_OFFSET) : 0
   return Math.max(0, viewH + pinTarget - listEl.offsetHeight)
+}
+
+
+// "Near the bottom" tolerance for the send rule, matching the
+// auto-follow engage threshold in CLAUDE.md "Chat UX" constraint #2. A
+// reader within this many pixels of the bottom is treated as at-bottom.
+const NEAR_BOTTOM_PX = 50
+
+/** The send rule: a new user message moves to the top (PIN_USER_MSG)
+ *  ONLY when it is the first message in the chat, or the user is
+ *  already at the bottom (following the stream). When the user is
+ *  scrolled up they are probably reading — possibly with something
+ *  queued — so the send must leave their scroll position alone.
+ *
+ *  "At the bottom" is decided two ways, neither a raw IntersectionObserver
+ *  read (appending the assistant shell hides the bottom sentinel before
+ *  the first follow-write, so a sentinel read at send time would
+ *  mis-classify an at-bottom reader):
+ *
+ *    1. The gesture-gated FOLLOW_BOTTOM mode — the user actively scrolled
+ *       to the bottom to follow the stream.
+ *    2. The scroll position is within NEAR_BOTTOM_PX of the bottom right
+ *       now, measured from scrollTop BEFORE the new message appends. This
+ *       is a position computation, not a sentinel read, and it covers the
+ *       cases FOLLOW_BOTTOM misses: a chat short enough to fit the
+ *       viewport (the user sees everything, so a pin is the expected
+ *       move and keeps a back-to-back short send pinning) and a reader
+ *       sitting at the tail without having made the bottom gesture. A
+ *       scrolled-up reader has a large gap and is correctly left alone.
+ *       The pin-spacer's empty room counts as "at the bottom" here — it
+ *       is phantom space, not content the user is reading past.
+ */
+export function shouldPinSend({ scrollEl, mode, isFirstUserMsg }) {
+  if (isFirstUserMsg) return true
+  if (mode && mode.kind === 'FOLLOW_BOTTOM') return true
+  if (scrollEl) {
+    const gap = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
+    if (gap < NEAR_BOTTOM_PX) return true
+  }
+  return false
 }
 
 
@@ -322,7 +395,9 @@ export default function useScrollMode({
 
     function sizeSpacer() {
       const lastUserEl = lastUserMsgRef.current
-      const h = _computeSpacerH(scrollEl, listEl, lastUserEl, fullViewHRef.current)
+      const h = _computeSpacerH(
+        scrollEl, listEl, lastUserEl, fullViewHRef.current, modeRef.current,
+      )
       spacerEl.style.height = `${h}px`
     }
 
@@ -506,14 +581,8 @@ export default function useScrollMode({
       if (atBottom) {
         modeRef.current = { kind: 'FOLLOW_BOTTOM' }
       } else {
-        const anchorEl = _topmostVisibleMsg(scrollEl)
-        if (anchorEl?.dataset?.key) {
-          modeRef.current = {
-            kind: 'ANCHOR_AT',
-            key: anchorEl.dataset.key,
-            offset: anchorEl.offsetTop - scrollEl.scrollTop,
-          }
-        }
+        const anchor = anchorModeFromScroll(scrollEl)
+        if (anchor) modeRef.current = anchor
       }
     }
     scrollEl.addEventListener('scroll', onScroll, { passive: true })
