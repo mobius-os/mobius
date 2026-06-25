@@ -771,7 +771,13 @@ else
   fi
   export BUILD_SHA="$_sha"
   # The commit's date (YYYY-MM-DD) → a human "version · date" line in Settings.
-  export BUILD_DATE="$(git -C "$REPO_ROOT" show -s --format=%cs HEAD 2>/dev/null || echo unknown)"
+  # For a DIRTY (--allow-unpushed) build the working tree is NOT HEAD, so HEAD's
+  # commit date would mislabel uncommitted code with an older date — stamp the
+  # build date (today, UTC) instead so the date matches what actually shipped.
+  case "$_sha" in
+    *-dirty) export BUILD_DATE="$(date -u +%Y-%m-%d)" ;;
+    *) export BUILD_DATE="$(git -C "$REPO_ROOT" show -s --format=%cs HEAD 2>/dev/null || echo unknown)" ;;
+  esac
   BUILT_THIS_RUN=1
   info "baking BUILD_SHA=${BUILD_SHA:0:18}… (${BUILD_DATE}) into the image"
   intent "docker compose ${COMPOSE_ARGS[*]} build"
