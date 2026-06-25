@@ -37,6 +37,9 @@ class Settings(BaseSettings):
   # local `docker compose up` that didn't pass it. Surfaced at GET /api/version
   # so a deploy can verify the SERVED backend matches the intended commit.
   build_sha: str = "unknown"
+  # Commit date (YYYY-MM-DD) of build_sha, baked via the BUILD_DATE build-arg.
+  # Surfaced at GET /api/version so Settings can show "version · date".
+  build_date: str = "unknown"
 
   # Auto memory-search: on a substantive FIRST message of a chat, the platform
   # runs the memory-search subagent (scripts/memory_search.py) and injects its

@@ -160,6 +160,14 @@
 .settings__btn--sm {
   padding: 5px 12px;
   font-size: 13px;
+  /* Uniform width + centered label so short row actions ("Open", "Update",
+     "Restart", "Retry") render at the same size — a button and an anchor with
+     different label lengths otherwise read as mismatched controls. line-height
+     pins the box height so a <button> and an <a> match exactly. */
+  min-width: 80px;
+  text-align: center;
+  line-height: 1.4;
+  box-sizing: border-box;
 }
 
 .settings__btn--outline {
@@ -242,10 +250,32 @@
    ../ProviderAuth/ProviderAuth.css since the component is shared
    between SettingsView and SetupWizard. */
 
-/* A lone right-aligned action (e.g. "Check for updates") on its own row, so a
-   long label never shares a flex row with long info text and wraps/cramps. */
-/* App row "Up to date" status + the manual Check affordance share one trailing
-   cluster so re-checking for a shell update stays reachable (the calm redesign
-   had orphaned checkForUpdates) without shifting the row layout. */
-.settings__app-status { display: inline-flex; align-items: center; gap: 10px; }
+/* Möbius update cluster: the status line stacks ABOVE the build identity, so a
+   short status ("Up to date") never shares a flex row with the build string and
+   wraps mid-phrase. A vertical stack reads as one calm unit; the trailing action
+   button (top-aligned via .settings__row--top) sits level with the status line. */
+.settings__update {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+/* The build sha as a quiet, monospaced identity line — tabular glyphs make a
+   hex sha read AS a build id rather than stray text. */
+.settings__build {
+  margin: 0;
+  font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
+  font-size: 12px;
+  letter-spacing: 0;
+  color: var(--muted);
+}
+
 .settings__btn--nowrap { white-space: nowrap; }
+
+/* Cancel + confirm pair for a deliberate two-step action (e.g. the manual
+   server restart, which interrupts any live chat). */
+.settings__confirm {
+  display: inline-flex;
+  gap: 8px;
+}
