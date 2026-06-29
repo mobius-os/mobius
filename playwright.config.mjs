@@ -47,6 +47,15 @@ export default defineConfig({
     {
       name: 'auth',
       testMatch: /auth\.setup\.mjs/,
+      // Block the service worker for setup only. On a fresh context the first
+      // /sw.js install activates + clientsClaim()s the page ~1s in, and
+      // index.html's watchdog does a one-time location.reload() to adopt it.
+      // That reload lands mid-setup and wipes the just-filled login form — a
+      // ~50% flake (the form submits empty; native "Please fill out this
+      // field" blocks login). Setup only needs to log in and save state; it
+      // never exercises the SW, so blocking it makes the page load once and
+      // stay stable. The SW-behavior specs keep their own (allowed) contexts.
+      use: { serviceWorkers: 'block' },
       // Auth setup races a 15s rAF poll for shell readiness — if the
       // shell genuinely never reaches ready, additional retries just
       // multiply that wait. One retry is enough to absorb single-flake
