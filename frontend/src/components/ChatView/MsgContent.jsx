@@ -6,13 +6,8 @@ import Attachments from './Attachments.jsx'
 import CompactionCard from './CompactionCard.jsx'
 import { questionKey } from './questionKey.js'
 import { suppressedQuestionToolIndices } from './streamReducers.js'
+import { stripAugmentation } from './msgText.js'
 
-
-function stripAugmentation(text) {
-  let cleaned = text.replace(/\s*<agent_experience>[\s\S]*?<\/agent_experience>\s*/g, '')
-  cleaned = cleaned.replace(/\s*\[Files in this session:\n[\s\S]*?\]\s*/g, '')
-  return cleaned.trim()
-}
 
 // Answerability is purely a function of the block + its position + live hint.
 // Computing it here (rather than passing an arrow from ChatView's render loop)

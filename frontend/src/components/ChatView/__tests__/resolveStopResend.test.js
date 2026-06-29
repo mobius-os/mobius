@@ -30,8 +30,8 @@ test('non-empty cleared set with full match resends exactly that subset', () => 
     snap({ ts: 11, content: 'first' }),
     snap({ ts: 22, content: 'second' }),
   ]
-  const got = resolveStopResend(snapshot, [11, 22], combined('first\n\nsecond'))
-  assert.equal(got.text, 'first\n\nsecond')
+  const got = resolveStopResend(snapshot, [11, 22], combined('first\nsecond'))
+  assert.equal(got.text, 'first\nsecond')
 })
 
 test('cleared subset narrows to only the cleared entries', () => {
@@ -41,7 +41,7 @@ test('cleared subset narrows to only the cleared entries', () => {
   ]
   // Backend only cleared ts 22 (11 was promoted into the dying turn).
   const got = resolveStopResend(
-    snapshot, [22], combined('keep-streaming\n\nonly-this-was-cleared'),
+    snapshot, [22], combined('keep-streaming\nonly-this-was-cleared'),
   )
   assert.equal(got.text, 'only-this-was-cleared',
     'resend only the cleared entry, not the whole combined text')
@@ -74,7 +74,7 @@ test('attachments de-dup by name across the resent subset', () => {
     snap({ ts: 11, content: 'a', attachments: [{ name: 'x.png' }, { name: 'y.png' }] }),
     snap({ ts: 22, content: 'b', attachments: [{ name: 'x.png' }, { name: 'z.png' }] }),
   ]
-  const got = resolveStopResend(snapshot, [11, 22], combined('a\n\nb'))
+  const got = resolveStopResend(snapshot, [11, 22], combined('a\nb'))
   assert.deepEqual(
     got.attachments.map(a => a.name).sort(),
     ['x.png', 'y.png', 'z.png'],

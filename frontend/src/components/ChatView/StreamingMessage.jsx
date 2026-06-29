@@ -14,20 +14,19 @@ import QuestionCard from './QuestionCard.jsx'
  * which no longer imports any of them.
  *
  * The `<li>` MUST keep `className="chat__msg chat__msg--assistant"`
- * and `data-key={dataKey}`: the scroll state machine
- * (useScrollMode's applyMode) resolves ANCHOR_AT via
- * `querySelector('.chat__msg[data-key]')`. `dataKey` is
- * `streamingDataKey` from ChatView — set only in the BRIDGE case so a
- * kept DB partial's anchor still resolves through the catch-up
- * window, and left undefined for multi-turn flow so the lookup
- * doesn't go ambiguous against the previous turn's persisted
- * assistant message.
+   * and `data-key={dataKey}`: the scroll state machine
+   * (useScrollMode's applyMode) resolves ANCHOR_AT via
+   * `querySelector('.chat__msg[data-key]')`. `dataKey` is
+   * `streamingDataKey` from ChatView — the kept DB partial's key in the
+   * BRIDGE case, otherwise a synthetic `streaming-<chatId>` key. The
+   * synthetic key lets foreground reconnect preserve the reader's position
+   * inside a live streaming answer while catch-up fills content below.
  *
  * @param {object} props
  * @param {Array<object>} props.streamItems  the live stream items
  *   (latestItemsRef's render mirror): text/tool/question/error.
- * @param {string|undefined} props.dataKey  ChatView's
- *   `streamingDataKey` (BRIDGE-only; undefined for multi-turn).
+   * @param {string|undefined} props.dataKey  ChatView's stable
+   *   `streamingDataKey`.
  * @param {(text: string, resolvedAnswers: object, questionId?: string) => void} props.onAnswer
  *   doSendSilent — submits an AskUserQuestion answer as a hidden
  *   user message. The card is clickable even mid-stream because the

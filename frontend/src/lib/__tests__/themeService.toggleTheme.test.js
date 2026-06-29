@@ -288,6 +288,33 @@ test('toggleTheme dark → light swaps structural colors but preserves accent', 
     'custom --accent must survive the mode toggle')
 })
 
+test('REGRESSION — toggleTheme preserves selectors containing -- in extra CSS', async () => {
+  // The Settings recovery spacing rule uses `.settings__section--compact`.
+  // parseThemeMeta used to scan the whole stylesheet for custom properties,
+  // so it treated the selector's `--compact:last-child...` as a bogus CSS
+  // variable. The next toggle rebuilt theme.css with `--compact: ...` inside
+  // :root and removed the actual rule.
+  const cssWithSettingsRule = `${DARK_CSS}
+/* settings restart/recovery spacing: keep Restart and Recovery actions visually separate. */
+.settings__section--server .settings__row--recovery,
+.settings .settings__content > .settings__section.settings__section--compact:last-child .settings__row:last-child {
+  margin-top: 16px;
+}
+`
+  const qc = makeQueryClient()
+  const api = makeApi(cssWithSettingsRule)
+  await themeService.toggleTheme(qc, 'dark', api)
+  const putCall = api.calls.find(c => c[0] === 'putThemeCss')
+  assert.ok(putCall, 'putThemeCss must have been called')
+  const newCss = putCall[1]
+  assert.ok(newCss.includes('.settings__section--server .settings__row--recovery'),
+    'settings spacing rule must remain outside :root')
+  assert.ok(newCss.includes('.settings__section.settings__section--compact:last-child'),
+    'selector containing --compact must be preserved as a selector')
+  assert.equal(/^\s*--compact\s*:/m.test(newCss), false,
+    `selector text must not be converted into a bogus --compact variable:\n${newCss}`)
+})
+
 test('REGRESSION — toggling an accent-stripped theme restores the missing tokens', async () => {
   // The prod "light mode completely broken" bug: a prior toggle had
   // re-persisted theme.css with ONLY structural tokens (no --accent /

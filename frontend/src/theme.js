@@ -51,12 +51,17 @@ export function parseThemeMeta(css) {
     imports.push(`@import url('${url}');`)
     return ''
   })
-  const font = (css.match(/--font:\s*([^;]+);/) || [])[1]?.trim() || "'Inter', system-ui, sans-serif"
-  const mono = (css.match(/--mono:\s*([^;]+);/) || [])[1]?.trim() || "'JetBrains Mono', ui-monospace, monospace"
-  const fontSize = (css.match(/font-size:\s*([^;]+);/) || [])[1]?.trim() || '15px'
-  // Extract all CSS custom properties so agent-set colors survive toggles.
+  const rootBlock = extractRootBlock(rest)
+  const font = (rootBlock.match(/--font:\s*([^;]+);/) || [])[1]?.trim() || "'Inter', system-ui, sans-serif"
+  const mono = (rootBlock.match(/--mono:\s*([^;]+);/) || [])[1]?.trim() || "'JetBrains Mono', ui-monospace, monospace"
+  const fontSize = (rootBlock.match(/font-size:\s*([^;]+);/) || [])[1]?.trim() || '15px'
+  // Extract CSS custom properties only from the first top-level :root block.
+  // Rules outside :root can legally include class names like
+  // `.settings__section--compact:last-child`; scanning the whole stylesheet
+  // misread that selector as a bogus custom property (`--compact`) and a
+  // later theme toggle rebuilt theme.css with the selector folded into :root.
   const colors = {}
-  css.replace(/--([\w-]+):\s*([^;]+);/g, (_, name, value) => {
+  rootBlock.replace(/--([\w-]+):\s*([^;]+);/g, (_, name, value) => {
     const key = `--${name}`
     if (key !== '--font' && key !== '--mono') colors[key] = value.trim()
   })
@@ -66,6 +71,23 @@ export function parseThemeMeta(css) {
   // counting brace depth so nested rules don't confuse us.
   const extras = stripRootBlock(rest).trim()
   return { imports, font, mono, fontSize, colors, extras }
+}
+
+function extractRootBlock(css) {
+  const m = css.match(/:root\s*\{/)
+  if (!m) return ''
+  const start = m.index
+  let depth = 0
+  const open = css.indexOf('{', start)
+  for (let i = open; i < css.length; i++) {
+    const c = css[i]
+    if (c === '{') depth++
+    else if (c === '}') {
+      depth--
+      if (depth === 0) return css.slice(open + 1, i)
+    }
+  }
+  return ''
 }
 
 function stripRootBlock(css) {

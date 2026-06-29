@@ -45,6 +45,35 @@ test('swapOptimisticTs preserves cid while updating ts and position', () => {
   assert.equal(list[0].position, 3)
 })
 
+test('swapOptimisticTs can replace optimistic content with server canonical row', () => {
+  const { result } = renderHook(usePendingQueue)
+  result.current.add(fixtureMsg({ cid: 'optimistic-x', ts: 999, content: 'clean draft' }))
+  result.current.swapOptimisticTs('optimistic-x', 12345, 2, {
+    role: 'user',
+    ts: 12345,
+    content: 'clean draft\n\n[Files in this session:\n- Screenshot.png → /x.png\n]',
+    attachments: [{ name: 'Screenshot.png' }],
+  })
+  const list = result.current.pendingMessagesRef.current
+  assert.equal(list[0].cid, 'optimistic-x', 'client cid stays stable for row UI')
+  assert.equal(list[0].ts, 12345)
+  assert.equal(list[0].content.includes('[Files in this session:'), true,
+    'canonical server content is retained for force-steer matching')
+  assert.equal(list[0].attachments[0].name, 'Screenshot.png')
+  assert.equal(list[0].serverTs, true)
+  assert.equal(list[0].position, 2)
+})
+
+test('swapOptimisticTs can keep acked-but-not-canonical rows unsteerable', () => {
+  const { result } = renderHook(usePendingQueue)
+  result.current.add(fixtureMsg({ cid: 'optimistic-x', ts: 999, content: 'local only' }))
+  result.current.swapOptimisticTs('optimistic-x', 12345, 1, null, { confirmed: false })
+  const list = result.current.pendingMessagesRef.current
+  assert.equal(list[0].ts, 12345)
+  assert.equal(list[0].serverTs, false,
+    'without canonical content, hydrate must confirm before fast-forward is enabled')
+})
+
 test('promoteByTs returns the matching entry and removes it', () => {
   const { result } = renderHook(usePendingQueue)
   result.current.add(fixtureMsg({ cid: 'a', ts: 1 }))
@@ -74,8 +103,8 @@ test('promoteAll collapses the matching entry and everything after it', () => {
   const got = result.current.promoteAll(2)
   assert.equal(got.cid, 'b')
   assert.equal(got.ts, 2)
-  // Double-newline join matches handleStop and renders as separate paragraphs.
-  assert.equal(got.content, 'second\n\nthird')
+  // Single-newline join matches backend promotion and avoids an extra blank row.
+  assert.equal(got.content, 'second\nthird')
   assert.deepEqual(
     result.current.pendingMessagesRef.current.map(m => m.cid),
     ['a'],
@@ -88,7 +117,7 @@ test('promoteAll only consumes the queue present at promotion time', () => {
   result.current.add(fixtureMsg({ cid: 'b', ts: 2, content: 'second' }))
   const got = result.current.promoteAll(1)
   result.current.add(fixtureMsg({ cid: 'c', ts: 3, content: 'third' }))
-  assert.equal(got.content, 'first\n\nsecond')
+  assert.equal(got.content, 'first\nsecond')
   assert.deepEqual(
     result.current.pendingMessagesRef.current.map(m => m.cid),
     ['c'],
@@ -101,8 +130,8 @@ test('promoteManyByTs preserves later entries not consumed by the backend', () =
   result.current.add(fixtureMsg({ cid: 'b', ts: 2, content: 'second' }))
   result.current.add(fixtureMsg({ cid: 'c', ts: 3, content: 'third' }))
   const got = result.current.promoteManyByTs([1, 2])
-  // Double-newline join matches handleStop and promoteAll.
-  assert.equal(got.content, 'first\n\nsecond')
+  // Single-newline join matches handleStop and promoteAll.
+  assert.equal(got.content, 'first\nsecond')
   assert.deepEqual(
     result.current.pendingMessagesRef.current.map(m => m.cid),
     ['c'],
@@ -402,6 +431,35 @@ test('a server-CONFIRMED `s-<ts>` add is DROPPED by a later hydrate([])', () => 
   )
 })
 
+test('explicit preserveMissing keeps a missing visible row but downgrades fast-forward confirmation', () => {
+  // This is a low-level escape hatch only. ChatView must not use it for normal
+  // runtime reconciliation: server pending_messages is authoritative for
+  // server-confirmed rows, and preserving them after the server omits them
+  // creates ghost queue chips. The hook still supports the option for any
+  // future non-authoritative merge that deliberately wants this behavior.
+  const { result } = renderHook(usePendingQueue)
+  result.current.add(fixtureMsg({
+    cid: 's-123',
+    ts: 123,
+    content: 'do not drop me',
+    serverTs: true,
+  }))
+
+  result.current.hydrate([], { preserveMissing: true })
+  let list = result.current.pendingMessagesRef.current
+  assert.equal(list.length, 1, 'the visible queued row stays visible')
+  assert.equal(list[0].content, 'do not drop me')
+  assert.equal(list[0].serverTs, false,
+    'the row is no longer force-steerable until the server confirms it again')
+  assert.equal(list[0].missingFromServer, true)
+
+  result.current.hydrate([{ role: 'user', content: 'do not drop me', ts: 123 }])
+  list = result.current.pendingMessagesRef.current
+  assert.equal(list.length, 1)
+  assert.equal(list[0].serverTs, true,
+    'a later authoritative server row re-confirms fast-forward eligibility')
+})
+
 test('an in-flight entry survives hydrate regardless of POST-vs-fetch ordering', () => {
   // The race is symmetric — the fix must hold whichever lands first.
   //
@@ -501,4 +559,23 @@ test('a promoted entry does NOT resurrect on a later hydrate', () => {
     ['keep-me'],
     'the promoted entry is not resurrected; the still-in-flight sibling survives',
   )
+})
+
+
+test('hydrate dedupes an optimistic in-flight row when the server row arrives before POST ack', () => {
+  const { result } = renderHook(usePendingQueue, [])
+  result.current.add({ cid: 'local-1', role: 'user', content: 'hello', ts: 100, queued: true })
+  result.current.hydrate([{ role: 'user', content: 'hello', ts: 101 }])
+  assert.equal(result.current.pendingMessagesRef.current.length, 1)
+  assert.equal(result.current.pendingMessagesRef.current[0].cid, 'local-1')
+  assert.equal(result.current.pendingMessagesRef.current[0].ts, 101)
+  assert.equal(result.current.pendingMessagesRef.current[0].serverTs, true)
+})
+
+test('hydrate does not collapse ambiguous identical in-flight queued rows', () => {
+  const { result } = renderHook(usePendingQueue, [])
+  result.current.add({ cid: 'local-1', role: 'user', content: 'same', ts: 100, queued: true })
+  result.current.add({ cid: 'local-2', role: 'user', content: 'same', ts: 101, queued: true })
+  result.current.hydrate([{ role: 'user', content: 'same', ts: 102 }])
+  assert.equal(result.current.pendingMessagesRef.current.length, 3)
 })

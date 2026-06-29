@@ -13,8 +13,9 @@
  *      on the first layout pass, before the image decodes. The default ratio
  *      is landscape-leaning (agent screenshots are landscape) so the pre-load
  *      estimate is close to reality and the on-load delta is small. A
- *      `max-height` cap bounds extreme tall ratios; `object-fit: contain`
- *      letterboxes inside the reserved box.
+ *      `max-height` cap bounds extreme tall ratios. Once dimensions are known,
+ *      portrait images also shrink the frame width so the cap does not create
+ *      a wide gray letterbox around phone screenshots.
  *
  *   2. `.chat__msg` deliberately does NOT use `content-visibility: auto`. It
  *      was added as a phone-scroll perf hint (2459dff) but collapses off-screen
@@ -81,7 +82,17 @@ describe('.md-image-frame reserves height before image decode', () => {
       'frame must cap reserved height for extreme tall ratios')
   })
 
-  test('inner image is contained, so the cap letterboxes instead of cropping', () => {
+  test('frame width can shrink after image dimensions load', () => {
+    assert.match(body, /width:\s*min\(100%,\s*var\(--md-image-fit-width/,
+      'portrait screenshots must shrink the frame width instead of showing side letterboxes')
+  })
+
+  test('frame background is transparent so any remaining containment blends into chat', () => {
+    assert.match(body, /background:\s*transparent/,
+      'image frames must not paint a gray box around portrait screenshots')
+  })
+
+  test('inner image is contained, so the cap never crops screenshots', () => {
     const imgBody = ruleBody(markdownCss, '.md-image ')
     assert.match(imgBody, /object-fit:\s*contain/,
       '.md-image must use object-fit: contain to fit inside the reserved/capped frame')

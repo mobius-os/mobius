@@ -5,7 +5,8 @@
    ║   Every rule below has a real-bug history. If a future     ║
    ║   pass quietly violates one, regression-hunt these first.  ║
    ║                                                            ║
-   ║   1. `.chat__foot` is `position: absolute; bottom: 0`      ║
+   ║   1. `.chat__foot` is `position: absolute`, offset above   ║
+   ║      env(safe-area-inset-bottom),                          ║
    ║      with `pointer-events: none` — chat content scrolls    ║
    ║      *behind* the composer. Only the pill + + + queue +    ║
    ║      attach-tray re-enable pointer-events. The gutter is   ║
@@ -14,8 +15,9 @@
    ║   2. `--composer-h` is published by a ResizeObserver in    ║
    ║      ChatView.jsx that watches `.chat__foot`. `.chat__list`║
    ║      reserves `padding-bottom: calc(var(--composer-h) +    ║
-   ║      16px)` so the last message clears the pill as it      ║
-   ║      grows (chips, queue tray, multi-line input).          ║
+   ║      env(safe-area-inset-bottom) + 16px)` so the last      ║
+   ║      message clears the pill and gesture area as it grows  ║
+   ║      (chips, queue tray, multi-line input).                ║
    ║                                                            ║
    ║   3. Empty-state wrap centers in the chat area with a      ║
    ║      FIXED 140px bottom reservation (NOT --composer-h).    ║
@@ -157,11 +159,12 @@
   margin: 0 auto;
   /* Bottom padding clears the absolutely-positioned `.chat__foot`.
      Tracks the foot's measured height via the `--composer-h` CSS
-     var (written by ChatView's ResizeObserver), plus a small
-     breathing-room margin so chips/queue tray growing the foot
-     keeps the last message clear of the pill. Fallback 80px is
-     for the first paint before the RO fires. */
-  padding: 8px 6px calc(var(--composer-h, 80px) + 16px);
+     var (written by ChatView's ResizeObserver), the device bottom
+     safe-area gap below the foot, plus a small breathing-room
+     margin so chips/queue tray growing the foot keeps the last
+     message clear of the pill. Fallback 80px is for the first
+     paint before the RO fires. */
+  padding: 8px 6px calc(var(--composer-h, 80px) + env(safe-area-inset-bottom, 0px) + 16px);
   display: flex;
   flex-direction: column;
   gap: 24px;
@@ -648,10 +651,10 @@
    children, so taps on the gutter pass through to the chat. */
 .chat__foot {
   position: absolute;
-  bottom: 0;
+  bottom: env(safe-area-inset-bottom, 0px);
   left: 0;
   right: 0;
-  padding: 8px 12px max(8px, env(safe-area-inset-bottom));
+  padding: 8px 12px;
   background: transparent;
   pointer-events: none;
   z-index: 5;

@@ -7,6 +7,11 @@ import {
   closeToolLifecycle,
   closeAllToolLifecycles,
 } from './streamReducers.js'
+import {
+  readStoredStreamSnapshot,
+  writeStoredStreamSnapshot,
+  clearStoredStreamSnapshot,
+} from './streamSnapshotCache.js'
 
 // Characters revealed per frame at 60fps.
 // 3 chars/frame × 60fps = ~180 chars/sec — fast but smooth.
@@ -157,22 +162,22 @@ export default function useStreamConnection(chatId, {
   onSteeredIntoTurn,
   onLiveQuestion,
 }) {
-  const [streamItems, _setStreamItems] = useState([])
-  const latestItemsRef = useRef([])
+  const initialStoredStreamItems = readStoredStreamSnapshot(chatId)
+  const [streamItems, _setStreamItems] = useState(initialStoredStreamItems)
+  const latestItemsRef = useRef(initialStoredStreamItems)
   // Snapshot of the last non-empty latestItemsRef value. Written every
   // time items become non-empty; never cleared by a reconnect reset.
   // On retry exhaustion we promote from this ref so the user sees the
   // partial response instead of a blank screen.
   //
-  // CONTRACT: updated before any reconnect wipes latestItemsRef.
-  // Only wiped when a successful catch-up burst begins (items actually
-  // arrive on the new connection), preventing stale partial from
-  // doubling into a complete response on a successful reconnect.
-  const lastGoodItemsRef = useRef([])
+  // CONTRACT: updated before any reconnect changes latestItemsRef.
+  // Reconnect no longer wipes the visible stream while catch-up is in flight;
+  // the snapshot is still the fallback if replay fails before catch_up_done.
+  const lastGoodItemsRef = useRef(initialStoredStreamItems)
   // Set to true from the first event of a catch-up burst on a new
-  // connection. Once we see real events, lastGoodItemsRef can be
-  // cleared; if retries exhaust before this flag fires, we still have
-  // the last-good snapshot.
+  // connection. The previous visible snapshot remains intact until the
+  // catch-up commits; if replay stalls on a tool-only pause or drops before
+  // catch_up_done, the user still sees the last real stream state.
   const catchUpStartedRef = useRef(false)
 
   // Wrapper that keeps latestItemsRef in sync synchronously.
@@ -183,6 +188,7 @@ export default function useStreamConnection(chatId, {
     const next = typeof updater === 'function' ? updater(latestItemsRef.current) : updater
     if (next.length > 0) lastGoodItemsRef.current = next
     latestItemsRef.current = next
+    if (next.length > 0) writeStoredStreamSnapshot(activeStreamChatIdRef.current, next)
     _setStreamItems(next)
   }
 
@@ -202,6 +208,11 @@ export default function useStreamConnection(chatId, {
   const abortRef = useRef(null)
   const retryCount = useRef(0)
   const chatIdRef = useRef(chatId)
+  // The chat whose live stream is currently responsible for streamItems.
+  // Do not derive this from chatIdRef during cleanup: on a route change React
+  // renders the new chat before running the old effect cleanup, so the cleanup
+  // would otherwise persist the old stream snapshot under the new chat's key.
+  const activeStreamChatIdRef = useRef(chatId)
   chatIdRef.current = chatId
 
   // Tracks setTimeout handles for reconnect attempts so unmount can
@@ -354,6 +365,14 @@ export default function useStreamConnection(chatId, {
   }, [chatId, disconnect])
 
   useEffect(() => {
+    activeStreamChatIdRef.current = chatId
+    const stored = readStoredStreamSnapshot(chatId)
+    latestItemsRef.current = stored
+    lastGoodItemsRef.current = stored
+    _setStreamItems(stored)
+  }, [chatId])
+
+  useEffect(() => {
     function trackMaxHeight() {
       if (window.innerHeight > maxInnerHeightRef.current) {
         maxInnerHeightRef.current = window.innerHeight
@@ -399,17 +418,17 @@ export default function useStreamConnection(chatId, {
   const answersByQuestionKeyRef = useRef(new Map())
 
   const connectToStream = useCallback(async (resetState = false) => {
+    activeStreamChatIdRef.current = chatIdRef.current
     disconnect()
 
     if (resetState) {
-      // Clear visible state but preserve lastGoodItemsRef — that snapshot
-      // survives until we confirm the new connection is delivering events.
-      // Wiping latestItemsRef here is safe for a SUCCESSFUL reconnect
-      // because the catch-up burst will replay everything; it's only
-      // unsafe on retry exhaustion where no events arrive. catchUpStarted
-      // tracks whether events arrived on this connection attempt.
+      // Keep the currently visible stream while a reconnect catch-up is in
+      // flight. The catch-up burst is replayed from the beginning; if we wipe
+      // visible items here, mobile background/foreground makes the in-progress
+      // answer disappear until replay completes (or until a new live token
+      // arrives). Instead, rebuild catch-up into a local buffer and replace
+      // streamItems atomically at catch_up_done / done.
       catchUpStartedRef.current = false
-      setStreamItems([])
       textBufferRef.current = ''
       forceNewTextBlockRef.current = false
     }
@@ -467,19 +486,20 @@ export default function useStreamConnection(chatId, {
         setConnectionError(null)
         retryCount.current = 0
         wantsReconnectRef.current = false
-        setIsStreaming(false)
+        clearStoredStreamSnapshot(activeStreamChatIdRef.current)
+        lastGoodItemsRef.current = []
         setStreamItems([])
         textBufferRef.current = ''
         forceNewTextBlockRef.current = false
         // The chat may have finished while we were offline — re-fetch
         // messages from the DB so the component shows the final state.
-        // Let ChatView clear its `sending` state, then force a refresh
-        // from persisted DB state. This path is terminal: there is no
-        // active broadcast left to clobber.
-        requestAnimationFrame(() => {
-          onStreamEndRef.current?.()
-          onNeedsRefreshRef.current?.({ force: true })
-        })
+        // This path is terminal: there is no active broadcast left to
+        // clobber. Keep the teardown in one React batch so the UI does not
+        // show a one-frame "thinking" row between dropping stale streamItems
+        // and ChatView clearing its running state.
+        onStreamEndRef.current?.()
+        onNeedsRefreshRef.current?.({ force: true })
+        setIsStreaming(false)
         return
       }
 
@@ -494,8 +514,53 @@ export default function useStreamConnection(chatId, {
       const decoder = new TextDecoder()
       let buffer = ''
       // The first reader.read() returns the catch-up burst as one chunk.
-      // Apply catch-up text immediately (no typewriter animation).
+      // Rebuild catch-up off-screen, then swap it into view atomically. This
+      // preserves the last visible stream during mobile resume and avoids a
+      // temporary blank/thinking state while a long catch-up replay is parsed.
       let isCatchUp = true
+      let catchUpItems = []
+
+      const applyStreamItems = (updater) => {
+        if (!isCatchUp) {
+          setStreamItems(updater)
+          return
+        }
+        catchUpItems = typeof updater === 'function'
+          ? updater(catchUpItems)
+          : updater
+      }
+
+      const commitCatchUp = () => {
+        if (!isCatchUp) return
+        if (catchUpItems.length > 0) {
+          setStreamItems(catchUpItems)
+        } else {
+          // Empty replay is authoritative. Do not preserve a stale visible
+          // snapshot here: after fast-forward, that snapshot may already be
+          // represented by a persisted partial above the inserted user row.
+          latestItemsRef.current = []
+          lastGoodItemsRef.current = []
+          clearStoredStreamSnapshot(activeStreamChatIdRef.current)
+          _setStreamItems([])
+        }
+        catchUpItems = []
+        isCatchUp = false
+        catchUpStartedRef.current = false
+      }
+
+      const patchCatchUpQuestionAnswers = (questionId, answers) => {
+        const key = questionId ? `question_id:${questionId}` : null
+        if (key) answersByQuestionKeyRef.current.set(key, answers)
+        catchUpItems = catchUpItems.map(it => {
+          if (it.type !== 'question') return it
+          const itKey = questionKey(it)
+          if (key ? itKey === key : true) {
+            if (!key) answersByQuestionKeyRef.current.set(itKey, answers)
+            return { ...it, answers }
+          }
+          return it
+        })
+      }
 
       while (true) {
         const { done, value } = await reader.read()
@@ -511,11 +576,11 @@ export default function useStreamConnection(chatId, {
           try { event = JSON.parse(line.slice(6)) } catch { continue }
 
           // First real event on this connection: the catch-up burst is
-          // delivering content. It is now safe to clear lastGoodItemsRef
-          // because a full replay will rebuild latestItemsRef from scratch.
+          // delivering content. Do not clear lastGoodItemsRef until catch-up
+          // commits; if the connection drops mid-replay, the previous visible
+          // stream is still the best snapshot.
           if (!catchUpStartedRef.current) {
             catchUpStartedRef.current = true
-            lastGoodItemsRef.current = []
           }
 
           if (SYSTEM_EVENTS.has(event.type)) {
@@ -524,7 +589,7 @@ export default function useStreamConnection(chatId, {
           }
 
           if (event.type === 'catch_up_done') {
-            isCatchUp = false
+            commitCatchUp()
             continue
           }
 
@@ -534,8 +599,8 @@ export default function useStreamConnection(chatId, {
           } else if (event.type === 'text') {
             const content = event.content || ''
             if (isCatchUp) {
-              // Catch-up burst: apply immediately, no typewriter.
-              setStreamItems(prev => appendTextChunk(prev, content))
+              // Catch-up burst: rebuild into the off-screen catch-up buffer.
+              applyStreamItems(prev => appendTextChunk(prev, content))
             } else {
               // Live streaming: buffer for typewriter reveal.
               textBufferRef.current += content
@@ -543,7 +608,7 @@ export default function useStreamConnection(chatId, {
             }
           } else if (event.type === 'tool_start') {
             flushBuffer()
-            setStreamItems(prev => [...prev, {
+            applyStreamItems(prev => [...prev, {
               type: 'tool',
               tool: event.tool,
               input: event.input || '',
@@ -553,7 +618,7 @@ export default function useStreamConnection(chatId, {
           } else if (event.type === 'tool_input') {
             // Backfill input summary from the assistant event.
             // Match earliest tool without input (same order as assistant event).
-            setStreamItems(prev => {
+            applyStreamItems(prev => {
               const updated = [...prev]
               const i = updated.findIndex(
                 b => b.type === 'tool' && !b.input
@@ -566,15 +631,15 @@ export default function useStreamConnection(chatId, {
             // item, or a question card that absorbed its tool block
             // (the post-answer "answers echo" output is swallowed
             // there; see streamReducers.js).
-            setStreamItems(prev => attachToolOutput(prev, event.content))
+            applyStreamItems(prev => attachToolOutput(prev, event.content))
           } else if (event.type === 'tool_end') {
-            setStreamItems(prev => closeToolLifecycle(prev))
+            applyStreamItems(prev => closeToolLifecycle(prev))
           } else if (event.type === 'skill_loaded') {
             // Skill observability: stamp the loaded skill's name onto
             // the most recent Skill tool block so ToolBlock renders a
             // chip. Mirrors backend/app/events.py:process_event so the
             // live stream and the persisted transcript agree.
-            setStreamItems(prev => {
+            applyStreamItems(prev => {
               const updated = [...prev]
               for (let i = updated.length - 1; i >= 0; i--) {
                 if (updated[i].type === 'tool' && updated[i].tool === 'Skill') {
@@ -612,7 +677,7 @@ export default function useStreamConnection(chatId, {
               )
               if (knownAnswers && !incoming.answers) incoming.answers = knownAnswers
               onLiveQuestionRef.current?.(event.question_id || null)
-              setStreamItems(prev => upsertQuestionItem(prev, incoming))
+              applyStreamItems(prev => upsertQuestionItem(prev, incoming))
             }
           } else if (event.type === 'answers_applied') {
             // The question was answered (by this tab, another tab, or the
@@ -624,13 +689,19 @@ export default function useStreamConnection(chatId, {
             // because the persisted answered block is suppressed while a
             // same-id streaming card is still in flight.
             if (event.question_id || event.answers) {
-              patchQuestionAnswers(
-                event.question_id || null, event.answers || {},
-              )
+              if (isCatchUp) {
+                patchCatchUpQuestionAnswers(
+                  event.question_id || null, event.answers || {},
+                )
+              } else {
+                patchQuestionAnswers(
+                  event.question_id || null, event.answers || {},
+                )
+              }
             }
           } else if (event.type === 'error') {
             flushBuffer()
-            setStreamItems(prev => {
+            applyStreamItems(prev => {
               // A provider error terminates every open tool lifecycle
               // (running tools flip done; an absorbed question drops
               // its pending-tool marker — no tool_end is coming).
@@ -673,19 +744,20 @@ export default function useStreamConnection(chatId, {
               // A1, and re-inserting Q2 is redundant. Drop the replayed
               // pre-steer segment from streamItems so the post-steer
               // continuation (A2) accumulates fresh and promotes as its own
-              // assistant after Q2. (setStreamItems clears latestItemsRef
-              // synchronously too, so a later promote can't resurrect A1.)
-              setStreamItems([])
+              // assistant after Q2. Clear the off-screen catch-up buffer; the
+              // visible stream is replaced only when catch-up commits.
+              catchUpItems = []
               forceNewTextBlockRef.current = false
             } else {
               onSteeredIntoTurnRef.current?.({
                 ts: event.ts ?? null,
                 content: event.content || '',
+                messages: Array.isArray(event.messages) ? event.messages : null,
               })
             }
           } else if (event.type === 'done') {
             flushBuffer()
-            setIsStreaming(false)
+            commitCatchUp()
             // Null the controller so visibility/online handlers know the
             // connection is closed and can trigger a reconnect if the user
             // backgrounds and returns.  Without this, abortRef stays
@@ -709,17 +781,16 @@ export default function useStreamConnection(chatId, {
             // next turn (a queued continuation streams on the same hook and
             // must not inherit a stale answer for a re-used question key).
             answersByQuestionKeyRef.current.clear()
-            // Delay onStreamEnd by one frame so the React render
-            // triggered by setIsStreaming(false) above completes before
-            // ChatView promotes streamItems to messages.  latestItemsRef
-            // is already up-to-date (synchronous), so this is purely for
-            // render consistency (e.g. streaming UI teardown).
-            requestAnimationFrame(() => {
-              onStreamEndRef.current?.({ continues, promotedTs, promotedMessage })
-              if (continues) {
-                scheduleReconnect(() => connectRef.current?.(true), 150)
-              }
-            })
+            // Promote before flipping `isStreaming` false. `flushBuffer()`,
+            // `commitCatchUp()`, and setStreamItems keep latestItemsRef
+            // synchronous, so the old rAF delay was unnecessary and created a
+            // visible terminal flash: React could paint the stream shutdown
+            // before ChatView copied streamItems into the final assistant row.
+            onStreamEndRef.current?.({ continues, promotedTs, promotedMessage })
+            setIsStreaming(false)
+            if (continues) {
+              scheduleReconnect(() => connectRef.current?.(true), 150)
+            }
             return
           } else if (import.meta.env.DEV) {
             // Surface event types the dispatch chain doesn't handle
@@ -737,8 +808,11 @@ export default function useStreamConnection(chatId, {
       abortRef.current = null
       flushBuffer()
       if (!wantsReconnectRef.current) {
+        // EOF without an explicit done is still terminal here. Promote and
+        // clear running state in the same batch so the final live row does not
+        // briefly collapse into the generic thinking dots.
+        onStreamEndRef.current?.()
         setIsStreaming(false)
-        requestAnimationFrame(() => onStreamEndRef.current?.())
         return
       }
 
@@ -757,10 +831,9 @@ export default function useStreamConnection(chatId, {
       flushBuffer()
       setIsStreaming(false)
       // Retry with exponential backoff.
-      // IMPORTANT: reconnect with resetState=true so streamItems are cleared
-      // before the catch-up burst.  Without this, catch-up replays all events
-      // from the start and appends them on top of existing streamItems,
-      // duplicating the initial portion of the response.
+      // IMPORTANT: reconnect with resetState=true so catch-up rebuilds into an
+      // off-screen buffer. Without this, replay would append from the start on
+      // top of existing streamItems, duplicating the initial response.
       if (retryCount.current >= 3) {
         setConnectionError('disconnected')
         // Null the stale controller so visibility/online handlers can
@@ -774,18 +847,24 @@ export default function useStreamConnection(chatId, {
         // would silently discard the user's partial response. Restoring
         // from lastGoodItemsRef here lets the caller promote and display
         // whatever the stream produced before the connection collapsed.
-        // On a successful reconnect lastGoodItemsRef was already cleared
-        // (catchUpStartedRef fired) so this no-ops there.
+        // On a successful reconnect latestItemsRef is non-empty from the
+        // committed catch-up, so this no-ops there.
         if (lastGoodItemsRef.current.length > 0 && latestItemsRef.current.length === 0) {
           const saved = lastGoodItemsRef.current
           latestItemsRef.current = saved
           _setStreamItems(saved)
         }
-        // Retries are exhausted and no reconnect is scheduled, so this is
-        // a terminal end of the stream. Signal stream-end like the normal
-        // close path above does, otherwise ChatView's `sending` stays true
-        // and the thinking dots spin forever.
-        requestAnimationFrame(() => onStreamEndRef.current?.())
+        // Retries are exhausted for THIS browser connection, not necessarily
+        // for the backend turn. Signal stream-end so any last-good partial can
+        // be promoted locally, then force a DB refresh; ChatView rehydrates
+        // `running` from the server and flips the composer back to active if
+        // the agent is still working. Without that refresh, a mobile sleep /
+        // network handoff could make the UI look idle while the server was
+        // still running.
+        requestAnimationFrame(() => {
+          onStreamEndRef.current?.()
+          onNeedsRefreshRef.current?.({ force: true })
+        })
       } else {
         setConnectionError('retrying')
         const delay = Math.pow(2, retryCount.current) * 1000
@@ -815,10 +894,12 @@ export default function useStreamConnection(chatId, {
       queueOnly = false,
       forceSteer = false,
       consumePendingTs = undefined,
+      steeredMessages = undefined,
       answers = undefined,
       question_id = undefined,
     } = {},
   ) => {
+    activeStreamChatIdRef.current = chatIdRef.current
     // Answer submissions (hidden+answers) ride the EXISTING turn —
     // the runner is paused on the AskUserQuestion future and resumes
     // in place. Wiping streamItems here would erase the question card
@@ -840,6 +921,8 @@ export default function useStreamConnection(chatId, {
     if (!queueOnly && !isAnswerSubmission && !forceSteer) {
       wantsReconnectRef.current = true
       justSentAtRef.current = Date.now()
+      clearStoredStreamSnapshot(activeStreamChatIdRef.current)
+      lastGoodItemsRef.current = []
       setStreamItems([])
       textBufferRef.current = ''
       setIsStreaming(true)
@@ -853,6 +936,9 @@ export default function useStreamConnection(chatId, {
       if (forceSteer) body.force_steer = true
       if (consumePendingTs && consumePendingTs.length > 0) {
         body.consume_pending_ts = consumePendingTs
+      }
+      if (forceSteer && Array.isArray(steeredMessages) && steeredMessages.length > 0) {
+        body.steered_messages = steeredMessages
       }
       // AskUserQuestion answers persist atomically with the hidden
       // user message — backend writes them into the question block
@@ -914,6 +1000,8 @@ export default function useStreamConnection(chatId, {
       if (queueOnly || data.status === 'queued') {
         wantsReconnectRef.current = true
         justSentAtRef.current = Date.now()
+        clearStoredStreamSnapshot(activeStreamChatIdRef.current)
+        lastGoodItemsRef.current = []
         setStreamItems([])
         textBufferRef.current = ''
         forceNewTextBlockRef.current = false
@@ -1002,8 +1090,15 @@ export default function useStreamConnection(chatId, {
   // setStreamItems([]) — the user sees a duplicate of the assistant
   // message that flashes and disappears.
   function clearStreamItems() {
+    clearStoredStreamSnapshot(activeStreamChatIdRef.current)
+    // Semantic boundary: ChatView just copied the stream into `messages`
+    // or retired the turn. Do not keep the last-good fallback alive, or a
+    // later reconnect can restore already-promoted assistant text below a
+    // fast-forwarded queued message.
+    lastGoodItemsRef.current = []
     setStreamItems([])
     textBufferRef.current = ''
+    forceNewTextBlockRef.current = false
   }
 
   // Patch the `answers` field on the matching question item in streamItems.

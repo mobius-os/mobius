@@ -81,6 +81,13 @@ def _content_with_uploads(chat: models.Chat, body: schemas.SendMessage) -> str:
   """Returns message content with the session upload notice appended."""
   settings = get_settings()
   content = body.content
+  # Force-steer resends the exact canonical pending-message content. Pending
+  # rows already include this hidden upload manifest; appending it again makes
+  # steered multi-message turns look duplicated/newline-heavy in the client and
+  # changes what the provider sees. If the body already carries the manifest,
+  # leave it as-is.
+  if "[Files in this session:" in content:
+    return content
   if chat.uploads:
     safe_entries = []
     for f in chat.uploads:
@@ -156,6 +163,13 @@ def _queued_response(
     "status": "queued",
     "position": position,
     "ts": new_msg["ts"],
+    # Echo the canonical persisted row back to the client. The frontend's
+    # optimistic queue row is built from the visible composer text, while
+    # _user_message_from_body appends hidden session/upload context before
+    # storing it. Force-steer compares against the server's canonical pending
+    # content, so the client must swap to this exact row as soon as the queue
+    # POST acks; waiting for a remount/hydrate leaves fast-forward rejected.
+    "pending_message": new_msg,
   }
   if started:
     payload["started"] = True
@@ -271,23 +285,55 @@ def _not_steered_response(chat_id: str) -> JSONResponse:
   )
 
 
-def _force_steer_matches_pending(chat: models.Chat, body: schemas.SendMessage) -> bool:
-  """Force-steer is only for converting already-queued UI messages."""
+def _selected_force_steer_pending(
+  chat: models.Chat,
+  body: schemas.SendMessage,
+) -> list[dict] | None:
+  """Return selected pending rows in queue order if force-steer is valid.
+
+  Force-steer is only for converting already-queued UI messages. The browser
+  may send a newer `steered_messages` hint so it can render a batch as
+  separate rows, but durable rows are reconstructed from the server-owned
+  pending queue here; the client cannot forge transcript entries.
+  """
   requested_ts = set(body.consume_pending_ts or [])
   if not requested_ts:
-    return False
+    return None
   selected = [
     m for m in list(chat.pending_messages or [])
     if m.get("ts") in requested_ts
   ]
   if len(selected) != len(requested_ts):
-    return False
-  expected = "\n\n".join(
+    return None
+  expected = "\n".join(
     (m.get("content") or "").strip()
     for m in selected
     if (m.get("content") or "").strip()
   )
-  return bool(expected) and body.content == expected
+  if not (bool(expected) and body.content == expected):
+    return None
+  return selected
+
+
+def _force_steer_matches_pending(chat: models.Chat, body: schemas.SendMessage) -> bool:
+  """Force-steer is only for converting already-queued UI messages."""
+  return _selected_force_steer_pending(chat, body) is not None
+
+
+def _user_messages_from_pending(
+  selected_pending: list[dict],
+  fallback_user_msg: dict,
+) -> list[dict]:
+  """Build durable transcript rows for a force-steered pending batch."""
+  user_msgs: list[dict] = []
+  for pending in selected_pending:
+    msg = dict(pending)
+    msg["role"] = "user"
+    msg.pop("queued", None)
+    msg.pop("serverTs", None)
+    msg.pop("position", None)
+    user_msgs.append(msg)
+  return user_msgs or [fallback_user_msg]
 
 
 @router.post(
@@ -455,7 +501,11 @@ async def send_message(
   # queue from the head, so the queued messages actually get answered
   # rather than sitting forever.
   if is_chat_running(chat_id) or chat.pending_messages:
-    if body.force_steer and not _force_steer_matches_pending(chat, body):
+    selected_force_pending = (
+      _selected_force_steer_pending(chat, body)
+      if body.force_steer else None
+    )
+    if body.force_steer and selected_force_pending is None:
       return _not_steered_response(chat_id)
 
     # Mid-turn steering: ordinary sends require the opt-in flag, while
@@ -473,6 +523,9 @@ async def send_message(
       and _has_live_steerable_turn(chat_id, provider)
     ):
       user_msg = _user_message_from_body(chat, body)
+      user_msgs = _user_messages_from_pending(
+        selected_force_pending or [], user_msg,
+      ) if body.force_steer else [user_msg]
       try:
         steered = await _steer_into_active_turn(
           provider, chat_id, user_msg["content"],
@@ -495,14 +548,14 @@ async def send_message(
           sink = get_active_sink(chat_id)
           if sink is not None:
             stored_result = await sink.split_for_steer(
-              user_msg, body.consume_pending_ts or [],
+              user_msgs, body.consume_pending_ts or [],
             )
           else:
             ack = get_writer().submit(
               AppendSteeredUserMessage(
                 chat_id=chat_id,
                 run_token="",
-                user_msg=user_msg,
+                user_msgs=user_msgs,
                 consume_pending_ts=body.consume_pending_ts or [],
               )
             )
@@ -521,10 +574,25 @@ async def send_message(
           )
         bc = get_broadcast(chat_id)
         if bc is not None:
+          stored_messages = stored_result.get("stored_messages")
+          if not isinstance(stored_messages, list) or not stored_messages:
+            stored = stored_result.get("stored") or user_msg
+            stored_messages = [stored]
           bc.publish({
             "type": "steered_into_turn",
-            "ts": user_msg["ts"],
-            "content": user_msg["content"],
+            "messages": [
+              {
+                "role": "user",
+                "ts": msg.get("ts"),
+                "content": msg.get("content", ""),
+                **({"attachments": msg.get("attachments")} if msg.get("attachments") else {}),
+              }
+              for msg in stored_messages
+            ],
+            # Backward-compatible shape for any existing client still
+            # expecting a single steered row.
+            "ts": stored_messages[-1].get("ts"),
+            "content": stored_messages[-1].get("content", ""),
           })
         return _steered_response(
           chat_id, stored_result.get("pending"),

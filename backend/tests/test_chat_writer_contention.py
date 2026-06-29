@@ -530,7 +530,8 @@ def test_persist_session_id_updates_chat_without_touching_transcript(actor):
 
 # -- 8. PromotePending collapses queued follow-ups ------------------------
 def test_promote_pending_collapses_all_followups(actor):
-  """PromotePending combines queued follow-ups into one transcript turn."""
+  """PromotePending stores queued follow-ups as separate transcript rows;
+  promoted.content stays the combined provider-facing continuation."""
   _seed_chat(
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[
@@ -542,7 +543,7 @@ def test_promote_pending_collapses_all_followups(actor):
   assert result["promoted"]["content"] == "first\nsecond"
   assert result["promoted"]["ts"] == 10
   chat = _load_chat()
-  assert chat["messages"][-1]["content"] == "first\nsecond"
+  assert [m["content"] for m in chat["messages"][-2:]] == ["first", "second"]
   assert chat["pending_messages"] == []
   assert chat["run_status"] == "running"
 

@@ -56,7 +56,7 @@ export function resolveStopResend(queuedSnapshot, clearedPendingTs, combined) {
   const text = toResend
     .map(m => (m.content || '').trim())
     .filter(Boolean)
-    .join('\n\n')
+    .join('\n')
   const seen = new Set()
   const attachments = []
   for (const m of toResend) {

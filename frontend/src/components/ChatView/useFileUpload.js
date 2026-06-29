@@ -5,7 +5,14 @@ import { getToken, BASE } from '../../api/client.js'
  * Hook encapsulating file upload state and API calls for chat attachments.
  *
  * @param {{ chatId: string }} options
- * @returns {{ files: Array, addFiles: (fileList: File[]) => Promise<void>, removeFile: (id: string) => void, clearFiles: () => void }}
+ * @returns {{
+ *   files: Array,
+ *   addFiles: (fileList: File[]) => Promise<void>,
+ *   removeFile: (id: string) => void,
+ *   clearFiles: (opts?: {revoke?: boolean}) => void,
+ *   restoreFiles: (files: Array) => void,
+ *   releaseFiles: (files: Array) => void,
+ * }}
  */
 export default function useFileUpload({ chatId }) {
   const [files, setFiles] = useState([])
@@ -87,10 +94,24 @@ export default function useFileUpload({ chatId }) {
     }
   }
 
-  function clearFiles() {
-    files.forEach(f => { if (f.objectUrl) URL.revokeObjectURL(f.objectUrl) })
+  function releaseFiles(fileList) {
+    for (const f of fileList || []) {
+      if (f.objectUrl) URL.revokeObjectURL(f.objectUrl)
+    }
+  }
+
+  function clearFiles({ revoke = true } = {}) {
+    const current = filesRef.current
+    if (revoke) releaseFiles(current)
+    filesRef.current = []
     setFiles([])
   }
 
-  return { files, addFiles, removeFile, clearFiles }
+  function restoreFiles(fileList) {
+    const restored = Array.isArray(fileList) ? fileList : []
+    filesRef.current = restored
+    setFiles(restored)
+  }
+
+  return { files, addFiles, removeFile, clearFiles, restoreFiles, releaseFiles }
 }

@@ -57,13 +57,13 @@ import { useState, useRef, useCallback } from 'react'
  *   pendingMessages: PendingMsg[],
  *   pendingMessagesRef: React.MutableRefObject<PendingMsg[]>,
  *   add: (msg: PendingMsg) => void,
- *   swapOptimisticTs: (cid: string, serverTs: number, position?: number) => void,
+ *   swapOptimisticTs: (cid: string, serverTs: number, position?: number, serverMsg?: object, opts?: {confirmed?: boolean}) => void,
  *   promoteByTs: (ts: number) => PendingMsg | null,
  *   promoteAll: (ts: number) => PendingMsg | null,
  *   promoteManyByTs: (tsList: number[]) => PendingMsg | null,
  *   cancelByTs: (ts: number) => void,
  *   cancelByCid: (cid: string) => void,
- *   hydrate: (serverList: Array<{ts: number, content: string, role?: string, attachments?: Array, position?: number}>) => void, // MERGE: server list + any in-flight optimistic-only entry the server hasn't seen yet
+ *   hydrate: (serverList: Array<{ts: number, content: string, role?: string, attachments?: Array, position?: number}>, opts?: {preserveMissing?: boolean}) => void, // MERGE: server list + any local entry that must not be silently dropped
  *   markInFlight: (cid: string) => void,
  *   clearInFlight: (cid: string) => void,
  *   clear: () => void,
@@ -78,9 +78,36 @@ import { useState, useRef, useCallback } from 'react'
  * under "add(...)" (lines 719-723, 742-746) are actually cid-keyed
  * removes; cancelByCid is the faithful mapping.
  */
-export default function usePendingQueue() {
-  const [pendingMessages, setPendingMessages] = useState([])
-  const pendingMessagesRef = useRef([])
+
+function _attachmentKey(att) {
+  return JSON.stringify([
+    att?.name || att?.filename || '',
+    att?.url || att?.path || '',
+    att?.size || 0,
+    att?.mime_type || att?.type || '',
+  ])
+}
+
+function _queueIdentityKey(msg) {
+  return JSON.stringify([
+    String(msg?.content || '').trim(),
+    (msg?.attachments || []).map(_attachmentKey).sort(),
+  ])
+}
+
+function _fromServerList(serverList) {
+  return (serverList || []).map(m => ({
+    ...m,
+    cid: m.cid || `s-${m.ts}`,
+    queued: true,
+    serverTs: true,
+  }))
+}
+
+export default function usePendingQueue(initialServerList = []) {
+  const initialPending = _fromServerList(initialServerList)
+  const [pendingMessages, setPendingMessages] = useState(initialPending)
+  const pendingMessagesRef = useRef(initialPending)
   // Deferred-removal guard: `Map<consumedTs, Set<cid>>`. When a started turn
   // consumes a server ts whose OPTIMISTIC entry is still in flight (its POST
   // not yet acked, so the entry carries a client ts, not this server ts, and
@@ -179,7 +206,7 @@ export default function usePendingQueue() {
     ])
   }, [apply])
 
-  const swapOptimisticTs = useCallback((cid, serverTs, position) => {
+  const swapOptimisticTs = useCallback((cid, serverTs, position, serverMsg, opts = {}) => {
     // The server acknowledged the POST (it handed back a ts): the
     // optimistic round-trip is resolved, so the entry no longer needs
     // hydrate's in-flight protection regardless of which branch runs.
@@ -196,11 +223,37 @@ export default function usePendingQueue() {
       resolveCidFromGuard(cid)
       return
     }
+    // A runtime hydrate can land before the optimistic POST ack and already
+    // insert the canonical server row (`s-${serverTs}`). When the ack then
+    // arrives, mapping the optimistic cid onto that same ts would leave two
+    // local chips for one pending row, which makes fast-forward send duplicate
+    // content and get rejected by the backend. Prefer the already-hydrated
+    // server row and drop the optimistic copy.
+    if (serverTs != null && pendingMessagesRef.current.some(
+      m => m.cid !== cid && m.ts === serverTs && m.serverTs === true,
+    )) {
+      apply(prev => prev.filter(m => m.cid !== cid))
+      resolveCidFromGuard(cid)
+      return
+    }
     apply(prev => prev.map(m => {
       if (m.cid !== cid) return m
-      // The POST acked with a real server ts — mark the entry confirmed so
-      // the steer gate (canSteer / handleSteer) treats it as eligible.
-      const next = { ...m, ts: serverTs ?? m.ts, serverTs: serverTs != null || m.serverTs === true }
+      // The POST may ack before the server response includes the canonical
+      // pending row. When it does include that row, swap the visible item to
+      // the server's exact content immediately; force-steer matches against
+      // canonical pending text, which can include hidden upload/session
+      // context that was not present in the clean composer draft.
+      const confirmed = opts.confirmed !== undefined
+        ? !!opts.confirmed
+        : (serverTs != null || serverMsg?.ts != null || m.serverTs === true)
+      const next = {
+        ...m,
+        ...(serverMsg && typeof serverMsg === 'object' ? serverMsg : {}),
+        cid: m.cid,
+        queued: true,
+        ts: serverTs ?? serverMsg?.ts ?? m.ts,
+        serverTs: confirmed,
+      }
       if (position !== undefined) next.position = position
       return next
     }))
@@ -252,9 +305,9 @@ export default function usePendingQueue() {
     }
     const promoted = {
       ...first,
-      // Double-newline matches handleStop's join so promoted multi-message
-      // blocks render as separate paragraphs in the markdown renderer.
-      content: promotedGroup.map(m => m.content || '').filter(Boolean).join('\n\n'),
+      // Single-newline matches backend promotion and fast-forward: multiple
+      // queued chats should be separated, not rendered with an extra blank row.
+      content: promotedGroup.map(m => m.content || '').filter(Boolean).join('\n'),
       ts: first.ts,
     }
     if (attachments.length > 0) promoted.attachments = attachments
@@ -314,8 +367,8 @@ export default function usePendingQueue() {
     }
     const promoted = {
       ...first,
-      // Double-newline matches handleStop's join and promoteAll above.
-      content: promotedGroup.map(m => m.content || '').filter(Boolean).join('\n\n'),
+      // Single-newline matches handleStop, fast-forward, and promoteAll above.
+      content: promotedGroup.map(m => m.content || '').filter(Boolean).join('\n'),
       ts: first.ts,
     }
     if (attachments.length > 0) promoted.attachments = attachments
@@ -373,7 +426,7 @@ export default function usePendingQueue() {
   // cid handling is unchanged: reuse the local cid when a server entry
   // shares its ts (keeps QueuedMessages from remounting; R2 in
   // _034-design.md — the swap race), else mint `s-${ts}`.
-  const hydrate = useCallback((serverList) => {
+  const hydrate = useCallback((serverList, opts = {}) => {
     // Deliberately does NOT clear consumedServerTsRef: a hydrate can land
     // WHILE a legitimate in-flight consume is still pending (its optimistic
     // cid in flight, its consumed server ts armed). Clearing the guard here
@@ -381,26 +434,83 @@ export default function usePendingQueue() {
     // finally lands. The guard is instead pruned per-cid as each round-trip
     // resolves and fully cleared the moment nothing is in flight
     // (resolveCidFromGuard), which is the precise end of any legitimate race.
-    const localByTs = new Map(
-      (pendingMessagesRef.current || []).map(m => [m.ts, m.cid])
-    )
-    const serverTsSet = new Set((serverList || []).map(m => m.ts))
-    const reconciled = (serverList || []).map(m => ({
+    const local = pendingMessagesRef.current || []
+    const serverRows = serverList || []
+    const localByTs = new Map(local.map(m => [m.ts, m.cid]))
+    const serverTsSet = new Set(serverRows.map(m => m.ts))
+
+    // POST ack can race with runtime hydrate: the server row can arrive with
+    // the real server ts before swapOptimisticTs maps the optimistic cid to it.
+    // In the unambiguous 1-local-in-flight ↔ 1-server-row case, adopt the
+    // local cid onto the server row and do NOT preserve the optimistic twin.
+    // Ambiguous duplicate content (two identical queued messages) is left for
+    // the ack path rather than risking a lossy collapse.
+    const serverByIdentity = new Map()
+    for (const row of serverRows) {
+      const key = _queueIdentityKey(row)
+      const list = serverByIdentity.get(key) || []
+      list.push(row)
+      serverByIdentity.set(key, list)
+    }
+    const localInFlightByIdentity = new Map()
+    for (const row of local) {
+      if (!row?.cid || !inFlightCidsRef.current.has(row.cid) || serverTsSet.has(row.ts)) continue
+      const key = _queueIdentityKey(row)
+      const list = localInFlightByIdentity.get(key) || []
+      list.push(row)
+      localInFlightByIdentity.set(key, list)
+    }
+    const cidByServerTs = new Map()
+    const matchedInFlightCids = new Set()
+    for (const [key, serverMatches] of serverByIdentity) {
+      const localMatches = localInFlightByIdentity.get(key) || []
+      if (serverMatches.length === 1 && localMatches.length === 1) {
+        const localMatch = localMatches[0]
+        cidByServerTs.set(serverMatches[0].ts, localMatch.cid)
+        matchedInFlightCids.add(localMatch.cid)
+      }
+    }
+    for (const cid of matchedInFlightCids) {
+      inFlightCidsRef.current.delete(cid)
+      resolveCidFromGuard(cid)
+    }
+
+    const reconciled = serverRows.map(m => ({
       ...m,
-      cid: localByTs.get(m.ts) || `s-${m.ts}`,
+      cid: localByTs.get(m.ts) || cidByServerTs.get(m.ts) || `s-${m.ts}`,
       queued: true,
       // Everything in the server list has a real server ts by definition.
       serverTs: true,
     }))
-    const preserved = (pendingMessagesRef.current || []).filter(m =>
+    const preservedInFlight = local.filter(m =>
       m.cid != null
       && inFlightCidsRef.current.has(m.cid)
+      && !matchedInFlightCids.has(m.cid)
       && !serverTsSet.has(m.ts),
     )
-    const next = [...reconciled, ...preserved]
+    const preservedCidSet = new Set(preservedInFlight.map(m => m.cid))
+    const preservedMissing = opts.preserveMissing
+      ? local
+          .filter(m =>
+            m
+            && !serverTsSet.has(m.ts)
+            && !preservedCidSet.has(m.cid)
+          )
+          .map(m => ({
+            ...m,
+            // The server omitted this row during an active-turn/runtime
+            // reconcile. Keep the human-visible text instead of dropping it,
+            // but downgrade the row so fast-forward cannot force-steer using
+            // a server ts the backend no longer confirms. A later hydrate
+            // that includes the row will re-confirm serverTs=true.
+            serverTs: false,
+            missingFromServer: true,
+          }))
+      : []
+    const next = [...reconciled, ...preservedInFlight, ...preservedMissing]
     pendingMessagesRef.current = next
     setPendingMessages(next)
-  }, [])
+  }, [resolveCidFromGuard])
 
   const clear = useCallback(() => {
     consumedServerTsRef.current.clear()

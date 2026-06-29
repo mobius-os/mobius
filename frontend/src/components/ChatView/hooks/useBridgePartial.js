@@ -34,6 +34,7 @@ import { useLayoutEffect, useRef } from 'react'
  *
  * @returns {{
  *   shouldBridge: (currentLastMsg: {ts?: number} | null | undefined) => boolean,
+ *   findBridgeIndex: (messages: Array<{ts?: number, role?: string}> | null | undefined) => number,
  *   markBridged: () => void,
  * }}
  */
@@ -71,16 +72,41 @@ export default function useBridgePartial({ runningAtMount, lastMsgAtMount }) {
     keptPartialTsRef.current = lastMsgAtMount.ts
   }, [runningAtMount, lastMsgAtMount])
 
+  function candidateTs() {
+    if (keptPartialTsRef.current != null) return keptPartialTsRef.current
+    // Render-time bridge candidate. The layout-effect capture above is still
+    // the sticky lifecycle owner, but render needs to suppress the cached DB
+    // partial on the FIRST paint after navigating back to a running chat.
+    // Waiting for a later render shows the persisted partial and the cached
+    // stream snapshot side-by-side. This derivation is pure (no ref writes),
+    // so it is safe during render and still lets markBridged() retire it.
+    if (!runningAtMount) return null
+    if (!lastMsgAtMount) return null
+    if (lastMsgAtMount.role !== 'assistant') return null
+    return lastMsgAtMount.ts ?? null
+  }
+
   function shouldBridge(currentLastMsg) {
     if (bridgedRef.current) return false
-    if (keptPartialTsRef.current == null) return false
+    const ts = candidateTs()
+    if (ts == null) return false
     if (!currentLastMsg) return false
-    return currentLastMsg.ts === keptPartialTsRef.current
+    return currentLastMsg.ts === ts
+  }
+
+  function findBridgeIndex(messages) {
+    if (bridgedRef.current) return -1
+    const ts = candidateTs()
+    if (ts == null) return -1
+    if (!Array.isArray(messages)) return -1
+    return messages.findIndex(
+      m => m?.role === 'assistant' && m.ts === ts
+    )
   }
 
   function markBridged() {
     bridgedRef.current = true
   }
 
-  return { shouldBridge, markBridged }
+  return { shouldBridge, findBridgeIndex, markBridged }
 }

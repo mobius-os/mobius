@@ -12,7 +12,7 @@
 import { test, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { inferMode, resolveTheme, applyTheme, HEX_RE, PREPAINT_SRC } from '../applyTheme.js'
+import { inferMode, resolveTheme, applyTheme, HEX_RE, PREPAINT_SRC, colorSchemeMetaContent } from '../applyTheme.js'
 
 // --- inferMode ---------------------------------------------------------
 
@@ -50,6 +50,7 @@ function makeDomStub() {
   const fontLinks = []
   const headChildren = []
   const meta = { content: '#000000', getAttribute: (k) => meta[k], setAttribute: (k, v) => { meta[k] = v } }
+  const colorScheme = { content: 'dark light', name: 'color-scheme', getAttribute: (k) => colorScheme[k], setAttribute: (k, v) => { colorScheme[k] = v } }
   const statusBar = { content: 'black', getAttribute: (k) => statusBar[k], setAttribute: (k, v) => { statusBar[k] = v } }
   const body = { style: {} }
   const documentElement = {
@@ -83,6 +84,7 @@ function makeDomStub() {
       getElementById(id) { return styleNodes.get(id) || slotNodes.get(id) || null },
       querySelector(sel) {
         if (sel === 'meta[name="theme-color"]') return meta
+        if (sel === 'meta[name="color-scheme"]') return colorScheme
         if (sel.includes('apple-mobile-web-app-status-bar-style')) return statusBar
         return null
       },
@@ -104,7 +106,7 @@ function makeDomStub() {
       body,
       documentElement,
     },
-    meta, statusBar, documentElement, fontLinks, headChildren, styleNodes, slotNodes,
+    meta, colorScheme, statusBar, documentElement, fontLinks, headChildren, styleNodes, slotNodes,
   }
 }
 
@@ -241,12 +243,20 @@ test('applyTheme sets data-theme + color-scheme + status bar from mode', () => {
   applyTheme({ css: ':root{--bg:#f0eeeb;}', bg: '#f0eeeb' }, ctx())  // light
   assert.equal(dom.documentElement.getAttribute('data-theme'), 'light')
   assert.equal(dom.documentElement.style.colorScheme, 'light')
+  assert.equal(dom.colorScheme.content, 'light dark')
   assert.equal(dom.statusBar.content, 'default')
 
   applyTheme({ css: ':root{--bg:#0d0d0d;}', bg: '#0d0d0d' }, ctx())  // dark
   assert.equal(dom.documentElement.getAttribute('data-theme'), 'dark')
   assert.equal(dom.documentElement.style.colorScheme, 'dark')
+  assert.equal(dom.colorScheme.content, 'dark light')
   assert.equal(dom.statusBar.content, 'black')
+})
+
+test('colorSchemeMetaContent orders the active mode first', () => {
+  assert.equal(colorSchemeMetaContent('light'), 'light dark')
+  assert.equal(colorSchemeMetaContent('dark'), 'dark light')
+  assert.equal(colorSchemeMetaContent(undefined), 'dark light')
 })
 
 test('applyTheme honours an explicit mode over inferred', () => {

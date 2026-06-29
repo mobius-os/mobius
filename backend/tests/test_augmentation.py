@@ -234,8 +234,9 @@ def test_stale_pending_drains_on_fresh_send(client, db, auth, chat):
     assert data["message"]["_consumed_ts"][:2] == [100, 200]
     assert len(data["message"]["_consumed_ts"]) == 3
     db.refresh(chat)
-    # Stale pending plus the new send were promoted into one ordered turn.
-    assert chat.messages[-1]["content"] == "stale 1\nstale 2\nnew send"
+    # Stale pending plus the new send were promoted as separate ordered rows
+    # (the provider-facing combined text is data["message"]["content"] above).
+    assert [m["content"] for m in chat.messages[-3:]] == ["stale 1", "stale 2", "new send"]
     assert chat.pending_messages == []
     # Run was scheduled (gen bumped + starting marker set).
     assert chat.id in registry.all_alive_chat_ids()
@@ -474,7 +475,8 @@ def test_pending_ts_strictly_unique_under_collision(client, db, auth, chat):
 
 
 def test_promote_pending_messages(db):
-  """_promote_pending_messages collapses pending sends into one turn."""
+  """_promote_pending_messages stores pending sends as separate transcript
+  rows; the provider still gets one combined continuation turn."""
   import asyncio
   from app import models
   from app.chat_queue import promote_pending_messages as _promote_pending_messages
@@ -498,8 +500,10 @@ def test_promote_pending_messages(db):
 
   db.refresh(chat)
   assert chat.pending_messages == []
-  assert len(chat.messages) == 2
-  assert chat.messages[1]["content"] == "queued msg 1\nqueued msg 2"
+  # Visible transcript stores each queued send SEPARATELY; the provider
+  # still gets the combined continuation (next_user.content) below.
+  assert len(chat.messages) == 3
+  assert [m["content"] for m in chat.messages[1:]] == ["queued msg 1", "queued msg 2"]
   # Returned values for next run.
   assert next_user["content"] == "queued msg 1\nqueued msg 2"
   assert next_user["ts"] == 123

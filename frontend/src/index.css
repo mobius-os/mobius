@@ -126,6 +126,16 @@ body, h1, h2, h3, h4, h5, h6, p, ul, ol, li, dl, dd, figure, blockquote, fieldse
 html, body, * { scrollbar-width: none; -ms-overflow-style: none; }
 *::-webkit-scrollbar { width: 0; height: 0; }
 
+/* Paint every top-level layer with the active app background. Android gesture
+   navigation can expose the root/html backing layer at the bottom edge during
+   keyboard and viewport-fit transitions; leaving it unpainted leaks the UA's
+   gray instead of Möbius's background. */
+html,
+body,
+#root {
+  background: var(--bg, #0d0d0d);
+}
+
 /* Theme colors are injected server-side into <head> via theme.py.
    Do NOT define color variables here — they cause a flash to the
    wrong color before the server-injected theme takes effect.
