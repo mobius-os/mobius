@@ -498,8 +498,8 @@ export default function useStreamConnection(chatId, {
         // show a one-frame "thinking" row between dropping stale streamItems
         // and ChatView clearing its running state.
         onStreamEndRef.current?.()
-        onNeedsRefreshRef.current?.({ force: true })
         setIsStreaming(false)
+        onNeedsRefreshRef.current?.({ force: true, terminal204: true })
         return
       }
 
@@ -776,6 +776,8 @@ export default function useStreamConnection(chatId, {
             queuedContinuationRef.current = false
             queuedContinuationTsRef.current = null
             queuedContinuationMessageRef.current = null
+            setConnectionError(null)
+            retryCount.current = 0
             // The turn is done — its answers are durable in the promoted
             // message now, so drop the reconnect-survival cache before the
             // next turn (a queued continuation streams on the same hook and
