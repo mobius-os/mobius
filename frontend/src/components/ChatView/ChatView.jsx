@@ -76,6 +76,15 @@ function sameMessageList(a, b) {
   return true
 }
 
+function serverSnapshotBehindLocal(serverMsgs, localMsgs) {
+  if (!Array.isArray(localMsgs) || localMsgs.length === 0) return false
+  if (!Array.isArray(serverMsgs)) return false
+  if (serverMsgs.length < localMsgs.length) return true
+
+  const serverTs = new Set(serverMsgs.map(m => m?.ts).filter(v => v != null))
+  return localMsgs.some(m => m?.ts != null && !serverTs.has(m.ts))
+}
+
 function appendMessageBatch(prev, rows) {
   const batch = Array.isArray(rows) ? rows.filter(Boolean) : []
   if (batch.length === 0) return prev
@@ -247,6 +256,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   const queuedContinuationLocalPromotedRef = useRef(null)
   const steerPinIntentRef = useRef(null)
   const runtimeReconnectInFlightRef = useRef(false)
+  const swReloadHoldTimerRef = useRef(null)
 
   // Single setter that updates local state AND the query cache.
   //
@@ -447,7 +457,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // and gets a 204 (no active broadcast — the chat finished while the
   // user was offline or on poor connectivity). Replaces stale messages
   // with the current DB state.
-  const fetchMessages = useCallback(async ({ force = false } = {}) => {
+  const fetchMessages = useCallback(async ({ force = false, terminal204 = false } = {}) => {
     if (sendingRef.current && !force) return
     const gen = fetchGenRef.current
     try {
@@ -466,14 +476,24 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           }
         }
       }
-      commitMessages(msgs, data.offset || 0)
+      const preserveLocalTurn =
+        force && (sendingRef.current || isStreamingRef.current || serverRunningRef.current)
+      const staleSnapshot =
+        !terminal204
+        && !preserveLocalTurn
+        && serverSnapshotBehindLocal(msgs, messagesRef.current)
+      if (!preserveLocalTurn && !staleSnapshot) {
+        commitMessages(msgs, data.offset || 0)
+      }
       if (data.running) {
         setSending(true)
-      } else if (force) {
+      } else if (force && !preserveLocalTurn && !staleSnapshot) {
         setSending(false)
         sendingRef.current = false
       }
-      setServerRunningState(!!data.running)
+      if (data.running || (!preserveLocalTurn && !staleSnapshot)) {
+        setServerRunningState(!!data.running)
+      }
       setLiveQuestionId(data.pending_question_id || null)
       queryClient.setQueryData(chatMessagesQueryKey(chatId), (existing) => ({
         ...(existing || {}),
@@ -487,7 +507,9 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       // pending_messages have been consumed/cancelled/steered and must be
       // dropped even while the agent turn is still running; preserving them
       // creates ghost queue chips that cannot be fast-forwarded.
-      pendingQueue.hydrate(data.pending_messages || [])
+      if (!preserveLocalTurn) {
+        pendingQueue.hydrate(data.pending_messages || [])
+      }
     } catch { /* network error — silent, user can retry */ }
   }, [chatId, commitMessages, pendingQueue.hydrate, queryClient])
 
@@ -524,11 +546,17 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         pending_messages: serverPending,
         pending_question_id: data.pending_question_id || null,
       }))
-      // Server pending_messages is authoritative for server-confirmed rows.
-      // The hook still preserves genuinely in-flight optimistic rows, so a
-      // queue POST racing this read stays visible; an already-confirmed row
-      // that disappeared from the server is gone and must not be resurrected.
-      pendingQueue.hydrate(serverPending)
+      // Server pending_messages is authoritative for server-confirmed rows,
+      // but a legacy queue POST may ack with only {ts, position}; in that
+      // window an active-turn reconcile can read [] before the full pending
+      // row is visible. Keep the local queue until the turn ends or a later
+      // reconcile returns concrete server rows.
+      const hasLocalQueue = pendingQueue.pendingMessagesRef.current.length > 0
+      const activeLocalTurn =
+        sendingRef.current || isStreamingRef.current || serverRunningRef.current
+      if (!(activeLocalTurn && hasLocalQueue && serverPending.length === 0)) {
+        pendingQueue.hydrate(serverPending)
+      }
     } catch { /* background reconciliation is best-effort */ }
   }, [chatId, pendingQueue.hydrate, pendingQueue.pendingMessagesRef, queryClient])
 
@@ -602,6 +630,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       } else {
         queuedContinuationLocalPromotedRef.current = null
         setSending(false)
+        sendingRef.current = false
         setServerRunningState(false)
         // Stream ended without continuation. If we have local pending
         // entries, server may have cleared them (auth fail, error) —
@@ -694,6 +723,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   })
 
   const ensureRuntimeStreamConnected = useCallback(() => {
+    if (connectionError === 'disconnected') return
     if (!serverRunningRef.current) return
     if (isStreamingRef.current) return
     if (runtimeReconnectInFlightRef.current) return
@@ -708,7 +738,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       .finally(() => {
         runtimeReconnectInFlightRef.current = false
       })
-  }, [connectToStream, isStreamingRef])
+  }, [connectToStream, connectionError, isStreamingRef])
 
   const {
     files: pendingFiles,
@@ -900,11 +930,17 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     chatIdStaleRef.current = false
     setLoadError(false)
 
+    const gen = fetchGenRef.current
     apiFetch(`/chats/${chatId}?limit=20`)
       .then(r => r.json())
       .then(data => {
         if (cancelled) return
+        if (fetchGenRef.current !== gen) return
         const msgs = data.messages || []
+        if (serverSnapshotBehindLocal(msgs, messagesRef.current)) {
+          setLoading(false)
+          return
+        }
 
         // Keep the DB partial when the agent is still running. The
         // user sees the most recent persisted state immediately; SSE
@@ -1334,6 +1370,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     }
 
     // FRESH SEND PATH: no active turn, no queue.
+    fetchGenRef.current += 1
     onMessageStartRef.current?.()
     promotedRef.current = false
 
@@ -2007,6 +2044,22 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // visible in the tray but do not expose an inert fast-forward button.
   const composerBusy = turnActive || pendingQueue.pendingMessages.length > 0
   const canSteer = canFastForwardQueue(pendingQueue.pendingMessages, turnActive)
+
+  useEffect(() => {
+    try {
+      if (swReloadHoldTimerRef.current) {
+        clearTimeout(swReloadHoldTimerRef.current)
+        swReloadHoldTimerRef.current = null
+      }
+      sessionStorage.setItem('sw-auto-reloaded', '1')
+      if (!turnActive) {
+        swReloadHoldTimerRef.current = setTimeout(() => {
+          try { sessionStorage.removeItem('sw-auto-reloaded') } catch {}
+          swReloadHoldTimerRef.current = null
+        }, 5000)
+      }
+    } catch {}
+  }, [turnActive])
 
   useEffect(() => {
     const hasQueue = pendingQueue.pendingMessages.length > 0
