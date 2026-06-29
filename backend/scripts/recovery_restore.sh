@@ -62,11 +62,6 @@ if [ "$MODE" = "platform" ]; then
     echo "platform restore: /data/platform/.git not found — run 'platform-baked' instead." >&2
     exit 2
   fi
-  # Rescue uncommitted edits before the hard reset discards them. The baked
-  # helper is immutable, so it works even when the live tree is broken.
-  # timeout-bounded: this script also runs at boot from entrypoint's
-  # .recover-pending path, so a stalled tar must never hang the container up.
-  timeout 30 sh /app/scripts-baked/recovery_snapshot.sh platform || true
   echo "Restoring /data/platform via git reset --hard HEAD..."
   # Clear pycache first so stale bytecache doesn't survive the reset.
   find /data/platform -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
@@ -90,9 +85,6 @@ if [ "$MODE" = "platform-baked" ]; then
     echo "Source missing: $SRC_APP (broken image?)" >&2
     exit 2
   fi
-  # Rescue uncommitted edits before the baked floor overwrites them.
-  # timeout-bounded for the boot-time .recover-pending path (see above).
-  timeout 30 sh /app/scripts-baked/recovery_snapshot.sh platform-baked || true
   echo "Restoring /data/platform from baked floor..."
   # Clear pycache before the overwrite to avoid stale bytecache.
   find "$DST_APP" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
@@ -178,15 +170,6 @@ if [ ! -d "$SRC" ]; then
 fi
 
 echo "Restoring $DST from $SRC..."
-
-# Rescue uncommitted source edits before the baked copy overwrites them.
-# shell-dist is regenerable build output, not source — nothing to rescue.
-case "$MODE" in
-  backend|scripts|shell-src)
-    # timeout-bounded for the boot-time .recover-pending path (see above).
-    timeout 30 sh /app/scripts-baked/recovery_snapshot.sh "$MODE" || true
-    ;;
-esac
 
 # mkdir -p the destination so a fresh volume / wiped directory works.
 mkdir -p "$DST"
