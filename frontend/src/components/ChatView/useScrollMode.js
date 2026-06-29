@@ -54,19 +54,6 @@ const _scrollModes = (() => {
 })()
 
 
-/** Element's margin-box height (offsetHeight + vertical margins).
- *  Needed for the queued tray: it sits in a flex column above
- *  .chat__form, so its bottom margin shrinks .chat__scroll just as
- *  much as its border-box does. offsetHeight alone misses that. */
-function _trayMarginBox(el) {
-  if (!el) return 0
-  const cs = getComputedStyle(el)
-  return el.offsetHeight
-    + (parseFloat(cs.marginTop) || 0)
-    + (parseFloat(cs.marginBottom) || 0)
-}
-
-
 /** Returns the first message <li> whose bottom edge is past the
  *  viewport top — i.e. the topmost partially-visible message.
  *  Used to resolve a fresh ANCHOR_AT when the user scrolls. */
@@ -86,13 +73,12 @@ function _topmostVisibleMsg(scrollEl) {
  *  the user scrolls up). Returns null when there's no scroll element or
  *  no anchorable message.
  *
- *  Why this exists: a non-pinning send must leave a PIN_USER_MSG behind
- *  (otherwise _computeSpacerH keeps gating the pin-spacer on the stale
- *  PIN mode and sizes phantom room against the new, unpinned message —
- *  the reader then gets shifted by space they're not reading past). The
- *  send sites call this to convert a stale PIN into the reader's actual
- *  position, which both flips the spacer math off (mode is no longer
- *  PIN_USER_MSG) and keeps the reader exactly where they were. */
+ *  Why this exists: a non-pinning send must not leave a stale PIN_USER_MSG
+ *  behind. The bottom spacer is always reserved for the latest user message,
+ *  but the scrollTop write is still mode-driven. The send sites call this to
+ *  convert a stale PIN into the reader's actual position, so the reader stays
+ *  exactly where they were while the new message still gets bottom room below
+ *  it if they later scroll to the tail. */
 export function anchorModeFromScroll(scrollEl) {
   if (!scrollEl) return null
   const anchorEl = _topmostVisibleMsg(scrollEl)
@@ -157,10 +143,10 @@ function _validateSavedMode(saved, messages, scrollEl) {
 }
 
 
-/** Spacer height needed so PIN_USER_MSG is achievable (the user
- *  message can scroll FLUSH to the top of the viewport, with the
- *  PIN_OFFSET breathing room above it). The spacer's only job — it
- *  does NOT touch scrollTop.
+/** Spacer height needed so the latest user message can sit near the
+ *  top of the viewport, with the PIN_OFFSET breathing room above it.
+ *  The spacer's only job is reserving bottom room — it does NOT touch
+ *  scrollTop and it does NOT decide whether a send pins.
  *
  *  Formula: max(0, viewH + (lastUserMsgTop − PIN_OFFSET) − listH).
  *
@@ -169,23 +155,18 @@ function _validateSavedMode(saved, messages, scrollEl) {
  *  lands PIN_OFFSET pixels below the top (visual "extra space" at
  *  the top + phantom over-scroll room at the bottom).
  *
- *  Mode-aware: the pin-spacer exists ONLY to give PIN_USER_MSG the
- *  scroll room to reach the top. Reserving it in any other mode would
- *  add phantom space below the list that a scrolled-up reader (ANCHOR_AT)
- *  can be shifted by, and that un-glues an at-bottom follower
- *  (FOLLOW_BOTTOM) — both are the send-while-not-pinning hazards the
- *  send rule must avoid. So a non-pin mode reserves nothing; the send
- *  becomes a true no-op for scroll/spacer.
+ *  Reservation is intentionally independent from pinning. The send rule
+ *  decides whether to move scrollTop (first message / already at bottom).
+ *  This function always reserves enough bottom room for the latest visible
+ *  user message, so keyboard open/close and later manual scrolls don't make
+ *  that message lose its reachable "top of screen" position.
  */
 const PIN_OFFSET = 4
-function _computeSpacerH(scrollEl, listEl, lastUserMsgEl, fullViewH, mode) {
+export function _computeSpacerH(scrollEl, listEl, lastUserMsgEl, fullViewH) {
   if (!scrollEl || !listEl) return 0
-  if (!mode || mode.kind !== 'PIN_USER_MSG') return 0
-  const queuedTrayEl = scrollEl.parentElement?.querySelector('.queued')
-  const trayH = _trayMarginBox(queuedTrayEl)
-  const viewH = (fullViewH || scrollEl.clientHeight) - trayH
-  const pinTarget = lastUserMsgEl
-    ? Math.max(0, lastUserMsgEl.offsetTop - PIN_OFFSET) : 0
+  if (!lastUserMsgEl) return 0
+  const viewH = fullViewH || scrollEl.clientHeight
+  const pinTarget = Math.max(0, lastUserMsgEl.offsetTop - PIN_OFFSET)
   return Math.max(0, viewH + pinTarget - listEl.offsetHeight)
 }
 
@@ -206,27 +187,74 @@ const NEAR_BOTTOM_PX = 50
  *  the first follow-write, so a sentinel read at send time would
  *  mis-classify an at-bottom reader):
  *
- *    1. The gesture-gated FOLLOW_BOTTOM mode — the user actively scrolled
- *       to the bottom to follow the stream.
- *    2. The scroll position is within NEAR_BOTTOM_PX of the bottom right
- *       now, measured from scrollTop BEFORE the new message appends. This
- *       is a position computation, not a sentinel read, and it covers the
- *       cases FOLLOW_BOTTOM misses: a chat short enough to fit the
- *       viewport (the user sees everything, so a pin is the expected
- *       move and keeps a back-to-back short send pinning) and a reader
- *       sitting at the tail without having made the bottom gesture. A
- *       scrolled-up reader has a large gap and is correctly left alone.
- *       The pin-spacer's empty room counts as "at the bottom" here — it
- *       is phantom space, not content the user is reading past.
+ *    1. The scroll position is within NEAR_BOTTOM_PX of the true scroll
+ *       bottom right now, measured from scrollTop BEFORE the new message
+ *       appends. This is a position computation, not a sentinel read, and
+ *       it covers a chat short enough to fit the viewport and a reader
+ *       sitting at the actual tail without having made the bottom gesture.
+ *       Reserved pin-spacer room is part of the scroll range for this
+ *       purpose: a reader in the middle of that empty reserved room is not
+ *       at the bottom and must not be yanked to the next user message.
+ *
+ *    2. FOLLOW_BOTTOM is only a fallback when the scroll element is not
+ *       available. It is deliberately NOT authoritative when scrollEl
+ *       exists: mobile browsers can move/clamp the viewport during keyboard
+ *       and restore transitions without a user-gesture scroll event, leaving
+ *       modeRef stale as FOLLOW_BOTTOM while the reader is visibly in the
+ *       middle. The actual scroll position wins.
  */
-export function shouldPinSend({ scrollEl, mode, isFirstUserMsg }) {
+export function shouldPinSend({
+  scrollEl,
+  mode,
+  isFirstUserMsg,
+  respectFollowMode = true,
+  wasNearScrollBottom = null,
+}) {
   if (isFirstUserMsg) return true
-  if (mode && mode.kind === 'FOLLOW_BOTTOM') return true
-  if (scrollEl) {
-    const gap = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
-    if (gap < NEAR_BOTTOM_PX) return true
-  }
+  if (typeof wasNearScrollBottom === 'boolean') return wasNearScrollBottom
+  if (scrollEl) return isNearScrollBottom(scrollEl)
+  if (respectFollowMode && mode && mode.kind === 'FOLLOW_BOTTOM') return true
   return false
+}
+
+
+/** Position-based bottom check that treats the dynamic pin spacer as
+ *  phantom room, not real content. Useful for reasoning about whether real
+ *  message content is at the tail, but NOT for deciding whether to move the
+ *  viewport: the reserved spacer is intentionally scrollable. */
+export function isNearContentBottom(scrollEl, threshold = NEAR_BOTTOM_PX) {
+  if (!scrollEl) return false
+  const spacerH = scrollEl.querySelector('.spacer-dynamic')?.offsetHeight || 0
+  const gap = scrollEl.scrollHeight - spacerH - scrollEl.scrollTop - scrollEl.clientHeight
+  return gap < threshold
+}
+
+
+/** True scroll-bottom check: includes the dynamic spacer because the spacer is
+ *  user-scrollable reserved room. Keyboard preservation and send pinning use
+ *  this so "middle of the reserved space" remains a stable reading position
+ *  instead of being treated as the bottom. */
+export function isNearScrollBottom(scrollEl, threshold = NEAR_BOTTOM_PX) {
+  if (!scrollEl) return false
+  const gap = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
+  return gap < threshold
+}
+
+
+/** visualViewport resize/scroll is a browser viewport clamp, not a user
+ *  reading gesture. If the reader was at the true scroll bottom before the
+ *  keyboard moved, preserve that bottom intent. Otherwise, retire stale
+ *  bottom/pin modes to the current anchor when possible so opening/closing the
+ *  keyboard preserves the reader's chosen position inside reserved space. */
+export function modeForViewportChange(mode, wasNearScrollBottom, anchorMode = null) {
+  if (wasNearScrollBottom) return { kind: 'FOLLOW_BOTTOM' }
+  if (
+    anchorMode
+    && (mode?.kind === 'FOLLOW_BOTTOM' || mode?.kind === 'PIN_USER_MSG')
+  ) {
+    return anchorMode
+  }
+  return mode
 }
 
 
@@ -324,18 +352,40 @@ export default function useScrollMode({
   // finished loading, an error/question card rendered), which the identity
   // gate above otherwise misses. Stays null when no pin is active.
   const lastPinTopRef = useRef(null)
+  // Tracks physical tail position independently from modeRef. A stale
+  // PIN_USER_MSG can survive after the reader manually returns to the bottom;
+  // when the keyboard opens, visualViewport fires AFTER the viewport has
+  // already changed, so we need the last known pre-change tail snapshot.
+  const nearScrollBottomRef = useRef(false)
+
+  const persistMode = () => {
+    try {
+      if (modeRef.current && modeRef.current.kind !== 'INITIAL') {
+        _scrollModes[chatId] = modeRef.current
+        sessionStorage.setItem('chat-mode', JSON.stringify(_scrollModes))
+      }
+    } catch {}
+  }
 
   // Persist mode on every chatId change so the next mount restores.
   // (Layout effect can't easily handle persistence because it runs
   // on every messages change; cleanup is only fired on chatId change.)
   useLayoutEffect(() => {
+    return () => persistMode()
+  }, [chatId])
+
+  // A hard shell refresh/page background does not reliably run React's
+  // cleanup after the human manually scrolls. Persist the current mode on the
+  // browser lifecycle events too, so reload returns to the last reading
+  // position rather than an older mode saved during the last message change.
+  useLayoutEffect(() => {
+    if (typeof window === 'undefined') return
+    const onPageLeaving = () => persistMode()
+    window.addEventListener('pagehide', onPageLeaving)
+    window.addEventListener('beforeunload', onPageLeaving)
     return () => {
-      try {
-        if (modeRef.current && modeRef.current.kind !== 'INITIAL') {
-          _scrollModes[chatId] = modeRef.current
-          sessionStorage.setItem('chat-mode', JSON.stringify(_scrollModes))
-        }
-      } catch {}
+      window.removeEventListener('pagehide', onPageLeaving)
+      window.removeEventListener('beforeunload', onPageLeaving)
     }
   }, [chatId])
 
@@ -380,6 +430,7 @@ export default function useScrollMode({
       const cRect = scrollEl.getBoundingClientRect()
       bottomVisibleRef.current = sRect.top < cRect.bottom && sRect.bottom > cRect.top
     }
+    nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
 
     // Identity check: apply the mode ONLY when modeRef.current
     // changed since the last apply. Callers always assign a fresh
@@ -396,7 +447,7 @@ export default function useScrollMode({
     function sizeSpacer() {
       const lastUserEl = lastUserMsgRef.current
       const h = _computeSpacerH(
-        scrollEl, listEl, lastUserEl, fullViewHRef.current, modeRef.current,
+        scrollEl, listEl, lastUserEl, fullViewHRef.current,
       )
       spacerEl.style.height = `${h}px`
     }
@@ -418,13 +469,36 @@ export default function useScrollMode({
       }
     }
 
-    // Full sync — size spacer and apply-if-changed. Used at mount,
-    // RO, vv, reveal. Each call sizes the spacer (always needed —
-    // the spacer math depends on changing content) but only
-    // touches scrollTop on a real mode transition.
-    function syncLayout() {
+    // Full sync — size spacer and apply-if-changed. Used at mount, RO, reveal,
+    // and visualViewport keyboard changes. Each call sizes the spacer (always
+    // needed — the spacer math depends on changing content). Most callers only
+    // touch scrollTop on a real mode transition; keyboard resize passes
+    // forceApply so the current PIN/FOLLOW/ANCHOR survives the viewport clamp.
+    function syncLayout({ forceApply = false, viewportChange = false } = {}) {
+      const preserveBottom = viewportChange && nearScrollBottomRef.current
       sizeSpacer()
-      maybeApplyMode()
+      if (viewportChange) {
+        const anchor = preserveBottom ? null : anchorModeFromScroll(scrollEl)
+        modeRef.current = modeForViewportChange(
+          modeRef.current, preserveBottom, anchor,
+        )
+        persistMode()
+        applyMode(scrollEl, modeRef.current)
+        lastAppliedModeRef.current = modeRef.current
+        if (modeRef.current.kind === 'PIN_USER_MSG') {
+          const el = scrollEl.querySelector(
+            `.chat__msg--user[data-ts="${modeRef.current.ts}"]`,
+          )
+          lastPinTopRef.current = el ? el.offsetTop : null
+        } else {
+          lastPinTopRef.current = null
+        }
+      } else if (forceApply) {
+        applyMode(scrollEl, modeRef.current)
+      } else {
+        maybeApplyMode()
+      }
+      nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
     }
     syncLayout()
 
@@ -485,6 +559,7 @@ export default function useScrollMode({
       if (k === 'FOLLOW_BOTTOM'
           || (k === 'ANCHOR_AT' && !revealedOnce)) {
         applyMode(scrollEl, modeRef.current)
+        nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
       } else if (k === 'PIN_USER_MSG') {
         // Re-pin in two cases, both of which leave the message off its
         // intended top position with no user action:
@@ -529,9 +604,11 @@ export default function useScrollMode({
           if (el.offsetTop !== lastPinTopRef.current || clampedShort) {
             applyMode(scrollEl, modeRef.current)
             lastPinTopRef.current = el.offsetTop
+            nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
           }
         }
       }
+      nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
       requestRevealOnQuiet()  // each RO firing pushes the reveal back
     })
     ro.observe(listEl)
@@ -550,6 +627,7 @@ export default function useScrollMode({
 
     // Scroll handler — only user-driven scrolls mutate mode.
     const onScroll = () => {
+      nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
       const userDriven = performance.now() < gestureWindowUntilRef.current
       if (!userDriven) return
       if (loadingOlderRef.current) return
@@ -584,14 +662,16 @@ export default function useScrollMode({
         const anchor = anchorModeFromScroll(scrollEl)
         if (anchor) modeRef.current = anchor
       }
+      persistMode()
     }
     scrollEl.addEventListener('scroll', onScroll, { passive: true })
 
     // Mobile keyboard via visualViewport.
     let vvHandler = null
     if (typeof window !== 'undefined' && window.visualViewport) {
-      vvHandler = () => syncLayout()
+      vvHandler = () => syncLayout({ forceApply: true, viewportChange: true })
       window.visualViewport.addEventListener('resize', vvHandler)
+      window.visualViewport.addEventListener('scroll', vvHandler)
     }
 
     // Hide-then-reveal: kick off the quiet-debounce path immediately
@@ -621,6 +701,7 @@ export default function useScrollMode({
       scrollEl.removeEventListener('keydown', onUserInput)
       if (vvHandler && typeof window !== 'undefined' && window.visualViewport) {
         window.visualViewport.removeEventListener('resize', vvHandler)
+        window.visualViewport.removeEventListener('scroll', vvHandler)
       }
     }
   }, [messages, pendingMessagesLength, chatId])

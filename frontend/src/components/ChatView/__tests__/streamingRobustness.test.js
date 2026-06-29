@@ -17,8 +17,8 @@ import assert from 'node:assert/strict'
 // We test the invariant by exercising the same logic that setStreamItems
 // and connectToStream use: when items become non-empty, lastGoodItemsRef is
 // updated; when resetState fires, latestItemsRef/visible-items are cleared
-// but lastGoodItemsRef is NOT; when a catch-up burst begins
-// (catchUpStartedRef fires), lastGoodItemsRef is cleared.
+// but lastGoodItemsRef is NOT; during catch-up, the last visible snapshot is
+// preserved until replay commits.
 
 test('lastGoodItemsRef is updated whenever items become non-empty', () => {
   let latestItems = []
@@ -55,7 +55,7 @@ test('lastGoodItemsRef is NOT cleared when resetState wipes latestItemsRef', () 
   assert.equal(lastGoodItems.length, 1, 'lastGoodItems preserved after reset')
 })
 
-test('lastGoodItemsRef is cleared when catch-up burst begins (catchUpStartedRef fires)', () => {
+test('lastGoodItemsRef is preserved while catch-up is incomplete', () => {
   let latestItems = []
   let lastGoodItems = []
   let catchUpStarted = false
@@ -73,14 +73,14 @@ test('lastGoodItemsRef is cleared when catch-up burst begins (catchUpStartedRef 
   // Reconnect
   latestItems = []
 
-  // First event of catch-up burst fires — this is the safe point to clear
-  // lastGoodItems because the replay will rebuild everything from scratch
+  // First event of catch-up burst fires. This is NOT safe to clear anymore:
+  // mobile can lose the stream while replaying a tool-only catch-up, and the
+  // previous visible snapshot is still the best state until catch_up_done.
   if (!catchUpStarted) {
     catchUpStarted = true
-    lastGoodItems = []
   }
 
-  assert.equal(lastGoodItems.length, 0, 'lastGoodItems cleared when catch-up starts')
+  assert.equal(lastGoodItems.length, 1, 'lastGoodItems survives incomplete catch-up')
 })
 
 test('on retry exhaustion, lastGoodItemsRef is restored into latestItemsRef when latestItems empty', () => {
@@ -115,9 +115,9 @@ test('on retry exhaustion, lastGoodItemsRef is restored into latestItemsRef when
 })
 
 test('on retry exhaustion, restore is skipped when latestItems is non-empty', () => {
-  // A successful reconnect delivers events (catchUpStarted=true clears
-  // lastGoodItems), but even if it didn't, if latestItems already has
-  // content the restore must not double it.
+  // A successful reconnect delivers events into latestItems. Even though
+  // lastGoodItems remains a fallback snapshot, retry exhaustion must not
+  // overwrite non-empty latestItems or double the response.
   let latestItems = []
   let lastGoodItems = []
 
@@ -142,6 +142,164 @@ test('on retry exhaustion, restore is skipped when latestItems is non-empty', ()
   }
 
   assert.equal(latestItems[0].content, 'new content', 'no overwrite when latestItems non-empty')
+})
+
+test('reconnect reset keeps visible stream while catch-up rebuilds off-screen', () => {
+  let visibleItems = [{ type: 'tool', tool: 'Bash', status: 'running', input: 'long task' }]
+  let latestItems = visibleItems
+  let catchUpItems = []
+  let isCatchUp = true
+
+  function setStreamItems(next) {
+    visibleItems = next
+    latestItems = next
+  }
+
+  function applyStreamItems(updater) {
+    if (!isCatchUp) return setStreamItems(updater(visibleItems))
+    catchUpItems = updater(catchUpItems)
+  }
+
+  function commitCatchUp() {
+    setStreamItems(catchUpItems)
+    catchUpItems = []
+    isCatchUp = false
+  }
+
+  // Reset no longer clears visibleItems. The user should keep seeing the last
+  // tool block while SSE replay parses.
+  assert.deepEqual(visibleItems, latestItems)
+
+  applyStreamItems(prev => [...prev, { type: 'tool', tool: 'Bash', status: 'running', input: 'long task' }])
+  assert.equal(visibleItems.length, 1,
+    'visible stream is preserved while catch-up is still incomplete')
+
+  commitCatchUp()
+  assert.equal(visibleItems.length, 1)
+  assert.equal(visibleItems[0].tool, 'Bash')
+})
+
+test('stream snapshot writes non-empty items and terminal clear removes it', () => {
+  const session = new Map()
+  const chatId = 'chat-a'
+  const key = `chat-stream-items:v2:${chatId}`
+  const legacyKey = `chat-stream-items:${chatId}`
+  const items = [{ type: 'tool', tool: 'Bash', status: 'running' }]
+
+  function writeStoredStreamSnapshot(id, value) {
+    if (!Array.isArray(value) || value.length === 0) return
+    session.set(`chat-stream-items:v2:${id}`, JSON.stringify(value))
+  }
+  function clearStoredStreamSnapshot(id) {
+    session.delete(`chat-stream-items:v2:${id}`)
+    session.delete(`chat-stream-items:${id}`)
+  }
+
+  session.set(legacyKey, JSON.stringify([{ type: 'text', content: 'old' }]))
+  writeStoredStreamSnapshot(chatId, items)
+  assert.deepEqual(JSON.parse(session.get(key)), items)
+  writeStoredStreamSnapshot(chatId, [])
+  assert.ok(session.has(key), 'empty reconnect reset must not wipe the last visible snapshot')
+  clearStoredStreamSnapshot(chatId)
+  assert.equal(session.has(key), false, 'terminal clear removes the snapshot')
+  assert.equal(session.has(legacyKey), false, 'terminal clear removes stale v1 snapshots')
+})
+
+test('semantic stream clear retires last-good fallback too', () => {
+  let latestItems = [{ type: 'text', content: 'already promoted' }]
+  let visibleItems = latestItems
+  let lastGoodItems = latestItems
+
+  function clearStreamItems() {
+    lastGoodItems = []
+    latestItems = []
+    visibleItems = []
+  }
+
+  clearStreamItems()
+
+  assert.deepEqual(visibleItems, [])
+  assert.deepEqual(latestItems, [])
+  assert.deepEqual(lastGoodItems, [],
+    'last-good cache must not resurrect already-promoted text after fast-forward')
+})
+
+test('steering seals pre-steer stream and leaves post-steer continuation promotable', () => {
+  let messages = [{ role: 'user', ts: 1, content: 'Q1' }]
+  let latestItems = [{ type: 'text', content: 'A1 so far' }]
+  let visibleItems = latestItems
+  let lastGoodItems = latestItems
+  let promoted = false
+
+  function promoteStreamToMessages({ keepTurnOpen = false } = {}) {
+    if (promoted && !keepTurnOpen) return
+    if (latestItems.length === 0) return
+    promoted = true
+    messages = [
+      ...messages,
+      {
+        role: 'assistant',
+        content: latestItems.filter(i => i.type === 'text').map(i => i.content).join('\n\n'),
+        blocks: latestItems,
+      },
+    ]
+    lastGoodItems = []
+    latestItems = []
+    visibleItems = []
+    if (keepTurnOpen) promoted = false
+  }
+
+  // steered_into_turn boundary: seal A1, append Q2, clear stream for A2.
+  promoteStreamToMessages({ keepTurnOpen: true })
+  messages = [...messages, { role: 'user', ts: 2, content: 'Q2 steer' }]
+
+  assert.deepEqual(messages.map(m => m.role), ['user', 'assistant', 'user'])
+  assert.equal(messages[1].content, 'A1 so far')
+  assert.deepEqual(visibleItems, [])
+  assert.deepEqual(lastGoodItems, [])
+  assert.equal(promoted, false, 'post-steer continuation can promote on done')
+
+  latestItems = [{ type: 'text', content: 'A2 after steer' }]
+  promoteStreamToMessages()
+  assert.deepEqual(messages.map(m => m.role), ['user', 'assistant', 'user', 'assistant'])
+  assert.equal(messages[3].content, 'A2 after steer')
+})
+
+test('terminal stream finish promotes before clearing streaming state', () => {
+  // User-visible invariant: the end of a stream should be a direct swap from
+  // the live assistant row to the promoted assistant row. If the hook flips
+  // streaming/running state first and waits a frame before promotion, ChatView
+  // can briefly render the generic thinking row or a blank/duplicate boundary.
+  const order = []
+  let latestItems = [{ type: 'text', content: 'final answer' }]
+  let isStreaming = true
+  let messages = [{ role: 'user', ts: 1, content: 'Q' }]
+
+  function onStreamEnd() {
+    order.push('promote')
+    messages = [
+      ...messages,
+      {
+        role: 'assistant',
+        content: latestItems.map(i => i.content).join(''),
+        blocks: latestItems,
+      },
+    ]
+    latestItems = []
+  }
+
+  function setIsStreaming(value) {
+    order.push(value ? 'streaming-on' : 'streaming-off')
+    isStreaming = value
+  }
+
+  // Mirrors useStreamConnection's `done` terminal ordering.
+  onStreamEnd()
+  setIsStreaming(false)
+
+  assert.deepEqual(order, ['promote', 'streaming-off'])
+  assert.equal(isStreaming, false)
+  assert.equal(messages.at(-1).content, 'final answer')
 })
 
 // ---------------------------------------------------------------------------

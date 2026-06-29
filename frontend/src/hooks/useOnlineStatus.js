@@ -27,9 +27,9 @@ import { resolveOnline } from '../lib/onlineStatus.js'
 // The probe verdict is HYSTERETIC (see lib/onlineStatus.js): recovery to
 // online is fast (one good probe clears offline) but demotion to offline is
 // debounced (a streak of failed probes is required before flipping the banner,
-// unless navigator.onLine itself reads false or the window `offline` event
-// fires). This is what kills the spurious offline banner from one slow probe
-// on a cold radio.
+// unless navigator.onLine itself reads false after the short offline-event
+// grace below). This is what kills the spurious offline banner from one slow
+// probe or a brief mobile-data↔Wi‑Fi handoff.
 //
 // Re-probes on: window online/offline events, tab becoming visible, and a
 // periodic interval while visible. Used by the chat composer (chat is
@@ -53,6 +53,13 @@ const HEALTH_URL = '/api/health'
 // genuine online session (access-log exposure). Capping the probe is the safe
 // lever; the JWT-in-URL boundary stays intact.
 const PROBE_TIMEOUT_MS = 3000
+// Android can emit a window `offline` event during a mobile-data → Wi‑Fi
+// handoff even though the connection recovers a moment later. If we publish
+// `offline` synchronously, the shell flashes the offline pill and the composer
+// disables just as the user taps Send. Treat the event as a prompt to verify
+// reachability after a short grace; a real offline state still appears quickly,
+// while handoff blips never surface.
+const OFFLINE_EVENT_GRACE_MS = 2500
 // Periodic re-probe while the tab is visible. Connectivity can change
 // without any window event firing (captive portal, flaky mobile data), so
 // we poll, but only when visible to avoid waking a backgrounded tab.
@@ -108,6 +115,7 @@ export default function useOnlineStatus() {
   useEffect(() => {
     let cancelled = false
     let inflight = false
+    let offlineTimer = 0
     // Caller-held connectivity state threaded through resolveOnline between
     // check() calls. The streaks give the verdict its hysteresis:
     //   • successStreak — consecutive successful probes; gates promotion to
@@ -160,16 +168,21 @@ export default function useOnlineStatus() {
       }
     }
 
-    // A definite offline event is trustworthy — reflect it immediately
-    // without waiting for a probe to time out. Reset the streaks so the next
-    // probe starts the hysteresis from a clean slate.
+    // An offline event is a useful hint, not a verdict. Android can fire it
+    // during a brief radio handoff (mobile data → Wi‑Fi); publishing false
+    // immediately makes the shell flash offline and can disable Send for a
+    // moment even though the server is reachable again by the time the user
+    // retries. Delay, then verify with the real /api/health probe. A matching
+    // `online` event or visibility-triggered successful probe cancels this.
     const onOffline = () => {
-      if (!cancelled) {
-        connState = { successStreak: 0, failureStreak: 0, online: false }
-        publish(false)
-      }
+      if (cancelled) return
+      clearTimeout(offlineTimer)
+      offlineTimer = setTimeout(() => { check() }, OFFLINE_EVENT_GRACE_MS)
     }
-    const onOnline = () => { check() }
+    const onOnline = () => {
+      clearTimeout(offlineTimer)
+      check()
+    }
     const onVisible = () => {
       if (document.visibilityState === 'visible') check()
     }
@@ -189,6 +202,7 @@ export default function useOnlineStatus() {
 
     return () => {
       cancelled = true
+      clearTimeout(offlineTimer)
       clearInterval(interval)
       window.removeEventListener('online', onOnline)
       window.removeEventListener('offline', onOffline)

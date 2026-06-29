@@ -52,3 +52,11 @@ test('the two HTML files embed the IDENTICAL pre-paint script', () => {
   const frame = extractPrepaint(readFileSync(join(frontendRoot, 'public', 'app-frame.html'), 'utf8'))
   assert.equal(idx, frame)
 })
+
+
+test('pre-paint updates theme-color and color-scheme metadata', () => {
+  assert.ok(PREPAINT_SRC.includes('meta[name=\"theme-color\"]'))
+  assert.ok(/themeColorMeta\.setAttribute\(['\"]content['\"], bg\)/.test(PREPAINT_SRC))
+  assert.ok(PREPAINT_SRC.includes('meta[name=\"color-scheme\"]'))
+  assert.ok(PREPAINT_SRC.includes("mode === 'light' ? 'light dark' : 'dark light'"))
+})

@@ -283,6 +283,12 @@ class SendMessage(BaseModel):
   # normal send-while-running behavior is queueing.
   force_steer: bool = False
   consume_pending_ts: list[int] | None = None
+  # Optional UI hint for force-steering multiple already-queued messages.
+  # The server still reconstructs the durable rows from Chat.pending_messages
+  # so the browser cannot forge transcript entries; this only lets newer
+  # clients declare that they expect separate ordered rows rather than one
+  # joined row.
+  steered_messages: list[dict] | None = None
   # When `hidden=True` and the user is answering an AskUserQuestion,
   # frontend includes the resolved answers here. Backend writes them
   # into the question block in the same transaction that appends the

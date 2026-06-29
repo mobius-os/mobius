@@ -3,7 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { apiFetch, getToken, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
-import useScrollMode, { shouldPinSend, anchorModeFromScroll } from './useScrollMode.js'
+import useScrollMode, { shouldPinSend, anchorModeFromScroll, isNearScrollBottom } from './useScrollMode.js'
 import useVoiceInput from './useVoiceInput.js'
 import useFileUpload from './useFileUpload.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
@@ -18,6 +18,12 @@ import QueuedMessages from './QueuedMessages.jsx'
 import MsgContent from './MsgContent.jsx'
 import { questionKey } from './questionKey.js'
 import { resolveStopResend } from './resolveStopResend.js'
+import { assistantStreamCoversMessage, findTrailingAssistantPartialIndex, messageCoversAssistantStream, promoteAssistantStream } from './streamPromotion.js'
+import {
+  canFastForwardQueue,
+  continuationRowsFromPromotedMessage,
+  startedMessagesFromResponse,
+} from './chatRuntimeState.js'
 import './ChatView.css'
 
 
@@ -70,16 +76,24 @@ function sameMessageList(a, b) {
   return true
 }
 
-function startedMessageFromResponse(result) {
-  if (!result?.message) return null
-  const {
-    queued: _q,
-    cid: _c,
-    position: _p,
-    _consumed_ts: _cts,
-    ...msg
-  } = result.message
-  return msg
+function appendMessageBatch(prev, rows) {
+  const batch = Array.isArray(rows) ? rows.filter(Boolean) : []
+  if (batch.length === 0) return prev
+  const seenTs = new Set(prev.map(m => m?.ts).filter(v => v != null))
+  const nextRows = batch.filter(m => {
+    if (m.ts == null) return true
+    if (seenTs.has(m.ts)) return false
+    seenTs.add(m.ts)
+    return true
+  })
+  return nextRows.length ? [...prev, ...nextRows] : prev
+}
+
+function replaceOptimisticWithBatch(prev, optimisticTs, rows) {
+  const base = optimisticTs == null
+    ? prev
+    : prev.filter(m => !(m?.role === 'user' && m.ts === optimisticTs))
+  return appendMessageBatch(base, rows)
 }
 
 function findOptimisticUserIndex(messages, ts) {
@@ -93,15 +107,15 @@ function findOptimisticUserIndex(messages, ts) {
 /** Settle the scroll mode for a send that did NOT pin (the reader is
  *  scrolled up, or a caller opted out via pin:false).
  *
- *  The only mode that misbehaves on a non-pin send is a STALE
- *  PIN_USER_MSG left by an earlier send: _computeSpacerH still gates the
- *  pin-spacer on it and sizes phantom room against the new (unpinned)
- *  message, shifting the reader. Convert that stale pin into the reader's
- *  current scroll position (ANCHOR_AT) — that turns the spacer math off
- *  and keeps them exactly where they were. Any other current mode is
- *  left untouched: ANCHOR_AT is already the reader's position, and
- *  FOLLOW_BOTTOM (reachable only via pin:false, e.g. handleStop's
- *  queue-collapse) must keep following the stream. */
+ *  The mode that misbehaves on a non-pin send is a STALE PIN_USER_MSG left
+ *  by an earlier send: re-applying it would move scrollTop even though the
+ *  user is reading above the tail. Convert that stale pin into the reader's
+ *  current scroll position (ANCHOR_AT). The bottom spacer is now independent
+ *  from pinning, so it can still reserve room below the newest user message
+ *  without moving the reader. Any other current mode is left untouched:
+ *  ANCHOR_AT is already the reader's position, and FOLLOW_BOTTOM (reachable
+ *  only via pin:false, e.g. handleStop's queue-collapse) must keep following
+ *  the stream. */
 function settleNonPinMode(modeRef, scrollEl) {
   if (modeRef.current?.kind !== 'PIN_USER_MSG') return
   const anchor = anchorModeFromScroll(scrollEl)
@@ -172,7 +186,23 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // Query cache, scroll positions, drafts, the app-iframe LRU, and the
   // back-stack — and contradicts the project's no-hard-reload principle).
   const [loadNonce, setLoadNonce] = useState(0)
-  const [sending, setSending] = useState(false)
+  const [sending, setSending] = useState(() => !!cached?.running)
+  // Server-hydrated running marker. `sending` is the local UI flag and
+  // `isStreaming` belongs to the SSE hook; both can briefly be false across
+  // app/chat remounts or reconnect windows even though the backend still has
+  // an active run. Keep the durable server verdict separate so the composer
+  // does not fall back to Mic while a turn is still running with queued work.
+  const [serverRunning, setServerRunning] = useState(() => !!cached?.running)
+  const serverRunningRef = useRef(!!cached?.running)
+  function setServerRunningState(v) {
+    const running = !!v
+    serverRunningRef.current = running
+    setServerRunning(running)
+    queryClient.setQueryData(chatMessagesQueryKey(chatId), (existing) => existing
+      ? { ...existing, running }
+      : existing
+    )
+  }
   const [input, setInput] = useState(() => {
     try {
       const pending = sessionStorage.getItem('pending-draft')
@@ -213,8 +243,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // for render and pendingQueue.pendingMessagesRef for closure-safe
   // synchronous access (handleStop's pre-await clear, fetchMessages'
   // cid preservation).
-  const pendingQueue = usePendingQueue()
+  const pendingQueue = usePendingQueue(cached?.pending_messages || [])
   const queuedContinuationLocalPromotedRef = useRef(null)
+  const steerPinIntentRef = useRef(null)
+  const runtimeReconnectInFlightRef = useRef(false)
 
   // Single setter that updates local state AND the query cache.
   //
@@ -311,10 +343,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // ts is sticky on first mount; markBridged() retires the gate
   // after the first promote so subsequent turns always append.
   // See hooks/useBridgePartial.js for the ts-based design.
-  const [bridgeMountInputs, setBridgeMountInputs] = useState({
-    runningAtMount: false,
-    lastMsgAtMount: null,
-  })
+  const [bridgeMountInputs, setBridgeMountInputs] = useState(() => ({
+    runningAtMount: !!cached?.running,
+    lastMsgAtMount: cached?.messages?.length
+      ? cached.messages[cached.messages.length - 1]
+      : null,
+  }))
   const bridgeHook = useBridgePartial(bridgeMountInputs)
 
   // Spacer "active" CSS state — keeps min-height: 0 on the list while
@@ -356,6 +390,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   onMessageStartRef.current = onMessageStart
   const onFirstMessageRef = useRef(onFirstMessage)
   onFirstMessageRef.current = onFirstMessage
+  const onStreamEndRef = useRef(onStreamEnd)
+  onStreamEndRef.current = onStreamEnd
   // getContext: optional callback that returns a Promise<object|null> with
   // the current app state snapshot. Called on the fresh-send path only (not
   // the queue path, which is already mid-turn). The result is serialized as a
@@ -431,25 +467,70 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         }
       }
       commitMessages(msgs, data.offset || 0)
+      if (data.running) {
+        setSending(true)
+      } else if (force) {
+        setSending(false)
+        sendingRef.current = false
+      }
+      setServerRunningState(!!data.running)
       setLiveQuestionId(data.pending_question_id || null)
       queryClient.setQueryData(chatMessagesQueryKey(chatId), (existing) => ({
         ...(existing || {}),
+        running: !!data.running,
+        pending_messages: data.pending_messages || [],
         pending_question_id: data.pending_question_id || null,
       }))
-      // Reconcile the pending queue against server state. hydrate is a
-      // MERGE: it preserves the client-side cid for any entry whose ts
-      // already exists locally (so QueuedMessages's expanded state
-      // doesn't remount under a fresh `s-${ts}` key), stamps a stable
-      // s-prefixed cid on previously-unseen server entries, AND keeps any
-      // optimistic-only entry whose own POST is still in flight (the
-      // server hasn't seen it yet). The last clause is what stops a
-      // reconcile-fetch — e.g. onStreamEnd's continues:false refetch
-      // racing a Stop-timeout resend's queueOnly POST — from dropping a
-      // just-re-queued message that is persisted server-side but not yet
-      // visible to this read.
+      // Reconcile pending queue against authoritative server state.
+      // hydrate() already preserves truly optimistic/in-flight local rows
+      // whose POST has not committed yet. Server-confirmed rows omitted from
+      // pending_messages have been consumed/cancelled/steered and must be
+      // dropped even while the agent turn is still running; preserving them
+      // creates ghost queue chips that cannot be fast-forwarded.
       pendingQueue.hydrate(data.pending_messages || [])
     } catch { /* network error — silent, user can retry */ }
-  }, [chatId, commitMessages, pendingQueue, queryClient])
+  }, [chatId, commitMessages, pendingQueue.hydrate, queryClient])
+
+  // Active-turn runtime reconciliation. The SSE stream is authoritative for
+  // assistant output, but queued-message affordances depend on the durable
+  // Chat.running + Chat.pending_messages fields. Mobile backgrounding, an
+  // old service-worker client, or a queue POST that acks without canonical
+  // pending_message can leave the mounted view showing a stale Stop button
+  // until some unrelated local event (like focusing the composer) causes a
+  // refresh. While a turn or visible queue exists, poll the small chat state
+  // payload and hydrate only runtime fields — do not replace the transcript.
+  const reconcileRuntimeState = useCallback(async () => {
+    const gen = fetchGenRef.current
+    try {
+      const res = await apiFetch(`/chats/${chatId}?limit=1`)
+      const data = await res.json()
+      if (chatIdStaleRef.current) return
+      if (fetchGenRef.current !== gen) return
+      const serverPending = data.pending_messages || []
+      if (data.running) {
+        setSending(true)
+      } else if (serverPending.length === 0) {
+        // Authoritative idle+empty runtime state must clear stale local busy
+        // state even if the tray still has a preserved/ghost row. Hydrate below
+        // runs without preserveMissing in this case and removes the row.
+        setSending(false)
+        sendingRef.current = false
+      }
+      setServerRunningState(!!data.running)
+      setLiveQuestionId(data.pending_question_id || null)
+      queryClient.setQueryData(chatMessagesQueryKey(chatId), (existing) => ({
+        ...(existing || {}),
+        running: !!data.running,
+        pending_messages: serverPending,
+        pending_question_id: data.pending_question_id || null,
+      }))
+      // Server pending_messages is authoritative for server-confirmed rows.
+      // The hook still preserves genuinely in-flight optimistic rows, so a
+      // queue POST racing this read stays visible; an already-confirmed row
+      // that disappeared from the server is gone and must not be resurrected.
+      pendingQueue.hydrate(serverPending)
+    } catch { /* background reconciliation is best-effort */ }
+  }, [chatId, pendingQueue.hydrate, pendingQueue.pendingMessagesRef, queryClient])
 
   const handleCompactionStored = useCallback(
     () => fetchMessages({ force: true }),
@@ -472,21 +553,19 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     onStreamEnd: ({ continues, promotedMessage } = {}) => {
       promoteStreamToMessages()
       if (continues) {
-        // Backend auto-promoted the queued follow-ups into one combined
-        // new turn. The local queue was already trimmed when the
+        // Backend auto-promoted queued follow-ups into the next turn. Newer
+        // backend code persists the visible rows separately while sending
+        // combined text to the provider; older code returned one combined row.
+        // The local queue was already trimmed when the
         // queued_turn_starting event arrived, so a message queued after
         // that event cannot be accidentally folded into this turn here.
         const localPromoted = queuedContinuationLocalPromotedRef.current
         queuedContinuationLocalPromotedRef.current = null
-        const promoted = promotedMessage || localPromoted
-        if (promoted) {
-          const {
-            queued: _q,
-            cid: _c,
-            position: _p,
-            _consumed_ts: _cts,
-            ...msg
-          } = promoted
+        const promotedRows = continuationRowsFromPromotedMessage(
+          promotedMessage,
+          localPromoted,
+        )
+        if (promotedRows.length > 0) {
           // A queued continuation is still a user send becoming the active
           // turn, so it follows the same send rule (see shouldPinSend):
           // pin only when first-or-at-bottom. Read the first-user check
@@ -496,17 +575,21 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           const contIsFirstUser = !messagesRef.current.some(
             m => m.role === 'user' && !m.hidden,
           )
-          const contWillPin = !!msg.ts && shouldPinSend({
+          const pinTargetTs = promotedRows[0]?.ts
+          const contWillPin = pinTargetTs != null && shouldPinSend({
             scrollEl: scrollRef.current,
             mode: modeRef.current,
             isFirstUserMsg: contIsFirstUser,
+            respectFollowMode: false,
           })
-          commitMessages(prev => [...prev, msg])
+          commitMessages(prev => appendMessageBatch(prev, promotedRows))
           promotedRef.current = false
+          setSpacerActive(true)
           if (contWillPin) {
-            setSpacerActive(true)
             if (spacerRef.current) spacerRef.current.style.height = '0px'
-            modeRef.current = { kind: 'PIN_USER_MSG', ts: msg.ts }
+            modeRef.current = { kind: 'PIN_USER_MSG', ts: pinTargetTs }
+          } else {
+            settleNonPinMode(modeRef, scrollRef.current)
           }
         } else {
           // Server's promoted ts isn't in our local queue (cancel raced
@@ -515,9 +598,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           fetchMessages({ force: true })
         }
         setSending(true)
+        setServerRunningState(true)
       } else {
         queuedContinuationLocalPromotedRef.current = null
         setSending(false)
+        setServerRunningState(false)
         // Stream ended without continuation. If we have local pending
         // entries, server may have cleared them (auth fail, error) —
         // refetch to reconcile. Skip when pending empty.
@@ -531,48 +616,120 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     onNeedsRefresh: fetchMessages,
     onQueuedTurnStarting: ({ ts, message } = {}) => {
       const consumedTs = message?._consumed_ts
-      queuedContinuationLocalPromotedRef.current = Array.isArray(consumedTs)
+      const serverRows = Array.isArray(message?._messages)
+        ? message._messages.map(stripInternalUserMessageFields).filter(Boolean)
+        : null
+      const localPromoted = Array.isArray(consumedTs)
         ? pendingQueue.promoteManyByTs(consumedTs)
         : pendingQueue.promoteAll(ts)
+      queuedContinuationLocalPromotedRef.current =
+        serverRows?.length ? serverRows : localPromoted
     },
     onLiveQuestion: setLiveQuestionId,
-    onSteeredIntoTurn: ({ ts, content }) => {
+    onSteeredIntoTurn: ({ ts, content, messages: steeredBatch }) => {
       // A send was injected mid-turn into a live turn (steering — fired for
       // both providers when Stop is pressed with a queued message). The
-      // backend persisted the user message in the transcript, so render it
-      // inline as a user message ABOVE the still-streaming assistant block
-      // (the streaming <li> renders after `messages`). This is content
-      // growth — do NOT re-arm the send-time spacer or pin the message to
-      // the viewport top; the ChatView scroll contract treats a mid-stream
-      // insertion as auto-follow growth (only snaps if the user is near the
-      // bottom), not a fresh send.
+      // backend seals the assistant text streamed so far, persists the user
+      // message, and then continues the assistant after that boundary. Mirror
+      // that exact shape locally: first promote the current live stream
+      // segment into `messages`, then append the steered user row, then let
+      // future text deltas build a fresh streaming assistant block.
       //
-      // Promote the pre-steer assistant text to its OWN message FIRST,
-      // while messages[-1] is still the in-flight assistant block (a kept
-      // bridge partial, or a fresh live stream). If the steered user
-      // message landed first, the end-of-turn promote would see it as the
-      // last message, take the APPEND path, and stack a new assistant block
-      // holding the pre-steer text AFTER it — while the kept bridge partial
-      // stayed in place — duplicating the streamed-so-far content (the
-      // reported Q / A1 / Q2 / A1-again / A2 bug). Promoting here REPLACEs
-      // the partial (or appends when there is none), clears the live stream
-      // items, and retires the bridge gate. Re-arming promotedRef lets the
-      // post-steer continuation promote as its own message after the steered
-      // turn on `done`. The hook flushes the typewriter buffer before
-      // calling this, so latestItemsRef already holds the complete
-      // pre-steer text.
-      promoteStreamToMessages()
-      promotedRef.current = false
+      // It still follows the USER-SEND scroll rule: if the reader was at the
+      // bottom when they tapped fast-forward, the steered message pins to the
+      // top and gets the same bottom spacer as a normal send. If the reader
+      // was scrolled up, leave them anchored. Earlier code treated steering
+      // as generic content growth and never armed the spacer, so fast-forward
+      // could work while the message stayed low in the viewport with no
+      // reserved room below it.
+      //
+      const pinIntent = steerPinIntentRef.current
+      const steeredMessages = Array.isArray(steeredBatch) && steeredBatch.length > 0
+        ? steeredBatch.map((m, i) => ({
+            role: 'user',
+            content: m?.content || '',
+            ts: m?.ts ?? (ts != null ? ts + i : Date.now() + i),
+            ...(m?.attachments ? { attachments: m.attachments } : {}),
+          }))
+        : [{ role: 'user', content, ts: ts ?? Date.now() }]
+      const pinTargetTs = steeredMessages[0]?.ts
+      promoteStreamToMessages({ keepTurnOpen: true })
+      // Pin decision is intentionally recomputed at the moment the steered
+      // row becomes visible. The reader may have scrolled after tapping the
+      // button or while the queued POST was in flight; using an old at-bottom
+      // snapshot would yank a scrolled-up reader back to the new message.
+      const steeredIsFirstUser = !messagesRef.current.some(
+        m => m.role === 'user' && !m.hidden,
+      )
+      const pinStillValid = !!pinIntent
+      const shouldPinSteered = pinTargetTs != null && pinStillValid
+        && shouldPinSend({
+          scrollEl: scrollRef.current,
+          mode: modeRef.current,
+          isFirstUserMsg: steeredIsFirstUser,
+          respectFollowMode: false,
+        })
       // Dedup by ts so a reconnect's catch-up replay of the same event
       // can't double-insert the steered user message.
       commitMessages(prev => {
-        if (ts != null && prev.some(m => m.ts === ts)) return prev
-        return [...prev, { role: 'user', content, ts: ts ?? Date.now() }]
+        const seenTs = new Set(prev.map(m => m.ts).filter(v => v != null))
+        const nextRows = steeredMessages.filter(m => {
+          if (m.ts == null) return true
+          if (seenTs.has(m.ts)) return false
+          seenTs.add(m.ts)
+          return true
+        })
+        if (nextRows.length === 0) return prev
+        return [...prev, ...nextRows]
       })
+      setSpacerActive(true)
+      if (shouldPinSteered) {
+        if (spacerRef.current) spacerRef.current.style.height = '0px'
+        modeRef.current = { kind: 'PIN_USER_MSG', ts: pinTargetTs }
+      } else if (pinStillValid) {
+        settleNonPinMode(modeRef, scrollRef.current)
+      }
+      steerPinIntentRef.current = null
     },
   })
 
-  const { files: pendingFiles, addFiles, removeFile, clearFiles } = useFileUpload({ chatId })
+  const ensureRuntimeStreamConnected = useCallback(() => {
+    if (!serverRunningRef.current) return
+    if (isStreamingRef.current) return
+    if (runtimeReconnectInFlightRef.current) return
+
+    runtimeReconnectInFlightRef.current = true
+    // The durable chat row can say "running" while this mounted mobile
+    // client has no live SSE attached: Android can pause/kill the fetch
+    // during app switch, network handoff, or a shell rebuild. Reconnect
+    // from the server verdict instead of waiting for a full remount.
+    Promise.resolve(connectToStream(true))
+      .catch(() => {})
+      .finally(() => {
+        runtimeReconnectInFlightRef.current = false
+      })
+  }, [connectToStream, isStreamingRef])
+
+  const {
+    files: pendingFiles,
+    addFiles,
+    removeFile,
+    clearFiles,
+    restoreFiles,
+    releaseFiles,
+  } = useFileUpload({ chatId })
+
+  function restoreComposerText(text) {
+    setInput(text)
+    requestAnimationFrame(() => {
+      const el = inputRef.current
+      if (!el) return
+      el.style.height = 'auto'
+      const h = Math.min(el.scrollHeight, 280)
+      el.style.height = `${h}px`
+      el.closest('.chat__pill')?.classList.toggle('chat__pill--tall', h > 45)
+    })
+  }
 
   const { listening, listeningRef, stopVoice, toggleVoice } = useVoiceInput({
     onTranscript: (text) => setInput(text),
@@ -597,86 +754,31 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // would duplicate the in-flight content in the final transcript.
   // APPEND otherwise (the normal first-time send path: `prev` ends in
   // a user message, the assistant message hasn't been committed yet).
-  function promoteStreamToMessages() {
-    if (promotedRef.current) return
+  function promoteStreamToMessages({ keepTurnOpen = false } = {}) {
+    if (promotedRef.current && !keepTurnOpen) return
     const items = latestItemsRef.current
     if (items.length === 0) return
     promotedRef.current = true
-    const blocks = items.map(item => {
-      if (item.type === 'text') return { type: 'text', content: item.content }
-      if (item.type === 'question') {
-        return {
-          type: 'question',
-          questions: item.questions,
-          ...(item.question_id ? { question_id: item.question_id } : {}),
-          // Carry optimistic answers that landed in streamItems via
-          // patchQuestionAnswers so the promoted block shows the answered
-          // state immediately, before the backend round-trip confirms.
-          ...(item.answers ? { answers: item.answers } : {}),
-        }
-      }
-      if (item.type === 'error') return { type: 'error', message: item.message }
-      const status = item.status === 'running' ? 'done' : item.status
-      return { type: 'tool', ...item, status }
-    })
-    const content = items
-      .filter(i => i.type === 'text')
-      .map(i => i.content)
-      .filter(Boolean)
-      // Text runs separated by tools/status updates are distinct assistant
-      // blocks. Joining with '' collapses progress messages into
-      // "done.next"; preserve a paragraph break in the legacy content
-      // string while keeping structured blocks unchanged.
-      .join('\n\n')
-    // Decide REPLACE-vs-APPEND on the live last message and retire
-    // the bridge gate (one-shot — next turn always appends, even if
-    // it streams through the same chat without remount).
-    const isBridge = bridgeHook.shouldBridge(
-      messagesRef.current[messagesRef.current.length - 1]
-    )
+
+    // Decide REPLACE-vs-APPEND against the captured mounted partial.
+    // Usually that partial is still the last message. Fast-forward is the
+    // exception: it inserts a steered user row below the still-live partial,
+    // and the active stream continues after that row. The bridge must still
+    // replace the original partial by ts instead of appending duplicated
+    // assistant text below the steered row.
+    const bridgeIdx = bridgeHook.findBridgeIndex(messagesRef.current)
+    const trailingIdx = bridgeIdx >= 0 ? -1 : findTrailingAssistantPartialIndex(messagesRef.current)
+    const bridgeTs = bridgeIdx >= 0
+      ? messagesRef.current[bridgeIdx]?.ts
+      : (trailingIdx >= 0 && assistantStreamCoversMessage(messagesRef.current[trailingIdx], items)
+          ? messagesRef.current[trailingIdx]?.ts
+          : null)
     bridgeHook.markBridged()
-    commitMessages(prev => {
-      const last = prev[prev.length - 1]
-      if (isBridge && last?.role === 'assistant') {
-        // BRIDGE case: we mounted with a DB partial that we KEPT, and
-        // this is the same in-flight turn finishing. Replace the
-        // partial with the freshly-promoted version, preserving id/ts
-        // so the <li>'s data-key stays stable.
-        //
-        // ANSWER PRESERVATION: question-block answers live INSIDE the
-        // block (block.answers), not at the message level. The catch-
-        // up streamItems re-emits the question event WITHOUT answers
-        // (the backend doesn't include them in the SSE replay — they
-        // live in chat.messages, not in the per-turn event stream).
-        // If we blindly replace blocks, any answers the user submitted
-        // before navigating away (which ARE persisted in the DB and
-        // came back in our fetch) would be wiped on this promote.
-        //
-        // Match by question identity (shared questionKey helper —
-        // mirrors backend/app/events.py:question_block_key), NOT by
-        // block index. A duplicate-card hiccup mid-stream can shift
-        // positions between live streamItems and the persisted
-        // message; position-match would either drop answers or paste
-        // them onto the wrong card. Identity-match survives any
-        // intervening block reshuffles.
-        const existingAnswersByKey = new Map()
-        for (const ob of last.blocks || []) {
-          if (ob?.type === 'question' && ob.answers) {
-            existingAnswersByKey.set(questionKey(ob), ob.answers)
-          }
-        }
-        const mergedBlocks = blocks.map(nb => {
-          if (nb.type !== 'question' || nb.answers) return nb
-          const carried = existingAnswersByKey.get(questionKey(nb))
-          return carried ? { ...nb, answers: carried } : nb
-        })
-        const merged = { ...last, content, blocks: mergedBlocks }
-        return [...prev.slice(0, -1), merged]
-      }
-      // Normal multi-turn flow: append a fresh assistant message.
-      // No ts on this one — it'll get one from the DB on next fetch.
-      return [...prev, { role: 'assistant', content, blocks }]
-    }, undefined, { force: true })
+    commitMessages(
+      prev => promoteAssistantStream(prev, { items, bridgeTs }),
+      undefined,
+      { force: true },
+    )
     // force=true bypasses sameMessageList. In the BRIDGE merge path
     // the new (catch-up) blocks may be structurally identical to the
     // kept DB-partial blocks (backend's throttled save was recent +
@@ -694,6 +796,12 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     // would otherwise clear streamItems — the user sees a duplicate
     // flash on every queued-continuation turn.
     clearStreamItems?.()
+    if (keepTurnOpen) {
+      // Steering is a semantic boundary INSIDE the still-running turn. The
+      // pre-steer assistant segment has just been sealed, but the post-steer
+      // continuation must still be promotable on the eventual `done` event.
+      promotedRef.current = false
+    }
   }
 
   // Persist draft so it survives leaving and re-entering the chat.
@@ -819,10 +927,13 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         }
 
         commitMessages(msgs, data.offset || 0)
+        setServerRunningState(!!data.running)
         hadMessagesRef.current = msgs.length > 0
         setLiveQuestionId(data.pending_question_id || null)
         queryClient.setQueryData(chatMessagesQueryKey(chatId), (existing) => ({
           ...(existing || {}),
+          running: !!data.running,
+          pending_messages: data.pending_messages || [],
           pending_question_id: data.pending_question_id || null,
         }))
         // Snapshot the per-chat runtime config so ChatSettingsPanel
@@ -849,14 +960,17 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         setLoading(false)
 
         // Hydrate pending queue from backend so a reload mid-queue
-        // doesn't drop the visible "queued" tray. hydrate stamps a
-        // stable s-prefixed cid on each entry so QueuedMessages's
-        // expanded state survives future re-renders.
+        // doesn't drop the visible "queued" tray. The server list is
+        // authoritative for confirmed rows; hydrate() still preserves
+        // optimistic in-flight rows if a queue POST is racing this fetch.
         pendingQueue.hydrate(data.pending_messages || [])
 
         if (data.running) {
           setSending(true)
           connectToStream(false)
+        } else {
+          setSending(false)
+          sendingRef.current = false
         }
       })
       .catch(() => {
@@ -983,6 +1097,15 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     // after we clear it.
     if (listeningRef.current) stopVoiceRef.current?.()
 
+    // Capture bottom intent BEFORE blurring the textarea. On mobile,
+    // blur collapses the soft keyboard and can resize/clamp the visual
+    // viewport before we compute the send rule; if we measure after
+    // blur, a reader who was genuinely at the bottom can be misread as
+    // scrolled up and the new user message won't pin to the top.
+    const wasNearScrollBottomAtSubmit = scrollRef.current
+      ? isNearScrollBottom(scrollRef.current)
+      : null
+
     // On touch devices, blur to dismiss the soft keyboard. Desktop keeps
     // focus so the cursor stays ready for the next message.
     if (_isTouchPrimary) inputRef.current?.blur()
@@ -990,11 +1113,28 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     // Callers can pre-supply attachments (e.g. handleStop collapsing
     // a queue that had files attached to queued items). When provided,
     // they replace the pendingFiles-derived list so data isn't lost.
+    const usesComposerFiles = !Array.isArray(opts.attachments)
+    const composerFileSnapshot = usesComposerFiles ? [...pendingFiles] : []
     const attachments = Array.isArray(opts.attachments)
       ? opts.attachments
       : pendingFiles
           .filter(f => f.status === 'done')
           .map(f => ({ name: f.name, size: f.size, mime_type: f.mime_type }))
+
+    function clearComposerFilesForSend() {
+      if (!usesComposerFiles) return
+      // Hide the chips immediately for normal send UX, but do NOT revoke image
+      // object URLs until the POST is accepted. A transient network failure must
+      // restore the full composer state (text + staged files), not just text.
+      clearFiles({ revoke: false })
+    }
+    function releaseComposerFilesAfterAccepted() {
+      if (usesComposerFiles) releaseFiles(composerFileSnapshot)
+    }
+    function restoreComposerAfterFailedSend() {
+      restoreComposerText(text)
+      if (usesComposerFiles) restoreFiles(composerFileSnapshot)
+    }
 
     // QUEUE PATH: agent is streaming or queue isn't empty. Optimistic
     // entry with a stable client-side `cid` (UUID) that survives the
@@ -1010,6 +1150,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     if (
       sendingRef.current
       || isStreamingRef.current
+      || serverRunningRef.current
       || pendingQueue.pendingMessagesRef.current.length > 0
     ) {
       const cid = (typeof crypto !== 'undefined' && crypto.randomUUID)
@@ -1035,9 +1176,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         scrollEl: scrollRef.current,
         mode: modeRef.current,
         isFirstUserMsg: queuedIsFirstUser,
+        wasNearScrollBottom: wasNearScrollBottomAtSubmit,
       })
       setInput('')
-      clearFiles()
+      clearComposerFilesForSend()
       if (inputRef.current) {
         inputRef.current.style.height = 'auto'
         // Drop the multi-line `.chat__pill--tall` class so send/mic
@@ -1057,36 +1199,50 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           attachments.length > 0 ? attachments : undefined,
           { queueOnly: true },
         )
+        releaseComposerFilesAfterAccepted()
         if (result?.status === 'queued') {
+          const canonicalPending = result.pending_message || null
           // Replace optimistic ts with server's (cid is stable).
           pendingQueue.swapOptimisticTs(
-            queuedMsg.cid, result.ts ?? queuedMsg.ts, result.position,
+            queuedMsg.cid,
+            canonicalPending?.ts ?? result.ts ?? queuedMsg.ts,
+            result.position,
+            canonicalPending,
+            { confirmed: !!canonicalPending },
           )
+          if (!canonicalPending) {
+            // Older backends acknowledge only {ts, position}. Hydrate
+            // immediately so the queued row uses the server's canonical text
+            // before the user taps fast-forward; otherwise upload/context
+            // augmentation can make force-steer reject until a remount.
+            fetchMessages({ force: true })
+          }
           if (result.started) {
             if (Array.isArray(result.message?._consumed_ts)) {
               pendingQueue.promoteManyByTs(result.message._consumed_ts)
             }
-            const startedMessage = startedMessageFromResponse(result)
-            if (startedMessage) {
-              commitMessages(prev => [...prev, startedMessage])
+            const startedMessages = startedMessagesFromResponse(result)
+            if (startedMessages) {
+              commitMessages(prev => appendMessageBatch(prev, startedMessages))
             }
             onMessageStartRef.current?.()
             promotedRef.current = false
             setSending(true)
+            setServerRunningState(true)
             // The queued send was promoted straight into the active turn,
             // so it's a new visible user message and follows the send rule
             // just like a fresh send. Use the at-send-time decision
             // (captured before the await) and yield to a user scroll that
-            // changed the mode during the POST. Pin keys to the SERVER ts:
-            // the rendered row carries data-ts from startedMessage.ts, not
-            // the optimistic queuedMsg.ts.
+            // changed the mode during the POST. Pin keys to the first SERVER
+            // ts from the promoted batch, not the optimistic queuedMsg.ts.
             const pinStillValid = modeRef.current === queuedModeAtSend
+            const pinTargetTs = startedMessages?.[0]?.ts ?? queuedMsg.ts
+            setSpacerActive(true)
             if (queuedWillPin && pinStillValid) {
-              setSpacerActive(true)
               if (spacerRef.current) spacerRef.current.style.height = '0px'
               modeRef.current = {
                 kind: 'PIN_USER_MSG',
-                ts: startedMessage?.ts ?? queuedMsg.ts,
+                ts: pinTargetTs,
               }
             } else if (pinStillValid) {
               settleNonPinMode(modeRef, scrollRef.current)
@@ -1117,27 +1273,27 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           // time (before the await): reading scrollRef/modeRef HERE would
           // let a scroll during the POST flip it. `pinStillValid` yields to
           // a user-driven mode change that landed during the await.
-          const startedMessage = startedMessageFromResponse(result)
+          const startedMessages = startedMessagesFromResponse(result)
           commitMessages(prev => {
-            if (startedMessage) return [...prev, startedMessage]
+            if (startedMessages) return appendMessageBatch(prev, startedMessages)
             const { queued: _q, cid: _c, position: _p, ...msg } = queuedMsg
-            return [...prev, msg]
+            return appendMessageBatch(prev, [msg])
           })
           setSending(true)
+          setServerRunningState(true)
           // New visible user msg → pin to the top only when the rule
           // allows; otherwise convert any stale pin to the reader's
           // ANCHOR_AT (see settleNonPinMode) so the reader stays put with
-          // no phantom spacer. Pin keys to the SERVER ts: the rendered row
-          // carries data-ts from startedMessage.ts, so keying to the
-          // optimistic queuedMsg.ts makes applyMode's selector miss and the
-          // pin silently fail.
+          // reservation still available below. Pin keys to the first SERVER
+          // ts when available; otherwise fall back to the optimistic ts.
           const startedPinStillValid = modeRef.current === queuedModeAtSend
+          const pinTargetTs = startedMessages?.[0]?.ts ?? queuedMsg.ts
+          setSpacerActive(true)
           if (queuedWillPin && startedPinStillValid) {
-            setSpacerActive(true)
             if (spacerRef.current) spacerRef.current.style.height = '0px'
             modeRef.current = {
               kind: 'PIN_USER_MSG',
-              ts: startedMessage?.ts ?? queuedMsg.ts,
+              ts: pinTargetTs,
             }
           } else if (startedPinStillValid) {
             settleNonPinMode(modeRef, scrollRef.current)
@@ -1164,10 +1320,14 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       } catch (err) {
         // Roll back optimistic + restore input.
         pendingQueue.cancelByCid(queuedMsg.cid)
-        setInput(text)
+        restoreComposerAfterFailedSend()
         commitMessages(prev => [
           ...prev,
-          { role: 'assistant', content: `Error: ${err.message}`, blocks: [] },
+          {
+            role: 'assistant',
+            content: `Message didn’t send. I put it back in the composer so you can try again.`,
+            blocks: [],
+          },
         ])
       }
       return
@@ -1190,13 +1350,14 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       scrollEl: scrollRef.current,
       mode: modeRef.current,
       isFirstUserMsg,
+      wasNearScrollBottom: wasNearScrollBottomAtSubmit,
     })
 
     const userMsg = { role: 'user', content: text, ts: Date.now() }
     if (attachments.length > 0) userMsg.attachments = attachments
     commitMessages(prev => [...prev, userMsg])
     setInput('')
-    clearFiles()
+    clearComposerFilesForSend()
     if (inputRef.current) {
       inputRef.current.style.height = 'auto'
       // Drop the multi-line `.chat__pill--tall` class — see queue-path
@@ -1204,19 +1365,18 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       inputRef.current.closest('.chat__pill')?.classList.remove('chat__pill--tall')
     }
     setSending(true)
-    // Pin to top only when the rule allows. When not pinning the user is
-    // reading (scrolled up) — the send must be a no-op for scroll/spacer,
-    // so leave the spacer state and height alone, BUT convert any stale
-    // PIN_USER_MSG (from an earlier send) into the reader's current
-    // ANCHOR_AT: otherwise _computeSpacerH keeps gating the pin-spacer on
-    // that stale pin and sizes phantom room against THIS new message,
-    // shifting the reader. (Activating/zeroing the spacer on a non-pin was
-    // the latent pin:false leak Codex flagged; the phantom spacer is the
-    // stale-mode follow-on.) The fresh path returns {status:'started'}
-    // with no server message, so the optimistic userMsg.ts is also the
-    // rendered data-ts — keying the pin to it is correct here.
+    setServerRunningState(true)
+    // Pin to top only when the rule allows. Reservation is separate:
+    // every visible user send activates the dynamic bottom spacer, but
+    // only first-or-at-bottom sends mutate scrollTop to PIN_USER_MSG.
+    // When not pinning the user is reading (scrolled up), so convert any
+    // stale PIN_USER_MSG from an earlier send into the reader's current
+    // ANCHOR_AT and leave their viewport fixed. The fresh path returns
+    // {status:'started'} with no server message, so the optimistic
+    // userMsg.ts is also the rendered data-ts — keying the pin to it is
+    // correct here.
+    setSpacerActive(true)
     if (willPin) {
-      setSpacerActive(true)
       if (spacerRef.current) spacerRef.current.style.height = '0px'
       modeRef.current = { kind: 'PIN_USER_MSG', ts: userMsg.ts }
     } else {
@@ -1249,7 +1409,9 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
     try {
       const result = await streamSend(sendText, attachments.length > 0 ? attachments : undefined)
+      releaseComposerFilesAfterAccepted()
       if (result?.status === 'queued') {
+        const canonicalPending = result.pending_message || null
         commitMessages(prev => {
           const next = [...prev]
           const idx = findOptimisticUserIndex(next, userMsg.ts)
@@ -1257,33 +1419,41 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           return next
         })
         pendingQueue.add({
-          ...userMsg,
-          ts: result.ts ?? userMsg.ts,
-          cid: `s-${result.ts ?? userMsg.ts}`,
+          ...(canonicalPending || userMsg),
+          ts: canonicalPending?.ts ?? result.ts ?? userMsg.ts,
+          cid: canonicalPending
+            ? `s-${canonicalPending.ts ?? result.ts ?? userMsg.ts}`
+            : `q-${userMsg.ts}`,
           queued: true,
+          serverTs: !!canonicalPending,
           position: result.position,
         })
+        if (!canonicalPending) {
+          // Same compatibility path as the queue-only branch: reconcile the
+          // visible queued tray with the server's exact pending row before
+          // fast-forward can compare against stale local text.
+          fetchMessages({ force: true })
+        }
         if (result.started) {
           if (Array.isArray(result.message?._consumed_ts)) {
             pendingQueue.promoteManyByTs(result.message._consumed_ts)
           }
-          const startedMessage = startedMessageFromResponse(result)
-          if (startedMessage) {
-            commitMessages(prev => [...prev, startedMessage])
+          const startedMessages = startedMessagesFromResponse(result)
+          if (startedMessages) {
+            commitMessages(prev => appendMessageBatch(prev, startedMessages))
           }
           return
         }
-        if (!result.started) setSending(false)
+        if (!result.started) {
+          setSending(false)
+          setServerRunningState(false)
+        }
         return
       }
-      const startedMessage = startedMessageFromResponse(result)
-      if (startedMessage) {
+      const startedMessages = startedMessagesFromResponse(result)
+      if (startedMessages) {
         commitMessages(prev => {
-          const next = [...prev]
-          const idx = findOptimisticUserIndex(next, userMsg.ts)
-          if (idx >= 0) next[idx] = startedMessage
-          else next.push(startedMessage)
-          return next
+          return replaceOptimisticWithBatch(prev, userMsg.ts, startedMessages)
         })
       }
       if (!hadMessagesRef.current) {
@@ -1292,10 +1462,25 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       }
     } catch (err) {
       setSending(false)
-      commitMessages(prev => [
-        ...prev,
-        { role: 'assistant', content: `Error: ${err.message}`, blocks: [] },
-      ])
+      sendingRef.current = false
+      setServerRunningState(false)
+      restoreComposerAfterFailedSend()
+      // The POST never reached/finished on the server, so remove the optimistic
+      // user bubble and keep the text in the composer. Otherwise a transient
+      // "Failed to fetch" looks like the message was accepted locally but
+      // silently disappears from the durable chat after refresh.
+      commitMessages(prev => {
+        const next = [...prev]
+        const idx = findOptimisticUserIndex(next, userMsg.ts)
+        if (idx >= 0) next.splice(idx, 1)
+        next.push({
+          role: 'assistant',
+          content: `Message didn’t send. I put it back in the composer so you can try again.`,
+          blocks: [],
+        })
+        return next
+      })
+      onStreamEndRef.current?.({ continues: false })
     }
     // doSend doesn't need `sending` / `isStreaming` in deps anymore —
     // the guard reads sendingRef/isStreamingRef, and refs are stable.
@@ -1306,7 +1491,15 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     // identities. Dropping all of these from deps avoids needlessly
     // re-creating doSend on every stream tick (and avoids the
     // stale-closure trap for callers like handleStop).
-  }, [streamSend, pendingFiles, commitMessages, clearFiles])
+  }, [
+    streamSend,
+    pendingFiles,
+    commitMessages,
+    fetchMessages,
+    clearFiles,
+    restoreFiles,
+    releaseFiles,
+  ])
 
   // Sends the answer without a visible user message bubble.
   // Sends the answer to an AskUserQuestion as a hidden user message.
@@ -1373,6 +1566,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     }
 
     setSending(true)
+    setServerRunningState(true)
     // doSendSilent starts a NEW hidden turn (the answer-followup).
     // The bridge gate may still be live if mount kept a DB partial
     // and the user submitted an answer before that partial's done
@@ -1395,6 +1589,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       if (questionId) setLiveQuestionId(prev => prev === questionId ? null : prev)
     } catch (err) {
       setSending(false)
+      setServerRunningState(false)
       if (err.message === 'HTTP 410') {
         // The pending question is stale — the backend process restarted and
         // the in-memory future is gone. Backend reconcile_interrupted_chats
@@ -1476,7 +1671,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       const queuedTexts = queuedSnapshot
         .map(m => (m.content || '').trim())
         .filter(Boolean)
-      const combined = queuedTexts.join('\n\n')
+      const combined = queuedTexts.join('\n')
       const seenNames = new Set()
       const combinedAttachments = []
       for (const m of queuedSnapshot) {
@@ -1600,6 +1795,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       disconnect({ clearStreaming: true })
       promoteStreamToMessages()
       setSending(false)
+      setServerRunningState(false)
       // Sync sendingRef to the just-committed state so the synchronous
       // doSend(resendText) call below reads the post-stop value.
       // setSending(false) queues a render — the next render will write
@@ -1671,26 +1867,37 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       // (canSteer below) keeps the fast-forward hidden until then, so this
       // is belt-and-suspenders — if a stray optimistic entry slips in, bail
       // and leave the queue intact (it drains at turn-end as usual).
-      const allServerConfirmed = snapshot.length > 0 && snapshot.every(
+      // Before bailing, run one forced runtime reconcile: a mounted mobile
+      // client can have visible queued rows whose serverTs flag is stale
+      // until focus/new input wakes a fetch. If hydrate confirms them, retry
+      // from the now-canonical snapshot in the same tap.
+      if (snapshot.length > 0 && !snapshot.every(
+        m => typeof m.ts === 'number' && m.serverTs === true,
+      )) {
+        await reconcileRuntimeState()
+      }
+      const confirmedSnapshot = pendingQueue.pendingMessagesRef.current
+      const allServerConfirmed = confirmedSnapshot.length > 0 && confirmedSnapshot.every(
         m => typeof m.ts === 'number' && m.serverTs === true,
       )
       if (!allServerConfirmed) return
 
       // Build content EXACTLY as the backend expects: the non-empty
-      // trimmed contents joined by "\n\n", in pending order. This must
+      // trimmed contents joined by "\n", in pending order. This must
       // byte-match _force_steer_matches_pending's `expected` or the
       // request is rejected (not_steered). consume_pending_ts is every
       // snapshot entry's ts (the backend selects pending rows by this set
       // and rebuilds the same join over them).
-      const steerTexts = snapshot
+      const steerTexts = confirmedSnapshot
         .map(m => (m.content || '').trim())
         .filter(Boolean)
-      const content = steerTexts.join('\n\n')
-      const consumePendingTs = snapshot.map(m => m.ts)
+      const content = steerTexts.join('\n')
+      const legacyContent = steerTexts.join('\n\n')
+      const consumePendingTs = confirmedSnapshot.map(m => m.ts)
       // De-dupe attachments by name, exactly like handleStop/resolveStopResend.
       const seenNames = new Set()
       const attachments = []
-      for (const m of snapshot) {
+      for (const m of confirmedSnapshot) {
         for (const a of (m.attachments || [])) {
           if (a && a.name && !seenNames.has(a.name)) {
             seenNames.add(a.name)
@@ -1701,10 +1908,42 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       if (!content) return
 
       try {
-        const result = await streamSend(content, attachments, {
+        steerPinIntentRef.current = { inFlight: true }
+        let result = await streamSend(content, attachments, {
           forceSteer: true,
           consumePendingTs,
+          steeredMessages: confirmedSnapshot.map(m => ({
+            ts: m.ts,
+            content: m.content || '',
+            ...(m.attachments ? { attachments: m.attachments } : {}),
+          })),
         })
+        // Backward compatibility for a running backend process that has not
+        // restarted since the queue separator fix. New code expects "\n";
+        // old code expects "\n\n". Retry only after a clean not_steered
+        // response and only when the local queue still contains exactly the
+        // same server-confirmed ts set, so a race cannot double-send.
+        if (
+          result?.status === 'not_steered'
+          && legacyContent !== content
+          && consumePendingTs.length > 1
+        ) {
+          const currentTs = pendingQueue.pendingMessagesRef.current.map(m => m.ts)
+          const sameQueue = currentTs.length === consumePendingTs.length
+            && currentTs.every((ts, i) => ts === consumePendingTs[i])
+          if (sameQueue) {
+            steerPinIntentRef.current = { inFlight: true }
+            result = await streamSend(legacyContent, attachments, {
+              forceSteer: true,
+              consumePendingTs,
+              steeredMessages: confirmedSnapshot.map(m => ({
+                ts: m.ts,
+                content: m.content || '',
+                ...(m.attachments ? { attachments: m.attachments } : {}),
+              })),
+            })
+          }
+        }
         if (result?.status === 'steered') {
           // The steered rows now render inline (onSteeredIntoTurn promotes
           // them from the SSE event + transcript). Drop them from the local
@@ -1716,11 +1955,15 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             for (const ts of consumePendingTs) pendingQueue.cancelByTs(ts)
           }
         }
+        if (result?.status !== 'steered') {
+          steerPinIntentRef.current = null
+        }
         // not_steered (the turn closed between the gate and the POST) or any
         // other status: leave the queue intact. The backend kept the
         // messages queued and they drain at turn-end — surface nothing
         // scary, the tray simply stays until the natural drain.
       } catch {
+        steerPinIntentRef.current = null
         // Network/POST error — leave the queue intact for the turn-end drain.
       }
     } finally {
@@ -1728,25 +1971,106 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     }
   }
 
-  // Whether the fast-forward (steer) affordance can fire right now: a turn
-  // is streaming, there is at least one queued message, and every queued
-  // entry is serverTs-confirmed (see allServerConfirmed in handleSteer for
-  // why optimistic-only entries can't be force-steered). When false but
-  // messages ARE queued, the bar keeps the Stop button — the user can still
-  // hard-stop, and can clear the queue via the tray's X (which reverts to
-  // plain Stop once empty). Stop is never silently removed.
-  const canSteer = sending
-    && pendingQueue.pendingMessages.length > 0
-    && pendingQueue.pendingMessages.every(
-      m => typeof m.ts === 'number' && m.serverTs === true,
-    )
+  // Show the fast-forward affordance as soon as queued work exists during an
+  // active turn. handleSteer remains the hard gate: it performs one forced
+  // runtime reconcile and only force-steers server-confirmed rows. This keeps
+  // the quick-tap path on "steer" instead of momentarily exposing destructive
+  // Stop while the queue POST ack is still catching up.
+  const turnActive = sending || isStreaming || serverRunning
+  useEffect(() => {
+    function freezeStreamingReturn() {
+      if (typeof document !== 'undefined'
+          && document.visibilityState
+          && document.visibilityState !== 'visible') {
+        return
+      }
+      if (!turnActive) return
+      const anchor = anchorModeFromScroll(scrollRef.current)
+      if (anchor) modeRef.current = anchor
+    }
+
+    document.addEventListener('visibilitychange', freezeStreamingReturn)
+    window.addEventListener('pageshow', freezeStreamingReturn)
+    window.addEventListener('online', freezeStreamingReturn)
+    return () => {
+      document.removeEventListener('visibilitychange', freezeStreamingReturn)
+      window.removeEventListener('pageshow', freezeStreamingReturn)
+      window.removeEventListener('online', freezeStreamingReturn)
+    }
+  }, [turnActive, modeRef])
+
+  // Composer action state: queued work is also non-idle from the user's point
+  // of view. Even if we momentarily don't have a live stream attached yet, a
+  // visible queue must keep the primary action on Stop/Send-now, never Mic.
+  // Fast-forward is stricter: it appears only when the click can actually
+  // steer a live turn with server-confirmed pending rows. Optimistic rows stay
+  // visible in the tray but do not expose an inert fast-forward button.
+  const composerBusy = turnActive || pendingQueue.pendingMessages.length > 0
+  const canSteer = canFastForwardQueue(pendingQueue.pendingMessages, turnActive)
+
+  useEffect(() => {
+    const hasQueue = pendingQueue.pendingMessages.length > 0
+    if (!turnActive && !hasQueue) return
+    let cancelled = false
+    const run = () => {
+      if (cancelled) return
+      reconcileRuntimeState().finally(() => {
+        if (!cancelled) ensureRuntimeStreamConnected()
+      })
+    }
+    run()
+    const intervalMs = hasQueue ? 1000 : 3000
+    const timer = setInterval(run, intervalMs)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') run()
+    }
+    window.addEventListener('focus', run)
+    window.addEventListener('pageshow', run)
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+      window.removeEventListener('focus', run)
+      window.removeEventListener('pageshow', run)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [
+    ensureRuntimeStreamConnected,
+    turnActive,
+    pendingQueue.pendingMessages.length,
+    reconcileRuntimeState,
+  ])
+
+  useEffect(() => {
+    let cancelled = false
+    const run = () => {
+      if (cancelled) return
+      reconcileRuntimeState().finally(() => {
+        if (!cancelled) ensureRuntimeStreamConnected()
+      })
+    }
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') run()
+    }
+    window.addEventListener('focus', run)
+    window.addEventListener('pageshow', run)
+    window.addEventListener('online', run)
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      cancelled = true
+      window.removeEventListener('focus', run)
+      window.removeEventListener('pageshow', run)
+      window.removeEventListener('online', run)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [ensureRuntimeStreamConnected, reconcileRuntimeState])
 
   const hasMore = offset > 0
   // Empty-state is the "I have nothing to show because nothing happened
   // yet" view. If the initial chat fetch errored, we have no idea
   // whether the chat is empty — surfacing that branch separately keeps
   // us from lying with "What's on your mind?" over a network failure.
-  const showEmpty = !loadError && messages.length === 0 && !isStreaming && !loading && !sending
+  const showEmpty = !loadError && messages.length === 0 && !turnActive && !loading
 
   // Collect the question keys currently live in streamItems so MsgContent
   // can suppress any persisted question block that is already rendered by
@@ -1755,39 +2079,64 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // streamItems, BOTH the persisted message row AND the streaming <li>
   // render the card — the duplicate is impossible by construction when
   // MsgContent skips blocks whose key is already in streamItems.
-  const streamItemQuestionKeys = (sending && streamItems.length > 0)
+  const streamItemQuestionKeys = (turnActive && streamItems.length > 0)
     ? new Set(
         streamItems
           .filter(it => it.type === 'question')
           .map(it => questionKey(it))
       )
     : null
-  const showLoadError = loadError && messages.length === 0 && !loading && !sending
+  const showLoadError = loadError && messages.length === 0 && !loading && !turnActive
   const lastUserIdx = messages.reduce((acc, m, i) => (m.role === 'user' && !m.hidden) ? i : acc, -1)
+  const bridgeMsgIdx = (turnActive && streamItems.length > 0)
+    ? bridgeHook.findBridgeIndex(messages)
+    : -1
+  const trailingAssistantPartialIdx = (turnActive && streamItems.length > 0)
+    ? findTrailingAssistantPartialIndex(messages)
+    : -1
+  const activePartialMsgIdx = bridgeMsgIdx >= 0 ? bridgeMsgIdx : trailingAssistantPartialIdx
+  const activePartialMsg = activePartialMsgIdx >= 0 ? messages[activePartialMsgIdx] : null
+  const liveStreamCoversPartial = activePartialMsg
+    ? assistantStreamCoversMessage(activePartialMsg, streamItems)
+    : false
+  const partialCoversLiveStream = activePartialMsg
+    ? messageCoversAssistantStream(activePartialMsg, streamItems)
+    : false
+  // Single-surface invariant for active assistant partials:
+  // - if the live stream is at least as fresh as the saved DB partial, hide the
+  //   DB row and render StreamingMessage; final promotion replaces that row.
+  // - if the DB partial is richer than a stale cached stream snapshot (e.g.
+  //   stray "I" after returning to chat), keep the DB row and suppress the
+  //   stale stream until catch-up catches up.
+  const liveMirrorMsgIdx = liveStreamCoversPartial ? activePartialMsgIdx : -1
+  const suppressStreamingSurface = !!(activePartialMsg && partialCoversLiveStream && !liveStreamCoversPartial)
+  const showStreamingSurface = turnActive && streamItems.length > 0 && !suppressStreamingSurface
 
-  // The streaming <li> only carries a data-key in the BRIDGE case
-  // (we kept a DB partial on mount and the streaming <li> is the
-  // visual replacement for that suppressed message). Using the
-  // partial's data-key keeps an ANCHOR_AT pointing at the partial
-  // resolving correctly through the catch-up window.
+  // The streaming <li> carries a stable data-key so the scroll state machine
+  // can anchor inside an in-flight answer. Without this, returning to a
+  // streaming chat while scrolled into the live bubble had no anchorable row,
+  // so reconnect/catch-up could fall back to bottom-follow behavior. In the
+  // BRIDGE case (we kept a DB partial on mount and the streaming <li> is the
+  // visual replacement for that suppressed message), use the partial's key so
+  // an existing ANCHOR_AT still resolves through the catch-up window.
   //
-  // For multi-turn flow (no bridge), the previous turn's assistant
-  // is rendered alongside the streaming <li> (different turns). If
-  // we shared a data-key, applyMode's querySelector lookup would be
-  // ambiguous (two elements with the same data-key). Better to leave
-  // the streaming <li> with NO data-key — ANCHOR_AT during streaming
-  // falls back to the topmost visible message (e.g., the user msg
-  // above), which is the user's natural reading anchor anyway.
+  // Fast-forward can insert a user row AFTER the mounted partial while the
+  // stream remains live. Therefore bridge identity is ts-based across the
+  // full message list, not "last message only." For multi-turn flow (no
+  // bridge), the previous assistant is rendered alongside the streaming
+  // <li> (different turns), so the streaming <li> gets its own synthetic key
+  // rather than reusing a previous assistant row's key.
   const streamingDataKey = (() => {
-    const last = messages[messages.length - 1]
-    if (!bridgeHook.shouldBridge(last)) return undefined
-    if (!last || last.role !== 'assistant' || last.hidden) return undefined
-    return last.id || `${last.role}-${last.ts ?? messages.length - 1}`
+    const bridged = liveMirrorMsgIdx >= 0 ? messages[liveMirrorMsgIdx] : null
+    if (!bridged || bridged.role !== 'assistant' || bridged.hidden) {
+      return `streaming-${chatId}`
+    }
+    return bridged.id || `${bridged.role}-${bridged.ts ?? bridgeMsgIdx}`
   })()
 
   // Polite aria-live status: announced once per state transition, not per
   // token. Visually hidden via the sr-only utility in ChatView.css.
-  const ariaStatus = sending
+  const ariaStatus = turnActive
     ? 'Assistant is responding…'
     : (messages.length > 0 && messages[messages.length - 1]?.role === 'assistant'
         ? 'Response ready.'
@@ -1897,10 +2246,9 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             // DIFFERENT turns and must BOTH render — otherwise a
             // user's answered-question card would hide whenever the
             // next turn streams.
-            if (isLastMsg
-                && bridgeHook.shouldBridge(msg)
+            if (i === liveMirrorMsgIdx
                 && msg.role === 'assistant'
-                && sending && streamItems.length > 0) {
+                && showStreamingSurface) {
               return null
             }
             // A question is answerable while the runner is parked on it,
@@ -1967,7 +2315,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             </li>
           )})}
 
-          {sending && streamItems.length > 0 && (
+          {showStreamingSurface && (
             <StreamingMessage
               streamItems={streamItems}
               dataKey={streamingDataKey}
@@ -1975,7 +2323,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             />
           )}
 
-          {sending && streamItems.length === 0 && !loading && (
+          {turnActive && streamItems.length === 0 && !loading && (
             <li className="chat__msg chat__msg--assistant">
               <div className="chat__thinking"><span /><span /><span /></div>
             </li>
@@ -1991,7 +2339,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       </div>
       )}
 
-      {builtApp && !sending && (
+      {builtApp && !turnActive && (
         <div className="chat__open-app">
           <button
             className="chat__open-app-btn"
@@ -2010,7 +2358,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           onInputChange={setInput}
           onSubmit={handleSubmit}
           inputRef={inputRef}
-          sending={sending}
+          sending={composerBusy}
           listening={listening}
           listeningRef={listeningRef}
           onToggleVoice={toggleVoice}

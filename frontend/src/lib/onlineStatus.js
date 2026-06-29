@@ -35,12 +35,12 @@ export const PROMOTE_STREAK_WHEN_FLAG_OFFLINE = 2
 // does. 2 is the minimum that distinguishes a one-shot slow probe from a real
 // loss of connectivity.
 //
-// This does NOT slow down a GENUINE offline transition the user notices: the
-// browser's window `offline` event flips the indicator immediately (the hook
-// publishes false on that event directly), and when navigator.onLine itself
-// reads `false` a failing probe demotes at once (see below). The streak only
-// gates the ambiguous "OS says online, probe failed" case, which is exactly
-// where the spurious flap lives.
+// The hook may give the browser's window `offline` event a short grace period
+// before calling this resolver, because Android can fire that event during a
+// mobile-data↔Wi‑Fi handoff. Once the grace expires, a failing probe while
+// navigator.onLine itself reads `false` still demotes at once (see below). The
+// streak only gates the ambiguous "OS says online, probe failed" case, which is
+// exactly where the spurious flap lives.
 export const DEMOTE_STREAK_WHEN_FLAG_ONLINE = 2
 
 /**

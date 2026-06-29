@@ -81,13 +81,14 @@ _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
 /** The primary action button — FastForward / Send / Stop / Mic —
  *  auto-resolved from the bar's input/sending/listening/uploading state.
  *
- *  When a turn is streaming AND there are queued messages ready to steer
- *  (`canSteer`), the Stop square is swapped for a fast-forward button that
- *  injects the queued messages into the LIVE turn (Codex-style steering)
- *  instead of hard-stopping. Stop is NOT lost: clearing the queue (the
- *  tray's X) flips canSteer back to false and the Stop square returns, and
- *  while the composer has text the Send button (queue-another) still wins
- *  over both — typing is never blocked by a running turn. */
+ *  When there are queued messages ready to try (`canSteer`), the Stop square
+ *  is swapped for a fast-forward button. The handler reconciles server state
+ *  before acting: if a live turn exists, it injects the queued messages into
+ *  that turn; if local running state was stale, this still gives the user one
+ *  immediate affordance instead of waiting for focus/remount to reveal it.
+ *  Stop is NOT lost: clearing the queue (the tray's X) flips canSteer back to
+ *  false and the Stop square returns, and while the composer has text the Send
+ *  button (queue-another) still wins over both. */
 function PrimaryAction({
   sending, listening, hasInput, hasUploading, offline, canSteer,
   onSubmit, onStop, onSteer, onToggleVoice,

@@ -566,7 +566,7 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
           </form>
         </section>
 
-        <section className="settings__section settings__section--compact">
+        <section className="settings__section settings__section--compact settings__section--server">
           <div className="settings__row">
             <span className="settings__label">Dark mode</span>
             <Switch
@@ -716,7 +716,7 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
               description={restartError}
             />
           )}
-          <div className="settings__row">
+          <div className="settings__row settings__row--recovery">
             <span className="settings__label">Recovery</span>
             <a className="settings__btn settings__btn--outline settings__btn--sm" href="/recover" target="_blank" rel="noopener noreferrer">
               Open

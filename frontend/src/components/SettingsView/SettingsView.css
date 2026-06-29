@@ -279,3 +279,10 @@
   display: inline-flex;
   gap: 8px;
 }
+
+/* Give the recovery shortcut a little breathing room below the manual server
+   restart controls; both are important actions, so they should not read as one
+   tight cluster. */
+.settings__section--server .settings__row--recovery {
+  margin-top: 16px;
+}

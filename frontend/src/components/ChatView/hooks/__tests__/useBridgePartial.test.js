@@ -54,6 +54,61 @@ test('shouldBridge is false when the current last-ts differs from the captured t
   assert.equal(result.current.shouldBridge({ ts: 9999 }), false)
 })
 
+test('findBridgeIndex finds mounted partial even after a steered user row', () => {
+  const { result } = renderHook(useBridgePartial, {
+    runningAtMount: true,
+    lastMsgAtMount: { ts: 555, role: 'assistant' },
+  })
+
+  const messages = [
+    { role: 'user', ts: 100 },
+    { role: 'assistant', ts: 555 },
+    { role: 'user', ts: 777 },
+  ]
+
+  assert.equal(result.current.shouldBridge(messages[messages.length - 1]), false,
+    'last-message bridge check must not match the steered user row')
+  assert.equal(result.current.findBridgeIndex(messages), 1,
+    'ts bridge still locates the mounted assistant partial')
+})
+
+test('findBridgeIndex can derive the bridge candidate from current args', () => {
+  // First paint after returning to a running chat may already have cached
+  // messages + cached streamItems before any later render. The bridge lookup
+  // must be derivable from current args, not only from a stale previous
+  // capture, or the DB partial and cached stream render side-by-side.
+  const { result } = renderHook(useBridgePartial, {
+    runningAtMount: true,
+    lastMsgAtMount: { ts: 222, role: 'assistant' },
+  })
+  assert.equal(result.current.findBridgeIndex([
+    { role: 'user', ts: 111 },
+    { role: 'assistant', ts: 222 },
+  ]), 1)
+})
+
+test('derived bridge candidate is retired by markBridged', () => {
+  const { result } = renderHook(useBridgePartial, {
+    runningAtMount: true,
+    lastMsgAtMount: { ts: 222, role: 'assistant' },
+  })
+  result.current.markBridged()
+  assert.equal(result.current.findBridgeIndex([
+    { role: 'assistant', ts: 222 },
+  ]), -1)
+})
+
+test('findBridgeIndex is false after markBridged', () => {
+  const { result } = renderHook(useBridgePartial, {
+    runningAtMount: true,
+    lastMsgAtMount: { ts: 555, role: 'assistant' },
+  })
+  result.current.markBridged()
+  assert.equal(result.current.findBridgeIndex([
+    { role: 'assistant', ts: 555 },
+  ]), -1)
+})
+
 test('shouldBridge is FALSE when last message at mount was an error (parallel-agent be32e58)', () => {
   // be32e58 made errors persist as the LAST message in the chat.
   // The earlier role-based check ("last message is assistant")

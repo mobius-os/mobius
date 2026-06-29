@@ -128,7 +128,7 @@ function resolveStaticImageSrc(href) {
 
 function ExpandableImage({ href, alt }) {
   const [open, setOpen] = useState(false)
-  const [ratio, setRatio] = useState(null)
+  const [imageVars, setImageVars] = useState(null)
   const [resolvedSrc, setResolvedSrc] = useState(null)
 
   const rawSrc = safeUrl(href, SAFE_IMAGE_PROTOCOLS)
@@ -154,7 +154,7 @@ function ExpandableImage({ href, alt }) {
     <>
       <span
         className="md-image-frame"
-        style={ratio ? { '--md-image-ratio': ratio } : undefined}
+        style={imageVars || undefined}
       >
         <img
           src={resolvedSrc}
@@ -163,7 +163,18 @@ function ExpandableImage({ href, alt }) {
           onLoad={(e) => {
             const img = e.currentTarget
             if (img.naturalWidth && img.naturalHeight) {
-              setRatio(`${img.naturalWidth} / ${img.naturalHeight}`)
+              const ratio = img.naturalWidth / img.naturalHeight
+              const viewportH =
+                window.visualViewport?.height || window.innerHeight || 800
+              const cappedH = Math.min(viewportH * 0.60, 480)
+              const fitWidth = Math.min(
+                520,
+                Math.max(120, Math.round(cappedH * ratio)),
+              )
+              setImageVars({
+                '--md-image-ratio': `${img.naturalWidth} / ${img.naturalHeight}`,
+                '--md-image-fit-width': `${fitWidth}px`,
+              })
             }
           }}
           onClick={() => setOpen(true)}

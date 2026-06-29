@@ -91,12 +91,14 @@ export default defineConfig({
       injectRegister: null,
       injectManifest: {
         // Precache the shell entry + the Vite-hashed bundle. Skip
-        // the prebuilt mini-app frame HTML (`app-frame.html`) and
-        // anything under `vendor/` — those are runtime-cached by
-        // workbox-routing rules in sw.js, not precached, so they
-        // don't bloat the install-time payload.
+        // the prebuilt mini-app frame HTML (`app-frame.html`), the dynamic
+        // web manifest, and anything under `vendor/`. app-frame/vendor are
+        // runtime-cached by workbox-routing rules in sw.js. The manifest is
+        // served dynamically by the backend with theme_color/background_color
+        // rewritten to the active --bg, so precaching it would freeze gesture/
+        // system-UI color hints to whatever theme existed at build time.
         globPatterns: ['**/*.{js,css,html,svg,png,ico,webmanifest}'],
-        globIgnores: ['vendor/**', 'app-frame.html'],
+        globIgnores: ['vendor/**', 'app-frame.html', 'manifest.webmanifest'],
         // ROOT FIX for stale installed PWAs: give EVERY precache
         // entry a real content-hash revision.
         //

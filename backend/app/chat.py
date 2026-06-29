@@ -395,7 +395,7 @@ class _ChatEventSink:
     await _await_ack(ack)
 
   async def split_for_steer(
-    self, user_msg: dict, consume_pending_ts: list[int],
+    self, user_msg: dict | list[dict], consume_pending_ts: list[int],
   ) -> dict:
     """Split the streaming turn at a steer boundary so reload order is
     Q1, A1, Q2, A2.
@@ -457,11 +457,12 @@ class _ChatEventSink:
           # so the combined snapshot is complete.
           self.assistant_blocks = sealed_blocks + self.assistant_blocks
           raise
+      user_msgs = user_msg if isinstance(user_msg, list) else [user_msg]
       ack = get_writer().submit(
         AppendSteeredUserMessage(
           chat_id=self.chat_id,
           run_token="",
-          user_msg=user_msg,
+          user_msgs=user_msgs,
           consume_pending_ts=consume_pending_ts,
         )
       )

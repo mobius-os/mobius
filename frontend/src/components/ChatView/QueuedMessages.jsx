@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { stripAugmentation } from './msgText.js'
 
 const TRUNCATE_AT = 80
 
@@ -64,6 +65,10 @@ export default function QueuedMessages({ items, onCancel }) {
         className="queued__hdr"
         role="button"
         tabIndex={0}
+        // Queued tray lives inside the composer footer. Keep textarea focus
+        // on touch/mouse taps so expanding/collapsing the tray does not
+        // collapse the soft keyboard mid-composition.
+        onPointerDown={(e) => e.preventDefault()}
         onClick={toggleCollapsed}
         onKeyDown={onHdrKeyDown}
         aria-expanded={!collapsed}
@@ -87,7 +92,7 @@ export default function QueuedMessages({ items, onCancel }) {
         <div id={itemsId} className="queued__items">
           {items.map(msg => {
             const key = keyOf(msg)
-            const text = msg.content || ''
+            const text = stripAugmentation(msg.content || '')
             const isExpanded = expanded.has(key)
             const needsTruncation = text.length > TRUNCATE_AT || text.includes('\n')
             const firstLine = text.split('\n')[0]
@@ -104,6 +109,7 @@ export default function QueuedMessages({ items, onCancel }) {
                 <button
                   type="button"
                   className="queued__toggle"
+                  onPointerDown={(e) => e.preventDefault()}
                   onClick={() => needsTruncation && toggle(key)}
                   aria-expanded={isExpanded}
                   aria-label={isExpanded ? 'Collapse message' : 'Expand message'}
@@ -125,6 +131,7 @@ export default function QueuedMessages({ items, onCancel }) {
                 <button
                   type="button"
                   className="queued__cancel"
+                  onPointerDown={(e) => e.preventDefault()}
                   onClick={() => onCancel?.(msg.ts)}
                   aria-label="Cancel queued message"
                   title="Cancel"

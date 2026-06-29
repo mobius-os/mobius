@@ -43,6 +43,16 @@ const STORE_BG_KEY = 'mobius-theme-bg'
 const DEFAULT_BG = '#0d0d0d'
 const DEFAULT_MODE = 'dark'
 
+export function colorSchemeMetaContent(mode) {
+  return mode === 'light' ? 'light dark' : 'dark light'
+}
+
+function setMetaContent(meta, value) {
+  if (!meta) return
+  if (typeof meta.setAttribute === 'function') meta.setAttribute('content', value)
+  else meta.content = value
+}
+
 /**
  * 'dark' | 'light' for a bg hex by average-RGB luminance, or null when
  * `bg` is missing/unparseable. 128 splits dark/light cleanly enough —
@@ -133,6 +143,7 @@ export function resolveTheme({ doc = globalThis.document, store = globalThis.loc
 export function applyTheme(theme, { doc = globalThis.document, store = globalThis.localStorage } = {}) {
   const css = theme && typeof theme.css === 'string' ? theme.css : ''
   const bg = theme && theme.bg
+  let themeStyleEl = null
   // Mode precedence: an explicit theme.mode, else inferMode(bg), else the
   // --bg parsed out of the CSS body (so a css-only apply with no bg arg still
   // resolves a mode — this preserves the old themeService._inferThemeMode
@@ -172,26 +183,47 @@ export function applyTheme(theme, { doc = globalThis.document, store = globalThi
     // Re-append so this block is the LAST <head> child and wins the
     // cascade. appendChild on an attached node moves it; cheap.
     doc.head.appendChild(el)
+    themeStyleEl = el
     el.textContent = cssBody
   }
 
   if (bg && HEX_RE.test(bg)) {
+    doc.documentElement.style.background = bg
     if (doc.body) doc.body.style.background = bg
     const meta = doc.querySelector('meta[name="theme-color"]')
-    if (meta) meta.setAttribute('content', bg)
+    setMetaContent(meta, bg)
     doc.documentElement.style.setProperty('--bg', bg)
   }
 
   if (mode) {
     doc.documentElement.setAttribute('data-theme', mode)
     // color-scheme drives UA-native surfaces (form controls, scrollbars,
-    // canvas defaults) — without it a dark shell on a light OS flashes
-    // light native widgets. data-theme covers our own CSS tokens.
+    // canvas defaults, and Android/Chrome system UI hints). The meta
+    // content order is a preference, so it must follow the active theme:
+    // light mode prefers `light dark`, dark mode prefers `dark light`.
     doc.documentElement.style.colorScheme = mode
+    let colorSchemeMeta = doc.querySelector('meta[name="color-scheme"]')
+    if (!colorSchemeMeta && doc.head && typeof doc.createElement === 'function') {
+      colorSchemeMeta = doc.createElement('meta')
+      if (typeof colorSchemeMeta.setAttribute === 'function') {
+        colorSchemeMeta.setAttribute('name', 'color-scheme')
+      } else {
+        colorSchemeMeta.name = 'color-scheme'
+      }
+      doc.head.appendChild(colorSchemeMeta)
+    }
+    setMetaContent(colorSchemeMeta, colorSchemeMetaContent(mode))
     // iOS PWA status bar: `default` is a light bar with dark glyphs
     // (light mode), `black` is opaque dark (dark mode).
     const sb = doc.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]')
-    if (sb) sb.setAttribute('content', mode === 'light' ? 'default' : 'black')
+    setMetaContent(sb, mode === 'light' ? 'default' : 'black')
+  }
+
+  if (themeStyleEl && doc.head) {
+    // Creating/updating early paint meta tags must not break the long-standing
+    // cascade contract: the injected owner theme remains the final <head>
+    // child so it wins over bundled CSS and imported font styles.
+    doc.head.appendChild(themeStyleEl)
   }
 
   // Persist for the next boot: the new {bg,mode} key the pre-paint IIFE +
@@ -304,6 +336,10 @@ export const PREPAINT_SRC = `(function () {
     root.style.setProperty('--bg', bg);
     root.setAttribute('data-theme', mode);
     root.style.colorScheme = mode;
+    var themeColorMeta = document.querySelector('meta[name="theme-color"]');
+    if (themeColorMeta) themeColorMeta.setAttribute('content', bg);
+    var colorSchemeMeta = document.querySelector('meta[name="color-scheme"]');
+    if (colorSchemeMeta) colorSchemeMeta.setAttribute('content', mode === 'light' ? 'light dark' : 'dark light');
     // Persist (TOP-LEVEL SHELL ONLY) so a frame's pre-paint can read the
     // correct {bg,mode}. The same-origin app-frame shares this localStorage but
     // has an EMPTY slot, so it must NOT write — else it clobbers the owner's

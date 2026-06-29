@@ -172,12 +172,12 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
    in `dvh` (not `vh`) so it tracks the mobile dynamic viewport. */
 .md-image-frame {
   display: block;
-  width: min(100%, 520px);
+  width: min(100%, var(--md-image-fit-width, 520px));
   max-width: 100%;
   aspect-ratio: var(--md-image-ratio, 4 / 3);
   max-height: min(60dvh, 480px);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--surface) 88%, var(--text) 12%);
+  background: transparent;
   overflow: hidden;
 }
 
