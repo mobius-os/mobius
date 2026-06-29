@@ -145,6 +145,12 @@ function AppRoot() {
 function removeSplash() {
   const splash = document.getElementById('splash')
   if (splash) {
+    // Drop pointer-events as we start the fade: the overlay is fixed at
+    // z-index 9999 over the whole viewport and lingers ~400ms after opacity
+    // hits 0, so without this it keeps intercepting taps on the login form
+    // underneath it during the fade (a fast tap on Sign in lands on the
+    // splash instead).
+    splash.style.pointerEvents = 'none'
     splash.style.opacity = '0'
     setTimeout(() => splash.remove(), 400)
   }
