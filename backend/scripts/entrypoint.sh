@@ -73,6 +73,14 @@ echo "$_boot_counter $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.boot-attempt
 # strongly implies the platform code itself is broken.
 if [ "$_boot_counter" -ge 3 ] && [ -f /data/.last-successful-boot ]; then
   echo "PLATFORM-RESTORE: boot-attempt counter = $_boot_counter, restoring from baked floor..." >&2
+  # Rescue any uncommitted platform/shell edits BEFORE the baked floor
+  # overwrites them. Unlike the update path, this crash-loop restore does
+  # not commit-first, so without this the agent's uncommitted work is lost
+  # with nothing to recover from. Bounded + best-effort: a crash-looping
+  # instance must still boot, so this can never hang or fail the boot
+  # (timeout + `|| true`, no git op that could block on a lock). Uses the
+  # immutable baked helper so a corrupt overlay can't break it.
+  timeout 30 sh /app/scripts-baked/recovery_snapshot.sh crash-loop || true
   # Clear pycache in the live platform tree before the restore so stale
   # bytecache doesn't survive the copy-over.
   find /data/platform -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
@@ -815,6 +823,9 @@ platform/
 .last-successful-boot
 .platform-restore-active
 .platform-upgrade-available
+# Pre-restore rescue snapshots (recovery_snapshot.sh) — a local safety net,
+# not content to version.
+.rescue/
 EOF
 chown mobius:mobius /data/.gitignore 2>/dev/null || true
 
