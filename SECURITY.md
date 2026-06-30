@@ -12,16 +12,26 @@ being external attackers reaching the public HTTPS endpoint.
   No client-side token exposure.
 - **Encryption at rest:** API keys stored with Fernet (AES-128 + HMAC),
   derived from SECRET_KEY.
-- **TLS:** Caddy auto-provisions HTTPS certificates. HSTS enabled
-  (1 year, preload).
-- **CSP:** Strict Content-Security-Policy via Caddy — scripts limited
-  to self + esm.sh CDN, no external connect-src.
+- **TLS:** Caddy auto-provisions HTTPS certificates. HSTS (1 year,
+  preload) plus X-Frame-Options, X-Content-Type-Options, Referrer-Policy,
+  and Permissions-Policy are set by a backend middleware (`main.py`), so
+  they hold regardless of which proxy fronts the app (the external
+  production Caddy does not set them).
+- **No Content-Security-Policy on the app:** the bundled Caddyfile carries
+  a strict CSP, but it is NOT enforced on the external-Caddy production
+  edge — and a CSP would not close the real risk anyway, because a
+  same-origin mini-app reads the owner JWT and can exfiltrate it via
+  `/api/proxy` regardless of any CSP. See the accepted trade-off below and
+  `.pm/172` for the real (HttpOnly-cookie session) fix.
 - **Protected files:** Credential-handling components (login form, setup
   wizard, provider auth) are root-owned and read-only (chmod 444),
   re-enforced on every container boot.
-- **Mini-app isolation:** Iframes receive a scoped JWT that cannot access
-  auth, settings, or chat endpoints. The full owner token never enters
-  the iframe context.
+- **Mini-app tokens are scoped (least privilege, not an isolation wall):**
+  mini-apps are given an app-scoped JWT that can't reach auth/settings/chat
+  endpoints. But because mini-app iframes run same-origin
+  (`allow-same-origin`), their JavaScript CAN read the owner JWT from the
+  shell's localStorage — so the scoped token is a sensible default, not a
+  boundary. See the accepted same-origin trade-off below and `.pm/172`.
 - **Rate limiting:** 120 req/min global, 3-5/min on auth endpoints.
   Uses TCP peer address (not X-Forwarded-For).
 
@@ -29,8 +39,13 @@ being external attackers reaching the public HTTPS endpoint.
 
 These are intentional design decisions appropriate for a single-owner app:
 
-- **JWT in localStorage:** The owner is the only user on their own device.
-  XSS is mitigated by CSP.
+- **JWT in localStorage, readable by mini-apps:** the owner is the only
+  user on their own device and every mini-app is authored by the owner's
+  own agent. A malicious or compromised app could read the owner JWT and
+  exfiltrate it (same-origin localStorage + `/api/proxy`); the accepted bet
+  is that the agent-authored, single-owner model keeps that low-risk. The
+  real fix, if the threat model changes, is an HttpOnly-cookie session
+  (`.pm/172`).
 - **`null` CORS origin:** Required for sandboxed mini-app iframes to call
   the API. Mitigated by scoped tokens — even if a mini-app reads the
   iframe's token, it can only access storage/proxy/AI endpoints.
