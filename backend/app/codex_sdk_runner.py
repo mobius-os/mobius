@@ -212,6 +212,8 @@ def _sdk_imports() -> dict[str, Any]:
     ItemGuardianApprovalReviewStartedNotification,
     ItemStartedNotification,
     McpToolCallThreadItem,
+    ReasoningSummaryTextDeltaNotification,
+    ReasoningTextDeltaNotification,
     ThreadTokenUsageUpdatedNotification,
     TurnCompletedNotification,
     WebSearchThreadItem,
@@ -245,6 +247,10 @@ def _sdk_imports() -> dict[str, Any]:
     ),
     "ItemStartedNotification": ItemStartedNotification,
     "McpToolCallThreadItem": McpToolCallThreadItem,
+    "ReasoningSummaryTextDeltaNotification": (
+      ReasoningSummaryTextDeltaNotification
+    ),
+    "ReasoningTextDeltaNotification": ReasoningTextDeltaNotification,
     "ThreadTokenUsageUpdatedNotification": (
       ThreadTokenUsageUpdatedNotification
     ),
@@ -954,6 +960,24 @@ async def run_codex_sdk_turn(
         if isinstance(payload, sdk["AgentMessageDeltaNotification"]):
           if payload.delta:
             bc.publish({"type": "text", "content": payload.delta})
+          continue
+
+        # Reasoning deltas are Codex's analog of Claude's thinking_delta:
+        # both publish the same `thinking` event so the provider-agnostic
+        # frontend renders the collapsed "Thinking…" trace either way.
+        # Codex emits one of two delta streams depending on its reasoning
+        # summary config — the raw chain-of-thought (item/reasoning/textDelta)
+        # or a summarized form (item/reasoning/summaryTextDelta); handle both
+        # so the trace shows up whichever the model produces.
+        if isinstance(
+          payload,
+          (
+            sdk["ReasoningTextDeltaNotification"],
+            sdk["ReasoningSummaryTextDeltaNotification"],
+          ),
+        ):
+          if payload.delta:
+            bc.publish({"type": "thinking", "content": payload.delta})
           continue
 
         if isinstance(

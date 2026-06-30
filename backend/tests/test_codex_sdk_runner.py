@@ -141,6 +141,8 @@ def _fake_sdk(async_codex_cls):
     "ItemGuardianApprovalReviewStartedNotification": _Dummy,
     "ItemStartedNotification": _Dummy,
     "McpToolCallThreadItem": _Dummy,
+    "ReasoningSummaryTextDeltaNotification": _Dummy,
+    "ReasoningTextDeltaNotification": _Dummy,
     "ThreadTokenUsageUpdatedNotification": _Dummy,
     "TurnCompletedNotification": _FakeTurnCompletedNotification,
     "WebSearchThreadItem": _Dummy,
@@ -521,6 +523,98 @@ def test_run_codex_sdk_turn_error_notification_will_retry_continues(monkeypatch)
   assert bc.events == [
     {"type": "session_init", "session_id": "thread-1"},
     {"type": "text", "content": "still running"},
+  ]
+  assert registry.get_handle("chat-1", RunnerKind.CODEX_SDK) is None
+
+
+def test_run_codex_sdk_turn_publishes_thinking_for_reasoning_deltas(
+  monkeypatch,
+):
+  """Codex reasoning deltas surface as `thinking` events, like Claude.
+
+  Both the raw chain-of-thought stream (item/reasoning/textDelta) and the
+  summarized stream (item/reasoning/summaryTextDelta) translate to the
+  same provider-agnostic `thinking` event; an empty delta publishes
+  nothing.
+  """
+  class ReasoningTextDeltaNotification:
+    def __init__(self, delta: str):
+      self.delta = delta
+
+  class ReasoningSummaryTextDeltaNotification:
+    def __init__(self, delta: str):
+      self.delta = delta
+
+  class AgentMessageDeltaNotification:
+    def __init__(self, delta: str):
+      self.delta = delta
+
+  completed_turn = SimpleNamespace(id="turn-1", usage=None, error=None)
+  notifications = [
+    SimpleNamespace(
+      method="item/reasoning/textDelta",
+      payload=ReasoningTextDeltaNotification("plotting"),
+    ),
+    SimpleNamespace(
+      method="item/reasoning/summaryTextDelta",
+      payload=ReasoningSummaryTextDeltaNotification(" the route"),
+    ),
+    SimpleNamespace(
+      method="item/reasoning/textDelta",
+      payload=ReasoningTextDeltaNotification(""),
+    ),
+    SimpleNamespace(
+      method="item/agentMessage/delta",
+      payload=AgentMessageDeltaNotification("answer"),
+    ),
+    SimpleNamespace(
+      method="turn/completed",
+      payload=_FakeTurnCompletedNotification(completed_turn),
+    ),
+  ]
+  thread = _FakeThread("thread-1", _FakeTurnHandle(notifications))
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_start(self, *_args, **_kwargs):
+      return thread
+
+  sdk = _fake_sdk(FakeAsyncCodex)
+  sdk["AgentMessageDeltaNotification"] = AgentMessageDeltaNotification
+  sdk["ReasoningTextDeltaNotification"] = ReasoningTextDeltaNotification
+  sdk["ReasoningSummaryTextDeltaNotification"] = (
+    ReasoningSummaryTextDeltaNotification
+  )
+  monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
+
+  bc = _FakeBroadcast()
+  result = asyncio.run(
+    codex_sdk_runner.run_codex_sdk_turn(
+      user_message="hello",
+      session_id=None,
+      base_env={},
+      cwd="/tmp",
+      chat_id="chat-1",
+      bc=bc,
+      pending_questions={},
+      db=None,
+    )
+  )
+
+  assert result["error"] is None
+  assert bc.events == [
+    {"type": "session_init", "session_id": "thread-1"},
+    {"type": "thinking", "content": "plotting"},
+    {"type": "thinking", "content": " the route"},
+    {"type": "text", "content": "answer"},
   ]
   assert registry.get_handle("chat-1", RunnerKind.CODEX_SDK) is None
 
