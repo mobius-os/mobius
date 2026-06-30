@@ -999,6 +999,41 @@ umask 022
 # registered app files are mobius-owned.
 su -s /bin/sh mobius -c "umask 022 && CLAUDE_CONFIG_DIR=/data/cli-auth/claude bash /app/scripts/install-core-apps.sh" &
 
+# O1: platform-restart sentinel poller (the recoveryd handshake).
+#
+# The frozen recovery container (recoveryd) cannot signal THIS container's
+# uvicorn — it's a different container with a different pid namespace. So a
+# Tier-1 restore in recoveryd writes /data/.recover-pending=<mode> and then
+# the restart sentinel /data/.platform-restart-requested; this poller is the
+# in-container half that acts on it. On sight it removes the sentinel and
+# `kill -TERM 1` — SIGTERM to docker-init (pid1, this container runs with
+# `init: true`). docker-init forwards SIGTERM to uvicorn (which drains within
+# --timeout-graceful-shutdown 10), then exits; Docker's `restart:
+# unless-stopped` recreates the container; the fresh entrypoint processes
+# /data/.recover-pending AS ROOT (the ~905 handler above ran earlier this
+# boot but the flag is set for the NEXT boot) and reverts /data/platform, so
+# the platform comes back on fixed code. NO Docker socket is involved.
+#
+# This subshell is forked BEFORE the final `exec` below, so when the shell
+# exec's uvicorn the poller is reparented to docker-init and keeps running —
+# the same survival mechanism the health probe relies on. It is the SOLE
+# writer that consumes /data/.platform-restart-requested; recoveryd is the
+# sole writer that creates it. The 2s cadence bounds restore latency without
+# busy-looping.
+(
+  while true; do
+    if [ -f /data/.platform-restart-requested ]; then
+      rm -f /data/.platform-restart-requested 2>/dev/null || true
+      echo "O1: platform-restart sentinel seen — sending SIGTERM to pid 1 (container restart)." >&2
+      kill -TERM 1 2>/dev/null || true
+      # pid1 is now draining + exiting; give it a moment, then stop polling.
+      sleep 5
+      exit 0
+    fi
+    sleep 2
+  done
+) &
+
 # PHASE 3: Background health probe — writes /data/.last-successful-boot
 # and resets the boot-attempt counter once the server is confirmed
 # healthy. This is the "success" signal that prevents false-positive

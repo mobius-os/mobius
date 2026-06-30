@@ -123,6 +123,16 @@ COPY backend/app ./app-baked/
 COPY backend/scripts ./scripts-baked/
 RUN chmod -R a-w /app/app-baked /app/scripts-baked
 
+# Frozen recovery floor (recoveryd) — the Tier-1 recovery system that runs
+# in its OWN container (same image, command `python3 -P /app/recovery/
+# recoveryd.py`). It imports ZERO app.* code and survives a fully-broken
+# platform. Baked root-owned + chmod a-w so even root can't modify it in
+# place and the agent (mobius) cannot touch it; recoveryd self-checks this
+# at startup and refuses to run if any file is writable. This is the floor
+# of the recovery story, distinct from the app-baked restore source above.
+COPY backend/recovery ./recovery/
+RUN chmod -R a-w /app/recovery
+
 # Frontend static files + app-frame served by FastAPI.
 COPY --from=frontend /build/dist ./static/
 COPY frontend/public/app-frame.html ./app-frame.html

@@ -44,6 +44,35 @@ services:
       retries: 3
       start_period: 30s
 
+  # Frozen recovery floor — a SEPARATE container from the same image, so a
+  # broken/crash-looping platform can't take it down. Runs recoveryd (stdlib
+  # http.server, zero app.* imports) on :8001. Mounts the SAME test_data
+  # volume so it can write /data/.recover-pending + the restart sentinel that
+  # the platform's entrypoint poller acts on. Exposed on a host port for the
+  # mobius-test rehearsal (prod routes /recover* via the external Caddy, which
+  # is the owner's cutover step — not wired here).
+  recoveryd:
+    image: ${MOBIUS_IMAGE:-mobius-test:ci}
+    container_name: ${MOBIUS_RECOVERYD_CONTAINER:-mobius-test-recoveryd}
+    init: true
+    restart: unless-stopped
+    command: ["python3", "-P", "/app/recovery/recoveryd.py"]
+    environment:
+      - DATA_DIR=/data
+      - DATABASE_URL=sqlite:////data/db/ultimate.db
+      - RECOVERY_PORT=8001
+      # The platform service is reachable as `app` on the compose network.
+      - RECOVERY_PLATFORM_HEALTH_URL=http://app:8000/api/health
+    volumes:
+      - test_data:/data
+    ports: !override ["${RECOVERY_TEST_PORT:-8011}:8001"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8001/recover/health',timeout=3).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   pytest:
     image: ${MOBIUS_IMAGE:-mobius-test:ci}
     profiles: ["test"]
