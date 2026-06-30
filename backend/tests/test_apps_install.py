@@ -2305,13 +2305,16 @@ def test_clean_merge_with_unreadable_bytes_is_treated_as_conflict(
     db.close()
 
 
-def test_conflicting_update_spawns_resolver_chat_and_dedupes(
+def test_conflicting_update_returns_conflict_without_auto_spawning(
   client, auth, bypass_url_validation,
 ):
-  """A conflicting update opens ONE visible resolver chat (the agent-driven
-  resolution flow) + an app_conflict notification; a repeated conflict while
-  that resolver is still running does not pile up a second chat. (run_chat is
-  stubbed autouse, so the StartTurn run marker is set but no real agent runs.)"""
+  """A conflicting update returns mode=conflict and materializes the merge on
+  disk (markers), but does NOT auto-spawn a resolver chat or fire a
+  notification. Whether to involve the agent is the owner's call, made via the
+  store's click-gated "Resolve in chat" affordance — auto-spawning here preempted
+  that choice and raced a duplicate chat against the store's own. A repeated
+  conflict behaves the same (the abort guard still prevents committing stale
+  markers)."""
   base = "https://spawn-conflict.test/repo/"
   m = {**MANIFEST_NEWS, "id": "spawn-conflict", "name": "Spawn Conflict"}
   r1 = _install_v1(client, auth, base, m, JSX_MULTI)
@@ -2324,41 +2327,35 @@ def test_conflicting_update_spawns_resolver_chat_and_dedupes(
   r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
   assert r2.status_code == 201, r2.text
   assert r2.json()["mode"] == "conflict"
+  assert r2.json()["conflict_paths"]  # the store surfaces these to the owner
+  # The merge IS materialized on disk so the owner's opt-in resolver has real
+  # markers to fix; the app keeps serving its prior version meanwhile.
+  assert "<<<<<<<" in jsx_file.read_text()
 
   from app.models import Chat, Notification
   from app.database import SessionLocal
-  title = "Resolve update conflict — Spawn Conflict"
   db = SessionLocal()
   try:
-    chats = db.query(Chat).filter(Chat.title == title).all()
-    assert len(chats) == 1
-    chat = chats[0]
-    assert chat.created_by_app_id is None       # visible in the drawer
-    assert chat.run_status == "running"          # StartTurn set the run marker
-    assert any(
-      "resolving-app-git" in (msg.get("content") or "")
-      for msg in (chat.messages or [])
-    )
-    notifs = (
+    # No resolver chat was auto-spawned and no app_conflict notification fired.
+    assert db.query(Chat).filter(Chat.title.like("%Spawn Conflict%")).count() == 0
+    assert (
       db.query(Notification)
       .filter(Notification.source_type == "app_conflict")
-      .all()
+      .count()
+      == 0
     )
-    assert any(n.source_id == chat.id for n in notifs)
   finally:
     db.close()
 
-  # A second conflicting update while the resolver is still running must NOT
-  # spawn a second chat (dedupe by running-resolver title). The abort guard
-  # also keeps the second update from committing the stale markers.
+  # A repeated conflicting update still just returns mode=conflict with no chat,
+  # and the abort guard keeps it from committing the stale markers.
   jsx_v3 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE 3")
   r3 = _update_v2(client, auth, base, {**m, "version": "3.0.0"}, jsx_v3)
   assert r3.status_code == 201, r3.text
   assert r3.json()["mode"] == "conflict"
   db = SessionLocal()
   try:
-    chats = db.query(Chat).filter(Chat.title == title).all()
-    assert len(chats) == 1  # still just the one running resolver
+    assert db.query(Chat).filter(Chat.title.like("%Spawn Conflict%")).count() == 0
   finally:
     db.close()
 
