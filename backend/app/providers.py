@@ -390,7 +390,12 @@ class ClaudeProvider(BaseProvider):
 
 
 class CodexProvider(BaseProvider):
-  """OpenAI Codex CLI (codex exec --json)."""
+  """OpenAI Codex provider.
+
+  build() launches the app-server JSON-RPC runner; live chat uses the
+  Codex Agent SDK. The `codex exec --json` path is not used because it
+  does not provide per-token deltas.
+  """
 
   name = "Codex"
   cli_cmd = "codex"

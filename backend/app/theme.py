@@ -263,7 +263,7 @@ def _is_safe_import_url(url: str) -> bool:
 # any theme that omits one of the variables listed in `_CORE_VARS`.
 # It is applied inside `get_theme_css`, so the EFFECTIVE theme is
 # complete for every consumer — `GET /api/theme`, the app-frame
-# iframe, and the server-rendered `<style>` block all see it. The
+# iframe, and the shell's theme-as-data JSON slot all see it. The
 # augmentation is purely additive: the agent's CSS is never
 # rewritten, only gap-filled. The raw, un-augmented override is
 # still readable verbatim at `/api/storage/shared/theme.css` for
@@ -276,7 +276,7 @@ def _is_safe_import_url(url: str) -> bool:
 # because `--surface`, `--border`, --accent, etc. were injected by
 # the getter. To inspect the on-disk source, read the storage file;
 # to see what the browser received, read `GET /api/theme` or the
-# served `<style>` block.
+# shell's theme-as-data JSON slot.
 #
 # Variables augmented when missing (full list lives in
 # `_CORE_VARS`):

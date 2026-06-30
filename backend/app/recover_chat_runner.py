@@ -12,8 +12,9 @@ What it does:
   asyncio.create_subprocess_exec (args as list, no shell)
 - Parses each stdout JSON line into a small set of events
 - Yields them as SSE-formatted strings for the recovery chat page
-- Appends each user + assistant turn to /data/recovery_chat.jsonl
-  (append-only log; survives if the chats DB schema is broken)
+- Appends each user + assistant turn to a per-chat file at
+  /data/recovery/chats/<chat_id>.jsonl (one jsonl file per chat;
+  survives if the chats DB schema is broken)
 
 What it does NOT do:
 - AskUserQuestion (user can just type)

@@ -11,8 +11,8 @@ Gating (design §2):
   - App tokens need `App.chat_log_access >= 'summary'`, read from the
     App row at request time via `deps.require_app_permission` — flipping
     the column revokes on the next request, no JWT rotation.
-  - `full` is reserved but rejected here until a concrete consumer +
-    louder consent lands.
+  - `full` passes this gate as at least `summary`, but grants nothing
+    extra because this route always serves the redacted summary view.
 
 Read-only. No mutation endpoints. Every app-initiated read is written to
 the activity log (which app, which scope, when) so the owner can audit

@@ -9,8 +9,8 @@ Claude while upgrading Codex chats to true mid-turn injection.
 This module runs one Codex SDK turn, translates streamed SDK
 notifications into Möbius broadcast events, relies on the SDK's
 default auto-approval behavior, and stores the live `ActiveCodexTurn`
-in `active_sessions[chat_id]` so Stop and queued-message steering can
-reach it.
+in the shared runner registry, keyed by `(chat_id, RunnerKind.CODEX_SDK)`,
+so Stop and queued-message steering can reach it.
 
 **AskUserQuestion parity is shipped via the `request_user_input`
 tool.** The underlying wire surface is `item/tool/requestUserInput`
@@ -121,7 +121,7 @@ async def _persist_session_id(db, chat_id: str, session_id: str | None) -> None:
 
 
 class ActiveCodexTurn:
-  """Stop + steer handle stored in `chat._active_sessions` for Codex turns.
+  """Stop + steer handle registered for SDK-backed Codex turns.
 
   Wraps the live `(thread, turn_handle)` pair so callers can either steer
   (via `.turn`) or interrupt (via `.interrupt()`). The interrupt method

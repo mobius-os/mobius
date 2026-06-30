@@ -23,7 +23,7 @@ The image bundles everything the agent needs at runtime (the Claude CLI, esbuild
 
 ### Frontend serving priority (the #1 deploy gotcha)
 
-At startup `backend/app/main.py:764` picks one static directory **at module load time**, not per request:
+At startup `backend/app/main.py:836` picks one static directory **at module load time**, not per request (though a request for a file missing from the chosen `/data/shell/dist` still falls back per-request to the baked `/app/static`):
 
 ```
 /data/shell/dist/  ← preferred (the agent's live rebuild; persists across image rebuilds)
@@ -85,13 +85,13 @@ All three converge on **one** small tree-aware engine (`app_git.py`): `record_up
 
 ## Backend (`backend/app/`)
 
-FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serving). `routes/__init__.py` is a crash-tolerant import scaffold: every router is loaded through `_load(name)`, and an import failure returns a 503 stub instead of killing uvicorn, so `/recover/chat` stays reachable. To add a route, write the module under `routes/`, expose a `router`, and register it in `routes/__init__.py` (both the `_load(...)` line and `__all__`), then mount it in `main.py`.
+FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serving). `routes/__init__.py` is a crash-tolerant import scaffold: every router is loaded through `_load(name)`, and an import failure returns a 503 stub instead of killing uvicorn, so `/recover/chat` stays reachable. To add a route, write the module under `routes/`, expose a `router`, and register it in `routes/__init__.py` (both the `_load(...)` line and `__all__`), then mount it in `main.py`. (One documented exception: `routes/chats.py` exposes a *second* router, `app_chat_router` (`/api/app-chats`), which `main.py` imports and mounts directly because `_load` returns only each module's primary `router`.)
 
 ### Core app + chat runtime
 
 | File | Role |
 |------|------|
-| `main.py` | App factory: CORS, rate limiting, router mounting, static file serving; resolves `_static_dir` at load (`main.py:764`) |
+| `main.py` | App factory: CORS, rate limiting, router mounting, static file serving; resolves `_static_dir` at load (`main.py:836`) |
 | `config.py` | `Settings` via pydantic-settings; reads `.env` |
 | `database.py` | SQLAlchemy engine, `SessionLocal`, `Base`, `get_db` |
 | `models.py` | ORM tables: `Owner`, `Chat`, `ChatRun`, `App`, `PushSubscription`, `Notification` |
@@ -102,7 +102,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `providers.py` | `BaseProvider` adapters (`ClaudeProvider`, `CodexProvider`) + the `PROVIDERS` registry; identity/auth/env shaping for the SDK runners, and `get_skill_path()`. (`CodexProvider.build`/`parse_line` — the app-server subprocess path — are retained but not on the live chat path; see `codex_appserver.py`.) |
 | `claude_sdk_runner.py` | Claude SDK turn runner; passes `cli_path="/usr/local/bin/claude"` so the SDK drives the same pinned binary recovery + cron use |
 | `codex_sdk_runner.py` | Codex SDK turn runner (Thread/TurnHandle + steer) |
-| `codex_appserver.py` | Pure-function translator for the Codex `app-server` JSON-RPC protocol. The subprocess streaming path it served is legacy (live Codex chat runs through `codex_sdk_runner.py`), but this module stays live — the SDK runner reuses its event-classification + bash-extraction helpers |
+| `codex_appserver.py` | Pure-function translator for the Codex `app-server` JSON-RPC protocol. The subprocess streaming path it served is legacy (live Codex chat runs through `codex_sdk_runner.py`), but this module stays live — the SDK runner reuses one helper from it, `_extract_bash_command` (it implements its own event/tool classification locally) |
 | `chat.py` | `run_chat()` background task: spawns the turn, publishes events, routes persistence through the actor |
 | `chat_writer.py` | Single-writer chat-persistence actor — one thread owns the DB session + a FIFO command queue; ALL `Chat.messages` / `Chat.pending_messages` mutations route through it (do not write those columns directly) |
 | `chat_queue.py` | Per-chat queue lock + turn-end `drain_and_release` / `promote_pending_messages_locked` + the `TerminalDisposition` state machine; the awaited bridge between `chat.py` and the writer actor |
@@ -165,7 +165,7 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 
 | File | Role |
 |------|------|
-| `auth.py` | Setup, login, CLI provider PKCE OAuth (`/api/auth/provider/*`) |
+| `auth.py` | Setup, login, CLI provider auth (`/api/auth/provider/*`) — Claude via self-managed PKCE OAuth, Codex via a `codex login --device-auth` subprocess |
 | `apps.py` | Mini-app registry CRUD + `/module` and `/frame` serving (ETag revalidation) |
 | `chat.py` | `POST /api/chat/stop` — interrupts the agent turn |
 | `chats.py` | Chat CRUD + reversible soft-delete with recovery |
@@ -207,8 +207,8 @@ React + Vite. Entry is `main.jsx` → `App.jsx`. `App.jsx` checks setup status a
 | `SettingsView/` | Theme, provider auth, owner config |
 | `SetupWizard/` | First-boot: account + provider auth |
 | `LoginForm/` | Subsequent logins |
-| `ProviderAuth/` | Reusable Claude OAuth flow |
-| `ProviderModelPicker/` | Provider + model selection UI |
+| `ProviderAuth/` | Provider-auth UI: `ProviderAuth.jsx` (Claude OAuth), `CodexAuth.jsx` (Codex device-auth), `ProviderRow.jsx` (shared per-provider row) |
+| `ProviderModelPicker/` | `CLAUDE_MODELS`/`CODEX_MODELS` constants shared with `ChatSettingsPanel` (the old radio-list picker was superseded by the composer popover and is no longer rendered) |
 | `MenuButton/` | Hamburger icon |
 | `ErrorBoundary/` | Top-level React error boundary |
 | `Walkthrough/` | First-run walkthrough |
@@ -262,7 +262,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | `frontend/src/sw-cache-policy.js` | Authoritative cache-route policy (see *Service worker + offline* below) |
 | `frontend/src/lib/` | Cross-cutting helpers: `appToken.js`, `chatEmbed.js`, `themeService.js`, `onlineStatus.js`, `navHistory.js`, `errorLog.js`, etc. |
 
-**Vendored mini-app libs are version-pinned in lockstep across several places.** Each lib (React, three, pdf.js, CodeMirror, KaTeX, recharts, date-fns, d3-geo, marked, DOMPurify) is served same-origin under `/vendor/<name>@<version>/` so mini-apps resolve it offline. Bumping a version means changing it in *all* of: the `Dockerfile` vendor step (installs + builds the lib), the `app-frame.html` importmap (resolves the bare specifier), `sw.js`'s precache list (offline-guarantees it), and `runtime_libs.py`'s `RUNTIME_LIBS` (marks it external so esbuild doesn't try to bundle the bare specifier). `routes/standalone.py` derives its importmap from `app-frame.html` via `runtime_libs.importmap_block()`, and `backend/tests/test_runtime_libs.py` locks the importmap ↔ `RUNTIME_LIBS` pair so a desync fails CI. These are security-relevant: the vendored DOMPurify/marked are on the mini-app sanitize/render path, so they must be kept current with the shell's own npm copies.
+**Vendored mini-app libs are version-pinned in lockstep across several places.** Each lib (React, three, pdf.js, CodeMirror, KaTeX, recharts, date-fns, d3-geo, marked, DOMPurify) is served same-origin under `/vendor/<name>@<version>/` so mini-apps resolve it offline. Bumping a version means changing it in *all* of: the `Dockerfile` vendor step (installs + builds the lib), the `app-frame.html` importmap (resolves the bare specifier), `sw.js`'s precache list (offline-guarantees the libs it precaches — but three/pdf.js/KaTeX are NOT precached; they ride the runtime `/vendor` `CacheFirst` route instead, so they only warm online), and `runtime_libs.py`'s `RUNTIME_LIBS` (marks it external so esbuild doesn't try to bundle the bare specifier). `routes/standalone.py` derives its importmap from `app-frame.html` via `runtime_libs.importmap_block()`, and `backend/tests/test_runtime_libs.py` locks the importmap ↔ `RUNTIME_LIBS` pair so a desync fails CI. These are security-relevant: the vendored DOMPurify/marked are on the mini-app sanitize/render path, so they must be kept current with the shell's own npm copies.
 
 ## Where do I make a change?
 
@@ -396,9 +396,9 @@ Three frontend gates must stay aligned. `StreamingMessage.jsx` renders live ques
 
 ## Chat persistence — single-writer actor
 
-All chat-domain mutations — transcript writes, run-markers, question rows, answers, finalize, error-persist — route through the single-writer actor in `chat_writer.py` as **domain commands** (`PersistTranscript`, `Finalize`, `PersistError`, `AnswerQuestion`, `Barrier`, `DrainAndStop`). The strict paths (`Finalize`, `PersistError`, `AnswerQuestion`, `Barrier`, `DrainAndStop`) await commit-before-ack; `PersistTranscript` is the one coalesced, fire-and-forget command (no ack — rapid streaming snapshots collapse instead of blocking). One dedicated thread owns the SQLAlchemy session and a FIFO command queue; async callers submit a command and await its `Future`. The blocking `db.commit()` (which SQLite's `busy_timeout` can stall up to 5s) thus never runs on the event loop, and the actor never touches asyncio or `ChatBroadcast` (those stay loop-owned). Commands are DOMAIN-level, not row-level, so a later milestone can swap their dispatch for normalized-row writes without rewriting the actor.
+All chat-domain mutations — transcript writes, run-markers, question rows, answers, finalize, error-persist — route through the single-writer actor in `chat_writer.py` as **domain commands** (`PersistTranscript`, `Finalize`, `PersistError`, `AnswerQuestion`, `Barrier`, `DrainAndStop`). Every command allocates an ack `Future`, but only the strict paths (`Finalize`, `AnswerQuestion`, `Barrier`, `DrainAndStop`) *await* it (commit-before-ack); `PersistTranscript` and `PersistError` are submitted fire-and-forget — `PersistTranscript` additionally coalesces rapid streaming snapshots, while `PersistError` does not coalesce (an unwritten error state is repaired by a later `Finalize`/snapshot). One dedicated thread owns the SQLAlchemy session and a FIFO command queue; async callers submit a command and await its `Future`. The blocking `db.commit()` (which SQLite's `busy_timeout` can stall up to 5s) thus never runs on the event loop, and the actor never touches asyncio or `ChatBroadcast` (those stay loop-owned). Commands are DOMAIN-level, not row-level, so a later milestone can swap their dispatch for normalized-row writes without rewriting the actor.
 
-- **Commit-before-ack (strict paths):** the caller's `await` doesn't unblock until the commit succeeds (`PersistTranscript` is the exception — coalesced, no ack).
+- **Commit-before-ack (strict paths):** the caller's `await` on `Finalize`/`AnswerQuestion`/`Barrier`/`DrainAndStop` doesn't unblock until the commit succeeds; `PersistTranscript` and `PersistError` are fire-and-forget (submitted without awaiting the ack).
 - **Questions commit-before-broadcast:** a question row is durable before its SSE push fires, so a reconnect's catch-up burst always finds it.
 - **Concurrency invariant:** ack `Future`s are NEVER resolved while a producer lock is held — collect `(ack, value)` under the lock, resolve after release — so even a synchronous done-callback that re-enters `submit()`/`stop()` can't deadlock. Do not move an ack resolution back inside a `with` block.
 

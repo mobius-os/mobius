@@ -1,10 +1,11 @@
 """Admin / introspection endpoints (service-token-gated).
 
-Today this is just the activity-log read endpoint feeding introspective
-mini-apps (the curated `app-reflection` cron agent in particular). If
-more admin surfaces show up they belong here too — keep them all behind
+This module exposes activity-log read endpoints for introspective
+mini-apps (the curated `app-reflection` cron agent in particular),
+plus state-changing admin POST routes for emitting activity, signing
+out everywhere, and restarting the worker. Keep them all behind
 `get_current_owner`, which rejects app-scoped JWTs so a compromised
-mini-app can't pivot to the cross-app event feed.
+mini-app can't pivot to owner-only admin surfaces.
 
 The service-token at /data/service-token.txt is a 90-day owner JWT
 minted at setup time, so authenticating with it passes the same

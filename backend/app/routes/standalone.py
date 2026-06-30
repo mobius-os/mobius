@@ -7,9 +7,9 @@ origin means the JWT in localStorage works as-is).
 
 The PWA install picks up the manifest at `/apps/<slug>/manifest.json`.
 The `scope` is `/apps/<slug>/`, so it does not overlap with the Möbius
-shell scope (currently `/`, planned `/shell/`). Once Möbius's own
-manifest scope is narrowed, install prompts for these sub-app URLs
-will fire on Chromium.
+shell scope, which is already narrowed to `/shell/`. That scope
+separation lets install prompts for these sub-app URLs fire on
+Chromium.
 
 These routes live OUTSIDE the `/api/...` namespace because (a) they
 serve user-facing HTML/manifest/image content, not JSON APIs; (b)
@@ -18,9 +18,9 @@ manifest MUST live at `/apps/<slug>/...` to scope correctly.
 
 Auth: unauthenticated visitors are redirected to Möbius's login page
 with a `return` param so they land back at the standalone URL after
-logging in. The standalone shell itself is publicly cacheable —
-secrets live in the JWT, which the user's browser supplies once
-logged in.
+logging in. The standalone shell uses `Cache-Control: no-cache,
+must-revalidate`; only the service-worker offline cache is opted into
+separately for offline-capable apps.
 """
 
 import io
@@ -1307,7 +1307,7 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
   headers = {"Cache-Control": "no-cache, must-revalidate"}
   # Lets the service worker cache this standalone page for offline use
   # (Tier 4a) — only for apps the agent declared offline_capable. The
-  # SW's cacheWillUpdate gate keys on this header.
+  # gated appCodeHandler's appCodeStoreAction policy keys on this header.
   if app.offline_capable:
     headers["X-Mobius-Offline"] = "1"
   return HTMLResponse(content=html, headers=headers)

@@ -552,9 +552,14 @@ export default function AppCanvas({
       {!loaded && (
         <div className="canvas-loading" aria-live="polite">
           {!online && !offlineCapable ? (
-            // Non-offline-capable apps are never cached by the SW, so
-            // offline their frame + module can't load and the spinner
-            // would hang forever (a blank screen). Show why instead.
+            // A non-offline-capable app whose frame + module aren't cached
+            // yet (never opened while online) can't load offline, so the
+            // spinner would hang forever (a blank screen). Show why instead.
+            // Note: the SW DOES cache frame/module ungated for every app once
+            // opened (every 200 stored) — the `offline_capable` flag only
+            // gates the separate standalone-navigation cache + offline write
+            // semantics, not this in-shell read path. So this branch is the
+            // not-yet-cached case for a non-capable app, not "never cached."
             <div className="canvas-loading__offline">
               <WifiOff className="canvas-loading__offline-icon" aria-hidden="true" />
               <div className="canvas-loading__offline-title">You're offline</div>

@@ -13,16 +13,20 @@
  *   { kind: 'FOLLOW_BOTTOM' }     — sticky-bottom for streaming
  *   { kind: 'ANCHOR_AT', key, offset }  — anchored at a specific msg
  *
- * Bottom detection uses an IntersectionObserver on a sentinel at the
- * end of `.chat__scroll`. No scrollHeight math — the browser tells us
- * if the user is at the bottom.
+ * Bottom detection: the load-bearing at-bottom decision for
+ * send-pinning is scrollHeight math (`shouldPinSend` →
+ * `isNearScrollBottom`, read from `scrollTop` before the append). The
+ * IntersectionObserver on a sentinel at the end of `.chat__scroll` is
+ * used only for the gesture-driven mode transition (engaging
+ * FOLLOW_BOTTOM when the user scrolls to the bottom), not for the
+ * send-pin decision.
  *
  * User-gesture detection: pointerdown/wheel/touchstart/keydown open a
  * 250ms window in which scroll events are user-driven and can
  * transition the mode. Outside the window, scrolls come from our
  * applyMode or browser clamps and are ignored.
  *
- * See docs/chat-redesign.md for the full design.
+ * See ARCHITECTURE.md "Chat scroll + steer contract" for the full design.
  */
 
 import { useState, useRef, useLayoutEffect } from 'react'

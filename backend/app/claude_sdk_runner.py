@@ -6,10 +6,12 @@ same event shapes the rest of the backend already understands.
 
 Design choices:
 
-- `permission_mode="bypassPermissions"` preserves Möbius's existing
-  trust posture. The agent is expected to have the normal Claude Code
-  tool surface. We intercept only `AskUserQuestion`, because that tool
-  must become an explicit partner choice in the Möbius UI.
+- The runner stays in the SDK's default permission mode and registers a
+  dummy PreToolUse keepalive hook so `can_use_tool` still fires.
+  `can_use_tool` auto-approves every tool except `AskUserQuestion`, which
+  becomes an explicit partner choice in the Möbius UI. Using
+  `permission_mode="bypassPermissions"` would skip `can_use_tool` and
+  break that interception.
 - `ClaudeSDKClient` is used instead of one-shot `query()` because
   Möbius needs the bidirectional control surface: explicit `connect()`,
   `query()`, streaming `receive_response()`, and external
@@ -26,7 +28,8 @@ Design choices:
   the model sees. PreToolUse/PostToolUse was explored and rejected:
   the SDK does NOT fire PostToolUse for AskUserQuestion in headless
   mode, so the two-hook flow never worked.
-- Stop support is wired through `active_clients[chat_id]`. The caller
+- Stop and steer support is wired through the shared runner registry. The
+  caller looks up the registered `ActiveClaudeClient` handle and
   interrupts the live SDK client while this runner keeps draining
   `receive_response()` until the terminal result arrives.
 - `system_prompt` is passed on EVERY turn, not just the first. The
@@ -144,7 +147,7 @@ def _resumable(
 
 
 class ActiveClaudeClient:
-  """Stop handle stored in `chat._active_clients` for SDK-backed turns.
+  """Stop/steer handle registered for SDK-backed Claude turns.
 
   Ordering contract: `interrupt()` signals the SDK and then awaits
   `_finished`, which the runner resolves ONLY after `client.disconnect()`
@@ -729,7 +732,8 @@ async def run_claude_sdk_turn(
     base_env: Environment passed through to the Claude subprocess.
     cwd: Working directory for the SDK run.
     chat_id: Möbius chat identifier used for registries.
-    skill_text: Möbius skill/system prompt text for first turn only.
+    skill_text: Möbius skill/system prompt text, passed as the system
+      prompt on every turn (including resumes).
     bc: Chat broadcast object with a publish(event) method.
     pending_questions: Shared AskUserQuestion registry owned by chat.py.
     db: SQLAlchemy session used by runner-side persistence.

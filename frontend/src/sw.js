@@ -30,8 +30,14 @@
  *     non-capable app's /apps/<slug>/ page is never stored, so its offline
  *     open keeps showing the branded offline page exactly as before. Only the
  *     in-shell read path (frame/module) is flag-independent.
- *   - HTML/shell navigations: StaleWhileRevalidate (instant cached shell);
- *     other `/api/*`: straight to network.
+ *   - HTML/shell navigations: served from the Workbox precache via
+ *     `NavigationRoute(createHandlerBoundToURL('/index.html'))` — NOT
+ *     StaleWhileRevalidate; the shell deliberately avoids SWR.
+ *   - Several `/api/*` routes are cached rather than going straight to
+ *     network: `/api/theme` is StaleWhileRevalidate, `/api/chats` and
+ *     `/api/apps/` are NetworkFirst (cache fallback when offline), and
+ *     `/api/apps/{id}/{frame,module}` go through the cache-first
+ *     `appCodeHandler` above.
  */
 
 import {
@@ -368,8 +374,12 @@ registerRoute(
 // state. This is safe and fresh enough because AppCanvas includes
 // `?v=<app.updated_at>` in the frame URL and the frame forwards that same
 // version into the module URL; an app edit changes the cache key and forces a
-// network load for the new version. Stale cached versions are left harmlessly
-// behind and cleaned only when their runtime cache bucket is cleared.
+// network load for the new version. Stale cached versions are NOT left behind
+// until the bucket is cleared — they are pruned eagerly on the next successful
+// store: after each `cache.put` of a new `?v=` version, applyAppCodeStore()
+// calls supersededVersionKeys() to find prior versions of the same route (same
+// pathname, different `?v=`) and deletes them, so the frame/module cache holds
+// at most the current versioned pair per app.
 //
 // NET_TIMEOUT_MS bounds the network attempt — it is a HANG-GUARD for the
 // pathological Android "fetch stays pending forever" case, NOT a latency lever.

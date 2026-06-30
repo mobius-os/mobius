@@ -3,8 +3,8 @@
 This sidesteps browser CORS restrictions for external APIs that mini-apps
 need to read (e.g. public market data feeds).
 
-Only GET and POST are supported. Requests are authenticated so only the
-owner can use this endpoint.
+Only GET and POST are supported. Requests are authenticated by the
+owner or an app-scoped token.
 """
 
 import httpx

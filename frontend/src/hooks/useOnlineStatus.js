@@ -20,9 +20,12 @@ import { resolveOnline } from '../lib/onlineStatus.js'
 // even after the network is back (it only updates when a real request
 // resolves, and the SW serves most requests from cache). So the probe always
 // runs; the /api/health fetch is the sole source of truth. The window
-// `offline` event still flips the UI to offline immediately (it's a prompt
-// hint and the next probe confirms), but RECOVERY to online only ever comes
-// from a successful probe — never from navigator.onLine going true.
+// `offline` event does NOT flip the UI to offline immediately — `onOffline`
+// only schedules a deferred `check()` after OFFLINE_EVENT_GRACE_MS (see
+// below) and never calls setOnline(false) itself. The UI transitions to
+// offline only after that probe runs and the hysteresis verdict demotes.
+// RECOVERY to online likewise only ever comes from a successful probe —
+// never from navigator.onLine going true.
 //
 // The probe verdict is HYSTERETIC (see lib/onlineStatus.js): recovery to
 // online is fast (one good probe clears offline) but demotion to offline is
