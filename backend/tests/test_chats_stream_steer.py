@@ -195,6 +195,73 @@ def _register_sink_with_partial(chat_id: str, run_token: str, text: str):
   return sink
 
 
+def test_steer_drops_empty_pre_steer_partial(client, auth, monkeypatch):
+  """A steer landing before any real output must not seal a stray empty A1.
+
+  Card 166: when only a whitespace/empty token streamed before the steer cut
+  over, the old seal committed an empty assistant message (A1) between Q1 and
+  Q2 — a stray orphaned fragment on reload. The fix skips the seal when the
+  pre-steer segment has no renderable content, so the transcript stays Q1, Q2
+  (no empty assistant row) and the post-steer continuation (A2) lands as the
+  turn's first real assistant message. A single REAL token would still seal —
+  this only drops the empty/whitespace case.
+  """
+  chat_id = "emptysteer"
+  db = SessionLocal()
+  try:
+    db.add(models.Chat(
+      id=chat_id,
+      title="Codex chat",
+      provider="codex",
+      messages=[{"role": "user", "content": "Q1", "ts": 1}],
+      agent_settings_json={"steer_enabled": True},
+    ))
+    db.commit()
+  finally:
+    db.close()
+  registry.register(_make_active_codex_turn(chat_id))
+  run_token = "run-empty"
+  # Only a whitespace token streamed before the steer landed.
+  sink = _register_sink_with_partial(chat_id, run_token, " ")
+
+  async def _fake_steer(cid, message):
+    return True
+
+  monkeypatch.setattr(
+    "app.codex_sdk_runner.steer_into_active_turn", _fake_steer,
+  )
+
+  res = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={"content": "Q2"},
+    headers=auth,
+  )
+  assert res.status_code == 202, res.text
+  assert res.json()["status"] == "steered"
+
+  # No stray empty assistant row was sealed between Q1 and Q2.
+  chat = _read_chat(chat_id)
+  assert [(m["role"], m.get("content")) for m in chat.messages] == [
+    ("user", "Q1"),
+    ("user", "Q2"),
+  ]
+
+  # The post-steer continuation lands as the turn's first real assistant
+  # message, after Q2 — not merged into a phantom empty A1.
+  async def _stream_a2():
+    sink.publish({"type": "text", "content": "A2"})
+    await sink.finalize()
+
+  asyncio.run(_stream_a2())
+
+  chat = _read_chat(chat_id)
+  assert [(m["role"], m.get("content")) for m in chat.messages] == [
+    ("user", "Q1"),
+    ("user", "Q2"),
+    ("assistant", "A2"),
+  ]
+
+
 def test_steer_splits_assistant_turn_for_reload_order(
   client, auth, monkeypatch,
 ):

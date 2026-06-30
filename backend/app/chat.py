@@ -55,6 +55,7 @@ from app.chat_writer import (
 )
 from app.config import get_settings
 from app.events import (
+  blocks_have_renderable_content,
   build_assistant_message,
   capture_question_scrub,
   commit_question_scrub,
@@ -427,10 +428,13 @@ class _ChatEventSink:
     snapshot enqueued earlier cannot clobber them. Returns the steered append
     result (`stored` + remaining `pending`).
 
-    When there is no streamed-so-far text (an empty pre-steer turn) the seal
-    step is skipped — there is no A1 to commit — and Q2 is simply appended;
-    the trailing assistant message, if any, is already the in-progress one
-    the next snapshot will replace, matching the no-partial seed case.
+    When the pre-steer segment has no renderable content (an empty pre-steer
+    turn, or only an empty/whitespace token streamed before the cut) the seal
+    step is skipped — there is no A1 worth committing — and Q2 is simply
+    appended; the trailing assistant message, if any, is already the
+    in-progress one the next snapshot will replace, matching the no-partial
+    seed case. Keeping that empty A1 would leave a stray empty assistant row
+    before Q2 on reload (card 166).
     """
     self._steering = True
     try:
@@ -438,7 +442,17 @@ class _ChatEventSink:
       # Reset BEFORE the first await so the continuation accumulates into a
       # fresh list the instant the steer lands.
       self.assistant_blocks = []
-      if self.chat_id and self.run_token and sealed_blocks:
+      # Skip the seal when the pre-steer segment has no renderable content — a
+      # steer that lands before the assistant emitted any real output would
+      # otherwise commit a stray empty assistant message (A1) before the
+      # steered user row, the durable twin of card 166's orphaned fragment. A
+      # single REAL token ("I ") still seals; only the empty/whitespace case is
+      # dropped (no A1 to commit, matching the no-partial seed case).
+      if (
+        self.chat_id
+        and self.run_token
+        and blocks_have_renderable_content(sealed_blocks)
+      ):
         ack = get_writer().submit(
           Finalize(
             chat_id=self.chat_id,
