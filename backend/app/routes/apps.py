@@ -456,16 +456,14 @@ async def install_app(
   get_system_broadcast().publish(
     {"type": "app_updated", "appId": str(app.id)}
   )
-  # A conflicting update left a REAL working-tree merge (markers + MERGE_HEAD)
-  # in /data/apps/<slug>/. Open a chat that drives the agent to resolve it with
-  # ordinary git — the Möbius way (the agent fixes its own breaks). Best-effort:
-  # the app IS installed and the conflict is on disk regardless, so a spawn
-  # failure must never fail this response.
-  if mode == "conflict":
-    try:
-      await _spawn_app_conflict_chat(db, app, conflict_paths)
-    except Exception as exc:
-      log.warning("conflict-resolver chat spawn failed for %s: %r", app.slug, exc)
+  # A conflicting update leaves the app on its current version with a real
+  # working-tree merge (markers + MERGE_HEAD) on disk; the merge is NOT
+  # auto-resolved. Whether to involve the agent is the owner's call, not ours:
+  # the store surfaces the conflict (mode + conflict_paths, below) and the owner
+  # opts in via its click-gated "Resolve in chat" affordance, which opens the
+  # resolver chat itself. We deliberately do NOT auto-spawn a resolver here —
+  # doing so preempted the owner's choice and raced a duplicate chat against the
+  # store's own.
   return schemas.AppInstallOut(
     id=app.id,
     name=app.name,
@@ -497,6 +495,13 @@ async def install_app(
 async def _spawn_app_conflict_chat(db: Session, app, conflict_paths) -> str | None:
   """Open a visible chat that drives the agent to resolve an app update merge
   conflict, and notify the owner.
+
+  No longer auto-called on an app update conflict: the store surfaces the
+  conflict and the owner opts in to resolution via its click-gated "Resolve in
+  chat" affordance (which opens its own resolver chat). Retained as the
+  reference pattern the platform's resolver-chat spawn mirrors; a follow-up can
+  decide whether to wire it back behind an explicit owner-confirm endpoint or
+  delete it once the platform path is unified.
 
   The conflict is already materialized on disk (markers + MERGE_HEAD) by
   `install.start_conflict_merge`; this just opens the chat that resolves it, the
