@@ -70,19 +70,32 @@ export default function StreamingMessage({ streamItems, dataKey, onAnswer }) {
           )
         }
         if (item.type === 'thinking') {
-          // The agent's live reasoning. Rendered dim + secondary so it
-          // fills the silence of a long "thinking" stretch without
-          // competing with the answer. Ephemeral: it lives only in
-          // streamItems, so it disappears when the turn is promoted to
-          // the persisted message (thinking isn't saved) — that's by
-          // design, it's live narration, not transcript.
+          // The agent's live reasoning, shown as a COLLAPSED, secondary
+          // disclosure so a long "thinking" stretch reads as a quiet
+          // "Thinking…" indication (filling the silence) rather than a
+          // wall of raw chain-of-thought. The partner can expand it to
+          // peek; by default the answer stays the focus. While this is
+          // the last item the agent is still mid-thought, so the summary
+          // animates ("Thinking…" + dots); an earlier thinking block the
+          // agent has already moved past reads as a static "Thinking"
+          // toggle. Ephemeral: it lives only in streamItems and drops
+          // when the turn promotes to the persisted message — it's live
+          // narration, not transcript.
+          const isActive = i === streamItems.length - 1
           return (
-            <div key={`s-${i}`} className="chat__reasoning">
-              <span className="chat__reasoning-label">Thinking</span>
+            <details key={`s-${i}`} className="chat__reasoning">
+              <summary className="chat__reasoning-summary">
+                <span className="chat__reasoning-label">Thinking</span>
+                {isActive && (
+                  <span className="chat__reasoning-dots" aria-hidden="true">
+                    <span /><span /><span />
+                  </span>
+                )}
+              </summary>
               <div className="chat__reasoning-body">
                 <StandardMarkdown text={item.content} />
               </div>
-            </div>
+            </details>
           )
         }
         if (item.type === 'text') {
