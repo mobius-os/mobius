@@ -252,6 +252,78 @@ The in-product agent is a first-class reader of this code, and its behavior is g
 
 `/data` is itself a git repo owned by the `mobius` user, tracking `shared/memory/` and `shared/skills/` with a nightly safety-net commit, so a bad memory consolidation or skill overwrite is recoverable. Inspect it as that user (`docker exec -u mobius ... git -C /data ...`) — as root it dies with "dubious ownership," which reads misleadingly as an empty/non-repo tree.
 
+## Boot, self-heal, and how each layer updates
+
+**Layers + where they live:** core platform = backend (`/data/platform`, a git
+repo) + shell (`/data/shell` src+dist); mini-apps (`/data/apps/<slug>`, each a
+git repo); recovery (the frozen island, below). Runtime trees are gitignored
+(db, compiled, cli-auth).
+
+**Updates** flow through git. `backend/app/platform_update.py` is the merge
+engine: it records the baked image as the `upstream` branch (today the upstream
+IS the baked floor; a signed-GitHub origin is the planned direction, `.pm/147`),
+computes a merge tree, and on conflict spawns an agent conflict-chat to resolve.
+Shell rebuilds via `rebuild_shell.sh`; the served bundle is `/data/shell/dist`
+if a complete build exists else baked `/app/static` (the #1 deploy gotcha — the
+volume masks a new baked dist; always byte-check the served hash). Mini-apps
+update through each app's git repo + the store; freshness rides ETags
+(`/module` = `updated_at` µs; `/frame` = compound `updated_at`+content-hash).
+
+**Self-heal — DIRECTION (owner 2026-06-30), replacing the current code.** The
+model is git + a minimal pre-flight gate + recovery, with **no baked duplicate,
+no `/app/app` symlink-swap, no auto-heal probe, no magic**:
+- The platform is served directly as a git repo.
+- **Pre-flight gate:** a change only takes effect on the restart that applies it,
+  so the running server keeps serving the working code while the agent edits.
+  Before applying, a minimal check — does the new tree import (`python -c "import
+  app.main"`) and answer `/api/health`? Green → apply; red → don't apply, hand the
+  traceback back to the agent's turn to fix. A break never reaches the live server.
+- **Recovery, not healing:** if a break slips the gate (or a core file is
+  corrupted), boot a **separate, minimal, frozen recovery-only server** (just
+  `/recover` + `recover_chat_runner.py`, which already shares no code with the SDK
+  stack and is stdlib-only) — NOT a full platform copy. Its recovery agent restores
+  via git (`git reset --hard` / `checkout` a good commit) or fixes the issue.
+- The crash-loop `cp`-restore, the `platform-baked` destructive `recovery_restore`
+  mode, and card 148's `.platform-serve-baked` probe/flag are removed. Real
+  image/disk corruption is an operator redeploy, not something to auto-heal around.
+
+## Chat scroll + steer contract
+
+How a chat scrolls/steers, owner-authoritative. The Playwright lock-in specs
+(`tests/send-rule`, `spacer`, `second-send-pin`, `steer-queued`, `stream-reconnect`,
+`backend/tests/test_chats_stream_steer`) encode this:
+
+- **R1** First message always pins to the viewport top, reserving bottom room for
+  the streaming reply.
+- **R2** Subsequent messages always reserve enough space, but only MOVE the scroll
+  if the user is at the bottom (the autoscroll zone). Scrolled-up/reading → the
+  viewport must NOT jump (the load-bearing guarantee is "don't move a reading
+  user", not "spacer is zero"). At-bottom is read from `scrollTop` before the
+  append (`shouldPinSend`/`isNearScrollBottom` in `useScrollMode.js`), not a
+  sentinel.
+- **R3** Steered messages obey R1/R2 (pin only if they'd have pinned as a fresh send).
+- **R4** Leave-and-return restores the same scroll position, even mid-stream
+  (hide-then-reveal + the versioned snapshot cache).
+- **Steer = separate rows, one turn.** Steered queued messages render as separate
+  transcript rows in send order (`insertMessageBatchByTs`), never one stranded
+  after the reply. The agent receives them joined by `\n\n` (clean paragraphs,
+  not a `\n` blob) — matched byte-for-byte FE (`handleSteer`) + BE
+  (`_selected_force_steer_pending`). The fast-forward button shows only when every
+  queued row is server-confirmed (`canFastForwardQueue`); confirm on a numeric ts.
+- **Regression guards (owner-observed prod bugs):** an at-bottom send must not land
+  mid-viewport; a steered row must not render after the agent's reply.
+
+## Testing — determinism principle
+
+Flaky e2e is a SYMPTOM of app non-determinism, not slow tests. Fix at the source:
+(1) eliminate app races — the SW first-install reload (only reload on a genuine
+update), and make the SSE stream (event) authoritative over the reconcile poll so
+optimistic state is never clobbered mid-turn; (2) mock the clock for genuinely
+time-dependent behavior; (3) wait on signals/state, never `setTimeout` durations;
+(4) expose a "settled" flag from the app rather than guessing a delay. The two app
+fixes above took `handleStop` 0→3/3 and removed the steer/app-canvas deterministic
+failures — product improvements, not test hacks.
+
 ## See also
 
 - **Build / test / run commands and the dev loop:** `CONTRIBUTING.md`. (The #1 deploy gotcha — a stale `/data/shell/dist` masking a fresh image — is covered under *Frontend serving priority* above.)
