@@ -1,7 +1,7 @@
 {
   "id": "memory",
   "name": "Memory",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "A browsable graph of what Möbius has learned over time, the agent’s own memory.",
   "author": "mobius-os",
   "license": "MIT",
@@ -21,13 +21,13 @@
   "runtime": {
     "imports": [
       "react",
-      "react-dom"
+      "react-dom",
+      "marked",
+      "dompurify"
     ],
     "esm_deps": [
       "d3",
-      "pixi.js",
-      "marked",
-      "dompurify"
+      "pixi.js"
     ]
   }
 }
