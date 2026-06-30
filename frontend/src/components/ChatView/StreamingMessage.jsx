@@ -69,6 +69,22 @@ export default function StreamingMessage({ streamItems, dataKey, onAnswer }) {
             </div>
           )
         }
+        if (item.type === 'thinking') {
+          // The agent's live reasoning. Rendered dim + secondary so it
+          // fills the silence of a long "thinking" stretch without
+          // competing with the answer. Ephemeral: it lives only in
+          // streamItems, so it disappears when the turn is promoted to
+          // the persisted message (thinking isn't saved) — that's by
+          // design, it's live narration, not transcript.
+          return (
+            <div key={`s-${i}`} className="chat__reasoning">
+              <span className="chat__reasoning-label">Thinking</span>
+              <div className="chat__reasoning-body">
+                <StandardMarkdown text={item.content} />
+              </div>
+            </div>
+          )
+        }
         if (item.type === 'text') {
           const isLast = i === streamItems.length - 1
           return (
