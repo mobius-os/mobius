@@ -24,6 +24,9 @@ services:
       args:
         BUILD_SHA: ${BUILD_SHA:-unknown}
         BUILD_DATE: ${BUILD_DATE:-unknown}
+    # Tag the built image so the recoveryd service can reuse the SAME image
+    # (no second build, shared layers) rather than rebuilding the context.
+    image: ${MOBIUS_IMAGE:-mobius}
     container_name: mobius
     init: true
     restart: unless-stopped
@@ -43,6 +46,46 @@ services:
       timeout: 10s
       retries: 3
       start_period: 20s
+
+  # Frozen recovery floor (recoveryd) — its OWN container so a broken or
+  # crash-looping platform cannot take recovery down (different cgroup,
+  # different pid1). Same image as `app`, different command + its own
+  # `restart: unless-stopped`. Mounts the SAME app_data volume so it can write
+  # /data/.recover-pending + /data/.platform-restart-requested, which the
+  # platform container's entrypoint poller (O1) acts on to git-restore and
+  # restart. Imports zero app.* code; self-checks its frozen bundle at startup.
+  #
+  # Routing is the OWNER'S deliberate, separately-reversible cutover step (O5),
+  # NOT wired here: in prod the external root-owned deploy-caddy proxies
+  # `/recover*` -> recoveryd:8001, and recoveryd must join the deploy network so
+  # Caddy can reach it. For the bundled Caddy (this file), the same
+  # `handle /recover* { reverse_proxy recoveryd:8001 }` block would route it;
+  # left undone deliberately so adopting recovery is an explicit owner action.
+  # `expose` withholds a host port; it is NOT an access-control boundary
+  # (recoveryd enforces auth + cross-site checks on every request).
+  recoveryd:
+    build:
+      context: .
+      args:
+        BUILD_SHA: ${BUILD_SHA:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    image: ${MOBIUS_IMAGE:-mobius}
+    container_name: mobius-recoveryd
+    init: true
+    restart: unless-stopped
+    command: ["python3", "-P", "/app/recovery/recoveryd.py"]
+    environment:
+      - DATA_DIR=/data
+      - DATABASE_URL=sqlite:////data/db/ultimate.db
+      - RECOVERY_PORT=8001
+      - RECOVERY_PLATFORM_HEALTH_URL=http://app:8000/api/health
+      # Set RECOVERY_ALLOWED_HOSTS to the public DOMAIN at cutover so the
+      # Origin fallback check is active for clients without Sec-Fetch-Site.
+      - RECOVERY_ALLOWED_HOSTS=${DOMAIN:-}
+    volumes:
+      - app_data:/data
+    expose:
+      - "8001"
 
 volumes:
   caddy_data:
