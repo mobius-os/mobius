@@ -82,19 +82,38 @@ AB_SESSION="${AB_SESSION:-render-miniapp}"
 OUT="${2:-/tmp/render-${SLUG}.png}"
 BASE="http://${HOST}:${PORT}"
 
+# Is HOST a loopback / RFC1918 target? Accept ONLY the loopback literals or a
+# CANONICAL dotted-quad IPv4 (no leading zeros, octets 0-255) in a private
+# range. A glob like `10.*` would also match a HOSTNAME that merely starts with
+# "10." (e.g. `10.evil.com`) which DNS-resolves anywhere — a parser/validator
+# differential where the string passes our check but curl connects elsewhere.
+# Requiring a real dotted-quad closes that: a hostname is never a dotted-quad.
+host_is_local() {
+  local h="$1"
+  case "$h" in
+    localhost|127.0.0.1|::1) return 0 ;;
+  esac
+  local oct='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+  if [[ "$h" =~ ^${oct}\.${oct}\.${oct}\.${oct}$ ]]; then
+    local a="${BASH_REMATCH[1]}" b="${BASH_REMATCH[2]}"
+    [[ "$a" == 127 || "$a" == 10 ]] && return 0          # 127.0.0.0/8, 10.0.0.0/8
+    [[ "$a" == 192 && "$b" == 168 ]] && return 0         # 192.168.0.0/16
+    [[ "$a" == 172 ]] && (( b >= 16 && b <= 31 )) && return 0  # 172.16.0.0/12
+  fi
+  return 1
+}
+
 # ENFORCED test-only target guard. This tool mints + injects an OWNER JWT, so a
 # wrong target hands a real owner session to whatever app renders there. Rather
 # than rely on the defaults happening to fail against prod, refuse outright any
-# non-loopback / non-RFC1918 host or the prod port (8000). An operator who
-# genuinely needs another target must opt in explicitly with RENDER_ALLOW_NONTEST=1.
+# host that isn't a loopback/RFC1918 IPv4 (or localhost), or the prod port
+# (8000). An operator who genuinely needs another target opts in explicitly.
 if [[ "${RENDER_ALLOW_NONTEST:-}" != "1" ]]; then
-  case "$HOST" in
-    localhost|127.0.0.1|::1|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) : ;;
-    *)
-      echo "error: refusing non-local host '$HOST' — this tool injects an owner JWT and is test-only." >&2
-      echo "       set RENDER_ALLOW_NONTEST=1 to override (you are then responsible for the target)." >&2
-      exit 2 ;;
-  esac
+  if ! host_is_local "$HOST"; then
+    echo "error: refusing host '$HOST' — this tool injects an owner JWT and is test-only." >&2
+    echo "       only loopback/RFC1918 IPv4 (or localhost) is allowed; set RENDER_ALLOW_NONTEST=1 to override." >&2
+    exit 2
+  fi
   if [[ "$PORT" == "8000" ]]; then
     echo "error: refusing port 8000 (the prod port) — this tool is test-only." >&2
     echo "       set RENDER_ALLOW_NONTEST=1 to override." >&2
