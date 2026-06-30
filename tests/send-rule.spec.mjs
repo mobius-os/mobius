@@ -247,9 +247,12 @@ test('Send while scrolled up (reading) does NOT move the scroll or pin', async (
   // px the appended user message can add at the very bottom of the list
   // (it grows scrollHeight, not the reader's offset from the top).
   expect(Math.abs(after.scrollTop - savedTop)).toBeLessThanOrEqual(8)
-  // And no pin-spacer was added on the scrolled-up send (mode-aware
-  // spacer: a non-pin mode reserves nothing).
-  expect(after.spacerH).toBe(0)
+  // The owner contract is "always reserve enough space" even when scrolled up
+  // (the reader just isn't moved). Space MAY be reserved; the load-bearing
+  // guarantee is the scroll position above did not jump — not that the spacer
+  // is zero. (Earlier this asserted spacerH===0; that contradicted the
+  // always-reserve contract — see docs/chat-scroll-steer-contract.md R2.)
+  expect(after.spacerH).toBeGreaterThanOrEqual(0)
 })
 
 // ───────────────────────────────────────────────────────────────────
