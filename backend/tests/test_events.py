@@ -5,6 +5,7 @@ from typing import get_args
 from app.chat import _ChatEventSink
 from app.events import (
   EventType,
+  blocks_have_renderable_content,
   build_assistant_message,
   finalize_blocks,
   process_event,
@@ -362,3 +363,42 @@ def test_text_boundary_marker_never_persists():
   assert msg["content"] == "x"
   finalize_blocks(blocks)
   assert all(b.get("type") != "text_boundary" for b in blocks)
+
+
+def test_blocks_have_renderable_content_empty_and_whitespace():
+  """An empty/whitespace-only pre-steer segment is NOT renderable (card 166)."""
+  assert blocks_have_renderable_content([]) is False
+  assert blocks_have_renderable_content(None) is False
+  assert blocks_have_renderable_content(
+    [{"type": "text", "content": ""}]
+  ) is False
+  assert blocks_have_renderable_content(
+    [{"type": "text", "content": "   "}]
+  ) is False
+  assert blocks_have_renderable_content(
+    [{"type": "text", "content": "\n"}]
+  ) is False
+  # Only the internal boundary marker, no real text.
+  assert blocks_have_renderable_content(
+    [{"type": "text_boundary"}]
+  ) is False
+
+
+def test_blocks_have_renderable_content_real_token_and_blocks():
+  """A single real token, or any non-text block, IS renderable."""
+  assert blocks_have_renderable_content(
+    [{"type": "text", "content": "I "}]
+  ) is True
+  assert blocks_have_renderable_content(
+    [{"type": "text", "content": "I"}]
+  ) is True
+  assert blocks_have_renderable_content(
+    [{"type": "tool", "tool": "Bash", "status": "running"}]
+  ) is True
+  # Whitespace text plus a real tool block still counts (the tool is real).
+  assert blocks_have_renderable_content(
+    [
+      {"type": "text", "content": " "},
+      {"type": "tool", "tool": "Bash", "status": "done"},
+    ]
+  ) is True

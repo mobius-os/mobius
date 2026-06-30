@@ -11,6 +11,7 @@ import {
   messageCoversAssistantStream,
   assistantMessageText,
   findTrailingAssistantPartialIndex,
+  streamItemsHaveRenderableContent,
 } from '../streamPromotion.js'
 
 test('streamItemsToAssistantPayload preserves text boundaries in legacy content', () => {
@@ -157,4 +158,35 @@ test('findTrailingAssistantPartialIndex returns only the latest visible assistan
     { role: 'assistant', ts: 2 },
     { role: 'user', hidden: true, ts: 3 },
   ]), 1)
+})
+
+test('streamItemsHaveRenderableContent: empty/whitespace-only pre-steer partial is NOT renderable (card 166)', () => {
+  // A steer landing after only an empty or whitespace token streamed must not
+  // seal a stray empty assistant bubble before the steered user row.
+  assert.equal(streamItemsHaveRenderableContent([]), false)
+  assert.equal(streamItemsHaveRenderableContent([{ type: 'text', content: '' }]), false)
+  assert.equal(streamItemsHaveRenderableContent([{ type: 'text', content: '   ' }]), false)
+  assert.equal(streamItemsHaveRenderableContent([{ type: 'text', content: '\n' }]), false)
+})
+
+test('streamItemsHaveRenderableContent: a single REAL token is kept', () => {
+  // Owner contract: a real "I " emitted before the steer is valid output —
+  // keep it (placed before the steered user row), do not blanket-discard.
+  assert.equal(streamItemsHaveRenderableContent([{ type: 'text', content: 'I ' }]), true)
+  assert.equal(streamItemsHaveRenderableContent([{ type: 'text', content: 'I' }]), true)
+})
+
+test('streamItemsHaveRenderableContent: any non-text block is renderable', () => {
+  assert.equal(
+    streamItemsHaveRenderableContent([{ type: 'tool', tool: 'Bash', status: 'running' }]),
+    true,
+  )
+  // Whitespace text + a real tool block is still renderable (the tool counts).
+  assert.equal(
+    streamItemsHaveRenderableContent([
+      { type: 'text', content: ' ' },
+      { type: 'tool', tool: 'Bash', status: 'done' },
+    ]),
+    true,
+  )
 })

@@ -18,7 +18,7 @@ import QueuedMessages from './QueuedMessages.jsx'
 import MsgContent from './MsgContent.jsx'
 import { questionKey } from './questionKey.js'
 import { resolveStopResend } from './resolveStopResend.js'
-import { assistantStreamCoversMessage, findTrailingAssistantPartialIndex, messageCoversAssistantStream, promoteAssistantStream } from './streamPromotion.js'
+import { assistantStreamCoversMessage, findTrailingAssistantPartialIndex, messageCoversAssistantStream, promoteAssistantStream, streamItemsHaveRenderableContent } from './streamPromotion.js'
 import {
   canFastForwardQueue,
   continuationRowsFromPromotedMessage,
@@ -804,6 +804,18 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     if (promotedRef.current && !keepTurnOpen) return
     const items = latestItemsRef.current
     if (items.length === 0) return
+    // A steer can cut over before the assistant emitted any real output — the
+    // only buffered item is an empty/whitespace token. Sealing it would leave a
+    // stray empty assistant bubble before the steered user row (the card-166
+    // orphaned fragment). Drop the empty pre-steer segment: keep the turn open
+    // (the live items already cleared below) so the post-steer continuation
+    // becomes the turn's first assistant message, in the right place. A single
+    // REAL token ("I ") is renderable and still seals — we only skip when there
+    // is nothing worth keeping.
+    if (keepTurnOpen && !streamItemsHaveRenderableContent(items)) {
+      clearStreamItems?.()
+      return
+    }
     promotedRef.current = true
 
     // Decide REPLACE-vs-APPEND against the captured mounted partial.

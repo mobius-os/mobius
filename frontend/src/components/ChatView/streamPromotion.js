@@ -132,6 +132,21 @@ export function streamItemsToAssistantPayload(items) {
   return { content, blocks }
 }
 
+// True when the live stream carries something worth sealing into its own
+// assistant message. A steer can land before the assistant emitted any real
+// output — the only buffered item is an empty or whitespace-only text token.
+// Sealing that produces a stray empty assistant bubble sitting before the
+// steered user row, which reads as an orphaned fragment. A single real token
+// ("I ") IS renderable and stays; only the empty/whitespace case is dropped.
+// Any non-text block (tool/question/error) is always renderable.
+export function streamItemsHaveRenderableContent(items) {
+  if (!Array.isArray(items) || items.length === 0) return false
+  return items.some(item => {
+    if (item?.type === 'text') return !!String(item.content || '').trim()
+    return true
+  })
+}
+
 export function carryQuestionAnswers(blocks, existingBlocks = []) {
   const existingAnswersByKey = new Map()
   for (const block of existingBlocks) {

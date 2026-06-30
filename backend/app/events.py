@@ -381,6 +381,28 @@ def build_assistant_message(
   }
 
 
+def blocks_have_renderable_content(assistant_blocks: list) -> bool:
+  """True when the blocks carry something worth sealing as a message.
+
+  A steer can cut over before the assistant produced any real output — the
+  only accumulated block is an empty or whitespace-only text token (or just
+  the internal `text_boundary` marker). Sealing that produces a stray empty
+  assistant message sitting before the steered user row, which reads as an
+  orphaned fragment (card 166). A single REAL token ("I ") IS renderable and
+  is kept; any non-text block (tool/question/error) is always renderable.
+  """
+  for blk in assistant_blocks or []:
+    btype = blk.get("type")
+    if btype == "text_boundary":
+      continue
+    if btype == "text":
+      if str(blk.get("content") or "").strip():
+        return True
+      continue
+    return True
+  return False
+
+
 def finalize_blocks(assistant_blocks: list) -> None:
   """Force-completes running tools and removes unused internal markers."""
   assistant_blocks[:] = [
