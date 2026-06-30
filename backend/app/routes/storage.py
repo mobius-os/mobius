@@ -95,11 +95,15 @@ def _check_cross_app(
 
   mode: 'read' or 'write'.
   """
-  # The target app must EXIST for any storage access — owner, own-app, or
-  # cross-app. Without this, a token (or an owner) addressing a deleted or
-  # never-created app id could read, recreate, list, or delete an orphan
-  # /data/apps/<id> storage tree. Load it once up front so
-  # every branch below can assume the row is real.
+  # The target app row must exist for any storage access. NOTE: a SOFT-DELETED
+  # (tombstoned) app's row is preserved, so this existence check alone does NOT
+  # block access to an uninstalled app's /data/apps/<id> tree. The real guard
+  # against a stale APP token reaching a tombstoned app lives at the token
+  # layer: deps._enforce_app_scope filters `deleted_at IS NULL` and checks
+  # token_nonce, so an uninstalled app's token can't resolve to an app_id and
+  # never reaches here. Only an OWNER token can address a tombstoned app's
+  # preserved storage (intended — owner-owned, useful for recovery). Load the
+  # row once up front so every branch below can assume it's real.
   target = (
     db.query(models.App).filter(models.App.id == target_app_id).first()
   )
