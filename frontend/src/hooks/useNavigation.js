@@ -91,11 +91,10 @@ export const coldRestoredCanvasAppId =
 /**
  * Navigation: drawer-as-virtual-route + custom navStack.
  *
- * **READ CLAUDE.md "Navigation — DO NOT CHANGE WITHOUT READING THIS
- * WHOLE SECTION" before editing this file.** It documents the full
- * desiderata, the architecture diagram, the table of rejected
- * alternatives, and the gotchas. This docstring is a summary, not
- * the spec.
+ * **READ ARCHITECTURE.md "Navigation back-stack + drawer model"**
+ * before editing this file. It documents the full desiderata, the
+ * architecture diagram, the table of rejected alternatives, and the
+ * gotchas. This docstring is a summary, not the spec.
  *
  * Three load-bearing pieces:
  *
@@ -110,8 +109,9 @@ export const coldRestoredCanvasAppId =
  *      swipe-back artifact: Chrome's per-entry snapshot of the base
  *      entry was captured before any drawer opened, so it's clean.
  *
- *   3. Every drawer-close path (X button, overlay tap, OS back-
- *      gesture) funnels through `history.back()` → `handleBack`.
+ *   3. Every drawer-close path (overlay tap, Escape key, swipe-left,
+ *      the Shell brand toggle, and the OS back-gesture) funnels
+ *      through `history.back()` → `handleBack`.
  *      `handleBack` has a **drawer-first guard**: if the drawer was
  *      open with a sentinel, just close drawer and return — do NOT
  *      pop `navStackRef`. This prevents the "tap overlay
@@ -152,8 +152,9 @@ export default function useNavigation() {
   // Per-app pending nav-sentinels installed via the moebius:nav-push
   // postMessage protocol. Keyed by appId. AppCanvas validates incoming
   // messages and increments via appNavPush; handleBack consumes via
-  // moebius:nav-back postMessage to the iframe. See "Mini-app back-
-  // nav protocol" in skill/agent-skill.md.
+  // moebius:nav-back postMessage to the iframe. See the mini-app
+  // nav-push/nav-back protocol in
+  // backend/scripts/seed-skills/building-apps.md.
   const appSentinelCountsRef = useRef(new Map())
 
   function openDrawer() {
@@ -335,7 +336,8 @@ export default function useNavigation() {
       // entry being consumed by this back, treat the event as just a
       // drawer-close — don't pop navStack. Catches both real
       // back-gestures on a drawer-open view AND closeDrawer's
-      // history.back() (overlay tap, X button). Without this guard,
+      // history.back() (overlay tap, Escape key, swipe-left, Shell
+      // brand toggle). Without this guard,
       // closing the drawer from any deep view over-pops navStack and
       // navigates back unexpectedly.
       if (drawerOpenRef.current && drawerPushedRef.current) {

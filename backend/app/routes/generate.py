@@ -32,11 +32,9 @@ from app.storage_io import app_dir_usage
 # while bounding the blast radius on the memory-tight host.
 _MAX_CHAT_MEDIA_BYTES = 100 * 1024 * 1024  # 100 MB per chat media dir
 
-# Chat IDs are UUID4 hex strings (32 hex chars, no dashes) produced by
-# str(uuid.uuid4()) — 36 chars with dashes.  Both shapes are accepted
-# because the DB stores the dashed form but legacy code strips dashes in
-# a few paths. Rejecting early prevents using a crafted chat_id as a
-# filesystem path component to escape the chats/ subtree.
+# Chat IDs are dashed UUID4 strings produced by str(uuid.uuid4()).
+# Rejecting early prevents using a crafted chat_id as a filesystem path
+# component to escape the chats/ subtree.
 _CHAT_ID_RE = re.compile(
   r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
   re.IGNORECASE,

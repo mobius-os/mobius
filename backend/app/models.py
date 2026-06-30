@@ -92,7 +92,7 @@ class Chat(Base):
   # rather than dedicated columns so new fields can land without a
   # migration. Read in `chat.py:_run_chat_impl` and merged over the
   # file-loaded defaults; written by `PATCH /api/chats/{id}` from the
-  # `/` slash picker (see `frontend/.../SlashPicker.jsx`).
+  # composer popover's model picker (see `ChatSettingsPanel`).
   agent_settings_json = Column(JSON, nullable=True, default=None)
   # Vestigial: the named-agent feature was removed; column retained
   # nullable to avoid a prod migration. Nothing reads or writes it.

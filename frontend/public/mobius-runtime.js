@@ -19,7 +19,7 @@
 // are TYPED: pick the method for your data shape (json is the default). A read
 // of the wrong type for a path throws a clear error rather than corrupting:
 //   window.mobius.appId
-//   window.mobius.online                          -> navigator.onLine
+//   window.mobius.online                          -> probed reachability verdict (the shell's /api/health probe forwarded by AppCanvas; navigator.onLine is only the standalone-host seed/fallback)
 //   window.mobius.storage.get(path)               -> JSON value | null  (offline-capable, SWR)
 //   window.mobius.storage.set(path, data)         -> {synced} | {queued}
 //   window.mobius.storage.getText(path)           -> string | null      (offline-capable, SWR)
@@ -1383,7 +1383,8 @@ export function createUseDocument(storage, reactProvider = null) {
 // Implementation invariants:
 //   - never throws; all async work is fire-and-forget
 //   - no-ops when storage is unavailable (null storage arg)
-//   - name: short kebab-case string; anything else is dropped silently
+//   - name: any non-empty string is accepted (kebab-case recommended but
+//     NOT enforced); only non-string or empty names are dropped silently
 //   - payload values: primitives only (string/number/boolean); non-
 //     primitive values (objects, arrays) are dropped with no error
 //   - ring buffer cap 500; oldest entries evicted when full

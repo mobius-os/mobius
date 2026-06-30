@@ -422,8 +422,9 @@ async def install_app(
 
   See `app.install.install_from_manifest` for the lifecycle: fetch
   manifest → fetch entry JSX + icon + seed files → compile → write
-  source_dir → seed storage → register cron, all inside one DB
-  transaction with filesystem rollback on failure.
+  source_dir → seed storage, all inside one DB transaction with
+  filesystem rollback on failure. Cron registration happens after the
+  commit; failures are non-fatal and returned as warnings.
 
   Returns the new (or updated) App row plus the install `mode` and
   any non-fatal `warnings` (e.g. icon 404, cron deferred).
@@ -1407,8 +1408,9 @@ def _not_modified_if_match(
   `etag`, else None. The 304 keeps the ETag header so a browser
   re-validating an existing cache entry can keep its validator, and
   mirrors the X-Mobius-Offline marker so the 304 carries the same
-  cache directive as the 200 it stands in for (the SW's
-  cacheWillUpdate gate keys on that header)."""
+  cache metadata as the 200 it stands in for. The SW's
+  appCodeStoreAction policy keys on that header for the gated
+  standalone-navigation cache."""
   match = request.headers.get("if-none-match")
   if match and etag in [v.strip() for v in match.split(",")]:
     headers = {"ETag": etag}
@@ -1494,8 +1496,9 @@ def get_frame(
   browser's HTTP-cache revalidation on cold / non-SW paths — the
   browser sends `If-None-Match` and gets a 304 when nothing changed
   or a fresh 200 when `updated_at` advanced or the frame file
-  changed. The service worker revalidates offline-capable apps
-  against the same ETag (`offlineCapableHandler` in `sw.js`).
+  changed. The service worker revalidates frame/module routes against
+  the same ETag via `appCodeHandler` in `sw.js`; that cache is ungated
+  and applies to every installed app.
   SEPARATELY, `AppCanvas` appends `?v=<app.updated_at>` to the frame
   URL, which the SW keeps as its offline cache key (it strips only
   token/_/install, not `v`), so an app edit changes the SW key and
@@ -1506,7 +1509,7 @@ def get_frame(
   (importmap, error UI, postMessage init script). Actual app
   modules at `/api/apps/{id}/module` still require a token. An
   attacker embedding this frame in their own page would receive
-  the iframe's `frame-ready` postMessage on their parent window,
+  the iframe's `moebius:frame-mounted` postMessage on their parent window,
   but the iframe's origin check (against `window.location.origin`)
   rejects any reply from a non-Möbius origin, so no token can be
   coerced into the frame.
@@ -1572,12 +1575,11 @@ def get_frame(
   headers = {"Cache-Control": "no-cache"}
   if etag:
     headers["ETag"] = etag
-  # Tells the service worker this app is safe to cache for offline use
-  # (Tier 4a). The SW's offlineCapableHandler caches frame/module only when
-  # this header is present, so non-offline_capable apps keep their network-only
-  # behavior. Cached offline-capable app code is served cache-first and
-  # refreshed in the background; versioned URLs keep app edits fresh.
-  # Cacheability is a function of server state, not a client-pushed list.
+  # The X-Mobius-Offline header does not gate frame/module caching: the SW
+  # caches code for every installed app via appCodeHandler(OFFLINE_APPS_CACHE,
+  # {gated:false}), regardless of this header. It only gates the separate
+  # standalone-navigation cache and offline write/open semantics.
+  # Offline capability is a function of server state, not a client-pushed list.
   if app.offline_capable:
     headers["X-Mobius-Offline"] = "1"
 
@@ -1646,8 +1648,10 @@ def get_module(
   headers = {"Cache-Control": "no-cache"}
   if etag:
     headers["ETag"] = etag
-  # See get_frame — marks an offline_capable app's module cacheable by
-  # the service worker (Tier 4a).
+  # See get_frame: X-Mobius-Offline does not gate in-shell module caching.
+  # The SW caches modules for every installed app regardless of this header;
+  # the header only gates the separate standalone-navigation cache and
+  # offline write/open semantics.
   if app.offline_capable:
     headers["X-Mobius-Offline"] = "1"
   # The module is a REVALIDATING response (no-cache + stable ETag), so it

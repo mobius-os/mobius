@@ -1,6 +1,6 @@
 """Route registry — crash-tolerant import scaffold.
 
-`main.py` does a single `from app.routes import (...)` with ~15 names.
+`main.py` does a single `from app.routes import (...)` with 24 names.
 A `SyntaxError` (or any other ImportError) in any one of those
 unprotected route modules would otherwise kill uvicorn at boot and
 take the always-reachable `/recover/chat` endpoint down with it.

@@ -664,10 +664,10 @@ def recover_chat_generation(chat_id: str) -> int:
 #
 # C2: SET is folded into the turn's StartTurn / PromotePending
 # writer-actor command (atomic with the user-message write, no separate
-# _mark_run_started). CLEAR routes through the actor's ClearRunStatus
-# below. Both stay best-effort — a missed clear degrades to
-# "reconciliation resolves a turn that actually finished", which is
-# self-correcting and never strands the chat.
+# _mark_run_started). Non-terminal CLEAR routes through the best-effort
+# helper below. Terminal turn-end CLEAR uses the strict helper so a failed
+# ack surfaces as FAILED_LEAVE_MARKER and leaves the marker set for
+# reconciliation instead of reporting a clean completion.
 
 
 async def _clear_run_status(chat_id: str, run_token: str = "") -> None:
@@ -2484,11 +2484,12 @@ async def _run_chat_impl(
   # user-message write, keyed on this same run_token — so there is no
   # separate _mark_run_started here (it was a direct write the actor now
   # owns, eliminating the gap between the user-message commit and the
-  # marker). The matching clear lives in run_chat's finally (routed
-  # through the actor's ClearRunStatus), gated on the same
-  # generation-ownership check that releases the _starting claim, so a
-  # continuation handoff keeps the marker continuously set across the
-  # whole chain of turns.
+  # marker). The normal empty-queue clear happens inside the locked
+  # terminal transition (_complete_turn -> _drain_and_release ->
+  # chat_queue.drain_and_release), using strict ClearRunStatus so a failed
+  # ack leaves the marker for reconciliation. run_chat's finally only owns
+  # the separate Stop-handoff marker clear; continuation handoff keeps the
+  # marker continuously set across the whole chain of turns.
 
   # On the first message of a session, prepend the dynamic memory block (built
   # from the knowledge graph, empty when no validated graph is published) so

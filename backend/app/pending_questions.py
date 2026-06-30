@@ -2,10 +2,10 @@
 
 The SDK runner constructs one inside `can_use_tool` and inserts it
 into the registry owned by `app.questions` (see `_pending` there).
-Routes resolve the future via `questions.claim()` + setting the
-result, or `questions.deliver_answer()`. Keeping the class in its
-own module avoids a circular import (questions → runner; runner
-needs the class).
+Routes resolve the future by peeking with `questions.get()`, reclaiming
+the same entry with `questions.claim_if()`, then setting the future
+result. Keeping the class in its own module avoids a circular import
+(questions → runner; runner needs the class).
 """
 
 from __future__ import annotations

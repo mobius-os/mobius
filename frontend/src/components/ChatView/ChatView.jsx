@@ -462,7 +462,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   //   • revealed              — apply to .chat__scroll style for the
   //                             hide-then-reveal scroll restore.
   //
-  // See useScrollMode.js + docs/chat-redesign.md for full design.
+  // See useScrollMode.js + ARCHITECTURE.md "Chat scroll + steer
+  // contract" for full design.
   const { modeRef, gestureWindowUntilRef, revealed } = useScrollMode({
     chatId,
     scrollRef,
@@ -2037,11 +2038,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     }
   }
 
-  // Show the fast-forward affordance as soon as queued work exists during an
-  // active turn. handleSteer remains the hard gate: it performs one forced
-  // runtime reconcile and only force-steers server-confirmed rows. This keeps
-  // the quick-tap path on "steer" instead of momentarily exposing destructive
-  // Stop while the queue POST ack is still catching up.
+  // Re-anchor the scroll mode when the tab returns to the foreground
+  // (visibilitychange/pageshow/online) while a turn is active, so a
+  // backgrounded-then-resumed streaming chat doesn't snap away from where the
+  // user was reading. No-op when the turn isn't active or the tab is hidden.
+  // (The fast-forward affordance is computed separately at `canSteer` below.)
   const turnActive = sending || isStreaming || serverRunning
   useEffect(() => {
     function freezeStreamingReturn() {

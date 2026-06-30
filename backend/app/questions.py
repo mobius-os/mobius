@@ -2,21 +2,25 @@
 
 Both Claude and Codex SDK runners INSERT into the registry when the
 agent calls AskUserQuestion. The POST /messages route resolves a
-pending future via `claim` + setting the result. Stop flows cancel
-the pending future via `cancel`.
+pending future by peeking with `get`, identity-reclaiming with
+`claim_if`, then setting the result. Stop flows cancel the pending
+future via `cancel`.
 
-Timeout SLA — there is none. A pending question's future is resolved
-only by one of:
+Timeout SLA — Claude has none; Codex has a 420-second bridge timeout
+that cancels the shared future and returns a JSON-RPC timeout error
+instead of fabricated empty answers. A pending question's future is
+resolved or cancelled by one of:
   (a) the user-answer POST → resolves with the answers dict, or
-  (b) `stop_chat` / `stop_chat_for` → cancels the future.
+  (b) `stop_chat` / `stop_chat_for` → cancels the future, or
+  (c) the Codex bridge timeout → cancels the future.
 
-If neither fires (container crash, lost client, stuck SDK), the
-future stays alive until the process restarts. This is intentional:
-the question card blocks the user's chat UI, so a silent timeout
-would silently drop their turn. Resolving with no answer would be
-worse than blocking — the agent would interpret the empty payload as
-a real choice and proceed with garbage state. Investigate any sign
-of a leaked future in chat.log, don't paper over it with a deadline.
+On the no-timeout Claude path, if neither user answer nor stop fires
+(container crash, lost client, stuck SDK), the future stays alive until
+the process restarts. This is intentional: the question card blocks the
+user's chat UI, so a silent timeout would silently drop their turn.
+Resolving with no answer would be worse than blocking — the agent would
+interpret the empty payload as a real choice and proceed with garbage
+state.
 
 `pending_questions.py` keeps the `PendingQuestion` dataclass alone so
 the type can be shared without dragging this module's globals into
@@ -32,7 +36,7 @@ from app.pending_questions import PendingQuestion
 # Module-level singleton registry. Runners receive this dict (or an
 # alias of it) via the existing `pending_questions=` DI kwarg and
 # write the PendingQuestion in directly under the chat_id key. Routes
-# import `app.questions` and call `claim` / `cancel` / etc.
+# import `app.questions` and call `get` / `claim_if` / `cancel` / etc.
 _pending: dict[str, PendingQuestion] = {}
 
 
