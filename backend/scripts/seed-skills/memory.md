@@ -20,9 +20,7 @@ below). Don't try to do Reflection's work mid-chat.
 
 ```
 /data/shared/memory/
-  index.md            root "Home" map (the router). Injected every session,
-                      followed by the full summaries of the ~10 most-recently-
-                      updated chat notes. Keep it tiny.
+  index.md            root "Home" map (the router). Keep it tiny.
   chats/<id>/index.md THE per-chat note (type: chat) — the chat's name + a
                       GROWING summary + the user's facts & intent + cross-chat
                       links. The primary memory carrier; you maintain the
@@ -55,33 +53,25 @@ Filename stem = the note's `id` (the slug other notes `[[link]]` to).
 **`description` is the scent line — the highest-leverage field.** It is the one
 line the router (`index.md`) shows for this note so a reader decides *open or
 skip without opening it*. Write it as the gist in the user's words, not a label.
-**Recall does NOT rank or score notes.** It is by relevance to the live question
-(router → traverse, below), never by a hotness number. `importance` in older
-seed notes is vestigial — nothing ranks by it. `access_count` (tracked in a
-`usage.json` sidecar) survives ONLY as the Memory app's "Used" display column;
-it does not influence what gets injected or recalled. (`type` is OKF-aligned, so
-the whole graph is a portable OKF bundle — it opens in Obsidian and any future
-tool.)
+`importance` and `access_count` (the latter in a `usage.json` sidecar) are inert
+legacy fields — recall is by relevance to the live question (router → traverse),
+never by a score, so don't write them.
 
-Optional frontmatter, when it applies: `as-of: YYYY-MM-DD` (the claim is
-time-sensitive — date it), `supersedes: [old-slug]` (this note replaces an
-older one), `source: [chat:abc123]` (where the fact came from). **`source:` is
-REQUIRED for any fact promoted from a chat** — which is most of them; it's the
-audit trail back to the raw conversation (use `source: legacy` only for a
-seed/non-chat note with genuinely no chat to cite). A moved or renamed note
-leaves a `type: redirect` stub behind — see the structure rules below.
+Optional frontmatter, when it applies: `as-of: YYYY-MM-DD` (time-sensitive
+claim), `supersedes: [old-slug]` (this note replaces an older one), `source:
+[chat:abc123]` (where the fact came from), `type: redirect` (a moved/renamed
+note's stub) — see the structure rules below for the as-of/supersede/redirect
+mechanics. **`source:` is REQUIRED for any fact promoted from a chat** — which is
+most of them; it's the audit trail back to the raw conversation (use `source:
+legacy` only for a seed/non-chat note with genuinely no chat to cite).
 
 ## Reading — descend until you have enough
 
 Each session opens with the router index plus the full summaries of the ~10
-most-recently-updated chat notes already injected. When that's not enough, the
-**memory-search subagent is the primary way to go deeper** — `core.md` has the
-agent run `memory_search.py "<request>" "$CHAT_ID"` early in a chat, which
-spawns a read-only subagent that traverses the graph for what the conversation
-touches and returns the relevant facts (recording its reads to the trace). Reach
-for that first; it reads more thoroughly than a busy main agent tends to.
-
-You can also read **iteratively, by depth** yourself — navigate, don't grep:
+most-recently-updated chat notes already injected. When that's not enough, prefer
+the **memory-search subagent** (`core.md` runs it) over a manual sweep — it reads
+more thoroughly than a busy main agent tends to. You can also read **iteratively,
+by depth** yourself — navigate, don't grep:
 
 1. Start at `index.md`; pick the most relevant map by its one-line entry
    descriptions.
@@ -97,11 +87,6 @@ without opening everything — a whole-graph sweep is the failure mode this
 layout prevents. For "what happened recently," the injected chat summaries
 are usually enough; fetch a full transcript (`GET /api/chats/<id>`) only
 when a specific exchange matters.
-
-The platform records what you were shown and what you `Read` into
-`read-trace/<chat>.json`. The nightly pass diffs that trace against the
-graph to find what *would* have helped you, then reorganizes so next time
-it's nearer the surface. You don't maintain the trace — just read normally.
 
 ## What to record — the inclusion bar
 
@@ -131,17 +116,6 @@ mid-chat, its default home is **this chat's note** (the `## Facts & intent`
 section, below) — not a new standalone note. The nightly pass decides what is
 worth promoting from the chat notes into the wider graph.
 
-## How recall works — router, then traverse (no ranking)
-
-There is no injected "top-N by importance." Each session injects the **router**
-(`index.md` — one scent line per topic) plus the **full summaries of the ~10
-most-recently-updated chat notes**. You then **traverse on demand**: read the
-router's scent lines, pick the topics the live conversation actually touches,
-and `Read` those notes (and their direct `see also` targets — one hop). Recall
-is conditioned on the question, not a fixed bundle. So the work that makes
-recall good is **a sharp scent line per note + good typed links** (the nightly
-pass maintains these) — never tuning a score.
-
 ## Chat notes — the per-chat note is the primary carrier (`type: chat`)
 
 Every chat is a memory node, and **its note is where memory lives by day** —
@@ -168,12 +142,8 @@ maintain `chats/$CHAT_ID/index.md` **every turn**:
   `[[<the-note>]]`), so a future reader pulls just the fact, not the chat's whole
   summary. When a concept recurs across several chats, that recurring thread is the
   highest-value connection: surface it here. **Curate this set** — keep the handful a future
-  reader would actually follow, not every passing mention. (This curation exception
-  is scoped to the `## Related` pointer list ONLY: it is an index of pointers, not
-  facts, so replacing a stale pointer with a better one loses nothing — the facts
-  live in the linked notes/chats and in this note's growing Summary. It is NOT
-  license to trim `## Summary`, `## Facts & intent`, or an inline factual `[[link]]`
-  — those still grow-never-shrink.)
+  reader would actually follow, not every passing mention; replacing a stale `## Related`
+  pointer with a better one loses nothing (it is an index of pointers, not facts).
 
 **Grow, never shrink.** Each turn, `Read` the note and then `Write` a *larger*
 version — fold in the new turn's information and reorganize for coherence, but
@@ -188,13 +158,8 @@ The `by_agent: true` is load-bearing: it makes your sync DEFER to the owner — 
 they have manually renamed the chat the backend keeps their name; if they clear
 it, the name drops to the first message and you re-derive it next turn. Never
 PUT/PATCH the title without `by_agent` (that would read as a manual rename and
-lock it).
-
-Fallback is free: if you never write this file (an error on the first turn), the
-name stays the partner's initial message — the existing default. And the nightly
-pass is the backstop — it gives every substantive chat a good summary + links even
-when the daytime agent didn't (the same daytime-best-effort / night-is-the-system-
-of-record split as fact capture).
+lock it). If you never write this file (an error on the first turn), the name
+stays the partner's initial message — a safe default.
 
 ## The daytime contract (light consistency)
 
@@ -202,13 +167,11 @@ Day-to-day you have a few low-effort moves, in order of effort. Anything past
 these is deferred to Reflection.
 
 1. **Maintain this chat's note (every turn) — the primary move.** Keep
-   `chats/$CHAT_ID/index.md` growing (summary + `## Facts & intent`) and
-   re-propose the name, per "Chat notes" above. Everything durable you notice
-   mid-task lands here first; you don't break flow to author a perfect standalone
-   note. The nightly Reflection pass reads these chat notes and promotes what
-   deserves to be a `note`/`moc` in the wider graph, carrying the source chat id
-   into the new note's `source:` frontmatter list (required — the provenance/audit
-   trail back to the raw chat):
+   `chats/$CHAT_ID/index.md` growing and re-propose the name, per "Chat notes"
+   above; everything durable lands here first. When the nightly Reflection pass
+   promotes a fact out, it carries the source chat id into the new note's
+   `source:` frontmatter list (required — the provenance/audit trail back to the
+   raw chat):
    ```yaml
    source: [chat:abc123, chat:def456]
    ```
@@ -237,10 +200,10 @@ these is deferred to Reflection.
 **Explicitly DEFER the heavy work to the nightly Reflection pass:** reorganizing
 or restructuring maps, MDL-style rebalancing of where things live, promoting a
 cluster of notes to a new MOC, splitting one MOC into sub-MOCs, and *judgment*
-merges of near-duplicates that aren't identical. Keeping rewrites off the live
-loop is deliberate — Reflection has the whole day's activity in view and a lint
-gate; mid-chat you have neither. If you find yourself moving more than a note or
-two, stop and capture the intent in this chat's note for Reflection instead.
+merges of near-duplicates that aren't identical. Reflection has the whole day's
+activity in view and a lint gate; mid-chat you have neither. If you find yourself
+moving more than a note or two, stop and capture the intent in this chat's note
+for Reflection instead.
 
 ## One note or a line? (atomicity)
 
@@ -253,17 +216,12 @@ two, stop and capture the intent in this chat's note for Reflection instead.
 - If a note has started asserting **2+ independent claims**, leave a note for
   Reflection to split it — don't split mid-chat unless it's trivial. Split on idea
   boundaries, never on length alone.
-- A note past **~30 prose lines** (the linter warns) is a signal it probably
-  contains 2+ claims — either split it now per the structure rules below (if
-  the boundary is obvious) or leave a split note for Reflection.
 
 ## The shape of the graph (structure rules)
 
-These rules keep the graph balanced as it grows — shallow enough to orient
-in, deep enough that no node overflows. The linter
-(`python3 /app/scripts/build_memory_graph.py`) warns when one is broken; by
-day you act only on the obvious ones, and the nightly Reflection pass works
-the rest (its reorganization worklist IS the warning list).
+The linter (`python3 /app/scripts/build_memory_graph.py`) warns when one of
+these is broken; by day you fix only the obvious ones and leave the rest for the
+nightly Reflection pass (its reorganization worklist IS the warning list).
 
 - **Every map entry carries a one-line description.** `- [[slug]] — what
   you will find there`, never a bare `- [[slug]]`. A bare entry forces a
@@ -285,19 +243,9 @@ the rest (its reorganization worklist IS the warning list).
   links is already doing a map's job — move it to `mocs/` and give every
   entry its one-line description.
 - **A move or rename leaves a redirect stub** at the old slug so existing
-  `[[links]]` keep resolving:
-
-  ```yaml
-  ---
-  title: <old title>
-  type: redirect
-  target: <new-slug>
-  ---
-  This content has moved to [[new-slug]].
-  ```
-
-  The indexer follows stubs, flags chains (A → B → C — repoint to C), and
-  flags stubs nothing links to anymore (safe to delete).
+  `[[links]]` keep resolving: a `type: redirect` note whose `target:` is the
+  new slug (body: "This content has moved to [[new-slug]]."). The indexer
+  follows stubs and flags stale chains; fix chains only if obvious.
 - **Date time-sensitive claims; supersede rather than delete.** Give the
   note `as-of: YYYY-MM-DD` and anchor the claim in the body ("As of June
   2026, ..."). When the fact changes, update the note and advance the date.
@@ -308,21 +256,18 @@ the rest (its reorganization worklist IS the warning list).
 
 ## Anti-orphan + dedup (every write)
 
-- **No orphans.** Every note links into `>= 1` map (`mocs:` frontmatter) at
-  creation. A note reachable from nothing is a bug — the indexer flags it.
+- **No orphans, link with a reason.** Every note links into `>= 1` map
+  (`mocs:` frontmatter) at creation plus ~1-5 lateral `[[links]]`, each with a
+  one-line reason. A note reachable from nothing is a bug — the indexer flags
+  it. ~5+ outbound links = the note is really a disguised map (leave a note for
+  Reflection to promote it).
 - **Search before create.** `grep -ril '<topic>' /data/shared/memory/notes/`
   (or read the relevant MOC) before adding a note. If a near-duplicate exists,
   extend or link it instead of forking a sibling.
-- **Link with a reason.** 1 mandatory map link + ~1-5 lateral `[[links]]`,
-  each with a one-line reason. 0 links = orphan; ~5+ outbound links = the note
-  is really a disguised map (the linter flags it — leave a note for Reflection
-  to promote it).
-- **Supersede on a clear correction, else defer.** When new info clearly
-  corrects an old note (the partner corrected it, or recency/context picks the
-  winner), edit/replace it — don't leave two notes that disagree. Time-sensitive
-  claims carry `as-of:` dates so staleness is visible instead of silent (structure
-  rules above). A genuine contradiction with no clear winner goes to Reflection's
-  one-tap question, not a silent overwrite. Git history is the undo.
+- **Supersede a clear correction, else defer** (the daytime "Newer fact wins"
+  rule + the structure-rules supersede mechanics above): a genuine contradiction
+  with no clear winner goes to Reflection's one-tap question, not a silent
+  overwrite.
 - **Partner corrections are authoritative.** When the partner says a memory is
   wrong, their correction outranks everything else — supersede the note in the
   same turn, keep the correction's date, and tell the partner what you changed.
