@@ -32,6 +32,18 @@ At startup `backend/app/main.py:764` picks one static directory **at module load
 
 The `/data` volume persists across `docker compose build && up -d`, so a new image's `/app/static/` is masked by an old `/data/shell/dist/`. After a frontend deploy, refresh both source and dist and verify the bundle hash changed in `/data/shell/dist/assets/index-*.js`. Because the choice is made at module load, an in-container shell rebuild does not take effect until the uvicorn process restarts. Never delete `/app/static/` — it is the only recovery fallback and is root-owned.
 
+### Security updates — who patches what
+
+Möbius is meant to be self-hosted on a user-provisioned host — a managed platform (Railway/Render/Fly/PikaPods) or a raw VPS — so "apply a security update" splits into three tiers by who can even act:
+
+- **Image userspace** — the Python wheels, npm globals, apt packages, and vendored mini-app libs baked into the image. The agent owns these end-to-end: bump the pin (`Dockerfile` / `backend/requirements.txt` / `frontend/package.json`), rebuild, recreate. Never `apt upgrade` / `pip install -U` a *running* container — that mutation is ephemeral and drifts the live container away from the reproducible image. `deploy-prod.sh` is the apply path.
+- **Host OS userspace + the Docker engine** — outside every container; patched on the host (`unattended-upgrades` covers the OS packages; the engine is a separate host upgrade).
+- **Host kernel** — *not in the container*; it shares the host's and cannot be patched from inside. On a managed platform the operator patches+reboots the kernel underneath you (the safe default for non-devops owners); on a raw VPS it's the owner's job, via `unattended-upgrades` + livepatch + a scheduled reboot window.
+
+Two invariants follow. (1) **Möbius never patches the kernel from inside the container** — it only *surfaces* "host reboot pending / kernel CVE outstanding" to the owner; the platform/OS applies it. (2) **The in-container agent cannot recreate its own container** (the swap would kill its own process), so the shape is *propose-in* (agent scans → bumps → tests → commits) / *dispose-out* (a host-driven `deploy-prod.sh`, or blue-green, does the rebuild+recreate). Detection is the agent's leverage on every tier: `pip-audit` + `npm audit` + an image scanner (Trivy / `docker scout`) over the built image → triage → bump → test → deploy (tier 1) or surface a reboot window (tiers 2/3).
+
+**One accepted advisory.** `npm audit` reports a HIGH on `lodash` (4.17.21 — the latest published version; there is no upstream fix) pulled in transitively by `@openai/apps-sdk-ui`. lodash enters the tree only through that library's `Slider` component, which the shell does not import, so Vite tree-shakes lodash out of the shipped bundle entirely (verified) and the vulnerable `_.template` / `_.unset` / `_.omit` never reach the browser. `frontend/src/lib/__tests__/appsSdkLodash.test.js` fails if the shell ever imports `Slider`; revisit if apps-sdk-ui ships a lodash-free release.
+
 ## Backend (`backend/app/`)
 
 FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serving). `routes/__init__.py` is a crash-tolerant import scaffold: every router is loaded through `_load(name)`, and an import failure returns a 503 stub instead of killing uvicorn, so `/recover/chat` stays reachable. To add a route, write the module under `routes/`, expose a `router`, and register it in `routes/__init__.py` (both the `_load(...)` line and `__all__`), then mount it in `main.py`.
@@ -210,6 +222,8 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | `frontend/src/sw.js` | Service worker: precache + cache strategy, incl. the offline-capable-app handler |
 | `frontend/src/sw-cache-policy.js` | Authoritative cache-route policy (see `docs/offline.md`) |
 | `frontend/src/lib/` | Cross-cutting helpers: `appToken.js`, `chatEmbed.js`, `themeService.js`, `onlineStatus.js`, `navHistory.js`, `errorLog.js`, etc. |
+
+**Vendored mini-app libs are version-pinned in lockstep across several places.** Each lib (React, three, pdf.js, CodeMirror, KaTeX, recharts, date-fns, d3-geo, marked, DOMPurify) is served same-origin under `/vendor/<name>@<version>/` so mini-apps resolve it offline. Bumping a version means changing it in *all* of: the `Dockerfile` vendor step (installs + builds the lib), the `app-frame.html` importmap (resolves the bare specifier), `sw.js`'s precache list (offline-guarantees it), and `runtime_libs.py`'s `RUNTIME_LIBS` (marks it external so esbuild doesn't try to bundle the bare specifier). `routes/standalone.py` derives its importmap from `app-frame.html` via `runtime_libs.importmap_block()`, and `backend/tests/test_runtime_libs.py` locks the importmap ↔ `RUNTIME_LIBS` pair so a desync fails CI. These are security-relevant: the vendored DOMPurify/marked are on the mini-app sanitize/render path, so they must be kept current with the shell's own npm copies.
 
 ## Where do I make a change?
 
