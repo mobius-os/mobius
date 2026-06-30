@@ -305,7 +305,10 @@ def _selected_force_steer_pending(
   ]
   if len(selected) != len(requested_ts):
     return None
-  expected = "\n".join(
+  # Join with "\n\n" (paragraph break) so a steered multi-message turn reads
+  # as distinct messages, not a single newline-crammed blob — must byte-match
+  # the frontend handleSteer content (steerTexts.join("\n\n")).
+  expected = "\n\n".join(
     (m.get("content") or "").strip()
     for m in selected
     if (m.get("content") or "").strip()

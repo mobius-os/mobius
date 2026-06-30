@@ -98,6 +98,27 @@ function appendMessageBatch(prev, rows) {
   return nextRows.length ? [...prev, ...nextRows] : prev
 }
 
+function insertMessageBatchByTs(prev, rows) {
+  const batch = Array.isArray(rows) ? rows.filter(Boolean) : []
+  if (batch.length === 0) return prev
+  const seenTs = new Set(prev.map(m => m?.ts).filter(v => v != null))
+  const next = [...prev]
+  let changed = false
+  for (const row of batch) {
+    if (row.ts != null) {
+      if (seenTs.has(row.ts)) continue
+      seenTs.add(row.ts)
+      const insertAt = next.findIndex(m => m?.ts != null && m.ts > row.ts)
+      if (insertAt >= 0) next.splice(insertAt, 0, row)
+      else next.push(row)
+    } else {
+      next.push(row)
+    }
+    changed = true
+  }
+  return changed ? next : prev
+}
+
 function replaceOptimisticWithBatch(prev, optimisticTs, rows) {
   const base = optimisticTs == null
     ? prev
@@ -699,18 +720,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           respectFollowMode: false,
         })
       // Dedup by ts so a reconnect's catch-up replay of the same event
-      // can't double-insert the steered user message.
-      commitMessages(prev => {
-        const seenTs = new Set(prev.map(m => m.ts).filter(v => v != null))
-        const nextRows = steeredMessages.filter(m => {
-          if (m.ts == null) return true
-          if (seenTs.has(m.ts)) return false
-          seenTs.add(m.ts)
-          return true
-        })
-        if (nextRows.length === 0) return prev
-        return [...prev, ...nextRows]
-      })
+      // can't double-insert the steered user message. Insert by transcript ts
+      // instead of blindly appending: if a fetch/replay already committed the
+      // post-steer assistant row, the steered user still belongs before it.
+      commitMessages(prev => insertMessageBatchByTs(prev, steeredMessages))
       setSpacerActive(true)
       if (shouldPinSteered) {
         if (spacerRef.current) spacerRef.current.style.height = '0px'
@@ -1239,12 +1252,13 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         if (result?.status === 'queued') {
           const canonicalPending = result.pending_message || null
           // Replace optimistic ts with server's (cid is stable).
+          const ackTs = canonicalPending?.ts ?? result.ts
           pendingQueue.swapOptimisticTs(
             queuedMsg.cid,
-            canonicalPending?.ts ?? result.ts ?? queuedMsg.ts,
+            ackTs ?? queuedMsg.ts,
             result.position,
             canonicalPending,
-            { confirmed: !!canonicalPending },
+            { confirmed: !!canonicalPending || typeof ackTs === 'number' },
           )
           if (!canonicalPending) {
             // Older backends acknowledge only {ts, position}. Hydrate
@@ -1462,7 +1476,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             ? `s-${canonicalPending.ts ?? result.ts ?? userMsg.ts}`
             : `q-${userMsg.ts}`,
           queued: true,
-          serverTs: !!canonicalPending,
+          serverTs: !!canonicalPending || typeof result.ts === 'number',
           position: result.position,
         })
         if (!canonicalPending) {
@@ -1920,7 +1934,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       if (!allServerConfirmed) return
 
       // Build content EXACTLY as the backend expects: the non-empty
-      // trimmed contents joined by "\n", in pending order. This must
+      // trimmed contents joined by "\n\n", in pending order. This must
       // byte-match _force_steer_matches_pending's `expected` or the
       // request is rejected (not_steered). consume_pending_ts is every
       // snapshot entry's ts (the backend selects pending rows by this set
@@ -1928,8 +1942,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       const steerTexts = confirmedSnapshot
         .map(m => (m.content || '').trim())
         .filter(Boolean)
-      const content = steerTexts.join('\n')
-      const legacyContent = steerTexts.join('\n\n')
+      const content = steerTexts.join('\n\n')
+      const legacyContent = steerTexts.join('\n')
       const consumePendingTs = confirmedSnapshot.map(m => m.ts)
       // De-dupe attachments by name, exactly like handleStop/resolveStopResend.
       const seenNames = new Set()
@@ -1956,8 +1970,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           })),
         })
         // Backward compatibility for a running backend process that has not
-        // restarted since the queue separator fix. New code expects "\n";
-        // old code expects "\n\n". Retry only after a clean not_steered
+        // restarted since the queue separator fix. New code expects "\n\n";
+        // old code expects "\n". Retry only after a clean not_steered
         // response and only when the local queue still contains exactly the
         // same server-confirmed ts set, so a race cannot double-send.
         if (

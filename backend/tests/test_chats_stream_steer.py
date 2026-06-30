@@ -363,7 +363,7 @@ def test_force_steer_consumes_existing_queued_messages(
   res = client.post(
     f"/api/chats/{chat_id}/messages",
     json={
-      "content": "use blue\nalso square",
+      "content": "use blue\n\nalso square",
       "force_steer": True,
       "consume_pending_ts": [10, 11],
     },
@@ -372,7 +372,7 @@ def test_force_steer_consumes_existing_queued_messages(
 
   assert res.status_code == 202, res.text
   assert res.json()["status"] == "steered"
-  assert steered_calls == [(chat_id, "use blue\nalso square")]
+  assert steered_calls == [(chat_id, "use blue\n\nalso square")]
   chat = _read_chat(chat_id)
   assert [m["content"] for m in chat.pending_messages] == ["later"]
   # No live sink in this wiring test → the steered row is appended at the END.
