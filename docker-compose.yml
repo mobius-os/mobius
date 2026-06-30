@@ -46,6 +46,11 @@ services:
       timeout: 10s
       retries: 3
       start_period: 20s
+    # Cap the platform's memory so a leak can't starve the host into OOM-killing
+    # the recovery floor; pairs with recoveryd's kill-last oom_score_adj below
+    # (Codex HIGH; plan _148 1.6). Env-overridable for bigger/smaller hosts.
+    mem_limit: ${MOBIUS_APP_MEM_LIMIT:-6g}
+    oom_score_adj: 200
 
   # Frozen recovery floor (recoveryd) — its OWN container so a broken or
   # crash-looping platform cannot take recovery down (different cgroup,
@@ -86,6 +91,10 @@ services:
       - app_data:/data
     expose:
       - "8001"
+    # Protect the recovery floor from the host OOM-killer (earlyoom is active):
+    # kill-last, so a platform leak / heavy swap sacrifices the app + the rescue
+    # child before recoveryd is ever selected (Codex HIGH; plan _148 1.6).
+    oom_score_adj: -900
 
 volumes:
   caddy_data:

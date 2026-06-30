@@ -189,9 +189,9 @@ def _assert_self_integrity() -> None:
       continue
     if st.st_uid != 0:
       problems.append(f"{name}: not root-owned (uid={st.st_uid})")
-    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+    if st.st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH):
       problems.append(
-        f"{name}: group/other-writable (mode={oct(st.st_mode & 0o777)})"
+        f"{name}: writable (mode={oct(st.st_mode & 0o777)})"
       )
   if problems:
     for pr in problems:
@@ -336,22 +336,23 @@ class _Handler(BaseHTTPRequestHandler):
     one is configured. Applied to EVERY state-changing POST.
     """
     sfs = self.headers.get("Sec-Fetch-Site")
-    if sfs is not None:
-      return sfs.lower() == "cross-site"
-    # No Sec-Fetch-Site: fall back to an Origin/Referer host check, but
-    # only if an allowlist is configured (else we can't know our host).
-    if not _ALLOWED_HOSTS:
-      return False
-    ref = self.headers.get("Origin") or self.headers.get("Referer")
-    if not ref:
-      # A missing Origin on a same-origin POST is common; not by itself
-      # evidence of an attack.
-      return False
-    try:
-      host = urllib.parse.urlparse(ref).hostname or ""
-    except Exception:
+    if sfs is not None and sfs.lower() == "cross-site":
       return True
-    return host.lower() not in _ALLOWED_HOSTS
+    # INDEPENDENTLY of Sec-Fetch-Site: if an allowlist is configured and an
+    # Origin/Referer is present, its host MUST match. A same-site sibling
+    # origin can still send a SameSite=Strict cookie, so "same-site" is not a
+    # free pass for a destructive POST (Codex vector 4). A missing Origin on a
+    # genuine same-origin POST is common and is not by itself an attack.
+    if _ALLOWED_HOSTS:
+      ref = self.headers.get("Origin") or self.headers.get("Referer")
+      if ref:
+        try:
+          host = urllib.parse.urlparse(ref).hostname or ""
+        except Exception:
+          return True
+        if host.lower() not in _ALLOWED_HOSTS:
+          return True
+    return False
 
   # -- routing ------------------------------------------------------------
 

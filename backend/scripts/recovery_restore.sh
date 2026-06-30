@@ -66,8 +66,10 @@ if [ "$MODE" = "platform" ]; then
   # Clear pycache first so stale bytecache doesn't survive the reset.
   find /data/platform -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
   find /data/platform -name '*.pyc' -delete 2>/dev/null || true
-  if su -s /bin/sh mobius -c 'git -C /data/platform reset --hard HEAD'; then
-    echo "platform restore: git reset --hard HEAD succeeded."
+  if su -s /bin/sh mobius -c 'git -C /data/platform reset --hard HEAD && git -C /data/platform clean -fdx'; then
+    # clean -fdx also removes UNTRACKED files a bad change may have added —
+    # reset --hard alone leaves them, so a stray module could survive (Codex).
+    echo "platform restore: git reset --hard + clean -fdx succeeded."
     exit 0
   else
     echo "FATAL: git reset --hard HEAD failed in /data/platform" >&2
@@ -90,6 +92,9 @@ if [ "$MODE" = "platform-baked" ]; then
   find "$DST_APP" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
   find "$DST_APP" -name '*.pyc' -delete 2>/dev/null || true
   find "$DST_SCR" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+  # Wipe first so files NOT in the baked floor (an agent-added module) do
+  # not survive the restore — cp -a alone only overwrites (Codex).
+  rm -rf "$DST_APP" "$DST_SCR"
   mkdir -p "$DST_APP" "$DST_SCR"
   cp_out=$(cp -a "$SRC_APP/." "$DST_APP/" 2>&1) || {
     echo "FATAL: cp -a $SRC_APP -> $DST_APP failed: $cp_out" >&2; exit 3
