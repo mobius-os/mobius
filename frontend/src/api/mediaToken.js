@@ -1,7 +1,8 @@
 /**
- * Short-lived media tokens for serving uploads and generated images.
+ * Short-lived media tokens for serving uploads, media, and generated images.
  *
- * The serve routes (/api/chats/{id}/uploads/{file} and /api/chats/{id}/generated/{file})
+ * The serve routes (/api/chats/{id}/{uploads,media,generated}/{file} — `media` is
+ * where agent screenshots + image-gen land; `generated` is the legacy alias)
  * accept the auth token from a ?token= query param because <img> tags can't set
  * Authorization headers. Passing the full 30-day owner JWT as a query param leaks it
  * into server access logs, browser history, and Referer headers.
