@@ -1,16 +1,16 @@
 {
   "id": "memory",
   "name": "Memory",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "A browsable graph of what Möbius has learned over time, the agent’s own memory.",
   "author": "mobius-os",
   "license": "MIT",
   "homepage": "https://github.com/mobius-os/app-memory",
   "entry": "index.jsx",
   "icon": "icon.png",
-  "offline_capable": false,
+  "offline_capable": true,
   "offline": {
-    "reads": false,
+    "reads": true,
     "writes": "none",
     "execution": "none"
   },

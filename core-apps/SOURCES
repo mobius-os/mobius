@@ -1,0 +1,13 @@
+# Core apps are SNAPSHOTS of their catalog repos. The catalog repo is the
+# single source of truth; core-apps/<slug>/ is a committed copy of it, baked
+# into the image and installed at boot by install-core-apps.sh.
+#
+# To update a built-in app: edit it in its catalog repo (mobius-os/app-<slug>),
+# bump the commit below, run `scripts/sync-core-apps.sh`, and commit the diff.
+# CI (`scripts/check-core-apps-sync.sh`) fails the build if core-apps/<slug>
+# drifts from <repo>@<commit> — so the two trees can never silently diverge
+# again (which is how core-apps/reflection once shipped without its manifest).
+#
+# Format: <slug>  <owner/repo>  <commit-sha>
+memory      mobius-os/app-memory      a4e5d4c95e9ba63b9124147a75911c38c31f8cc0
+reflection  mobius-os/app-reflection  66a6766cb7d76e59a6ed124bfad53a2b4ff27b31

@@ -8,6 +8,19 @@
  *     problem: { severity:'warn'|'error', kind, detail }
  *   GET /api/storage/shared/memory/<node.path>  → raw markdown (frontmatter + body)
  *
+ * Offline + live-repaint (see makeSharedMemoryStore below): the graph and notes
+ * live in SHARED storage (/data/shared/memory/, written by the chat + dreaming
+ * agents), which window.mobius.storage cannot address — that runtime is hard-
+ * scoped to /api/storage/apps/${appId}/ and the shell service worker sends every
+ * other /api/* straight to network, so a raw shared GET renders blank offline and
+ * never repaints when an agent rewrites the graph beneath an open app. So this
+ * app carries its own read-through cache over the shared route: a Cache-Storage-
+ * backed store serving the last-known value instantly (offline-capable),
+ * revalidating in the background, with a visibility-aware poller so subscribed
+ * views (the graph, the open note) repaint when the agent writes. It is the
+ * shared-namespace twin of window.mobius.storage.get/getText/subscribe until the
+ * runtime grows a shared scope; offline_capable then caches only the app CODE.
+ *
  * Everything else here is presentation. The graph renderer intentionally follows
  * Quartz's durable shape: d3-force for layout and PixiJS for links, nodes, and
  * labels in one transformed scene. D3/Pixi load the same way Quartz does:
@@ -17,7 +30,6 @@
  */
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 
-const GRAPH_URL = '/api/storage/shared/memory/graph.json';
 const NOTE_BASE = '/api/storage/shared/memory/';
 // Self-hosted under /vendor (frontend/public/vendor/, precached by sw.js).
 // Prod CSP (script-src 'self' 'unsafe-inline' https://esm.sh) blocks
@@ -181,13 +193,191 @@ function relDate(s) {
   return Math.floor(days / 365) + 'y ago';
 }
 
+// ── Shared-memory read-through store ──────────────────────────────────────
+// The graph + notes live in SHARED storage (/api/storage/shared/memory/),
+// which `window.mobius.storage` cannot reach — that runtime hard-scopes every
+// read to /api/storage/apps/${appId}/ — and the shell service worker sends all
+// other /api/* straight to network, so a raw shared GET is blank offline and
+// load-once (stale after an agent rewrite). This factory is the shared-scope
+// twin of window.mobius.storage.get/getText/subscribe: read-through cache
+// (last-known value served instantly, offline-capable), background revalidate,
+// and a visibility-aware poller so subscribed views repaint when the chat or
+// dreaming agent rewrites the file. Pure factory (deps injected) so the offline
+// harness can drive it with a mocked cache + fetch and no network.
+export function makeSharedMemoryStore({
+  baseUrl = NOTE_BASE,
+  getToken,
+  fetchImpl,
+  cacheStore,
+  cacheName = 'mobius-memory-shared-v1',
+  pollMs = 4000,
+  isVisible = () => (typeof document === 'undefined'
+    ? true
+    : document.visibilityState !== 'hidden'),
+} = {}) {
+  const doFetch = fetchImpl
+    || (typeof fetch === 'function' ? (...a) => fetch(...a) : null);
+
+  // The cache is a thin key->{ body, present } map. Backed by Cache Storage when
+  // available (survives reloads, the offline mirror), else an in-memory Map so
+  // a mock / a browser without caches still works (degrades to online-only).
+  function memoryCache() {
+    const m = new Map();
+    return {
+      async read(key) { return m.has(key) ? m.get(key) : null; },
+      async write(key, entry) { m.set(key, entry); },
+    };
+  }
+  async function openCacheStore() {
+    if (cacheStore) return cacheStore;
+    if (typeof caches === 'undefined' || !caches.open) return memoryCache();
+    let c;
+    try { c = await caches.open(cacheName); } catch { return memoryCache(); }
+    return {
+      async read(key) {
+        const res = await c.match(key);
+        if (!res) return null;
+        const present = res.headers.get('x-memory-present') !== '0';
+        const body = present ? await res.text() : null;
+        return { body, present };
+      },
+      async write(key, entry) {
+        const headers = { 'x-memory-present': entry.present ? '1' : '0' };
+        try { await c.put(key, new Response(entry.body ?? '', { headers })); }
+        catch { /* cache write is best-effort; reads still hit network */ }
+      },
+    };
+  }
+  let cacheReady = null;
+  function cache() { return (cacheReady ||= openCacheStore()); }
+
+  function url(path) {
+    return path === 'graph.json' ? baseUrl + 'graph.json' : baseUrl + path;
+  }
+
+  // One network read. Returns { present, body } on a definitive answer (200 or
+  // 404) and writes it through to the cache; throws on transient failure
+  // (offline / 5xx) so the caller can fall back to the cached value.
+  async function fetchThrough(path) {
+    if (!doFetch) throw new Error('no fetch');
+    const token = typeof getToken === 'function' ? await getToken() : null;
+    const headers = token ? { Authorization: 'Bearer ' + token } : {};
+    const res = await doFetch(url(path), { headers });
+    if (res.status === 404) {
+      const entry = { body: null, present: false };
+      (await cache()).write(url(path), entry);
+      return entry;
+    }
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const body = await res.text();
+    const entry = { body, present: true };
+    (await cache()).write(url(path), entry);
+    return entry;
+  }
+
+  // Read-through: cached value first (instant, offline), revalidated in the
+  // background. Returns { body, present, fromCache, error }. `error` is set only
+  // when there is NO cached value AND the network failed — the genuine
+  // can't-render state; a background-revalidate failure is swallowed (the
+  // cached value already answered).
+  async function read(path) {
+    const cached = await (await cache()).read(url(path));
+    if (cached) {
+      fetchThrough(path).catch(() => {}); // revalidate; poller delivers fresh data
+      return { ...cached, fromCache: true, error: null };
+    }
+    try {
+      const fresh = await fetchThrough(path);
+      return { ...fresh, fromCache: false, error: null };
+    } catch (e) {
+      return { body: null, present: false, fromCache: false, error: e };
+    }
+  }
+
+  function parseJSON(body) {
+    if (body == null) return null;
+    try { return JSON.parse(body); } catch { return null; }
+  }
+
+  async function getJSON(path) {
+    const r = await read(path);
+    return { value: r.present ? parseJSON(r.body) : null, present: r.present, error: r.error };
+  }
+  async function getText(path) {
+    const r = await read(path);
+    return { value: r.present ? (r.body ?? '') : null, present: r.present, error: r.error };
+  }
+
+  // Subscribe a path: fire `cb` immediately with the cached/first value, then on
+  // every poll where the raw body changed (an agent write). The poller only
+  // ticks while the tab is visible, so a backgrounded app costs nothing. `cb`
+  // receives { body, present, error } so callers parse for their own kind.
+  // `opts.onRevalidate(bool)` brackets each background revalidation so a view
+  // can show a "merging…" indicator while fresh shared data is being pulled in
+  // and clear it once the new content (or a no-change verdict) has landed.
+  function subscribe(path, cb, opts = {}) {
+    const onRevalidate = typeof opts.onRevalidate === 'function' ? opts.onRevalidate : () => {};
+    let alive = true;
+    let last; // last raw body delivered — repaint only on a real change
+    let timer = null;
+
+    function deliver(body, present, error) {
+      last = body;
+      try { cb({ body, present, error: error || null }); }
+      catch { /* a subscriber throwing must not kill the poller */ }
+    }
+
+    async function revalidate() {
+      onRevalidate(true);
+      try {
+        const e = await fetchThrough(path);
+        if (alive && e.body !== last) deliver(e.body, e.present, null);
+      } catch { /* transient: keep the last value, just clear the indicator */ }
+      finally { if (alive) onRevalidate(false); }
+    }
+
+    async function init() {
+      const cached = await (await cache()).read(url(path));
+      if (!alive) return;
+      if (cached) {
+        // Cached value paints instantly (offline-capable); then revalidate so an
+        // agent write since last open is merged in.
+        deliver(cached.body, cached.present, null);
+        revalidate();
+      } else {
+        // Nothing cached: the first read IS the revalidation.
+        onRevalidate(true);
+        try {
+          const e = await fetchThrough(path);
+          if (alive) deliver(e.body, e.present, null);
+        } catch (e) {
+          if (alive) deliver(null, false, e);
+        } finally { if (alive) onRevalidate(false); }
+      }
+    }
+
+    function schedule() {
+      if (!alive || pollMs <= 0) return;
+      timer = setTimeout(async () => {
+        if (isVisible()) await revalidate();
+        schedule();
+      }, pollMs);
+    }
+
+    init().finally(schedule);
+    return () => { alive = false; if (timer) clearTimeout(timer); };
+  }
+
+  return { read, getJSON, getText, subscribe, _url: url };
+}
+
 export default function App({ appId, token }) {
   const [graph, setGraph] = useState(null);
   const [status, setStatus] = useState('loading'); // loading | ready | empty | error
   const [errMsg, setErrMsg] = useState('');
   const [view, setView] = useState('graph'); // graph | list
   const [selected, setSelected] = useState(null); // node object
-  const [noteState, setNoteState] = useState({ status: 'idle', md: '', fm: {} });
+  const [noteState, setNoteState] = useState({ status: 'idle', md: '', fm: {}, revalidating: false });
   const [hoverId, setHoverId] = useState(null);
   const [sortKey, setSortKey] = useState('access_count');
   const [sortDir, setSortDir] = useState('desc');
@@ -210,8 +400,12 @@ export default function App({ appId, token }) {
   const [dims, setDims] = useState({ w: 0, h: 0 });
   const [localDims, setLocalDims] = useState({ w: 0, h: 0 });
 
-  const authHeaders = useMemo(
-    () => ({ Authorization: 'Bearer ' + token }),
+  // Read-through, offline-capable, subscribe-driven store over the SHARED
+  // /api/storage/shared/memory/ route (see makeSharedMemoryStore). One per
+  // token so a token refresh rebuilds it; the cache mirror is keyed by URL and
+  // shared across instances, so the offline value survives the rebuild.
+  const store = useMemo(
+    () => makeSharedMemoryStore({ getToken: () => token }),
     [token],
   );
 
@@ -236,33 +430,40 @@ export default function App({ appId, token }) {
     return () => { alive = false; };
   }, []);
 
-  // --- Load the graph index. ---
+  // --- Subscribe to the graph index. ---
+  // graph.json is rewritten by the chat + dreaming agents while this app sits
+  // open, so it MUST subscribe, not load-once (a mount-only read leaves the
+  // owner on a stale graph after an agent write). The store serves the cached
+  // graph instantly (offline-capable) and repaints on every agent rewrite.
   useEffect(() => {
-    let alive = true;
-    (async () => {
-      setStatus('loading');
-      try {
-        const res = await fetch(GRAPH_URL, { headers: authHeaders });
-        if (res.status === 404) {
-          if (alive) { setGraph({ nodes: [], edges: [], problems: [] }); setStatus('empty'); }
-          return;
-        }
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json();
-        const nodes = Array.isArray(data.nodes) ? data.nodes : [];
-        if (!alive) return;
-        setGraph({
-          nodes,
-          edges: Array.isArray(data.edges) ? data.edges : [],
-          problems: Array.isArray(data.problems) ? data.problems : [],
-        });
-        setStatus(nodes.length === 0 ? 'empty' : 'ready');
-      } catch (e) {
-        if (alive) { setErrMsg(String(e.message || e)); setStatus('error'); }
+    setStatus('loading');
+    const unsub = store.subscribe('graph.json', ({ body, present, error }) => {
+      if (error && body == null) {
+        setErrMsg(String(error.message || error));
+        setStatus('error');
+        return;
       }
-    })();
-    return () => { alive = false; };
-  }, [authHeaders]);
+      if (!present || body == null) {
+        setGraph({ nodes: [], edges: [], problems: [] });
+        setStatus('empty');
+        return;
+      }
+      let data;
+      try { data = JSON.parse(body); } catch {
+        setErrMsg('graph.json is not valid JSON');
+        setStatus('error');
+        return;
+      }
+      const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+      setGraph({
+        nodes,
+        edges: Array.isArray(data.edges) ? data.edges : [],
+        problems: Array.isArray(data.problems) ? data.problems : [],
+      });
+      setStatus(nodes.length === 0 ? 'empty' : 'ready');
+    });
+    return unsub;
+  }, [store]);
 
   // --- Measure graph containers in CSS pixels; Pixi handles the DPR backing store. ---
   useEffect(() => {
@@ -344,35 +545,44 @@ export default function App({ appId, token }) {
     [graph, selected, localDepth],
   );
 
-  // --- Load a note body when a node is selected. ---
+  // --- Subscribe to the selected note body. ---
+  // The open note is exactly the kind of view an agent can rewrite underneath
+  // the owner (the chat appends to a note, dreaming reorganizes it), so it
+  // subscribes too: cached body paints instantly (offline), and an external
+  // write to this path repaints it. The `revalidating` flag drives the
+  // "merging…" indicator, which clears once the fresh body has landed.
   useEffect(() => {
     if (!selected) return;
-    let alive = true;
     // node.path comes from agent-written graph.json — refuse traversal,
     // absolute paths, and query/fragment smuggling before fetching.
     const path = safeMemoryPath(selected.path || ('notes/' + selected.id + '.md'));
     if (!path) {
-      setNoteState({ status: 'missing', md: '', fm: {} });
+      setNoteState({ status: 'missing', md: '', fm: {}, revalidating: false });
       return;
     }
-    setNoteState({ status: 'loading', md: '', fm: {} });
-    (async () => {
-      try {
-        const res = await fetch(NOTE_BASE + path, { headers: authHeaders });
-        if (res.status === 404) {
-          if (alive) setNoteState({ status: 'missing', md: '', fm: {} });
+    setNoteState({ status: 'loading', md: '', fm: {}, revalidating: false });
+    const unsub = store.subscribe(
+      path,
+      ({ body, present, error }) => {
+        if (error && body == null) {
+          setNoteState({ status: 'error', md: String(error.message || error), fm: {}, revalidating: false });
           return;
         }
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const raw = await res.text();
-        if (!alive) return;
-        setNoteState({ status: 'ready', md: stripFrontmatter(raw), fm: parseFrontmatter(raw) });
-      } catch (e) {
-        if (alive) setNoteState({ status: 'error', md: String(e.message || e), fm: {} });
-      }
-    })();
-    return () => { alive = false; };
-  }, [selected, authHeaders]);
+        if (!present || body == null) {
+          setNoteState((s) => ({ status: 'missing', md: '', fm: {}, revalidating: s.revalidating }));
+          return;
+        }
+        setNoteState((s) => ({
+          status: 'ready',
+          md: stripFrontmatter(body),
+          fm: parseFrontmatter(body),
+          revalidating: s.revalidating,
+        }));
+      },
+      { onRevalidate: (busy) => setNoteState((s) => ({ ...s, revalidating: busy })) },
+    );
+    return unsub;
+  }, [selected, store]);
 
   // --- Lazy-load the markdown renderer the first time we need it. ---
   useEffect(() => {
@@ -846,6 +1056,12 @@ export default function App({ appId, token }) {
                   )}
                   {noteState.status === 'missing' && <div style={S.centerText}>No note body on disk for this entry.</div>}
                   {noteState.status === 'error' && <div style={S.centerText}>Couldn't load: {noteState.md}</div>}
+                  {noteState.status === 'ready' && noteState.revalidating && (
+                    <div style={S.mergePill} role="status" aria-live="polite">
+                      <span style={S.mergeDot} aria-hidden="true" />
+                      Merging latest…
+                    </div>
+                  )}
                   {noteState.status === 'ready' && (
                     noteHtml != null
                       ? <div dangerouslySetInnerHTML={{ __html: noteHtml }} />
@@ -1969,6 +2185,17 @@ const S = {
     minHeight: 0,
   },
   notePlaceholder: { display: 'flex', flexDirection: 'column', gap: 11, paddingTop: 4 },
+  mergePill: {
+    display: 'inline-flex', alignItems: 'center', gap: 6, alignSelf: 'flex-start',
+    margin: '0 0 10px', padding: '3px 10px', borderRadius: 999,
+    fontSize: 11.5, fontWeight: 600, letterSpacing: 0.2,
+    color: 'var(--muted)', background: 'var(--surface2)',
+    border: '1px solid var(--border)',
+  },
+  mergeDot: {
+    width: 6, height: 6, borderRadius: '50%', background: 'var(--accent)',
+    animation: 'mg-pulse 1s ease-in-out infinite',
+  },
   pre: { whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'var(--mono)', fontSize: 12.5 },
   panelFoot: { padding: 12, borderTop: '1px solid var(--border)', background: 'var(--surface)' },
   discussBtn: {
@@ -2029,6 +2256,7 @@ const CSS = `
 .mg-scroll::-webkit-scrollbar-track { background: transparent; }
 
 @keyframes mg-skel-pulse { 0%,100% { opacity: 0.5; } 50% { opacity: 1; } }
+@keyframes mg-pulse { 0%,100% { opacity: 0.4; } 50% { opacity: 1; } }
 .mg-skel {
   height: 13px; border-radius: 5px;
   background: linear-gradient(90deg, var(--surface2), var(--border), var(--surface2));
