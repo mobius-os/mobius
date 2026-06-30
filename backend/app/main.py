@@ -875,7 +875,24 @@ if _static_dir.is_dir():
       bg = get_bg_color(settings.data_dir)
       manifest["background_color"] = bg
       manifest["theme_color"] = bg
-      return JSONResponse(manifest, media_type="application/manifest+json")
+      return JSONResponse(
+        manifest,
+        media_type="application/manifest+json",
+        # Revalidate on every fetch so an installed PWA picks up a new
+        # theme_color after the owner changes the theme. On standalone
+        # Android the OS derives the system/gesture-nav bar tint from the
+        # manifest theme_color, so a browser-heuristic-cached manifest pins
+        # the bar to the OLD --bg even though the page's own meta theme-color
+        # (pre-paint + applyTheme) already followed the change — that lag was
+        # the residual "gesture bar lighter than the app" report in card 164.
+        # The manifest is NOT in the SW precache (vite.config.js globIgnores),
+        # so the HTTP cache was the only stale layer left; no-cache keeps the
+        # body cheap (304 when unchanged). Matches the per-app standalone
+        # manifest (routes/standalone.py) and index.html/sw.js. This is the
+        # delivery-path piece the reverted pre-paint-only #9 (2d882be) never
+        # addressed; the meta theme-color sync it tried is already covered.
+        headers={"Cache-Control": "no-cache, must-revalidate"},
+      )
 
     file = _static_dir / path
     if file.is_file() and path != "index.html":
