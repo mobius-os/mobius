@@ -66,10 +66,15 @@ if [ "$MODE" = "platform" ]; then
   # Clear pycache first so stale bytecache doesn't survive the reset.
   find /data/platform -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
   find /data/platform -name '*.pyc' -delete 2>/dev/null || true
-  if su -s /bin/sh mobius -c 'git -C /data/platform reset --hard HEAD && git -C /data/platform clean -fdx'; then
-    # clean -fdx also removes UNTRACKED files a bad change may have added —
-    # reset --hard alone leaves them, so a stray module could survive (Codex).
-    echo "platform restore: git reset --hard + clean -fdx succeeded."
+  if su -s /bin/sh mobius -c 'git -C /data/platform reset --hard HEAD && git -C /data/platform clean -fd'; then
+    # clean -fd removes UNTRACKED files a bad change may have added — reset
+    # --hard alone leaves them, so a stray module could survive (Codex). We use
+    # -fd, NOT -fdx: -x would also delete GITIGNORED files, which now include
+    # the recovery/core island (app/main.py, auth, recover_*, scripts/...). The
+    # parent dirs are mobius-owned, so a mobius-run `clean -x` would unlink even
+    # the root-owned 444 recovery files, leaving the overlay unbootable with no
+    # recovery surface. -fd preserves everything gitignored.
+    echo "platform restore: git reset --hard + clean -fd succeeded."
     # Clear the stale upgrade-available marker so a post-restore status read
     # does not fall back to its build sha (availability itself is the ancestry
     # check now, but the flag still seeds current_build_sha).
