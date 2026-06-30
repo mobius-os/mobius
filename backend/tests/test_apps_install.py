@@ -9,6 +9,7 @@ and force failure modes.
 
 import io
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import patch, AsyncMock, MagicMock
 from urllib.parse import urlparse
@@ -2250,13 +2251,13 @@ def test_flag_on_conflicting_update_materializes_real_merge_conflict(
 def test_clean_merge_with_unreadable_bytes_is_treated_as_conflict(
   client, auth, bypass_url_validation, monkeypatch,
 ):
-  """A clean merge VERDICT whose merged index.jsx came back as None bytes (an
-  in-memory cat-file read that failed inside merge_upstream) must NOT fall
-  through to a silent pure-upstream overwrite + single-parent commit — that
-  strands the merge base and resolves the NEXT update to stale local content.
-  The fix routes it to the same safe path as a real conflict: local source is
-  preserved (served version unchanged) and the new upstream is recorded for an
-  agent-resolution pass. Regression for the clean-verdict-no-bytes gap."""
+  """A clean merge VERDICT whose merged tree has NO index.jsx (an unreadable
+  tree) must NOT fall through to a silent pure-upstream overwrite + single-parent
+  commit — that strands the merge base and resolves the NEXT update to stale
+  local content. The fix routes it to the same safe path as a real conflict:
+  local source is preserved (served version unchanged) and the new upstream is
+  recorded for an agent-resolution pass. Regression for the clean-verdict-no-
+  entry gap."""
   base = "https://on-cleanempty.test/repo/"
   m = {**MANIFEST_NEWS, "id": "on-cleanempty"}
   r1 = _install_v1(client, auth, base, m, JSX_MULTI)
@@ -2271,12 +2272,18 @@ def test_clean_merge_with_unreadable_bytes_is_treated_as_conflict(
   jsx_file.write_text(JSX_MULTI.replace("ORIGINAL TITLE", "AGENT TITLE"))
   jsx_v2 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
 
-  # Force merge_upstream to report clean but yield NO bytes — the contract
-  # violation the fix guards against (clean status normally implies bytes).
+  # Force a clean merge verdict whose merged tree can't be read into an
+  # index.jsx — the contract violation the fix guards against (clean status
+  # normally implies the entry is in the tree). merge_upstream returns clean with
+  # a tree oid, but read_merged_tree yields a dict WITHOUT index.jsx.
   from app.app_git import MergeResult
   monkeypatch.setattr(
     "app.app_git.merge_upstream",
-    lambda *a, **k: MergeResult(status="clean", merged_bytes=None),
+    lambda *a, **k: MergeResult(status="clean", merged_tree_oid="deadbeef"),
+  )
+  monkeypatch.setattr(
+    "app.app_git.read_merged_tree",
+    lambda *a, **k: {},
   )
 
   r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
@@ -2883,3 +2890,299 @@ def test_rename_keeps_old_slug_when_target_taken(
   assert len(listed) == 2
   assert (data_dir / "apps" / "gym" / "index.jsx").exists()
   assert (data_dir / "apps" / "workout" / "index.jsx").exists()
+
+
+# --- Multi-file mini-apps: index.jsx + sibling modules ---------------
+#
+# A multi-file app's `index.jsx` imports sibling modules (`cards.js`, …)
+# declared in the manifest's `source_files`. Install must fetch them,
+# write them next to the entry, and compile with esbuild bundling the
+# import graph. An update merges the whole tree so locally edited siblings
+# survive. The JSX below imports a sibling so the compiled bundle proves
+# esbuild resolved + inlined it; the sibling spacing mirrors JSX_MULTI so
+# git's line-based 3-way merge can interleave disjoint edits cleanly.
+
+JSX_IMPORTS_CARDS = (
+  "import { CARD_LABEL } from './cards.js'\n"
+  "export default function App() {\n"
+  "  return <div>{CARD_LABEL}</div>\n"
+  "}\n"
+)
+
+CARDS_V1 = (
+  "export const CARD_LABEL = 'CARDS_ORIGINAL'\n"
+  "export const PAD_A = 1\n"
+  "export const PAD_B = 2\n"
+  "export const PAD_C = 3\n"
+  "export const PAD_D = 4\n"
+  "export const PAD_E = 5\n"
+  "export const FOOTER = 'FOOTER_ORIGINAL'\n"
+)
+
+MANIFEST_MULTI = {
+  "id": "multi-app",
+  "name": "Multi App",
+  "version": "1.0.0",
+  "description": "Multi-file app",
+  "entry": "index.jsx",
+  "source_files": ["cards.js"],
+  "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
+}
+
+
+def _install_multi(client, auth, base, manifest, jsx, cards):
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, jsx.encode()),
+    base + "cards.js": (200, cards.encode()),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    return client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+
+
+def test_multifile_install_writes_siblings_and_bundles(
+  client, auth, bypass_url_validation,
+):
+  """A fresh multi-file install writes index.jsx + the declared sibling to
+  the source dir and the compiled bundle inlines the sibling's export — proof
+  esbuild resolved the `./cards.js` import from the on-disk source tree."""
+  base = "https://multi.test/repo/"
+  r = _install_multi(
+    client, auth, base, MANIFEST_MULTI, JSX_IMPORTS_CARDS, CARDS_V1,
+  )
+  assert r.status_code == 201, r.text
+  payload = r.json()
+  assert payload["mode"] == "install"
+  app_id = payload["id"]
+
+  data_dir = Path(get_settings().data_dir)
+  src = data_dir / "apps" / "multi-app"
+  assert (src / "index.jsx").read_text() == JSX_IMPORTS_CARDS
+  assert (src / "cards.js").read_text() == CARDS_V1
+
+  bundle = data_dir / "compiled" / f"app-{app_id}.js"
+  assert bundle.exists()
+  bundle_text = bundle.read_text()
+  assert len(bundle_text) > 0
+  # The sibling was bundled in, not left as an unresolved import.
+  assert "CARDS_ORIGINAL" in bundle_text
+  assert "./cards.js" not in bundle_text
+
+
+def test_multifile_update_delivers_new_sibling_bytes(
+  client, auth, bypass_url_validation,
+):
+  """An update that bumps a sibling (no local edits) delivers the new sibling
+  bytes to disk via a clean fast-forward — no spurious conflict — and the new
+  bundle reflects the bumped export."""
+  base = "https://multi2.test/repo/"
+  r1 = _install_multi(
+    client, auth, base, MANIFEST_MULTI, JSX_IMPORTS_CARDS, CARDS_V1,
+  )
+  assert r1.status_code == 201, r1.text
+  app_id = r1.json()["id"]
+  data_dir = Path(get_settings().data_dir)
+  src = data_dir / "apps" / "multi-app"
+
+  cards_v2 = CARDS_V1.replace("CARDS_ORIGINAL", "CARDS_V2")
+  r2 = _install_multi(
+    client, auth, base,
+    {**MANIFEST_MULTI, "version": "2.0.0"}, JSX_IMPORTS_CARDS, cards_v2,
+  )
+  assert r2.status_code == 201, r2.text
+  payload = r2.json()
+  assert payload["mode"] == "update"
+  # No local edits → upstream wins outright, not a three-way merge conflict.
+  assert payload["divergence"] == "fast_forward"
+  assert (src / "cards.js").read_text() == cards_v2
+  bundle = (data_dir / "compiled" / f"app-{app_id}.js").read_text()
+  assert "CARDS_V2" in bundle
+
+
+def test_multifile_update_merges_local_sibling_edit(
+  client, auth, bypass_url_validation,
+):
+  """A local edit to a sibling + a DISJOINT upstream edit to the same sibling
+  merges cleanly: the merged tree (read via read_merged_tree) carries BOTH
+  changes to disk, the same way the entry file's clean merge does."""
+  base = "https://multi3.test/repo/"
+  r1 = _install_multi(
+    client, auth, base, MANIFEST_MULTI, JSX_IMPORTS_CARDS, CARDS_V1,
+  )
+  assert r1.status_code == 201, r1.text
+  data_dir = Path(get_settings().data_dir)
+  cards_file = data_dir / "apps" / "multi-app" / "cards.js"
+
+  # Agent edits the label region of the sibling locally.
+  cards_file.write_text(CARDS_V1.replace("CARDS_ORIGINAL", "AGENT_LABEL"))
+
+  # Upstream v2 edits the disjoint footer region of the SAME sibling.
+  cards_v2 = CARDS_V1.replace("FOOTER_ORIGINAL", "FOOTER_UPSTREAM")
+  r2 = _install_multi(
+    client, auth, base,
+    {**MANIFEST_MULTI, "version": "2.0.0"}, JSX_IMPORTS_CARDS, cards_v2,
+  )
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["mode"] == "update"
+  assert r2.json()["divergence"] == "clean_merge"
+  merged = cards_file.read_text()
+  assert "AGENT_LABEL" in merged       # local sibling edit carried forward
+  assert "FOOTER_UPSTREAM" in merged   # upstream sibling change applied
+  assert "<<<<<<<" not in merged
+
+
+def test_singlefile_install_unchanged_without_source_files(
+  client, auth, bypass_url_validation,
+):
+  """Regression: a manifest with no `source_files` installs exactly as before
+  — only index.jsx in the source dir, no stray sibling, bundle non-empty."""
+  base = "https://single.test/repo/"
+  manifest = {
+    "id": "single-app",
+    "name": "Single App",
+    "version": "1.0.0",
+    "description": "Single-file app",
+    "entry": "index.jsx",
+    "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
+  }
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r.status_code == 201, r.text
+  app_id = r.json()["id"]
+  data_dir = Path(get_settings().data_dir)
+  src = data_dir / "apps" / "single-app"
+  assert (src / "index.jsx").read_text() == JSX
+  # Only the entry (+ managed .git) — no sibling source files materialized.
+  jsx_siblings = [
+    p.name for p in src.iterdir()
+    if p.is_file() and p.suffix in (".js", ".jsx") and p.name != "index.jsx"
+  ]
+  assert jsx_siblings == []
+  bundle = data_dir / "compiled" / f"app-{app_id}.js"
+  assert bundle.exists() and bundle.stat().st_size > 0
+
+
+def test_multifile_manifest_rejects_unsafe_source_file(
+  client, auth, bypass_url_validation,
+):
+  """Schema guard: a `source_files` entry that escapes the repo, names the
+  entry / managed .gitignore, or collides with an install-managed path (static/,
+  dist/, the cron/job scripts, .bak snapshots, the numeric storage tree) is a
+  clean 400, not a surprising fetch or a write that fights another phase."""
+  base = "https://multibad.test/repo/"
+  bad_paths = (
+    "../escape.js", "index.jsx", ".gitignore", "/abs.js",
+    "static/x.js", "dist/x.js", ".build/x.js", "node_modules/x.js",
+    "init-cron.sh", "cards.js.bak", "5/data.js", "fetch.sh",
+  )
+  for bad in bad_paths:
+    # fetch.sh is the declared job; the rest collide with managed prefixes.
+    manifest = {**MANIFEST_MULTI, "source_files": [bad],
+                "schedule": {"job": "fetch.sh"}}
+    responses = {base + "mobius.json": (200, json.dumps(manifest).encode())}
+    with patch(
+      "app.install.httpx.AsyncClient",
+      side_effect=_fake_async_client(responses),
+    ):
+      r = client.post("/api/apps/install", headers=auth, json={
+        "manifest_url": base + "mobius.json",
+      })
+    assert r.status_code == 400, (bad, r.text)
+    assert "source_files" in r.json()["detail"], (bad, r.text)
+
+
+def test_assert_within_rejects_symlinked_parent_escape(tmp_path):
+  """The realpath guard rejects a write that resolves outside the source dir
+  through a symlinked parent — the catastrophic case lexical validation misses
+  (a nested `lib/cards.js` where `lib` symlinks to a dir outside the app)."""
+  from app.install import _assert_within
+  from fastapi import HTTPException
+
+  src = tmp_path / "apps" / "victim"
+  src.mkdir(parents=True)
+  outside = tmp_path / "shared"
+  outside.mkdir()
+  # `lib` inside the source dir is actually a symlink to /shared.
+  (src / "lib").symlink_to(outside)
+
+  # A file under the symlinked parent resolves outside the source dir.
+  with pytest.raises(HTTPException) as exc:
+    _assert_within(src, src / "lib" / "cards.js", "source_files lib/cards.js")
+  assert exc.value.status_code == 400
+
+  # A genuine in-tree path is accepted.
+  _assert_within(src, src / "real" / "cards.js", "source_files real/cards.js")
+
+
+def test_multifile_update_deletes_dropped_sibling(
+  client, auth, bypass_url_validation,
+):
+  """A v2 that drops a sibling the v1 shipped removes it from disk AND from git
+  tracking, with no spurious divergence on a later update — the worktree is
+  reconciled to the new tree, not left with a stale sibling that git re-records
+  onto `main` as permanent local divergence."""
+  base = "https://multidrop.test/repo/"
+  # v1 ships index.jsx + cards.js, where index.jsx imports the sibling.
+  r1 = _install_multi(
+    client, auth, base, MANIFEST_MULTI, JSX_IMPORTS_CARDS, CARDS_V1,
+  )
+  assert r1.status_code == 201, r1.text
+  data_dir = Path(get_settings().data_dir)
+  src = data_dir / "apps" / "multi-app"
+  assert (src / "cards.js").exists()
+
+  # v2 drops the sibling: a self-contained index.jsx, no source_files.
+  jsx_v2 = "export default function App() { return <div>standalone</div> }"
+  m2 = {
+    "id": "multi-app", "name": "Multi App", "version": "2.0.0",
+    "description": "Multi-file app", "entry": "index.jsx",
+    "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
+  }
+  responses = {
+    base + "mobius.json": (200, json.dumps(m2).encode()),
+    base + "index.jsx": (200, jsx_v2.encode()),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    r2 = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["mode"] == "update"
+  # The dropped sibling is gone from disk AND from git tracking.
+  assert not (src / "cards.js").exists(), "dropped sibling lingered on disk"
+  tracked = subprocess.run(
+    ["git", "-C", str(src), "ls-files"],
+    capture_output=True, text=True, check=True,
+  ).stdout.split()
+  assert "cards.js" not in tracked, f"dropped sibling still tracked: {tracked}"
+
+  # A subsequent no-op re-install of v2 must NOT report a spurious conflict —
+  # the worktree already matches the recorded tree (no lingering divergence).
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    r3 = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r3.status_code == 201, r3.text
+  assert r3.json()["mode"] == "update"
+  assert r3.json()["divergence"] != "conflict"
+  assert r3.json()["conflict_paths"] == []

@@ -11,13 +11,23 @@ two branches:
     commit their edits here (via `commit_local`); it is the branch the
     working tree actually checks out.
 
-Update is `record_upstream` (commit the new upstream bytes) then
+Update is `record_upstream` (commit the new upstream source TREE) then
 `merge_upstream`, which computes a clean-vs-conflict verdict with
 `git merge-tree --write-tree` WITHOUT touching the live working tree —
 so a conflict never leaves the app served in a half-merged state. The
-caller (install.py) applies a clean merge by writing the merged bytes
-and recompiling; on conflict it surfaces the conflicting paths and
-leaves the local edits intact for an agent to resolve later.
+caller (install.py) applies a clean merge by reading the whole merged tree
+(`read_merged_tree`), writing it back, and recompiling; on conflict it
+surfaces the conflicting paths and leaves the local edits intact for an
+agent to resolve later. One and many files share one tree path — the entry
+`index.jsx` is just one key in the tree.
+
+A finalized update is a SINGLE-parent replay (linear): both the clean
+apply (`commit_replay`) and a resolved conflict (`commit_local` with
+MERGE_HEAD set) commit the applied tree with `upstream` as its sole
+parent, squashing the local delta into one replay commit on top of
+upstream. So `main` is a straight-line descendant of `upstream`
+(`A -> B -> X`) and `git merge-base --is-ancestor upstream main` is
+exact — never the 2-parent merge a `git merge` would leave.
 
 Only SOURCE is tracked — `index.jsx`, job scripts (`*.sh`), prompts,
 seed templates. The compiled bundle (`/data/compiled/app-<id>.js`) is a
@@ -108,28 +118,18 @@ class MergeResult:
   """Verdict of merging `upstream` into the local `main` branch.
 
   `status` is 'clean' when the three-way merge produced no conflicts and
-  `merged_bytes` holds the merged `index.jsx` the caller should write and
-  recompile. `status` is 'conflict' when at least one tracked file
-  conflicted; `conflict_paths` names them and `merged_bytes` is None —
-  the caller must NOT write anything, leaving the local edits intact for
-  an agent to resolve.
+  `merged_tree_oid` is the oid of the full merged tree; the caller passes it to
+  `read_merged_tree` to materialise EVERY merged file and writes the whole tree
+  back. `status` is 'conflict' when at least one tracked file conflicted;
+  `conflict_paths` names them and `merged_tree_oid` is None — the caller must NOT
+  write anything, leaving the local edits intact for an agent to resolve.
 
-  `merged_job` is the merged bytes of the schedule job script (when the
-  caller passed `job_name` to `merge_upstream`), carried back so a locally
-  edited `fetch.sh`/`build.sh` survives a clean update instead of being
-  overwritten by the bundled copy. It is None when no `job_name` was
-  requested, or when the job is not present in the merged tree.
-
-  `merged_tree_oid` is the oid of the full merged tree on a clean merge
-  (None on conflict). `merged_bytes`/`merged_job` are the single-entry
-  fast path; pass this oid to `read_merged_tree` to materialise EVERY
-  merged file — needed for a multi-file source (the platform layer, or a
-  multi-file app) where one entry file is not the whole tree.
+  There is one path for one and many files: a single-file app is just a tree
+  with one source key (`index.jsx`), so the caller always reads the merged tree
+  rather than a single-entry shortcut.
   """
   status: str
   conflict_paths: list[str] = field(default_factory=list)
-  merged_bytes: bytes | None = None
-  merged_job: bytes | None = None
   merged_tree_oid: str | None = None
 
 
@@ -243,85 +243,70 @@ def align_local_to_upstream(source_dir: str | Path) -> None:
 
 def record_upstream(
   source_dir: str | Path,
-  entry_bytes: bytes,
+  files: dict[str, bytes],
   manifest_url: str,
   version: str,
-  job_name: str | None = None,
-  job_bytes: bytes | None = None,
+  *,
+  exec_paths: frozenset[str] = frozenset(),
 ) -> str:
-  """Commits the pristine installed `index.jsx` bytes onto `upstream`.
+  """Commits the pristine installed SOURCE TREE onto `upstream`.
 
-  Writes `entry_bytes` to the upstream branch's `index.jsx` and commits
-  it as the canonical "this is what version <version> shipped" snapshot,
-  WITHOUT disturbing the checked-out `main` working tree. Returns the new
-  upstream commit sha (the merge base a later update will diverge from).
+  Records the COMPLETE shipped tree `files` (repo-relative path -> bytes) onto
+  the upstream branch as the canonical "this is what version <version> shipped"
+  snapshot, WITHOUT disturbing the checked-out `main` working tree. Returns the
+  new upstream commit sha (the merge base a later update diverges from).
 
-  When both `job_name` and `job_bytes` are given, the schedule job script
-  (e.g. `fetch.sh`) is committed into the same `upstream` tree alongside
-  `index.jsx`, so a later update can three-way-merge a locally edited job
-  script the same way it merges `index.jsx` — instead of the bundled copy
-  silently clobbering the local edit.
+  `files` is the whole tree: `index.jsx` is just one key, sibling modules
+  (`cards.js`, …) are more keys, and the schedule job script is a key listed in
+  `exec_paths`. There is no entry/sibling distinction — recording the whole tree
+  is what lets a multi-file app update cleanly (a sibling that only ever lived on
+  `main` would have no pristine `upstream` version to three-way-merge against,
+  so every update would keep it stale or report a spurious add/add conflict).
+  The managed `.gitignore` is always carried in regardless of `files`.
 
-  Implemented by staging the bytes into the index against the `upstream`
-  tip and committing with an explicit parent, so the working tree (on
-  `main`) is never checked out to `upstream` and back — the live
-  `index.jsx` the watcher might be compiling stays put.
+  Paths in `exec_paths` are staged executable (100755), everything else 100644;
+  the caller names the exec files explicitly (no `*.sh` inference). The job
+  script's mode must match what `main` records or the merge reports a phantom
+  add/add conflict on a pure 644-vs-755 skew. The tree is built from an EMPTY
+  index, not by patching the previous upstream tip, so a file DROPPED from the
+  new version is correctly removed from `upstream` too. Staged into a temp view
+  of the shared index and restored to `main` afterwards, so the live working
+  tree the watcher may be compiling stays put.
   """
   repo = Path(source_dir)
   ensure_repo(repo)
   parent = _run(repo, "rev-parse", UPSTREAM_BRANCH).stdout.strip()
-  # Hash the pristine bytes into a blob. This needs bytes on stdin, which
-  # `_run` (text-mode, no stdin) can't carry, so it's a direct subprocess
-  # call. `--path index.jsx` lets git apply any path-based attributes.
-  blob = subprocess.run(
-    [
-      "git", "-C", str(repo), "hash-object", "-w", "--stdin",
-      "--path", "index.jsx",
-    ],
-    input=entry_bytes, capture_output=True, timeout=_GIT_TIMEOUT, check=True,
-    env=_git_env(repo),
-  ).stdout.decode().strip()
-  # Build a tree that is the upstream tip's tree with index.jsx replaced
-  # by the new blob, via a temporary index keyed to the upstream commit.
-  _run(repo, "read-tree", UPSTREAM_BRANCH)
-  subprocess.run(
-    [
-      "git", "-C", str(repo), "update-index", "--add", "--cacheinfo",
-      f"100644,{blob},index.jsx",
-    ],
-    capture_output=True, text=True, timeout=_GIT_TIMEOUT, check=True,
-    env=_git_env(repo),
+  # Preserve the existing managed .gitignore exactly (avoids churning it when the
+  # module constant drifts); fall back to the constant if upstream lacks one.
+  gi = subprocess.run(
+    ["git", "-C", str(repo), "cat-file", "-p", f"{UPSTREAM_BRANCH}:.gitignore"],
+    capture_output=True, timeout=_GIT_TIMEOUT, check=False, env=_git_env(repo),
   )
-  # Stage the schedule job script alongside index.jsx so it lives in the
-  # same upstream tree and a later update merges local job edits the same
-  # way it merges index.jsx. Same bytes-on-stdin reason as the index.jsx
-  # blob, so a direct subprocess call rather than `_run`.
-  #
-  # Job scripts are staged EXECUTABLE (100755), matching the mode the local
-  # `main` branch records for them. cron runs the bare job path (the crontab
-  # entry init-cron-scaffold.sh writes is `<job-path> [app-id]`, with no `bash`
-  # prefix), so the script lives on disk with the exec bit, and commit_local's
-  # plain `git add` under the default core.fileMode=true records 100755. Staging
-  # the upstream copy at 100644 instead would leave a permanent 644-vs-755 skew
-  # between `upstream` and `main` that the merge has to reconcile on every
-  # update — and when the merge base predates job-script tracking (the job is an
-  # add/add against an empty base), the mode mismatch alone makes git report a
-  # spurious CONFLICT (add/add) even with identical bytes. Recording the same
-  # 100755 keeps the modes equal so the only thing the merge sees is content.
-  if job_name and job_bytes is not None:
-    job_blob = subprocess.run(
-      [
-        "git", "-C", str(repo), "hash-object", "-w", "--stdin",
-        "--path", job_name,
-      ],
-      input=job_bytes, capture_output=True, timeout=_GIT_TIMEOUT, check=True,
+  gitignore_bytes = gi.stdout if gi.returncode == 0 else _GITIGNORE.encode()
+  # The full pristine source set: the managed .gitignore plus every file in the
+  # shipped tree. Files in `exec_paths` are 100755 so `upstream` and `main` agree
+  # on the mode (a 644/755 skew alone makes merge report a phantom add/add).
+  staged: list[tuple[str, bytes, str]] = [
+    (".gitignore", gitignore_bytes, "100644"),
+  ]
+  for rel, data in files.items():
+    if rel == ".gitignore":
+      continue  # the managed .gitignore always wins
+    staged.append((rel, data, "100755" if rel in exec_paths else "100644"))
+  # Build the upstream tree from an EMPTY index so files dropped from the new
+  # version vanish. Each blob needs bytes on stdin (which text-mode `_run` can't
+  # carry), so hash-object + update-index run as direct subprocess calls under
+  # the isolated git env.
+  _run(repo, "read-tree", "--empty")
+  for rel, data, mode in staged:
+    blob = subprocess.run(
+      ["git", "-C", str(repo), "hash-object", "-w", "--stdin", "--path", rel],
+      input=data, capture_output=True, timeout=_GIT_TIMEOUT, check=True,
       env=_git_env(repo),
     ).stdout.decode().strip()
     subprocess.run(
-      [
-        "git", "-C", str(repo), "update-index", "--add", "--cacheinfo",
-        f"100755,{job_blob},{job_name}",
-      ],
+      ["git", "-C", str(repo), "update-index", "--add", "--cacheinfo",
+       f"{mode},{blob},{rel}"],
       capture_output=True, text=True, timeout=_GIT_TIMEOUT, check=True,
       env=_git_env(repo),
     )
@@ -332,8 +317,7 @@ def record_upstream(
   ).stdout.strip()
   _run(repo, "update-ref", f"refs/heads/{UPSTREAM_BRANCH}", sha)
   # Restore the index to match the checked-out working branch so a later
-  # `git status`/commit on `main` isn't confused by the upstream tree we
-  # just staged into the shared index.
+  # `git status`/commit on `main` isn't confused by the tree we just staged.
   _run(repo, "read-tree", LOCAL_BRANCH)
   return sha
 
@@ -396,9 +380,14 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
   caller (watcher or install) can commit a marker-bearing tree as source.
 
   If a merge is in progress and FULLY resolved (no unmerged entries, no
-  markers), the `git commit` here finalizes it as a 2-parent merge commit,
-  so the upstream tip becomes an ancestor of `main` and the merge base
-  advances for free.
+  markers), this finalizes it as a SINGLE-parent replay commit parented on
+  the upstream tip read from `.git/MERGE_HEAD`, so the upstream tip becomes
+  a direct parent of `main` and the merge base advances for free while
+  history stays linear — the same `A -> B -> X` shape `commit_replay` makes
+  for a clean apply. The pre-merge local `main` tip becomes unreachable
+  (its content lives on in the replay's tree); the squash is intentional.
+  An ordinary local edit (no MERGE_HEAD) still commits as a plain
+  single-parent commit on the old `main` tip.
   """
   repo = Path(source_dir)
   ensure_repo(repo)
@@ -410,8 +399,24 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
   # never `git add`ed would still show as an unmerged index entry and we'd
   # wrongly refuse to finalize a clean resolution.
   _run(repo, "add", *_tracked_source(repo))
-  if (repo / ".git" / "MERGE_HEAD").exists() and has_unresolved_conflicts(repo):
-    return None
+  merge_head_path = repo / ".git" / "MERGE_HEAD"
+  if merge_head_path.exists():
+    if has_unresolved_conflicts(repo):
+      return None
+    # Finalize the resolved merge as a single-parent replay on the upstream
+    # tip so the line stays linear. A plain `git commit` here would parent on
+    # BOTH the old main tip and MERGE_HEAD (git makes a merge commit whenever
+    # MERGE_HEAD is set), fanning history into a 2-parent merge; we want the
+    # squashed `A -> B -> X` shape instead, identical to commit_replay.
+    merge_head = merge_head_path.read_text(encoding="utf-8").strip()
+    tree = _run(repo, "write-tree").stdout.strip()
+    sha = _run(
+      repo, "commit-tree", tree, "-p", merge_head, "-m", msg,
+    ).stdout.strip()
+    _run(repo, "update-ref", f"refs/heads/{LOCAL_BRANCH}", sha)
+    for name in ("MERGE_HEAD", "MERGE_MSG", "MERGE_MODE"):
+      (repo / ".git" / name).unlink(missing_ok=True)
+    return sha
   status = _run(repo, "status", "--porcelain").stdout.strip()
   if not status:
     return None
@@ -419,24 +424,30 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
   return _run(repo, "rev-parse", LOCAL_BRANCH).stdout.strip()
 
 
-def commit_merge(
+def commit_replay(
   source_dir: str | Path, upstream_tip: str, msg: str,
 ) -> str | None:
-  """Records the working-tree source onto `main` as a merge of upstream.
+  """Records the working-tree source onto `main` as a single-parent replay.
 
-  Commits the current working tree (the just-applied merge result) with
-  TWO parents: the previous `main` tip and `upstream_tip` (the upstream
-  commit whose changes were merged in). The second parent is what makes
-  the base advance — after this, `upstream_tip` is an ancestor of `main`,
-  so the NEXT update's three-way merge diffs only the genuinely-new
-  upstream delta against local edits instead of re-litigating the whole
-  already-merged history against a stale base (the bug that turned every
-  repeated update into a spurious conflict).
+  Commits the current working tree (the just-applied merge result) with a
+  SINGLE parent: `upstream_tip` (the upstream commit whose changes were
+  folded in). The local delta is squashed into this one replay commit on
+  top of upstream, so history stays linear (`A -> B -> X`): `main` is a
+  straight-line descendant of `upstream`, after which `upstream_tip` is a
+  direct parent of `main` and `git merge-base --is-ancestor upstream main`
+  is exact. That ancestry is what advances the base — the NEXT update's
+  three-way merge diffs only the genuinely-new upstream delta against local
+  edits instead of re-litigating already-merged history against a stale base
+  (the bug that turned every repeated update into a spurious conflict).
 
-  A plain `commit_local` cannot do this: a single-parent commit leaves
-  `upstream` unreachable from `main`, so `git merge-base` keeps returning
-  the original install point. Returns the new commit sha, or None when
-  there is nothing to record (working tree already matches `main` and
+  The previous local `main` tip becomes unreachable after the replay, which
+  is intentional: its content lives on in the replay commit's tree, and the
+  squash is what keeps the line linear rather than fanning into a merge.
+
+  A plain `commit_local` cannot do this: it parents on the old `main` tip,
+  which leaves `upstream` unreachable from `main`, so `git merge-base` keeps
+  returning the original install point. Returns the new commit sha, or None
+  when there is nothing to record (working tree already matches `main` and
   `upstream_tip` is already an ancestor — e.g. a re-install of the same
   version with no local edits).
   """
@@ -451,9 +462,8 @@ def commit_merge(
   ).returncode == 0
   if tree == main_tree and already_merged:
     return None
-  main_tip = _run(repo, "rev-parse", LOCAL_BRANCH).stdout.strip()
   sha = _run(
-    repo, "commit-tree", tree, "-p", main_tip, "-p", upstream_tip, "-m", msg,
+    repo, "commit-tree", tree, "-p", upstream_tip, "-m", msg,
   ).stdout.strip()
   _run(repo, "update-ref", f"refs/heads/{LOCAL_BRANCH}", sha)
   return sha
@@ -473,28 +483,24 @@ def local_diverged_from(source_dir: str | Path, base_commit: str) -> bool:
   return proc.returncode != 0
 
 
-def merge_upstream(
-  source_dir: str | Path, job_name: str | None = None,
-) -> MergeResult:
+def merge_upstream(source_dir: str | Path) -> MergeResult:
   """Merges `upstream` into `main` and returns the verdict.
 
   Uses `git merge-tree --write-tree` to perform the three-way merge in
   memory: it neither moves `main` nor touches the working tree, so a
   conflict cannot leave the app served in a half-merged state. On a clean
-  merge the merged `index.jsx` bytes are read out of the resulting tree
-  and returned for the caller to write + recompile. When `job_name` is
-  given, the merged job script bytes are read out of the same tree into
-  `merged_job` (None when the job is not tracked in the tree) so a locally
-  edited job script flows through the merge like `index.jsx`. On conflict
-  the conflicting paths are returned and `merged_bytes` is None — the
-  caller leaves the local edits untouched.
+  merge `merged_tree_oid` is the resulting tree; the caller materialises the
+  WHOLE tree via `read_merged_tree` (there is no single-file shortcut — a
+  single-file app is just a tree with one source key) and writes it back. On
+  conflict the conflicting paths are returned and `merged_tree_oid` is None —
+  the caller leaves the local edits untouched.
 
   The caller is responsible for advancing `main` to the merged tree (by
-  writing `merged_bytes` and letting the watcher/`commit_local` commit
-  it). We deliberately do NOT fast-forward `main` here: the merged source
-  has to be recompiled and committed as one transactional unit on the
-  caller's side, and moving the branch before that would briefly point
-  `main` at a tree the compiled bundle doesn't match.
+  writing it and letting the watcher/`commit_local` commit it). We deliberately
+  do NOT fast-forward `main` here: the merged source has to be recompiled and
+  committed as one transactional unit on the caller's side, and moving the
+  branch before that would briefly point `main` at a tree the compiled bundle
+  doesn't match.
   """
   repo = Path(source_dir)
   ensure_repo(repo)
@@ -522,42 +528,18 @@ def merge_upstream(
         break  # blank line ends the path section
       conflict_paths.append(ln.strip())
     return MergeResult(status="conflict", conflict_paths=conflict_paths)
-  # Read the merged blob in BINARY mode (not via `_run`, which is text)
-  # so the bytes the caller compiles + writes are byte-faithful — no
-  # encode round-trip or line-ending normalization.
-  merged = subprocess.run(
-    ["git", "-C", str(repo), "cat-file", "-p", f"{tree_oid}:index.jsx"],
-    capture_output=True, timeout=_GIT_TIMEOUT, check=False,
-    env=_git_env(repo),
-  )
-  merged_bytes = merged.stdout if merged.returncode == 0 else None
-  merged_job: bytes | None = None
-  if job_name:
-    # Read the merged job script in BINARY mode, same as index.jsx. rc != 0
-    # means the job isn't present in the merged tree (e.g. a tree recorded
-    # before job scripts were tracked) — leave merged_job None and let the
-    # caller fall back to the bundled job.
-    job = subprocess.run(
-      ["git", "-C", str(repo), "cat-file", "blob", f"{tree_oid}:{job_name}"],
-      capture_output=True, timeout=_GIT_TIMEOUT, check=False,
-      env=_git_env(repo),
-    )
-    merged_job = job.stdout if job.returncode == 0 else None
-  return MergeResult(
-    status="clean", merged_bytes=merged_bytes, merged_job=merged_job,
-    merged_tree_oid=tree_oid,
-  )
+  return MergeResult(status="clean", merged_tree_oid=tree_oid)
 
 
 def read_merged_tree(source_dir: str | Path, tree_oid: str) -> dict[str, bytes]:
   """Read EVERY file of a merged tree oid into {repo_relative_path: bytes}.
 
-  `merge_upstream` hands back the single entry file in `merged_bytes` for
-  the app fast path. The platform layer (and any multi-file app) needs the
-  WHOLE merged tree written back, not just one file, so the caller passes
-  `MergeResult.merged_tree_oid` here to materialise all of it. Paths are
-  repo-relative POSIX; bytes are read binary-faithful (no text decode).
-  `-z` keeps paths NUL-separated so names with spaces or newlines survive.
+  The single source-tree path: every clean-merge caller (app install + the
+  platform layer) materialises the WHOLE merged tree from
+  `MergeResult.merged_tree_oid` here and writes it back, so one and many files
+  share one path. Paths are repo-relative POSIX; bytes are read binary-faithful
+  (no text decode). `-z` keeps paths NUL-separated so names with spaces or
+  newlines survive.
   """
   repo = Path(source_dir)
   listing = subprocess.run(
@@ -588,7 +570,8 @@ def start_conflict_merge(source_dir: str | Path) -> list[str]:
   marker-bearing source won't compile, so the file watcher keeps serving the
   prior good bundle until the agent resolves the markers and finishes the merge
   (`git add` + `git commit` / `git merge --continue`), at which point
-  `commit_local` finalizes the 2-parent merge and the base advances.
+  `commit_local` finalizes a single-parent replay (linear) on the upstream
+  tip and the base advances.
 
   To back out, the agent runs `git merge --abort`, restoring `main` to its
   pre-merge (committed local) state. Call only after `merge_upstream` verdicted
@@ -642,9 +625,9 @@ def abort_in_progress_merge(source_dir: str | Path) -> bool:
 #   the module top; flagged here because the index-borrow is the spot that
 #   relies on it. A conflict-free alternative is a bare temp index
 #   (GIT_INDEX_FILE), deferred until a non-locked caller needs it.
-# - The schedule job script now flows through record_upstream + merge_upstream
-#   like index.jsx: record_upstream commits it into the `upstream` tree (when
-#   the caller passes job_name + job_bytes), and merge_upstream reads the merged
-#   job back into MergeResult.merged_job (when the caller passes job_name). So a
-#   locally edited fetch.sh/build.sh survives a clean update instead of being
-#   clobbered by the bundled copy — the gap the old note flagged is closed.
+# - The whole source tree flows through record_upstream + merge_upstream as one
+#   set: record_upstream commits every file in `files` onto the `upstream` tree
+#   (the schedule job script is just a key listed in `exec_paths`), and a clean
+#   merge_upstream hands back the merged tree oid the caller reads in full via
+#   read_merged_tree. A locally edited fetch.sh/build.sh survives a clean update
+#   like any other file — there is no entry/sibling/job special-casing.

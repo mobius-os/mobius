@@ -645,6 +645,30 @@ if [ -d /data/shell/src ] && [ -f /app/static/index.html ]; then
   fi
 fi
 
+# --- seed the shell git repo (two-branch self-update model) ---
+# /data/shell gets the SAME `upstream` (pristine image source) + `main` (agent
+# edits) git model the apps and platform use, so a pulled image's new shell
+# source can be merged in-product (POST /api/shell/apply) instead of only via a
+# full reset. Seed ONLY when .git is absent — idempotent on every later boot.
+#
+# CORRECTNESS: the seed records the BAKED /app/shell-src as `upstream` and
+# commits the CURRENT on-disk /data/shell working tree (whatever is there,
+# including any agent edits) onto `main` as a single-parent replay on `upstream`.
+# So both a FRESH boot (working tree == baked source) and an EXISTING instance
+# (working tree already has agent edits, no .git) seed correctly — agent edits
+# are never reset to the baked source. Runs as mobius (writes /data; as root it
+# would poison /data ownership + hit git "dubious ownership"). The auth
+# components are gitignored out of the model, so the protected-files chmod pass
+# below still root-owns them afterward (the repo never touches them). Never
+# blocks boot: wrapped in `|| true` and logged.
+if [ -d /data/shell ] && [ ! -d /data/shell/.git ]; then
+  echo "Shell git: seeding /data/shell two-branch repo..."
+  su -s /bin/sh mobius -c \
+    "cd /app && python3 -c 'from app import shell_update; shell_update.seed_shell_repo()'" \
+    2>&1 || echo "WARNING: shell git seed failed (non-fatal)" >&2
+  chown -R mobius:mobius /data/shell/.git 2>/dev/null || true
+fi
+
 # --- enforce protected file permissions ---
 # Two categories of protected files (see protected-files.txt header):
 #   1. Credential surfaces — chmod 444 root prevents agent tampering.
@@ -789,8 +813,6 @@ service-token.txt
 .recovery-secret
 .pm-commit
 compiled/
-shell/dist/
-shell/node_modules/
 db/
 db.sqlite3
 mobius.db
@@ -805,11 +827,12 @@ agent-browser-profiles/
 generated/
 logs/
 cron-logs/
-# platform/ has its own git repo; exclude it from the outer /data repo so
-# `git add -A` from /data doesn't treat platform as an untracked submodule.
-# The .baked-sha and .gitignore inside platform/ are tracked by platform's own
-# git, not /data's.
+# platform/ and shell/ each have their OWN git repo (two-branch upstream/main
+# self-update); exclude them from the outer /data repo so `git add -A` from
+# /data doesn't treat them as untracked submodules. Their source is tracked by
+# their own git, not /data's.
 platform/
+shell/
 # Phase 3 boot-state files — runtime counters, not content the agent manages.
 .boot-attempt
 .last-successful-boot
@@ -819,15 +842,17 @@ EOF
 chown mobius:mobius /data/.gitignore 2>/dev/null || true
 
 # Drop accidental nested git repos under /data, but preserve the intentional
-# per-app repos at /data/apps/<slug>/.git AND the platform git at
-# /data/platform/.git. The outer /data repo ignores those repos so `git add -A`
-# does not try to treat them as submodules, while the installer/update path can
-# still keep each manifest-installed app's upstream/main history across
-# container restarts, and the platform git is its own repo.
+# per-app repos at /data/apps/<slug>/.git, the platform git at
+# /data/platform/.git, AND the shell git at /data/shell/.git. The outer /data
+# repo ignores those repos so `git add -A` does not try to treat them as
+# submodules, while the installer/update path can still keep each manifest-
+# installed app's upstream/main history across container restarts, and the
+# platform + shell gits are each their own two-branch repo.
 find /data -regextype posix-extended -mindepth 2 -maxdepth 4 \
   -type d -name '.git' \
   ! -regex '/data/apps/[^/]+/\.git' \
   ! -regex '/data/platform/\.git' \
+  ! -regex '/data/shell/\.git' \
   -prune -exec rm -rf {} + 2>/dev/null || true
 
 # Idempotent re-chown of /data/.git BEFORE the if/else below — git

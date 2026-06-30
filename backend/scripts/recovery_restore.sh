@@ -70,6 +70,10 @@ if [ "$MODE" = "platform" ]; then
     # clean -fdx also removes UNTRACKED files a bad change may have added —
     # reset --hard alone leaves them, so a stray module could survive (Codex).
     echo "platform restore: git reset --hard + clean -fdx succeeded."
+    # Clear the stale upgrade-available marker so a post-restore status read
+    # does not fall back to its build sha (availability itself is the ancestry
+    # check now, but the flag still seeds current_build_sha).
+    rm -f /data/.platform-upgrade-available
     exit 0
   else
     echo "FATAL: git reset --hard HEAD failed in /data/platform" >&2
@@ -142,6 +146,9 @@ if [ "$MODE" = "platform-baked" ]; then
       if [ '$_bsha' != 'unknown' ]; then git -C /data/platform tag -f 'baked-$_bsha' HEAD 2>/dev/null || true; fi
     "
   fi
+  # Clear the stale upgrade-available marker so a post-restore status read does
+  # not fall back to its build sha (availability is the ancestry check now).
+  rm -f /data/.platform-upgrade-available
   echo "Restore complete: /data/platform (platform-baked)"
   exit 0
 fi

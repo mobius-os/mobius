@@ -1,33 +1,44 @@
-"""Platform self-update merge engine.
+"""Platform self-update — a thin ``/data/platform`` caller of ``app.app_git``.
 
-Platform-level counterpart to ``app.app_git``. It keeps ``/data/platform`` on
-local ``main`` (owner/agent edits) while recording each baked image floor on an
-``upstream`` branch, then uses ``git merge-tree --write-tree`` to decide clean
-vs conflict BEFORE touching any served file — exactly the per-app update model,
-lifted to the whole backend.
+The platform repo at ``/data/platform`` updates with the SAME engine every
+installed app uses: ``app_git`` records each baked image floor on an
+``upstream`` branch, merges it into the local working branch with
+``git merge-tree --write-tree`` (a clean-vs-conflict verdict computed off the
+live worktree, so a conflict never leaves the served backend half-merged), and
+finalises a clean apply as a single-parent linear replay. This module owns only
+the platform-specific lifecycle around that engine: which baked floor to record,
+the gitignore migration that takes the recovery files out of git entirely, the
+restart/conflict flags, and the resolver chat.
 
 Two facts shape every operation here:
 
 1. ``/data/platform`` holds the SERVED backend, so a half-applied merge must be
-   impossible. ``merge-tree`` computes the verdict off the live worktree; only a
-   proven-clean merge writes files, and it writes them one-by-one via
-   ``os.replace`` so a crash leaves whole files, never truncated ones.
+   impossible. The engine's ``merge_upstream`` computes the verdict off the live
+   worktree; only a proven-clean merge writes files, and ``write_merged_tree_to_
+   worktree`` writes them one-by-one via ``os.replace`` so a crash leaves whole
+   files, never truncated ones.
 
 2. The recovery island + core files (``protected-files.txt``: ``main.py``,
    ``auth.py``, the ``recover_*`` modules, ``entrypoint.sh`` …) are root-owned
    ``chmod 444`` in the live tree. The ``mobius`` user that runs this engine
-   CANNOT and MUST NOT overwrite them — which also means a plain ``git merge``
-   or ``git reset --hard`` is off-limits (both would try to write those paths).
-   So the clean path writes the merged tree manually, skipping protected paths;
-   those files update only via the image (deploy / root entrypoint), never
-   in-product. Recovery therefore stays agent-proof AND current with the image.
+   CANNOT and MUST NOT overwrite them. Rather than special-case them in the merge
+   path, they leave the git model entirely: ``/data/platform/.gitignore`` lists
+   them, a one-time migration untracks them, and ``record_baked_upstream`` never
+   records them on ``upstream``. So they simply never appear in any merged tree —
+   they update only via the image (deploy / root entrypoint), never in-product,
+   and the merge code is the same gitignore-respecting engine an app uses.
 
 A conflict (local edits and the new baked floor changed the same lines — only
-possible in NON-protected files, since protected files never diverge locally)
-does not get materialised programmatically. The engine records the new
-``upstream`` and spawns an agent resolver chat to merge it, mirroring how a
-per-app conflict is handed to the agent. Nothing restarts on its own: a clean
-apply marks "restart needed" and the owner confirms.
+possible in gitignored-out recovery files never conflict) does not get
+materialised programmatically. The engine records the new ``upstream`` and the
+async wrapper spawns an agent resolver chat to merge it, mirroring how a per-app
+conflict is handed to the agent. Nothing restarts on its own: a clean apply
+marks "restart needed" and the owner confirms.
+
+Availability is an EXACT ancestry check, not a sha-string compare: an update is
+available iff ``upstream`` is NOT already an ancestor of the working branch (the
+same ``git merge-base --is-ancestor`` model ``app_git`` uses). A baked sha that
+merely differs from the recorded one no longer falsely reads "available".
 """
 
 from __future__ import annotations
@@ -52,6 +63,9 @@ PLATFORM_APP = PLATFORM_REPO / "app"
 PLATFORM_SCRIPTS = PLATFORM_REPO / "scripts"
 BAKED_APP = Path("/app/app-baked")
 BAKED_SCRIPTS = Path("/app/scripts-baked")
+# The recovery / core files (root-owned chmod 444 in the live tree). These are
+# gitignored out of the platform repo, so the merge engine never has to special-
+# case them; the image owns them.
 PROTECTED_LIST = Path("/app/protected-files.txt")
 UPGRADE_FLAG = Path("/data/.platform-upgrade-available")
 RESTART_NEEDED_FLAG = Path("/data/.platform-restart-needed")
@@ -284,7 +298,16 @@ def recorded_upstream_build_sha(repo: Path = PLATFORM_REPO) -> str | None:
 
 
 def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
-  """Compute update availability on demand (no daemon, no polling)."""
+  """Compute update availability on demand (no daemon, no polling).
+
+  Availability is an EXACT ancestry check: when ``upstream`` exists, an update
+  is available iff ``upstream`` is NOT an ancestor of the working branch (the
+  baked floor carries commits the working branch has not replayed). When no
+  ``upstream`` branch exists yet, this instance predates the feature and a baked
+  floor newer than what the code descends from is available pending a one-time
+  seed. The old ``image_sha != upstream_sha`` string compare is gone — a baked
+  sha that merely differs no longer falsely reads "available" (the phantom).
+  """
   image_sha = current_build_sha()
   upstream_sha = recorded_upstream_build_sha(repo)
   conflict = CONFLICT_FLAG.exists() or (repo / ".git" / "MERGE_HEAD").exists()
@@ -301,9 +324,19 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
       conflict_paths=paths, conflict_chat_id=flag.get("chat_id"),
     )
 
-  available = bool(image_sha and upstream_sha and image_sha != upstream_sha)
-  if not available and UPGRADE_FLAG.exists() and image_sha and image_sha != upstream_sha:
-    available = True
+  if has_upstream:
+    # Available iff `upstream` is NOT already an ancestor of the working branch.
+    anc = _git(
+      "merge-base", "--is-ancestor", UPSTREAM_BRANCH, _local_branch(repo),
+      repo=repo, check=False,
+    )
+    available = anc.returncode != 0
+    seed_required = False
+  else:
+    # No upstream branch yet (pre-feature instance). A baked floor newer than
+    # what the code descends from is available, gated on the one-time seed.
+    available = bool(image_sha and upstream_sha and image_sha != upstream_sha)
+    seed_required = available
 
   if restart_needed:
     state = PlatformUpdateState.RESTART_NEEDED
@@ -315,7 +348,7 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
   return PlatformStatus(
     state=state.value, available=available, needs_restart=restart_needed,
     current_build_sha=image_sha, recorded_upstream_sha=upstream_sha,
-    seed_required=(available and not has_upstream), conflict_paths=[],
+    seed_required=seed_required, conflict_paths=[],
     conflict_chat_id=None,
   )
 
@@ -341,6 +374,104 @@ def seed_upstream_if_missing(repo: Path = PLATFORM_REPO) -> bool:
   return True
 
 
+def _normalize_working_branch(repo: Path = PLATFORM_REPO) -> bool:
+  """Rename the platform working branch to ``main`` if it isn't already.
+
+  ``entrypoint.sh`` inits ``/data/platform`` with a bare ``git init`` (no ``-b``),
+  so the working branch is whatever the container's git defaults to — ``master``
+  on prod. The ``app_git`` engine operates on the literal branch name ``main``
+  (``LOCAL_BRANCH``), so the platform repo's branch must be ``main`` before any
+  engine call. Returns True if it renamed. A detached HEAD (no branch) is left
+  alone — there is nothing to rename, and the engine paths that follow create
+  ``main`` from the seed point instead.
+  """
+  current = _git(
+    "rev-parse", "--abbrev-ref", "HEAD", repo=repo, check=False,
+  ).stdout.strip()
+  if not current or current == "HEAD" or current == app_git.LOCAL_BRANCH:
+    return False
+  _git("branch", "-m", current, app_git.LOCAL_BRANCH, repo=repo)
+  return True
+
+
+def recovery_platform_paths() -> set[str]:
+  """Repo-relative paths gitignored out of the platform repo entirely. From
+  ``protected-files.txt``: ``/app/app/...`` → ``app/...``,
+  ``/app/scripts/...`` → ``scripts/...`` (the ``/data/shell`` entries are not in
+  this repo). These are the root-owned recovery / core files the mobius user
+  CANNOT write; ignoring them keeps them out of every tree the merge engine
+  touches, so the engine never special-cases them — the image owns them."""
+  paths: set[str] = set()
+  if not PROTECTED_LIST.exists():
+    return paths
+  for raw in PROTECTED_LIST.read_text().splitlines():
+    line = raw.strip()
+    if not line or line.startswith("#") or not line.startswith("/app/"):
+      continue
+    rel = line[len("/app/"):]
+    if rel.startswith("app/") or rel.startswith("scripts/"):
+      paths.add(rel)
+  return paths
+
+
+def _ensure_gitignore_has_recovery(repo: Path, paths: set[str]) -> bool:
+  """Ensure ``/data/platform/.gitignore`` lists every recovery path under a
+  managed block. Returns True if the file changed. Each path is anchored with a
+  leading slash so it matches only the repo-root entry, never a same-named file
+  deeper in the tree."""
+  gi = repo / ".gitignore"
+  existing = gi.read_text() if gi.exists() else ""
+  lines = existing.splitlines()
+  want = {f"/{p}" for p in paths}
+  present = {ln.strip() for ln in lines}
+  missing = sorted(want - present)
+  if not missing:
+    return False
+  body = list(lines)
+  if body and body[-1].strip():
+    body.append("")
+  body.append("# Recovery / core files are image-managed (root-owned chmod 444);")
+  body.append("# they leave the platform git model entirely. See protected-files.txt.")
+  body.extend(missing)
+  gi.write_text("\n".join(body) + "\n")
+  return True
+
+
+def _untrack_recovery_files(repo: Path = PLATFORM_REPO) -> bool:
+  """One-time idempotent migration: take the recovery files out of git.
+
+  If any recovery path is still tracked (``git ls-files``), remove it from the
+  INDEX ONLY (``git rm --cached`` — the root-owned file stays on disk), ensure
+  ``.gitignore`` lists every recovery path, and commit both. Idempotent: a no-op
+  once the files are already untracked and ignored. Returns True if it committed.
+
+  ORDERING IS LOAD-BEARING: this must run BEFORE any ``record_baked_upstream`` /
+  ``merge_upstream`` / seed in an apply, or the recovery files would still be in
+  the merged tree and the mobius user would try (and fail) to write them.
+  """
+  paths = recovery_platform_paths()
+  if not paths:
+    return False
+  tracked = {
+    ln.strip()
+    for ln in _git("ls-files", repo=repo).stdout.splitlines()
+    if ln.strip()
+  }
+  to_untrack = sorted(p for p in paths if p in tracked)
+  gitignore_changed = _ensure_gitignore_has_recovery(repo, paths)
+  if not to_untrack and not gitignore_changed:
+    return False
+  if to_untrack:
+    _git("rm", "--cached", "--ignore-unmatch", *to_untrack, repo=repo)
+  _git("add", ".gitignore", repo=repo)
+  _git(
+    "-c", "user.name=Mobius", "-c", "user.email=agent@mobius",
+    "commit", "-q", "-m",
+    "migration: untrack recovery files from platform git", repo=repo,
+  )
+  return True
+
+
 def collect_baked_floor(build_sha: str | None = None) -> BakedFloor:
   """Describe the baked floor that becomes the next ``upstream`` commit."""
   sha = build_sha or current_build_sha()
@@ -358,7 +489,15 @@ def record_baked_upstream(floor: BakedFloor, repo: Path = PLATFORM_REPO) -> str:
   """Commit the baked ``app`` + ``scripts`` floor onto ``upstream`` as a child
   of the previous upstream tip, WITHOUT checking the live worktree out to
   ``upstream``. Returns the new upstream commit SHA and (force-)tags it
-  ``baked-<sha>`` so the next update's merge base is exact."""
+  ``baked-<sha>`` so the next update's merge base is exact.
+
+  Recovery files are EXCLUDED from the recorded tree: the repo's ``.gitignore``
+  (which ``_untrack_recovery_files`` has populated with the recovery paths) is
+  copied into the temp worktree, so ``git add`` honours it and stages neither
+  the recovery files nor pycache. The recorded ``upstream`` tree therefore
+  carries the ``.gitignore`` and NONE of the recovery files — exactly the same
+  gitignore-respecting shape ``app_git.record_upstream`` produces for an app.
+  """
   old_upstream = _git("rev-parse", UPSTREAM_BRANCH, repo=repo).stdout.strip()
   tmp = Path(tempfile.mkdtemp(prefix="platform-baked-"))
   index_path = Path(tempfile.mkstemp(prefix="platform-index-")[1])
@@ -370,6 +509,20 @@ def record_baked_upstream(floor: BakedFloor, repo: Path = PLATFORM_REPO) -> str:
     ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
     shutil.copytree(floor.app_dir, tmp / "app", symlinks=False, ignore=ignore)
     shutil.copytree(floor.scripts_dir, tmp / "scripts", symlinks=False, ignore=ignore)
+    # Carry the repo's managed .gitignore (recovery paths + pycache) into the
+    # temp worktree so `git add -A` honours it and never stages a recovery file.
+    # `_untrack_recovery_files` has already committed it to `main`; read it from
+    # the work tree (it always exists by the time an apply records the floor).
+    gitignore_bytes = (
+      (repo / ".gitignore").read_bytes() if (repo / ".gitignore").exists()
+      else b""
+    )
+    (tmp / ".gitignore").write_bytes(gitignore_bytes)
+    # Carry the floor stamp over so the recorded upstream tree keeps it and a
+    # later merge doesn't delete `.baked-sha` off `main`. It is a root file the
+    # baked floor copy doesn't include, so copy the on-disk one verbatim.
+    if (repo / ".baked-sha").exists():
+      shutil.copyfile(repo / ".baked-sha", tmp / ".baked-sha")
     env = {
       **os.environ,
       "GIT_CEILING_DIRECTORIES": str(repo.resolve().parent),
@@ -383,11 +536,13 @@ def record_baked_upstream(floor: BakedFloor, repo: Path = PLATFORM_REPO) -> str:
         timeout=_GIT_TIMEOUT, check=check, env=env,
       )
 
-    # Seed the temp index from upstream's tree, then restage only app/ + scripts/
-    # from the baked work-tree. Root files (.gitignore, .baked-sha) carry through
-    # from upstream untouched.
-    g("read-tree", UPSTREAM_BRANCH)
-    g("add", "-A", "app", "scripts")
+    # Build the recorded tree from an EMPTY index, like `app_git.record_upstream`,
+    # so nothing leaks in from a possibly-recovery-laden previous upstream tree —
+    # a file dropped from the new baked floor (or an already-tracked recovery
+    # file on the old upstream) vanishes. `git add -A` then stages only the temp
+    # worktree, and the copied .gitignore filters recovery files + pycache out.
+    g("read-tree", "--empty")
+    g("add", "-A")
     tree = g("write-tree").stdout.strip()
     new_upstream = _git(
       "-c", "user.name=Mobius", "-c", "user.email=agent@mobius",
@@ -410,34 +565,6 @@ def record_baked_upstream(floor: BakedFloor, repo: Path = PLATFORM_REPO) -> str:
     index_path.unlink(missing_ok=True)
 
 
-@dataclass(frozen=True)
-class _MergeVerdict:
-  clean: bool
-  tree_oid: str | None
-  conflict_paths: list[str]
-
-
-def compute_merge_tree(repo: Path = PLATFORM_REPO) -> _MergeVerdict:
-  """``git merge-tree --write-tree --name-only main upstream`` — the verdict,
-  off the live worktree. Clean → tree OID; conflict → paths; else raise."""
-  proc = _git(
-    "merge-tree", "--write-tree", "--name-only", _local_branch(repo),
-    UPSTREAM_BRANCH, repo=repo, check=False,
-  )
-  if proc.returncode > 1:
-    raise PlatformUpdateError(f"merge_tree_failed: {proc.stderr.strip()}")
-  lines = proc.stdout.splitlines()
-  tree_oid = lines[0].strip() if lines else ""
-  if proc.returncode == 1:
-    paths: list[str] = []
-    for ln in lines[1:]:
-      if not ln.strip():
-        break
-      paths.append(ln.strip())
-    return _MergeVerdict(clean=False, tree_oid=None, conflict_paths=paths)
-  return _MergeVerdict(clean=True, tree_oid=tree_oid, conflict_paths=[])
-
-
 def _tree_modes(tree_oid: str, repo: Path = PLATFORM_REPO) -> dict[str, str]:
   out = _git("ls-tree", "-r", tree_oid, repo=repo).stdout
   modes: dict[str, str] = {}
@@ -449,41 +576,21 @@ def _tree_modes(tree_oid: str, repo: Path = PLATFORM_REPO) -> dict[str, str]:
   return modes
 
 
-def protected_platform_paths() -> set[str]:
-  """Repo-relative paths the mobius merge must never overwrite. From
-  ``protected-files.txt``: ``/app/app/...`` → ``app/...``,
-  ``/app/scripts/...`` → ``scripts/...`` (the ``/data/shell`` entries are not
-  in this repo)."""
-  paths: set[str] = set()
-  if not PROTECTED_LIST.exists():
-    return paths
-  for raw in PROTECTED_LIST.read_text().splitlines():
-    line = raw.strip()
-    if not line or line.startswith("#") or not line.startswith("/app/"):
-      continue
-    rel = line[len("/app/"):]
-    if rel.startswith("app/") or rel.startswith("scripts/"):
-      paths.add(rel)
-  return paths
-
-
 def write_merged_tree_to_worktree(
   merged_files: dict[str, bytes],
   *,
   repo: Path = PLATFORM_REPO,
   exec_paths: set[str] | None = None,
-  protected_paths: set[str] | None = None,
 ) -> list[str]:
   """Write a CLEAN merge result back to ``/data/platform`` file-by-file (temp +
   fsync + ``os.replace`` so a crash never leaves a truncated file), then delete
-  tracked files that vanished from the merged tree. Skips protected root-owned
-  paths (they update via the image), ``.git``, and pycache. Returns the paths
-  written."""
-  protected = protected_paths if protected_paths is not None else protected_platform_paths()
+  tracked files that vanished from the merged tree. Skips ``.git`` and pycache.
+  The recovery files are gitignored out of the repo, so they are never in the
+  merged tree and need no skip here. Returns the paths written."""
   execs = exec_paths or set()
   written: list[str] = []
   for rel, data in merged_files.items():
-    if rel in protected or rel == ".git" or rel.startswith(".git/"):
+    if rel == ".git" or rel.startswith(".git/"):
       continue
     if "/__pycache__/" in rel or rel.endswith(".pyc"):
       continue
@@ -500,7 +607,7 @@ def write_merged_tree_to_worktree(
   merged_set = set(merged_files)
   for rel in _git("ls-files", repo=repo).stdout.splitlines():
     rel = rel.strip()
-    if not rel or rel in merged_set or rel in protected:
+    if not rel or rel in merged_set:
       continue
     try:
       (repo / rel).unlink()
@@ -509,103 +616,108 @@ def write_merged_tree_to_worktree(
   return written
 
 
-def commit_clean_merge(upstream_commit: str, repo: Path = PLATFORM_REPO) -> str:
-  """Record the applied worktree as a two-parent merge on ``main`` (parents:
-  previous ``main`` and the new ``upstream``). Stages the on-disk state, so the
-  committed tree carries the new non-protected files plus the unchanged
-  (root-owned) protected files. No ``reset --hard`` — that would try to rewrite
-  protected paths; index + disk already match after staging."""
-  local = _local_branch(repo)
-  _git("add", "-A", repo=repo)
-  main_tip = _git("rev-parse", local, repo=repo).stdout.strip()
-  merged_tree = _git("write-tree", repo=repo).stdout.strip()
-  merge_commit = _git(
-    "-c", "user.name=Mobius", "-c", "user.email=agent@mobius",
-    "commit-tree", merged_tree, "-p", main_tip, "-p", upstream_commit,
-    "-m", "merge: platform self-update", repo=repo,
-  ).stdout.strip()
-  _git("update-ref", f"refs/heads/{local}", merge_commit, main_tip, repo=repo)
-  return merge_commit
-
-
-def _commit_local_edits(repo: Path = PLATFORM_REPO) -> None:
-  """Commit any uncommitted agent/owner edits so the merge has a committed base
-  to diverge from (mirrors install committing local edits before an update).
-  Strict: if the tree is still dirty after the commit, refuse to merge from a
-  stale base rather than risk overwriting unsaved work."""
-  if not _git("status", "--porcelain", repo=repo, check=False).stdout.strip():
-    return
-  _git("add", "-A", repo=repo)
-  _git(
-    "-c", "user.name=Mobius", "-c", "user.email=agent@mobius",
-    "commit", "-q", "-m", "platform: local edits before update", repo=repo,
-  )
-  if _git("status", "--porcelain", repo=repo, check=False).stdout.strip():
-    raise PlatformUpdateError("local_edits_uncommittable")
-
-
 def mark_restart_needed(build_sha: str) -> None:
+  """Record that a restart is needed to finish the applied update, stamping the
+  build sha the apply targeted. The clear-side reads this sha back to confirm a
+  process actually booted on the applied floor before clearing the flag."""
   tmp = RESTART_NEEDED_FLAG.with_name(RESTART_NEEDED_FLAG.name + f".tmp-{os.getpid()}")
   tmp.write_text(build_sha)
   os.replace(tmp, RESTART_NEEDED_FLAG)
 
 
 def clear_restart_needed_if_reconciled(repo: Path = PLATFORM_REPO) -> None:
-  """Clear the restart flag once the running image matches what the platform
-  descends from and no merge is in progress — i.e. the restart took effect."""
+  """Clear the restart flag only once a process actually booted on the applied
+  sha and no merge is in progress.
+
+  The flag records the build sha the apply TARGETED (``mark_restart_needed``).
+  The bug this fixes: the old clear fired on ``image_sha == recorded_upstream_
+  sha``, but an apply advances ``upstream`` to the new floor BEFORE the new image
+  boots — so that equality could hold while the OLD process is still running,
+  clearing "restart needed" before the restart happened. Comparing the RUNNING
+  image's build sha against the sha stamped in the flag instead means the flag
+  clears only when the booted process is the one the apply targeted.
+  """
   if not RESTART_NEEDED_FLAG.exists():
     return
   if (repo / ".git" / "MERGE_HEAD").exists():
     return
+  applied_sha = RESTART_NEEDED_FLAG.read_text().strip()
   image = current_build_sha()
-  upstream = recorded_upstream_build_sha(repo)
-  if image and upstream and image == upstream:
+  if applied_sha and image and image == applied_sha:
     RESTART_NEEDED_FLAG.unlink(missing_ok=True)
 
 
 def _apply_sync(repo: Path) -> dict:
   """The blocking git work of an apply (run under ``asyncio.to_thread``).
+
+  A thin sequence over the ``app_git`` engine, with the platform-specific
+  ordering up front:
+
+    1. ``_untrack_recovery_files`` — the gitignore migration. MUST run first so
+       the recovery files are out of the index before anything records or merges
+       a tree; otherwise they would surface in the merged tree and the mobius
+       user would try (and fail) to write them.
+    2. ``app_git.commit_local`` — stash any uncommitted owner/agent edits so the
+       merge has a committed base to diverge from.
+    3. seed + ``record_baked_upstream`` — put the new baked floor on ``upstream``.
+    4. ``app_git.merge_upstream`` — the clean-vs-conflict verdict off the live
+       worktree. Clean → write the merged tree + single-parent ``commit_replay``
+       + mark restart. Conflict → record the flag; the async wrapper spawns the
+       resolver chat.
+
   Returns a dict describing the outcome; the async wrapper does the (async)
-  conflict-chat spawn."""
+  conflict-chat spawn.
+  """
   if CONFLICT_FLAG.exists() or (repo / ".git" / "MERGE_HEAD").exists():
     return {"state": "conflict", "conflict_paths": _unmerged_paths(repo),
             "upstream_commit": None, "merge_commit": None}
 
-  # Recover from a previous apply that crashed mid-write: only non-protected
-  # files are ever written, so resetting to the committed `main` restores them
-  # (protected files were never touched). `upstream` stays advanced for retry.
-  local = _local_branch(repo)
+  # The engine operates on the literal branch `main`; rename `master` first so
+  # every app_git call resolves the working branch.
+  _normalize_working_branch(repo)
+  local = app_git.LOCAL_BRANCH
+
+  # Recover from a previous apply that crashed mid-write: only gitignored-out
+  # recovery files are never written, so resetting to the committed working
+  # branch restores every file we touched. `upstream` stays advanced for retry.
   if APPLYING_FLAG.exists():
     _git("reset", "--hard", local, repo=repo, check=False)
     APPLYING_FLAG.unlink(missing_ok=True)
 
   _git("checkout", "-q", local, repo=repo, check=False)
-  _commit_local_edits(repo)
+  # ORDERING IS LOAD-BEARING: untrack the recovery files BEFORE recording or
+  # merging any tree, so they never enter the merged tree.
+  _untrack_recovery_files(repo)
+  app_git.commit_local(repo, "platform: local edits before update")
   seed_upstream_if_missing(repo)
   floor = collect_baked_floor()
   new_upstream = record_baked_upstream(floor, repo)
-  verdict = compute_merge_tree(repo)
+  result = app_git.merge_upstream(repo)
 
-  if not verdict.clean:
-    # Do NOT materialise markers programmatically: a plain `git merge` would try
-    # to write root-owned protected files and fail. The new code is on
-    # `upstream`; the agent reconciles the named non-protected files into `main`
-    # and restarts. Record the conflict so Settings keeps surfacing it (the chat
-    # id is stamped in by the async wrapper once the resolver chat is spawned).
-    _write_conflict_flag(new_upstream, verdict.conflict_paths)
-    return {"state": "conflict", "conflict_paths": verdict.conflict_paths,
+  if result.status == "conflict":
+    # Do NOT materialise markers here: the new code is on `upstream`; the agent
+    # reconciles the named files into the working branch and restarts. Record the
+    # conflict so Settings keeps surfacing it (the chat id is stamped in by the
+    # async wrapper once the resolver chat is spawned).
+    _write_conflict_flag(new_upstream, result.conflict_paths)
+    return {"state": "conflict", "conflict_paths": result.conflict_paths,
             "upstream_commit": new_upstream, "merge_commit": None}
 
-  merged = app_git.read_merged_tree(repo, verdict.tree_oid)
-  modes = _tree_modes(verdict.tree_oid, repo)
+  merged = app_git.read_merged_tree(repo, result.merged_tree_oid)
+  modes = _tree_modes(result.merged_tree_oid, repo)
   exec_paths = {p for p, m in modes.items() if m == "100755"}
   APPLYING_FLAG.write_text(floor.build_sha)
   try:
     write_merged_tree_to_worktree(merged, repo=repo, exec_paths=exec_paths)
-    merge_commit = commit_clean_merge(new_upstream, repo)
+    # Finalise as a SINGLE-parent linear replay on the new upstream tip, so the
+    # working branch is a straight-line descendant of `upstream` and the next
+    # update's `--is-ancestor` availability check is exact.
+    merge_commit = app_git.commit_replay(
+      repo, new_upstream, "merge: platform self-update",
+    )
   except Exception:
-    # Roll the worktree back to the last good local tip (rewrites only the
-    # non-protected files we touched; protected ones were never written).
+    # Roll the worktree back to the last good local tip (rewrites only the files
+    # we touched; the gitignored recovery files were never written).
     _git("reset", "--hard", local, repo=repo, check=False)
     raise
   finally:
@@ -699,18 +811,18 @@ async def spawn_platform_conflict_chat(
     "The new platform code is recorded on the `upstream` branch of the git "
     "repo at `/data/platform`. Reconcile these conflicting files into `main` "
     f"by hand: {files}.\n\n"
-    "For each file: compare the local version (current `main`) against the new "
-    "one (`git show upstream:<path>`), combine the intent of both, save the "
-    "reconciled file, then `git add` it. When every listed file is reconciled, "
-    "`git commit` on `main`.\n\n"
-    "IMPORTANT: do NOT run a bare `git merge` — the root-owned recovery/core "
-    "files (main.py, auth.py, the recover_* modules, entrypoint.sh …) are "
-    "image-managed and a merge would fail trying to rewrite them. Only the "
-    "listed non-protected files conflict; leave everything else untouched.\n\n"
+    "Resolve it with ordinary git: `git -C /data/platform merge upstream` "
+    "writes conflict markers into the listed files; for each, combine the "
+    "intent of the local version and upstream's, save it, then `git add` it. "
+    "When every listed file is reconciled, `git commit` to finalise the merge "
+    "on `main`. The recovery/core files (main.py, auth.py, the recover_* "
+    "modules, entrypoint.sh …) are gitignored and image-managed, so they are "
+    "never part of the merge — leave them be.\n\n"
     "When the reconcile is committed, clear the flag "
     "(`rm -f /data/.platform-conflict`) and tell the owner to **restart the "
-    "server** from Settings to finish. To back out instead, "
-    "`rm -f /data/.platform-conflict` and tell the owner the update was skipped."
+    "server** from Settings to finish. To back out instead, `git -C "
+    "/data/platform merge --abort`, `rm -f /data/.platform-conflict`, and tell "
+    "the owner the update was skipped."
   )
 
   chat_id = str(uuid.uuid4())
