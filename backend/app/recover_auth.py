@@ -55,7 +55,10 @@ def verify_password(plain: str, hashed: str) -> bool:
   """Bcrypt password check. Returns False on any error rather than
   raising — recovery surfaces shouldn't 500 on a bad cookie."""
   try:
-    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    # bcrypt>=5 raises on >72-byte inputs (caught below → silent False), so
+    # truncate to the first 72 bytes to match auth.hash_password's contract —
+    # otherwise a >72-byte password can't log in on the recovery surface.
+    return bcrypt.checkpw(plain.encode("utf-8")[:72], hashed.encode("utf-8"))
   except Exception:
     return False
 
