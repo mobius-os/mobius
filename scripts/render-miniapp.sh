@@ -20,10 +20,10 @@
 # production utility. It mints a real owner JWT and injects it into the browser
 # session's localStorage on the app origin, so the standalone page authenticates.
 # Consequences and bounds:
-#   * Test-only by ENFORCEMENT, not by luck: it refuses any non-loopback /
-#     non-RFC1918 host and the prod port (8000) unless RENDER_ALLOW_NONTEST=1 is
-#     set explicitly. Defaults (port 8001 + admin/admin) also can't authenticate
-#     to prod. So a wrong target fails closed — it never silently drives prod.
+#   * Test-only: the defaults (port 8001 + admin/admin) can't authenticate to
+#     prod, and prod isn't host-published on 8000. As a cheap backstop for the
+#     obvious mistake it also refuses the prod port (8000) unless
+#     RENDER_ALLOW_NONTEST=1 is set. Point it elsewhere only on purpose.
 #   * The minted JWT is short-lived but, while valid, lives in the agent-browser
 #     session profile's localStorage (and appears on the `agent-browser eval`
 #     argv) until it expires or the session is closed. Intended for a
@@ -82,43 +82,16 @@ AB_SESSION="${AB_SESSION:-render-miniapp}"
 OUT="${2:-/tmp/render-${SLUG}.png}"
 BASE="http://${HOST}:${PORT}"
 
-# Is HOST a loopback / RFC1918 target? Accept ONLY the loopback literals or a
-# CANONICAL dotted-quad IPv4 (no leading zeros, octets 0-255) in a private
-# range. A glob like `10.*` would also match a HOSTNAME that merely starts with
-# "10." (e.g. `10.evil.com`) which DNS-resolves anywhere — a parser/validator
-# differential where the string passes our check but curl connects elsewhere.
-# Requiring a real dotted-quad closes that: a hostname is never a dotted-quad.
-host_is_local() {
-  local h="$1"
-  case "$h" in
-    localhost|127.0.0.1|::1) return 0 ;;
-  esac
-  local oct='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
-  if [[ "$h" =~ ^${oct}\.${oct}\.${oct}\.${oct}$ ]]; then
-    local a="${BASH_REMATCH[1]}" b="${BASH_REMATCH[2]}"
-    [[ "$a" == 127 || "$a" == 10 ]] && return 0          # 127.0.0.0/8, 10.0.0.0/8
-    [[ "$a" == 192 && "$b" == 168 ]] && return 0         # 192.168.0.0/16
-    [[ "$a" == 172 ]] && (( b >= 16 && b <= 31 )) && return 0  # 172.16.0.0/12
-  fi
-  return 1
-}
-
-# ENFORCED test-only target guard. This tool mints + injects an OWNER JWT, so a
-# wrong target hands a real owner session to whatever app renders there. Rather
-# than rely on the defaults happening to fail against prod, refuse outright any
-# host that isn't a loopback/RFC1918 IPv4 (or localhost), or the prod port
-# (8000). An operator who genuinely needs another target opts in explicitly.
-if [[ "${RENDER_ALLOW_NONTEST:-}" != "1" ]]; then
-  if ! host_is_local "$HOST"; then
-    echo "error: refusing host '$HOST' — this tool injects an owner JWT and is test-only." >&2
-    echo "       only loopback/RFC1918 IPv4 (or localhost) is allowed; set RENDER_ALLOW_NONTEST=1 to override." >&2
-    exit 2
-  fi
-  if [[ "$PORT" == "8000" ]]; then
-    echo "error: refusing port 8000 (the prod port) — this tool is test-only." >&2
-    echo "       set RENDER_ALLOW_NONTEST=1 to override." >&2
-    exit 2
-  fi
+# Test-only foot-gun guard. This tool mints + injects a real OWNER JWT, so it's
+# for a LOCAL test container. The natural safety is the defaults: port 8001 +
+# admin/admin can't authenticate to prod (whose owner isn't admin/admin), and
+# prod isn't host-published on 8000 anyway. We add ONE cheap explicit guard for
+# the obvious mistake — refuse the prod port — and otherwise trust the operator.
+# Set RENDER_ALLOW_NONTEST=1 to aim it elsewhere on purpose (you own the target).
+if [[ "${RENDER_ALLOW_NONTEST:-}" != "1" && "$PORT" == "8000" ]]; then
+  echo "error: refusing port 8000 (the prod port) — this tool is test-only." >&2
+  echo "       set RENDER_ALLOW_NONTEST=1 to override." >&2
+  exit 2
 fi
 
 # Resolve agent-browser: prefer the repo-local install, fall back to PATH.
