@@ -670,6 +670,76 @@ def test_resolved_conflict_finalize_single_parent_clears_merge_head(tmp_path):
     assert not (repo / ".git" / name).exists()
 
 
+def test_partial_conflict_isolates_to_the_overlapping_line(tmp_path):
+  """Models the real prod webstudio case: the agent edits an app (including
+  bumping its version constant) while upstream releases a version that bumps
+  the SAME constant. The three-way merge must conflict ONLY on the version
+  line — the agent's other edit and upstream's disjoint edit both merge
+  cleanly — and resolving that one line finalizes as a single-parent replay
+  carrying both disjoint edits. This is the everyday "APP_VERSION collision"
+  that drives the resolver chats, and it is a genuine conflict the engine is
+  right to surface, not a spurious whole-file one."""
+  repo = tmp_path / "app"
+  base = (
+    "const APP_VERSION = '0.10.2'\n"
+    "function header() { return 'hi' }\n"
+    "function footer() { return 'bye' }\n"
+  )
+  _install(repo, base.encode())
+
+  # Agent bumps the version AND edits an unrelated function (header).
+  _write(repo, (
+    "const APP_VERSION = '0.10.4'\n"
+    "function header() { return 'HELLO agent' }\n"
+    "function footer() { return 'bye' }\n"
+  ))
+  app_git.commit_local(repo, "agent edit")
+
+  # Upstream v2 bumps the version (same line) and edits a DIFFERENT function
+  # (footer) — disjoint from the agent's header edit.
+  app_git.record_upstream(
+    repo,
+    {"index.jsx": (
+      "const APP_VERSION = '0.12.0'\n"
+      "function header() { return 'hi' }\n"
+      "function footer() { return 'BYE upstream' }\n"
+    ).encode()},
+    "https://x/mobius.json",
+    "2.0.0",
+  )
+
+  result = app_git.merge_upstream(repo)
+  assert result.status == "conflict"
+  assert result.conflict_paths == ["index.jsx"]
+
+  # The materialized markers must be ISOLATED to the version line: the agent's
+  # header edit and upstream's footer edit are already merged in cleanly.
+  app_git.start_conflict_merge(repo)
+  materialized = (repo / "index.jsx").read_text()
+  assert "HELLO agent" in materialized
+  assert "BYE upstream" in materialized
+  assert "<<<<<<<" in materialized and "0.12.0" in materialized
+
+  # Agent resolves by taking upstream's version, keeping both disjoint edits.
+  _write(repo, (
+    "const APP_VERSION = '0.12.0'\n"
+    "function header() { return 'HELLO agent' }\n"
+    "function footer() { return 'BYE upstream' }\n"
+  ))
+  sha = app_git.commit_local(repo, "resolve version conflict")
+
+  assert sha is not None
+  assert _has_second_parent(repo) is False
+  assert app_git._run(
+    repo, "merge-base", "--is-ancestor", app_git.UPSTREAM_BRANCH,
+    app_git.LOCAL_BRANCH, check=False,
+  ).returncode == 0
+  final = (repo / "index.jsx").read_text()
+  assert "0.12.0" in final
+  assert "HELLO agent" in final and "BYE upstream" in final
+  assert "<<<<<<<" not in final
+
+
 def _stage_non_entry_conflict(repo: Path) -> str:
   """Install + diverge so a NON-entry file (fetch.sh) conflicts.
 
