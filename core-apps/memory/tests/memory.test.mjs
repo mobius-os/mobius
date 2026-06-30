@@ -30,6 +30,7 @@ const {
   safeMemoryPath,
   neutralizeMemoryMarkdown,
   MEMORY_SANITIZE_OPTIONS,
+  makeSharedMemoryStore,
 } = await import('./.build/index.mjs')
 
 test('shouldShowNodeLabel hides ordinary nodes below every threshold except close zoom', () => {
@@ -235,4 +236,116 @@ test('memory sanitizer forbids network-bearing tags and attributes', () => {
   // href is deliberately NOT forbidden — wikilink anchors need it; the
   // restrictNoteHtml pass strips every non-#memory-node- href instead.
   assert.ok(!MEMORY_SANITIZE_OPTIONS.FORBID_ATTR.includes('href'))
+})
+
+// ── makeSharedMemoryStore: offline read-through + subscribe repaint ──────────
+// A fake cache (plain Map) and a controllable fetch let these run with no
+// network and no browser caches — the same shape the offline harness drives.
+function makeFakeCache() {
+  const m = new Map()
+  return {
+    map: m,
+    read: async (k) => (m.has(k) ? m.get(k) : null),
+    write: async (k, e) => { m.set(k, e) },
+  }
+}
+
+test('store getJSON caches the graph then serves it offline', async () => {
+  const cacheStore = makeFakeCache()
+  let online = true
+  const graph = JSON.stringify({ nodes: [{ id: 'a' }], edges: [], problems: [] })
+  const fetchImpl = async () => {
+    if (!online) throw new TypeError('Failed to fetch')
+    return { ok: true, status: 200, text: async () => graph }
+  }
+  const store = makeSharedMemoryStore({ getToken: () => 't', fetchImpl, cacheStore, pollMs: 0 })
+
+  const first = await store.getJSON('graph.json')
+  assert.equal(first.present, true)
+  assert.deepEqual(first.value.nodes, [{ id: 'a' }])
+
+  // Network goes down; the read-through cache still answers from the mirror.
+  online = false
+  const offlineRead = await store.getJSON('graph.json')
+  assert.equal(offlineRead.present, true, 'cached graph served offline')
+  assert.deepEqual(offlineRead.value.nodes, [{ id: 'a' }])
+  assert.equal(offlineRead.error, null)
+})
+
+test('store getText with no cache and offline reports an error, not a crash', async () => {
+  const cacheStore = makeFakeCache()
+  const fetchImpl = async () => { throw new TypeError('Failed to fetch') }
+  const store = makeSharedMemoryStore({ getToken: () => 't', fetchImpl, cacheStore, pollMs: 0 })
+  const r = await store.getText('notes/x.md')
+  assert.equal(r.present, false)
+  assert.equal(r.value, null)
+  assert.ok(r.error, 'no cache + offline surfaces an error to render the error state')
+})
+
+test('store getText caches a note then serves it offline', async () => {
+  const cacheStore = makeFakeCache()
+  let online = true
+  let body = '# hello\nworld'
+  const fetchImpl = async () => {
+    if (!online) throw new TypeError('offline')
+    return { ok: true, status: 200, text: async () => body }
+  }
+  const store = makeSharedMemoryStore({ getToken: () => 't', fetchImpl, cacheStore, pollMs: 0 })
+  const first = await store.getText('notes/n.md')
+  assert.equal(first.value, '# hello\nworld')
+  online = false
+  const offline = await store.getText('notes/n.md')
+  assert.equal(offline.value, '# hello\nworld', 'cached note served offline')
+})
+
+test('store subscribe repaints when an external write changes the body, and brackets revalidation', async () => {
+  const cacheStore = makeFakeCache()
+  let body = 'v1'
+  let visible = true
+  const fetchImpl = async () => ({ ok: true, status: 200, text: async () => body })
+  const store = makeSharedMemoryStore({
+    getToken: () => 't', fetchImpl, cacheStore, pollMs: 5,
+    isVisible: () => visible,
+  })
+
+  const bodies = []
+  const reval = []
+  const unsub = store.subscribe(
+    'notes/n.md',
+    ({ body }) => bodies.push(body),
+    { onRevalidate: (b) => reval.push(b) },
+  )
+
+  // Let the initial read + first revalidation settle.
+  await new Promise((r) => setTimeout(r, 30))
+  assert.ok(bodies.includes('v1'), 'initial body delivered')
+  assert.ok(reval.includes(true) && reval.includes(false), 'revalidation brackets fired (true then false)')
+
+  // Simulate an external (agent/cron) write to this path, then a poll tick.
+  body = 'v2-agent-wrote-this'
+  await new Promise((r) => setTimeout(r, 40))
+  assert.equal(bodies[bodies.length - 1], 'v2-agent-wrote-this', 'view repainted on external write')
+
+  // No change => no extra repaint (dedupe).
+  const countBefore = bodies.length
+  await new Promise((r) => setTimeout(r, 30))
+  assert.equal(bodies.length, countBefore, 'no repaint when body is unchanged')
+
+  unsub()
+})
+
+test('store subscribe paints cached value first when offline, before any network', async () => {
+  const cacheStore = makeFakeCache()
+  // Pre-seed the cache as if a previous online session had stored the graph.
+  const graphUrl = '/api/storage/shared/memory/graph.json'
+  cacheStore.map.set(graphUrl, { body: JSON.stringify({ nodes: [{ id: 'seed' }] }), present: true })
+  const fetchImpl = async () => { throw new TypeError('offline') }
+  const store = makeSharedMemoryStore({ getToken: () => 't', fetchImpl, cacheStore, pollMs: 0 })
+
+  const seen = []
+  const unsub = store.subscribe('graph.json', ({ body }) => seen.push(body))
+  await new Promise((r) => setTimeout(r, 20))
+  assert.ok(seen.length >= 1, 'cached value painted even though network is down')
+  assert.match(seen[0], /seed/)
+  unsub()
 })

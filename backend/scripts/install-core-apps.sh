@@ -13,6 +13,11 @@
 # Core-app source is baked at /app/core-apps/<slug>/. The reflection app also
 # ships prompt.md + fetch.sh, which are copied to /data/apps/reflection/ so the
 # cron can run them.
+#
+# core-apps/ is NOT hand-edited: it is a committed snapshot of the catalog repos
+# (mobius-os/app-<slug>), pinned by commit in core-apps/SOURCES and regenerated
+# by scripts/sync-core-apps.sh. The catalog repo is the single source of truth;
+# CI (scripts/check-core-apps-sync.sh) fails the build if the two ever drift.
 set -uo pipefail
 
 API_BASE_URL="${API_BASE_URL:-http://localhost:8000}"

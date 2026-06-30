@@ -94,6 +94,14 @@ jobs:
       - name: Run static app packager tests
         run: npm run test:packager
 
+  core-apps-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check core-apps matches the pinned catalog
+        run: scripts/check-core-apps-sync.sh
+
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 15

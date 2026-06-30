@@ -472,12 +472,12 @@ function dayOfMonth(dateStr) {
 // alive rather than static.
 //
 // One module-level `const CSS` is rendered once at the app root as
-// <style>{CSS}</style>; the app's class prefix is `dr-`. The shared chrome
+// <style>{CSS}</style>; the app's class prefix is `rf-`. The shared chrome
 // (Root / Header / Sheet / Empty / Card / Button / Input / Segmented /
 // ChatEmbed / SyncPill) is fenced with `/* mobius-ui:<Block> v1 … */` markers
 // so a future extraction is mechanical; app-specific blocks (aurora, moon
 // tile, date tile, streak badge, brief↔chat split, settings) stay below as
-// unfenced `dr-` rules and keep their exact current values. The violet
+// unfenced `rf-` rules and keep their exact current values. The violet
 // accent (#7c6cf0 / #a78bfa) is the one committed hardcode the theme can't
 // express. Structural colors are theme tokens.
 // ---------------------------------------------------------------------------
@@ -488,16 +488,16 @@ const ACCENT_DIM = 'rgba(124,108,240,0.13)'
 const ACCENT_DIM_2 = 'rgba(167,139,250,0.10)'
 
 const CSS = `
-@keyframes dr-drift {
+@keyframes rf-drift {
   0%   { transform: translateY(0) rotate(0deg); opacity: .85; }
   50%  { transform: translateY(-6px) rotate(4deg); opacity: 1; }
   100% { transform: translateY(0) rotate(0deg); opacity: .85; }
 }
-@keyframes dr-rise {
+@keyframes rf-rise {
   from { opacity: 0; transform: translateY(8px); }
   to   { opacity: 1; transform: translateY(0); }
 }
-@keyframes dr-spin {
+@keyframes rf-spin {
   to { transform: rotate(360deg); }
 }
 
@@ -509,7 +509,7 @@ const CSS = `
 /* /mobius-ui:Focus */
 
 /* mobius-ui:Root v1 — keep in sync; library candidate. Diverge below the marker only. */
-.dr-root {
+.rf-root {
   position: relative;
   display: flex; flex-direction: column;
   height: 100%; width: 100%; max-width: 100%;
@@ -520,7 +520,7 @@ const CSS = `
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
 }
-.dr-scroll {
+.rf-scroll {
   flex: 1; min-height: 0;
   overflow-y: auto; overflow-x: hidden;
   padding: 16px 20px 40px;
@@ -531,45 +531,45 @@ const CSS = `
 /* /mobius-ui:Root */
 
 /* mobius-ui:Header v1 — keep in sync; library candidate. Diverge below the marker only. */
-.dr-header {
+.rf-header {
   flex: 0 0 auto;
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   flex-wrap: wrap;
   padding: max(22px, env(safe-area-inset-top)) 20px 0;
   position: relative; z-index: 1;
 }
-.dr-brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
-.dr-brand-icon {
+.rf-brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.rf-brand-icon {
   flex: 0 0 auto; width: 26px; height: 26px; border-radius: 6px;
   object-fit: cover; display: block;
 }
-.dr-brand-fallback {
+.rf-brand-fallback {
   flex: 0 0 auto; width: 26px; height: 26px; border-radius: 6px;
   align-items: center; justify-content: center;
   background: ${ACCENT}; color: var(--bg, #0c0c0c);
   font-weight: 700; line-height: 1;
 }
-.dr-header-right { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; flex: 0 0 auto; position: relative; z-index: 1; }
+.rf-header-right { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; flex: 0 0 auto; position: relative; z-index: 1; }
 /* /mobius-ui:Header */
 
 /* mobius-ui:Empty v1 — keep in sync; library candidate. Diverge below the marker only. */
-.dr-empty {
+.rf-empty {
   display: flex; flex-direction: column; align-items: center; text-align: center;
   max-width: 440px; margin: 0 auto; padding: 60px 24px 40px;
   color: var(--muted); font-size: 14px; line-height: 1.65;
 }
-.dr-empty-mark {
+.rf-empty-mark {
   width: 74px; height: 74px; margin: 0 auto 18px; border-radius: 22px;
   display: flex; align-items: center; justify-content: center;
   background: linear-gradient(160deg, ${ACCENT_DIM} 0%, ${ACCENT_DIM_2} 100%);
   border: 1px solid var(--border);
 }
-.dr-empty-mark-glyph { font-size: 34px; animation: dr-drift 6s ease-in-out infinite; }
-.dr-empty-title { font-size: 17px; font-weight: 700; color: var(--text); letter-spacing: -0.2px; margin-bottom: 8px; }
+.rf-empty-mark-glyph { font-size: 34px; animation: rf-drift 6s ease-in-out infinite; }
+.rf-empty-title { font-size: 17px; font-weight: 700; color: var(--text); letter-spacing: -0.2px; margin-bottom: 8px; }
 /* /mobius-ui:Empty */
 
 /* mobius-ui:Card v1 — keep in sync; library candidate. Diverge below the marker only. */
-.dr-card {
+.rf-card {
   display: flex; align-items: stretch; gap: 14px; width: 100%; min-height: 44px;
   padding: 15px 16px; text-align: left;
   background: var(--surface); color: var(--text); font-family: var(--font);
@@ -578,15 +578,15 @@ const CSS = `
   transition: border-color .16s ease, transform .12s ease, box-shadow .16s ease, background .16s ease;
   touch-action: manipulation; user-select: none;
 }
-button.dr-card { cursor: pointer; }
-@media (hover:hover) { .dr-card:hover { border-color: ${ACCENT}; box-shadow: 0 6px 22px -12px ${ACCENT}; } }
-.dr-card:active { transform: scale(.992); background: var(--surface-active, var(--surface)); }
-.dr-card:focus-visible { outline: 2px solid ${ACCENT}; outline-offset: 2px; }
-.dr-card.is-latest { border-left: 3px solid ${ACCENT}; }
+button.rf-card { cursor: pointer; }
+@media (hover:hover) { .rf-card:hover { border-color: ${ACCENT}; box-shadow: 0 6px 22px -12px ${ACCENT}; } }
+.rf-card:active { transform: scale(.992); background: var(--surface-active, var(--surface)); }
+.rf-card:focus-visible { outline: 2px solid ${ACCENT}; outline-offset: 2px; }
+.rf-card.is-latest { border-left: 3px solid ${ACCENT}; }
 /* /mobius-ui:Card */
 
 /* mobius-ui:Button v1 — keep in sync; library candidate. Diverge below the marker only. */
-.dr-btn {
+.rf-btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 5px;
   min-height: 44px; padding: 10px 16px; border-radius: 10px;
   border: 1px solid var(--border); background: var(--surface); color: var(--text);
@@ -594,140 +594,140 @@ button.dr-card { cursor: pointer; }
   transition: background .14s ease, border-color .14s ease, transform .1s ease, color .14s ease;
   touch-action: manipulation; user-select: none;
 }
-.dr-btn:active { transform: scale(.97); opacity: 0.85; }
-.dr-btn:focus-visible { outline: 2px solid ${ACCENT}; outline-offset: 2px; }
-.dr-btn:disabled { opacity: 0.5; cursor: default; transform: none; }
+.rf-btn:active { transform: scale(.97); opacity: 0.85; }
+.rf-btn:focus-visible { outline: 2px solid ${ACCENT}; outline-offset: 2px; }
+.rf-btn:disabled { opacity: 0.5; cursor: default; transform: none; }
 /* /mobius-ui:Button */
 
 /* mobius-ui:Segmented v1 — keep in sync; library candidate. Diverge below the marker only. */
-.dr-seg {
+.rf-seg {
   display: flex; gap: 2px; padding: 3px;
   background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
 }
-.dr-seg-btn {
+.rf-seg-btn {
   min-height: 44px; padding: 6px 15px; border: none; border-radius: 7px;
   background: transparent; color: var(--muted); font-family: var(--font);
   font-size: 13px; font-weight: 650; cursor: pointer; transition: background .15s, color .15s;
   touch-action: manipulation; user-select: none;
 }
-@media (hover:hover) { .dr-seg-btn:hover { color: var(--text); } }
-.dr-seg-btn.is-active { background: ${ACCENT}; color: #fff; }
+@media (hover:hover) { .rf-seg-btn:hover { color: var(--text); } }
+.rf-seg-btn.is-active { background: ${ACCENT}; color: #fff; }
 /* /mobius-ui:Segmented */
 
 /* mobius-ui:ChatEmbed v1 — keep in sync; library candidate. Diverge below the marker only. */
-.dr-chat-embed {
+.rf-chat-embed {
   flex: 1 1 auto;
   min-height: 0;   /* the flexbox overflow fix — lets the iframe scroll internally */
   width: 100%;
   overflow: hidden;
   background: var(--bg);
 }
-.dr-chat-embed iframe { display: block; width: 100%; height: 100%; border: 0; }
+.rf-chat-embed iframe { display: block; width: 100%; height: 100%; border: 0; }
 /* /mobius-ui:ChatEmbed */
 
 /* mobius-ui:Spinner v1 — keep in sync; library candidate. */
-.dr-spinner {
+.rf-spinner {
   width: 26px; height: 26px; border-radius: 50%;
   border: 2.5px solid ${ACCENT_DIM}; border-top-color: ${ACCENT};
-  animation: dr-spin 0.8s linear infinite;
+  animation: rf-spin 0.8s linear infinite;
 }
-.dr-spinner-sm { width: 16px; height: 16px; border-width: 2px; }
-@media (prefers-reduced-motion: reduce) { .dr-spinner { animation: none; } }
+.rf-spinner-sm { width: 16px; height: 16px; border-width: 2px; }
+@media (prefers-reduced-motion: reduce) { .rf-spinner { animation: none; } }
 /* /mobius-ui:Spinner */
 
-/* mobius-ui:Scrollskin v1 — keep in sync; library candidate. Add the \`dr-scroll\` class to a scroller. */
-.dr-scroll::-webkit-scrollbar { width: 9px; height: 9px; }
-.dr-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; border: 2px solid transparent; background-clip: padding-box; }
-.dr-scroll::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: padding-box; }
+/* mobius-ui:Scrollskin v1 — keep in sync; library candidate. Add the \`rf-scroll\` class to a scroller. */
+.rf-scroll::-webkit-scrollbar { width: 9px; height: 9px; }
+.rf-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; border: 2px solid transparent; background-clip: padding-box; }
+.rf-scroll::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: padding-box; }
 /* /mobius-ui:Scrollskin */
 
 /* ---- App-specific (reflection) — keep exact current values ---- */
 
 /* The detail view reuses the shared empty shape for its missing/error notes,
    but with a tighter top inset than the list's first-run empty. */
-.dr-empty.is-compact { padding-top: 56px; }
+.rf-empty.is-compact { padding-top: 56px; }
 
 /* Entrance + press affordances. A handful of reflection surfaces ride a small
    rise-in on mount; pressable controls get the same active/focus feel as the
    shared card without being one. */
-.dr-rise { animation: dr-rise .32s cubic-bezier(.22,.61,.36,1) both; }
-.dr-pressable { transition: background .14s ease, border-color .14s ease, transform .1s ease, color .14s ease; touch-action: manipulation; user-select: none; }
-.dr-pressable:active { transform: scale(.97); opacity: 0.85; }
-.dr-pressable:focus-visible { outline: 2px solid ${ACCENT}; outline-offset: 2px; }
+.rf-rise { animation: rf-rise .32s cubic-bezier(.22,.61,.36,1) both; }
+.rf-pressable { transition: background .14s ease, border-color .14s ease, transform .1s ease, color .14s ease; touch-action: manipulation; user-select: none; }
+.rf-pressable:active { transform: scale(.97); opacity: 0.85; }
+.rf-pressable:focus-visible { outline: 2px solid ${ACCENT}; outline-offset: 2px; }
 
 /* A faint aurora wash behind the header — pure decoration, pointer-none, so
    the top of the app reads as a sky rather than a flat bar. */
-.dr-aurora {
+.rf-aurora {
   position: absolute; top: 0; left: 0; right: 0; height: 220px;
   background: radial-gradient(120% 90% at 18% -10%, ${ACCENT_DIM} 0%, transparent 55%), radial-gradient(110% 80% at 92% -20%, ${ACCENT_DIM_2} 0%, transparent 60%);
   pointer-events: none; z-index: 0;
 }
-.dr-divider { height: 1px; background: var(--border); margin: 16px 20px 0; position: relative; z-index: 1; }
+.rf-divider { height: 1px; background: var(--border); margin: 16px 20px 0; position: relative; z-index: 1; }
 
 /* Streak badge — header pill + standalone streak bar share the base; the bar
    variant bumps padding + font. */
-.dr-streak-badge {
+.rf-streak-badge {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 5px 11px; border-radius: 999px;
   background: ${ACCENT_DIM}; color: ${ACCENT};
   border: 1px solid transparent;
   font-size: 12.5px; font-weight: 650; line-height: 1.2; white-space: nowrap;
 }
-.dr-streak-badge.is-quiet {
+.rf-streak-badge.is-quiet {
   background: var(--surface); color: var(--muted); border-color: var(--border);
 }
-.dr-streak-bar { max-width: 660px; margin: 0 auto 16px; display: flex; }
-.dr-streak-bar .dr-streak-badge { padding: 7px 13px; font-size: 13px; }
-.dr-streak-flame { animation: dr-drift 4s ease-in-out infinite; }
-.dr-streak-num { font-weight: 750; }
-.dr-streak-unit { font-weight: 550; }
-.dr-streak-dots { margin-left: 4px; letter-spacing: 1px; opacity: 0.55; font-size: 9px; }
+.rf-streak-bar { max-width: 660px; margin: 0 auto 16px; display: flex; }
+.rf-streak-bar .rf-streak-badge { padding: 7px 13px; font-size: 13px; }
+.rf-streak-flame { animation: rf-drift 4s ease-in-out infinite; }
+.rf-streak-num { font-weight: 750; }
+.rf-streak-unit { font-weight: 550; }
+.rf-streak-dots { margin-left: 4px; letter-spacing: 1px; opacity: 0.55; font-size: 9px; }
 
 /* Reports list + dated card */
-.dr-list { display: flex; flex-direction: column; gap: 11px; max-width: 660px; margin: 0 auto; }
-.dr-date-tile {
+.rf-list { display: flex; flex-direction: column; gap: 11px; max-width: 660px; margin: 0 auto; }
+.rf-date-tile {
   width: 46px; flex-shrink: 0; border-radius: 12px;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 0; align-self: center;
   background: ${ACCENT_DIM}; color: ${ACCENT};
   padding: 8px 0; line-height: 1;
 }
-.dr-date-tile.is-latest {
+.rf-date-tile.is-latest {
   background: linear-gradient(160deg, ${ACCENT} 0%, ${ACCENT_2} 100%); color: #fff;
 }
-.dr-date-tile-day { font-size: 10px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; opacity: 0.92; }
-.dr-date-tile-num { font-size: 19px; font-weight: 750; letter-spacing: -0.5px; }
-.dr-card-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; justify-content: center; }
-.dr-card-label-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.dr-card-label { font-size: 16px; font-weight: 700; letter-spacing: -0.2px; line-height: 1.2; }
-.dr-card-sub { font-size: 12px; color: var(--muted); font-weight: 500; }
-.dr-card-tldr {
+.rf-date-tile-day { font-size: 10px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; opacity: 0.92; }
+.rf-date-tile-num { font-size: 19px; font-weight: 750; letter-spacing: -0.5px; }
+.rf-card-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; justify-content: center; }
+.rf-card-label-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rf-card-label { font-size: 16px; font-weight: 700; letter-spacing: -0.2px; line-height: 1.2; }
+.rf-card-sub { font-size: 12px; color: var(--muted); font-weight: 500; }
+.rf-card-tldr {
   font-size: 13px; color: var(--muted); line-height: 1.5; margin-top: 5px;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
-.dr-card-chevron { align-self: center; font-size: 20px; color: var(--muted); flex-shrink: 0; line-height: 1; opacity: 0.7; }
-.dr-latest-pill {
+.rf-card-chevron { align-self: center; font-size: 20px; color: var(--muted); flex-shrink: 0; line-height: 1; opacity: 0.7; }
+.rf-latest-pill {
   font-size: 11px; font-weight: 750; letter-spacing: 0.7px;
   text-transform: uppercase; color: #fff;
   background: ${ACCENT}; padding: 2px 8px; border-radius: 999px;
 }
 
 /* Loading / error / offline states */
-.dr-loading-wrap { text-align: center; padding: 64px 24px; color: var(--muted); font-size: 13px; }
-.dr-loading-wrap .dr-spinner { margin: 0 auto 14px; }
-.dr-error-box {
+.rf-loading-wrap { text-align: center; padding: 64px 24px; color: var(--muted); font-size: 13px; }
+.rf-loading-wrap .rf-spinner { margin: 0 auto 14px; }
+.rf-error-box {
   max-width: 660px; margin: 0 auto; padding: 16px; border-radius: 14px;
   border: 1px solid var(--border); background: var(--surface);
   color: var(--text); font-size: 13px; line-height: 1.55;
   display: flex; flex-direction: column; gap: 10px;
 }
-.dr-retry-btn {
+.rf-retry-btn {
   align-self: flex-start; padding: 7px 14px; border-radius: 9px;
   border: 1px solid ${ACCENT}; background: transparent; color: ${ACCENT};
   font-size: 12.5px; font-weight: 650; cursor: pointer; font-family: var(--font);
   touch-action: manipulation; user-select: none;
 }
-.dr-offline-banner {
+.rf-offline-banner {
   max-width: 660px; margin: 0 auto 14px; padding: 10px 14px;
   border-radius: 12px; background: ${ACCENT_DIM}; border: 1px solid var(--border);
   color: var(--text); font-size: 12.5px; line-height: 1.45;
@@ -735,17 +735,17 @@ button.dr-card { cursor: pointer; }
 }
 
 /* Report detail — brief + chat split view */
-.dr-detail {
+.rf-detail {
   position: absolute; inset: 0; display: flex; flex-direction: column;
   background: var(--bg); z-index: 5;
 }
-.dr-detail-bar {
+.rf-detail-bar {
   display: flex; align-items: center; gap: 12px;
   padding: max(11px, env(safe-area-inset-top)) 14px 11px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0; background: var(--surface);
 }
-.dr-back-btn {
+.rf-back-btn {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 7px 13px 7px 9px; border-radius: 10px;
   border: 1px solid var(--border); background: var(--bg);
@@ -753,11 +753,11 @@ button.dr-card { cursor: pointer; }
   cursor: pointer; font-family: var(--font); flex-shrink: 0;
   touch-action: manipulation; user-select: none;
 }
-.dr-back-glyph { font-size: 16px; }
-.dr-detail-title { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; flex: 1; }
-.dr-detail-title-main { font-size: 15px; font-weight: 700; letter-spacing: -0.2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.dr-detail-title-sub { font-size: 12px; color: var(--muted); font-weight: 500; }
-.dr-split-body {
+.rf-back-glyph { font-size: 16px; }
+.rf-detail-title { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; flex: 1; }
+.rf-detail-title-main { font-size: 15px; font-weight: 700; letter-spacing: -0.2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rf-detail-title-sub { font-size: 12px; color: var(--muted); font-weight: 500; }
+.rf-split-body {
   flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
   display: flex; flex-direction: column;
   overscroll-behavior: contain;
@@ -766,22 +766,22 @@ button.dr-card { cursor: pointer; }
      (width change → text re-wrap → new height → feedback loop). */
   scrollbar-gutter: stable;
 }
-.dr-brief-panel {
+.rf-brief-panel {
   flex-shrink: 0; display: flex; flex-direction: column;
   border-bottom: 1px solid var(--border);
 }
-.dr-brief-iframe { width: 100%; border: none; background: var(--bg); display: block; }
-.dr-brief-loading {
+.rf-brief-iframe { width: 100%; border: none; background: var(--bg); display: block; }
+.rf-brief-loading {
   min-height: 320px; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 12px;
   color: var(--muted); font-size: 13px;
 }
-.dr-chat-mount-wrap {
+.rf-chat-mount-wrap {
   position: relative;
   flex: 1 1 auto; min-height: 0;
   display: flex; flex-direction: column;
 }
-.dr-chat-panel { flex-shrink: 0; display: flex; flex-direction: column; background: var(--bg); }
+.rf-chat-panel { flex-shrink: 0; display: flex; flex-direction: column; background: var(--bg); }
 /* With a live conversation the panel takes a real share of the viewport
    (the house bottom-chat-pane model; cf. app-latex's 50/50 split). The chain
    must keep every height DEFINITE: panel 60dvh → mount-wrap flex:1 → embed
@@ -793,33 +793,33 @@ button.dr-card { cursor: pointer; }
    silently re-creating the collapsed chat. While resolving / chatless the
    panel stays content-sized so the spinner and the no-chat note don't
    reserve blank space. */
-.dr-chat-panel.is-live { height: 60vh; height: 60dvh; min-height: 340px; }
-.dr-chat-header { display: flex; align-items: center; gap: 8px; padding: 13px 16px 9px; flex-shrink: 0; }
-.dr-chat-header-dot {
+.rf-chat-panel.is-live { height: 60vh; height: 60dvh; min-height: 340px; }
+.rf-chat-header { display: flex; align-items: center; gap: 8px; padding: 13px 16px 9px; flex-shrink: 0; }
+.rf-chat-header-dot {
   width: 7px; height: 7px; border-radius: 50%; background: ${ACCENT};
   box-shadow: 0 0 0 4px ${ACCENT_DIM}; flex-shrink: 0;
 }
-.dr-chat-header-text { font-size: 13px; font-weight: 700; letter-spacing: -0.1px; }
-.dr-chat-header-hint { font-size: 12px; color: var(--muted); font-weight: 500; margin-left: auto; }
-.dr-chat-resolving {
+.rf-chat-header-text { font-size: 13px; font-weight: 700; letter-spacing: -0.1px; }
+.rf-chat-header-hint { font-size: 12px; color: var(--muted); font-weight: 500; margin-left: auto; }
+.rf-chat-resolving {
   padding: 20px 16px 28px; display: flex; align-items: center; gap: 10px;
   color: var(--muted); font-size: 12.5px;
 }
-.dr-no-chat-note {
+.rf-no-chat-note {
   margin: 14px 16px 22px; padding: 14px 16px; border-radius: 13px;
   background: var(--surface); border: 1px dashed var(--border);
   color: var(--muted); font-size: 12.5px; line-height: 1.55;
   display: flex; align-items: flex-start; gap: 10px;
 }
-.dr-no-chat-glyph { font-size: 15px; line-height: 1.2; }
+.rf-no-chat-glyph { font-size: 15px; line-height: 1.2; }
 /* Sits flush under the embedded chat's composer — the border is the only
    separation, so there is no dead band between the chat and the button. */
-.dr-feedback-row {
+.rf-feedback-row {
   flex-shrink: 0; margin: 0 16px;
   padding: 12px 0 max(14px, env(safe-area-inset-bottom));
   border-top: 1px solid var(--border);
 }
-.dr-feedback-btn {
+.rf-feedback-btn {
   display: flex; align-items: center; justify-content: center; gap: 7px;
   width: 100%; min-height: 46px; padding: 11px 16px; border-radius: 12px;
   border: 1px solid ${ACCENT}; background: ${ACCENT_DIM};
@@ -829,22 +829,22 @@ button.dr-card { cursor: pointer; }
 }
 
 /* Last-night status row */
-.dr-status-row {
+.rf-status-row {
   max-width: 660px; margin: 0 auto 14px; display: flex; align-items: center;
   gap: 10px; padding: 10px 14px; border-radius: 13px;
   border: 1px solid var(--border); background: var(--surface);
   font-size: 12.5px; line-height: 1.45; flex-wrap: wrap;
 }
-.dr-status-dot {
+.rf-status-dot {
   width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
 }
-.dr-status-dot.ok   { background: var(--green, #3fb950); box-shadow: 0 0 0 3px rgba(63,185,80,.15); }
-.dr-status-dot.fail { background: var(--danger, #f85149); box-shadow: 0 0 0 3px rgba(248,81,73,.15); }
-.dr-status-dot.skip { background: var(--muted); }
-.dr-status-dot.none { background: var(--border); }
-.dr-status-label { flex: 1; color: var(--text); font-weight: 600; }
-.dr-status-hint  { color: var(--muted); font-size: 12px; }
-.dr-status-investigate {
+.rf-status-dot.ok   { background: var(--green, #3fb950); box-shadow: 0 0 0 3px rgba(63,185,80,.15); }
+.rf-status-dot.fail { background: var(--danger, #f85149); box-shadow: 0 0 0 3px rgba(248,81,73,.15); }
+.rf-status-dot.skip { background: var(--muted); }
+.rf-status-dot.none { background: var(--border); }
+.rf-status-label { flex: 1; color: var(--text); font-weight: 600; }
+.rf-status-hint  { color: var(--muted); font-size: 12px; }
+.rf-status-investigate {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 5px 12px; border-radius: 9px; border: 1px solid var(--danger, #f85149);
   background: transparent; color: var(--danger, #f85149);
@@ -853,72 +853,72 @@ button.dr-card { cursor: pointer; }
 }
 
 /* Settings */
-.dr-settings-wrap { max-width: 580px; margin: 0 auto; display: flex; flex-direction: column; gap: 22px; }
-.dr-settings-card {
+.rf-settings-wrap { max-width: 580px; margin: 0 auto; display: flex; flex-direction: column; gap: 22px; }
+.rf-settings-card {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: 16px; padding: 18px; display: flex; flex-direction: column; gap: 10px;
 }
-.dr-section-head { display: flex; align-items: center; gap: 10px; }
-.dr-section-icon {
+.rf-section-head { display: flex; align-items: center; gap: 10px; }
+.rf-section-icon {
   width: 30px; height: 30px; border-radius: 9px; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center;
   background: ${ACCENT_DIM}; font-size: 15px;
 }
-.dr-section-label { font-size: 14.5px; font-weight: 700; letter-spacing: -0.1px; margin: 0; }
-.dr-note { font-size: 12.5px; color: var(--muted); margin: 0; line-height: 1.55; }
-.dr-note-strong { color: var(--text); font-weight: 650; }
-.dr-time-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 2px; }
-.dr-time-input {
+.rf-section-label { font-size: 14.5px; font-weight: 700; letter-spacing: -0.1px; margin: 0; }
+.rf-note { font-size: 12.5px; color: var(--muted); margin: 0; line-height: 1.55; }
+.rf-note-strong { color: var(--text); font-weight: 650; }
+.rf-time-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 2px; }
+.rf-time-input {
   padding: 9px 12px; font-size: 16px; font-family: var(--font); font-weight: 600;
   background: var(--bg); color: var(--text);
   border: 1px solid var(--border); border-radius: 10px;
   width: 132px;
 }
-.dr-time-input:focus:not(:focus-visible) { outline: none; }
-.dr-custom-cron-note {
+.rf-time-input:focus:not(:focus-visible) { outline: none; }
+.rf-custom-cron-note {
   font-size: 12px; color: var(--muted); line-height: 1.5;
   padding: 10px 12px; border-radius: 11px;
   background: var(--bg); border: 1px solid var(--border); margin-top: 2px;
 }
-.dr-custom-cron-note .dr-time-row { margin-top: 10px; }
-.dr-select {
+.rf-custom-cron-note .rf-time-row { margin-top: 10px; }
+.rf-select {
   width: 100%; min-height: 44px; padding: 9px 12px;
   border: 1px solid var(--border); border-radius: 10px;
   background: var(--bg); color: var(--text); font-size: 16px;
   font-family: var(--font); font-weight: 650;
   touch-action: manipulation; user-select: none;
 }
-.dr-select:focus:not(:focus-visible) { outline: none; }
-.dr-meta {
+.rf-select:focus:not(:focus-visible) { outline: none; }
+.rf-meta {
   font-size: 12px; color: var(--muted); line-height: 1.5;
   font-family: var(--mono, var(--font));
   padding: 10px 12px; border-radius: 11px;
   background: var(--bg); border: 1px solid var(--border);
 }
-.dr-model-label {
+.rf-model-label {
   font-size: 12px; color: var(--muted); font-weight: 750;
   text-transform: uppercase; letter-spacing: 0.4px; margin-top: 4px;
 }
-.dr-textarea {
+.rf-textarea {
   width: 100%; min-height: 64px; padding: 9px 12px;
   border: 1px solid var(--border); border-radius: 10px;
   background: var(--bg); color: var(--text); font-size: 14px;
   font-family: var(--font); resize: vertical; line-height: 1.5;
   box-sizing: border-box;
 }
-.dr-textarea:focus:not(:focus-visible) { outline: none; }
-.dr-verbosity-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
-.dr-verb-btn {
+.rf-textarea:focus:not(:focus-visible) { outline: none; }
+.rf-verbosity-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+.rf-verb-btn {
   flex: 1; min-height: 44px; padding: 8px 12px; border-radius: 10px;
   border: 1px solid var(--border); background: var(--bg); color: var(--muted);
   font-size: 13px; font-weight: 650; cursor: pointer; font-family: var(--font);
   transition: background .14s, border-color .14s, color .14s;
   touch-action: manipulation; user-select: none; text-align: center;
 }
-.dr-verb-btn.is-active { border-color: ${ACCENT}; color: ${ACCENT}; background: ${ACCENT_DIM}; }
-.dr-verb-hint { font-size: 11.5px; color: var(--muted); margin-top: 4px; line-height: 1.45; }
-.dr-save-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 2px; }
-.dr-save-btn {
+.rf-verb-btn.is-active { border-color: ${ACCENT}; color: ${ACCENT}; background: ${ACCENT_DIM}; }
+.rf-verb-hint { font-size: 11.5px; color: var(--muted); margin-top: 4px; line-height: 1.45; }
+.rf-save-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 2px; }
+.rf-save-btn {
   padding: 10px 22px; border-radius: 12px; border: none;
   background: ${ACCENT}; color: #fff;
   font-size: 13.5px; font-weight: 700; cursor: pointer;
@@ -926,28 +926,28 @@ button.dr-card { cursor: pointer; }
   box-shadow: 0 6px 18px -8px ${ACCENT};
   touch-action: manipulation; user-select: none;
 }
-.dr-save-btn:disabled {
+.rf-save-btn:disabled {
   background: var(--surface); color: var(--muted); cursor: default; box-shadow: none;
 }
-.dr-toast { font-size: 12.5px; color: var(--green, #3fb950); font-weight: 650; }
-.dr-error-toast { font-size: 12.5px; color: var(--danger, #f85149); font-weight: 650; }
+.rf-toast { font-size: 12.5px; color: var(--green, #3fb950); font-weight: 650; }
+.rf-error-toast { font-size: 12.5px; color: var(--danger, #f85149); font-weight: 650; }
 /* Dead-letter banner: a previously-"Saved" offline write the server later
    refused on drain. Lives at the app root (the originating form is usually
    unmounted by drain time) and reads as an honest retraction, not a toast. */
-.dr-deadletter {
+.rf-deadletter {
   display: flex; align-items: flex-start; gap: 10px;
   margin: 14px 20px 0; padding: 11px 13px;
   border-radius: 12px;
   font-size: 12.5px; line-height: 1.5; color: var(--danger, #f85149);
   background: var(--surface); border: 1px solid var(--danger, #f85149);
 }
-.dr-deadletter__x {
+.rf-deadletter__x {
   flex: none; margin-left: auto; border: none; background: none;
   color: var(--muted); font-size: 16px; line-height: 1;
   padding: 0 2px; cursor: pointer;
   touch-action: manipulation; user-select: none;
 }
-.dr-schedule-hint {
+.rf-schedule-hint {
   font-size: 12px; color: var(--muted); line-height: 1.55;
   padding: 11px 13px; border-radius: 12px;
   background: ${ACCENT_DIM}; border: 1px solid var(--border);
@@ -960,26 +960,26 @@ button.dr-card { cursor: pointer; }
    live agent the way a background AskUserQuestion would park a server-orphaned
    future. Shape mirrors the shell's QuestionCard; styling mirrors the News
    app's nw-rq, recoloured to Reflection's violet accent. */
-.dr-rq {
+.rf-rq {
   margin: 18px 16px 22px;
   padding: 16px 16px 18px;
   border-radius: 14px;
   border: 1px solid ${ACCENT};
   background: ${ACCENT_DIM};
 }
-.dr-rq__title { font-size: 15px; font-weight: 750; color: var(--text); margin: 0 0 4px; letter-spacing: -0.1px; }
-.dr-rq__note { font-size: 12px; color: var(--muted); margin: 0 0 14px; line-height: 1.5; }
-.dr-rq__q + .dr-rq__q {
+.rf-rq__title { font-size: 15px; font-weight: 750; color: var(--text); margin: 0 0 4px; letter-spacing: -0.1px; }
+.rf-rq__note { font-size: 12px; color: var(--muted); margin: 0 0 14px; line-height: 1.5; }
+.rf-rq__q + .rf-rq__q {
   margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border);
 }
-.dr-rq__header {
+.rf-rq__header {
   font-size: 11px; font-weight: 600; text-transform: uppercase;
   letter-spacing: .5px; color: ${ACCENT}; margin-bottom: 4px;
 }
-.dr-rq__text { font-size: 14px; margin-bottom: 6px; color: var(--text); line-height: 1.45; }
-.dr-rq__hint { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
-.dr-rq__opts { display: flex; flex-wrap: wrap; gap: 6px; }
-.dr-rq__opt {
+.rf-rq__text { font-size: 14px; margin-bottom: 6px; color: var(--text); line-height: 1.45; }
+.rf-rq__hint { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+.rf-rq__opts { display: flex; flex-wrap: wrap; gap: 6px; }
+.rf-rq__opt {
   display: inline-flex; align-items: center; gap: 7px;
   padding: 8px 13px; min-height: 38px;
   border-radius: 9px; border: 1px solid var(--border);
@@ -988,12 +988,12 @@ button.dr-card { cursor: pointer; }
   font-family: var(--font); touch-action: manipulation; user-select: none;
 }
 @media (hover: hover) {
-  .dr-rq__opt:not(.dr-rq__opt--on):hover { border-color: ${ACCENT}; }
+  .rf-rq__opt:not(.rf-rq__opt--on):hover { border-color: ${ACCENT}; }
 }
-.dr-rq__opt--on { background: ${ACCENT}; color: #fff; border-color: ${ACCENT}; }
-.dr-rq__opt--dim { opacity: 0.4; border-color: transparent; }
-.dr-rq__opt:disabled { cursor: default; }
-.dr-rq__submit {
+.rf-rq__opt--on { background: ${ACCENT}; color: #fff; border-color: ${ACCENT}; }
+.rf-rq__opt--dim { opacity: 0.4; border-color: transparent; }
+.rf-rq__opt:disabled { cursor: default; }
+.rf-rq__submit {
   display: block; width: 100%; margin-top: 14px; min-height: 44px;
   padding: 11px; border-radius: 11px; border: none;
   background: ${ACCENT}; color: #fff;
@@ -1001,16 +1001,16 @@ button.dr-card { cursor: pointer; }
   font-family: var(--font); touch-action: manipulation; user-select: none;
   box-shadow: 0 6px 18px -8px ${ACCENT};
 }
-.dr-rq__submit:disabled { opacity: 0.4; cursor: default; box-shadow: none; }
-.dr-rq--answered .dr-rq__done {
+.rf-rq__submit:disabled { opacity: 0.4; cursor: default; box-shadow: none; }
+.rf-rq--answered .rf-rq__done {
   margin-top: 14px; font-size: 12.5px; color: var(--muted); line-height: 1.5;
 }
-.dr-rq__error {
+.rf-rq__error {
   margin-top: 10px; font-size: 12.5px; color: var(--danger, #f85149); line-height: 1.5;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .dr-rise, .dr-empty-mark-glyph, .dr-streak-flame { animation: none !important; }
+  .rf-rise, .rf-empty-mark-glyph, .rf-streak-flame { animation: none !important; }
 }
 
 /* mobius-ui:ReducedMotion v1 -- honor the OS reduce-motion setting */
@@ -1080,12 +1080,22 @@ export function makeStorage(appId, token) {
   }
 
   async function getReportHtml(name) {
-    // Report bodies are raw HTML documents — read as text, not JSON.
-    // `cache: 'no-store'` is load-bearing: the nightly cron can RE-AUTHOR a
-    // brief for the same date (a corrected or expanded morning note), so a
-    // browser/SW cached copy keyed on the unchanged URL would serve the stale
-    // body. Force a fresh read each open so a re-authored brief shows.
+    // Report bodies are raw HTML documents — read as TEXT through the runtime's
+    // typed, read-through store (getText). That mirror is what lets a brief
+    // OPEN OFFLINE: an online read caches the body, and a later offline read
+    // serves the last-known copy (overlaid with any pending write). It also
+    // makes the body appear in the offline reports listing — list() derives its
+    // offline entries from exactly the paths this app has read into the cache.
+    // The cron can RE-AUTHOR a brief for the same date; the runtime revisions
+    // the cache on every online read, so reopening online always reconciles to
+    // the freshly-authored body (no stale-cache pin). Standalone (no bridge)
+    // falls back to a raw text fetch with `no-store` so a re-authored brief
+    // never serves stale there either.
     try {
+      if (ms && typeof ms.getText === 'function') {
+        const data = await ms.getText(`reports/${name}`)
+        return data == null ? { notFound: true } : { data }
+      }
       const r = await fetch(`${base}/reports/${name}`, { headers, cache: 'no-store' })
       if (r.status === 404) return { notFound: true }
       if (!r.ok) return { error: r.status }
@@ -1103,9 +1113,14 @@ export function makeStorage(appId, token) {
   // brief is still readable; the chat just doesn't mount this open.
   async function getReportChatId(dateStr) {
     try {
-      const r = await fetch(`${base}/reports/${dateStr}.meta.json`, { headers })
-      if (!r.ok) return null
-      const data = await r.json()
+      // Typed JSON read through the runtime store (offline-capable, SWR) so the
+      // morning chat still resolves from cache when the brief is opened offline.
+      const data = ms && typeof ms.get === 'function'
+        ? await ms.get(`reports/${dateStr}.meta.json`)
+        : await (async () => {
+            const r = await fetch(`${base}/reports/${dateStr}.meta.json`, { headers })
+            return r.ok ? r.json() : null
+          })()
       const id = data && (data.chat_id ?? data.chatId ?? data.morning_chat)
       return typeof id === 'string' && id.trim() ? id.trim() : null
     } catch {
@@ -1113,12 +1128,36 @@ export function makeStorage(appId, token) {
     }
   }
 
-  // Enumerate reports via the listing endpoint (newest-first), walking the
-  // cursor. A non-advancing cursor is treated as a server fault rather than
-  // spinning forever. Returns { dates: [...] } on success, or { error } /
-  // { notFound } so the caller can distinguish "no reports yet" from "the
-  // listing call failed" and keep its cached snapshot in the latter case.
+  // Enumerate reports through the runtime's typed listing (offline-capable).
+  // storage.list(prefix) pages the server when reachable and ELSE derives the
+  // listing from the read-through cache (the paths this app has read) overlaid
+  // with the outbox — so the date list survives a network outage instead of
+  // collapsing to empty. It returns the entries ARRAY directly ([] for an
+  // empty/unknown dir), so a bridge present means we never special-case the
+  // cursor. Standalone (no bridge) keeps the raw cursor walk.
+  function datesFromEntries(entries) {
+    const out = []
+    for (const e of entries || []) {
+      if (e.type === 'file' && typeof e.name === 'string' && e.name.endsWith('.html')) {
+        out.push(e.name.slice(0, -'.html'.length))
+      }
+    }
+    // ISO date names sort lexicographically = chronologically; newest first.
+    out.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0))
+    return out
+  }
+
   async function listReportDates() {
+    if (ms && typeof ms.list === 'function') {
+      try {
+        const entries = await ms.list('reports/')
+        return { dates: datesFromEntries(entries) }
+      } catch {
+        return { error: 0 }
+      }
+    }
+    // Standalone fallback: walk the listing endpoint's cursor by hand. A
+    // non-advancing cursor is treated as a server fault rather than spinning.
     const out = []
     let cursor = null
     try {
@@ -1142,16 +1181,17 @@ export function makeStorage(appId, token) {
     } catch {
       return { error: 0 }
     }
-    // ISO date names sort lexicographically = chronologically; newest first.
     out.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0))
     return { dates: out }
   }
 
-  // Subscribe to a JSON path so the list refreshes live when the cron writes a
-  // new brief. The nightly run updates state.json (last_run + streak) on every
-  // pass, so a change there is the reliable "a new brief just landed" signal —
-  // the reports listing has no subscribe of its own. Returns an unsubscribe
-  // fn, or a no-op when the runtime bridge is absent (standalone).
+  // Subscribe to a JSON path through window.mobius.storage.subscribe so the
+  // report LIST repaints live when an agent/cron writes a new reflection. The
+  // runtime exposes per-path subscription (no directory watch), and the nightly
+  // run rewrites state.json (last_run + streak) on every pass it lands a brief
+  // — so a change there is the reliable "a new brief just landed" signal the
+  // list re-lists on. Returns an unsubscribe fn, or a no-op when the runtime
+  // bridge is absent (standalone).
   function subscribeJSON(path, cb) {
     if (ms && typeof ms.subscribe === 'function') {
       try { return ms.subscribe(path, cb) } catch { return () => {} }
@@ -1163,42 +1203,16 @@ export function makeStorage(appId, token) {
 }
 
 // ---------------------------------------------------------------------------
-// Tiny offline snapshot. Reflection reads via direct fetch (text bodies +
-// apps-list), neither of which the platform read-cache covers, so we keep our
-// own localStorage snapshot: the dates list, the streak, and the latest
-// summary. This is read-only mirror state — only the cron writes reports, so
-// the snapshot just paints the same thing the user saw before they lost
-// connectivity. Bodies aren't cached here (the report iframe re-fetches; if
-// offline it shows a graceful error), only the cheap list metadata.
+// Offline reads are now served by the RUNTIME's read-through cache, not a
+// hand-rolled localStorage snapshot. Every read goes through window.mobius.
+// storage (get/getText/list), which mirrors values into IndexedDB on the
+// online read and replays them when offline — so the dates list, the streak
+// (state.json), and each opened brief body all survive a network outage from
+// one source of truth. The old `reflection:<appId>:list` localStorage mirror
+// was removed: it duplicated the runtime cache, could only ever hold list
+// metadata (never the bodies, which is why briefs couldn't open offline), and
+// drifted from the authoritative cache. No app-owned offline mirror remains.
 // ---------------------------------------------------------------------------
-
-const CACHE_VERSION = 1
-function cacheKey(appId) { return `reflection:${appId}:list:v${CACHE_VERSION}` }
-
-function readCache(appId) {
-  try {
-    const raw = localStorage.getItem(cacheKey(appId))
-    if (!raw) return null
-    const p = JSON.parse(raw)
-    if (!p || typeof p !== 'object') return null
-    return {
-      dates: Array.isArray(p.dates) ? p.dates.filter((d) => typeof d === 'string') : [],
-      streak: Number.isFinite(p.streak) ? p.streak : 0,
-      lastSummary: typeof p.lastSummary === 'string' ? p.lastSummary : '',
-      lastRun: typeof p.lastRun === 'string' ? p.lastRun : '',
-    }
-  } catch {
-    return null
-  }
-}
-
-function writeCache(appId, snap) {
-  try {
-    localStorage.setItem(cacheKey(appId), JSON.stringify(snap))
-  } catch {
-    // Quota / private-mode Safari: skip silently. In-memory state still works.
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Online/offline hook — runtime signal if present, else navigator.onLine.
@@ -1283,8 +1297,8 @@ function MorningChat({ chatId, onPhase }) {
 
   if (phase === 'unavailable') {
     return (
-      <div className="dr-no-chat-note">
-        <span aria-hidden="true" className="dr-no-chat-glyph">💬</span>
+      <div className="rf-no-chat-note">
+        <span aria-hidden="true" className="rf-no-chat-glyph">💬</span>
         <span>
           The conversation about this brief isn’t available here. Open it from
           your chat list to reply.
@@ -1294,14 +1308,14 @@ function MorningChat({ chatId, onPhase }) {
   }
 
   return (
-    <div className="dr-chat-mount-wrap">
+    <div className="rf-chat-mount-wrap">
       {phase === 'mounting' && (
-        <div className="dr-chat-resolving">
-          <span className="dr-spinner dr-spinner-sm" aria-hidden="true" />
+        <div className="rf-chat-resolving">
+          <span className="rf-spinner rf-spinner-sm" aria-hidden="true" />
           Opening the conversation…
         </div>
       )}
-      <div ref={mountRef} className="dr-chat-embed" style={{ display: phase === 'live' ? 'block' : 'none' }} />
+      <div ref={mountRef} className="rf-chat-embed" style={{ display: phase === 'live' ? 'block' : 'none' }} />
     </div>
   )
 }
@@ -1419,9 +1433,9 @@ function ReportQuestions({ questions, storage, dateStr, appId, token }) {
   }
 
   return (
-    <div className={`dr-rq${answered ? ' dr-rq--answered' : ''}`}>
-      <p className="dr-rq__title">A few questions for tomorrow night</p>
-      <p className="dr-rq__note">
+    <div className={`rf-rq${answered ? ' rf-rq--answered' : ''}`}>
+      <p className="rf-rq__title">A few questions for tomorrow night</p>
+      <p className="rf-rq__note">
         Your answers guide my next run — they won’t change this brief.
       </p>
       {questions.map((q, qi) => {
@@ -1430,16 +1444,16 @@ function ReportQuestions({ questions, storage, dateStr, appId, token }) {
         const selected = (label) =>
           isMulti ? (Array.isArray(cur) && cur.includes(label)) : cur === label
         return (
-          <div key={qi} className="dr-rq__q">
-            {q.header && <div className="dr-rq__header">{q.header}</div>}
-            <div className="dr-rq__text">{q.question}</div>
+          <div key={qi} className="rf-rq__q">
+            {q.header && <div className="rf-rq__header">{q.header}</div>}
+            <div className="rf-rq__text">{q.question}</div>
             {!answered && (
-              <div className="dr-rq__hint">
+              <div className="rf-rq__hint">
                 {isMulti ? 'Select all that apply' : 'Choose one'}
               </div>
             )}
             <div
-              className="dr-rq__opts"
+              className="rf-rq__opts"
               role={isMulti ? 'group' : 'radiogroup'}
               aria-label={q.question}
             >
@@ -1452,7 +1466,7 @@ function ReportQuestions({ questions, storage, dateStr, appId, token }) {
                     type="button"
                     role={isMulti ? 'checkbox' : 'radio'}
                     aria-checked={on}
-                    className={`dr-rq__opt dr-pressable${on ? ' dr-rq__opt--on' : ''}${dim ? ' dr-rq__opt--dim' : ''}`}
+                    className={`rf-rq__opt rf-pressable${on ? ' rf-rq__opt--on' : ''}${dim ? ' rf-rq__opt--dim' : ''}`}
                     onClick={answered ? undefined : () => choose(qi, q, opt.label)}
                     disabled={answered}
                     title={opt.description || ''}
@@ -1466,18 +1480,18 @@ function ReportQuestions({ questions, storage, dateStr, appId, token }) {
         )
       })}
       {answered ? (
-        <div className="dr-rq__done">Saved — I’ll use this for tomorrow night’s run.</div>
+        <div className="rf-rq__done">Saved — I’ll use this for tomorrow night’s run.</div>
       ) : (
         <>
           <button
             type="button"
-            className="dr-rq__submit dr-pressable"
+            className="rf-rq__submit rf-pressable"
             onClick={submit}
             disabled={!allAnswered || saving || seeding}
           >
             {saving ? 'Saving…' : 'Save for next time'}
           </button>
-          {error && <div className="dr-rq__error" role="alert">{error}</div>}
+          {error && <div className="rf-rq__error" role="alert">{error}</div>}
         </>
       )}
     </div>
@@ -1506,8 +1520,8 @@ function FeedbackLauncher({ dateStr, chatId, appId, token }) {
     )
   }
   return (
-    <div className="dr-feedback-row">
-      <button className="dr-feedback-btn dr-pressable" onClick={openDiscussionChat}>
+    <div className="rf-feedback-row">
+      <button className="rf-feedback-btn rf-pressable" onClick={openDiscussionChat}>
         💬 Discuss this brief with the agent
       </button>
     </div>
@@ -1526,7 +1540,7 @@ function FeedbackLauncher({ dateStr, chatId, appId, token }) {
 // messages so the brief reads as one scrolled column. Beneath it, the morning
 // chat panel: once live it takes a fixed share of the viewport and the
 // embedded ChatView scrolls internally with its composer pinned at the
-// panel's bottom (see the .dr-chat-panel.is-live CSS for the height chain).
+// panel's bottom (see the .rf-chat-panel.is-live CSS for the height chain).
 // ---------------------------------------------------------------------------
 
 function ReportDetail({ dateStr, storage, online, onBack, appId, token }) {
@@ -1623,35 +1637,35 @@ function ReportDetail({ dateStr, storage, online, onBack, appId, token }) {
   }, [])
 
   return (
-    <div className="dr-detail dr-rise">
-      <div className="dr-detail-bar">
+    <div className="rf-detail rf-rise">
+      <div className="rf-detail-bar">
         <button
-          className="dr-back-btn dr-pressable"
+          className="rf-back-btn rf-pressable"
           onClick={onBack} aria-label="Back to reports"
         >
-          <span aria-hidden="true" className="dr-back-glyph">‹</span> Briefs
+          <span aria-hidden="true" className="rf-back-glyph">‹</span> Briefs
         </button>
-        <div className="dr-detail-title">
-          <span className="dr-detail-title-main">{relativeLabel(dateStr)}’s brief</span>
-          <span className="dr-detail-title-sub">{subLabel(dateStr)}</span>
+        <div className="rf-detail-title">
+          <span className="rf-detail-title-main">{relativeLabel(dateStr)}’s brief</span>
+          <span className="rf-detail-title-sub">{subLabel(dateStr)}</span>
         </div>
       </div>
 
       {state.phase === 'loading' && (
-        <div className="dr-brief-loading">
-          <span className="dr-spinner" aria-hidden="true" />
+        <div className="rf-brief-loading">
+          <span className="rf-spinner" aria-hidden="true" />
           <span>Opening your brief…</span>
         </div>
       )}
 
       {state.phase === 'missing' && (
-        <div className="dr-empty is-compact">
+        <div className="rf-empty is-compact">
           This brief is no longer available.
         </div>
       )}
 
       {state.phase === 'error' && (
-        <div className="dr-empty is-compact">
+        <div className="rf-empty is-compact">
           {online
             ? 'This brief could not be loaded. Try opening it again in a moment.'
             : 'You’re offline — open this brief again once you’re back online.'}
@@ -1659,11 +1673,11 @@ function ReportDetail({ dateStr, storage, online, onBack, appId, token }) {
       )}
 
       {state.phase === 'ready' && (
-        <div className="dr-split-body dr-scroll">
-          <div className="dr-brief-panel">
+        <div className="rf-split-body rf-scroll">
+          <div className="rf-brief-panel">
             <iframe
               ref={iframeRef}
-              className="dr-brief-iframe"
+              className="rf-brief-iframe"
               style={{ height: `${briefHeight}px` }}
               title={`Morning brief for ${dateStr}`}
               srcDoc={state.html}
@@ -1696,20 +1710,20 @@ function ReportDetail({ dateStr, storage, online, onBack, appId, token }) {
             />
           )}
 
-          <div className={`dr-chat-panel${chatId && chatPhase === 'live' ? ' is-live' : ''}`}>
-            <div className="dr-chat-header">
-              <span className="dr-chat-header-dot" aria-hidden="true" />
-              <span className="dr-chat-header-text">Morning conversation</span>
-              {chatId && <span className="dr-chat-header-hint">tap a card or reply below</span>}
+          <div className={`rf-chat-panel${chatId && chatPhase === 'live' ? ' is-live' : ''}`}>
+            <div className="rf-chat-header">
+              <span className="rf-chat-header-dot" aria-hidden="true" />
+              <span className="rf-chat-header-text">Morning conversation</span>
+              {chatId && <span className="rf-chat-header-hint">tap a card or reply below</span>}
             </div>
             {chatId === undefined ? (
-              <div className="dr-chat-resolving">
-                <span className="dr-spinner dr-spinner-sm" aria-hidden="true" />
+              <div className="rf-chat-resolving">
+                <span className="rf-spinner rf-spinner-sm" aria-hidden="true" />
                 Finding the conversation…
               </div>
             ) : chatId === null ? (
-              <div className="dr-no-chat-note">
-                <span aria-hidden="true" className="dr-no-chat-glyph">🌙</span>
+              <div className="rf-no-chat-note">
+                <span aria-hidden="true" className="rf-no-chat-glyph">🌙</span>
                 <span>
                   No conversation was opened for this brief — it’s a read-only
                   morning note. When a brief has questions for you, the chat
@@ -1732,10 +1746,9 @@ function ReportDetail({ dateStr, storage, online, onBack, appId, token }) {
 // ---------------------------------------------------------------------------
 
 function ReportsList({ appId, storage, online, onOpen }) {
-  const cached = useMemo(() => readCache(appId), [appId])
-  const [dates, setDates] = useState(cached?.dates || [])
-  const [streak, setStreak] = useState(cached?.streak || 0)
-  const [lastSummary, setLastSummary] = useState(cached?.lastSummary || '')
+  const [dates, setDates] = useState([])
+  const [streak, setStreak] = useState(0)
+  const [lastSummary, setLastSummary] = useState('')
   const [phase, setPhase] = useState('loading') // loading | ready | error
   const [reloadKey, setReloadKey] = useState(0)
 
@@ -1743,42 +1756,38 @@ function ReportsList({ appId, storage, online, onOpen }) {
     let cancelled = false
     ;(async () => {
       setPhase((p) => (dates.length ? p : 'loading'))
+      // Both reads are served by the runtime read-through cache, so offline
+      // returns the last-known listing + state automatically — no separate
+      // app-owned snapshot to consult or keep in sync.
       const [listRes, stateRes] = await Promise.all([
         storage.listReportDates(),
         storage.getJSON('state.json'),
       ])
       if (cancelled) return
 
-      // state.json: 404 is normal (cron hasn't written it) -> streak 0.
+      // state.json: notFound is normal (cron hasn't written it) -> streak 0.
+      // Offline with a prior read, getJSON resolves the cached value; a true
+      // error (standalone fetch failure) leaves the header at zero.
       let nextStreak = 0
       let nextSummary = ''
-      let nextLastRun = ''
       if (stateRes.data && typeof stateRes.data === 'object') {
         nextStreak = Number.isFinite(stateRes.data.streak) ? stateRes.data.streak : 0
         nextSummary = typeof stateRes.data.last_summary === 'string' ? stateRes.data.last_summary : ''
-        nextLastRun = typeof stateRes.data.last_run === 'string' ? stateRes.data.last_run : ''
-      } else if (stateRes.error != null && cached) {
-        // Couldn't reach state.json (offline) — keep the cached header.
-        nextStreak = cached.streak
-        nextSummary = cached.lastSummary
       }
       setStreak(nextStreak)
       setLastSummary(nextSummary)
 
       if (listRes.dates) {
-        // Listing succeeded (even if empty []): trust the server.
+        // list() returns an array whether online (server-authoritative) or
+        // offline (derived from the read-through cache) — trust it either way.
         setDates(listRes.dates)
         setPhase('ready')
-        writeCache(appId, {
-          dates: listRes.dates, streak: nextStreak,
-          lastSummary: nextSummary, lastRun: nextLastRun,
-        })
-      } else if (cached && cached.dates.length) {
-        // Listing failed but we have a cached snapshot — show it.
-        setDates(cached.dates)
+      } else if (dates.length) {
+        // Standalone listing failed but we already have rows on screen — keep
+        // them rather than blanking to an error.
         setPhase('ready')
       } else {
-        // Listing failed and nothing cached — surface a retryable error.
+        // Listing failed and nothing to show — surface a retryable error.
         setPhase('error')
       }
     })()
@@ -1814,8 +1823,8 @@ function ReportsList({ appId, storage, online, onOpen }) {
 
   if (phase === 'loading' && dates.length === 0) {
     return (
-      <div className="dr-loading-wrap">
-        <span className="dr-spinner" aria-hidden="true" />
+      <div className="rf-loading-wrap">
+        <span className="rf-spinner" aria-hidden="true" />
         <div>Gathering last night’s brief…</div>
       </div>
     )
@@ -1823,14 +1832,14 @@ function ReportsList({ appId, storage, online, onOpen }) {
 
   if (phase === 'error' && dates.length === 0) {
     return (
-      <div className="dr-error-box">
+      <div className="rf-error-box">
         <span>
           {online
             ? 'Couldn’t load your briefs just now.'
             : 'You’re offline and there’s nothing cached yet.'}
         </span>
         {online && (
-          <button className="dr-retry-btn dr-pressable" onClick={() => setReloadKey((k) => k + 1)}>
+          <button className="rf-retry-btn rf-pressable" onClick={() => setReloadKey((k) => k + 1)}>
             Try again
           </button>
         )}
@@ -1840,11 +1849,11 @@ function ReportsList({ appId, storage, online, onOpen }) {
 
   if (dates.length === 0) {
     return (
-      <div className="dr-empty">
-        <div className="dr-empty-mark">
-          <span className="dr-empty-mark-glyph" aria-hidden="true">🌙</span>
+      <div className="rf-empty">
+        <div className="rf-empty-mark">
+          <span className="rf-empty-mark-glyph" aria-hidden="true">🌙</span>
         </div>
-        <div className="dr-empty-title">No briefs yet</div>
+        <div className="rf-empty-title">No briefs yet</div>
         Reflection runs overnight — consolidating what the day’s agents learned,
         tidying your Memory, and tending your apps. Your first morning brief will
         be waiting right here.
@@ -1853,37 +1862,37 @@ function ReportsList({ appId, storage, online, onOpen }) {
   }
 
   return (
-    <div className="dr-rise">
+    <div className="rf-rise">
       <StreakBar streak={streak} />
       {!online && (
-        <div className="dr-offline-banner">
+        <div className="rf-offline-banner">
           <span aria-hidden="true">🌙</span>
           Offline — showing your last cached briefs. Tonight’s brief appears
           once you’re back online.
         </div>
       )}
-      <div className="dr-list">
+      <div className="rf-list">
         {dates.map((d, i) => (
           <button
             key={d}
-            className={`dr-card${i === 0 ? ' is-latest' : ''}`}
+            className={`rf-card${i === 0 ? ' is-latest' : ''}`}
             onClick={() => onOpen(d)}
           >
-            <div className={`dr-date-tile${i === 0 ? ' is-latest' : ''}`} aria-hidden="true">
-              <span className="dr-date-tile-day">{weekdayInitial(d)}</span>
-              <span className="dr-date-tile-num">{dayOfMonth(d)}</span>
+            <div className={`rf-date-tile${i === 0 ? ' is-latest' : ''}`} aria-hidden="true">
+              <span className="rf-date-tile-day">{weekdayInitial(d)}</span>
+              <span className="rf-date-tile-num">{dayOfMonth(d)}</span>
             </div>
-            <div className="dr-card-main">
-              <div className="dr-card-label-row">
-                <span className="dr-card-label">{relativeLabel(d)}</span>
-                {i === 0 && <span className="dr-latest-pill">Latest</span>}
+            <div className="rf-card-main">
+              <div className="rf-card-label-row">
+                <span className="rf-card-label">{relativeLabel(d)}</span>
+                {i === 0 && <span className="rf-latest-pill">Latest</span>}
               </div>
-              <span className="dr-card-sub">{subLabel(d)}</span>
+              <span className="rf-card-sub">{subLabel(d)}</span>
               {i === 0 && lastSummary && (
-                <span className="dr-card-tldr">{lastSummary}</span>
+                <span className="rf-card-tldr">{lastSummary}</span>
               )}
             </div>
-            <span className="dr-card-chevron" aria-hidden="true">›</span>
+            <span className="rf-card-chevron" aria-hidden="true">›</span>
           </button>
         ))}
       </div>
@@ -1895,14 +1904,14 @@ function StreakBar({ streak }) {
   if (!streak || streak < 1) return null
   const flames = Math.min(streak, 5)
   return (
-    <div className="dr-streak-bar">
-      <span className="dr-streak-badge">
-        <span aria-hidden="true" className="dr-streak-flame">🔥</span>
-        <strong className="dr-streak-num">{streak}</strong>
-        <span className="dr-streak-unit">
+    <div className="rf-streak-bar">
+      <span className="rf-streak-badge">
+        <span aria-hidden="true" className="rf-streak-flame">🔥</span>
+        <strong className="rf-streak-num">{streak}</strong>
+        <span className="rf-streak-unit">
           {streak === 1 ? 'morning in a row' : 'mornings in a row'}
         </span>
-        <span aria-hidden="true" className="dr-streak-dots">
+        <span aria-hidden="true" className="rf-streak-dots">
           {'•'.repeat(flames)}
         </span>
       </span>
@@ -1989,12 +1998,12 @@ function LastNightStatus({ token }) {
     : ''
 
   return (
-    <div className="dr-status-row">
-      <span className={`dr-status-dot ${dotClass}`} aria-hidden="true" />
-      <span className="dr-status-label">{label}</span>
-      {tsLabel && <span className="dr-status-hint">{tsLabel}</span>}
+    <div className="rf-status-row">
+      <span className={`rf-status-dot ${dotClass}`} aria-hidden="true" />
+      <span className="rf-status-label">{label}</span>
+      {tsLabel && <span className="rf-status-hint">{tsLabel}</span>}
       {isFail && (
-        <button className="dr-status-investigate dr-pressable" onClick={investigate}>
+        <button className="rf-status-investigate rf-pressable" onClick={investigate}>
           Investigate
         </button>
       )}
@@ -2135,56 +2144,56 @@ function SettingsTab({ appId, storage, token }) {
 
   if (loading) {
     return (
-      <div className="dr-loading-wrap">
-        <span className="dr-spinner" aria-hidden="true" />
+      <div className="rf-loading-wrap">
+        <span className="rf-spinner" aria-hidden="true" />
         <div>Loading settings…</div>
       </div>
     )
   }
 
   return (
-    <div className="dr-settings-wrap dr-rise">
-      <div className="dr-settings-card">
-        <div className="dr-section-head">
-          <span className="dr-section-icon" aria-hidden="true">⏰</span>
-          <h2 className="dr-section-label">When it runs</h2>
+    <div className="rf-settings-wrap rf-rise">
+      <div className="rf-settings-card">
+        <div className="rf-section-head">
+          <span className="rf-section-icon" aria-hidden="true">⏰</span>
+          <h2 className="rf-section-label">When it runs</h2>
         </div>
-        <p className="dr-note">
+        <p className="rf-note">
           Pick the hour your morning brief should be ready. Reflection writes it
           overnight so it’s waiting when you wake.
         </p>
         {cronIsCustom ? (
-          <div className="dr-custom-cron-note">
+          <div className="rf-custom-cron-note">
             You have a custom schedule set (<code>{rawCron}</code>). Pick an
             hour below to switch to a simple daily time, or leave it as-is.
-            <div className="dr-time-row">
+            <div className="rf-time-row">
               <input
                 type="time"
                 step="3600"
-                className="dr-time-input"
+                className="rf-time-input"
                 value={hourToTimeValue(hour)}
                 onChange={onTimeChange}
                 aria-label="Daily brief time"
               />
-              <span className="dr-note">on the hour, every day</span>
+              <span className="rf-note">on the hour, every day</span>
             </div>
           </div>
         ) : (
-          <div className="dr-time-row">
+          <div className="rf-time-row">
             <input
               type="time"
               step="3600"
-              className="dr-time-input"
+              className="rf-time-input"
               value={hourToTimeValue(hour)}
               onChange={onTimeChange}
               aria-label="Daily brief time"
             />
-            <span className="dr-note">
-              ready around <strong className="dr-note-strong">{hourClockLabel(hour)}</strong>, every day
+            <span className="rf-note">
+              ready around <strong className="rf-note-strong">{hourClockLabel(hour)}</strong>, every day
             </span>
           </div>
         )}
-        <div className="dr-schedule-hint">
+        <div className="rf-schedule-hint">
           <span aria-hidden="true">💡</span>
           <span>
             Schedule changes take effect after the reflection agent re-installs
@@ -2194,27 +2203,27 @@ function SettingsTab({ appId, storage, token }) {
         </div>
       </div>
 
-      <div className="dr-settings-card">
-        <div className="dr-section-head">
-          <span className="dr-section-icon" aria-hidden="true">🤖</span>
-          <h2 className="dr-section-label">Nightly model</h2>
+      <div className="rf-settings-card">
+        <div className="rf-section-head">
+          <span className="rf-section-icon" aria-hidden="true">🤖</span>
+          <h2 className="rf-section-label">Nightly model</h2>
         </div>
-        <p className="dr-note">
+        <p className="rf-note">
           The model Reflection uses for the overnight pass. It runs its own
           procedure with the default skill.
         </p>
         {modelGroups === null ? (
-          <div className="dr-note">Loading models…</div>
+          <div className="rf-note">Loading models…</div>
         ) : modelGroups.length === 0 ? (
           // Models API unavailable — fall back to letting the CLI choose.
-          <div className="dr-note">
+          <div className="rf-note">
             Model list unavailable. Reflection will use the CLI's default model
             for your account.
           </div>
         ) : (
           <>
             <select
-              className="dr-select"
+              className="rf-select"
               value={model ? `${provider}\t${model}` : `${provider}\t`}
               onChange={(e) => {
                 const idx = e.target.value.indexOf('\t')
@@ -2251,7 +2260,7 @@ function SettingsTab({ appId, storage, token }) {
                 )
               })}
             </select>
-            <div className="dr-meta">
+            <div className="rf-meta">
               {(modelGroups.find((group) => group.key === provider)?.label || provider)}
               {' · '}
               {model || 'provider default'}
@@ -2260,20 +2269,20 @@ function SettingsTab({ appId, storage, token }) {
         )}
       </div>
 
-      <div className="dr-settings-card">
-        <div className="dr-section-head">
-          <span className="dr-section-icon" aria-hidden="true">📝</span>
-          <h2 className="dr-section-label">Brief style</h2>
+      <div className="rf-settings-card">
+        <div className="rf-section-head">
+          <span className="rf-section-icon" aria-hidden="true">📝</span>
+          <h2 className="rf-section-label">Brief style</h2>
         </div>
-        <p className="dr-note">
+        <p className="rf-note">
           How long and how detailed you'd like the morning brief. The reflection
           skill honors this when writing tonight's report.
         </p>
-        <div className="dr-verbosity-row">
+        <div className="rf-verbosity-row">
           {VERBOSITY_OPTIONS.map((opt) => (
             <button
               key={opt.id}
-              className={`dr-verb-btn${verbosity === opt.id ? ' is-active' : ''} dr-pressable`}
+              className={`rf-verb-btn${verbosity === opt.id ? ' is-active' : ''} rf-pressable`}
               onClick={() => setVerbosity(opt.id)}
               aria-pressed={verbosity === opt.id}
             >
@@ -2281,35 +2290,35 @@ function SettingsTab({ appId, storage, token }) {
             </button>
           ))}
         </div>
-        <p className="dr-verb-hint">
+        <p className="rf-verb-hint">
           {VERBOSITY_OPTIONS.find((o) => o.id === verbosity)?.hint}
         </p>
       </div>
 
-      <div className="dr-settings-card">
-        <div className="dr-section-head">
-          <span className="dr-section-icon" aria-hidden="true">🧭</span>
-          <h2 className="dr-section-label">Tonight's steering</h2>
+      <div className="rf-settings-card">
+        <div className="rf-section-head">
+          <span className="rf-section-icon" aria-hidden="true">🧭</span>
+          <h2 className="rf-section-label">Tonight's steering</h2>
         </div>
-        <p className="dr-note">
+        <p className="rf-note">
           Optional nudges the reflection agent reads before deciding what to cover.
           Leave blank to let it choose freely.
         </p>
-        <label className="dr-note" style={{ display: 'block', marginBottom: 4 }}>
-          <span className="dr-note-strong">Prioritise</span> — topics or apps to pay extra attention to
+        <label className="rf-note" style={{ display: 'block', marginBottom: 4 }}>
+          <span className="rf-note-strong">Prioritise</span> — topics or apps to pay extra attention to
         </label>
         <textarea
-          className="dr-textarea"
+          className="rf-textarea"
           value={focus}
           onChange={(e) => setFocus(e.target.value)}
           placeholder={'e.g. "look for regressions in the Habits app" or "I\'ve been researching climate policy"'}
           aria-label="Topics to prioritise tonight"
         />
-        <label className="dr-note" style={{ display: 'block', marginTop: 10, marginBottom: 4 }}>
-          <span className="dr-note-strong">Skip</span> — topics or apps to leave out of tonight's brief
+        <label className="rf-note" style={{ display: 'block', marginTop: 10, marginBottom: 4 }}>
+          <span className="rf-note-strong">Skip</span> — topics or apps to leave out of tonight's brief
         </label>
         <textarea
-          className="dr-textarea"
+          className="rf-textarea"
           value={avoid}
           onChange={(e) => setAvoid(e.target.value)}
           placeholder={'e.g. "skip the workout app" or "don\'t mention work projects"'}
@@ -2317,12 +2326,12 @@ function SettingsTab({ appId, storage, token }) {
         />
       </div>
 
-      <div className="dr-save-row">
-        <button className="dr-save-btn dr-pressable" onClick={save} disabled={saving}>
+      <div className="rf-save-row">
+        <button className="rf-save-btn rf-pressable" onClick={save} disabled={saving}>
           {saving ? 'Saving…' : 'Save settings'}
         </button>
-        {toast && <span className="dr-toast">{toast}</span>}
-        {error && <span className="dr-error-toast">{error}</span>}
+        {toast && <span className="rf-toast">{toast}</span>}
+        {error && <span className="rf-error-toast">{error}</span>}
       </div>
     </div>
   )
@@ -2357,10 +2366,11 @@ export default function App({ appId, token }) {
     })
   }, [])
 
-  // Surface the streak in the header on the reports tab. We read it once
-  // here (cheap, cached) so the badge is present even before the list
-  // finishes its own load. The list keeps its own authoritative copy.
-  const [headerStreak, setHeaderStreak] = useState(() => readCache(appId)?.streak || 0)
+  // Surface the streak in the header on the reports tab. The read below goes
+  // through the runtime read-through cache (offline-capable), so the badge
+  // fills from the last-known state.json even before the list finishes its own
+  // load — and offline too. The list keeps its own authoritative copy.
+  const [headerStreak, setHeaderStreak] = useState(0)
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -2405,11 +2415,11 @@ export default function App({ appId, token }) {
   }, [])
 
   return (
-    <div className="dr-root">
+    <div className="rf-root">
       <style>{CSS}</style>
-      <div className="dr-aurora" aria-hidden="true" />
-      <div className="dr-header">
-        <div className="dr-brand">
+      <div className="rf-aurora" aria-hidden="true" />
+      <div className="rf-header">
+        <div className="rf-brand">
           {/* Brand mark: the app's real glossy icon (downscaled + cached),
               no name text. Falls back to an accent dot when this install
               has no custom icon and the route 404s. */}
@@ -2418,27 +2428,27 @@ export default function App({ appId, token }) {
             alt=""
             width={26}
             height={26}
-            className="dr-brand-icon"
+            className="rf-brand-icon"
             onError={(e) => {
               e.currentTarget.style.display = 'none'
               const f = e.currentTarget.nextElementSibling
               if (f) f.style.display = 'flex'
             }}
           />
-          <span className="dr-brand-fallback" style={{ display: 'none' }} aria-hidden="true">·</span>
+          <span className="rf-brand-fallback" style={{ display: 'none' }} aria-hidden="true">·</span>
         </div>
-        <div className="dr-header-right">
+        <div className="rf-header-right">
           {headerStreak >= 1 && (
-            <span className="dr-streak-badge" title={`${headerStreak} mornings in a row`}>
+            <span className="rf-streak-badge" title={`${headerStreak} mornings in a row`}>
               <span aria-hidden="true">🔥</span>
               {headerStreak}
             </span>
           )}
-          <div className="dr-seg" role="tablist" aria-label="View">
+          <div className="rf-seg" role="tablist" aria-label="View">
             <button
               role="tab"
               aria-selected={tab === 'reports'}
-              className={`dr-seg-btn${tab === 'reports' ? ' is-active' : ''}`}
+              className={`rf-seg-btn${tab === 'reports' ? ' is-active' : ''}`}
               onClick={() => setTab('reports')}
             >
               Briefs
@@ -2446,7 +2456,7 @@ export default function App({ appId, token }) {
             <button
               role="tab"
               aria-selected={tab === 'settings'}
-              className={`dr-seg-btn${tab === 'settings' ? ' is-active' : ''}`}
+              className={`rf-seg-btn${tab === 'settings' ? ' is-active' : ''}`}
               onClick={() => { closeDetail(); setTab('settings') }}
             >
               Settings
@@ -2454,14 +2464,14 @@ export default function App({ appId, token }) {
           </div>
         </div>
       </div>
-      <div className="dr-divider" />
-      <div className="dr-scroll">
+      <div className="rf-divider" />
+      <div className="rf-scroll">
         {deadLetter && (
-          <div className="dr-deadletter" role="alert">
+          <div className="rf-deadletter" role="alert">
             <span>{deadLetter}</span>
             <button
               type="button"
-              className="dr-deadletter__x dr-pressable"
+              className="rf-deadletter__x rf-pressable"
               aria-label="Dismiss"
               onClick={() => setDeadLetter(null)}
             >
