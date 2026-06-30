@@ -34,8 +34,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
     fonts-liberation fonts-noto-color-emoji \
-    && npm install -g esbuild@0.25.12 \
-    && npm install -g @anthropic-ai/claude-code@2.1.183 \
+    && npm install -g esbuild@0.28.1 \
+    && npm install -g @anthropic-ai/claude-code@2.1.196 \
     && npm install -g @openai/codex@0.134.0 \
     && npm install -g agent-browser@0.27.0 \
     && agent-browser install \
@@ -66,7 +66,7 @@ RUN ln -s /opt/agent-browser /root/.agent-browser
 # CLAUDE_CONFIG_DIR=/data/cli-auth/claude/, which is a volume and
 # can't be baked into the image). Stays root-owned + world-readable
 # (git clone's default 755/644) — install only reads from here.
-RUN git clone --depth 1 --branch v1.0.4 \
+RUN git clone --depth 1 --branch v1.0.5 \
       https://github.com/openai/codex-plugin-cc.git /opt/codex-plugin-cc
 
 WORKDIR /app
@@ -213,8 +213,8 @@ COPY backend/scripts/build-codemirror-vendor.mjs /tmp/build-codemirror-vendor.mj
 RUN mkdir -p /tmp/cm-install && cd /tmp/cm-install \
     && npm init -y >/dev/null \
     && npm install --no-audit --no-fund --silent \
-         codemirror@6.0.2 @codemirror/state@6.6.0 @codemirror/view@6.43.0 \
-         @codemirror/commands@6.10.3 @codemirror/language@6.12.3 \
+         codemirror@6.0.2 @codemirror/state@6.7.0 @codemirror/view@6.43.4 \
+         @codemirror/commands@6.10.4 @codemirror/language@6.12.4 \
          @codemirror/lang-markdown@6.5.0 @lezer/highlight@1.2.3 \
     && mkdir -p /app/static/vendor/codemirror@6 \
     && node /tmp/build-codemirror-vendor.mjs /tmp/cm-install \
@@ -291,10 +291,10 @@ RUN mkdir -p /tmp/d3geo-install && cd /tmp/d3geo-install \
 COPY backend/scripts/build-marked-vendor.mjs /tmp/build-marked-vendor.mjs
 RUN mkdir -p /tmp/marked-install && cd /tmp/marked-install \
     && npm init -y >/dev/null \
-    && npm install --no-audit --no-fund --silent marked@14.1.4 \
-    && mkdir -p /app/static/vendor/marked@14.1.4 \
+    && npm install --no-audit --no-fund --silent marked@17.0.6 \
+    && mkdir -p /app/static/vendor/marked@17.0.6 \
     && node /tmp/build-marked-vendor.mjs /tmp/marked-install \
-         /app/static/vendor/marked@14.1.4 "$(command -v esbuild)" \
+         /app/static/vendor/marked@17.0.6 "$(command -v esbuild)" \
     && cd / && rm -rf /tmp/marked-install /tmp/build-marked-vendor.mjs
 
 # DOMPurify — self-hosted for the mini-app import map. The Notes preview
