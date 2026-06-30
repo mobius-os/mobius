@@ -353,6 +353,55 @@ class _BodySizeLimitMiddleware:
     })
 
 
+# Standard security headers. The bundled Caddy sets these, but production is
+# fronted by an external Caddy whose vhost has no header block (and managed
+# deployments often proxy the app directly), so prod serves NONE of them today.
+# Setting them here means they hold regardless of what fronts the app. These are
+# resource-load-agnostic — they protect against clickjacking, MIME-sniffing, TLS
+# downgrade, and referrer leakage WITHOUT restricting what apps may load, so web
+# images / external embeds keep working. There is deliberately NO Content-Security-
+# Policy here: a same-origin mini-app can read the owner JWT (the documented
+# same-origin trade-off) and exfiltrate it via /api/proxy regardless of any CSP,
+# so a CSP wouldn't close that and a strict one would just break apps — the real
+# fix is an HttpOnly-cookie session (.pm/172). Clickjacking is covered by
+# X-Frame-Options without a CSP.
+_SECURITY_HEADERS = [
+  (b"x-content-type-options", b"nosniff"),
+  (b"x-frame-options", b"SAMEORIGIN"),
+  (b"referrer-policy", b"strict-origin-when-cross-origin"),
+  (b"permissions-policy", b"camera=(), geolocation=()"),
+  (b"strict-transport-security",
+   b"max-age=31536000; includeSubDomains; preload"),
+]
+_SECURITY_HEADER_NAMES = frozenset(name for name, _ in _SECURITY_HEADERS)
+
+
+class _SecurityHeadersMiddleware:
+  """Authoritatively sets the platform security headers on every response. Pure
+  ASGI so it never buffers a streaming body. It strips any same-named header a
+  route may have set first and replaces it with the platform value, so no route
+  can weaken the CSP/HSTS/etc. (the headers must be uniform to be a wall)."""
+
+  def __init__(self, app):
+    self.app = app
+
+  async def __call__(self, scope, receive, send):
+    if scope["type"] != "http":
+      return await self.app(scope, receive, send)
+
+    async def _send(message):
+      if message["type"] == "http.response.start":
+        headers = [
+          (k, v) for k, v in message.get("headers", [])
+          if k.lower() not in _SECURITY_HEADER_NAMES
+        ]
+        headers.extend(_SECURITY_HEADERS)
+        message["headers"] = headers
+      await send(message)
+
+    return await self.app(scope, receive, _send)
+
+
 app.add_middleware(_BodySizeLimitMiddleware, max_bytes=_MAX_REQUEST_BODY_BYTES)
 
 app.add_middleware(
@@ -364,6 +413,10 @@ app.add_middleware(
   allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allow_headers=["Authorization", "Content-Type"],
 )
+
+# Added last → outermost, so the security headers land on every response,
+# including error responses and CORS-handled preflights.
+app.add_middleware(_SecurityHeadersMiddleware)
 
 # -- API routes --------------------------------------------------------
 app.include_router(auth_router)
