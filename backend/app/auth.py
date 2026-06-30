@@ -16,8 +16,9 @@ def hash_password(password: str) -> str:
   """Returns a bcrypt hash of the given password."""
   # bcrypt only ever uses the first 72 bytes of the input; bcrypt>=5 raises
   # ValueError on longer inputs instead of silently truncating, so truncate
-  # explicitly to keep the historical contract (existing hashes still verify)
-  # and avoid crashing on a >72-byte password.
+  # explicitly. Hashes produced by bcrypt 4.x (silent truncation) or by this
+  # code still verify — both feed bcrypt the same 72-byte prefix — and a
+  # >72-byte password no longer crashes.
   return bcrypt.hashpw(
     password.encode()[:72], bcrypt.gensalt(rounds=12)
   ).decode()
