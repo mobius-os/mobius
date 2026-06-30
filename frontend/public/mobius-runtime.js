@@ -687,9 +687,13 @@ export function makeStorage({ appId, getToken }) {
   // Web Locks serializes draining across contexts (an in-shell iframe
   // and a standalone page for the same app can both be open). Falls
   // back to a plain drain where Web Locks is unavailable.
+  // Returns the drain promise so a caller that needs to know the pass
+  // FINISHED can await it; the event/init callers fire-and-forget and ignore
+  // the return. Each branch's .catch keeps a rejected drain from surfacing as
+  // an unhandled rejection whether or not anyone awaits.
   function drain() {
     if (navigator.locks && navigator.locks.request) {
-      navigator.locks.request(
+      return navigator.locks.request(
         `mobius-outbox-${appId}`, { ifAvailable: true },
         async (lock) => { if (lock) await drainInner() },
       ).catch(() => {})
@@ -699,7 +703,7 @@ export function makeStorage({ appId, getToken }) {
       // a write's drain could run drainInner concurrently in a no-Web-Locks
       // browser and send a stale snapshot. (Cross-tab in that fallback stays
       // unprotected, bounded by idempotent PUT/DELETE + server-arrival LWW.)
-      drainNow().catch(() => {})
+      return drainNow().catch(() => {})
     }
   }
 
