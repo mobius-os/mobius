@@ -25,10 +25,14 @@ _EVENT_LOG_MAX = 10_000
 # Global registry of active broadcasts, keyed by chat_id.
 _broadcasts: dict[str, "ChatBroadcast"] = {}
 
-# The notify endpoint needs to find the running broadcast without
-# knowing the chat ID.  Since Möbius is single-owner, there is at
-# most one active broadcast at a time.  run_chat() sets this on
-# start and clears it in its finally block.
+# A best-effort pointer to the most-recently-started chat's broadcast, for
+# the notify endpoint which has no chat ID to target. This is NOT a "there is
+# only one" guarantee: single-owner does not mean single-stream — two chats
+# can stream concurrently, and `_broadcasts` holds them all per chat. The
+# robust delivery path is the always-live system broadcast (notify always
+# publishes there); this scalar is only the secondary "active chat" hint, so
+# under concurrent turns it points at whichever started last. run_chat() sets
+# it on start and clears it in its finally block.
 _active_broadcast: "ChatBroadcast | None" = None
 
 
