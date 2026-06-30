@@ -189,8 +189,17 @@
         if (sessionStorage.getItem('sw-auto-reloaded') === '1') {
           sessionStorage.removeItem('sw-auto-reloaded')
         }
+        // A page that loaded WITHOUT a controller is a first-ever SW install:
+        // the worker claiming this page is NOT an update (it just re-fetches the
+        // same bundle), so reloading is a wasted splash-flash for real first-time
+        // users AND — in e2e — a navigation that destroys the running test's
+        // execution context mid-action (app-canvas/steer/handleStop flakes). Only
+        // reload when the page was ALREADY controlled and a NEW worker takes over
+        // (a genuine deploy/update).
+        const hadControllerAtLoad = !!navigator.serviceWorker.controller
         const reloadAfterControllerChange = () => {
-          if (navigator.serviceWorker.controller
+          if (hadControllerAtLoad
+              && navigator.serviceWorker.controller
               && !sessionStorage.getItem('sw-auto-reloaded')) {
             sessionStorage.setItem('sw-auto-reloaded', '1')
             window.location.reload()

@@ -550,12 +550,20 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       if (chatIdStaleRef.current) return
       if (fetchGenRef.current !== gen) return
       const serverPending = data.pending_messages || []
+      // The SSE stream is the source of truth for "a turn is live" — this poll
+      // is only a fallback. While the stream is alive (isStreamingRef) or a Stop
+      // is in flight, local optimistic state is authoritative: this background
+      // poll must NOT tear down sending nor hydrate/clobber the queue (the poll
+      // racing the optimistic queue was the steer + handleStop e2e flake). Only
+      // when the stream is genuinely dead (a stale Stop with no real turn) does
+      // the server snapshot win. Event-driven over polling — see
+      // docs/architecture.md "determinism".
+      const localAuthoritative =
+        handlingStopRef.current || isStreamingRef.current
       if (data.running) {
         setSending(true)
-      } else if (serverPending.length === 0) {
-        // Authoritative idle+empty runtime state must clear stale local busy
-        // state even if the tray still has a preserved/ghost row. Hydrate below
-        // runs without preserveMissing in this case and removes the row.
+      } else if (serverPending.length === 0 && !localAuthoritative) {
+        // Stream is dead and the server is idle+empty: clear the stale Stop.
         setSending(false)
         sendingRef.current = false
       }
@@ -567,15 +575,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         pending_messages: serverPending,
         pending_question_id: data.pending_question_id || null,
       }))
-      // Server pending_messages is authoritative for server-confirmed rows,
-      // but a legacy queue POST may ack with only {ts, position}; in that
-      // window an active-turn reconcile can read [] before the full pending
-      // row is visible. Keep the local queue until the turn ends or a later
-      // reconcile returns concrete server rows.
-      const hasLocalQueue = pendingQueue.pendingMessagesRef.current.length > 0
-      const activeLocalTurn =
-        sendingRef.current || isStreamingRef.current || serverRunningRef.current
-      if (!(activeLocalTurn && hasLocalQueue && serverPending.length === 0)) {
+      // Don't let the fallback poll add/clobber the queue while a turn is live
+      // (localAuthoritative, above) — the optimistic queue + swapOptimisticTs
+      // own it during a turn; hydrate only when the stream is dead.
+      if (!localAuthoritative) {
         pendingQueue.hydrate(serverPending)
       }
     } catch { /* background reconciliation is best-effort */ }
