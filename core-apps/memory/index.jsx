@@ -25,8 +25,9 @@
  * Quartz's durable shape: d3-force for layout and PixiJS for links, nodes, and
  * labels in one transformed scene. D3/Pixi load the same way Quartz does:
  * pinned global scripts — served same-origin from /vendor because the prod
- * CSP only allows 'self' + esm.sh for scripts. Markdown rendering still
- * lazy-loads marked + DOMPurify from esm.sh (which the CSP permits).
+ * CSP only allows 'self' + esm.sh for scripts. Markdown rendering lazy-loads
+ * marked + DOMPurify the same way — from the same-origin /vendor importmap
+ * (offline-deterministic) via bare import('marked') / import('dompurify').
  */
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 
@@ -591,8 +592,8 @@ export default function App({ appId, token }) {
     (async () => {
       try {
         const [mk, dp] = await Promise.all([
-          import('https://esm.sh/marked@14.1.4'),
-          import('https://esm.sh/dompurify@3.1.7'),
+          import('marked'),
+          import('dompurify'),
         ]);
         if (alive) {
           setMarked(() => mk.marked || mk.default);
