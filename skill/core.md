@@ -167,7 +167,7 @@ Two gotchas every session:
 
 Loading a PNG into your vision (`Read` on Claude, `view_image` on Codex) lets YOU inspect it. The partner sees ONLY your text plus any `![caption](/api/chats/$CHAT_ID/media/<name>.png)` embeds you explicitly write. The failure mode: you view it, describe it ("the grid rendered beautifully"), but never embed — so the partner trusts an unverified claim. Pattern:
 
-1. `Bash`: capture with `bash "$SCRIPTS_DIR/agent-screenshot.sh" <route>` — with no output path it lands in the chat's served media dir (`/data/chats/$CHAT_ID/media/shot-*.png`) and prints the path. (Already-open or non-Möbius page: `agent-browser screenshot /data/chats/$CHAT_ID/media/<name>.png`.) Only files under that dir embed — a bare `agent-browser screenshot /tmp/x.png` is viewable but 404s if embedded.
+1. `Bash`: capture with `bash "$SCRIPTS_DIR/agent-screenshot.sh" <route>` — with no output path it lands in the chat's served media dir (`/data/chats/$CHAT_ID/media/shot-*.png`) and prints the path **plus a ready-to-paste `embed: ![screenshot](/api/chats/…)` line** — copy that line into your reply (step 3) so the shot actually shows. (Already-open or non-Möbius page: `agent-browser screenshot /data/chats/$CHAT_ID/media/<name>.png`.) Only files under that dir embed — a bare `agent-browser screenshot /tmp/x.png` is viewable but 404s if embedded.
 2. `Read` / `view_image`: the path it printed.
 3. **Text** (same message, BEFORE interpreting): `![first render](/api/chats/$CHAT_ID/media/<name>.png)` — the embed path must match the file. Then a one-line description.
 4. Continue.
