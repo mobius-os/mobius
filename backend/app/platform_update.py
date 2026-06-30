@@ -186,10 +186,12 @@ def _git(*args: str, repo: Path = PLATFORM_REPO, check: bool = True):
   """Run a git command in the platform repo, text mode, with the search ceiling
   pinned to the repo's parent so it can never walk up into the enclosing
   ``/data`` repo and operate on the wrong tree."""
-  env = {
-    **os.environ,
-    "GIT_CEILING_DIRECTORIES": str(Path(repo).resolve().parent),
-  }
+  # Use app_git._git_env so inherited GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE
+  # pointers are SCRUBBED, not just the ceiling pinned: an inherited GIT_DIR
+  # would otherwise silently retarget every platform op (availability check,
+  # untrack, seed, update-ref) at the wrong repo. Same isolation the engine's
+  # own _run uses; without it this prep path was the one unprotected gap.
+  env = app_git._git_env(repo)
   return subprocess.run(
     ["git", "-C", str(repo), *args],
     capture_output=True, text=True, timeout=_GIT_TIMEOUT, check=check, env=env,
@@ -523,9 +525,12 @@ def record_baked_upstream(floor: BakedFloor, repo: Path = PLATFORM_REPO) -> str:
     # baked floor copy doesn't include, so copy the on-disk one verbatim.
     if (repo / ".baked-sha").exists():
       shutil.copyfile(repo / ".baked-sha", tmp / ".baked-sha")
+    # Base on _git_env (scrubs any inherited GIT_DIR/GIT_OBJECT_DIRECTORY so a
+    # leaked pointer can't make `add -A`/`write-tree` stage into a foreign
+    # object store), then set the intentional staging overrides: a throwaway
+    # index and the temp worktree are exactly where we DO want git pointed.
     env = {
-      **os.environ,
-      "GIT_CEILING_DIRECTORIES": str(repo.resolve().parent),
+      **app_git._git_env(repo),
       "GIT_INDEX_FILE": str(index_path),
       "GIT_WORK_TREE": str(tmp),
     }
