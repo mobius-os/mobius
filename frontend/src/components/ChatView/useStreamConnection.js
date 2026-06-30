@@ -6,6 +6,7 @@ import {
   attachToolOutput,
   closeToolLifecycle,
   closeAllToolLifecycles,
+  appendThinkingChunk,
 } from './streamReducers.js'
 import {
   readStoredStreamSnapshot,
@@ -605,6 +606,18 @@ export default function useStreamConnection(chatId, {
               // Live streaming: buffer for typewriter reveal.
               textBufferRef.current += content
               startDraining()
+            }
+          } else if (event.type === 'thinking') {
+            // The agent's extended reasoning (Claude thinking_delta /
+            // Codex reasoning). Render it as a dim, secondary block so a
+            // long silent "thinking" stretch shows live progress instead
+            // of motionless dots. Flush any pending typewriter text first
+            // so the thinking block lands in emit-order, not after text
+            // that was buffered before it.
+            const content = event.content || ''
+            if (content) {
+              flushBuffer()
+              applyStreamItems(prev => appendThinkingChunk(prev, content))
             }
           } else if (event.type === 'tool_start') {
             flushBuffer()

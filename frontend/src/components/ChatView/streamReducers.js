@@ -153,6 +153,27 @@ export function attachToolOutput(prev, content) {
 }
 
 /**
+ * Applies a `thinking` event (the agent's extended reasoning). Like
+ * text, consecutive thinking deltas coalesce into a single trailing
+ * `{type:'thinking'}` item; a thinking that arrives after any other
+ * item (text, a tool block) opens a fresh thinking item so the
+ * reasoning stays in emit-order. Empty content is a no-op. The caller
+ * is responsible for flushing any pending typewriter text first.
+ */
+export function appendThinkingChunk(prev, chunk) {
+  if (!chunk) return prev
+  const last = prev[prev.length - 1]
+  if (last && last.type === 'thinking') {
+    const updated = [...prev]
+    updated[updated.length - 1] = {
+      ...last, content: last.content + chunk,
+    }
+    return updated
+  }
+  return [...prev, { type: 'thinking', content: chunk }]
+}
+
+/**
  * Applies a `tool_end` event. A running tool flips to done; an
  * absorbed question's lifecycle closes by dropping `absorbedTool`
  * (the card itself has no status), so a later tool_output can never

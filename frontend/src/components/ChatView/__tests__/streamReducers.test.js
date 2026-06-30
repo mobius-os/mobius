@@ -21,6 +21,7 @@ import {
   closeAllToolLifecycles,
   isQuestionTool,
   suppressedQuestionToolIndices,
+  appendThinkingChunk,
 } from '../streamReducers.js'
 import { questionKey } from '../questionKey.js'
 
@@ -377,4 +378,28 @@ test('without the surviving map, a wiped replay reverts to pending (proves the b
   items = upsertQuestionItem(items, incoming)
   assert.equal(items[0].answers, undefined,
     'a bare replay over wiped items has no answers — the exact revert the map fixes')
+})
+
+test('appendThinkingChunk coalesces consecutive deltas into one item', () => {
+  let items = []
+  items = appendThinkingChunk(items, 'Let me ')
+  items = appendThinkingChunk(items, 'think about ')
+  items = appendThinkingChunk(items, 'this.')
+  assert.equal(items.length, 1, 'consecutive thinking deltas stay one item')
+  assert.deepEqual(items[0], { type: 'thinking', content: 'Let me think about this.' })
+})
+
+test('appendThinkingChunk opens a fresh item after a non-thinking item', () => {
+  // A thinking that arrives after text (or a tool) must NOT merge into the
+  // text — it opens its own block so reasoning stays in emit-order.
+  let items = [{ type: 'text', content: 'Here is the answer.' }]
+  items = appendThinkingChunk(items, 'reconsidering...')
+  assert.equal(items.length, 2)
+  assert.equal(items[0].type, 'text')
+  assert.deepEqual(items[1], { type: 'thinking', content: 'reconsidering...' })
+})
+
+test('appendThinkingChunk is a no-op on empty content', () => {
+  const items = [{ type: 'thinking', content: 'x' }]
+  assert.equal(appendThinkingChunk(items, ''), items, 'empty chunk returns the same array')
 })
