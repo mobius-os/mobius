@@ -121,6 +121,36 @@ _STATIC_ASSETS_COUNT_MAX = 256
 _STATIC_ASSETS_TOTAL_MAX = 64 * 1024 * 1024
 _STATIC_ASSETS_MANIFEST = ".mobius-static-assets.json"
 
+# Sibling source modules a multi-file mini-app declares alongside `entry`
+# (`cards.js`, `utils.js`, …) so esbuild can bundle the import graph. Bounds
+# mirror the static-asset guards: cap the count here, cap the summed bytes at
+# fetch time. Each module reuses the entry cap per file.
+_SOURCE_FILES_COUNT_MAX = 50
+_SOURCE_FILES_TOTAL_MAX = 8 * 1024 * 1024
+
+# Install-managed path prefixes a `source_files` entry must never claim. These
+# are written/owned by other phases (static_assets under static/, the cron
+# scaffold's init-cron.sh, build output, the .bak snapshots, the integer-id
+# storage tree) — a manifest that listed one as a source file would have the
+# source-write loop fight the phase that owns it. Mirrors the app_git
+# `_GITIGNORE` set conceptually so the per-app git model and the installer agree
+# on what is hand-written source versus generated/managed artifact.
+_SOURCE_FILES_MANAGED_PREFIXES = (
+  "static/", "dist/", ".build/", "node_modules/",
+)
+_SOURCE_FILES_MANAGED_EXACT = frozenset((
+  "index.jsx", ".gitignore", "init-cron.sh", _STATIC_ASSETS_MANIFEST,
+))
+
+# Tracked files in a merged tree that are NOT hand-written app source: the
+# managed .gitignore, the install-managed static-asset manifest, and the cron
+# script. The job script is dropped separately (its name is known only at call
+# time). Excluding these keeps the source-write loop from rewriting an
+# install-managed artifact a clean merge happened to carry on `main`.
+_MERGED_NON_SOURCE = frozenset((
+  ".gitignore", _STATIC_ASSETS_MANIFEST, "init-cron.sh",
+))
+
 # Icon cap matches the icon-upload route's 12 MB ceiling.
 _ICON_MAX_BYTES = 12 * 1024 * 1024
 
@@ -263,6 +293,49 @@ def _validate_manifest(m: dict) -> None:
   for dest, src in _static_asset_entries(static_assets).items():
     _validate_repo_relative_path(dest, f"static_assets.{dest}")
     _validate_repo_relative_path(src, f"static_assets.{dest}")
+  # Optional sibling modules a multi-file app imports from `index.jsx`. Each is
+  # a repo-relative path the installer fetches and writes next to the entry so
+  # esbuild can bundle the import graph. `entry` is declared separately and the
+  # managed `.gitignore` is never author-supplied, so both are rejected here.
+  source_files = m.get("source_files")
+  if source_files is not None:
+    if not isinstance(source_files, list):
+      raise HTTPException(400, "Manifest `source_files` must be an array.")
+    if len(source_files) > _SOURCE_FILES_COUNT_MAX:
+      raise HTTPException(
+        400,
+        "Manifest has too many source_files "
+        f"(max {_SOURCE_FILES_COUNT_MAX}).",
+      )
+    # The schedule job script is written to the source-dir root under its bare
+    # filename, so a source file naming it would collide with the job-write
+    # phase. Pull the declared job name here so the loop can reject that too.
+    job_sched = m.get("schedule")
+    declared_job = (
+      job_sched.get("job") if isinstance(job_sched, dict) else None
+    )
+    for i, rel in enumerate(source_files):
+      _validate_repo_relative_path(rel, f"source_files[{i}]")
+      # Reject any entry that collides with an install-managed path. `entry`
+      # (index.jsx) is declared separately, and the rest (.gitignore, the cron
+      # script, the static-asset manifest, the static_assets / build-output /
+      # storage trees, the declared job script) are written and owned by other
+      # install phases — a source file there would have the source-write loop
+      # fight the owning phase.
+      if (
+        rel in _SOURCE_FILES_MANAGED_EXACT
+        or rel == declared_job
+        or rel.endswith(".bak")
+        or rel[0].isdigit()
+        or any(rel.startswith(p) for p in _SOURCE_FILES_MANAGED_PREFIXES)
+      ):
+        raise HTTPException(
+          400,
+          f"Manifest `source_files[{i}]` {rel!r} collides with an "
+          "install-managed path (entry, .gitignore, static/, dist/, .build/, "
+          "node_modules/, the cron/job scripts, .bak snapshots, or the "
+          "numeric-id storage tree).",
+        )
   sched = m.get("schedule")
   if sched is not None:
     if not isinstance(sched, dict):
@@ -573,6 +646,105 @@ def _static_asset_entries(value) -> dict[str, str]:
   raise HTTPException(
     400, "Manifest `static_assets` must be an object or array.",
   )
+
+
+def _assert_within(root: Path, target: Path, field: str) -> None:
+  """Reject a write target that escapes `root` once symlinks are resolved.
+
+  `source_files` paths are validated lexically (no `..`, no leading `/`), but a
+  nested entry like `lib/cards.js` can still write THROUGH a symlinked parent
+  (`lib -> /data/shared`) to clobber a file outside the app. Resolving both
+  sides with `os.path.realpath` and requiring containment closes that — the one
+  silent-and-catastrophic failure mode on the untrusted-manifest fetch path that
+  earns a hard sanitizer.
+  """
+  real_root = os.path.realpath(root)
+  real_target = os.path.realpath(target)
+  if real_target != real_root and not real_target.startswith(real_root + os.sep):
+    raise HTTPException(
+      400, f"Manifest `{field}` resolves outside the app source dir."
+    )
+
+
+def _write_source_file(
+  target: Path,
+  content: bytes,
+  backup: Path,
+  created_paths: list[Path],
+  rollback_actions: list[Callable[[], None]],
+  commit_actions: list[Callable[[], None]],
+) -> None:
+  """Write one source file with the install's transactional rollback pattern.
+
+  Snapshots an existing `target` to `backup` and registers rollback (restore the
+  snapshot) + commit (drop the snapshot) actions; a newly-created file is tracked
+  in `created_paths` so a failure deletes it. The bytes land via `atomic_write`
+  so a concurrent reader never sees a torn file. Generalizes the single
+  `index.jsx` write so every entry in a multi-file app's source set goes through
+  the same snapshot-and-restore path.
+  """
+  if target.exists():
+    if backup.exists():
+      try:
+        backup.unlink()
+      except OSError:
+        pass
+    shutil.copy2(target, backup)
+    rollback_actions.append(
+      lambda b=backup, o=target: os.replace(b, o) if b.exists() else None
+    )
+    commit_actions.append(
+      lambda b=backup: b.unlink() if b.exists() else None
+    )
+  else:
+    created_paths.append(target)
+  atomic_write(target, content)
+
+
+def _prune_dropped_source_files(
+  source_dir_path: Path,
+  keep: set[str],
+  rollback_actions: list[Callable[[], None]],
+) -> None:
+  """Delete git-tracked source files not in `keep`, making the worktree match a
+  merged tree.
+
+  On a clean merge the merged tree omits a sibling the new version dropped, but
+  the source-write loop only writes files it has — the stale sibling stays on
+  disk and `git add -A` re-records it onto `main` as permanent local divergence.
+  This reconciles by unlinking every tracked file absent from `keep` (the merged
+  tree's path set). Only git-tracked files are touched, so runtime/storage dirs,
+  `.bak` snapshots, and gitignored output are never removed. Each deletion
+  snapshots to a `.bak` and registers a rollback restore so a later compile
+  failure brings the file back. Best-effort on the `ls-files` read: if git can't
+  enumerate, nothing is pruned (the worst case is a lingering stale sibling, not
+  data loss).
+  """
+  try:
+    listing = subprocess.run(
+      ["git", "-C", str(source_dir_path), "ls-files", "-z"],
+      capture_output=True, timeout=30, check=True,
+      env=app_git._git_env(source_dir_path),
+    )
+  except (OSError, subprocess.SubprocessError):
+    return
+  for rel in listing.stdout.decode().split("\0"):
+    if not rel or rel in keep:
+      continue
+    target = source_dir_path / rel
+    if not target.is_file():
+      continue
+    backup = target.with_name(target.name + ".mobius-drop-bak")
+    if backup.exists():
+      try:
+        backup.unlink()
+      except OSError:
+        pass
+    shutil.copy2(target, backup)
+    rollback_actions.append(
+      lambda b=backup, o=target: os.replace(b, o) if b.exists() else None
+    )
+    target.unlink()
 
 
 def _write_static_assets(
@@ -1017,6 +1189,18 @@ async def install_from_manifest(
         )
       static_assets_fetched[dest] = data
 
+    source_files_fetched: dict[str, bytes] = {}
+    source_files_total = 0
+    for rel in manifest.get("source_files") or []:
+      data = await _http_get(cli, raw_base + rel, _ENTRY_MAX_BYTES)
+      source_files_total += len(data)
+      if source_files_total > _SOURCE_FILES_TOTAL_MAX:
+        raise HTTPException(
+          400,
+          f"Manifest source_files exceed {_SOURCE_FILES_TOTAL_MAX} bytes total.",
+        )
+      source_files_fetched[rel] = data
+
     seeds_fetched: dict[str, bytes] = {}
     seeds_total = 0
     for sub, value in (manifest.get("storage_seeds") or {}).items():
@@ -1130,30 +1314,42 @@ async def install_from_manifest(
   divergence: str = "none"
   # Set when upstream content is actually folded into the served `main`
   # branch (a clean merge, or a forced take-upstream). The post-write
-  # commit then records the upstream tip as a second parent so the merge
-  # base advances — otherwise every later update re-merges from the
-  # install point and conflicts spuriously. None means a plain local
-  # commit (fresh install, or a conflict that left local untouched).
+  # commit then replays the result on the upstream tip as its sole parent
+  # (linear history) so the merge base advances — otherwise every later
+  # update re-merges from the install point and conflicts spuriously. None
+  # means a plain local commit (fresh install, or a conflict that left local
+  # untouched).
   merge_applied = False
   if icon_warning:
     warnings.append(icon_warning)
 
   # The per-app git model: an update merges the new upstream into the app's
-  # local edits instead of clobbering them, so `effective_source` may end up
-  # being the MERGED bytes rather than the upstream bytes we just fetched.
+  # local edits instead of clobbering them, so `source_tree` may end up being
+  # the MERGED tree rather than the upstream bytes we just fetched.
   upstream_jsx_sha = hashlib.sha256(entry_bytes).hexdigest()
-  # The source that actually gets compiled + written to disk. Defaults
-  # to the upstream bytes; the git merge step below may replace it with
-  # the merged bytes on a clean update.
-  effective_source = jsx_source
-  # The schedule job script the per-app git model tracks (e.g. fetch.sh /
-  # build.sh). Derived ONCE here so both the git block and the source-write
-  # below agree on the path; Phase 5 re-reads it but does not change it.
-  # effective_job defaults to the bundled (upstream) job and is replaced by
-  # the merged job on a clean update — the same shape effective_source has,
-  # so a locally edited job script survives an update like index.jsx does.
-  job_name = sched.get("job", "fetch.sh") if sched else "fetch.sh"
-  effective_job: bytes | None = bundled_job
+  # The schedule job script's bare filename — it is just one key in the source
+  # tree, written executable. `exec_paths` carries that to record_upstream so
+  # `upstream` and `main` agree on its mode; the cron phase reads `job_name` to
+  # point the crontab entry at it.
+  job_name = sched.get("job") if sched else None
+  exec_paths = frozenset({job_name}) if job_name else frozenset()
+  # The ONE complete source tree that gets written to disk and recorded on
+  # `upstream`: the entry, every declared sibling module, and the job script —
+  # all just keys, no entry/sibling/job special-casing. `index.jsx` is one key.
+  # A clean update replaces this with the MERGED tree so locally edited files
+  # (the entry, a sibling, the job) survive instead of being clobbered.
+  source_tree: dict[str, bytes] = {
+    "index.jsx": entry_bytes,
+    **source_files_fetched,
+  }
+  if job_name and bundled_job is not None:
+    source_tree[job_name] = bundled_job
+  # True once `source_tree` is the MERGED tree (a clean merge or forced
+  # take-upstream): the post-write commit then replays the result on the
+  # upstream tip as its sole parent so the merge base advances — otherwise
+  # every later update re-merges from the install point and conflicts
+  # spuriously. False means a plain local commit (fresh install, or a conflict
+  # that left local untouched).
 
   # --- Phase 4: materialize. Wrapped so cleanup runs on any failure. --
   # `created_paths`: files/dirs to delete on failure (and leave on
@@ -1320,20 +1516,28 @@ async def install_from_manifest(
       db.flush()  # assign app.id without committing yet
 
     # --- Per-app git: record upstream + (on update) merge into local ---
-    # Engaged whenever the app has a real source_dir. The git ops run under
-    # source_dir_lock — the same
-    # lock the source write below takes — acquired here as a SEPARATE,
-    # non-nested critical section (acquire/release, then re-acquire for
-    # the write), which is safe for a non-reentrant asyncio.Lock. We do
-    # the merge BEFORE the compile so `effective_source` (which the
-    # compile + write below consume) reflects the merged bytes on a clean
-    # update, and so a conflict can short-circuit both.
+    # Engaged whenever the app has a real source_dir. The merge decision AND the
+    # disk write below run under ONE held span of source_dir_lock — not two
+    # separate critical sections — so the file watcher (which takes the same lock
+    # before its own commit_local) cannot commit an agent edit in the gap and
+    # have the write then clobber it (the edit would be lost from the live tree,
+    # the bundle, and app.jsx_source, recoverable only from git history). We do
+    # the merge BEFORE the compile so `source_tree` (which the compile + write
+    # below consume) reflects the merged tree on a clean update, and so a
+    # conflict can short-circuit both. The lock is released before the seeds
+    # block takes app_storage_lock, preserving the documented acquisition order
+    # (install_uninstall -> app_storage -> source_dir).
     # Guard on the raw string, NOT the Path: Path("") is a truthy Path, so a
     # row with an empty source_dir would otherwise initialize a git repo in
     # the server's working directory. Only engage git when there's a real dir.
     git_source_dir = Path(app.source_dir) if app.source_dir else None
-    if git_source_dir:
-      async with fs_locks.source_dir_lock(str(git_source_dir)):
+    source_lock = (
+      fs_locks.source_dir_lock(str(git_source_dir)) if git_source_dir else None
+    )
+    if source_lock is not None:
+      await source_lock.acquire()
+    try:
+      if git_source_dir:
         version = str(manifest.get("version", "unknown"))
         had_repo = app_git.is_repo(git_source_dir)
         if existing and had_repo:
@@ -1361,87 +1565,78 @@ async def install_from_manifest(
           # merge is needed or wanted. Taking the bytes verbatim here keeps
           # the no-edit case off merge_upstream entirely, so it can never
           # hinge on merge-tree's in-memory cat-file succeeding — the path
-          # that, when it returned None, dropped to a single-parent local
-          # commit and left `upstream` unreachable from `main`, stranding the
-          # merge base at the install point and resolving the NEXT update to
-          # stale local content. commit_merge still runs (merge_applied gate)
-          # so the two-parent commit advances the base.
+          # that, when it returned None, dropped to a local commit parented on
+          # the old `main` tip and left `upstream` unreachable from `main`,
+          # stranding the merge base at the install point and resolving the
+          # NEXT update to stale local content. commit_replay still runs
+          # (merge_applied gate) so the single-parent replay advances the base.
           diverged = bool(prev_upstream_commit) and await asyncio.to_thread(
             app_git.local_diverged_from,
             git_source_dir, prev_upstream_commit,
           )
           await asyncio.to_thread(
             app_git.record_upstream,
-            git_source_dir, entry_bytes, canonical_manifest_url, version,
-            job_name, bundled_job,
+            git_source_dir, source_tree, canonical_manifest_url, version,
+            exec_paths=exec_paths,
           )
           if not diverged:
-            effective_source = jsx_source
-            # No local edits → upstream wins for the job script too.
-            effective_job = bundled_job
+            # No local edits → upstream wins outright for the whole tree; it is
+            # already `source_tree` as fetched. Taking the bytes verbatim keeps
+            # the no-edit case off merge_upstream entirely.
             divergence = "fast_forward"
             merge_applied = True
           else:
             # Local diverged: fold the new upstream into the local edits with
             # a three-way merge that touches neither `main` nor the working
-            # tree, then act on the clean-vs-conflict verdict. Pass job_name so
-            # the merge carries a locally edited job script forward too.
+            # tree, then act on the clean-vs-conflict verdict.
             merge = await asyncio.to_thread(
-              app_git.merge_upstream, git_source_dir, job_name,
+              app_git.merge_upstream, git_source_dir,
             )
             if merge.status == "conflict":
               if force_core_store_update:
+                # Core App Store self-update: published upstream wins, keep the
+                # fetched `source_tree` and apply it like a fast-forward.
                 warnings.append(
                   "core App Store self-update replaced local edits with upstream"
                 )
-                effective_source = jsx_source
-                effective_job = bundled_job
                 divergence = "fast_forward"
                 merge_applied = True
               else:
-                # Never rebase local. The app stays served with
-                # its current bundle + source; the new upstream is recorded
-                # for a later agent-resolution pass. Skip compile + source
-                # overwrite by switching to conflict mode below. The job
-                # script is left untouched on disk like index.jsx.
+                # Never rebase local. The app stays served with its current
+                # bundle + source; the new upstream is recorded for a later
+                # agent-resolution pass. Switch to conflict mode below.
                 mode = "conflict"
                 conflict_paths = merge.conflict_paths
-            elif merge.merged_bytes is not None:
-              # Clean merge: the merged source is what we compile + write.
-              effective_source = merge.merged_bytes.decode("utf-8")
-              # Carry a local job-script edit forward when the merge produced
-              # merged job bytes; otherwise fall back to the bundled job (e.g.
-              # an upstream tree recorded before job scripts were tracked).
-              effective_job = (
-                merge.merged_job if merge.merged_job is not None else bundled_job
-              )
-              divergence = "clean_merge"
-              merge_applied = True
             else:
-              # Clean verdict (no conflict) but merge-tree produced no
-              # index.jsx bytes — e.g. the in-memory cat-file read failed.
-              # Falling through here would silently keep effective_source =
-              # jsx_source (pure upstream, clobbering local) AND leave
-              # merge_applied False, so commit_merge never runs and `upstream`
-              # stays unreachable from `main`: the same stranded-merge-base
-              # failure the no-edit fast-path avoids, which resolves the NEXT
-              # update to stale local content. Treat it exactly like a
-              # conflict — keep local source + bundle served, leave the new
-              # upstream recorded, and let an agent-resolution pass reconcile
-              # it — rather than half-applying a merge we couldn't read.
-              mode = "conflict"
-              conflict_paths = merge.conflict_paths or ["index.jsx"]
+              # Clean merge: the WHOLE merged tree is what we write + compile.
+              # Read it in full (one path for one and many files) and drop the
+              # managed/non-source files so `source_tree` is the source set the
+              # writer reconciles the worktree to. A clean verdict that yields
+              # no index.jsx (e.g. an unreadable tree) is treated as a conflict
+              # rather than half-applying a merge we can't materialise.
+              merged_tree = app_git.read_merged_tree(
+                git_source_dir, merge.merged_tree_oid,
+              )
+              merged_source = {
+                rel: data for rel, data in merged_tree.items()
+                if rel not in _MERGED_NON_SOURCE
+              }
+              if "index.jsx" not in merged_source:
+                mode = "conflict"
+                conflict_paths = merge.conflict_paths or ["index.jsx"]
+              else:
+                source_tree = merged_source
+                divergence = "clean_merge"
+                merge_applied = True
         else:
           # Fresh install (or an existing app that somehow lost its repo):
-          # record the pristine bytes on `upstream`, then align the local
-          # `main` branch to that commit so the working branch starts exactly
-          # at the installed version — a shared base for the next update's
-          # merge. Record the job script too so a future update can merge
-          # against the version the app shipped with.
+          # record the pristine source tree on `upstream`, then align the local
+          # `main` branch to that commit so the working branch starts exactly at
+          # the installed version — a shared base for the next update's merge.
           await asyncio.to_thread(
             app_git.record_upstream,
-            git_source_dir, entry_bytes, canonical_manifest_url, version,
-            job_name, bundled_job,
+            git_source_dir, source_tree, canonical_manifest_url, version,
+            exec_paths=exec_paths,
           )
           await asyncio.to_thread(
             app_git.align_local_to_upstream, git_source_dir,
@@ -1450,190 +1645,209 @@ async def install_from_manifest(
         app.upstream_commit = await asyncio.to_thread(
           app_git.head_sha, git_source_dir, app_git.UPSTREAM_BRANCH,
         )
-
-    if mode == "conflict":
-      # Conflict: materialize a REAL working-tree merge conflict (markers +
-      # MERGE_HEAD) so the agent resolves it with ordinary git, exactly like a
-      # `git pull` conflict — then the install ENDPOINT spawns a resolver chat.
-      # We deliberately do NOT recompile: the marker-bearing source won't
-      # compile, so the file watcher keeps serving the prior good bundle until
-      # the agent finishes the merge (resolve markers + commit → commit_local
-      # finalizes the 2-parent merge → base advances). `app.jsx_source` stays
-      # the LOCAL source and the upstream provenance (upstream_commit /
-      # upstream_jsx_sha, set above) persists for the resolution; the agent can
-      # back out anytime with `git merge --abort`. Re-acquire source_dir_lock
-      # as its own critical section (the git block above already released it).
-      if git_source_dir:
-        async with fs_locks.source_dir_lock(str(git_source_dir)):
+        if mode == "conflict":
+          # Conflict: materialize a REAL working-tree merge conflict (markers +
+          # MERGE_HEAD) so the agent resolves it with ordinary git, exactly like
+          # a `git pull` conflict — then the install ENDPOINT spawns a resolver
+          # chat. We deliberately do NOT recompile: the marker-bearing source
+          # won't compile, so the file watcher keeps serving the prior good
+          # bundle until the agent finishes the merge (resolve markers + commit →
+          # commit_local finalizes a single-parent replay → base advances).
+          # `app.jsx_source` stays the LOCAL source and the upstream provenance
+          # (upstream_commit / upstream_jsx_sha, set above) persists for the
+          # resolution; the agent can back out anytime with `git merge --abort`.
+          # Materialized inside the held source_dir_lock so a watcher commit
+          # can't interleave; the DB commit + return run after the lock releases.
           conflict_paths = await asyncio.to_thread(
             app_git.start_conflict_merge, git_source_dir,
           ) or conflict_paths
+
+      # The disk-write phase runs INSIDE the same held lock for the git path so
+      # no watcher commit interleaves between the merge decision and the write; a
+      # conflict skips it (the source stays the local edits, served by the prior
+      # bundle). The no-source_dir legacy path falls through with no lock.
+      if mode != "conflict":
+        # Stamp the installed version on the row now that we know the source is
+        # actually being applied (the conflict path skips this with the old
+        # version intact). This is what GET /api/apps/ exposes, so the store and
+        # any out-of-band caller read the installed version without a side-map.
+        app.version = str(manifest.get("version", "")).strip() or None
+        app.theme_color = _manifest_color(manifest.get("theme_color"))
+        app.background_color = _manifest_color(manifest.get("background_color")) or app.theme_color
+        app.display = _manifest_display(manifest.get("display"))
+
+        # `app.jsx_source` mirrors the entry the tree carries (the merged
+        # index.jsx on a clean update, the upstream bytes otherwise).
+        entry_source = source_tree["index.jsx"].decode("utf-8")
+        if existing:
+          # Apply the (possibly merged) source AND the new manifest's capability /
+          # offline fields now that the merge decision is made and the conflict
+          # short-circuit above has been skipped. Deferring these past the
+          # conflict skip keeps a served-old-code conflict from jumping
+          # capabilities or offline semantics ahead of the code actually running.
+          # Without local divergence (or for an app with no source_dir),
+          # the entry is just the upstream bytes.
+          app.jsx_source = entry_source
+          # Re-stamp the canonical identity. A no-op for a plain re-install (the
+          # row already matched on this exact value), but LOAD-BEARING for an
+          # adopted predecessor: a rename carried the predecessor's OLD canonical
+          # url and a legacy adoption carried NULL/"" — without this, the next
+          # install of the new id would miss the manifest_url match and mint a
+          # duplicate, defeating the adoption. Deferred past the conflict skip so
+          # a served-old-code conflict keeps its old provenance.
+          app.manifest_url = canonical_manifest_url
+          app.cross_app_access = perms.get("cross_app_access", app.cross_app_access)
+          app.share_with_apps = perms.get("share_with_apps", app.share_with_apps)
+          app.chat_log_access = perms.get("chat_log_access", app.chat_log_access)
+          # manage_apps and offline_capable can change across versions; default
+          # to the existing value when the manifest omits the key.
+          if "manage_apps" in perms:
+            app.manage_apps = bool(perms["manage_apps"])
+          if "offline_capable" in manifest:
+            app.offline_capable = bool(manifest["offline_capable"])
+          if "embeds_agent" in manifest:
+            app.embeds_agent = bool(manifest["embeds_agent"])
+          # P1-D: persist the offline contract block (replaces on update to match
+          # the new manifest; None if the key is absent in the new manifest).
+          app.offline_contract = manifest.get("offline") or None
+
+        # The compiled bundle is written OUT OF PLACE to a staging file and
+        # promoted into the live bundle only AFTER the DB commit (commit_actions
+        # run post-commit). So a concurrent module read never observes a missing
+        # or half-written live bundle mid-update, and a rollback or crash
+        # discards the staging file, leaving the prior bundle intact (a leaked
+        # staging file is reaped at startup and is never served). The actual
+        # compile happens below, AFTER the source files are on disk, so esbuild
+        # can bundle a multi-file app's sibling imports from the real source tree
+        # — a syntax error there raises and the outer except rolls everything
+        # back. Same transactional shape the recompile PATCH and the watcher use.
+        live_bundle = data_dir / "compiled" / f"app-{app.id}.js"
+        staged_bundle = data_dir / "compiled" / f"app-{app.id}.js.staging"
+        app.compiled_path = str(live_bundle)
+
+        source_dir_path = Path(app.source_dir or "")
+        if source_dir_path:
+          # The per-source-dir lock is ALREADY held (acquired above for the merge
+          # decision and kept across this write), so a watcher commit can't
+          # interleave and the merge result we computed is exactly what lands.
+          # Every file is written atomically, and on an UPDATE the prior copy is
+          # snapshotted to a .bak so a later rollback restores it — otherwise the
+          # watcher would compile the rolled-back (broken) update. A multi-file
+          # app's siblings must be on disk before esbuild bundles them.
+          _reject_if_source_dir_taken(
+            db, str(source_dir_path), exclude_id=app.id
+          )
+          source_dir_path.mkdir(parents=True, exist_ok=True)
+          jsx_file = source_dir_path / "index.jsx"
+          # Write the WHOLE source tree: index.jsx + every sibling + the job
+          # script, all just keys. index.jsx keeps its historical
+          # `index.jsx.bak` snapshot name (so the existing rollback expectations
+          # hold); every other file uses `<name>.bak`. Nested paths get their
+          # parent dirs created first; the job script is staged executable.
+          for rel, content in source_tree.items():
+            target = source_dir_path / rel
+            if rel == "index.jsx":
+              backup = jsx_file.with_suffix(".jsx.bak")
+            else:
+              backup = target.with_name(target.name + ".bak")
+            # Create parent dirs first so the realpath check sees the actual
+            # on-disk shape (a symlinked existing parent resolves to its target),
+            # then reject any write whose resolved path escapes the source dir.
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _assert_within(source_dir_path, target, f"source_files {rel}")
+            _write_source_file(
+              target, content, backup,
+              created_paths, rollback_actions, commit_actions,
+            )
+            if rel in exec_paths:
+              target.chmod(0o755)
+          # Reconcile the worktree to the source tree: a file the new version
+          # dropped (a sibling, an old job) must be deleted, not left on disk to
+          # be re-recorded onto `main` as permanent local divergence. Keep the
+          # tree's files plus the install-managed ones other phases own (the
+          # static-asset manifest is rewritten by _write_static_assets just
+          # below; .gitignore + init-cron.sh are managed too).
+          keep = set(source_tree) | {
+            _STATIC_ASSETS_MANIFEST, ".gitignore", "init-cron.sh",
+          }
+          _prune_dropped_source_files(
+            source_dir_path, keep, rollback_actions,
+          )
+          # Compile now that the whole source tree is on disk. Passing the real
+          # entry path makes esbuild resolve `./cards.js`-style sibling imports
+          # from the files just written; promotion of the staged bundle into the
+          # live path is a post-commit commit_action, and a compile failure here
+          # raises into the outer except which runs the source rollback actions
+          # appended above (restoring every .bak).
+          await compile_jsx(
+            app.id, entry_source,
+            out_path=staged_bundle, source_path=jsx_file,
+          )
+          rollback_actions.append(
+            lambda s=staged_bundle: s.unlink() if s.exists() else None
+          )
+          commit_actions.append(
+            lambda s=staged_bundle, l=live_bundle: os.replace(s, l)
+          )
+          _write_static_assets(
+            source_dir_path,
+            static_assets_fetched,
+            created_paths,
+            rollback_actions,
+            commit_actions,
+          )
+          # On the git path, commit the working-tree source onto the local
+          # `main` branch so the watcher's future commits build on a known base.
+          # When this update folded upstream into the served source, record it
+          # as a single-parent replay on the upstream tip (commit_replay) so the
+          # merge base advances and history stays linear — otherwise the NEXT
+          # update re-merges from the install point and conflicts spuriously
+          # even on disjoint changes. A plain local commit otherwise (fresh
+          # install, or a conflict that left local untouched). No-op when the
+          # source is unchanged.
+          if git_source_dir:
+            commit_msg = (
+              f"install: {manifest.get('name', app.slug)} "
+              f"v{manifest.get('version', 'unknown')}"
+            )
+            if merge_applied and app.upstream_commit:
+              await asyncio.to_thread(
+                app_git.commit_replay, source_dir_path,
+                app.upstream_commit, commit_msg,
+              )
+            else:
+              await asyncio.to_thread(
+                app_git.commit_local, source_dir_path, commit_msg,
+              )
+        else:
+          # No source_dir (legacy app): there is no sibling tree on disk, so
+          # compile the bare entry string with no source_path — esbuild writes it
+          # to a temp file and bundles that. The staged bundle still promotes
+          # into the live path post-commit.
+          await compile_jsx(app.id, entry_source, out_path=staged_bundle)
+          rollback_actions.append(
+            lambda s=staged_bundle: s.unlink() if s.exists() else None
+          )
+          commit_actions.append(
+            lambda s=staged_bundle, l=live_bundle: os.replace(s, l)
+          )
+    finally:
+      # Release the per-source-dir lock (held across the merge + write for the
+      # git path) BEFORE the seeds block takes app_storage_lock, preserving the
+      # documented acquisition order. A no-op for the no-source_dir legacy path.
+      if source_lock is not None:
+        source_lock.release()
+
+    if mode == "conflict":
+      # The conflict merge was materialized on disk inside the held lock above;
+      # commit the recorded upstream provenance + return so the install ENDPOINT
+      # can spawn a resolver chat. The served bundle stays the prior good one.
       db.commit()
       db.refresh(app)
       activity.log_event(
         "app_install", app_id=app.id, slug=app.slug, source=source,
       )
       return app, mode, warnings, manifest, conflict_paths, divergence
-
-    # Stamp the installed version on the row now that we know the source is
-    # actually being applied (the conflict path returned above with the old
-    # version intact). This is what GET /api/apps/ exposes, so the store and
-    # any out-of-band caller read the installed version without a side-map.
-    app.version = str(manifest.get("version", "")).strip() or None
-    app.theme_color = _manifest_color(manifest.get("theme_color"))
-    app.background_color = _manifest_color(manifest.get("background_color")) or app.theme_color
-    app.display = _manifest_display(manifest.get("display"))
-
-    if existing:
-      # Apply the (possibly merged) source AND the new manifest's capability /
-      # offline fields now that the merge decision is made and the conflict
-      # short-circuit above has already returned. Deferring these past the
-      # conflict return keeps a served-old-code conflict from jumping
-      # capabilities or offline semantics ahead of the code actually running.
-      # Without local divergence (or for an app with no source_dir),
-      # effective_source is just the upstream jsx_source.
-      app.jsx_source = effective_source
-      # Re-stamp the canonical identity. A no-op for a plain re-install (the
-      # row already matched on this exact value), but LOAD-BEARING for an
-      # adopted predecessor: a rename carried the predecessor's OLD canonical
-      # url and a legacy adoption carried NULL/"" — without this, the next
-      # install of the new id would miss the manifest_url match and mint a
-      # duplicate, defeating the adoption. Deferred past the conflict return so
-      # a served-old-code conflict keeps its old provenance.
-      app.manifest_url = canonical_manifest_url
-      app.cross_app_access = perms.get("cross_app_access", app.cross_app_access)
-      app.share_with_apps = perms.get("share_with_apps", app.share_with_apps)
-      app.chat_log_access = perms.get("chat_log_access", app.chat_log_access)
-      # manage_apps and offline_capable can change across versions; default to
-      # the existing value when the manifest omits the key.
-      if "manage_apps" in perms:
-        app.manage_apps = bool(perms["manage_apps"])
-      if "offline_capable" in manifest:
-        app.offline_capable = bool(manifest["offline_capable"])
-      if "embeds_agent" in manifest:
-        app.embeds_agent = bool(manifest["embeds_agent"])
-      # P1-D: persist the offline contract block (replaces on update to match
-      # the new manifest; None if the key is absent in the new manifest).
-      app.offline_contract = manifest.get("offline") or None
-
-    # Compile the JSX OUT OF PLACE to a staging file and promote it into the
-    # live bundle only AFTER the DB commit (commit_actions run post-commit). So
-    # a concurrent module read never observes a missing or half-written live
-    # bundle mid-update, and a rollback or crash discards the staging file,
-    # leaving the prior bundle intact (a leaked staging file is reaped at
-    # startup and is never served). Raises on syntax error -> the outer except
-    # rolls everything back. Same transactional recompile PATCH and the file
-    # watcher use (compiler.recompile_app_bundle).
-    live_bundle = data_dir / "compiled" / f"app-{app.id}.js"
-    staged_bundle = data_dir / "compiled" / f"app-{app.id}.js.staging"
-    await compile_jsx(app.id, effective_source, out_path=staged_bundle)
-    app.compiled_path = str(live_bundle)
-    rollback_actions.append(
-      lambda s=staged_bundle: s.unlink() if s.exists() else None
-    )
-    commit_actions.append(
-      lambda s=staged_bundle, l=live_bundle: os.replace(s, l)
-    )
-
-    # Write source_dir/index.jsx so the file watcher sees the app. Under the
-    # per-source-dir lock (the endpoint already holds the lifecycle lock, and
-    # the seeds' app_storage_lock below is acquired SEPARATELY, never nested
-    # with this — so no lock-order violation) a concurrent create/patch can't
-    # claim this directory mid-write. Written
-    # atomically, and on an UPDATE the prior JSX is snapshotted to a .bak so a
-    # later rollback restores it — otherwise the watcher would compile the
-    # rolled-back (broken) update.
-    source_dir_path = Path(app.source_dir or "")
-    if source_dir_path:
-      async with fs_locks.source_dir_lock(str(source_dir_path)):
-        # Refuse if a DIFFERENT app already claims this source dir (Codex
-        # review round-10 #1). The slug is freshly unique, so this only
-        # catches a manually-created app that explicitly supplied the same
-        # path; on the update path exclude_id is this very app.
-        _reject_if_source_dir_taken(
-          db, str(source_dir_path), exclude_id=app.id
-        )
-        source_dir_path.mkdir(parents=True, exist_ok=True)
-        jsx_file = source_dir_path / "index.jsx"
-        if jsx_file.exists():
-          jsx_backup = jsx_file.with_suffix(".jsx.bak")
-          if jsx_backup.exists():
-            try:
-              jsx_backup.unlink()
-            except OSError:
-              pass
-          shutil.copy2(jsx_file, jsx_backup)
-          rollback_actions.append(
-            lambda b=jsx_backup, o=jsx_file:
-              os.replace(b, o) if b.exists() else None
-          )
-          commit_actions.append(
-            lambda b=jsx_backup: b.unlink() if b.exists() else None
-          )
-        else:
-          created_paths.append(jsx_file)
-        atomic_write(jsx_file, effective_source)
-        # Write the schedule job script in the SAME transactional unit as
-        # index.jsx so a locally edited fetch.sh/build.sh survives an update
-        # (effective_job is the merged job on a clean update, the bundled job
-        # otherwise). On a conflict effective_job is left as the bundled bytes
-        # but we never reach here — the conflict branch returned above leaving
-        # the local job file untouched, exactly like index.jsx. Snapshot the
-        # prior job to a .bak on update so a rollback restores it, and write
-        # before the git commit so commit_local/commit_merge stages it onto
-        # `main`. The Phase 5 post-commit blind overwrite is gone; the cron
-        # scaffold preserves an existing job file, so this is the only writer.
-        if effective_job is not None:
-          job_file = source_dir_path / job_name
-          if job_file.exists():
-            job_backup = job_file.with_suffix(job_file.suffix + ".bak")
-            if job_backup.exists():
-              try:
-                job_backup.unlink()
-              except OSError:
-                pass
-            shutil.copy2(job_file, job_backup)
-            rollback_actions.append(
-              lambda b=job_backup, o=job_file:
-                os.replace(b, o) if b.exists() else None
-            )
-            commit_actions.append(
-              lambda b=job_backup: b.unlink() if b.exists() else None
-            )
-          else:
-            created_paths.append(job_file)
-          atomic_write(job_file, effective_job)
-          job_file.chmod(0o755)
-        _write_static_assets(
-          source_dir_path,
-          static_assets_fetched,
-          created_paths,
-          rollback_actions,
-          commit_actions,
-        )
-        # On the git path, commit the working-tree source onto the local
-        # `main` branch so the watcher's future commits build on a known
-        # base. When this update folded upstream into the served source,
-        # record the merge with the upstream tip as a second parent
-        # (commit_merge) so the merge base advances — otherwise the NEXT
-        # update re-merges from the install point and conflicts spuriously
-        # even on disjoint changes. A plain local commit otherwise (fresh
-        # install, or a conflict that left local untouched). No-op when the
-        # source is unchanged.
-        if git_source_dir:
-          commit_msg = (
-            f"install: {manifest.get('name', app.slug)} "
-            f"v{manifest.get('version', 'unknown')}"
-          )
-          if merge_applied and app.upstream_commit:
-            await asyncio.to_thread(
-              app_git.commit_merge, source_dir_path,
-              app.upstream_commit, commit_msg,
-            )
-          else:
-            await asyncio.to_thread(
-              app_git.commit_local, source_dir_path, commit_msg,
-            )
 
     # Storage seeds — fresh installs always seed; updates only fill in keys
     # that don't exist yet so user data isn't clobbered. Under the per-app lock
@@ -1708,7 +1922,11 @@ async def install_from_manifest(
   # schedule, and run-job needs the script on disk to find it. A recurring
   # crontab entry is installed here only when `schedule.default` is present.
   # `job_name` was derived once before the git block; reuse it so the cron
-  # entry points at the same file the source write produced.
+  # entry points at the same file the source write produced. A manifest may
+  # declare `schedule.default` without a `schedule.job`; fall back to the
+  # scaffold's own default basename so the crontab entry is still well-formed
+  # (it points at a stub the scaffold writes when no job was shipped).
+  cron_job_name = job_name or "job.sh"
   has_cron = bool(sched and sched.get("default"))
   # An UPDATE must CONVERGE cron state, not just add to it: the prior install
   # may have registered a crontab line this new manifest no longer wants
@@ -1743,7 +1961,7 @@ async def install_from_manifest(
         # is exactly the orphan this clears. Off the event loop (shells out).
         if drop_prior_cron:
           await asyncio.to_thread(_drop_app_cron, app_data_dir)
-        job_path = app_data_dir / job_name
+        job_path = app_data_dir / cron_job_name
         if has_cron and CRON_SCAFFOLD.exists():
           # The job script is already on disk; the scaffold preserves it and
           # installs the crontab entry pointing at it.
@@ -1761,7 +1979,7 @@ async def install_from_manifest(
             # persist a sentinel so the contract is observable + warn.
             sentinel = app_data_dir / ".cron-pending.json"
             sentinel.write_text(json.dumps({
-              "expr": sched["default"], "job": job_name,
+              "expr": sched["default"], "job": cron_job_name,
               "status": "pending — init-cron-scaffold.sh not on PATH",
             }), encoding="utf-8")
             warnings.append(

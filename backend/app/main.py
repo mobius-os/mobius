@@ -39,7 +39,7 @@ from app.routes import (
   recover_router, self_reminders_router, settings_router,
   client_error_router, standalone_router, storage_router,
   theme_router, uploads_router, platform_router,
-  published_router,
+  shell_router, published_router,
 )
 
 
@@ -405,6 +405,7 @@ from app.recover_oauth import router as recover_oauth_router  # noqa: E402
 app.include_router(recover_oauth_router)
 app.include_router(settings_router)
 app.include_router(platform_router)
+app.include_router(shell_router)
 app.include_router(uploads_router)
 app.include_router(generate_router)
 app.include_router(push_router)

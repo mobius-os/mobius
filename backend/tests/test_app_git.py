@@ -3,8 +3,9 @@
 These exercise `app_git` directly against a throwaway repo in `tmp_path`
 (no DB, no HTTP, no install endpoint) so the git plumbing is pinned in
 isolation. The clean/conflict cases are the load-bearing ones: a clean
-merge must hand back the merged bytes and a conflict must name the file
-WITHOUT touching the working tree.
+merge must hand back the merged tree oid (whose `index.jsx` carries the
+combined edits) and a conflict must name the file WITHOUT touching the
+working tree.
 """
 
 import os
@@ -121,7 +122,7 @@ def test_ensure_repo_does_not_reinit_existing_per_app_repo(tmp_path):
   repo = tmp_path / "app"
   app_git.ensure_repo(repo)
   app_git.record_upstream(
-    repo, b"INSTALLED V1\n", "https://x/mobius.json", "1.0.0",
+    repo, {"index.jsx": b"INSTALLED V1\n"}, "https://x/mobius.json", "1.0.0",
   )
   app_git.align_local_to_upstream(repo)
   _write(repo, "LOCAL V1\n")
@@ -160,7 +161,7 @@ def test_record_upstream_commits_pristine_bytes_without_touching_worktree(
   before = (repo / "index.jsx").read_text()
 
   sha = app_git.record_upstream(
-    repo, b"UPSTREAM V2", "https://x/mobius.json", "2.0.0",
+    repo, {"index.jsx": b"UPSTREAM V2"}, "https://x/mobius.json", "2.0.0",
   )
   assert sha == app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
   # The working tree (main) still holds the local edit — recording the
@@ -170,9 +171,10 @@ def test_record_upstream_commits_pristine_bytes_without_touching_worktree(
 
 def test_record_upstream_stages_job_script_on_upstream_tree(tmp_path):
   """record_upstream commits the schedule job script into the `upstream`
-  tree alongside index.jsx (when job_name + job_bytes are given), so a
-  later update can three-way-merge a locally edited job. The checked-out
-  `main` working tree is left untouched — only `upstream` advances."""
+  tree alongside index.jsx (when the job is passed as another key in `files`
+  and named in `exec_paths`), so a later update can three-way-merge a locally
+  edited job. The checked-out `main` working tree is left untouched — only
+  `upstream` advances."""
   repo = tmp_path / "app"
   app_git.ensure_repo(repo)
   _write(repo, "LOCAL EDIT")
@@ -180,8 +182,10 @@ def test_record_upstream_stages_job_script_on_upstream_tree(tmp_path):
   before = (repo / "index.jsx").read_text()
 
   app_git.record_upstream(
-    repo, b"UPSTREAM V2", "https://x/mobius.json", "2.0.0",
-    job_name="fetch.sh", job_bytes=b"#!/bin/bash\necho upstream\n",
+    repo,
+    {"index.jsx": b"UPSTREAM V2", "fetch.sh": b"#!/bin/bash\necho upstream\n"},
+    "https://x/mobius.json", "2.0.0",
+    exec_paths=frozenset({"fetch.sh"}),
   )
 
   # The job script is in the upstream tree...
@@ -198,16 +202,18 @@ def test_record_upstream_stages_job_script_on_upstream_tree(tmp_path):
 
 
 def test_merge_clean_carries_local_job_edit_forward(tmp_path):
-  """A locally edited job script flows through a clean merge: merge_upstream
-  returns merged_job carrying the local edit when an upstream v2 changes a
-  DISJOINT region of the same script."""
+  """A locally edited job script flows through a clean merge: the merged tree
+  carries the local edit forward when an upstream v2 changes a DISJOINT region
+  of the same script. The job is just another key in the merged tree, read via
+  read_merged_tree like any other file."""
   repo = tmp_path / "app"
   base_jsx = b"export default () => null\n"
   base_job = "#!/bin/bash\nstep one\nstep two\nstep three\nstep four\nstep five\n"
   app_git.ensure_repo(repo)
   app_git.record_upstream(
-    repo, base_jsx, "https://x/mobius.json", "1.0.0",
-    job_name="fetch.sh", job_bytes=base_job.encode(),
+    repo, {"index.jsx": base_jsx, "fetch.sh": base_job.encode()},
+    "https://x/mobius.json", "1.0.0",
+    exec_paths=frozenset({"fetch.sh"}),
   )
   app_git.align_local_to_upstream(repo)
 
@@ -218,15 +224,17 @@ def test_merge_clean_carries_local_job_edit_forward(tmp_path):
   app_git.commit_local(repo, "local job edit")
   # Upstream v2 edits the LAST step — disjoint from the local change.
   app_git.record_upstream(
-    repo, base_jsx, "https://x/mobius.json", "2.0.0",
-    job_name="fetch.sh",
-    job_bytes=base_job.replace("step five", "step FIVE UPSTREAM").encode(),
+    repo,
+    {"index.jsx": base_jsx,
+     "fetch.sh": base_job.replace("step five", "step FIVE UPSTREAM").encode()},
+    "https://x/mobius.json", "2.0.0",
+    exec_paths=frozenset({"fetch.sh"}),
   )
 
-  result = app_git.merge_upstream(repo, job_name="fetch.sh")
+  result = app_git.merge_upstream(repo)
   assert result.status == "clean"
-  assert result.merged_job is not None
-  merged_job = result.merged_job.decode()
+  tree = app_git.read_merged_tree(repo, result.merged_tree_oid)
+  merged_job = tree["fetch.sh"].decode()
   assert "step ONE LOCAL" in merged_job       # local edit carried forward
   assert "step FIVE UPSTREAM" in merged_job   # upstream change applied
 
@@ -262,7 +270,9 @@ def test_merge_clean_when_only_the_job_exec_bit_differs(tmp_path):
   app_git.ensure_repo(repo)
   # v1 install predates job-script tracking — no job recorded on upstream, so
   # the merge base carries no fetch.sh.
-  app_git.record_upstream(repo, base_jsx, "https://x/mobius.json", "1.0.0")
+  app_git.record_upstream(
+    repo, {"index.jsx": base_jsx}, "https://x/mobius.json", "1.0.0",
+  )
   app_git.align_local_to_upstream(repo)
   # The agent's job script lands on disk EXECUTABLE (the install chmod 0o755),
   # and commit_local records it at 100755 on main.
@@ -272,15 +282,16 @@ def test_merge_clean_when_only_the_job_exec_bit_differs(tmp_path):
   # v2 update now tracks the job with IDENTICAL bytes. The only possible delta
   # against main is the recorded mode.
   app_git.record_upstream(
-    repo, base_jsx, "https://x/mobius.json", "2.0.0",
-    job_name="fetch.sh", job_bytes=job,
+    repo, {"index.jsx": base_jsx, "fetch.sh": job},
+    "https://x/mobius.json", "2.0.0",
+    exec_paths=frozenset({"fetch.sh"}),
   )
 
   # Both branches must record the job EXECUTABLE so no mode skew exists.
   assert _job_mode(repo, app_git.LOCAL_BRANCH, "fetch.sh") == "100755"
   assert _job_mode(repo, app_git.UPSTREAM_BRANCH, "fetch.sh") == "100755"
 
-  result = app_git.merge_upstream(repo, job_name="fetch.sh")
+  result = app_git.merge_upstream(repo)
   assert result.status == "clean"
   assert not result.conflict_paths
 
@@ -295,8 +306,11 @@ def test_record_upstream_keeps_index_jsx_non_executable(tmp_path):
   repo = tmp_path / "app"
   app_git.ensure_repo(repo)
   app_git.record_upstream(
-    repo, b"export default () => null\n", "https://x/mobius.json", "1.0.0",
-    job_name="fetch.sh", job_bytes=b"#!/bin/bash\necho hi\n",
+    repo,
+    {"index.jsx": b"export default () => null\n",
+     "fetch.sh": b"#!/bin/bash\necho hi\n"},
+    "https://x/mobius.json", "1.0.0",
+    exec_paths=frozenset({"fetch.sh"}),
   )
 
   assert _job_mode(repo, app_git.UPSTREAM_BRANCH, "index.jsx") == "100644"
@@ -315,32 +329,40 @@ def test_recorded_job_checks_out_executable(tmp_path):
   repo = tmp_path / "app"
   app_git.ensure_repo(repo)
   app_git.record_upstream(
-    repo, b"export default () => null\n", "https://x/mobius.json", "1.0.0",
-    job_name="fetch.sh", job_bytes=b"#!/bin/bash\necho hi\n",
+    repo,
+    {"index.jsx": b"export default () => null\n",
+     "fetch.sh": b"#!/bin/bash\necho hi\n"},
+    "https://x/mobius.json", "1.0.0",
+    exec_paths=frozenset({"fetch.sh"}),
   )
   app_git.align_local_to_upstream(repo)
 
   assert (repo / "fetch.sh").stat().st_mode & stat.S_IXUSR
 
 
-def test_merge_clean_without_job_name_leaves_merged_job_none(tmp_path):
-  """Omitting job_name keeps merged_job None — the job script is only read
-  back when the caller asks for it (a manifest with no schedule.job)."""
+def test_merge_clean_tree_has_no_job_when_none_recorded(tmp_path):
+  """When no job script was ever recorded, the clean merge's tree carries
+  index.jsx but no fetch.sh — the job is just a tree key, so a manifest with
+  no schedule.job simply never puts one in the merged tree."""
   repo = tmp_path / "app"
   base = "line A\nline B\nline C\n"
   app_git.ensure_repo(repo)
-  app_git.record_upstream(repo, base.encode(), "https://x/mobius.json", "1.0.0")
+  app_git.record_upstream(
+    repo, {"index.jsx": base.encode()}, "https://x/mobius.json", "1.0.0",
+  )
   app_git.align_local_to_upstream(repo)
   _write(repo, "line A LOCAL\nline B\nline C\n")
   app_git.commit_local(repo, "local edit")
   app_git.record_upstream(
-    repo, b"line A\nline B\nline C UPSTREAM\n", "https://x/mobius.json", "2.0.0",
+    repo, {"index.jsx": b"line A\nline B\nline C UPSTREAM\n"},
+    "https://x/mobius.json", "2.0.0",
   )
 
   result = app_git.merge_upstream(repo)
   assert result.status == "clean"
-  assert result.merged_bytes is not None
-  assert result.merged_job is None
+  tree = app_git.read_merged_tree(repo, result.merged_tree_oid)
+  assert "index.jsx" in tree
+  assert "fetch.sh" not in tree
 
 
 def _install(repo: Path, bytes_v1: bytes) -> None:
@@ -348,14 +370,16 @@ def _install(repo: Path, bytes_v1: bytes) -> None:
   `upstream`, then align `main` to it so the working branch starts at the
   installed version (a shared merge base for the next update)."""
   app_git.ensure_repo(repo)
-  app_git.record_upstream(repo, bytes_v1, "https://x/mobius.json", "1.0.0")
+  app_git.record_upstream(
+    repo, {"index.jsx": bytes_v1}, "https://x/mobius.json", "1.0.0",
+  )
   app_git.align_local_to_upstream(repo)
 
 
 def test_merge_clean_returns_merged_bytes(tmp_path):
   """Install v1, edit one region locally, then an upstream v2 edits a
-  DISJOINT region — the three-way merge is clean and hands back the
-  combined bytes (local edit + upstream edit)."""
+  DISJOINT region — the three-way merge is clean and the merged tree's
+  index.jsx carries the combined bytes (local edit + upstream edit)."""
   repo = tmp_path / "app"
   base = "line A\nline B\nline C\nline D\nline E\n"
   _install(repo, base.encode())
@@ -366,23 +390,22 @@ def test_merge_clean_returns_merged_bytes(tmp_path):
   # Upstream v2 edits line E — disjoint from the local change.
   app_git.record_upstream(
     repo,
-    b"line A\nline B\nline C\nline D\nline E UPSTREAM\n",
+    {"index.jsx": b"line A\nline B\nline C\nline D\nline E UPSTREAM\n"},
     "https://x/mobius.json",
     "2.0.0",
   )
 
   result = app_git.merge_upstream(repo)
   assert result.status == "clean"
-  assert result.merged_bytes is not None
-  merged = result.merged_bytes.decode()
+  tree = app_git.read_merged_tree(repo, result.merged_tree_oid)
+  merged = tree["index.jsx"].decode()
   assert "line A LOCAL" in merged
   assert "line E UPSTREAM" in merged
 
 
 def test_merge_clean_exposes_full_merged_tree(tmp_path):
   """A clean merge exposes the merged tree oid; read_merged_tree reads the
-  whole tree back and index.jsx matches merged_bytes (fast path and tree
-  agree)."""
+  whole tree back, with index.jsx carrying the combined edits."""
   repo = tmp_path / "app"
   base = "line A\nline B\nline C\nline D\nline E\n"
   _install(repo, base.encode())
@@ -390,7 +413,7 @@ def test_merge_clean_exposes_full_merged_tree(tmp_path):
   app_git.commit_local(repo, "local edit A")
   app_git.record_upstream(
     repo,
-    b"line A\nline B\nline C\nline D\nline E UPSTREAM\n",
+    {"index.jsx": b"line A\nline B\nline C\nline D\nline E UPSTREAM\n"},
     "https://x/mobius.json",
     "2.0.0",
   )
@@ -402,7 +425,6 @@ def test_merge_clean_exposes_full_merged_tree(tmp_path):
   # The whole tree comes back (index.jsx plus the repo's tracked .gitignore),
   # not just the entry file — that is the point of read_merged_tree.
   assert "index.jsx" in tree
-  assert tree["index.jsx"] == result.merged_bytes
   assert b"line A LOCAL" in tree["index.jsx"]
   assert b"line E UPSTREAM" in tree["index.jsx"]
 
@@ -453,13 +475,14 @@ def test_merge_conflict_names_paths_and_leaves_worktree_intact(tmp_path):
   app_git.commit_local(repo, "local edit")
   worktree_before = (repo / "index.jsx").read_text()
   app_git.record_upstream(
-    repo, b"shared line UPSTREAM\n", "https://x/mobius.json", "2.0.0",
+    repo, {"index.jsx": b"shared line UPSTREAM\n"},
+    "https://x/mobius.json", "2.0.0",
   )
 
   result = app_git.merge_upstream(repo)
   assert result.status == "conflict"
   assert "index.jsx" in result.conflict_paths
-  assert result.merged_bytes is None
+  assert result.merged_tree_oid is None
   # The verdict must NOT have written conflict markers into the live file.
   assert (repo / "index.jsx").read_text() == worktree_before
 
@@ -474,7 +497,8 @@ def test_start_conflict_merge_leaves_real_markers_and_merge_head(tmp_path):
   app_git.commit_local(repo, "local edit")
   local_before = (repo / "index.jsx").read_text()
   app_git.record_upstream(
-    repo, b"shared line UPSTREAM\n", "https://x/mobius.json", "2.0.0",
+    repo, {"index.jsx": b"shared line UPSTREAM\n"},
+    "https://x/mobius.json", "2.0.0",
   )
   # The in-memory verdict agrees it's a conflict.
   assert app_git.merge_upstream(repo).status == "conflict"
@@ -495,14 +519,16 @@ def test_start_conflict_merge_leaves_real_markers_and_merge_head(tmp_path):
 
 def test_resolved_conflict_commit_advances_base(tmp_path):
   """After start_conflict_merge, resolving the markers + commit_local
-  finalizes a 2-parent merge so upstream becomes an ancestor of main — the
-  next update merges clean (the B1 base-advance the watcher gives for free)."""
+  finalizes a single-parent replay (linear) so upstream becomes an ancestor
+  of main — the next update merges clean (the B1 base-advance the watcher
+  gives for free)."""
   repo = tmp_path / "app"
   _install(repo, b"l1\nshared\nl3\n")
   _write(repo, "l1\nshared LOCAL\nl3\n")
   app_git.commit_local(repo, "local edit")
   app_git.record_upstream(
-    repo, b"l1\nshared UPSTREAM\nl3\n", "https://x/mobius.json", "2.0.0",
+    repo, {"index.jsx": b"l1\nshared UPSTREAM\nl3\n"},
+    "https://x/mobius.json", "2.0.0",
   )
   app_git.start_conflict_merge(repo)
   # Agent resolves the markers (keeps both sides), marker-free.
@@ -511,8 +537,137 @@ def test_resolved_conflict_commit_advances_base(tmp_path):
 
   assert sha is not None
   assert not (repo / ".git" / "MERGE_HEAD").exists()
+  # The finalize is single-parent (linear history), not a 2-parent merge.
+  assert app_git._run(
+    repo, "rev-parse", "--verify", "-q", f"{app_git.LOCAL_BRANCH}^2",
+    check=False,
+  ).returncode != 0
   # upstream is now an ancestor of main → a re-merge is clean (no re-conflict).
   assert app_git.merge_upstream(repo).status == "clean"
+
+
+def _has_second_parent(repo: Path) -> bool:
+  """Whether main's tip is a merge commit (has a second parent).
+
+  `git rev-parse --verify -q main^2` exits non-zero when `main^2` does not
+  resolve (the tip is single-parent), so a linear replay history makes this
+  False.
+  """
+  return app_git._run(
+    repo, "rev-parse", "--verify", "-q", f"{app_git.LOCAL_BRANCH}^2",
+    check=False,
+  ).returncode == 0
+
+
+def _apply_clean_update(
+  repo: Path, new_index: bytes, version: str,
+) -> str | None:
+  """Run a full clean-update apply the way install.py does, then replay.
+
+  Records `new_index` as the next upstream version, takes the in-memory
+  clean verdict, materialises the whole merged tree back onto disk, and
+  finalizes with `commit_replay` parented on the NEW upstream tip. Returns
+  the replay sha (None if there was nothing to record). Asserts the verdict
+  was clean so a caller that expected a clean update fails loudly here.
+  """
+  app_git.record_upstream(
+    repo, {"index.jsx": new_index}, "https://x/mobius.json", version,
+  )
+  new_upstream = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  merge = app_git.merge_upstream(repo)
+  assert merge.status == "clean", merge.conflict_paths
+  for rel, data in app_git.read_merged_tree(repo, merge.merged_tree_oid).items():
+    (repo / rel).write_bytes(data)
+  return app_git.commit_replay(repo, new_upstream, f"update {version}")
+
+
+def test_clean_update_replay_is_linear_and_advances_base(tmp_path):
+  """A clean update via commit_replay keeps history linear (no merge commit)
+  and still makes upstream an ancestor of main, with both the local edit and
+  the disjoint upstream change present in the served source."""
+  repo = tmp_path / "app"
+  base = "line A\nline B\nline C\nline D\nline E\n"
+  _install(repo, base.encode())
+  # Local edits line A; upstream v2 edits the disjoint line E.
+  _write(repo, "line A LOCAL\nline B\nline C\nline D\nline E\n")
+  app_git.commit_local(repo, "local edit A")
+
+  sha = _apply_clean_update(
+    repo, b"line A\nline B\nline C\nline D\nline E UPSTREAM\n", "2.0.0",
+  )
+
+  assert sha is not None
+  # main is linear: its tip has no second parent.
+  assert _has_second_parent(repo) is False
+  # upstream is an exact ancestor of main (the base advanced for the next update).
+  assert app_git._run(
+    repo, "merge-base", "--is-ancestor", app_git.UPSTREAM_BRANCH,
+    app_git.LOCAL_BRANCH, check=False,
+  ).returncode == 0
+  # Both the local edit and the disjoint upstream change landed in the source.
+  merged = (repo / "index.jsx").read_text()
+  assert "line A LOCAL" in merged
+  assert "line E UPSTREAM" in merged
+  assert "<<<<<<<" not in merged
+
+
+def test_clean_update_replay_second_update_does_not_conflict(tmp_path):
+  """A SECOND clean update after the first must merge cleanly on a disjoint
+  change: the first replay advanced the base to v2, so v3's three-way merge
+  diffs only the genuinely-new upstream delta — never re-litigates v1->v2."""
+  repo = tmp_path / "app"
+  base = "line A\nline B\nline C\nline D\nline E\n"
+  _install(repo, base.encode())
+  _write(repo, "line A LOCAL\nline B\nline C\nline D\nline E\n")
+  app_git.commit_local(repo, "local edit A")
+
+  # v2 edits line E (disjoint from the local line-A edit).
+  assert _apply_clean_update(
+    repo, b"line A\nline B\nline C\nline D\nline E UPSTREAM\n", "2.0.0",
+  ) is not None
+  # v3 edits line E AGAIN. With the base advanced to v2 this is still disjoint
+  # from the local line-A edit, so the verdict is clean — not a spurious
+  # conflict against the stale install-point base.
+  sha = _apply_clean_update(
+    repo, b"line A\nline B\nline C\nline D\nline E UPSTREAM v3\n", "3.0.0",
+  )
+
+  assert sha is not None
+  assert _has_second_parent(repo) is False
+  merged = (repo / "index.jsx").read_text()
+  assert "line A LOCAL" in merged       # local edit still preserved
+  assert "line E UPSTREAM v3" in merged  # latest upstream landed
+  assert "<<<<<<<" not in merged
+
+
+def test_resolved_conflict_finalize_single_parent_clears_merge_head(tmp_path):
+  """A conflict update resolved on disk and finalized via commit_local lands
+  as a single-parent replay: main^2 does not resolve, upstream is an ancestor
+  of main, and .git/MERGE_HEAD (plus MERGE_MSG/MERGE_MODE) is gone."""
+  repo = tmp_path / "app"
+  _install(repo, b"l1\nshared\nl3\n")
+  _write(repo, "l1\nshared LOCAL\nl3\n")
+  app_git.commit_local(repo, "local edit")
+  app_git.record_upstream(
+    repo, {"index.jsx": b"l1\nshared UPSTREAM\nl3\n"},
+    "https://x/mobius.json", "2.0.0",
+  )
+  paths = app_git.start_conflict_merge(repo)
+  assert "index.jsx" in paths
+  assert (repo / ".git" / "MERGE_HEAD").exists()
+  # Agent resolves the markers on disk (keeps both sides), marker-free.
+  _write(repo, "l1\nshared LOCAL+UPSTREAM\nl3\n")
+
+  sha = app_git.commit_local(repo, "resolved merge")
+
+  assert sha is not None
+  assert _has_second_parent(repo) is False
+  assert app_git._run(
+    repo, "merge-base", "--is-ancestor", app_git.UPSTREAM_BRANCH,
+    app_git.LOCAL_BRANCH, check=False,
+  ).returncode == 0
+  for name in ("MERGE_HEAD", "MERGE_MSG", "MERGE_MODE"):
+    assert not (repo / ".git" / name).exists()
 
 
 def _stage_non_entry_conflict(repo: Path) -> str:
@@ -527,8 +682,9 @@ def _stage_non_entry_conflict(repo: Path) -> str:
   base_job = b"#!/bin/bash\nshared step\n"
   app_git.ensure_repo(repo)
   app_git.record_upstream(
-    repo, base_jsx, "https://x/mobius.json", "1.0.0",
-    job_name="fetch.sh", job_bytes=base_job,
+    repo, {"index.jsx": base_jsx, "fetch.sh": base_job},
+    "https://x/mobius.json", "1.0.0",
+    exec_paths=frozenset({"fetch.sh"}),
   )
   app_git.align_local_to_upstream(repo)
   # Agent edits the job (and only the job) locally on main.
@@ -536,10 +692,11 @@ def _stage_non_entry_conflict(repo: Path) -> str:
   app_git.commit_local(repo, "local job edit")
   # Upstream v2 edits the SAME line of the job — index.jsx is unchanged.
   app_git.record_upstream(
-    repo, base_jsx, "https://x/mobius.json", "2.0.0",
-    job_name="fetch.sh", job_bytes=b"#!/bin/bash\nUPSTREAM step\n",
+    repo, {"index.jsx": base_jsx, "fetch.sh": b"#!/bin/bash\nUPSTREAM step\n"},
+    "https://x/mobius.json", "2.0.0",
+    exec_paths=frozenset({"fetch.sh"}),
   )
-  assert app_git.merge_upstream(repo, job_name="fetch.sh").status == "conflict"
+  assert app_git.merge_upstream(repo).status == "conflict"
   app_git.start_conflict_merge(repo)
   return "#!/bin/bash\nRESOLVED step\n"
 
@@ -632,8 +789,8 @@ def test_commit_local_refuses_to_finalize_non_entry_marker_conflict(tmp_path):
 
 def test_commit_local_finalizes_once_markers_resolved(tmp_path):
   """Once ALL markers are resolved (agent writes the file clean + it's
-  staged), commit_local DOES finalize the 2-parent merge: HEAD advances,
-  MERGE_HEAD clears, and the clean bytes are committed."""
+  staged), commit_local DOES finalize as a single-parent replay: HEAD
+  advances, MERGE_HEAD clears, and the clean bytes are committed."""
   repo = tmp_path / "app"
   resolved = _stage_non_entry_conflict(repo)
   head_before = app_git.head_sha(repo, app_git.LOCAL_BRANCH)
@@ -644,8 +801,13 @@ def test_commit_local_finalizes_once_markers_resolved(tmp_path):
   assert sha is not None
   assert sha != head_before
   assert not (repo / ".git" / "MERGE_HEAD").exists()
-  # The finalize is a true 2-parent merge (upstream became an ancestor).
-  assert app_git.merge_upstream(repo, job_name="fetch.sh").status == "clean"
+  # The finalize is single-parent (linear), so `main^2` does not resolve.
+  assert app_git._run(
+    repo, "rev-parse", "--verify", "-q", f"{app_git.LOCAL_BRANCH}^2",
+    check=False,
+  ).returncode != 0
+  # upstream still became an ancestor of main, so a re-merge is clean.
+  assert app_git.merge_upstream(repo).status == "clean"
   committed = app_git._run(
     repo, "show", f"{app_git.LOCAL_BRANCH}:fetch.sh",
   ).stdout
@@ -692,7 +854,7 @@ def test_align_local_to_upstream_resets_main_to_upstream_tip(tmp_path):
   repo = tmp_path / "app"
   app_git.ensure_repo(repo)
   app_git.record_upstream(
-    repo, b"INSTALLED V1\n", "https://x/mobius.json", "1.0.0",
+    repo, {"index.jsx": b"INSTALLED V1\n"}, "https://x/mobius.json", "1.0.0",
   )
   app_git.align_local_to_upstream(repo)
   assert app_git.head_sha(repo, app_git.LOCAL_BRANCH) == app_git.head_sha(

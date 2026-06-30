@@ -96,9 +96,13 @@ def _audit_or_repair_app(
     )
 
   base_bytes = index.read_bytes()
+  # Seed the migrated base as a one-file tree: an app that predates the per-app
+  # git model (the only case this script repairs) is single-file index.jsx —
+  # multi-file apps always install WITH git. record_upstream takes the complete
+  # tree, so `index.jsx` is the single key here.
   app_git.record_upstream(
     source_dir,
-    base_bytes,
+    {"index.jsx": base_bytes},
     app.manifest_url or "mobius://repair-app-git-repos",
     "migrated-base",
   )

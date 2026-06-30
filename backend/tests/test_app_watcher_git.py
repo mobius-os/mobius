@@ -38,7 +38,7 @@ async def test_watcher_commits_successful_recompile_and_noops_unchanged(
 
   app_git.ensure_repo(src)
   app_git.record_upstream(
-    src, initial.encode(), "https://x/mobius.json", "1.0.0",
+    src, {"index.jsx": initial.encode()}, "https://x/mobius.json", "1.0.0",
   )
   app_git.align_local_to_upstream(src)
   before = app_git.head_sha(src, app_git.LOCAL_BRANCH)
@@ -95,17 +95,20 @@ async def test_watcher_holds_prior_bundle_while_non_entry_conflict_unresolved(
   # edits the SAME job line → a NON-entry conflict (index.jsx is unchanged).
   app_git.ensure_repo(src)
   app_git.record_upstream(
-    src, base_jsx.encode(), "https://x/mobius.json", "1.0.0",
-    job_name="fetch.sh", job_bytes=base_job.encode(),
+    src, {"index.jsx": base_jsx.encode(), "fetch.sh": base_job.encode()},
+    "https://x/mobius.json", "1.0.0",
+    exec_paths=frozenset({"fetch.sh"}),
   )
   app_git.align_local_to_upstream(src)
   (src / "fetch.sh").write_text("#!/bin/bash\nLOCAL step\n")
   app_git.commit_local(src, "local job edit")
   app_git.record_upstream(
-    src, base_jsx.encode(), "https://x/mobius.json", "2.0.0",
-    job_name="fetch.sh", job_bytes=b"#!/bin/bash\nUPSTREAM step\n",
+    src,
+    {"index.jsx": base_jsx.encode(), "fetch.sh": b"#!/bin/bash\nUPSTREAM step\n"},
+    "https://x/mobius.json", "2.0.0",
+    exec_paths=frozenset({"fetch.sh"}),
   )
-  assert app_git.merge_upstream(src, job_name="fetch.sh").status == "conflict"
+  assert app_git.merge_upstream(src).status == "conflict"
   app_git.start_conflict_merge(src)
   assert (src / ".git" / "MERGE_HEAD").exists()
 

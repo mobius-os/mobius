@@ -44,6 +44,45 @@ Two invariants follow. (1) **Möbius never patches the kernel from inside the co
 
 **lodash is pinned to 4.18.1 via `overrides`.** `@openai/apps-sdk-ui` pulls lodash transitively — only through its `Slider` component, which the shell does not import. The 4.17.x line sat unfixed against several advisories for a long stretch; 4.18.x restored maintenance and patched them, so `frontend/package.json` `overrides` forces the transitive lodash to 4.18.1 (`npm audit` is clean). As defense-in-depth, `frontend/src/lib/__tests__/appsSdkLodash.test.js` also fails if the shell ever imports `Slider`, which keeps lodash tree-shaken out of the shipped bundle regardless of the pin.
 
+## Self-update model — `upstream` / `main`, rebase on update
+
+Möbius is the rare app whose own agent edits its live code: the in-product agent customizes its mini-apps (`/data/apps/<slug>`), its backend overlay (`/data/platform`), and its shell (`/data/shell`) while the platform runs. A deploy then ships a *new pristine version* of that same code. One small model keeps every such surface up to date without clobbering the owner's customizations and without a deploy ever silently dropping them.
+
+**Two branches per surface, and the update is a rebase.** Each updatable surface is a git repo with:
+
+- **`upstream`** — pristine history (`A → B → …`). The exact bytes of each *released* version, committed only by the installer / image, never the agent.
+- **`main`** — the owner/agent's edits (`X`), and what the surface actually serves. It sits on top of the `upstream` version it was last updated to.
+
+So the repo is `A → X` (release `A`, then local edits `X`). An update fetches the new release and does exactly what a developer would:
+
+```
+record the new release as a new upstream commit:   A → B   (and  A → X  locally)
+rebase the local edits onto it:                    A → B → X
+```
+
+The owner's customizations end up *on top of* the current release, as if they'd just been made against it. Mechanically: commit any stray working-tree changes onto `main` first (so the rebase has nothing uncommitted to trip over), advance `upstream` to `B`, then `git rebase upstream main`.
+
+- **Clean rebase** → the surface recompiles (apps) or restarts (backend) onto the new code.
+- **Conflict** (the release and the local edits touched the same lines) → the rebase pauses with ordinary git conflict markers and Möbius **opens an agent chat to resolve it** (`git rebase --continue`), exactly as an app conflict already works. The owner never hand-merges.
+
+**"Update available" is an ancestry question, not a version-string compare:** an update is available iff `upstream`'s tip is **not yet an ancestor of `main`** (a new release hasn't been rebased in). This is the content question — "does my working tree already contain this release" — that a `image_sha != recorded_sha` proxy can't answer on a customized instance, and it's what eliminates phantom "update available" rows after a deploy that changed nothing the owner hadn't already.
+
+### The recovery/auth files are NOT in the model — they're gitignored
+
+The one thing that makes a self-editing platform tricky is the recovery/core island (`protected-files.txt`: the `recover_*` modules, `main.py`/`auth.py`/`database.py`/`config.py`/`models.py`, `entrypoint.sh`/`recovery_restore.sh`, and the auth-handling shell components `LoginForm`/`SetupWizard`/`ProviderAuth`). These are root-owned `chmod 444`; the `mobius` user that runs the updater genuinely cannot write them.
+
+The simple answer is that **they are not part of the git model at all** — each surface's `.gitignore` excludes them. They live on disk, managed wholly by the image (the root entrypoint refreshes them from the baked floor on every boot). Because they're untracked, neither `record upstream` nor `git rebase` ever touches them, so there is no special "protected-file" machinery in the update engine — the rebase only ever moves agent-editable files, and the recovery island updates the one way it should: via an image deploy. (Recovery therefore stays agent-proof *and* current with the image.)
+
+### Where each surface stands
+
+| Surface | Repo | On the model | Engine |
+|---------|------|------------------|--------|
+| **Mini-apps** (`/data/apps/<slug>`) | `.git` per app (installed apps; agent-built bespoke apps have no upstream to track) | yes — whole source tree on `upstream`, single-parent replay, so **multi-file apps update cleanly** | `backend/app/app_git.py` + `install.py` |
+| **Platform backend** (`/data/platform`) | `.git`, recovery files gitignored | yes — thin caller of `app_git`; ancestry availability (no sha proxy); an idempotent migration untracks recovery files | `backend/app/platform_update.py` |
+| **Shell** (`/data/shell`) | `.git`, auth components gitignored | yes — thin caller of `app_git`, seeded at boot so existing agent edits become the local delta | `backend/app/shell_update.py` |
+
+All three converge on **one** small tree-aware engine (`app_git.py`): `record_upstream` commits the *whole source tree* on `upstream`, `merge_upstream` verdicts a clean-vs-conflict via `git merge-tree`, and a clean apply replays the merged tree as a **single-parent** commit on top of `upstream` (linear `A→B→X`). The platform and shell are thin callers of that primitive — they pass their own source tree and let their `.gitignore` keep recovery/auth files out of the model. Availability everywhere is the ancestry check (`upstream` not an ancestor of the working branch); there is no sha-string proxy and no per-surface protected-file scaffolding.
+
 ## Backend (`backend/app/`)
 
 FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serving). `routes/__init__.py` is a crash-tolerant import scaffold: every router is loaded through `_load(name)`, and an import failure returns a 503 stub instead of killing uvicorn, so `/recover/chat` stays reachable. To add a route, write the module under `routes/`, expose a `router`, and register it in `routes/__init__.py` (both the `_load(...)` line and `__all__`), then mount it in `main.py`.
