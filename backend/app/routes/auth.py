@@ -186,6 +186,16 @@ def setup(
   return schemas.TokenResponse(access_token=token)
 
 
+# Bcrypt-verifying against this dummy hash when the username is unknown makes the
+# missing-user path cost the same as a wrong-password path (anti-enumeration —
+# the old short-circuit skipped bcrypt entirely for unknown users, leaking
+# existence by timing). Computed at import with the real hasher so the cost
+# factor matches stored hashes.
+_DUMMY_PASSWORD_HASH = auth.hash_password(
+  "login-timing-equalizer-not-a-real-credential"
+)
+
+
 @router.post("/token", response_model=schemas.TokenResponse)
 @_limiter.limit("5/minute")
 def login(
@@ -200,9 +210,13 @@ def login(
     .filter(models.Owner.username == form.username)
     .first()
   )
-  if not owner or not auth.verify_password(
-    form.password, owner.hashed_password
-  ):
+  # Constant-time: always run bcrypt so a missing username can't be told from a
+  # wrong password by response timing. Verifying against a dummy hash when the
+  # owner is absent keeps the cost identical; the boolean is then discarded.
+  password_ok = auth.verify_password(
+    form.password, owner.hashed_password if owner else _DUMMY_PASSWORD_HASH
+  )
+  if not owner or not password_ok:
     _record_login_failure(form.username)
     raise HTTPException(
       status_code=401,

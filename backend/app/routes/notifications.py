@@ -9,7 +9,12 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.database import get_db
-from app.deps import get_current_owner_or_app, reject_cross_site
+from app.deps import (
+  Principal,
+  get_current_owner,
+  get_principal,
+  reject_cross_site,
+)
 from app.push import notify_owner
 from app.schemas import NotificationOut, NotificationSendRequest
 
@@ -25,20 +30,27 @@ limiter = Limiter(key_func=get_remote_address)
 def send_notification(
   request: Request,
   body: NotificationSendRequest,
-  owner: models.Owner = Depends(get_current_owner_or_app),
+  principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
 ):
   """Send a push notification to all owner subscriptions."""
   actions_list = (
     [a.model_dump() for a in body.actions] if body.actions else None
   )
+  # An app-scoped caller can't spoof the notification's source: force it to be
+  # attributed to the app itself, so a mini-app can't masquerade as the system
+  # or another app in a push (a phishing vector). Owner tokens keep full control.
+  if principal.app_id is not None:
+    source_type, source_id = "app", str(principal.app_id)
+  else:
+    source_type, source_id = body.source_type, body.source_id
   notification_id = notify_owner(
     db,
-    owner.id,
+    principal.owner.id,
     title=body.title,
     body=body.body,
-    source_type=body.source_type,
-    source_id=body.source_id,
+    source_type=source_type,
+    source_id=source_id,
     icon=body.icon,
     target=body.target,
     actions=actions_list,
@@ -48,7 +60,9 @@ def send_notification(
 
 @router.get("")
 def list_notifications(
-  owner: models.Owner = Depends(get_current_owner_or_app),
+  # Owner-only: the notification history is the owner's. App tokens have no
+  # need to read it and previously could enumerate the full history.
+  owner: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
   limit: int = Query(20, ge=1, le=100),
   before: str | None = Query(None),

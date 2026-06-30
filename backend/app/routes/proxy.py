@@ -31,6 +31,35 @@ class ProxyPostRequest(BaseModel):
   content_type: str = "application/x-www-form-urlencoded"
 
 
+async def _capped_response(
+  client: httpx.AsyncClient, req: httpx.Request
+) -> Response:
+  """Sends `req` streaming and reads at most `_MAX_BYTES` into memory. The prior
+  code read the FULL body (`r.content`) before slicing, so a huge or malicious
+  upstream response could exhaust process memory before the cap ever applied.
+  This stops at the cap and drops the rest."""
+  try:
+    r = await client.send(req, stream=True)
+  except Exception as exc:
+    raise HTTPException(status_code=502, detail=str(exc))
+  try:
+    buf = bytearray()
+    async for chunk in r.aiter_bytes():
+      # Append only up to the cap so the buffer is STRICTLY bounded by _MAX_BYTES
+      # (extending the whole chunk first could overshoot by a chunk's worth).
+      room = _MAX_BYTES - len(buf)
+      buf.extend(chunk[:room])
+      if len(buf) >= _MAX_BYTES:
+        break
+    return Response(
+      content=bytes(buf),
+      status_code=r.status_code,
+      media_type=r.headers.get("content-type", "application/octet-stream"),
+    )
+  finally:
+    await r.aclose()
+
+
 @router.get("", dependencies=[Depends(reject_cross_site)])
 async def proxy_get(
   url: str,
@@ -39,18 +68,10 @@ async def proxy_get(
   """Fetches a URL via GET and returns the raw response body."""
   pinned_url, host_header, sni_host = validate_url_safe(url)
   async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
-    try:
-      req = client.build_request("GET", pinned_url)
-      req.headers["host"] = host_header
-      req.extensions["sni_hostname"] = sni_host.encode("ascii")
-      r = await client.send(req)
-    except Exception as exc:
-      raise HTTPException(status_code=502, detail=str(exc))
-  return Response(
-    content=r.content[:_MAX_BYTES],
-    status_code=r.status_code,
-    media_type=r.headers.get("content-type", "application/octet-stream"),
-  )
+    req = client.build_request("GET", pinned_url)
+    req.headers["host"] = host_header
+    req.extensions["sni_hostname"] = sni_host.encode("ascii")
+    return await _capped_response(client, req)
 
 
 @router.post("", dependencies=[Depends(reject_cross_site)])
@@ -63,19 +84,11 @@ async def proxy_post(
     raise HTTPException(413, "Request body too large (max 512 KB)")
   pinned_url, host_header, sni_host = validate_url_safe(body.url)
   async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
-    try:
-      req = client.build_request(
-        "POST", pinned_url,
-        content=body.body.encode(),
-        headers={"Content-Type": body.content_type},
-      )
-      req.headers["host"] = host_header
-      req.extensions["sni_hostname"] = sni_host.encode("ascii")
-      r = await client.send(req)
-    except Exception as exc:
-      raise HTTPException(status_code=502, detail=str(exc))
-  return Response(
-    content=r.content[:_MAX_BYTES],
-    status_code=r.status_code,
-    media_type=r.headers.get("content-type", "application/octet-stream"),
-  )
+    req = client.build_request(
+      "POST", pinned_url,
+      content=body.body.encode(),
+      headers={"Content-Type": body.content_type},
+    )
+    req.headers["host"] = host_header
+    req.extensions["sni_hostname"] = sni_host.encode("ascii")
+    return await _capped_response(client, req)
