@@ -105,6 +105,7 @@ import json  # noqa: E402
 import logging  # noqa: E402
 import socket  # noqa: E402
 import time  # noqa: E402
+import urllib.error  # noqa: E402
 import urllib.parse  # noqa: E402
 import urllib.request  # noqa: E402
 from http import HTTPStatus  # noqa: E402
