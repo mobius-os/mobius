@@ -1,0 +1,49 @@
+{
+  "id": "reflection",
+  "name": "Reflection",
+  "version": "2.2.0",
+  "description": "While you sleep, Möbius reviews the day's work and leaves a one-page morning brief.",
+  "author": "mobius-os",
+  "license": "MIT",
+  "homepage": "https://github.com/mobius-os/app-reflection",
+  "entry": "index.jsx",
+  "icon": "icon.png",
+  "offline_capable": true,
+  "permissions": {
+    "cross_app_access": "read",
+    "share_with_apps": "none",
+    "chat_log_access": "summary"
+  },
+  "storage_seeds": {
+    "settings.json": {
+      "hour": 6,
+      "minute": 0,
+      "timezone": null,
+      "cron": "0 6 * * *",
+      "exclude_apps": [],
+      "provider": "claude",
+      "model": null,
+      "verbosity": "standard",
+      "focus": null,
+      "avoid": null
+    }
+  },
+  "offline": {
+    "reads": true,
+    "writes": "queued",
+    "execution": "none"
+  },
+  "schedule": {
+    "default": "0 6 * * *",
+    "user_configurable": true,
+    "job": "fetch.sh"
+  },
+  "runtime": {
+    "imports": [
+      "react",
+      "react-dom"
+    ],
+    "esm_deps": []
+  },
+  "embeds_agent": true
+}

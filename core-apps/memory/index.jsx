@@ -419,7 +419,16 @@ export default function App({ appId, token }) {
     const a = e.target?.closest?.('a[href^="#memory-node-"]');
     if (!a) return;
     e.preventDefault();
-    const slug = decodeURIComponent(a.getAttribute('href').replace('#memory-node-', ''));
+    // Note bodies are agent-written and can carry malformed percent-encoding
+    // (e.g. a stray `[x](#memory-node-%)`); decodeURIComponent throws URIError on
+    // those. A bad fragment must dead-end as a no-op, never break the handler.
+    const raw = a.getAttribute('href').replace('#memory-node-', '');
+    let slug;
+    try {
+      slug = decodeURIComponent(raw);
+    } catch {
+      return;
+    }
     const node = nodesById.get(slug);
     if (node) {
       setSelected(node);
@@ -532,8 +541,8 @@ export default function App({ appId, token }) {
           <img
             src={`/api/apps/${appId}/icon?size=64`}
             alt=""
-            width={26}
-            height={26}
+            width={34}
+            height={34}
             style={S.brandIcon}
             onError={(e) => {
               e.currentTarget.style.display = 'none'
@@ -688,11 +697,11 @@ export default function App({ appId, token }) {
             <table style={S.table}>
               <thead>
                 <tr>
-                  <Th label="Note" active={sortKey === 'title'} dir={sortDir} onClick={() => toggleSort('title')} align="left" />
+                  <Th label="Note" active={sortKey === 'title'} dir={sortDir} onSort={() => toggleSort('title')} align="left" />
                   <Th label="Type" />
-                  <Th label="Weight" active={sortKey === 'importance'} dir={sortDir} onClick={() => toggleSort('importance')} />
-                  <Th label="Reads" active={sortKey === 'access_count'} dir={sortDir} onClick={() => toggleSort('access_count')} />
-                  <Th label="Size" active={sortKey === 'size_bytes'} dir={sortDir} onClick={() => toggleSort('size_bytes')} />
+                  <Th label="Weight" active={sortKey === 'importance'} dir={sortDir} onSort={() => toggleSort('importance')} />
+                  <Th label="Reads" active={sortKey === 'access_count'} dir={sortDir} onSort={() => toggleSort('access_count')} />
+                  <Th label="Size" active={sortKey === 'size_bytes'} dir={sortDir} onSort={() => toggleSort('size_bytes')} />
                 </tr>
               </thead>
               <tbody>
@@ -702,6 +711,17 @@ export default function App({ appId, token }) {
                     style={S.tr}
                     onClick={() => openPanel(n)}
                     className="mg-row"
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Open ${n.title || n.id}`}
+                    onKeyDown={(e) => {
+                      // Enter/Space activate the row like a button; preventDefault
+                      // on Space stops the list pane scrolling instead of opening.
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        openPanel(n);
+                      }
+                    }}
                   >
                     <td style={S.tdTitle}>
                       <span style={{ ...S.rowDot, background: colorForNode(n) }} />
@@ -872,18 +892,42 @@ export default function App({ appId, token }) {
 
 // ------------------------------------------------------------- subcomponents ---
 
-function Th({ label, subLabel, active, dir, onClick, align }) {
-  return (
-    <th
-      style={{ ...S.th, textAlign: align || 'right', cursor: onClick ? 'pointer' : 'default' }}
-      onClick={onClick}
-      className={onClick ? 'mg-th' : undefined}
-    >
+function Th({ label, subLabel, active, dir, onSort, align }) {
+  // scope=col names the column for assistive tech; aria-sort reflects the live
+  // sort on the one active column ('ascending'/'descending') and 'none' on the
+  // other sortable columns, so a screen reader announces the current ordering.
+  const ariaSort = onSort
+    ? (active ? (dir === 'asc' ? 'ascending' : 'descending') : 'none')
+    : undefined;
+  const inner = (
+    <>
       <span style={S.thMain}>
         {label}
         {active && <span style={S.sortCaret}>{dir === 'asc' ? '↑' : '↓'}</span>}
       </span>
       {subLabel && <span style={S.thSub}>{subLabel}</span>}
+    </>
+  );
+  // Sortable headers are a real <button> inside the <th>: native Enter/Space
+  // activation + focus, instead of an un-focusable <th onClick>. A non-sortable
+  // header (e.g. Type) stays a plain, non-interactive cell.
+  if (onSort) {
+    return (
+      <th scope="col" style={{ ...S.th, textAlign: align || 'right' }} aria-sort={ariaSort}>
+        <button
+          type="button"
+          className="mg-th"
+          style={{ ...S.thButton, justifyContent: align === 'left' ? 'flex-start' : 'flex-end' }}
+          onClick={onSort}
+        >
+          {inner}
+        </button>
+      </th>
+    );
+  }
+  return (
+    <th scope="col" style={{ ...S.th, textAlign: align || 'right' }}>
+      {inner}
     </th>
   );
 }
@@ -1676,7 +1720,7 @@ const S = {
   },
   brand: { display: 'flex', alignItems: 'center', gap: 11, minWidth: 0 },
   brandDot: {
-    width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
+    width: 34, height: 34, borderRadius: '50%', flexShrink: 0,
     display: 'flex', alignItems: 'center', justifyContent: 'center',
     background: 'radial-gradient(circle at 32% 28%, var(--accent-hover, #c4b5fd), var(--accent))',
     boxShadow: '0 0 0 1px var(--accent-dim, rgba(167,139,250,0.18)), 0 4px 14px var(--accent-dim, rgba(167,139,250,0.3))',
@@ -1686,7 +1730,8 @@ const S = {
     boxShadow: '0 0 6px rgba(255,255,255,0.7)',
   },
   brandIcon: {
-    width: 26, height: 26, borderRadius: 6, objectFit: 'cover', flexShrink: 0, display: 'block',
+    width: 34, height: 34, borderRadius: 7, flexShrink: 0, display: 'block',
+    objectFit: 'cover',
   },
   subtitle: {
     fontSize: 11.5, color: 'var(--muted)', marginTop: 2, whiteSpace: 'nowrap',
@@ -1789,6 +1834,14 @@ const S = {
     color: 'var(--muted)', fontWeight: 600, fontSize: 11, textTransform: 'uppercase',
     letterSpacing: '0.05em', padding: '11px 12px', borderBottom: '1px solid var(--border)',
     whiteSpace: 'nowrap', userSelect: 'none',
+  },
+  // The sortable-header button fills the cell and inherits its typography so it
+  // looks identical to the old <th onClick>, while being natively focusable +
+  // keyboard-activatable. Padding lives on the <th>, so the button carries none.
+  thButton: {
+    display: 'flex', alignItems: 'center', gap: 0, width: '100%', padding: 0, margin: 0,
+    border: 0, background: 'transparent', cursor: 'pointer', font: 'inherit',
+    color: 'inherit', letterSpacing: 'inherit', textTransform: 'inherit', textAlign: 'inherit',
   },
   thMain: { display: 'block', lineHeight: 1.05 },
   thSub: {
@@ -1956,6 +2009,10 @@ const CSS = `
 
 .mg-row:hover { background: var(--surface2); }
 .mg-th:hover { color: var(--text); }
+/* Keyboard-focus ring for the now-focusable list rows + sort-header buttons,
+   so the keyboard affordance these gained is actually visible. */
+.mg-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.mg-th:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 .mg-legend-row:hover { background: var(--surface2); }
 .mg-tgl:hover { color: var(--text); }
 .mg-tab:hover { color: var(--text); }

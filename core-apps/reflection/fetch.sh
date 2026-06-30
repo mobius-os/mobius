@@ -7,7 +7,7 @@
 # Unlike v1, this wrapper is NOT a security boundary. The Reflection agent
 # runs with FULL tools and a REAL token (no staging tree, no
 # Bash-less/token-less envelope, no graph validation gate). It forks
-# chats, consolidates the Memory graph, edits skills, fixes apps, writes
+# chats, consolidates the memory graph, edits skills, fixes apps, writes
 # the brief to reports/<date>.html via the storage API, opens the
 # morning chat, and commits — all itself, instructed by its skill
 # (/data/shared/skills/reflection.md), per Möbius's "code empowers the
@@ -33,9 +33,6 @@ HEARTBEAT="$DATA_DIR/cron-logs/reflection.heartbeat"
 TOKEN_FILE="$DATA_DIR/service-token.txt"
 DATE="$(date +%F)"
 INPUTS="$DATA_DIR/apps/reflection/inputs"
-# Wall-clock start, captured BEFORE any early exit (lock / token / app-id) so
-# emit_outcome can always record how long the night ran (duration_ms).
-START_EPOCH="$(date +%s)"
 RUNNER="${REFLECTION_RUNNER:-/app/scripts/reflection_runner.py}"
 # Wall-clock cap for the whole night. Generous (the agent does real,
 # multi-phase work) but bounded so a wedged run can't hold the lock past
@@ -59,15 +56,11 @@ log() { echo "[$(date -Iseconds)] reflection: $*" >>"$LOG"; }
 emit_outcome() {
   local exit_code="$1"
   [[ -r "$TOKEN_FILE" ]] || return 0
-  local token ts payload dur_ms
+  local token ts payload
   token="$(cat "$TOKEN_FILE")"
   ts="$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")"
-  # How long the night ran, in ms (second-resolution clock x1000 — finer
-  # precision isn't meaningful for a multi-minute nightly run). Lets the next
-  # run's self-history flag a near-timeout night, not just pass/fail.
-  dur_ms=$(( ( $(date +%s) - START_EPOCH ) * 1000 ))
-  payload="$(printf '{"ev":"cron_outcome","ts":"%s","app_id":%s,"job":"reflection","exit_code":%s,"duration_ms":%s}' \
-    "$ts" "${APP_ID:-0}" "$exit_code" "$dur_ms")"
+  payload="$(printf '{"ev":"cron_outcome","ts":"%s","app_id":%s,"job":"reflection","exit_code":%s}' \
+    "$ts" "${APP_ID:-0}" "$exit_code")"
   # The activity log is the PRIMARY liveness signal the next night's run
   # reads, so a dropped emit is invisible there (only this .log file keeps
   # it). Retry a transient API blip (restart/overload) with backoff before
@@ -144,80 +137,6 @@ SINCE="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%
 curl -s "${auth[@]}" "$API_BASE_URL/api/admin/activity?since=$SINCE" \
   >"$INPUTS/activity.jsonl" 2>>"$LOG" || true
 
-# changed-since-last-run.txt — files changed in /data since the agent's last SUCCESSFUL
-# nightly run. The marker records the HEAD that run ENDED at, so this diff is the DAY's
-# work and naturally excludes the agent's own prior-night commits (no exclude-own-commits
-# machinery needed). Diff-from-marker (not a fixed window) catches every committer; the
-# agent is trusted to skip unchanged items. No marker yet -> a note; fall back to the 24h
-# slices. Pathspecs (drop binary/DB/log/cache churn) come from the module (single source).
-MARKER="$DATA_DIR/apps/reflection/last-run.json"
-LAST_SHA="$(PYTHONPATH=/app python3 -c "from app import reflection_checkpoint as dc; m=dc.read_marker('$MARKER') or {}; print((m.get('repos') or {}).get('data',''))" 2>/dev/null)"
-if [ -n "$LAST_SHA" ] && git -C "$DATA_DIR" cat-file -e "${LAST_SHA}^{commit}" 2>/dev/null; then
-  mapfile -t _ps < <(PYTHONPATH=/app python3 -c "from app import reflection_checkpoint as dc; print(chr(10).join(dc.EXCLUDE_PATHSPECS))" 2>/dev/null)
-  git -C "$DATA_DIR" diff --name-only "$LAST_SHA"..HEAD -- "${_ps[@]}" \
-    >"$INPUTS/changed-since-last-run.txt" 2>>"$LOG" || true
-else
-  echo "(no prior marker — first tracked run; use the 24h slices below)" >"$INPUTS/changed-since-last-run.txt"
-fi
-
-# reflection-run-history.txt — the agent's OWN track record, so it can reflect on
-# recurring failures (e.g. repeated max_turns deaths) instead of reflection with
-# amnesia each night. Three best-effort sources: the cron_outcome ledger (this
-# skill's exit codes over ~14 nights), recent WARN/ERROR/steering lines from
-# its own reflection.log, and its last self-edits to this skill. All wrapped so a
-# failed source degrades to a note rather than aborting.
-HIST="$INPUTS/reflection-run-history.txt"
-SINCE_14D="$(date -u -d '14 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$SINCE")"
-curl -s "${auth[@]}" "$API_BASE_URL/api/admin/activity?since=$SINCE_14D" \
-  >"$INPUTS/.activity-14d.jsonl" 2>>"$LOG" || true
-{
-  echo "# Your own recent runs — read this BEFORE deciding what to improve tonight."
-  echo
-  echo "## Outcomes (last ~14 nights, from cron_outcome activity events)"
-  # Heredoc reads the staged file via argv (a heredoc IS stdin, so it can't also
-  # consume a pipe) — lets the program use any quoting freely.
-  python3 - "$INPUTS/.activity-14d.jsonl" <<'PY' 2>>"$LOG" || echo "(outcome history unavailable)"
-import sys, json
-legend = {0: "success", 2: "agent run error / max_turns (instant ~0s = wrapper config, e.g. missing app-id)",
-          3: "token missing", 5: "skipped (overlap)", 124: "wall-clock timeout"}
-rows = []
-try:
-    with open(sys.argv[1]) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ev = json.loads(line)
-            except Exception:
-                continue
-            if ev.get("ev") == "cron_outcome" and ev.get("job") == "reflection":
-                rows.append(ev)
-except Exception:
-    pass
-if not rows:
-    print("(no prior cron_outcome events yet — first tracked nights)")
-for ev in rows[-14:]:
-    code = ev.get("exit_code")
-    ts = (ev.get("ts") or "")[:19]
-    dur = ev.get("duration_ms")
-    dur_s = "  %ds" % round(dur / 1000) if isinstance(dur, (int, float)) else ""
-    print("%s  exit=%s  %s%s" % (ts, code, legend.get(code, "agent error"), dur_s))
-PY
-  echo
-  echo "## Recent friction (WARN/ERROR/steering from your reflection.log, last 40)"
-  if [ -s "$LOG" ]; then
-    grep -aE 'WARN|ERROR|error_max_turns|injected turn-budget|run ended in error' \
-      "$LOG" 2>/dev/null | tail -40 || true
-  else
-    echo "(no reflection.log yet)"
-  fi
-  echo
-  echo "## Your last 10 edits to THIS skill (git log -- shared/skills/reflection.md)"
-  git -C "$DATA_DIR" log --oneline -10 -- shared/skills/reflection.md 2>>"$LOG" || echo "(no history)"
-} >"$HIST" 2>>"$LOG" || true
-rm -f "$INPUTS/.activity-14d.jsonl"
-
 # chats.md — recent chats list (titles + ids + provider), so the agent
 # knows which sessions to fork-and-interview without re-deriving the list.
 python3 - "$API_BASE_URL" "$SERVICE_TOKEN" >"$INPUTS/chats.md" 2>>"$LOG" <<'PY' || true
@@ -229,7 +148,7 @@ def get(path):
         return json.load(r)
 print("# Recent chats (fork + interview the ones with activity)\n")
 print("# `[app]` rows are app-driven chats (created_by_app_id set): hidden from")
-print("# the user's drawer but yours to read for the Memory graph. `updated` is the")
+print("# the user's drawer but yours to read for the memory graph. `updated` is the")
 print("# cadence signal — interview the most recently/often active first.\n")
 try:
     # include_app_chats=1 surfaces app-created chats too — they're excluded from
@@ -405,31 +324,17 @@ fi
 
 # per-app-digest.json — compact per-app analytics summary the Reflection
 # agent uses to triage which apps need attention tonight. Produced from
-# THREE sources:
+# two sources:
 #   - activity.jsonl ON DISK (already staged above) for opens_24h counts
-#   - activity.jsonl app_error events for UNCAUGHT crashes (app_errors_24h +
-#     recent_app_errors per app; shell_errors_24h for owner-shell errors) —
-#     these fire even when the app never called signal('error')
 #   - each app's signals.jsonl read via the storage API for signal counts,
-#     last-5-error messages (EXPLICIT signal('error') calls), and has_signals
-# The two error channels are kept as SEPARATE fields on purpose: last_5_errors
-# is what an app explicitly reported; recent_app_errors is what the browser
-# caught uncaught. ~2–3 KB for 12 apps vs 10–100 KB of raw log; gives the agent
-# a digest-first orientation so it doesn't burn turns re-reading raw events.
+#     last-5-error messages, and the has_signals flag
+# ~2–3 KB for 12 apps vs 10–100 KB of raw log; gives the agent a
+# digest-first orientation so it doesn't burn turns re-reading raw events.
 # Graceful on API errors: a failed app-read records has_signals:false and
 # an error note rather than aborting the whole step.
-PYTHONPATH=/app python3 - "$API_BASE_URL" "$SERVICE_TOKEN" "$INPUTS" \
+APP_ID_FOR_DIGEST="$APP_ID" python3 - "$API_BASE_URL" "$SERVICE_TOKEN" "$INPUTS" \
   >"$INPUTS/per-app-digest.json" 2>>"$LOG" <<'PY' || true
 import json, os, sys, urllib.request, urllib.error, datetime
-
-# app_error classification lives in app.reflection_digest (unit-tested). Import
-# defensively: if PYTHONPATH=/app is somehow unavailable (an older instance),
-# the digest still builds, just without the uncaught-error fields.
-try:
-    from app import reflection_digest
-    _summarize_app_errors = reflection_digest.summarize_app_errors
-except Exception:
-    _summarize_app_errors = None
 
 base    = sys.argv[1].rstrip("/")
 token   = sys.argv[2]
@@ -459,13 +364,9 @@ def storage_get_text(app_id, path, timeout=15):
     except Exception:
         return None
 
-# --- scan the already-staged 24h activity.jsonl ONCE for two things:
-#     app_open counts (opens_24h) and app_error events (uncaught crashes).
-#     Kept as two independent accumulators so the signals.jsonl channel below
-#     can't corrupt them. ---
+# --- opens_24h: count app_open events in the already-staged activity.jsonl ---
 activity_path = os.path.join(inp_dir, "activity.jsonl")
-opens_by_app = {}        # app_id (str) -> count
-app_error_events = []    # raw app_error rows, classified after the loop
+opens_by_app = {}   # app_id (str) -> count
 if os.path.exists(activity_path):
     with open(activity_path) as f:
         for line in f:
@@ -476,21 +377,11 @@ if os.path.exists(activity_path):
                 ev = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            kind = ev.get("ev")
-            if kind == "app_open":
-                aid = str(ev.get("app_id", ""))
-                if aid:
-                    opens_by_app[aid] = opens_by_app.get(aid, 0) + 1
-            elif kind == "app_error":
-                app_error_events.append(ev)
-
-# Classify the uncaught errors (the staged file is already the 24h window, so
-# no extra time filtering is needed). Shell errors (no app_id) bucket separately.
-err_summary = (
-    _summarize_app_errors(app_error_events)
-    if _summarize_app_errors
-    else {"by_app": {}, "shell": {"count": 0, "recent": []}}
-)
+            if ev.get("ev") != "app_open":
+                continue
+            aid = str(ev.get("app_id", ""))
+            if aid:
+                opens_by_app[aid] = opens_by_app.get(aid, 0) + 1
 
 # --- fetch app list ---
 try:
@@ -551,7 +442,6 @@ for app in apps:
     except Exception as e:
         signals_error = str(e)[:200]
 
-    app_err = err_summary["by_app"].get(app_id, {})
     entry = {
         "app_id":      app_id,
         "slug":        slug,
@@ -559,25 +449,13 @@ for app in apps:
         "opens_24h":   opens_24h,
         "has_signals": has_signals,
         "signal_counts": signal_counts,
-        # Two error channels, kept separate: last_5_errors = signalled
-        # (signal('error')); app_errors_24h/recent_app_errors = uncaught
-        # (activity app_error) — the primary crash signal, fires without a call.
         "last_5_errors": last_5_errors[-5:],
-        "app_errors_24h": app_err.get("count", 0),
-        "recent_app_errors": app_err.get("recent", []),
     }
     if signals_error:
         entry["signals_read_error"] = signals_error
     digests.append(entry)
 
-print(json.dumps({
-    "generated_at": now_utc.isoformat(),
-    "apps": digests,
-    # Owner-shell errors (app_error with no app_id) have no per-app home;
-    # surface them at the top level so they aren't lost.
-    "shell_errors_24h": err_summary["shell"]["count"],
-    "recent_shell_errors": err_summary["shell"]["recent"],
-}, indent=2))
+print(json.dumps({"generated_at": now_utc.isoformat(), "apps": digests}, indent=2))
 PY
 
 # Record the app id where the runner's goal message and the agent can
@@ -648,34 +526,6 @@ fi
 
 # --- emit cron_outcome ------------------------------------------------
 emit_outcome "$RC"
-
-# --- advance the last-run marker (success only) -----------------------
-# Record the /data HEAD the agent ended at, so next night's diff-from-marker is the DAY's
-# new work and skips tonight's own commits. ONLY on a clean run (rc 0) — a failed/killed
-# night leaves the marker so its window is re-reviewed (re-reading is cheap; missing isn't).
-if [[ "$RC" == "0" ]]; then
-  _head="$(git -C "$DATA_DIR" rev-parse HEAD 2>/dev/null || true)"
-  [ -n "$_head" ] && PYTHONPATH=/app python3 -c "from app import reflection_checkpoint as dc; import datetime; dc.write_marker('$MARKER', {'repos': {'data': '$_head'}, 'ts': datetime.datetime.now(datetime.timezone.utc).isoformat()})" >>"$LOG" 2>&1 || true
-fi
-
-# --- failure push (card 125) ------------------------------------------
-# A failed/killed night must actively reach the owner (not just sit in the activity log),
-# so they don't wake to nothing. rc 5 is a benign no-overlap skip — don't alarm on it.
-# The body is honest about whether a brief actually landed: a non-zero main run can still
-# leave a brief behind (the runner's guaranteed-brief fallback rescues one), so "no morning
-# brief" would cry wolf on a rescued night. Check the brief file the agent writes to the
-# app's numeric storage dir before wording the push.
-if [[ "$RC" != "0" && "$RC" != "5" ]]; then
-  if [[ -f "$DATA_DIR/apps/$APP_ID/reports/$DATE.html" ]]; then
-    PUSH_BODY="Last night ended rc=$RC but a recovery brief was salvaged — open Reflection. See /data/cron-logs."
-  else
-    PUSH_BODY="Last night ended rc=$RC — no morning brief. See /data/cron-logs."
-  fi
-  curl -s "${auth[@]}" -X POST "$API_BASE_URL/api/notifications/send" \
-    -H "Content-Type: application/json" \
-    -d "$(python3 -c 'import json,sys; print(json.dumps({"title":"Reflection run failed","body":sys.argv[1]}))' "$PUSH_BODY")" \
-    >>"$LOG" 2>&1 || true
-fi
 
 log "done (rc=$RC)"
 exit "$RC"

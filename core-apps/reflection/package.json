@@ -1,0 +1,6 @@
+{
+  "scripts": {
+    "test": "NODE_PATH=/home/hmzmrzx/projects/mobius/frontend/node_modules node --test tests/"
+  },
+  "devDependencies": {}
+}

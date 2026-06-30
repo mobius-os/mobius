@@ -925,7 +925,7 @@ step "[3/4] refresh /data/shell/ from new image's /app/shell-src"
 # blocks the deploy; recover later by diffing the tarball into frontend/src.
 if docker exec "$CONTAINER" sh -c 'test -d /data/shell/src' 2>/dev/null \
    && ! docker exec "$CONTAINER" sh -c 'diff -rq /app/shell-src/src /data/shell/src >/dev/null 2>&1'; then
-  # Write under /data/backups/ (gitignored, so nightly pm-commit/dreaming
+  # Write under /data/backups/ (gitignored, so nightly pm-commit/reflection
   # `git add -A` never commits a ~360KB blob into /data history) and run as
   # `mobius` (NOT bare docker exec → root, which would poison the mobius-owned
   # /data tree). Keep only the last 5 so they can't accumulate on the host.
