@@ -198,6 +198,26 @@ def test_restamp_chat_id_preserves_existing_conflict_data(platform_env):
   assert got["chat_id"] == "chat-77"
 
 
+def test_restamp_preserves_chat_id_when_spawn_dedups(platform_env):
+  # The regression case: a re-apply of an in-progress conflict spawns NO new
+  # resolver (spawn_platform_conflict_chat dedups to None because one is already
+  # running), so the re-stamp's chat_id is None. It must fall back to the
+  # recorded chat_id, not drop the "Open chat" link. Mirrors the apply wrapper's
+  # `chat_id or existing.get("chat_id")`.
+  pu._write_conflict_flag("good-upstream", ["app/a.py"], "chat-99")
+  existing = pu._read_conflict_flag()
+  fresh_chat_id = None  # spawn deduped
+  pu._write_conflict_flag(
+    None or existing["upstream"],
+    [] or existing["paths"] or [],
+    fresh_chat_id or existing["chat_id"],
+  )
+  got = pu._read_conflict_flag()
+  assert got["chat_id"] == "chat-99"  # preserved despite the deduped None
+  assert got["upstream"] == "good-upstream"
+  assert got["paths"] == ["app/a.py"]
+
+
 def test_status_reports_available_when_image_sha_advances(platform_env, monkeypatch):
   repo, baked, root = platform_env
   _init_platform(repo, "sha-old", {"app/server.py": b"x\n"})

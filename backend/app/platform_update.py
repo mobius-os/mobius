@@ -632,13 +632,16 @@ async def apply_platform_update(
       # still link straight to it. When the apply BAILED on a pre-existing
       # conflict, the outcome carries no fresh upstream AND an empty path list
       # (a flag-only conflict isn't materialised in git, so _unmerged_paths is
-      # []) — fall back to the recorded flag for both so re-stamping the chat id
-      # never clobbers the good upstream/paths already on disk.
+      # []), AND spawn_platform_conflict_chat dedups to None because a resolver
+      # is already running — so fall back to the recorded flag for ALL three
+      # fields (upstream, paths, chat_id), never clobbering the good values
+      # already on disk. Missing the chat_id fallback would drop the "Open chat"
+      # link on every re-apply of an in-progress conflict.
       existing = _read_conflict_flag() or {}
       _write_conflict_flag(
         outcome["upstream_commit"] or existing.get("upstream"),
         outcome["conflict_paths"] or existing.get("paths") or [],
-        chat_id,
+        chat_id or existing.get("chat_id"),
       )
     state = (
       PlatformUpdateState.RESTART_NEEDED

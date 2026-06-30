@@ -412,7 +412,17 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
     setPlatformError('')
     setPlatformPhase('restarting')
     try {
-      await api.platform.restart()
+      // apiFetch resolves for any non-401, so a 5xx is NOT a thrown error —
+      // check res.ok or we'd poll + reload onto the same (unchanged) code and
+      // report a non-restart as success. Mirrors applyPlatformUpdate's guard.
+      const res = await api.platform.restart()
+      if (!res.ok) {
+        let detail = ''
+        try { detail = (await res.json())?.detail || '' } catch {}
+        setPlatformError(detail ? `Restart failed: ${detail}` : 'Restart signal failed.')
+        setPlatformPhase('idle')
+        return
+      }
       pollHealthThenReload(() =>
         setPlatformError("Server hasn't come back yet — check the container."))
     } catch {
