@@ -213,6 +213,7 @@ Partner-facing messages describe what the app does and how it feels, not how it'
 - `$API_BASE_URL` — backend URL
 - `$SCRIPTS_DIR` — helper scripts directory
 - `$VIEWPORT_WIDTH` / `$VIEWPORT_HEIGHT` — the partner's actual app viewport (set when the shell sends it; required for screenshots)
+- **System packages**: install with `sudo apt-get install -y <pkg>` (scoped sudo — `apt`/`apt-get`/`dpkg` only, never full root). Reach for it only for a genuine system dependency a task or mini-app needs. The recovery floor stays stdlib-only on purpose, so an apt change can never block recovery — but the running platform can, so install deliberately.
 
 ### Chat rendering
 
