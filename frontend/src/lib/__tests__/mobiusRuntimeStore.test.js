@@ -25,7 +25,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { IDBFactory } from 'fake-indexeddb'
-import { freshEnv, tick, waitFor } from './mobiusRuntimeHarness.mjs'
+import { freshEnv, waitFor } from './mobiusRuntimeHarness.mjs'
 
 // makeStorage is imported lazily inside each test AFTER freshEnv() installs the
 // browser globals it reads at construction time. A top-level import would run
@@ -128,8 +128,7 @@ test('an offline write queues, then drains to the server on reconnect', async ()
   assert.deepEqual(server.serverValue('k.json'), { v: 'first' })  // server untouched
 
   server.setOnline(true)
-  s._drain()
-  await tick(20)
+  await s._drain()
   assert.equal(await s.pendingCount(), 0)
   assert.deepEqual(server.serverValue('k.json'), { v: 'edited offline' })
 })
@@ -145,8 +144,7 @@ test('the outbox coalesces to one op per path; the last write wins on drain', as
   assert.equal(await s.pendingCount(), 1)   // coalesced, not 3
 
   server.setOnline(true)
-  s._drain()
-  await tick(20)
+  await s._drain()
   assert.deepEqual(server.serverValue('y.json'), { n: 'c' })  // LWW
 })
 
@@ -160,16 +158,19 @@ test('a transient failure on the head op stops the drain and preserves order', a
 
   server.setOnline(true)
   server.forceWrite('a.json', 503)          // head op fails transiently
-  s._drain()
-  await tick(20)
-  // Both still queued — b.json must NOT have been sent ahead of a.json.
-  assert.equal(await s.pendingCount(), 2)
+  // _drain() returns its drain promise, so awaiting it fences on the pass
+  // FINISHING: drainInner attempts the head op, hits the 503, and breaks
+  // (order-preserving). pendingCount stays 2 here, so the drain promise — not a
+  // count — is the settle signal.
+  await s._drain()
+  // Order preserved: b.json must NOT have been sent ahead of the stuck a.json.
+  assert.equal(server.log.some((e) => e.method === 'PUT' && e.url.includes('b.json')), false)
+  assert.equal(await s.pendingCount(), 2)    // both still queued
   assert.equal(server.serverHas('a.json'), false)
   assert.equal(server.serverHas('b.json'), false)
 
   // Next drain (no forced failure) flushes both, a before b.
-  s._drain()
-  await tick(20)
+  await s._drain()
   assert.equal(await s.pendingCount(), 0)
   assert.deepEqual(server.serverValue('a.json'), { n: 1 })
   assert.deepEqual(server.serverValue('b.json'), { n: 2 })
@@ -204,11 +205,12 @@ test('subscribe() fires the initial value, then again on every set()', async () 
   assert.deepEqual(seen, [{ v: 0 }, { v: 1 }, { v: 2 }])
   unsub()
 
-  // After unsubscribe, no further fires. There's no positive end-state to wait
-  // on (we're asserting an ABSENCE), so a fixed settle is the right tool here —
-  // give any erroneous fire a window to land, then assert it didn't.
+  // After unsubscribe, no further fires. notify() runs SYNCHRONOUSLY inside the
+  // write (writeLocal notifies before set() resolves), so the awaited set() is
+  // itself the fence — a fire to a still-subscribed cb would already have landed
+  // by the time it resolves. A buggy unsub that left the cb attached surfaces
+  // here with no fixed delay.
   await s.set('a.json', { v: 3 })
-  await tick(5)
   assert.deepEqual(seen, [{ v: 0 }, { v: 1 }, { v: 2 }])
 })
 
@@ -238,7 +240,11 @@ test('a set() racing a slow initial get() wins the tie-break (notify-last, no st
   const unsub = s.subscribe('t.json', (v) => seen.push(v))
   // Fire the set BEFORE awaiting the initial get — it must win.
   await s.set('t.json', { fresh: true })
-  await tick(30)   // let the initial get() + any revalidate settle
+  // Fence on a path-serialized op, not a fixed delay: get() runs under the same
+  // per-path lock as the subscribe's initial get(), so once this resolves that
+  // initial get() has fully resolved (delivered or self-suppressed) — exactly
+  // the settle the tie-break assertion needs.
+  await s.get('t.json')
 
   // The subscriber must END on the fresh value — the stale initial must never
   // land after the set's notify (the `delivered` flag's whole job).
@@ -320,8 +326,7 @@ test('a poison write does not head-of-line-block a later good write for another 
 
   server.setOnline(true)
   server.forceWrite('poison.json', 422)     // first op is poison
-  s._drain()
-  await tick(20)
+  await s._drain()
 
   // The poison op is dead-lettered; the good op still drains (kept draining
   // past the dropped op rather than wedging the queue).
@@ -339,7 +344,7 @@ test('two concurrent set()s on one path serialize; the mirror ends at the last c
   const p1 = s.set('x.json', { n: 1 })
   const p2 = s.set('x.json', { n: 2 })
   await Promise.all([p1, p2])
-  await tick(10)
+  await waitFor(async () => (await s.pendingCount()) === 0)
 
   server.setOnline(false)
   assert.deepEqual(await s.get('x.json'), { n: 2 })   // last call wins the mirror
@@ -360,7 +365,7 @@ test('a get() interleaved with two writes never strands the mirror on a mid valu
     s.set('m.json', { n: 2 }),
   ]
   await Promise.all(ops)
-  await tick(20)
+  await waitFor(async () => (await s.pendingCount()) === 0)
   server.setOnline(false)
   assert.deepEqual(await s.get('m.json'), { n: 2 })
 })
@@ -464,7 +469,7 @@ test('412 CAS conflict is retryable and does not emit dead-letter', async () => 
       err.status === 412 &&
       err.retryable === true,
   )
-  await tick(10)
+  await waitFor(async () => (await s.pendingCount()) === 0)
   assert.equal(await s.pendingCount(), 0)
   assert.deepEqual(deadLetters, [])
   unsub()

@@ -265,8 +265,9 @@ def login_html(error: str = "", clear_storage: bool = False) -> str:
 
 
 _CONFIRM_FACTORY = (
-  "Factory reset: deletes your account, all apps, credentials,"
-  " and theme. Chat history is preserved. Continue?"
+  "Factory reset: permanently deletes your account, all apps, chats,"
+  " credentials, and theme — a clean slate. This cannot be undone."
+  " Continue?"
 )
 _CONFIRM_BACKUP = (
   "Backup includes OAuth credentials, identity secrets (.secret-key,"

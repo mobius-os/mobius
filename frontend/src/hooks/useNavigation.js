@@ -473,7 +473,6 @@ export default function useNavigation() {
     openDrawer,
     closeDrawer,
     navTo,
-    canGoBack: navStackRef.current.length > 0,
     backFiredRef,
     drawerPushedRef,
     drawerOpenRef,
@@ -484,6 +483,5 @@ export default function useNavigation() {
     appNavPush,
     appNavPop,
     appNavReset,
-    appSentinelCountsRef,
   }
 }
