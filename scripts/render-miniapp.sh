@@ -16,6 +16,23 @@
 # This is the durable answer to "we can't screenshot-verify mini-app UIs."
 # Every future mini-app change is now visually verifiable from the host.
 #
+# SECURITY MODEL — this is a host-side DEV tool for a TEST container, not a
+# production utility. It mints a real owner JWT and injects it into the browser
+# session's localStorage on the app origin, so the standalone page authenticates.
+# Consequences and bounds:
+#   * Test-only by ENFORCEMENT, not by luck: it refuses any non-loopback /
+#     non-RFC1918 host and the prod port (8000) unless RENDER_ALLOW_NONTEST=1 is
+#     set explicitly. Defaults (port 8001 + admin/admin) also can't authenticate
+#     to prod. So a wrong target fails closed — it never silently drives prod.
+#   * The minted JWT is short-lived but, while valid, lives in the agent-browser
+#     session profile's localStorage (and appears on the `agent-browser eval`
+#     argv) until it expires or the session is closed. Intended for a
+#     single-user dev host against a throwaway test instance. Do NOT point this
+#     at an instance whose owner JWT you wouldn't expose to local processes.
+#   * `<slug>` is validated to the mobius slug charset and JSON-encoded before
+#     it reaches the in-page eval, so it can't break out of the JS string and
+#     run arbitrary script in the (JWT-bearing) app origin.
+#
 # Usage:
 #   scripts/render-miniapp.sh <slug> [output.png]
 #
@@ -38,15 +55,52 @@ if [[ -z "$SLUG" ]]; then
   echo "usage: $0 <slug> [output.png]" >&2
   exit 2
 fi
+# Validate the slug to the mobius slug charset (allocate_unique_slug emits
+# lowercase alphanumerics + hyphens). This is the FIRST line of defence against
+# a slug that could break out of the in-page JS eval (which runs in the
+# JWT-bearing app origin) or distort the request URL / default output path — the
+# eval below also JSON-encodes it as a second layer.
+if [[ ! "$SLUG" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+  echo "error: invalid slug '$SLUG' (expected lowercase letters, digits, hyphens)" >&2
+  exit 2
+fi
 
 PORT="${MOBIUS_PORT:-8001}"
 HOST="${MOBIUS_HOST:-172.17.0.1}"
 USER="${MOBIUS_USER:-admin}"
 PASS="${MOBIUS_PASS:-admin}"
 VIEWPORT="${VIEWPORT:-412 915}"
+# Validate VIEWPORT to "WIDTH HEIGHT" (two integers) and split it into separate
+# args below, so the deliberate word-split that the viewport needs can't be
+# abused to smuggle extra arguments into the agent-browser invocation.
+if [[ ! "$VIEWPORT" =~ ^[0-9]+[[:space:]]+[0-9]+$ ]]; then
+  echo "error: invalid VIEWPORT '$VIEWPORT' (expected 'WIDTH HEIGHT', e.g. '412 915')" >&2
+  exit 2
+fi
+read -r VW VH <<<"$VIEWPORT"
 AB_SESSION="${AB_SESSION:-render-miniapp}"
 OUT="${2:-/tmp/render-${SLUG}.png}"
 BASE="http://${HOST}:${PORT}"
+
+# ENFORCED test-only target guard. This tool mints + injects an OWNER JWT, so a
+# wrong target hands a real owner session to whatever app renders there. Rather
+# than rely on the defaults happening to fail against prod, refuse outright any
+# non-loopback / non-RFC1918 host or the prod port (8000). An operator who
+# genuinely needs another target must opt in explicitly with RENDER_ALLOW_NONTEST=1.
+if [[ "${RENDER_ALLOW_NONTEST:-}" != "1" ]]; then
+  case "$HOST" in
+    localhost|127.0.0.1|::1|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) : ;;
+    *)
+      echo "error: refusing non-local host '$HOST' — this tool injects an owner JWT and is test-only." >&2
+      echo "       set RENDER_ALLOW_NONTEST=1 to override (you are then responsible for the target)." >&2
+      exit 2 ;;
+  esac
+  if [[ "$PORT" == "8000" ]]; then
+    echo "error: refusing port 8000 (the prod port) — this tool is test-only." >&2
+    echo "       set RENDER_ALLOW_NONTEST=1 to override." >&2
+    exit 2
+  fi
+fi
 
 # Resolve agent-browser: prefer the repo-local install, fall back to PATH.
 AB_BIN=""
@@ -61,10 +115,12 @@ if [[ -z "$AB_BIN" ]]; then
 fi
 ab() { "$AB_BIN" --session "$AB_SESSION" "$@"; }
 
-# 1. Mint an owner JWT (form-encoded, not JSON).
-TOK="$(curl -s -X POST "${BASE}/api/auth/token" \
-  -H 'Content-Type: application/x-www-form-urlencoded' \
-  -d "username=${USER}&password=${PASS}" \
+# 1. Mint an owner JWT (form-encoded, not JSON). --data-urlencode percent-
+#    encodes each field, so a username/password containing `&` or `=` can't
+#    inject extra form fields into the request body.
+TOK="$(curl -s --connect-timeout 5 --max-time 20 -X POST "${BASE}/api/auth/token" \
+  --data-urlencode "username=${USER}" \
+  --data-urlencode "password=${PASS}" \
   | python3 -c 'import sys,json; print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null || true)"
 if [[ -z "$TOK" ]]; then
   echo "error: could not authenticate as ${USER} at ${BASE} (is the container up?)" >&2
@@ -73,10 +129,18 @@ fi
 
 # 2. Set viewport, land on a lightweight same-origin page, inject the token +
 #    the install-card dismiss key (the standalone page reads both from web
-#    storage on the app origin).
-ab set viewport $VIEWPORT >/dev/null
+#    storage on the app origin). Both values are JSON-encoded into JS string
+#    literals — never concatenated raw — so a value containing a quote can't
+#    break out of the eval and run script in the JWT-bearing app origin. The
+#    secrets are fed to python on STDIN, not argv, so they don't sit in `ps`
+#    for the encode step (the token unavoidably reaches the `ab eval` argv,
+#    which is the documented exposure window — see SECURITY MODEL above).
+json_str() { python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'; }
+TOK_JS="$(printf '%s' "$TOK" | json_str)"
+SLUG_JS="$(printf '%s' "$SLUG" | json_str)"
+ab set viewport "$VW" "$VH" >/dev/null
 ab open "${BASE}/api/health" >/dev/null
-ab eval "localStorage.setItem('token', $(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$TOK")); sessionStorage.setItem('mobius:install-card:dismissed:${SLUG}', '1'); 'ok'" >/dev/null
+ab eval "localStorage.setItem('token', ${TOK_JS}); sessionStorage.setItem('mobius:install-card:dismissed:' + ${SLUG_JS}, '1'); 'ok'" >/dev/null
 
 # 3. Navigate to the standalone app shell and wait for the module to mount
 #    (#loading gets .hidden after root.render completes).
