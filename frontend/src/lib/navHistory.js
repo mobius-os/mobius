@@ -10,8 +10,8 @@
 // pops that land on an UNTAGGED entry ("untagged == phantom"). The base
 // entry is tagged too (via replaceState) so that invariant holds.
 //
-// See docs/navigation.md "History-state tags guard against PHANTOM
-// descendant-frame entries." kind ∈ base | drawer | app | nav (informational
+// See ARCHITECTURE.md (Navigation back-stack + drawer model): history-state
+// tags guard against phantom descendant-frame entries. kind ∈ base | drawer | app | nav (informational
 // only — the back handlers key off the __mobiusNav flag, not the kind).
 export function navState(kind) {
   return { __mobiusNav: true, kind }

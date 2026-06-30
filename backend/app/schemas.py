@@ -194,7 +194,7 @@ class ChatMessage(BaseModel):
   # Request-side only. This is the shape a client POSTs in ChatRequest.messages,
   # not the persisted or returned message shape. Chat transcripts are stored as
   # dicts inside the Chat.messages JSON column; see the message-shape and
-  # single-writer rules in docs/persistence/chat-persistence-model.md.
+  # single-writer rules in ARCHITECTURE.md (Chat persistence — single-writer actor).
   role: str
   content: str
 
