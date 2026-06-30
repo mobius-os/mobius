@@ -79,6 +79,16 @@ services:
     init: true
     restart: unless-stopped
     command: ["python3", "-P", "/app/recovery/recoveryd.py"]
+    # recoveryd serves on 8001, not the app's 8000. Without this override it
+    # inherits the image HEALTHCHECK (curl :8000/api/health), can never reach it,
+    # and reports `unhealthy` forever even though /recover answers fine. Nothing
+    # depends on this status, but a recovery floor showing "unhealthy" is alarming.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8001/recover/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     environment:
       - DATA_DIR=/data
       - DATABASE_URL=sqlite:////data/db/ultimate.db
