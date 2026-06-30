@@ -304,10 +304,10 @@ RUN mkdir -p /tmp/marked-install && cd /tmp/marked-install \
 COPY backend/scripts/build-dompurify-vendor.mjs /tmp/build-dompurify-vendor.mjs
 RUN mkdir -p /tmp/dompurify-install && cd /tmp/dompurify-install \
     && npm init -y >/dev/null \
-    && npm install --no-audit --no-fund --silent dompurify@3.1.7 \
-    && mkdir -p /app/static/vendor/dompurify@3.1.7 \
+    && npm install --no-audit --no-fund --silent dompurify@3.4.11 \
+    && mkdir -p /app/static/vendor/dompurify@3.4.11 \
     && node /tmp/build-dompurify-vendor.mjs /tmp/dompurify-install \
-         /app/static/vendor/dompurify@3.1.7 "$(command -v esbuild)" \
+         /app/static/vendor/dompurify@3.4.11 "$(command -v esbuild)" \
     && cd / && rm -rf /tmp/dompurify-install /tmp/build-dompurify-vendor.mjs
 
 # Full frontend source so the agent can edit and rebuild the shell.

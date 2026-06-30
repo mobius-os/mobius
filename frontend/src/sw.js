@@ -133,7 +133,7 @@ const VENDORED_DATE_FNS = [
 const VENDORED_ATLAS_NOTES = [
   { url: '/vendor/d3-geo@3/d3-geo.mjs', revision: null },
   { url: '/vendor/marked@14.1.4/marked.mjs', revision: null },
-  { url: '/vendor/dompurify@3.1.7/dompurify.mjs', revision: null },
+  { url: '/vendor/dompurify@3.4.11/dompurify.mjs', revision: null },
 ]
 
 // Self-hosted CodeMirror 6 — same precache rationale as React above. The
