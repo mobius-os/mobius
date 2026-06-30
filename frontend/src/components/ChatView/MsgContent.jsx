@@ -84,7 +84,10 @@ function MsgContentInner({
           if (block.type === 'tool') {
             return (
               <div key={i} className="chat__tools">
-                <ToolBlock t={block} />
+                {/* chatId + msg.ts + block index let ToolBlock lazily fetch a
+                    truncated large output on expand (see chats.py
+                    _truncate_large_tool_outputs + GET /tool-output). */}
+                <ToolBlock t={block} chatId={chatId} msgTs={msg.ts} blockIdx={i} />
               </div>
             )
           }

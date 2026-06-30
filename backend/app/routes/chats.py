@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
@@ -534,6 +535,44 @@ async def patch_chat(
     }
 
 
+_TOOL_OUTPUT_PREVIEW_CHARS = 1024
+_TOOL_OUTPUT_INLINE_THRESHOLD = 4096
+
+
+def _truncate_large_tool_outputs(messages: list) -> list:
+  """Returns a copy of ``messages`` with large tool outputs replaced by a short
+  preview plus an ``output_truncated`` marker, so loading a chat does not ship
+  the full output (a Read of a 2000-line file, a long bash run) for every tool
+  block — including the ones the user never expands. The full output stays in
+  the stored message; the client fetches it on expand via
+  ``GET /api/chats/{id}/tool-output?ts=&i=``. Outputs at or below the threshold
+  stay inline, since a round-trip would cost more than the bytes."""
+  out = []
+  for m in messages:
+    blocks = m.get("blocks") if isinstance(m, dict) else None
+    if not isinstance(blocks, list) or m.get("role") != "assistant":
+      out.append(m)
+      continue
+    new_blocks = None
+    for i, blk in enumerate(blocks):
+      if not isinstance(blk, dict) or blk.get("type") != "tool":
+        continue
+      output = blk.get("output")
+      if (not isinstance(output, str)
+          or len(output) <= _TOOL_OUTPUT_INLINE_THRESHOLD):
+        continue
+      if new_blocks is None:
+        new_blocks = list(blocks)
+      new_blocks[i] = {
+        **blk,
+        "output": output[:_TOOL_OUTPUT_PREVIEW_CHARS],
+        "output_truncated": True,
+        "output_full_len": len(output),
+      }
+    out.append({**m, "blocks": new_blocks} if new_blocks is not None else m)
+  return out
+
+
 @router.get("/{chat_id}")
 def get_chat(
   chat_id: str,
@@ -576,7 +615,7 @@ def get_chat(
   return {
     "id": chat.id,
     "title": chat.title,
-    "messages": page,
+    "messages": _truncate_large_tool_outputs(page),
     "pending_messages": list(chat.pending_messages or []),
     "total": total,
     "offset": start,
@@ -594,6 +633,29 @@ def get_chat(
     ),
     "has_assistant_turns": has_assistant_turns,
   }
+
+
+@router.get("/{chat_id}/tool-output", response_class=PlainTextResponse)
+def get_tool_output(
+  chat_id: str,
+  ts: int,
+  i: int,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+) -> PlainTextResponse:
+  """Returns the FULL output of a single tool block, fetched lazily when the
+  user expands it — the chat-load payload ships only a preview (see
+  ``_truncate_large_tool_outputs``). The block is located by its message ``ts``
+  plus its index ``i`` within that message's blocks."""
+  chat = get_active_chat_or_404(db, chat_id)
+  for m in (chat.messages or []):
+    if m.get("role") != "assistant" or m.get("ts") != ts:
+      continue
+    blocks = m.get("blocks") or []
+    if 0 <= i < len(blocks) and blocks[i].get("type") == "tool":
+      return PlainTextResponse(blocks[i].get("output") or "")
+    break
+  raise HTTPException(status_code=404, detail="tool output not found")
 
 
 @router.get("/{chat_id}/agent-context")
