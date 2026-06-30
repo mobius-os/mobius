@@ -398,30 +398,56 @@
   30% { transform: scale(1.4); opacity: 1; }
 }
 
-/* ── Reasoning block ─────────────────────────────── */
+/* ── Reasoning disclosure ────────────────────────── */
 
-/* The agent's live thinking/reasoning, streamed during a turn (see
-   StreamingMessage's `item.type === 'thinking'` branch + the
-   useStreamConnection 'thinking' event handler). Dim + indented so it
-   reads as secondary narration that fills a long silent "thinking"
-   stretch, not as the answer. It's ephemeral — promoting the turn to a
-   persisted message drops it — so it only ever appears mid-stream. */
+/* Collapsed-by-default "Thinking" disclosure for the agent's live
+   reasoning (StreamingMessage's `item.type === 'thinking'` branch + the
+   useStreamConnection 'thinking' handler). Quiet + dim so it reads as a
+   secondary "the agent is thinking" indication that fills a long silent
+   stretch — not a wall of raw chain-of-thought competing with the
+   answer. The partner can expand to peek. Ephemeral: promoting the turn
+   to a persisted message drops it, so it only appears mid-stream. */
 .chat__reasoning {
   margin: 4px 0 8px;
-  padding-left: 10px;
-  border-left: 2px solid color-mix(in srgb, var(--border) 70%, transparent);
   color: var(--text-muted, color-mix(in srgb, var(--text) 55%, transparent));
   font-size: 13px;
   line-height: 1.5;
 }
+.chat__reasoning-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  list-style: none; /* hide the native disclosure triangle; we draw our own */
+  user-select: none;
+  padding: 2px 0;
+}
+.chat__reasoning-summary::-webkit-details-marker { display: none; }
+/* Theme-matched chevron that rotates open. */
+.chat__reasoning-summary::before {
+  content: '';
+  width: 0;
+  height: 0;
+  border-left: 4px solid currentColor;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  opacity: 0.6;
+  transition: transform 0.15s ease;
+}
+.chat__reasoning[open] > .chat__reasoning-summary::before {
+  transform: rotate(90deg);
+}
 .chat__reasoning-label {
-  display: block;
-  margin-bottom: 2px;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   opacity: 0.8;
+}
+.chat__reasoning-body {
+  margin-top: 4px;
+  padding-left: 10px;
+  border-left: 2px solid color-mix(in srgb, var(--border) 70%, transparent);
 }
 /* Inherit the dim color for the markdown body — don't let StandardMarkdown's
    default text color override the muted reasoning tone. */
@@ -429,6 +455,24 @@
 .chat__reasoning-body :is(p, li, code, strong, em) {
   color: inherit;
 }
+/* Live "still thinking" dots in the summary while this is the active block
+   (reuses the typing-indicator @keyframes thinking). */
+.chat__reasoning-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.chat__reasoning-dots span {
+  display: block;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.4;
+  animation: thinking 1.2s ease-in-out infinite;
+}
+.chat__reasoning-dots span:nth-child(2) { animation-delay: 0.2s; }
+.chat__reasoning-dots span:nth-child(3) { animation-delay: 0.4s; }
 
 .chat__cursor {
   display: inline-block;
