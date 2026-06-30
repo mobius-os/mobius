@@ -283,23 +283,35 @@ volume masks a new baked dist; always byte-check the served hash). Mini-apps
 update through each app's git repo + the store; freshness rides ETags
 (`/module` = `updated_at` µs; `/frame` = compound `updated_at`+content-hash).
 
-**Self-heal — DIRECTION (owner 2026-06-30), replacing the current code.** The
-model is git + a minimal pre-flight gate + recovery, with **no baked duplicate,
-no `/app/app` symlink-swap, no auto-heal probe, no magic**:
+**Self-heal — DIRECTION (owner-signed-off 2026-06-30; PLANNED, NOT YET BUILT —
+full adversarially-reviewed plan in `.pm/148` + `.pm/_148-recoveryd-hardened-plan`).**
+The model is git + a minimal pre-flight gate + a separate always-up recovery
+container, with **no baked duplicate, no `/app/app` symlink-swap, no auto-heal
+probe, no magic**:
 - The platform is served directly as a git repo.
-- **Pre-flight gate:** a change only takes effect on the restart that applies it,
-  so the running server keeps serving the working code while the agent edits.
-  Before applying, a minimal check — does the new tree import (`python -c "import
-  app.main"`) and answer `/api/health`? Green → apply; red → don't apply, hand the
-  traceback back to the agent's turn to fix. A break never reaches the live server.
-- **Recovery, not healing:** if a break slips the gate (or a core file is
-  corrupted), boot a **separate, minimal, frozen recovery-only server** (just
-  `/recover` + `recover_chat_runner.py`, which already shares no code with the SDK
-  stack and is stdlib-only) — NOT a full platform copy. Its recovery agent restores
-  via git (`git reset --hard` / `checkout` a good commit) or fixes the issue.
+- **Pre-flight gate (`.pm/154`):** a change only takes effect on the restart that
+  applies it, so the running server keeps serving the working code while the agent
+  edits. Before applying, a minimal check — does the new tree import (`python -c
+  "import app.main"`) and answer `/api/health`? Green → apply; red → don't apply,
+  hand the traceback back to the agent's turn. A break never reaches the live server.
+- **Recovery is a SEPARATE CONTAINER, not a process inside the platform.**
+  `recoveryd` runs from the same image with its own command + `restart:
+  unless-stopped`, mounts the same `/data`, and is routed by the external
+  `deploy-caddy` at `/recover*` *independently of platform health* (with an
+  auto-surfaced broken-state page when `:8000` is down). It must be a separate
+  container — the adversarial review confirmed prod pid1 `exec`s uvicorn, so a
+  backgrounded supervisor inside the platform container dies with it. **Two tiers:**
+  *Tier 1* is a deterministic "Restore platform" button (git-reset `/data/platform`
+  via the existing `.recover-pending` + restart) needing **zero CLI / OAuth /
+  network / agent** — this is THE floor; *Tier 2* is the lifted
+  `recover_chat_runner` spawning a rescue agent (best-effort, only when creds
+  exist). recoveryd restarts the platform via a sentinel file + a baked
+  `kill -TERM 1` poller (no Docker socket — O1), and its auth is DB-independent
+  (bcrypt `owner.json`, bootstrapped from owner-creation so it can't auth before
+  an owner exists — O2).
 - The crash-loop `cp`-restore, the `platform-baked` destructive `recovery_restore`
-  mode, and card 148's `.platform-serve-baked` probe/flag are removed. Real
-  image/disk corruption is an operator redeploy, not something to auto-heal around.
+  mode, and the `.platform-serve-baked` probe/flag are removed. Real image/disk
+  corruption is an operator redeploy, not something to auto-heal around.
 
 ## Chat scroll + steer contract
 
