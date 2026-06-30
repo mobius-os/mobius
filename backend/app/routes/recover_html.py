@@ -315,6 +315,10 @@ def dashboard_html(msg: str = "") -> str:
         <form method="POST" action="/recover/action"
               onsubmit="{_confirm_attr(_CONFIRM_BACKUP)}">
           <input type="hidden" name="action" value="download_backup">
+          <input class="pw-confirm" type="password" name="password"
+                 placeholder="Confirm with your password"
+                 autocomplete="current-password" required
+                 style="display:block;width:100%;margin:8px 0;box-sizing:border-box">
           <button class="btn btn-outline" type="submit">
             Download backup (.zip)
           </button>
@@ -345,6 +349,10 @@ def dashboard_html(msg: str = "") -> str:
         <form method="POST" action="/recover/action"
               onsubmit="{_confirm_attr(_CONFIRM_FACTORY)}">
           <input type="hidden" name="action" value="factory_reset">
+          <input class="pw-confirm" type="password" name="password"
+                 placeholder="Confirm with your password"
+                 autocomplete="current-password" required
+                 style="display:block;width:100%;margin:8px 0;box-sizing:border-box">
           <button class="btn btn-warn" type="submit">
             Factory reset
           </button>

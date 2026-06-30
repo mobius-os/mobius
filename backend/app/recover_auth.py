@@ -33,6 +33,7 @@ import hmac
 import json
 import os
 import secrets
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -95,19 +96,37 @@ def _recovery_secret_bytes() -> bytes:
   except Exception as exc:
     raise RuntimeError(f"could not read recovery secret at {path}: {exc}") from exc
 
-  # File absent — generate and persist it.
+  # File absent — generate and persist it. Write to a UNIQUE temp (crash-safe —
+  # the target is never left partial), then create the target with os.link,
+  # which fails atomically if it already exists. The backend runs sync handlers
+  # in AnyIO's threadpool, so on a fresh volume several requests can each mint a
+  # candidate at once; os.link makes exactly one win and the losers re-read the
+  # winner's key, so every concurrent caller agrees on one secret. A shared temp
+  # + overwriting rename (the prior approach) let the last writer clobber a key
+  # another thread had ALREADY signed a cookie with, invalidating that cookie.
+  # (Mirrors the frozen floor in backend/recovery/recovery_auth.py.)
   new_key = secrets.token_hex(32)
   try:
-    # Write to a temp file in the same directory, then rename atomically
-    # so a crash mid-write never leaves a partial file that silently
-    # invalidates future cookies.
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(new_key, encoding="ascii")
-    tmp.chmod(0o600)
-    tmp.rename(path)
+    fd, tmpname = tempfile.mkstemp(prefix=".recovery-secret.", dir=str(path.parent))
+    try:
+      with os.fdopen(fd, "w") as fh:
+        fh.write(new_key)
+      os.chmod(tmpname, 0o600)
+      try:
+        os.link(tmpname, path)
+        return new_key.encode("ascii")
+      except FileExistsError:
+        winner = path.read_text(encoding="ascii").strip()
+        if winner:
+          return winner.encode("ascii")
+        raise RuntimeError(f"recovery secret at {path} exists but is empty")
+    finally:
+      try:
+        os.unlink(tmpname)
+      except OSError:
+        pass
   except Exception as exc:
     raise RuntimeError(f"could not write recovery secret to {path}: {exc}") from exc
-  return new_key.encode("ascii")
 
 
 def create_session_token(username: str) -> str:

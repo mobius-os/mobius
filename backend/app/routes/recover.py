@@ -198,6 +198,11 @@ def recover_login(
     _COOKIE, token,
     httponly=True, samesite="strict", max_age=3600,
     secure=_request_is_https(request),
+    # Scope to the recovery surface so the cookie is NOT attached to ordinary
+    # same-origin requests (the shell, /api/*, mini-app fetches) — it is only
+    # sent on /recover/*, shrinking the replay surface to the recovery routes
+    # themselves (which the password re-auth above then gates).
+    path="/recover",
   )
   return resp
 
@@ -206,7 +211,11 @@ def recover_login(
 def recover_logout(request: Request):
   """Clears the recovery session cookie and returns the login page."""
   resp = HTMLResponse(login_html())
-  resp.delete_cookie(_COOKIE)
+  resp.delete_cookie(_COOKIE, path="/recover")
+  # Also clear any pre-fix cookie issued with the default Path=/ (a browser that
+  # logged in before this deploy still holds one); without this, logout would
+  # leave that legacy cookie valid until its 1h expiry.
+  resp.delete_cookie(_COOKIE, path="/")
   return resp
 
 
@@ -276,6 +285,7 @@ def _action_factory_reset(data_dir: Path) -> None:
 def recover_action(
   request: Request,
   action: str = Form(...),
+  password: str = Form(""),
 ):
   """Executes a recovery action.
 
@@ -287,8 +297,35 @@ def recover_action(
   used to expose (the deeper reset/restore knobs) is now the recovery
   chat agent's job — see /recover/chat.
   """
-  _verify_session(request)
+  username = _verify_session(request)
   data_dir = _DATA_DIR
+
+  # The recovery cookie ALONE must not authorize the secret-bearing or
+  # destructive actions. It is HttpOnly + SameSite=Strict + path-scoped to
+  # /recover, but a same-origin mini-app (its iframe runs with
+  # sandbox="... allow-same-origin") can still attach the cookie to a
+  # credentialed fetch and replay it within the 1-hour window — silently
+  # exfiltrating the secrets backup (download_backup) or wiping the instance
+  # (factory_reset). Gate those two on a fresh owner-password re-entry, which a
+  # replaying app cannot supply (it never sees the password). reinstall_store is
+  # idempotent and non-secret, so it stays cookie-only.
+  if action in ("download_backup", "factory_reset"):
+    pw_hash = _owner_password_hash(username)
+    # Run bcrypt either way (dummy hash when the row is somehow gone) so the
+    # response time doesn't distinguish a wrong password from a missing owner.
+    candidate_hash = pw_hash if pw_hash else _DUMMY_HASH
+    # Reject an EMPTY submission outright: a replayed cookie-only POST defaults
+    # `password` to "", and verify_password("", hash_of_"") is True — so without
+    # this an owner who configured an empty password could still be exploited.
+    if (
+      not password
+      or not pw_hash
+      or not recover_auth.verify_password(password, candidate_hash)
+    ):
+      return HTMLResponse(
+        dashboard_html(msg="Incorrect password — the action was not performed."),
+        status_code=401,
+      )
 
   if action == "download_backup":
     return _create_backup(data_dir)
@@ -303,7 +340,8 @@ def recover_action(
       error="Factory reset complete.  Set up your account again.",
       clear_storage=True,
     ))
-    resp.delete_cookie(_COOKIE)
+    resp.delete_cookie(_COOKIE, path="/recover")
+    resp.delete_cookie(_COOKIE, path="/")  # also clear any legacy Path=/ cookie
     return resp
 
   if action == "reinstall_store":
