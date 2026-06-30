@@ -29,7 +29,7 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 # Chromium copy via the symlinks below (~/.agent-browser is where
 # agent-browser looks by default).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    cron curl ca-certificates git \
+    cron curl ca-certificates git sudo \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
     libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
@@ -332,6 +332,17 @@ RUN useradd -m -s /bin/bash mobius \
     && chown -R mobius:mobius /data \
     && ln -s /opt/agent-browser /home/mobius/.agent-browser \
     && chown -R mobius:mobius /opt/agent-browser
+
+# apt scoped-sudo (owner spec): mobius (the in-product agent) may install/remove
+# OS packages but NOT have full root, so it can't break the recovery floor or
+# core system files. Scoped to apt/dpkg only; validated by visudo. NOT a hard
+# sandbox (apt maintainer scripts run as root) — the real safety is that the
+# recovery runtime depends on ZERO apt-installed packages, so a bad package can
+# never compromise it.
+RUN printf 'mobius ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/dpkg\n' \
+      > /etc/sudoers.d/mobius-apt \
+    && chmod 440 /etc/sudoers.d/mobius-apt \
+    && visudo -cf /etc/sudoers.d/mobius-apt
 
 COPY backend/scripts/entrypoint.sh ./scripts/entrypoint.sh
 RUN chmod +x ./scripts/entrypoint.sh
