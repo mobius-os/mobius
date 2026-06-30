@@ -104,3 +104,13 @@ agent-browser wait 300 >/dev/null
 
 agent-browser screenshot "${OUT}" >/dev/null
 echo "${OUT}"
+
+# Also print the ready-to-paste chat embed. The partner sees ONLY embedded
+# images in chat — never a file path or your prose description of a shot. Paste
+# this line into your reply (same message, BEFORE describing the screenshot) so
+# it actually shows. Only files under /data/chats/<id>/media/ are servable, so
+# only emit an embed for those.
+case "$OUT" in
+  /data/chats/*/media/*)
+    echo "embed: ![screenshot](/api/chats/${OUT#/data/chats/})" ;;
+esac
