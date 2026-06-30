@@ -550,7 +550,11 @@ def _truncate_large_tool_outputs(messages: list) -> list:
   out = []
   for m in messages:
     blocks = m.get("blocks") if isinstance(m, dict) else None
-    if not isinstance(blocks, list) or m.get("role") != "assistant":
+    # A message with no ``ts`` (legacy pre-stamping rows) can't be located by
+    # the ``/tool-output?ts=`` fetch route, so truncating it would strand the
+    # block on a permanently-unfetchable "expand to load". Keep those inline.
+    if (not isinstance(blocks, list) or m.get("role") != "assistant"
+        or not m.get("ts")):
       out.append(m)
       continue
     new_blocks = None
