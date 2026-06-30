@@ -445,6 +445,20 @@ export default function useScrollMode({
     // React 19 StrictMode's dev-time double-invoke.
 
     function sizeSpacer() {
+      // Keep fullViewHRef authoritative at EVERY spacer sizing, not just at
+      // the layout-effect entry and the RO callback start (the other two grow
+      // sites). The visualViewport keyboard handler reaches sizeSpacer via
+      // syncLayout BEFORE either of those grow steps runs on a keyboard-close,
+      // so without this the spacer would be sized from a stale-small fullViewH
+      // (the keyboard-open height) even though clientHeight has already grown
+      // back. That undersizes the spacer, the pin clamps below its target, and
+      // the message lands mid-viewport instead of at the top — the R5 "sent
+      // while at the bottom, went to the middle not the top" bug. Grow-only: a
+      // keyboard-OPEN shrink is ignored, so Chat-UX constraint #4 (keyboard
+      // open/close must not resize the spacer) still holds.
+      if (scrollEl.clientHeight > fullViewHRef.current) {
+        fullViewHRef.current = scrollEl.clientHeight
+      }
       const lastUserEl = lastUserMsgRef.current
       const h = _computeSpacerH(
         scrollEl, listEl, lastUserEl, fullViewHRef.current,

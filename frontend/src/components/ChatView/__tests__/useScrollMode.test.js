@@ -177,3 +177,42 @@ test('queued tray does not shorten spacer reservation', () => {
     396,
   )
 })
+
+// R5 regression contract: a send while at the bottom must pin the new user
+// message to the TOP, which requires the dynamic spacer to reserve enough
+// bottom room that the pin target is actually REACHABLE (maxScrollTop >=
+// pinTarget). The reachability reduces to: fullViewH >= clientHeight. When
+// fullViewH is stale-SMALL (the keyboard-open height used after the keyboard
+// has already closed and grown clientHeight), the spacer is undersized, the
+// pin clamps short, and the message lands mid-viewport. The fix keeps
+// fullViewHRef >= clientHeight at every sizeSpacer() call (grow guard), so
+// this asserts the math the fix preserves.
+function pinReachable({ fullViewH, clientHeight, listH, lastUserTop }) {
+  const scrollEl = makeScrollEl({
+    scrollHeight: 0, scrollTop: 0, clientHeight,
+  })
+  const listEl = { offsetHeight: listH }
+  const lastUserMsgEl = { offsetTop: lastUserTop }
+  const spacerH = _computeSpacerH(scrollEl, listEl, lastUserMsgEl, fullViewH)
+  const scrollHeight = listH + spacerH
+  const maxScrollTop = scrollHeight - clientHeight
+  const pinTarget = Math.max(0, lastUserTop - 4) // PIN_OFFSET = 4
+  return { spacerH, maxScrollTop, pinTarget, reachable: maxScrollTop >= pinTarget }
+}
+
+test('R5: spacer keeps the pin reachable when fullViewH tracks the (grown) clientHeight', () => {
+  // Keyboard just closed: clientHeight grew back to 700. With the grow guard,
+  // fullViewH is >= clientHeight, so the pin target is reachable → top pin.
+  const r = pinReachable({ fullViewH: 700, clientHeight: 700, listH: 1040, lastUserTop: 1000 })
+  assert.equal(r.reachable, true, 'message can reach the top when fullViewH >= clientHeight')
+  assert.equal(r.maxScrollTop, r.pinTarget, 'spacer reserves exactly enough — no phantom overscroll')
+})
+
+test('R5: a stale-small fullViewH undersizes the spacer and strands the pin mid-viewport (the bug)', () => {
+  // The pre-fix path: visualViewport fired sizeSpacer with the keyboard-open
+  // height (400) after clientHeight had already grown to 700.
+  const r = pinReachable({ fullViewH: 400, clientHeight: 700, listH: 1040, lastUserTop: 1000 })
+  assert.equal(r.reachable, false, 'stale-small fullViewH leaves the pin target unreachable')
+  assert.ok(r.pinTarget - r.maxScrollTop > 250,
+    'the message is stranded hundreds of px below the top — visually mid-viewport')
+})
