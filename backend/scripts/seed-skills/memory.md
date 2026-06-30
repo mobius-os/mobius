@@ -225,8 +225,11 @@ these is deferred to Reflection.
      undo).
    - **Collapse an obvious exact duplicate** into the richer note — only when
      they assert the *same* claim and there's no judgment call.
-   - **Newer fact wins:** when new info contradicts an existing note, edit or
-     replace the old note rather than leaving two notes that disagree.
+   - **Newer fact wins — but only on a clear correction.** If the partner
+     explicitly corrects an earlier fact, or recency/context clearly picks the
+     current one, edit/replace the old note. A genuine either/or contradiction
+     with no clear winner (`likes X` vs `doesn't`) is NOT a daytime call — record
+     both in the chat note and leave it for Reflection's one-tap question.
 
    These three keep the graph honest without a reorg. The bar is "obvious" — if
    it needs a decision, leave it for Reflection.
@@ -314,10 +317,12 @@ the rest (its reorganization worklist IS the warning list).
   each with a one-line reason. 0 links = orphan; ~5+ outbound links = the note
   is really a disguised map (the linter flags it — leave a note for Reflection
   to promote it).
-- **Supersede, don't contradict.** When new info contradicts an old note, edit
-  or replace the old note (newer wins) — don't leave two contradictory notes.
-  Time-sensitive claims carry `as-of:` dates so staleness is visible instead
-  of silent (structure rules above). Git history is the undo.
+- **Supersede on a clear correction, else defer.** When new info clearly
+  corrects an old note (the partner corrected it, or recency/context picks the
+  winner), edit/replace it — don't leave two notes that disagree. Time-sensitive
+  claims carry `as-of:` dates so staleness is visible instead of silent (structure
+  rules above). A genuine contradiction with no clear winner goes to Reflection's
+  one-tap question, not a silent overwrite. Git history is the undo.
 - **Partner corrections are authoritative.** When the partner says a memory is
   wrong, their correction outranks everything else — supersede the note in the
   same turn, keep the correction's date, and tell the partner what you changed.
