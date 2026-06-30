@@ -12,8 +12,8 @@ Commands are DOMAIN-level (`PersistTranscript`, `Finalize`,
 row-level so a later milestone can swap their dispatch for normalized-row
 writes without rewriting the actor.
 
-See docs/persistence/redesign.md for the rationale and
-docs/persistence/chat-writer-actor-plan.md for the staged rollout.
+See the "Chat persistence — single-writer actor" section in ARCHITECTURE.md
+for the contract; the v2 design + staged-rollout notes are internal/gitignored.
 The activation milestone has landed: this actor IS the live chat-persistence
 path — the runners and routes (`get_writer()` in the C2 write paths) submit
 every transcript write through it.
@@ -1063,7 +1063,7 @@ class ChatWriterActor:
     """Apply one command's persistence effect against the actor's session.
 
     Each command maps to a real DB mutation (the dispatch table in
-    docs/persistence/activation-design.md).  Must-persist commands
+    this method).  Must-persist commands
     commit before their ack resolves and RAISE to fail the ack when the
     commit didn't land; `PersistTranscript`/`PersistError` are
     fire-and-forget (a later snapshot/Finalize repairs a dropped write).

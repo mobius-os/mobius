@@ -82,7 +82,7 @@ const restored = (() => {
 // — not shellReload/deepLink — drove it). The restore is OPTIMISTIC: this
 // hook can't see the apps list, so Shell validates this id against the
 // live /api/apps list ONCE and demotes a restored-but-uninstalled canvas
-// to chat. See docs/navigation.md.
+// to chat. See ARCHITECTURE.md (Navigation back-stack + drawer model).
 export const coldRestoredCanvasAppId =
   (!shellReload?.activeView && !deepLink?.view && restored?.view === 'canvas')
     ? restored.appId
@@ -446,7 +446,7 @@ export default function useNavigation() {
   }, [activeChatId])
 
   // Persist active view + app (mirror of active chat) so a cold relaunch
-  // of the shell PWA restores the app the user was on. See docs/navigation.md.
+  // of the shell PWA restores the app the user was on. See ARCHITECTURE.md (Navigation back-stack + drawer model).
   useEffect(() => {
     try { localStorage.setItem(ACTIVE_VIEW_KEY, activeView) } catch { /* ignore */ }
   }, [activeView])

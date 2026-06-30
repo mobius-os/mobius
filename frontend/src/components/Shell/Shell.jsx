@@ -358,7 +358,7 @@ export default function Shell() {
   // useNavigation can't see the apps list. Once the live list lands, if the
   // restored app is gone (uninstalled since), demote the canvas to chat.
   // The present->absent eviction effect above can't cover this: a restored
-  // id was never 'seen present' this session. See docs/navigation.md.
+  // id was never 'seen present' this session. See ARCHITECTURE.md (Navigation back-stack + drawer model).
   const coldRestoreCheckedRef = useRef(false)
   useEffect(() => {
     if (!appsLiveFetched || coldRestoreCheckedRef.current) return
