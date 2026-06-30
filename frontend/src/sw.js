@@ -132,7 +132,7 @@ const VENDORED_DATE_FNS = [
 // Dockerfile vendor step in lockstep.
 const VENDORED_ATLAS_NOTES = [
   { url: '/vendor/d3-geo@3/d3-geo.mjs', revision: null },
-  { url: '/vendor/marked@14.1.4/marked.mjs', revision: null },
+  { url: '/vendor/marked@17.0.6/marked.mjs', revision: null },
   { url: '/vendor/dompurify@3.4.11/dompurify.mjs', revision: null },
 ]
 

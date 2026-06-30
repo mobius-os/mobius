@@ -50,6 +50,9 @@ services:
     volumes:
       - ./backend/app:/app/app
       - ./backend/tests:/app/tests
+      # memeval/ is the package the test_memeval_* suites import; mount it so the
+      # compose pytest path matches CI (which runs `cd backend && pytest`).
+      - ./backend/memeval:/app/memeval
       # describe-tree.py + entrypoint + register_app are imported by
       # tests; mount the live scripts dir so renames/new scripts are
       # picked up without rebuilding the image.

@@ -1,14 +1,11 @@
-// Guards the one npm-audit HIGH we knowingly accept: lodash (4.17.21 — the
-// latest published version, and still vulnerable; there is no upstream fix).
-// lodash enters the dependency tree ONLY through @openai/apps-sdk-ui's `Slider`
-// component, which the shell does not import — so Vite/rollup tree-shakes lodash
-// out of the shipped bundle entirely (verified: an esbuild bundle of the
-// apps-sdk-ui components we DO import contains zero lodash). The vulnerable
-// _.template / _.unset / _.omit therefore never reach the browser.
-//
-// If the shell ever imports `Slider`, lodash would start shipping and the
-// reachability rationale in ARCHITECTURE.md ("Security updates") would silently
-// rot. This test fails the moment that happens.
+// Defense-in-depth for the lodash supply-chain risk. @openai/apps-sdk-ui pulls
+// lodash transitively, only through its `Slider` component — which the shell
+// does not import, so lodash is tree-shaken out of the shipped bundle entirely
+// (verified: an esbuild bundle of the apps-sdk-ui components we DO import
+// contains zero lodash). lodash is ALSO pinned to a patched 4.18.1 via
+// `overrides` in package.json. This test is the second layer: it fails the
+// moment the shell imports `Slider`, which would start shipping lodash and make
+// the bundle depend on the override alone. See ARCHITECTURE.md "Security updates".
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
@@ -36,8 +33,8 @@ test('shell does not import the apps-sdk-ui Slider (its only lodash carrier)', (
   assert.deepEqual(
     offenders,
     [],
-    'Importing apps-sdk-ui Slider pulls lodash (HIGH advisory, no upstream fix) ' +
-      'into the shipped bundle. See ARCHITECTURE.md "Security updates". Use a ' +
-      'different control or vendor a lodash-free slider instead.',
+    'Importing apps-sdk-ui Slider ships lodash in the bundle (it is otherwise ' +
+      'tree-shaken out). lodash is pinned to a patched version via overrides, ' +
+      'but keep it out of the bundle anyway. See ARCHITECTURE.md "Security updates".',
   )
 })

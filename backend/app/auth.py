@@ -14,14 +14,20 @@ from app.config import get_settings
 
 def hash_password(password: str) -> str:
   """Returns a bcrypt hash of the given password."""
+  # bcrypt only ever uses the first 72 bytes of the input; bcrypt>=5 raises
+  # ValueError on longer inputs instead of silently truncating, so truncate
+  # explicitly to keep the historical contract (existing hashes still verify)
+  # and avoid crashing on a >72-byte password.
   return bcrypt.hashpw(
-    password.encode(), bcrypt.gensalt(rounds=12)
+    password.encode()[:72], bcrypt.gensalt(rounds=12)
   ).decode()
 
 
 def verify_password(plain: str, hashed: str) -> bool:
   """Returns True if the plain password matches the hash."""
-  return bcrypt.checkpw(plain.encode(), hashed.encode())
+  # Match hash_password's 72-byte truncation (see there): bcrypt>=5 raises on
+  # >72-byte inputs, and the stored hash was computed from the first 72 bytes.
+  return bcrypt.checkpw(plain.encode()[:72], hashed.encode())
 
 
 def create_access_token(
