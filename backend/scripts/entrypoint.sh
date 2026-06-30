@@ -313,6 +313,34 @@ __pycache__/
 dist/
 build/
 PGITIGNORE
+  # Also exclude the protected recovery / core files from the platform git
+  # model at the moment of init — BEFORE the `git add -A` below — so this
+  # fresh-init seed never tracks them in the first place. The recovery island
+  # is image-managed and root-owned chmod 444 in the live tree; the mobius user
+  # that runs the in-product merge engine cannot and must not write it, so it
+  # must never enter the rebase model. This mirrors the SHELL boot-seed (which
+  # gitignores its auth components before staging) and the apply-time
+  # platform_update._untrack_recovery_files (which untracks them on the first
+  # update for instances whose repos predate this seed). We source the paths
+  # from /app/protected-files.txt and apply the SAME mapping the Python uses
+  # (platform_update.recovery_platform_paths): take only absolute /app/ entries,
+  # strip the /app/ prefix, keep the ones under app/ or scripts/, and anchor
+  # each with a leading slash so it matches only the repo-root path.
+  if [ -f /app/protected-files.txt ]; then
+    {
+      echo ""
+      echo "# Recovery / core files are image-managed (root-owned chmod 444);"
+      echo "# they leave the platform git model entirely. See protected-files.txt."
+      while IFS= read -r pf_line; do
+        case "$pf_line" in \#*|"") continue ;; esac
+        case "$pf_line" in /app/*) : ;; *) continue ;; esac
+        pf_rel=${pf_line#/app/}
+        case "$pf_rel" in
+          app/*|scripts/*) echo "/$pf_rel" ;;
+        esac
+      done < /app/protected-files.txt
+    } >> /data/platform/.gitignore
+  fi
   chown mobius:mobius /data/platform/.gitignore 2>/dev/null || true
   su -s /bin/sh mobius -c '
     git -C /data/platform add -A
