@@ -48,22 +48,28 @@ def etag_matches(token: str, if_match: str) -> bool:
   """Reports whether a client's If-Match refers to the version in `token`.
 
   A transcoding reverse proxy rewrites the ETag it forwards so the tag stays
-  unique per content-encoding: a strong `"<tok>"` becomes `"<tok>-gzip"`, and
-  some proxies additionally weaken it to `W/"<tok>"`. Caddy's `encode` does
-  exactly this whenever it compresses a storage read. Our version token
-  identifies the stored file regardless of transfer encoding, so a client that
-  echoes the transformed tag back must still match — otherwise every CAS write
-  to a resource whose GET got compressed fails its precondition forever. Strip
-  a proxy-added weak prefix and content-encoding suffix before comparing.
+  unique per content-encoding: Caddy's `encode` turns a strong `"<tok>"` into
+  `"<tok>-gzip"` on a compressed read. A client echoing that suffixed tag back
+  in If-Match would never strong-equal our un-suffixed version token, so every
+  CAS write to a compressible file would 412 forever — strip a trailing
+  `-<encoding>` suffix before comparing. Otherwise follow RFC 9110 §13.1.1:
+  `*` matches any existing representation, a weak (`W/`) tag never
+  strong-matches, and comma-separated candidates match if any one does.
   """
-  candidate = if_match.strip()
-  if candidate.startswith("W/"):
-    candidate = candidate[2:]
-  for encoding in ("gzip", "br", "zstd", "deflate", "compress"):
-    if candidate.endswith(f'-{encoding}"'):
-      candidate = candidate[: -(len(encoding) + 2)] + '"'
-      break
-  return candidate == token
+  value = if_match.strip()
+  if value == "*":
+    return True
+  for raw in value.split(","):
+    tag = raw.strip()
+    if tag.startswith("W/"):
+      continue
+    for encoding in ("gzip", "br", "zstd", "deflate"):
+      if tag.endswith(f'-{encoding}"'):
+        tag = tag[: -(len(encoding) + 2)] + '"'
+        break
+    if tag == token:
+      return True
+  return False
 
 
 def atomic_write(file_path: Path, content: str | bytes) -> None:
