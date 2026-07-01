@@ -23,7 +23,7 @@ The image bundles everything the agent needs at runtime (the Claude CLI, esbuild
 
 ### Frontend serving priority (the #1 deploy gotcha)
 
-At startup `backend/app/main.py:836` picks one static directory **at module load time**, not per request (though a request for a file missing from the chosen `/data/shell/dist` still falls back per-request to the baked `/app/static`):
+At startup `backend/app/main.py:890` picks one static directory **at module load time**, not per request (though a request for a file missing from the chosen `/data/shell/dist` still falls back per-request to the baked `/app/static`):
 
 ```
 /data/shell/dist/  ← preferred (the agent's live rebuild; persists across image rebuilds)
@@ -91,7 +91,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 
 | File | Role |
 |------|------|
-| `main.py` | App factory: CORS, rate limiting, router mounting, static file serving; resolves `_static_dir` at load (`main.py:836`) |
+| `main.py` | App factory: CORS, rate limiting, router mounting, static file serving; resolves `_static_dir` at load (`main.py:890`) |
 | `config.py` | `Settings` via pydantic-settings; reads `.env` |
 | `database.py` | SQLAlchemy engine, `SessionLocal`, `Base`, `get_db` |
 | `models.py` | ORM tables: `Owner`, `Chat`, `ChatRun`, `App`, `PushSubscription`, `Notification` |
@@ -322,8 +322,14 @@ volume masks a new baked dist; always byte-check the served hash). Mini-apps
 update through each app's git repo + the store; freshness rides ETags
 (`/module` = `updated_at` µs; `/frame` = compound `updated_at`+content-hash).
 
-**Self-heal — DIRECTION (owner-signed-off 2026-06-30; PLANNED, NOT YET BUILT —
-full adversarially-reviewed plan in `.pm/148` + `.pm/_148-recoveryd-hardened-plan`).**
+**Self-heal — LANDING (owner-signed-off 2026-06-30; the `recoveryd` container is
+BUILT and wired — `backend/recovery/recoveryd.py`, its own service in
+`docker-compose.yml` with `restart: unless-stopped` on the same `/data`, routed
+by `deploy-caddy` at `/recover*` — per the adversarially-reviewed plan in
+`.pm/148` + `.pm/_148-recoveryd-hardened-plan`. Some hardening is still in flight
+under an active session, so treat the finer status of the bullets below —
+especially the pre-flight gate (`.pm/154`) and the listed removals — as
+"intended end-state, confirm against the recovery rework" rather than settled).**
 The model is git + a minimal pre-flight gate + a separate always-up recovery
 container, with **no baked duplicate, no `/app/app` symlink-swap, no auto-heal
 probe, no magic**:
