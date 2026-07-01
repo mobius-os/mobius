@@ -1393,7 +1393,15 @@
 }
 
 .chat__open-app-btn {
-  background: var(--accent-dim); /* CONTRACT: translucent accent glow — NOT a fill, relies on the surface beneath */
+  /* Frosted accent card: an accent-tinted translucent SURFACE floor (so it
+     reads as a card over any chat content) plus a backdrop-blur that softens
+     the chat behind it — the same frosted-glass technique as the composer
+     pill (.chat__pill). The old `var(--accent-dim)` alone had no surface and
+     no blur, so live chat showed through it SHARP and it read as a stray
+     transparent overlay floating on the messages. */
+  background: color-mix(in srgb, var(--accent) 16%, color-mix(in srgb, var(--surface) 78%, transparent));
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
   border: 1px solid var(--accent); /* CONTRACT: vivid accent line */
   color: var(--accent); /* CONTRACT: vivid accent text */
   border-radius: 8px;
