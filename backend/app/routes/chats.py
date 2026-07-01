@@ -535,18 +535,18 @@ async def patch_chat(
     }
 
 
-_TOOL_OUTPUT_PREVIEW_CHARS = 1024
 _TOOL_OUTPUT_INLINE_THRESHOLD = 4096
 
 
 def _truncate_large_tool_outputs(messages: list) -> list:
-  """Returns a copy of ``messages`` with large tool outputs replaced by a short
-  preview plus an ``output_truncated`` marker, so loading a chat does not ship
-  the full output (a Read of a 2000-line file, a long bash run) for every tool
-  block — including the ones the user never expands. The full output stays in
-  the stored message; the client fetches it on expand via
-  ``GET /api/chats/{id}/tool-output?ts=&i=``. Outputs at or below the threshold
-  stay inline, since a round-trip would cost more than the bytes."""
+  """Returns a copy of ``messages`` with large tool outputs dropped to an
+  ``output_truncated`` marker, so loading a chat does not ship the full output
+  (a Read of a 2000-line file, a long bash run) for every tool block — including
+  the ones the user never expands. The collapsed block already shows its
+  top-line summary (the tool + its ``input``, e.g. the bash command), so a
+  preview of the output adds nothing on load; the client fetches the full output
+  on expand via ``GET /api/chats/{id}/tool-output?ts=&i=``. Outputs at or below
+  the threshold stay inline, since a round-trip would cost more than the bytes."""
   out = []
   for m in messages:
     blocks = m.get("blocks") if isinstance(m, dict) else None
@@ -569,7 +569,7 @@ def _truncate_large_tool_outputs(messages: list) -> list:
         new_blocks = list(blocks)
       new_blocks[i] = {
         **blk,
-        "output": output[:_TOOL_OUTPUT_PREVIEW_CHARS],
+        "output": "",
         "output_truncated": True,
         "output_full_len": len(output),
       }

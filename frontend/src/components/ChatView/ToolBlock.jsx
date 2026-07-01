@@ -4,9 +4,11 @@ import { apiFetch } from '../../api/client.js'
 export default function ToolBlock({ t, chatId, msgTs, blockIdx }) {
   const [open, setOpen] = useState(() => !!t.defaultOpen)
   // The full output of a large tool block is fetched lazily on first expand —
-  // a chat load ships only a preview (see chats.py _truncate_large_tool_outputs)
-  // so a Read of a huge file or a long bash run doesn't bloat the payload for
-  // blocks the user never opens. Cached here so re-collapsing doesn't refetch.
+  // a chat load ships only the top-line summary (the tool + its input) and an
+  // output_truncated marker, no output preview (see chats.py
+  // _truncate_large_tool_outputs), so a Read of a huge file or a long bash run
+  // doesn't bloat the payload for blocks the user never opens. Cached here so
+  // re-collapsing doesn't refetch.
   const [fullOutput, setFullOutput] = useState(null)
   const [loadingFull, setLoadingFull] = useState(false)
   const toolName = t.tool || 'Tool'

@@ -1,11 +1,11 @@
-"""Lazy tool-output truncation (card 163): large tool outputs are served as a
-preview + marker on chat load, fetched in full on expand. Tests the pure
-truncation helper, including the no-mutation invariant (it must NOT corrupt the
-stored message dicts)."""
+"""Lazy tool-output truncation (card 163): large tool outputs are dropped to an
+output_truncated marker on chat load (the collapsed block already shows its
+top-line summary), fetched in full on expand. Tests the pure truncation helper,
+including the no-mutation invariant (it must NOT corrupt the stored message
+dicts)."""
 from app.routes.chats import (
     _truncate_large_tool_outputs,
     _TOOL_OUTPUT_INLINE_THRESHOLD,
-    _TOOL_OUTPUT_PREVIEW_CHARS,
 )
 
 
@@ -16,12 +16,14 @@ def _tool_msg(output, ts=1):
     }
 
 
-def test_large_tool_output_is_truncated_to_preview():
+def test_large_tool_output_is_dropped_to_marker():
     big = "x" * (_TOOL_OUTPUT_INLINE_THRESHOLD + 5000)
     blk = _truncate_large_tool_outputs([_tool_msg(big)])[0]["blocks"][0]
     assert blk["output_truncated"] is True
     assert blk["output_full_len"] == len(big)
-    assert blk["output"] == big[:_TOOL_OUTPUT_PREVIEW_CHARS]
+    # No preview is shipped — the collapsed block's top-line summary is enough;
+    # the full output is fetched on expand via /tool-output.
+    assert blk["output"] == ""
 
 
 def test_small_tool_output_stays_inline():
