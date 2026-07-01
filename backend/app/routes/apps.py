@@ -1205,9 +1205,14 @@ async def delete_app_data(
 
   settings = get_settings()
   apps_root = (Path(settings.data_dir) / "apps").resolve()
-  storage_dir = apps_root / str(app.id)
   data_dir = settings.data_dir
   async with fs_locks.app_storage_lock(app.id):
+    # re-query while holding the storage lock so a concurrent uninstall that won
+    # the race remains reversible. uninstall tombstones the row but deliberately
+    # preserves /data/apps/<id>, so a stale live row must not authorize this wipe.
+    db.expire_all()
+    app = live_app_or_404(db, app_id)
+    storage_dir = apps_root / str(app.id)
     # Drop the id-keyed runtime tree and its mirrored content-type sidecars.
     # Leaving the dir absent is fine — routes/storage.py recreates it on the
     # next write (atomic_write mkdirs its parent). Passing rel="" targets the
