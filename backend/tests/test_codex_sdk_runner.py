@@ -173,6 +173,57 @@ def test_tool_completed_events_emit_output_before_end():
   ]
 
 
+def test_websearch_completed_events_emit_sources_when_exposed():
+  class WebSearchThreadItem:
+    def __init__(self):
+      self.results = [{
+        "title": "Docs",
+        "url": "https://example.com/docs",
+        "snippet": "Search hit",
+      }]
+
+  sdk = {
+    "CommandExecutionThreadItem": type("CommandExecutionThreadItem", (), {}),
+    "FileChangeThreadItem": type("FileChangeThreadItem", (), {}),
+    "McpToolCallThreadItem": type("McpToolCallThreadItem", (), {}),
+    "DynamicToolCallThreadItem": type("DynamicToolCallThreadItem", (), {}),
+    "WebSearchThreadItem": WebSearchThreadItem,
+  }
+
+  events = codex_sdk_runner._tool_completed_events(
+    WebSearchThreadItem(), sdk,
+  )
+
+  assert events == [
+    {"type": "tool_sources", "sources": [{
+      "title": "Docs",
+      "url": "https://example.com/docs",
+      "snippet": "Search hit",
+    }]},
+    {"type": "tool_end"},
+  ]
+
+
+def test_websearch_completed_events_noop_when_sdk_exposes_no_sources():
+  class WebSearchThreadItem:
+    query = "latest news"
+    action = None
+
+  sdk = {
+    "CommandExecutionThreadItem": type("CommandExecutionThreadItem", (), {}),
+    "FileChangeThreadItem": type("FileChangeThreadItem", (), {}),
+    "McpToolCallThreadItem": type("McpToolCallThreadItem", (), {}),
+    "DynamicToolCallThreadItem": type("DynamicToolCallThreadItem", (), {}),
+    "WebSearchThreadItem": WebSearchThreadItem,
+  }
+
+  events = codex_sdk_runner._tool_completed_events(
+    WebSearchThreadItem(), sdk,
+  )
+
+  assert events == [{"type": "tool_end"}]
+
+
 def test_steer_into_active_turn_cleans_dead_handle(monkeypatch):
   sdk = _fake_sdk(async_codex_cls=object)
 

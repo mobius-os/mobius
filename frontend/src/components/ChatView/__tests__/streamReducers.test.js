@@ -22,6 +22,7 @@ import {
   isQuestionTool,
   suppressedQuestionToolIndices,
   appendThinkingChunk,
+  attachToolSources,
 } from '../streamReducers.js'
 import { questionKey } from '../questionKey.js'
 
@@ -138,6 +139,18 @@ test('tool_output still attaches to a running ordinary tool (non-regression)', (
   const next = attachToolOutput(prev, 'file1\nfile2')
   assert.equal(next[0].output, 'file1\nfile2')
   assert.equal(next[0].status, 'running', 'output does not close the lifecycle')
+})
+
+test('tool_sources attach to the latest WebSearch tool block', () => {
+  const sources = [{ title: 'Docs', url: 'https://example.com/docs' }]
+  const prev = [
+    toolItem('WebSearch', { status: 'done', sources: [{ url: 'old' }] }),
+    toolItem('Bash', { input: 'ls' }),
+    toolItem('WebSearch', { input: 'docs' }),
+  ]
+  const next = attachToolSources(prev, sources)
+  assert.deepEqual(next[0].sources, [{ url: 'old' }])
+  assert.deepEqual(next[2].sources, sources)
 })
 
 test('post-answer tool_output is swallowed by the absorbed card, not appended', () => {

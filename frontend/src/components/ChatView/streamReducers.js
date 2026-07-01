@@ -153,6 +153,23 @@ export function attachToolOutput(prev, content) {
 }
 
 /**
+ * Applies a `tool_sources` event to the most recent WebSearch block.
+ * Sources are small metadata, so they stay inline on the tool item.
+ */
+export function attachToolSources(prev, sources) {
+  if (!Array.isArray(sources) || sources.length === 0) return prev
+  for (let i = prev.length - 1; i >= 0; i--) {
+    const it = prev[i]
+    if (it.type === 'tool' && it.tool === 'WebSearch') {
+      const updated = [...prev]
+      updated[i] = { ...it, sources }
+      return updated
+    }
+  }
+  return prev
+}
+
+/**
  * Applies a `thinking` event (the agent's extended reasoning). Like
  * text, consecutive thinking deltas coalesce into a single trailing
  * `{type:'thinking'}` item; a thinking that arrives after any other

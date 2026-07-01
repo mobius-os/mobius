@@ -21,6 +21,8 @@ from claude_agent_sdk.types import (
   RateLimitEvent,
   RateLimitInfo,
   ResultMessage,
+  ServerToolResultBlock,
+  ServerToolUseBlock,
   StreamEvent,
   SystemMessage,
   TaskNotificationMessage,
@@ -807,6 +809,43 @@ def test_dispatch_user_tool_result():
   types = [e["type"] for e in bus.events]
   assert "tool_output" in types
   assert "tool_end" in types
+
+
+def test_dispatch_server_web_search_result_emits_sources():
+  bus = _Bus()
+  msg = AssistantMessage(
+    content=[
+      ServerToolUseBlock(
+        id="srv-1",
+        name="web_search",
+        input={"query": "mobius docs"},
+      ),
+      ServerToolResultBlock(
+        tool_use_id="srv-1",
+        content={
+          "type": "web_search_tool_result",
+          "content": [{
+            "title": "Mobius",
+            "url": "https://example.com/mobius",
+            "snippet": "Project page",
+          }],
+        },
+      ),
+    ],
+    model="claude-opus",
+  )
+
+  dispatch_sdk_message(msg, bus, None)
+
+  assert bus.events == [
+    {"type": "tool_start", "tool": "WebSearch", "input": "mobius docs"},
+    {"type": "tool_sources", "sources": [{
+      "title": "Mobius",
+      "url": "https://example.com/mobius",
+      "snippet": "Project page",
+    }]},
+    {"type": "tool_end"},
+  ]
 
 
 def test_dispatch_rate_limit_event():

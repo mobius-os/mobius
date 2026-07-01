@@ -606,14 +606,60 @@
   padding: 0 10px 8px;
   font-size: 12px; /* floor raised from 10.5px */
   color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
-  white-space: pre-wrap;
-  word-break: break-all;
   max-height: 200px;
   overflow-y: auto;
   line-height: 1.5;
 }
 
+.chat__tool-text {
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.chat__tool-text + .chat__tool-sources,
+.chat__tool-sources + .chat__tool-text {
+  margin-top: 6px;
+}
+
+.chat__tool-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.chat__tool-source-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 2px 7px;
+  border-radius: 8px;
+  color: var(--text); /* CONTRACT: readable source text on opaque fill */
+  background: var(--surface); /* CONTRACT: opaque chip fill inside tool */
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border-light));
+  text-decoration: none;
+}
+
+.chat__tool-source-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat__tool-source-host {
+  flex-shrink: 0;
+  color: var(--muted); /* CONTRACT: lower emphasis source domain */
+}
+
 .chat__tool-output { color: var(--text); /* CONTRACT: high-contrast text on opaque fill */ }
+
+.chat__tool-output-more {
+  display: block;
+  white-space: pre-wrap;
+}
 
 .chat__tool-spin {
   display: inline-block;

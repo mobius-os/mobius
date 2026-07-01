@@ -7,6 +7,7 @@ import {
   closeToolLifecycle,
   closeAllToolLifecycles,
   appendThinkingChunk,
+  attachToolSources,
 } from './streamReducers.js'
 import {
   readStoredStreamSnapshot,
@@ -79,6 +80,8 @@ const SYSTEM_EVENTS = new Set([
  *                         after start). { input }.
  *   tool_output           Tool finished, here's its result
  *                         { content }. Attaches to running block.
+ *   tool_sources          WebSearch source metadata
+ *                         { sources }. Stamps source chips onto block.
  *   tool_end              Marks the running tool done (status flip).
  *   skill_loaded          Agent loaded a skill { skill }. Stamps the
  *                         name onto the matching Skill tool block so
@@ -645,6 +648,8 @@ export default function useStreamConnection(chatId, {
             // (the post-answer "answers echo" output is swallowed
             // there; see streamReducers.js).
             applyStreamItems(prev => attachToolOutput(prev, event.content))
+          } else if (event.type === 'tool_sources') {
+            applyStreamItems(prev => attachToolSources(prev, event.sources))
           } else if (event.type === 'tool_end') {
             applyStreamItems(prev => closeToolLifecycle(prev))
           } else if (event.type === 'skill_loaded') {

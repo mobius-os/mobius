@@ -1,6 +1,14 @@
 import { useEffect, useState } from 'react'
 import { apiFetch } from '../../api/client.js'
 
+function sourceHost(url) {
+  try {
+    return new URL(url).host
+  } catch {
+    return url
+  }
+}
+
 export default function ToolBlock({ t, chatId, msgTs, blockIdx }) {
   const [open, setOpen] = useState(() => !!t.defaultOpen)
   // The full output of a large tool block is fetched lazily on first expand —
@@ -13,7 +21,12 @@ export default function ToolBlock({ t, chatId, msgTs, blockIdx }) {
   const [loadingFull, setLoadingFull] = useState(false)
   const toolName = t.tool || 'Tool'
   const label = toolName + (t.input ? `: ${t.input}` : '')
-  const hasDetail = !!(t.input || t.output || t.output_truncated)
+  const sources = Array.isArray(t.sources)
+    ? t.sources.filter(source => source?.url) : []
+  const hasSources = sources.length > 0
+  const hasDetail = !!(
+    t.input || t.output || t.output_truncated || hasSources
+  )
 
   useEffect(() => {
     if (t.defaultOpen) setOpen(true)
@@ -48,10 +61,35 @@ export default function ToolBlock({ t, chatId, msgTs, blockIdx }) {
         </span>
         {hasDetail && <span className="chat__tool-toggle">{open ? '▾' : '▸'}</span>}
       </div>
-      {open && (t.input || shownOutput) && (
-        <pre className="chat__tool-detail">
-          {t.input && <>{t.input}{'\n'}</>}
-          {shownOutput && <span className="chat__tool-output">{shownOutput}</span>}
+      {open && hasDetail && (
+        <div className="chat__tool-detail">
+          {t.input && <pre className="chat__tool-text">{t.input}</pre>}
+          {hasSources && (
+            <div className="chat__tool-sources">
+              {sources.map((source, i) => (
+                <a
+                  key={`${source.url}-${i}`}
+                  className="chat__tool-source-chip"
+                  href={source.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={source.snippet || source.title || source.url}
+                >
+                  <span className="chat__tool-source-title">
+                    {source.title || source.url}
+                  </span>
+                  <span className="chat__tool-source-host">
+                    {sourceHost(source.url)}
+                  </span>
+                </a>
+              ))}
+            </div>
+          )}
+          {shownOutput && (
+            <pre className="chat__tool-text chat__tool-output">
+              {shownOutput}
+            </pre>
+          )}
           {t.output_truncated && fullOutput === null && (
             <span className="chat__tool-output-more">
               {loadingFull
@@ -59,7 +97,7 @@ export default function ToolBlock({ t, chatId, msgTs, blockIdx }) {
                 : `\n… (${t.output_full_len ?? 'more'} chars total — expand to load)`}
             </span>
           )}
-        </pre>
+        </div>
       )}
     </div>
   )

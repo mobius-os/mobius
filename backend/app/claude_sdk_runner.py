@@ -76,6 +76,8 @@ from claude_agent_sdk.types import (
   PermissionResultDeny,
   RateLimitEvent,
   ResultMessage,
+  ServerToolResultBlock,
+  ServerToolUseBlock,
   StreamEvent,
   SystemMessage,
   TaskNotificationMessage,
@@ -94,6 +96,7 @@ from app.runner_registry import RunnerKind, registry
 from app.runtime_types import RunnerResult
 from app.sdk_emit import emit_unknown_enabled, unknown_event
 from app.tool_summaries import summarize_tool_input
+from app.tool_sources import normalize_tool_sources
 
 
 def _thinking_event(content: str) -> dict:
@@ -477,6 +480,26 @@ def _format_tool_output(content: Any) -> str:
   return json.dumps(content, ensure_ascii=True)
 
 
+def _server_web_search_input(inp: dict[str, Any]) -> str:
+  """Return the displayed query from Claude's server web_search input."""
+  if not isinstance(inp, dict):
+    return ""
+  query = inp.get("query")
+  if isinstance(query, str):
+    return query
+  queries = inp.get("queries")
+  if isinstance(queries, list):
+    return ", ".join(q for q in queries if isinstance(q, str))
+  return ""
+
+
+def _is_web_search_tool_result(content: Any) -> bool:
+  """True when Claude's opaque server result is a web-search result."""
+  if not isinstance(content, dict):
+    return False
+  return content.get("type") == "web_search_tool_result"
+
+
 async def _maybe_await(value: Any) -> Any:
   """Awaits a value only when the callback returned an awaitable."""
   if inspect.isawaitable(value):
@@ -602,6 +625,7 @@ def dispatch_sdk_message(
   if isinstance(sdk_msg, AssistantMessage):
     if sdk_msg.session_id:
       current_session_id = sdk_msg.session_id
+    server_tools: dict[str, str] = {}
     for block in sdk_msg.content:
       if isinstance(block, ToolUseBlock):
         bc.publish({
@@ -628,6 +652,34 @@ def dispatch_sdk_message(
           if skill:
             bc.publish({"type": "skill_loaded", "skill": skill})
             activity.log_skill_load(getattr(bc, "chat_id", None), skill)
+        continue
+      if isinstance(block, ServerToolUseBlock):
+        server_tools[block.id] = block.name
+        if block.name == "web_search":
+          bc.publish({
+            "type": "tool_start",
+            "tool": "WebSearch",
+            "input": _server_web_search_input(block.input),
+          })
+          continue
+        _emit_unknown(
+          bc, f"assistant_block:{type(block).__name__}", block,
+        )
+        continue
+      if isinstance(block, ServerToolResultBlock):
+        tool_name = server_tools.get(block.tool_use_id)
+        if (
+          tool_name == "web_search"
+          or _is_web_search_tool_result(block.content)
+        ):
+          sources = normalize_tool_sources(block.content)
+          if sources:
+            bc.publish({"type": "tool_sources", "sources": sources})
+          bc.publish({"type": "tool_end"})
+          continue
+        _emit_unknown(
+          bc, f"assistant_block:{type(block).__name__}", block,
+        )
         continue
       if isinstance(block, ThinkingBlock):
         bc.publish(_thinking_event(block.thinking))
