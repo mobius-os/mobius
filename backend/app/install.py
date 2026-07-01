@@ -41,6 +41,7 @@ from urllib.parse import unquote, urljoin, urlparse
 import httpx
 from fastapi import HTTPException
 from PIL import Image as _PILImage
+from sqlalchemy import case
 from sqlalchemy.orm import Session
 
 from app import activity, app_git, fs_locks, models
@@ -568,16 +569,22 @@ def _is_trusted_catalog_source(canonical_manifest_url: str) -> bool:
   """True when the manifest is published under the canonical mobius-os org on
   raw.githubusercontent.com.
 
-  Only a trusted-catalog install may adopt a reserved platform slug via
-  `previous_id` (e.g. Reflection legitimately superseding the baked
-  `dreaming`). An owner-pasted manifest from any other host cannot, so it can
-  never hijack Memory/Reflection/the store by declaring their slug.
+  Gates BOTH the legacy-shape update fallback and the `previous_id` platform-slug
+  adoption below. An owner-pasted manifest from any other host is therefore never
+  matched against a mobius-os row, so it can neither hijack Memory/Reflection/the
+  store by declaring their slug nor overwrite them by pointing at their base.
+
+  Reject any `..` segment: `raw.githubusercontent.com/mobius-os/../evil/…`
+  string-checks as mobius-os here but GitHub resolves it to the `evil` org — the
+  path is compared BEFORE the fetch normalizes it, so treat traversal as untrusted.
+  `unquote` runs first, so a percent-encoded `%2e%2e` is caught too.
   """
   parsed = urlparse(canonical_manifest_url)
   parts = [unquote(part) for part in parsed.path.split("/") if part]
   return (
     parsed.hostname == "raw.githubusercontent.com"
-    and bool(parts)
+    and ".." not in parts
+    and len(parts) >= 2
     and parts[0] == "mobius-os"
   )
 
@@ -1273,18 +1280,27 @@ async def install_from_manifest(
     .filter(models.App.manifest_url == canonical_manifest_url)
     .first()
   )
-  if existing is None:
-    # SHAPE-DRIFT TOLERANCE. The SAME app can carry an OLDER manifest_url string
-    # than today's canonical `<base>#manifest-id=<id>`: install-core-apps /
-    # register_app wrote the raw `<base>/mobius.json`, and very old rows wrote a
-    # bare `<base>`. Match those legacy shapes of the same canonical BASE so a
-    # store update lands IN PLACE — the write path below self-heals
-    # `app.manifest_url` to the canonical form — instead of forking a duplicate
-    # row (the "app installed, not updated" dup that surfaced once core apps
-    # became store-updatable). Keyed on the base, not the slug, so two genuinely
-    # different apps (different repos -> different bases) still stay separate.
-    # Tombstone-agnostic like the primary lookup, but prefer a LIVE row when
-    # both a live and a soft-deleted legacy row share the base.
+  if existing is None and _is_trusted_catalog_source(canonical_manifest_url):
+    # SHAPE-DRIFT TOLERANCE (trusted catalog only). The SAME app can carry an
+    # OLDER manifest_url string than today's canonical `<base>#manifest-id=<id>`:
+    # install-core-apps / register_app wrote the raw `<base>/mobius.json`, and
+    # very old rows wrote a bare `<base>`. Match those legacy shapes of the same
+    # canonical BASE so a store update lands IN PLACE — the write path below
+    # self-heals `app.manifest_url` to the canonical form — instead of forking a
+    # duplicate row (the "app installed, not updated" dup that surfaced once core
+    # apps became store-updatable).
+    #
+    # GATED on the trusted mobius-os catalog because this matches on BASE, not
+    # manifest id: an UNTRUSTED install (esp. the inline-manifest path, where the
+    # caller supplies both id and raw_base) pointing a DIFFERENT id at an
+    # existing row's base would otherwise flip a fresh install into an in-place
+    # OVERWRITE of that row before any adoption check runs. Within mobius-os one
+    # repo is one base is one app, so a base match there is unambiguously the
+    # same app, and the fetched code comes from that trusted base regardless.
+    # Every affected legacy row (the core apps) is mobius-os, so the gate keeps
+    # the fix while closing the overwrite path. Tombstone-agnostic like the
+    # primary lookup, but prefer a LIVE row when a live + a soft-deleted legacy
+    # row share the base.
     base = _canonical_base(canonical_manifest_url)
     existing = (
       db.query(models.App)
@@ -1292,7 +1308,8 @@ async def install_from_manifest(
         models.App.manifest_url.in_([f"{base}/mobius.json", base, f"{base}/"])
       )
       .order_by(
-        models.App.deleted_at.isnot(None).asc(),
+        # live rows (deleted_at IS NULL) first, then lowest id
+        case((models.App.deleted_at.is_(None), 0), else_=1),
         models.App.id.asc(),
       )
       .first()
