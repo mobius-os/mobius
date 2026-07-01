@@ -129,6 +129,29 @@
 .drawer__group--apps {
   flex: 1 1 0;
   min-height: 80px;
+  /* Anchors the ::after bottom-fade overlay to the group. */
+  position: relative;
+}
+
+/* Bottom fade — the same 16px "there's more below / this row is
+   clipped" cue the scroll container used to paint with mask-image,
+   moved OFF the scroller onto a static overlay. A mask on an
+   overflow:auto element forces the compositor to re-apply the mask
+   against the moving rows on every scroll frame (a real Android
+   scroll-jank source); a fixed ::after does not — the list scrolls
+   underneath it on a cheap layer. Visually identical: content fades
+   into --bg over the last 16px. pointer-events:none so it never eats
+   a tap/scroll on the row beneath it. */
+.drawer__group--chats::after,
+.drawer__group--apps::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 16px;
+  pointer-events: none;
+  background: linear-gradient(to top, var(--bg), transparent);
 }
 
 
@@ -163,30 +186,26 @@
 .drawer__label svg { flex-shrink: 0; opacity: 0.85; color: var(--muted); }
 .drawer__label span { line-height: 1; }
 
-/* Per-section row container — scrolls internally when its group
-   has been shrunk below its content size. Fade-mask at the bottom
-   so a partial row at the scroll boundary doesn't read as cut. */
+/* Per-section row container — scrolls internally when its group has
+   been shrunk below its content size. The bottom "more below" fade is
+   painted by the static .drawer__group--*::after overlay above, NOT a
+   mask on this element: a mask-image on an overflow:auto container
+   makes the compositor re-apply the mask against the moving rows every
+   scroll frame (Android jank). overscroll-behavior:contain keeps a
+   boundary scroll from chaining out to the blurred scrim behind the
+   drawer. */
 .drawer__scroll {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  overscroll-behavior: contain;
   scrollbar-width: thin;
-  mask-image: linear-gradient(
-    to bottom,
-    black calc(100% - 16px),
-    transparent
-  );
-  -webkit-mask-image: linear-gradient(
-    to bottom,
-    black calc(100% - 16px),
-    transparent
-  );
-  /* Bottom overscroll room equal to the 16px fade-mask, so the last row
-     (e.g. the selected app) can scroll clear of the dimmed band instead of
-     reading as pinned under the Settings divider. scroll-padding-bottom keeps
-     scroll-into-view from re-tucking it under the mask. */
+  /* Bottom room equal to the 16px overlay fade, so the last row (e.g. the
+     selected app) can scroll clear of the dimmed band instead of reading as
+     pinned under the Settings divider. scroll-padding-bottom keeps
+     scroll-into-view from re-tucking it under the fade. */
   padding-bottom: 16px;
   scroll-padding-bottom: 16px;
 }
