@@ -659,15 +659,18 @@ def test_install_update_path_in_place(client, auth, bypass_url_validation):
   assert jsx_file.read_text() == jsx_v2
 
 
+@pytest.mark.parametrize("legacy_shape", ["mobius.json", "bare", "trailing"])
 def test_update_matches_legacy_manifest_url_shape_in_place(
-    client, db, auth, bypass_url_validation):
-  """A row whose manifest_url is the OLD raw `<base>/mobius.json` shape (what
-  install-core-apps / register_app wrote for the core apps) must still resolve
-  as an UPDATE, not fork a duplicate install. Regression for the "app installed,
-  not updated" core-app dup that shipped once core apps became store-updatable.
-  """
+    legacy_shape, client, db, auth, bypass_url_validation):
+  """A row whose manifest_url is a LEGACY shape (the raw `<base>/mobius.json`
+  install-core-apps / register_app wrote, or a very old bare `<base>` / `<base>/`)
+  must still resolve as an UPDATE, not fork a duplicate install. Regression for
+  the "app installed, not updated" core-app dup that shipped once core apps
+  became store-updatable — covering every legacy shape in the fallback's `in_`."""
   from app import models
-  base = "https://x.test/legacyrepo/"
+  # A trusted mobius-os base — the shape-drift fallback is gated on it, and every
+  # affected legacy row (the core apps) is mobius-os.
+  base = "https://raw.githubusercontent.com/mobius-os/app-legacytest/main/"
   responses = {
     base + "mobius.json": (200, json.dumps({**MANIFEST_NEWS, "version": "1.0.0"}).encode()),
     base + "index.jsx": (200, JSX.encode()),
@@ -683,10 +686,15 @@ def test_update_matches_legacy_manifest_url_shape_in_place(
   assert r1.status_code == 201, r1.text
   v1_id = r1.json()["id"]
 
-  # Drift the row's manifest_url back to the raw legacy shape, exactly as a
+  # Drift the row's manifest_url to the legacy shape under test, exactly as a
   # platform-installed core app carries it (canonical exact-match would miss).
+  legacy_manifest_url = {
+    "mobius.json": base + "mobius.json",
+    "bare": base.rstrip("/"),
+    "trailing": base,
+  }[legacy_shape]
   row = db.query(models.App).filter(models.App.id == v1_id).first()
-  row.manifest_url = base + "mobius.json"
+  row.manifest_url = legacy_manifest_url
   db.commit()
 
   responses_v2 = {
@@ -708,10 +716,15 @@ def test_update_matches_legacy_manifest_url_shape_in_place(
   assert row.manifest_url.endswith("#manifest-id=test-news")  # self-healed
 
 
-def _seed_null_manifest_core(db, slug: str, source_dir: str):
-  """A baked core app the way install-core-apps registers it: a real slug but
-  NO manifest_url (the shape the previous_id-adoption guard protects)."""
+def _seed_null_manifest_core(db, slug: str):
+  """A baked core app the way install-core-apps registers it: a real slug and a
+  real source tree under <data_dir>/apps/<slug>, but NO manifest_url (the shape
+  the previous_id-adoption guard protects). Creating it under data_dir/apps also
+  ensures that dir exists so a trusted adoption's source-tree rename can land."""
   from app import models
+  import os
+  source_dir = str(Path(get_settings().data_dir) / "apps" / slug)
+  os.makedirs(source_dir, exist_ok=True)
   app = models.App(
     name=slug.title(),
     description="",
@@ -734,7 +747,7 @@ def test_previous_id_cannot_adopt_reserved_slug_from_untrusted_source(
   must NOT take over the platform app — it installs as a SEPARATE app instead,
   leaving the core row untouched (card 172)."""
   from app import models
-  core_id = _seed_null_manifest_core(db, "memory", "/tmp/memory-core-untrusted")
+  core_id = _seed_null_manifest_core(db, "memory")
 
   base = "https://x.test/evil/"  # not the mobius-os catalog
   manifest = {**MANIFEST_NEWS, "id": "evil", "name": "Evil App",
@@ -766,7 +779,7 @@ def test_previous_id_may_adopt_reserved_slug_from_trusted_catalog(
   previous_id — the guard only blocks UNTRUSTED sources, so legitimate renames
   (e.g. Reflection adopting the old baked row) keep working."""
   from app import models
-  core_id = _seed_null_manifest_core(db, "memory", "/tmp/memory-core-trusted")
+  core_id = _seed_null_manifest_core(db, "memory")
 
   base = "https://raw.githubusercontent.com/mobius-os/app-memory/main/"
   manifest = {**MANIFEST_NEWS, "id": "memory-catalog", "name": "Memory",
@@ -786,6 +799,62 @@ def test_previous_id_may_adopt_reserved_slug_from_trusted_catalog(
   assert r.status_code == 201, r.text
   assert r.json()["mode"] == "update"   # adopted the baked core row
   assert r.json()["id"] == core_id
+
+
+def test_untrusted_same_base_inline_install_does_not_overwrite_legacy_row(
+    client, db, auth, bypass_url_validation):
+  """An UNTRUSTED install (here the inline-manifest path, where the caller
+  supplies both the id and the raw_base) that merely SHARES a base with an
+  existing legacy-shape row — but declares a different manifest id — must NOT
+  match/overwrite that row. The shape-drift fallback is gated on the trusted
+  mobius-os catalog, so this installs a SEPARATE app. Regression for the Codex
+  adversarial finding that base-only matching could flip a fresh install into an
+  in-place overwrite of an existing (incl. core) row before any adoption check."""
+  from app import models
+  base = "https://x.test/shared/"  # untrusted host, shared base
+  victim = models.App(
+    name="Victim", description="",
+    jsx_source="export default function App() { return null }",
+    source_dir="/tmp/victim-app", slug="victim",
+    manifest_url=base + "mobius.json",  # the legacy shape the fallback matches
+    cross_app_access="none", share_with_apps="none", offline_capable=False,
+  )
+  db.add(victim)
+  db.commit()
+  victim_id = victim.id
+
+  manifest = {**MANIFEST_NEWS, "id": "attacker", "name": "Attacker"}
+  responses = {
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, b"p"),
+    base + "fetch.sh": (200, b""),
+  }
+  with patch("app.install.httpx.AsyncClient",
+             side_effect=_fake_async_client(responses)):
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest": manifest,
+      "raw_base": base,
+    })
+  assert r.status_code == 201, r.text
+  assert r.json()["mode"] == "install"   # a separate app, NOT an overwrite
+  assert r.json()["id"] != victim_id
+  victim = db.query(models.App).filter(models.App.id == victim_id).first()
+  assert victim.slug == "victim"
+  assert victim.name == "Victim"
+  assert victim.manifest_url == base + "mobius.json"  # untouched
+
+
+def test_is_trusted_catalog_source_rejects_path_traversal():
+  """`raw.githubusercontent.com/mobius-os/../evil/...` string-matches mobius-os
+  but GitHub resolves it to the `evil` org — it must read as UNTRUSTED so the
+  guard/fallback can't be bypassed (Codex adversarial finding)."""
+  from app.install import _is_trusted_catalog_source as trusted
+  assert trusted("https://raw.githubusercontent.com/mobius-os/app-x/main#manifest-id=x")
+  assert not trusted("https://raw.githubusercontent.com/mobius-os/../evil/app-x/main#manifest-id=x")
+  assert not trusted("https://raw.githubusercontent.com/mobius-os/%2e%2e/evil/x/main#manifest-id=x")
+  assert not trusted("https://raw.githubusercontent.com.evil.com/mobius-os/x/main#manifest-id=x")
+  assert not trusted("https://raw.githubusercontent.com/mobius-os#manifest-id=x")  # too shallow
 
 
 def test_update_dropping_schedule_unregisters_orphan_cron(
