@@ -382,21 +382,31 @@ test('without the surviving map, a wiped replay reverts to pending (proves the b
 
 test('appendThinkingChunk coalesces consecutive deltas into one item', () => {
   let items = []
-  items = appendThinkingChunk(items, 'Let me ')
-  items = appendThinkingChunk(items, 'think about ')
-  items = appendThinkingChunk(items, 'this.')
+  items = appendThinkingChunk(items, 'Let me ', 1000)
+  items = appendThinkingChunk(items, 'think about ', 1750)
+  items = appendThinkingChunk(items, 'this.', 2600)
   assert.equal(items.length, 1, 'consecutive thinking deltas stay one item')
-  assert.deepEqual(items[0], { type: 'thinking', content: 'Let me think about this.' })
+  assert.deepEqual(items[0], {
+    type: 'thinking',
+    content: 'Let me think about this.',
+    startedAt: 1000,
+    duration_ms: 1600,
+  })
 })
 
 test('appendThinkingChunk opens a fresh item after a non-thinking item', () => {
   // A thinking that arrives after text (or a tool) must NOT merge into the
   // text — it opens its own block so reasoning stays in emit-order.
   let items = [{ type: 'text', content: 'Here is the answer.' }]
-  items = appendThinkingChunk(items, 'reconsidering...')
+  items = appendThinkingChunk(items, 'reconsidering...', 5000)
   assert.equal(items.length, 2)
   assert.equal(items[0].type, 'text')
-  assert.deepEqual(items[1], { type: 'thinking', content: 'reconsidering...' })
+  assert.deepEqual(items[1], {
+    type: 'thinking',
+    content: 'reconsidering...',
+    startedAt: 5000,
+    duration_ms: 0,
+  })
 })
 
 test('appendThinkingChunk is a no-op on empty content', () => {

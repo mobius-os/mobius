@@ -8,6 +8,15 @@ import { questionKey } from './questionKey.js'
 
 export function streamItemToBlock(item) {
   if (item.type === 'text') return { type: 'text', content: item.content }
+  if (item.type === 'thinking') {
+    return {
+      type: 'thinking',
+      content: item.content,
+      ...(Number.isFinite(item.duration_ms)
+        ? { duration_ms: item.duration_ms }
+        : {}),
+    }
+  }
   if (item.type === 'question') {
     return {
       type: 'question',
@@ -65,6 +74,10 @@ function streamBlocksCoverMessageBlocks(msgBlocks, streamBlocks) {
       if (!sameToolBlock(msgBlock, streamBlock)) return false
     } else if (msgBlock.type === 'question') {
       if (questionKey(msgBlock) !== questionKey(streamBlock)) return false
+    } else if (msgBlock.type === 'thinking') {
+      const msgText = normalizeMirrorText(msgBlock.content)
+      const streamText = normalizeMirrorText(streamBlock.content)
+      if (msgText && !streamText.startsWith(msgText)) return false
     } else if (msgBlock.type === 'error') {
       if ((msgBlock.message || '') !== (streamBlock.message || '')) return false
     } else {
@@ -100,6 +113,7 @@ export function messageCoversAssistantStream(msg, items) {
     const msgBlock = msgBlocks[i]
     if (!msgBlock || msgBlock.type !== block.type) return false
     if (block.type === 'text') return normalizeMirrorText(msgBlock.content).startsWith(normalizeMirrorText(block.content))
+    if (block.type === 'thinking') return normalizeMirrorText(msgBlock.content).startsWith(normalizeMirrorText(block.content))
     if (block.type === 'tool') return sameToolBlock(msgBlock, block)
     if (block.type === 'question') return questionKey(msgBlock) === questionKey(block)
     if (block.type === 'error') return (msgBlock.message || '') === (block.message || '')

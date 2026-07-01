@@ -594,6 +594,7 @@ def test_run_codex_sdk_turn_publishes_thinking_for_reasoning_deltas(
     ReasoningSummaryTextDeltaNotification
   )
   monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
+  monkeypatch.setattr(codex_sdk_runner.time, "time", lambda: 3.25)
 
   bc = _FakeBroadcast()
   result = asyncio.run(
@@ -612,8 +613,8 @@ def test_run_codex_sdk_turn_publishes_thinking_for_reasoning_deltas(
   assert result["error"] is None
   assert bc.events == [
     {"type": "session_init", "session_id": "thread-1"},
-    {"type": "thinking", "content": "plotting"},
-    {"type": "thinking", "content": " the route"},
+    {"type": "thinking", "content": "plotting", "ts": 3250},
+    {"type": "thinking", "content": " the route", "ts": 3250},
     {"type": "text", "content": "answer"},
   ]
   assert registry.get_handle("chat-1", RunnerKind.CODEX_SDK) is None

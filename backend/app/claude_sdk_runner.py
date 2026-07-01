@@ -62,6 +62,7 @@ import inspect
 import json
 import logging
 import os
+import time
 from collections import deque
 from typing import Any
 from uuid import uuid4
@@ -93,6 +94,15 @@ from app.runner_registry import RunnerKind, registry
 from app.runtime_types import RunnerResult
 from app.sdk_emit import emit_unknown_enabled, unknown_event
 from app.tool_summaries import summarize_tool_input
+
+
+def _thinking_event(content: str) -> dict:
+  """Build the provider-agnostic reasoning event with runner time."""
+  return {
+    "type": "thinking",
+    "content": content,
+    "ts": int(time.time() * 1000),
+  }
 
 
 async def _persist_session_id(db, chat_id: str, session_id: str | None) -> None:
@@ -568,7 +578,7 @@ def dispatch_sdk_message(
       if delta_type == "thinking_delta":
         thinking = delta.get("thinking") or delta.get("text") or ""
         if thinking:
-          bc.publish({"type": "thinking", "content": thinking})
+          bc.publish(_thinking_event(thinking))
         return current_session_id, None
       _emit_unknown(bc, f"stream:content_block_delta:{delta_type}", delta)
       return current_session_id, None
@@ -620,7 +630,7 @@ def dispatch_sdk_message(
             activity.log_skill_load(getattr(bc, "chat_id", None), skill)
         continue
       if isinstance(block, ThinkingBlock):
-        bc.publish({"type": "thinking", "content": block.thinking})
+        bc.publish(_thinking_event(block.thinking))
         continue
       if isinstance(block, TextBlock):
         # Streamed via text_delta already — snapshot duplicate.

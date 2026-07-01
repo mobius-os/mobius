@@ -9,6 +9,13 @@ import { suppressedQuestionToolIndices } from './streamReducers.js'
 import { stripAugmentation } from './msgText.js'
 
 
+function thoughtLabel(durationMs) {
+  if (!Number.isFinite(durationMs)) return 'Thought'
+  const seconds = Math.max(1, Math.round(durationMs / 1000))
+  return `Thought for ${seconds}s`
+}
+
+
 // Answerability is purely a function of the block + its position + live hint.
 // Computing it here (rather than passing an arrow from ChatView's render loop)
 // lets React.memo skip re-renders for non-last messages on every streaming
@@ -89,6 +96,20 @@ function MsgContentInner({
                     _truncate_large_tool_outputs + GET /tool-output). */}
                 <ToolBlock t={block} chatId={chatId} msgTs={msg.ts} blockIdx={i} />
               </div>
+            )
+          }
+          if (block.type === 'thinking') {
+            return (
+              <details key={i} className="chat__reasoning">
+                <summary className="chat__reasoning-summary">
+                  <span className="chat__reasoning-label">
+                    {thoughtLabel(block.duration_ms)}
+                  </span>
+                </summary>
+                <div className="chat__reasoning-body">
+                  <StandardMarkdown text={block.content || ''} />
+                </div>
+              </details>
             )
           }
           if (block.type === 'question') {

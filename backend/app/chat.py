@@ -331,13 +331,12 @@ class _ChatEventSink:
     # stall the stream, and a dropped write is repaired by a later
     # snapshot or the terminal Finalize.
     #
-    # Deep-copy is load-bearing: build_assistant_message aliases
-    # self.assistant_blocks (its "blocks" IS that live list, and
-    # process_event mutates those block dicts in place). The actor reads
-    # the snapshot on its own thread; copying here means it reads a
-    # frozen value no later publish()/process_event on the loop can
-    # mutate underneath it. Snapshots are <=1/sec (throttle) and tiny
-    # next to a commit, so the copy is free.
+    # Deep-copy is load-bearing: build_assistant_message can alias the
+    # live block dicts (process_event mutates those dicts in place). The
+    # actor reads the snapshot on its own thread; copying here means it
+    # reads a frozen value no later publish()/process_event on the loop
+    # can mutate underneath it. Snapshots are <=1/sec (throttle) and
+    # tiny next to a commit, so the copy is free.
     if needs_save:
       self._last_save = time.monotonic()
       snapshot = copy.deepcopy(build_assistant_message(self.assistant_blocks))
