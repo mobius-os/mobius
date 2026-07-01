@@ -484,35 +484,111 @@ test.describe('Scroll position', () => {
     await setup(page)
     await newChat(page)
 
-    // Send a message and get some content
-    await sendMessage(page, 'Content for scroll test')
-    await page.evaluate(() => document.querySelector('.chat__stop')?.click())
-    await page.waitForFunction(() => !document.querySelector('.chat__stop'), { timeout: 3000 })
-    await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))))
+    const chatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
+    expect(chatId).toBeTruthy()
 
-    // Record scroll position
-    const scrollBefore = await page.evaluate(() => {
-      const el = document.querySelector('.chat__scroll')
-      return el ? el.scrollHeight - el.scrollTop : null
+    const messages = [
+      { role: 'user', content: 'Scroll restore prompt', ts: 1700000000000 },
+      {
+        role: 'assistant',
+        content: Array.from({ length: 36 }, (_, i) =>
+          `Scroll restore paragraph ${i + 1}. ${'Persisted content. '.repeat(10)}`
+        ).join('\n\n'),
+        blocks: Array.from({ length: 36 }, (_, i) => ({
+          type: 'text',
+          content: `Scroll restore paragraph ${i + 1}. ${'Persisted content. '.repeat(10)}`,
+        })),
+      },
+    ]
+
+    // Scroll restore is only meaningful for content that survives navigation.
+    // The shared POST stub creates optimistic rows only, so this test serves
+    // the persisted transcript directly and keeps the invariant under test
+    // focused on the chat-mode save/restore path.
+    await page.route(new RegExp(`/api/chats/${chatId}\\?limit=`), route => {
+      if (route.request().method() !== 'GET') return route.continue()
+      return route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages,
+          total: messages.length,
+          offset: 0,
+          running: false,
+          pending_messages: [],
+        }),
+      })
     })
 
-    // Reload page
-    await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+    await page.goto(`${BASE}/shell/?chat=${chatId}`, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
-      () => !!document.querySelector('.chat__scroll'),
+      () => {
+        const el = document.querySelector('.chat__scroll')
+        return !!el
+          && getComputedStyle(el).visibility !== 'hidden'
+          && el.scrollHeight > el.clientHeight + 100
+          && el.textContent.includes('Scroll restore paragraph 36')
+      },
       { timeout: 10000 }
     )
-    await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
 
-    // Check scroll was restored (within tolerance)
+    // Stamp an ANCHOR_AT mode with a real wheel gesture; the scroll state
+    // machine intentionally ignores non-gesture scroll events.
+    const scroll = page.locator('.chat__scroll')
+    await scroll.hover()
+    await page.mouse.wheel(0, -3000)
+    await page.waitForFunction(() => {
+      const el = document.querySelector('.chat__scroll')
+      if (!el) return false
+      const gap = el.scrollHeight - el.scrollTop - el.clientHeight
+      return el.scrollTop > 0 && gap > 100
+    }, { timeout: 3000 })
+    const scrollBefore = await page.evaluate(() => {
+      const el = document.querySelector('.chat__scroll')
+      return el ? el.scrollTop : null
+    })
+    expect(scrollBefore).toBeGreaterThan(0)
+    await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))))
+
+    // Navigating away unmounts ChatView, which is the lifecycle boundary that
+    // saves the reader's ANCHOR_AT mode for this chat.
+    await page.getByLabel('Toggle navigation').click()
+    await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
+    await page.locator('.drawer.drawer--open .drawer__item', { hasText: 'Settings' }).click()
+    await expect(page.locator('.settings')).toBeVisible({ timeout: 5000 })
+    await page.waitForFunction(
+      id => {
+        try {
+          const modes = JSON.parse(sessionStorage.getItem('chat-mode') || '{}')
+          return modes[id]?.kind === 'ANCHOR_AT'
+        } catch {
+          return false
+        }
+      },
+      chatId,
+      { timeout: 3000 }
+    )
+
+    // Return through the app navigation stack so ChatView remounts and consumes
+    // the saved mode for the same chat.
+    await page.evaluate(() => history.back())
+    await page.waitForFunction(
+      () => {
+        const el = document.querySelector('.chat__scroll')
+        return !!el
+          && getComputedStyle(el).visibility !== 'hidden'
+          && el.scrollHeight > el.clientHeight + 100
+          && el.textContent.includes('Scroll restore paragraph 36')
+      },
+      { timeout: 10000 }
+    )
+    await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))))
+
     const scrollAfter = await page.evaluate(() => {
       const el = document.querySelector('.chat__scroll')
-      return el ? el.scrollHeight - el.scrollTop : null
+      return el ? el.scrollTop : null
     })
-
-    if (scrollBefore != null && scrollAfter != null) {
-      expect(Math.abs(scrollBefore - scrollAfter)).toBeLessThan(50)
-    }
+    expect(Math.abs(scrollAfter - scrollBefore)).toBeLessThan(50)
   })
 })
 
