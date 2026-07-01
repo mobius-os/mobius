@@ -16,6 +16,7 @@ from typing import Literal
 
 EventType = Literal[
   "text",
+  "thinking",
   "text_boundary",
   "tool_start",
   "tool_input",
@@ -56,6 +57,30 @@ def _join_text_parts(parts: list[str]) -> str:
   return out
 
 
+def _event_ts_ms(event: dict) -> int | None:
+  """Return a normalized event timestamp when the runner supplied one."""
+  try:
+    return int(event["ts"])
+  except (KeyError, TypeError, ValueError):
+    return None
+
+
+def _close_trailing_thinking(assistant_blocks: list) -> None:
+  """Mark the latest thinking run closed without changing persisted shape."""
+  if assistant_blocks and assistant_blocks[-1].get("type") == "thinking":
+    assistant_blocks[-1]["_thinking_closed"] = True
+
+
+def _persisted_block(block: dict) -> dict:
+  """Drop live-only reducer metadata from a block before storage."""
+  if block.get("type") != "thinking":
+    return block
+  persisted = dict(block)
+  persisted.pop("_thinking_start_ts", None)
+  persisted.pop("_thinking_closed", None)
+  return persisted
+
+
 def process_event(event: dict, assistant_blocks: list) -> bool:
   """Accumulates a parsed event into the assistant blocks list.
 
@@ -64,6 +89,9 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
   blocks changed and a DB save may be warranted.
   """
   event_type = event.get("type")
+
+  if event_type != "thinking":
+    _close_trailing_thinking(assistant_blocks)
 
   if event_type == "text":
     content = event.get("content", "")
@@ -81,6 +109,35 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
       assistant_blocks.append(
         {"type": "text", "content": content}
       )
+    return True
+
+  if event_type == "thinking":
+    content = event.get("content", "")
+    if not content:
+      return False
+    ts = _event_ts_ms(event)
+    last = assistant_blocks[-1] if assistant_blocks else None
+    if (
+      last
+      and last.get("type") == "thinking"
+      and not last.get("_thinking_closed")
+    ):
+      start_ts = last.get("_thinking_start_ts")
+      if start_ts is None and ts is not None:
+        start_ts = ts - int(last.get("duration_ms") or 0)
+        last["_thinking_start_ts"] = start_ts
+      last["content"] += content
+      if start_ts is not None and ts is not None:
+        last["duration_ms"] = max(0, ts - int(start_ts))
+    else:
+      block = {
+        "type": "thinking",
+        "content": content,
+        "duration_ms": 0,
+      }
+      if ts is not None:
+        block["_thinking_start_ts"] = ts
+      assistant_blocks.append(block)
     return True
 
   if event_type == "text_boundary":
@@ -377,7 +434,11 @@ def build_assistant_message(
   return {
     "role": "assistant",
     "content": all_text,
-    "blocks": [b for b in assistant_blocks if b.get("type") != "text_boundary"],
+    "blocks": [
+      _persisted_block(b)
+      for b in assistant_blocks
+      if b.get("type") != "text_boundary"
+    ],
   }
 
 
@@ -406,7 +467,8 @@ def blocks_have_renderable_content(assistant_blocks: list) -> bool:
 def finalize_blocks(assistant_blocks: list) -> None:
   """Force-completes running tools and removes unused internal markers."""
   assistant_blocks[:] = [
-    blk for blk in assistant_blocks
+    _persisted_block(blk)
+    for blk in assistant_blocks
     if blk.get("type") != "text_boundary"
   ]
   for blk in assistant_blocks:

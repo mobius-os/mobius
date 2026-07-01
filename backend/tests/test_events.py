@@ -123,6 +123,53 @@ def test_text_deltas_are_concatenated_exactly():
   assert blocks[0]["content"] == "Use `Foo.Bar`, U.S.A., or API:GET /v1."
 
 
+def test_thinking_events_coalesce_with_duration():
+  blocks = []
+  process_event({"type": "thinking", "content": "plan ", "ts": 1000}, blocks)
+  process_event({"type": "thinking", "content": "then act", "ts": 2450}, blocks)
+
+  assert len(blocks) == 1
+  assert blocks[0]["type"] == "thinking"
+  assert blocks[0]["content"] == "plan then act"
+  assert blocks[0]["duration_ms"] == 1450
+
+  msg = build_assistant_message(blocks)
+  assert msg["content"] == ""
+  assert msg["blocks"] == [{
+    "type": "thinking",
+    "content": "plan then act",
+    "duration_ms": 1450,
+  }]
+  assert "_thinking_start_ts" in blocks[0]
+  assert "_thinking_start_ts" not in msg["blocks"][0]
+
+
+def test_thinking_event_after_tool_starts_fresh_block():
+  blocks = []
+  process_event({"type": "thinking", "content": "first", "ts": 1000}, blocks)
+  process_event({"type": "tool_start", "tool": "Bash", "input": "ls"}, blocks)
+  process_event({"type": "thinking", "content": "second", "ts": 2000}, blocks)
+
+  thinking_blocks = [b for b in blocks if b.get("type") == "thinking"]
+  assert len(thinking_blocks) == 2
+  assert [b["content"] for b in thinking_blocks] == ["first", "second"]
+  assert [b["duration_ms"] for b in thinking_blocks] == [0, 0]
+
+
+def test_finalize_blocks_keeps_thinking_and_strips_transients():
+  blocks = []
+  process_event({"type": "thinking", "content": "a", "ts": 1000}, blocks)
+  process_event({"type": "thinking", "content": "b", "ts": 1600}, blocks)
+
+  finalize_blocks(blocks)
+
+  assert blocks == [{
+    "type": "thinking",
+    "content": "ab",
+    "duration_ms": 600,
+  }]
+
+
 def test_finalize_blocks_completes_running_tools():
   blocks = [
     {"type": "tool", "tool": "Bash", "input": "ls",

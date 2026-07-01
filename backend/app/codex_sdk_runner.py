@@ -66,6 +66,7 @@ import logging
 import os
 import re
 import shutil
+import time
 from typing import Any
 
 from app.codex_appserver import _extract_bash_command
@@ -74,6 +75,15 @@ from app.runtime_types import RunnerResult
 from app.runner_registry import RunnerKind, registry
 
 log = logging.getLogger("moebius.chat")
+
+
+def _thinking_event(content: str) -> dict:
+  """Build the provider-agnostic reasoning event with runner time."""
+  return {
+    "type": "thinking",
+    "content": content,
+    "ts": int(time.time() * 1000),
+  }
 
 
 class _BridgeError(Exception):
@@ -977,7 +987,7 @@ async def run_codex_sdk_turn(
           ),
         ):
           if payload.delta:
-            bc.publish({"type": "thinking", "content": payload.delta})
+            bc.publish(_thinking_event(payload.delta))
           continue
 
         if isinstance(

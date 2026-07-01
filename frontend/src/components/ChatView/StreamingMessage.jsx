@@ -1,6 +1,50 @@
+import { useEffect, useState } from 'react'
 import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ToolBlock from './ToolBlock.jsx'
 import QuestionCard from './QuestionCard.jsx'
+
+
+function durationSeconds(durationMs) {
+  if (!Number.isFinite(durationMs)) return null
+  return Math.max(1, Math.round(durationMs / 1000))
+}
+
+
+function ThinkingDisclosure({ item, isActive }) {
+  const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    if (!isActive) return undefined
+    const id = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(id)
+  }, [isActive])
+
+  const startedAt = Number.isFinite(item.startedAt) ? item.startedAt : now
+  const activeSeconds = durationSeconds(Math.max(0, now - startedAt))
+  const frozenSeconds = durationSeconds(item.duration_ms)
+  const label = isActive
+    ? `Thinking for ${activeSeconds || 1}s`
+    : frozenSeconds
+      ? `Thought for ${frozenSeconds}s`
+      : 'Thought'
+
+  return (
+    <details className="chat__reasoning">
+      <summary className="chat__reasoning-summary">
+        <span className="chat__reasoning-label">{label}</span>
+        {isActive && (
+          <span className="chat__reasoning-dots" aria-hidden="true">
+            <span /><span /><span />
+          </span>
+        )}
+      </summary>
+      <div className="chat__reasoning-body">
+        <StandardMarkdown text={item.content} />
+      </div>
+    </details>
+  )
+}
+
 
 /**
  * The single live `<li>` that renders the in-flight turn's
@@ -72,30 +116,15 @@ export default function StreamingMessage({ streamItems, dataKey, onAnswer }) {
         if (item.type === 'thinking') {
           // The agent's live reasoning, shown as a COLLAPSED, secondary
           // disclosure so a long "thinking" stretch reads as a quiet
-          // "Thinking…" indication (filling the silence) rather than a
+          // timer (filling the silence) rather than a
           // wall of raw chain-of-thought. The partner can expand it to
           // peek; by default the answer stays the focus. While this is
           // the last item the agent is still mid-thought, so the summary
-          // animates ("Thinking…" + dots); an earlier thinking block the
-          // agent has already moved past reads as a static "Thinking"
-          // toggle. Ephemeral: it lives only in streamItems and drops
-          // when the turn promotes to the persisted message — it's live
-          // narration, not transcript.
+          // animates with dots; an earlier thinking block the agent has
+          // already moved past reads as a frozen "Thought for Ns" toggle.
           const isActive = i === streamItems.length - 1
           return (
-            <details key={`s-${i}`} className="chat__reasoning">
-              <summary className="chat__reasoning-summary">
-                <span className="chat__reasoning-label">Thinking</span>
-                {isActive && (
-                  <span className="chat__reasoning-dots" aria-hidden="true">
-                    <span /><span /><span />
-                  </span>
-                )}
-              </summary>
-              <div className="chat__reasoning-body">
-                <StandardMarkdown text={item.content} />
-              </div>
-            </details>
+            <ThinkingDisclosure key={`s-${i}`} item={item} isActive={isActive} />
           )
         }
         if (item.type === 'text') {

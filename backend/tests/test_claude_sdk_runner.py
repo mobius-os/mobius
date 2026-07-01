@@ -33,7 +33,7 @@ from claude_agent_sdk.types import (
   UserMessage,
 )
 
-from app import models
+from app import claude_sdk_runner, models
 from app.claude_sdk_runner import (
   ActiveClaudeClient,
   dispatch_sdk_message,
@@ -641,11 +641,16 @@ def test_dispatch_text_delta_emits_text():
   assert bus.events == [{"type": "text", "content": "hello"}]
 
 
-def test_dispatch_thinking_delta_emits_thinking():
+def test_dispatch_thinking_delta_emits_thinking(monkeypatch):
+  monkeypatch.setattr(claude_sdk_runner.time, "time", lambda: 1.234)
   bus = _Bus()
   msg = _stream_delta("thinking_delta", thinking="planning...")
   dispatch_sdk_message(msg, bus, None)
-  assert bus.events == [{"type": "thinking", "content": "planning..."}]
+  assert bus.events == [{
+    "type": "thinking",
+    "content": "planning...",
+    "ts": 1234,
+  }]
 
 
 def test_dispatch_input_json_delta_emits_unknown(monkeypatch):
@@ -666,14 +671,19 @@ def test_dispatch_unknown_delta_silent_when_disabled(monkeypatch):
   assert bus.events == []
 
 
-def test_dispatch_assistant_thinking_block_emits_thinking():
+def test_dispatch_assistant_thinking_block_emits_thinking(monkeypatch):
+  monkeypatch.setattr(claude_sdk_runner.time, "time", lambda: 2.5)
   bus = _Bus()
   msg = AssistantMessage(
     content=[ThinkingBlock(thinking="reflecting", signature="sig")],
     model="claude-opus",
   )
   dispatch_sdk_message(msg, bus, None)
-  assert {"type": "thinking", "content": "reflecting"} in bus.events
+  assert {
+    "type": "thinking",
+    "content": "reflecting",
+    "ts": 2500,
+  } in bus.events
 
 
 def test_dispatch_assistant_tool_use_emits_tool_start():
