@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import activity, app_git, fs_locks, icon_cache, models, schemas, theme
-from app.storage_io import read_capped_body
+from app.storage_io import delete_content_type_tree, read_capped_body
 from app.broadcast import get_system_broadcast
 from app.routes.notify import publish_app_built_to_owning_chat
 from app.compiler import compile_jsx, recompile_app_bundle
@@ -1173,6 +1173,61 @@ async def delete_app(
     if resolved_source is not None:
       async with fs_locks.source_dir_lock(str(resolved_source)):
         await asyncio.to_thread(_drop_cron_only, resolved_source)
+
+
+@router.delete(
+  "/{app_id}/data",
+  status_code=204,
+  dependencies=[Depends(reject_cross_site)],
+)
+async def delete_app_data(
+  app_id: int,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+):
+  """Wipes an installed app's runtime storage back to empty, KEEPING the app
+  installed — the DB row, source tree, compiled bundle, and cron all stay.
+
+  This is a separate, additive action from uninstall: uninstall (delete_app)
+  tombstones the row and hides the app; this leaves the app fully live and
+  running, just with an empty `/data/apps/<id>` tree. There is no tombstone and
+  no recovery window — a data wipe is what the owner asked for, so unlike the
+  reversible uninstall it takes effect immediately.
+
+  The wipe holds ``app_storage_lock(app_id)`` — the SAME per-app lock every
+  storage write and folder-delete takes (see fs_locks + routes/storage.py) — so
+  a concurrent write can't recreate the tree mid-wipe. Taking only this innermost
+  storage lock (never the outer install_uninstall_lock) keeps the documented
+  lock order intact; we are not touching the source tree, cron, or the id
+  allocation that the outer lock protects.
+  """
+  app = live_app_or_404(db, app_id)
+
+  settings = get_settings()
+  apps_root = (Path(settings.data_dir) / "apps").resolve()
+  storage_dir = apps_root / str(app.id)
+  data_dir = settings.data_dir
+  async with fs_locks.app_storage_lock(app.id):
+    # Drop the id-keyed runtime tree and its mirrored content-type sidecars.
+    # Leaving the dir absent is fine — routes/storage.py recreates it on the
+    # next write (atomic_write mkdirs its parent). Passing rel="" targets the
+    # whole `<meta>/apps/<id>` sidecar tree (an empty component is dropped in
+    # the path join), the sidecar analogue of removing the storage root.
+    await asyncio.to_thread(shutil.rmtree, storage_dir, ignore_errors=True)
+    delete_content_type_tree(data_dir, Path("apps") / str(app.id), "")
+
+  # Advance updated_at so the iframe cache-buster (versionForApp reads
+  # app.updated_at) changes and a currently-open app remounts against its
+  # now-empty storage — the wipe touches no mapped column, so onupdate won't
+  # fire on its own. Naive UTC to match the App soft-delete write convention.
+  app.updated_at = now_naive_utc()
+  db.commit()
+
+  # Refetch the drawer and bust any cached iframe so the app reloads against
+  # its now-empty storage (Shell's app_updated handler refreshes the list).
+  get_system_broadcast().publish(
+    {"type": "app_updated", "appId": str(app.id)}
+  )
 
 
 @router.post(

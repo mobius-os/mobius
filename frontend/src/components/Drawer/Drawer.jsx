@@ -26,6 +26,7 @@ export default function Drawer({
   onNewChat,
   onDeleteChat,
   onDeleteApp,
+  onDeleteAppData,
   onSettings,
   // Set of chat ids whose agent is currently streaming. Used to
   // pulse a small accent dot next to the row label so the user can
@@ -498,6 +499,7 @@ export default function Drawer({
                     }}
                     onPin={(next) => pinApp(app.id, next)}
                     onDelete={() => onDeleteApp?.(app.id)}
+                    onDeleteData={() => onDeleteAppData?.(app.id)}
                     onInstall={() => setInstallingApp({ id: app.id, name: app.name, slug: app.slug, updatedAt: app.updated_at })}
                   />
                 ))}
@@ -564,19 +566,27 @@ function DrawerRow({
   onRenameSubmit,
   onPin,
   onDelete,
+  onDeleteData,
   onInstall,
 }) {
   const wrapRef = useRef(null)
   const inputRef = useRef(null)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
+  // Separate two-step confirm for the app-only "Delete data" action, which
+  // wipes stored data but keeps the app installed. Independent of
+  // confirmingDelete so the two confirm chips can't collide.
+  const [confirmingDeleteData, setConfirmingDeleteData] = useState(false)
 
-  // Reset the inline-confirm two-step (apps only) whenever the menu
+  // Reset the inline-confirm two-steps (apps only) whenever the menu
   // closes — otherwise reopening would land the user back on the
   // primed "Confirm delete?" view. The SDK Menu (Radix) handles
   // open/close, outside-click, escape, and collision-aware
   // positioning natively; we just listen for the close.
   useEffect(() => {
-    if (!menuOpen) setConfirmingDelete(false)
+    if (!menuOpen) {
+      setConfirmingDelete(false)
+      setConfirmingDeleteData(false)
+    }
   }, [menuOpen])
 
   // Cancel-on-outside-tap during rename. Capture-phase listeners on
@@ -708,7 +718,7 @@ function DrawerRow({
           </button>
         </Menu.Trigger>
         <Menu.Content side="bottom" align="end" sideOffset={4} minWidth={200}>
-          {!confirmingDelete ? (
+          {!confirmingDelete && !confirmingDeleteData ? (
             <>
               <Menu.Item
                 onSelect={() => onPin?.(!pinned)}
@@ -761,7 +771,48 @@ function DrawerRow({
                   Delete
                 </Menu.Item>
               )}
+              {kind === 'app' && (
+                // Wipes the app's stored data but keeps it installed — a
+                // separate action from Delete (which removes the whole app).
+                // Same preventDefault-to-hold-open + confirm-chip pattern as
+                // the app Delete above; the wording stays exactly "Delete
+                // data" (no "keeps your data" phrasing).
+                <Menu.Item
+                  onSelect={(e) => { e.preventDefault(); setConfirmingDeleteData(true) }}
+                  className="drawer__menu-item--danger"
+                >
+                  Delete data
+                </Menu.Item>
+              )}
             </>
+          ) : confirmingDeleteData ? (
+            <div className="drawer__menu-confirm">
+              <span className="drawer__menu-confirm-label">Delete data?</span>
+              <div className="drawer__menu-confirm-actions">
+                <button
+                  type="button"
+                  className="drawer__menu-confirm-btn drawer__menu-confirm-btn--cancel"
+                  onClick={() => setConfirmingDeleteData(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="drawer__menu-confirm-btn drawer__menu-confirm-btn--yes"
+                  onClick={() => {
+                    // Close the parent's menu state before the wipe fires,
+                    // matching the Delete confirm below — keeps Radix's
+                    // open-trigger bookkeeping in sync. The app STAYS in the
+                    // list here (only its data is wiped), so no row unmounts.
+                    setConfirmingDeleteData(false)
+                    onMenuToggle(false)
+                    onDeleteData?.()
+                  }}
+                >
+                  Delete data
+                </button>
+              </div>
+            </div>
           ) : (
             <div className="drawer__menu-confirm">
               <span className="drawer__menu-confirm-label">Confirm delete?</span>
@@ -794,9 +845,14 @@ function DrawerRow({
               </div>
             </div>
           )}
-          <p className="drawer__menu-note">
-            The agent can recover deleted {kind === 'chat' ? 'chats' : 'apps'} for 7 days.
-          </p>
+          {/* The 7-day recovery note applies to Delete (soft-delete), not
+              to the immediate, non-recoverable "Delete data" wipe — hide it
+              while that confirm chip is showing. */}
+          {!confirmingDeleteData && (
+            <p className="drawer__menu-note">
+              The agent can recover deleted {kind === 'chat' ? 'chats' : 'apps'} for 7 days.
+            </p>
+          )}
         </Menu.Content>
       </Menu>
     </div>

@@ -273,6 +273,62 @@ def test_tombstoned_app_no_slug_redirect_or_static(
   assert _app_source_dir_for_static_asset(app_id=app_id) is None
 
 
+# --- delete app data (wipe storage, keep app installed) ---
+
+
+def test_delete_app_data_wipes_storage_and_keeps_app(
+  client, auth, db, bypass_url_validation,
+):
+  """DELETE /api/apps/{id}/data must wipe the id-keyed storage tree while
+  leaving the app fully installed: the DB row stays live (deleted_at IS NULL),
+  the app is still listed, and only the runtime data is gone."""
+  app = _install(client, auth)
+  app_id = app["id"]
+  data_file = _seed_data(app_id, body="wipe-me")
+  storage_dir = Path(get_settings().data_dir) / "apps" / str(app_id)
+  assert data_file.exists()
+
+  r = client.delete(f"/api/apps/{app_id}/data", headers=auth)
+  assert r.status_code == 204, r.text
+
+  # Storage tree gone.
+  assert not data_file.exists()
+  assert not storage_dir.exists()
+
+  # App row still LIVE — not tombstoned, not hard-deleted.
+  db.expire_all()
+  row = db.query(models.App).filter(models.App.id == app_id).first()
+  assert row is not None
+  assert row.deleted_at is None
+
+  # Still listed and still reachable (unlike an uninstall, the app stays).
+  listed = client.get("/api/apps/", headers=auth).json()
+  assert app_id in [a["id"] for a in listed]
+  assert client.get(f"/api/apps/{app_id}", headers=auth).status_code == 200
+
+
+def test_delete_app_data_404s_tombstoned(client, auth, db, bypass_url_validation):
+  """A wipe on an uninstalled (tombstoned) app 404s — it resolves through the
+  live-app filter, so a data wipe can't touch a soft-deleted app's preserved
+  tree (which the recovery window still owns)."""
+  app = _install(client, auth)
+  app_id = app["id"]
+  assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
+  assert client.delete(f"/api/apps/{app_id}/data", headers=auth).status_code == 404
+
+
+def test_delete_app_data_on_empty_tree_succeeds(
+  client, auth, db, bypass_url_validation,
+):
+  """Wiping an app that has never written data is a no-op success — the
+  rmtree is ignore_errors, so an absent tree is fine."""
+  app = _install(client, auth)
+  app_id = app["id"]
+  r = client.delete(f"/api/apps/{app_id}/data", headers=auth)
+  assert r.status_code == 204, r.text
+  assert app_id in [a["id"] for a in client.get("/api/apps/", headers=auth).json()]
+
+
 # --- feature 113: soft-delete tooling (live_app helper, now_naive_utc) ---
 
 
