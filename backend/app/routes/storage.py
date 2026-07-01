@@ -54,6 +54,7 @@ from app.storage_io import (
   app_dir_usage,
   atomic_write,
   file_version_token,
+  etag_matches,
   delete_content_type,
   delete_content_type_tree,
   move_content_type,
@@ -657,7 +658,9 @@ async def write_app_file(
       if file_path.exists():
         raise HTTPException(status_code=412, detail="Storage precondition failed.")
     elif if_match is not None:
-      if not file_path.is_file() or file_version_token(file_path) != if_match.strip():
+      if not file_path.is_file() or not etag_matches(
+        file_version_token(file_path), if_match
+      ):
         raise HTTPException(status_code=412, detail="Storage precondition failed.")
     # Snapshot the pre-write size for size_delta. A missing file is zero; a
     # stat failure (race with delete) is also zero — best-effort, not
