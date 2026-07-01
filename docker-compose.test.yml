@@ -64,7 +64,20 @@ services:
       # The platform service is reachable as `app` on the compose network.
       - RECOVERY_PLATFORM_HEALTH_URL=http://app:8000/api/health
     volumes:
-      - test_data:/data
+      # nocopy is load-bearing. recoveryd shares the SAME fresh test_data
+      # volume as `app`, and the image bakes /data/db etc. (Dockerfile:304),
+      # so on a fresh volume BOTH containers would trigger Docker's
+      # image->volume copy-up. Two concurrent copy-ups race on `mkdir
+      # _data/db` -> "file exists", and whichever loses fails to create —
+      # the intermittent e2e "Start test container" flake. nocopy makes
+      # recoveryd skip copy-up entirely, so only `app` populates the volume:
+      # one mkdir, no race. Safe because recoveryd needs no /data content at
+      # boot (main() only asserts its frozen /app/recovery bundle, then
+      # serves; it touches /data lazily per recovery request, after `app` has
+      # populated it). This also keeps the recovery floor independent of app
+      # startup — no depends_on coupling, which the "survives a broken
+      # platform" design relies on.
+      - test_data:/data:nocopy
     ports: !override ["${RECOVERY_TEST_PORT:-8011}:8001"]
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8001/recover/health',timeout=3).status==200 else 1)"]

@@ -98,7 +98,18 @@ services:
       # Origin fallback check is active for clients without Sec-Fetch-Site.
       - RECOVERY_ALLOWED_HOSTS=${DOMAIN:-}
     volumes:
-      - app_data:/data
+      # nocopy is load-bearing — see the same option on recoveryd in
+      # docker-compose.test.yml for the full rationale. recoveryd shares the
+      # fresh app_data volume with `app`; the image bakes /data/db etc., so on
+      # a FRESH volume both containers race on the image->volume copy-up
+      # (`mkdir _data/db` -> "file exists") and one fails to start. This is
+      # latent on an existing prod deploy (populated volume = no copy-up) but
+      # bites exactly when it must not: first boot, and after a recovery
+      # factory-reset WIPES the volume — the container would fail to come back
+      # up. nocopy makes `app` the sole populator; recoveryd needs no /data at
+      # boot, and stays independent of app startup (the recovery floor's whole
+      # point), so no depends_on.
+      - app_data:/data:nocopy
     expose:
       - "8001"
     # Protect the recovery floor from the host OOM-killer (earlyoom is active):
