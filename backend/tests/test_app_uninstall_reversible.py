@@ -317,6 +317,55 @@ def test_delete_app_data_404s_tombstoned(client, auth, db, bypass_url_validation
   assert client.delete(f"/api/apps/{app_id}/data", headers=auth).status_code == 404
 
 
+def test_delete_app_data_preserves_tombstoned_storage(
+  client, auth, db, bypass_url_validation, monkeypatch,
+):
+  """A wipe request that loses the liveness race to uninstall must not delete
+  the preserved id-keyed tree. The first live-app check has already passed here;
+  the app enters its recovery window before the storage-lock body runs."""
+  from app.database import SessionLocal
+  from app.routes import apps as apps_route
+  from app.timeutil import now_naive_utc
+
+  app = _install(client, auth)
+  app_id = app["id"]
+  data_file = _seed_data(app_id, body="preserve-me")
+
+  real_app_storage_lock = apps_route.fs_locks.app_storage_lock
+  tombstoned = False
+
+  class _TombstoneOnEnter:
+    def __init__(self, lock):
+      self._lock = lock
+
+    async def __aenter__(self):
+      nonlocal tombstoned
+      await self._lock.__aenter__()
+      if not tombstoned:
+        tombstoned = True
+        other_db = SessionLocal()
+        try:
+          row = other_db.query(models.App).filter(models.App.id == app_id).first()
+          row.deleted_at = now_naive_utc()
+          other_db.commit()
+        finally:
+          other_db.close()
+      return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+      return await self._lock.__aexit__(exc_type, exc, tb)
+
+  def race_lock(lock_app_id):
+    return _TombstoneOnEnter(real_app_storage_lock(lock_app_id))
+
+  monkeypatch.setattr(apps_route.fs_locks, "app_storage_lock", race_lock)
+
+  r = client.delete(f"/api/apps/{app_id}/data", headers=auth)
+  assert r.status_code == 404
+  assert data_file.exists()
+  assert data_file.read_text() == "preserve-me"
+
+
 def test_delete_app_data_on_empty_tree_succeeds(
   client, auth, db, bypass_url_validation,
 ):
