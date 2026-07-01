@@ -1025,6 +1025,32 @@ export default function Shell() {
     })
   }
 
+  // Wipes an app's stored data back to empty while KEEPING it installed —
+  // a separate, additive action from deleteApp (which tombstones the whole
+  // app). Lives here, like deleteApp, so it has access to showToast and
+  // refreshApps. The app STAYS in the list; refreshApps picks up the bumped
+  // updated_at, which rotates versionForApp's cache-buster so an open iframe
+  // remounts against its now-empty storage — no manual cache eviction.
+  async function deleteAppData(id) {
+    let res
+    try {
+      res = await api.apps.deleteData(id)
+    } catch {
+      showToast("Couldn't delete app data — check your connection.", { variant: 'error' })
+      return
+    }
+    if (!res.ok) {
+      if (res.status === 409) {
+        showToast('Agent is still working in this app — stop it first.', { duration: 6000 })
+        return
+      }
+      showToast("Couldn't delete app data.", { variant: 'error' })
+      return
+    }
+    await refreshApps()
+    showToast('App data deleted')
+  }
+
   // Bootstrap: create an initial chat once the server confirms zero
   // chats exist. Gate on live-fetch confirmation, not just any
   // chatsLoadedRef flip — a stale persisted snapshot with chats=[]
@@ -1114,6 +1140,7 @@ export default function Shell() {
         onNewChat={newChat}
         onDeleteChat={deleteChat}
         onDeleteApp={deleteApp}
+        onDeleteAppData={deleteAppData}
         onSettings={() => navTo('settings')}
         streamingChatIds={streamingChatIds}
         attentionChatIds={attentionChatIds}
