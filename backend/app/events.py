@@ -21,6 +21,7 @@ EventType = Literal[
   "tool_start",
   "tool_input",
   "tool_output",
+  "tool_sources",
   "tool_end",
   "skill_loaded",
   "question",
@@ -182,6 +183,16 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
         blk["output"] = event.get("content", "")
         break
     return True
+
+  if event_type == "tool_sources":
+    sources = event.get("sources") or []
+    if not isinstance(sources, list) or not sources:
+      return False
+    for blk in reversed(assistant_blocks):
+      if blk.get("type") == "tool" and blk.get("tool") == "WebSearch":
+        blk["sources"] = sources
+        return True
+    return False
 
   if event_type == "tool_end":
     for blk in reversed(assistant_blocks):

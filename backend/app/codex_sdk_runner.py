@@ -73,6 +73,7 @@ from app.codex_appserver import _extract_bash_command
 from app.providers import get_skill_path
 from app.runtime_types import RunnerResult
 from app.runner_registry import RunnerKind, registry
+from app.tool_sources import normalize_tool_sources
 
 log = logging.getLogger("moebius.chat")
 
@@ -291,6 +292,28 @@ def _format_json(value: Any) -> str:
     return str(dumped)
 
 
+def _web_search_sources(item: Any) -> list[dict[str, str]]:
+  """Extract source URLs exposed by a Codex web-search item, if any."""
+  collected: list[dict[str, str]] = []
+  seen: set[str] = set()
+
+  def add(raw: Any) -> None:
+    for source in normalize_tool_sources(raw):
+      url = source.get("url")
+      if not url or url in seen:
+        continue
+      collected.append(source)
+      seen.add(url)
+
+  for attr in ("results", "sources", "content", "output"):
+    add(getattr(item, attr, None))
+
+  action = getattr(item, "action", None)
+  action_root = getattr(action, "root", action)
+  add(action_root)
+  return collected
+
+
 def _tool_start_event(item: Any, sdk: dict[str, Any]) -> dict[str, Any] | None:
   """Builds one Möbius `tool_start` event from a typed item."""
   if isinstance(item, sdk["CommandExecutionThreadItem"]):
@@ -374,7 +397,12 @@ def _tool_completed_events(item: Any, sdk: dict[str, Any]) -> list[dict[str, Any
     return events
 
   if isinstance(item, sdk["WebSearchThreadItem"]):
-    return [{"type": "tool_end"}]
+    events: list[dict[str, Any]] = []
+    sources = _web_search_sources(item)
+    if sources:
+      events.append({"type": "tool_sources", "sources": sources})
+    events.append({"type": "tool_end"})
+    return events
 
   return []
 

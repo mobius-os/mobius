@@ -88,6 +88,40 @@ def test_tool_output_fills_last_running():
   assert blocks[1]["output"] == "file contents"
 
 
+def test_tool_sources_attach_to_most_recent_websearch_tool():
+  blocks = [
+    {"type": "tool", "tool": "WebSearch", "input": "old",
+     "output": "", "status": "done"},
+    {"type": "tool", "tool": "WebSearch", "input": "new",
+     "output": "", "status": "running"},
+  ]
+  sources = [{
+    "title": "Example",
+    "url": "https://example.com/page",
+    "snippet": "Result text",
+  }]
+
+  changed = process_event(
+    {"type": "tool_sources", "sources": sources}, blocks,
+  )
+
+  assert changed
+  assert "sources" not in blocks[0]
+  assert blocks[1]["sources"] == sources
+
+
+def test_tool_sources_noop_without_matching_block_or_sources():
+  blocks = [{"type": "tool", "tool": "Bash", "input": "ls",
+             "output": "", "status": "running"}]
+
+  assert process_event({"type": "tool_sources", "sources": []}, blocks) is False
+  assert process_event(
+    {"type": "tool_sources", "sources": [{"url": "https://e.com"}]},
+    blocks,
+  ) is False
+  assert "sources" not in blocks[0]
+
+
 def test_build_assistant_message():
   blocks = [
     {"type": "text", "content": "Here is the result:"},
