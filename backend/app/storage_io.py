@@ -44,6 +44,28 @@ def file_version_token(file_path: Path) -> str:
   return f'"{st.st_mtime_ns:x}-{st.st_size:x}"'
 
 
+def etag_matches(token: str, if_match: str) -> bool:
+  """Reports whether a client's If-Match refers to the version in `token`.
+
+  A transcoding reverse proxy rewrites the ETag it forwards so the tag stays
+  unique per content-encoding: a strong `"<tok>"` becomes `"<tok>-gzip"`, and
+  some proxies additionally weaken it to `W/"<tok>"`. Caddy's `encode` does
+  exactly this whenever it compresses a storage read. Our version token
+  identifies the stored file regardless of transfer encoding, so a client that
+  echoes the transformed tag back must still match — otherwise every CAS write
+  to a resource whose GET got compressed fails its precondition forever. Strip
+  a proxy-added weak prefix and content-encoding suffix before comparing.
+  """
+  candidate = if_match.strip()
+  if candidate.startswith("W/"):
+    candidate = candidate[2:]
+  for encoding in ("gzip", "br", "zstd", "deflate", "compress"):
+    if candidate.endswith(f'-{encoding}"'):
+      candidate = candidate[: -(len(encoding) + 2)] + '"'
+      break
+  return candidate == token
+
+
 def atomic_write(file_path: Path, content: str | bytes) -> None:
   """Writes content to file_path atomically — no torn or interleaved reads.
 

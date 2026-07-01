@@ -1123,6 +1123,51 @@ def test_app_storage_if_match_conflict_412_and_unconditional_put_unchanged(clien
   assert client.get(path, headers=auth).json() == {"v": 4}
 
 
+def test_app_storage_if_match_tolerates_proxy_encoding_suffix(client, auth, owner_token):
+  # A transcoding reverse proxy (Caddy `encode`) rewrites the ETag it forwards
+  # so the tag stays unique per content-encoding — a strong `"<tok>"` becomes
+  # `"<tok>-gzip"`, and it may weaken it to `W/"<tok>"`. The client echoes that
+  # transformed tag back in If-Match, so a strong string compare would 412 every
+  # CAS write to a resource whose GET got compressed. The server must still match.
+  app_id = _make_app(client, owner_token)
+  path = f"/api/storage/apps/{app_id}/proxy-cas.json"
+  assert client.put(path, json={"v": 1}, headers=auth).status_code == 204
+  version = client.get(path, headers={**auth, "X-Mobius-Version": "1"}).headers["etag"]
+
+  gzip_tag = version[:-1] + '-gzip"'
+  ok = client.put(path, json={"v": 2}, headers={**auth, "If-Match": gzip_tag})
+  assert ok.status_code == 204
+  assert client.get(path, headers=auth).json() == {"v": 2}
+
+  fresh = client.get(path, headers={**auth, "X-Mobius-Version": "1"}).headers["etag"]
+  weak_br = "W/" + fresh[:-1] + '-br"'
+  assert client.put(
+    path, json={"v": 3}, headers={**auth, "If-Match": weak_br}
+  ).status_code == 204
+  assert client.get(path, headers=auth).json() == {"v": 3}
+
+  # A genuinely stale tag still conflicts — the normalization must not over-match.
+  stale = client.put(
+    path, json={"v": 4}, headers={**auth, "If-Match": '"deadbeef-1-gzip"'}
+  )
+  assert stale.status_code == 412
+  assert client.get(path, headers=auth).json() == {"v": 3}
+
+
+def test_etag_matches_normalizes_proxy_transforms():
+  from app.storage_io import etag_matches
+
+  token = '"18be2bdc61e90a77-660"'
+  assert etag_matches(token, token)
+  assert etag_matches(token, '"18be2bdc61e90a77-660-gzip"')
+  assert etag_matches(token, '"18be2bdc61e90a77-660-br"')
+  assert etag_matches(token, 'W/"18be2bdc61e90a77-660"')
+  assert etag_matches(token, 'W/"18be2bdc61e90a77-660-zstd"')
+  assert etag_matches(token, '  "18be2bdc61e90a77-660-gzip"  ')
+  assert not etag_matches(token, '"18be2bdc61e90a77-661"')
+  assert not etag_matches(token, '"18be2bdc61e90a77-660-lol"')
+
+
 def test_app_storage_if_none_match_create_if_absent(client, auth, owner_token):
   app_id = _make_app(client, owner_token)
   path = f"/api/storage/apps/{app_id}/created-once.json"
