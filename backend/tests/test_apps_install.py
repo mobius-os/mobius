@@ -659,6 +659,135 @@ def test_install_update_path_in_place(client, auth, bypass_url_validation):
   assert jsx_file.read_text() == jsx_v2
 
 
+def test_update_matches_legacy_manifest_url_shape_in_place(
+    client, db, auth, bypass_url_validation):
+  """A row whose manifest_url is the OLD raw `<base>/mobius.json` shape (what
+  install-core-apps / register_app wrote for the core apps) must still resolve
+  as an UPDATE, not fork a duplicate install. Regression for the "app installed,
+  not updated" core-app dup that shipped once core apps became store-updatable.
+  """
+  from app import models
+  base = "https://x.test/legacyrepo/"
+  responses = {
+    base + "mobius.json": (200, json.dumps({**MANIFEST_NEWS, "version": "1.0.0"}).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, b"p"),
+    base + "fetch.sh": (200, b""),
+  }
+  with patch("app.install.httpx.AsyncClient",
+             side_effect=_fake_async_client(responses)):
+    r1 = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r1.status_code == 201, r1.text
+  v1_id = r1.json()["id"]
+
+  # Drift the row's manifest_url back to the raw legacy shape, exactly as a
+  # platform-installed core app carries it (canonical exact-match would miss).
+  row = db.query(models.App).filter(models.App.id == v1_id).first()
+  row.manifest_url = base + "mobius.json"
+  db.commit()
+
+  responses_v2 = {
+    **responses,
+    base + "mobius.json": (200, json.dumps({**MANIFEST_NEWS, "version": "2.0.0"}).encode()),
+  }
+  with patch("app.install.httpx.AsyncClient",
+             side_effect=_fake_async_client(responses_v2)):
+    r2 = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["mode"] == "update"      # matched the legacy-shape row
+  assert r2.json()["id"] == v1_id           # same row, no duplicate
+  assert r2.json()["version"] == "2.0.0"
+  rows = db.query(models.App).filter(models.App.slug.like("test-news%")).all()
+  assert len(rows) == 1, [r.slug for r in rows]
+  db.refresh(row)
+  assert row.manifest_url.endswith("#manifest-id=test-news")  # self-healed
+
+
+def _seed_null_manifest_core(db, slug: str, source_dir: str):
+  """A baked core app the way install-core-apps registers it: a real slug but
+  NO manifest_url (the shape the previous_id-adoption guard protects)."""
+  from app import models
+  app = models.App(
+    name=slug.title(),
+    description="",
+    jsx_source="export default function App() { return null }",
+    source_dir=source_dir,
+    slug=slug,
+    manifest_url=None,
+    cross_app_access="none",
+    share_with_apps="none",
+    offline_capable=False,
+  )
+  db.add(app)
+  db.commit()
+  return app.id
+
+
+def test_previous_id_cannot_adopt_reserved_slug_from_untrusted_source(
+    client, db, auth, bypass_url_validation):
+  """An owner-pasted (untrusted-host) manifest declaring previous_id=<core slug>
+  must NOT take over the platform app — it installs as a SEPARATE app instead,
+  leaving the core row untouched (card 172)."""
+  from app import models
+  core_id = _seed_null_manifest_core(db, "memory", "/tmp/memory-core-untrusted")
+
+  base = "https://x.test/evil/"  # not the mobius-os catalog
+  manifest = {**MANIFEST_NEWS, "id": "evil", "name": "Evil App",
+              "previous_id": "memory"}
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, b"p"),
+    base + "fetch.sh": (200, b""),
+  }
+  with patch("app.install.httpx.AsyncClient",
+             side_effect=_fake_async_client(responses)):
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r.status_code == 201, r.text
+  assert r.json()["mode"] == "install"   # a fresh app, NOT an adoption
+  assert r.json()["id"] != core_id
+  core = db.query(models.App).filter(models.App.id == core_id).first()
+  assert core.slug == "memory"
+  assert core.manifest_url is None
+  assert core.deleted_at is None
+
+
+def test_previous_id_may_adopt_reserved_slug_from_trusted_catalog(
+    client, db, auth, bypass_url_validation):
+  """The trusted mobius-os catalog CAN still supersede a baked core app via
+  previous_id — the guard only blocks UNTRUSTED sources, so legitimate renames
+  (e.g. Reflection adopting the old baked row) keep working."""
+  from app import models
+  core_id = _seed_null_manifest_core(db, "memory", "/tmp/memory-core-trusted")
+
+  base = "https://raw.githubusercontent.com/mobius-os/app-memory/main/"
+  manifest = {**MANIFEST_NEWS, "id": "memory-catalog", "name": "Memory",
+              "previous_id": "memory"}
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, b"p"),
+    base + "fetch.sh": (200, b""),
+  }
+  with patch("app.install.httpx.AsyncClient",
+             side_effect=_fake_async_client(responses)):
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r.status_code == 201, r.text
+  assert r.json()["mode"] == "update"   # adopted the baked core row
+  assert r.json()["id"] == core_id
+
+
 def test_update_dropping_schedule_unregisters_orphan_cron(
     client, auth, bypass_url_validation):
   """Recurring → on-demand migration must converge cron state, not just add.

@@ -554,6 +554,34 @@ def _should_force_core_store_update(
   )
 
 
+# Platform/core apps that must never be silently ADOPTED (and thereby replaced
+# in place, inheriting the row's id + storage) by a `previous_id` declaration in
+# an untrusted manifest. Includes the current catalog slugs plus their
+# pre-rename predecessors, so an old baked `mind`/`dreaming` row is protected
+# too. See the guard in the predecessor-adoption block.
+_RESERVED_PLATFORM_SLUGS = frozenset({
+  "memory", "reflection", "store", "mind", "dreaming",
+})
+
+
+def _is_trusted_catalog_source(canonical_manifest_url: str) -> bool:
+  """True when the manifest is published under the canonical mobius-os org on
+  raw.githubusercontent.com.
+
+  Only a trusted-catalog install may adopt a reserved platform slug via
+  `previous_id` (e.g. Reflection legitimately superseding the baked
+  `dreaming`). An owner-pasted manifest from any other host cannot, so it can
+  never hijack Memory/Reflection/the store by declaring their slug.
+  """
+  parsed = urlparse(canonical_manifest_url)
+  parts = [unquote(part) for part in parsed.path.split("/") if part]
+  return (
+    parsed.hostname == "raw.githubusercontent.com"
+    and bool(parts)
+    and parts[0] == "mobius-os"
+  )
+
+
 async def _http_get(
   client: httpx.AsyncClient, url: str, max_bytes: int, _hops: int = 0,
 ) -> bytes:
@@ -1245,6 +1273,30 @@ async def install_from_manifest(
     .filter(models.App.manifest_url == canonical_manifest_url)
     .first()
   )
+  if existing is None:
+    # SHAPE-DRIFT TOLERANCE. The SAME app can carry an OLDER manifest_url string
+    # than today's canonical `<base>#manifest-id=<id>`: install-core-apps /
+    # register_app wrote the raw `<base>/mobius.json`, and very old rows wrote a
+    # bare `<base>`. Match those legacy shapes of the same canonical BASE so a
+    # store update lands IN PLACE — the write path below self-heals
+    # `app.manifest_url` to the canonical form — instead of forking a duplicate
+    # row (the "app installed, not updated" dup that surfaced once core apps
+    # became store-updatable). Keyed on the base, not the slug, so two genuinely
+    # different apps (different repos -> different bases) still stay separate.
+    # Tombstone-agnostic like the primary lookup, but prefer a LIVE row when
+    # both a live and a soft-deleted legacy row share the base.
+    base = _canonical_base(canonical_manifest_url)
+    existing = (
+      db.query(models.App)
+      .filter(
+        models.App.manifest_url.in_([f"{base}/mobius.json", base, f"{base}/"])
+      )
+      .order_by(
+        models.App.deleted_at.isnot(None).asc(),
+        models.App.id.asc(),
+      )
+      .first()
+    )
   # adopt_kind records HOW a predecessor was matched when the manifest_url
   # lookup missed — "" for a normal install/update (the canonical match above),
   # "rename" when this manifest renamed a prior catalog app (via `previous_id`),
@@ -1274,6 +1326,17 @@ async def install_from_manifest(
     # silently hijack the user's app — which `test_install_with_same_slug_
     # different_manifest_keeps_both` exists to forbid.
     prev_id = manifest.get("previous_id")
+    # A manifest must not use `previous_id` to ADOPT (and thereby replace) a
+    # platform/core app unless it comes from the trusted mobius-os catalog.
+    # Otherwise an owner who pastes an untrusted manifest declaring
+    # previous_id="memory" would take over Memory in place — inheriting its id
+    # and stored data. Trusted-catalog renames still work; anything else falls
+    # through to a normal install as a separate app rather than a hijack.
+    if (
+      prev_id in _RESERVED_PLATFORM_SLUGS
+      and not _is_trusted_catalog_source(canonical_manifest_url)
+    ):
+      prev_id = None
     if prev_id:
       # RENAME: the predecessor came through the catalog under `previous_id`.
       # Match its canonical identity from the SAME base.
