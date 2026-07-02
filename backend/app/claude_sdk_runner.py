@@ -758,23 +758,23 @@ def dispatch_sdk_message(
   return current_session_id, None
 
 
-# Appended to a turn's prompt when the owner picks the "ultracode" effort
-# tier. "ultracode" is not an SDK EffortLevel — it is the Claude Code CLI's
-# ultracode mode (xhigh effort + dynamic multi-agent Workflow orchestration).
-# The SDK only exposes effort as `--effort <value>` and that flag rejects
-# "ultracode", so the effort knob is set to xhigh separately and the
-# orchestration is armed via the CLI's documented "ultracode" keyword
-# trigger: a turn whose prompt contains the word opts that turn into the
-# Workflow tool. The trigger is default-on, model-gated to ultracode-capable
-# (Opus-tier) models, and a graceful no-op on older CLIs or lesser models —
-# in which case the turn simply runs at xhigh with no orchestration. The
-# literal token "ultracode" below is what arms it; keep it in the text.
-_ULTRACODE_TRIGGER = (
-  "\n\n<system-reminder>Ultracode mode is enabled for this turn: you are "
-  "running at xhigh effort with the Workflow tool available for dynamic "
-  "multi-agent orchestration. For substantial multi-step work, decompose it "
-  "and use the Workflow tool; answer trivial turns directly. (The ultracode "
-  "keyword in this reminder is what arms the mode.)</system-reminder>"
+# Injected when the owner picks the "ultracode" effort tier. Ultracode (xhigh
+# effort + standing dynamic-workflow orchestration) is armed the DOCUMENTED way
+# — the CLI's `ultracode` settings flag, passed below — NOT by putting the word
+# "ultracode" in the prompt. That keyword trigger (`workflowKeywordTriggerEnabled`,
+# default-on) is an interactive-CLI convenience and is brittle here: a stray
+# "ultracode" token in injected memory/context arms the whole Workflow fleet on a
+# turn the owner never opted into (the observed "$32 for a restaurant question").
+# We disable the keyword trigger and drive ultracode purely by the flag, so this
+# reminder carries only behavioural guidance and deliberately contains NO arming
+# keyword. Möbius's turn is one-shot (no post-turn re-invoke), so the agent must
+# await its Workflow within the turn or the fleet's work is lost when the turn ends.
+_ULTRACODE_REMINDER = (
+  "\n\n<system-reminder>You have the Workflow tool for dynamic multi-agent "
+  "orchestration this turn. Use it for substantial multi-step work; answer "
+  "trivial turns directly. When you launch a Workflow, await its result within "
+  "this turn (block on it) and deliver the synthesis — never end a turn with a "
+  "Workflow still running in the background, or its work is lost.</system-reminder>"
 )
 
 
@@ -958,7 +958,7 @@ async def run_claude_sdk_turn(
   _ultracode = _effort == "ultracode"
   if _ultracode:
     _effort = "xhigh"
-  turn_message = user_message + _ULTRACODE_TRIGGER if _ultracode else user_message
+  turn_message = user_message + _ULTRACODE_REMINDER if _ultracode else user_message
   # Cross-provider mismatch defense (mirrors codex_sdk_runner).
   # Chats persisted before the snapshot logic learned to
   # provider-validate (see chat.py snapshot-on-first-send and
@@ -1020,6 +1020,14 @@ async def run_claude_sdk_turn(
       options_kwargs["model"] = model_override
     if _effort:
       options_kwargs["effort"] = _effort
+    # Arm ultracode via its documented settings flag (see _ULTRACODE_REMINDER),
+    # and ALWAYS disable the "ultracode"-keyword prompt trigger so a stray token
+    # in injected memory/context can't arm the Workflow fleet on a turn the owner
+    # did not opt into. Passed via --settings as inline JSON.
+    _cli_settings = {"workflowKeywordTriggerEnabled": False}
+    if _ultracode:
+      _cli_settings["ultracode"] = True
+    options_kwargs["extra_args"] = {"settings": json.dumps(_cli_settings)}
     options = ClaudeAgentOptions(**options_kwargs)
 
     client = ClaudeSDKClient(options)
