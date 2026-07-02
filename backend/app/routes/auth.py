@@ -180,6 +180,13 @@ def setup(
     _write_service_token(owner.username, owner.token_epoch)
   except OSError as exc:
     log.warning("Could not write service token: %s", exc)
+  # Mirror the owner credential to the DB-independent recovery seed so the
+  # recovery floor can still authenticate the owner if the database is
+  # later wiped or corrupted. Written only now — after the owner row is
+  # committed — so the seed can never authenticate before an owner exists.
+  # Best-effort: recovery_seed swallows its own errors.
+  from app import recovery_seed
+  recovery_seed.write_owner_seed(owner.username, owner.hashed_password)
   token = auth.create_access_token(
     {"sub": owner.username}, token_epoch=owner.token_epoch
   )
