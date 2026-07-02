@@ -323,9 +323,11 @@ update through each app's git repo + the store; freshness rides ETags
 (`/module` = `updated_at` µs; `/frame` = compound `updated_at`+content-hash).
 
 **Self-heal — LANDING (owner-signed-off 2026-06-30; the `recoveryd` container is
-BUILT and wired — `backend/recovery/recoveryd.py`, its own service in
-`docker-compose.yml` with `restart: unless-stopped` on the same `/data`, routed
-by `deploy-caddy` at `/recover*` — per the adversarially-reviewed plan in
+BUILT — `backend/recovery/recoveryd.py`, its own service in `docker-compose.yml`
+with `restart: unless-stopped` on the same `/data` — though `/recover*` routing
+is NOT yet wired in the bundled `Caddyfile` (which still only proxies
+`app:8000`; recovery routing is left to the external `deploy-caddy` and marked
+"NOT wired here" in `docker-compose.yml`) — per the adversarially-reviewed plan in
 `.pm/148` + `.pm/_148-recoveryd-hardened-plan`. Some hardening is still in flight
 under an active session, so treat the finer status of the bullets below —
 especially the pre-flight gate (`.pm/154`) and the listed removals — as
