@@ -16,5 +16,5 @@ pytest-asyncio>=0.23
 watchdog>=4.0.0
 claude-agent-sdk>=0.2.110
 # openai-codex is installed in a separate Dockerfile step:
-# upstream pyproject pins openai-codex-cli-bin==0.131.0a4 (absent on PyPI),
-# so we install --no-deps and pin the cli-bin to a version that exists.
+# upstream pyproject pins openai-codex-cli-bin==0.137.0a4, so Docker
+# installs --no-deps and pins the cli-bin explicitly there.

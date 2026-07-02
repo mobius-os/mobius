@@ -149,9 +149,9 @@ def test_codex_runner_registers_then_unregisters_handle(monkeypatch):
   sdk = {
     "AgentMessageDeltaNotification": type("AgentMessageDeltaNotification", (), {}),
     "ApprovalMode": type("ApprovalMode", (), {"auto_review": "auto_review"}),
-    "AppServerConfig": lambda **kwargs: SimpleNamespace(**kwargs),
     "AsyncCodex": FakeAsyncCodex,
-    "AppServerRpcError": RuntimeError,
+    "CodexConfig": lambda **kwargs: SimpleNamespace(**kwargs),
+    "CodexRpcError": RuntimeError,
     "CommandExecutionOutputDeltaNotification": type(
       "CommandExecutionOutputDeltaNotification", (), {}
     ),
@@ -174,13 +174,13 @@ def test_codex_runner_registers_then_unregisters_handle(monkeypatch):
     "ItemStartedNotification": type("ItemStartedNotification", (), {}),
     "McpToolCallThreadItem": type("McpToolCallThreadItem", (), {}),
     "ReasoningEffort": lambda value: value,
-    "SandboxMode": type(
-      "SandboxMode",
+    "Sandbox": type(
+      "Sandbox",
       (),
       {
         "read_only": "read-only",
         "workspace_write": "workspace-write",
-        "danger_full_access": "danger-full-access",
+        "full_access": "full-access",
       },
     ),
     "ThreadTokenUsageUpdatedNotification": type(

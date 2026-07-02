@@ -851,15 +851,15 @@ async def _fetch_codex_models(data_dir: str) -> list[str]:
   has connected Codex in Settings the call works.
   """
   from openai_codex import AsyncCodex
-  from openai_codex.client import AppServerConfig
+  from openai_codex.client import CodexConfig
 
   codex_home = Path(data_dir) / "cli-auth" / "codex"
   if not (codex_home / "auth.json").exists():
     raise RuntimeError("codex credentials missing")
   # Match codex_sdk_runner.py's binary/env resolution: pass the resolved
   # path explicitly and set CODEX_HOME in the app-server environment.
-  # Recent SDKs no longer accept `codex_home=` on AppServerConfig.
-  config = AppServerConfig(
+  # Recent SDKs no longer accept `codex_home=` on CodexConfig.
+  config = CodexConfig(
     codex_bin=shutil.which("codex"),
     env={"CODEX_HOME": str(codex_home)},
   )

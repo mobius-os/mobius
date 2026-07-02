@@ -15,18 +15,17 @@ so Stop and queued-message steering can reach it.
 **AskUserQuestion parity is shipped via the `request_user_input`
 tool.** The underlying wire surface is `item/tool/requestUserInput`
 JSON-RPC requests emitted by the app-server when the model calls
-the tool. `AppServerClient.approval_handler` is the documented
+the tool. `CodexClient.approval_handler` is the documented
 constructor argument that receives them (public as of
 openai-codex 0.134.0; was a private attribute on a less-stable
-path before). Only the sync `AppServerClient` accepts
+path before). Only the sync `CodexClient` accepts
 `approval_handler` in its constructor. The async wrappers
-(`AsyncCodex`, `AsyncAppServerClient`) don't, so we set the
-attribute on `codex._client._sync` after construction. The
-attribute itself is public API; we just reach through two async
-wrappers to get at it. See `_install_request_user_input_handler`
-below.
+(`AsyncCodex`, `AsyncCodexClient`) don't, so we set the
+attribute on `codex._client._sync` after construction, targeting
+the same callable slot the public constructor argument populates.
+See `_install_request_user_input_handler` below.
 
-Why we don't drop `AsyncCodex` and construct `AppServerClient`
+Why we don't drop `AsyncCodex` and construct `CodexClient`
 directly to pass `approval_handler` as a kwarg: doing so would
 mean rebuilding everything `AsyncCodex` / `AsyncThread` /
 `AsyncTurnHandle` give us for free. That list includes lazy
@@ -48,7 +47,7 @@ constructor (forwarded down to `_sync`), at which point
 The tool is gated by the `default_mode_request_user_input`
 feature flag (stage `UnderDevelopment`, default off), enabled via
 `features.default_mode_request_user_input=true` in the
-`AppServerConfig.config_overrides` list. Once enabled, the model
+`CodexConfig.config_overrides` list. Once enabled, the model
 sees `request_user_input` in its tool list and uses it the same
 way Claude uses its `AskUserQuestion` tool — both producers
 publish a `question` event on the Möbius wire and both wait on
@@ -204,10 +203,10 @@ def _sdk_imports() -> dict[str, Any]:
   freely. TG-NEW should add a contract test that imports these symbols
   at test time so breakage is caught immediately.
   """
-  from openai_codex import ApprovalMode, AsyncCodex
-  from openai_codex.client import AppServerConfig
-  from openai_codex.errors import AppServerRpcError, InvalidParamsError
-  from openai_codex.types import ReasoningEffort, SandboxMode
+  from openai_codex import ApprovalMode, AsyncCodex, Sandbox
+  from openai_codex.client import CodexConfig
+  from openai_codex.errors import CodexRpcError, InvalidParamsError
+  from openai_codex.types import ReasoningEffort
   from openai_codex.generated.v2_all import (
     AgentMessageDeltaNotification,
     AgentMessageThreadItem,
@@ -234,9 +233,9 @@ def _sdk_imports() -> dict[str, Any]:
     "AgentMessageDeltaNotification": AgentMessageDeltaNotification,
     "AgentMessageThreadItem": AgentMessageThreadItem,
     "ApprovalMode": ApprovalMode,
-    "AppServerConfig": AppServerConfig,
     "AsyncCodex": AsyncCodex,
-    "AppServerRpcError": AppServerRpcError,
+    "CodexConfig": CodexConfig,
+    "CodexRpcError": CodexRpcError,
     "CommandExecutionOutputDeltaNotification": (
       CommandExecutionOutputDeltaNotification
     ),
@@ -248,7 +247,7 @@ def _sdk_imports() -> dict[str, Any]:
     "FileChangeThreadItem": FileChangeThreadItem,
     "InvalidParamsError": InvalidParamsError,
     "ReasoningEffort": ReasoningEffort,
-    "SandboxMode": SandboxMode,
+    "Sandbox": Sandbox,
     "ItemCompletedNotification": ItemCompletedNotification,
     "ItemGuardianApprovalReviewCompletedNotification": (
       ItemGuardianApprovalReviewCompletedNotification
@@ -475,7 +474,7 @@ def _is_closed_turn_error(exc: BaseException) -> bool:
   except ModuleNotFoundError:
     sdk = None
   if sdk is not None and isinstance(
-    exc, (sdk["InvalidParamsError"], sdk["AppServerRpcError"])
+    exc, (sdk["InvalidParamsError"], sdk["CodexRpcError"])
   ):
     text = str(exc).lower()
     return "closed" in text or "not running" in text or "broken pipe" in text
@@ -509,14 +508,14 @@ def _install_request_user_input_handler(
 ) -> None:
   """Wires Möbius's question-bridge into `codex._client._sync._approval_handler`.
 
-  As of openai-codex 0.134.0, `AppServerClient.approval_handler` is a
+  As of openai-codex 0.142.5, `CodexClient.approval_handler` is a
   documented constructor argument on the sync client. Neither
-  `AsyncCodex` nor `AsyncAppServerClient` accept it in their
+  `AsyncCodex` nor `AsyncCodexClient` accept it in their
   constructors, so we still set the attribute on the underlying sync
-  client after construction. The attribute itself is public API; we
-  just reach through two async wrappers to get at it. See the module
-  docstring for the full reasoning on why we don't drop `AsyncCodex`
-  and construct `AppServerClient` directly.
+  client after construction, targeting the same callable slot the
+  public constructor argument populates. See the module docstring for
+  the full reasoning on why we don't drop `AsyncCodex` and construct
+  `CodexClient` directly.
 
   The handler runs on the SDK's sync worker thread, so anything that
   touches asyncio state (the future, the broadcast, the DB session)
@@ -612,7 +611,7 @@ def _install_request_user_input_handler(
   def handler(method: str, params: dict | None) -> dict:
     if method != _REQUEST_USER_INPUT_METHOD:
       # Replicate the SDK's default auto-accept for the two known
-      # approval methods (mirrors AppServerClient._default_approval_handler
+      # approval methods (mirrors CodexClient._default_approval_handler
       # in openai_codex.client). We inline rather than delegate so the
       # bridge stays decoupled from the SDK's internal layout — a
       # future SDK rename won't break this fallback.
@@ -744,8 +743,8 @@ def _install_request_user_input_handler(
       }
     return {"answers": answers_by_qid}
 
-  # Reach the sync client. AsyncCodex._client is AsyncAppServerClient;
-  # AsyncAppServerClient._sync is AppServerClient — the level that
+  # Reach the sync client. AsyncCodex._client is AsyncCodexClient;
+  # AsyncCodexClient._sync is CodexClient — the level that
   # owns the public `approval_handler` constructor argument. Test
   # fakes legitimately lack the chain entirely; only real
   # openai-codex installs reach the strict check.
@@ -766,7 +765,7 @@ def _install_request_user_input_handler(
     # operator pins a known-good version instead of debugging silent
     # question loss.
     raise RuntimeError(
-      "openai-codex API broken: AppServerClient._approval_handler "
+      "openai-codex API broken: CodexClient._approval_handler "
       "missing — pin a known-good version"
     )
   sync_client._approval_handler = handler
@@ -861,7 +860,7 @@ async def run_codex_sdk_turn(
   env = dict(base_env)
   env.setdefault("CODEX_HOME", "/data/cli-auth/codex")
 
-  config = sdk["AppServerConfig"](
+  config = sdk["CodexConfig"](
     codex_bin=shutil.which("codex"),
     cwd=cwd,
     env=env,
@@ -886,12 +885,12 @@ async def run_codex_sdk_turn(
 
   try:
     async with sdk["AsyncCodex"](config=config) as codex:
-      # Install AskUserQuestion bridge on the sync AppServerClient's
+      # Install AskUserQuestion bridge on the sync CodexClient's
       # approval_handler attribute. `approval_handler` is a public
-      # sync-client constructor argument as of openai-codex 0.134.0;
-      # neither AsyncCodex nor AsyncAppServerClient accept it, so we
+      # sync-client constructor argument as of openai-codex 0.142.5;
+      # neither AsyncCodex nor AsyncCodexClient accept it, so we
       # set it on `codex._client._sync` after construction. Staying
-      # on AsyncCodex (instead of dropping to AppServerClient to pass
+      # on AsyncCodex (instead of dropping to CodexClient to pass
       # the kwarg natively) keeps ~100 lines of SDK glue out of this
       # module. See the module docstring for the full reasoning.
       # When the model calls the `request_user_input` tool (enabled by
@@ -928,7 +927,8 @@ async def run_codex_sdk_turn(
       # approval prompt in some cases; see `.pm/features/_003-tech-debt-and-test-gaps.md`
       # OQ-5 for the required live equivalence check.
 
-      # SandboxMode.danger_full_access disables bwrap. Möbius runs
+      # Sandbox.full_access maps to wire SandboxMode.danger_full_access
+      # and disables bwrap. Möbius runs
       # inside a Docker container where the default bwrap-based
       # workspace_write sandbox fails with `bwrap: No permissions to
       # create a new namespace, likely because the kernel does not
@@ -940,7 +940,7 @@ async def run_codex_sdk_turn(
       # screenshots. The legacy subprocess path used danger-full-
       # access for the same reason, and Möbius's design philosophy
       # ("trust the agent; container is the sandbox") is consistent.
-      _sandbox = sdk["SandboxMode"].danger_full_access
+      _sandbox = sdk["Sandbox"].full_access
       if session_id is None:
         thread = await codex.thread_start(
           approval_mode=sdk["ApprovalMode"].auto_review,
