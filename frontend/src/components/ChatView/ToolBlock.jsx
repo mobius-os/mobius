@@ -5,7 +5,8 @@ function sourceHost(url) {
   try {
     return new URL(url).host
   } catch {
-    return url
+    // Unparseable URLs have no meaningful host chip; the title keeps the label.
+    return ''
   }
 }
 

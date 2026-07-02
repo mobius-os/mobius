@@ -395,16 +395,38 @@ test('without the surviving map, a wiped replay reverts to pending (proves the b
 
 test('appendThinkingChunk coalesces consecutive deltas into one item', () => {
   let items = []
-  items = appendThinkingChunk(items, 'Let me ', 1000)
-  items = appendThinkingChunk(items, 'think about ', 1750)
-  items = appendThinkingChunk(items, 'this.', 2600)
+  items = appendThinkingChunk(items, 'Let me ', 1000, 10000)
+  items = appendThinkingChunk(items, 'think about ', 1750, 10750)
+  items = appendThinkingChunk(items, 'this.', 2600, 11600)
   assert.equal(items.length, 1, 'consecutive thinking deltas stay one item')
   assert.deepEqual(items[0], {
     type: 'thinking',
     content: 'Let me think about this.',
     startedAt: 1000,
+    firstTs: 10000,
     duration_ms: 1600,
   })
+})
+
+test('appendThinkingChunk keeps replay duration from runner timestamps', () => {
+  let items = []
+  items = appendThinkingChunk(items, 'Long ', 1000, 10000)
+  items = appendThinkingChunk(items, 'catch-up ', 1001, 55000)
+  items = appendThinkingChunk(items, 'think.', 1002, 100000)
+  assert.equal(items.length, 1)
+  assert.equal(items[0].startedAt, 1000, 'live ticker starts at client receipt')
+  assert.equal(items[0].duration_ms, 90000,
+    'frozen label uses runner span, not bursty client replay delta')
+})
+
+test('appendThinkingChunk falls back to client delta without runner timestamps', () => {
+  let items = []
+  items = appendThinkingChunk(items, 'Let me ', 1000)
+  items = appendThinkingChunk(items, 'think.', 2500, null)
+  assert.equal(items.length, 1)
+  assert.equal(items[0].startedAt, 1000)
+  assert.equal(items[0].firstTs, null)
+  assert.equal(items[0].duration_ms, 1500)
 })
 
 test('appendThinkingChunk opens a fresh item after a non-thinking item', () => {
@@ -418,6 +440,7 @@ test('appendThinkingChunk opens a fresh item after a non-thinking item', () => {
     type: 'thinking',
     content: 'reconsidering...',
     startedAt: 5000,
+    firstTs: null,
     duration_ms: 0,
   })
 })

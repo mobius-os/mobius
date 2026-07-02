@@ -177,17 +177,22 @@ export function attachToolSources(prev, sources) {
  * reasoning stays in emit-order. Empty content is a no-op. The caller
  * is responsible for flushing any pending typewriter text first.
  */
-export function appendThinkingChunk(prev, chunk, at = Date.now()) {
+export function appendThinkingChunk(prev, chunk, at = Date.now(), ts = null) {
   if (!chunk) return prev
   const last = prev[prev.length - 1]
+  const eventTs = Number.isFinite(ts) ? ts : null
   if (last && last.type === 'thinking') {
     const startedAt = Number.isFinite(last.startedAt) ? last.startedAt : at
+    const firstTs = Number.isFinite(last.firstTs) ? last.firstTs : eventTs
     const updated = [...prev]
     updated[updated.length - 1] = {
       ...last,
       startedAt,
+      firstTs,
       content: last.content + chunk,
-      duration_ms: Math.max(0, at - startedAt),
+      duration_ms: Number.isFinite(firstTs) && Number.isFinite(eventTs)
+        ? Math.max(0, eventTs - firstTs)
+        : Math.max(0, at - startedAt),
     }
     return updated
   }
@@ -195,6 +200,7 @@ export function appendThinkingChunk(prev, chunk, at = Date.now()) {
     type: 'thinking',
     content: chunk,
     startedAt: at,
+    firstTs: eventTs,
     duration_ms: 0,
   }]
 }
