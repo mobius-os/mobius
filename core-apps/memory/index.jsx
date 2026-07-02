@@ -9,7 +9,7 @@
  *   GET /api/storage/shared/memory/<node.path>  → raw markdown (frontmatter + body)
  *
  * Offline + live-repaint (see makeSharedMemoryStore below): the graph and notes
- * live in SHARED storage (/data/shared/memory/, written by the chat + reflection
+ * live in SHARED storage (/data/shared/memory/, written by the chat + dreaming
  * agents), which window.mobius.storage cannot address — that runtime is hard-
  * scoped to /api/storage/apps/${appId}/ and the shell service worker sends every
  * other /api/* straight to network, so a raw shared GET renders blank offline and
@@ -203,7 +203,7 @@ function relDate(s) {
 // twin of window.mobius.storage.get/getText/subscribe: read-through cache
 // (last-known value served instantly, offline-capable), background revalidate,
 // and a visibility-aware poller so subscribed views repaint when the chat or
-// Reflection agent rewrites the file. Pure factory (deps injected) so the offline
+// dreaming agent rewrites the file. Pure factory (deps injected) so the offline
 // harness can drive it with a mocked cache + fetch and no network.
 export function makeSharedMemoryStore({
   baseUrl = NOTE_BASE,
@@ -432,7 +432,7 @@ export default function App({ appId, token }) {
   }, []);
 
   // --- Subscribe to the graph index. ---
-  // graph.json is rewritten by the chat + reflection agents while this app sits
+  // graph.json is rewritten by the chat + dreaming agents while this app sits
   // open, so it MUST subscribe, not load-once (a mount-only read leaves the
   // owner on a stale graph after an agent write). The store serves the cached
   // graph instantly (offline-capable) and repaints on every agent rewrite.
@@ -548,7 +548,7 @@ export default function App({ appId, token }) {
 
   // --- Subscribe to the selected note body. ---
   // The open note is exactly the kind of view an agent can rewrite underneath
-  // the owner (the chat appends to a note, reflection reorganizes it), so it
+  // the owner (the chat appends to a note, dreaming reorganizes it), so it
   // subscribes too: cached body paints instantly (offline), and an external
   // write to this path repaints it. The `revalidating` flag drives the
   // "merging…" indicator, which clears once the fresh body has landed.
