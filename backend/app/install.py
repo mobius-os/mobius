@@ -555,13 +555,16 @@ def _should_force_core_store_update(
   )
 
 
+# Frozen old core-app slugs kept reserved so a hostile manifest cannot adopt a
+# pre-rename core row on not-yet-migrated installs. Safe to drop only after the
+# migration window closes.
+PRE_RENAME_PLATFORM_SLUGS = ("mind", "dreaming")
+
 # Platform/core apps that must never be silently ADOPTED (and thereby replaced
 # in place, inheriting the row's id + storage) by a `previous_id` declaration in
-# an untrusted manifest. Includes the current catalog slugs plus their
-# pre-rename predecessors, so an old baked `mind`/`dreaming` row is protected
-# too. See the guard in the predecessor-adoption block.
+# an untrusted manifest. See the guard in the predecessor-adoption block.
 _RESERVED_PLATFORM_SLUGS = frozenset({
-  "memory", "reflection", "store", "mind", "dreaming",
+  "memory", "reflection", "store", *PRE_RENAME_PLATFORM_SLUGS,
 })
 
 
