@@ -673,19 +673,16 @@ def test_dispatch_unknown_delta_silent_when_disabled(monkeypatch):
   assert bus.events == []
 
 
-def test_dispatch_assistant_thinking_block_emits_thinking(monkeypatch):
-  monkeypatch.setattr(claude_sdk_runner.time, "time", lambda: 2.5)
+def test_dispatch_assistant_thinking_block_is_silent():
+  """ThinkingBlock is a snapshot duplicate of streamed thinking_delta —
+  must not re-emit as thinking to avoid doubling the content."""
   bus = _Bus()
   msg = AssistantMessage(
     content=[ThinkingBlock(thinking="reflecting", signature="sig")],
     model="claude-opus",
   )
   dispatch_sdk_message(msg, bus, None)
-  assert {
-    "type": "thinking",
-    "content": "reflecting",
-    "ts": 2500,
-  } in bus.events
+  assert bus.events == []
 
 
 def test_dispatch_assistant_tool_use_emits_tool_start():
@@ -844,6 +841,50 @@ def test_dispatch_server_web_search_result_emits_sources():
       "url": "https://example.com/mobius",
       "snippet": "Project page",
     }]},
+    {"type": "tool_end"},
+  ]
+
+
+def test_dispatch_client_web_search_tool_result_emits_sources():
+  bus = _Bus()
+  result_text = (
+    "Web search results for query: \"mobius docs\"\n\n"
+    "Links: [{\"title\":\"Mobius\",\"url\":\"https://example.com/mobius\","
+    "\"snippet\":\"Project page\"},{\"title\":\"Docs\","
+    "\"url\":\"https://example.com/docs\"}]\n\n"
+    "Summary text continues after the links."
+  )
+
+  dispatch_sdk_message(
+    AssistantMessage(
+      content=[ToolUseBlock(id="t1", name="WebSearch", input={
+        "query": "mobius docs",
+      })],
+      model="claude-opus",
+    ),
+    bus,
+    None,
+  )
+  dispatch_sdk_message(
+    UserMessage(
+      content=[ToolResultBlock(tool_use_id="t1", content=result_text)],
+    ),
+    bus,
+    None,
+  )
+
+  assert bus.events == [
+    {"type": "tool_start", "tool": "WebSearch", "input": ""},
+    {"type": "tool_input", "tool": "WebSearch", "input": "mobius docs"},
+    {"type": "tool_output", "content": result_text},
+    {"type": "tool_sources", "sources": [
+      {
+        "title": "Mobius",
+        "url": "https://example.com/mobius",
+        "snippet": "Project page",
+      },
+      {"title": "Docs", "url": "https://example.com/docs"},
+    ]},
     {"type": "tool_end"},
   ]
 

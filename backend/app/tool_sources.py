@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from urllib.parse import urlparse
 
@@ -95,3 +96,31 @@ def normalize_tool_sources(raw: Any) -> list[dict[str, str]]:
 
   visit(raw)
   return sources
+
+
+def sources_from_websearch_text(text: str) -> list[dict[str, str]]:
+  """Extract normalized sources from Claude WebSearch result text.
+
+  The CLI runs WebSearch as a client tool whose result is plain text
+  with a JSON ``Links`` array followed by prose (claude-agent-sdk 0.2.x
+  never parses it into ServerToolResultBlock). Decode only that array
+  and let ``normalize_tool_sources`` enforce URL safety and dedupe
+  before anything reaches the client.
+  """
+  if not isinstance(text, str):
+    return []
+
+  marker = "Links: ["
+  marker_index = text.find(marker)
+  if marker_index < 0:
+    return []
+
+  array_index = marker_index + len("Links: ")
+  try:
+    parsed, _end = json.JSONDecoder().raw_decode(text[array_index:])
+  except (TypeError, ValueError):
+    return []
+
+  if not isinstance(parsed, list):
+    return []
+  return normalize_tool_sources(parsed)
