@@ -14,12 +14,13 @@ This split is why a section can read either "this is intentionally hackable, don
 
 ```
 Dockerfile (root)     Single-container image: frontend build + backend + CLI tools
-docker-compose.yml    Self-hosted: Caddy (TLS) + app container
+docker-compose.yml    Self-hosted: Caddy (TLS) + app + recoveryd
 ├── caddy             HTTPS reverse proxy — forwards everything to app:8000
-└── app               FastAPI serves the API + the frontend static files
+├── app               FastAPI serves the API + the frontend static files
+└── recoveryd         frozen recovery floor — same image, own container, serves :8001 (/recover* routing deliberately not wired in the bundled Caddyfile; see the self-heal section)
 ```
 
-The image bundles everything the agent needs at runtime (the Claude CLI, esbuild, Node) so the platform works out of the box. To join an existing Caddy setup instead of the bundled one, use `docker-compose.override.example.yml`.
+The image bundles everything the agent needs at runtime (the Claude and Codex CLIs, esbuild, Node) so the platform works out of the box. To join an existing Caddy setup instead of the bundled one, use `docker-compose.override.example.yml`.
 
 ### Frontend serving priority (the #1 deploy gotcha)
 
@@ -36,7 +37,7 @@ The `/data` volume persists across `docker compose build && up -d`, so a new ima
 
 Möbius is meant to be self-hosted on a user-provisioned host — a managed platform (Railway/Render/Fly/PikaPods) or a raw VPS — so "apply a security update" splits into three tiers by who can even act:
 
-- **Image userspace** — the Python wheels, npm globals, apt packages, and vendored mini-app libs baked into the image. The agent owns these end-to-end: bump the pin (`Dockerfile` / `backend/requirements.txt` / `frontend/package.json`), rebuild, recreate. Never `apt upgrade` / `pip install -U` a *running* container — that mutation is ephemeral and drifts the live container away from the reproducible image. `deploy-prod.sh` is the apply path.
+- **Image userspace** — the Python wheels, npm globals, apt packages, and vendored mini-app libs baked into the image. The agent owns these end-to-end: bump the pin (`Dockerfile` / `backend/requirements.txt` / `frontend/package.json`), rebuild, recreate. Never `apt upgrade` / `pip install -U` a *running* container — that mutation is ephemeral and drifts the live container away from the reproducible image. `deploy-prod.sh` is the apply path. One deliberate runtime exception: the `mobius` user (the in-product agent) has scoped NOPASSWD sudo for `apt-get`/`apt`/`dpkg` only (`/etc/sudoers.d/mobius-apt`, baked and visudo-validated in the `Dockerfile`), so it can install a genuinely needed OS package at runtime without full root — such installs stay ephemeral until pinned into the image, and the recovery floor deliberately depends on zero apt-installed packages, so a bad package can never take recovery down.
 - **Host OS userspace + the Docker engine** — outside every container; patched on the host (`unattended-upgrades` covers the OS packages; the engine is a separate host upgrade).
 - **Host kernel** — *not in the container*; it shares the host's and cannot be patched from inside. On a managed platform the operator patches+reboots the kernel underneath you (the safe default for non-devops owners); on a raw VPS it's the owner's job, via `unattended-upgrades` + livepatch + a scheduled reboot window.
 
@@ -44,7 +45,7 @@ Two invariants follow. (1) **Möbius never patches the kernel from inside the co
 
 **lodash is pinned to 4.18.1 via `overrides`.** `@openai/apps-sdk-ui` pulls lodash transitively — only through its `Slider` component, which the shell does not import. The 4.17.x line sat unfixed against several advisories for a long stretch; 4.18.x restored maintenance and patched them, so `frontend/package.json` `overrides` forces the transitive lodash to 4.18.1 (`npm audit` is clean). As defense-in-depth, `frontend/src/lib/__tests__/appsSdkLodash.test.js` also fails if the shell ever imports `Slider`, which keeps lodash tree-shaken out of the shipped bundle regardless of the pin.
 
-## Self-update model — `upstream` / `main`, rebase on update
+## Self-update model — `upstream` / `main`, replay on update
 
 Möbius is the rare app whose own agent edits its live code: the in-product agent customizes its mini-apps (`/data/apps/<slug>`), its backend overlay (`/data/platform`), and its shell (`/data/shell`) while the platform runs. A deploy then ships a *new pristine version* of that same code. One small model keeps every such surface up to date without clobbering the owner's customizations and without a deploy ever silently dropping them.
 
@@ -60,28 +61,28 @@ record the new release as a new upstream commit:   A → B   (and  A → X  loca
 rebase the local edits onto it:                    A → B → X
 ```
 
-The owner's customizations end up *on top of* the current release, as if they'd just been made against it. Mechanically: commit any stray working-tree changes onto `main` first (so the rebase has nothing uncommitted to trip over), advance `upstream` to `B`, then `git rebase upstream main`.
+The owner's customizations end up *on top of* the current release, as if they'd just been made against it. Mechanically: commit any stray working-tree changes onto `main` first (`app_git.commit_local`, so the merge has a committed base), advance `upstream` to `B`, then compute the three-way verdict with `git merge-tree --write-tree` (`app_git.merge_upstream`) and, when clean, write the merged tree back and replay it as a single-parent commit on the new `upstream` tip — rebase-shaped linear history (`A → B → X`) without ever running `git rebase`.
 
-- **Clean rebase** → the surface recompiles (apps) or restarts (backend) onto the new code.
-- **Conflict** (the release and the local edits touched the same lines) → the rebase pauses with ordinary git conflict markers and Möbius **opens an agent chat to resolve it** (`git rebase --continue`), exactly as an app conflict already works. The owner never hand-merges.
+- **Clean merge** → the merged tree is replayed as a single-parent commit on the new `upstream` tip and the surface recompiles (apps) or restarts (backend) onto the new code.
+- **Conflict** (the release and the local edits touched the same lines) → an **agent chat** resolves it. Apps materialize standard conflict markers up front (`start_conflict_merge`, a `git merge --no-commit --no-ff upstream`) for the agent to edit; platform/shell leave the live tree untouched and the resolver chat runs the merge itself. Either way the resolution is finalized as the *same* single-parent replay — `--no-ff` points `MERGE_HEAD` at the upstream tip and the commit takes only that one parent, so even a resolved conflict stays linear (`A → B → X`), never the 2-parent commit a plain `git merge` would leave. Auto-spawn of the chat differs by surface: platform and shell spawn it automatically, but for apps the auto-spawn was retired (a0a828b) — the update returns `mode=conflict` + `conflict_paths` and the owner opts in via the store's click-gated "Resolve in chat" button. The owner never hand-merges; back out with `git merge --abort`.
 
 **"Update available" is an ancestry question, not a version-string compare:** an update is available iff `upstream`'s tip is **not yet an ancestor of `main`** (a new release hasn't been rebased in). This is the content question — "does my working tree already contain this release" — that a `image_sha != recorded_sha` proxy can't answer on a customized instance, and it's what eliminates phantom "update available" rows after a deploy that changed nothing the owner hadn't already.
 
 ### The recovery/auth files are NOT in the model — they're gitignored
 
-The one thing that makes a self-editing platform tricky is the recovery/core island (`protected-files.txt`: the `recover_*` modules, `main.py`/`auth.py`/`database.py`/`config.py`/`models.py`, `entrypoint.sh`/`recovery_restore.sh`, and the auth-handling shell components `LoginForm`/`SetupWizard`/`ProviderAuth`). These are root-owned `chmod 444`; the `mobius` user that runs the updater genuinely cannot write them.
+The one thing that makes a self-editing platform tricky is the recovery/core island (`protected-files.txt`: the `recover_*` modules, `main.py`/`routes/__init__.py`/`auth.py`/`database.py`/`config.py`/`models.py`, `entrypoint.sh`/`recovery_restore.sh`, and the auth-handling shell components `LoginForm`/`SetupWizard`/`ProviderAuth`). These are root-owned `chmod 444`; the `mobius` user that runs the updater genuinely cannot write them.
 
-The simple answer is that **they are not part of the git model at all** — each surface's `.gitignore` excludes them. They live on disk, managed wholly by the image (the root entrypoint refreshes them from the baked floor on every boot). Because they're untracked, neither `record upstream` nor `git rebase` ever touches them, so there is no special "protected-file" machinery in the update engine — the rebase only ever moves agent-editable files, and the recovery island updates the one way it should: via an image deploy. (Recovery therefore stays agent-proof *and* current with the image.)
+The simple answer is that **they are not part of the git model at all** — each surface's `.gitignore` excludes them. They live on disk, managed wholly by the image (the root entrypoint re-enforces root-owned 444/555 on them every boot; their contents refresh from the baked floor only on first boot, a crash-loop restore, or a `recovery_restore.sh` run — the deploy/recovery path, not every reboot). Because they're untracked, neither `record upstream` nor the merge/replay ever touches them, so there is no special "protected-file" machinery in the update engine — the replay only ever moves agent-editable files, and the recovery island updates the one way it should: via an image deploy. (Recovery therefore stays agent-proof, and becomes current with the image once the deploy's restore/reconcile step runs.)
 
 ### Where each surface stands
 
 | Surface | Repo | On the model | Engine |
 |---------|------|------------------|--------|
 | **Mini-apps** (`/data/apps/<slug>`) | `.git` per app (installed apps; agent-built bespoke apps have no upstream to track) | yes — whole source tree on `upstream`, single-parent replay, so **multi-file apps update cleanly** | `backend/app/app_git.py` + `install.py` |
-| **Platform backend** (`/data/platform`) | `.git`, recovery files gitignored | yes — thin caller of `app_git`; ancestry availability (no sha proxy); an idempotent migration untracks recovery files | `backend/app/platform_update.py` |
+| **Platform backend** (`/data/platform`) | `.git`, recovery files gitignored | yes — thin caller of `app_git`; ancestry availability (sha compare only as the one-time pre-seed fallback); an idempotent migration untracks recovery files | `backend/app/platform_update.py` |
 | **Shell** (`/data/shell`) | `.git`, auth components gitignored | yes — thin caller of `app_git`, seeded at boot so existing agent edits become the local delta | `backend/app/shell_update.py` |
 
-All three converge on **one** small tree-aware engine (`app_git.py`): `record_upstream` commits the *whole source tree* on `upstream`, `merge_upstream` verdicts a clean-vs-conflict via `git merge-tree`, and a clean apply replays the merged tree as a **single-parent** commit on top of `upstream` (linear `A→B→X`). The platform and shell are thin callers of that primitive — they pass their own source tree and let their `.gitignore` keep recovery/auth files out of the model. Availability everywhere is the ancestry check (`upstream` not an ancestor of the working branch); there is no sha-string proxy and no per-surface protected-file scaffolding.
+All three converge on **one** small tree-aware engine (`app_git.py`): `record_upstream` commits the *whole source tree* on `upstream`, `merge_upstream` verdicts a clean-vs-conflict via `git merge-tree`, and a clean apply replays the merged tree as a **single-parent** commit on top of `upstream` (linear `A→B→X`). The platform and shell are thin callers of that primitive — they pass their own source tree and let their `.gitignore` keep recovery/auth files out of the model. Availability for the platform and shell is the ancestry check (`upstream` not an ancestor of the working branch); the one surviving sha-string compare is the platform's one-time pre-seed fallback for instances that predate the `upstream` branch (`platform_status`'s `seed_required` path). Mini-app update discovery is different: the store compares the catalog manifest version against the installed `App.version` (the new release lives in the remote catalog, so a local ancestry check can't see it). There is no per-surface protected-file scaffolding.
 
 ## Backend (`backend/app/`)
 
@@ -91,9 +92,9 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 
 | File | Role |
 |------|------|
-| `main.py` | App factory: CORS, rate limiting, router mounting, static file serving; resolves `_static_dir` at load (`main.py:890`) |
+| `main.py` | App factory: CORS, rate limiting, security headers (`_SecurityHeadersMiddleware` — authoritative on every response, strips-and-replaces same-named route headers; deliberately no CSP, see SECURITY.md), router mounting, static file serving; resolves `_static_dir` at load (`main.py:890`); serves `GET /api/version` (image + served-platform identity) |
 | `config.py` | `Settings` via pydantic-settings; reads `.env` |
-| `database.py` | SQLAlchemy engine, `SessionLocal`, `Base`, `get_db` |
+| `database.py` | SQLAlchemy engine, `SessionLocal`, `Base`, `get_db`, and `run_migrations()` (idempotent boot-time additive `ALTER TABLE`s) |
 | `models.py` | ORM tables: `Owner`, `Chat`, `ChatRun`, `App`, `PushSubscription`, `Notification` |
 | `schemas.py` | Pydantic request/response models |
 | `auth.py` | bcrypt hashing, JWT creation/decoding, Fernet encryption |
@@ -110,9 +111,11 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `events.py` | Pure data transforms accumulating streaming events into the persisted message structure |
 | `compaction.py` | Cross-provider chat compaction (portable plain-text summary; native SDK compaction is within-provider only) |
 | `runner_registry.py` | Runner lifecycle registry shared across chat backends |
-| `pending_questions.py` | Shared `PendingQuestion` registry for AskUserQuestion interception |
+| `pending_questions.py` | Shared `PendingQuestion` dataclass for AskUserQuestion interception (split out to break the `questions`↔runner import cycle; the registry itself lives in `questions.py`) |
 | `tool_summaries.py` | Tool-input summary strings (shared by SDK + subprocess paths) |
+| `tool_sources.py` | `normalize_tool_sources()` — normalizes provider web-search results into `{title, url, snippet}` source chips for the WebSearch `ToolBlock`; drops non-`http(s)` URLs so a `javascript:`/`data:` source never reaches an `<a href>` |
 | `sdk_emit.py` | Helpers for emitting "unknown" SDK events on the SSE wire |
+| `restart_util.py` | `restart_this_worker()` — arms a daemon SIGKILL fallback, then SIGTERMs its own pid; shared by `/api/admin/restart` and `/api/platform/restart` so the two restart paths can't drift. Pairs with uvicorn's `--timeout-graceful-shutdown 10` (entrypoint.sh) — without a bound, an open chat SSE stream held graceful shutdown open forever and the container never cycled (6ac51b0) |
 
 ### Mini-apps, storage, files
 
@@ -121,7 +124,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `install.py` | Atomic install + update lifecycle for mini-apps from a manifest |
 | `app_git.py` | Per-app git repo (`/data/apps/<slug>/.git`): pristine `upstream` history + a local working branch |
 | `app_watcher.py` | File watcher that auto-recompiles a mini-app's source on edit |
-| `storage_io.py` | Filesystem helpers for per-app + shared storage; lives apart from `routes/storage.py` so `install.py` can reuse it |
+| `storage_io.py` | Filesystem helpers for per-app + shared storage; lives apart from `routes/storage.py` so `install.py` can reuse it. Also owns `etag_matches()`, the If-Match CAS compare — RFC 9110-correct (wildcard, weak tags, multi-value) plus deliberate tolerance for a proxy content-encoding suffix (Caddy `encode` rewrites `"<tok>"` to `"<tok>-gzip"`; a strict compare would 412 every compressible CAS write) |
 | `fs_locks.py` | In-process async locks serializing storage-tree / source-tree mutations against app uninstall |
 | `runtime_libs.py` | Canonical list of mini-app runtime libraries externalized by esbuild |
 | `runtime_types.py` | Shared runtime type definitions |
@@ -144,7 +147,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 
 ### Recovery (the frozen island)
 
-These bootstrap an agent into a broken instance and are deliberately isolated from the SDK/chat stack so a broken SDK install cannot take recovery down. Most are chmod 444/555 root-owned (`protected-files.txt`); the agent cannot edit them.
+The `recover_*` modules bootstrap an agent into a broken instance and are deliberately isolated from the SDK/chat stack so a broken SDK install cannot take recovery down. They are chmod 444 root-owned via `protected-files.txt` (together with the boot-chain files `main.py`, `routes/__init__.py`, `auth.py`, `database.py`, `config.py`, `models.py`); the agent cannot edit them.
 
 | File | Role |
 |------|------|
@@ -152,12 +155,21 @@ These bootstrap an agent into a broken instance and are deliberately isolated fr
 | `recover_chat_runner.py` | Minimal CLI runner for the recovery chat; shares no code with `chat`/`providers`/SDK (runs the standalone `claude` binary as its own subprocess) |
 | `recover_auth.py` | Recovery-page auth |
 | `recover_oauth.py` | OAuth handling for the recovery flow |
-| `bootstrap.py` | First-boot bootstrap that auto-installs the curated app-store mini-app |
+
+The separate `recoveryd` container's code is a distinct package, `backend/recovery/` (baked root-owned to `/app/recovery/`, outside `backend/app/`): `recoveryd.py` (stdlib `http.server`, zero `app.*` imports; also owns the Sec-Fetch-Site/Origin cross-site reject), `recovery_auth.py` (HMAC-cookie auth — a deliberately frozen *verbatim* copy of `recover_auth.py` above, so edits to the platform copy do NOT propagate), `recovery_db.py` (raw-`sqlite3` owner-row read, no ORM), `recovery_pages.py` (dependency-free HTML). See the self-heal section below for the container itself.
+
+### Misc shared helpers
+
+Agent-editable general-purpose modules — several sit on live chat paths, so despite living near `recover_*` they are NOT part of the frozen island.
+
+| File | Role |
+|------|------|
+| `bootstrap.py` | First-boot bootstrap (`ensure_store_installed`) that auto-installs the curated app-store mini-app; called idempotently from the FastAPI lifespan |
 | `chat_log_redaction.py` | Server-side structural redaction for the gated chat-log read API |
 | `http_caching.py` | Range/206 hardening for revalidating `FileResponse`s |
 | `timeutil.py` | `now_naive_utc()` + `SOFT_DELETE_TTL`; SQLite stores naive datetimes (mixing aware/naive `TypeError`s on compare) |
-| `presence.py` | Owner presence tracking |
-| `questions.py` | Question helpers |
+| `presence.py` | Chat-broadcast presence (`has_watchers(chat_id)`) — `push.notify_owner` uses it to skip a push when a live SSE subscriber is already watching |
+| `questions.py` | The AskUserQuestion pending-future registry + lifecycle (`_pending` dict; `register`/`deliver_answer`/`get`/`claim`/`claim_if`/`cancel`) — both SDK runners insert into it, `POST /messages` resolves, Stop cancels |
 
 ### Routes (`backend/app/routes/`)
 
@@ -166,9 +178,9 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | File | Role |
 |------|------|
 | `auth.py` | Setup, login, CLI provider auth (`/api/auth/provider/*`) — Claude via self-managed PKCE OAuth, Codex via a `codex login --device-auth` subprocess |
-| `apps.py` | Mini-app registry CRUD + `/module` and `/frame` serving (ETag revalidation) |
+| `apps.py` | Mini-app registry CRUD, `/module` and `/frame` serving (ETag revalidation), `POST /{id}/publish` (site snapshot → `/sites/<token>/`), and `DELETE /{id}/data` — wipe an app's runtime storage keeping it installed (no tombstone/recovery window; takes only the innermost `app_storage_lock`, liveness re-checked under it) |
 | `chat.py` | `POST /api/chat/stop` — interrupts the agent turn |
-| `chats.py` | Chat CRUD + reversible soft-delete with recovery |
+| `chats.py` | Chat CRUD + reversible soft-delete with recovery; the chat-load serializer drops tool outputs >4KB to an `output_truncated`/`output_full_len` marker (read-side only — the stored message keeps the full text; blocks ≤4KB or without a message `ts` stay inline), lazy-fetched by `ToolBlock` on expand via `GET /{id}/tool-output?ts=&i=`; also `GET /{id}/agent-context` — read-only inspection of the assembled prompt (system prompt + injected memory / app-context / compaction blocks) |
 | `chats_stream.py` | `POST /messages` (starts a turn, returns 202) + `GET /stream` (SSE) |
 | `chat_logs.py` | Gated, redacted chat-log read API for mini-apps |
 | `storage.py` | Per-app and shared file storage |
@@ -177,6 +189,9 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `generate.py` | Gemini image-generation endpoint (image-only; not a chat provider) |
 | `proxy.py` | Server-side CORS-bypass proxy for mini-apps |
 | `standalone.py` | Top-level routes that make a mini-app installable as its own PWA (own importmap) |
+| `published.py` | Serves published site snapshots at `/sites/<token>/` — token-validated, traversal-confined static files from `/data/published/<token>/` (created by `POST /api/apps/{id}/publish` in `apps.py`; token stable per project) |
+| `platform.py` | Owner-gated platform self-update: `GET /api/platform/status`, `POST /apply`, `POST /restart` (drives Settings → Updates; thin caller of `platform_update.py`) |
+| `shell.py` | Owner-gated shell self-update: `GET /api/shell/status` + `POST /apply` (thin caller of `shell_update.py`) |
 | `notify.py` | System-event notifications to active broadcasts |
 | `notifications.py` | Push notification sending + history |
 | `push.py` | Web Push subscription management |
@@ -203,8 +218,8 @@ React + Vite. Entry is `main.jsx` → `App.jsx`. `App.jsx` checks setup status a
 | `Drawer/Drawer.jsx` | Slide-in nav: current chat, new chat, collapsible history, apps; `InstallSheet.jsx` is the PWA install prompt |
 | `ChatView/` | Chat surface (its own subtree — see below) |
 | `AppCanvas/AppCanvas.jsx` | Sandboxed `<iframe>` host for a mini-app + the postMessage init handshake |
-| `ChatEmbed/` | In-app embedded chat surface (agent chat inside a mini-app) |
-| `SettingsView/` | Theme, provider auth, owner config |
+| `ChatEmbed/` | In-app embedded chat surface (agent chat inside a mini-app). Chats can be project-scoped: `window.mobius.chat({ projectId })` forwards `project_id` on the app-chat create (create-time only — `AppChatPatch` has no `project_id`, so the resume PATCH ignores it); `chat.py` then scopes the injected `<app_context>`/`APP_STORAGE_DIR` to the `projects/<id>/` subdir of the app's storage dir and sets `APP_PROJECT_ID` |
+| `SettingsView/` | Theme, provider auth, owner config, and the update/restart surface: platform + shell update status/apply ("Restart to finish"), two-step confirmed server Restart, version display (sha · build date from `/api/version`) |
 | `SetupWizard/` | First-boot: account + provider auth |
 | `LoginForm/` | Subsequent logins |
 | `ProviderAuth/` | Provider-auth UI: `ProviderAuth.jsx` (Claude OAuth), `CodexAuth.jsx` (Codex device-auth), `ProviderRow.jsx` (shared per-provider row) |
@@ -222,10 +237,11 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 |------|------|
 | `ChatView.jsx` | Message history, streaming render, scroll/spacer management, `handleStop` |
 | `ChatInputBar.jsx` | Composer input |
-| `ComposerPopover.jsx` | The `+` popover: attach files + model/effort/provider picker (rendered by `ChatSettingsPanel.jsx`) |
+| `ComposerPopover.jsx` | The `+` popover: attach files, model/effort/provider picker (rendered by `ChatSettingsPanel.jsx`), and the agent-context inspector entry |
+| `AgentContextInspector.jsx` | "What the agent knows" sheet — renders `GET /api/chats/{id}/agent-context`; opened from the `+` popover |
 | `MsgContent.jsx` | Per-message rendering: markdown, tool blocks, attachments |
 | `ToolBlock.jsx` | Collapsible tool-execution block with status |
-| `StreamingMessage.jsx` | The live, in-progress assistant message |
+| `StreamingMessage.jsx` | The live, in-progress assistant message, incl. the collapsed reasoning disclosure for `thinking` stream events (Claude `thinking_delta` and Codex reasoning deltas publish the identical provider-agnostic event via each runner's `_thinking_event()`); the block is promoted and persisted (`streamPromotion.js` + `events.py`) and re-rendered post-turn by `MsgContent.jsx`, so it is durable, not stream-only |
 | `QuestionCard.jsx` | AskUserQuestion UI (gates the turn) |
 | `QueuedMessages.jsx` | Tray of messages queued while a turn streams |
 | `CompactionCard.jsx` | Compaction summary affordance |
@@ -234,10 +250,16 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | `ManageModelsModal.jsx` | Model management modal |
 | `streamReducers.js` | Stream-event reducers |
 | `resolveStopResend.js` | Stop → collapse-queue → re-send logic |
+| `chatRuntimeState.js` | Pure queue/stream branch helpers (`canFastForwardQueue`, referenced by the steer contract below) |
+| `streamPromotion.js` | Pure helpers sealing live stream items into durable assistant messages on promote/steer (`promoteAssistantStream`, `streamItemsHaveRenderableContent`) — ChatView owns *when* promotion happens, this owns *how* |
+| `streamSnapshotCache.js` | Versioned `sessionStorage` cache of the visible streaming items (the R4 leave-and-return restore) |
+| `msgText.js` | Strips `<agent_experience>` blocks + the hidden attachment manifest from message text |
 | `useStreamConnection.js` | SSE connection, text buffering, typewriter drain, sleep/wake reconnect |
 | `useScrollMode.js` | Scroll-mode state machine |
 | `useVoiceInput.js` | Web Speech API with Android-Chrome workarounds |
 | `useFileUpload.js` | File-upload state + API calls |
+| `hooks/usePendingQueue.js` | Owns the pending-queue state + all its mutations (optimistic vs server-confirmed `serverTs` rows); its `pendingMessagesRef` is what `handleStop` snapshots and the steer/fast-forward gate reads |
+| `hooks/useBridgePartial.js` | One-shot mount-time decision: REPLACE the kept partial of an in-flight turn on first promote vs APPEND a new assistant message (ts-keyed, not role-keyed) |
 | `markdown/` | `BlockRenderer.jsx`, `blocks.jsx`, `InlineContent.jsx`, `ImageLightbox.jsx`, `highlight.js` (lazy highlight.js), `math.js` (KaTeX) |
 
 ### Hooks (`frontend/src/hooks/`)
@@ -269,7 +291,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | Task | Start here |
 |------|------------|
 | New API route | New module in `backend/app/routes/` exposing `router` → register in `routes/__init__.py` (`_load(...)` line + `__all__`) → mount in `main.py` |
-| New ORM table / column | `backend/app/models.py` (and a manual `ALTER TABLE` — `create_all` never ALTERs an existing table) |
+| New ORM table / column | `backend/app/models.py` plus an idempotent `ALTER TABLE` entry in `database.py:run_migrations()` (runs at boot; `create_all` never ALTERs an existing table) |
 | Change request/response shape | `backend/app/schemas.py` + the owning route |
 | Add an auth dependency / change CSRF | `backend/app/deps.py` |
 | Persist anything chat-domain | A domain command in `backend/app/chat_writer.py` — never write `Chat.messages`/`Chat.pending_messages` directly |
@@ -282,11 +304,12 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | Add a runtime vendor library | `backend/app/runtime_libs.py` + both importmaps + the Dockerfile vendor copy |
 | Change offline / SW behavior | `frontend/src/sw.js` + `frontend/src/sw-cache-policy.js` (read *Service worker + offline* below first) |
 | Change the in-product agent's instructions | `skill/core.md` (constitution) or `backend/scripts/seed-skills/*.md` (per-task skills) — see below |
+| Change a built-in core app (Memory / Reflection) | The catalog repo (`mobius-os/app-<slug>`) is the source of truth — `core-apps/` is a committed snapshot, never hand-edited. Bump the pinned commit in `core-apps/SOURCES`, run `scripts/sync-core-apps.sh`, commit the diff; CI (`scripts/check-core-apps-sync.sh`) fails on drift. The snapshot is baked to `/app/core-apps` (Dockerfile) and installed at boot by `backend/scripts/install-core-apps.sh` |
 | Theme CSS / tokens | `backend/app/theme.py` + `routes/theme.py` + `frontend/src/hooks/useTheme.js` |
 
 ## In-product agent context — three layers
 
-The in-product agent is a first-class reader of this code, and its behavior is governed by three layers, not one. (1) **Constitution** — `skill/core.md`, the owner-curated system prompt, baked to `/app/skill/core.md`; `chat.py` reads it into `system_prompt` (the Claude SDK receives it on every turn; the Codex SDK uses it as base instructions only when starting a new thread, i.e. `session_id is None`). `providers.get_skill_path()` resolves `core.md` only (there is no `agent-skill.md` fallback). (2) **Skills** — `/data/shared/skills/*.md` (building-apps, theming, cron, notifications, recovery, memory, reflection, …), seeded create-if-absent by `backend/scripts/init_skills.py` from `backend/scripts/seed-skills/`; the agent `Read`s the relevant one on demand and may edit them. (3) **Memory** — the knowledge graph under `/data/shared/memory/` (`index.md` + `mocs/` + `notes/` + `graph.json` + `.ready`), injected progressive-disclosure by `backend/app/memory.py` into the first user message as an `<agent_experience>` block (not the system prompt, so static content caches), indexed by `memory_graph.py`, and viewed through the Memory mini-app. To change agent behavior, edit `skill/core.md` and the seeds — not code-level validators (see the design philosophy above).
+The in-product agent is a first-class reader of this code, and its behavior is governed by three layers, not one. (1) **Constitution** — `skill/core.md`, the owner-curated system prompt, baked to `/app/skill/core.md`; `chat.py` reads it into `system_prompt` (the Claude SDK receives it on every turn; the Codex SDK uses it as base instructions only when starting a new thread, i.e. `session_id is None`). `providers.get_skill_path()` resolves `core.md` only (there is no `agent-skill.md` fallback). (2) **Skills** — `/data/shared/skills/*.md` (building-apps, theming, cron, notifications, recovery, memory, reflection, …), seeded create-if-absent by `backend/scripts/init_skills.py` from `backend/scripts/seed-skills/`; the agent `Read`s the relevant one on demand and may edit them. (3) **Memory** — the knowledge graph under `/data/shared/memory/` (`index.md` + per-chat notes `chats/<id>/index.md` — the primary day-time memory carrier — + `mocs/` + `notes/` + `graph.json` + `read-trace/` + `.ready`), injected progressive-disclosure by `backend/app/memory.py` into the first user message as an `<agent_experience>` block (not the system prompt, so static content caches), indexed by `memory_graph.py`, and viewed through the Memory mini-app. The injected block is `index.md` plus the ~10 most-recently-modified chat notes; the deeper graph (`mocs/`, `notes/`) is read on demand. Two platform scripts maintain/retrieve it: `backend/scripts/chat_note.py` (tool-free turn-end summarizer `chat.py` runs when a settled chat's note is missing or stale; it also syncs the chat title from the note's gist) and `backend/scripts/memory_search.py` (the memory-search recall subagent, auto-run on substantive first messages when `auto_memory_search` is enabled). To change agent behavior, edit `skill/core.md` and the seeds — not code-level validators (see the design philosophy above).
 
 ## Data layout (`/data/` volume)
 
@@ -300,6 +323,7 @@ The in-product agent is a first-class reader of this code, and its behavior is g
 ├── shell/                  agent's editable shell copy (src/ + dist/)
 ├── cli-auth/claude/        CLI credentials
 ├── cron-logs/              output from scheduled task scripts
+├── published/<token>/      published site snapshots (shareable /sites/<token>/ URLs)
 └── service-token.txt       long-lived JWT for cron scripts (chmod 600)
 ```
 
@@ -312,15 +336,37 @@ repo) + shell (`/data/shell` src+dist); mini-apps (`/data/apps/<slug>`, each a
 git repo); recovery (the frozen island, below). Runtime trees are gitignored
 (db, compiled, cli-auth).
 
-**Updates** flow through git. `backend/app/platform_update.py` is the merge
-engine: it records the baked image as the `upstream` branch (today the upstream
-IS the baked floor; a signed-GitHub origin is the planned direction, `.pm/147`),
-computes a merge tree, and on conflict spawns an agent conflict-chat to resolve.
-Shell rebuilds via `rebuild_shell.sh`; the served bundle is `/data/shell/dist`
-if a complete build exists else baked `/app/static` (the #1 deploy gotcha — the
-volume masks a new baked dist; always byte-check the served hash). Mini-apps
-update through each app's git repo + the store; freshness rides ETags
-(`/module` = `updated_at` µs; `/frame` = compound `updated_at`+content-hash).
+**Updates** flow through git. `backend/app/platform_update.py` is a thin caller
+of the shared `app_git.py` engine (see "Where each surface stands" above): it
+picks the baked image floor to record as the `upstream` branch (today the
+upstream IS the baked floor; a signed-GitHub origin is the planned direction,
+tracked as card 147 on the maintainers' local backlog — `.pm/` is gitignored, so
+these card refs here and below are not present in a fresh clone), the engine
+computes the merge tree, and on conflict the platform path spawns an agent
+conflict-chat to resolve. Shell rebuilds via `rebuild_shell.sh`; the served
+bundle is `/data/shell/dist` if a complete build exists else baked `/app/static`
+(the #1 deploy gotcha — the volume masks a new baked dist; always byte-check the
+served hash). Mini-apps update through each app's git repo + the store; freshness
+rides ETags (`/module` = `updated_at` µs; `/frame` = compound
+`updated_at`+content-hash). The backend has the same served-vs-baked gotcha as
+the shell: a new image's `sha` advances on every deploy even while
+`/data/platform` keeps serving the previous deploy's Python. `GET /api/version`
+(`backend/app/main.py`) therefore reports the image identity (`sha`, `shell_sha`)
+plus the SERVED-platform identity — `serving_source` (from the `/tmp/serving-source`
+stamp `entrypoint.sh` writes at boot), `platform_sha`, `platform_dirty`,
+`baked_sha` — and `scripts/deploy-prod.sh`'s verify step asserts these match its
+sync decision (it also hard-blocks deploying a checkout strictly BEHIND
+`origin/main`).
+
+**Built-in apps (Memory, Reflection)** come from the tracked top-level
+`core-apps/<slug>/` trees — committed SNAPSHOTS of their catalog repos
+(`mobius-os/app-*`), pinned by commit in `core-apps/SOURCES`, baked to
+`/app/core-apps` (Dockerfile), and registered/re-synced at boot by
+`backend/scripts/install-core-apps.sh` (backgrounded post-launch by the
+entrypoint; registration goes through the API with the service token). Never edit
+`core-apps/` directly: update the catalog repo, bump `SOURCES`, and run
+`scripts/sync-core-apps.sh`; CI (`scripts/check-core-apps-sync.sh`) fails the
+build on drift.
 
 **Self-heal — LANDING (owner-signed-off 2026-06-30; the `recoveryd` container is
 BUILT — `backend/recovery/recoveryd.py`, its own service in `docker-compose.yml`
@@ -328,15 +374,17 @@ with `restart: unless-stopped` on the same `/data` — though `/recover*` routin
 is NOT yet wired in the bundled `Caddyfile` (which still only proxies
 `app:8000`; recovery routing is left to the external `deploy-caddy` and marked
 "NOT wired here" in `docker-compose.yml`) — per the adversarially-reviewed plan in
-`.pm/148` + `.pm/_148-recoveryd-hardened-plan`. Some hardening is still in flight
+cards 148 + its recoveryd-hardened addendum. Some hardening is still in flight
 under an active session, so treat the finer status of the bullets below —
-especially the pre-flight gate (`.pm/154`) and the listed removals — as
+especially the pre-flight gate (card 154) and the listed removals — as
 "intended end-state, confirm against the recovery rework" rather than settled).**
-The model is git + a minimal pre-flight gate + a separate always-up recovery
-container, with **no baked duplicate, no `/app/app` symlink-swap, no auto-heal
-probe, no magic**:
+The *end-state* model is git + a minimal pre-flight gate + a separate always-up
+recovery container, with **no baked duplicate, no `/app/app` symlink-swap, no
+auto-heal probe, no magic** — but note several of those removals are not done at
+HEAD yet (see the last bullet); today boot still symlink-swaps `/app/app` →
+`/data/platform/app` with a baked fallback:
 - The platform is served directly as a git repo.
-- **Pre-flight gate (`.pm/154`):** a change only takes effect on the restart that
+- **Pre-flight gate (card 154):** a change only takes effect on the restart that
   applies it, so the running server keeps serving the working code while the agent
   edits. Before applying, a minimal check — does the new tree import (`python -c
   "import app.main"`) and answer `/api/health`? Green → apply; red → don't apply,
@@ -350,15 +398,25 @@ probe, no magic**:
   backgrounded supervisor inside the platform container dies with it. **Two tiers:**
   *Tier 1* is a deterministic "Restore platform" button (git-reset `/data/platform`
   via the existing `.recover-pending` + restart) needing **zero CLI / OAuth /
-  network / agent** — this is THE floor; *Tier 2* is the lifted
-  `recover_chat_runner` spawning a rescue agent (best-effort, only when creds
-  exist). recoveryd restarts the platform via a sentinel file + a baked
-  `kill -TERM 1` poller (no Docker socket — O1), and its auth is DB-independent
-  (bcrypt `owner.json`, bootstrapped from owner-creation so it can't auth before
-  an owner exists — O2).
-- The crash-loop `cp`-restore, the `platform-baked` destructive `recovery_restore`
-  mode, and the `.platform-serve-baked` probe/flag are removed. Real image/disk
-  corruption is an operator redeploy, not something to auto-heal around.
+  network / agent** — this is THE floor and the ONLY tier built today; *Tier 2*
+  (the lifted `recover_chat_runner` spawning a rescue agent, best-effort when
+  creds exist) is an explicitly DEFERRED follow-on, NOT in the built recoveryd
+  (per `backend/recovery/recoveryd.py`'s docstring) — today the rescue chat still
+  lives only inside the platform uvicorn at `/recover`, so it dies with the
+  platform. recoveryd restarts the platform via a sentinel file + a baked
+  `kill -TERM 1` poller (no Docker socket — O1). Its auth bcrypt-checks the
+  SQLite owner row read via raw sqlite3 (`backend/recovery/recovery_db.py`) plus
+  an HMAC session cookie keyed off `/data/.recovery-secret` — so it survives a
+  broken platform but NOT a wiped DB; the DB-independent bcrypt `owner.json` auth
+  (owner sign-off O2) is likewise an explicitly deferred follow-on.
+- Of the planned removals, only the `.platform-serve-baked` probe/flag is gone
+  today. The crash-loop `cp`-restore (`backend/scripts/entrypoint.sh`, boot-counter
+  ≥ 3) and the destructive `platform-baked` `recovery_restore.sh` mode are STILL
+  PRESENT at HEAD — slated for removal with the recovery rework — and boot still
+  symlink-swaps `/app/app` → `/data/platform/app` (falling back to the baked floor
+  when the platform tree fails its sanity check; the entrypoint stamps the decision
+  to `/tmp/serving-source`). End-state intent: real image/disk corruption is an
+  operator redeploy, not something to auto-heal around.
 
 ## Chat scroll + steer contract
 
@@ -383,6 +441,12 @@ How a chat scrolls/steers, owner-authoritative. The Playwright lock-in specs
   not a `\n` blob) — matched byte-for-byte FE (`handleSteer`) + BE
   (`_selected_force_steer_pending`). The fast-forward button shows only when every
   queued row is server-confirmed (`canFastForwardQueue`); confirm on a numeric ts.
+  A steer landing before any renderable assistant output seals nothing — the
+  empty/whitespace pre-steer segment is dropped symmetrically on the live path
+  (`streamPromotion.streamItemsHaveRenderableContent`) and the persisted path
+  (`events.blocks_have_renderable_content`, gating the seal in `chat.py`), so no
+  stray empty assistant bubble precedes the steered row; a single real token still
+  seals, correctly placed before it (card 166). Keep the two predicates aligned.
 - **Regression guards (owner-observed prod bugs):** an at-bottom send must not land
   mid-viewport; a steered row must not render after the agent's reply.
 
@@ -438,6 +502,13 @@ time-dependent behavior; (3) wait on signals/state, never `setTimeout` durations
 (4) expose a "settled" flag from the app rather than guessing a delay. The two app
 fixes above took `handleStop` 0→3/3 and removed the steer/app-canvas deterministic
 failures — product improvements, not test hacks.
+
+`backend/memeval/` is the offline evaluation harness for the memory system —
+synthetic/real-session corpora (`corpus.py`, `fixtures/`) run through
+consolidation and recall metrics (`runner.py`, `systems.py`, `metrics.py`),
+including a reflection-in-the-middle stage (`reflection_stage.py`). It is dev
+tooling, never imported by the running app; `backend/tests/test_memeval_*.py`
+cover it deterministically.
 
 ## See also
 
