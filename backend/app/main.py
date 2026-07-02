@@ -173,6 +173,20 @@ async def lifespan(app):
       _bs_db.close()
   except Exception as exc:
     _log.error("bootstrap store install wiring failed: %s", exc, exc_info=True)
+  # Reconcile the DB-independent recovery credential seed with the current
+  # owner. Backfills instances that completed setup before the seed
+  # existed and keeps it current; idempotent (no write when unchanged) and
+  # best-effort — recovery is a convenience layer, never boot-critical.
+  try:
+    from app import recovery_seed
+    from app.database import SessionLocal as _SeedSession
+    _seed_db = _SeedSession()
+    try:
+      recovery_seed.sync_owner_seed(_seed_db)
+    finally:
+      _seed_db.close()
+  except Exception as exc:
+    _log.error("recovery owner seed sync wiring failed: %s", exc, exc_info=True)
   # Backfill source_dir for legacy app rows. The file watcher resolves
   # /data/apps/<slug>/index.jsx → app.id via exact source_dir match;
   # rows with NULL (older builds, or apps imported without going

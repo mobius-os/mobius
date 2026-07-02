@@ -260,7 +260,14 @@ def _action_factory_reset(data_dir: Path) -> None:
   # auto-generates new values for .secret-key and service-token.txt;
   # recover_auth._recovery_secret_bytes() generates .recovery-secret on
   # first use.
-  for name in [".secret-key", ".recovery-secret", "service-token.txt"]:
+  # `.recovery-owner.json` is the DB-independent recovery credential seed
+  # (backend/app/recovery_seed.py). It MUST go on a factory reset or the
+  # recovery floor would keep authenticating the prior owner against the
+  # wiped instance. The next owner's setup writes a fresh one.
+  for name in [
+    ".secret-key", ".recovery-secret", ".recovery-owner.json",
+    "service-token.txt",
+  ]:
     p = data_dir / name
     try:
       p.unlink(missing_ok=True)

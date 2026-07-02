@@ -839,6 +839,7 @@ push/*.txt
 service-token.txt
 .secret-key
 .recovery-secret
+.recovery-owner.json
 .pm-commit
 compiled/
 db/

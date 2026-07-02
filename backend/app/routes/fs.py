@@ -73,13 +73,18 @@ _DENY_RELPATHS = (
   "cli-auth",
   "service-token.txt",
   ".secret-key",
+  ".recovery-owner.json",
   ".env",
   "db/ultimate.db",
   ".storage-meta",
 )
 # Defense in depth: a secret-shaped filename anywhere in the tree is denied,
-# in case one is copied outside its canonical home.
-_SECRET_NAMES = {".env", ".secret-key", ".credentials.json", "service-token.txt"}
+# in case one is copied outside its canonical home. `.recovery-owner.json`
+# holds the owner's bcrypt hash for the DB-independent recovery fallback.
+_SECRET_NAMES = {
+  ".env", ".secret-key", ".recovery-owner.json", ".credentials.json",
+  "service-token.txt",
+}
 
 
 def _fs_root() -> Path:
