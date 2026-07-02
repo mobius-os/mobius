@@ -96,7 +96,7 @@ from app.runner_registry import RunnerKind, registry
 from app.runtime_types import RunnerResult
 from app.sdk_emit import emit_unknown_enabled, unknown_event
 from app.tool_summaries import summarize_tool_input
-from app.tool_sources import normalize_tool_sources
+from app.tool_sources import normalize_tool_sources, sources_from_websearch_text
 
 
 def _thinking_event(content: str) -> dict:
@@ -682,7 +682,7 @@ def dispatch_sdk_message(
         )
         continue
       if isinstance(block, ThinkingBlock):
-        bc.publish(_thinking_event(block.thinking))
+        # Streamed via thinking_delta already — snapshot duplicate.
         continue
       if isinstance(block, TextBlock):
         # Streamed via text_delta already — snapshot duplicate.
@@ -703,10 +703,15 @@ def dispatch_sdk_message(
     content = sdk_msg.content if isinstance(sdk_msg.content, list) else []
     for block in content:
       if isinstance(block, ToolResultBlock):
+        output = _format_tool_output(block.content)
         bc.publish({
           "type": "tool_output",
-          "content": _format_tool_output(block.content),
+          "content": output,
         })
+        if output.startswith("Web search results for query"):
+          sources = sources_from_websearch_text(output)
+          if sources:
+            bc.publish({"type": "tool_sources", "sources": sources})
         bc.publish({"type": "tool_end"})
         continue
       _emit_unknown(bc, f"user_block:{type(block).__name__}", block)
