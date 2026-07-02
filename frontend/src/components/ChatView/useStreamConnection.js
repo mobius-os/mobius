@@ -620,7 +620,12 @@ export default function useStreamConnection(chatId, {
             const content = event.content || ''
             if (content) {
               flushBuffer()
-              applyStreamItems(prev => appendThinkingChunk(prev, content))
+              applyStreamItems(prev => appendThinkingChunk(
+                prev,
+                content,
+                Date.now(),
+                event.ts
+              ))
             }
           } else if (event.type === 'tool_start') {
             flushBuffer()
