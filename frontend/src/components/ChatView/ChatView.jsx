@@ -966,6 +966,19 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         if (cancelled) return
         if (fetchGenRef.current !== gen) return
         const msgs = data.messages || []
+        // Snapshot the per-chat runtime config (provider/model/effort) BEFORE
+        // the behind-local guard below. This is independent of the messages
+        // snapshot, and the guard's early-return used to skip it — so after any
+        // interaction (local optimistic state ahead of the server snapshot) the
+        // `+` popover's model picker silently vanished, leaving only Attach +
+        // "What the agent knows". Setting it here keeps the picker present
+        // regardless of the messages fast-path.
+        setChatInfo({
+          provider: data.provider || 'claude',
+          agent_settings_json: data.agent_settings_json || null,
+          effective: data.effective_agent_settings || {},
+          has_assistant_turns: !!data.has_assistant_turns,
+        })
         if (serverSnapshotBehindLocal(msgs, messagesRef.current)) {
           setLoading(false)
           return
@@ -1001,17 +1014,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           pending_messages: data.pending_messages || [],
           pending_question_id: data.pending_question_id || null,
         }))
-        // Snapshot the per-chat runtime config so ChatSettingsPanel
-        // (the model + effort picker in the `+` popover) renders
-        // with the current effective model/effort. The initial
-        // fetch is the only canonical source; the picker updates
-        // this dict in place on each PATCH.
-        setChatInfo({
-          provider: data.provider || 'claude',
-          agent_settings_json: data.agent_settings_json || null,
-          effective: data.effective_agent_settings || {},
-          has_assistant_turns: !!data.has_assistant_turns,
-        })
+        // (chatInfo — the model/effort picker config — is snapshotted above,
+        // before the behind-local guard, so the picker survives interactions.)
         // Feed the bridge gate with the data.running + last-msg
         // snapshot. useBridgePartial captures the kept-partial ts
         // on first valid input and stays sticky from there — only
