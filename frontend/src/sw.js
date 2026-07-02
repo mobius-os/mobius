@@ -106,7 +106,7 @@ clientsClaim()
 // route takes precedence over the runtime /vendor CacheFirst route below
 // (first-registered route wins) — the precached copy shadows any stale
 // runtime-cached vendor entry from before this fix.
-const REACT_VENDOR = '/vendor/react@19.2.6'
+const REACT_VENDOR = '/vendor/react@19.2.7'
 const VENDORED_REACT = [
   `${REACT_VENDOR}/core.mjs`,
   `${REACT_VENDOR}/react.mjs`,
@@ -137,7 +137,7 @@ const VENDORED_DATE_FNS = [
 // Bumping a version here means bumping it in app-frame.html's import map + the
 // Dockerfile vendor step in lockstep.
 const VENDORED_ATLAS_NOTES = [
-  { url: '/vendor/d3-geo@3/d3-geo.mjs', revision: null },
+  { url: '/vendor/d3-geo@3.1.1/d3-geo.mjs', revision: null },
   { url: '/vendor/marked@17.0.6/marked.mjs', revision: null },
   { url: '/vendor/dompurify@3.4.11/dompurify.mjs', revision: null },
 ]
