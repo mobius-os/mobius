@@ -35,7 +35,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
     fonts-liberation fonts-noto-color-emoji \
     && npm install -g esbuild@0.28.1 \
-    && npm install -g @anthropic-ai/claude-code@2.1.196 \
+    && npm install -g @anthropic-ai/claude-code@2.1.198 \
     && npm install -g @openai/codex@0.134.0 \
     && npm install -g agent-browser@0.31.1 \
     && agent-browser install \
