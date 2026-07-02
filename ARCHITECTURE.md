@@ -156,7 +156,7 @@ The `recover_*` modules bootstrap an agent into a broken instance and are delibe
 | `recover_auth.py` | Recovery-page auth |
 | `recover_oauth.py` | OAuth handling for the recovery flow |
 
-The separate `recoveryd` container's code is a distinct package, `backend/recovery/` (baked root-owned to `/app/recovery/`, outside `backend/app/`): `recoveryd.py` (stdlib `http.server`, zero `app.*` imports; also owns the Sec-Fetch-Site/Origin cross-site reject), `recovery_auth.py` (HMAC-cookie auth — a deliberately frozen *verbatim* copy of `recover_auth.py` above, so edits to the platform copy do NOT propagate), `recovery_db.py` (raw-`sqlite3` owner-row read, no ORM), `recovery_pages.py` (dependency-free HTML). See the self-heal section below for the container itself.
+The separate `recoveryd` container's code is a distinct package, `backend/recovery/` (baked root-owned to `/app/recovery/`, outside `backend/app/`): `recoveryd.py` (stdlib `http.server`, zero `app.*` imports; also owns the Sec-Fetch-Site/Origin cross-site reject), `recovery_auth.py` (HMAC-cookie auth — a deliberately frozen *verbatim* copy of `recover_auth.py` above, so edits to the platform copy do NOT propagate), `recovery_db.py` (raw-`sqlite3` owner-row read, no ORM, with a DB-independent `/data/.recovery-owner.json` fallback for a wiped DB — see the self-heal section), `recovery_pages.py` (dependency-free HTML). See the self-heal section below for the container itself.
 
 ### Misc shared helpers
 
@@ -405,10 +405,19 @@ HEAD yet (see the last bullet); today boot still symlink-swaps `/app/app` →
   lives only inside the platform uvicorn at `/recover`, so it dies with the
   platform. recoveryd restarts the platform via a sentinel file + a baked
   `kill -TERM 1` poller (no Docker socket — O1). Its auth bcrypt-checks the
-  SQLite owner row read via raw sqlite3 (`backend/recovery/recovery_db.py`) plus
-  an HMAC session cookie keyed off `/data/.recovery-secret` — so it survives a
-  broken platform but NOT a wiped DB; the DB-independent bcrypt `owner.json` auth
-  (owner sign-off O2) is likewise an explicitly deferred follow-on.
+  owner password against the SQLite owner row read via raw sqlite3
+  (`backend/recovery/recovery_db.py`), with an HMAC session cookie keyed off
+  `/data/.recovery-secret`. It also survives a **wiped or corrupt DB** (O2): the
+  platform mirrors the owner's username + bcrypt hash into a DB-independent seed
+  at `/data/.recovery-owner.json` (`backend/app/recovery_seed.py`, written at
+  `setup()` and idempotently re-synced at boot), and `recovery_db` falls back to
+  it **only when the DB is unreadable** — never when it is readable-but-owner-less,
+  so a fresh install and a completed factory reset (both `DELETE FROM owner`,
+  leaving a readable empty table) still read as "no owner" and a transient
+  busy/locked DB fails closed. The seed is only ever written after an owner row
+  commits (the first-boot-takeover guard), deleted on factory reset, and
+  gitignored + FS-deny-listed so it never leaks through `pm-commit` or
+  `/api/fs/read`.
 - Of the planned removals, only the `.platform-serve-baked` probe/flag is gone
   today. The crash-loop `cp`-restore (`backend/scripts/entrypoint.sh`, boot-counter
   ≥ 3) and the destructive `platform-baked` `recovery_restore.sh` mode are STILL
