@@ -10,7 +10,7 @@ from app.runner_registry import RunnerKind, registry
 
 # Mirrors the installed SDK:
 # - ErrorNotification: /usr/local/lib/python3.12/site-packages/openai_codex/generated/v2_all.py:6958
-# - AppServerRpcError: /usr/local/lib/python3.12/site-packages/openai_codex/errors.py:24
+# - CodexRpcError: /usr/local/lib/python3.12/site-packages/openai_codex/errors.py:24
 # - InvalidParamsError: /usr/local/lib/python3.12/site-packages/openai_codex/errors.py:40
 
 
@@ -22,7 +22,7 @@ class _FakeBroadcast:
     self.events.append(event)
 
 
-class _FakeAppServerConfig:
+class _FakeCodexConfig:
   def __init__(self, **kwargs):
     self.kwargs = kwargs
 
@@ -31,10 +31,10 @@ class _FakeApprovalMode:
   auto_review = "auto_review"
 
 
-class _FakeSandboxMode:
+class _FakeSandbox:
   read_only = "read-only"
   workspace_write = "workspace-write"
-  danger_full_access = "danger-full-access"
+  full_access = "full-access"
 
 
 class _FakeReasoningEffort:
@@ -113,7 +113,7 @@ def _fake_sdk(async_codex_cls):
       self.message = message
       self.data = data
 
-  class _FakeAppServerRpcError(RuntimeError):
+  class _FakeCodexRpcError(RuntimeError):
     def __init__(self, code: int, message: str, data=None):
       super().__init__(f"JSON-RPC error {code}: {message}")
       self.code = code
@@ -123,9 +123,9 @@ def _fake_sdk(async_codex_cls):
   return {
     "AgentMessageDeltaNotification": _Dummy,
     "ApprovalMode": _FakeApprovalMode,
-    "AppServerConfig": _FakeAppServerConfig,
     "AsyncCodex": async_codex_cls,
-    "AppServerRpcError": _FakeAppServerRpcError,
+    "CodexConfig": _FakeCodexConfig,
+    "CodexRpcError": _FakeCodexRpcError,
     "CommandExecutionOutputDeltaNotification": _Dummy,
     "CommandExecutionThreadItem": _Dummy,
     "ContextCompactedNotification": _Dummy,
@@ -135,7 +135,7 @@ def _fake_sdk(async_codex_cls):
     "FileChangeThreadItem": _Dummy,
     "InvalidParamsError": _FakeInvalidParamsError,
     "ReasoningEffort": _FakeReasoningEffort(),
-    "SandboxMode": _FakeSandboxMode,
+    "Sandbox": _FakeSandbox,
     "ItemCompletedNotification": _Dummy,
     "ItemGuardianApprovalReviewCompletedNotification": _Dummy,
     "ItemGuardianApprovalReviewStartedNotification": _Dummy,
@@ -322,7 +322,7 @@ def test_is_closed_turn_error_matches_sdk_rpc_errors(monkeypatch):
   monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
 
   invalid_params = sdk["InvalidParamsError"](-32602, "turn is not running")
-  rpc_error = sdk["AppServerRpcError"](-32000, "turn closed")
+  rpc_error = sdk["CodexRpcError"](-32000, "turn closed")
 
   assert codex_sdk_runner._is_closed_turn_error(invalid_params) is True
   assert codex_sdk_runner._is_closed_turn_error(rpc_error) is True

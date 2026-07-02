@@ -349,7 +349,7 @@ def test_model_registry_returns_known_models_on_missing_creds(client, auth):
 
 
 def test_fetch_codex_models_uses_codex_home_env(tmp_path, monkeypatch):
-  """The installed Codex SDK no longer accepts AppServerConfig(codex_home=).
+  """The installed Codex SDK no longer accepts CodexConfig(codex_home=).
 
   The chat path sets CODEX_HOME in the app-server env; the model registry
   should do the same.
@@ -362,7 +362,7 @@ def test_fetch_codex_models_uses_codex_home_env(tmp_path, monkeypatch):
 
   captured = {}
 
-  class FakeAppServerConfig:
+  class FakeCodexConfig:
     def __init__(self, **kwargs):
       captured.update(kwargs)
 
@@ -387,7 +387,7 @@ def test_fetch_codex_models_uses_codex_home_env(tmp_path, monkeypatch):
   )
   monkeypatch.setitem(
     sys.modules, "openai_codex.client",
-    SimpleNamespace(AppServerConfig=FakeAppServerConfig),
+    SimpleNamespace(CodexConfig=FakeCodexConfig),
   )
   monkeypatch.setattr(providers.shutil, "which", lambda _name: "/usr/bin/codex")
 

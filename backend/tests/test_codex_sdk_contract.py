@@ -25,7 +25,7 @@ These tests catch (1), (2), (3) at build time so a Codex SDK bump
 fails CI loudly rather than producing a silent runtime regression.
 
 Earlier version of these tests probed `codex._client._sync` as a
-module import and `AppServerClient` as a class — neither matches what
+module import and `CodexClient` as a class — neither matches what
 the runner actually accesses. As a result both tests silently SKIPPED
 in CI (the module didn't exist; pytest.importorskip swallowed it),
 giving zero coverage of the contract they were named for. The current
