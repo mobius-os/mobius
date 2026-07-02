@@ -136,7 +136,7 @@ async function fetchClaudeProviderStatus() {
   return jsonOrThrow(res, 'provider status fetch failed:')
 }
 
-function useClaudeProviderStatusQuery() {
+function useClaudeProviderStatusQuery({ enabled = true } = {}) {
   return useQuery({
     queryKey: providerClaudeStatusKey,
     queryFn: fetchClaudeProviderStatus,
@@ -145,6 +145,9 @@ function useClaudeProviderStatusQuery() {
     // keep the default staleTime (0) so that instant paint is followed
     // by a background refetch (stale-while-revalidate); explicit
     // invalidation (onClaudeAuthDone) still flips it after a re-auth.
+    // `enabled` lets callers (SetupWizard) defer this until a token
+    // exists — see call site for why.
+    enabled,
   })
 }
 

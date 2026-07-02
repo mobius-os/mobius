@@ -10,12 +10,14 @@ import './SetupWizard.css'
 export default function SetupWizard({ onDone, initialStep = 'account' }) {
   const [step, setStep] = useState(initialStep)
   // Hoisted from ProviderStep so ProviderAuth (which is a
-  // grandchild) doesn't need to re-run the same query. The
-  // wizard typically reaches the provider step within seconds
-  // of mount, so the slight overhead of fetching during the
-  // account step is fine — and avoids a layout shift the
-  // first time ProviderStep renders.
-  const claudeStatusQuery = authQueries.provider.claudeStatus.useQuery()
+  // grandchild) doesn't need to re-run the same query. Gated on
+  // step !== 'account': there's no token yet during account
+  // creation, so an eager fetch here 401s, and apiFetch's global
+  // 401 handler (client.js) treats that as an expired session and
+  // reloads the page — an infinite reload loop on first load.
+  const claudeStatusQuery = authQueries.provider.claudeStatus.useQuery({
+    enabled: step !== 'account',
+  })
   const claudeAuthenticated = !!claudeStatusQuery.data?.authenticated
 
   // Persists step synchronously alongside setStep so a refresh in
