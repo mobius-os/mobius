@@ -37,7 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && npm install -g esbuild@0.28.1 \
     && npm install -g @anthropic-ai/claude-code@2.1.196 \
     && npm install -g @openai/codex@0.134.0 \
-    && npm install -g agent-browser@0.27.0 \
+    && npm install -g agent-browser@0.31.1 \
     && agent-browser install \
     && mv /root/.agent-browser /opt/agent-browser \
     && apt-get autoremove -y \
@@ -153,11 +153,11 @@ COPY frontend/public/app-frame.html ./app-frame.html
 # it. Without the alias those requests 404 → SPA HTML → spinner-forever.
 RUN mkdir -p /tmp/vendor-install && cd /tmp/vendor-install \
     && npm init -y >/dev/null \
-    && npm install --no-audit --no-fund --silent three@0.184.0 \
-    && mkdir -p /app/static/vendor/three@0.184.0/addons \
-    && cp -r node_modules/three/build/. /app/static/vendor/three@0.184.0/ \
-    && cp -r node_modules/three/examples/jsm/. /app/static/vendor/three@0.184.0/addons/ \
-    && ln -s three@0.184.0 /app/static/vendor/three \
+    && npm install --no-audit --no-fund --silent three@0.185.1 \
+    && mkdir -p /app/static/vendor/three@0.185.1/addons \
+    && cp -r node_modules/three/build/. /app/static/vendor/three@0.185.1/ \
+    && cp -r node_modules/three/examples/jsm/. /app/static/vendor/three@0.185.1/addons/ \
+    && ln -s three@0.185.1 /app/static/vendor/three \
     && cd / && rm -rf /tmp/vendor-install
 
 # Self-hosted React for the mini-app import map — same rationale as
@@ -165,7 +165,7 @@ RUN mkdir -p /tmp/vendor-install && cd /tmp/vendor-install \
 # speed. Mini-apps import react/react-dom via app-frame.html's (and
 # standalone.py's) import map. Serving these from esm.sh meant offline-
 # capable apps depended on a third-party CDN whose React entry is a
-# multi-hop re-export chain (react@19.2.6 → /react@19.2.6/es2022/
+# multi-hop re-export chain (react@19.2.7 -> /react@19.2.7/es2022/
 # react.bundle.mjs → …; react-dom pulls scheduler + sub-chunks as separate
 # URLs). The service worker cache-firsts esm.sh, but only opportunistically
 # per URL, so a single uncached hop (or a version bump invalidating the
@@ -184,10 +184,10 @@ RUN mkdir -p /tmp/vendor-install && cd /tmp/vendor-install \
 COPY backend/scripts/build-react-vendor.mjs /tmp/build-react-vendor.mjs
 RUN mkdir -p /tmp/react-install && cd /tmp/react-install \
     && npm init -y >/dev/null \
-    && npm install --no-audit --no-fund --silent react@19.2.6 react-dom@19.2.6 \
-    && mkdir -p /app/static/vendor/react@19.2.6 \
+    && npm install --no-audit --no-fund --silent react@19.2.7 react-dom@19.2.7 \
+    && mkdir -p /app/static/vendor/react@19.2.7 \
     && node /tmp/build-react-vendor.mjs /tmp/react-install \
-         /app/static/vendor/react@19.2.6 "$(command -v esbuild)" \
+         /app/static/vendor/react@19.2.7 "$(command -v esbuild)" \
     && cd / && rm -rf /tmp/react-install /tmp/build-react-vendor.mjs
 
 # pdf.js (Mozilla's engine — what Firefox's built-in PDF viewer uses),
@@ -265,7 +265,7 @@ RUN mkdir -p /tmp/katex-install && cd /tmp/katex-install \
 COPY backend/scripts/build-recharts-vendor.mjs /tmp/build-recharts-vendor.mjs
 RUN mkdir -p /tmp/recharts-install && cd /tmp/recharts-install \
     && npm init -y >/dev/null \
-    && npm install --no-audit --no-fund --silent recharts@2.15.4 react@19.2.6 react-dom@19.2.6 \
+    && npm install --no-audit --no-fund --silent recharts@2.15.4 react@19.2.7 react-dom@19.2.7 \
     && mkdir -p /app/static/vendor/recharts@2.15.4 \
     && node /tmp/build-recharts-vendor.mjs /tmp/recharts-install \
          /app/static/vendor/recharts@2.15.4 "$(command -v esbuild)" \
@@ -289,10 +289,10 @@ RUN mkdir -p /tmp/datefns-install && cd /tmp/datefns-install \
 COPY backend/scripts/build-d3-geo-vendor.mjs /tmp/build-d3-geo-vendor.mjs
 RUN mkdir -p /tmp/d3geo-install && cd /tmp/d3geo-install \
     && npm init -y >/dev/null \
-    && npm install --no-audit --no-fund --silent d3-geo@3 \
-    && mkdir -p /app/static/vendor/d3-geo@3 \
+    && npm install --no-audit --no-fund --silent d3-geo@3.1.1 \
+    && mkdir -p /app/static/vendor/d3-geo@3.1.1 \
     && node /tmp/build-d3-geo-vendor.mjs /tmp/d3geo-install \
-         /app/static/vendor/d3-geo@3 "$(command -v esbuild)" \
+         /app/static/vendor/d3-geo@3.1.1 "$(command -v esbuild)" \
     && cd / && rm -rf /tmp/d3geo-install /tmp/build-d3-geo-vendor.mjs
 
 # marked — self-hosted for the mini-app import map. The Notes app imports marked
