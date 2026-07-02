@@ -148,12 +148,12 @@ except Exception: print("")')"
 # offline support would need those cached/synced, not just the JSX. The store
 # manifest (app-memory/mobius.json) declares false to match — keep all three
 # (manifest, schema default, this script) in agreement if that ever changes.
-mg_id="$(sync_core_app memory "Memory" "What Möbius knows about you — an Obsidian-style graph of its memory it grows over time.")"
+memory_app_id="$(sync_core_app memory "Memory" "What Möbius knows about you — an Obsidian-style graph of its memory it grows over time.")"
 # Set the app icon (kg-t1: glossy infinity-as-graph, the owner's pick). Raw PNG
 # bytes; the route downscales + stores. Idempotent — fine to re-PUT each boot.
-if [[ -n "$mg_id" && -f "$CORE_SRC/memory/icon.png" ]]; then
+if [[ -n "$memory_app_id" && -f "$CORE_SRC/memory/icon.png" ]]; then
   curl -s -X PUT -H "Authorization: Bearer $TOKEN" --data-binary @"$CORE_SRC/memory/icon.png" \
-    "$API_BASE_URL/api/apps/$mg_id/icon" -o /dev/null -w 'memory icon: HTTP %{http_code}\n' >>"$LOG" 2>&1 || true
+    "$API_BASE_URL/api/apps/$memory_app_id/icon" -o /dev/null -w 'memory icon: HTTP %{http_code}\n' >>"$LOG" 2>&1 || true
 fi
 
 # Migration (kg-t1 rename): Memory supersedes the old "Memory Graph" viewer. On
@@ -162,12 +162,12 @@ fi
 # renaming (it owns no unique data — it read the shared graph — so we keep the
 # row for audit/recovery rather than hard-deleting). Idempotent + a no-op on
 # fresh instances and on prod (where the orphan was already removed).
-if [[ -n "$mg_id" ]]; then
+if [[ -n "$memory_app_id" ]]; then
   old_mg_id="$(has_app memory-graph)"
-  if [[ -n "$old_mg_id" && "$old_mg_id" != "$mg_id" ]]; then
+  if [[ -n "$old_mg_id" && "$old_mg_id" != "$memory_app_id" ]]; then
     if curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
       -d '{"name":"Memory Graph (archived)"}' "$API_BASE_URL/api/apps/$old_mg_id" >>"$LOG" 2>&1; then
-      log "archived predecessor Memory Graph app (id=$old_mg_id; superseded by Memory id=$mg_id)"
+      log "archived predecessor Memory Graph app (id=$old_mg_id; superseded by Memory id=$memory_app_id)"
     else
       log "WARN failed to archive old Memory Graph app (id=$old_mg_id) — drawer may show both"
     fi
@@ -175,13 +175,13 @@ if [[ -n "$mg_id" ]]; then
 fi
 
 # --- reflection ---------------------------------------------------------
-dr_id="$(sync_core_app reflection "Reflection" "Your nightly morning brief — Möbius works while you sleep and reports back.")"
+reflection_app_id="$(sync_core_app reflection "Reflection" "Your nightly morning brief — Möbius works while you sleep and reports back.")"
 
 # Ship the reflection cron machinery + install the schedule (idempotent).
 # fetch.sh + the fork helpers are platform machinery (a thin runner wrapper
 # and the introspection utilities) — always re-copied from baked source, no
 # version gate: the agent edits the reflection SKILL, not these.
-if [[ -n "$dr_id" ]]; then
+if [[ -n "$reflection_app_id" ]]; then
   mkdir -p "$DATA_DIR/apps/reflection"
   cp "$CORE_SRC/reflection/fetch.sh" "$DATA_DIR/apps/reflection/fetch.sh"
   # Introspection helpers the Reflection agent calls to fork + interview chats
@@ -192,11 +192,11 @@ if [[ -n "$dr_id" ]]; then
     "$DATA_DIR/apps/reflection/fork-chat.sh" "$DATA_DIR/apps/reflection/fork-session.sh" 2>/dev/null || true
   # offline_capable: the report viewer just reads cached HTML.
   curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-    -d '{"offline_capable": true}' "$API_BASE_URL/api/apps/$dr_id" >>"$LOG" 2>&1 || true
+    -d '{"offline_capable": true}' "$API_BASE_URL/api/apps/$reflection_app_id" >>"$LOG" 2>&1 || true
   # Install the nightly cron pointing at fetch.sh with the app id as $1.
-  bash /app/scripts/init-cron-scaffold.sh reflection "0 6 * * *" fetch.sh "$dr_id" >>"$LOG" 2>&1 \
-    && log "installed reflection cron (0 6 * * *, app_id=$dr_id)" \
+  bash /app/scripts/init-cron-scaffold.sh reflection "0 6 * * *" fetch.sh "$reflection_app_id" >>"$LOG" 2>&1 \
+    && log "installed reflection cron (0 6 * * *, app_id=$reflection_app_id)" \
     || log "WARN reflection cron install failed (see log)"
 fi
 
-log "done (memory=$mg_id reflection=$dr_id)"
+log "done (memory=$memory_app_id reflection=$reflection_app_id)"

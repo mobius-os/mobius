@@ -1,48 +1,161 @@
 #!/bin/bash
-# migrate-app-rename.sh — idempotent in-place rename of the two core apps on an
-# existing instance: mind→memory and dreaming→reflection.
+# This is the migration source of truth for the pre-rename core app slugs
+# mind->memory and dreaming->reflection. Keep those old source slugs visible
+# here until the supported migration window closes.
 #
-# Renames each app's SLUG + display name + SOURCE_DIR in the DB, and moves the
-# slug-keyed on-disk state (the source/config dir under /data/apps/<slug>/, the
-# editable skill file, the cron-log files, and the crontab entry). It
-# deliberately does NOT touch /data/apps/<numeric-id>/ — the app's numeric id is
-# preserved, so its reports/storage (e.g. Reflection's brief history) stay put.
+# The migration renames each app's slug, display name, and source_dir in place,
+# then moves slug-keyed on-disk state under /data/apps/<slug>, the editable skill
+# file, cron logs, and the crontab entry. It deliberately does not touch
+# /data/apps/<numeric-id>, so report history and id-keyed storage stay attached
+# to the same app row.
 #
-# source_dir IS updated (load-bearing): register_app.py's _find_existing matches
-# an existing app by source_dir, not name. If the migrated row kept the old
-# source_dir, install-core-apps' re-sync would MISS it and register a DUPLICATE
-# app — stranding the brief history. So the DB rename sets source_dir to the new
-# path too.
+# source_dir is load-bearing because register_app.py's _find_existing matches an
+# existing app by source_dir, not name. A migrated row with the old source_dir
+# would make install-core-apps register a duplicate and strand brief history.
 #
-# Why in-place rather than the install-core-apps "register new + archive old"
-# pattern: Reflection owns real data (the briefs under its numeric-id dir). A
-# fresh registration would mint a NEW numeric id and strand that history; an
-# in-place rename keeps the same row + id + data.
+# Reflection owns real data under its numeric app id, so this must be an
+# in-place rename rather than install-core-apps' "register new and archive old"
+# pattern.
 #
-# Idempotent + self-healing: a no-op on a fresh instance (no old-slug app) and on
-# one already fully migrated. The DB step and the filesystem/crontab steps are
-# DECOUPLED — each runs on its own guard (old present / new absent) — so a run
-# interrupted after the DB commit but before the moves still completes on a later
-# boot, and a row left half-migrated by an earlier buggy version (slug renamed
-# but source_dir stale) is repaired. Safe to run on every boot.
+# The database, filesystem, and crontab steps are guarded independently. A fresh
+# instance, an already migrated instance, or a boot interrupted partway through a
+# previous run can safely run this script again.
 #
-# MUST run BEFORE init_skills.py (which would reseed a fresh reflection.md/
-# memory.md and lose the agent's edits) and BEFORE install-core-apps.sh (which
-# would register duplicates). Run as the `mobius` user (it writes /data + the
-# mobius crontab; as root it would poison /data ownership + target root's crontab).
+# Run before init_skills.py and install-core-apps.sh, as the mobius user, so live
+# skill edits are moved before seeding and app rows are renamed before core app
+# registration.
 set -uo pipefail
 
 DATA_DIR="${DATA_DIR:-/data}"
 DB="$DATA_DIR/db/ultimate.db"
-[ -f "$DB" ] || exit 0   # no DB yet (very first boot) → nothing to migrate
+[ -f "$DB" ] || exit 0   # no db yet on first boot, so there is nothing to migrate.
 
-migrate_one() { # $1=old_slug  $2=new_slug  $3=new_display_name
+# Return the first base-plus-extension path that does not already exist.
+next_available_path() {
+  local base="$1" ext="$2" candidate i
+  candidate="${base}${ext}"
+  if [ ! -e "$candidate" ]; then
+    printf '%s\n' "$candidate"
+    return
+  fi
+  i=1
+  while :; do
+    candidate="${base}.${i}${ext}"
+    if [ ! -e "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+    i=$((i + 1))
+  done
+}
+
+# Move a slug-keyed app source directory only when it cannot clobber another.
+move_source_dir() {
+  local old="$1" new="$2" olddir="$DATA_DIR/apps/$1" newdir="$DATA_DIR/apps/$2"
+  if [ -d "$olddir" ] && [ ! -e "$newdir" ]; then
+    mv "$olddir" "$newdir" && echo "migrate-app-rename: moved apps/$old -> apps/$new"
+  elif [ -d "$olddir" ] && [ -e "$newdir" ]; then
+    echo "migrate-app-rename: WARN source dir conflict for $old -> $new; preserved both" >&2
+  fi
+}
+
+# Move or archive a renamed skill without leaving both names active.
+move_skill_file() {
+  local old="$1" new="$2"
+  local oldfile="$DATA_DIR/shared/skills/$old.md"
+  local newfile="$DATA_DIR/shared/skills/$new.md"
+  local archive_dir archive
+  if [ -f "$oldfile" ] && [ ! -e "$newfile" ]; then
+    mv "$oldfile" "$newfile" && echo "migrate-app-rename: moved skill $old.md -> $new.md"
+  elif [ -f "$oldfile" ] && [ -e "$newfile" ]; then
+    archive_dir="$DATA_DIR/shared/skills/.rename-conflicts"
+    mkdir -p "$archive_dir"
+    archive="$(next_available_path "$archive_dir/$old.pre-rename" ".md")"
+    mv "$oldfile" "$archive" \
+      && echo "migrate-app-rename: WARN archived conflicting skill $old.md at $archive" >&2
+  fi
+}
+
+# Move old cron logs to the new prefix without overwriting existing logs.
+move_cron_logs() {
+  local old="$1" new="$2" f suffix dest
+  shopt -s nullglob
+  for f in "$DATA_DIR"/cron-logs/"$old".*; do
+    suffix="${f##*"$old".}"
+    dest="$DATA_DIR/cron-logs/$new.$suffix"
+    if [ -e "$dest" ]; then
+      dest="$(next_available_path "$DATA_DIR/cron-logs/$new.pre-rename" ".$suffix")"
+      mv "$f" "$dest" \
+        && echo "migrate-app-rename: WARN preserved existing cron log $new.$suffix; moved old log to $dest" >&2
+    else
+      mv "$f" "$dest" && echo "migrate-app-rename: moved cron log $old.$suffix -> $new.$suffix"
+    fi
+  done
+  shopt -u nullglob
+}
+
+# Rewrite only crontab command text, preserving comments and env lines.
+rewrite_crontab() {
+  local old="$1" new="$2" before after
+  before="$(mktemp)"
+  after="$(mktemp)"
+  if ! crontab -l >"$before" 2>/dev/null; then
+    rm -f "$before" "$after"
+    return
+  fi
+  OLD_SLUG="$old" NEW_SLUG="$new" python3 -c '
+import os
+import sys
+
+old = "/apps/{}/".format(os.environ["OLD_SLUG"])
+new = "/apps/{}/".format(os.environ["NEW_SLUG"])
+changed = False
+
+for line in sys.stdin:
+    raw = line.rstrip("\n")
+    stripped = raw.lstrip()
+    if not stripped or stripped.startswith("#"):
+        print(raw)
+        continue
+    first = stripped.split(None, 1)[0]
+    if "=" in first and not first.startswith("@"):
+        print(raw)
+        continue
+    if stripped.startswith("@"):
+        parts = stripped.split(None, 1)
+        command_index = len(raw) if len(parts) == 1 else raw.find(parts[1])
+    else:
+        parts = stripped.split(None, 5)
+        command_index = len(raw) if len(parts) < 6 else raw.find(parts[5])
+    prefix = raw[:command_index]
+    command = raw[command_index:]
+    updated = command.replace(old, new)
+    changed = changed or updated != command
+    print(prefix + updated)
+
+sys.exit(0 if changed else 3)
+' <"$before" >"$after"
+  case "$?" in
+    0)
+      cat "$after" | crontab - 2>/dev/null \
+        && echo "migrate-app-rename: repointed crontab $old -> $new"
+      ;;
+    3)
+      ;;
+    *)
+      echo "migrate-app-rename: WARN failed to rewrite crontab $old -> $new" >&2
+      ;;
+  esac
+  rm -f "$before" "$after"
+}
+
+# Migrate one old app slug to its new platform identity.
+migrate_one() {
   local old="$1" new="$2" name="$3"
   local newdir="$DATA_DIR/apps/$new"
 
-  # DB: rename slug+name+source_dir in place when the old slug exists and the new
-  # doesn't; OR repair a half-migrated row (new slug present but source_dir still
-  # points at the old dir — an earlier buggy run, or a partial run). Idempotent.
+  # Rename the row in place when only the old slug exists, repair stale
+  # source_dir when only the new slug exists, and preserve both rows on conflict.
   DB="$DB" NEWDIR="$newdir" python3 - "$old" "$new" "$name" <<'PY' 2>&1 || true
 import os, sqlite3, sys
 old, new, name = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -55,30 +168,22 @@ if o and not n:
                 (new, name, newdir, old))
     con.commit()
     print(f"migrate-app-rename: DB {old} -> {new} (id {o[0]}, source_dir set)")
+elif o and n:
+    print(
+        f"migrate-app-rename: WARN db conflict for {old} -> {new}; "
+        f"preserved old id {o[0]} and new id {n[0]}",
+        file=sys.stderr,
+    )
 elif n and (n[1] or "").rstrip("/").endswith("/" + old):
-    # half-migrated by an earlier run: slug already new, source_dir still old
     cur.execute("update apps set source_dir=? where slug=?", (newdir, new))
     con.commit()
     print(f"migrate-app-rename: repaired stale source_dir for {new} (id {n[0]})")
 PY
 
-  # Filesystem + crontab — run INDEPENDENTLY of the DB step (each guarded by
-  # old-exists + new-absent) so a partial prior run still completes.
-  if [ -d "$DATA_DIR/apps/$old" ] && [ ! -e "$newdir" ]; then
-    mv "$DATA_DIR/apps/$old" "$newdir" && echo "migrate-app-rename: moved apps/$old -> apps/$new"
-  fi
-  if [ -f "$DATA_DIR/shared/skills/$old.md" ] && [ ! -e "$DATA_DIR/shared/skills/$new.md" ]; then
-    mv "$DATA_DIR/shared/skills/$old.md" "$DATA_DIR/shared/skills/$new.md"
-  fi
-  shopt -s nullglob
-  for f in "$DATA_DIR"/cron-logs/"$old".*; do
-    mv "$f" "$DATA_DIR/cron-logs/$new.${f##*"$old".}"
-  done
-  shopt -u nullglob
-  if crontab -l 2>/dev/null | grep -q "/apps/$old/"; then
-    crontab -l 2>/dev/null | sed "s#/apps/$old/#/apps/$new/#g" | crontab - 2>/dev/null \
-      && echo "migrate-app-rename: repointed crontab $old -> $new"
-  fi
+  move_source_dir "$old" "$new"
+  move_skill_file "$old" "$new"
+  move_cron_logs "$old" "$new"
+  rewrite_crontab "$old" "$new"
 }
 
 migrate_one mind memory Memory
