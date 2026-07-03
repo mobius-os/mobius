@@ -308,6 +308,22 @@ def test_reexec_hands_off_to_trusted_live(recoveryd, monkeypatch):
   assert os.environ.get("MOBIUS_RECOVERY_EXECED") == "1"
 
 
+def test_reexec_declines_live_when_bump_fails(recoveryd, monkeypatch):
+  # If the crash-loop counter cannot be persisted, the launcher must fail
+  # TOWARD the baked floor rather than run an untracked live copy that could
+  # crash-loop forever with no way to reach quarantine.
+  _trusted_live(recoveryd, monkeypatch)
+  calls = []
+  monkeypatch.setattr(
+    recoveryd.os, "execv", lambda path, args: calls.append((path, args)))
+  monkeypatch.setattr(recoveryd, "_bump_live_attempts", lambda: False)
+  monkeypatch.delenv("MOBIUS_RECOVERY_EXECED", raising=False)
+  recoveryd._maybe_reexec_into_run_dir()
+  assert calls == []
+  # No hand-off happened, so the exec-loop sentinel must stay unset.
+  assert os.environ.get("MOBIUS_RECOVERY_EXECED") != "1"
+
+
 def test_reexec_guard_blocks_second_exec(recoveryd, monkeypatch):
   # Even with a trusted live copy that differs from the running dir, an
   # already-execed process (sentinel set) must never exec again.
