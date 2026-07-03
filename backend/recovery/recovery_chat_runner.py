@@ -998,6 +998,11 @@ async def _spawn_claude(
   env = dict(os.environ)
   if CLAUDE_CONFIG_PATH.is_dir():
     env["CLAUDE_CONFIG_DIR"] = str(CLAUDE_CONFIG_PATH)
+  # The recovery agent runs as root (full sudo), but the Claude CLI refuses
+  # --dangerously-skip-permissions under root/sudo unless it knows it is in a
+  # sandbox. recoveryd IS a locked-down container, so declare it: without this
+  # the root agent dies with "cannot be used with root/sudo privileges".
+  env["IS_SANDBOX"] = "1"
 
   # No positional user_message — it goes via stdin below.
   cmd = [
