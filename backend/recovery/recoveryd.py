@@ -150,13 +150,17 @@ RESTART_SENTINEL = DATA_DIR / ".platform-restart-requested"
 LAST_BOOT = DATA_DIR / ".last-successful-boot"
 CLI_CREDS = DATA_DIR / "cli-auth" / "claude"
 
-# The frozen-bundle files whose integrity is asserted at startup.
-_FROZEN_FILES = [
-  "recoveryd.py",
-  "recovery_auth.py",
-  "recovery_db.py",
-  "recovery_pages.py",
-]
+# The directory this running bundle lives in. Baked -> /app/recovery;
+# after a launcher hand-off (see resolve_run_dir) -> /data/recovery-live.
+# Mirrors the local `recovery_dir` computed in _scrub_sys_path, which runs
+# before this module constant is bound.
+_SELF_DIR = Path(__file__).resolve().parent
+
+# The optional live copy on the persistent volume. It is preferred over
+# the baked floor ONLY when it passes bundle_is_trusted (see
+# resolve_run_dir); a fresh volume or an untrusted copy falls back to
+# baked, which is the guaranteed floor.
+LIVE_DIR = DATA_DIR / "recovery-live"
 
 # Valid Tier-1 restore modes. Kept in lockstep with the entrypoint's
 # `.recover-pending` handler (entrypoint.sh ~909) and recovery_restore.sh.
@@ -164,44 +168,93 @@ _RESTORE_MODES = {"platform", "platform-baked"}
 
 
 # ---------------------------------------------------------------------------
+# Bundle trust — the root-ownership integrity rule, reused by both the
+# self check and the launcher's live-copy decision.
+# ---------------------------------------------------------------------------
+
+def _uid_and_mode(path: str) -> tuple[int, int]:
+  """Returns (st_uid, st_mode) for `path` via os.stat.
+
+  This is the single ownership/mode lookup, isolated so tests can
+  simulate root-owned files (which a non-root test process cannot
+  create) by monkeypatching this one function. Production always hits
+  the real os.stat here, so the trust check is never env-bypassable.
+  """
+  st = os.stat(path)
+  return st.st_uid, st.st_mode
+
+
+def bundle_is_trusted(dir_path) -> bool:
+  """Returns True iff `dir_path` is a directory whose every `*.py` file
+  (recursively) is owned by root (uid 0) and not group/other-writable.
+
+  This is the load-bearing trust rule for a floor that runs as root: it
+  may execute code from a directory ONLY when the agent — a non-root
+  user with write access to /data — could not have forged or modified
+  any Python in it. root ownership is unforgeable by the agent (only
+  root can chown to root); a not-group/other-writable mode means the
+  agent cannot rewrite a root-owned file it does not own. The user-write
+  bit is deliberately NOT checked: only root owns these files and root
+  writes regardless of it, so it carries no security signal.
+
+  A directory with no Python at all is untrusted — there is nothing to
+  verify and nothing runnable. Never raises: a missing directory or any
+  stat error resolves to False (untrusted), so a broken live copy can
+  only ever cause a fallback to the baked floor, never a crash.
+  """
+  try:
+    d = Path(dir_path)
+    if not d.is_dir():
+      return False
+    py_files = sorted(d.rglob("*.py"))
+  except OSError:
+    return False
+  if not py_files:
+    return False
+  for p in py_files:
+    try:
+      uid, mode = _uid_and_mode(str(p))
+    except OSError:
+      return False
+    if uid != 0:
+      return False
+    if mode & (stat.S_IWGRP | stat.S_IWOTH):
+      return False
+  return True
+
+
+# ---------------------------------------------------------------------------
 # Startup self-integrity — refuse to run from a tampered bundle.
 # ---------------------------------------------------------------------------
 
 def _assert_self_integrity() -> None:
-  """Asserts every frozen source file is root-owned and not writable by
-  group/other. A tampered (agent-writable) module is a breached floor;
-  refuse to start loudly rather than serve compromised recovery code.
+  """Refuses to run from a tampered bundle.
 
-  The check is skipped only when RECOVERY_SKIP_INTEGRITY=1 is set
-  explicitly (unit tests + local non-root dev), never in the image.
+  The running bundle (_SELF_DIR — baked /app/recovery, or the live copy
+  after a launcher hand-off) must pass bundle_is_trusted: every source
+  file root-owned and not group/other-writable. A tampered
+  (agent-writable) module is a breached floor, so fail loudly rather
+  than serve compromised recovery code.
+
+  Skipped ONLY when RECOVERY_SKIP_INTEGRITY=1 is set explicitly (unit
+  tests + local non-root dev), never in the image. The bypass applies to
+  this SELF check alone; bundle_is_trusted itself is never
+  env-bypassable, so the launcher's live-copy trust decision cannot be
+  disabled.
   """
   if os.environ.get("RECOVERY_SKIP_INTEGRITY") == "1":
     log.warning("self-integrity check SKIPPED (RECOVERY_SKIP_INTEGRITY=1)")
     return
-  here = Path(__file__).resolve().parent
-  problems: list[str] = []
-  for name in _FROZEN_FILES:
-    p = here / name
-    try:
-      st = p.stat()
-    except OSError as exc:
-      problems.append(f"{name}: cannot stat ({exc})")
-      continue
-    if st.st_uid != 0:
-      problems.append(f"{name}: not root-owned (uid={st.st_uid})")
-    if st.st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH):
-      problems.append(
-        f"{name}: writable (mode={oct(st.st_mode & 0o777)})"
-      )
-  if problems:
-    for pr in problems:
-      log.error("INTEGRITY FAIL: %s", pr)
+  if not bundle_is_trusted(_SELF_DIR):
+    log.error(
+      "INTEGRITY FAIL: %s is not a trusted bundle — every source file must "
+      "be root-owned and not group/other-writable", _SELF_DIR,
+    )
     raise SystemExit(
       "FATAL: recoveryd self-integrity check failed — refusing to start. "
       "The frozen bundle must be root-owned and non-writable."
     )
-  log.info("self-integrity OK: %d frozen files root-owned + read-only",
-           len(_FROZEN_FILES))
+  log.info("self-integrity OK: %s is a trusted (root-owned) bundle", _SELF_DIR)
 
 
 # ---------------------------------------------------------------------------
