@@ -1,0 +1,166 @@
+"""Tests for the recovery launcher — trusted-copy selection + re-exec.
+
+Phase 1 of the recovery self-updating feature (see
+docs/superpowers/plans/2026-07-03-recovery-self-updating.md). recoveryd
+runs as root and must NEVER exec code from an agent-writable path, so the
+launcher prefers a root-owned, integrity-checked /data/recovery-live copy
+and otherwise runs the baked floor.
+
+The test process runs as a normal user and cannot create uid-0 files, so
+these tests monkeypatch recoveryd._uid_and_mode — the single seam the
+production code uses to look up a path's ownership and mode — to simulate
+both trusted (root-owned) and untrusted bundles deterministically. The
+production path always calls the real os.stat via _uid_and_mode; the
+trust decision is never env-bypassable.
+"""
+
+import importlib
+import os
+import sys
+from pathlib import Path
+
+import pytest
+
+# The frozen bundle ships at backend/recovery/. Put it on sys.path so the
+# stdlib-only modules import the same way they do inside /app/recovery.
+_RECOVERY_DIR = Path(__file__).resolve().parents[1] / "recovery"
+if str(_RECOVERY_DIR) not in sys.path:
+  sys.path.insert(0, str(_RECOVERY_DIR))
+
+
+@pytest.fixture()
+def recoveryd(monkeypatch, tmp_path):
+  """Freshly-imported recoveryd bound to an isolated DATA_DIR.
+
+  Mirrors the recovery_env fixture in test_recoveryd.py: sets the env
+  BEFORE re-importing so module-scope path constants (DATA_DIR, LIVE_DIR)
+  pick it up. RECOVERY_SKIP_INTEGRITY=1 bypasses only the SELF check;
+  bundle_is_trusted (which the launcher tests exercise) ignores it.
+  """
+  data_dir = tmp_path
+  (data_dir / "db").mkdir()
+  db_path = data_dir / "db" / "ultimate.db"
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+  monkeypatch.setenv("RECOVERY_SKIP_INTEGRITY", "1")
+  # Own the exec-loop sentinel so any value the code sets during a test is
+  # reverted at teardown (os.environ mutations by the code under test are
+  # otherwise invisible to monkeypatch and would leak across tests).
+  monkeypatch.delenv("MOBIUS_RECOVERY_EXECED", raising=False)
+  for mod in ("recovery_auth", "recovery_db", "recovery_pages", "recoveryd"):
+    sys.modules.pop(mod, None)
+  return importlib.import_module("recoveryd")
+
+
+def _write_py(dir_path: Path, name: str = "recoveryd.py",
+              content: str = "# recovery\n") -> Path:
+  dir_path.mkdir(parents=True, exist_ok=True)
+  p = dir_path / name
+  p.write_text(content)
+  return p
+
+
+# -- Task 1.1: bundle_is_trusted -------------------------------------------
+
+def test_bundle_is_trusted_missing_dir(recoveryd, tmp_path):
+  assert recoveryd.bundle_is_trusted(tmp_path / "nope") is False
+
+
+def test_bundle_is_trusted_rejects_non_root_owner(recoveryd, tmp_path,
+                                                  monkeypatch):
+  d = tmp_path / "bundle"
+  _write_py(d)
+  # Simulate a mobius-owned (non-root) file — the exact thing the agent
+  # could plant on /data.
+  monkeypatch.setattr(recoveryd, "_uid_and_mode", lambda p: (1000, 0o644))
+  assert recoveryd.bundle_is_trusted(d) is False
+
+
+def test_bundle_is_trusted_rejects_group_writable(recoveryd, tmp_path,
+                                                  monkeypatch):
+  d = tmp_path / "bundle"
+  _write_py(d)
+  # Root-owned but group-writable: the agent could rewrite it if it shares
+  # the group, so it is not trusted.
+  monkeypatch.setattr(recoveryd, "_uid_and_mode", lambda p: (0, 0o664))
+  assert recoveryd.bundle_is_trusted(d) is False
+
+
+def test_bundle_is_trusted_rejects_other_writable(recoveryd, tmp_path,
+                                                  monkeypatch):
+  d = tmp_path / "bundle"
+  _write_py(d)
+  monkeypatch.setattr(recoveryd, "_uid_and_mode", lambda p: (0, 0o646))
+  assert recoveryd.bundle_is_trusted(d) is False
+
+
+def test_bundle_is_trusted_accepts_root_readonly(recoveryd, tmp_path,
+                                                 monkeypatch):
+  d = tmp_path / "bundle"
+  _write_py(d, "recoveryd.py")
+  _write_py(d, "recovery_auth.py")
+  monkeypatch.setattr(recoveryd, "_uid_and_mode", lambda p: (0, 0o644))
+  assert recoveryd.bundle_is_trusted(d) is True
+
+
+def test_bundle_is_trusted_any_untrusted_file_fails_bundle(recoveryd, tmp_path,
+                                                           monkeypatch):
+  d = tmp_path / "bundle"
+  _write_py(d, "recoveryd.py")
+  _write_py(d, "evil.py")
+  owners = {"recoveryd.py": (0, 0o644), "evil.py": (1000, 0o644)}
+  monkeypatch.setattr(
+    recoveryd, "_uid_and_mode", lambda p: owners[os.path.basename(p)])
+  assert recoveryd.bundle_is_trusted(d) is False
+
+
+def test_bundle_is_trusted_catches_nested_py(recoveryd, tmp_path, monkeypatch):
+  d = tmp_path / "bundle"
+  _write_py(d, "recoveryd.py")
+  _write_py(d / "sub", "planted.py")
+  owners = {"recoveryd.py": (0, 0o644), "planted.py": (1000, 0o644)}
+  monkeypatch.setattr(
+    recoveryd, "_uid_and_mode", lambda p: owners[os.path.basename(p)])
+  assert recoveryd.bundle_is_trusted(d) is False
+
+
+def test_bundle_is_trusted_never_raises_on_stat_error(recoveryd, tmp_path,
+                                                      monkeypatch):
+  d = tmp_path / "bundle"
+  _write_py(d)
+
+  def boom(p):
+    raise OSError("stat failed")
+
+  monkeypatch.setattr(recoveryd, "_uid_and_mode", boom)
+  assert recoveryd.bundle_is_trusted(d) is False
+
+
+def test_bundle_is_trusted_empty_dir_is_untrusted(recoveryd, tmp_path):
+  d = tmp_path / "empty"
+  d.mkdir()
+  # A directory with no Python is not a runnable bundle — nothing to
+  # verify, nothing to run — so it is untrusted rather than vacuously OK.
+  assert recoveryd.bundle_is_trusted(d) is False
+
+
+# -- Task 1.1: _assert_self_integrity delegates to bundle_is_trusted -------
+
+def test_assert_self_integrity_skips_with_env(recoveryd, monkeypatch):
+  monkeypatch.setenv("RECOVERY_SKIP_INTEGRITY", "1")
+  monkeypatch.setattr(recoveryd, "bundle_is_trusted", lambda d: False)
+  # The SELF check is bypassable for tests/dev; must NOT raise.
+  recoveryd._assert_self_integrity()
+
+
+def test_assert_self_integrity_raises_when_untrusted(recoveryd, monkeypatch):
+  monkeypatch.delenv("RECOVERY_SKIP_INTEGRITY", raising=False)
+  monkeypatch.setattr(recoveryd, "bundle_is_trusted", lambda d: False)
+  with pytest.raises(SystemExit):
+    recoveryd._assert_self_integrity()
+
+
+def test_assert_self_integrity_passes_when_trusted(recoveryd, monkeypatch):
+  monkeypatch.delenv("RECOVERY_SKIP_INTEGRITY", raising=False)
+  monkeypatch.setattr(recoveryd, "bundle_is_trusted", lambda d: True)
+  recoveryd._assert_self_integrity()
