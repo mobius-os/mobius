@@ -410,10 +410,15 @@ class _ChatEventSink:
     Codex. Stop (interrupt + fresh turn) is the path with a real boundary on
     both providers.
 
-    Called from the steer route (both providers) on the one FastAPI event
-    loop, so it is serialized with this sink's `publish()` snapshots. The
-    streamed-so-far assistant text (A1) becomes its own trailing assistant
-    message, the steered user message (Q2) is appended at the END, and the
+    Called from the RUNNER at turn-end for Claude (`_seal_steer_split`, where
+    the pre-interrupt A1 is complete — the route cannot split at HTTP arrival
+    because A1 has not streamed yet, which merged A1+A2 after the steered row)
+    and from the steer ROUTE for Codex (`_split_steer_at_route`, which injects
+    into the running turn with no interrupt boundary). Both run on the one
+    FastAPI event loop, so it is serialized with this sink's `publish()`
+    snapshots. The pre-steer assistant text (A1) becomes its own trailing
+    assistant message, the steered user message (Q2) is appended at the END,
+    and the
     sink resets its blocks so the post-steer continuation (A2) accumulates
     fresh and the next snapshot appends it as a NEW assistant message —
     rather than the old behaviour of keeping A1+A2 as one message with Q2
