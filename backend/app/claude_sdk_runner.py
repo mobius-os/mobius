@@ -863,9 +863,22 @@ def dispatch_sdk_message(
 _ULTRACODE_REMINDER = (
   "\n\n<system-reminder>You have the Workflow tool for dynamic multi-agent "
   "orchestration this turn. Use it for substantial multi-step work; answer "
-  "trivial turns directly. When you launch a Workflow, await its result within "
-  "this turn (block on it) and deliver the synthesis — never end a turn with a "
-  "Workflow still running in the background, or its work is lost.</system-reminder>"
+  "trivial turns directly.\n\n"
+  "This runtime gives you exactly ONE turn per message and CANNOT wake you "
+  "after it ends — there is no background notification and no follow-up turn. "
+  "So any Workflow (or background task) you launch must be fully awaited AND its "
+  "result delivered WITHIN this same turn, or the work is lost and the user is "
+  "left with a dead turn. Concretely: right after launching a Workflow, block on "
+  "it here — call TaskOutput(task_id=..., block=True, timeout=600000) (run "
+  "ToolSearch \"select:TaskOutput\" first if it is not loaded). If that returns "
+  "retrieval_status: timeout while the workflow is still running, call it again "
+  "and keep re-blocking until it finishes — verifying between checks that it is "
+  "still making progress (if it is genuinely stuck, say so and deliver what you "
+  "have rather than silently abandoning it). Then synthesize the result and give "
+  "the full answer in this turn. "
+  "NEVER let your final output be \"I'll let you know when it's done\" or "
+  "\"waiting for the workflow to finish\" — you will not get another turn to "
+  "finish.</system-reminder>"
 )
 
 
