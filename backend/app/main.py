@@ -36,7 +36,7 @@ from app.routes import (
   chat_logs_router, chat_router, chats_router, chats_stream_router,
   debug_router, fs_router, generate_router,
   notifications_router, notify_router, proxy_router, push_router,
-  recover_router, self_reminders_router, settings_router,
+  self_reminders_router, settings_router,
   client_error_router, standalone_router, storage_router,
   theme_router, uploads_router, platform_router,
   shell_router, published_router,
@@ -487,20 +487,6 @@ except Exception as _exc:  # pragma: no cover - defensive boot guard
 app.include_router(notify_router)
 app.include_router(proxy_router)
 app.include_router(client_error_router)
-app.include_router(recover_router)
-
-# Recovery chat — frozen, isolated from production chat code so it
-# stays reachable when the agent breaks chat.py / providers.py /
-# auth.py. See app/recover_chat.py for the design.
-from app.recover_chat import router as recover_chat_router  # noqa: E402
-app.include_router(recover_chat_router)
-
-# Recovery OAuth — frozen, isolated from routes/auth.py so the
-# recovery surface can connect/reconnect a provider even when the
-# main-app auth routes are broken by an agent edit. See
-# app/recover_oauth.py for the design.
-from app.recover_oauth import router as recover_oauth_router  # noqa: E402
-app.include_router(recover_oauth_router)
 app.include_router(settings_router)
 app.include_router(platform_router)
 app.include_router(shell_router)

@@ -60,14 +60,15 @@ services:
   # platform container's entrypoint poller (O1) acts on to git-restore and
   # restart. Imports zero app.* code; self-checks its frozen bundle at startup.
   #
-  # Routing is the OWNER'S deliberate, separately-reversible cutover step (O5),
-  # NOT wired here: in prod the external root-owned deploy-caddy proxies
-  # `/recover*` -> recoveryd:8001, and recoveryd must join the deploy network so
-  # Caddy can reach it. For the bundled Caddy (this file), the same
-  # `handle /recover* { reverse_proxy recoveryd:8001 }` block would route it;
-  # left undone deliberately so adopting recovery is an explicit owner action.
-  # `expose` withholds a host port; it is NOT an access-control boundary
-  # (recoveryd enforces auth + cross-site checks on every request).
+  # recoveryd is the SOLE recovery surface — the in-process `/recover`
+  # implementation has been retired. Both fronts route `/recover*` here:
+  # in prod the external root-owned deploy-caddy proxies `/recover*` ->
+  # recoveryd:8001 (recoveryd joins the deploy network so Caddy can reach
+  # it), and the bundled Caddy (`Caddyfile`) routes it with a
+  # `handle /recover* { reverse_proxy recoveryd:8001 }` block ahead of its
+  # catch-all `reverse_proxy app:8000`. `expose` withholds a host port; it
+  # is NOT an access-control boundary (recoveryd enforces auth + cross-site
+  # checks on every request).
   recoveryd:
     build:
       context: .
