@@ -13,8 +13,10 @@ with tags so no network is ever touched — offline is the default.
 """
 
 import importlib
+import io
 import subprocess
 import sys
+from email.message import Message
 from pathlib import Path
 
 import pytest
@@ -382,3 +384,158 @@ def test_pull_resets_live_attempts(recoveryd, monkeypatch, tmp_path):
   ok, ver = recoveryd.pull_latest_recovery()
   assert ok is True, ver
   assert recoveryd._live_attempts() == 0
+
+
+# -- Task 3.3: /recover/update endpoint + Update Recovery button -----------
+
+def _create_owner(recoveryd, username: str, password: str) -> None:
+  """Inserts an owner row into recoveryd's isolated DB (mirrors
+  test_recoveryd._create_owner) so the session-auth gate has a live owner."""
+  import sqlite3
+
+  import bcrypt
+
+  con = sqlite3.connect(str(recoveryd.recovery_db.DB_PATH))
+  con.execute(
+    "CREATE TABLE IF NOT EXISTS owner "
+    "(id INTEGER PRIMARY KEY, username TEXT, hashed_password TEXT)"
+  )
+  pw = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+  con.execute(
+    "INSERT INTO owner (username, hashed_password) VALUES (?, ?)",
+    (username, pw),
+  )
+  con.commit()
+  con.close()
+
+
+def _session_cookie(recoveryd, username: str) -> str:
+  token = recoveryd.recovery_auth.create_session_token(username)
+  return f"{recoveryd.recovery_auth.COOKIE_NAME}={token}"
+
+
+def _post(recoveryd, path: str, *, cookie=None, sec_fetch_site=None,
+          body: bytes = b""):
+  """Drives _Handler.do_POST for `path`, returning captured (code, body,
+  content_type) responses.
+
+  Builds a handler via __new__ with fake headers/rfile (the same
+  direct-instantiation style test_recoveryd uses) and a stubbed _send that
+  records the response, so the REAL routing + cross-site guard + session-auth
+  gate + handler run without a live socket. This is the auth-session helper
+  Task 3.3 reuses for both /recover/restore and /recover/update.
+  """
+  h = recoveryd._Handler.__new__(recoveryd._Handler)
+  h.command = "POST"
+  h.path = path
+  h.client_address = ("127.0.0.1", 0)
+  h.rfile = io.BytesIO(body)
+  h.wfile = io.BytesIO()
+  headers = Message()
+  headers["Content-Length"] = str(len(body))
+  if cookie is not None:
+    headers["Cookie"] = cookie
+  if sec_fetch_site is not None:
+    headers["Sec-Fetch-Site"] = sec_fetch_site
+  h.headers = headers
+  sent = []
+  h._send = (
+    lambda code, b, *, content_type="text/html", extra_headers=None:
+    sent.append((int(code), b, content_type))
+  )
+  h.do_POST()
+  return sent
+
+
+def test_dashboard_shows_update_button_when_available(recoveryd):
+  pages = recoveryd.recovery_pages
+  status = {
+    "platform": {"healthy": True},
+    "running_version": "0.1.0",
+    "available_version": "0.2.0",
+    "update_available": True,
+  }
+  dash = pages.dashboard_html(status)
+  assert 'action="/recover/update"' in dash
+  assert "Update Recovery" in dash
+  assert "0.1.0" in dash and "0.2.0" in dash
+
+
+def test_dashboard_hides_update_button_when_current(recoveryd):
+  pages = recoveryd.recovery_pages
+  status = {
+    "platform": {"healthy": True},
+    "running_version": "0.2.0",
+    "available_version": "0.2.0",
+    "update_available": False,
+  }
+  dash = pages.dashboard_html(status)
+  assert 'action="/recover/update"' not in dash
+
+
+def test_dashboard_hides_update_button_when_key_absent(recoveryd):
+  # The login/restore render path passes a status with no update fields; the
+  # button must not appear then.
+  pages = recoveryd.recovery_pages
+  dash = pages.dashboard_html({"platform": {"healthy": True}})
+  assert 'action="/recover/update"' not in dash
+
+
+def test_update_requires_session_like_restore(recoveryd):
+  _create_owner(recoveryd, "admin", "secret")
+  # No session cookie: /recover/update rejects with 401 exactly like
+  # /recover/restore.
+  r_update = _post(recoveryd, "/recover/update", body=b"")
+  r_restore = _post(recoveryd, "/recover/restore", body=b"mode=platform")
+  assert r_update[0][0] == 401
+  assert r_restore[0][0] == 401
+
+
+def test_update_rejects_cross_site(recoveryd):
+  _create_owner(recoveryd, "admin", "secret")
+  sent = _post(recoveryd, "/recover/update", sec_fetch_site="cross-site",
+               body=b"")
+  assert sent[0][0] == 403
+
+
+def test_update_with_session_invokes_pull(recoveryd, monkeypatch):
+  _create_owner(recoveryd, "admin", "secret")
+  monkeypatch.setattr(recoveryd, "_probe_platform_health",
+                      lambda *a, **k: None)
+  monkeypatch.setattr(recoveryd, "latest_upstream_version",
+                      lambda *a, **k: "0.2.0")
+  monkeypatch.setattr(recoveryd, "running_version", lambda: "0.2.0")
+  called = []
+  monkeypatch.setattr(
+    recoveryd, "pull_latest_recovery",
+    lambda: (called.append(True), (True, "0.2.0"))[1])
+  restarts = []
+  monkeypatch.setattr(recoveryd, "_restart_recoveryd",
+                      lambda: restarts.append(True))
+  sent = _post(recoveryd, "/recover/update",
+               cookie=_session_cookie(recoveryd, "admin"), body=b"")
+  assert called == [True]
+  assert sent[0][0] == 200
+  assert "Recovery updated to v0.2.0" in sent[0][1]
+  # The restart is triggered AFTER the response is rendered.
+  assert restarts == [True]
+
+
+def test_update_failure_reports_reason_no_restart(recoveryd, monkeypatch):
+  _create_owner(recoveryd, "admin", "secret")
+  monkeypatch.setattr(recoveryd, "_probe_platform_health",
+                      lambda *a, **k: None)
+  monkeypatch.setattr(recoveryd, "latest_upstream_version",
+                      lambda *a, **k: "0.2.0")
+  monkeypatch.setattr(recoveryd, "running_version", lambda: "0.1.0")
+  monkeypatch.setattr(recoveryd, "pull_latest_recovery",
+                      lambda: (False, "no upstream release reachable"))
+  restarts = []
+  monkeypatch.setattr(recoveryd, "_restart_recoveryd",
+                      lambda: restarts.append(True))
+  sent = _post(recoveryd, "/recover/update",
+               cookie=_session_cookie(recoveryd, "admin"), body=b"")
+  assert sent[0][0] == 200
+  assert "no upstream release reachable" in sent[0][1]
+  # A failed update never restarts.
+  assert restarts == []

@@ -288,6 +288,41 @@ _CONFIRM_BAKED = (
   " uncommitted platform edits and recopies the shipped code, then"
   " restarts. Use only if the git restore wasn't enough. Continue?"
 )
+_CONFIRM_UPDATE = (
+  "Update recovery to the latest release and restart the recovery"
+  " service. Your chats and data are untouched. Continue?"
+)
+
+
+def _update_block(status: dict) -> str:
+  """Renders the "Update Recovery" card, but ONLY when a newer recovery
+  release is available.
+
+  Gated on status["update_available"] (populated by the dashboard handler
+  from the version check) so the owner can only ever trigger an update that
+  actually exists — when up-to-date or offline the whole block is empty and
+  there is no button. Shows the running vs available versions so the action
+  is legible.
+  """
+  if not status.get("update_available"):
+    return ""
+  running = html.escape(str(status.get("running_version", "?")))
+  available = html.escape(str(status.get("available_version") or "?"))
+  return f"""
+    <div class="recommended">
+      <p class="label">&#8593; Update available</p>
+      <p class="desc">
+        A newer recovery release is available &mdash; running
+        <code>v{running}</code>, latest <code>v{available}</code>. Updating
+        pulls the newest recovery (root-owned and integrity-checked) and
+        restarts into it. Your chats and data are untouched.
+      </p>
+      <form method="POST" action="/recover/update"
+            onsubmit="{_confirm_attr(_CONFIRM_UPDATE)}">
+        <button class="btn btn-primary" type="submit">Update Recovery</button>
+      </form>
+    </div>
+"""
 
 
 def dashboard_html(status: dict, msg: str = "") -> str:
@@ -296,7 +331,7 @@ def dashboard_html(status: dict, msg: str = "") -> str:
   body = f"""    <p class="sub">Restore a working platform. Chats and data are untouched.</p>
     {msg_html}
 {_status_block(status)}
-
+{_update_block(status)}
     <div class="recommended">
       <p class="label">&#10003; Restore platform (recommended)</p>
       <p class="desc">
