@@ -40,6 +40,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && npm install -g agent-browser@0.31.1 \
     && agent-browser install \
     && mv /root/.agent-browser /opt/agent-browser \
+    && git_version="$(git --version | awk '{print $3}')" \
+    && [ "$(printf '%s\n' "2.38" "$git_version" | sort -V | head -n1)" = "2.38" ] \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
@@ -111,14 +113,11 @@ COPY skill/ ./skill/
 COPY core-apps/ ./core-apps/
 COPY protected-files.txt ./protected-files.txt
 
-# Recovery sources — immutable baked copies of the backend code and
-# scripts. The entrypoint chowns the LIVE /app/app/ and /app/scripts/
-# to mobius so the agent can edit them; if the agent breaks something,
-# recovery_restore.sh restores from these baked copies. Stay root-owned
-# and chmod a-w so even root running the recovery script can't
-# accidentally modify them in-place. They are the floor of the
-# recovery story: if the agent corrupts the live copy, this is what
-# we copy back from.
+# Baked floor copies of the backend code and scripts. The entrypoint
+# bootstraps /data/platform from these on first boot and falls back to
+# /app/app-baked if the persisted platform tree is broken. Stay root-owned
+# and chmod a-w so even root running restore code can't accidentally modify
+# them in place.
 COPY backend/app ./app-baked/
 COPY backend/scripts ./scripts-baked/
 RUN chmod -R a-w /app/app-baked /app/scripts-baked

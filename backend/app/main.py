@@ -534,18 +534,17 @@ def ready(response: Response):
 def _served_platform_identity(data_dir: str) -> dict:
   """The ACTUALLY-SERVED backend identity, distinct from the image ``build_sha``.
 
-  The served backend is ``/data/platform/app`` (symlinked over ``/app/app``),
-  which persists across image deploys — so the image ``build_sha`` can disagree
-  with what is really running when ``/data/platform`` diverged or a deploy
-  skipped the platform sync (the "deployed but never served" false-green). The
-  entrypoint writes ``/tmp/serving-source`` (``platform``|``baked``) at boot; the
-  git HEAD of /data/platform is only meaningful when serving from the platform
-  layer. Never raises — every field degrades to ``unknown``/``None``.
+  The served backend is normally ``/data/platform/app``, which persists across
+  image deploys. On a broken platform tree, entrypoint falls back to the baked
+  floor. The entrypoint writes ``/tmp/serving-source`` (``platform``|``baked``)
+  and ``/tmp/serving-sha`` at boot so this route reports the tree actually
+  selected for uvicorn. Never raises — every field degrades to
+  ``unknown``/``None``.
   """
   import os
   import subprocess
 
-  out = {"serving_source": "unknown", "platform_sha": None,
+  out = {"serving_source": "unknown", "served_sha": None, "platform_sha": None,
          "platform_dirty": None, "baked_sha": None}
   try:
     sentinel = Path("/tmp/serving-source").read_text(encoding="utf-8").strip()
@@ -553,12 +552,18 @@ def _served_platform_identity(data_dir: str) -> dict:
       out["serving_source"] = sentinel
   except Exception:  # incl. UnicodeError, which is not an OSError — never raise
     pass
+  try:
+    served_sha = Path("/tmp/serving-sha").read_text(encoding="utf-8").strip()
+    out["served_sha"] = served_sha or None
+  except Exception:
+    pass
   repo = Path(data_dir) / "platform"
   try:
     out["baked_sha"] = (repo / ".baked-sha").read_text(encoding="utf-8").strip() or None
   except Exception:
     pass
   if out["serving_source"] == "platform" and (repo / ".git").exists():
+    out["platform_sha"] = out["served_sha"]
     env = {**os.environ, "GIT_CEILING_DIRECTORIES": str(repo.parent)}
 
     def _git(*args):
@@ -566,9 +571,10 @@ def _served_platform_identity(data_dir: str) -> dict:
                             capture_output=True, text=True, timeout=5, env=env)
 
     try:
-      head = _git("rev-parse", "--short", "HEAD")
-      if head.returncode == 0:
-        out["platform_sha"] = head.stdout.strip() or None
+      if not out["platform_sha"]:
+        head = _git("rev-parse", "HEAD")
+        if head.returncode == 0:
+          out["platform_sha"] = head.stdout.strip() or None
       # dirty filters .baked-sha churn + untracked dotfiles, mirroring step-3b.
       st = _git("-c", "core.fileMode=false", "status", "--porcelain")
       if st.returncode == 0:
