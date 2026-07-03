@@ -86,6 +86,10 @@ services:
     # must fix) plus tmpfs scratch, and physically cannot corrupt its own
     # lifeboat. Kernel-enforced, not by trust.
     read_only: true
+    # Drop CAP_SYS_ADMIN so a full-root agent can't remount the
+    # read-only recovery floor back to writable — makes the lockdown airtight.
+    cap_drop:
+      - SYS_ADMIN
     tmpfs:
       - /tmp
       - /run
