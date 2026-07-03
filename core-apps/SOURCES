@@ -8,6 +8,12 @@
 # drifts from <repo>@<commit> — so the two trees can never silently diverge
 # again (which is how core-apps/reflection once shipped without its manifest).
 #
-# Format: <slug>  <owner/repo>  <commit-sha>
+# NATIVE apps: a core app may instead be authored directly in this repo with no
+# catalog repo (e.g. skills, tasks). Such apps are simply NOT listed below —
+# they have no upstream to diff against, so the sync check skips them. Their
+# manifest is still required: tests/test_core_apps_manifests.py enforces that
+# EVERY core-apps/<slug>/ ships a valid mobius.json, native or not.
+#
+# Format (catalog-synced apps only): <slug>  <owner/repo>  <commit-sha>
 memory      mobius-os/app-memory      44ff275d01ae8f53e94de9906b4a7d3371a9f701
 reflection  mobius-os/app-reflection  66a6766cb7d76e59a6ed124bfad53a2b4ff27b31
