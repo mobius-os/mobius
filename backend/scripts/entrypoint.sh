@@ -63,34 +63,20 @@ echo "$_boot_counter $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.boot-attempt
 # false failures; three consecutive failures without a health success
 # strongly implies the platform code itself is broken.
 if [ "$_boot_counter" -ge 3 ] && [ -f /data/.last-successful-boot ]; then
-  echo "PLATFORM-RESTORE: boot-attempt counter = $_boot_counter, restoring from baked floor..." >&2
-  # Clear pycache in the live platform tree before the restore so stale
-  # bytecache doesn't survive the copy-over.
-  find /data/platform -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
-  find /data/platform -name '*.pyc' -delete 2>/dev/null || true
-  # Restore the WHOLE platform repo from the baked floor. This is the
-  # crash-loop escape hatch; slice B will replace it with deploy=rebase
-  # reconciliation. It must overlay the full repo (/app/mobius-baked ->
-  # /data/platform), NOT the old backend subset — the served backend is
-  # /data/platform/backend/app, so restoring only /data/platform/app would
-  # leave the broken code in place and keep crash-looping.
-  mkdir -p /data/platform
-  if cp -a /app/mobius-baked/. /data/platform/; then
-    # Re-open write access (baked copies are chmod a-w; cp -a preserves that).
-    chmod -R u+rwX /data/platform 2>/dev/null || true
-    echo "PLATFORM-RESTORE: baked restore succeeded." >&2
-    # Record the restore event in a flag file that debug/status surfaces.
-    echo "baked-restore $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.platform-restore-active
+  echo "PLATFORM-RESTORE: boot-attempt counter = $_boot_counter, re-cloning platform..." >&2
+  # Crash-loop escape hatch: the platform imported OK (else the probe would
+  # have already fallen back to baked) but keeps crashing at runtime. Move the
+  # broken tree ASIDE so the next boot re-clones a fresh canonical
+  # /data/platform. Non-destructive: the broken tree is preserved at
+  # /data/platform.crashloop-prev for inspection/recovery, not deleted.
+  # (slice B's deploy=rebase reconciliation will refine this.)
+  rm -rf /data/platform.crashloop-prev 2>/dev/null || true
+  if [ -e /data/platform ] && mv /data/platform /data/platform.crashloop-prev 2>/dev/null; then
+    echo "PLATFORM-RESTORE: broken tree moved to /data/platform.crashloop-prev; next boot re-clones." >&2
+    echo "crashloop-reclone $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.platform-restore-active
     chown mobius:mobius /data/.platform-restore-active 2>/dev/null || true
-    # git commit the restore so history records what happened.
-    if [ -d /data/platform/.git ]; then
-      su -s /bin/sh mobius -c '
-        git -C /data/platform add -A
-        git -C /data/platform commit -m "auto: crash-loop restore from baked floor" 2>/dev/null || true
-      '
-    fi
   else
-    echo "PLATFORM-RESTORE: baked restore FAILED — continuing with potentially broken code." >&2
+    echo "PLATFORM-RESTORE: no /data/platform to move aside (or mv failed); serving baked floor." >&2
   fi
   # Reset counter after the restore attempt regardless of success, so
   # the next boot gets a clean slate. If the restore fixed things, the
@@ -174,7 +160,6 @@ _platform_backend=/data/platform/backend
 _platform_app=${_platform_backend}/app
 _baked_app=/app/app-baked
 _baked_scripts=/app/scripts-baked
-_baked_repo=/app/mobius-baked
 _use_platform=0
 _serve_workdir=/app
 _serve_source=baked
@@ -210,23 +195,27 @@ _restore_baked_dir_if_symlink() {
 }
 
 _platform_bootstrap() {
-  echo "Platform layer: /data/platform/backend/app absent — bootstrapping whole repo from baked."
-  find "$_platform_root" -mindepth 1 -exec rm -rf {} + 2>/dev/null || true
-  mkdir -p "$_platform_root"
-  cp -a "$_baked_repo/." "$_platform_root/" || return 1
-  chmod -R u+rwX "$_platform_root" 2>/dev/null || true
-  find "$_platform_root" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
-  find "$_platform_root" -name '*.pyc' -delete 2>/dev/null || true
-  chown -R mobius:mobius "$_platform_root" 2>/dev/null || true
-  su -s /bin/sh mobius -c '
-    git init -b main /data/platform
-    git -C /data/platform config user.name "Mobius Agent"
-    git -C /data/platform config user.email "agent@mobius"
-    git -C /data/platform add -A
-    git -C /data/platform commit -m "init: platform layer from baked image floor"
+  # /data/platform is a REAL git clone of the canonical repo. Cloning (not
+  # copying a baked tree + `git init`) is load-bearing for the PR model: a fresh
+  # init has NO common ancestor with origin/main, so a pushed branch would read
+  # as unrelated histories. A clone shares ancestry, so `git diff origin/main`
+  # is exactly the agent's edits and `git push` a branch is a clean PR. The
+  # whole repo lands here and the agent edits it in place. One-time, first boot.
+  # On clone failure (offline / unreachable) return non-zero — the caller serves
+  # the baked backend floor and the clone is retried on the next boot.
+  _origin="${MOBIUS_PLATFORM_ORIGIN:-https://github.com/mobius-os/mobius.git}"
+  echo "Platform layer: cloning $_origin -> /data/platform (first boot)."
+  rm -rf /data/platform
+  mkdir -p /data/platform
+  chown mobius:mobius /data/platform 2>/dev/null || true
+  # --depth 1: shallow is fine — a later PR fetches origin + unshallows only if
+  # it needs the merge base (same pattern as the app clone-update path).
+  su -s /bin/sh mobius -c "
+    git clone --depth 1 '$_origin' /data/platform &&
+    git -C /data/platform config user.name 'Mobius Agent' &&
+    git -C /data/platform config user.email 'agent@mobius' &&
     git -C /data/platform branch -f upstream HEAD
-    git -C /data/platform remote add origin https://github.com/mobius-os/mobius.git
-  ' || return 1
+  " || return 1
   _build_sha=${BUILD_SHA:-unknown}
   if [ "$_build_sha" != "unknown" ]; then
     su -s /bin/sh mobius -c \
@@ -234,7 +223,7 @@ _platform_bootstrap() {
   fi
   echo "$_build_sha" > /data/platform/.baked-sha
   chown mobius:mobius /data/platform/.baked-sha 2>/dev/null || true
-  echo "Platform layer: bootstrap complete; serving /data/platform/backend."
+  echo "Platform layer: clone complete; serving /data/platform/backend."
 }
 
 _platform_use_direct() {
