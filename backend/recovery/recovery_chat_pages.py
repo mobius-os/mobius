@@ -19,8 +19,15 @@ import json
 import recovery_chat_runner
 
 
-def _escape(s: str) -> str:
-  """Server-side HTML escape for pre-rendered history."""
+def _escape(s) -> str:
+  """Server-side HTML escape for pre-rendered history.
+
+  Coerces to str first: a /data-poisoned jsonl entry can carry a
+  non-string `role`/`content` (a number, list, or null), which .replace
+  would AttributeError on — a poisoned recovery log must degrade to escaped
+  text, never 500 the page you need most.
+  """
+  s = str(s)
   return (
     s.replace("&", "&amp;")
      .replace("<", "&lt;")
@@ -132,7 +139,7 @@ def render_chat_page(
     is_active = " rc-chat-active" if cid == (active_chat_id or "") else ""
     chat_rows.append(
       f'<div class="rc-chat-row{is_active}" data-chat-id="{cid}">'
-      f'<a class="rc-chat-link" href="/recover/chat?id={cid}">'
+      f'<a class="rc-chat-link" href="/recover/chat?chat={cid}">'
       f'<span class="rc-chat-id">{cid}</span>'
       f' <span class="rc-chat-prov">{prov}</span>{badge_legacy}'
       f'</a>'
@@ -405,7 +412,7 @@ def render_chat_page(
   </div>
 </div>
 
-<!-- Chat view: shown when ?id=<chat_id> is set. The chat surface
+<!-- Chat view: shown when ?chat=<chat_id> is set. The chat surface
      hosts the live conversation; the actions row provides
      Restart / Reset / back-to-list. -->
 <div id="rc-chat-view" style="display: {show_chat_view}">
@@ -494,7 +501,7 @@ async function handleSend(e) {{
     const r = await fetch('/recover/chat/send', {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{chat_id: CHAT_ID, message: text}}),
+      body: JSON.stringify({{chat_id: CHAT_ID, text: text}}),
     }});
     if (r.status === 401) {{
       // Recovery session expired — show a clear, actionable message
@@ -674,7 +681,7 @@ async function handleStartChat() {{
     }});
     if (!r.ok) {{ throw new Error(await r.text() || ('status ' + r.status)); }}
     const body = await r.json();
-    window.location.href = '/recover/chat?id=' + encodeURIComponent(body.chat_id);
+    window.location.href = '/recover/chat?chat=' + encodeURIComponent(body.chat_id);
   }} catch (err) {{
     alert('Could not create chat: ' + err);
     startBtn.disabled = false;
