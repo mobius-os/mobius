@@ -162,7 +162,7 @@ copy both change) is a nice thoughtful touch to copy.
 
 ## 3. Tasks & Skills apps — shipped, with room to grow
 
-### 3.1 🟢 **M** — Tasks app *(shipped 2026-07-03, `core-apps/tasks`)*
+### 3.1 🟢 **M** — Tasks app *(shipped 2026-07-03; catalog app `mobius-os/app-tasks`)*
 Viewer for the agent's scheduled check-ins (`/data/shared/self-reminders.jsonl`).
 Amber **"Needs attention"** summary pill (Hermex's derived "silently-failed job"
 status), status badges, due/created meta grid, smart sort (attention → soonest →
@@ -171,7 +171,7 @@ done). Reschedule/done/cancel route to the agent chat (scheduling is owner-only)
   add recurring-cron jobs (Hermex shows `schedule_display`, next/last run, deliver
   target, model). A "Running now" live pill needs a status endpoint an app can hit.
 
-### 3.2 🟢 **S** — Skills app *(shipped 2026-07-03, `core-apps/skills`)*
+### 3.2 🟢 **S** — Skills app *(shipped 2026-07-03; catalog app `mobius-os/app-skills`)*
 Searchable read-only browser for `/data/shared/skills/*.md`; tap → SKILL.md as
 markdown (`marked` + `dompurify`). Create/edit routes to the agent chat.
 - **Future ⚪:** Hermex exposes skills as `/slash` commands in chat too. A Möbius
@@ -218,13 +218,26 @@ the stale copy. Masked in dev because a fresh headless browser has no prior ETag
   in `recompile_app_bundle` (safe: iframe remounts are already driven by the
   `app_updated` event, not by `updated_at`, so this only corrects the ETag). Same
   class as the `three`/frame-ETag staleness already in memory.
-- **Status:** fix drafted this session; see Changelog.
+- **Status:** ✅ fixed on `main` (d38d758), regression test in `test_frame_etag.py`.
+
+### 5.2 🟢 **M** — Dynamic web app-store registry *(shipped 2026-07-03)*
+The App Store's catalog was a hardcoded `CATALOG` array in `app-store/constants.js`
+— adding an app meant editing + bumping + republishing the store app, and every
+instance had to *update the store* before the new app appeared. Now the store
+fetches `mobius-os/app-store/main/catalog.json` at mount (via the server proxy),
+validates it, and uses it as the catalog source, **falling back to the baked
+`CATALOG` only if the fetch fails**. So publishing an app is: create
+`mobius-os/app-<name>` (manifest + `index.jsx` + `icon.png`) → append an entry to
+`catalog.json` → it appears in every instance's store on next open, no store
+redeploy. `api.js:fetchCatalog` does the shape/https validation; the trusted-host
+warning + backend SSRF defenses remain the security boundary. Store 1.8.0.
 
 ---
 
 ## Changelog
 
 - **2026-07-03** — Doc created. Reviewed Hermex chat rendering, Tasks, Skills, and
-  Workspace. Shipped: Tasks + Skills mini-apps (`core-apps/`), Editor git-chip
-  polish (§2.1, to `app-editor`), and drafted the watcher `updated_at`/ETag fix
-  (§5.1). Everything else here is a logged idea to pick up later.
+  Workspace. Shipped: Tasks + Skills as **catalog apps** (`mobius-os/app-tasks`,
+  `app-skills`), Editor git-chip polish (§2.1, to `app-editor`), the watcher
+  `updated_at`/ETag fix (§5.1, on `main`), and a **dynamic web app-store registry**
+  (§5.2, `catalog.json`). Everything else here is a logged idea to pick up later.
