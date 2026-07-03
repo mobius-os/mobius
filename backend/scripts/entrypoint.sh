@@ -23,14 +23,14 @@ mkdir -p /data/db /data/apps /data/compiled /data/shared /data/shell /data/logs 
 # -----------------------------------------------------------------------
 # PHASE 1: Platform layer — served directly from /data/platform
 #
-# /data/platform/ is the agent-editable, git-tracked backend source.
-# uvicorn serves it directly with `cd /data/platform && uvicorn
+# /data/platform/ is the agent-editable, git-tracked whole mobius repo.
+# uvicorn serves its backend with `cd /data/platform/backend && uvicorn
 # app.main:app`. There is no normal /app/app symlink swap and no
 # each-boot copy-over of an existing platform tree.
 #
-# Fallback invariant: if /data/platform/app exists but cannot import, or
-# the repo is missing/corrupt, preserve it untouched and serve the baked
-# floor from /app/app-baked via a degraded /app/app -> /app/app-baked
+# Fallback invariant: if /data/platform/backend/app exists but cannot import,
+# or the repo is missing/corrupt, preserve it untouched and serve the baked
+# backend floor from /app/app-baked via a degraded /app/app -> /app/app-baked
 # symlink. recoveryd remains the outer recovery floor.
 # -----------------------------------------------------------------------
 
@@ -68,12 +68,16 @@ if [ "$_boot_counter" -ge 3 ] && [ -f /data/.last-successful-boot ]; then
   # bytecache doesn't survive the copy-over.
   find /data/platform -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
   find /data/platform -name '*.pyc' -delete 2>/dev/null || true
-  # Restore platform from baked. This is the crash-loop escape hatch;
-  # slice B will replace it with deploy=rebase reconciliation.
-  mkdir -p /data/platform/app /data/platform/scripts
-  if cp -a /app/app-baked/. /data/platform/app/ && cp -a /app/scripts-baked/. /data/platform/scripts/; then
+  # Restore the WHOLE platform repo from the baked floor. This is the
+  # crash-loop escape hatch; slice B will replace it with deploy=rebase
+  # reconciliation. It must overlay the full repo (/app/mobius-baked ->
+  # /data/platform), NOT the old backend subset — the served backend is
+  # /data/platform/backend/app, so restoring only /data/platform/app would
+  # leave the broken code in place and keep crash-looping.
+  mkdir -p /data/platform
+  if cp -a /app/mobius-baked/. /data/platform/; then
     # Re-open write access (baked copies are chmod a-w; cp -a preserves that).
-    chmod -R u+w /data/platform/app /data/platform/scripts 2>/dev/null || true
+    chmod -R u+rwX /data/platform 2>/dev/null || true
     echo "PLATFORM-RESTORE: baked restore succeeded." >&2
     # Record the restore event in a flag file that debug/status surfaces.
     echo "baked-restore $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.platform-restore-active
@@ -165,10 +169,12 @@ fi
 # defenses"; this replaces the old `chmod a+rX /app/app` the symlink model had.
 chmod -R a+rX /app/app-baked /app/scripts-baked 2>/dev/null || true
 
-_platform_app=/data/platform/app
-_platform_scripts=/data/platform/scripts
+_platform_root=/data/platform
+_platform_backend=/data/platform/backend
+_platform_app=${_platform_backend}/app
 _baked_app=/app/app-baked
 _baked_scripts=/app/scripts-baked
+_baked_repo=/app/mobius-baked
 _use_platform=0
 _serve_workdir=/app
 _serve_source=baked
@@ -189,7 +195,7 @@ _platform_import_probe() {
   # the uvicorn exec to `su -`/`su -l`/`env -i` would drop SECRET_KEY and make
   # EVERY boot false-negative to baked (or brick uvicorn) — keep them identical.
   su -s /bin/sh mobius -c \
-    'cd /data/platform && python3 -c "import app.main"'
+    'cd /data/platform/backend && python3 -c "import app.main"'
 }
 
 _restore_baked_dir_if_symlink() {
@@ -204,27 +210,14 @@ _restore_baked_dir_if_symlink() {
 }
 
 _platform_bootstrap() {
-  echo "Platform layer: /data/platform/app absent — bootstrapping from baked."
-  mkdir -p "$_platform_app" "$_platform_scripts"
-  cp -a "$_baked_app/." "$_platform_app/"
-  cp -a "$_baked_scripts/." "$_platform_scripts/"
-  chmod -R u+w "$_platform_app" "$_platform_scripts" 2>/dev/null || true
-  find "$_platform_app" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
-  find "$_platform_app" -name '*.pyc' -delete 2>/dev/null || true
-  find "$_platform_scripts" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
-  find "$_platform_scripts" -name '*.pyc' -delete 2>/dev/null || true
-  cat > /data/platform/.gitignore <<'PGITIGNORE'
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-*.so
-*.egg-info/
-.eggs/
-dist/
-build/
-PGITIGNORE
-  chown -R mobius:mobius /data/platform 2>/dev/null || true
+  echo "Platform layer: /data/platform/backend/app absent — bootstrapping whole repo from baked."
+  find "$_platform_root" -mindepth 1 -exec rm -rf {} + 2>/dev/null || true
+  mkdir -p "$_platform_root"
+  cp -a "$_baked_repo/." "$_platform_root/" || return 1
+  chmod -R u+rwX "$_platform_root" 2>/dev/null || true
+  find "$_platform_root" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+  find "$_platform_root" -name '*.pyc' -delete 2>/dev/null || true
+  chown -R mobius:mobius "$_platform_root" 2>/dev/null || true
   su -s /bin/sh mobius -c '
     git init -b main /data/platform
     git -C /data/platform config user.name "Mobius Agent"
@@ -232,7 +225,8 @@ PGITIGNORE
     git -C /data/platform add -A
     git -C /data/platform commit -m "init: platform layer from baked image floor"
     git -C /data/platform branch -f upstream HEAD
-  '
+    git -C /data/platform remote add origin https://github.com/mobius-os/mobius.git
+  ' || return 1
   _build_sha=${BUILD_SHA:-unknown}
   if [ "$_build_sha" != "unknown" ]; then
     su -s /bin/sh mobius -c \
@@ -240,13 +234,13 @@ PGITIGNORE
   fi
   echo "$_build_sha" > /data/platform/.baked-sha
   chown mobius:mobius /data/platform/.baked-sha 2>/dev/null || true
-  echo "Platform layer: bootstrap complete; serving /data/platform."
+  echo "Platform layer: bootstrap complete; serving /data/platform/backend."
 }
 
 _platform_use_direct() {
   _use_platform=1
   _serve_source=platform
-  _serve_workdir=/data/platform
+  _serve_workdir=$_platform_backend
   _restore_baked_dir_if_symlink /app/app "$_baked_app"
   _restore_baked_dir_if_symlink /app/scripts "$_baked_scripts"
   _served_sha=$(su -s /bin/sh mobius -c \
@@ -282,7 +276,7 @@ if [ ! -d "$_platform_app" ]; then
 else
   if _platform_git_valid; then
     if _platform_import_probe; then
-      echo "Platform layer: import probe OK; serving /data/platform."
+      echo "Platform layer: import probe OK; serving /data/platform/backend."
       _platform_use_direct
     else
       echo "PLATFORM LAYER WARNING: import probe failed for /data/platform." >&2
