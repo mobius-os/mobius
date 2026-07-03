@@ -60,19 +60,14 @@ def _make_active_claude_client(chat_id: str):
   return asyncio.run(_build())
 
 
-def _make_codex_chat(
-  chat_id: str, *, steer_enabled: bool, legacy_flag: bool = False,
-) -> None:
+def _make_codex_chat(chat_id: str, *, steer_enabled: bool) -> None:
   """Persist a Codex chat with one assistant partial mid-turn.
 
   The assistant message is the in-progress turn's partial; a steered
   user message must land just before it so the runner's snapshot /
   finalize writes keep targeting the assistant as `messages[-1]`.
   """
-  settings = {}
-  if steer_enabled:
-    key = "codex_steer_enabled" if legacy_flag else "steer_enabled"
-    settings = {key: True}
+  settings = {"steer_enabled": True} if steer_enabled else {}
   db = SessionLocal()
   try:
     chat = models.Chat(
@@ -341,6 +336,165 @@ def test_steer_splits_assistant_turn_for_reload_order(
   ]
 
 
+def test_steer_enabled_honors_global_flag():
+  """A GLOBAL `steer_enabled` in /data/shared/agent-settings.json enables
+  steering.
+
+  Regression: `_steer_enabled` read through `effective_agent_settings`, whose
+  file layer only carries model/effort/effort_by_provider, so it silently
+  DROPPED a global `steer_enabled: true` — steering stayed off despite the
+  owner opting in ("not sure if steering works"). It now reads the flag
+  directly, like `skills_enabled`.
+  """
+  import json
+  import os
+  from pathlib import Path
+
+  from app.routes.chats_stream import _steer_enabled
+
+  shared = Path(os.environ["DATA_DIR"]) / "shared"
+  shared.mkdir(parents=True, exist_ok=True)
+  gf = shared / "agent-settings.json"
+  chat = models.Chat(
+    id="gsteer", provider="claude",
+    agent_settings_json={"model": "claude-opus-4-8"},
+  )
+
+  # No global flag → steering off (default).
+  gf.write_text(json.dumps({"model": "claude-opus-4-8"}))
+  assert _steer_enabled(chat) is False
+
+  # Global flag on → steering ON even with no per-chat override.
+  gf.write_text(json.dumps(
+    {"model": "claude-opus-4-8", "steer_enabled": True}
+  ))
+  assert _steer_enabled(chat) is True
+
+  # Per-chat override still works (and wins) with no global flag.
+  gf.write_text(json.dumps({"model": "claude-opus-4-8"}))
+  chat.agent_settings_json = {"steer_enabled": True}
+  assert _steer_enabled(chat) is True
+
+
+def test_seal_steer_split_retains_buffer_on_failure_and_delta_clears():
+  """Adversarial hardening for `_seal_steer_split`:
+
+  - a split FAILURE leaves the buffer intact so the turn-end finally retries
+    (the client was already told 202 — the row must not be silently dropped);
+  - on SUCCESS only the rows actually sealed are removed, so a second steer
+    that lands during the (up to 30s) actor round-trip survives for the next
+    call rather than being wiped by a wholesale reset.
+  """
+  from app.claude_sdk_runner import _seal_steer_split
+
+  # Build the handle OUTSIDE the async body — `_make_active_claude_client`
+  # itself calls asyncio.run, which can't nest inside asyncio.run(_run()).
+  handle = _make_active_claude_client("sealunit")
+
+  async def _run():
+    handle._steer_user_msgs = [{"role": "user", "content": "Q2", "ts": 10}]
+    handle._steer_consume_ts = []
+
+    # 1) A failing split must NOT clear the buffer.
+    class _FailBc:
+      async def split_for_steer(self, rows, consume):
+        raise RuntimeError("writer down")
+
+    await _seal_steer_split(_FailBc(), handle, "sealunit")
+    assert [m["content"] for m in handle._steer_user_msgs] == ["Q2"]
+
+    # 2) A successful split removes only the sealed row; a steer that lands
+    #    DURING the await survives.
+    class _OkBc:
+      def __init__(self):
+        self.seen = None
+
+      async def split_for_steer(self, rows, consume):
+        self.seen = [m["content"] for m in rows]
+        # A concurrent steer arrives while we await the writer acks.
+        handle._steer_user_msgs.append(
+          {"role": "user", "content": "Q3", "ts": 11}
+        )
+
+    bc = _OkBc()
+    await _seal_steer_split(bc, handle, "sealunit")
+    assert bc.seen == ["Q2"]
+    assert [m["content"] for m in handle._steer_user_msgs] == ["Q3"]
+
+  asyncio.run(_run())
+
+
+def test_claude_force_steer_defers_to_runner_and_reorders(client, auth):
+  """A Claude fast-forward (force_steer) defers its split to the runner, same
+  as an ordinary steer, so the fast-forwarded rows land AFTER the sealed
+  pre-interrupt A1 (reload Q1, A1, Q2, A2) instead of merging.
+
+  Deferring moves the queued-row consume to the runner: at the route the rows
+  stay in pending and are BUFFERED on the handle; the runner seals A1, appends
+  them, and consumes them at the interrupt boundary. Because the rows remain in
+  pending until then, a crash before the boundary drains them normally rather
+  than dropping them."""
+  from app.chat import _ChatEventSink, register_active_sink
+  from app.events import process_event
+
+  chat_id = "claudeforce"
+  db = SessionLocal()
+  try:
+    chat = models.Chat(
+      id=chat_id, title="Claude", provider="claude",
+      messages=[{"role": "user", "content": "Q1", "ts": 1}],
+      agent_settings_json={},  # auto-steer OFF — force_steer overrides.
+    )
+    chat.pending_messages = [{"role": "user", "content": "use blue", "ts": 10}]
+    db.add(chat)
+    db.commit()
+  finally:
+    db.close()
+  handle = _make_active_claude_client(chat_id)
+  registry.register(handle)
+  bc = create_broadcast(chat_id)
+  sink = _ChatEventSink(bc, chat_id, run_token="rt")
+  register_active_sink(chat_id, sink)
+
+  res = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={
+      "content": "use blue", "force_steer": True, "consume_pending_ts": [10],
+    },
+    headers=auth,
+  )
+  assert res.status_code == 202, res.text
+  assert res.json()["status"] == "steered"
+  # The route did NOT split: the transcript is still Q1 and the row is still in
+  # pending (durable) — the runner owns the append + consume.
+  chat = _read_chat(chat_id)
+  assert [(m["role"], m.get("content")) for m in chat.messages] == [
+    ("user", "Q1"),
+  ]
+  assert [m["content"] for m in (chat.pending_messages or [])] == ["use blue"]
+  # The steered row is buffered on the handle for the runner.
+  assert [m["content"] for m in handle._steer_user_msgs] == ["use blue"]
+
+  async def _drive_runner():
+    sink.publish({"type": "text", "content": "A1 pre-interrupt"})
+    await _seal_steer_split(sink, handle, chat_id)
+    sink.publish({"type": "text", "content": "A2 answer"})
+    await sink.finalize()
+
+  from app.claude_sdk_runner import _seal_steer_split
+  asyncio.run(_drive_runner())
+
+  # Reload order Q1, A1, Q2, A2 — and the queued row is consumed from pending.
+  chat = _read_chat(chat_id)
+  assert [(m["role"], m.get("content")) for m in chat.messages] == [
+    ("user", "Q1"),
+    ("assistant", "A1 pre-interrupt"),
+    ("user", "use blue"),
+    ("assistant", "A2 answer"),
+  ]
+  assert chat.pending_messages in (None, [])
+
+
 def test_split_gates_snapshots_so_continuation_cannot_clobber_a1(
   client, auth, monkeypatch,
 ):
@@ -597,52 +751,23 @@ def test_falls_back_to_queue_when_flag_off(client, auth, monkeypatch):
   assert [m["content"] for m in chat.pending_messages] == ["queued please"]
 
 
-def test_legacy_codex_steer_flag_still_enables_steering(
-  client, auth, monkeypatch,
-):
-  """Existing `codex_steer_enabled` opt-ins keep working after rename."""
-  chat_id = "codexlegacy"
-  _make_codex_chat(chat_id, steer_enabled=True, legacy_flag=True)
-  registry.register(_make_active_codex_turn(chat_id))
-  create_broadcast(chat_id)
-
-  async def _fake_steer(cid, message):
-    return cid == chat_id and message == "legacy flag"
-
-  monkeypatch.setattr(
-    "app.codex_sdk_runner.steer_into_active_turn", _fake_steer,
-  )
-
-  res = client.post(
-    f"/api/chats/{chat_id}/messages",
-    json={"content": "legacy flag"},
-    headers=auth,
-  )
-
-  assert res.status_code == 202, res.text
-  assert res.json()["status"] == "steered"
-
-
 def test_steers_into_live_claude_turn_when_flag_on(
-  client, auth, monkeypatch,
+  client, auth,
 ):
-  """claude + running + flag-on + live client: steer called, transcript
-  append, `steered_into_turn` broadcast, response status `steered`."""
+  """claude + running + flag-on + live client: the steer payload is BUFFERED
+  on the handle, the response is `steered`, and a `steered_into_turn` event
+  renders it inline. The route deliberately does NOT write the transcript for
+  Claude — the runner seals A1 and appends the steered row at the interrupt
+  boundary (see test_claude_runner_splits_steer_at_boundary_not_http_arrival).
+  Writing it here at HTTP arrival, before A1 had streamed, sealed an empty A1
+  and merged the real A1 with A2 after the steered row on reload."""
   chat_id = "claudechat"
   _make_claude_chat(chat_id, steer_enabled=True)
-  registry.register(_make_active_claude_client(chat_id))
+  handle = _make_active_claude_client(chat_id)
+  registry.register(handle)
   create_broadcast(chat_id)
 
-  steered_calls = []
-
-  async def _fake_steer(cid, message):
-    steered_calls.append((cid, message))
-    return True
-
-  monkeypatch.setattr(
-    "app.claude_sdk_runner.steer_into_active_turn", _fake_steer,
-  )
-
+  # No monkeypatch: the real steer_into_active_turn buffers onto the handle.
   res = client.post(
     f"/api/chats/{chat_id}/messages",
     json={"content": "actually use blue"},
@@ -651,20 +776,91 @@ def test_steers_into_live_claude_turn_when_flag_on(
 
   assert res.status_code == 202, res.text
   assert res.json()["status"] == "steered"
-  assert steered_calls == [(chat_id, "actually use blue")]
-  chat = _read_chat(chat_id)
-  assert chat.pending_messages in (None, [])
-  # No live sink in this wiring test → the steered row is appended at the END.
-  assert [m["role"] for m in chat.messages] == [
-    "user", "assistant", "user",
+  # The steer payload is buffered for the runner to split at the boundary.
+  assert [m["content"] for m in handle._steer_user_msgs] == [
+    "actually use blue"
   ]
-  assert chat.messages[-1]["content"] == "actually use blue"
+  # The route did NOT touch the transcript — the runner owns the Claude split.
+  chat = _read_chat(chat_id)
+  assert [m["role"] for m in chat.messages] == ["user", "assistant"]
+  assert chat.pending_messages in (None, [])
+  # A `steered_into_turn` event was broadcast for the inline render.
   bc = get_broadcast(chat_id)
   steered_events = [
     e for e in bc.event_log if e.get("type") == "steered_into_turn"
   ]
   assert len(steered_events) == 1
   assert steered_events[0]["content"] == "actually use blue"
+
+
+def test_claude_runner_splits_steer_at_boundary_not_http_arrival(
+  client, auth,
+):
+  """The Claude steer split runs when the interrupted turn ENDS (A1 complete),
+  not at HTTP arrival (A1 still empty).
+
+  Reproduces the prod merge (chats 37ab92a1, 99b57536): a steer that lands
+  before A1 has streamed used to seal an empty A1 at the route, append the
+  steered row, and then the real A1 streamed in and merged with A2 AFTER the
+  row — reloading as Q1, Q2, A1\\n\\nA2. With the split deferred to the runner
+  (where A1 is complete) the durable order is Q1, A1, Q2, A2."""
+  from app.broadcast import create_broadcast
+  from app.chat import _ChatEventSink, register_active_sink
+  from app.claude_sdk_runner import _seal_steer_split
+
+  chat_id = "claudeboundary"
+  # Seed only Q1: the assistant turn is in progress and A1 has NOT streamed.
+  db = SessionLocal()
+  try:
+    db.add(models.Chat(
+      id=chat_id, title="Claude chat", provider="claude",
+      messages=[{"role": "user", "content": "Q1", "ts": 1}],
+      agent_settings_json={"steer_enabled": True},
+    ))
+    db.commit()
+  finally:
+    db.close()
+  handle = _make_active_claude_client(chat_id)
+  registry.register(handle)
+  bc = create_broadcast(chat_id)
+  sink = _ChatEventSink(bc, chat_id, run_token="run-boundary")
+  register_active_sink(chat_id, sink)
+
+  # The steer arrives BEFORE A1 has streamed — the exact prod race.
+  res = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={"content": "Q2"}, headers=auth,
+  )
+  assert res.status_code == 202, res.text
+  assert res.json()["status"] == "steered"
+  # The route sealed no empty A1 and appended no row — transcript is still Q1.
+  assert [(m["role"], m.get("content")) for m in _read_chat(chat_id).messages] == [
+    ("user", "Q1"),
+  ]
+
+  async def _drive_runner():
+    # A1 streams AFTER the steer (the timing the route-side split got wrong).
+    sink.publish({"type": "text", "content": "A1 pre-interrupt"})
+    # The interrupted turn ends: the runner seals A1, appends Q2, resets. In
+    # production the runner's `bc` IS the sink (chat.py passes `bc=sink`), so
+    # the split runs against the live sink here too.
+    await _seal_steer_split(sink, handle, chat_id)
+    # The requery's answer (A2) streams into the fresh sink and finalizes.
+    sink.publish({"type": "text", "content": "A2 answer"})
+    await sink.finalize()
+
+  asyncio.run(_drive_runner())
+
+  # Q1, A1, Q2, A2 — A1 and A2 are SEPARATE messages with the steered row
+  # between them, NOT Q1, Q2, A1\\n\\nA2.
+  assert [(m["role"], m.get("content")) for m in _read_chat(chat_id).messages] == [
+    ("user", "Q1"),
+    ("assistant", "A1 pre-interrupt"),
+    ("user", "Q2"),
+    ("assistant", "A2 answer"),
+  ]
+  # The runner consumed the buffered payload (no double-split on turn end).
+  assert handle._steer_user_msgs == []
 
 
 def test_claude_falls_back_to_queue_when_flag_off(
@@ -705,7 +901,7 @@ def test_claude_falls_back_to_queue_when_steer_raises(
   registry.register(_make_active_claude_client(chat_id))
   create_broadcast(chat_id)
 
-  async def _steer_raises(cid, message):
+  async def _steer_raises(cid, message, *args):
     raise RuntimeError("SDK blew up")
 
   monkeypatch.setattr(

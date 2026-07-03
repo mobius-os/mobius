@@ -178,6 +178,15 @@ class ActiveClaudeClient:
     # (both are already persisted to the transcript), so a single slot would
     # silently drop the first. The runner drains the whole list on interrupt.
     self.pending_steer: list[str] = []
+    # Transcript-side payload for the buffered steers: the steered user rows +
+    # any queued rows they consume. The RUNNER drives the transcript split
+    # (seal the pre-interrupt A1, append these user rows, reset the sink for
+    # A2) when the interrupted turn ends — the first point the true A1/A2 cut
+    # is known. The old route-driven split ran at HTTP arrival, before A1 had
+    # streamed, so it sealed an empty A1 and the real A1 then merged with A2
+    # after the steered row on reload (Q1, Q2, A1A2 instead of Q1, A1, Q2, A2).
+    self._steer_user_msgs: list[dict] = []
+    self._steer_consume_ts: list[int] = []
     # A steer was requested but not yet cut over. The runner clears the
     # turn at the NEXT completed content-block boundary (an AssistantMessage)
     # rather than mid-token, so the user sees the finished sentence/thought
@@ -195,7 +204,12 @@ class ActiveClaudeClient:
       asyncio.get_running_loop().create_future()
     )
 
-  async def steer(self, text: str) -> bool:
+  async def steer(
+    self,
+    text: str,
+    user_msgs: list[dict] | None = None,
+    consume_pending_ts: list[int] | None = None,
+  ) -> bool:
     """Buffers a steer to cut in at the next content-block boundary.
 
     Claude's SDK cannot append to an in-flight tool loop, and the only
@@ -209,10 +223,19 @@ class ActiveClaudeClient:
     interrupt's terminal result delivers the buffered text on the same
     connected client, preserving session context. (Stop is the separate
     immediate-cut path — see `interrupt()`.)
+
+    `user_msgs` / `consume_pending_ts` are the transcript-side payload the
+    runner replays into `sink.split_for_steer` when the interrupted turn
+    ends (seal A1, append these rows, reset for A2). They are buffered here
+    rather than split at the route so A1 is the real pre-interrupt text.
     """
     if self._finished.done():
       return False
     self.pending_steer.append(text)
+    if user_msgs:
+      self._steer_user_msgs.extend(user_msgs)
+    if consume_pending_ts:
+      self._steer_consume_ts.extend(consume_pending_ts)
     self._steer_requested = True
     return True
 
@@ -275,12 +298,80 @@ def _steer_redirect_message(text: str) -> str:
   )
 
 
-async def steer_into_active_turn(chat_id: str, text: str) -> bool:
-  """Interrupts a live Claude SDK turn so it can resume with `text`."""
+async def steer_into_active_turn(
+  chat_id: str,
+  text: str,
+  user_msgs: list[dict] | None = None,
+  consume_pending_ts: list[int] | None = None,
+) -> bool:
+  """Interrupts a live Claude SDK turn so it can resume with `text`.
+
+  `user_msgs` / `consume_pending_ts` are buffered on the handle so the
+  runner can seal A1 and append the steered rows at the interrupt boundary;
+  see `ActiveClaudeClient.steer`.
+  """
   handle = registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK)
   if not isinstance(handle, ActiveClaudeClient):
     return False
-  return await handle.steer(text)
+  return await handle.steer(text, user_msgs, consume_pending_ts)
+
+
+async def _seal_steer_split(bc, active_client, chat_id: str) -> None:
+  """Seal the pre-interrupt A1 and append the buffered steered user row(s).
+
+  Called at each requery boundary (so A1 is sealed before the answer A2
+  streams) AND unconditionally in the turn-end `finally` (so a steer that was
+  buffered but never sealed — an exception/early-return before the requery, or
+  a hard Stop that cleared `pending_steer` — is still persisted rather than
+  discarded with the handle). A1 is the sink's accumulated pre-interrupt
+  content — complete once the turn closes — so `split_for_steer` seals it as
+  its own message, appends the steered row(s) after it, and resets the sink so
+  A2 lands fresh: reload order Q1, A1, Q2, A2.
+
+  This is the fix for the steer-merge: the route cannot know where A1 ends (at
+  HTTP arrival A1 has not streamed yet, so a route-side split sealed an empty
+  A1 and the real A1 then merged with A2 after the steered row), but the runner
+  does. `bc` is the live `_ChatEventSink`; a non-sink `bc` (legacy path / a
+  test double) cannot persist here and drops the buffered rows.
+
+  Durability contract (adversarial-review hardening):
+  - The rows are snapshotted BEFORE the await and only the snapshotted count is
+    removed on success, so a second steer landing during `split_for_steer`'s
+    actor round-trips is not wiped (it survives for the next call / the
+    finally).
+  - On a persistence FAILURE the buffer is left intact so the turn-end
+    `finally` retries the write; the rows are not silently dropped after the
+    client was already told the steer landed. A persistent failure means the
+    writer is down (the whole turn is failing to persist), not a steer-specific
+    loss.
+  """
+  rows = list(active_client._steer_user_msgs)
+  if not rows:
+    return
+  consume = list(active_client._steer_consume_ts)
+  split = getattr(bc, "split_for_steer", None)
+  if split is None:
+    # No live sink (legacy/test caller): there is no streamed A1 to seal
+    # against and no way to persist here — drop the buffer.
+    active_client._steer_user_msgs = active_client._steer_user_msgs[len(rows):]
+    active_client._steer_consume_ts = (
+      active_client._steer_consume_ts[len(consume):]
+    )
+    return
+  try:
+    await split(rows, consume)
+  except Exception:
+    # Leave the buffer intact so the turn-end finally retries the write.
+    log.exception(
+      "steer split failed chat_id=%s; will retry at turn end", chat_id,
+    )
+    return
+  # Success: remove ONLY the rows just sealed; a steer that landed during the
+  # await was appended after them and must survive.
+  active_client._steer_user_msgs = active_client._steer_user_msgs[len(rows):]
+  active_client._steer_consume_ts = (
+    active_client._steer_consume_ts[len(consume):]
+  )
 
 
 def _skill_file_read_name(
@@ -1100,6 +1191,10 @@ async def run_claude_sdk_turn(
           active_client._interrupt_in_flight = False
           steer_texts = active_client.pending_steer
           if steer_texts:
+            # Seal A1 + append the steered row(s) BEFORE the requery so the
+            # answer (A2) lands as a fresh message. The turn-end finally is the
+            # durability catch-all for a steer that never reaches a requery.
+            await _seal_steer_split(bc, active_client, chat_id)
             active_client.pending_steer = []
             active_client._steer_requested = False
             await client.query(
@@ -1117,6 +1212,9 @@ async def run_claude_sdk_turn(
           active_client._interrupt_in_flight = False
           steer_texts = active_client.pending_steer
           if steer_texts:
+            # Seal A1 before the requery (see the terminal-result branch); the
+            # turn-end finally covers the no-requery case.
+            await _seal_steer_split(bc, active_client, chat_id)
             active_client.pending_steer = []
             active_client._steer_requested = False
             await client.query(
@@ -1155,6 +1253,12 @@ async def run_claude_sdk_turn(
         "error": msg,
       }
     finally:
+      # Durability catch-all: persist any steer that was buffered but never
+      # sealed at a requery boundary — an exception/early return above, or a
+      # hard Stop that cleared pending_steer. Runs before disconnect so the
+      # sink is still live. No-op when nothing is buffered (the normal path
+      # sealed + cleared it already). Never raises (swallowed inside).
+      await _seal_steer_split(bc, active_client, chat_id)
       current_handle = registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK)
       if current_handle is active_client:
         registry.unregister(chat_id, RunnerKind.CLAUDE_SDK)

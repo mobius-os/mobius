@@ -33,7 +33,7 @@ from app.chat_writer import (
   get_writer,
 )
 from app import claude_sdk_runner, codex_sdk_runner
-from app.providers import effective_agent_settings
+from app.providers import _load_agent_settings
 from app.runner_registry import RunnerKind, registry
 from app.config import get_settings
 from app.database import get_db
@@ -211,29 +211,30 @@ def _user_message_from_body(
 
 
 def _steer_enabled(chat: models.Chat) -> bool:
-  """Whether mid-turn steering is opted in for this chat.
+  """Whether AUTO-steering is opted in for this chat.
 
-  Read through `effective_agent_settings`, the same merge other per-chat
-  / per-owner flags use: hard-coded defaults, then the owner-wide
-  `/data/shared/agent-settings.json`, then this chat's
-  `agent_settings_json` overrides (later wins). The flag DEFAULTS OFF —
-  it appears in none of those layers out of the box — so deploying this
-  code changes nothing until the owner sets `steer_enabled: true`
-  globally or on a chat. The legacy `codex_steer_enabled` key remains
-  honored so existing Codex opt-ins keep working.
+  This is the "steer every mid-turn send" flag, DISTINCT from the fast-forward
+  button (which sends `force_steer` and steers regardless of this flag). It
+  DEFAULTS OFF — queuing is the default; a mid-turn send only auto-steers when
+  `steer_enabled: true` is set globally (`/data/shared/agent-settings.json`) or
+  on the chat.
+
+  Read DIRECTLY from the settings file merged with the per-chat override, like
+  `skills_enabled` — NOT through `effective_agent_settings`, whose model/effort
+  allowlist silently DROPPED this flag so a global `steer_enabled` was never
+  respected.
   """
   settings = get_settings()
+  merged = dict(_load_agent_settings(settings.data_dir))
   raw = chat.agent_settings_json
   if isinstance(raw, str):
     try:
       raw = json.loads(raw)
     except (ValueError, TypeError):
       raw = None
-  overrides = raw if isinstance(raw, dict) else None
-  merged = effective_agent_settings(
-    settings.data_dir, chat_overrides=overrides, provider=chat.provider,
-  )
-  return bool(merged.get("steer_enabled", merged.get("codex_steer_enabled")))
+  if isinstance(raw, dict):
+    merged.update(raw)  # per-chat override wins over the global file
+  return bool(merged.get("steer_enabled"))
 
 
 def _has_live_steerable_turn(chat_id: str, provider: str) -> bool:
@@ -256,12 +257,52 @@ def _has_live_steerable_turn(chat_id: str, provider: str) -> bool:
 
 
 async def _steer_into_active_turn(
-  provider: str, chat_id: str, content: str,
+  provider: str,
+  chat_id: str,
+  content: str,
+  user_msgs: list[dict] | None = None,
+  consume_pending_ts: list[int] | None = None,
 ) -> bool:
-  """Routes a steer request to the active provider-specific handle."""
+  """Routes a steer request to the active provider-specific handle.
+
+  For Claude the `user_msgs` / `consume_pending_ts` payload is buffered on
+  the handle so the RUNNER performs the transcript split (seal A1, append the
+  steered rows, reset for A2) when the interrupted turn ends — the first point
+  the true A1/A2 boundary is known. Codex still splits at the route below
+  (its `turn.steer()` injects into the same running turn, so there is no
+  interrupt boundary to defer to).
+  """
   if provider == "claude":
-    return await claude_sdk_runner.steer_into_active_turn(chat_id, content)
+    return await claude_sdk_runner.steer_into_active_turn(
+      chat_id, content, user_msgs, consume_pending_ts,
+    )
   return await codex_sdk_runner.steer_into_active_turn(chat_id, content)
+
+
+async def _split_steer_at_route(
+  chat_id: str, user_msgs: list[dict], consume_pending_ts: list[int],
+) -> dict:
+  """Route-driven transcript split for Codex (seal A1, append steered rows).
+
+  Claude defers the split to the runner (there is a real interrupt boundary
+  where A1 is complete); Codex injects into the same running turn with no such
+  boundary, so the route drives the split here on this event loop, serialized
+  with the sink's streaming snapshots. A turn with no registered sink (a
+  closed-turn race or a non-SDK path) has no streamed text to seal, so it
+  falls back to a plain end-of-transcript append of the steered rows.
+  """
+  sink = get_active_sink(chat_id)
+  if sink is not None:
+    return await sink.split_for_steer(user_msgs, consume_pending_ts)
+  ack = get_writer().submit(
+    AppendSteeredUserMessage(
+      chat_id=chat_id,
+      run_token="",
+      user_msgs=user_msgs,
+      consume_pending_ts=consume_pending_ts,
+    )
+  )
+  return await await_ack(ack)
 
 
 def _steered_response(
@@ -529,52 +570,73 @@ async def send_message(
       user_msgs = _user_messages_from_pending(
         selected_force_pending or [], user_msg,
       ) if body.force_steer else [user_msg]
+      # Every Claude steer — ordinary AND fast-forward (force_steer) — defers
+      # its transcript split to the runner. At HTTP arrival the pre-interrupt
+      # text A1 has often not streamed yet, so a route-side split sealed an
+      # empty A1 and the real A1 then merged with A2 after the steered row
+      # (the fast-forward "dropped message" bug). The runner splits at the
+      # interrupt boundary where A1 is complete. Codex has no interrupt
+      # boundary (it injects into the running turn) so it still splits here.
+      # Deferring force_steer moves the queued-row consume to the runner; the
+      # writer's AppendSteeredUserMessage tolerates rows a concurrent Stop
+      # already cleared (appends them anyway) so the fast-forwarded rows can't
+      # be dropped.
+      defer_to_runner = provider == "claude"
       try:
         steered = await _steer_into_active_turn(
           provider, chat_id, user_msg["content"],
+          user_msgs if defer_to_runner else None,
+          (body.consume_pending_ts or []) if defer_to_runner else None,
         )
       except Exception:
         # Any steer failure is non-fatal: log nothing louder than the
         # runner already does and queue the message instead.
         steered = False
       if steered:
-        # Split the turn so a reload renders Q1, A1, Q2, A2: seal the
-        # streamed-so-far assistant text as its own message, append this
+        # Persist the steer so a reload renders Q1, A1, Q2, A2: seal the
+        # pre-interrupt assistant text (A1) as its own message, append this
         # steered user row at the END, and reset the live sink so the
-        # post-steer continuation lands as a fresh assistant message. The
-        # sink runs on this same event loop, so driving it here is
-        # serialized with streaming snapshots without a lock. A turn with no
-        # registered sink (a closed-turn race, or a non-SDK path) falls back
-        # to a plain end-of-transcript append — the live turn still absorbed
-        # the steer, but without a sink there is no streamed text to seal.
-        try:
-          sink = get_active_sink(chat_id)
-          if sink is not None:
-            stored_result = await sink.split_for_steer(
-              user_msgs, body.consume_pending_ts or [],
+        # post-steer continuation (A2) lands as a fresh assistant message.
+        #
+        # An ordinary Claude steer defers this to the RUNNER, which runs
+        # `split_for_steer` at the interrupt boundary (where A1 is complete):
+        # doing it here, before A1 has streamed, sealed an empty A1 and merged
+        # the real A1 with A2 after the steered row (the Q1, Q2, A1A2 reload
+        # bug). The response returns optimistic queue state; the runner's split
+        # (with a turn-end finally catch-all for durability) and the
+        # `steered_into_turn` broadcast below reconcile the client.
+        #
+        # Codex (no interrupt boundary — `turn.steer()` injects into the
+        # running turn) and Claude force-steers drive the split on this event
+        # loop, serialized with streaming snapshots. A turn with no registered
+        # sink (closed-turn race / non-SDK path) falls back to a plain
+        # end-of-transcript append.
+        if defer_to_runner:
+          consumed = set(body.consume_pending_ts or [])
+          stored_result = {
+            "stored_messages": user_msgs,
+            "pending": [
+              m for m in (chat.pending_messages or [])
+              if m.get("ts") not in consumed
+            ],
+          }
+        else:
+          try:
+            stored_result = await _split_steer_at_route(
+              chat_id, user_msgs, body.consume_pending_ts or [],
             )
-          else:
-            ack = get_writer().submit(
-              AppendSteeredUserMessage(
-                chat_id=chat_id,
-                run_token="",
-                user_msgs=user_msgs,
-                consume_pending_ts=body.consume_pending_ts or [],
-              )
+          except Exception:
+            # The transcript write didn't land, but the live turn already
+            # absorbed the steer — we can't un-steer. Surface the failure so
+            # the client refetches authoritative state rather than silently
+            # dropping the message.
+            log.warning(
+              "steered transcript write did not persist chat_id=%s", chat_id,
             )
-            stored_result = await await_ack(ack)
-        except Exception:
-          # The transcript write didn't land, but the live turn already
-          # absorbed the steer — we can't un-steer. Surface the failure so
-          # the client refetches authoritative state rather than silently
-          # dropping the message.
-          log.warning(
-            "steered transcript write did not persist chat_id=%s", chat_id,
-          )
-          raise HTTPException(
-            status_code=503,
-            detail="Could not save your message; please refresh.",
-          )
+            raise HTTPException(
+              status_code=503,
+              detail="Could not save your message; please refresh.",
+            )
         bc = get_broadcast(chat_id)
         if bc is not None:
           stored_messages = stored_result.get("stored_messages")
