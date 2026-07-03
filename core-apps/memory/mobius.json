@@ -1,7 +1,7 @@
 {
   "id": "memory",
   "name": "Memory",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "description": "A browsable graph of what Möbius has learned over time, the agent’s own memory.",
   "author": "mobius-os",
   "license": "MIT",
@@ -29,5 +29,20 @@
       "d3",
       "pixi.js"
     ]
-  }
+  },
+  "source_files": [
+    "constants.js",
+    "theme.js",
+    "domain.js",
+    "storage.js",
+    "graph/render.jsx",
+    "ui/Th.jsx",
+    "ui/ImportanceDots.jsx",
+    "ui/EmptyConstellation.jsx",
+    "ui/GraphGlyph.jsx",
+    "ui/ListGlyph.jsx",
+    "ui/ChatGlyph.jsx",
+    "ui/TextGlyph.jsx",
+    "ui/NetworkGlyph.jsx"
+  ]
 }
