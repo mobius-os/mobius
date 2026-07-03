@@ -164,3 +164,98 @@ def test_assert_self_integrity_passes_when_trusted(recoveryd, monkeypatch):
   monkeypatch.delenv("RECOVERY_SKIP_INTEGRITY", raising=False)
   monkeypatch.setattr(recoveryd, "bundle_is_trusted", lambda d: True)
   recoveryd._assert_self_integrity()
+
+
+# -- Task 1.2: resolve_run_dir ---------------------------------------------
+
+def _trusted_live(recoveryd, monkeypatch) -> Path:
+  """Populates LIVE_DIR with a recoveryd.py and makes ownership look
+  root-owned (0644) so bundle_is_trusted passes."""
+  live = recoveryd.LIVE_DIR
+  live.mkdir(parents=True)
+  (live / "recoveryd.py").write_text("# live\n")
+  monkeypatch.setattr(recoveryd, "_uid_and_mode", lambda p: (0, 0o644))
+  return live
+
+
+def test_resolve_run_dir_baked_when_no_live(recoveryd):
+  # No live copy on the fresh isolated volume -> baked self dir.
+  assert recoveryd.resolve_run_dir() == str(recoveryd._SELF_DIR)
+
+
+def test_resolve_run_dir_live_when_trusted(recoveryd, monkeypatch):
+  live = _trusted_live(recoveryd, monkeypatch)
+  assert recoveryd.resolve_run_dir() == str(live)
+
+
+def test_resolve_run_dir_baked_when_live_untrusted(recoveryd, monkeypatch):
+  live = recoveryd.LIVE_DIR
+  live.mkdir(parents=True)
+  (live / "recoveryd.py").write_text("# live\n")
+  # Mobius-owned -> untrusted -> fall back to the baked floor.
+  monkeypatch.setattr(recoveryd, "_uid_and_mode", lambda p: (1000, 0o644))
+  assert recoveryd.resolve_run_dir() == str(recoveryd._SELF_DIR)
+
+
+def test_resolve_run_dir_baked_when_live_missing_entrypoint(recoveryd,
+                                                            monkeypatch):
+  live = recoveryd.LIVE_DIR
+  live.mkdir(parents=True)
+  # Trusted files but no recoveryd.py -> not runnable -> baked.
+  (live / "recovery_auth.py").write_text("# not the entrypoint\n")
+  monkeypatch.setattr(recoveryd, "_uid_and_mode", lambda p: (0, 0o644))
+  assert recoveryd.resolve_run_dir() == str(recoveryd._SELF_DIR)
+
+
+# -- Task 1.2: launcher re-exec + loop guard -------------------------------
+
+def test_reexec_hands_off_to_trusted_live(recoveryd, monkeypatch):
+  live = _trusted_live(recoveryd, monkeypatch)
+  calls = []
+  monkeypatch.setattr(
+    recoveryd.os, "execv", lambda path, args: calls.append((path, args)))
+  monkeypatch.delenv("MOBIUS_RECOVERY_EXECED", raising=False)
+  recoveryd._maybe_reexec_into_run_dir()
+  assert len(calls) == 1
+  path, args = calls[0]
+  assert path == sys.executable
+  # Same interpreter, same -P hardening, into the live recoveryd.py.
+  assert args[:3] == [sys.executable, "-P", str(live / "recoveryd.py")]
+  # Sentinel is set before exec so the successor process won't loop.
+  assert os.environ.get("MOBIUS_RECOVERY_EXECED") == "1"
+
+
+def test_reexec_guard_blocks_second_exec(recoveryd, monkeypatch):
+  # Even with a trusted live copy that differs from the running dir, an
+  # already-execed process (sentinel set) must never exec again.
+  _trusted_live(recoveryd, monkeypatch)
+  calls = []
+  monkeypatch.setattr(
+    recoveryd.os, "execv", lambda path, args: calls.append((path, args)))
+  monkeypatch.setenv("MOBIUS_RECOVERY_EXECED", "1")
+  recoveryd._maybe_reexec_into_run_dir()
+  assert calls == []
+
+
+def test_reexec_noop_when_run_dir_is_self(recoveryd, monkeypatch):
+  # No live copy -> resolve_run_dir == running dir -> no hand-off.
+  calls = []
+  monkeypatch.setattr(
+    recoveryd.os, "execv", lambda path, args: calls.append((path, args)))
+  monkeypatch.delenv("MOBIUS_RECOVERY_EXECED", raising=False)
+  recoveryd._maybe_reexec_into_run_dir()
+  assert calls == []
+
+
+def test_main_runs_launcher_first(recoveryd, monkeypatch):
+  """main() invokes the launcher before any server setup."""
+  marker = []
+
+  def sentinel():
+    marker.append("launcher")
+    raise RuntimeError("stop-after-launcher")
+
+  monkeypatch.setattr(recoveryd, "_maybe_reexec_into_run_dir", sentinel)
+  with pytest.raises(RuntimeError, match="stop-after-launcher"):
+    recoveryd.main()
+  assert marker == ["launcher"]

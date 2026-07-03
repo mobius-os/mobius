@@ -258,6 +258,55 @@ def _assert_self_integrity() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Launcher — prefer a trusted /data live copy over the baked floor.
+# ---------------------------------------------------------------------------
+
+# Set in the environment right before os.execv so the re-exec'd process
+# knows it must run in place instead of execing again (loop guard).
+_EXEC_SENTINEL_ENV = "MOBIUS_RECOVERY_EXECED"
+
+
+def resolve_run_dir() -> str:
+  """Returns the directory recoveryd should run from.
+
+  Prefers the live copy at LIVE_DIR when it exists, contains a
+  recoveryd.py entrypoint, AND passes bundle_is_trusted (root-owned +
+  not group/other-writable — the SAME rule the baked floor uses).
+  Otherwise returns the baked self dir, which is the guaranteed
+  always-present fallback. Any reason to distrust the live copy resolves
+  to baked, so no path can leave recovery unrunnable.
+  """
+  if (LIVE_DIR / "recoveryd.py").is_file() and bundle_is_trusted(LIVE_DIR):
+    return str(LIVE_DIR)
+  return str(_SELF_DIR)
+
+
+def _maybe_reexec_into_run_dir() -> None:
+  """Re-execs into the trusted live copy when it differs from the running
+  bundle, so a baked process hands off to a newer /data copy at startup.
+
+  Guarded against an exec loop by the _EXEC_SENTINEL_ENV sentinel: it is
+  set in the environment before os.execv, so the re-exec'd process sees
+  it and runs in place instead of execing again. os.execv replaces the
+  current process image, so this function returns only when NO hand-off
+  happens — already re-exec'd, or the resolved run dir IS the running
+  dir.
+  """
+  if os.environ.get(_EXEC_SENTINEL_ENV) == "1":
+    return
+  run_dir = resolve_run_dir()
+  if os.path.realpath(run_dir) == os.path.realpath(str(_SELF_DIR)):
+    return
+  target = os.path.join(run_dir, "recoveryd.py")
+  # Preserve the interpreter's `-P` hardening (drops the script dir from
+  # sys.path[0]) and pass any extra argv through unchanged.
+  argv = [sys.executable, "-P", target, *sys.argv[1:]]
+  os.environ[_EXEC_SENTINEL_ENV] = "1"
+  log.info("launcher: re-exec into trusted live copy at %s", run_dir)
+  os.execv(sys.executable, argv)
+
+
+# ---------------------------------------------------------------------------
 # Platform health + status.
 # ---------------------------------------------------------------------------
 
@@ -600,6 +649,11 @@ def _init_dummy_hash() -> None:
 
 
 def main() -> None:
+  # Launcher first: hand off to a trusted /data live copy when present so
+  # a baked process spends no time on baked-specific setup when a newer,
+  # trusted copy should run instead. A re-exec replaces this process; the
+  # loop guard makes the successor fall through and run in place.
+  _maybe_reexec_into_run_dir()
   _assert_self_integrity()
   _init_dummy_hash()
   server = ThreadingHTTPServer(("0.0.0.0", RECOVERY_PORT), _Handler)
