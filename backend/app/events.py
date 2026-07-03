@@ -16,6 +16,7 @@ from typing import Literal
 
 EventType = Literal[
   "text",
+  "text_final",
   "thinking",
   "text_boundary",
   "tool_start",
@@ -139,6 +140,34 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
       if ts is not None:
         block["_thinking_start_ts"] = ts
       assistant_blocks.append(block)
+    return True
+
+  if event_type == "text_final":
+    # Authoritative full text of a completed assistant item (from the SDK's
+    # AssistantMessage TextBlock), emitted at item end AFTER its deltas. The
+    # streamed deltas are the only other source of durable prose, so if any
+    # delta was dropped in the persist path this REPLACES the accumulated
+    # block with the complete text — idempotent when nothing was lost. The
+    # trailing block is this item's text: an AssistantMessage arrives right
+    # after its own deltas (a text_boundary, if any, was already overwritten
+    # by the "text" reducer when this item's first delta landed), so replacing
+    # the trailing text block targets the correct item. Replace, never append.
+    content = event.get("content", "")
+    if not content:
+      return False
+    if (assistant_blocks
+        and assistant_blocks[-1].get("type") == "text"):
+      if assistant_blocks[-1].get("content") == content:
+        return False
+      assistant_blocks[-1]["content"] = content
+      return True
+    if (assistant_blocks
+        and assistant_blocks[-1].get("type") == "text_boundary"):
+      assistant_blocks[-1] = {"type": "text", "content": content}
+      return True
+    # No trailing text block (e.g. every delta for this item was dropped) —
+    # the authoritative text is all we have, so materialise it.
+    assistant_blocks.append({"type": "text", "content": content})
     return True
 
   if event_type == "text_boundary":

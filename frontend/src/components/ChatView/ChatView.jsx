@@ -483,7 +483,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     if (sendingRef.current && !force) return
     const gen = fetchGenRef.current
     try {
-      const res = await apiFetch(`/chats/${chatId}?limit=20`)
+      const res = await apiFetch(`/chats/${chatId}?limit=20`, { timeoutMs: 15000 })
       const data = await res.json()
       if (chatIdStaleRef.current) return
       // Discard if a Stop (or other clear) bumped gen while we waited.
@@ -546,7 +546,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   const reconcileRuntimeState = useCallback(async () => {
     const gen = fetchGenRef.current
     try {
-      const res = await apiFetch(`/chats/${chatId}?limit=1`)
+      const res = await apiFetch(`/chats/${chatId}?limit=1`, { timeoutMs: 15000 })
       const data = await res.json()
       if (chatIdStaleRef.current) return
       if (fetchGenRef.current !== gen) return
@@ -2099,9 +2099,16 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     const hasQueue = pendingQueue.pendingMessages.length > 0
     if (!turnActive && !hasQueue) return
     let cancelled = false
+    let inFlight = false
     const run = () => {
-      if (cancelled) return
+      if (cancelled || inFlight) return
+      // Single-flight: without this guard a slow/hung reconcile lets the next
+      // interval tick fire another overlapping fetch, and they stack unbounded
+      // against a wedged backend. Skip a tick while the prior one is in flight;
+      // the fetch is time-boxed (apiFetch timeoutMs) so inFlight always clears.
+      inFlight = true
       reconcileRuntimeState().finally(() => {
+        inFlight = false
         if (!cancelled) ensureRuntimeStreamConnected()
       })
     }
