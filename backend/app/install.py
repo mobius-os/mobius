@@ -479,6 +479,23 @@ def _derive_raw_base(manifest_url: str) -> str:
   return manifest_url.rsplit("/", 1)[0] + "/"
 
 
+def _derive_repo_ref(manifest_url: str) -> tuple[str, str] | None:
+  """Return the GitHub repo/ref for a raw GitHub manifest URL, if derivable."""
+  parsed = urlparse(manifest_url)
+  parts = [unquote(part) for part in parsed.path.split("/") if part]
+  if (
+    parsed.scheme != "https"
+    or parsed.hostname != "raw.githubusercontent.com"
+    or len(parts) < 4
+  ):
+    return None
+  org, repo, ref = parts[:3]
+  for part in (org, repo, ref):
+    if part in ("", ".", "..") or "/" in part or "\\" in part:
+      return None
+  return f"https://github.com/{org}/{repo}.git", ref
+
+
 def _canonical_for_inline(raw_base: str, manifest_id: str) -> str:
   """Synthesize a stable manifest_url for inline-manifest installs.
 
@@ -1427,6 +1444,10 @@ async def install_from_manifest(
   }
   if job_name and bundled_job is not None:
     source_tree[job_name] = bundled_job
+  repo_ref = (
+    _derive_repo_ref(manifest_url) if manifest_url is not None else None
+  )
+  cloned_install = False
   # True once `source_tree` is the MERGED tree (a clean merge or forced
   # take-upstream): the post-write commit then replays the result on the
   # upstream tip as its sole parent so the merge base advances — otherwise
@@ -1713,21 +1734,53 @@ async def install_from_manifest(
                 merge_applied = True
         else:
           # Fresh install (or an existing app that somehow lost its repo):
-          # record the pristine source tree on `upstream`, then align the local
-          # `main` branch to that commit so the working branch starts exactly at
-          # the installed version — a shared base for the next update's merge.
-          await asyncio.to_thread(
-            app_git.record_upstream,
-            git_source_dir, source_tree, canonical_manifest_url, version,
-            exec_paths=exec_paths,
-          )
-          await asyncio.to_thread(
-            app_git.align_local_to_upstream, git_source_dir,
-          )
+          # for a new raw-GitHub catalog install, prefer a REAL clone so the
+          # source tree carries origin/<ref> and the app's own .gitignore. If
+          # cloning fails (private repo, renamed repo, offline git access), fall
+          # back to the existing synthetic-upstream path unchanged. This slice
+          # only clones apps whose entry is the conventional root `index.jsx`
+          # (which the clone reads back below); a non-root/renamed entry falls
+          # back rather than read the wrong file — generalizing the entry is a
+          # follow-up.
+          if (
+            not existing
+            and repo_ref is not None
+            and manifest.get("entry") == "index.jsx"
+          ):
+            repo_url, ref = repo_ref
+            try:
+              app.upstream_commit = await asyncio.to_thread(
+                app_git.clone_upstream, git_source_dir, repo_url, ref,
+              )
+              entry_bytes = (git_source_dir / "index.jsx").read_bytes()
+              jsx_source = entry_bytes.decode("utf-8")
+              upstream_jsx_sha = hashlib.sha256(entry_bytes).hexdigest()
+              source_tree = {"index.jsx": entry_bytes}
+              cloned_install = True
+            except Exception as exc:
+              log.warning(
+                "install: clone from %s at %s failed; falling back to "
+                "fetched source path — %r",
+                repo_url, ref, exc,
+              )
+          if not cloned_install:
+            # record the pristine source tree on `upstream`, then align the
+            # local `main` branch to that commit so the working branch starts
+            # exactly at the installed version — a shared base for the next
+            # update's merge.
+            await asyncio.to_thread(
+              app_git.record_upstream,
+              git_source_dir, source_tree, canonical_manifest_url, version,
+              exec_paths=exec_paths,
+            )
+            await asyncio.to_thread(
+              app_git.align_local_to_upstream, git_source_dir,
+            )
         app.upstream_jsx_sha = upstream_jsx_sha
-        app.upstream_commit = await asyncio.to_thread(
-          app_git.head_sha, git_source_dir, app_git.UPSTREAM_BRANCH,
-        )
+        if not cloned_install:
+          app.upstream_commit = await asyncio.to_thread(
+            app_git.head_sha, git_source_dir, app_git.UPSTREAM_BRANCH,
+          )
         if mode == "conflict":
           # Conflict: materialize a REAL working-tree merge conflict (markers +
           # MERGE_HEAD) so the agent resolves it with ordinary git, exactly like
@@ -1827,35 +1880,37 @@ async def install_from_manifest(
           # `index.jsx.bak` snapshot name (so the existing rollback expectations
           # hold); every other file uses `<name>.bak`. Nested paths get their
           # parent dirs created first; the job script is staged executable.
-          for rel, content in source_tree.items():
-            target = source_dir_path / rel
-            if rel == "index.jsx":
-              backup = jsx_file.with_suffix(".jsx.bak")
-            else:
-              backup = target.with_name(target.name + ".bak")
-            # Create parent dirs first so the realpath check sees the actual
-            # on-disk shape (a symlinked existing parent resolves to its target),
-            # then reject any write whose resolved path escapes the source dir.
-            target.parent.mkdir(parents=True, exist_ok=True)
-            _assert_within(source_dir_path, target, f"source_files {rel}")
-            _write_source_file(
-              target, content, backup,
-              created_paths, rollback_actions, commit_actions,
+          if not cloned_install:
+            for rel, content in source_tree.items():
+              target = source_dir_path / rel
+              if rel == "index.jsx":
+                backup = jsx_file.with_suffix(".jsx.bak")
+              else:
+                backup = target.with_name(target.name + ".bak")
+              # Create parent dirs first so the realpath check sees the actual
+              # on-disk shape (a symlinked existing parent resolves to its
+              # target), then reject any write whose resolved path escapes the
+              # source dir.
+              target.parent.mkdir(parents=True, exist_ok=True)
+              _assert_within(source_dir_path, target, f"source_files {rel}")
+              _write_source_file(
+                target, content, backup,
+                created_paths, rollback_actions, commit_actions,
+              )
+              if rel in exec_paths:
+                target.chmod(0o755)
+            # Reconcile the worktree to the source tree: a file the new version
+            # dropped (a sibling, an old job) must be deleted, not left on disk
+            # to be re-recorded onto `main` as permanent local divergence. Keep
+            # the tree's files plus the install-managed ones other phases own
+            # (the static-asset manifest is rewritten by _write_static_assets
+            # just below; .gitignore + init-cron.sh are managed too).
+            keep = set(source_tree) | {
+              _STATIC_ASSETS_MANIFEST, ".gitignore", "init-cron.sh",
+            }
+            _prune_dropped_source_files(
+              source_dir_path, keep, rollback_actions,
             )
-            if rel in exec_paths:
-              target.chmod(0o755)
-          # Reconcile the worktree to the source tree: a file the new version
-          # dropped (a sibling, an old job) must be deleted, not left on disk to
-          # be re-recorded onto `main` as permanent local divergence. Keep the
-          # tree's files plus the install-managed ones other phases own (the
-          # static-asset manifest is rewritten by _write_static_assets just
-          # below; .gitignore + init-cron.sh are managed too).
-          keep = set(source_tree) | {
-            _STATIC_ASSETS_MANIFEST, ".gitignore", "init-cron.sh",
-          }
-          _prune_dropped_source_files(
-            source_dir_path, keep, rollback_actions,
-          )
           # Compile now that the whole source tree is on disk. Passing the real
           # entry path makes esbuild resolve `./cards.js`-style sibling imports
           # from the files just written; promotion of the staged bundle into the
