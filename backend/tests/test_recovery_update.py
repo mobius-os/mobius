@@ -166,7 +166,7 @@ def test_upstream_url_is_pinned_constant(recoveryd, monkeypatch):
   monkeypatch.delenv("RECOVERY_UPSTREAM_URL_TEST", raising=False)
   assert recoveryd._upstream_url() == recoveryd._RECOVERY_UPSTREAM_URL
   assert recoveryd._RECOVERY_UPSTREAM_URL == (
-    "https://github.com/mobius-os/recovery.git"
+    "https://github.com/mobius-os/mobius-recovery.git"
   )
 
 

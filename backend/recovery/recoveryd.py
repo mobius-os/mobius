@@ -474,10 +474,11 @@ def running_version() -> str:
 
 
 # The upstream recovery repo, pinned into the frozen bundle so it can never
-# be repointed from /data or an agent-writable env in production. This is a
-# placeholder until a later phase stands up the real mobius-os/recovery repo
-# and confirms the URL.
-_RECOVERY_UPSTREAM_URL = "https://github.com/mobius-os/recovery.git"
+# be repointed from /data or an agent-writable env in production. recoveryd
+# clones it over GitHub TLS as root — the same trust root as the baked image
+# itself (which is built from the org's own repos), so no separate signing
+# layer is required for the baseline.
+_RECOVERY_UPSTREAM_URL = "https://github.com/mobius-os/mobius-recovery.git"
 
 
 def _upstream_url() -> str:
