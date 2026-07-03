@@ -6,6 +6,7 @@ import re
 import tempfile
 from pathlib import Path
 
+from app import timeutil
 from app.config import get_settings
 from app.runtime_libs import RUNTIME_LIBS
 
@@ -220,6 +221,12 @@ async def recompile_app_bundle(db, app, jsx_source: str) -> None:
     raise
   app.jsx_source = jsx_source
   app.compiled_path = str(live)
+  # Advance updated_at so the /module and /frame ETags (derived from it) change.
+  # Without this a warm browser that already holds the module sends the old
+  # If-None-Match, the ETag is unchanged, the server 304s, and it serves the
+  # stale bundle even though the compiled file changed. The app_updated event
+  # remounts the iframe but the refetch would still 304 to the old code.
+  app.updated_at = timeutil.now_naive_utc()
   try:
     db.commit()
   except Exception:
