@@ -12,8 +12,9 @@ What it does:
   asyncio.create_subprocess_exec (args as list, no shell)
 - Parses each stdout JSON line into a small set of events
 - Yields them as SSE-formatted strings for the recovery chat page
-- Appends each user + assistant turn to /data/recovery_chat.jsonl
-  (append-only log; survives if the chats DB schema is broken)
+- Appends each user + assistant turn to a per-chat file at
+  /data/recovery/chats/<chat_id>.jsonl (one jsonl file per chat;
+  survives if the chats DB schema is broken)
 
 What it does NOT do:
 - AskUserQuestion (user can just type)
@@ -28,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import pwd
 import re
 import secrets
 import shutil
@@ -35,6 +37,67 @@ import threading
 import time
 from pathlib import Path
 from typing import AsyncIterator
+
+
+# ─── Recovery agent runs with FULL ROOT / sudo ─────────────────────
+#
+# The whole point of recovery is an agent that can fix ANYTHING: backend,
+# frontend, the platform tree, /data, system state, any command. recoveryd
+# runs as root, and the rescue agent it spawns INHERITS that root — full
+# sudo, no scoping, no privilege drop. Default RECOVERY_AGENT_USER=root
+# makes agent_preexec below a no-op (running as root, there is nothing to
+# drop).
+#
+# "Recovery can't break its own files" is NOT achieved by weakening the
+# agent (that would defeat the point). It is achieved at the CONTAINER layer:
+# the recovery bundle is a READ-ONLY mount, and a read-only mount returns
+# EROFS to root too — so the full-sudo agent physically cannot write its own
+# code, while keeping unlimited power everywhere else. The privilege-drop
+# machinery below is kept only as an opt-in escape hatch (set
+# RECOVERY_AGENT_USER to a non-root user) and is OFF by default.
+RECOVERY_AGENT_USER = os.environ.get("RECOVERY_AGENT_USER", "root")
+
+
+def _resolve_agent_ids() -> "tuple[int, int, str] | None":
+  """Returns (uid, gid, name) for the agent user, or None if unknown.
+
+  Resolved in the PARENT (before the spawn) so the returned preexec closure
+  never calls the non-async-signal-safe getpwnam inside the forked child.
+  """
+  try:
+    pw = pwd.getpwnam(RECOVERY_AGENT_USER)
+  except KeyError:
+    return None
+  return pw.pw_uid, pw.pw_gid, pw.pw_name
+
+
+def agent_preexec():
+  """Returns a preexec_fn that drops the spawned agent to `mobius`, or None.
+
+  Returns None when there is nothing to drop — recoveryd is not root (unit
+  tests / local dev), the agent user does not exist, or we already run as
+  that user — so the subprocess simply runs as the current user. When
+  recoveryd IS root the returned closure runs in the forked child before
+  exec: it sets the supplementary groups, then the gid, then the uid (uid
+  LAST — once root is dropped it can no longer change ids), so the CLI runs
+  with exactly mobius's privileges and can never touch the root-owned
+  recovery bundle or the /recovery-live volume.
+  """
+  if os.geteuid() != 0:
+    return None
+  ids = _resolve_agent_ids()
+  if ids is None:
+    return None
+  uid, gid, name = ids
+  if uid == os.getuid() and uid == os.geteuid():
+    return None
+
+  def _drop() -> None:
+    os.initgroups(name, gid)
+    os.setgid(gid)
+    os.setuid(uid)
+
+  return _drop
 
 
 # Multi-chat layout: one jsonl file per chat under RECOVERY_CHATS_DIR.
@@ -956,6 +1019,10 @@ async def _spawn_claude(
   # prompt resolve consistently. Without this, cwd inherits from
   # uvicorn's launch dir (/app) which contradicts the prompt's
   # `Read /data/recovery/chats/<chat_id>.jsonl` references.
+  # preexec_fn drops the child to the non-root `mobius` user (see
+  # agent_preexec) so the agent can repair all of /data but cannot write
+  # the root-owned recovery bundle. cwd /data and CLAUDE_CONFIG_DIR are
+  # both under mobius-owned /data.
   proc = await asyncio.create_subprocess_exec(
     *cmd,
     stdin=asyncio.subprocess.PIPE,
@@ -963,6 +1030,7 @@ async def _spawn_claude(
     stderr=asyncio.subprocess.PIPE,
     env=env,
     cwd=SUBPROCESS_CWD,
+    preexec_fn=agent_preexec(),
   )
   # Publish the live process onto the claim immediately so a
   # GeneratorExit between spawn and stdin-write still tears down.
@@ -1119,6 +1187,8 @@ async def _spawn_codex(
     cmd += ["-m", model]
   cmd.append("-")  # explicit stdin marker
 
+  # preexec_fn drops the child to the non-root `mobius` user (see
+  # agent_preexec) — same guarantee as the Claude path.
   proc = await asyncio.create_subprocess_exec(
     *cmd,
     stdin=asyncio.subprocess.PIPE,
@@ -1126,6 +1196,7 @@ async def _spawn_codex(
     stderr=asyncio.subprocess.PIPE,
     env=env,
     cwd=SUBPROCESS_CWD,
+    preexec_fn=agent_preexec(),
   )
   # Atomic publish + cancellation check under the run lock; mirrors
   # _spawn_claude. Without this guard a delete_chat that landed

@@ -100,6 +100,7 @@ _assert_platform_not_importable()
 
 
 # Now safe to import the rest of stdlib + our frozen siblings.
+import asyncio  # noqa: E402
 import fcntl  # noqa: E402
 import html  # noqa: E402
 import json  # noqa: E402
@@ -112,12 +113,16 @@ import time  # noqa: E402
 import urllib.error  # noqa: E402
 import urllib.parse  # noqa: E402
 import urllib.request  # noqa: E402
+from collections import OrderedDict  # noqa: E402
 from http import HTTPStatus  # noqa: E402
 from http.cookies import SimpleCookie  # noqa: E402
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
 
 import recovery_auth  # noqa: E402
+import recovery_chat_pages  # noqa: E402
+import recovery_chat_runner  # noqa: E402
 import recovery_db  # noqa: E402
+import recovery_oauth  # noqa: E402
 import recovery_pages  # noqa: E402
 
 
