@@ -1384,9 +1384,19 @@ class ChatWriterActor:
         ts for ts in cmd.consume_pending_ts if ts not in pending_ts
       ]
       if missing_ts:
-        raise _PersistFailed(
-          "AppendSteeredUserMessage pending rows missing: "
-          + ",".join(str(ts) for ts in missing_ts)
+        # A row named for consumption is no longer in pending — a concurrent
+        # Stop cleared the queue between the fast-forward's acceptance and this
+        # (now runner-deferred) write. Do NOT raise: the steered rows were
+        # already validated against the queue at the route and must land in the
+        # transcript, or the fast-forwarded message silently vanishes. Append
+        # them anyway and consume whatever is still present. (Double-consume of
+        # the SAME row is prevented upstream: the frontend guards against two
+        # fast-forwards of one ts, and the route validates against live
+        # pending.)
+        log.warning(
+          "AppendSteeredUserMessage pending rows already gone chat_id=%s "
+          "ts=%s; appending steered rows anyway",
+          cmd.chat_id, ",".join(str(ts) for ts in missing_ts),
         )
     used_messages = msgs + pending
     stored_messages: list[dict] = []
