@@ -1564,6 +1564,8 @@ _LIMIT_ERROR_MARKERS = (
   "rate_limit",
   "usage limit",
   "usage_limit",
+  "weekly limit",
+  "session limit",
   "overloaded",
   "quota",
   "too many requests",
@@ -1579,11 +1581,20 @@ def _is_limit_error_text(text: str | None) -> bool:
   only that the queue is parked for the user to resend (never lost), while a
   false negative reinstates the limit storm. A genuinely transient one-off
   error does NOT match, so the queue still flows through a blip.
+
+  The marker list is grounded in the ACTUAL Anthropic limit strings seen in
+  prod chat.log: "You've hit your weekly limit · resets ...", "... session
+  limit ...", "Server is temporarily limiting requests ... Rate limited". The
+  `limit`+`resets` compound catches the whole "hit your <period> limit · resets
+  <time>" family (weekly / session / usage / 5-hour) without matching a random
+  error that merely contains the word "limit".
   """
   if not text:
     return False
   low = text.lower()
-  return any(marker in low for marker in _LIMIT_ERROR_MARKERS)
+  if any(marker in low for marker in _LIMIT_ERROR_MARKERS):
+    return True
+  return "limit" in low and "resets" in low
 
 
 def _is_limit_terminal(runner_result: dict) -> bool:

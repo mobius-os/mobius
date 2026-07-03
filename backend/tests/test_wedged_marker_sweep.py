@@ -149,6 +149,22 @@ def test_limit_error_text_classifier():
   assert not f("")
 
 
+def test_limit_classifier_matches_real_prod_strings():
+  # The actual Anthropic limit strings seen in prod chat.log — bug C is
+  # pointless if these don't classify (they lack the bare "rate limit" marker).
+  f = chat_mod._is_limit_error_text
+  assert f("You've hit your weekly limit · resets Jul 4, 3am (UTC)")
+  assert f("You've hit your session limit · resets 2:20am (UTC)")
+  assert f(
+    "API Error: Server is temporarily limiting requests "
+    "(not your usage limit) · Rate limited"
+  )
+  # A generic error that merely mentions "limit" but isn't a rate/usage kill
+  # must NOT park (no reset window, no rate/usage/weekly/session marker).
+  assert not f("ValueError: list index out of range (limit check)")
+  assert not f("Execution interrupted.")
+
+
 def test_limit_terminal_classifier_uses_api_error_status():
   f = chat_mod._is_limit_terminal
   assert f({"api_error_status": 429, "error": None})
