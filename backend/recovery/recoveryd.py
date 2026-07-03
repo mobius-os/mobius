@@ -103,8 +103,10 @@ _assert_platform_not_importable()
 import html  # noqa: E402
 import json  # noqa: E402
 import logging  # noqa: E402
+import shutil  # noqa: E402
 import socket  # noqa: E402
 import subprocess  # noqa: E402
+import threading  # noqa: E402
 import time  # noqa: E402
 import urllib.error  # noqa: E402
 import urllib.parse  # noqa: E402
@@ -162,6 +164,11 @@ _SELF_DIR = Path(__file__).resolve().parent
 # resolve_run_dir); a fresh volume or an untrusted copy falls back to
 # baked, which is the guaranteed floor.
 LIVE_DIR = DATA_DIR / "recovery-live"
+
+# The previous live copy is moved aside to this path during an atomic swap
+# (see _swap_into_live) and removed best-effort afterwards. Same filesystem
+# as LIVE_DIR (both under DATA_DIR) so the swap is a pure rename.
+LIVE_DIR_OLD = DATA_DIR / "recovery-live.old"
 
 # Valid Tier-1 restore modes. Kept in lockstep with the entrypoint's
 # `.recover-pending` handler (entrypoint.sh ~909) and recovery_restore.sh.
@@ -461,6 +468,164 @@ def update_available() -> bool:
     return False
   running_parsed = _parse_semver(running_version()) or (0, 0, 0)
   return latest_parsed > running_parsed
+
+
+# ---------------------------------------------------------------------------
+# Pull-and-run — recoveryd (as root) fetches the latest release into a
+# root-owned live copy on /data, validates it with the SAME trust check the
+# baked floor uses, and atomically swaps it in. The agent (non-root, /data
+# write) can delete the live copy (→ baked fallback) but can never forge a
+# root-owned one, so it cannot get its own code executed as root.
+# ---------------------------------------------------------------------------
+
+def _clone_release(url: str, version: str, dest: Path,
+                   timeout: float) -> bool:
+  """Shallow-clones the release tag for `version` into `dest`.
+
+  Tries the `v`-prefixed tag first, then the bare tag, so both `vX.Y.Z` and
+  `X.Y.Z` release spellings work. `git clone` refuses a non-empty target, so
+  a failed attempt's partial `dest` is removed before the next spelling is
+  tried. On success the clone's `.git` directory is dropped — the live copy
+  is a frozen runtime bundle that recoveryd never runs git against, so
+  carrying history (and a root-owned gitconfig/hooks tree) is dead weight and
+  needless trust-check surface. Returns True iff a clone succeeded.
+  """
+  for ref in (f"v{version}", version):
+    try:
+      proc = subprocess.run(
+        ["git", "clone", "--depth", "1", "--single-branch",
+         "--branch", ref, url, str(dest)],
+        capture_output=True, text=True, timeout=timeout, check=False,
+      )
+    except (subprocess.SubprocessError, OSError):
+      shutil.rmtree(dest, ignore_errors=True)
+      continue
+    if proc.returncode == 0 and dest.is_dir():
+      shutil.rmtree(dest / ".git", ignore_errors=True)
+      return True
+    shutil.rmtree(dest, ignore_errors=True)
+  return False
+
+
+def _harden_tree(path: Path) -> bool:
+  """Makes `path` root-owned and not group/other-writable, recursively.
+
+  Runs `chown -R root:root` then `chmod -R go-w` over the whole tree so the
+  subsequent bundle_is_trusted check can pass and the agent can never rewrite
+  the live copy. Only meaningful as root (the caller has already verified
+  euid 0); returns False if either step fails so the caller aborts rather
+  than swapping in a half-hardened copy.
+  """
+  for cmd in (
+    ["chown", "-R", "root:root", str(path)],
+    ["chmod", "-R", "go-w", str(path)],
+  ):
+    try:
+      proc = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=60, check=False,
+      )
+    except (subprocess.SubprocessError, OSError):
+      return False
+    if proc.returncode != 0:
+      return False
+  return True
+
+
+def _validate_pulled(path: Path) -> tuple[bool, str]:
+  """Validates a hardened pull BEFORE it may replace LIVE_DIR.
+
+  All three gates must hold or the copy is rejected and never swapped in:
+  it carries a recoveryd.py entrypoint, it passes bundle_is_trusted
+  (root-owned + not group/other-writable — the same rule the baked floor
+  uses), and that entrypoint parses as Python. The parse runs in a separate
+  `python3 -P` process that only `ast.parse`s the file — the pulled code is
+  never imported or executed here, so validating an untrusted download never
+  runs it as root. Operates entirely on `path`; LIVE_DIR is untouched until
+  this returns True.
+  """
+  entry = path / "recoveryd.py"
+  if not entry.is_file():
+    return False, "pulled copy has no recoveryd.py entrypoint"
+  if not bundle_is_trusted(path):
+    return False, "pulled copy failed the root-ownership trust check"
+  try:
+    proc = subprocess.run(
+      [sys.executable, "-P", "-c",
+       "import ast, sys; ast.parse(open(sys.argv[1]).read())", str(entry)],
+      capture_output=True, text=True, timeout=30, check=False,
+    )
+  except (subprocess.SubprocessError, OSError) as exc:
+    return False, f"could not smoke-check the pulled copy: {exc}"
+  if proc.returncode != 0:
+    return False, "pulled recoveryd.py does not parse as Python"
+  return True, "ok"
+
+
+def _swap_into_live(tmp: Path) -> None:
+  """Atomically moves the validated `tmp` tree into LIVE_DIR.
+
+  os.rename is atomic within a filesystem (tmp and LIVE_DIR are both under
+  DATA_DIR by construction), so a concurrent reader (resolve_run_dir /
+  bundle_is_trusted) never observes a half-written LIVE_DIR: it sees the old
+  dir, then — for the brief window between the two renames — no LIVE_DIR at
+  all (which resolve_run_dir treats as "run baked", the safe floor), then the
+  new dir. There is never a partially-populated LIVE_DIR. The previous copy
+  is moved aside first (rename cannot replace a non-empty dir) and removed
+  best-effort afterwards.
+  """
+  if LIVE_DIR_OLD.exists():
+    shutil.rmtree(LIVE_DIR_OLD, ignore_errors=True)
+  if LIVE_DIR.exists():
+    os.rename(str(LIVE_DIR), str(LIVE_DIR_OLD))
+  os.rename(str(tmp), str(LIVE_DIR))
+  if LIVE_DIR_OLD.exists():
+    shutil.rmtree(LIVE_DIR_OLD, ignore_errors=True)
+
+
+def pull_latest_recovery(timeout: float = 120) -> tuple[bool, str]:
+  """Pulls the latest upstream recovery release into a trusted LIVE_DIR.
+
+  The security-critical apply path. Refuses unless running as root (only root
+  can produce the root-owned copy the trust check demands). Resolves the
+  latest release tag, clones it into a UNIQUE temp dir under DATA_DIR (same
+  filesystem as LIVE_DIR, so the swap is a pure rename), hardens it
+  (root-owned + not group/other-writable), then VALIDATES the temp copy
+  (trust check + entrypoint present + parses) BEFORE any swap. Only a fully
+  validated copy is atomically swapped into LIVE_DIR; any failure cleans up
+  the temp dir and leaves the existing LIVE_DIR (and the baked floor)
+  untouched. Returns (True, version) on success, else (False, reason). Never
+  raises — a recovery action that 500s is the worst failure mode.
+  """
+  if os.geteuid() != 0:
+    return (
+      False,
+      "refusing to pull: recoveryd must run as root to write a root-owned "
+      "live copy",
+    )
+  version = latest_upstream_version()
+  if version is None:
+    return False, "no upstream release reachable"
+  url = _upstream_url()
+  tmp = DATA_DIR / f".recovery-pull-{os.getpid()}-{time.time_ns()}"
+  try:
+    if not _clone_release(url, version, tmp, timeout):
+      return False, f"could not clone recovery release v{version}"
+    if not _harden_tree(tmp):
+      return False, "could not harden the pulled copy (chown/chmod failed)"
+    ok, reason = _validate_pulled(tmp)
+    if not ok:
+      return False, reason
+    _swap_into_live(tmp)
+    log.info("pulled recovery v%s into %s", version, LIVE_DIR)
+    return True, version
+  except Exception as exc:  # noqa: BLE001 — never propagate into a request
+    log.error("recovery pull failed: %s", exc)
+    return False, f"pull failed: {exc}"
+  finally:
+    # If tmp still exists, the swap never consumed it (any early return or
+    # error), so remove it — a failed pull must leave nothing behind.
+    if tmp.exists():
+      shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
