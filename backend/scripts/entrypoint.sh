@@ -216,6 +216,13 @@ _platform_bootstrap() {
     git -C /data/platform config user.email 'agent@mobius' &&
     git -C /data/platform branch -f upstream HEAD
   " || return 1
+  su -s /bin/sh mobius -c "
+    cd /data/platform/frontend 2>/dev/null || exit 0
+    [ -e node_modules ] || [ -L node_modules ] ||
+      ln -s /app/shell-src/node_modules node_modules || true
+    mkdir -p dist 2>/dev/null || true
+    cp -a /app/static/. dist/ 2>/dev/null || true
+  " || true
   _build_sha=${BUILD_SHA:-unknown}
   if [ "$_build_sha" != "unknown" ]; then
     su -s /bin/sh mobius -c \

@@ -236,11 +236,26 @@ async def lifespan(app):
   # failure must not crash lifespan.
   _observer = None
   _handler = None
+  _frontend_observer = None
+  _frontend_handler = None
   try:
     from app.app_watcher import start_watcher
     _observer, _handler = start_watcher(_asyncio.get_running_loop())
   except Exception as exc:
     _log.error("start_watcher failed: %s", exc, exc_info=True)
+  # Start the whole-repo frontend watcher when /data/platform is active.
+  # Wrapped separately from app_watcher: a broken shell build path must not
+  # disable mini-app recompiles or crash lifespan.
+  try:
+    from pathlib import Path as _Path
+    _frontend_src = _Path("/data/platform/frontend/src")
+    if _frontend_src.is_dir():
+      from app.frontend_watcher import start_watcher as start_frontend_watcher
+      _frontend_observer, _frontend_handler = start_frontend_watcher(
+        _asyncio.get_running_loop(),
+      )
+  except Exception as exc:
+    _log.error("start_frontend_watcher failed: %s", exc, exc_info=True)
   try:
     yield
   finally:
@@ -259,6 +274,13 @@ async def lifespan(app):
         _handler.close()
       except Exception as exc:
         _log.error("watcher handler.close failed: %s", exc, exc_info=True)
+    if _frontend_handler is not None:
+      try:
+        _frontend_handler.close()
+      except Exception as exc:
+        _log.error(
+          "frontend watcher handler.close failed: %s", exc, exc_info=True,
+        )
     if _observer is not None:
       # Split stop/join into independent try blocks so a stop()
       # failure doesn't skip join() — otherwise the watchdog thread
@@ -273,6 +295,19 @@ async def lifespan(app):
         _observer.join(timeout=2)
       except Exception as exc:
         _log.error("watcher observer.join failed: %s", exc, exc_info=True)
+    if _frontend_observer is not None:
+      try:
+        _frontend_observer.stop()
+      except Exception as exc:
+        _log.error(
+          "frontend watcher observer.stop failed: %s", exc, exc_info=True,
+        )
+      try:
+        _frontend_observer.join(timeout=2)
+      except Exception as exc:
+        _log.error(
+          "frontend watcher observer.join failed: %s", exc, exc_info=True,
+        )
 
 settings = get_settings()
 
@@ -653,10 +688,10 @@ def root_redirect():
 
 
 # -- Frontend static files (single-container mode) ---------------------
-# Prefer the agent-editable build at /data/shell/dist/ if it exists and
-# is complete (both assets/ and index.html must be present).
+# Prefer the agent-editable whole-repo build at /data/platform/frontend/dist/
+# if it exists and is complete (both assets/ and index.html must be present).
 # Fall back to the baked-in build at /app/static/ on any error.
-_live_dir = Path(settings.data_dir) / "shell" / "dist"
+_live_dir = Path(settings.data_dir) / "platform" / "frontend" / "dist"
 _baked_dir = Path(__file__).parent.parent / "static"
 
 
@@ -996,12 +1031,12 @@ if _static_dir.is_dir():
         strip_range(request)
       return FileResponse(str(file), headers=headers)
     # _static_dir resolution is all-or-nothing at startup — when the
-    # agent's live build (/data/shell/dist) is selected, any file
+    # agent's live build (/data/platform/frontend/dist) is selected, any file
     # that lives ONLY in the baked build (/app/static) would
     # otherwise fall through to the HTML response. /vendor/three/*
     # is the canonical example: the npm-install vendor copy lands in
     # /app/static at image build time, but Vite doesn't include
-    # vendor in /data/shell/dist. Falling back to the baked dir for
+    # vendor in /data/platform/frontend/dist. Falling back to the baked dir for
     # files-not-in-live keeps mini-app imports working without
     # forcing the rebuild script to mirror the entire vendor tree.
     if _static_dir != _baked_dir and path != "index.html":
