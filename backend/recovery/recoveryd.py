@@ -360,18 +360,23 @@ def _live_attempts() -> int:
     return 0
 
 
-def _bump_live_attempts() -> None:
-  """Increments the persisted live-copy start count (best-effort).
+def _bump_live_attempts() -> bool:
+  """Increments the persisted live-copy start count. Returns whether it stuck.
 
   Ensures the recoveryd-only volume exists first so the very first bump
-  (before any pull created it) still lands. Attempts tracking is best-effort:
-  any write failure is swallowed so it can never crash the launcher.
+  (before any pull created it) still lands. Returns True when the higher
+  count was durably written, False on any write failure. The caller uses a
+  False return to fail TOWARD the baked floor: if the crash-loop counter
+  cannot be persisted (e.g. ENOSPC), an untracked live-copy start could loop
+  forever, so the launcher declines the live copy rather than run it blind.
   """
   try:
     os.makedirs(RECOVERY_LIVE_ROOT, exist_ok=True)
     _atomic_write(ATTEMPTS_FILE, str(_live_attempts() + 1))
+    return True
   except OSError as exc:
     log.warning("could not bump live-attempts counter: %s", exc)
+    return False
 
 
 def _reset_live_attempts() -> None:
@@ -441,12 +446,17 @@ def _maybe_reexec_into_run_dir() -> None:
   # Preserve the interpreter's `-P` hardening (drops the script dir from
   # sys.path[0]) and pass any extra argv through unchanged.
   argv = [sys.executable, "-P", target, *sys.argv[1:]]
-  os.environ[_EXEC_SENTINEL_ENV] = "1"
   # Count this live-copy start BEFORE handing off. execv never returns, and
   # if the live copy crashes before its serve loop resets the counter the
   # bump persists across the container restart, so after _MAX_LIVE_ATTEMPTS
-  # resolve_run_dir quarantines to the baked floor.
-  _bump_live_attempts()
+  # resolve_run_dir quarantines to the baked floor. If the bump cannot be
+  # persisted, decline the live copy and run baked in-place — an untracked
+  # start could otherwise crash-loop forever with no way to reach the floor.
+  if not _bump_live_attempts():
+    log.warning("launcher: cannot persist attempts counter — running baked "
+                "floor instead of the live copy")
+    return
+  os.environ[_EXEC_SENTINEL_ENV] = "1"
   log.info("launcher: re-exec into trusted live copy at %s", run_dir)
   os.execv(sys.executable, argv)
 
