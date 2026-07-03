@@ -83,6 +83,32 @@ def _init_upstream(tmp_path: Path, tags) -> str:
   return f"file://{bare}"
 
 
+def _init_recovery_upstream(tmp_path: Path, version: str, *,
+                            body: str = "# recovery live\nprint('ok')\n") -> str:
+  """Creates a bare upstream repo carrying a real recoveryd.py + VERSION,
+  tagged v<version>, and returns its file:// URL.
+
+  pull_latest_recovery clones the release tag, so the fixture repo must
+  contain the files a real recovery release has (an entrypoint + a VERSION),
+  not just the placeholder VERSION `_init_upstream` uses for tag-listing.
+  """
+  bare = tmp_path / "upstream.git"
+  _run_git("init", "--bare", "-q", str(bare))
+  work = tmp_path / "upstream-work"
+  _run_git("init", "-q", str(work))
+  _run_git("-C", str(work), "config", "user.email", "t@example.com")
+  _run_git("-C", str(work), "config", "user.name", "Test")
+  (work / "recoveryd.py").write_text(body, encoding="utf-8")
+  (work / "VERSION").write_text(f"{version}\n", encoding="utf-8")
+  _run_git("-C", str(work), "add", "-A")
+  _run_git("-C", str(work), "commit", "-q", "-m", "release")
+  _run_git("-C", str(work), "tag", f"v{version}")
+  _run_git("-C", str(work), "remote", "add", "origin", str(bare))
+  _run_git("-C", str(work), "push", "-q", "origin", "HEAD")
+  _run_git("-C", str(work), "push", "-q", "origin", "--tags")
+  return f"file://{bare}"
+
+
 def _trusted_live(recoveryd, monkeypatch, version: str | None) -> Path:
   """Populates LIVE_DIR with a recoveryd.py (+ optional VERSION) and makes
   ownership look root-owned (0644) so bundle_is_trusted passes and
@@ -234,3 +260,111 @@ def test_update_available_false_when_offline(recoveryd, monkeypatch, tmp_path):
   monkeypatch.setenv("RECOVERY_UPSTREAM_URL_TEST", f"file://{missing}")
   monkeypatch.setattr(recoveryd, "running_version", lambda: "0.1.0")
   assert recoveryd.update_available() is False
+
+
+# -- Task 3.1: pull_latest_recovery ----------------------------------------
+
+def _as_root_with_stubbed_harden(recoveryd, monkeypatch) -> None:
+  """Makes pull_latest_recovery runnable from the non-root test process.
+
+  The test user cannot chown to root, so stub the privileged harden step and
+  make ownership read as root via the same _uid_and_mode seam the launcher
+  tests use. This exercises the real clone -> validate -> atomic-swap
+  orchestration with only the two genuinely-privileged operations simulated.
+  """
+  monkeypatch.setattr(recoveryd.os, "geteuid", lambda: 0)
+  monkeypatch.setattr(recoveryd, "_harden_tree", lambda p: True)
+  monkeypatch.setattr(recoveryd, "_uid_and_mode", lambda p: (0, 0o644))
+
+
+def test_pull_latest_recovery_success(recoveryd, monkeypatch, tmp_path):
+  url = _init_recovery_upstream(tmp_path / "up", "0.2.0")
+  monkeypatch.setenv("RECOVERY_UPSTREAM_URL_TEST", url)
+  _as_root_with_stubbed_harden(recoveryd, monkeypatch)
+  ok, ver = recoveryd.pull_latest_recovery()
+  assert ok is True, ver
+  assert ver == "0.2.0"
+  live = recoveryd.LIVE_DIR
+  assert (live / "recoveryd.py").is_file()
+  assert (live / "VERSION").read_text().strip() == "0.2.0"
+  # The frozen live copy carries no .git, and the swap leaves no leftovers.
+  assert not (live / ".git").exists()
+  assert not recoveryd.LIVE_DIR_OLD.exists()
+  assert list(recoveryd.DATA_DIR.glob(".recovery-pull-*")) == []
+
+
+def test_pull_swaps_over_existing_live(recoveryd, monkeypatch, tmp_path):
+  live = recoveryd.LIVE_DIR
+  live.mkdir(parents=True)
+  (live / "recoveryd.py").write_text("# old live\n")
+  (live / "VERSION").write_text("0.1.0\n")
+  url = _init_recovery_upstream(tmp_path / "up", "0.2.0")
+  monkeypatch.setenv("RECOVERY_UPSTREAM_URL_TEST", url)
+  _as_root_with_stubbed_harden(recoveryd, monkeypatch)
+  ok, ver = recoveryd.pull_latest_recovery()
+  assert ok is True, ver
+  assert (live / "VERSION").read_text().strip() == "0.2.0"
+  assert not recoveryd.LIVE_DIR_OLD.exists()
+
+
+def test_pull_refuses_when_not_root(recoveryd, monkeypatch, tmp_path):
+  url = _init_recovery_upstream(tmp_path / "up", "0.2.0")
+  monkeypatch.setenv("RECOVERY_UPSTREAM_URL_TEST", url)
+  monkeypatch.setattr(recoveryd.os, "geteuid", lambda: 1000)
+  ok, reason = recoveryd.pull_latest_recovery()
+  assert ok is False
+  assert "root" in reason.lower()
+  # Nothing was cloned or swapped when we refused up front.
+  assert not recoveryd.LIVE_DIR.exists()
+
+
+def test_pull_no_upstream_leaves_live_intact(recoveryd, monkeypatch, tmp_path):
+  live = recoveryd.LIVE_DIR
+  live.mkdir(parents=True)
+  (live / "recoveryd.py").write_text("# prior live\n")
+  (live / "VERSION").write_text("0.1.0\n")
+  missing = tmp_path / "nonexistent.git"
+  monkeypatch.setenv("RECOVERY_UPSTREAM_URL_TEST", f"file://{missing}")
+  monkeypatch.setattr(recoveryd.os, "geteuid", lambda: 0)
+  ok, reason = recoveryd.pull_latest_recovery()
+  assert ok is False
+  # A failed pull never touches the existing live copy.
+  assert (live / "recoveryd.py").read_text() == "# prior live\n"
+  assert (live / "VERSION").read_text() == "0.1.0\n"
+
+
+def test_pull_rejects_bundle_without_entrypoint(recoveryd, monkeypatch,
+                                                tmp_path):
+  # Upstream tagged v0.2.0 but its tree has no recoveryd.py -> validation
+  # fails and nothing is swapped in.
+  url = _init_upstream(tmp_path / "up", ["v0.2.0"])
+  monkeypatch.setenv("RECOVERY_UPSTREAM_URL_TEST", url)
+  _as_root_with_stubbed_harden(recoveryd, monkeypatch)
+  ok, reason = recoveryd.pull_latest_recovery()
+  assert ok is False
+  assert not recoveryd.LIVE_DIR.exists()
+  assert list(recoveryd.DATA_DIR.glob(".recovery-pull-*")) == []
+
+
+def test_pull_rejects_unparseable_entrypoint(recoveryd, monkeypatch, tmp_path):
+  # A recoveryd.py that cannot even be parsed must never become the live
+  # copy (a corrupt download that would crash-loop at import).
+  url = _init_recovery_upstream(tmp_path / "up", "0.2.0", body="def (:\n")
+  monkeypatch.setenv("RECOVERY_UPSTREAM_URL_TEST", url)
+  _as_root_with_stubbed_harden(recoveryd, monkeypatch)
+  ok, reason = recoveryd.pull_latest_recovery()
+  assert ok is False
+  assert not recoveryd.LIVE_DIR.exists()
+
+
+def test_pull_rejects_untrusted_clone(recoveryd, monkeypatch, tmp_path):
+  # Even with the harden step stubbed, if the tree still reads as
+  # agent-owned the trust check must reject it — nothing is swapped in.
+  url = _init_recovery_upstream(tmp_path / "up", "0.2.0")
+  monkeypatch.setenv("RECOVERY_UPSTREAM_URL_TEST", url)
+  monkeypatch.setattr(recoveryd.os, "geteuid", lambda: 0)
+  monkeypatch.setattr(recoveryd, "_harden_tree", lambda p: True)
+  monkeypatch.setattr(recoveryd, "_uid_and_mode", lambda p: (1000, 0o644))
+  ok, reason = recoveryd.pull_latest_recovery()
+  assert ok is False
+  assert not recoveryd.LIVE_DIR.exists()
