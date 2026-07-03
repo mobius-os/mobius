@@ -230,12 +230,54 @@ validates it, and uses it as the catalog source, **falling back to the baked
 `mobius-os/app-<name>` (manifest + `index.jsx` + `icon.png`) → append an entry to
 `catalog.json` → it appears in every instance's store on next open, no store
 redeploy. `api.js:fetchCatalog` does the shape/https validation; the trusted-host
-warning + backend SSRF defenses remain the security boundary. Store 1.8.0.
+warning + backend SSRF defenses remain the security boundary. **Hardened after an
+adversarial review (store 1.8.1):** the registry is now MERGED over the baked
+`CATALOG` (never replaced) so a stale/partial registry can't drop an installed
+app; `raw_base` must share the `manifest_url` host (no benign-manifest / evil-
+source split); ids are de-duped; and `core` (platform) status comes only from the
+baked list — the registry can't make Memory/Reflection installable.
+
+### 5.3 ⚪ **S** — Reconcile `core-apps/{tasks,skills}` with the catalog repos (OPEN)
+A parallel session added `core-apps/{tasks,skills}` manifests and classified them
+as **native** core apps (there was no catalog repo at the time) to unbreak CI.
+Now they ARE catalog apps (`app-tasks`/`app-skills`), so the native copies in
+`core-apps/` are redundant and will drift from the repos. Options: **(A)** remove
+`core-apps/{tasks,skills}` entirely (they install on demand from the store, no
+need to bake them like Memory/Reflection — cleanest), or **(B)** reclassify them
+as catalog-synced snapshots in `core-apps/SOURCES` (baked + pinned, like the
+others). Recommend A. Coordinate — the sibling session is active on `core-apps/`.
+
+---
+
+## 6. Review-round follow-ups (logged, low priority)
+
+From the 2026-07-03 adversarial review pass. All are LOW unless noted; the MEDIUMs
+and the registry hardening were fixed in-session.
+
+- ⚪ **Tasks** — done/cancelled cards render under a header literally titled
+  "Scheduled" (§3.1); a reminder with no `id` is dropped; a pending reminder with
+  no `due_at` stays "Scheduled" forever. Relabel the section / add fallbacks.
+- ⚪ **Skills** — fetches every skill body up front (`Promise.all`) just for the
+  one-line description (fine for a handful; lazy-load if the set grows);
+  `setState`-after-unmount warning (add an abort/mounted guard).
+- ⚪ **Store registry** — a registry that repoints an app to a new repo/branch
+  URL while keeping the manifest id breaks the install-vs-update identity match
+  (offers a fresh install → dup); keep catalog URLs immutable or add id aliases.
+  Skeleton count is still `CATALOG.length` (minor layout jump if the registry
+  differs). Both LOW.
+- ⚪ **Compiler** — `updated_at` is written naive-UTC via `timeutil.now_naive_utc()`
+  while the model default/`onupdate` use aware `datetime.now(UTC)`; harmless on a
+  UTC container, but the model default should also be naive-UTC for consistency.
 
 ---
 
 ## Changelog
 
+- **2026-07-03 (later)** — Adversarial review round (Claude + Codex). Hardened the
+  dynamic registry (§5.2, store 1.8.1). Fixed: Skills fence-aware title/description
+  parse + `cross_app_access: none` (v1.0.1); Tasks `cross_app_access: none`
+  (v1.0.1); Editor untracked-directory porcelain handling (v0.4.8). Logged the
+  remaining LOW findings (§6) and the `core-apps` reconciliation (§5.3).
 - **2026-07-03** — Doc created. Reviewed Hermex chat rendering, Tasks, Skills, and
   Workspace. Shipped: Tasks + Skills as **catalog apps** (`mobius-os/app-tasks`,
   `app-skills`), Editor git-chip polish (§2.1, to `app-editor`), the watcher
