@@ -241,9 +241,40 @@ async def lifespan(app):
     _observer, _handler = start_watcher(_asyncio.get_running_loop())
   except Exception as exc:
     _log.error("start_watcher failed: %s", exc, exc_info=True)
+  # Runtime liveness watchdog. reconcile_interrupted_chats only runs at boot,
+  # so a turn that leaves its run marker set without a process restart (a
+  # FAILED_LEAVE_MARKER terminal, or the late-promote gap) would hold the chat
+  # "running" forever and make the app look permanently busy. This periodic
+  # sweep clears such orphaned markers between boots. Wrapped so a sweep failure
+  # can't kill the loop; the loop is cancelled on shutdown.
+  _wedged_sweep_task = None
+  try:
+    from app.chat import sweep_wedged_run_markers
+    from app.database import SessionLocal as _SweepSession
+
+    async def _wedged_marker_loop():
+      while True:
+        await _asyncio.sleep(60)
+        try:
+          _sw_db = _SweepSession()
+          try:
+            await sweep_wedged_run_markers(_sw_db)
+          finally:
+            _sw_db.close()
+        except _asyncio.CancelledError:
+          raise
+        except Exception as _exc:
+          _log.error("wedged-marker sweep failed: %s", _exc, exc_info=True)
+
+    _wedged_sweep_task = _asyncio.create_task(_wedged_marker_loop())
+  except Exception as exc:
+    _log.error("wedged-marker sweep wiring failed: %s", exc, exc_info=True)
   try:
     yield
   finally:
+    # Stop the liveness watchdog before the writer drains.
+    if _wedged_sweep_task is not None:
+      _wedged_sweep_task.cancel()
     # Drain + join the chat-writer actor so any in-flight persistence
     # completes before the process exits. Wrapped: a stop failure must
     # not mask the rest of shutdown.

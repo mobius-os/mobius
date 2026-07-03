@@ -106,6 +106,13 @@ class TerminalDisposition(enum.Enum):
   # timed out) OR a terminal lock-acquisition timeout. The marker is LEFT
   # set so reconciliation recovers the incomplete turn + queued messages;
   # no continuation is scheduled.
+  LIMIT_PARKED = "limit_parked"
+  # The turn ended on a provider rate/usage-limit kill. The marker is cleared
+  # (the turn is over) but the pending queue is deliberately NOT drained —
+  # promoting it would fire every queued message straight into the same limit
+  # (the "limit storm"). The queue is preserved and self-heals on the user's
+  # next send via the stale-pending drain. No auto-resume: the user resends
+  # (or waits for the limit to reset) themselves.
 
 
 _locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (

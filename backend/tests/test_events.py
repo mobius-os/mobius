@@ -27,6 +27,67 @@ def test_text_events_concatenate():
   assert blocks[0]["content"] == "hello world"
 
 
+def test_text_final_repairs_truncated_stream():
+  # A dropped delta left the persisted text truncated ("I "); the authoritative
+  # text_final replaces it with the complete text (not append — no doubling).
+  blocks = []
+  process_event({"type": "text", "content": "I "}, blocks)
+  process_event({"type": "text_final", "content": "I am here."}, blocks)
+  assert len(blocks) == 1
+  assert blocks[0] == {"type": "text", "content": "I am here."}
+
+
+def test_text_final_idempotent_when_nothing_lost():
+  blocks = []
+  process_event({"type": "text", "content": "hello world"}, blocks)
+  changed = process_event(
+    {"type": "text_final", "content": "hello world"}, blocks
+  )
+  assert changed is False
+  assert blocks == [{"type": "text", "content": "hello world"}]
+
+
+def test_text_final_replaces_only_trailing_text_item():
+  # text, tool, text ordering — text_final for the second item replaces the
+  # trailing text block, leaving the first text and the tool intact.
+  blocks = []
+  process_event({"type": "text", "content": "first"}, blocks)
+  process_event({"type": "tool_start", "tool": "Bash", "input": "ls"}, blocks)
+  process_event({"type": "text", "content": "seco"}, blocks)
+  process_event({"type": "text_final", "content": "second"}, blocks)
+  assert [b["type"] for b in blocks] == ["text", "tool", "text"]
+  assert blocks[0]["content"] == "first"
+  assert blocks[2]["content"] == "second"
+
+
+def test_text_final_materialises_when_all_deltas_lost():
+  # Every delta for the item was dropped, so there's no trailing text block —
+  # the authoritative text is materialised as a new block rather than lost.
+  blocks = []
+  process_event({"type": "tool_start", "tool": "Bash", "input": "ls"}, blocks)
+  process_event({"type": "tool_end"}, blocks)
+  process_event({"type": "text_final", "content": "recovered text"}, blocks)
+  assert blocks[-1] == {"type": "text", "content": "recovered text"}
+
+
+def test_text_final_replaces_pending_boundary():
+  # A text_boundary awaiting text, then text_final — the boundary becomes the
+  # authoritative text block.
+  blocks = [{"type": "text", "content": "a"}, {"type": "text_boundary"}]
+  process_event({"type": "text_final", "content": "b"}, blocks)
+  assert blocks == [
+    {"type": "text", "content": "a"},
+    {"type": "text", "content": "b"},
+  ]
+
+
+def test_text_final_empty_is_noop():
+  blocks = [{"type": "text", "content": "kept"}]
+  changed = process_event({"type": "text_final", "content": ""}, blocks)
+  assert changed is False
+  assert blocks == [{"type": "text", "content": "kept"}]
+
+
 def test_tool_start_creates_block():
   blocks = []
   process_event({"type": "tool_start", "tool": "Bash", "input": "ls"}, blocks)

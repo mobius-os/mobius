@@ -761,12 +761,25 @@ def test_dispatch_non_skill_tool_emits_no_skill_loaded(monkeypatch):
   assert [e for e in bus.events if e["type"] == "skill_loaded"] == []
 
 
-def test_dispatch_assistant_text_block_is_silent():
-  """TextBlock is a snapshot duplicate of streamed text_delta — must
-  not re-emit as text to avoid doubling the content."""
+def test_dispatch_assistant_text_block_emits_text_final():
+  """TextBlock is the AUTHORITATIVE full text of the just-completed item; it is
+  emitted as a replace-semantics `text_final` (NOT a plain `text`, which the
+  reducer would concatenate and double the content). events.py overwrites the
+  streamed block with it, repairing any dropped delta."""
   bus = _Bus()
   msg = AssistantMessage(
     content=[TextBlock(text="hello")],
+    model="claude-opus",
+  )
+  dispatch_sdk_message(msg, bus, None)
+  assert bus.events == [{"type": "text_final", "content": "hello"}]
+
+
+def test_dispatch_assistant_empty_text_block_is_silent():
+  """An empty TextBlock emits nothing — no point publishing a no-op replace."""
+  bus = _Bus()
+  msg = AssistantMessage(
+    content=[TextBlock(text="")],
     model="claude-opus",
   )
   dispatch_sdk_message(msg, bus, None)

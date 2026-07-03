@@ -13,12 +13,12 @@ from typing import Optional
 
 log = logging.getLogger("moebius.broadcast")
 
-# Hard cap on event_log entries. A long turn with rapid text-delta events
+# Hard cap on event_log entries. A long turn with rapid streaming-text events
 # would otherwise grow the log without bound, consuming memory for the
 # process lifetime of that broadcast (30s TTL after completion). When the
 # cap is reached the OLDEST event is dropped so the tail (most recent
 # state) is preserved for reconnect catch-up. The cap is generous — a
-# typical turn produces far fewer events — and coalescing text-deltas below
+# typical turn produces far fewer events — and coalescing text chunks below
 # keeps the effective count well under it.
 _EVENT_LOG_MAX = 10_000
 
@@ -87,32 +87,37 @@ class ChatBroadcast:
   def publish(self, event: dict):
     """Appends event to log and pushes to all subscriber queues.
 
-    Coalesces adjacent text-delta events in the log to bound memory use
-    during long turns with many rapid deltas. The live push to subscribers
+    Coalesces adjacent streaming-text events in the log to bound memory use
+    during long turns with many rapid chunks. The live push to subscribers
     is always the raw event — coalescing is log-only so in-flight streaming
-    clients receive every delta verbatim. A reconnecting client replays the
+    clients receive every chunk verbatim. A reconnecting client replays the
     coalesced log, which is semantically equivalent (same final text) with
     fewer entries.
 
     When the log reaches _EVENT_LOG_MAX the oldest entry is dropped to keep
     the cap. The tail (most recent state) is always preserved.
     """
-    # Coalesce: if the last log entry is also a text-delta for the same
-    # block index, merge the text rather than appending a new entry. This
-    # keeps the log size proportional to block count rather than character
-    # count.
+    # Coalesce: if the last log entry is also a streaming-text chunk, merge
+    # the content rather than appending a new entry. This keeps the log size
+    # proportional to contiguous-text-run count rather than character count.
+    # The runners publish streaming text as {"type": "text", "content": ...}
+    # (see claude_sdk_runner / codex_sdk_runner and the wire contract in
+    # CLAUDE.md); there is no "text_delta"/"index" event on the wire, so we
+    # key on the real shape. A text_boundary event breaks the run, so distinct
+    # assistant text blocks stay separate log entries.
     event_type = event.get("type")
     if (
-      event_type == "text_delta"
+      event_type == "text"
       and self.event_log
-      and self.event_log[-1].get("type") == "text_delta"
-      and self.event_log[-1].get("index") == event.get("index")
+      and self.event_log[-1].get("type") == "text"
     ):
       # Merge into the last entry in-place (the entry is already in the log;
-      # mutating it here is safe — subscribers got the original delta live and
+      # mutating it here is safe — subscribers got the original chunk live and
       # reconnect catch-up replays the coalesced form).
       prev = self.event_log[-1]
-      self.event_log[-1] = dict(prev, text=(prev.get("text") or "") + (event.get("text") or ""))
+      self.event_log[-1] = dict(
+        prev, content=(prev.get("content") or "") + (event.get("content") or "")
+      )
     else:
       self.event_log.append(event)
       # Drop the oldest entry when the cap is exceeded to bound memory.
