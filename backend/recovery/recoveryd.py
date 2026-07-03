@@ -170,6 +170,16 @@ LIVE_DIR = DATA_DIR / "recovery-live"
 # as LIVE_DIR (both under DATA_DIR) so the swap is a pure rename.
 LIVE_DIR_OLD = DATA_DIR / "recovery-live.old"
 
+# Persistent crash-loop guard for the live copy. recoveryd (root) bumps this
+# counter just before it execs into the live copy and resets it once the live
+# copy reaches a bound, serving state. Because it lives on the /data volume it
+# SURVIVES a container restart — unlike the in-process exec sentinel — so a
+# trusted-but-crashing live copy that dies before serving cannot loop past the
+# baked floor forever: after _MAX_LIVE_ATTEMPTS the launcher quarantines to
+# baked. Written by recoveryd as root.
+ATTEMPTS_FILE = DATA_DIR / ".recovery-live-attempts"
+_MAX_LIVE_ATTEMPTS = 3
+
 # Valid Tier-1 restore modes. Kept in lockstep with the entrypoint's
 # `.recover-pending` handler (entrypoint.sh ~909) and recovery_restore.sh.
 _RESTORE_MODES = {"platform", "platform-baked"}
@@ -301,6 +311,47 @@ def _assert_self_integrity() -> None:
 _EXEC_SENTINEL_ENV = "MOBIUS_RECOVERY_EXECED"
 
 
+def _live_attempts() -> int:
+  """Returns the persisted live-copy start count, or 0 when unreadable.
+
+  A missing, empty, or garbage counter reads as 0 rather than raising, so a
+  corrupt attempts file can never wedge the launcher — the worst case is a
+  reset budget, which only ever gives the live copy MORE chances, never
+  fewer than the safe fallback would allow.
+  """
+  try:
+    return int(ATTEMPTS_FILE.read_text(encoding="utf-8").strip())
+  except (OSError, ValueError):
+    return 0
+
+
+def _bump_live_attempts() -> None:
+  """Increments the persisted live-copy start count (best-effort)."""
+  try:
+    _atomic_write(ATTEMPTS_FILE, str(_live_attempts() + 1))
+  except OSError as exc:
+    log.warning("could not bump live-attempts counter: %s", exc)
+
+
+def _reset_live_attempts() -> None:
+  """Clears the live-copy start count (best-effort)."""
+  try:
+    _atomic_write(ATTEMPTS_FILE, "0")
+  except OSError as exc:
+    log.warning("could not reset live-attempts counter: %s", exc)
+
+
+def _running_live_copy() -> bool:
+  """True when this process is running from the /data live copy, not baked.
+
+  After the launcher execs into LIVE_DIR, the successor's _SELF_DIR resolves
+  to LIVE_DIR; a baked or quarantined run does not. main() uses this to reset
+  the crash-loop counter only on a genuine live-copy start (never on the
+  baked fallback that a quarantine put there).
+  """
+  return os.path.realpath(str(_SELF_DIR)) == os.path.realpath(str(LIVE_DIR))
+
+
 def resolve_run_dir() -> str:
   """Returns the directory recoveryd should run from.
 
@@ -310,7 +361,15 @@ def resolve_run_dir() -> str:
   Otherwise returns the baked self dir, which is the guaranteed
   always-present fallback. Any reason to distrust the live copy resolves
   to baked, so no path can leave recovery unrunnable.
+
+  Crash-loop quarantine: once the live copy has been started
+  _MAX_LIVE_ATTEMPTS times without reaching a healthy serve loop (which
+  resets the counter), it is presumed broken and the baked floor is returned
+  even if the live copy still passes the trust check. This is what stops a
+  trusted-but-crashing copy from looping forever across container restarts.
   """
+  if _live_attempts() >= _MAX_LIVE_ATTEMPTS:
+    return str(_SELF_DIR)
   if (LIVE_DIR / "recoveryd.py").is_file() and bundle_is_trusted(LIVE_DIR):
     return str(LIVE_DIR)
   return str(_SELF_DIR)
@@ -337,6 +396,11 @@ def _maybe_reexec_into_run_dir() -> None:
   # sys.path[0]) and pass any extra argv through unchanged.
   argv = [sys.executable, "-P", target, *sys.argv[1:]]
   os.environ[_EXEC_SENTINEL_ENV] = "1"
+  # Count this live-copy start BEFORE handing off. execv never returns, and
+  # if the live copy crashes before its serve loop resets the counter the
+  # bump persists across the container restart, so after _MAX_LIVE_ATTEMPTS
+  # resolve_run_dir quarantines to the baked floor.
+  _bump_live_attempts()
   log.info("launcher: re-exec into trusted live copy at %s", run_dir)
   os.execv(sys.executable, argv)
 
@@ -616,6 +680,10 @@ def pull_latest_recovery(timeout: float = 120) -> tuple[bool, str]:
     if not ok:
       return False, reason
     _swap_into_live(tmp)
+    # A fresh pull deserves a fresh crash-loop try budget: clear any attempts
+    # accrued by a previous (now-replaced) live copy so the new one gets its
+    # full _MAX_LIVE_ATTEMPTS before quarantine.
+    _reset_live_attempts()
     log.info("pulled recovery v%s into %s", version, LIVE_DIR)
     return True, version
   except Exception as exc:  # noqa: BLE001 — never propagate into a request
@@ -981,6 +1049,14 @@ def main() -> None:
   server = ThreadingHTTPServer(("0.0.0.0", RECOVERY_PORT), _Handler)
   # Daemonic worker threads so a hung handler can't block shutdown.
   server.daemon_threads = True
+  # Reaching a bound server from the live copy means it started cleanly, so
+  # clear the crash-loop counter and give it a fresh budget. Guard on
+  # running-as-the-live-copy so a baked run (including the quarantine
+  # fallback) never resets the counter that put it on baked in the first
+  # place. Done after the bind succeeds and before serve_forever so a bind
+  # failure does not count as a healthy start.
+  if _running_live_copy():
+    _reset_live_attempts()
   log.info(
     "recoveryd listening on 0.0.0.0:%d (platform health: %s)",
     RECOVERY_PORT, PLATFORM_HEALTH_URL,
