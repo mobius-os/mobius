@@ -36,11 +36,16 @@ def recoveryd(monkeypatch, tmp_path):
   BEFORE re-importing so module-scope path constants (DATA_DIR, LIVE_DIR)
   pick it up. RECOVERY_SKIP_INTEGRITY=1 bypasses only the SELF check;
   bundle_is_trusted (which the launcher tests exercise) ignores it.
+  RECOVERY_LIVE_ROOT points the live copy at a tmp dir that is a SIBLING of
+  DATA_DIR (not under it), mirroring the prod split where the live copy lives
+  on a recoveryd-only volume separate from shared /data.
   """
-  data_dir = tmp_path
+  data_dir = tmp_path / "data"
+  data_dir.mkdir()
   (data_dir / "db").mkdir()
   db_path = data_dir / "db" / "ultimate.db"
   monkeypatch.setenv("DATA_DIR", str(data_dir))
+  monkeypatch.setenv("RECOVERY_LIVE_ROOT", str(tmp_path / "recovery-live"))
   monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
   monkeypatch.setenv("RECOVERY_SKIP_INTEGRITY", "1")
   # Own the exec-loop sentinel so any value the code sets during a test is
@@ -353,6 +358,7 @@ def test_live_attempts_bump_and_reset(recoveryd):
 def test_live_attempts_zero_on_garbage(recoveryd):
   # An unreadable/garbage counter reads as 0 rather than raising, so a
   # corrupt attempts file can never wedge the launcher.
+  recoveryd.RECOVERY_LIVE_ROOT.mkdir(parents=True, exist_ok=True)
   recoveryd.ATTEMPTS_FILE.write_text("not-an-int")
   assert recoveryd._live_attempts() == 0
 

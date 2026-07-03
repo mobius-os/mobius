@@ -100,6 +100,7 @@ _assert_platform_not_importable()
 
 
 # Now safe to import the rest of stdlib + our frozen siblings.
+import fcntl  # noqa: E402
 import html  # noqa: E402
 import json  # noqa: E402
 import logging  # noqa: E402
@@ -154,30 +155,63 @@ LAST_BOOT = DATA_DIR / ".last-successful-boot"
 CLI_CREDS = DATA_DIR / "cli-auth" / "claude"
 
 # The directory this running bundle lives in. Baked -> /app/recovery;
-# after a launcher hand-off (see resolve_run_dir) -> /data/recovery-live.
-# Mirrors the local `recovery_dir` computed in _scrub_sys_path, which runs
-# before this module constant is bound.
+# after a launcher hand-off (see resolve_run_dir) -> the live copy under
+# RECOVERY_LIVE_ROOT. Mirrors the local `recovery_dir` computed in
+# _scrub_sys_path, which runs before this module constant is bound.
 _SELF_DIR = Path(__file__).resolve().parent
 
-# The optional live copy on the persistent volume. It is preferred over
-# the baked floor ONLY when it passes bundle_is_trusted (see
-# resolve_run_dir); a fresh volume or an untrusted copy falls back to
-# baked, which is the guaranteed floor.
-LIVE_DIR = DATA_DIR / "recovery-live"
+# ---------------------------------------------------------------------------
+# The live-copy store — a DEDICATED, recoveryd-ONLY volume, NOT shared /data.
+#
+# SECURITY (root-escalation defense): recoveryd runs as ROOT and execs the
+# live copy by PATH. If the live copy lived on /data (agent-writable), the
+# agent — a non-root user with write access to /data — could win a TOCTOU
+# race: between the trust check and the exec, it renames the trusted,
+# root-owned live dir aside and renames an agent-owned dir into its place, so
+# execv loads AGENT code as root (its module-level body runs before any
+# self-integrity check). Owning the FILES root can't stop this, because
+# directory-entry replacement is governed by write permission on the PARENT,
+# and /data's parent must stay agent-writable by design.
+#
+# The fix is structural: put the entire live copy (code + its crash-loop
+# counter + the pull's temp/clone dirs) on a volume the AGENT'S CONTAINER
+# NEVER MOUNTS. With no filesystem path to it from the agent's side, the
+# agent cannot rename, unlink, or swap it at any level, and the TOCTOU window
+# closes completely. RECOVERY_LIVE_ROOT is env-overridable ONLY so tests can
+# point it at a tmp dir; the prod default is the real recoveryd-only mount
+# (see docker-compose.yml, where `recovery_live` is mounted into the recoveryd
+# service alone and the `app` service does not mount it). Auth/db/sentinels
+# stay on shared /data (recoveryd must exchange those with the platform);
+# ONLY the live recovery CODE + its attempts counter move here.
+# ---------------------------------------------------------------------------
+RECOVERY_LIVE_ROOT = Path(
+  os.environ.get("RECOVERY_LIVE_ROOT", "/recovery-live")
+)
+
+# The optional live copy on the recoveryd-only volume. It is preferred over
+# the baked floor ONLY when it passes bundle_is_trusted (see resolve_run_dir);
+# a fresh volume or an untrusted copy falls back to baked, the guaranteed
+# floor.
+LIVE_DIR = RECOVERY_LIVE_ROOT / "live"
 
 # The previous live copy is moved aside to this path during an atomic swap
 # (see _swap_into_live) and removed best-effort afterwards. Same filesystem
-# as LIVE_DIR (both under DATA_DIR) so the swap is a pure rename.
-LIVE_DIR_OLD = DATA_DIR / "recovery-live.old"
+# as LIVE_DIR (both under RECOVERY_LIVE_ROOT) so the swap is a pure rename.
+LIVE_DIR_OLD = RECOVERY_LIVE_ROOT / "live.old"
+
+# Serializes concurrent pulls (see pull_latest_recovery) via fcntl.flock so a
+# double-click can't race the swap. Lives on the recoveryd-only volume.
+_PULL_LOCK = RECOVERY_LIVE_ROOT / ".pull.lock"
 
 # Persistent crash-loop guard for the live copy. recoveryd (root) bumps this
 # counter just before it execs into the live copy and resets it once the live
-# copy reaches a bound, serving state. Because it lives on the /data volume it
-# SURVIVES a container restart — unlike the in-process exec sentinel — so a
-# trusted-but-crashing live copy that dies before serving cannot loop past the
-# baked floor forever: after _MAX_LIVE_ATTEMPTS the launcher quarantines to
-# baked. Written by recoveryd as root.
-ATTEMPTS_FILE = DATA_DIR / ".recovery-live-attempts"
+# copy reaches a bound, serving state. It lives on the recoveryd-only volume
+# (which persists across a container restart) — unlike the in-process exec
+# sentinel — so a trusted-but-crashing live copy that dies before serving
+# cannot loop past the baked floor forever: after _MAX_LIVE_ATTEMPTS the
+# launcher quarantines to baked. Written by recoveryd as root; kept off
+# /data so the agent cannot forge a low count to defeat the quarantine.
+ATTEMPTS_FILE = RECOVERY_LIVE_ROOT / ".attempts"
 _MAX_LIVE_ATTEMPTS = 3
 
 # Valid Tier-1 restore modes. Kept in lockstep with the entrypoint's
@@ -303,7 +337,8 @@ def _assert_self_integrity() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Launcher — prefer a trusted /data live copy over the baked floor.
+# Launcher — prefer a trusted live copy (on the recoveryd-only volume) over
+# the baked floor.
 # ---------------------------------------------------------------------------
 
 # Set in the environment right before os.execv so the re-exec'd process
@@ -326,23 +361,34 @@ def _live_attempts() -> int:
 
 
 def _bump_live_attempts() -> None:
-  """Increments the persisted live-copy start count (best-effort)."""
+  """Increments the persisted live-copy start count (best-effort).
+
+  Ensures the recoveryd-only volume exists first so the very first bump
+  (before any pull created it) still lands. Attempts tracking is best-effort:
+  any write failure is swallowed so it can never crash the launcher.
+  """
   try:
+    os.makedirs(RECOVERY_LIVE_ROOT, exist_ok=True)
     _atomic_write(ATTEMPTS_FILE, str(_live_attempts() + 1))
   except OSError as exc:
     log.warning("could not bump live-attempts counter: %s", exc)
 
 
 def _reset_live_attempts() -> None:
-  """Clears the live-copy start count (best-effort)."""
+  """Clears the live-copy start count (best-effort).
+
+  Ensures the recoveryd-only volume exists first; any write failure is
+  swallowed so a counter-write problem can never crash the launcher.
+  """
   try:
+    os.makedirs(RECOVERY_LIVE_ROOT, exist_ok=True)
     _atomic_write(ATTEMPTS_FILE, "0")
   except OSError as exc:
     log.warning("could not reset live-attempts counter: %s", exc)
 
 
 def _running_live_copy() -> bool:
-  """True when this process is running from the /data live copy, not baked.
+  """True when this process is running from the live copy, not baked.
 
   After the launcher execs into LIVE_DIR, the successor's _SELF_DIR resolves
   to LIVE_DIR; a baked or quarantined run does not. main() uses this to reset
@@ -377,7 +423,7 @@ def resolve_run_dir() -> str:
 
 def _maybe_reexec_into_run_dir() -> None:
   """Re-execs into the trusted live copy when it differs from the running
-  bundle, so a baked process hands off to a newer /data copy at startup.
+  bundle, so a baked process hands off to a newer live copy at startup.
 
   Guarded against an exec loop by the _EXEC_SENTINEL_ENV sentinel: it is
   set in the environment before os.execv, so the re-exec'd process sees
@@ -415,7 +461,7 @@ def running_version() -> str:
   """Returns the semver string of the currently-running recovery bundle.
 
   Reads the VERSION file from the running bundle dir (resolve_run_dir() —
-  the trusted /data live copy after a launcher hand-off, else the baked
+  the trusted live copy after a launcher hand-off, else the baked
   floor). Returns its trimmed contents, or "0.0.0" when the file is
   missing, unreadable, or blank. A bundle with no version is treated as
   the lowest possible version so any tagged upstream release looks newer.
@@ -536,10 +582,11 @@ def update_available() -> bool:
 
 # ---------------------------------------------------------------------------
 # Pull-and-run — recoveryd (as root) fetches the latest release into a
-# root-owned live copy on /data, validates it with the SAME trust check the
-# baked floor uses, and atomically swaps it in. The agent (non-root, /data
-# write) can delete the live copy (→ baked fallback) but can never forge a
-# root-owned one, so it cannot get its own code executed as root.
+# root-owned live copy on the recoveryd-ONLY volume (RECOVERY_LIVE_ROOT, which
+# the agent's container never mounts), validates it with the SAME trust check
+# the baked floor uses, and atomically swaps it in. Because the agent has no
+# path to that volume it cannot forge, swap, or delete the live copy, so it
+# cannot get its own code executed as root.
 # ---------------------------------------------------------------------------
 
 def _clone_release(url: str, version: str, dest: Path,
@@ -629,8 +676,8 @@ def _swap_into_live(tmp: Path) -> None:
   """Atomically moves the validated `tmp` tree into LIVE_DIR.
 
   os.rename is atomic within a filesystem (tmp and LIVE_DIR are both under
-  DATA_DIR by construction), so a concurrent reader (resolve_run_dir /
-  bundle_is_trusted) never observes a half-written LIVE_DIR: it sees the old
+  RECOVERY_LIVE_ROOT by construction), so a concurrent reader (resolve_run_dir
+  / bundle_is_trusted) never observes a half-written LIVE_DIR: it sees the old
   dir, then — for the brief window between the two renames — no LIVE_DIR at
   all (which resolve_run_dir treats as "run baked", the safe floor), then the
   new dir. There is never a partially-populated LIVE_DIR. The previous copy
@@ -650,14 +697,12 @@ def pull_latest_recovery(timeout: float = 120) -> tuple[bool, str]:
   """Pulls the latest upstream recovery release into a trusted LIVE_DIR.
 
   The security-critical apply path. Refuses unless running as root (only root
-  can produce the root-owned copy the trust check demands). Resolves the
-  latest release tag, clones it into a UNIQUE temp dir under DATA_DIR (same
-  filesystem as LIVE_DIR, so the swap is a pure rename), hardens it
-  (root-owned + not group/other-writable), then VALIDATES the temp copy
-  (trust check + entrypoint present + parses) BEFORE any swap. Only a fully
-  validated copy is atomically swapped into LIVE_DIR; any failure cleans up
-  the temp dir and leaves the existing LIVE_DIR (and the baked floor)
-  untouched. Returns (True, version) on success, else (False, reason). Never
+  can produce the root-owned copy the trust check demands). Everything — the
+  clone temp dir, the hardened copy, and the atomic swap target — lives under
+  RECOVERY_LIVE_ROOT (the recoveryd-only volume the agent's container never
+  mounts), so NOTHING here touches shared /data and the agent has no path to
+  race the swap. An fcntl.flock serializes concurrent pulls so a double-click
+  cannot race. Returns (True, version) on success, else (False, reason). Never
   raises — a recovery action that 500s is the worst failure mode.
   """
   if os.geteuid() != 0:
@@ -666,11 +711,41 @@ def pull_latest_recovery(timeout: float = 120) -> tuple[bool, str]:
       "refusing to pull: recoveryd must run as root to write a root-owned "
       "live copy",
     )
+  # Ensure the recoveryd-only volume exists (root-owned) before we clone or
+  # lock under it. On a fresh volume this is the first thing to create it.
+  try:
+    os.makedirs(RECOVERY_LIVE_ROOT, exist_ok=True)
+  except OSError as exc:
+    return False, f"could not prepare the live-copy volume: {exc}"
+  lock_fd = os.open(str(_PULL_LOCK), os.O_CREAT | os.O_WRONLY, 0o600)
+  try:
+    try:
+      fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+      return False, "update already in progress"
+    return _pull_locked(timeout)
+  finally:
+    # Closing the fd releases the flock (the lock is tied to this open file
+    # description), so a crashed/returned pull never leaves it held.
+    os.close(lock_fd)
+
+
+def _pull_locked(timeout: float) -> tuple[bool, str]:
+  """Runs the pull with the pull-lock held and root already verified.
+
+  Resolves the latest release tag, clones it into a UNIQUE temp dir under
+  RECOVERY_LIVE_ROOT (same filesystem as LIVE_DIR, so the swap is a pure
+  rename), hardens it (root-owned + not group/other-writable), then VALIDATES
+  the temp copy (trust check + entrypoint present + parses) BEFORE any swap.
+  Only a fully validated copy is atomically swapped into LIVE_DIR; any failure
+  cleans up the temp dir and leaves the existing LIVE_DIR (and the baked
+  floor) untouched.
+  """
   version = latest_upstream_version()
   if version is None:
     return False, "no upstream release reachable"
   url = _upstream_url()
-  tmp = DATA_DIR / f".recovery-pull-{os.getpid()}-{time.time_ns()}"
+  tmp = RECOVERY_LIVE_ROOT / f".recovery-pull-{os.getpid()}-{time.time_ns()}"
   try:
     if not _clone_release(url, version, tmp, timeout):
       return False, f"could not clone recovery release v{version}"
@@ -1134,7 +1209,7 @@ def _init_dummy_hash() -> None:
 
 
 def main() -> None:
-  # Launcher first: hand off to a trusted /data live copy when present so
+  # Launcher first: hand off to a trusted live copy when present so
   # a baked process spends no time on baked-specific setup when a newer,
   # trusted copy should run instead. A re-exec replaces this process; the
   # loop guard makes the successor fall through and run in place.

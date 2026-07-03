@@ -27,11 +27,18 @@ if str(_RECOVERY_DIR) not in sys.path:
 @pytest.fixture()
 def recovery_env(monkeypatch, tmp_path):
   """Isolated DATA_DIR + DB for one test, with the recovery modules
-  freshly imported against it."""
-  data_dir = tmp_path
+  freshly imported against it.
+
+  RECOVERY_LIVE_ROOT points the live copy at a tmp dir that is a SIBLING of
+  DATA_DIR (not under it), mirroring the prod split where the live copy lives
+  on a recoveryd-only volume separate from shared /data.
+  """
+  data_dir = tmp_path / "data"
+  data_dir.mkdir()
   (data_dir / "db").mkdir()
   db_path = data_dir / "db" / "ultimate.db"
   monkeypatch.setenv("DATA_DIR", str(data_dir))
+  monkeypatch.setenv("RECOVERY_LIVE_ROOT", str(tmp_path / "recovery-live"))
   monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
   monkeypatch.setenv("RECOVERY_SKIP_INTEGRITY", "1")
   # Force a clean re-import so module-scope path constants pick up the env.

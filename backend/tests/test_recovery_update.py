@@ -36,11 +36,17 @@ def recoveryd(monkeypatch, tmp_path):
   BEFORE re-importing so module-scope path constants (DATA_DIR, LIVE_DIR)
   pick it up. RECOVERY_SKIP_INTEGRITY=1 both bypasses the SELF check and
   gates the test-only upstream-URL override honored by _upstream_url.
+  RECOVERY_LIVE_ROOT points the live copy at a tmp dir that is a SIBLING of
+  DATA_DIR (not under it), mirroring the prod split where the live copy lives
+  on a recoveryd-only volume separate from shared /data — which lets the
+  "a pull never writes under DATA_DIR" test observe the isolation.
   """
-  data_dir = tmp_path
+  data_dir = tmp_path / "data"
+  data_dir.mkdir()
   (data_dir / "db").mkdir()
   db_path = data_dir / "db" / "ultimate.db"
   monkeypatch.setenv("DATA_DIR", str(data_dir))
+  monkeypatch.setenv("RECOVERY_LIVE_ROOT", str(tmp_path / "recovery-live"))
   monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
   monkeypatch.setenv("RECOVERY_SKIP_INTEGRITY", "1")
   # A stray override from another test's environment must not leak in.
@@ -289,10 +295,11 @@ def test_pull_latest_recovery_success(recoveryd, monkeypatch, tmp_path):
   live = recoveryd.LIVE_DIR
   assert (live / "recoveryd.py").is_file()
   assert (live / "VERSION").read_text().strip() == "0.2.0"
-  # The frozen live copy carries no .git, and the swap leaves no leftovers.
+  # The frozen live copy carries no .git, and the swap leaves no leftovers on
+  # the recoveryd-only volume.
   assert not (live / ".git").exists()
   assert not recoveryd.LIVE_DIR_OLD.exists()
-  assert list(recoveryd.DATA_DIR.glob(".recovery-pull-*")) == []
+  assert list(recoveryd.RECOVERY_LIVE_ROOT.glob(".recovery-pull-*")) == []
 
 
 def test_pull_swaps_over_existing_live(recoveryd, monkeypatch, tmp_path):
@@ -345,7 +352,7 @@ def test_pull_rejects_bundle_without_entrypoint(recoveryd, monkeypatch,
   ok, reason = recoveryd.pull_latest_recovery()
   assert ok is False
   assert not recoveryd.LIVE_DIR.exists()
-  assert list(recoveryd.DATA_DIR.glob(".recovery-pull-*")) == []
+  assert list(recoveryd.RECOVERY_LIVE_ROOT.glob(".recovery-pull-*")) == []
 
 
 def test_pull_rejects_unparseable_entrypoint(recoveryd, monkeypatch, tmp_path):
@@ -384,6 +391,49 @@ def test_pull_resets_live_attempts(recoveryd, monkeypatch, tmp_path):
   ok, ver = recoveryd.pull_latest_recovery()
   assert ok is True, ver
   assert recoveryd._live_attempts() == 0
+
+
+def test_pull_never_touches_data_dir(recoveryd, monkeypatch, tmp_path):
+  # The whole apply path (clone temp, hardened copy, atomic swap, attempts
+  # counter) must live on the recoveryd-only volume — NOT shared /data — so
+  # the agent has no filesystem path to race the swap. Snapshot DATA_DIR
+  # before and after and assert it is byte-for-byte untouched.
+  before = sorted(p.name for p in recoveryd.DATA_DIR.iterdir())
+  url = _init_recovery_upstream(tmp_path / "up", "0.2.0")
+  monkeypatch.setenv("RECOVERY_UPSTREAM_URL_TEST", url)
+  _as_root_with_stubbed_harden(recoveryd, monkeypatch)
+  ok, ver = recoveryd.pull_latest_recovery()
+  assert ok is True, ver
+  # The live copy landed on RECOVERY_LIVE_ROOT, which is NOT under DATA_DIR.
+  assert (recoveryd.LIVE_DIR / "recoveryd.py").is_file()
+  root = str(recoveryd.RECOVERY_LIVE_ROOT)
+  assert str(recoveryd.LIVE_DIR).startswith(root)
+  assert not root.startswith(str(recoveryd.DATA_DIR))
+  after = sorted(p.name for p in recoveryd.DATA_DIR.iterdir())
+  assert after == before  # nothing added to /data
+
+
+def test_pull_serialized_by_lock(recoveryd, monkeypatch, tmp_path):
+  # A second concurrent pull (e.g. a double-click) must not race the swap: it
+  # loses the flock and returns without touching the live copy.
+  import fcntl
+
+  url = _init_recovery_upstream(tmp_path / "up", "0.2.0")
+  monkeypatch.setenv("RECOVERY_UPSTREAM_URL_TEST", url)
+  _as_root_with_stubbed_harden(recoveryd, monkeypatch)
+  # Simulate a pull already holding the lock by grabbing it ourselves first.
+  import os as _os
+  _os.makedirs(recoveryd.RECOVERY_LIVE_ROOT, exist_ok=True)
+  held = _os.open(str(recoveryd._PULL_LOCK), _os.O_CREAT | _os.O_WRONLY, 0o600)
+  fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+  try:
+    ok, reason = recoveryd.pull_latest_recovery()
+  finally:
+    fcntl.flock(held, fcntl.LOCK_UN)
+    _os.close(held)
+  assert ok is False
+  assert "already in progress" in reason
+  assert not recoveryd.LIVE_DIR.exists()
 
 
 # -- Task 3.3: /recover/update endpoint + Update Recovery button -----------

@@ -94,6 +94,9 @@ services:
       - DATABASE_URL=sqlite:////data/db/ultimate.db
       - RECOVERY_PORT=8001
       - RECOVERY_PLATFORM_HEALTH_URL=http://app:8000/api/health
+      # Root of recoveryd's PRIVATE live-copy store (the recovery_live volume
+      # below). Kept OFF /data deliberately — see the volume comment.
+      - RECOVERY_LIVE_ROOT=/recovery-live
       # Set RECOVERY_ALLOWED_HOSTS to the public DOMAIN at cutover so the
       # Origin fallback check is active for clients without Sec-Fetch-Site.
       - RECOVERY_ALLOWED_HOSTS=${DOMAIN:-}
@@ -110,6 +113,15 @@ services:
       # boot, and stays independent of app startup (the recovery floor's whole
       # point), so no depends_on.
       - app_data:/data:nocopy
+      # recoveryd's PRIVATE live-copy store, mounted into THIS service ONLY —
+      # the `app` (agent) container never mounts it. The self-updating floor
+      # pulls the latest recovery here, root-owned, and execs it. Because the
+      # agent (a non-root user with write access to /data) has NO filesystem
+      # path to this volume, it cannot rename, unlink, or swap the live copy
+      # between recoveryd's trust check and its exec — which is what closes the
+      # root-escalation rename race that an agent-writable parent (/data) would
+      # otherwise allow. Do NOT add this mount to the `app` service.
+      - recovery_live:/recovery-live
     expose:
       - "8001"
     # Protect the recovery floor from the host OOM-killer (earlyoom is active):
@@ -121,3 +133,8 @@ volumes:
   caddy_data:
   caddy_config:
   app_data:
+  # recoveryd's private live-copy store — mounted into the recoveryd service
+  # ONLY (never `app`). Keeping the pulled live recovery off the agent-writable
+  # /data volume is what makes it un-swappable by the agent (root-escalation
+  # TOCTOU close).
+  recovery_live:
