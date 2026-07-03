@@ -56,9 +56,17 @@ services:
     container_name: ${MOBIUS_RECOVERYD_CONTAINER:-mobius-test-recoveryd}
     init: true
     restart: unless-stopped
+    # GUARDRAIL (mirrors docker-compose.yml): read-only rootfs so the full-root
+    # recovery agent gets EROFS writing recovery's own code (/app/recovery) —
+    # writable surfaces are the /data + /recovery-live volumes + tmpfs scratch.
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
     command: ["python3", "-P", "/app/recovery/recoveryd.py"]
     environment:
       - DATA_DIR=/data
+      - HOME=/tmp
       - DATABASE_URL=sqlite:////data/db/ultimate.db
       - RECOVERY_PORT=8001
       # Root of recoveryd's PRIVATE live-copy store (the recovery_live volume

@@ -78,6 +78,17 @@ services:
     container_name: mobius-recoveryd
     init: true
     restart: unless-stopped
+    # GUARDRAIL: the recovery agent runs as full root, but recoveryd's root
+    # filesystem is READ-ONLY, so even root gets EROFS trying to write
+    # recovery's OWN code (/app, /app/recovery) — sudo overrides permissions
+    # but not a read-only mount. The agent keeps unlimited power over the
+    # WRITABLE surfaces (the /data + /recovery-live volumes = the platform it
+    # must fix) plus tmpfs scratch, and physically cannot corrupt its own
+    # lifeboat. Kernel-enforced, not by trust.
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
     command: ["python3", "-P", "/app/recovery/recoveryd.py"]
     # recoveryd serves on 8001, not the app's 8000. Without this override it
     # inherits the image HEALTHCHECK (curl :8000/api/health), can never reach it,
@@ -91,6 +102,10 @@ services:
       start_period: 10s
     environment:
       - DATA_DIR=/data
+      # Writable HOME on tmpfs: under read_only:true the default root HOME is
+      # read-only, and the agent's Claude/Codex CLI needs a writable home for
+      # its cache. Config still lives under /data (CLAUDE_CONFIG_DIR/CODEX_HOME).
+      - HOME=/tmp
       - DATABASE_URL=sqlite:////data/db/ultimate.db
       - RECOVERY_PORT=8001
       - RECOVERY_PLATFORM_HEALTH_URL=http://app:8000/api/health
