@@ -696,6 +696,25 @@ def pull_latest_recovery(timeout: float = 120) -> tuple[bool, str]:
       shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _restart_recoveryd() -> None:
+  """Exits the process so the container restart policy re-runs the launcher.
+
+  Called AFTER the update response has been written and flushed to the
+  client (never mid-response — os.execv here would kill the reply in flight).
+  A short-lived daemon thread gives the response bytes a moment to drain
+  through the reverse proxy to the browser, then os._exit(0) drops the
+  process; the recoveryd container's `restart: unless-stopped` policy
+  immediately recreates it, and the fresh main() runs the launcher, which now
+  execs into the just-pulled live copy. os._exit (not sys.exit) so no
+  atexit/finally can intercept — this is a deliberate, unconditional restart.
+  """
+  def _die() -> None:
+    time.sleep(1.0)
+    os._exit(0)
+
+  threading.Thread(target=_die, daemon=True).start()
+
+
 # ---------------------------------------------------------------------------
 # Platform health + status.
 # ---------------------------------------------------------------------------
@@ -733,6 +752,37 @@ def build_status() -> dict:
     "recovery": "ok",
     "owner_configured": recovery_db.owner_exists(),
   }
+
+
+def _dashboard_status() -> dict:
+  """build_status() plus the version + update-available fields the dashboard
+  shows.
+
+  Kept OUT of build_status() so the frequently-polled status.json never
+  triggers the upstream network check — only a human loading the dashboard
+  pays for it. The upstream lookup is wrapped defensively: latest_upstream_
+  version is offline-safe (timeout-bounded, returns None on any error), and
+  the try/except means a slow or failing check can never block past its
+  timeout or bubble into a 500 — it simply means "no update offered". A
+  single ls-remote is done here (not update_available() plus a second lookup
+  for the display version) so the dashboard never pays for two network round
+  trips.
+  """
+  status = build_status()
+  running = running_version()
+  status["running_version"] = running
+  latest = None
+  try:
+    latest = latest_upstream_version()
+  except Exception:  # noqa: BLE001 — the dashboard must never 500
+    latest = None
+  status["available_version"] = latest
+  latest_parsed = _parse_semver(latest) if latest else None
+  running_parsed = _parse_semver(running) or (0, 0, 0)
+  status["update_available"] = bool(
+    latest_parsed is not None and latest_parsed > running_parsed
+  )
+  return status
 
 
 # ---------------------------------------------------------------------------
@@ -875,7 +925,9 @@ class _Handler(BaseHTTPRequestHandler):
     # early-return path connection-safe.
     form = self._read_form()
     path = urllib.parse.urlparse(self.path).path
-    if path not in ("/recover/auth", "/recover/restore", "/recover/logout"):
+    if path not in (
+      "/recover/auth", "/recover/restore", "/recover/update", "/recover/logout"
+    ):
       self._send(HTTPStatus.NOT_FOUND, "not found", content_type="text/plain")
       return
     # Cross-site guard on every state-changing POST.
@@ -889,6 +941,8 @@ class _Handler(BaseHTTPRequestHandler):
       self._handle_auth(form)
     elif path == "/recover/restore":
       self._handle_restore(form)
+    elif path == "/recover/update":
+      self._handle_update(form)
     elif path == "/recover/logout":
       self._handle_logout()
 
@@ -900,7 +954,8 @@ class _Handler(BaseHTTPRequestHandler):
       self._send(HTTPStatus.OK, recovery_pages.not_configured_html())
       return
     if self._authed_username():
-      self._send(HTTPStatus.OK, recovery_pages.dashboard_html(build_status()))
+      self._send(
+        HTTPStatus.OK, recovery_pages.dashboard_html(_dashboard_status()))
     else:
       self._send(HTTPStatus.OK, recovery_pages.login_html())
 
@@ -969,6 +1024,46 @@ class _Handler(BaseHTTPRequestHandler):
       "now — reload this page in ~30 seconds, then check the app."
     )
     self._send(HTTPStatus.OK, recovery_pages.dashboard_html(build_status(), msg=msg))
+
+  def _handle_update(self, form: dict[str, str]) -> None:
+    # Same gate as _handle_restore: this pulls + runs new root code, so it
+    # requires BOTH a live owner AND a valid session. The cross-site guard in
+    # do_POST already ran. Reuse the exact checks — do not weaken them.
+    if not recovery_db.owner_exists():
+      self._send(
+        HTTPStatus.FORBIDDEN, "Not configured.", content_type="text/plain",
+      )
+      return
+    if not self._authed_username():
+      self._send(
+        HTTPStatus.UNAUTHORIZED, "Not signed in.", content_type="text/plain",
+      )
+      return
+    ok, detail = pull_latest_recovery()
+    if not ok:
+      self._send(
+        HTTPStatus.OK,
+        recovery_pages.dashboard_html(
+          _dashboard_status(), msg=f"Recovery update failed: {detail}"),
+      )
+      return
+    # Respond FIRST, then restart. dashboard_html escapes msg, so pass the
+    # raw version through (a version string is safe, and double-escaping is
+    # avoided). The restart runs only after the reply is written + flushed so
+    # os.execv/_exit can never truncate the response mid-flight.
+    msg = (
+      f"Recovery updated to v{detail} — restarting now. Reload this page in "
+      "a few seconds."
+    )
+    self._send(
+      HTTPStatus.OK,
+      recovery_pages.dashboard_html(_dashboard_status(), msg=msg),
+    )
+    try:
+      self.wfile.flush()
+    except OSError:
+      pass
+    _restart_recoveryd()
 
   # -- logging ------------------------------------------------------------
 
