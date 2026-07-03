@@ -337,3 +337,63 @@ def test_main_runs_launcher_first(recoveryd, monkeypatch):
   with pytest.raises(RuntimeError, match="stop-after-launcher"):
     recoveryd.main()
   assert marker == ["launcher"]
+
+
+# -- Task 3.2: crash-loop quarantine ---------------------------------------
+
+def test_live_attempts_bump_and_reset(recoveryd):
+  assert recoveryd._live_attempts() == 0
+  recoveryd._bump_live_attempts()
+  recoveryd._bump_live_attempts()
+  assert recoveryd._live_attempts() == 2
+  recoveryd._reset_live_attempts()
+  assert recoveryd._live_attempts() == 0
+
+
+def test_live_attempts_zero_on_garbage(recoveryd):
+  # An unreadable/garbage counter reads as 0 rather than raising, so a
+  # corrupt attempts file can never wedge the launcher.
+  recoveryd.ATTEMPTS_FILE.write_text("not-an-int")
+  assert recoveryd._live_attempts() == 0
+
+
+def test_resolve_run_dir_quarantines_after_max_attempts(recoveryd,
+                                                        monkeypatch):
+  live = _trusted_live(recoveryd, monkeypatch)
+  recoveryd._reset_live_attempts()
+  # Below the cap, the trusted live copy is chosen.
+  assert recoveryd.resolve_run_dir() == str(live)
+  # At/above the cap it is quarantined to the baked floor even though it is
+  # still trusted — a trusted-but-crashing copy must not loop past the floor
+  # across container restarts (the in-process exec sentinel does not survive
+  # a restart, but this on-disk counter does).
+  for _ in range(recoveryd._MAX_LIVE_ATTEMPTS):
+    recoveryd._bump_live_attempts()
+  assert recoveryd._live_attempts() >= recoveryd._MAX_LIVE_ATTEMPTS
+  assert recoveryd.resolve_run_dir() == str(recoveryd._SELF_DIR)
+
+
+def test_reexec_bumps_attempts_before_execv(recoveryd, monkeypatch):
+  _trusted_live(recoveryd, monkeypatch)
+  recoveryd._reset_live_attempts()
+  seen = {}
+
+  def fake_execv(path, args):
+    # Capture the counter AT THE MOMENT of exec: the bump must precede it,
+    # because execv never returns and the successor may crash before its
+    # serve loop resets the counter.
+    seen["attempts"] = recoveryd._live_attempts()
+
+  monkeypatch.setattr(recoveryd.os, "execv", fake_execv)
+  monkeypatch.delenv("MOBIUS_RECOVERY_EXECED", raising=False)
+  recoveryd._maybe_reexec_into_run_dir()
+  assert seen["attempts"] == 1
+
+
+def test_running_live_copy_guard(recoveryd, monkeypatch):
+  # Baked run: _SELF_DIR != LIVE_DIR.
+  assert recoveryd._running_live_copy() is False
+  # Running from the live copy: the launcher's successor has _SELF_DIR
+  # resolving to LIVE_DIR, which is when main() may reset the counter.
+  monkeypatch.setattr(recoveryd, "_SELF_DIR", recoveryd.LIVE_DIR)
+  assert recoveryd._running_live_copy() is True

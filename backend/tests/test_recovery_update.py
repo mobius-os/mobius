@@ -368,3 +368,17 @@ def test_pull_rejects_untrusted_clone(recoveryd, monkeypatch, tmp_path):
   ok, reason = recoveryd.pull_latest_recovery()
   assert ok is False
   assert not recoveryd.LIVE_DIR.exists()
+
+
+def test_pull_resets_live_attempts(recoveryd, monkeypatch, tmp_path):
+  # A fresh successful pull deserves a fresh crash-loop try budget, so it
+  # clears any accumulated live-copy attempt count.
+  recoveryd._bump_live_attempts()
+  recoveryd._bump_live_attempts()
+  assert recoveryd._live_attempts() == 2
+  url = _init_recovery_upstream(tmp_path / "up", "0.2.0")
+  monkeypatch.setenv("RECOVERY_UPSTREAM_URL_TEST", url)
+  _as_root_with_stubbed_harden(recoveryd, monkeypatch)
+  ok, ver = recoveryd.pull_latest_recovery()
+  assert ok is True, ver
+  assert recoveryd._live_attempts() == 0
