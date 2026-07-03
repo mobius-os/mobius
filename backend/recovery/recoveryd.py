@@ -104,6 +104,7 @@ import html  # noqa: E402
 import json  # noqa: E402
 import logging  # noqa: E402
 import socket  # noqa: E402
+import subprocess  # noqa: E402
 import time  # noqa: E402
 import urllib.error  # noqa: E402
 import urllib.parse  # noqa: E402
@@ -307,7 +308,9 @@ def _maybe_reexec_into_run_dir() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Version — the running bundle's own version, read from its VERSION file.
+# Version + "update available" — the running bundle's version and whether
+# the pinned upstream has published a newer release. Read-only surfacing:
+# nothing here pulls or applies an update (that is Phase 3).
 # ---------------------------------------------------------------------------
 
 def running_version() -> str:
@@ -324,6 +327,113 @@ def running_version() -> str:
   except OSError:
     return "0.0.0"
   return text.strip() or "0.0.0"
+
+
+# The upstream recovery repo, pinned into the frozen bundle so it can never
+# be repointed from /data or an agent-writable env in production. This is a
+# placeholder until a later phase stands up the real mobius-os/recovery repo
+# and confirms the URL.
+_RECOVERY_UPSTREAM_URL = "https://github.com/mobius-os/recovery.git"
+
+
+def _upstream_url() -> str:
+  """Returns the pinned upstream recovery repo URL.
+
+  A test-only override via RECOVERY_UPSTREAM_URL_TEST lets the suite point
+  at a local fixture repo, but it is honored ONLY when
+  RECOVERY_SKIP_INTEGRITY=1 is ALSO set — the same bypass that gates the
+  self-integrity check. Production never sets RECOVERY_SKIP_INTEGRITY, so
+  the override is inert there and the frozen constant always wins: the
+  upstream can never be repointed on a real instance.
+  """
+  if os.environ.get("RECOVERY_SKIP_INTEGRITY") == "1":
+    override = os.environ.get("RECOVERY_UPSTREAM_URL_TEST")
+    if override:
+      return override
+  return _RECOVERY_UPSTREAM_URL
+
+
+def _parse_semver(text: str) -> tuple[int, int, int] | None:
+  """Parses a semver-ish string into a (major, minor, patch) int tuple.
+
+  Accepts an optional leading `v`/`V` and ignores any pre-release or build
+  metadata (everything from the first `-` or `+`), which is enough for the
+  release tags we compare today. Returns None when the core is not exactly
+  three dot-separated integers, so a non-semver tag is simply skipped
+  rather than mis-ranked.
+  """
+  s = text.strip()
+  if s[:1] in ("v", "V"):
+    s = s[1:]
+  for sep in ("-", "+"):
+    idx = s.find(sep)
+    if idx != -1:
+      s = s[:idx]
+  parts = s.split(".")
+  if len(parts) != 3:
+    return None
+  try:
+    return int(parts[0]), int(parts[1]), int(parts[2])
+  except ValueError:
+    return None
+
+
+def latest_upstream_version(timeout: float = 10) -> str | None:
+  """Returns the highest semver release tag on the pinned upstream, or None.
+
+  Runs `git ls-remote --tags --refs <url>` against _upstream_url() and
+  parses the highest semver tag (accepting `vX.Y.Z` and `X.Y.Z`),
+  returning it WITHOUT the leading `v`. Non-semver tags are ignored.
+
+  Offline-safe by contract: any failure — network error, missing repo,
+  non-zero git exit, or a timeout — returns None instead of raising or
+  hanging. The subprocess `timeout` bounds the call so an unreachable
+  upstream can never stall the recovery surface.
+  """
+  try:
+    proc = subprocess.run(
+      ["git", "ls-remote", "--tags", "--refs", _upstream_url()],
+      capture_output=True,
+      text=True,
+      timeout=timeout,
+      check=False,
+    )
+  except (subprocess.SubprocessError, OSError):
+    return None
+  if proc.returncode != 0:
+    return None
+  best: tuple[int, int, int] | None = None
+  for line in proc.stdout.splitlines():
+    # Each line is "<sha>\trefs/tags/<tag>"; take the tag after the last /.
+    ref = line.split("\t")[-1].strip()
+    if not ref.startswith("refs/tags/"):
+      continue
+    parsed = _parse_semver(ref.rsplit("/", 1)[-1])
+    if parsed is None:
+      continue
+    if best is None or parsed > best:
+      best = parsed
+  if best is None:
+    return None
+  return f"{best[0]}.{best[1]}.{best[2]}"
+
+
+def update_available() -> bool:
+  """Returns True iff the pinned upstream has a release newer than running.
+
+  True only when latest_upstream_version() is reachable (not None) AND
+  semver-greater than running_version(). Any offline/error path makes the
+  latest None, so this returns False — recovery never claims an update it
+  cannot see.
+  """
+  latest = latest_upstream_version()
+  if latest is None:
+    return False
+  latest_parsed = _parse_semver(latest)
+  if latest_parsed is None:
+    return False
+  running_parsed = _parse_semver(running_version()) or (0, 0, 0)
+  return latest_parsed > running_parsed
 
 
 # ---------------------------------------------------------------------------
