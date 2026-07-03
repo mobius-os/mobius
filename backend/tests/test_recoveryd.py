@@ -191,10 +191,15 @@ def test_build_status_shape(recovery_env, monkeypatch):
 # -- import isolation -------------------------------------------------------
 
 def test_recovery_modules_have_no_app_imports():
-  """CI guard: the frozen bundle must never `import app` / `from app`."""
-  for name in ("recoveryd.py", "recovery_auth.py", "recovery_db.py",
-               "recovery_pages.py"):
-    src = (_RECOVERY_DIR / name).read_text()
+  """CI guard: the frozen bundle must never `import app` / `from app`.
+
+  Covers every *.py in the bundle so a new module (the agent runner,
+  chat pages, provider OAuth) can't quietly reintroduce an `app.*`
+  dependency that would couple recovery to the platform it must survive.
+  """
+  for path in sorted(_RECOVERY_DIR.glob("*.py")):
+    name = path.name
+    src = path.read_text()
     for line in src.splitlines():
       stripped = line.strip()
       assert not stripped.startswith("import app"), f"{name}: {stripped!r}"
@@ -219,3 +224,33 @@ def test_pages_render(recovery_env):
   assert 'value="platform"' in dash
   assert 'value="platform-baked"' in dash
   assert "DOWN" in dash  # platform health reflected
+
+
+def test_render_chat_page_preserves_existing_active_chat(
+    recovery_env, monkeypatch):
+  """Regression: _render_chat_page matched ?chat= against c["id"], but
+  list_chats() keys each dict by "chat_id" — so any valid ?chat= was
+  nulled and chat-open silently bounced to the picker. Lock the active
+  id through when the chat exists."""
+  recoveryd = recovery_env["recoveryd"]
+  chat_runner = importlib.import_module("recovery_chat_runner")
+  chat_pages = importlib.import_module("recovery_chat_pages")
+  cid = "abc123def456"
+  captured = {}
+  monkeypatch.setattr(
+    chat_runner, "list_chats",
+    lambda: [{"chat_id": cid, "provider": "claude"}])
+  monkeypatch.setattr(chat_runner, "load_log", lambda c: [])
+  monkeypatch.setattr(chat_runner, "get_chat_provider", lambda c: "claude")
+  monkeypatch.setattr(
+    chat_pages, "render_chat_page",
+    lambda chats, active, history, provider: captured.__setitem__(
+      "active", active) or "<html></html>")
+  handler = recoveryd._Handler.__new__(recoveryd._Handler)
+  handler.path = f"/recover/chat?chat={cid}"
+  handler._authed_username = lambda: "admin"
+  handler._send = lambda *a, **k: None
+  monkeypatch.setattr(recovery_env["db"], "owner_exists", lambda: True)
+  handler._render_chat_page()
+  assert captured["active"] == cid, (
+    "existing ?chat= must resolve to that chat, not be nulled to the picker")

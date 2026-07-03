@@ -1044,10 +1044,13 @@ async def _spawn_claude(
   # prompt resolve consistently. Without this, cwd inherits from
   # uvicorn's launch dir (/app) which contradicts the prompt's
   # `Read /data/recovery/chats/<chat_id>.jsonl` references.
-  # preexec_fn drops the child to the non-root `mobius` user (see
-  # agent_preexec) so the agent can repair all of /data but cannot write
-  # the root-owned recovery bundle. cwd /data and CLAUDE_CONFIG_DIR are
-  # both under mobius-owned /data.
+  # By default RECOVERY_AGENT_USER=root, so agent_preexec() is a no-op and
+  # the agent runs as full root — able to fix anything, including the
+  # root-owned platform tree. Its own recovery code is still protected by
+  # the read-only rootfs + cap_drop guardrail, not by a privilege drop.
+  # preexec_fn only drops to `mobius` when RECOVERY_AGENT_USER is set to a
+  # non-root user (off by default). cwd /data and CLAUDE_CONFIG_DIR are
+  # both under /data.
   proc = await asyncio.create_subprocess_exec(
     *cmd,
     stdin=asyncio.subprocess.PIPE,
@@ -1242,8 +1245,9 @@ async def _spawn_codex(
     cmd += ["-m", model]
   cmd.append("-")  # explicit stdin marker
 
-  # preexec_fn drops the child to the non-root `mobius` user (see
-  # agent_preexec) — same guarantee as the Claude path.
+  # Runs as full root by default (RECOVERY_AGENT_USER=root → agent_preexec
+  # is a no-op) — same model as the Claude path; only drops to `mobius`
+  # when RECOVERY_AGENT_USER is set non-root.
   proc = await asyncio.create_subprocess_exec(
     *cmd,
     stdin=asyncio.subprocess.PIPE,
