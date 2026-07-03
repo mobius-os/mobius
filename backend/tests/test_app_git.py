@@ -22,6 +22,117 @@ def _write(repo: Path, text: str) -> None:
   (repo / "index.jsx").write_text(text, encoding="utf-8")
 
 
+def test_clone_upstream_uses_real_origin_and_app_gitignore(tmp_path):
+  """clone_upstream checks out main at a real origin/<ref> commit."""
+  fixture = tmp_path / "fixture"
+  bare = tmp_path / "fixture.git"
+  subprocess.run(["git", "init", "-q", "-b", "main", str(fixture)], check=True)
+  (fixture / "index.jsx").write_text(
+    "export default function App() { return <div>clone</div>; }\n",
+    encoding="utf-8",
+  )
+  (fixture / ".gitignore").write_text(
+    "# app-owned ignore\ntmp-output/\n", encoding="utf-8",
+  )
+  subprocess.run(
+    [
+      "git",
+      "-c", "user.name=Test",
+      "-c", "user.email=test@example.invalid",
+      "-C", str(fixture),
+      "add", ".",
+    ],
+    check=True,
+    env=app_git._git_env(fixture),
+  )
+  subprocess.run(
+    [
+      "git",
+      "-c", "user.name=Test",
+      "-c", "user.email=test@example.invalid",
+      "-C", str(fixture),
+      "commit", "-q", "-m", "fixture",
+    ],
+    check=True,
+    env=app_git._git_env(fixture),
+  )
+  fixture_head = subprocess.run(
+    ["git", "-C", str(fixture), "rev-parse", "HEAD"],
+    capture_output=True, text=True, check=True, env=app_git._git_env(fixture),
+  ).stdout.strip()
+  subprocess.run(
+    ["git", "clone", "-q", "--bare", str(fixture), str(bare)],
+    check=True,
+    env=app_git._git_env(fixture),
+  )
+
+  source_dir = tmp_path / "source"
+  source_dir.mkdir()
+  returned = app_git.clone_upstream(source_dir, bare.as_uri(), "main")
+
+  assert returned == fixture_head
+  origin_url = app_git._run(
+    source_dir, "remote", "get-url", "origin",
+  ).stdout.strip()
+  origin_head = app_git._run(
+    source_dir, "rev-parse", "origin/main",
+  ).stdout.strip()
+  branch = app_git._run(
+    source_dir, "branch", "--show-current",
+  ).stdout.strip()
+  local_head = app_git._run(
+    source_dir, "rev-parse", app_git.LOCAL_BRANCH,
+  ).stdout.strip()
+  upstream_head = app_git._run(
+    source_dir, "rev-parse", app_git.UPSTREAM_BRANCH,
+  ).stdout.strip()
+  assert origin_url == bare.as_uri()
+  assert origin_head == fixture_head
+  assert branch == app_git.LOCAL_BRANCH
+  assert local_head == fixture_head
+  assert upstream_head == fixture_head
+  assert (source_dir / ".gitignore").read_text(encoding="utf-8") == (
+    "# app-owned ignore\ntmp-output/\n"
+  )
+
+
+def test_clone_upstream_neutralizes_symlinks_and_layers_managed_ignore(tmp_path):
+  """A tracked symlink in an (untrusted) catalog repo must NOT check out as a
+  real filesystem symlink — that would escape the app dir. And the Möbius
+  managed-artifact ignores are layered via .git/info/exclude, leaving the
+  app's own committed .gitignore untouched so it still travels upstream."""
+  fixture = tmp_path / "fixture"
+  bare = tmp_path / "fixture.git"
+  subprocess.run(["git", "init", "-q", "-b", "main", str(fixture)], check=True)
+  (fixture / "index.jsx").write_text("export default () => null\n", "utf-8")
+  (fixture / ".gitignore").write_text("node_modules/\n", "utf-8")
+  # a malicious symlink pointing outside the eventual app dir
+  (fixture / "evil").symlink_to("/data/service-token.txt")
+  env = app_git._git_env(fixture)
+  for args in (["add", "."], ["commit", "-q", "-m", "fixture"]):
+    subprocess.run(
+      ["git", "-c", "user.name=Test", "-c", "user.email=t@t.invalid",
+       "-C", str(fixture), *args], check=True, env=env,
+    )
+  subprocess.run(
+    ["git", "clone", "-q", "--bare", str(fixture), str(bare)],
+    check=True, env=env,
+  )
+
+  source_dir = tmp_path / "source"
+  source_dir.mkdir()
+  app_git.clone_upstream(source_dir, bare.as_uri(), "main")
+
+  evil = source_dir / "evil"
+  assert not evil.is_symlink()  # neutralized: plain file, not a live symlink
+  assert evil.read_text().strip() == "/data/service-token.txt"
+  # app's own .gitignore is committed + untouched (travels upstream)
+  assert (source_dir / ".gitignore").read_text() == "node_modules/\n"
+  # managed artifacts are excluded locally, not committed
+  exclude = (source_dir / ".git" / "info" / "exclude").read_text()
+  assert "static/" in exclude and "init-cron.sh" in exclude
+
+
 def test_ensure_repo_is_idempotent_and_creates_branches(tmp_path):
   """ensure_repo inits the repo with upstream + main branches and is a
   no-op on a second call."""

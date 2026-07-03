@@ -857,6 +857,23 @@ def test_is_trusted_catalog_source_rejects_path_traversal():
   assert not trusted("https://raw.githubusercontent.com/mobius-os#manifest-id=x")  # too shallow
 
 
+def test_derive_repo_ref_from_raw_github_manifest_url():
+  from app.install import _derive_repo_ref
+
+  assert _derive_repo_ref(
+    "https://raw.githubusercontent.com/acme/widgets/main/mobius.json"
+  ) == ("https://github.com/acme/widgets.git", "main")
+
+
+def test_derive_repo_ref_returns_none_for_non_github_and_inline():
+  from app.install import _derive_repo_ref
+
+  assert _derive_repo_ref(
+    "https://example.test/acme/widgets/main/mobius.json"
+  ) is None
+  assert _derive_repo_ref("inline-manifest") is None
+
+
 def test_update_dropping_schedule_unregisters_orphan_cron(
     client, auth, bypass_url_validation):
   """Recurring → on-demand migration must converge cron state, not just add.

@@ -56,7 +56,9 @@ app with no source_dir has no `.git`.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -194,6 +196,81 @@ def head_sha(source_dir: str | Path, branch: str) -> str:
   """The commit sha at the tip of `branch` (e.g. the merge base an
   update will diverge from). Assumes the repo + branch exist."""
   return _run(Path(source_dir), "rev-parse", branch).stdout.strip()
+
+
+def clone_upstream(
+  source_dir: str | Path, repo_url: str, ref: str, *, depth: int = 1,
+) -> str:
+  """Clone a real upstream repo and check out local `main` at `origin/<ref>`.
+
+  This is the REAL-origin install variant of `record_upstream`: instead of
+  synthesizing an installer-owned `upstream` branch from fetched bytes, it keeps
+  the app repository's own origin and makes `origin/<ref>` the pristine
+  upstream. That remote-tracking commit is a real catalog commit an update can
+  fetch from and a local fix can be pushed against as a PR. Local edits then
+  commit onto `main`, so `git diff origin/<ref> main` is the user's delta.
+
+  `source_dir` may already exist as an empty directory. The clone is built in a
+  sibling temp directory first and moved into place after success, so a failed
+  clone leaves the caller free to fall back to the synthetic `record_upstream`
+  path without a half-created `.git`.
+
+  Returns:
+    The checked-out HEAD sha.
+  """
+  repo = Path(source_dir)
+  if repo.exists() and not repo.is_dir():
+    raise RuntimeError(f"source_dir exists and is not a directory: {repo}")
+  repo.parent.mkdir(parents=True, exist_ok=True)
+  clone_parent = repo.parent
+  with tempfile.TemporaryDirectory(
+    prefix=f".{repo.name}.clone-", dir=clone_parent,
+  ) as tmp:
+    clone_dir = Path(tmp) / "repo"
+    cmd = [
+      "git",
+      "-c", f"user.name={_GIT_NAME}",
+      "-c", f"user.email={_GIT_EMAIL}",
+      # core.symlinks=false: check out any tracked symlink as a PLAIN FILE
+      # (the link text as content), never a real filesystem symlink. Catalog
+      # repos are untrusted content; a materialized symlink (e.g. `static` ->
+      # outside the app dir, or `index.jsx` -> /data/service-token.txt) would
+      # escape the containment the fetched-source path enforces via
+      # _assert_within — that guard is skipped for the cloned tree, so the
+      # non-symlink checkout is what keeps the clone inside its own dir.
+      "-c", "core.symlinks=false",
+      "clone", "-q",
+      "--depth", str(depth),
+      "--branch", ref,
+      repo_url,
+      str(clone_dir),
+    ]
+    subprocess.run(
+      cmd, capture_output=True, text=True, timeout=_GIT_TIMEOUT,
+      check=True, env=_git_env(repo),
+    )
+    remote_ref = f"origin/{ref}"
+    _run(clone_dir, "rev-parse", "--verify", remote_ref)
+    _run(clone_dir, "branch", "-f", UPSTREAM_BRANCH, remote_ref)
+    _run(clone_dir, "checkout", "-q", "-B", LOCAL_BRANCH, remote_ref)
+    # Keep the app's OWN .gitignore committed (it travels upstream), but layer
+    # Möbius's managed-artifact ignores locally via .git/info/exclude so a
+    # later `git add -A` never tracks generated per-install files (static/,
+    # the static-asset manifest, init-cron.sh, *.bak, the compiled/id trees).
+    # A committed catalog .gitignore rarely lists these; without this, the
+    # first commit pollutes `main` and — since record_upstream preserves the
+    # on-disk .gitignore — never self-heals (the card-099 orphan-cron class).
+    exclude = clone_dir / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_text(_GITIGNORE + "\n", encoding="utf-8")
+    sha = _run(clone_dir, "rev-parse", "HEAD").stdout.strip()
+    repo.mkdir(parents=True, exist_ok=True)
+    existing = list(repo.iterdir())
+    if existing:
+      raise RuntimeError(f"source_dir is not empty: {repo}")
+    for child in clone_dir.iterdir():
+      shutil.move(str(child), str(repo / child.name))
+    return sha
 
 
 def ensure_repo(source_dir: str | Path) -> None:
