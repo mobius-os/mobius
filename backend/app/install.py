@@ -1678,17 +1678,51 @@ async def install_from_manifest(
             app_git.local_diverged_from,
             git_source_dir, prev_upstream_commit,
           )
-          await asyncio.to_thread(
-            app_git.record_upstream,
-            git_source_dir, source_tree, canonical_manifest_url, version,
-            exec_paths=exec_paths,
-          )
+          cloned_update = False
+          if repo_ref is not None and await asyncio.to_thread(
+            app_git.has_origin, git_source_dir,
+          ):
+            _, ref = repo_ref
+            try:
+              app.upstream_commit = await asyncio.to_thread(
+                app_git.fetch_upstream, git_source_dir, ref,
+              )
+              cloned_update = True
+            except Exception as exc:
+              log.warning(
+                "install: fetch from origin at %s failed; falling back to "
+                "fetched source path — %r",
+                ref, exc,
+              )
+          if not cloned_update:
+            await asyncio.to_thread(
+              app_git.record_upstream,
+              git_source_dir, source_tree, canonical_manifest_url, version,
+              exec_paths=exec_paths,
+            )
           if not diverged:
             # No local edits → upstream wins outright for the whole tree; it is
-            # already `source_tree` as fetched. Taking the bytes verbatim keeps
-            # the no-edit case off merge_upstream entirely.
-            divergence = "fast_forward"
-            merge_applied = True
+            # `source_tree` as fetched for synthetic repos, or the full
+            # origin-backed upstream tree for cloned repos. Taking the bytes
+            # verbatim keeps the no-edit case off merge_upstream entirely.
+            if cloned_update:
+              upstream_tree = await asyncio.to_thread(
+                app_git.read_ref_tree, git_source_dir, app_git.UPSTREAM_BRANCH,
+              )
+              source_tree = {
+                rel: data for rel, data in upstream_tree.items()
+                if rel not in _MERGED_NON_SOURCE
+              }
+            # A new upstream that dropped the root index.jsx (e.g. the manifest
+            # moved `entry`) can't fast-forward the served bundle — treat it as
+            # a conflict for the agent to resolve, mirroring the clean-merge
+            # branch below, rather than half-applying a tree with no entry.
+            if "index.jsx" not in source_tree:
+              mode = "conflict"
+              conflict_paths = ["index.jsx"]
+            else:
+              divergence = "fast_forward"
+              merge_applied = True
           else:
             # Local diverged: fold the new upstream into the local edits with
             # a three-way merge that touches neither `main` nor the working

@@ -198,6 +198,21 @@ def head_sha(source_dir: str | Path, branch: str) -> str:
   return _run(Path(source_dir), "rev-parse", branch).stdout.strip()
 
 
+def has_origin(source_dir: str | Path) -> bool:
+  """Whether this app repo has a real `origin` remote.
+
+  A cloned catalog app has `origin`; a synthetic-upstream app created via
+  `record_upstream` does not. Treat any git failure as false so callers can
+  fall back to the synthetic path unchanged.
+  """
+  if not is_repo(source_dir):
+    return False
+  proc = _run(
+    Path(source_dir), "remote", "get-url", "origin", check=False,
+  )
+  return proc.returncode == 0
+
+
 def clone_upstream(
   source_dir: str | Path, repo_url: str, ref: str, *, depth: int = 1,
 ) -> str:
@@ -271,6 +286,37 @@ def clone_upstream(
     for child in clone_dir.iterdir():
       shutil.move(str(child), str(repo / child.name))
     return sha
+
+
+def fetch_upstream(source_dir: str | Path, ref: str) -> str:
+  """Fetch `origin/<ref>` and advance local `upstream` to that real commit.
+
+  This is the cloned-app update analogue of `record_upstream`: the catalog's
+  complete git tree is fetched from the real remote, then the installer-owned
+  `upstream` branch is moved to the fetched remote-tracking commit.
+  Depth-1 fetches can leave the previous upstream behind a shallow boundary;
+  when that happens, unshallow so Git can prove ancestry and the existing merge
+  path can compute a real merge base.
+
+  Returns:
+    The fetched `origin/<ref>` commit sha.
+  """
+  repo = Path(source_dir)
+  previous = _run(
+    repo, "rev-parse", "--verify", UPSTREAM_BRANCH, check=False,
+  )
+  previous_sha = previous.stdout.strip() if previous.returncode == 0 else ""
+  _run(repo, "fetch", "--depth", "1", "origin", ref)
+  remote_ref = f"origin/{ref}"
+  sha = _run(repo, "rev-parse", "--verify", remote_ref).stdout.strip()
+  if previous_sha and previous_sha != sha:
+    related = _run(
+      repo, "merge-base", "--is-ancestor", previous_sha, sha, check=False,
+    )
+    if related.returncode != 0 and (repo / ".git" / "shallow").exists():
+      _run(repo, "fetch", "--unshallow", "origin", ref)
+  _run(repo, "branch", "-f", UPSTREAM_BRANCH, remote_ref)
+  return sha
 
 
 def ensure_repo(source_dir: str | Path) -> None:
@@ -634,6 +680,17 @@ def read_merged_tree(source_dir: str | Path, tree_oid: str) -> dict[str, bytes]:
     if blob.returncode == 0:
       files[rel] = blob.stdout
   return files
+
+
+def read_ref_tree(source_dir: str | Path, ref: str) -> dict[str, bytes]:
+  """Read EVERY file at `ref` into {repo_relative_path: bytes}.
+
+  `ref` may be a branch, tag, or commit. It is resolved to its tree first so
+  callers share the same binary-faithful full-tree reader as clean merges.
+  """
+  repo = Path(source_dir)
+  tree_oid = _run(repo, "rev-parse", f"{ref}^{{tree}}").stdout.strip()
+  return read_merged_tree(repo, tree_oid)
 
 
 def start_conflict_merge(source_dir: str | Path) -> list[str]:

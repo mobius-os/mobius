@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 import pytest
 
+from app import app_git
 from app.config import get_settings
 
 
@@ -2645,7 +2646,8 @@ def test_core_app_store_self_update_overwrites_local_conflict(
     "name": "App Store",
     "version": "1.0.0",
   }
-  r1 = _install_v1(client, auth, base, m, JSX_MULTI)
+  with patch("app.install._derive_repo_ref", return_value=None):
+    r1 = _install_v1(client, auth, base, m, JSX_MULTI)
   assert r1.status_code == 201, r1.text
   data_dir = Path(get_settings().data_dir)
   jsx_file = data_dir / "apps" / "store" / "index.jsx"
@@ -2654,7 +2656,8 @@ def test_core_app_store_self_update_overwrites_local_conflict(
   jsx_file.write_text(local)
 
   jsx_v2 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM STORE TITLE")
-  r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
+  with patch("app.install._derive_repo_ref", return_value=None):
+    r2 = _update_v2(client, auth, base, {**m, "version": "2.0.0"}, jsx_v2)
   assert r2.status_code == 201, r2.text
   payload = r2.json()
   assert payload["mode"] == "update"
@@ -3155,6 +3158,272 @@ def _install_multi(client, auth, base, manifest, jsx, cards):
     return client.post("/api/apps/install", headers=auth, json={
       "manifest_url": base + "mobius.json",
     })
+
+
+CLONE_INDEX_V1 = (
+  "import { CARD_LABEL, FOOTER } from './cards.js'\n"
+  "export default function App() {\n"
+  "  const title = 'TITLE_V1'\n"
+  "  return <div>{title}{CARD_LABEL}{FOOTER}</div>\n"
+  "}\n"
+)
+
+CLONE_CARDS_V1 = (
+  "export const CARD_LABEL = 'CARD_V1'\n"
+  "export const FOOTER = 'FOOTER_V1'\n"
+)
+
+
+def _fixture_commit(repo: Path, msg: str) -> str:
+  subprocess.run(
+    [
+      "git",
+      "-c", "user.name=Test",
+      "-c", "user.email=test@example.invalid",
+      "-C", str(repo),
+      "add", ".",
+    ],
+    check=True,
+    env=app_git._git_env(repo),
+  )
+  subprocess.run(
+    [
+      "git",
+      "-c", "user.name=Test",
+      "-c", "user.email=test@example.invalid",
+      "-C", str(repo),
+      "commit", "-q", "-m", msg,
+    ],
+    check=True,
+    env=app_git._git_env(repo),
+  )
+  return subprocess.run(
+    ["git", "-C", str(repo), "rev-parse", "HEAD"],
+    capture_output=True, text=True, check=True, env=app_git._git_env(repo),
+  ).stdout.strip()
+
+
+def _make_clone_fixture(tmp_path, index: str, cards: str):
+  work = tmp_path / "catalog-work"
+  bare = tmp_path / "catalog.git"
+  subprocess.run(["git", "init", "-q", "-b", "main", str(work)], check=True)
+  (work / "index.jsx").write_text(index, encoding="utf-8")
+  (work / "cards.js").write_text(cards, encoding="utf-8")
+  head = _fixture_commit(work, "v1")
+  subprocess.run(
+    ["git", "clone", "-q", "--bare", str(work), str(bare)],
+    check=True,
+    env=app_git._git_env(work),
+  )
+  return work, bare, head
+
+
+def _push_clone_fixture(work: Path, bare: Path, index: str, cards: str) -> str:
+  (work / "index.jsx").write_text(index, encoding="utf-8")
+  (work / "cards.js").write_text(cards, encoding="utf-8")
+  head = _fixture_commit(work, "update")
+  subprocess.run(
+    ["git", "-C", str(work), "push", "-q", str(bare), "main"],
+    check=True,
+    env=app_git._git_env(work),
+  )
+  return head
+
+
+def _install_clone_fixture(
+  client, auth, base, manifest, index, cards, bare, *,
+  include_source_file=False,
+):
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, index.encode()),
+  }
+  if include_source_file:
+    responses[base + "cards.js"] = (200, cards.encode())
+  with patch(
+    "app.install._derive_repo_ref", return_value=(bare.as_uri(), "main"),
+  ), patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    return client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+
+
+def test_clone_update_fast_forward_uses_full_origin_tree(
+  client, auth, tmp_path, bypass_url_validation,
+):
+  """A cloned no-local-edit update reads the full fetched git tree.
+
+  The manifest intentionally does NOT declare cards.js. The HTTP update fetch
+  therefore only has index.jsx; cards.js can update only if the clone fetch path
+  replaces source_tree with read_ref_tree("upstream").
+  """
+  base = "https://raw.githubusercontent.com/acme/clone-ff/main/"
+  manifest = {
+    "id": "clone-ff",
+    "name": "Clone FF",
+    "version": "1.0.0",
+    "description": "Clone fast-forward",
+    "entry": "index.jsx",
+    "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
+  }
+  work, bare, _ = _make_clone_fixture(
+    tmp_path, CLONE_INDEX_V1, CLONE_CARDS_V1,
+  )
+  r1 = _install_clone_fixture(
+    client, auth, base, manifest, CLONE_INDEX_V1, CLONE_CARDS_V1, bare,
+  )
+  assert r1.status_code == 201, r1.text
+
+  index_v2 = CLONE_INDEX_V1.replace("TITLE_V1", "TITLE_V2")
+  cards_v2 = CLONE_CARDS_V1.replace("CARD_V1", "CARD_V2")
+  new_head = _push_clone_fixture(work, bare, index_v2, cards_v2)
+  r2 = _install_clone_fixture(
+    client, auth, base, {**manifest, "version": "2.0.0"},
+    index_v2, CLONE_CARDS_V1, bare,
+  )
+
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["mode"] == "update"
+  assert r2.json()["divergence"] == "fast_forward"
+  src = Path(get_settings().data_dir) / "apps" / "clone-ff"
+  assert (src / "index.jsx").read_text() == index_v2
+  assert (src / "cards.js").read_text() == cards_v2
+  assert app_git.head_sha(src, app_git.UPSTREAM_BRANCH) == new_head
+  origin_head = app_git._run(src, "rev-parse", "origin/main").stdout.strip()
+  assert origin_head == new_head
+  assert app_git.local_diverged_from(src, new_head) is False
+
+
+def test_clone_update_diverged_clean_merge_carries_local_and_origin(
+  client, auth, tmp_path, bypass_url_validation,
+):
+  """A cloned diverged update cleanly merges local edits with origin changes."""
+  base = "https://raw.githubusercontent.com/acme/clone-clean/main/"
+  manifest = {
+    "id": "clone-clean",
+    "name": "Clone Clean",
+    "version": "1.0.0",
+    "description": "Clone clean merge",
+    "entry": "index.jsx",
+    "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
+  }
+  work, bare, _ = _make_clone_fixture(
+    tmp_path, CLONE_INDEX_V1, CLONE_CARDS_V1,
+  )
+  r1 = _install_clone_fixture(
+    client, auth, base, manifest, CLONE_INDEX_V1, CLONE_CARDS_V1, bare,
+  )
+  assert r1.status_code == 201, r1.text
+  src = Path(get_settings().data_dir) / "apps" / "clone-clean"
+  (src / "index.jsx").write_text(
+    CLONE_INDEX_V1.replace("TITLE_V1", "TITLE_LOCAL"),
+    encoding="utf-8",
+  )
+
+  cards_v2 = CLONE_CARDS_V1.replace("FOOTER_V1", "FOOTER_V2")
+  _push_clone_fixture(work, bare, CLONE_INDEX_V1, cards_v2)
+  r2 = _install_clone_fixture(
+    client, auth, base, {**manifest, "version": "2.0.0"},
+    CLONE_INDEX_V1, CLONE_CARDS_V1, bare,
+  )
+
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["mode"] == "update"
+  assert r2.json()["divergence"] == "clean_merge"
+  assert "TITLE_LOCAL" in (src / "index.jsx").read_text()
+  assert (src / "cards.js").read_text() == cards_v2
+  assert "<<<<<<<" not in (src / "index.jsx").read_text()
+
+
+def test_clone_update_conflict_keeps_served_old_source(
+  client, auth, tmp_path, bypass_url_validation,
+):
+  """A cloned same-line local/origin edit returns conflict and leaves the DB
+  source on the previously served version."""
+  base = "https://raw.githubusercontent.com/acme/clone-conflict/main/"
+  manifest = {
+    "id": "clone-conflict",
+    "name": "Clone Conflict",
+    "version": "1.0.0",
+    "description": "Clone conflict",
+    "entry": "index.jsx",
+    "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
+  }
+  work, bare, _ = _make_clone_fixture(
+    tmp_path, CLONE_INDEX_V1, CLONE_CARDS_V1,
+  )
+  r1 = _install_clone_fixture(
+    client, auth, base, manifest, CLONE_INDEX_V1, CLONE_CARDS_V1, bare,
+  )
+  assert r1.status_code == 201, r1.text
+  src = Path(get_settings().data_dir) / "apps" / "clone-conflict"
+  local_index = CLONE_INDEX_V1.replace("TITLE_V1", "TITLE_LOCAL")
+  (src / "index.jsx").write_text(local_index, encoding="utf-8")
+
+  upstream_index = CLONE_INDEX_V1.replace("TITLE_V1", "TITLE_UPSTREAM")
+  _push_clone_fixture(work, bare, upstream_index, CLONE_CARDS_V1)
+  r2 = _install_clone_fixture(
+    client, auth, base, {**manifest, "version": "2.0.0"},
+    upstream_index, CLONE_CARDS_V1, bare,
+  )
+
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["mode"] == "conflict"
+  assert "index.jsx" in r2.json()["conflict_paths"]
+  worktree_source = (src / "index.jsx").read_text()
+  assert "<<<<<<<" in worktree_source and ">>>>>>>" in worktree_source
+  from app.database import SessionLocal
+  from app.models import App
+  db = SessionLocal()
+  try:
+    app = db.query(App).filter(App.slug == "clone-conflict").first()
+    assert app.jsx_source == CLONE_INDEX_V1
+    assert app.version == "1.0.0"
+  finally:
+    db.close()
+
+
+def test_clone_update_fetch_failure_falls_back_to_record_upstream(
+  client, auth, tmp_path, bypass_url_validation,
+):
+  """If origin fetch fails, cloned apps use the existing HTTP-fetched path."""
+  base = "https://raw.githubusercontent.com/acme/clone-fallback/main/"
+  manifest = {
+    "id": "clone-fallback",
+    "name": "Clone Fallback",
+    "version": "1.0.0",
+    "description": "Clone fallback",
+    "entry": "index.jsx",
+    "source_files": ["cards.js"],
+    "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
+  }
+  work, bare, _ = _make_clone_fixture(
+    tmp_path, CLONE_INDEX_V1, CLONE_CARDS_V1,
+  )
+  r1 = _install_clone_fixture(
+    client, auth, base, manifest, CLONE_INDEX_V1, CLONE_CARDS_V1, bare,
+    include_source_file=True,
+  )
+  assert r1.status_code == 201, r1.text
+
+  index_v2 = CLONE_INDEX_V1.replace("TITLE_V1", "TITLE_HTTP_V2")
+  cards_v2 = CLONE_CARDS_V1.replace("CARD_V1", "CARD_HTTP_V2")
+  _push_clone_fixture(work, bare, index_v2, cards_v2)
+  with patch("app.app_git.fetch_upstream", side_effect=RuntimeError("offline")):
+    r2 = _install_clone_fixture(
+      client, auth, base, {**manifest, "version": "2.0.0"},
+      index_v2, cards_v2, bare, include_source_file=True,
+    )
+
+  assert r2.status_code == 201, r2.text
+  assert r2.json()["mode"] == "update"
+  assert r2.json()["divergence"] == "fast_forward"
+  src = Path(get_settings().data_dir) / "apps" / "clone-fallback"
+  assert (src / "index.jsx").read_text() == index_v2
+  assert (src / "cards.js").read_text() == cards_v2
 
 
 def test_multifile_install_writes_siblings_and_bundles(

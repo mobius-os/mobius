@@ -22,6 +22,35 @@ def _write(repo: Path, text: str) -> None:
   (repo / "index.jsx").write_text(text, encoding="utf-8")
 
 
+def _commit_all(repo: Path, msg: str) -> str:
+  subprocess.run(
+    [
+      "git",
+      "-c", "user.name=Test",
+      "-c", "user.email=test@example.invalid",
+      "-C", str(repo),
+      "add", ".",
+    ],
+    check=True,
+    env=app_git._git_env(repo),
+  )
+  subprocess.run(
+    [
+      "git",
+      "-c", "user.name=Test",
+      "-c", "user.email=test@example.invalid",
+      "-C", str(repo),
+      "commit", "-q", "-m", msg,
+    ],
+    check=True,
+    env=app_git._git_env(repo),
+  )
+  return subprocess.run(
+    ["git", "-C", str(repo), "rev-parse", "HEAD"],
+    capture_output=True, text=True, check=True, env=app_git._git_env(repo),
+  ).stdout.strip()
+
+
 def test_clone_upstream_uses_real_origin_and_app_gitignore(tmp_path):
   """clone_upstream checks out main at a real origin/<ref> commit."""
   fixture = tmp_path / "fixture"
@@ -131,6 +160,73 @@ def test_clone_upstream_neutralizes_symlinks_and_layers_managed_ignore(tmp_path)
   # managed artifacts are excluded locally, not committed
   exclude = (source_dir / ".git" / "info" / "exclude").read_text()
   assert "static/" in exclude and "init-cron.sh" in exclude
+
+
+def test_has_origin_distinguishes_clone_from_synthetic_repo(tmp_path):
+  """Cloned apps have origin; record_upstream synthetic apps do not."""
+  fixture = tmp_path / "fixture"
+  bare = tmp_path / "fixture.git"
+  subprocess.run(["git", "init", "-q", "-b", "main", str(fixture)], check=True)
+  (fixture / "index.jsx").write_text("export default () => null\n")
+  _commit_all(fixture, "fixture")
+  subprocess.run(
+    ["git", "clone", "-q", "--bare", str(fixture), str(bare)],
+    check=True,
+    env=app_git._git_env(fixture),
+  )
+
+  cloned = tmp_path / "cloned"
+  cloned.mkdir()
+  app_git.clone_upstream(cloned, bare.as_uri(), "main")
+  synthetic = tmp_path / "synthetic"
+  app_git.record_upstream(
+    synthetic, {"index.jsx": b"export default () => null\n"},
+    "https://x/mobius.json", "1.0.0",
+  )
+
+  assert app_git.has_origin(cloned) is True
+  assert app_git.has_origin(synthetic) is False
+
+
+def test_fetch_upstream_advances_real_origin_and_reads_full_tree(tmp_path):
+  """fetch_upstream moves upstream to origin/<ref>; read_ref_tree returns
+  every file at that commit, including sibling modules."""
+  fixture = tmp_path / "fixture"
+  bare = tmp_path / "fixture.git"
+  subprocess.run(["git", "init", "-q", "-b", "main", str(fixture)], check=True)
+  (fixture / "index.jsx").write_text("import './cards.js'\n")
+  (fixture / "cards.js").write_text("export const label = 'v1'\n")
+  _commit_all(fixture, "v1")
+  subprocess.run(
+    ["git", "clone", "-q", "--bare", str(fixture), str(bare)],
+    check=True,
+    env=app_git._git_env(fixture),
+  )
+
+  source_dir = tmp_path / "source"
+  source_dir.mkdir()
+  app_git.clone_upstream(source_dir, bare.as_uri(), "main")
+
+  (fixture / "index.jsx").write_text("import './cards.js'\n// v2\n")
+  (fixture / "cards.js").write_text("export const label = 'v2'\n")
+  new_head = _commit_all(fixture, "v2")
+  subprocess.run(
+    ["git", "-C", str(fixture), "push", "-q", str(bare), "main"],
+    check=True,
+    env=app_git._git_env(fixture),
+  )
+
+  fetched = app_git.fetch_upstream(source_dir, "main")
+  tree = app_git.read_ref_tree(source_dir, app_git.UPSTREAM_BRANCH)
+
+  assert fetched == new_head
+  assert app_git.head_sha(source_dir, app_git.UPSTREAM_BRANCH) == new_head
+  origin_head = app_git._run(
+    source_dir, "rev-parse", "origin/main",
+  ).stdout.strip()
+  assert origin_head == new_head
+  assert tree["index.jsx"] == b"import './cards.js'\n// v2\n"
+  assert tree["cards.js"] == b"export const label = 'v2'\n"
 
 
 def test_ensure_repo_is_idempotent_and_creates_branches(tmp_path):
