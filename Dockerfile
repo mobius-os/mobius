@@ -113,14 +113,15 @@ COPY skill/ ./skill/
 COPY core-apps/ ./core-apps/
 COPY protected-files.txt ./protected-files.txt
 
-# Baked floor copies of the backend code and scripts. The entrypoint
-# bootstraps /data/platform from these on first boot and falls back to
+# Baked floor copies. The entrypoint bootstraps the editable /data/platform
+# repo from /app/mobius-baked on first boot and still falls back to
 # /app/app-baked if the persisted platform tree is broken. Stay root-owned
 # and chmod a-w so even root running restore code can't accidentally modify
 # them in place.
+COPY . ./mobius-baked/
 COPY backend/app ./app-baked/
 COPY backend/scripts ./scripts-baked/
-RUN chmod -R a-w /app/app-baked /app/scripts-baked
+RUN chmod -R a-w /app/mobius-baked /app/app-baked /app/scripts-baked
 
 # Frozen recovery floor (recoveryd) — the Tier-1 recovery system that runs
 # in its OWN container (same image, command `python3 -P /app/recovery/
