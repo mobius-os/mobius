@@ -10,6 +10,8 @@ if (!globalThis.crypto) {
   globalThis.crypto = webcrypto
 }
 
+const cacheDir = process.env.MOBIUS_VITE_CACHE || 'node_modules/.vite'
+
 // Stamp `<meta name="mobius-frame-rev">` into the BUILT index.html so the
 // SW-precached shell carries the app-frame content rev.
 //
@@ -66,6 +68,7 @@ function stampFrameRev() {
 // build produces a new precache identity, old caches get purged
 // on activate by `cleanupOutdatedCaches`, no manual bumps.
 export default defineConfig({
+  cacheDir,
   plugins: [
     // Stamp the app-frame content rev into dist/index.html so the
     // SW-precached shell can rotate the app-frame cache key (see the
