@@ -1227,7 +1227,10 @@ class _Handler(BaseHTTPRequestHandler):
     query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
     active = (query.get("chat") or [None])[0]
     chats = recovery_chat_runner.list_chats()
-    if active and not any(c.get("id") == active for c in chats):
+    # list_chats() keys each dict by "chat_id" (never "id"); an "id" lookup
+    # is always None and would null every valid ?chat=, bouncing the user
+    # back to the picker and breaking chat-open entirely.
+    if active and not any(c.get("chat_id") == active for c in chats):
       active = None
     history = recovery_chat_runner.load_log(active) if active else []
     provider = (
