@@ -307,6 +307,26 @@ def _maybe_reexec_into_run_dir() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Version — the running bundle's own version, read from its VERSION file.
+# ---------------------------------------------------------------------------
+
+def running_version() -> str:
+  """Returns the semver string of the currently-running recovery bundle.
+
+  Reads the VERSION file from the running bundle dir (resolve_run_dir() —
+  the trusted /data live copy after a launcher hand-off, else the baked
+  floor). Returns its trimmed contents, or "0.0.0" when the file is
+  missing, unreadable, or blank. A bundle with no version is treated as
+  the lowest possible version so any tagged upstream release looks newer.
+  """
+  try:
+    text = (Path(resolve_run_dir()) / "VERSION").read_text(encoding="utf-8")
+  except OSError:
+    return "0.0.0"
+  return text.strip() or "0.0.0"
+
+
+# ---------------------------------------------------------------------------
 # Platform health + status.
 # ---------------------------------------------------------------------------
 
