@@ -33,6 +33,7 @@ import pwd
 import re
 import secrets
 import shutil
+import signal
 import threading
 import time
 from pathlib import Path
@@ -297,10 +298,9 @@ def terminate_active_run_for(chat_id: str) -> bool:
     proc = claim.get("proc")
     _current_run = None
   if proc is not None:
-    try:
-      proc.kill()
-    except (ProcessLookupError, OSError):
-      pass
+    # Kill the whole group, not just the CLI, so a tool child it spawned
+    # doesn't survive as an orphaned root process.
+    _killpg(proc, signal.SIGKILL)
   return True
 
 
@@ -330,10 +330,8 @@ def terminate_active_run() -> bool:
     return False
   proc = claim.get("proc")
   if proc is not None:
-    try:
-      proc.kill()
-    except (ProcessLookupError, OSError):
-      pass
+    # Kill the whole group so tool children of the rescue agent die too.
+    _killpg(proc, signal.SIGKILL)
   # Force-clear the slot so a new request can start immediately, even
   # if the stream generator's own cleanup hasn't run yet. Belt-and-
   # braces — the generator's finally also clears it.
@@ -358,6 +356,33 @@ _append_lock = threading.Lock()
 # (next /stream POST is unblocked), long enough for a polite shutdown
 # to flush a final stdout line.
 _KILL_GRACE_SECONDS = 0.5
+
+
+# Hard wall-clock cap on a single recovery turn. A hung CLI, or a tool it
+# launched that never returns, would otherwise hold the single run slot
+# forever (recovery serves one turn at a time), wedging the recovery chat
+# until a container restart. Env-overridable for genuinely slow repairs.
+try:
+  _MAX_TURN_SECONDS = float(os.environ.get("RECOVERY_MAX_TURN_SECONDS", "900"))
+except ValueError:
+  _MAX_TURN_SECONDS = 900.0
+
+
+def _killpg(proc, sig: int) -> None:
+  """Signals the whole process GROUP of `proc`, best-effort.
+
+  The CLI is spawned with start_new_session=True so it leads its own process
+  group; signalling the GROUP reaches any shell or tool child the root agent
+  launched, not just the direct process — otherwise a killed CLI can leave
+  orphaned root descendants running. A gone process (already reaped) or a
+  failed getpgid resolves to a no-op: cleanup must never raise.
+  """
+  if proc is None or proc.pid is None:
+    return
+  try:
+    os.killpg(os.getpgid(proc.pid), sig)
+  except (ProcessLookupError, OSError):
+    pass
 
 
 # Hard cap on the rendered + in-memory recovery log so a long repair
@@ -842,13 +867,11 @@ async def _terminate_proc(proc: asyncio.subprocess.Process) -> None:
   """
   if proc.returncode is not None:
     return
-  try:
-    proc.terminate()
-  except (ProcessLookupError, OSError):
-    # Process already gone, or signal delivery failed (denied by
-    # namespace, etc.). Either way, nothing to wait on — return so
-    # the caller's cleanup can proceed.
-    return
+  # SIGTERM the whole process group (the CLI leads its own session via
+  # start_new_session=True), so a shell/tool child the root agent spawned is
+  # signalled too — not just the direct CLI. Best-effort; a gone process
+  # no-ops rather than raising, and we still fall through to wait/kill.
+  _killpg(proc, signal.SIGTERM)
   try:
     await asyncio.wait_for(proc.wait(), timeout=_KILL_GRACE_SECONDS)
     return
@@ -858,10 +881,7 @@ async def _terminate_proc(proc: asyncio.subprocess.Process) -> None:
     # Don't let wait() failure (including CancelledError from the
     # surrounding task being cancelled) block the SIGKILL fallback.
     pass
-  try:
-    proc.kill()
-  except (ProcessLookupError, OSError):
-    return
+  _killpg(proc, signal.SIGKILL)
   try:
     await proc.wait()
   except BaseException:
@@ -1035,6 +1055,11 @@ async def _spawn_claude(
     stderr=asyncio.subprocess.PIPE,
     env=env,
     cwd=SUBPROCESS_CWD,
+    # New session/process group (setsid) so cleanup can signal the whole
+    # group and reap any shell/tool child the agent launches, not just the
+    # CLI. Composes with preexec_fn: setsid runs first, the privilege drop
+    # (when RECOVERY_AGENT_USER is non-root) runs last, right before exec.
+    start_new_session=True,
     preexec_fn=agent_preexec(),
   )
   # Publish the live process onto the claim immediately so a
@@ -1049,10 +1074,8 @@ async def _spawn_claude(
       claim["proc"] = proc
       cancelled_during_spawn = False
   if cancelled_during_spawn:
-    try:
-      proc.kill()
-    except (ProcessLookupError, OSError):
-      pass
+    # Kill the whole group — the CLI may already have forked a child.
+    _killpg(proc, signal.SIGKILL)
     yield _sse({"type": "done"})
     return
 
@@ -1074,10 +1097,25 @@ async def _spawn_claude(
       pass
 
   full_assistant_text = []
+  # Hard wall-clock cap: each readline is bounded by the time remaining, so a
+  # hung CLI or a tool that never returns can't hold the single run slot
+  # forever. On timeout we kill the group and surface an error rather than
+  # streaming indefinitely.
+  deadline = time.monotonic() + _MAX_TURN_SECONDS
+  timed_out = False
   try:
     assert proc.stdout is not None
     while True:
-      line = await proc.stdout.readline()
+      remaining = deadline - time.monotonic()
+      if remaining <= 0:
+        timed_out = True
+        break
+      try:
+        line = await asyncio.wait_for(
+          proc.stdout.readline(), timeout=remaining)
+      except asyncio.TimeoutError:
+        timed_out = True
+        break
       if not line:
         break
       try:
@@ -1107,29 +1145,41 @@ async def _spawn_claude(
           msg = event.get("result", "Agent reported an error")
           yield _sse({"type": "error", "message": str(msg)})
 
-    rc = await proc.wait()
-    if rc != 0:
-      stderr_b = await proc.stderr.read() if proc.stderr else b""
-      err = stderr_b.decode("utf-8", errors="replace").strip()[:500]
-      if err:
-        # Detect authentication failures specifically so the user gets
-        # an actionable message rather than a raw CLI error. The patterns
-        # below cover the three surfaces that produce auth errors:
-        # "authentication_error" (Anthropic API), "invalid_api_key"
-        # (some SDK paths), "401" in the message (generic HTTP auth).
-        auth_patterns = ["authentication_error", "invalid_api_key", "401"]
-        is_auth_error = any(p in err.lower() for p in auth_patterns)
-        if is_auth_error:
-          yield _sse({
-            "type": "error",
-            "message": (
-              f"CLI authentication error (exit {rc}). "
-              "Use the Connect button on the chat picker to reconnect "
-              "your AI provider credentials, then try again."
-            ),
-          })
-        else:
-          yield _sse({"type": "error", "message": f"CLI exit {rc}: {err}"})
+    if timed_out:
+      # Kill the group now; the generator's finally reaps it. Surface the
+      # cap so the user knows why the turn stopped.
+      _killpg(proc, signal.SIGKILL)
+      yield _sse({
+        "type": "error",
+        "message": (
+          f"Recovery turn exceeded {int(_MAX_TURN_SECONDS)}s and was "
+          "stopped — the CLI or a tool it launched never finished."
+        ),
+      })
+    else:
+      rc = await proc.wait()
+      if rc != 0:
+        stderr_b = await proc.stderr.read() if proc.stderr else b""
+        err = stderr_b.decode("utf-8", errors="replace").strip()[:500]
+        if err:
+          # Detect authentication failures specifically so the user gets
+          # an actionable message rather than a raw CLI error. The patterns
+          # below cover the three surfaces that produce auth errors:
+          # "authentication_error" (Anthropic API), "invalid_api_key"
+          # (some SDK paths), "401" in the message (generic HTTP auth).
+          auth_patterns = ["authentication_error", "invalid_api_key", "401"]
+          is_auth_error = any(p in err.lower() for p in auth_patterns)
+          if is_auth_error:
+            yield _sse({
+              "type": "error",
+              "message": (
+                f"CLI authentication error (exit {rc}). "
+                "Use the Connect button on the chat picker to reconnect "
+                "your AI provider credentials, then try again."
+              ),
+            })
+          else:
+            yield _sse({"type": "error", "message": f"CLI exit {rc}: {err}"})
 
   except Exception as exc:
     yield _sse({
@@ -1201,6 +1251,8 @@ async def _spawn_codex(
     stderr=asyncio.subprocess.PIPE,
     env=env,
     cwd=SUBPROCESS_CWD,
+    # New session/process group — see the matching note in _spawn_claude.
+    start_new_session=True,
     preexec_fn=agent_preexec(),
   )
   # Atomic publish + cancellation check under the run lock; mirrors
@@ -1214,10 +1266,8 @@ async def _spawn_codex(
       claim["proc"] = proc
       cancelled_during_spawn = False
   if cancelled_during_spawn:
-    try:
-      proc.kill()
-    except (ProcessLookupError, OSError):
-      pass
+    # Kill the whole group — the CLI may already have forked a child.
+    _killpg(proc, signal.SIGKILL)
     yield _sse({"type": "done"})
     return
 
@@ -1246,10 +1296,23 @@ async def _spawn_codex(
       pass
 
   full_assistant_text: list[str] = []
+  # Hard wall-clock cap — same rationale as the Claude path: a hung CLI must
+  # not hold the single run slot forever.
+  deadline = time.monotonic() + _MAX_TURN_SECONDS
+  timed_out = False
   try:
     assert proc.stdout is not None
     while True:
-      line = await proc.stdout.readline()
+      remaining = deadline - time.monotonic()
+      if remaining <= 0:
+        timed_out = True
+        break
+      try:
+        line = await asyncio.wait_for(
+          proc.stdout.readline(), timeout=remaining)
+      except asyncio.TimeoutError:
+        timed_out = True
+        break
       if not line:
         break
       try:
@@ -1277,14 +1340,24 @@ async def _spawn_codex(
           )
           yield _sse({"type": "tool", "name": str(name)[:80]})
 
-    rc = await proc.wait()
-    if rc != 0:
-      stderr_b = await proc.stderr.read() if proc.stderr else b""
-      err = stderr_b.decode("utf-8", errors="replace").strip()[:500]
-      if err:
-        yield _sse(
-          {"type": "error", "message": f"CLI exit {rc}: {err}"}
-        )
+    if timed_out:
+      _killpg(proc, signal.SIGKILL)
+      yield _sse({
+        "type": "error",
+        "message": (
+          f"Recovery turn exceeded {int(_MAX_TURN_SECONDS)}s and was "
+          "stopped — the CLI or a tool it launched never finished."
+        ),
+      })
+    else:
+      rc = await proc.wait()
+      if rc != 0:
+        stderr_b = await proc.stderr.read() if proc.stderr else b""
+        err = stderr_b.decode("utf-8", errors="replace").strip()[:500]
+        if err:
+          yield _sse(
+            {"type": "error", "message": f"CLI exit {rc}: {err}"}
+          )
 
   except Exception as exc:
     yield _sse({
