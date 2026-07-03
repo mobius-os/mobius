@@ -1003,19 +1003,37 @@ class _Handler(BaseHTTPRequestHandler):
     if path == "/recover" or path == "/recover/":
       self._render_recover_page()
       return
+    if path == "/recover/chat":
+      self._render_chat_page()
+      return
+    if path == "/recover/provider/codex/status":
+      if self._agent_gate():
+        self._json(HTTPStatus.OK, recovery_oauth.codex_status())
+      return
     self._send(HTTPStatus.NOT_FOUND, "not found", content_type="text/plain")
 
   def do_HEAD(self) -> None:  # noqa: N802
     self.do_GET()
 
   def do_POST(self) -> None:  # noqa: N802
+    path = urllib.parse.urlparse(self.path).path
+    # Recovery-agent routes carry JSON bodies read inside their own handler
+    # (which drains the body first, then runs the cross-site + auth gates);
+    # branch BEFORE the form drain below so the body is consumed exactly once.
+    if path in (
+      "/recover/chat/new", "/recover/chat/send", "/recover/chat/stream",
+      "/recover/chat/delete", "/recover/chat/reset",
+      "/recover/provider/claude/start", "/recover/provider/claude/code",
+      "/recover/provider/codex/start",
+    ):
+      self._handle_agent_post(path)
+      return
     # Read (drain) the request body FIRST, unconditionally. With HTTP/1.1
     # keep-alive, a handler that replies before consuming the body leaves
     # those bytes in the socket buffer, where they get mis-parsed as the
     # next request ("Bad request syntax"). Draining up front makes every
     # early-return path connection-safe.
     form = self._read_form()
-    path = urllib.parse.urlparse(self.path).path
     if path not in (
       "/recover/auth", "/recover/restore", "/recover/update", "/recover/logout"
     ):
@@ -1155,6 +1173,160 @@ class _Handler(BaseHTTPRequestHandler):
     except OSError:
       pass
     _restart_recoveryd()
+
+  # -- recovery agent (chat + provider reconnect) -------------------------
+
+  def _read_json(self) -> dict:
+    """Reads and drains a JSON request body, returning {} on any failure.
+
+    Drained unconditionally by _handle_agent_post BEFORE any early return so
+    a leftover body can't be mis-parsed as the next keep-alive request.
+    """
+    try:
+      length = int(self.headers.get("Content-Length", 0) or 0)
+    except (TypeError, ValueError):
+      return {}
+    if length <= 0:
+      return {}
+    try:
+      return json.loads(self.rfile.read(length).decode("utf-8")) or {}
+    except (ValueError, OSError):
+      return {}
+
+  def _json(self, code: int, obj: dict) -> None:
+    self._send(code, json.dumps(obj), content_type="application/json")
+
+  def _agent_gate(self) -> bool:
+    """True iff an owner exists AND the session is valid; else sends the error.
+
+    Same gate as the destructive routes: the recovery agent runs as root with
+    full sudo, so reaching it requires the recovery password.
+    """
+    if not recovery_db.owner_exists():
+      self._json(HTTPStatus.FORBIDDEN, {"error": "not configured"})
+      return False
+    if not self._authed_username():
+      self._json(HTTPStatus.UNAUTHORIZED, {"error": "not signed in"})
+      return False
+    return True
+
+  def _render_chat_page(self) -> None:
+    """GET /recover/chat — the recovery-agent chat surface (auth-gated)."""
+    if not recovery_db.owner_exists():
+      self._send(HTTPStatus.OK, recovery_pages.not_configured_html())
+      return
+    if not self._authed_username():
+      self._send(HTTPStatus.OK, recovery_pages.login_html())
+      return
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+    active = (query.get("chat") or [None])[0]
+    chats = recovery_chat_runner.list_chats()
+    if active and not any(c.get("id") == active for c in chats):
+      active = None
+    history = recovery_chat_runner.load_log(active) if active else []
+    provider = (
+      recovery_chat_runner.get_chat_provider(active) if active else None
+    )
+    self._send(HTTPStatus.OK, recovery_chat_pages.render_chat_page(
+      chats, active, history, provider))
+
+  def _handle_agent_post(self, path: str) -> None:
+    """Dispatches the gated JSON chat + provider-reconnect POST routes."""
+    payload = self._read_json()  # drain body first (keep-alive safe).
+    if self._reject_cross_site():
+      self._json(HTTPStatus.FORBIDDEN, {"error": "cross-site request blocked"})
+      return
+    if not self._agent_gate():
+      return
+    if path == "/recover/chat/stream":
+      self._stream_agent_turn(payload)
+      return
+    if path == "/recover/chat/new":
+      provider = (
+        payload.get("provider") or recovery_chat_runner.default_provider()
+      )
+      if provider not in recovery_chat_runner.SUPPORTED_PROVIDERS:
+        self._json(HTTPStatus.BAD_REQUEST, {"error": "unknown provider"})
+        return
+      self._json(HTTPStatus.OK,
+                 {"chat_id": recovery_chat_runner.create_chat(provider)})
+    elif path == "/recover/chat/send":
+      chat_id = str(payload.get("chat_id") or "")
+      text = str(payload.get("text") or "")
+      if not chat_id or not text.strip():
+        self._json(HTTPStatus.BAD_REQUEST, {"error": "chat_id + text required"})
+        return
+      self._json(HTTPStatus.OK,
+                 {"turn_id": recovery_chat_runner.append_log(
+                   chat_id, "user", text)})
+    elif path == "/recover/chat/delete":
+      chat_id = str(payload.get("chat_id") or "")
+      recovery_chat_runner.terminate_active_run_for(chat_id)
+      self._json(HTTPStatus.OK,
+                 {"ok": recovery_chat_runner.delete_chat(chat_id)})
+    elif path == "/recover/chat/reset":
+      chat_id = str(payload.get("chat_id") or "")
+      recovery_chat_runner.terminate_active_run_for(chat_id)
+      recovery_chat_runner.reset_log(chat_id)
+      self._json(HTTPStatus.OK, {"ok": True})
+    elif path == "/recover/provider/claude/start":
+      self._json(HTTPStatus.OK, recovery_oauth.claude_start())
+    elif path == "/recover/provider/claude/code":
+      try:
+        recovery_oauth.claude_exchange(str(payload.get("code") or ""))
+        self._json(HTTPStatus.OK, {"ok": True})
+      except recovery_oauth.OAuthError as exc:
+        self._json(exc.status, {"error": exc.detail})
+    elif path == "/recover/provider/codex/start":
+      try:
+        self._json(HTTPStatus.OK, recovery_oauth.codex_start())
+      except recovery_oauth.OAuthError as exc:
+        self._json(exc.status, {"error": exc.detail})
+    else:
+      self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+
+  def _stream_agent_turn(self, payload: dict) -> None:
+    """POST /recover/chat/stream — SSE bridge driving the async runner.
+
+    recoveryd is a sync ThreadingHTTPServer and each request has its own
+    thread, so a private event loop pumps the async stream_turn generator,
+    flushing each SSE chunk to the socket as it lands. The agent it spawns
+    runs as root (full sudo) with cwd /data.
+    """
+    chat_id = str(payload.get("chat_id") or "")
+    turn_id = payload.get("turn_id")
+    provider = payload.get("provider")
+    if provider not in recovery_chat_runner.SUPPORTED_PROVIDERS:
+      provider = None
+    model = payload.get("model")
+    if isinstance(turn_id, int):
+      message = recovery_chat_runner.user_message_by_id(chat_id, turn_id)
+    else:
+      message = recovery_chat_runner.latest_user_message(chat_id)
+    if not message:
+      self._json(HTTPStatus.BAD_REQUEST, {"error": "no message in log"})
+      return
+    self.send_response(HTTPStatus.OK)
+    self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+    self.send_header("Cache-Control", "no-cache")
+    self.send_header("X-Accel-Buffering", "no")
+    self.end_headers()
+    loop = asyncio.new_event_loop()
+    try:
+      agen = recovery_chat_runner.stream_turn(
+        message, provider, chat_id=chat_id, model=model)
+      while True:
+        try:
+          chunk = loop.run_until_complete(agen.__anext__())
+        except StopAsyncIteration:
+          break
+        data = chunk.encode("utf-8") if isinstance(chunk, str) else chunk
+        self.wfile.write(data)
+        self.wfile.flush()
+    except (BrokenPipeError, ConnectionResetError):
+      pass
+    finally:
+      loop.close()
 
   # -- logging ------------------------------------------------------------
 

@@ -325,12 +325,35 @@ def _update_block(status: dict) -> str:
 """
 
 
+def _agent_block() -> str:
+  """The flagship recovery action: launch the full-sudo recovery agent.
+
+  Links to /recover/chat, where the owner connects Claude or Codex and hands
+  a root-privileged AI agent the broken instance. The agent can change
+  anything (backend, frontend, platform, data, any command); recovery's own
+  code is a read-only mount so the agent cannot break recovery itself.
+  """
+  return """
+    <div class="recommended">
+      <p class="label">Run the recovery agent</p>
+      <p class="desc">
+        Connect Claude or Codex and hand a full-sudo AI agent the broken
+        instance. It can edit the backend, frontend, platform, and data, and
+        run any command to fix M&ouml;bius. Recovery's own code is read-only,
+        so the agent cannot break recovery itself.
+      </p>
+      <a class="btn btn-primary" href="/recover/chat">Run Recovery Agent</a>
+    </div>
+"""
+
+
 def dashboard_html(status: dict, msg: str = "") -> str:
-  """Recovery dashboard: platform health + the Tier-1 restore actions."""
+  """Recovery dashboard: platform health + the recovery agent + Tier-1 actions."""
   msg_html = f'<p class="msg">{html.escape(msg)}</p>' if msg else ""
   body = f"""    <p class="sub">Restore a working platform. Chats and data are untouched.</p>
     {msg_html}
 {_status_block(status)}
+{_agent_block()}
 {_update_block(status)}
     <div class="recommended">
       <p class="label">&#10003; Restore platform (recommended)</p>
