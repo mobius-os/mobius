@@ -21,5 +21,14 @@
         Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; frame-src 'self'; frame-ancestors 'self'"
     }
 
+    # Recovery floor lives in the separate recoveryd container (its own
+    # cgroup + pid1) so a broken or crash-looping platform can't take
+    # recovery down. Route the recovery surface to it BEFORE the catch-all
+    # proxy below — `handle` is terminal on match, so /recover* never falls
+    # through to app:8000. recoveryd exposes 8001 on the compose network.
+    handle /recover* {
+        reverse_proxy recoveryd:8001
+    }
+
     reverse_proxy app:8000
 }
