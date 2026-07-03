@@ -292,27 +292,51 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       })
     })
 
-    // One held-open SSE for the whole turn. It streams the pre-steer text
-    // immediately, then — after a delay timed to land AFTER the steer click
-    // — the steered_into_turn event followed by the post-steer text, all on
-    // the SAME connection. A reconnect (the bug) would open a SECOND /stream;
-    // we assert streamConnections stays 1.
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async (route) => {
-      streamConnections += 1
-      // Deliver the whole sequence as one body, but the steer event + post-
-      // steer text are what onSteeredIntoTurn seals the pre-steer text on.
-      // A small head-start lets the pre-steer text render and the queued
-      // message get steered before the steer event lands.
-      await new Promise(r => setTimeout(r, 200))
-      await route.fulfill({
-        status: 200,
-        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
-        body: sseBody([
-          { type: 'catch_up_done' },
-          { type: 'text', content: PRE_STEER },
-        ]),
-      }).catch(() => {})
-    })
+    // One held-open SSE for the whole turn. Playwright's route.fulfill()
+    // cannot stream incrementally (its body is a string/Buffer), so using it
+    // here closes /stream after the pre-steer text and legitimately lets the
+    // app reconnect. Mock fetch in the page with a ReadableStream instead:
+    // pre-steer text renders immediately, the connection stays open, and the
+    // steer boundary is released only after the force_steer POST is observed.
+    await page.addInitScript(({ preSteer, postSteer, queuedText, queueTs }) => {
+      const originalFetch = window.fetch.bind(window)
+      const encoder = new TextEncoder()
+      const encodeSse = events => encoder.encode(
+        events.map(e => `data: ${JSON.stringify(e)}\n\n`).join(''),
+      )
+      window.__steerQueuedStreamMock = {
+        connections: 0,
+        emitSteer: null,
+      }
+      window.fetch = async (input, init) => {
+        const url = typeof input === 'string' ? input : input?.url
+        if (typeof url === 'string' && /\/api\/chats\/[0-9a-f-]+\/stream$/.test(url)) {
+          window.__steerQueuedStreamMock.connections += 1
+          let emitSteer
+          const body = new ReadableStream({
+            start(controller) {
+              controller.enqueue(encodeSse([
+                { type: 'catch_up_done' },
+                { type: 'text', content: preSteer },
+              ]))
+              emitSteer = () => {
+                controller.enqueue(encodeSse([
+                  { type: 'steered_into_turn', ts: queueTs, content: queuedText },
+                  { type: 'text', content: postSteer },
+                ]))
+              }
+            },
+            cancel() {},
+          })
+          window.__steerQueuedStreamMock.emitSteer = () => emitSteer?.()
+          return new Response(body, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+          })
+        }
+        return originalFetch(input, init)
+      }
+    }, { preSteer: PRE_STEER, postSteer: POST_STEER, queuedText: QUEUED_TEXT, queueTs: QUEUE_TS })
 
     await setupChat(page)
     await newChat(page)
@@ -333,6 +357,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     await expect.poll(
       () => messagePosts.filter(b => b.force_steer).length, { timeout: 5000 },
     ).toBe(1)
+    await page.evaluate(() => window.__steerQueuedStreamMock?.emitSteer?.())
 
     // CORE ASSERTION: the pre-steer text is STILL on screen right after the
     // steer resolved. Before the fix, sendMessage's fresh-send reset cleared
@@ -342,6 +367,17 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       () => page.evaluate(t => document.body.textContent?.includes(t), PRE_STEER),
       { timeout: 2000 },
     ).toBe(true)
+    await page.waitForFunction(
+      ({ queuedText, postSteer }) => {
+        const text = document.body.textContent || ''
+        return text.includes(queuedText) && text.includes(postSteer)
+      },
+      { queuedText: QUEUED_TEXT, postSteer: POST_STEER },
+      { timeout: 5000 },
+    )
+    streamConnections = await page.evaluate(
+      () => window.__steerQueuedStreamMock?.connections || 0,
+    )
 
     // No reconnect flash: the live stream was never torn down + reopened.
     expect(streamConnections).toBe(1)
