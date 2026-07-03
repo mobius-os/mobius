@@ -185,18 +185,44 @@ def _uid_and_mode(path: str) -> tuple[int, int]:
   return st.st_uid, st.st_mode
 
 
-def bundle_is_trusted(dir_path) -> bool:
-  """Returns True iff `dir_path` is a directory whose every `*.py` file
-  (recursively) is owned by root (uid 0) and not group/other-writable.
+def _path_is_root_locked(path: str) -> bool:
+  """Returns True iff `path` is owned by root (uid 0) and not
+  group/other-writable.
 
-  This is the load-bearing trust rule for a floor that runs as root: it
-  may execute code from a directory ONLY when the agent — a non-root
-  user with write access to /data — could not have forged or modified
-  any Python in it. root ownership is unforgeable by the agent (only
-  root can chown to root); a not-group/other-writable mode means the
-  agent cannot rewrite a root-owned file it does not own. The user-write
-  bit is deliberately NOT checked: only root owns these files and root
-  writes regardless of it, so it carries no security signal.
+  The atom of the trust rule, shared by the file and directory passes of
+  bundle_is_trusted. root ownership is unforgeable by the agent (only root
+  can chown to root); a clear group/other write bit means the agent cannot
+  rewrite a root-owned entry it does not own. The user-write bit is
+  deliberately NOT checked: only root owns these entries and root writes
+  regardless of it, so it carries no security signal. Never raises: a stat
+  error resolves to False (untrusted), so a vanished or inaccessible path
+  can only cause a fallback to the baked floor, never a crash.
+  """
+  try:
+    uid, mode = _uid_and_mode(path)
+  except OSError:
+    return False
+  if uid != 0:
+    return False
+  if mode & (stat.S_IWGRP | stat.S_IWOTH):
+    return False
+  return True
+
+
+def bundle_is_trusted(dir_path) -> bool:
+  """Returns True iff `dir_path` is a directory whose every `*.py` file AND
+  every directory (the bundle root plus all subdirectories, recursively) is
+  owned by root (uid 0) and not group/other-writable.
+
+  This is the load-bearing trust rule for a floor that runs as root: it may
+  execute code from a directory ONLY when the agent — a non-root user with
+  write access to /data — could not have forged or modified any Python in
+  it. Checking the files is not enough: a root-owned file inside an
+  agent-writable directory is still unsafe, because the agent can unlink it
+  and drop a replacement (directory write permission governs the namespace,
+  not file ownership), or win a TOCTOU race between this check and the exec.
+  So every directory in the tree must itself be root-owned and not
+  group/other-writable, closing that gap.
 
   A directory with no Python at all is untrusted — there is nothing to
   verify and nothing runnable. Never raises: a missing directory or any
@@ -208,18 +234,19 @@ def bundle_is_trusted(dir_path) -> bool:
     if not d.is_dir():
       return False
     py_files = sorted(d.rglob("*.py"))
+    subdirs = [p for p in d.rglob("*") if p.is_dir()]
   except OSError:
     return False
   if not py_files:
     return False
+  # Files first: an untrusted *.py fails fast before the directory pass.
   for p in py_files:
-    try:
-      uid, mode = _uid_and_mode(str(p))
-    except OSError:
+    if not _path_is_root_locked(str(p)):
       return False
-    if uid != 0:
-      return False
-    if mode & (stat.S_IWGRP | stat.S_IWOTH):
+  # Then the bundle root and every subdirectory — a writable dir voids the
+  # trust even when all files are root-owned and read-only.
+  for dpath in (d, *subdirs):
+    if not _path_is_root_locked(str(dpath)):
       return False
   return True
 

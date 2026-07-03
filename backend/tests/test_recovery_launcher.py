@@ -144,6 +144,84 @@ def test_bundle_is_trusted_empty_dir_is_untrusted(recoveryd, tmp_path):
   assert recoveryd.bundle_is_trusted(d) is False
 
 
+# -- Task 3.0: directory ownership is part of the trust rule ----------------
+
+def test_bundle_is_trusted_accepts_root_dirs_and_files(recoveryd, tmp_path,
+                                                       monkeypatch):
+  # Happy path with a subdirectory: every DIR and every FILE is root-owned
+  # and not group/other-writable -> trusted.
+  d = tmp_path / "bundle"
+  _write_py(d, "recoveryd.py")
+  _write_py(d / "sub", "helper.py")
+  monkeypatch.setattr(recoveryd, "_uid_and_mode", lambda p: (0, 0o755))
+  assert recoveryd.bundle_is_trusted(d) is True
+
+
+def test_bundle_is_trusted_rejects_group_writable_subdir(recoveryd, tmp_path,
+                                                         monkeypatch):
+  # Every *.py is root-owned + read-only (0444), but a SUBDIRECTORY is
+  # group/other-writable: the agent could unlink the root-owned file inside
+  # it and drop its own, or win a TOCTOU race between this check and exec —
+  # so a writable dir voids the trust even with all files locked down.
+  d = tmp_path / "bundle"
+  _write_py(d, "recoveryd.py")
+  _write_py(d / "sub", "helper.py")
+
+  def fake(p):
+    if os.path.basename(p) == "sub":
+      return (0, 0o775)  # root-owned but group/other-writable directory
+    return (0, 0o444)    # root-owned read-only (files + the bundle root)
+
+  monkeypatch.setattr(recoveryd, "_uid_and_mode", fake)
+  assert recoveryd.bundle_is_trusted(d) is False
+
+
+def test_bundle_is_trusted_rejects_other_writable_subdir(recoveryd, tmp_path,
+                                                         monkeypatch):
+  d = tmp_path / "bundle"
+  _write_py(d, "recoveryd.py")
+  _write_py(d / "sub", "helper.py")
+
+  def fake(p):
+    if os.path.basename(p) == "sub":
+      return (0, 0o707)  # other-writable directory
+    return (0, 0o444)
+
+  monkeypatch.setattr(recoveryd, "_uid_and_mode", fake)
+  assert recoveryd.bundle_is_trusted(d) is False
+
+
+def test_bundle_is_trusted_rejects_non_root_bundle_dir(recoveryd, tmp_path,
+                                                       monkeypatch):
+  # A root-owned FILE inside an agent-OWNED bundle dir is still unsafe: the
+  # agent owns the directory and can replace its entries.
+  d = tmp_path / "bundle"
+  _write_py(d, "recoveryd.py")
+
+  def fake(p):
+    if os.path.basename(p) == "bundle":
+      return (1000, 0o755)  # the agent owns the bundle directory itself
+    return (0, 0o444)
+
+  monkeypatch.setattr(recoveryd, "_uid_and_mode", fake)
+  assert recoveryd.bundle_is_trusted(d) is False
+
+
+def test_bundle_is_trusted_rejects_non_root_subdir(recoveryd, tmp_path,
+                                                   monkeypatch):
+  d = tmp_path / "bundle"
+  _write_py(d, "recoveryd.py")
+  _write_py(d / "sub", "helper.py")
+
+  def fake(p):
+    if os.path.basename(p) == "sub":
+      return (1000, 0o755)  # the agent owns a subdirectory
+    return (0, 0o444)
+
+  monkeypatch.setattr(recoveryd, "_uid_and_mode", fake)
+  assert recoveryd.bundle_is_trusted(d) is False
+
+
 # -- Task 1.1: _assert_self_integrity delegates to bundle_is_trusted -------
 
 def test_assert_self_integrity_skips_with_env(recoveryd, monkeypatch):
