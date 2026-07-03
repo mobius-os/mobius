@@ -1020,13 +1020,14 @@ async def run_claude_sdk_turn(
       options_kwargs["model"] = model_override
     if _effort:
       options_kwargs["effort"] = _effort
-    # Arm ultracode via its documented settings flag (see _ULTRACODE_REMINDER),
-    # and ALWAYS disable the "ultracode"-keyword prompt trigger so a stray token
+    # Arm ultracode via its documented `ultracode` settings flag; on every other
+    # turn set the documented `disableWorkflows` flag so a stray "ultracode" token
     # in injected memory/context can't arm the Workflow fleet on a turn the owner
-    # did not opt into. Passed via --settings as inline JSON.
-    _cli_settings = {"workflowKeywordTriggerEnabled": False}
-    if _ultracode:
-      _cli_settings["ultracode"] = True
+    # did not opt into (the observed "$32 for a restaurant question"). Both keys
+    # are documented + stable in the Claude Code settings reference — unlike the
+    # binary-only `workflowKeywordTriggerEnabled`, which we deliberately avoid.
+    # Passed via --settings as inline JSON.
+    _cli_settings = {"ultracode": True} if _ultracode else {"disableWorkflows": True}
     options_kwargs["extra_args"] = {"settings": json.dumps(_cli_settings)}
     options = ClaudeAgentOptions(**options_kwargs)
 
