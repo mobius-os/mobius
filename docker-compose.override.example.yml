@@ -8,6 +8,14 @@ services:
     container_name: mobius
     networks:
       - deploy_default
+  # The recovery floor (recoveryd) must also join the external proxy network so
+  # the outer Caddy can route /recover* to `mobius-recoveryd:8001`. It reaches
+  # the platform for its health probe via the `app` alias on this same network.
+  # The guardrail (read_only + cap_drop + the recoveryd-only recovery_live
+  # volume) is defined in the base docker-compose.yml and carries through here.
+  recoveryd:
+    networks:
+      - deploy_default
 
 networks:
   deploy_default:
