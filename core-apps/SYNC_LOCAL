@@ -1,0 +1,12 @@
+# Files a catalog-synced core app owns LOCALLY in THIS repo — mobius platform
+# infra that happens to live inside the app tree, NOT sourced from or diffed
+# against the catalog pin. Format: `<slug> <relative-path>` (one per line).
+#
+# check-core-apps-sync.sh --excludes these from its drift diff; sync-core-apps.sh
+# preserves them across a re-materialize (so bumping the pin never clobbers the
+# mobius-owned copy). This is the escape hatch for the fetch.sh recurrence: it is
+# the nightly-cron WRAPPER, not app UI, so editing it must not require an upstream
+# app-reflection round-trip + re-pin (it drifted three times that way). The
+# runtime copy is installed from THIS repo by install-core-apps.sh, so mobius is
+# authoritative for it; the catalog repo's copy is legacy.
+reflection fetch.sh

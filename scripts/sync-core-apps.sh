@@ -31,11 +31,27 @@ while read -r slug repo commit _rest; do
   git clone --quiet "https://github.com/$repo.git" "$tmp/$slug"
   git -C "$tmp/$slug" checkout --quiet "$commit"
   dest="$DEST_ROOT/$slug"
+  # Preserve mobius-owned local files (core-apps/SYNC_LOCAL) across the
+  # re-materialize — they are NOT sourced from the catalog pin, so a pin bump
+  # must not clobber them. Stash before the rm, restore after the untar (the
+  # untar first writes the pin's copy; the restore overwrites it with mobius's).
+  stash="$tmp/_local_$slug"
+  if [ -f "$ROOT/core-apps/SYNC_LOCAL" ]; then
+    while read -r ls_slug ls_file _; do
+      case "$ls_slug" in ''|\#*) continue ;; esac
+      [ "$ls_slug" = "$slug" ] && [ -f "$dest/$ls_file" ] || continue
+      mkdir -p "$stash/$(dirname "$ls_file")"
+      cp -p "$dest/$ls_file" "$stash/$ls_file"
+    done < "$ROOT/core-apps/SYNC_LOCAL"
+  fi
   rm -rf "$dest"
   mkdir -p "$dest"
   ( cd "$tmp/$slug" \
       && tar --exclude=./.git --exclude=./README.md --exclude=./LICENSE --exclude=./.gitignore -cf - . ) \
     | ( cd "$dest" && tar -xf - )
+  if [ -d "$stash" ]; then
+    ( cd "$stash" && tar -cf - . ) | ( cd "$dest" && tar -xf - )
+  fi
 done < "$SOURCES"
 
 echo "core-apps synced into $DEST_ROOT"
