@@ -43,9 +43,14 @@ class Settings(BaseSettings):
 
   # GitHub OAuth app client id (env GITHUB_OAUTH_CLIENT_ID) for the device
   # flow in routes/github.py. Device flow needs only the client id — no
-  # secret. Empty means the device flow is unavailable and connecting
-  # GitHub falls back to the classic-PAT path.
-  github_oauth_client_id: str = ""
+  # secret — and a client id is public by design, so the Möbius OAuth
+  # app's id ships as the default: every instance gets one-tap GitHub
+  # sign-in out of the box. Self-hosters can point at their own OAuth app
+  # via the env var; empty disables the device flow (classic-PAT connect
+  # still works). GitHub caps device-code submissions at 50/hour per
+  # client id, shared across every instance using it — a future scaling
+  # concern, not a today one.
+  github_oauth_client_id: str = "Ov23liMpOLS6qp5YV8Vk"
 
   # Auto memory-search: on a substantive FIRST message of a chat, the platform
   # runs the memory-search subagent (scripts/memory_search.py) and injects its
