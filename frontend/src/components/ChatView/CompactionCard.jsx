@@ -1,5 +1,5 @@
-import { useState } from 'react'
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
+import MarkerCard from './MarkerCard.jsx'
 import { compactionBrief } from './compactionToolBlock.js'
 
 // A compaction message is a product moment, not a tool call: the chat's
@@ -16,7 +16,6 @@ import { compactionBrief } from './compactionToolBlock.js'
 // legacy messages that only carry the tool block still resolve because
 // compactionBrief falls back to the block output.
 export default function CompactionCard({ msg }) {
-  const [open, setOpen] = useState(false)
   const brief = compactionBrief(msg)
   // `provider` isn't part of the stored compaction shape today, so this
   // context line only appears if a future writer attaches it — the card
@@ -24,41 +23,19 @@ export default function CompactionCard({ msg }) {
   const provider = providerLabel(msg)
   const subtitle = provider ? `before switching to ${provider}` : null
 
+  // Renders through the shared MarkerCard shell. When `brief` is empty the
+  // shell drops the chevron and stays a static labeled divider on its own.
   return (
-    <div className={`chat__compaction${open ? ' chat__compaction--open' : ''}`}>
-      <button
-        type="button"
-        className="chat__compaction-header"
-        onClick={() => brief && setOpen(o => !o)}
-        aria-expanded={brief ? open : undefined}
-        disabled={!brief}
-      >
-        <span className="chat__compaction-icon" aria-hidden="true">
-          {/* Two arrows converging into one line — "context condensed". */}
-          <svg viewBox="0 0 16 16" width="14" height="14" fill="none"
-            stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"
-            strokeLinejoin="round">
-            <path d="M2 4h12M4 8h8M6 12h4" />
-          </svg>
-        </span>
-        <span className="chat__compaction-label">
-          <span className="chat__compaction-title">Conversation summarized</span>
-          {subtitle && (
-            <span className="chat__compaction-sub">{subtitle}</span>
-          )}
-        </span>
-        {brief && (
-          <span className="chat__compaction-toggle" aria-hidden="true">
-            {open ? '▾' : '▸'}
-          </span>
-        )}
-      </button>
-      {open && brief && (
-        <div className="chat__compaction-brief">
-          <StandardMarkdown text={brief} />
-        </div>
-      )}
-    </div>
+    <MarkerCard title="Conversation summarized" subtitle={subtitle} icon={
+      /* Two arrows converging into one line — "context condensed". */
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none"
+        stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"
+        strokeLinejoin="round">
+        <path d="M2 4h12M4 8h8M6 12h4" />
+      </svg>
+    }>
+      {brief ? <StandardMarkdown text={brief} /> : null}
+    </MarkerCard>
   )
 }
 

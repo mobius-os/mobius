@@ -661,6 +661,74 @@
   white-space: pre-wrap;
 }
 
+/* ── Envelope-aware tool results ─────────────────────── */
+/* A terminal result splits into stdout, a dimmer stderr stream, and a red
+   exit chip when the command failed — so a shell run reads like a terminal
+   instead of a raw JSON envelope. See toolResultFormat.js + ToolBlock. */
+.chat__tool-term {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chat__tool-stderr {
+  color: color-mix(in srgb, var(--danger) 78%, var(--text)); /* CONTRACT: stderr reads as a warning stream, still legible */
+}
+
+.chat__tool-exit {
+  align-self: flex-start;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-family: var(--mono); /* CONTRACT: monospace exit-code chip */
+  font-size: 11px;
+  color: var(--danger); /* CONTRACT: vivid danger text — a nonzero exit failed */
+  background: color-mix(in srgb, var(--danger) 12%, transparent); /* CONTRACT: faint danger tint on the opaque tool fill */
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--border-light)); /* CONTRACT: danger-tinted hairline */
+}
+
+/* The same exit chip on the COLLAPSED tool header, so a failed command shows
+   its nonzero exit without expanding (a tool never carries an 'error' status —
+   the exit code is the only failure signal). */
+.chat__tool-exit--head {
+  flex-shrink: 0;
+  align-self: auto;
+}
+
+/* A failed tool's header name tints toward danger so the whole row reads as a
+   failure at a glance, not just the chip. */
+.chat__tool--failed .chat__tool-name {
+  color: color-mix(in srgb, var(--danger) 70%, var(--text)); /* CONTRACT: danger-leaning tool name on a failed row */
+}
+
+/* A structured (object) result renders as key/value rows: a mono key column
+   and a wrapping value, instead of pretty-printed JSON braces. */
+.chat__tool-kv {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.chat__tool-kv-row {
+  display: grid;
+  grid-template-columns: minmax(56px, max-content) 1fr;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.chat__tool-kv-key {
+  font-family: var(--mono); /* CONTRACT: monospace key column */
+  color: var(--muted); /* CONTRACT: low-contrast key label on opaque fill */
+  word-break: break-word;
+}
+
+.chat__tool-kv-val {
+  margin: 0;
+  font: inherit;
+  color: var(--text); /* CONTRACT: high-contrast value on opaque fill */
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .chat__tool-spin {
   display: inline-block;
   width: 9px;
@@ -674,21 +742,115 @@
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ── Compaction card ───────────────────────────────── */
+/* ── Tool activity group ───────────────────────────── */
 
-/* A compaction is a product moment ("the chat was summarized"), not a tool
-   call — so it gets a labeled card instead of the generic tool block. The
-   accent tint marks it as Möbius-authored without shouting; it sits a touch
-   lower-key than an active tool block (4% vs 5%) and uses the regular text
-   font rather than --mono so it reads as prose, not output. */
-.chat__compaction {
+/* A run of 2+ adjacent tool calls collapses into one card so a build turn's
+   wall of tool blocks doesn't bury the agent's prose (see ToolActivityGroup +
+   groupBlocks.js). Collapsed by default; auto-expands while a child runs. The
+   header carries a status chip so a FAILED step shows without expanding. */
+.chat__toolgroup {
   border-radius: 10px;
-  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border-light)); /* CONTRACT: accent-tinted hairline framing the summary card */
+  border: 1px solid var(--border-light); /* CONTRACT: neutral hairline — the group is structure, not signal */
+  background: color-mix(in srgb, var(--accent) 3%, transparent); /* CONTRACT: faint tint on the opaque message-list fill beneath */
+  overflow: hidden;
+}
+
+.chat__toolgroup--error {
+  border-color: color-mix(in srgb, var(--danger) 34%, var(--border-light)); /* CONTRACT: danger-tinted hairline when a step failed */
+}
+
+.chat__toolgroup-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 11px;
+  background: none;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  color: inherit;
+  font: inherit;
+}
+
+.chat__toolgroup-header:focus-visible {
+  outline: 2px solid var(--accent); /* CONTRACT: vivid accent ring for keyboard focus */
+  outline-offset: -2px;
+}
+
+.chat__toolgroup-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--muted); /* CONTRACT: low-contrast completion glyph */
+}
+
+.chat__toolgroup--error .chat__toolgroup-icon {
+  color: var(--danger); /* CONTRACT: vivid danger — a step in the run failed */
+}
+
+.chat__toolgroup-summary {
+  font-size: 12.5px;
+  font-family: var(--mono); /* CONTRACT: monospace tool names, matching tool blocks */
+  color: var(--text); /* CONTRACT: high-contrast summary on opaque fill */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+
+.chat__toolgroup-count {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--muted); /* CONTRACT: low-contrast count on opaque fill */
+}
+
+.chat__toolgroup-chip {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--danger); /* CONTRACT: vivid danger text — a step failed */
+  background: color-mix(in srgb, var(--danger) 12%, transparent); /* CONTRACT: faint danger tint on the opaque fill */
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--border-light)); /* CONTRACT: danger-tinted hairline */
+}
+
+.chat__toolgroup-toggle {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--muted); /* CONTRACT: low-contrast chevron on opaque fill */
+}
+
+/* The individual tool blocks, stacked with a small gap when expanded. */
+.chat__toolgroup-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 6px 6px;
+}
+
+/* ── Marker card (compaction + future system markers) ── */
+
+/* A marker is a product/system moment ("the chat was summarized", "the turn
+   was interrupted"), not a tool call — so it gets a labeled card instead of
+   the generic tool block or a chat bubble. The accent tint marks it as
+   Möbius-authored without shouting; it sits a touch lower-key than an active
+   tool block (4% vs 5%) and uses the regular text font rather than --mono so
+   it reads as prose, not output. Shared shell in MarkerCard.jsx; renamed 1:1
+   from the old `.chat__compaction*` selectors (compaction is the first
+   marker, so its look is the default). */
+.chat__marker {
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border-light)); /* CONTRACT: accent-tinted hairline framing the marker card */
   background: color-mix(in srgb, var(--accent) 4%, transparent); /* CONTRACT: faint accent tint — sits on the opaque message-list fill beneath, not a standalone surface */
   overflow: hidden;
 }
 
-.chat__compaction-header {
+.chat__marker-header {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -703,14 +865,16 @@
   font: inherit;
 }
 
-.chat__compaction-header:disabled { cursor: default; }
+/* The static (non-collapsible) header is a plain div, not a button — it has no
+   toggle, so it should not read as interactive. */
+.chat__marker-header--static { cursor: default; }
 
-.chat__compaction-header:focus-visible {
+.chat__marker-header:focus-visible {
   outline: 2px solid var(--accent); /* CONTRACT: vivid accent ring for keyboard focus */
   outline-offset: -2px;
 }
 
-.chat__compaction-icon {
+.chat__marker-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -722,7 +886,7 @@
   background: color-mix(in srgb, var(--accent) 14%, transparent); /* CONTRACT: faint accent tint behind the glyph */
 }
 
-.chat__compaction-label {
+.chat__marker-label {
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -730,14 +894,14 @@
   flex: 1;
 }
 
-.chat__compaction-title {
+.chat__marker-title {
   font-size: 13px;
   font-weight: 600;
   color: var(--text); /* CONTRACT: high-contrast title on opaque fill */
   line-height: 1.3;
 }
 
-.chat__compaction-sub {
+.chat__marker-sub {
   font-size: 11.5px;
   color: var(--muted); /* CONTRACT: low-contrast context line on opaque fill */
   line-height: 1.3;
@@ -746,18 +910,18 @@
   white-space: nowrap;
 }
 
-.chat__compaction-toggle {
+.chat__marker-toggle {
   flex-shrink: 0;
   font-size: 12px;
   color: var(--muted); /* CONTRACT: low-contrast chevron on opaque fill */
 }
 
-.chat__compaction-brief {
+.chat__marker-body {
   padding: 2px 12px 12px;
   font-size: 13px;
   color: var(--text); /* CONTRACT: high-contrast briefing prose on opaque fill */
   line-height: 1.5;
-  border-top: 1px solid color-mix(in srgb, var(--accent) 14%, var(--border-light)); /* CONTRACT: hairline divider between header and expanded brief */
+  border-top: 1px solid color-mix(in srgb, var(--accent) 14%, var(--border-light)); /* CONTRACT: hairline divider between header and expanded body */
   margin-top: 2px;
   max-height: 360px;
   overflow-y: auto;
