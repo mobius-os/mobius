@@ -27,6 +27,14 @@ const CHARS_PER_FRAME = 3
 // catch resets the optimistic composer lock instead of hanging in Stop mode.
 const SEND_POST_TIMEOUT_MS = 20000
 
+// Delay before the wake/online reattach surfaces as a visible
+// "Reconnecting…" note. A healthy reattach (tab briefly hidden, socket
+// still warm) completes well inside this window — showing the note for
+// those would flash it on every tab switch. This is debounce on a real
+// state, not a bandaid: the reattach genuinely starts at arm time; we
+// only skip *rendering* it when it resolves faster than a human can read.
+const RECONNECT_NOTE_DELAY_MS = 300
+
 // Window during which a 204 from /stream after a send is a race
 // (the SSE GET landed before chats_stream.py:POST /messages finished
 // registering the broadcast) rather than "agent finished." The POST
@@ -146,6 +154,7 @@ const SYSTEM_EVENTS = new Set([
  *   isStreaming: boolean,
  *   isStreamingRef: React.MutableRefObject<boolean>,
  *   connectionError: string | null,
+ *   reconnecting: boolean,
  *   sendMessage: (text: string, attachments?: Array<object>,
  *                 opts?: {hidden?: boolean, queueOnly?: boolean,
  *                         forceSteer?: boolean, consumePendingTs?: number[],
@@ -214,6 +223,36 @@ export default function useStreamConnection(chatId, {
   const [connectionError, _setConnectionError] = useState(null)
   const connectionErrorRef = useRef(null)
   function setConnectionError(v) { connectionErrorRef.current = v; _setConnectionError(v) }
+
+  // Visible wake/online reattach window. Distinct from `connectionError`:
+  // the SSE is being proactively REPLACED after sleep/wake or network
+  // recovery (an expected, healthy transition), not failing — so it renders
+  // as a quiet note, never the error styling. Armed only by the
+  // visibility/online handlers below; a fast reattach (< the delay) never
+  // shows it. Cleared on every settled outcome: catch-up commit, `done`,
+  // terminal 204/EOF, or the stream erroring into the connectionError
+  // states (which take over the ConnectionStatus slot).
+  const [reconnecting, _setReconnecting] = useState(false)
+  const reconnectNoteTimerRef = useRef(null)
+  const reconnectNoteShownRef = useRef(false)
+  function armReconnectingNote() {
+    if (reconnectNoteShownRef.current || reconnectNoteTimerRef.current) return
+    reconnectNoteTimerRef.current = setTimeout(() => {
+      reconnectNoteTimerRef.current = null
+      reconnectNoteShownRef.current = true
+      _setReconnecting(true)
+    }, RECONNECT_NOTE_DELAY_MS)
+  }
+  function clearReconnectingNote() {
+    if (reconnectNoteTimerRef.current) {
+      clearTimeout(reconnectNoteTimerRef.current)
+      reconnectNoteTimerRef.current = null
+    }
+    if (reconnectNoteShownRef.current) {
+      reconnectNoteShownRef.current = false
+      _setReconnecting(false)
+    }
+  }
 
   const abortRef = useRef(null)
   const retryCount = useRef(0)
@@ -372,6 +411,7 @@ export default function useStreamConnection(chatId, {
       wantsReconnectRef.current = false
       setIsStreaming(false)
       setConnectionError(null)
+      clearReconnectingNote()
       retryCount.current = 0
       justSentAtRef.current = 0
     }
@@ -391,6 +431,10 @@ export default function useStreamConnection(chatId, {
     textBufferRef.current = ''
     forceNewTextBlockRef.current = false
     lastGoodItemsRef.current = []
+    // The reattach note (and its pending show-timer) belongs to the chat
+    // we're leaving — a stale timer firing after the switch would flash
+    // "Reconnecting…" over the new chat.
+    clearReconnectingNote()
     // Answers belong to the chat we're leaving; carrying them into the next
     // chat could re-arm a same-keyed question with a foreign answer.
     answersByQuestionKeyRef.current.clear()
@@ -516,6 +560,7 @@ export default function useStreamConnection(chatId, {
         // reconnections.
         abortRef.current = null
         setConnectionError(null)
+        clearReconnectingNote()
         retryCount.current = 0
         wantsReconnectRef.current = false
         clearStoredStreamSnapshot(activeStreamChatIdRef.current)
@@ -622,6 +667,9 @@ export default function useStreamConnection(chatId, {
 
           if (event.type === 'catch_up_done') {
             commitCatchUp()
+            // The reattach window ends when the catch-up burst commits —
+            // from here on it's normal live streaming again.
+            clearReconnectingNote()
             continue
           }
 
@@ -838,6 +886,7 @@ export default function useStreamConnection(chatId, {
             queuedContinuationTsRef.current = null
             queuedContinuationMessageRef.current = null
             setConnectionError(null)
+            clearReconnectingNote()
             retryCount.current = 0
             // The turn is done — its answers are durable in the promoted
             // message now, so drop the reconnect-survival cache before the
@@ -874,6 +923,7 @@ export default function useStreamConnection(chatId, {
         // EOF without an explicit done is still terminal here. Promote and
         // clear running state in the same batch so the final live row does not
         // briefly collapse into the generic thinking dots.
+        clearReconnectingNote()
         onStreamEndRef.current?.()
         setIsStreaming(false)
         return
@@ -886,13 +936,22 @@ export default function useStreamConnection(chatId, {
       // catch-up instead of hiding the in-progress assistant message.
       setIsStreaming(true)
       if (document.visibilityState === 'visible') {
+        // The 'retrying' connectionError takes over the ConnectionStatus
+        // slot; drop the quiet note so only one indicator renders.
+        clearReconnectingNote()
         setConnectionError('retrying')
         scheduleReconnect(() => connectRef.current?.(true), 300)
       }
     } catch (err) {
+      // An abort means this connection was REPLACED (wake handler, Stop,
+      // fresh send) — the reattach window, if one is open, continues on
+      // the successor connection, so the note is deliberately left alone.
       if (err.name === 'AbortError') return
       flushBuffer()
       setIsStreaming(false)
+      // Real failure: the connectionError states below own the
+      // ConnectionStatus slot from here.
+      clearReconnectingNote()
       // Retry with exponential backoff.
       // IMPORTANT: reconnect with resetState=true so catch-up rebuilds into an
       // off-screen buffer. Without this, replay would append from the start on
@@ -943,6 +1002,7 @@ export default function useStreamConnection(chatId, {
   const retry = useCallback(() => {
     retryCount.current = 0
     setConnectionError(null)
+    clearReconnectingNote()
     setIsStreaming(true)
     wantsReconnectRef.current = true
     // Reset state — same reason as the automatic retry above.
@@ -990,6 +1050,7 @@ export default function useStreamConnection(chatId, {
       textBufferRef.current = ''
       setIsStreaming(true)
       setConnectionError(null)
+      clearReconnectingNote()
     }
 
     let responseData = null
@@ -1134,6 +1195,9 @@ export default function useStreamConnection(chatId, {
     function onVisible() {
       if (document.visibilityState !== 'visible') return
       if (!wantsReconnectRef.current && !isStreamingRef.current) return
+      // Past the idle gate: a reattach genuinely starts here. Surface it
+      // if it outlives the show-delay (see armReconnectingNote).
+      armReconnectingNote()
       if (abortRef.current) {
         abortRef.current.abort()
         abortRef.current = null
@@ -1143,6 +1207,7 @@ export default function useStreamConnection(chatId, {
 
     function onOnline() {
       if (!wantsReconnectRef.current && !isStreamingRef.current && !connectionErrorRef.current) return
+      armReconnectingNote()
       if (abortRef.current) {
         abortRef.current.abort()
         abortRef.current = null
@@ -1212,6 +1277,7 @@ export default function useStreamConnection(chatId, {
     isStreaming,
     isStreamingRef,
     connectionError,
+    reconnecting,
     sendMessage,
     connectToStream,
     retry,

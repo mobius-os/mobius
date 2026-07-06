@@ -575,13 +575,14 @@ test.describe('Stream reconnection', () => {
     })
 
     // Queue a second message behind the streaming turn. A server-confirmed
-    // queued message now surfaces the fast-forward (steer) button in place
-    // of Stop (the steer feature — see steer-queued.spec.mjs). This test is
-    // about the STOP disconnect+resend stale-204 guard, so clear the queue
-    // via the tray's cancel-X to revert the primary action to Stop (the
-    // documented hard-stop escape hatch). The DELETE /pending does not hit
-    // /messages, so the post-counter sequence is unchanged: the fresh turn
-    // we send after Stop is POST #3 (status:'started' → real /stream).
+    // queued message surfaces the fast-forward (steer) chip alongside Stop
+    // (the steer feature — see steer-queued.spec.mjs). This test is about
+    // the STOP disconnect+resend stale-204 guard, so clear the queue via
+    // the tray's cancel-X before stopping — a Stop with queued rows would
+    // collapse them into the fresh turn and change the resend payload.
+    // The DELETE /pending does not hit /messages, so the post-counter
+    // sequence is unchanged: the fresh turn we send after Stop is POST #3
+    // (status:'started' → real /stream).
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('queued follow-up')
     await expect(page.locator('button[aria-label="Send"]')).toBeVisible()

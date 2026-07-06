@@ -257,6 +257,10 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // read is forward-compat: harmlessly null today, it would pick up a
   // persisted pending_question_id if one is ever added.)
   const [liveQuestionId, setLiveQuestionId] = useState(() => cached?.pending_question_id ?? null)
+  // True while a pending (unanswered) question card exists but is scrolled
+  // out of the viewport — drives the footer "tap to answer" chip. Written
+  // only by the IntersectionObserver effect below (near hasPendingQuestion).
+  const [pendingCardOffscreen, setPendingCardOffscreen] = useState(false)
   const [showInspector, setShowInspector] = useState(false)
 
   // Mirror `messages` in a ref so commitMessages can compute the next
@@ -596,6 +600,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     isStreaming,
     isStreamingRef,
     connectionError,
+    reconnecting,
     sendMessage: streamSend,
     connectToStream,
     retry,
@@ -2206,6 +2211,61 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   const suppressStreamingSurface = !!(activePartialMsg && partialCoversLiveStream && !liveStreamCoversPartial)
   const showStreamingSurface = turnActive && streamItems.length > 0 && !suppressStreamingSurface
 
+  // ── Sticky "needs your answer" affordance ──────────────────────────
+  // A pending AskUserQuestion freezes the turn until the user answers,
+  // but the card can sit outside the viewport (the user scrolled away,
+  // or content streamed in around it) — the chat then just looks hung.
+  // Detect a pending card in whichever surface currently renders it:
+  // the live stream (a question item without answers) or the durable
+  // tail-question invariant on the last visible assistant message (the
+  // same rule MsgContent's blockAnswerable enforces — see its comment).
+  const pendingQuestionInStream = showStreamingSurface
+    && streamItems.some(it => it.type === 'question' && !it.answers)
+  const pendingQuestionInMessages = (() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].hidden) continue
+      const msg = messages[i]
+      if (msg.role !== 'assistant' || !msg.blocks?.length) return false
+      const tail = msg.blocks[msg.blocks.length - 1]
+      return !!(tail.type === 'question' && !tail.answers
+        && (!liveQuestionId || tail.question_id === liveQuestionId))
+    }
+    return false
+  })()
+  const hasPendingQuestion = pendingQuestionInStream || pendingQuestionInMessages
+
+  // Visibility of that card is a pure viewport question — an
+  // IntersectionObserver rooted at the scroll container is the signal,
+  // no scroll math and no interaction with the spacer machinery. The
+  // card's DOM node is stable across streaming ticks (keyed children),
+  // so the observer only needs re-binding when the rendering surface
+  // can change: pending-flag flips, stream↔messages promotion, or a
+  // messages commit.
+  // The LAST un-answered card is the pending one: it lives in the last
+  // assistant message or the streaming <li> (both render after any old
+  // orphaned question a reconcile note retired, which keeps its plain
+  // .qcard class but is history).
+  const findPendingQuestionCard = () =>
+    [...(scrollRef.current?.querySelectorAll('.qcard:not(.qcard--answered)') ?? [])].pop()
+
+  useEffect(() => {
+    if (!hasPendingQuestion) {
+      setPendingCardOffscreen(false)
+      return undefined
+    }
+    const scrollEl = scrollRef.current
+    const card = findPendingQuestionCard()
+    if (!scrollEl || !card || typeof IntersectionObserver === 'undefined') {
+      setPendingCardOffscreen(false)
+      return undefined
+    }
+    const io = new IntersectionObserver(entries => {
+      setPendingCardOffscreen(!entries[0]?.isIntersecting)
+    }, { root: scrollEl, threshold: 0 })
+    io.observe(card)
+    return () => io.disconnect()
+  }, [hasPendingQuestion, showStreamingSurface, messages])
+
   // The streaming <li> carries a stable data-key so the scroll state machine
   // can anchor inside an in-flight answer. Without this, returning to a
   // streaming chat while scrolled into the live bubble had no anchorable row,
@@ -2445,7 +2505,25 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       )}
 
       <div ref={footRef} className="chat__foot">
-        <ConnectionStatus error={connectionError} onRetry={retry} />
+        {hasPendingQuestion && pendingCardOffscreen && (
+          <button
+            type="button"
+            className="chat__question-nudge"
+            onClick={() => {
+              // USER-initiated scroll — the no-auto-scroll contract only
+              // forbids the app moving the viewport on its own; a tap on
+              // this chip is the user asking to be taken to the card.
+              findPendingQuestionCard()?.scrollIntoView({ block: 'nearest' })
+            }}
+          >
+            Möbius asked you something — tap to answer
+          </button>
+        )}
+        <ConnectionStatus
+          error={connectionError}
+          reconnecting={reconnecting}
+          onRetry={retry}
+        />
         <QueuedMessages items={pendingQueue.pendingMessages} onCancel={handleCancelPending} />
         <ChatInputBar
           input={input}

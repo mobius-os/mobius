@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { groupToolRuns, toolGroupState, toolGroupSummary } from '../groupBlocks.js'
+import { toolActivityLabel } from '../toolActivityLabel.js'
 
 const e = item => ({ item })
 const tool = (extra = {}) => ({ type: 'tool', ...extra })
@@ -81,17 +82,35 @@ test('toolGroupState: running wins, then a nonzero exit is error, else done', ()
   assert.equal(toolGroupState([tool({ status: 'running', output: '' })]), 'running')
 })
 
-test('toolGroupSummary: distinct names, first 3 + overflow', () => {
+test('toolGroupSummary: distinct activity labels, first 3 + overflow', () => {
+  // Write maps to the same activity as Edit ("Editing code"), so 6 tools /
+  // 5 distinct names fold to 4 distinct activities → 3 shown + 1 overflow.
   assert.equal(
     toolGroupSummary([
       tool({ tool: 'Read' }), tool({ tool: 'Read' }), tool({ tool: 'Edit' }),
       tool({ tool: 'Bash' }), tool({ tool: 'Grep' }), tool({ tool: 'Write' }),
     ]),
-    'Read, Edit, Bash +2'
+    'Reading files · Editing code · Running commands +1'
   )
   assert.equal(
     toolGroupSummary([tool({ tool: 'Read' }), tool({ tool: 'Edit' })]),
-    'Read, Edit'
+    'Reading files · Editing code'
   )
   assert.equal(toolGroupSummary([tool({}), tool({})]), 'Tool')
+})
+
+test('toolGroupSummary: an unknown tool name passes through raw', () => {
+  assert.equal(
+    toolGroupSummary([tool({ tool: 'FooTool' }), tool({ tool: 'Bash' })]),
+    'FooTool · Running commands'
+  )
+})
+
+test('toolActivityLabel: maps known tools, falls back to the raw name', () => {
+  assert.equal(toolActivityLabel('Glob'), 'Reading files')
+  assert.equal(toolActivityLabel('WebSearch'), 'Browsing the web')
+  assert.equal(toolActivityLabel('FooTool'), 'FooTool')
+  assert.equal(toolActivityLabel(undefined), 'Tool')
+  // Prototype-chain names must not resolve to Object internals.
+  assert.equal(toolActivityLabel('constructor'), 'constructor')
 })

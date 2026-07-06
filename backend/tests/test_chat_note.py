@@ -101,7 +101,10 @@ def test_build_prompt_includes_existing_note_to_grow():
   cn = _load_chat_note()
   p = cn._build_prompt("user: hi", "---\n## Summary\nold")
   assert "user: hi" in p
-  assert "grow this, never shrink" in p.lower()
+  # The contract: a growing summary, lightly curated — grow + dedupe; noise is
+  # what gets trimmed, never informative content.
+  assert "grow it" in p.lower()
+  assert "dedupe" in p.lower()
   assert "old" in p
 
 

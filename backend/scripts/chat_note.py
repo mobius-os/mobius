@@ -58,8 +58,9 @@ description: <one-line gist of the chat in the partner's own words — this IS t
 chat's name, e.g. "dialing in a sour espresso shot", not "chat 12">
 ---
 ## Summary
-<a couple of paragraphs: what this chat is about and what it has produced (an app
-built, a decision made, a preference learned), recency-biased for a long chat>
+<what this chat is about and what it has produced (an app built, a decision made,
+a preference learned) — starts as a couple of paragraphs and grows with the chat;
+recency-biased means organized for usefulness, never capped for length>
 
 ## Facts & intent
 - <each durable fact the partner gave — a preference, constraint, identity,
@@ -67,9 +68,13 @@ built, a decision made, a preference learned), recency-biased for a long chat>
 - intent: <what the partner is ultimately trying to do>
 
 Rules:
-- GROW, never shrink: if a current note is given, fold the new transcript content
-  INTO it and reorganize for coherence — keep everything that's still true, add
-  what's new. Never drop facts (the nightly pass consolidates later).
+- A GROWING summary, lightly curated: if a current note is given, fold the new
+  transcript content INTO it and reorganize for coherence. The note grows by
+  default — every informative part stays. Curate lightly as you fold: if the
+  transcript revisits something the note already captures, add only what is
+  genuinely new; merge duplicate lines; drop lines that carry no future-useful
+  signal ("asked about X again" with nothing new is noise, not memory). Never
+  compress the note for length alone — noise is what you trim, never substance.
 - PRESERVE connections: if the current note has any `[[wiki-links]]`, `see also
   [[chats/<id>]]` lines, or a `## Related` section, keep them VERBATIM — they are
   this chat's links into the graph. You have no tools and can't see the graph, so
@@ -197,7 +202,11 @@ def _clean_note_output(text: str) -> str:
 def _build_prompt(transcript: str, existing: str) -> str:
   parts = ["The chat transcript:\n\n", transcript or "(empty)"]
   if existing.strip():
-    parts += ["\n\nThe CURRENT note (grow this, never shrink):\n\n", existing]
+    parts += [
+      "\n\nThe CURRENT note (grow it — fold in the new, dedupe the old, keep "
+      "everything informative):\n\n",
+      existing,
+    ]
   parts.append(
     "\n\nProduce the updated memory note now, in the exact format, and nothing else."
   )

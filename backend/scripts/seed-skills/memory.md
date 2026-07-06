@@ -124,7 +124,7 @@ maintain `chats/$CHAT_ID/index.md` **every turn**:
 
 - `type: chat`, with a one-line `description:` that IS the chat's name — the gist
   in the partner's words ("dialing in a sour espresso shot", not "chat 12").
-- `## Summary` — a **growing**, few-paragraph summary of what the chat is about
+- `## Summary` — a **growing** summary (starts as a few paragraphs, grows as needed) of what the chat is about
   and what it has produced (an app built, a decision made, a preference learned),
   recency-biased for long chats.
 - `## Facts & intent` — the durable facts this chat surfaced about the partner
@@ -145,11 +145,17 @@ maintain `chats/$CHAT_ID/index.md` **every turn**:
   reader would actually follow, not every passing mention; replacing a stale `## Related`
   pointer with a better one loses nothing (it is an index of pointers, not facts).
 
-**Grow, never shrink.** Each turn, `Read` the note and then `Write` a *larger*
-version — fold in the new turn's information and reorganize for coherence, but
-**never delete** what's there. (Reflection consolidates and prunes later; it can
-only do that if the daytime note kept everything.) This is the opposite of an
-atomic note's one-claim discipline — the chat note is *meant* to accumulate.
+**A growing summary, lightly curated.** Each turn, `Read` the note and then
+`Write` the updated version — usually larger: fold in the new turn's information
+and reorganize for coherence. The note grows by default, and every informative
+part of the chat stays. Curate lightly as you go: if the partner revisits a
+topic the note already captures, add only what's genuinely new — re-recording
+"asked about A again" with nothing new is noise, not memory. Merging duplicate
+lines and dropping lines with no future signal is normal editing; what you never
+do is compress the note for length alone — noise is what you trim, never
+substance. (Reflection does the deep consolidation later.) This is still the
+opposite of an atomic note's one-claim discipline — the chat note is *meant* to
+accumulate the chat's informative content.
 
 **Re-propose the name each turn**, so the partner sees the gist evolve. Sync the
 displayed title to the `description`:
