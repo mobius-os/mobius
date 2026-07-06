@@ -169,9 +169,11 @@ Two gotchas every session:
 
 ### 6. Screenshots — viewing is private; embedding is what the partner sees
 
+**This applies to EVERY turn that captures a screenshot** — debugging, audits, app reviews, investigations — not just builds. If you describe what a screenshot shows, the embed must precede the description in the same message.
+
 Loading a PNG into your vision (`Read` on Claude, `view_image` on Codex) lets YOU inspect it. The partner sees ONLY your text plus any `![caption](/api/chats/$CHAT_ID/media/<name>.png)` embeds you explicitly write. The failure mode: you view it, describe it ("the grid rendered beautifully"), but never embed — so the partner trusts an unverified claim. Pattern:
 
-1. `Bash`: capture with `bash "$SCRIPTS_DIR/agent-screenshot.sh" <route>` — with no output path it lands in the chat's served media dir (`/data/chats/$CHAT_ID/media/shot-*.png`) and prints the path **plus a ready-to-paste `embed: ![screenshot](/api/chats/…)` line** — copy that line into your reply (step 3) so the shot actually shows. (Already-open or non-Möbius page: `agent-browser screenshot /data/chats/$CHAT_ID/media/<name>.png`.) Only files under that dir embed — a bare `agent-browser screenshot /tmp/x.png` is viewable but 404s if embedded.
+1. `Bash`: capture with `bash "$SCRIPTS_DIR/agent-screenshot.sh" <route>` — with no output path it lands in the chat's served media dir (`/data/chats/$CHAT_ID/media/shot-*.png`) and prints the path **plus a ready-to-paste `![screenshot](/api/chats/…)` embed line** — copy that line into your reply (step 3) so the shot actually shows. (Already-open or non-Möbius page: `agent-browser screenshot /data/chats/$CHAT_ID/media/<name>.png`.) Only files under that dir embed — a bare `agent-browser screenshot /tmp/x.png` is viewable but 404s if embedded.
 2. `Read` / `view_image`: the path it printed.
 3. **Text** (same message, BEFORE interpreting): `![first render](/api/chats/$CHAT_ID/media/<name>.png)` — the embed path must match the file. Then a one-line description.
 4. Continue.
@@ -180,7 +182,7 @@ Loading a PNG into your vision (`Read` on Claude, `view_image` on Codex) lets YO
 
 ### 7. Before handing control back, run the ensure-checklist
 
-When about to stop tool-calling and write the final assistant message, walk this table. Each row is "if you did X this turn, do Y before you stop." (Tool names are Claude's; on Codex use its equivalents — `shell`/`apply_patch`/`view_image`.) Everything you'd record goes into **this chat's note** (`chats/$CHAT_ID/index.md`) — grow its summary, lightly curated; full memory rules in the `memory.md` skill.
+When about to stop tool-calling and write the final assistant message **on any tool-using task — not just builds and restyles** — walk this table. Each row is "if you did X this turn, do Y before you stop." (Tool names are Claude's; on Codex use its equivalents — `shell`/`apply_patch`/`view_image`.) Everything you'd record goes into **this chat's note** (`chats/$CHAT_ID/index.md`) — grow its summary, lightly curated; full memory rules in the `memory.md` skill.
 
 | If this turn... | Do this before handing over |
 |---|---|

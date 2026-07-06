@@ -18,8 +18,11 @@ const ACTIVITY_LABELS = new Map([
   ['WebFetch', 'Browsing the web'],
   ['WebSearch', 'Browsing the web'],
   ['TodoWrite', 'Planning'],
+  ['ToolSearch', 'Planning'],
   ['Task', 'Working in the background'],
   ['Agent', 'Working in the background'],
+  ['Workflow', 'Working in the background'],
+  ['TaskOutput', 'Working in the background'],
   ['AskUserQuestion', 'Asking you'],
   ['Skill', 'Using a skill'],
 ])
