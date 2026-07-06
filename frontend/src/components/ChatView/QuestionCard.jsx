@@ -155,7 +155,17 @@ export default function QuestionCard({ questions, questionId, answeredMap, onAns
                         className={`qcard__mark qcard__mark--${isMulti ? 'box' : 'radio'}`}
                         aria-hidden="true"
                       />
-                      {opt.label}
+                      {/* Description renders inline, not only as title= — a
+                          title tooltip is invisible on touch, and this is a
+                          phone-first surface. */}
+                      {opt.description ? (
+                        <span className="qcard__opt-body">
+                          <span className="qcard__opt-label">{opt.label}</span>
+                          <span className="qcard__opt-desc">{opt.description}</span>
+                        </span>
+                      ) : (
+                        opt.label
+                      )}
                     </button>
                   )
                 })

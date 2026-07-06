@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { apiFetch } from '../../api/client.js'
 import { formatToolResult } from './toolResultFormat.js'
+import { toolActivityLabel } from './toolActivityLabel.js'
 
 function sourceHost(url) {
   try {
@@ -132,8 +133,11 @@ export default function ToolBlock({ t, chatId, msgTs, blockIdx }) {
             skill, show its name as a chip so the user can see which
             skill the agent reached for this turn. */}
         {t.skill && <span className="chat__tool-chip">skill: {t.skill}</span>}
+        {/* While running, the header speaks owner language ("Running
+            commands…", not "Running Bash..."); once done it shows the raw
+            call (name + input) so what ran stays inspectable. */}
         <span className="chat__tool-name">
-          {t.status === 'running' ? `Running ${toolName}...` : label}
+          {t.status === 'running' ? `${toolActivityLabel(toolName)}…` : label}
         </span>
         {failed && (
           <span className="chat__tool-exit chat__tool-exit--head">exit {r.exitCode}</span>

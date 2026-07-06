@@ -1,8 +1,26 @@
 /**
- * Subtle reconnection indicator shown when the SSE connection is lost.
+ * Subtle reconnection indicator shown when the SSE connection is lost,
+ * plus a quieter note while a wake/online reattach is in flight.
  */
-export default function ConnectionStatus({ error, onRetry }) {
-  if (!error) return null
+export default function ConnectionStatus({ error, reconnecting, onRetry }) {
+  if (!error) {
+    // `reconnecting` is the healthy sleep/wake reattach window (see
+    // useStreamConnection's armReconnectingNote): the stream is being
+    // replaced, not failing, so it renders as a quiet note without the
+    // error bar or a Retry affordance. Error states below win the slot —
+    // 'retrying' already announces its own reconnect, and 'disconnected'
+    // needs the Retry button front and center.
+    if (!reconnecting) return null
+    return (
+      <div
+        className="connection-status connection-status--reattach"
+        role="status"
+        aria-live="polite"
+      >
+        <span className="connection-status__text">Reconnecting…</span>
+      </div>
+    )
+  }
 
   // Announce a dropped stream to assistive tech: 'alert' (assertive) for the
   // terminal "connection lost" so a screen-reader user hears it immediately

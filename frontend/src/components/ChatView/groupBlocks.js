@@ -1,4 +1,5 @@
 import { toolResultFailed } from './toolResultFormat.js'
+import { toolActivityLabel } from './toolActivityLabel.js'
 
 // Fold runs of 2+ adjacent tool entries into one group node, so a build turn's
 // wall of individual tool blocks collapses into a single "Activity" card. This
@@ -65,15 +66,19 @@ export function toolGroupState(tools) {
   return 'done'
 }
 
-// A compact header summary: distinct tool names in first-seen order, first 3
-// shown, the rest folded into "+N". "Read, Edit, Bash +2" for a 5-name mix.
+// A compact header summary: the run's distinct ACTIVITIES in first-seen
+// order, first 3 shown, the rest folded into "+N". Activities are the
+// owner-facing labels from toolActivityLabel, deduped on the LABEL so
+// Read+Glob+Read collapses to one "Reading files" — the header reads
+// "Reading files · Editing code", never "Read, Read, Edit". Raw tool names
+// stay on the expanded children (ToolBlock) for inspection.
 export function toolGroupSummary(tools) {
   const seen = []
   for (const t of tools) {
-    const name = t?.tool || 'Tool'
-    if (!seen.includes(name)) seen.push(name)
+    const label = toolActivityLabel(t?.tool)
+    if (!seen.includes(label)) seen.push(label)
   }
-  const head = seen.slice(0, 3).join(', ')
+  const head = seen.slice(0, 3).join(' · ')
   const extra = seen.length - 3
   return extra > 0 ? `${head} +${extra}` : head
 }
