@@ -59,9 +59,6 @@ chats_stream_router = _load("chats_stream")
 chat_logs_router = _load("chat_logs")
 proxy_router = _load("proxy")
 notify_router = _load("notify")
-# `recover.py` is also wrapped for symmetry / defense in depth, even
-# though it's in the frozen island and should never fail to import.
-recover_router = _load("recover")
 settings_router = _load("settings")
 storage_router = _load("storage")
 fs_router = _load("fs")
@@ -89,7 +86,6 @@ __all__ = [
   "chats_stream_router",
   "chat_logs_router",
   "proxy_router",
-  "recover_router",
   "notify_router",
   "settings_router",
   "uploads_router",

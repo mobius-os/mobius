@@ -22,5 +22,10 @@
 /data/shell/src/components/ProviderAuth/ProviderAuth.css
 
 # --- Boot / restore infra (scripts) ---
+# The whole-repo model un-freezes the backend: the SERVED code is
+# /data/platform/backend/app (mobius-owned, editable in place), so the old
+# /app/app/* freeze protected the baked FALLBACK, not the live code — moot now.
+# Recovery no longer depends on freezing the boot chain; the separate recoveryd
+# container is the floor. Only the baked boot/restore scripts stay frozen.
 /app/scripts/entrypoint.sh
 /app/scripts/recovery_restore.sh

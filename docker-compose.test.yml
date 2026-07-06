@@ -60,6 +60,10 @@ services:
     # recovery agent gets EROFS writing recovery's own code (/app/recovery) —
     # writable surfaces are the /data + /recovery-live volumes + tmpfs scratch.
     read_only: true
+    # Drop CAP_SYS_ADMIN so a full-root agent can't remount the
+    # read-only recovery floor back to writable — makes the lockdown airtight.
+    cap_drop:
+      - SYS_ADMIN
     tmpfs:
       - /tmp
       - /run

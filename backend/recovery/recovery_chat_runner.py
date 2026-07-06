@@ -33,6 +33,7 @@ import pwd
 import re
 import secrets
 import shutil
+import signal
 import threading
 import time
 from pathlib import Path
@@ -297,10 +298,9 @@ def terminate_active_run_for(chat_id: str) -> bool:
     proc = claim.get("proc")
     _current_run = None
   if proc is not None:
-    try:
-      proc.kill()
-    except (ProcessLookupError, OSError):
-      pass
+    # Kill the whole group, not just the CLI, so a tool child it spawned
+    # doesn't survive as an orphaned root process.
+    _killpg(proc, signal.SIGKILL)
   return True
 
 
@@ -330,10 +330,8 @@ def terminate_active_run() -> bool:
     return False
   proc = claim.get("proc")
   if proc is not None:
-    try:
-      proc.kill()
-    except (ProcessLookupError, OSError):
-      pass
+    # Kill the whole group so tool children of the rescue agent die too.
+    _killpg(proc, signal.SIGKILL)
   # Force-clear the slot so a new request can start immediately, even
   # if the stream generator's own cleanup hasn't run yet. Belt-and-
   # braces — the generator's finally also clears it.
@@ -358,6 +356,33 @@ _append_lock = threading.Lock()
 # (next /stream POST is unblocked), long enough for a polite shutdown
 # to flush a final stdout line.
 _KILL_GRACE_SECONDS = 0.5
+
+
+# Hard wall-clock cap on a single recovery turn. A hung CLI, or a tool it
+# launched that never returns, would otherwise hold the single run slot
+# forever (recovery serves one turn at a time), wedging the recovery chat
+# until a container restart. Env-overridable for genuinely slow repairs.
+try:
+  _MAX_TURN_SECONDS = float(os.environ.get("RECOVERY_MAX_TURN_SECONDS", "900"))
+except ValueError:
+  _MAX_TURN_SECONDS = 900.0
+
+
+def _killpg(proc, sig: int) -> None:
+  """Signals the whole process GROUP of `proc`, best-effort.
+
+  The CLI is spawned with start_new_session=True so it leads its own process
+  group; signalling the GROUP reaches any shell or tool child the root agent
+  launched, not just the direct process — otherwise a killed CLI can leave
+  orphaned root descendants running. A gone process (already reaped) or a
+  failed getpgid resolves to a no-op: cleanup must never raise.
+  """
+  if proc is None or proc.pid is None:
+    return
+  try:
+    os.killpg(os.getpgid(proc.pid), sig)
+  except (ProcessLookupError, OSError):
+    pass
 
 
 # Hard cap on the rendered + in-memory recovery log so a long repair
@@ -395,6 +420,13 @@ def _system_prompt(chat_id: str | None = None) -> str:
       this is intentionally filesystem-only)
   Updated 2026-05-26 (later): take chat_id, interpolate the per-
   chat log path so the agent reads the right file.
+  Updated 2026-07-03 (recoveryd migration): the agent now runs as
+  ROOT in the SEPARATE recovery container, where /app is a read-only
+  baked image. Point the write surface at the live editable overlay
+  (/data/platform/app/ for backend, /data/shell/ for frontend) — the
+  old map (mobius-writable /app/app + a frozen-island list of
+  now-retired recover_*.py files) described the in-process recovery
+  that recoveryd replaced.
   """
   if chat_id:
     prior_turns = (
@@ -432,52 +464,49 @@ def _system_prompt(chat_id: str | None = None) -> str:
     "Do NOT call AskUserQuestion. The recovery UI is a plain "
     "textarea; questions you ask via that tool will hang silently. "
     "Ask in plain prose and wait for the user's next turn.\n\n"
-    "Write surface:\n"
-    "  /app/app/        backend Python (mobius-writable, EXCEPT the "
-    "frozen-island files below). Your cwd is /data/; backend lives "
-    "at /app/app/.\n"
-    "  /app/scripts/    utility scripts (mobius-writable, EXCEPT "
-    "the two .sh files below).\n"
-    "  /data/shell/     frontend source + built bundle.\n\n"
-    "Frozen island (chmod 444/555 root-owned, edits are blocked at "
-    "the OS level — do not waste tool calls trying):\n"
-    "  /app/app/main.py                  router wiring\n"
-    "  /app/app/routes/__init__.py        router exports\n"
-    "  /app/app/auth.py                   production auth\n"
-    "  /app/app/database.py               DB engine init\n"
-    "  /app/app/config.py                 env settings\n"
-    "  /app/app/models.py                 SQLAlchemy table defs\n"
-    "  /app/app/routes/recover.py         recovery page\n"
-    "  /app/app/routes/recover_html.py    recovery HTML\n"
-    "  /app/app/recover_chat.py           this chat's endpoints\n"
-    "  /app/app/recover_chat_runner.py    this runner\n"
-    "  /app/app/recover_auth.py           recovery auth\n"
-    "  /app/app/recover_oauth.py          recovery OAuth\n"
-    "  /app/scripts/entrypoint.sh         boot\n"
-    "  /app/scripts/recovery_restore.sh   restore from baked\n\n"
+    "You run as ROOT inside the recovery container — a SEPARATE "
+    "container from the platform, sharing only the /data volume. Your "
+    "own code (/app/recovery/) and the entire /app tree are a "
+    "read-only baked image: writes there fail with EROFS, by design, "
+    "so recovery can never break itself. Do not waste tool calls "
+    "trying to edit anything under /app.\n\n"
+    "Everything the live platform runs is under /data (writable):\n"
+    "  /data/platform/app/      the LIVE backend Python — a git-tracked, "
+    "editable copy that uvicorn actually imports at runtime. Fix backend "
+    "bugs HERE (NOT in /app/app, which is the read-only baked original).\n"
+    "  /data/platform/scripts/  live utility scripts.\n"
+    "  /data/shell/             frontend source + built bundle (dist/).\n"
+    "  /data/shared/            memory, skills, shared files.\n"
+    "  /data/apps/              installed mini-apps + their data.\n"
+    "  /data/db/                the SQLite database.\n\n"
+    "Read-only baked originals, for reference/diff only:\n"
+    "  /app/app-baked/   pristine backend  -> "
+    "diff -ru /app/app-baked/ /data/platform/app/\n"
+    "  /app/shell-src/   pristine frontend -> "
+    "diff -ru /app/shell-src/ /data/shell/\n"
+    "(use `diff -ru`, not git diff, when comparing against a baked "
+    "tree.)\n\n"
     "Workflow:\n"
     "1. Read /data/logs/chat.log for the latest error trail.\n"
-    "2. To see what changed vs the baked copy, use `diff -ru "
-    "/app/app-baked/ /app/app/` (NOT git diff — /app/app-baked/ "
-    "has no .git). Same for `/app/shell-src/` vs `/data/shell/`.\n"
-    "3. Make the fix in /app/app/ or /app/scripts/ or /data/shell/.\n"
+    "2. diff the live tree against its baked original (above) to see "
+    "what changed.\n"
+    "3. Make the smallest correct fix in /data/platform/app/ (backend), "
+    "/data/shell/ (frontend), or the relevant /data path. NOTE: if "
+    "/data/platform/app/main.py fails to compile, the platform "
+    "auto-boots from the baked floor instead — so a syntactically "
+    "broken edit degrades safely, but always verify your fix parses.\n"
     "4. Tell the user: \"Click the **Restart server** button at the "
-    "top of this page.\" That POSTs /recover/restart, which SIGTERMs "
-    "uvicorn; the container's restart policy brings it back with "
-    "your edits loaded. No need to leave this chat.\n"
-    "5. After the partner confirms the fix, append a Lesson to "
-    "/data/shared/memory/inbox.md describing what went wrong "
-    "and how to avoid it.\n\n"
-    "If you cannot fix the problem in place, restore from the baked "
-    "image source yourself — you have Bash with write access. Run "
-    "`sh /app/scripts/recovery_restore.sh <mode>`; modes are "
-    "shell-dist, shell-src, backend, scripts, platform, and "
-    "platform-baked (run the script with no argument to see what "
-    "each does). There is no Restore button in the /recover "
-    "dashboard, so the agent invoking the script is the only restore "
-    "path. After a backend/scripts/platform restore, tell the user "
-    "to click the **Restart server** button at the top of this page "
-    "so uvicorn reloads the restored code."
+    "top of this page.\" That POSTs /recover/restart and cycles the "
+    "platform so your edits load. No need to leave this chat.\n"
+    "5. After the user confirms the fix, append a Lesson to "
+    "/data/shared/memory/inbox.md describing what went wrong and how "
+    "to avoid it.\n\n"
+    "If you cannot fix it in place, restore from the baked image: the "
+    "main recovery page has **Restore platform** and **Reset to baked "
+    "floor** buttons, or run `sh /app/scripts/recovery_restore.sh "
+    "<mode>` yourself (run it with no argument to list modes). After "
+    "any restore, have the user click **Restart server** so the "
+    "platform reloads the restored code."
   )
 
 
@@ -842,13 +871,11 @@ async def _terminate_proc(proc: asyncio.subprocess.Process) -> None:
   """
   if proc.returncode is not None:
     return
-  try:
-    proc.terminate()
-  except (ProcessLookupError, OSError):
-    # Process already gone, or signal delivery failed (denied by
-    # namespace, etc.). Either way, nothing to wait on — return so
-    # the caller's cleanup can proceed.
-    return
+  # SIGTERM the whole process group (the CLI leads its own session via
+  # start_new_session=True), so a shell/tool child the root agent spawned is
+  # signalled too — not just the direct CLI. Best-effort; a gone process
+  # no-ops rather than raising, and we still fall through to wait/kill.
+  _killpg(proc, signal.SIGTERM)
   try:
     await asyncio.wait_for(proc.wait(), timeout=_KILL_GRACE_SECONDS)
     return
@@ -858,10 +885,7 @@ async def _terminate_proc(proc: asyncio.subprocess.Process) -> None:
     # Don't let wait() failure (including CancelledError from the
     # surrounding task being cancelled) block the SIGKILL fallback.
     pass
-  try:
-    proc.kill()
-  except (ProcessLookupError, OSError):
-    return
+  _killpg(proc, signal.SIGKILL)
   try:
     await proc.wait()
   except BaseException:
@@ -1024,10 +1048,13 @@ async def _spawn_claude(
   # prompt resolve consistently. Without this, cwd inherits from
   # uvicorn's launch dir (/app) which contradicts the prompt's
   # `Read /data/recovery/chats/<chat_id>.jsonl` references.
-  # preexec_fn drops the child to the non-root `mobius` user (see
-  # agent_preexec) so the agent can repair all of /data but cannot write
-  # the root-owned recovery bundle. cwd /data and CLAUDE_CONFIG_DIR are
-  # both under mobius-owned /data.
+  # By default RECOVERY_AGENT_USER=root, so agent_preexec() is a no-op and
+  # the agent runs as full root — able to fix anything, including the
+  # root-owned platform tree. Its own recovery code is still protected by
+  # the read-only rootfs + cap_drop guardrail, not by a privilege drop.
+  # preexec_fn only drops to `mobius` when RECOVERY_AGENT_USER is set to a
+  # non-root user (off by default). cwd /data and CLAUDE_CONFIG_DIR are
+  # both under /data.
   proc = await asyncio.create_subprocess_exec(
     *cmd,
     stdin=asyncio.subprocess.PIPE,
@@ -1035,6 +1062,11 @@ async def _spawn_claude(
     stderr=asyncio.subprocess.PIPE,
     env=env,
     cwd=SUBPROCESS_CWD,
+    # New session/process group (setsid) so cleanup can signal the whole
+    # group and reap any shell/tool child the agent launches, not just the
+    # CLI. Composes with preexec_fn: setsid runs first, the privilege drop
+    # (when RECOVERY_AGENT_USER is non-root) runs last, right before exec.
+    start_new_session=True,
     preexec_fn=agent_preexec(),
   )
   # Publish the live process onto the claim immediately so a
@@ -1049,10 +1081,8 @@ async def _spawn_claude(
       claim["proc"] = proc
       cancelled_during_spawn = False
   if cancelled_during_spawn:
-    try:
-      proc.kill()
-    except (ProcessLookupError, OSError):
-      pass
+    # Kill the whole group — the CLI may already have forked a child.
+    _killpg(proc, signal.SIGKILL)
     yield _sse({"type": "done"})
     return
 
@@ -1074,10 +1104,25 @@ async def _spawn_claude(
       pass
 
   full_assistant_text = []
+  # Hard wall-clock cap: each readline is bounded by the time remaining, so a
+  # hung CLI or a tool that never returns can't hold the single run slot
+  # forever. On timeout we kill the group and surface an error rather than
+  # streaming indefinitely.
+  deadline = time.monotonic() + _MAX_TURN_SECONDS
+  timed_out = False
   try:
     assert proc.stdout is not None
     while True:
-      line = await proc.stdout.readline()
+      remaining = deadline - time.monotonic()
+      if remaining <= 0:
+        timed_out = True
+        break
+      try:
+        line = await asyncio.wait_for(
+          proc.stdout.readline(), timeout=remaining)
+      except asyncio.TimeoutError:
+        timed_out = True
+        break
       if not line:
         break
       try:
@@ -1107,29 +1152,41 @@ async def _spawn_claude(
           msg = event.get("result", "Agent reported an error")
           yield _sse({"type": "error", "message": str(msg)})
 
-    rc = await proc.wait()
-    if rc != 0:
-      stderr_b = await proc.stderr.read() if proc.stderr else b""
-      err = stderr_b.decode("utf-8", errors="replace").strip()[:500]
-      if err:
-        # Detect authentication failures specifically so the user gets
-        # an actionable message rather than a raw CLI error. The patterns
-        # below cover the three surfaces that produce auth errors:
-        # "authentication_error" (Anthropic API), "invalid_api_key"
-        # (some SDK paths), "401" in the message (generic HTTP auth).
-        auth_patterns = ["authentication_error", "invalid_api_key", "401"]
-        is_auth_error = any(p in err.lower() for p in auth_patterns)
-        if is_auth_error:
-          yield _sse({
-            "type": "error",
-            "message": (
-              f"CLI authentication error (exit {rc}). "
-              "Use the Connect button on the chat picker to reconnect "
-              "your AI provider credentials, then try again."
-            ),
-          })
-        else:
-          yield _sse({"type": "error", "message": f"CLI exit {rc}: {err}"})
+    if timed_out:
+      # Kill the group now; the generator's finally reaps it. Surface the
+      # cap so the user knows why the turn stopped.
+      _killpg(proc, signal.SIGKILL)
+      yield _sse({
+        "type": "error",
+        "message": (
+          f"Recovery turn exceeded {int(_MAX_TURN_SECONDS)}s and was "
+          "stopped — the CLI or a tool it launched never finished."
+        ),
+      })
+    else:
+      rc = await proc.wait()
+      if rc != 0:
+        stderr_b = await proc.stderr.read() if proc.stderr else b""
+        err = stderr_b.decode("utf-8", errors="replace").strip()[:500]
+        if err:
+          # Detect authentication failures specifically so the user gets
+          # an actionable message rather than a raw CLI error. The patterns
+          # below cover the three surfaces that produce auth errors:
+          # "authentication_error" (Anthropic API), "invalid_api_key"
+          # (some SDK paths), "401" in the message (generic HTTP auth).
+          auth_patterns = ["authentication_error", "invalid_api_key", "401"]
+          is_auth_error = any(p in err.lower() for p in auth_patterns)
+          if is_auth_error:
+            yield _sse({
+              "type": "error",
+              "message": (
+                f"CLI authentication error (exit {rc}). "
+                "Use the Connect button on the chat picker to reconnect "
+                "your AI provider credentials, then try again."
+              ),
+            })
+          else:
+            yield _sse({"type": "error", "message": f"CLI exit {rc}: {err}"})
 
   except Exception as exc:
     yield _sse({
@@ -1192,8 +1249,9 @@ async def _spawn_codex(
     cmd += ["-m", model]
   cmd.append("-")  # explicit stdin marker
 
-  # preexec_fn drops the child to the non-root `mobius` user (see
-  # agent_preexec) — same guarantee as the Claude path.
+  # Runs as full root by default (RECOVERY_AGENT_USER=root → agent_preexec
+  # is a no-op) — same model as the Claude path; only drops to `mobius`
+  # when RECOVERY_AGENT_USER is set non-root.
   proc = await asyncio.create_subprocess_exec(
     *cmd,
     stdin=asyncio.subprocess.PIPE,
@@ -1201,6 +1259,8 @@ async def _spawn_codex(
     stderr=asyncio.subprocess.PIPE,
     env=env,
     cwd=SUBPROCESS_CWD,
+    # New session/process group — see the matching note in _spawn_claude.
+    start_new_session=True,
     preexec_fn=agent_preexec(),
   )
   # Atomic publish + cancellation check under the run lock; mirrors
@@ -1214,10 +1274,8 @@ async def _spawn_codex(
       claim["proc"] = proc
       cancelled_during_spawn = False
   if cancelled_during_spawn:
-    try:
-      proc.kill()
-    except (ProcessLookupError, OSError):
-      pass
+    # Kill the whole group — the CLI may already have forked a child.
+    _killpg(proc, signal.SIGKILL)
     yield _sse({"type": "done"})
     return
 
@@ -1246,10 +1304,23 @@ async def _spawn_codex(
       pass
 
   full_assistant_text: list[str] = []
+  # Hard wall-clock cap — same rationale as the Claude path: a hung CLI must
+  # not hold the single run slot forever.
+  deadline = time.monotonic() + _MAX_TURN_SECONDS
+  timed_out = False
   try:
     assert proc.stdout is not None
     while True:
-      line = await proc.stdout.readline()
+      remaining = deadline - time.monotonic()
+      if remaining <= 0:
+        timed_out = True
+        break
+      try:
+        line = await asyncio.wait_for(
+          proc.stdout.readline(), timeout=remaining)
+      except asyncio.TimeoutError:
+        timed_out = True
+        break
       if not line:
         break
       try:
@@ -1277,14 +1348,24 @@ async def _spawn_codex(
           )
           yield _sse({"type": "tool", "name": str(name)[:80]})
 
-    rc = await proc.wait()
-    if rc != 0:
-      stderr_b = await proc.stderr.read() if proc.stderr else b""
-      err = stderr_b.decode("utf-8", errors="replace").strip()[:500]
-      if err:
-        yield _sse(
-          {"type": "error", "message": f"CLI exit {rc}: {err}"}
-        )
+    if timed_out:
+      _killpg(proc, signal.SIGKILL)
+      yield _sse({
+        "type": "error",
+        "message": (
+          f"Recovery turn exceeded {int(_MAX_TURN_SECONDS)}s and was "
+          "stopped — the CLI or a tool it launched never finished."
+        ),
+      })
+    else:
+      rc = await proc.wait()
+      if rc != 0:
+        stderr_b = await proc.stderr.read() if proc.stderr else b""
+        err = stderr_b.decode("utf-8", errors="replace").strip()[:500]
+        if err:
+          yield _sse(
+            {"type": "error", "message": f"CLI exit {rc}: {err}"}
+          )
 
   except Exception as exc:
     yield _sse({

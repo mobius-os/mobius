@@ -996,6 +996,106 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
   return reconciled
 
 
+# Runtime liveness floor: a turn must be at least this old before the periodic
+# sweep treats a still-"running" marker as a candidate. Reaping is gated on the
+# broadcast + registry state below; the floor is only belt-and-suspenders
+# against a just-started turn whose registry/broadcast state hasn't settled.
+_WEDGED_RUN_MIN_AGE = timedelta(seconds=120)
+
+
+async def sweep_wedged_run_markers(db: Session) -> list[str]:
+  """Clear run markers orphaned by a completed-but-uncleared turn at runtime.
+
+  `reconcile_interrupted_chats` only runs at boot, so a turn that reaches a
+  terminal WITHOUT clearing its marker and WITHOUT a process restart — a
+  FAILED_LEAVE_MARKER exit (finalize/promote ack raised or timed out) or the
+  documented late-promote gap — holds `run_status="running"` forever. The
+  frontend trusts that stale marker and the chat looks permanently busy ("whole
+  app busy"). This periodic sweep closes that gap between boots.
+
+  Reaping requires THREE signals together, because none is safe alone:
+
+    - `registry.is_alive(chat_id) == False` — no live handle and no `_starting`
+      claim. NOT sufficient alone: the Claude runner unregisters its handle
+      BEFORE `_complete_turn` runs, so is_alive is also False during a
+      legitimate terminal cleanup — acting on is_alive alone would reap a turn
+      that is about to clear its own marker or promote a continuation.
+    - the chat's broadcast is gone or NOT running. `_complete_turn` calls
+      `bc.mark_completed()` on every exit, so a running broadcast means the turn
+      (including its terminal transition) is still in flight. This is what
+      excludes the is_alive-false terminal window above, AND a genuinely-long
+      LIVE turn (a big build, or a workflow held open by
+      `TaskOutput(block=True)`) whose broadcast is still running — we never reap
+      a live turn, only a definitively-finished one whose marker stuck.
+    - `run_started_at` older than the floor — belt-and-suspenders.
+
+  The clear is IDENTITY-KEYED on the wedged run's `ChatRun.id` (never
+  tokenless): if a fresh turn raced in and took the marker, the actor no-ops
+  the clear rather than wiping the new run's marker. It runs under the per-chat
+  queue lock with an is_alive recheck, mirroring `stop_chat_for`'s clear
+  discipline. The transcript is NOT rewritten — a `ReplaceTranscript`
+  note-append would race a fresh send and could clobber its user message, and
+  any partial output already streamed is persisted. `pending_messages` is left
+  intact and self-heals on the next send; boot reconcile still adds the
+  interrupted-turn note on a real restart.
+  """
+  log = _get_logger()
+  swept: list[str] = []
+  try:
+    cutoff = datetime.now(UTC).replace(tzinfo=None) - _WEDGED_RUN_MIN_AGE
+    stale = (
+      db.query(models.Chat)
+      .filter(models.Chat.run_status == "running")
+      .filter(models.Chat.deleted_at.is_(None))
+      .filter(models.Chat.run_started_at.isnot(None))
+      .filter(models.Chat.run_started_at < cutoff)
+      .all()
+    )
+  except Exception:
+    log.exception("sweep_wedged_run_markers: query failed")
+    return swept
+  for chat in stale:
+    if registry.is_alive(chat.id):
+      continue
+    bc = get_broadcast(chat.id)
+    if bc is not None and bc.running:
+      # Still streaming, in terminal cleanup, or a legitimately-long live turn.
+      continue
+    run = (
+      db.query(models.ChatRun)
+      .filter(models.ChatRun.chat_id == chat.id)
+      .filter(models.ChatRun.status == "running")
+      .order_by(models.ChatRun.started_at.desc())
+      .first()
+    )
+    if run is None:
+      # No run record to identity-key the clear on — leave it for boot reconcile
+      # rather than risk a tokenless clear wiping a racing fresh run's marker.
+      continue
+    try:
+      async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
+        async with chat_queue.get_lock(chat.id):
+          if registry.is_alive(chat.id):
+            continue
+          # Identity-keyed on the wedged run's token: a fresh turn that raced in
+          # owns a different token, so the actor no-ops instead of wiping it.
+          # Strict variant so a failed ack RAISES — a marker we couldn't clear
+          # must not be reported as swept (reconciliation repairs it on boot).
+          await _clear_run_status_strict(chat.id, run.id)
+      _finalize_broadcast_if_running(chat.id)
+      swept.append(chat.id)
+    except (Exception, asyncio.TimeoutError):
+      log.warning(
+        "sweep_wedged_run_markers: clear failed chat_id=%s "
+        "(reconciliation will repair)", chat.id, exc_info=True,
+      )
+  if swept:
+    log.info(
+      "swept %d wedged run marker(s): %s", len(swept), ", ".join(swept),
+    )
+  return swept
+
+
 async def _clear_pending(chat_id: str) -> list[int]:
   """Clears persisted queued messages for the chat via the actor.
 
@@ -1459,6 +1559,57 @@ async def _terminal_setup_error_cleanup(
     return chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
 
 
+_LIMIT_ERROR_MARKERS = (
+  "rate limit",
+  "rate_limit",
+  "usage limit",
+  "usage_limit",
+  "weekly limit",
+  "session limit",
+  "overloaded",
+  "quota",
+  "too many requests",
+  "429",
+)
+
+
+def _is_limit_error_text(text: str | None) -> bool:
+  """Whether an error string names a provider rate/usage-limit exhaustion.
+
+  Substring match on the display error (mirrors `_should_retry_without_model`
+  in claude_sdk_runner). Deliberately broad — the cost of a false positive is
+  only that the queue is parked for the user to resend (never lost), while a
+  false negative reinstates the limit storm. A genuinely transient one-off
+  error does NOT match, so the queue still flows through a blip.
+
+  The marker list is grounded in the ACTUAL Anthropic limit strings seen in
+  prod chat.log: "You've hit your weekly limit · resets ...", "... session
+  limit ...", "Server is temporarily limiting requests ... Rate limited". The
+  `limit`+`resets` compound catches the whole "hit your <period> limit · resets
+  <time>" family (weekly / session / usage / 5-hour) without matching a random
+  error that merely contains the word "limit".
+  """
+  if not text:
+    return False
+  low = text.lower()
+  if any(marker in low for marker in _LIMIT_ERROR_MARKERS):
+    return True
+  return "limit" in low and "resets" in low
+
+
+def _is_limit_terminal(runner_result: dict) -> bool:
+  """Whether a success-path terminal result was a rate/usage-limit kill.
+
+  Keys on the structured `api_error_status` (Claude surfaces 429 there — see
+  claude_sdk_runner ResultMessage handling) first, then the display error
+  string. Codex results carry no `api_error_status`, so they fall back to the
+  string check.
+  """
+  if runner_result.get("api_error_status") == 429:
+    return True
+  return _is_limit_error_text(runner_result.get("error"))
+
+
 async def _complete_turn(
   *,
   bc,
@@ -1469,6 +1620,7 @@ async def _complete_turn(
   provider_id: str | None,
   cost_usd: float | int,
   close_browser: bool,
+  limit_reached: bool = False,
 ) -> chat_queue.TerminalDisposition:
   """Terminal sequence shared by both providers' success + error exits.
 
@@ -1596,6 +1748,46 @@ async def _complete_turn(
   # above may already hold the active pointer; clear only if it's still ours
   # (an unconditional clear would erase the successor's pointer).
   clear_active_broadcast_if(bc)
+  if limit_reached:
+    # Provider rate/usage-limit kill. Clear the marker (the turn is over) but
+    # do NOT drain-and-promote the queue: promoting would fire every queued
+    # message straight into the same limit (the limit storm — a single kill
+    # burning the whole queue in seconds). Leave pending_messages intact; the
+    # chat drops into the markerless-queue state that self-heals on the user's
+    # next send (chats_stream's stale-pending drain). No auto-resume scheduler
+    # by design — the user resends, or waits for the limit to reset. The limit
+    # error itself was already published + persisted by the call site before
+    # finalize, and the preserved queue stays visible in the composer tray, so
+    # the "why didn't my queue run" is already answered on screen.
+    try:
+      # Clear under the SAME bounded terminal lock the drain uses, so a racing
+      # stale-pending self-heal drain / append can't interleave with the marker
+      # clear. Identity-keyed on THIS run's token so a fresh turn that raced in
+      # during finalize isn't wiped (the actor no-ops a non-owning clear). On a
+      # lock/ack timeout the marker is LEFT set for reconciliation — the queue
+      # is preserved either way, so a wedged lock can't burn it.
+      async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
+        async with chat_queue.get_lock(chat_id):
+          await _clear_run_status_strict(chat_id, sink.run_token or "")
+    except (Exception, asyncio.TimeoutError):
+      _get_logger().warning(
+        "limit-park ClearRunStatus did not persist chat_id=%s "
+        "(reconciliation will repair)", chat_id, exc_info=True,
+      )
+      bc.publish({"type": "done"})
+      bc.mark_completed()
+      _publish_chat_run_finished(chat_id)
+      if close_browser:
+        await _close_browser_session(chat_id)
+      db.close()
+      return chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
+    bc.publish({"type": "done"})
+    bc.mark_completed()
+    _publish_chat_run_finished(chat_id)
+    if close_browser:
+      await _close_browser_session(chat_id)
+    db.close()
+    return chat_queue.TerminalDisposition.LIMIT_PARKED
   # The continuation is a fresh turn — give it its own run_token. The
   # turn-end drain's PromotePending sets the next turn's run marker under
   # this token, and _schedule_continuation hands the SAME token to the
@@ -2825,6 +3017,7 @@ async def _run_chat_impl(
       return await _complete_turn(
         bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
         provider_id=provider_id, cost_usd=0, close_browser=False,
+        limit_reached=_is_limit_error_text(str(exc)),
       )
     err = runner_result.get("error")
     if err:
@@ -2835,7 +3028,7 @@ async def _run_chat_impl(
     return await _complete_turn(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
       provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,
-      close_browser=True,
+      close_browser=True, limit_reached=_is_limit_terminal(runner_result),
     )
 
   if is_claude:
@@ -2929,6 +3122,7 @@ async def _run_chat_impl(
       return await _complete_turn(
         bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
         provider_id=provider_id, cost_usd=0, close_browser=False,
+        limit_reached=_is_limit_error_text(str(exc)),
       )
     if err:
       # Same save-before-broadcast rationale: persist the error alongside any partial
@@ -2937,7 +3131,7 @@ async def _run_chat_impl(
     return await _complete_turn(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
       provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,
-      close_browser=True,
+      close_browser=True, limit_reached=_is_limit_terminal(runner_result),
     )
 
   # Unknown provider — every supported provider is handled by an SDK
