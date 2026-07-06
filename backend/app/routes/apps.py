@@ -26,6 +26,7 @@ from app.broadcast import get_system_broadcast
 from app.routes.notify import publish_app_built_to_owning_chat
 from app.compiler import compile_jsx, recompile_app_bundle
 from app.config import get_settings
+from app import core_app_suppress
 from app.database import get_db
 from app.deps import (
   get_current_owner, get_current_owner_or_app, get_principal, Principal,
@@ -456,6 +457,11 @@ async def install_app(
   get_system_broadcast().publish(
     {"type": "app_updated", "appId": str(app.id)}
   )
+  # An explicit store (re)install of a core app lifts any durable-suppression
+  # marker — the owner deliberately brought it back. This is the after-TTL
+  # bring-back path (recover only works inside the tombstone window). No-op for
+  # ordinary apps. See core_app_suppress + delete_app.
+  core_app_suppress.clear_suppressed(get_settings().data_dir, app.slug)
   # A conflicting update leaves the app on its current version with a real
   # working-tree merge (markers + MERGE_HEAD) on disk; the merge is NOT
   # auto-resolved. Whether to involve the agent is the owner's call, not ours:
@@ -841,6 +847,12 @@ async def create_app(
     # emits the same event on a file-write recompile; the client upsert is
     # idempotent (deduped by appId), so a double-emit is harmless.
     publish_app_built_to_owning_chat(db, str(app.id))
+  # NOTE: create_app deliberately does NOT clear a suppression marker. This
+  # route is never reached by the boot seeder for a suppressed slug (the seeder
+  # skips it first), so the only caller here would be an owner/agent building a
+  # NEW same-named app post-TTL — and clearing the marker then would let the next
+  # boot cp baked core source over that custom app. Bring-back is recover_app
+  # (within TTL) or install_app (store reinstall); those clear the marker.
   return app
 
 
@@ -1151,6 +1163,15 @@ async def delete_app(
     app_slug = app.slug
     app_source_dir = app.source_dir
     db.commit()
+    # Durable owner-suppression: memory/reflection are re-seeded by
+    # install-core-apps.sh on every boot, so a bare tombstone doesn't keep them
+    # gone (the seeder isn't tombstone-aware, and the tombstone TTL-purges).
+    # Record the owner's removal as a marker file the seeder honors, so the
+    # deletion sticks until they bring it back (recover/install clears it).
+    # No-op for ordinary apps; best-effort — never blocks the delete.
+    core_app_suppress.mark_suppressed(
+      get_settings().data_dir, app_slug, app_id=app_id
+    )
     # Logical uninstall — pairs with the app_install event so churn analysis
     # (and the nightly digest) sees removals, not just installs. Best-effort,
     # after the tombstone commit.
@@ -1277,8 +1298,13 @@ async def recover_app(
       raise HTTPException(status_code=410, detail="Recovery window has expired.")
     app.deleted_at = None
     app_name = app.name
+    app_slug = app.slug
     app_source_dir = app.source_dir
     db.commit()
+    # The owner brought this app back — clear any durable-suppression marker so
+    # the boot seeder resumes managing it (no-op unless it was a suppressed core
+    # app). See core_app_suppress + delete_app.
+    core_app_suppress.clear_suppressed(get_settings().data_dir, app_slug)
 
     # Re-arm the schedule the tombstone dropped: rename init-cron.sh back into
     # the entrypoint's replay glob and run it once to reinstall the crontab

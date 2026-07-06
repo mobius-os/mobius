@@ -96,6 +96,22 @@ except Exception:
 # has no sentinel → treated as changed → installs/updates once.
 sync_core_app() {
   local slug="$1" name="$2" desc="$3"
+  # Durable owner-suppression: if the owner uninstalled this core app, a marker
+  # file persists under /data (it survives reboots AND the 7-day tombstone TTL
+  # purge). Honor it and do NOT re-create the app — the deletion stays deleted
+  # until the owner brings it back (recover within the TTL, or reinstall from
+  # the store; both clear the marker). Skipping here also avoids the stale
+  # cp-over-preserved-source a blind re-seed does during the TTL window.
+  # Path is kept in lockstep with core_app_suppress._SUPPRESS_SUBDIR. Only slugs
+  # in core_app_suppress.SUPPRESSIBLE_CORE_SLUGS ever get a marker (memory +
+  # reflection). For reflection, returning early here ALSO skips the reflection
+  # cron block below (gated on a non-empty id), so its nightly run — brief +
+  # memory-graph consolidation — stops. That's the intended "uninstall the
+  # feature" semantic (owner call 2026-07-06); the built graph is untouched.
+  if [[ -f "$DATA_DIR/shared/suppressed-core-apps/$slug" ]]; then
+    log "$slug is owner-suppressed (uninstalled) — skipping core-app seed"
+    return
+  fi
   local src="$CORE_SRC/$slug/index.jsx"
   local dst_dir="$DATA_DIR/apps/$slug"
   local hashfile="$dst_dir/.baked-jsx.sha256"
