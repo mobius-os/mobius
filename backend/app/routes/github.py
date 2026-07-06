@@ -32,7 +32,7 @@ from slowapi.util import get_remote_address
 from app import github_auth, models
 from app.config import get_settings
 from app.deps import (
-  get_current_owner_or_app, get_owner_or_app_with_github_access,
+  get_owner_or_app_with_github_access,
   reject_cross_site,
 )
 
@@ -273,10 +273,17 @@ async def connect_token(
 
 @router.get("/status")
 async def github_status(
-  _: models.Owner = Depends(get_current_owner_or_app),
+  _: models.Owner = Depends(get_owner_or_app_with_github_access),
 ):
   """Connection metadata for the Contribute app's UI. Never the token
-  (INV1)."""
+  (INV1).
+
+  Gated on github_access like the rest of the surface: status still discloses
+  the owner's GitHub login + scope list, so an app without the grant shouldn't
+  read it. The owner (Settings) always passes; the Contribute app holds the
+  grant. (A malicious same-origin app can already read the owner JWT and call
+  the granted endpoints directly — this is least-privilege consistency, not a
+  new boundary.)"""
   state = github_auth.read_state() or {}
   connected = bool(state.get("token"))
   return {

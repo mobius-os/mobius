@@ -24,7 +24,11 @@ payload tells you everything you need:
 - `connected: true` with a `login` — the owner has connected GitHub, and `gh`
   is already authenticated as them. You never see or handle the token itself;
   `gh` resolves it from the platform's credential store. Don't go digging for
-  it, and never print it.
+  it, and never print it. Note the credential is wired GLOBALLY: once connected,
+  ANY `git push` to a github.com remote (including a stray push in a normal
+  platform-edit turn) authenticates as the owner. Nothing at the git layer gates
+  that — the approval gate below is the whole safety net. So NEVER run a bare
+  `git push` to a github remote outside the approved fork flow.
 - `connected: false` — point the partner to the **Contribute app** (install
   it from the App Store if they don't have it) and its Connect GitHub card.
   You can still prepare a contribution (branch, commit, record it as
@@ -192,7 +196,10 @@ gh api graphql \
 
 - **403 mentioning "OAuth App access restrictions"** — the org hasn't
   approved the Möbius OAuth app. Suggest the partner reconnect with a
-  classic PAT instead (the Contribute app's Connect card has that option).
+  classic PAT instead (the Contribute app's Connect card has that option). A
+  **`public_repo`-scoped** PAT is enough for contributing and is the safer
+  choice — a full `repo` token also grants read of the owner's PRIVATE repos
+  through the read passthrough, which upstream contribution never needs.
 - **`gh: command not found`** — the platform image is too old; a platform
   update is needed.
 - **`git push fork` fails right after the fork** — forks are created

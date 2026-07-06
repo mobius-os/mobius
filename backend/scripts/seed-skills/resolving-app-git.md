@@ -91,41 +91,55 @@ just `index.jsx`. (An earlier watcher silently missed edits on the data volume
 and stalled here routinely; that bug is fixed — a memory note saying
 hand-finalizing is the norm predates the fix.)
 
-**Confirm it took — one check is enough.** The single fact that proves it is
-that the finalizing commit is a **2-parent merge** (that's what advances the
-base so the *next* update won't re-conflict):
+**Confirm it took — one check is enough.** The merge is finalized when
+`MERGE_HEAD` is gone and the tree is clean:
 
 ```bash
-GIT_CEILING_DIRECTORIES=/data/apps git -C /data/apps/<slug> log -1 --pretty='%p'
+GIT_CEILING_DIRECTORIES=/data/apps git -C /data/apps/<slug> rev-parse -q --verify MERGE_HEAD; echo "merge_head_exit=$?"
+GIT_CEILING_DIRECTORIES=/data/apps git -C /data/apps/<slug> status --porcelain
 ```
 
-TWO short SHAs printed = done — merge finalized, `MERGE_HEAD` gone, base
-advanced. (The commit subject reads `agent edit`, not `Merge` — that's the
-watcher finalizing; expected, don't let it fool you.) ONE SHA means it hasn't
-finalized — almost always leftover markers in SOME tracked file. Hunt across
-the whole repo, not just the file you edited
+`merge_head_exit=1` (MERGE_HEAD absent) **and** empty status = done. If
+`MERGE_HEAD` still resolves (exit 0), it hasn't finalized — almost always
+leftover markers in SOME tracked file. Hunt across the whole repo, not just the
+file you edited
 (`GIT_CEILING_DIRECTORIES=/data/apps git -C /data/apps/<slug> grep -n '<<<<<<<'`),
-fix, save again. If it's genuinely clean and still not finalized, finish by
-hand (below).
+fix, save again.
+
+**Don't be alarmed the finalizing commit isn't a merge commit.** The watcher
+finalizes as a *single-parent replay* — it parents the new commit directly on
+the **upstream tip** and squashes the local side, so history stays linear
+(`A → B → X`) instead of fanning into a 2-parent merge. So `git log -1
+--pretty='%p'` prints exactly ONE short SHA (the upstream tip) and the subject
+reads `agent edit`, not `Merge`. That single parent *being* the upstream tip is
+what advances the base so the next update won't re-conflict — a 2-parent merge
+here would mean something finalized it with a plain `git merge`, which is *not*
+what the platform wants.
 
 Optional eyeball that the app rebuilt: `stat -c '%y' /data/compiled/app-<id>.js`
 should be fresh and the file a real bundle, not the compile-failed stub (`<id>`
 from `curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/apps/"
 | python3 -c 'import sys,json;[print(a["id"],a["slug"]) for a in json.load(sys.stdin)]'`).
-This is a nice-to-have, not a gate — the 2-parent commit already tells you the
-resolution stuck.
+A nice-to-have, not a gate.
 
-If a merge is still in progress (`.git/MERGE_HEAD` exists) or the recompile
-failed (`/data/logs/chat.log` shows `compile failed`), finish by hand:
+If a merge is still in progress (`MERGE_HEAD` exists) or the recompile failed
+(`/data/logs/chat.log` shows `compile failed`) after a clean re-save, the fix is
+almost always leftover markers or a syntax error from the merge — open the file,
+fix it, and **save again**: re-saving is the normal finalizer, because the
+watcher runs the correct single-parent replay for you. Only reach for a manual
+finalize if the watcher is genuinely wedged — and do NOT use `git commit
+--no-edit` (with `MERGE_HEAD` set that makes exactly the 2-parent merge the
+platform avoids). Replicate the single-parent replay instead:
 
 ```bash
-GIT_CEILING_DIRECTORIES=/data/apps git -C /data/apps/<slug> add -A
-GIT_CEILING_DIRECTORIES=/data/apps git -C /data/apps/<slug> \
-  -c user.name=Mobius -c user.email=mobius@localhost commit --no-edit
+cd /data/apps/<slug>
+export GIT_CEILING_DIRECTORIES=/data/apps
+git grep -n '<<<<<<<' && { echo "markers remain — fix first"; exit 1; }
+tree=$(git write-tree)
+sha=$(git commit-tree "$tree" -p "$(cat .git/MERGE_HEAD)" -m 'agent edit')
+git update-ref refs/heads/main "$sha"
+rm -f .git/MERGE_HEAD .git/MERGE_MSG .git/MERGE_MODE
 ```
-
-A failed recompile almost always means leftover markers or a syntax error from
-the merge — open the file, fix it, save again.
 
 ## Backing out (it's always reversible)
 
@@ -135,9 +149,12 @@ You never have to force a resolution you're unsure about.
   /data/apps/<slug> merge --abort` restores the pre-update version. The app keeps
   serving what it served before; nothing is lost. The new version is still
   recorded on `upstream`, so the partner can retry later.
-- **Already finalized and it's wrong:** undo the merge commit — `git revert -m 1
-  <merge-sha>` (reversible, keeps history) or `git reset --hard <pre-merge-sha>`
-  (erases the attempt). Save/touch the source so the watcher recompiles the
+- **Already finalized and it's wrong:** the finalize is a single-parent replay
+  (not a merge commit), so undo it with a plain `git revert <replay-sha>`
+  (reversible, keeps history — do NOT use `git revert -m 1`, which errors on a
+  non-merge commit) or `git reset --hard <pre-replay-sha>` from the reflog
+  (erases the attempt; the pre-replay tip is unreachable after the squash but
+  the reflog still has it). Save/touch the source so the watcher recompiles the
   reverted version. `upstream` is untouched, so a retry still works.
 
 ## Don't

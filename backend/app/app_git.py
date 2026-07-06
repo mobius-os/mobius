@@ -84,9 +84,12 @@ _GITIGNORE = "\n".join([
   ".build/",
   "node_modules/",
   "# Manifest static_assets are install-managed (re-fetched from the manifest,",
-  "# listed in .mobius-static-assets.json), not edited source — keep prebuilt",
-  "# bundles/binaries out of per-app history.",
+  "# tracked in .mobius-static-assets.json), not edited source — keep both the",
+  "# prebuilt bundles/binaries AND the manifest that lists them out of per-app",
+  "# history, or the first commit diverges from origin and every update is",
+  "# forced through a three-way merge (breaks the clean-diff PR property).",
   "static/",
+  ".mobius-static-assets.json",
   "# Install/rollback snapshots are not source.",
   "*.bak",
   "*.mobius-bak",
@@ -714,6 +717,33 @@ def read_ref_tree(source_dir: str | Path, ref: str) -> dict[str, bytes]:
   repo = Path(source_dir)
   tree_oid = _run(repo, "rev-parse", f"{ref}^{{tree}}").stdout.strip()
   return read_merged_tree(repo, tree_oid)
+
+
+def read_tree_exec_paths(
+  source_dir: str | Path, tree_ish: str
+) -> frozenset[str]:
+  """Repo-relative paths that are executable (mode 100755) in `tree_ish`.
+
+  `read_ref_tree`/`read_merged_tree` return bytes only, so a cloned-update write
+  that re-materialises the tree from those bytes lands every file 0644 and drops
+  the executable bit git tracks — a spurious 644-vs-755 mode diff against origin
+  that breaks the clean-diff PR property and marks the app diverged. The
+  installer restores exec bits for these paths after writing. `tree_ish` may be
+  a ref, tag, commit, or a merged tree oid.
+  """
+  repo = Path(source_dir)
+  listing = subprocess.run(
+    ["git", "-C", str(repo), "ls-tree", "-r", "-z", tree_ish],
+    capture_output=True, timeout=_GIT_TIMEOUT, check=True, env=_git_env(repo),
+  )
+  out: set[str] = set()
+  for entry in listing.stdout.decode().split("\0"):
+    if not entry:
+      continue
+    meta, _, path = entry.partition("\t")
+    if path and meta.split(" ", 1)[0] == "100755":
+      out.add(path)
+  return frozenset(out)
 
 
 def start_conflict_merge(source_dir: str | Path) -> list[str]:

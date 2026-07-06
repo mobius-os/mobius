@@ -47,7 +47,7 @@ Two invariants follow. (1) **Möbius never patches the kernel from inside the co
 
 ## Self-update model — `upstream` / `main`, replay on update
 
-Möbius is the rare app whose own agent edits its live code: the in-product agent customizes its mini-apps (`/data/apps/<slug>`), its backend overlay (`/data/platform`), and its shell (`/data/shell`) while the platform runs. A deploy then ships a *new pristine version* of that same code. One small model keeps every such surface up to date without clobbering the owner's customizations and without a deploy ever silently dropping them.
+Möbius is the rare app whose own agent edits its live code: the in-product agent customizes its mini-apps (`/data/apps/<slug>`), the whole platform repo (`/data/platform`, a real clone of `mobius-os/mobius`), and its shell (`/data/shell`) while the platform runs. A deploy then ships a *new pristine version* of that same code. One small model keeps every such surface up to date without clobbering the owner's customizations and without a deploy ever silently dropping them.
 
 **Two branches per surface, and the update is a rebase.** Each updatable surface is a git repo with:
 
@@ -380,9 +380,11 @@ especially the pre-flight gate (card 154) and the listed removals — as
 "intended end-state, confirm against the recovery rework" rather than settled).**
 The *end-state* model is git + a minimal pre-flight gate + a separate always-up
 recovery container, with **no baked duplicate, no `/app/app` symlink-swap, no
-auto-heal probe, no magic** — but note several of those removals are not done at
-HEAD yet (see the last bullet); today boot still symlink-swaps `/app/app` →
-`/data/platform/app` with a baked fallback:
+auto-heal probe, no magic**. The whole-repo reshape landed most of it: boot now
+serves uvicorn directly with `cd /data/platform/backend` — **no `/app/app`
+symlink-swap** (`_platform_use_direct` restores `/app/app` to the baked dir) —
+and falls back to the baked floor when the platform tree fails its import probe.
+The removals not yet done at HEAD are noted in the last bullet:
 - The platform is served directly as a git repo.
 - **Pre-flight gate (card 154):** a change only takes effect on the restart that
   applies it, so the running server keeps serving the working code while the agent
@@ -421,10 +423,11 @@ HEAD yet (see the last bullet); today boot still symlink-swaps `/app/app` →
 - Of the planned removals, only the `.platform-serve-baked` probe/flag is gone
   today. The crash-loop `cp`-restore (`backend/scripts/entrypoint.sh`, boot-counter
   ≥ 3) and the destructive `platform-baked` `recovery_restore.sh` mode are STILL
-  PRESENT at HEAD — slated for removal with the recovery rework — and boot still
-  symlink-swaps `/app/app` → `/data/platform/app` (falling back to the baked floor
-  when the platform tree fails its sanity check; the entrypoint stamps the decision
-  to `/tmp/serving-source`). End-state intent: real image/disk corruption is an
+  PRESENT at HEAD — slated for removal with the recovery rework. Boot no longer
+  symlink-swaps `/app/app`: it serves uvicorn directly from `/data/platform/backend`
+  (restoring `/app/app` to the baked dir) and falls back to the baked floor when
+  the platform tree fails its import probe, stamping the decision to
+  `/tmp/serving-source`. End-state intent: real image/disk corruption is an
   operator redeploy, not something to auto-heal around.
 
 ## Chat scroll + steer contract
