@@ -67,14 +67,24 @@ if [ "$_boot_counter" -ge 3 ] && [ -f /data/.last-successful-boot ]; then
   # Crash-loop escape hatch: the platform imported OK (else the probe would
   # have already fallen back to baked) but keeps crashing at runtime. Move the
   # broken tree ASIDE so the next boot re-clones a fresh canonical
-  # /data/platform. Non-destructive: the broken tree is preserved at
-  # /data/platform.crashloop-prev for inspection/recovery, not deleted.
-  # (slice B's deploy=rebase reconciliation will refine this.)
-  rm -rf /data/platform.crashloop-prev 2>/dev/null || true
-  if [ -e /data/platform ] && mv /data/platform /data/platform.crashloop-prev 2>/dev/null; then
-    echo "PLATFORM-RESTORE: broken tree moved to /data/platform.crashloop-prev; next boot re-clones." >&2
-    echo "crashloop-reclone $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.platform-restore-active
+  # /data/platform. Non-destructive: the broken tree is preserved at a
+  # TIMESTAMPED /data/platform.crashloop-prev.<ts> for inspection/recovery, not
+  # deleted. A one-slot .crashloop-prev would let a SECOND crash-loop delete the
+  # first preserved tree before the owner could inspect it, so we timestamp each
+  # quarantine and keep only the newest few. (slice B's deploy=rebase
+  # reconciliation will refine this.)
+  _cl_ts=$(date -u +%Y%m%dT%H%M%SZ)
+  if [ -e /data/platform ] && [ -n "$(ls -A /data/platform 2>/dev/null)" ] &&
+     mv /data/platform "/data/platform.crashloop-prev.$_cl_ts" 2>/dev/null; then
+    echo "PLATFORM-RESTORE: broken tree moved to /data/platform.crashloop-prev.$_cl_ts; next boot re-clones." >&2
+    echo "crashloop-reclone /data/platform.crashloop-prev.$_cl_ts $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.platform-restore-active
     chown mobius:mobius /data/.platform-restore-active 2>/dev/null || true
+    # Retention cap: keep the newest 3 crashloop quarantines, prune older ones.
+    # Pruning runs AFTER the move so the tree just preserved this boot is always
+    # among the kept copies — we never delete the only/newest copy.
+    ls -1dt /data/platform.crashloop-prev.* 2>/dev/null | tail -n +4 | while IFS= read -r _old; do
+      rm -rf "$_old" 2>/dev/null || true
+    done
   else
     echo "PLATFORM-RESTORE: no /data/platform to move aside (or mv failed); serving baked floor." >&2
   fi
@@ -165,6 +175,15 @@ _serve_workdir=/app
 _serve_source=baked
 _served_sha="${BUILD_SHA:-unknown}"
 
+# Env scrub shared by the import probe and the uvicorn exec so probe and serve
+# stay identical. Drops ONLY inherited GIT_*/PYTHONPATH: a GIT_DIR/GIT_WORK_TREE
+# leaked from the entrypoint would silently redirect the app's own git ops
+# (app_git, platform_update, the /data repo) at the wrong repository, and a
+# stray PYTHONPATH could shadow app.main. SECRET_KEY/DATABASE_URL/DATA_DIR are
+# preserved (env -u removes only the named vars) so `import app.main` still
+# resolves settings exactly as the served process does.
+_env_scrub="env -u PYTHONPATH -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_COMMON_DIR -u GIT_NAMESPACE"
+
 _platform_git_valid() {
   [ -d /data/platform/.git ] || return 1
   su -s /bin/sh mobius -c \
@@ -179,8 +198,15 @@ _platform_import_probe() {
   # a plain env var. `su -s /bin/sh` (NON-login) inherits it; switching this or
   # the uvicorn exec to `su -`/`su -l`/`env -i` would drop SECRET_KEY and make
   # EVERY boot false-negative to baked (or brick uvicorn) — keep them identical.
+  #
+  # `timeout 60` bounds the probe: a module-level infinite loop or blocking
+  # network call in agent-edited code would otherwise wedge boot forever (before
+  # uvicorn, before crash-loop recovery can advance). A timeout-kill exits 124,
+  # which counts as probe-fail -> serve baked. `$_env_scrub` drops the inherited
+  # GIT_*/PYTHONPATH (see its definition); the uvicorn exec below applies the
+  # IDENTICAL scrub so probe and serve stay byte-for-byte the same environment.
   su -s /bin/sh mobius -c \
-    'cd /data/platform/backend && python3 -c "import app.main"'
+    "cd /data/platform/backend && $_env_scrub timeout 60 python3 -c 'import app.main'"
 }
 
 _restore_baked_dir_if_symlink() {
@@ -205,19 +231,60 @@ _platform_bootstrap() {
   # the baked backend floor and the clone is retried on the next boot.
   _origin="${MOBIUS_PLATFORM_ORIGIN:-https://github.com/mobius-os/mobius.git}"
   echo "Platform layer: cloning $_origin -> /data/platform (first boot)."
-  rm -rf /data/platform
-  mkdir -p /data/platform
-  chown mobius:mobius /data/platform 2>/dev/null || true
+  # F1 non-destructive migration. We are here because /data/platform/backend/app
+  # is absent, but a REAL prod volume may still carry the OLD overlay shape
+  # (/data/platform/app + the agent's committed edits + .git, NOT backend/app),
+  # which also reads as "no clone yet". `git clone` needs an empty/absent target,
+  # so NEVER rm -rf a non-empty tree: MOVE an existing non-empty /data/platform
+  # to a TIMESTAMPED quarantine the owner (or slice B's migration) can recover
+  # the edits from, and only rm a genuinely EMPTY dir (a fresh volume, or one a
+  # prior boot already quarantined then failed to clone into — so repeated failed
+  # boots don't pile up empty quarantines). If the move fails, return non-zero
+  # (serve baked, retry next boot) rather than deleting the only copy.
+  if [ -e /data/platform ]; then
+    if [ -n "$(ls -A /data/platform 2>/dev/null)" ]; then
+      _quar="/data/platform.pre-clone.$(date -u +%Y%m%dT%H%M%SZ)"
+      if mv /data/platform "$_quar" 2>/dev/null; then
+        echo "PLATFORM MIGRATION: existing /data/platform preserved at $_quar (NOT deleted)." >&2
+        echo "  Its agent edits + git history are intact; migrate them into the fresh clone as needed." >&2
+        echo "pre-clone $_quar $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.platform-pre-clone-active
+        chown mobius:mobius /data/.platform-pre-clone-active 2>/dev/null || true
+      else
+        echo "PLATFORM MIGRATION: FAILED to move existing /data/platform aside — refusing to delete it." >&2
+        echo "  Serving baked floor; will retry the migration on the next boot." >&2
+        return 1
+      fi
+    else
+      rm -rf /data/platform 2>/dev/null || true
+    fi
+  fi
   # --depth 1: shallow is fine — a later PR fetches origin + unshallows only if
   # it needs the merge base (same pattern as the app clone-update path).
+  #
+  # Clone into a TEMP dir and only move it into place on FULL success. A clone
+  # that dies mid-checkout (disk-full, smudge-filter, interrupt) must never leave
+  # a half-written /data/platform: a partial tree that still has backend/app would
+  # be served broken, and a partial tree WITHOUT backend/app would be re-quarantined
+  # as pre-clone data on every retry (accumulating). Build-then-atomic-move keeps
+  # /data/platform either absent or fully ready. MOBIUS_PLATFORM_ORIGIN goes
+  # through the ENV (not interpolated into the single-quoted su script) so a value
+  # with a quote / shell metacharacter can't break the quoting or inject shell;
+  # the temp path is ours (timestamp + pid) so it is safe to interpolate.
+  rm -rf /data/platform.cloning.* 2>/dev/null || true
+  _cloning="/data/platform.cloning.$(date -u +%Y%m%dT%H%M%SZ).$$"
+  mkdir -p "$_cloning"
+  chown mobius:mobius "$_cloning" 2>/dev/null || true
+  if ! MOBIUS_PLATFORM_ORIGIN="$_origin" _CLONING="$_cloning" su -s /bin/sh mobius -c '
+    git clone --depth 1 "$MOBIUS_PLATFORM_ORIGIN" "$_CLONING" &&
+    git -C "$_CLONING" config user.name "Mobius Agent" &&
+    git -C "$_CLONING" config user.email "agent@mobius" &&
+    git -C "$_CLONING" branch -f upstream HEAD
+  '; then
+    rm -rf "$_cloning" 2>/dev/null || true
+    return 1
+  fi
   su -s /bin/sh mobius -c "
-    git clone --depth 1 '$_origin' /data/platform &&
-    git -C /data/platform config user.name 'Mobius Agent' &&
-    git -C /data/platform config user.email 'agent@mobius' &&
-    git -C /data/platform branch -f upstream HEAD
-  " || return 1
-  su -s /bin/sh mobius -c "
-    cd /data/platform/frontend 2>/dev/null || exit 0
+    cd '$_cloning/frontend' 2>/dev/null || exit 0
     [ -e node_modules ] || [ -L node_modules ] ||
       ln -s /app/shell-src/node_modules node_modules || true
     mkdir -p dist 2>/dev/null || true
@@ -226,10 +293,19 @@ _platform_bootstrap() {
   _build_sha=${BUILD_SHA:-unknown}
   if [ "$_build_sha" != "unknown" ]; then
     su -s /bin/sh mobius -c \
-      "git -C /data/platform tag baked-${_build_sha} HEAD 2>/dev/null || true"
+      "git -C '$_cloning' tag baked-${_build_sha} HEAD 2>/dev/null || true"
   fi
-  echo "$_build_sha" > /data/platform/.baked-sha
-  chown mobius:mobius /data/platform/.baked-sha 2>/dev/null || true
+  echo "$_build_sha" > "$_cloning/.baked-sha"
+  chown mobius:mobius "$_cloning/.baked-sha" 2>/dev/null || true
+  # /data/platform is absent here (the move-aside / empty-rm above handled it);
+  # the rm is a belt-and-suspenders no-op so the rename can't nest temp inside a
+  # stray dir. Same-filesystem rename = atomic swap-in of a fully-ready tree.
+  rm -rf /data/platform 2>/dev/null || true
+  if ! mv "$_cloning" /data/platform 2>/dev/null; then
+    echo "PLATFORM LAYER WARNING: could not move the fresh clone into place; retrying next boot." >&2
+    rm -rf "$_cloning" 2>/dev/null || true
+    return 1
+  fi
   echo "Platform layer: clone complete; serving /data/platform/backend."
 }
 
@@ -760,6 +836,14 @@ shell/
 .last-successful-boot
 .platform-restore-active
 .platform-upgrade-available
+.platform-pre-clone-active
+# Transient platform-update markers — runtime signals, never user data. If the
+# outer /data repo is initialized while one of these exists, `git add -A` must
+# not track it.
+.platform-conflict
+.platform-restart-needed
+.platform-apply-in-progress
+.platform-restart-requested
 EOF
 chown mobius:mobius /data/.gitignore 2>/dev/null || true
 
@@ -770,11 +854,18 @@ chown mobius:mobius /data/.gitignore 2>/dev/null || true
 # submodules, while the installer/update path can still keep each manifest-
 # installed app's upstream/main history across container restarts, and the
 # platform + shell gits are each their own two-branch repo.
+#
+# The .pre-clone.<ts> / .crashloop-prev.<ts> quarantines are also preserved
+# WHOLE (including their .git): they hold the agent's migrated-aside platform
+# tree, and the whole point of the move-aside was to keep those edits AND their
+# git history recoverable — this pruner must not silently eat that history.
 find /data -regextype posix-extended -mindepth 2 -maxdepth 4 \
   -type d -name '.git' \
   ! -regex '/data/apps/[^/]+/\.git' \
   ! -regex '/data/platform/\.git' \
   ! -regex '/data/shell/\.git' \
+  ! -regex '/data/platform\.pre-clone\..*' \
+  ! -regex '/data/platform\.crashloop-prev\..*' \
   -prune -exec rm -rf {} + 2>/dev/null || true
 
 # Idempotent re-chown of /data/.git BEFORE the if/else below — git
@@ -1024,15 +1115,19 @@ _port=${PORT:-8000}
 # restarts ("pressed Restart, server never came back"). Bounding the drain makes
 # every SIGTERM-based restart reliably cycle the container.
 _uvicorn_flags="--host 0.0.0.0 --port ${PORT:-8000} --timeout-graceful-shutdown 10"
+# `$_env_scrub` is applied to the uvicorn exec so the served process runs with
+# the SAME scrubbed GIT_*/PYTHONPATH the import probe validated — a leaked
+# GIT_DIR must not redirect the app's git ops, and no stray PYTHONPATH may
+# shadow app.main. It wraps uvicorn on both the platform and baked serve paths.
 if [ "$_use_platform" -eq 1 ]; then
   _start_cmd="umask 022 && cd $_serve_workdir"
-  _start_cmd="$_start_cmd && exec uvicorn app.main:app $_uvicorn_flags"
+  _start_cmd="$_start_cmd && exec $_env_scrub uvicorn app.main:app $_uvicorn_flags"
   exec su -s /bin/sh mobius -c \
     "$_start_cmd"
 else
   _start_cmd="umask 022 && export PYTHONDONTWRITEBYTECODE=1"
   _start_cmd="$_start_cmd && cd $_serve_workdir"
-  _start_cmd="$_start_cmd && exec uvicorn app.main:app $_uvicorn_flags"
+  _start_cmd="$_start_cmd && exec $_env_scrub uvicorn app.main:app $_uvicorn_flags"
   exec su -s /bin/sh mobius -c \
     "$_start_cmd"
 fi

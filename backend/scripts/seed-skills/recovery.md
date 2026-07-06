@@ -71,12 +71,12 @@ Modes (run with no argument to print what each does):
 |---|---|
 | `shell-dist` | Prebuilt frontend bundle (`/app/static/` -> `/data/shell/dist/`). Fast; serves immediately after restart, no rebuild. |
 | `shell-src` | Editable frontend source (`/app/shell-src/` -> `/data/shell`). Wipes your `src/` edits; needs a rebuild to take visual effect. |
-| `backend` | Backend Python (`/app/app-baked/` -> `/app/app`), skipping the frozen-island files. |
-| `scripts` | Utility scripts (`/app/scripts-baked/` -> `/app/scripts`). |
 | `platform` | `git -C /data/platform reset --hard HEAD` — reverts *uncommitted* platform edits; commits are kept. Fast; no image needed. |
-| `platform-baked` | Full wipe + recopy of `/data/platform/{app,scripts}` from the baked floor, then commits the restore to `/data/platform` git history. Use when a bad change was already committed, or a git reset isn't enough. |
+| `platform-baked` | Full wipe + recopy of the SERVED clone tree `/data/platform/backend/{app,scripts}` from the baked floor, then commits the restore to `/data/platform` git history. Use when a bad change was already committed, or a git reset isn't enough. |
 
-After a `backend`, `scripts`, `platform`, or `platform-baked` restore, tell the partner to click **"Restart server"** at the top of the recovery chat page so uvicorn reloads the restored code.
+The backend served by uvicorn is the `/data/platform` clone, so `platform` and `platform-baked` are the modes that repair the running backend. (The script still accepts the legacy `backend`/`scripts` modes, which only recopy the baked fallback floor at `/app/app` + `/app/scripts` — not the served clone — so reach for `platform`/`platform-baked` here.)
+
+After a `platform` or `platform-baked` restore, tell the partner to click **"Restart server"** at the top of the recovery chat page so uvicorn reloads the restored code.
 
 | Situation | URL | Action |
 |---|---|---|

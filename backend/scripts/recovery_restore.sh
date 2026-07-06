@@ -21,11 +21,11 @@
 #                   (reverts uncommitted agent edits; commits are preserved).
 #                   Use when the agent made edits that broke the platform
 #                   but hasn't committed them yet. Fast; no image needed.
-#   platform-baked  Full restore: wipe /data/platform/app and
-#                   /data/platform/scripts, recopy from baked floor, then
-#                   commit the restore to /data/platform git history.
-#                   Use when the agent broke something and committed it, or
-#                   when git reset --hard is not enough.
+#   platform-baked  Full restore: wipe /data/platform/backend/app and
+#                   /data/platform/backend/scripts (the SERVED clone tree),
+#                   recopy from the baked floor, then commit the restore to
+#                   /data/platform git history. Use when the agent broke
+#                   something and committed it, or git reset --hard is not enough.
 #
 # After 'backend', 'scripts', 'platform', or 'platform-baked', the
 # caller should trigger POST /recover/restart so uvicorn picks up the
@@ -51,7 +51,7 @@ Modes:
   backend         Restore /app/app/ from /app/app-baked/
   scripts         Restore /app/scripts/ from /app/scripts-baked/
   platform        git reset --hard HEAD in /data/platform
-  platform-baked  Wipe + recopy /data/platform/{app,scripts} from baked floor
+  platform-baked  Wipe + recopy /data/platform/backend/{app,scripts} from baked floor
 EOF
   exit 1
 fi
@@ -88,15 +88,21 @@ fi
 
 # --- platform-baked mode: full wipe + recopy from baked floor -----------
 if [ "$MODE" = "platform-baked" ]; then
+  # The clone serves /data/platform/backend, so the served backend + scripts are
+  # /data/platform/backend/{app,scripts} — NOT the repo-root /data/platform/{app,
+  # scripts} an older baked-floor layout used. Restoring the root paths would
+  # commit irrelevant dirs and leave the SERVED backend/app broken, so we target
+  # the served tree. The baked sources map straight across: /app/app-baked is
+  # backend/app and /app/scripts-baked is backend/scripts in the image.
   SRC_APP="/app/app-baked"
   SRC_SCR="/app/scripts-baked"
-  DST_APP="/data/platform/app"
-  DST_SCR="/data/platform/scripts"
+  DST_APP="/data/platform/backend/app"
+  DST_SCR="/data/platform/backend/scripts"
   if [ ! -d "$SRC_APP" ]; then
     echo "Source missing: $SRC_APP (broken image?)" >&2
     exit 2
   fi
-  echo "Restoring /data/platform from baked floor..."
+  echo "Restoring /data/platform/backend from baked floor..."
   # Clear pycache before the overwrite to avoid stale bytecache.
   find "$DST_APP" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
   find "$DST_APP" -name '*.pyc' -delete 2>/dev/null || true

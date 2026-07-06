@@ -511,9 +511,33 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
   (its content lives on in the replay's tree); the squash is intentional.
   An ordinary local edit (no MERGE_HEAD) still commits as a plain
   single-parent commit on the old `main` tip.
+
+  HARD GATE on an in-progress rebase/cherry-pick: if one is mid-flight (no
+  MERGE_HEAD, but a rebase/cherry-pick state dir/head is present OR the index
+  still carries unmerged entries), this REFUSES before staging and returns
+  None. Staging there would mark conflicted paths resolved in the index — a
+  later `git add`/commit could then bake conflict markers into tracked source,
+  or a `git commit` mid-rebase would write a stray commit onto the detached
+  sequencer HEAD. The MERGE_HEAD finalize path below is the ONE case that must
+  legitimately stage-then-scan, so it is exempt from this refusal.
   """
   repo = Path(source_dir)
   ensure_repo(repo)
+  git_dir = repo / ".git"
+  merge_head_path = git_dir / "MERGE_HEAD"
+  # Refuse to touch the index while a rebase/cherry-pick/am is in progress
+  # (see the docstring's HARD GATE). Scoped to "no MERGE_HEAD" so the merge
+  # finalize path below still stages-then-scans. `ls-files -u` covers a
+  # conflict left in the index with no state dir (e.g. a bare `read-tree -m`).
+  if not merge_head_path.exists():
+    in_progress = (
+      (git_dir / "rebase-merge").exists()
+      or (git_dir / "rebase-apply").exists()
+      or (git_dir / "CHERRY_PICK_HEAD").exists()
+      or bool(_run(repo, "ls-files", "-u").stdout.strip())
+    )
+    if in_progress:
+      return None
   # Stage BEFORE the gate so `has_unresolved_conflicts` reads git's resolved
   # state: staging marks unmerged paths resolved in the index (clearing
   # `ls-files -u`) whether or not their content is clean, so the gate then
@@ -522,7 +546,6 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
   # never `git add`ed would still show as an unmerged index entry and we'd
   # wrongly refuse to finalize a clean resolution.
   _run(repo, "add", *_tracked_source(repo))
-  merge_head_path = repo / ".git" / "MERGE_HEAD"
   if merge_head_path.exists():
     if has_unresolved_conflicts(repo):
       return None
