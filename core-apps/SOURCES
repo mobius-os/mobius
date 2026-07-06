@@ -9,7 +9,7 @@
 # again (which is how core-apps/reflection once shipped without its manifest).
 #
 # NATIVE apps: a core app may instead be authored directly in this repo with no
-# catalog repo (e.g. skills, tasks). Such apps are simply NOT listed below —
+# catalog repo (none at present). Such apps are simply NOT listed below —
 # they have no upstream to diff against, so the sync check skips them. Their
 # manifest is still required: tests/test_core_apps_manifests.py enforces that
 # EVERY core-apps/<slug>/ ships a valid mobius.json, native or not.
