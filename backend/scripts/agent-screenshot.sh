@@ -112,5 +112,5 @@ echo "${OUT}"
 # only emit an embed for those.
 case "$OUT" in
   /data/chats/*/media/*)
-    echo "embed: ![screenshot](/api/chats/${OUT#/data/chats/})" ;;
+    echo "PASTE into your reply (the partner cannot see the PNG otherwise): ![screenshot](/api/chats/${OUT#/data/chats/})" ;;
 esac
