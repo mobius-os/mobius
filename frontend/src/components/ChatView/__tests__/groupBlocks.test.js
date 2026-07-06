@@ -68,8 +68,8 @@ test('toolGroupState: running wins, then a nonzero exit is error, else done', ()
     toolGroupState([tool({ status: 'done', output: okOutput }), tool({ status: 'running' })]),
     'running'
   )
-  // Running WINS over an already-failed sibling — the group must stay expanded
-  // to show the live tool; the failure surfaces once the run settles.
+  // Running WINS over an already-failed sibling — while live the header reads
+  // in-progress (spinner); the failure surfaces once the run settles to 'error'.
   assert.equal(
     toolGroupState([tool({ status: 'done', output: failOutput }), tool({ status: 'running' })]),
     'running'
@@ -103,6 +103,49 @@ test('toolGroupSummary: an unknown tool name passes through raw', () => {
   assert.equal(
     toolGroupSummary([tool({ tool: 'FooTool' }), tool({ tool: 'Bash' })]),
     'FooTool · Running commands'
+  )
+})
+
+test('toolGroupSummary: the running tool leads while the run is live', () => {
+  // The running tool is normally the tail; its activity reads FIRST so the
+  // collapsed header says what is executing NOW, not the run's first tool.
+  assert.equal(
+    toolGroupSummary([
+      tool({ tool: 'Read', status: 'done' }),
+      tool({ tool: 'Edit', status: 'done' }),
+      tool({ tool: 'Bash', status: 'running' }),
+    ]),
+    'Running commands · Reading files · Editing code'
+  )
+  // Dedupe still folds across the reorder: a running tool whose activity also
+  // appears earlier collapses to the single leading entry (Glob → Reading files
+  // === Read), so the label isn't shown twice.
+  assert.equal(
+    toolGroupSummary([
+      tool({ tool: 'Read', status: 'done' }),
+      tool({ tool: 'Grep', status: 'done' }),
+      tool({ tool: 'Glob', status: 'running' }),
+    ]),
+    'Reading files · Searching the code'
+  )
+  // Leading the running tool still respects the first-3 + "+N" overflow shape.
+  assert.equal(
+    toolGroupSummary([
+      tool({ tool: 'Read', status: 'done' }),
+      tool({ tool: 'Grep', status: 'done' }),
+      tool({ tool: 'Edit', status: 'done' }),
+      tool({ tool: 'WebSearch', status: 'running' }),
+    ]),
+    'Browsing the web · Reading files · Searching the code +1'
+  )
+  // No running tool → plain first-seen order (the done/persisted header),
+  // identical to the pre-change behavior.
+  assert.equal(
+    toolGroupSummary([
+      tool({ tool: 'Bash', status: 'done' }),
+      tool({ tool: 'Read', status: 'done' }),
+    ]),
+    'Running commands · Reading files'
   )
 })
 
