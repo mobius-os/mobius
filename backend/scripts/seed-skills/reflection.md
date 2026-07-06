@@ -275,10 +275,11 @@ The `questions` array is the EXACT shell QuestionCard shape: `{question, header,
 
 **Do NOT create a morning chat.** The conversation about a brief is opened by the partner on tap in the Reflection app — when they do, the backend injects this brief into the new chat's first turn automatically (the app passes `report_date`, and the app-context seam hands you the brief as context). You no longer create a chat, write a `.meta.json` chat link, or send an opener. **Never call `AskUserQuestion` from this background run** — the structured decisions are the carrier cards in the brief (above); the open-ended chat is the partner's escape hatch, opened later.
 
-After the brief is written, two cheap closing steps remain:
+After the brief is written, one cheap closing step remains — and one thing you must **not** do.
 
-1. Fire the morning push so the partner sees the brief is ready (follow `notifications.md`): title like "Your morning brief is ready", body the one-line headline, `target: "/shell/?app=$APP_ID"` so the tap lands **inside the PWA** on the Reflection app (the bare `/app/...` form opens a browser tab on a cold tap — see `notifications.md`). The brief and its tap cards are right there; the discuss-this-brief launcher is one tap away.
-2. **Write the app's header state** — the streak count + one-line summary the Reflection app shows up top. Without this, `state.json` never exists and the streak/summary stay permanently blank. Same numeric `$APP_ID` storage dir as the brief:
+**Do NOT send the morning push yourself.** The wrapper (`fetch.sh`) delivers it for you, deterministically, after your run finishes: it reads the one-line headline from the `state.json` you write below and POSTs it to `/api/notifications/send` with the service token. This is deliberate — a background agent picking its own notification tool proved unreliable (a leaked Claude Code harness `PushNotification` tool got chosen over the documented curl and silently no-op'd, so no brief reached the partner for a week). **Never call a `PushNotification` / `ToolSearch` / `Workflow` / `ScheduleWakeup` harness tool, and do not curl `/api/notifications/send` yourself for the morning push** (the runner also hard-blocks those harness tools). Your only job for the push is to make the headline below accurate and compelling — it becomes the push body verbatim.
+
+1. **Write the app's header state** — this is now load-bearing for BOTH the app header AND the morning push body. The streak count + one-line `last_summary` the Reflection app shows up top; the wrapper reads `last_summary` as the push body (only when `last_run` is today, else it falls back to a generic line — so always set both). Without this, `state.json` never exists, the streak/summary stay blank, and the push degrades to the generic fallback. Same numeric `$APP_ID` storage dir as the brief:
    ```bash
    python3 - "$APP_ID" "<one-line headline>" <<'PY'
    import json, os, sys, datetime

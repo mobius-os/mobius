@@ -746,6 +746,25 @@ async def _run_claude_session(
     "permission_mode": "bypassPermissions",
     "max_turns": max_turns,
     "cli_path": CLI_PATH,
+    # Hard-block the Claude Code harness / deferred tools that have no place
+    # in an unattended Möbius cron. This is a real bug fix, not hygiene: from
+    # 2026-06-30 the nightly agent began reaching for a leaked harness
+    # `PushNotification` tool (loaded via `ToolSearch`) instead of the
+    # documented `curl /api/notifications/send`, and that tool is a silent
+    # no-op inside Möbius — so a week of morning briefs were written but never
+    # delivered. `ToolSearch` is the loader for every deferred tool, so
+    # blocking it stops the rest from being pulled in; the others are named in
+    # case they are ever pre-loaded. A denylist is the only reliable lever:
+    # `disallowed_tools` is a hard block even under `bypassPermissions`, while
+    # `allowed_tools` is currently ignored by the SDK (claude-agent-sdk #361).
+    # The morning push is now owned by the wrapper (reflection/fetch.sh), which
+    # curls the notifications API deterministically after the run.
+    "disallowed_tools": [
+      "PushNotification",
+      "ToolSearch",
+      "Workflow",
+      "ScheduleWakeup",
+    ],
   }
   if model:
     options_kwargs["model"] = model
