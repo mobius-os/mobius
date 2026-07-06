@@ -12,9 +12,8 @@
  * This spec mocks the network (no live backend), mirroring the
  * route-mock style of second-send-pin.spec.mjs + handleStop-sync-
  * ordering.spec.mjs. It asserts:
- *   (a) the fast-forward chip appears (with Stop still visible — the two
- *       are different actions) once a message is queued AND
- *       server-confirmed during streaming,
+ *   (a) the fast-forward button appears (replacing Stop) once a message
+ *       is queued AND server-confirmed during streaming,
  *   (b) pressing it POSTs force_steer:true with the right
  *       consume_pending_ts + the exact "\n\n"-joined content,
  *   (c) the queued tray clears on a {status:"steered"} response.
@@ -145,13 +144,11 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
 
     // (a) Once the queue entry is server-confirmed (the queueOnly POST
     // returned a server ts → swapOptimisticTs cleared the in-flight flag),
-    // the fast-forward (steer) chip appears above the input row.
+    // the Stop square is swapped for the fast-forward (steer) button.
     const steerBtn = page.getByRole('button', { name: 'Send queued message now' })
     await expect(steerBtn).toBeVisible({ timeout: 5000 })
-    // Stop must STAY visible alongside the chip: Stop (interrupt + collapse
-    // the queue into a fresh turn) and fast-forward (inject the queue into
-    // the running turn) are different actions — one must never hide the other.
-    await expect(page.locator('.chat__stop')).toBeVisible()
+    // Stop must be gone while steer is showing (the slot swaps, not stacks).
+    await expect(page.locator('.chat__stop')).toHaveCount(0)
 
     // (b) Press it → expect a force_steer POST with the exact payload.
     await steerBtn.click()

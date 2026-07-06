@@ -950,7 +950,6 @@
 .chat__foot .connection-status,
 .chat__foot .chat__attach-tray,
 .chat__foot .chat__question-nudge,
-.chat__foot .chat__steer-chip,
 .chat__foot .chat__pill,
 .chat__foot .composer-plus { pointer-events: auto; }
 
@@ -1012,6 +1011,7 @@
 .chat__pill--tall { align-items: flex-end; }
 .chat__pill--tall .chat__send,
 .chat__pill--tall .chat__stop,
+.chat__pill--tall .chat__steer,
 .chat__pill--tall .chat__mic { align-self: flex-end; }
 
 /* Focus halo — exact restore of the be32e58 rule that was on the
@@ -1107,47 +1107,32 @@
   background: var(--danger); /* CONTRACT: destructive accent fill */
 }
 
-/* Steer (fast-forward) chip — injects the queued messages into the LIVE
-   turn. Lives on its own row between the queued tray and the pill (visually
-   the tray's action), never in the primary-action slot: Stop must stay
-   reachable while queued work exists, because Stop and fast-forward are
-   different actions (interrupt-and-restart vs advance-in-place). Accent, not
-   danger red, because it is a forward affordance. Frosted accent surface —
-   the same recipe as .chat__open-app-btn — because the chat scrolls behind
-   the transparent foot and the chip must read as a card over it. */
-.chat__steer-row {
-  display: flex;
-  justify-content: flex-end;
-  margin: 0 0 8px;
-}
-.chat__steer-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 12px;
-  border-radius: 999px;
-  border: 1px solid var(--accent); /* CONTRACT: vivid accent line */
-  background: color-mix(in srgb, var(--accent) 16%, color-mix(in srgb, var(--surface) 78%, transparent));
-  backdrop-filter: blur(16px) saturate(140%);
-  -webkit-backdrop-filter: blur(16px) saturate(140%);
-  color: var(--accent); /* CONTRACT: vivid accent text */
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.35;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s, transform 0.08s;
-}
-.chat__steer-chip:hover {
+/* Steer (fast-forward) button — replaces Stop while a turn is streaming
+   and there are queued messages ready to inject into the live turn. Accent
+   fill (not danger red) because this is a forward/primary affordance — it
+   advances the queue into the turn rather than interrupting it. Same 40×40
+   pill geometry as Send/Stop so the slot doesn't reflow on swap. */
+.chat__steer {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: none;
   background: var(--accent); /* CONTRACT: vivid opaque accent fill */
   color: #fff;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.08s;
 }
-.chat__steer-chip:active { transform: scale(0.96); }
+.chat__steer:hover { background: var(--accent-hover); /* CONTRACT: vivid opaque accent on hover */ }
+.chat__steer:active { transform: scale(0.94); }
 
 /* Pending-question nudge — shown in the foot when an unanswered
    AskUserQuestion card sits outside the viewport, so the frozen turn
    doesn't read as a hang. A tap scrolls the card into view (user-initiated
    — the no-auto-scroll contract stays intact). Same frosted accent chip
-   recipe as .chat__steer-chip: it must read as a card over the chat
+   recipe as .chat__open-app-btn: it must read as a card over the chat
    scrolling behind the transparent foot. Centered, because it speaks for
    the whole conversation rather than the queued tray. */
 .chat__question-nudge {
