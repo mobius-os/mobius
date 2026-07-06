@@ -149,18 +149,34 @@ cat > "$INIT_PATH" <<INIT
 #
 # Capture the existing crontab ONCE and check rc. Piping a second live
 # crontab listing into the rewrite risks a transient empty read collapsing
-# the whole crontab to just this one line. On rc 0 the listing is
-# authoritative — keep every other line. On rc != 0 (no crontab yet, or
-# unreadable) install only this entry; the entrypoint replays every
-# app's init-cron.sh in turn, so each re-adds its own line.
+# the whole crontab to just this one line.
+#
+# \`crontab -l\` exits non-zero for TWO different reasons and they must NOT be
+# treated the same: (a) "no crontab for <user>" — genuinely empty, nothing to
+# preserve, safe to install just this entry; (b) a real read error (spool
+# unreadable, etc.) — the crontab may be FULL of other apps' lines we just
+# can't see, so rewriting from an empty read would DROP every one of them.
+# We distinguish by the stderr message: only the benign "no crontab" case
+# installs the bare entry; a real error leaves the crontab untouched and lets
+# the next boot retry, rather than silently wiping other apps' jobs.
 ENTRY="$SCHEDULE $CRON_CMD"
-EXISTING=\$(crontab -u mobius -l 2>/dev/null); RC=\$?
+ERRFILE=\$(mktemp)
+EXISTING=\$(crontab -u mobius -l 2>"\$ERRFILE"); RC=\$?
 if [ "\$RC" -eq 0 ]; then
+  # Authoritative read — keep every other app's line, replace only ours.
   (printf '%s\\n' "\$EXISTING" | grep -vF "$JOB_PATH"; echo "\$ENTRY") \\
     | crontab -u mobius -
-else
+elif grep -qi 'no crontab for' "\$ERRFILE"; then
+  # Genuinely no crontab yet — safe to install just this entry; the entrypoint
+  # replays every app's init-cron.sh, so each re-adds its own line.
   echo "\$ENTRY" | crontab -u mobius -
+else
+  # A real read error (not "no crontab"): do NOT rewrite, or we'd drop every
+  # other app's entry from a partial/empty read. Leave the crontab as-is.
+  echo "init-cron($SLUG): crontab read error (rc=\$RC); leaving crontab unchanged" >&2
+  cat "\$ERRFILE" >&2
 fi
+rm -f "\$ERRFILE"
 INIT
 chmod +x "$INIT_PATH"
 echo "wrote $INIT_PATH"

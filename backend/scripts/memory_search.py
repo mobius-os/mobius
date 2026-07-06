@@ -13,16 +13,24 @@ per-chat note is what the agent WRITES every turn; this is how it READS the
 rest of the graph on demand. The main agent integrates the printed result into
 its own reasoning — it does not narrate this call to the partner.
 
+It is a fully AGENTIC tree walk — the subagent picks the route and follows the
+[[link]]/moc edges itself, judging relevance contextually (not a flat retrieve).
+What makes it FAST is the I/O: it walks DOWN the hierarchy (router -> picked
+maps -> picked notes) reading each level as a single batched `cat a.md b.md …`
+instead of one `Read` per model turn. The CLI serializes `Read` calls, so
+batching a hop into one `cat` collapses ~O(notes) serial turns into ~O(hops)
+turns — the ~3x win today, bounded at any graph size because only the relevant
+slice of each level is ever read. (A prior version read one note per turn: ~60s.)
+
 Two things make it more than "just ask claude in a subprocess":
 
-  - Read tracking. It runs the subagent with `--output-format stream-json` and
-    records every memory node the subagent actually `Read` into the chat's
-    read-trace (`nodes_read`), reusing `app.memory_trace`. That is the exact
-    signal the nightly Reflection pass diffs to learn which notes should sit
-    nearer the surface next time.
+  - Read tracking. Because reads are batched `cat`s (no per-file `Read` events),
+    the chat's read-trace (`nodes_read`, via `app.memory_trace`) is taken from the
+    notes the subagent CITES in its `SOURCES:` line — the "dug-for" signal the
+    nightly Reflection pass diffs to learn which notes to surface next time.
   - A search methodology, not a conversation. The `--append-system-prompt`
-    below is the subagent's whole identity: descend past the router into the
-    MOCs and the notes themselves, breadth then depth, and report compactly.
+    below is the subagent's whole identity: orient from the map, then batch-read
+    and expand along the edges, breadth then depth, and report compactly.
 
 Usage:  memory_search.py "<the partner's current request / focus>" [chat_id]
 Prints the synthesis (relevant memories) to stdout; records reads silently to
@@ -72,32 +80,34 @@ current request, return the memories that would actually change how you answer
 or build for it — found by READING the notes, not skimming the router.
 
 The graph is the current directory:
-  index.md            the router — one scent line per map. The ROUTE, not a source.
-  mocs/<slug>.md      topic maps — links to notes, grouped under headings. The route.
+  index.md            the router — one scent line per map. Small at ANY graph
+                      size (one line per map, not per note). Your entry point.
+  mocs/<slug>.md      topic maps — link to notes, grouped under headings. The route.
   notes/<slug>.md     atomic notes — ONE durable fact each. THESE are the sources.
   chats/<id>/index.md per-chat notes — a past chat's growing summary + facts.
 
-How to search:
-  1. Read index.md. Open EVERY map that could plausibly relate — resolve ties
-     toward opening, not skipping. A request about work, building, or planning
-     touches about-the-user AND the apps map AND any projects section. Opening a
-     map is cheap. (Open <2 maps for a multi-part request → you under-fanned.)
-  2. In each map, read EVERY heading — e.g. "How they like to work", "Projects
-     & plans" — not just the top. The request can touch a section far down a map.
-  3. Open the actual notes/ and read their CONTENT. A map's one-line description
-     is a SCENT, not a fact — if it smells relevant, OPEN the note before you
-     rely on it. Follow [[wiki-links]] toward related notes — INCLUDING cross-chat
-     links (`[[chats/<id>]]`). A concept that recurs across several chats is the
-     highest-value connection: when a note or chat links to another, open it and
-     pull the thread. (If a depth/breadth hint was given it bounds how far you
-     fan — but finding the answer always wins over the numbers.)
-  4. Before finalizing, Grep notes/ for the request's key nouns (the domain, the
-     activity, "schema"/"data model", etc.) and open any hit you missed — EVERY
-     time, not only when the router looks thin. Maps under-link; this catches
-     orphans and siblings.
+How to search — an agentic walk DOWN the hierarchy, reading each level in ONE
+batch. This stays fast whether the graph has 18 notes or 18,000, because you only
+ever read the RELEVANT slice at each level (the router never balloons; you never
+read the whole graph):
+  1. `cat index.md` — the router. Pick EVERY map that could plausibly bear on the
+     request, generously; a request about work/building/planning touches
+     about-the-user AND the apps map AND any projects map.
+  2. `cat mocs/<a>.md mocs/<b>.md …` — read all the maps you picked in ONE batch.
+     Each lists its notes with a scent + headings. Now pick EVERY note that could
+     bear on the request, PLUS their linked neighbours ([[wiki-links]], cross-chat
+     `[[chats/<id>]]`).
+  3. `cat notes/<x>.md notes/<y>.md chats/<id>/index.md …` — read ALL those notes
+     (and their neighbours) in ONE batch. **NEVER read notes one per turn** —
+     one-file-per-turn is the slow failure this rule exists to prevent.
+  4. Only if a note's CONTENT reveals a clearly-relevant note you hadn't reached
+     (a recurring cross-chat thread, a sibling app to copy from, a shared
+     data-model/schema note), do ONE more batched `cat` of just those, or
+     `rg -l "<noun>" notes chats` in a single call to catch an under-linked orphan.
+     Then STOP and report — you should be done in ~3-4 batched reads, not dozens.
   When the request is to BUILD or EXTEND something, the relevant set includes
-  every SIMILAR thing already built (sibling apps to copy from) and any shared
-  data-model/schema note — not only the one whose name matches.
+  every SIMILAR thing already built and any shared data-model/schema note.
+  Judge relevance as you read (opening generously, reporting strictly — below).
   Stopping at the router, or after a single note, is a FAILURE.
 
 Relevance — generous OPENING, strict REPORTING:
@@ -166,6 +176,49 @@ def _path_to_node_id(file_path: str) -> str | None:
   return _loaded_path_to_id(str(rel))
 
 
+def _slug_to_node_id(slug: str) -> str | None:
+  """Maps a SOURCES slug the model cited to a graph node id, trying the shapes
+  the model uses ("foo", "notes/foo", "chats/<id>"). Reuses _path_to_node_id so
+  the ids line up with graph.json."""
+  s = slug.strip().strip("`,.()[]").removesuffix(".md")
+  if not s:
+    return None
+  if s.startswith("chats/"):
+    # A per-chat note's file is chats/<id>/index.md, but the model cites it three
+    # ways: "chats/<id>", "chats/<id>/index", and "chats/<id>/index.md" (the .md
+    # already stripped above, leaving "…/index"). Peel a trailing "/index" so all
+    # three land on the same candidate — without this the "…/index" spelling
+    # built "chats/<id>/index/index.md" and silently dropped the chat.
+    base = s[: -len("/index")] if s.endswith("/index") else s
+    candidates = [f"{base}/index.md"]
+  elif "/" in s:
+    candidates = [f"{s}.md"]
+  else:
+    candidates = [f"notes/{s}.md", f"mocs/{s}.md", f"chats/{s}/index.md"]
+  for rel in candidates:
+    nid = _path_to_node_id(str(MEMORY_DIR / rel))
+    if nid:
+      return nid
+  return None
+
+
+def _sources_to_node_ids(final_text: str) -> list[str]:
+  """The notes the model drew facts from, parsed from its `SOURCES:` line. With
+  batched `cat` there are no per-file `Read` events to count, so SOURCES carries
+  the read-trace signal — and it's the better one: what was CITED, not merely
+  opened. The nightly Reflection pass diffs this to learn which notes to surface."""
+  ids: list[str] = []
+  for line in final_text.splitlines():
+    s = line.strip()
+    if not s.upper().startswith("SOURCES:"):
+      continue
+    for tok in s.split(":", 1)[1].replace(";", ",").split(","):
+      nid = _slug_to_node_id(tok)
+      if nid and nid not in ids:
+        ids.append(nid)
+  return ids
+
+
 def _parse_args(argv: list[str]) -> tuple[list[str], int | None, int | None]:
   """Pull optional --max-depth / --max-breadth out of argv; the rest is
   positional (query, then optional chat_id). Hints are soft (see _hints_clause).
@@ -221,9 +274,36 @@ def run() -> int:
     "stream-json",
     "--verbose",
     "--allowedTools",
+    # Scoped read-only Bash so a hop is one batched `cat a.md b.md c.md` (the CLI
+    # serializes N Read calls into N turns; batching a hop into one call is the
+    # speedup) while the subagent stays write-incapable. This scoping is
+    # load-bearing: the query is the partner's raw chat text and note bodies are
+    # agent-written, so a prompt injection could try to make this "read-only"
+    # search mutate the graph. Pinning Bash to cat/rg/ls keeps the walk fully
+    # agentic (the model still picks the route and follows the edges) and leaves
+    # Read/Grep/Glob for single-file use.
+    #
+    # Verified live against the pinned CLI (2.1.x, headless -p): batched `cat`
+    # and `rg` execute; a `touch` or `>`-redirect bash write is refused by the
+    # CLI's own headless write-sandbox ("may only modify files in the allowed
+    # working directories", and even those need an interactive grant no `-p` run
+    # can give); the Write/Edit tools are denied. Residual risk: the CLI's
+    # permission matching does NOT decompose compound commands, so a read-only
+    # rider after an allowed prefix (e.g. `cat x.md && echo …`) still runs — but a
+    # rider cannot mutate (writes hit the sandbox) and no network/exfil tool is
+    # granted, so the read-only guarantee holds. --disallowedTools names the
+    # write-shaped tools explicitly (deny beats allow) so the denial does not
+    # rely on their mere absence from the allow-list.
+    "Bash(cat:*)",
+    "Bash(rg:*)",
+    "Bash(ls:*)",
     "Read",
     "Grep",
     "Glob",
+    "--disallowedTools",
+    "Write",
+    "Edit",
+    "NotebookEdit",
     "--add-dir",
     str(MEMORY_DIR),
     "--append-system-prompt",
@@ -270,6 +350,13 @@ def run() -> int:
               read_ids.append(nid)
     elif typ == "result":
       final_text = obj.get("result") or final_text
+
+  # Batched `cat` reads leave no per-file Read events, so the cited SOURCES line
+  # is the authoritative read-trace; union in any actual Read-tool ids too, in
+  # case the model reached for single-file Read on a hop.
+  for nid in _sources_to_node_ids(final_text):
+    if nid not in read_ids:
+      read_ids.append(nid)
 
   if chat_id and read_ids:
     from app.memory_trace import record_note_read

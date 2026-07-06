@@ -48,6 +48,13 @@ export API_BASE_URL DATA_DIR
 mkdir -p "$DATA_DIR/cron-logs" "$INPUTS"
 log() { echo "[$(date -Iseconds)] reflection: $*" >>"$LOG"; }
 
+# Tracks whether the cron_outcome has been emitted yet, so the cleanup trap
+# can emit a backstop outcome if the run exits before the explicit emit near
+# the end (an unexpected failure between the two — e.g. an ENOSPC that kills a
+# step). A dropped outcome makes the night invisible to the next run and the
+# app, which then shows the PRIOR night's status; the backstop closes that gap.
+OUTCOME_EMITTED=0
+
 # emit_outcome <exit_code> — one cron_outcome activity event recording
 # how the night finished, so the next night's agent (and the Reflection
 # app) can see the run history. Routed through the API so one process
@@ -55,6 +62,10 @@ log() { echo "[$(date -Iseconds)] reflection: $*" >>"$LOG"; }
 # guard below emits a failure outcome before the main run.
 emit_outcome() {
   local exit_code="$1"
+  # Mark "attempted" before the token guard: whether or not we can reach the
+  # API, the backstop in cleanup() must not re-attempt (it would fail the same
+  # way — a missing token or a full disk doesn't heal within the run).
+  OUTCOME_EMITTED=1
   [[ -r "$TOKEN_FILE" ]] || return 0
   local token ts payload
   token="$(cat "$TOKEN_FILE")"
@@ -67,7 +78,7 @@ emit_outcome() {
   # giving up.
   local attempt=0
   while (( attempt < 3 )); do
-    if curl -fsS -X POST \
+    if curl -fsS --connect-timeout 10 --max-time 30 -X POST \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json" \
         -d "$payload" \
@@ -86,9 +97,16 @@ emit_outcome() {
 # if a prior night is still running (a long run that overran its window).
 # Exit-code legend (recorded as the cron_outcome exit_code, so the next
 # run + the Reflection app can tell a real success from a no-op):
-#   0  success           3  service token missing
-#   2  app id missing    5  skipped (a prior run still holds the lock)
-#   124 wall-clock timeout    other  agent run error
+#   0    success                  3    service token missing (config)
+#   2    app id missing (config)  5    skipped (a prior run holds the lock)
+#   124  wall-clock timeout       127  runner missing
+#   64   model error   65  usage/rate limit   66  provider auth expired
+#   70   wrapper died before completing (backstop-only: external kill, or an
+#        unexpected failure between the trap install and the final emit)
+# The 64-66 band is the RUNNER's own (reflection_runner.py); it can never
+# collide with the wrapper config codes above, so a model/usage/auth failure
+# is never mislabeled as a config error in cron_outcome. 70 is emitted only
+# by the cleanup trap's backstop, never by a completed run.
 exec 9>"$LOCK"
 if ! flock -n 9; then
   log "another reflection run holds the lock; skipping this night (exit 5)"
@@ -133,9 +151,26 @@ log "start (app_id=$APP_ID date=$DATE dry=${REFLECTION_DRY:-0} timeout=${RUN_TIM
 
 # activity.jsonl — last 24h of platform events (app opens, storage
 # writes, cron_outcomes). The runner's goal message points the agent here.
+# A SILENT gather failure is indistinguishable from a genuinely quiet night
+# (both leave empty inputs and exit 0), so every gather records its transport
+# failures into gather-errors.txt — a machine-readable signal the runner hands
+# the agent so the brief can tell "broken" from "quiet." Empty file = all OK.
+GATHER_ERRORS="$INPUTS/gather-errors.txt"
+: >"$GATHER_ERRORS"
+record_gather_error() { printf '%s\n' "$1" >>"$GATHER_ERRORS"; }
+
+# The gather curls run while the flock is held and OUTSIDE the runner's
+# `timeout`, so an un-timed curl against a stalled connection would hold the
+# lock forever and wedge every future night at `flock -n`. --connect-timeout +
+# --max-time bound each one; a stall then returns non-zero and is recorded.
+curl_timed=(curl -s --connect-timeout 10 --max-time 60)
+
 SINCE="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
-curl -s "${auth[@]}" "$API_BASE_URL/api/admin/activity?since=$SINCE" \
-  >"$INPUTS/activity.jsonl" 2>>"$LOG" || true
+if ! "${curl_timed[@]}" "${auth[@]}" \
+    "$API_BASE_URL/api/admin/activity?since=$SINCE" \
+    >"$INPUTS/activity.jsonl" 2>>"$LOG"; then
+  record_gather_error "activity.jsonl: fetch failed (transport error or timeout)"
+fi
 
 # chats.md — recent chats list (titles + ids + provider), so the agent
 # knows which sessions to fork-and-interview without re-deriving the list.
@@ -155,7 +190,22 @@ try:
     # the owner's drawer history but are relevant to memory consolidation.
     chats = get("/api/chats?include_app_chats=1")
     chats = chats if isinstance(chats, list) else chats.get("chats", [])
-    chats = sorted(chats, key=lambda c: c.get("updated_at",""), reverse=True)[:20]
+    chats = sorted(chats, key=lambda c: c.get("updated_at",""), reverse=True)
+    # Cap the list, but MUCH higher than the old top-20: on a busy day the
+    # 21st-most-recent chat was silently never offered for interview. A cap of
+    # 60 covers realistic nightly volume; if it's ever exceeded, SURFACE the
+    # truncation (a visible note here + a stderr line into the log) instead of
+    # dropping chats without a trace. The agent already self-dedups
+    # re-interviews via its run notes, so a generous cap only costs a longer
+    # list, never a double interview.
+    CAP = 60
+    total = len(chats)
+    if total > CAP:
+        chats = chats[:CAP]
+        print(f"# NOTE: {total} chats total; showing the {CAP} most recent — "
+              f"{total - CAP} older chat(s) were truncated from this list.\n")
+        print(f"chats.md: truncated {total - CAP} of {total} chats (cap {CAP})",
+              file=sys.stderr)
     for c in chats:
         cid = c.get("id"); title = c.get("title") or "(untitled)"
         prov = c.get("provider") or "claude"
@@ -265,6 +315,13 @@ try:
             break
         seen.add(nxt)
         cursor = nxt
+    # Exclude TODAY's report. A same-day manual retry would otherwise pick
+    # this run's own (possibly partial) brief as "yesterday's" — the agent
+    # would then compare against itself. We want the latest report BEFORE
+    # today, so a retry still sees the genuine previous brief.
+    import datetime
+    today_html = datetime.date.today().isoformat() + ".html"
+    reports = [n for n in reports if n != today_html]
     print(sorted(reports)[-1] if reports else "")
 except Exception as exc:
     print(f"could not enumerate previous reports: {exc}", file=sys.stderr)
@@ -272,8 +329,11 @@ except Exception as exc:
 PY
 )"
 if [[ -n "$PREV" ]]; then
-  curl -s "${auth[@]}" "$API_BASE_URL/api/storage/apps/$APP_ID/reports/$PREV" \
-    >"$INPUTS/prev-report.html" 2>>"$LOG" || true
+  if ! "${curl_timed[@]}" "${auth[@]}" \
+      "$API_BASE_URL/api/storage/apps/$APP_ID/reports/$PREV" \
+      >"$INPUTS/prev-report.html" 2>>"$LOG"; then
+    record_gather_error "prev-report.html: fetch failed (transport error or timeout)"
+  fi
 fi
 
 # prev-question-answers.json — the partner's taps on the in-brief question
@@ -318,8 +378,11 @@ except Exception as exc:
 PY
 )"
 if [[ -n "$PREV_QA" ]]; then
-  curl -s "${auth[@]}" "$API_BASE_URL/api/storage/apps/$APP_ID/question-answers/$PREV_QA" \
-    >"$INPUTS/prev-question-answers.json" 2>>"$LOG" || true
+  if ! "${curl_timed[@]}" "${auth[@]}" \
+      "$API_BASE_URL/api/storage/apps/$APP_ID/question-answers/$PREV_QA" \
+      >"$INPUTS/prev-question-answers.json" 2>>"$LOG"; then
+    record_gather_error "prev-question-answers.json: fetch failed (transport error or timeout)"
+  fi
 fi
 
 # per-app-digest.json — compact per-app analytics summary the Reflection
@@ -483,11 +546,35 @@ heartbeat_loop() {
 heartbeat_loop 9>&- &
 HEARTBEAT_PID=$!
 cleanup() {
+  # Capture the exiting status BEFORE any other command overwrites $?. On a
+  # signal-driven exit bash (5.x, verified) still runs this EXIT trap, but
+  # $? here holds the STALE last-command status — often 0 — not 128+signal.
+  # Reading the also-stale $RC instead once recorded exit_code:0 for a night
+  # that was SIGTERMed mid-runner and produced no brief.
+  local rc=$?
+  # Backstop the cron_outcome: if we're exiting before the explicit
+  # emit_outcome near the end (an unexpected failure in between, or an
+  # external kill), still record SOMETHING, since a dropped outcome makes the
+  # night invisible to the next run + the app (which then shows the PRIOR
+  # night's status). Idempotent — emit_outcome sets OUTCOME_EMITTED, so the
+  # normal path's explicit emit already ran and this is skipped. The backstop
+  # can NEVER record success: reaching it means the normal path did not
+  # complete, so a zero status is the staleness above, not a healthy run —
+  # substitute 70 ("died before completing", see the exit-code legend).
+  if [[ "${OUTCOME_EMITTED:-0}" != "1" ]]; then
+    (( rc == 0 )) && rc=70
+    emit_outcome "$rc"
+  fi
   if [[ -n "${HEARTBEAT_PID:-}" ]]; then
     kill "$HEARTBEAT_PID" 2>/dev/null || true
     wait "$HEARTBEAT_PID" 2>/dev/null || true
   fi
 }
+# EXIT-only on purpose. Verified on bash 5.2: an UNTRAPPED fatal SIGTERM (or
+# group SIGINT) during the foreground runner still fires the EXIT trap
+# promptly, while a TRAPPED signal is DEFERRED until the foreground child
+# completes — so trapping TERM/INT would postpone the backstop by up to the
+# whole RUN_TIMEOUT and lose it entirely under a kill -9 escalation.
 trap cleanup EXIT
 
 # --- run the agent: full tools, real token, no sandbox ----------------
@@ -575,7 +662,10 @@ print(json.dumps({
 PY
 )"
   local code
-  code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "${auth[@]}" \
+  # curl_timed, not bare curl: this POST runs while fd 9 still holds the
+  # nightly flock, so an unbounded stall here would wedge every future night
+  # (exit 5) exactly like the gather curls this run already bounds.
+  code="$("${curl_timed[@]}" -o /dev/null -w '%{http_code}' -X POST "${auth[@]}" \
     -H "Content-Type: application/json" -d "$payload" \
     "$API_BASE_URL/api/notifications/send" 2>>"$LOG")"
   case "$code" in
