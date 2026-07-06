@@ -465,6 +465,11 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
   // OR a backend overlay merge (platform.available). conflict/restart come only
   // from the backend platform flow.
   const platformConflict = platform?.state === 'conflict'
+  // A text-clean update that failed the post-rebase import probe was rolled back
+  // to the previous served version — the update is still available, but its last
+  // apply needs a repair pass, so the row says so distinctly rather than reading
+  // as a plain "New update available".
+  const platformRolledBack = platform?.state === 'rolled_back'
   const platformRestart = !!platform?.needs_restart
   const updateAvailable = !!platform?.available || newerBuildInstalled
   const mobiusUpdating =
@@ -612,15 +617,17 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
           <div className="settings__row settings__row--top">
             <div className="settings__update">
               <StatusDot
-                color={platformConflict || platformRestart || updateAvailable ? '--accent' : '--green'}
+                color={platformConflict || platformRolledBack || platformRestart || updateAvailable ? '--accent' : '--green'}
               >
                 {platformConflict
                   ? 'Resolving a conflict'
-                  : platformRestart
-                    ? 'Restart to finish'
-                    : updateAvailable
-                      ? 'New update available'
-                      : 'Up to date'}
+                  : platformRolledBack
+                    ? 'Update needs repair'
+                    : platformRestart
+                      ? 'Restart to finish'
+                      : updateAvailable
+                        ? 'New update available'
+                        : 'Up to date'}
               </StatusDot>
               {/* The honest build identity is the short commit sha — the SHELL_BUILD
                   marker is an internal cache-bust string, and its date is bumped by

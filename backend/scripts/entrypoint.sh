@@ -366,21 +366,33 @@ printf '%s\n' "$_served_sha" > /tmp/serving-sha
 chmod 644 /tmp/serving-source /tmp/serving-sha 2>/dev/null || true
 
 if [ "$_use_platform" -eq 1 ]; then
-  _build_sha=${BUILD_SHA:-unknown}
-  _recorded_sha=""
-  if [ -f /data/platform/.baked-sha ]; then
-    _recorded_sha=$(cat /data/platform/.baked-sha 2>/dev/null | tr -d '[:space:]')
-  fi
-  if [ "$_build_sha" != "unknown" ] && [ -n "$_recorded_sha" ] && \
-     [ "$_build_sha" != "$_recorded_sha" ]; then
-    echo "PLATFORM UPGRADE NOTICE: image SHA changed from $_recorded_sha to $_build_sha." >&2
-    echo "  /data/platform is unchanged in slice A; deploy=rebase is slice B." >&2
-    echo "upgrade-available ${_build_sha} (was ${_recorded_sha}) $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      > /data/.platform-upgrade-available
-    chown mobius:mobius /data/.platform-upgrade-available 2>/dev/null || true
-  else
-    rm -f /data/.platform-upgrade-available 2>/dev/null || true
-  fi
+  # Slice B deploy=rebase reconcile. A deploy ships a new image AND advances
+  # canonical origin/main; fetch origin and replay the local edits onto the new
+  # version NOW, before uvicorn imports the code, so the update goes live this
+  # boot with no restart. Runs as mobius (writes /data; root would poison /data
+  # ownership + hit git "dubious ownership"), cwd the served backend so `app`
+  # imports resolve from the clone, under the IDENTICAL GIT_*/PYTHONPATH scrub
+  # the import probe + uvicorn exec use. The function catches its own errors and
+  # `|| true` guards the shell, so a reconcile failure never bricks boot; a
+  # conflict/rollback leaves the pre-reconcile code on disk (aborted/reset) and
+  # sets a flag Settings surfaces. The outer `timeout` is a last-resort bound set
+  # ABOVE the sum of the reconcile's own per-op timeouts (fetch 120 + unshallow
+  # 120 + probe 60 = 300) so an internal timeout always fires FIRST — a clean
+  # offline/rollback return — and the outer never fires during the fast local
+  # rebase/reset mutation (which would otherwise leave a half-applied tree this
+  # boot then serves). recoveryd remains the outer floor.
+  echo "Platform layer: reconciling /data/platform with origin (slice B deploy=rebase)..." >&2
+  su -s /bin/sh mobius -c \
+    "cd /data/platform/backend && $_env_scrub timeout 450 python3 -c \
+     'from app import platform_update; print(platform_update.reconcile_clone_sync())'" \
+    2>&1 || true
+  # A fast-forward / rebase advanced main, so the served sha the /api/version and
+  # /api/debug/serving routes report (written to /tmp/serving-sha above) must
+  # reflect the reconciled HEAD, not the pre-reconcile clone tip.
+  _served_sha=$(su -s /bin/sh mobius -c \
+    'git -C /data/platform rev-parse HEAD' 2>/dev/null || echo "$_served_sha")
+  printf '%s\n' "$_served_sha" > /tmp/serving-sha
+  chmod 644 /tmp/serving-sha 2>/dev/null || true
 fi
 
 # SECRET_KEY drift detection.
@@ -845,6 +857,8 @@ shell/
 .platform-restart-needed
 .platform-apply-in-progress
 .platform-restart-requested
+.platform-rolled-back
+.platform-reconcile.lock
 EOF
 chown mobius:mobius /data/.gitignore 2>/dev/null || true
 

@@ -1,54 +1,51 @@
-"""Platform self-update — a thin ``/data/platform`` caller of ``app.app_git``.
+"""Platform self-update — clone-native ``git fetch`` + rebase reconcile.
 
-The platform repo at ``/data/platform`` updates with the SAME engine every
-installed app uses: ``app_git`` records each baked image floor on an
-``upstream`` branch, merges it into the local working branch with
-``git merge-tree --write-tree`` (a clean-vs-conflict verdict computed off the
-live worktree, so a conflict never leaves the served backend half-merged), and
-finalises a clean apply as a single-parent linear replay. This module owns only
-the platform-specific lifecycle around that engine: which baked floor to record,
-the gitignore migration that takes the recovery files out of git entirely, the
-restart/conflict flags, and the resolver chat.
+``/data/platform`` is a real ``git clone`` of the canonical repo; uvicorn serves
+its backend directly (``cd /data/platform/backend && uvicorn app.main:app``).
+Local ``main`` carries the agent's edits; the ``upstream`` branch records the
+commit the clone was last reconciled to (set to HEAD at clone time). A deploy
+ships a new image AND advances canonical ``origin/main``; this module makes that
+deploy actually REACH a running instance by fetching origin and replaying the
+local edits onto the new upstream — on boot (before uvicorn imports the code, so
+the update goes live automatically) and on owner-triggered Apply (which then
+needs a restart to load).
 
-Two facts shape every operation here:
+The reconcile is built to be non-destructive above all else:
 
-1. ``/data/platform`` holds the SERVED backend, so a half-applied merge must be
-   impossible. The engine's ``merge_upstream`` computes the verdict off the live
-   worktree; only a proven-clean merge writes files, and ``write_merged_tree_to_
-   worktree`` writes them one-by-one via ``os.replace`` so a crash leaves whole
-   files, never truncated ones.
+1. ``/data/platform`` holds the SERVED backend, so a reconcile must never leave a
+   half-applied tree. A rebase conflict is aborted back to the pre-reconcile
+   commit (the old, working code keeps serving) and surfaced as a conflict; a
+   crash mid-rebase is detected on the next boot (``.git/rebase-merge``) and
+   aborted before anything else runs.
 
-2. The recovery island + core files (``protected-files.txt``: ``main.py``,
-   ``auth.py``, the ``recover_*`` modules, ``entrypoint.sh`` …) are root-owned
-   ``chmod 444`` in the live tree. The ``mobius`` user that runs this engine
-   CANNOT and MUST NOT overwrite them. Rather than special-case them in the merge
-   path, they leave the git model entirely: ``/data/platform/.gitignore`` lists
-   them, a one-time migration untracks them, and ``record_baked_upstream`` never
-   records them on ``upstream``. So they simply never appear in any merged tree —
-   they update only via the image (deploy / root entrypoint), never in-product,
-   and the merge code is the same gitignore-respecting engine an app uses.
+2. Local edits are NEVER lost. Uncommitted working-tree edits are committed onto
+   ``main`` before any fast-forward/rebase, so a fast-forward ``reset --hard`` or
+   a rebase can only ever replay them, never discard them. A conflict or an
+   import-broken result rolls the served tree back to exactly those local edits.
 
-A conflict (local edits and the new baked floor changed the same lines — only
-possible in gitignored-out recovery files never conflict) does not get
-materialised programmatically. The engine records the new ``upstream`` and the
-async wrapper spawns an agent resolver chat to merge it, mirroring how a per-app
-conflict is handed to the agent. Nothing restarts on its own: a clean apply
-marks "restart needed" and the owner confirms.
+3. A text-clean rebase can still produce a tree that fails to import (e.g.
+   upstream deleted a module a local edit still imports). A post-rebase import
+   probe catches that and rolls back to the previous served commit rather than
+   serving a broken tree.
 
 Availability is an EXACT ancestry check, not a sha-string compare: an update is
-available iff ``upstream`` is NOT already an ancestor of the working branch (the
-same ``git merge-base --is-ancestor`` model ``app_git`` uses). A baked sha that
-merely differs from the recorded one no longer falsely reads "available".
+available iff ``origin/main`` is NOT already an ancestor of local ``main`` — the
+same ``git merge-base --is-ancestor`` model ``app_git`` uses for an app. This
+module reuses ``app_git``'s isolated git env and ``commit_local`` engine; it does
+NOT carry forward the old baked-floor machinery (recording a baked tree onto
+``upstream``), which fought the clone model — a real ``git fetch origin`` plus a
+rebase against real ancestry replaces it entirely.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import fcntl
 import os
-import shutil
 import subprocess
-import tempfile
-from dataclasses import dataclass
+import sys
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Literal, TypedDict
@@ -59,34 +56,45 @@ from app import app_git
 
 
 PLATFORM_REPO = Path("/data/platform")
-PLATFORM_APP = PLATFORM_REPO / "app"
-PLATFORM_SCRIPTS = PLATFORM_REPO / "scripts"
-BAKED_APP = Path("/app/app-baked")
-BAKED_SCRIPTS = Path("/app/scripts-baked")
-# The recovery / core files (root-owned chmod 444 in the live tree). These are
-# gitignored out of the platform repo, so the merge engine never has to special-
-# case them; the image owns them.
-PROTECTED_LIST = Path("/app/protected-files.txt")
+# The served backend — the import probe's cwd, so ``import app.main`` resolves
+# from the clone exactly as the uvicorn exec does.
+PLATFORM_BACKEND = PLATFORM_REPO / "backend"
+
+# Runtime marker files. Each is a transient signal, never user data (they are
+# gitignored out of the outer ``/data`` repo in entrypoint.sh).
 UPGRADE_FLAG = Path("/data/.platform-upgrade-available")
 RESTART_NEEDED_FLAG = Path("/data/.platform-restart-needed")
-# Persist a conflict so Settings keeps showing it across reloads (the merge is
-# NOT materialised on disk, so MERGE_HEAD alone can't signal it). Records the
-# conflicting upstream sha + paths.
+# Persist a conflict so Settings keeps showing it across reloads (the rebase is
+# aborted, so no git state alone can signal it). Records the target sha + paths.
 CONFLICT_FLAG = Path("/data/.platform-conflict")
-# Set just before the clean write-back, cleared after the merge commit. If a
-# later apply finds it, a previous apply crashed mid-write — reset to the last
-# good `main` first. (A crash that leaves /data/platform non-bootable is also
-# caught by the entrypoint crash-loop -> restore-from-baked backstop.)
-APPLYING_FLAG = Path("/data/.platform-apply-in-progress")
+# A text-clean rebase whose result failed the import probe was rolled back to the
+# previous served commit. Records the target sha + the import error so Settings
+# can show "rolled back — needs repair" rather than silently staying "up to
+# date".
+ROLLED_BACK_FLAG = Path("/data/.platform-rolled-back")
+# A filesystem lock shared by the boot reconcile subprocess and the running
+# uvicorn's Apply path. It MUST be a real flock (not an asyncio.Lock): the boot
+# reconcile runs in a throwaway ``python3 -c`` process, so an in-process lock
+# could not serialise it against uvicorn.
+RECONCILE_LOCK = Path("/data/.platform-reconcile.lock")
+
 UPSTREAM_BRANCH = "upstream"
 LOCAL_BRANCH = "main"
+# The canonical release ref a reconcile targets. A configured release channel
+# could override this later; for now it is the remote-tracking ``origin/main``.
+DEFAULT_TARGET_REF = "origin/main"
 
-# The platform tree is larger than an app, but still small; a git op slower
-# than this is wedged, not busy.
+# The platform tree is larger than an app but still small; a git op slower than
+# this is wedged, not busy. Fetch gets its own (network-bound) budget.
 _GIT_TIMEOUT = 120
+_FETCH_TIMEOUT = 120
+# The post-rebase import probe. A module-level infinite loop or a blocking call
+# in agent-edited code would otherwise wedge boot forever; a timeout-kill counts
+# as probe-fail -> roll back.
+_PROBE_TIMEOUT = 60
 
-# Serialise applies in-process (uvicorn is single-worker; this is belt-and-braces
-# against a double-click racing two merges on the same repo).
+# Serialise Apply in-process (uvicorn is single-worker; belt-and-braces against a
+# double-click racing two reconciles). The cross-process guard is RECONCILE_LOCK.
 _APPLY_LOCK = asyncio.Lock()
 
 
@@ -101,6 +109,9 @@ class PlatformUpdateState(str, Enum):
   AVAILABLE = "available"
   CONFLICT = "conflict"
   RESTART_NEEDED = "restart_needed"
+  # A text-clean rebase failed the import probe and was rolled back to the
+  # previous served commit; the update needs a repair pass before it can land.
+  ROLLED_BACK = "rolled_back"
 
 
 class PlatformStatus(TypedDict):
@@ -114,9 +125,8 @@ class PlatformStatus(TypedDict):
   seed_required: bool
   conflict_paths: list[str]
   # The resolver chat opened for an in-progress conflict, so Settings can link
-  # the owner straight to it (a conflict row that names a chat but can't reach
-  # it is a dead end). None unless ``state == "conflict"`` AND the id was
-  # recorded; a conflict flag written before this field existed reads back None.
+  # the owner straight to it. None unless ``state == "conflict"`` AND the id was
+  # recorded.
   conflict_chat_id: str | None
 
 
@@ -138,64 +148,62 @@ class PlatformRestartResponse(TypedDict):
 
 
 @dataclass(frozen=True)
-class BakedFloor:
-  """The baked platform tree available in the current image."""
+class ReconcileResult:
+  """Outcome of a single :func:`reconcile_clone` pass.
 
-  build_sha: str
-  app_dir: Path = BAKED_APP
-  scripts_dir: Path = BAKED_SCRIPTS
-
-
-def _write_conflict_flag(
-  upstream: str | None, paths: list[str], chat_id: str | None = None
-) -> None:
-  """Persist a conflict so Settings keeps surfacing it across reloads.
-
-  Line 0 is the conflicting upstream sha; an optional ``chat:<id>`` line records
-  the resolver chat; the remaining lines are the conflicting paths. The
-  ``chat:`` prefix keeps the format backward compatible — a flag written before
-  the chat id was recorded simply lacks that line and reads back as no chat id.
+  ``status`` is one of ``up_to_date`` (origin already integrated), ``updated``
+  (fast-forward or rebase applied and the import probe passed), ``conflict``
+  (rebase conflicted, aborted, serving the pre sha), ``rolled_back`` (text-clean
+  rebase failed the import probe, reset to the pre sha), ``offline`` (fetch
+  failed — kept serving unchanged), ``skipped`` (not a reconcilable clone), or
+  ``error`` (an unexpected git failure was caught and the served tree reset to
+  the pre sha).
+  ``pre_sha`` is the served commit before the pass; ``new_sha`` the served commit
+  after (== ``pre_sha`` unless ``updated``); ``target_sha`` the resolved
+  ``origin/main``.
   """
-  body = [upstream or ""]
-  if chat_id:
-    body.append(f"chat:{chat_id}")
-  body.extend(paths)
-  CONFLICT_FLAG.write_text("\n".join(body))
+
+  status: str
+  pre_sha: str | None
+  new_sha: str | None
+  target_sha: str | None
+  conflict_paths: list[str] = field(default_factory=list)
+  error: str | None = None
 
 
-def _read_conflict_flag() -> dict | None:
-  """Parse :data:`CONFLICT_FLAG` into ``{upstream, chat_id, paths}`` or None."""
-  if not CONFLICT_FLAG.exists():
-    return None
-  lines = CONFLICT_FLAG.read_text().splitlines()
-  upstream = lines[0].strip() if lines else ""
-  chat_id: str | None = None
-  paths: list[str] = []
-  for line in lines[1:]:
-    stripped = line.strip()
-    if not stripped:
-      continue
-    if stripped.startswith("chat:"):
-      chat_id = stripped[len("chat:"):] or None
-    else:
-      paths.append(stripped)
-  return {"upstream": upstream or None, "chat_id": chat_id, "paths": paths}
+def _scrubbed_git_env(repo: Path) -> dict:
+  """The isolated git env every op here runs under.
+
+  Reuses ``app_git._git_env`` so inherited ``GIT_DIR`` / ``GIT_WORK_TREE`` /
+  ``GIT_INDEX_FILE`` pointers are SCRUBBED (an inherited ``GIT_DIR`` would
+  silently retarget every op at the wrong repo) and ``GIT_CEILING_DIRECTORIES``
+  is pinned to the repo's parent so git can never walk up into the enclosing
+  ``/data`` repo. Identical isolation to the ``app_git`` engine's own ``_run``.
+  """
+  return app_git._git_env(repo)
 
 
-def _git(*args: str, repo: Path = PLATFORM_REPO, check: bool = True):
-  """Run a git command in the platform repo, text mode, with the search ceiling
-  pinned to the repo's parent so it can never walk up into the enclosing
-  ``/data`` repo and operate on the wrong tree."""
-  # Use app_git._git_env so inherited GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE
-  # pointers are SCRUBBED, not just the ceiling pinned: an inherited GIT_DIR
-  # would otherwise silently retarget every platform op (availability check,
-  # untrack, seed, update-ref) at the wrong repo. Same isolation the engine's
-  # own _run uses; without it this prep path was the one unprotected gap.
-  env = app_git._git_env(repo)
+def _git(
+  *args: str,
+  repo: Path = PLATFORM_REPO,
+  check: bool = True,
+  timeout: int = _GIT_TIMEOUT,
+) -> subprocess.CompletedProcess:
+  """Run ``git -C repo <args>`` in text mode under the scrubbed, ceiling-pinned
+  env. ``check=False`` lets callers read a non-zero return (a merge-base miss, a
+  rebase conflict) instead of raising."""
   return subprocess.run(
     ["git", "-C", str(repo), *args],
-    capture_output=True, text=True, timeout=_GIT_TIMEOUT, check=check, env=env,
+    capture_output=True, text=True, timeout=timeout, check=check,
+    env=_scrubbed_git_env(repo),
   )
+
+
+def _rev(repo: Path, ref: str) -> str:
+  """The commit sha ``ref`` resolves to, or ``""`` if it does not resolve."""
+  proc = _git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}",
+              repo=repo, check=False)
+  return proc.stdout.strip()
 
 
 def _has_branch(name: str, repo: Path = PLATFORM_REPO) -> bool:
@@ -206,19 +214,229 @@ def _has_branch(name: str, repo: Path = PLATFORM_REPO) -> bool:
 
 
 def _local_branch(repo: Path = PLATFORM_REPO) -> str:
-  """The repo's actual working branch. ``git init`` defaults to ``master`` on
-  some git versions and ``main`` on others, and ``entrypoint.sh`` inits
-  ``/data/platform`` WITHOUT ``-b`` — so detect the branch rather than assume
-  one (the live prod repo is on ``master``)."""
+  """The repo's actual working branch. A clone of ``origin/main`` checks out
+  ``main``, but detect it rather than assume so a differently-defaulted clone
+  (some git versions, a ``master`` default) still reconciles. A detached HEAD
+  falls back to ``main``."""
   name = _git(
     "rev-parse", "--abbrev-ref", "HEAD", repo=repo, check=False,
   ).stdout.strip()
   return name if name and name != "HEAD" else LOCAL_BRANCH
 
 
+def _has_origin(repo: Path = PLATFORM_REPO) -> bool:
+  return _git("remote", "get-url", "origin", repo=repo, check=False).returncode == 0
+
+
+def _is_shallow(repo: Path = PLATFORM_REPO) -> bool:
+  return _git(
+    "rev-parse", "--is-shallow-repository", repo=repo, check=False,
+  ).stdout.strip() == "true"
+
+
+def _is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
+  """Whether ``ancestor`` is an ancestor of (or equal to) ``descendant``."""
+  return _git(
+    "merge-base", "--is-ancestor", ancestor, descendant, repo=repo, check=False,
+  ).returncode == 0
+
+
 def _unmerged_paths(repo: Path = PLATFORM_REPO) -> list[str]:
   out = _git("diff", "--name-only", "--diff-filter=U", repo=repo, check=False)
   return [p.strip() for p in out.stdout.splitlines() if p.strip()]
+
+
+def _rebase_in_progress(repo: Path = PLATFORM_REPO) -> bool:
+  git_dir = repo / ".git"
+  return (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
+
+
+def _abort_interrupted(repo: Path = PLATFORM_REPO) -> None:
+  """Crash-safety: abort a rebase/merge left half-finished by a prior crash so
+  the reconcile starts from a clean, committed ``main`` (the pre-crash tip). A
+  mid-rebase SIGKILL leaves ``.git/rebase-merge``; a stray merge leaves
+  ``MERGE_HEAD``. Aborting each restores the branch to its state before the op."""
+  if _rebase_in_progress(repo):
+    _git("rebase", "--abort", repo=repo, check=False)
+  if (repo / ".git" / "MERGE_HEAD").exists():
+    _git("merge", "--abort", repo=repo, check=False)
+
+
+def _fetch(repo: Path = PLATFORM_REPO) -> bool:
+  """``git fetch --no-tags origin`` with a bounded timeout. Returns True on
+  success, False when the fetch fails (offline / unreachable origin) — a
+  non-fatal condition: the caller keeps serving the current clone and retries on
+  the next boot. A hung fetch (timeout) is treated as failure, not a wedge."""
+  try:
+    proc = _git("fetch", "--no-tags", "origin", repo=repo, check=False,
+                timeout=_FETCH_TIMEOUT)
+    return proc.returncode == 0
+  except (subprocess.TimeoutExpired, OSError):
+    return False
+
+
+def _fetch_unshallow(repo: Path = PLATFORM_REPO) -> None:
+  """Deepen a shallow clone so a rebase can find a real merge base. Best-effort:
+  an offline/timeout failure leaves the clone shallow and the caller's rebase
+  either still succeeds (the base was inside the shallow window) or reports a
+  conflict, which fails closed to serve-old — never a hard reset."""
+  try:
+    _git("fetch", "--unshallow", "--no-tags", "origin", repo=repo, check=False,
+         timeout=_FETCH_TIMEOUT)
+  except (subprocess.TimeoutExpired, OSError):
+    pass
+
+
+def _rebase_onto(repo: Path, target: str, local: str) -> int:
+  """Rebase the local commits (``main`` beyond the shared base) onto ``target``.
+
+  ``git rebase target local`` replays the commits in ``local`` that are not in
+  ``target`` on top of ``target`` — i.e. the agent's local edits onto the new
+  upstream. The Mobius identity is injected per-invocation (``-c user.*``) so a
+  replay commit never depends on repo/global git config being set — the rebase
+  writes new commits and would otherwise fail "committer identity unknown" on a
+  clone with no configured user. The editor is disabled so a replay never blocks
+  on an interactive editor, and the whole op is bounded by a timeout. Returns the
+  git return code (0 clean, non-zero on conflict/error)."""
+  env = {
+    **_scrubbed_git_env(repo),
+    "GIT_EDITOR": "true",
+    "GIT_SEQUENCE_EDITOR": "true",
+  }
+  try:
+    proc = subprocess.run(
+      [
+        "git",
+        "-c", f"user.name={app_git._GIT_NAME}",
+        "-c", f"user.email={app_git._GIT_EMAIL}",
+        "-C", str(repo), "rebase", target, local,
+      ],
+      capture_output=True, text=True, timeout=_GIT_TIMEOUT, check=False, env=env,
+    )
+    return proc.returncode
+  except subprocess.TimeoutExpired:
+    # A wedged rebase must not leave a half-rebased tree: abort so the caller's
+    # serve-old path is honoured.
+    _git("rebase", "--abort", repo=repo, check=False)
+    return 1
+
+
+def _reset_hard_to(repo: Path, local: str, sha: str) -> None:
+  """Return the working branch to ``sha`` (the pre-reconcile served commit),
+  updating the working tree. Used to serve OLD after a conflict/rollback."""
+  _git("checkout", "-q", local, repo=repo, check=False)
+  _git("reset", "--hard", sha, repo=repo, check=False)
+
+
+def _set_upstream(repo: Path, target: str) -> None:
+  """Point the ``upstream`` marker branch at ``target`` (the last reconciled
+  origin commit). ``branch -f`` creates it if absent (it never is on a real
+  clone). ``upstream`` is never checked out, so force-moving it is safe."""
+  _git("branch", "-f", UPSTREAM_BRANCH, target, repo=repo, check=False)
+
+
+def _import_probe(repo: Path = PLATFORM_REPO, timeout: int = _PROBE_TIMEOUT):
+  """Run ``import app.main`` as a fresh subprocess with cwd the served backend.
+
+  Single-source probe for both boot and post-rebase: it MUST be a subprocess (not
+  an in-process import) so the reconcile process — which already imported the OLD
+  ``app.platform_update`` — validates the NEW on-disk tree without corrupting its
+  own interpreter, and so cwd/env exactly mirror the uvicorn exec. The env scrubs
+  ``PYTHONPATH`` (no stray path may shadow ``app``) and the ``GIT_*`` pointers,
+  and keeps ``SECRET_KEY`` / ``DATABASE_URL`` / ``DATA_DIR`` so settings resolve
+  as the served process does. Returns ``(ok, error)``.
+  """
+  backend = repo / "backend"
+  env = dict(os.environ)
+  for var in (
+    "PYTHONPATH", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+  ):
+    env.pop(var, None)
+  try:
+    proc = subprocess.run(
+      [sys.executable or "python3", "-c", "import app.main"],
+      cwd=str(backend), capture_output=True, text=True, timeout=timeout, env=env,
+    )
+  except subprocess.TimeoutExpired:
+    return False, f"import probe timed out after {timeout}s"
+  except OSError as exc:
+    return False, f"import probe could not run: {exc!r}"
+  if proc.returncode == 0:
+    return True, ""
+  # Keep the tail of stderr (the traceback's final lines carry the real cause).
+  return False, (proc.stderr or proc.stdout or "").strip()[-2000:]
+
+
+@contextlib.contextmanager
+def _reconcile_flock():
+  """Hold the cross-process reconcile lock (see :data:`RECONCILE_LOCK`). Released
+  on context exit AND on process death (the fd closes), so a killed boot
+  reconcile never leaves the lock held."""
+  RECONCILE_LOCK.parent.mkdir(parents=True, exist_ok=True)
+  fd = os.open(str(RECONCILE_LOCK), os.O_CREAT | os.O_RDWR, 0o644)
+  try:
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    yield
+  finally:
+    try:
+      fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+      os.close(fd)
+
+
+def _write_conflict_flag(
+  target: str | None, paths: list[str], chat_id: str | None = None
+) -> None:
+  """Persist a conflict so Settings keeps surfacing it across reloads.
+
+  Line 0 is the target (``origin/main``) sha; an optional ``chat:<id>`` line
+  records the resolver chat; the remaining lines are the conflicting paths. The
+  ``chat:`` prefix keeps the format backward compatible — a flag written before
+  the chat id is recorded simply lacks that line and reads back as no chat id.
+  """
+  body = [target or ""]
+  if chat_id:
+    body.append(f"chat:{chat_id}")
+  body.extend(paths)
+  CONFLICT_FLAG.write_text("\n".join(body))
+
+
+def _read_conflict_flag() -> dict | None:
+  """Parse :data:`CONFLICT_FLAG` into ``{upstream, chat_id, paths}`` or None.
+
+  ``upstream`` is the target sha (named for backward compatibility with the
+  status field, not the ``upstream`` branch)."""
+  if not CONFLICT_FLAG.exists():
+    return None
+  lines = CONFLICT_FLAG.read_text().splitlines()
+  target = lines[0].strip() if lines else ""
+  chat_id: str | None = None
+  paths: list[str] = []
+  for line in lines[1:]:
+    stripped = line.strip()
+    if not stripped:
+      continue
+    if stripped.startswith("chat:"):
+      chat_id = stripped[len("chat:"):] or None
+    else:
+      paths.append(stripped)
+  return {"upstream": target or None, "chat_id": chat_id, "paths": paths}
+
+
+def _write_rolled_back_flag(target: str | None, error: str | None) -> None:
+  """Persist a rollback so Settings can show "needs repair". Line 0 is the target
+  sha; the rest is the import error (truncated) for the log/UI."""
+  body = (target or "") + "\n" + (error or "")
+  ROLLED_BACK_FLAG.write_text(body)
+
+
+def _read_rolled_back_flag() -> dict | None:
+  if not ROLLED_BACK_FLAG.exists():
+    return None
+  text = ROLLED_BACK_FLAG.read_text()
+  target, _, error = text.partition("\n")
+  return {"target": target.strip() or None, "error": error.strip() or None}
 
 
 def current_build_sha() -> str | None:
@@ -241,80 +459,189 @@ def current_build_sha() -> str | None:
   return None
 
 
-def _seed_baked_tag(repo: Path = PLATFORM_REPO) -> str | None:
-  """The newest ``baked-<sha>`` tag that is an ANCESTOR of the local branch —
-  the baked tree the live platform descends from, i.e. the correct 3-way merge
-  base. On a once-upgraded instance ``.baked-sha`` already points at the new
-  image, so the ancestor tag (not that file) is the reliable seed."""
+def recorded_upstream_sha(repo: Path = PLATFORM_REPO) -> str | None:
+  """The commit the clone was last reconciled to — the ``upstream`` branch tip.
+  Set to HEAD at clone time and advanced to ``origin/main`` on each successful
+  reconcile."""
+  return _rev(repo, UPSTREAM_BRANCH) or None
+
+
+def mark_restart_needed(target_sha: str) -> None:
+  """Record that a restart is needed to load an owner-applied update, stamping
+  the reconciled commit the running uvicorn does NOT yet import."""
+  tmp = RESTART_NEEDED_FLAG.with_name(
+    RESTART_NEEDED_FLAG.name + f".tmp-{os.getpid()}")
+  tmp.write_text(target_sha or "")
+  os.replace(tmp, RESTART_NEEDED_FLAG)
+
+
+def reconcile_clone(
+  repo: Path = PLATFORM_REPO,
+  *,
+  target_ref: str = DEFAULT_TARGET_REF,
+  at_boot: bool = False,
+) -> ReconcileResult:
+  """Fetch origin and reconcile the served clone onto ``target_ref``, safely.
+
+  The one entry point for both boot and owner Apply. At boot (``at_boot=True``)
+  the reconciled code IS what uvicorn imports moments later, so a success needs
+  no restart and the restart flag is cleared; an owner Apply runs inside the live
+  uvicorn, so the caller marks a restart. Never raises for an operational failure
+  (offline, conflict, import-broken) — it returns a :class:`ReconcileResult`
+  describing the outcome and always leaves ``/data/platform`` in a clean, served
+  state (either the update, or the pre-reconcile code).
+  """
+  if not (repo / ".git").exists():
+    return ReconcileResult("skipped", None, None, None, error="no_git")
+
   local = _local_branch(repo)
-  out = _git("tag", "--list", "baked-*", repo=repo, check=False)
-  best: tuple[int, str] | None = None
-  for tag in (t.strip() for t in out.stdout.splitlines() if t.strip()):
-    anc = _git(
-      "merge-base", "--is-ancestor", tag, local, repo=repo, check=False,
+  # Crash-safety FIRST: a mid-rebase crash must be aborted before anything reads
+  # the tree, so we reconcile from the committed pre-crash tip.
+  _abort_interrupted(repo)
+  pre = _rev(repo, local)
+
+  # A boot IS the restart the RESTART_NEEDED flag asks for — the fresh uvicorn
+  # imports whatever is on disk moments from now — so clear it unconditionally at
+  # boot, not only on the success branches, else an owner Apply followed by an
+  # offline reboot (fetch fails, early return) sticks a permanent restart prompt.
+  if at_boot:
+    RESTART_NEEDED_FLAG.unlink(missing_ok=True)
+
+  if not _has_origin(repo):
+    return ReconcileResult("skipped", pre, pre, None, error="no_origin")
+
+  if not _fetch(repo):
+    # Offline is non-fatal: keep serving the current clone, retry next boot.
+    return ReconcileResult("offline", pre, pre, None, error="fetch_failed")
+
+  target = _rev(repo, target_ref)
+  if not target:
+    return ReconcileResult("offline", pre, pre, None, error="no_target_ref")
+
+  # Already integrated: local main contains origin/main. Nothing to apply. Sync
+  # the upstream marker and clear any stale conflict/rollback flag (this target
+  # is fully in main, so a prior conflict/rollback for it is moot). The working
+  # tree is untouched — any uncommitted local edits stay on disk.
+  if _is_ancestor(repo, target, local):
+    _set_upstream(repo, target)
+    CONFLICT_FLAG.unlink(missing_ok=True)
+    ROLLED_BACK_FLAG.unlink(missing_ok=True)
+    if at_boot:
+      RESTART_NEEDED_FLAG.unlink(missing_ok=True)
+    return ReconcileResult("up_to_date", pre, pre, target, error=None)
+
+  # A deploy advanced origin beyond committed main. Commit any uncommitted edits
+  # FIRST so neither the fast-forward reset nor the rebase can discard them.
+  app_git.commit_local(repo, "platform: local edits before reconcile")
+  pre = _rev(repo, local)  # now includes the just-committed edits
+
+  # From here on the working tree is mutated. The served tree MUST end at either
+  # the update or exactly PRE — never a half-applied state — so any UNEXPECTED
+  # git failure fails closed: abort anything in progress and hard-reset to PRE.
+  # (The conflict/rollback branches below return normally; only a real error
+  # reaches the except.)
+  try:
+    # A shallow clone lacks the merge base a reliable ancestry check AND a rebase
+    # both need — deepen FIRST so the fast-forward-vs-rebase decision is correct.
+    if _is_shallow(repo):
+      _fetch_unshallow(repo)
+    _git("checkout", "-q", local, repo=repo, check=False)
+    if pre and _is_ancestor(repo, pre, target):
+      # main is fully contained in target (every commit on main is in target), so
+      # a fast-forward is PROVABLY loss-free. This is decided by ANCESTRY, never by
+      # an `upstream` marker that could drift and let `reset --hard` silently
+      # discard committed local edits.
+      _git("reset", "--hard", target, repo=repo)
+    else:
+      # main has commits not in target (diverged): REBASE local edits onto the new
+      # upstream so BOTH survive.
+      rc = _rebase_onto(repo, target, local)
+      if rc != 0:
+        # Conflict: NEVER leave a half-rebased tree. Abort back to PRE (the old,
+        # working code keeps serving), record the conflict, clear any stale
+        # rollback flag, and let the caller open a resolver chat.
+        paths = _unmerged_paths(repo)
+        _git("rebase", "--abort", repo=repo, check=False)
+        _reset_hard_to(repo, local, pre)  # belt-and-braces: ensure main == PRE
+        _write_conflict_flag(target, paths)
+        ROLLED_BACK_FLAG.unlink(missing_ok=True)
+        return ReconcileResult("conflict", pre, pre, target, conflict_paths=paths)
+
+    # Post-reconcile import probe: a text-clean ff/rebase can still produce a
+    # tree that fails to import (upstream dropped a module a local edit imports;
+    # a bad deploy). Roll back to the previous served commit rather than serve it
+    # broken.
+    ok, err = _import_probe(repo)
+    if not ok:
+      _reset_hard_to(repo, local, pre)
+      _write_rolled_back_flag(target, err)
+      CONFLICT_FLAG.unlink(missing_ok=True)
+      return ReconcileResult("rolled_back", pre, pre, target, error=err)
+  except Exception as exc:  # unexpected git failure — never serve a half-tree
+    _abort_interrupted(repo)
+    _reset_hard_to(repo, local, pre)
+    return ReconcileResult("error", pre, pre, target, error=repr(exc))
+
+  # Success: main now carries the update plus any replayed local edits. Advance
+  # the upstream marker and clear conflict/rollback flags. At boot the fresh
+  # uvicorn imports this directly (clear the restart flag — the boot IS the
+  # restart the flag would ask for); an owner Apply marks a restart via the
+  # caller.
+  new_sha = _rev(repo, local)
+  _set_upstream(repo, target)
+  CONFLICT_FLAG.unlink(missing_ok=True)
+  ROLLED_BACK_FLAG.unlink(missing_ok=True)
+  if at_boot:
+    RESTART_NEEDED_FLAG.unlink(missing_ok=True)
+  return ReconcileResult("updated", pre, new_sha, target, error=None)
+
+
+def _reconcile_under_lock(repo: Path, at_boot: bool) -> ReconcileResult:
+  """Hold :data:`RECONCILE_LOCK` around one reconcile so the boot subprocess and
+  the running uvicorn's Apply can never run two reconciles on the same repo."""
+  with _reconcile_flock():
+    return reconcile_clone(repo, at_boot=at_boot)
+
+
+def _short(sha: str | None) -> str:
+  return sha[:8] if sha else "-"
+
+
+def reconcile_clone_sync() -> str:
+  """Boot entry point (called from a throwaway ``python3 -c`` as mobius, cwd the
+  served backend). Runs one locked reconcile and returns a one-line summary for
+  the entrypoint log. Never raises — a reconcile failure must not brick boot; the
+  worst case leaves the pre-reconcile code serving and a flag set."""
+  try:
+    res = _reconcile_under_lock(PLATFORM_REPO, at_boot=True)
+    summary = (
+      f"reconcile[{res.status}] pre={_short(res.pre_sha)} "
+      f"new={_short(res.new_sha)} target={_short(res.target_sha)}"
     )
-    if anc.returncode != 0:
-      continue
-    ts = _git("log", "-1", "--format=%ct", tag, repo=repo, check=False).stdout.strip()
-    key = int(ts) if ts.isdigit() else 0
-    if best is None or key > best[0]:
-      best = (key, tag)
-  return best[1] if best else None
-
-
-def _seed_point(repo: Path = PLATFORM_REPO) -> str | None:
-  """The commit to seed ``upstream`` at: the ancestor baked tag if one exists,
-  else the repo's ROOT commit — which is the ``init: platform layer from baked
-  image floor`` commit, i.e. the original baked tree, so it is a sound merge
-  base even when no ``baked-<sha>`` tag was ever written (e.g. BUILD_SHA was
-  unknown at init)."""
-  tag = _seed_baked_tag(repo)
-  if tag:
-    return tag
-  local = _local_branch(repo)
-  roots = _git(
-    "rev-list", "--max-parents=0", local, repo=repo, check=False,
-  ).stdout.split()
-  return roots[-1] if roots else None
-
-
-def recorded_upstream_build_sha(repo: Path = PLATFORM_REPO) -> str | None:
-  """The build SHA the platform code currently descends from. Prefer the
-  ``baked-<sha>`` tag at the ``upstream`` tip; fall back to the ancestor seed
-  tag, then ``/data/platform/.baked-sha``."""
-  if _has_branch(UPSTREAM_BRANCH, repo):
-    out = _git(
-      "tag", "--points-at", UPSTREAM_BRANCH, "--list", "baked-*",
-      repo=repo, check=False,
-    )
-    tags = [t.strip()[len("baked-"):] for t in out.stdout.splitlines() if t.strip()]
-    if tags:
-      return tags[-1]
-  tag = _seed_baked_tag(repo)
-  if tag:
-    return tag[len("baked-"):]
-  f = repo / ".baked-sha"
-  if f.exists():
-    return (f.read_text().strip() or None)
-  return None
+    if res.conflict_paths:
+      summary += f" conflicts={len(res.conflict_paths)}"
+    if res.error:
+      summary += f" err={res.error}"
+    return summary
+  except Exception as exc:  # never propagate to the boot shell
+    return f"reconcile[error] {exc!r}"
 
 
 def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
-  """Compute update availability on demand (no daemon, no polling).
+  """Compute update availability on demand (no daemon, no polling, no fetch).
 
-  Availability is an EXACT ancestry check: when ``upstream`` exists, an update
-  is available iff ``upstream`` is NOT an ancestor of the working branch (the
-  baked floor carries commits the working branch has not replayed). When no
-  ``upstream`` branch exists yet, this instance predates the feature and a baked
-  floor newer than what the code descends from is available pending a one-time
-  seed. The old ``image_sha != upstream_sha`` string compare is gone — a baked
-  sha that merely differs no longer falsely reads "available" (the phantom).
+  Availability is an EXACT ancestry check: an update is available iff
+  ``origin/main`` (the remote-tracking ref from the last boot/apply fetch, read
+  cheaply with ``git rev-parse``) is NOT an ancestor of local ``main``. Conflict
+  and rolled-back states come from their persisted flags and take precedence over
+  a bare "available".
   """
   image_sha = current_build_sha()
-  upstream_sha = recorded_upstream_build_sha(repo)
-  conflict = CONFLICT_FLAG.exists() or (repo / ".git" / "MERGE_HEAD").exists()
+  upstream_sha = recorded_upstream_sha(repo)
+  conflict = CONFLICT_FLAG.exists() or _rebase_in_progress(repo)
+  rolled_back = ROLLED_BACK_FLAG.exists()
   restart_needed = RESTART_NEEDED_FLAG.exists()
-  has_upstream = _has_branch(UPSTREAM_BRANCH, repo)
+  local = _local_branch(repo)
 
   if conflict:
     flag = _read_conflict_flag() or {}
@@ -326,21 +653,14 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
       conflict_paths=paths, conflict_chat_id=flag.get("chat_id"),
     )
 
-  if has_upstream:
-    # Available iff `upstream` is NOT already an ancestor of the working branch.
-    anc = _git(
-      "merge-base", "--is-ancestor", UPSTREAM_BRANCH, _local_branch(repo),
-      repo=repo, check=False,
-    )
-    available = anc.returncode != 0
-    seed_required = False
-  else:
-    # No upstream branch yet (pre-feature instance). A baked floor newer than
-    # what the code descends from is available, gated on the one-time seed.
-    available = bool(image_sha and upstream_sha and image_sha != upstream_sha)
-    seed_required = available
+  target = _rev(repo, DEFAULT_TARGET_REF)
+  available = bool(target) and not _is_ancestor(repo, target, local)
 
-  if restart_needed:
+  if rolled_back:
+    # An update is available but its last apply failed the import probe.
+    state = PlatformUpdateState.ROLLED_BACK
+    available = True
+  elif restart_needed:
     state = PlatformUpdateState.RESTART_NEEDED
   elif available:
     state = PlatformUpdateState.AVAILABLE
@@ -350,427 +670,52 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
   return PlatformStatus(
     state=state.value, available=available, needs_restart=restart_needed,
     current_build_sha=image_sha, recorded_upstream_sha=upstream_sha,
-    seed_required=seed_required, conflict_paths=[],
-    conflict_chat_id=None,
+    seed_required=False, conflict_paths=[], conflict_chat_id=None,
   )
-
-
-def seed_upstream_if_missing(repo: Path = PLATFORM_REPO) -> bool:
-  """Create the ``upstream`` branch from the ancestor ``baked-<sha>`` tag on
-  instances that predate this feature (they have only ``main`` + that tag).
-  Returns True if it created the branch. Fails closed when no ancestor baked
-  tag exists — recovery / deploy still restore from the image floor."""
-  if _has_branch(UPSTREAM_BRANCH, repo):
-    return False
-  point = _seed_point(repo)
-  if not point:
-    raise PlatformUpdateError("seed_point_unavailable")
-  _git("branch", UPSTREAM_BRANCH, point, repo=repo)
-  anc = _git(
-    "merge-base", "--is-ancestor", UPSTREAM_BRANCH, _local_branch(repo),
-    repo=repo, check=False,
-  )
-  if anc.returncode != 0:
-    _git("branch", "-D", UPSTREAM_BRANCH, repo=repo, check=False)
-    raise PlatformUpdateError("seed_not_ancestor")
-  return True
-
-
-def _normalize_working_branch(repo: Path = PLATFORM_REPO) -> bool:
-  """Rename the platform working branch to ``main`` if it isn't already.
-
-  ``entrypoint.sh`` inits ``/data/platform`` with a bare ``git init`` (no ``-b``),
-  so the working branch is whatever the container's git defaults to — ``master``
-  on prod. The ``app_git`` engine operates on the literal branch name ``main``
-  (``LOCAL_BRANCH``), so the platform repo's branch must be ``main`` before any
-  engine call. Returns True if it renamed. A detached HEAD (no branch) is left
-  alone — there is nothing to rename, and the engine paths that follow create
-  ``main`` from the seed point instead.
-  """
-  current = _git(
-    "rev-parse", "--abbrev-ref", "HEAD", repo=repo, check=False,
-  ).stdout.strip()
-  if not current or current == "HEAD" or current == app_git.LOCAL_BRANCH:
-    return False
-  _git("branch", "-m", current, app_git.LOCAL_BRANCH, repo=repo)
-  return True
-
-
-def recovery_platform_paths() -> set[str]:
-  """Repo-relative paths gitignored out of the platform repo entirely. From
-  ``protected-files.txt``: ``/app/app/...`` → ``app/...``,
-  ``/app/scripts/...`` → ``scripts/...`` (the ``/data/shell`` entries are not in
-  this repo). These are the root-owned recovery / core files the mobius user
-  CANNOT write; ignoring them keeps them out of every tree the merge engine
-  touches, so the engine never special-cases them — the image owns them."""
-  paths: set[str] = set()
-  if not PROTECTED_LIST.exists():
-    return paths
-  for raw in PROTECTED_LIST.read_text().splitlines():
-    line = raw.strip()
-    if not line or line.startswith("#") or not line.startswith("/app/"):
-      continue
-    rel = line[len("/app/"):]
-    if rel.startswith("app/") or rel.startswith("scripts/"):
-      paths.add(rel)
-  return paths
-
-
-def _ensure_gitignore_has_recovery(repo: Path, paths: set[str]) -> bool:
-  """Ensure ``/data/platform/.gitignore`` lists every recovery path under a
-  managed block. Returns True if the file changed. Each path is anchored with a
-  leading slash so it matches only the repo-root entry, never a same-named file
-  deeper in the tree."""
-  gi = repo / ".gitignore"
-  existing = gi.read_text() if gi.exists() else ""
-  lines = existing.splitlines()
-  want = {f"/{p}" for p in paths}
-  present = {ln.strip() for ln in lines}
-  missing = sorted(want - present)
-  if not missing:
-    return False
-  body = list(lines)
-  if body and body[-1].strip():
-    body.append("")
-  body.append("# Recovery / core files are image-managed (root-owned chmod 444);")
-  body.append("# they leave the platform git model entirely. See protected-files.txt.")
-  body.extend(missing)
-  gi.write_text("\n".join(body) + "\n")
-  return True
-
-
-def _untrack_recovery_files(repo: Path = PLATFORM_REPO) -> bool:
-  """One-time idempotent migration: take the recovery files out of git.
-
-  If any recovery path is still tracked (``git ls-files``), remove it from the
-  INDEX ONLY (``git rm --cached`` — the root-owned file stays on disk), ensure
-  ``.gitignore`` lists every recovery path, and commit both. Idempotent: a no-op
-  once the files are already untracked and ignored. Returns True if it committed.
-
-  ORDERING IS LOAD-BEARING: this must run BEFORE any ``record_baked_upstream`` /
-  ``merge_upstream`` / seed in an apply, or the recovery files would still be in
-  the merged tree and the mobius user would try (and fail) to write them.
-  """
-  paths = recovery_platform_paths()
-  if not paths:
-    return False
-  tracked = {
-    ln.strip()
-    for ln in _git("ls-files", repo=repo).stdout.splitlines()
-    if ln.strip()
-  }
-  to_untrack = sorted(p for p in paths if p in tracked)
-  gitignore_changed = _ensure_gitignore_has_recovery(repo, paths)
-  if not to_untrack and not gitignore_changed:
-    return False
-  if to_untrack:
-    _git("rm", "--cached", "--ignore-unmatch", *to_untrack, repo=repo)
-  _git("add", ".gitignore", repo=repo)
-  _git(
-    "-c", "user.name=Mobius", "-c", "user.email=agent@mobius",
-    "commit", "-q", "-m",
-    "migration: untrack recovery files from platform git", repo=repo,
-  )
-  return True
-
-
-def collect_baked_floor(build_sha: str | None = None) -> BakedFloor:
-  """Describe the baked floor that becomes the next ``upstream`` commit."""
-  sha = build_sha or current_build_sha()
-  if not sha:
-    raise PlatformUpdateError("unknown_build_sha")
-  if not BAKED_APP.is_dir() or not BAKED_SCRIPTS.is_dir():
-    raise PlatformUpdateError("baked_floor_missing")
-  # Pass the dirs explicitly (read at call time) so the resolved paths follow
-  # the current module globals rather than the dataclass field defaults bound
-  # at import — which is what lets tests retarget the baked floor.
-  return BakedFloor(build_sha=sha, app_dir=BAKED_APP, scripts_dir=BAKED_SCRIPTS)
-
-
-def record_baked_upstream(floor: BakedFloor, repo: Path = PLATFORM_REPO) -> str:
-  """Commit the baked ``app`` + ``scripts`` floor onto ``upstream`` as a child
-  of the previous upstream tip, WITHOUT checking the live worktree out to
-  ``upstream``. Returns the new upstream commit SHA and (force-)tags it
-  ``baked-<sha>`` so the next update's merge base is exact.
-
-  Recovery files are EXCLUDED from the recorded tree: the repo's ``.gitignore``
-  (which ``_untrack_recovery_files`` has populated with the recovery paths) is
-  copied into the temp worktree, so ``git add`` honours it and stages neither
-  the recovery files nor pycache. The recorded ``upstream`` tree therefore
-  carries the ``.gitignore`` and NONE of the recovery files — exactly the same
-  gitignore-respecting shape ``app_git.record_upstream`` produces for an app.
-  """
-  old_upstream = _git("rev-parse", UPSTREAM_BRANCH, repo=repo).stdout.strip()
-  tmp = Path(tempfile.mkdtemp(prefix="platform-baked-"))
-  index_path = Path(tempfile.mkstemp(prefix="platform-index-")[1])
-  try:
-    # Skip pycache entirely rather than copy-then-delete: the baked floor's
-    # __pycache__ dirs/.pyc are root-owned read-only, and copytree preserves
-    # their modes, so a later unlink would EPERM. (.gitignore would drop them
-    # from the commit anyway; not copying them also keeps the temp tree clean.)
-    ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
-    shutil.copytree(floor.app_dir, tmp / "app", symlinks=False, ignore=ignore)
-    shutil.copytree(floor.scripts_dir, tmp / "scripts", symlinks=False, ignore=ignore)
-    # Carry the repo's managed .gitignore (recovery paths + pycache) into the
-    # temp worktree so `git add -A` honours it and never stages a recovery file.
-    # `_untrack_recovery_files` has already committed it to `main`; read it from
-    # the work tree (it always exists by the time an apply records the floor).
-    gitignore_bytes = (
-      (repo / ".gitignore").read_bytes() if (repo / ".gitignore").exists()
-      else b""
-    )
-    (tmp / ".gitignore").write_bytes(gitignore_bytes)
-    # Carry the floor stamp over so the recorded upstream tree keeps it and a
-    # later merge doesn't delete `.baked-sha` off `main`. It is a root file the
-    # baked floor copy doesn't include, so copy the on-disk one verbatim.
-    if (repo / ".baked-sha").exists():
-      shutil.copyfile(repo / ".baked-sha", tmp / ".baked-sha")
-    # Base on _git_env (scrubs any inherited GIT_DIR/GIT_OBJECT_DIRECTORY so a
-    # leaked pointer can't make `add -A`/`write-tree` stage into a foreign
-    # object store), then set the intentional staging overrides: a throwaway
-    # index and the temp worktree are exactly where we DO want git pointed.
-    env = {
-      **app_git._git_env(repo),
-      "GIT_INDEX_FILE": str(index_path),
-      "GIT_WORK_TREE": str(tmp),
-    }
-
-    def g(*a: str, check: bool = True):
-      return subprocess.run(
-        ["git", "-C", str(repo), *a], capture_output=True, text=True,
-        timeout=_GIT_TIMEOUT, check=check, env=env,
-      )
-
-    # Build the recorded tree from an EMPTY index, like `app_git.record_upstream`,
-    # so nothing leaks in from a possibly-recovery-laden previous upstream tree —
-    # a file dropped from the new baked floor (or an already-tracked recovery
-    # file on the old upstream) vanishes. `git add -A` then stages only the temp
-    # worktree, and the copied .gitignore filters recovery files + pycache out.
-    g("read-tree", "--empty")
-    g("add", "-A")
-    tree = g("write-tree").stdout.strip()
-    new_upstream = _git(
-      "-c", "user.name=Mobius", "-c", "user.email=agent@mobius",
-      "commit-tree", tree, "-p", old_upstream,
-      "-m", f"upstream: baked platform {floor.build_sha}", repo=repo,
-    ).stdout.strip()
-    _git(
-      "update-ref", f"refs/heads/{UPSTREAM_BRANCH}", new_upstream, old_upstream,
-      repo=repo,
-    )
-    _git("tag", "-f", f"baked-{floor.build_sha}", new_upstream, repo=repo)
-    return new_upstream
-  finally:
-    # The temp copy can contain read-only (copied-mode) files in read-only
-    # dirs; make it writable so cleanup can't leak temp trees into /tmp.
-    subprocess.run(
-      ["chmod", "-R", "u+rwX", str(tmp)], capture_output=True, check=False,
-    )
-    shutil.rmtree(tmp, ignore_errors=True)
-    index_path.unlink(missing_ok=True)
-
-
-def _tree_modes(tree_oid: str, repo: Path = PLATFORM_REPO) -> dict[str, str]:
-  out = _git("ls-tree", "-r", tree_oid, repo=repo).stdout
-  modes: dict[str, str] = {}
-  for line in out.splitlines():
-    if "\t" not in line:
-      continue
-    meta, path = line.split("\t", 1)
-    modes[path] = meta.split()[0]
-  return modes
-
-
-def write_merged_tree_to_worktree(
-  merged_files: dict[str, bytes],
-  *,
-  repo: Path = PLATFORM_REPO,
-  exec_paths: set[str] | None = None,
-) -> list[str]:
-  """Write a CLEAN merge result back to ``/data/platform`` file-by-file (temp +
-  fsync + ``os.replace`` so a crash never leaves a truncated file), then delete
-  tracked files that vanished from the merged tree. Skips ``.git`` and pycache.
-  The recovery files are gitignored out of the repo, so they are never in the
-  merged tree and need no skip here. Returns the paths written."""
-  execs = exec_paths or set()
-  written: list[str] = []
-  for rel, data in merged_files.items():
-    if rel == ".git" or rel.startswith(".git/"):
-      continue
-    if "/__pycache__/" in rel or rel.endswith(".pyc"):
-      continue
-    target = repo / rel
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f".{target.name}.tmp-{os.getpid()}")
-    with open(tmp, "wb") as fh:
-      fh.write(data)
-      fh.flush()
-      os.fsync(fh.fileno())
-    os.chmod(tmp, 0o755 if rel in execs else 0o644)
-    os.replace(tmp, target)
-    written.append(rel)
-  merged_set = set(merged_files)
-  for rel in _git("ls-files", repo=repo).stdout.splitlines():
-    rel = rel.strip()
-    if not rel or rel in merged_set:
-      continue
-    try:
-      (repo / rel).unlink()
-    except OSError:
-      pass
-  return written
-
-
-def mark_restart_needed(build_sha: str) -> None:
-  """Record that a restart is needed to finish the applied update, stamping the
-  build sha the apply targeted. The clear-side reads this sha back to confirm a
-  process actually booted on the applied floor before clearing the flag."""
-  tmp = RESTART_NEEDED_FLAG.with_name(RESTART_NEEDED_FLAG.name + f".tmp-{os.getpid()}")
-  tmp.write_text(build_sha)
-  os.replace(tmp, RESTART_NEEDED_FLAG)
-
-
-def clear_restart_needed_if_reconciled(repo: Path = PLATFORM_REPO) -> None:
-  """Clear the restart flag only once a process actually booted on the applied
-  sha and no merge is in progress.
-
-  The flag records the build sha the apply TARGETED (``mark_restart_needed``).
-  The bug this fixes: the old clear fired on ``image_sha == recorded_upstream_
-  sha``, but an apply advances ``upstream`` to the new floor BEFORE the new image
-  boots — so that equality could hold while the OLD process is still running,
-  clearing "restart needed" before the restart happened. Comparing the RUNNING
-  image's build sha against the sha stamped in the flag instead means the flag
-  clears only when the booted process is the one the apply targeted.
-  """
-  if not RESTART_NEEDED_FLAG.exists():
-    return
-  if (repo / ".git" / "MERGE_HEAD").exists():
-    return
-  applied_sha = RESTART_NEEDED_FLAG.read_text().strip()
-  image = current_build_sha()
-  if applied_sha and image and image == applied_sha:
-    RESTART_NEEDED_FLAG.unlink(missing_ok=True)
-
-
-def _apply_sync(repo: Path) -> dict:
-  """The blocking git work of an apply (run under ``asyncio.to_thread``).
-
-  A thin sequence over the ``app_git`` engine, with the platform-specific
-  ordering up front:
-
-    1. ``_untrack_recovery_files`` — the gitignore migration. MUST run first so
-       the recovery files are out of the index before anything records or merges
-       a tree; otherwise they would surface in the merged tree and the mobius
-       user would try (and fail) to write them.
-    2. ``app_git.commit_local`` — stash any uncommitted owner/agent edits so the
-       merge has a committed base to diverge from.
-    3. seed + ``record_baked_upstream`` — put the new baked floor on ``upstream``.
-    4. ``app_git.merge_upstream`` — the clean-vs-conflict verdict off the live
-       worktree. Clean → write the merged tree + single-parent ``commit_replay``
-       + mark restart. Conflict → record the flag; the async wrapper spawns the
-       resolver chat.
-
-  Returns a dict describing the outcome; the async wrapper does the (async)
-  conflict-chat spawn.
-  """
-  if CONFLICT_FLAG.exists() or (repo / ".git" / "MERGE_HEAD").exists():
-    return {"state": "conflict", "conflict_paths": _unmerged_paths(repo),
-            "upstream_commit": None, "merge_commit": None}
-
-  # The engine operates on the literal branch `main`; rename `master` first so
-  # every app_git call resolves the working branch.
-  _normalize_working_branch(repo)
-  local = app_git.LOCAL_BRANCH
-
-  # Recover from a previous apply that crashed mid-write: only gitignored-out
-  # recovery files are never written, so resetting to the committed working
-  # branch restores every file we touched. `upstream` stays advanced for retry.
-  if APPLYING_FLAG.exists():
-    _git("reset", "--hard", local, repo=repo, check=False)
-    APPLYING_FLAG.unlink(missing_ok=True)
-
-  _git("checkout", "-q", local, repo=repo, check=False)
-  # ORDERING IS LOAD-BEARING: untrack the recovery files BEFORE recording or
-  # merging any tree, so they never enter the merged tree.
-  _untrack_recovery_files(repo)
-  app_git.commit_local(repo, "platform: local edits before update")
-  seed_upstream_if_missing(repo)
-  floor = collect_baked_floor()
-  new_upstream = record_baked_upstream(floor, repo)
-  result = app_git.merge_upstream(repo)
-
-  if result.status == "conflict":
-    # Do NOT materialise markers here: the new code is on `upstream`; the agent
-    # reconciles the named files into the working branch and restarts. Record the
-    # conflict so Settings keeps surfacing it (the chat id is stamped in by the
-    # async wrapper once the resolver chat is spawned).
-    _write_conflict_flag(new_upstream, result.conflict_paths)
-    return {"state": "conflict", "conflict_paths": result.conflict_paths,
-            "upstream_commit": new_upstream, "merge_commit": None}
-
-  merged = app_git.read_merged_tree(repo, result.merged_tree_oid)
-  modes = _tree_modes(result.merged_tree_oid, repo)
-  exec_paths = {p for p, m in modes.items() if m == "100755"}
-  APPLYING_FLAG.write_text(floor.build_sha)
-  try:
-    write_merged_tree_to_worktree(merged, repo=repo, exec_paths=exec_paths)
-    # Finalise as a SINGLE-parent linear replay on the new upstream tip, so the
-    # working branch is a straight-line descendant of `upstream` and the next
-    # update's `--is-ancestor` availability check is exact.
-    merge_commit = app_git.commit_replay(
-      repo, new_upstream, "merge: platform self-update",
-    )
-  except Exception:
-    # Roll the worktree back to the last good local tip (rewrites only the files
-    # we touched; the gitignored recovery files were never written).
-    _git("reset", "--hard", local, repo=repo, check=False)
-    raise
-  finally:
-    APPLYING_FLAG.unlink(missing_ok=True)
-  CONFLICT_FLAG.unlink(missing_ok=True)
-  mark_restart_needed(floor.build_sha)
-  UPGRADE_FLAG.unlink(missing_ok=True)
-  return {"state": "restart_needed", "conflict_paths": [],
-          "upstream_commit": new_upstream, "merge_commit": merge_commit}
 
 
 async def apply_platform_update(
   db: Session, repo: Path = PLATFORM_REPO,
 ) -> PlatformApplyResult:
-  """Apply the current image's baked platform floor to local ``main``. Clean →
-  written + ``restart_needed``. Conflict → ``upstream`` recorded + an agent
-  resolver chat opened. Never restarts on its own."""
+  """Owner-triggered reconcile. Clean/updated -> ``restart_needed`` (the running
+  uvicorn must restart to load the new code). Conflict -> the conflict is
+  recorded and an agent resolver chat is opened. Rolled back -> the tree stayed
+  on the old code and the state says so. Offline/skipped -> a ``409`` via
+  :class:`PlatformUpdateError`. Never restarts on its own."""
   async with _APPLY_LOCK:
-    outcome = await asyncio.to_thread(_apply_sync, repo)
+    res = await asyncio.to_thread(_reconcile_under_lock, repo, False)
     chat_id: str | None = None
-    if outcome["state"] == "conflict":
-      chat_id = await spawn_platform_conflict_chat(db, outcome["conflict_paths"])
+
+    if res.status == "updated":
+      mark_restart_needed(res.new_sha or "")
+      state = PlatformUpdateState.RESTART_NEEDED
+    elif res.status == "conflict":
+      chat_id = await spawn_platform_conflict_chat(db, res.conflict_paths)
       # Stamp the resolver chat into the persisted flag so a Settings reload can
-      # still link straight to it. When the apply BAILED on a pre-existing
-      # conflict, the outcome carries no fresh upstream AND an empty path list
-      # (a flag-only conflict isn't materialised in git, so _unmerged_paths is
-      # []), AND spawn_platform_conflict_chat dedups to None because a resolver
-      # is already running — so fall back to the recorded flag for ALL three
-      # fields (upstream, paths, chat_id), never clobbering the good values
-      # already on disk. Missing the chat_id fallback would drop the "Open chat"
-      # link on every re-apply of an in-progress conflict.
+      # still link to it. When a re-apply hit a pre-existing conflict the fresh
+      # values can be empty (no new target, no fresh paths, spawn deduped to
+      # None), so fall back to the recorded flag for all three fields rather than
+      # clobbering the good values already on disk.
       existing = _read_conflict_flag() or {}
       _write_conflict_flag(
-        outcome["upstream_commit"] or existing.get("upstream"),
-        outcome["conflict_paths"] or existing.get("paths") or [],
+        res.target_sha or existing.get("upstream"),
+        res.conflict_paths or existing.get("paths") or [],
         chat_id or existing.get("chat_id"),
       )
-    state = (
-      PlatformUpdateState.RESTART_NEEDED
-      if outcome["state"] == "restart_needed"
-      else PlatformUpdateState.CONFLICT
-    )
+      state = PlatformUpdateState.CONFLICT
+    elif res.status == "rolled_back":
+      state = PlatformUpdateState.ROLLED_BACK
+    elif res.status == "up_to_date":
+      state = PlatformUpdateState.UP_TO_DATE
+    else:  # offline / skipped — nothing changed; tell the UI plainly.
+      raise PlatformUpdateError(res.error or res.status)
+
     return PlatformApplyResult(
       state=state.value,
       needs_restart=(state is PlatformUpdateState.RESTART_NEEDED),
-      upstream_commit=outcome["upstream_commit"],
-      merge_commit=outcome["merge_commit"],
-      conflict_paths=outcome["conflict_paths"],
+      upstream_commit=res.target_sha,
+      merge_commit=res.new_sha if res.status == "updated" else None,
+      conflict_paths=res.conflict_paths,
       chat_id=chat_id,
     )
 
@@ -778,9 +723,9 @@ async def apply_platform_update(
 async def spawn_platform_conflict_chat(
   db: Session, conflict_paths: list[str],
 ) -> str | None:
-  """Open a visible agent chat to merge the new platform version into ``main``
-  and resolve conflicts — the platform analogue of
-  ``routes.apps._spawn_app_conflict_chat``. Dedupes on a running resolver."""
+  """Open a visible agent chat to reconcile the new platform version into
+  ``main`` — the platform analogue of ``routes.apps._spawn_app_conflict_chat``.
+  Dedupes on a running resolver."""
   import time
   import uuid
 
@@ -808,25 +753,23 @@ async def spawn_platform_conflict_chat(
     return None
   provider = owner.provider or "claude"
 
-  files = ", ".join(conflict_paths) if conflict_paths else "some backend files"
+  files = ", ".join(conflict_paths) if conflict_paths else "some files"
   content = (
     "A platform update is ready but conflicts with local edits — the new "
     "version and the local changes both touched the same lines, so it can't "
-    "apply cleanly.\n\n"
-    "The new platform code is recorded on the `upstream` branch of the git "
-    "repo at `/data/platform`. Reconcile these conflicting files into `main` "
-    f"by hand: {files}.\n\n"
-    "Resolve it with ordinary git: `git -C /data/platform merge upstream` "
-    "writes conflict markers into the listed files; for each, combine the "
-    "intent of the local version and upstream's, save it, then `git add` it. "
-    "When every listed file is reconciled, `git commit` to finalise the merge "
-    "on `main`. The recovery/core files (main.py, auth.py, the recover_* "
-    "modules, entrypoint.sh …) are gitignored and image-managed, so they are "
-    "never part of the merge — leave them be.\n\n"
+    "rebase cleanly.\n\n"
+    "The clone at `/data/platform` is a real git checkout of the platform repo. "
+    "The new version is on the fetched `origin/main`; local edits are on `main`. "
+    f"Reconcile these conflicting files by hand: {files}.\n\n"
+    "Resolve it with ordinary git: `git -C /data/platform rebase origin/main` "
+    "replays the local edits onto the new version and stops on the conflicting "
+    "files with conflict markers; for each, combine the intent of the local "
+    "version and origin's, save it, then `git add` it and `git rebase "
+    "--continue`. When the rebase finishes, `main` carries both.\n\n"
     "When the reconcile is committed, clear the flag "
     "(`rm -f /data/.platform-conflict`) and tell the owner to **restart the "
     "server** from Settings to finish. To back out instead, `git -C "
-    "/data/platform merge --abort`, `rm -f /data/.platform-conflict`, and tell "
+    "/data/platform rebase --abort`, `rm -f /data/.platform-conflict`, and tell "
     "the owner the update was skipped."
   )
 
