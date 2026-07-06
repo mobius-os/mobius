@@ -108,6 +108,11 @@ origin` succeeds. Work in the app's own repo:
 ```bash
 cd /data/apps/<slug>                      # the app's own repo; main is checked out
 git checkout -b fix/<slug>-<short>        # branch from main
+# Squash the watcher's incremental commits into ONE clean commit for the PR —
+# reviewable upstream, and it carries the Möbius co-author mark:
+git reset --soft "$(git merge-base HEAD upstream)"
+git commit -m "<one line, generic>" \
+  -m "Co-Authored-By: Möbius Agent <mobius-agent@users.noreply.github.com>"
 gh repo fork --remote --remote-name fork  # inside the clone; idempotent
 git push fork HEAD   # forks are created async: on failure wait 2s, retry (3x)
 gh pr create -R <upstream-owner>/<repo> -H <login>:fix/<slug>-<short> --draft \
@@ -119,7 +124,10 @@ Prepared by a Möbius agent with owner review."
 git checkout main    # INVARIANT — see below
 ```
 
-`<login>` is the owner's GitHub login from the status payload.
+`<login>` is the owner's GitHub login from the status payload. The
+`Co-Authored-By: Möbius Agent` trailer goes on every contributed commit — it
+is how a commit visibly carries the Möbius mark on GitHub (the partner stays
+the author; Möbius appears as co-author).
 
 **`git checkout main` before the turn ends is an invariant, not a
 courtesy.** The watcher auto-commits partner edits onto whatever branch is
@@ -142,7 +150,8 @@ git clone https://github.com/<org>/<repo> /tmp/<repo> && cd /tmp/<repo>
 git checkout -b fix/<slug>-<short>
 # copy the changed source files over (or git apply a diff you generated),
 # re-read the result against the privacy allowlist, then commit:
-git commit -am "<generic message>"
+git commit -am "<generic message>" \
+  -m "Co-Authored-By: Möbius Agent <mobius-agent@users.noreply.github.com>"
 # then, from /tmp/<repo>: gh repo fork --remote --remote-name fork;
 # git push fork HEAD (same 2s-retry rule); gh pr create ... --draft
 ```
