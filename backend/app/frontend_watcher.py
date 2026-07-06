@@ -93,7 +93,20 @@ def _tail(text: str, limit: int = 4000) -> str:
 
 
 def _replace_dist() -> None:
-  """Swap the freshly built temp directory into the served ``dist`` path."""
+  """Swap the freshly built temp directory into the served ``dist`` path.
+
+  Two renames (``dist``→``.dist-old``, then ``.dist-next``→``dist``) leave a
+  window of a few microseconds where ``dist`` does not exist; a request served
+  in that window gets a 404 on an asset or a 503 from the SPA fallback (which
+  guards its ``index.html`` read for exactly this). The window is accepted, not
+  eliminated: ``rename`` cannot atomically replace a non-empty directory
+  (ENOTEMPTY), so a truly windowless swap would require serving ``dist`` as a
+  symlink flipped with ``os.replace`` — but a symlinked ``dist`` is not matched
+  by ``dist/`` in ``.gitignore`` (trailing slash = directories only), so it
+  would surface as untracked and break the clean-diff PR property. Given the
+  swap is owner-edit-triggered, single-owner, and recoverable on reload, the
+  documented microsecond window is the right trade over that ripple.
+  """
   if _OLD_DIST_DIR.exists():
     shutil.rmtree(_OLD_DIST_DIR)
   old_moved = False
@@ -242,6 +255,16 @@ class _FrontendHandler(FileSystemEventHandler):
     _publish_system_event({"type": "shell_rebuilding"})
     try:
       await asyncio.to_thread(_run_vite_build)
+    except asyncio.CancelledError:
+      # Cancelled mid-build (lifespan shutdown): resolve the rebuild indicator
+      # so a client doesn't hang on shell_rebuilding, then propagate — never
+      # swallow CancelledError. The worker thread's vite child is reaped with
+      # the process group on exit.
+      _publish_system_event({
+        "type": "shell_rebuild_failed",
+        "error": "cancelled",
+      })
+      raise
     except Exception as exc:
       log.warning(
         "frontend rebuild failed after %s: %s", changed_path, exc,

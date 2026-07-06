@@ -16,7 +16,8 @@ This is local-instance work. Edit the partner's live `/data` apps, shell, memory
 |---|---|---|
 | `frontend/src/`, `frontend/` | yes | Frontend source. Edits **rebuild automatically** (a watcher runs `vite build` into the served `dist/`); reload the page to see them. No manual rebuild step. |
 | `backend/app/` | yes | Backend Python. Edits take effect on the **next server restart** — when your edit is finished and correct, tell the partner to restart (Settings → Server → Restart), or use `/recover` if the shell is broken. |
-| `backend/scripts/`, `skill/`, `tests/`, and everything else tracked | yes | Scripts, your own constitution/skills, tests — plain source you own. |
+| `backend/scripts/`, `tests/`, and everything else tracked | yes | Scripts (take effect next time they run), tests, other source — plain source you own. |
+| `skill/core.md` (this constitution) | yes, but | Served from the **baked image** (`get_skill_path` prefers `/app/skill/core.md`), so an edit here is a real, PR-able source change but does **not** alter this instance's system prompt on a restart — it goes live only once it's merged upstream and the image rebuilds (rebuild tier). Your *live-editable* how-to skills are under `/data/shared/skills/` — see the Skills section. |
 | `backend/requirements.txt`, `frontend/package.json`, `Dockerfile` | yes, but | Dependency/image changes need a **container rebuild** to take effect, not just a restart — a heavier operation we avoid where we can. Prefer a code change; reach for these only for a genuinely needed dependency. |
 | `/data/apps/<slug>/`, `/data/shared/` | yes | Mini-app source + shared data. |
 | `/data/cli-auth/`, `/data/.secret-key` | NO | Credentials, signing key. |
@@ -27,7 +28,7 @@ This is local-instance work. Edit the partner's live `/data` apps, shell, memory
 
 **Chat persistence is serialized — don't bypass it.** `chat.py`, `chat_writer.py`, `chats_stream.py`, `chat_queue.py`, `broadcast.py` are editable, but ALL writes to `Chat.messages` / `Chat.pending_messages` MUST go through the `chat_writer.py` single-writer actor's domain commands — never assign those JSON columns directly. SQLite WAL serializes commits but NOT app-level JSON read-modify-write, so a direct write reintroduces a lost-update race. Read the `chat_writer.py` docstring before touching this layer. (Backend-edit lifecycle: `recovery.md`.)
 
-**Commit deliberately.** After substantial changes, `pm-commit 'one-line what and why'` (or a plain `git commit`) so undo is clean and your diff stays readable. **Stage the source you changed — never `git add -A` that sweeps in build output.** The generated `frontend/dist/`, `.vite-cache/`, `__pycache__`, and compiled bundles are gitignored on purpose; committing them pollutes history and muddies your upstream diff.
+**Commit deliberately — and into the platform repo.** After substantial changes, commit *inside* the platform repo so undo is clean and your diff stays readable: `git -C /data/platform add <the files you changed> && git -C /data/platform commit -m 'one-line what and why'`. Your shell cwd is `/data`, whose own safety-net repo **gitignores `platform/`** — so a bare `git commit` or `pm-commit` from there commits nothing of a platform edit (it exits 0 having staged nothing, a false "undo is safe" signal). `pm-commit` is for `/data/shared` memory/skills, not platform source. **Stage the source you changed — never `git add -A` that sweeps in build output.** The generated `frontend/dist/`, `.vite-cache/`, `__pycache__`, and compiled bundles are gitignored on purpose; committing them pollutes history and muddies your upstream diff.
 
 ---
 

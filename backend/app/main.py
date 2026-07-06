@@ -641,6 +641,30 @@ def _served_platform_identity(data_dir: str) -> dict:
   return out
 
 
+def _served_frontend_identity() -> dict:
+  """Identity of the frontend bundle ACTUALLY being served.
+
+  The whole-repo platform serves ``_static_dir`` — ``/data/platform/frontend/
+  dist`` when it is a complete build, else the baked ``/app/static`` floor. Vite
+  injects a content-hashed asset name into ``index.html``, so hashing the served
+  ``index.html`` yields an identity that changes on every rebuild the watcher
+  swaps in: the frontend analogue of ``served_sha``. ``frontend_source`` says
+  which tree is live. Distinct from ``shell_sha`` (the legacy baked-image stamp
+  under ``/data/shell``, a path the whole-repo model does not serve). Never
+  raises.
+  """
+  import hashlib
+
+  out = {"served_frontend": None,
+         "frontend_source": "baked" if _static_dir == _baked_dir else "platform"}
+  try:
+    html = (_static_dir / "index.html").read_bytes()
+    out["served_frontend"] = hashlib.sha256(html).hexdigest()[:16]
+  except Exception:  # missing/unreadable dist — degrade, never raise
+    pass
+  return out
+
+
 @app.get("/api/version")
 def version():
   """Returns the build identity the running image was built from.
@@ -651,13 +675,18 @@ def version():
     backend matches the intended commit — the backend analogue of the
     frontend bundle-hash check (bundle-info.sh / verify-fresh.sh, which only
     see the shell bundle, not the backend).
-  - ``shell_sha``: the image-build-sha of the shell bundle currently served
-    from /data/shell/dist, stamped by entrypoint.sh / deploy-prod.sh when
-    that dist was last refreshed from a baked image. A client compares it to
-    ``sha`` to detect a stale served UI (shell_sha != sha ⇒ a newer image is
-    installed but its UI isn't being served yet), and polls ``sha`` itself to
-    detect that a newer image/build went live. "unknown" before any stamped
-    refresh (e.g. an instance predating this marker).
+  - ``shell_sha``: the LEGACY image-build-sha marker under /data/shell,
+    stamped by entrypoint.sh / deploy-prod.sh for the pre-whole-repo shell.
+    Under the whole-repo platform model the frontend is served from
+    /data/platform/frontend/dist, NOT /data/shell — so to verify the served
+    UI use ``served_frontend`` (below), not ``shell_sha``. Kept for
+    backward-compat with instances that still serve /data/shell; "unknown"
+    otherwise.
+  - ``served_frontend``: a content hash of the ``index.html`` in the frontend
+    dir ACTUALLY being served (``frontend_source`` = ``platform`` or ``baked``).
+    Changes whenever the watcher swaps a fresh ``vite build`` into the served
+    ``dist`` — the frontend analogue of ``served_sha``. Poll it to confirm a
+    frontend edit went live.
 
   A full GitHub-release check + one-click update is a follow-up; this exposes
   the local build identity cleanly so the image-pull path is self-verifying.
@@ -670,7 +699,8 @@ def version():
     shell_sha = "unknown"
   return {"sha": settings.build_sha, "shell_sha": shell_sha,
           "build_date": settings.build_date,
-          **_served_platform_identity(settings.data_dir)}
+          **_served_platform_identity(settings.data_dir),
+          **_served_frontend_identity()}
 
 
 @app.api_route(
@@ -1090,7 +1120,17 @@ if _static_dir.is_dir():
     # `\u`-escaped too. This is the mandatory slot-XSS defense.
     import json
     from fastapi.responses import HTMLResponse
-    html = (_static_dir / "index.html").read_text(encoding="utf-8")
+    try:
+      html = (_static_dir / "index.html").read_text(encoding="utf-8")
+    except FileNotFoundError:
+      # The served dist is absent only during the frontend watcher's dist swap
+      # (a two-rename window of a few microseconds — see
+      # frontend_watcher._replace_dist). Report transient-unavailable so the
+      # client retries into the settled build rather than seeing a 500.
+      raise HTTPException(
+        status_code=503, detail="Frontend rebuilding, retry.",
+        headers={"Retry-After": "1"},
+      )
     payload = (
       json.dumps(theme_data(settings.data_dir))
       .replace("</", "<\\/")

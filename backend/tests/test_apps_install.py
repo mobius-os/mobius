@@ -875,6 +875,33 @@ def test_derive_repo_ref_returns_none_for_non_github_and_inline():
   assert _derive_repo_ref("inline-manifest") is None
 
 
+def test_derive_repo_ref_only_root_manifest_single_segment_ref():
+  """Only the canonical root-manifest / single-segment-ref shape clones.
+
+  A subdir-hosted manifest or a slash-containing branch would make a greedy
+  parse clone the wrong tree (repo root at a mis-read ref), so both must fall
+  back to None (synthetic install), and a leading-dash ref is rejected so it
+  can't reach git as an option."""
+  from app.install import _derive_repo_ref
+
+  # subdir-hosted manifest — clone would get the wrong index.jsx
+  assert _derive_repo_ref(
+    "https://raw.githubusercontent.com/acme/widgets/main/pkg/mobius.json"
+  ) is None
+  # slash-containing branch — greedy parts[:3] would mis-read ref as "feature"
+  assert _derive_repo_ref(
+    "https://raw.githubusercontent.com/acme/widgets/feature/x/mobius.json"
+  ) is None
+  # too few segments (no manifest file)
+  assert _derive_repo_ref(
+    "https://raw.githubusercontent.com/acme/widgets/main"
+  ) is None
+  # leading-dash ref (defense-in-depth: git would read it as an option)
+  assert _derive_repo_ref(
+    "https://raw.githubusercontent.com/acme/widgets/-x/mobius.json"
+  ) is None
+
+
 def test_update_dropping_schedule_unregisters_orphan_cron(
     client, auth, bypass_url_validation):
   """Recurring → on-demand migration must converge cron state, not just add.

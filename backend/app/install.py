@@ -484,18 +484,33 @@ def _derive_raw_base(manifest_url: str) -> str:
 
 
 def _derive_repo_ref(manifest_url: str) -> tuple[str, str] | None:
-  """Return the GitHub repo/ref for a raw GitHub manifest URL, if derivable."""
+  """Return the GitHub repo/ref for a raw GitHub manifest URL, if derivable.
+
+  Deliberately narrow: only a ROOT manifest at a SINGLE-SEGMENT ref
+  (`raw.githubusercontent.com/<org>/<repo>/<ref>/<manifest-file>`, exactly four
+  path segments) is clone-eligible. That is the canonical `mobius-os/app-*`
+  shape, and it is the only shape where the repo root's `index.jsx` is the entry
+  the manifest points at. Two other shapes must NOT be clone-derived — they fall
+  back to the synthetic HTTP-fetch install instead of mis-cloning:
+    - a manifest in a repo SUBDIR (`…/<ref>/<subdir>/mobius.json`) — cloning the
+      repo root would then get the wrong `index.jsx`.
+    - a branch name CONTAINING A SLASH (`…/<repo>/feature/x/mobius.json`) — a
+      greedy `parts[:3]` would mis-read the ref as `feature`.
+  Both push the segment count past four, so the strict `== 4` check rejects
+  them. The caller (`install_from_manifest`) treats a `None` return as
+  not-clone-eligible and keeps the already-fetched HTTP entry.
+  """
   parsed = urlparse(manifest_url)
   parts = [unquote(part) for part in parsed.path.split("/") if part]
   if (
     parsed.scheme != "https"
     or parsed.hostname != "raw.githubusercontent.com"
-    or len(parts) < 4
+    or len(parts) != 4
   ):
     return None
-  org, repo, ref = parts[:3]
+  org, repo, ref, _manifest_file = parts
   for part in (org, repo, ref):
-    if part in ("", ".", "..") or "/" in part or "\\" in part:
+    if part in ("", ".", "..") or part.startswith("-") or "\\" in part:
       return None
   return f"https://github.com/{org}/{repo}.git", ref
 
@@ -1437,6 +1452,12 @@ async def install_from_manifest(
   # point the crontab entry at it.
   job_name = sched.get("job") if sched else None
   exec_paths = frozenset({job_name}) if job_name else frozenset()
+  # Exec paths carried by a git tree we materialise on a cloned FF/clean-merge
+  # UPDATE (read_ref_tree/read_merged_tree return bytes only, dropping the exec
+  # bit). Defined at function scope because the disk-write loop that consumes it
+  # runs for fresh installs too, where the update branch never sets it; the
+  # cloned-update branches below reassign it. Empty for every non-cloned path.
+  git_exec_paths: frozenset[str] = frozenset()
   # The ONE complete source tree that gets written to disk and recorded on
   # `upstream`: the entry, every declared sibling module, and the job script —
   # all just keys, no entry/sibling/job special-casing. `index.jsx` is one key.
@@ -1728,6 +1749,14 @@ async def install_from_manifest(
             else:
               divergence = "fast_forward"
               merge_applied = True
+              # Only now that we WILL write this tree, read its exec bits so the
+              # byte-write loop restores them (a conflict never reaches here, so
+              # a degenerate/unreadable tree is never ls-tree'd).
+              if cloned_update:
+                git_exec_paths = await asyncio.to_thread(
+                  app_git.read_tree_exec_paths,
+                  git_source_dir, app_git.UPSTREAM_BRANCH,
+                )
           else:
             # Local diverged: fold the new upstream into the local edits with
             # a three-way merge that touches neither `main` nor the working
@@ -1771,6 +1800,13 @@ async def install_from_manifest(
                 source_tree = merged_source
                 divergence = "clean_merge"
                 merge_applied = True
+                # Read exec bits only now that we WILL write this tree — a
+                # conflict/unreadable verdict never ls-tree's the (possibly
+                # degenerate) merged oid.
+                git_exec_paths = await asyncio.to_thread(
+                  app_git.read_tree_exec_paths,
+                  git_source_dir, merge.merged_tree_oid,
+                )
         else:
           # Fresh install (or an existing app that somehow lost its repo):
           # for a new raw-GitHub catalog install, prefer a REAL clone so the
@@ -1938,7 +1974,7 @@ async def install_from_manifest(
                 target, content, backup,
                 created_paths, rollback_actions, commit_actions,
               )
-              if rel in exec_paths:
+              if rel in exec_paths or rel in git_exec_paths:
                 target.chmod(0o755)
             # Reconcile the worktree to the source tree: a file the new version
             # dropped (a sibling, an old job) must be deleted, not left on disk

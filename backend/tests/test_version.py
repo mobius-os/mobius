@@ -110,6 +110,21 @@ def test_version_always_includes_served_platform_keys(client):
     assert key in body
 
 
+def test_version_includes_served_frontend_identity(client):
+  # served_frontend is the identity of the frontend bundle ACTUALLY served
+  # (hash of the served index.html), the frontend analogue of served_sha —
+  # distinct from the legacy shell_sha which points at the unserved
+  # /data/shell/dist under the whole-repo model. frontend_source names the live
+  # tree. Both must always be present; served_frontend is a str hash or None
+  # (None when the served dir has no index.html, e.g. a bare test env).
+  body = client.get("/api/version").json()
+  assert "served_frontend" in body and "frontend_source" in body
+  assert body["frontend_source"] in ("platform", "baked")
+  assert body["served_frontend"] is None or isinstance(
+    body["served_frontend"], str
+  )
+
+
 def test_served_platform_degrades_when_unstamped(client):
   # No sentinel + no .baked-sha (a plain instance) ⇒ everything degrades to a
   # serializable default rather than raising or 500-ing the endpoint.

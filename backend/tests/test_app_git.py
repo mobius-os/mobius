@@ -160,6 +160,18 @@ def test_clone_upstream_neutralizes_symlinks_and_layers_managed_ignore(tmp_path)
   # managed artifacts are excluded locally, not committed
   exclude = (source_dir / ".git" / "info" / "exclude").read_text()
   assert "static/" in exclude and "init-cron.sh" in exclude
+  # the static-asset MANIFEST itself must be excluded too (not just static/):
+  # if it is tracked, an app that declares static_assets diverges from origin
+  # on its first commit and every update is forced through a three-way merge,
+  # breaking the clean-diff PR property. check-ignore, not substring, so the
+  # exclude rule actually fires against a real repo.
+  for name, want in ((".mobius-static-assets.json", True),
+                     ("index.jsx", False)):
+    r = subprocess.run(
+      ["git", "-C", str(source_dir), "check-ignore", name],
+      env=env, capture_output=True,
+    )
+    assert (r.returncode == 0) is want, name
 
 
 def test_has_origin_distinguishes_clone_from_synthetic_repo(tmp_path):
@@ -227,6 +239,30 @@ def test_fetch_upstream_advances_real_origin_and_reads_full_tree(tmp_path):
   assert origin_head == new_head
   assert tree["index.jsx"] == b"import './cards.js'\n// v2\n"
   assert tree["cards.js"] == b"export const label = 'v2'\n"
+
+
+def test_read_tree_exec_paths_reports_only_executables(tmp_path):
+  """read_tree_exec_paths returns the 100755 paths in a tree — the bit the
+  cloned-update byte-write loop must restore so a repo-tracked helper script
+  (not just the manifest's schedule.job) doesn't diverge 644-vs-755 from
+  origin and break the clean-diff PR property."""
+  fixture = tmp_path / "fixture"
+  subprocess.run(["git", "init", "-q", "-b", "main", str(fixture)], check=True)
+  (fixture / "index.jsx").write_text("export default () => null\n")
+  helper = fixture / "scripts" / "build.sh"
+  helper.parent.mkdir()
+  helper.write_text("#!/bin/sh\necho hi\n")
+  helper.chmod(0o755)
+  job = fixture / "fetch.sh"
+  job.write_text("#!/bin/sh\n")
+  job.chmod(0o755)
+  head = _commit_all(fixture, "v1")
+
+  execs = app_git.read_tree_exec_paths(fixture, head)
+  assert execs == frozenset({"scripts/build.sh", "fetch.sh"})
+  assert "index.jsx" not in execs
+  # also resolvable by branch name, not just commit sha
+  assert app_git.read_tree_exec_paths(fixture, "main") == execs
 
 
 def test_ensure_repo_is_idempotent_and_creates_branches(tmp_path):
