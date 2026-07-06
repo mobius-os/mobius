@@ -78,21 +78,45 @@ let _isTouchPrimary = _touchMql?.matches ?? false
 _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
 
 
-/** The primary action button — Send / Stop / Mic — auto-resolved from the
- *  bar's input/sending/listening/uploading state.
+/** The primary action button — FastForward / Send / Stop / Mic —
+ *  auto-resolved from the bar's input/sending/listening/uploading state.
  *
- *  Stop is NEVER displaced while a turn is running: Stop (interrupt the turn,
- *  collapse the queue into a fresh turn) and fast-forward (inject the queue
- *  into the RUNNING turn) are different actions, so the fast-forward lives on
- *  its own SteerChip above the input row instead of swapping into this slot.
- *  While the composer has text the Send button (queue-another) still wins. */
+ *  When there are queued messages ready to try (`canSteer`), the Stop square
+ *  is swapped for a fast-forward button. The handler reconciles server state
+ *  before acting: if a live turn exists, it injects the queued messages into
+ *  that turn; if local running state was stale, this still gives the user one
+ *  immediate affordance instead of waiting for focus/remount to reveal it.
+ *  Stop is NOT lost: clearing the queue (the tray's X) flips canSteer back to
+ *  false and the Stop square returns, and while the composer has text the Send
+ *  button (queue-another) still wins over both.
+ *
+ *  Each state's button carries a distinct `key`, and that is load-bearing.
+ *  A state swap must REPLACE the DOM node, not patch a reused one: keyless
+ *  same-type buttons let React keep one node across the swap, and
+ *  `.chat__stop`'s background/color transition then cross-fades accent →
+ *  transparent under the already-swapped icon, flashing a purple stop for
+ *  ~150ms. Distinct keys force a fresh mount (a new node runs no CSS
+ *  transition); within-state hover/active fades still run. */
 function PrimaryAction({
-  sending, listening, hasInput, hasUploading, offline,
-  onSubmit, onStop, onToggleVoice,
+  sending, listening, hasInput, hasUploading, offline, canSteer,
+  onSubmit, onStop, onSteer, onToggleVoice,
 }) {
+  if (sending && !hasInput && canSteer) {
+    return (
+      <button
+        key="steer"
+        className="chat__steer"
+        type="button"
+        onClick={onSteer}
+        aria-label="Send queued message now"
+      >
+        <DoubleChevronRight width={20} height={20} />
+      </button>
+    )
+  }
   if (sending && !hasInput) {
     return (
-      <button className="chat__stop" type="button" onClick={onStop} aria-label="Stop">
+      <button key="stop" className="chat__stop" type="button" onClick={onStop} aria-label="Stop">
         <svg width="16" height="16" viewBox="0 0 12 12" fill="currentColor">
           <rect width="12" height="12" rx="2" />
         </svg>
@@ -102,6 +126,7 @@ function PrimaryAction({
   if (hasInput && !listening) {
     return (
       <button
+        key="send"
         className="chat__send"
         type="button"
         onTouchEnd={(e) => { e.preventDefault(); onSubmit(e) }}
@@ -115,6 +140,7 @@ function PrimaryAction({
   }
   return (
     <button
+      key="mic"
       className={`chat__mic ${listening ? 'chat__mic--active' : ''}`}
       type="button"
       onTouchEnd={(e) => { e.preventDefault(); onToggleVoice() }}
@@ -123,36 +149,6 @@ function PrimaryAction({
     >
       <Mic width={24} height={24} />
     </button>
-  )
-}
-
-
-/** Fast-forward chip — sends the queued messages into the RUNNING turn
- *  (force_steer). Rendered as a compact chip row directly below the
- *  queued-messages tray (the form's preceding sibling in `.chat__foot`),
- *  NOT in the primary-action slot: Stop (interrupt + collapse the queue
- *  into a fresh turn) and fast-forward (advance the queue into the live
- *  turn) are different actions, and queued work must never make the
- *  interrupt unreachable. Shown only when the click can actually steer
- *  (`canSteer` — live turn + server-confirmed queue, computed by
- *  ChatView). */
-function SteerChip({ canSteer, onSteer }) {
-  if (!canSteer) return null
-  return (
-    <div className="chat__steer-row">
-      <button
-        className="chat__steer-chip"
-        type="button"
-        // Keep the soft keyboard up — same pointerdown contract as every
-        // other interactive composer element.
-        onPointerDown={(e) => e.preventDefault()}
-        onClick={onSteer}
-        aria-label="Send queued message now"
-      >
-        <DoubleChevronRight width={14} height={14} />
-        Send queued now
-      </button>
-    </div>
   )
 }
 
@@ -264,11 +260,11 @@ function FileChips({ files, onRemove }) {
  *   onToggleVoice      — mic button handler
  *   onStop             — stop button handler
  *   onSteer            — fast-forward handler (steer queued msgs into the
- *                        live turn). Wired to the SteerChip above the
- *                        input row; Stop keeps the primary slot.
+ *                        live turn). Shown in place of Stop while a turn
+ *                        is streaming AND `canSteer` is true.
  *   canSteer           — true when there are queued messages that can be
- *                        steered right now (all server-confirmed + live
- *                        turn). Shows/hides the SteerChip.
+ *                        steered right now (all server-confirmed). Drives
+ *                        the FastForward-vs-Stop choice in PrimaryAction.
  *   pendingFiles       — file upload chips state
  *   onAddFiles         — receives FileList from file picker
  *   onRemoveFile       — receives chip id
@@ -397,7 +393,6 @@ export default function ChatInputBar({
           You're offline — chat needs a connection.
         </div>
       )}
-      <SteerChip canSteer={canSteer} onSteer={onSteer} />
       <div className="chat__input-row">
         {leftButtons}
         <div className={`chat__pill${hasFiles ? ' chat__pill--with-attach' : ''}`}>
@@ -422,8 +417,10 @@ export default function ChatInputBar({
               hasInput={hasInput}
               hasUploading={hasUploading}
               offline={offline}
+              canSteer={canSteer}
               onSubmit={onSubmit}
               onStop={onStop}
+              onSteer={onSteer}
               onToggleVoice={onToggleVoice}
             />
           </div>
