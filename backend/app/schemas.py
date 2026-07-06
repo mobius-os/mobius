@@ -86,6 +86,8 @@ class AppOut(BaseModel):
   embeds_agent: bool = False
   # Install authority — see models.App.manage_apps for the contract.
   manage_apps: bool = False
+  # Read-only GitHub surface access — see models.App.github_access.
+  github_access: bool = False
   # URL slug for the standalone PWA install at /apps/<slug>/. Null
   # only for legacy rows from before the slug column existed; lazy-
   # backfilled on first access via standalone routes (see

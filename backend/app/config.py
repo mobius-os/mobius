@@ -41,6 +41,12 @@ class Settings(BaseSettings):
   # Surfaced at GET /api/version so Settings can show "version · date".
   build_date: str = "unknown"
 
+  # GitHub OAuth app client id (env GITHUB_OAUTH_CLIENT_ID) for the device
+  # flow in routes/github.py. Device flow needs only the client id — no
+  # secret. Empty means the device flow is unavailable and connecting
+  # GitHub falls back to the classic-PAT path.
+  github_oauth_client_id: str = ""
+
   # Auto memory-search: on a substantive FIRST message of a chat, the platform
   # runs the memory-search subagent (scripts/memory_search.py) and injects its
   # result into the <agent_experience> block — so deep recall happens without

@@ -25,7 +25,11 @@ the partner while you work; you're just finishing the merge.
 
 ## Look at the conflict
 
-Everything is LOCAL — this repo has no `origin`, no GitHub. Never `git push`.
+Conflict resolution is LOCAL work. The repo may or may not have an `origin`
+— a cloned catalog app does, a synthetic-upstream app doesn't
+(`git remote get-url origin` tells you) — but either way, pushing is never
+part of resolving a conflict. Sending an improvement upstream is a separate,
+approval-gated flow: `contributing.md`.
 
 Each app has its own `.git`, so git normally stays scoped to it. As cheap
 insurance against a missing/corrupt app repo silently committing into `/data`
@@ -138,7 +142,9 @@ You never have to force a resolution you're unsure about.
 
 ## Don't
 
-- Don't `git push` — there's no remote; this is the partner's local instance.
+- Don't `git push` while resolving — whether or not this repo has an
+  `origin`, pushing upstream is a separate, approval-gated flow
+  (`contributing.md`), never part of conflict resolution.
 - Don't commit conflict markers (a failed recompile is the tell — fix and save).
 - Don't edit the `upstream` branch.
 

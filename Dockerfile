@@ -53,6 +53,28 @@ ARG TECTONIC_VERSION=0.16.9
 RUN curl -fsSL "https://github.com/tectonic-typesetting/tectonic/releases/download/tectonic%40${TECTONIC_VERSION}/tectonic-${TECTONIC_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
     | tar xz -C /usr/local/bin/ tectonic && chmod +x /usr/local/bin/tectonic && tectonic --version
 
+# GitHub CLI: the agent's Contribute flow opens PRs/issues upstream through
+# `gh` (a server-side subprocess, so CSP connect-src 'self' — which governs
+# only mini-app iframe fetches — does not apply). Pinned and sha256-verified
+# against the release's own checksums file, fetched at build time; a mismatch
+# fails the build. Built for the image arch (amd64|arm64); only the single
+# `gh` binary is installed, docs/man pages are dropped. Placed after the apt
+# layer so a gh bump doesn't bust the apt cache.
+ARG GH_CLI_VERSION=2.96.0
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in amd64|arm64) ;; *) echo "unsupported arch: $arch" >&2; exit 1 ;; esac; \
+    tarball="gh_${GH_CLI_VERSION}_linux_${arch}.tar.gz"; \
+    base="https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}"; \
+    curl -fsSL "${base}/${tarball}" -o "/tmp/${tarball}"; \
+    curl -fsSL "${base}/gh_${GH_CLI_VERSION}_checksums.txt" -o /tmp/gh_checksums.txt; \
+    grep " ${tarball}\$" /tmp/gh_checksums.txt | (cd /tmp && sha256sum -c -); \
+    tar xzf "/tmp/${tarball}" -C /tmp; \
+    install -m 0755 "/tmp/gh_${GH_CLI_VERSION}_linux_${arch}/bin/gh" /usr/local/bin/gh; \
+    rm -rf "/tmp/${tarball}" /tmp/gh_checksums.txt \
+      "/tmp/gh_${GH_CLI_VERSION}_linux_${arch}"; \
+    gh --version
+
 # Share the agent-browser install between root and mobius via symlinks.
 # The mobius user is created further down; we chown the shared dir to
 # mobius:mobius after that, so mobius can write session sockets/locks

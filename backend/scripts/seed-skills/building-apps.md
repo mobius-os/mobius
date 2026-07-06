@@ -41,6 +41,8 @@ curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/apps/" | pyth
 
 If an app with the same purpose exists, update it instead of duplicating. If the partner says "build X" and X already exists, confirm whether they want to update or replace it.
 
+Check the wider ecosystem too: the catalog (`https://raw.githubusercontent.com/mobius-os/app-store/main/catalog.json`) may already ship an installable app, and an upstream issue or PR may already cover the fix you're about to write. The search moves — `gh search issues/prs --owner mobius-os`, reading the catalog — live in `contributing.md` ("Search before building"); a one-minute check beats rebuilding what exists.
+
 ---
 
 ## Packaging / wrapping a pre-built or third-party web app

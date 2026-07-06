@@ -272,6 +272,10 @@ def _validate_manifest(m: dict) -> None:
     raise HTTPException(
       400, "Manifest `permissions.manage_apps` must be a boolean.",
     )
+  if "github_access" in perms and not isinstance(perms["github_access"], bool):
+    raise HTTPException(
+      400, "Manifest `permissions.github_access` must be a boolean.",
+    )
   # Optional `offline` block — declares the app's offline contract.
   # Schema only (P1-D): accepted, validated, and stored on the App row as JSON;
   # no store badge built yet. The block is informational for the SW/agent but
@@ -1605,6 +1609,7 @@ async def install_from_manifest(
         share_with_apps=perms.get("share_with_apps", "none"),
         chat_log_access=perms.get("chat_log_access", "none"),
         manage_apps=bool(perms.get("manage_apps", False)),
+        github_access=bool(perms.get("github_access", False)),
         # The manifest's `offline_capable: true` opts the app into the
         # SW frame cache + the window.mobius.storage outbox. Without
         # this line every installed app defaulted to offline_capable=
@@ -1873,6 +1878,8 @@ async def install_from_manifest(
           # to the existing value when the manifest omits the key.
           if "manage_apps" in perms:
             app.manage_apps = bool(perms["manage_apps"])
+          if "github_access" in perms:
+            app.github_access = bool(perms["github_access"])
           if "offline_capable" in manifest:
             app.offline_capable = bool(manifest["offline_capable"])
           if "embeds_agent" in manifest:
