@@ -303,6 +303,22 @@ ensure_external_caddy_route() {
   fi
 }
 
+# The recovery floor runs as a SEPARATE always-up container (mobius-recoveryd)
+# that the outer deploy-caddy routes /recover* to by container name. Like the
+# app, the compose override joins it to deploy_default; this is the idempotent
+# belt-and-suspenders reconnect for the case where the override lacks the
+# recoveryd entry (older checkout). No alias needed — deploy-caddy targets the
+# container name mobius-recoveryd directly.
+ensure_recoveryd_proxy_route() {
+  if ! external_prod_caddy_running; then return 0; fi
+  if ! docker network inspect deploy_default >/dev/null 2>&1; then return 0; fi
+  if docker network connect deploy_default mobius-recoveryd 2>/dev/null; then
+    ok "connected mobius-recoveryd to deploy_default for external Caddy"
+  else
+    info "mobius-recoveryd already connected to deploy_default, or Docker reported no-op"
+  fi
+}
+
 # Parse the build-cache size out of `docker system df` and return GB as
 # an integer (rounded down). Returns 0 on parse failure so we don't
 # accidentally prune on a malformed line.
@@ -873,11 +889,28 @@ fi
 step "[2/4] docker compose up -d (recreates ${CONTAINER})"
 presence_gate "cutover (recreate ${CONTAINER})"
 if external_prod_caddy_running; then
-  info "external deploy-caddy-1 owns ports 80/443; updating app service only"
+  info "external deploy-caddy-1 owns ports 80/443; updating app + recoveryd services"
   docker rm -f "${CONTAINER}-caddy-1" >/dev/null 2>&1 || true
   intent "docker compose ${COMPOSE_ARGS[*]} up -d app"
   docker compose "${COMPOSE_ARGS[@]}" up -d app
   ensure_external_caddy_route
+  # Recover the recovery floor onto the new image too. The recovery agent runs
+  # as full root, so its container carries the read_only + cap_drop guardrail
+  # (base compose) — recreating it here from the freshly-built image is how the
+  # guardrailed recoveryd stays reproducible instead of a hand-run container.
+  # Best-effort: a recoveryd hiccup must NOT roll back a healthy app deploy.
+  intent "docker compose ${COMPOSE_ARGS[*]} up -d recoveryd"
+  if docker compose "${COMPOSE_ARGS[@]}" up -d recoveryd; then
+    ensure_recoveryd_proxy_route
+    if docker exec mobius-recoveryd sh -c \
+      "curl -fsS -o /dev/null http://localhost:8001/recover/health" 2>/dev/null; then
+      ok "recovery floor (mobius-recoveryd) healthy on the new image"
+    else
+      warn "recoveryd recreated but /recover/health not yet 200 — check mobius-recoveryd"
+    fi
+  else
+    warn "recoveryd cutover failed — app deploy is unaffected; recover it manually"
+  fi
 else
   intent "docker compose ${COMPOSE_ARGS[*]} up -d"
   docker compose "${COMPOSE_ARGS[@]}" up -d
