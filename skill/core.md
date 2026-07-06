@@ -10,21 +10,24 @@ This is local-instance work. Edit the partner's live `/data` apps, shell, memory
 
 ## Write surface
 
-You have direct write access to almost the entire platform. The short version: anything tracked in git is yours to edit, except a small "frozen island" that keeps recovery reachable.
+`/data/platform/` **is the whole Möbius repo** — a real git clone of `mobius-os/mobius`, and what actually runs. You edit it in place; **nothing in it is frozen.** Backend, frontend, scripts, your own skills (`skill/`), tests — all yours to change.
 
-| Path | Editable? | Notes |
+| Path (under `/data/platform/`) | Editable? | How it takes effect |
 |---|---|---|
-| `/data/shell/src/`, `/data/shell/dist/` | yes | Frontend source + built bundle. Rebuild with `bash /app/scripts/rebuild_shell.sh` after editing src/. See `theming.md` / the shell section below. |
-| `/app/app/` | yes | Backend Python. Edits take effect on next uvicorn restart. Use Settings -> Server -> Restart when the main shell is healthy; see `recovery.md` for broken-shell recovery. |
-| `/app/scripts/` | yes | Utility scripts (rebuild_shell.sh, init scripts). |
+| `frontend/src/`, `frontend/` | yes | Frontend source. Edits **rebuild automatically** (a watcher runs `vite build` into the served `dist/`); reload the page to see them. No manual rebuild step. |
+| `backend/app/` | yes | Backend Python. Edits take effect on the **next server restart** — when your edit is finished and correct, tell the partner to restart (Settings → Server → Restart), or use `/recover` if the shell is broken. |
+| `backend/scripts/`, `skill/`, `tests/`, and everything else tracked | yes | Scripts, your own constitution/skills, tests — plain source you own. |
+| `backend/requirements.txt`, `frontend/package.json`, `Dockerfile` | yes, but | Dependency/image changes need a **container rebuild** to take effect, not just a restart — a heavier operation we avoid where we can. Prefer a code change; reach for these only for a genuinely needed dependency. |
 | `/data/apps/<slug>/`, `/data/shared/` | yes | Mini-app source + shared data. |
-| `/app/app-baked/`, `/app/scripts-baked/`, `/app/static/`, `/app/shell-src/` | NO | Immutable recovery sources (chmod a-w). `recovery_restore.sh` copies these back to live if you break something. |
-| Frozen recovery island + boot-chain wiring (`recover*.py`, `main.py`, `auth.py`, `database.py`, `config.py`, `models.py`, `entrypoint.sh`, `recovery_restore.sh`; full list in `/app/protected-files.txt`) | NO | Chmod 444/555 root-owned. `main.py` imports these at module load, so a broken one kills uvicorn boot and takes `/recover` down with it. Don't try to chmod or rewrite them — it's OS-blocked. |
 | `/data/cli-auth/`, `/data/.secret-key` | NO | Credentials, signing key. |
+
+**Recovery is separate and always up — there is no "frozen island" inside the platform to work around.** Recovery is its own `recoveryd` container at `/recover`, independent of your code. That separation is exactly what lets the whole platform repo be yours: break the running platform and recovery brings it back (see `recovery.md`). The only immutable pieces are the boot + recovery infrastructure baked into the *image* (the entrypoint, the recoveryd bundle) — you never need to touch them.
+
+**Your edits are contributable.** `/data/platform` is a real clone with `origin = mobius-os/mobius`, so `git diff origin/main` is exactly your changes. A generally-useful fix can become a pull request upstream that improves Möbius for everyone — that flow is owner-triggered (you don't hold GitHub credentials yourself), but keeping your changes clean makes it trivial when it happens.
 
 **Chat persistence is serialized — don't bypass it.** `chat.py`, `chat_writer.py`, `chats_stream.py`, `chat_queue.py`, `broadcast.py` are editable, but ALL writes to `Chat.messages` / `Chat.pending_messages` MUST go through the `chat_writer.py` single-writer actor's domain commands — never assign those JSON columns directly. SQLite WAL serializes commits but NOT app-level JSON read-modify-write, so a direct write reintroduces a lost-update race. Read the `chat_writer.py` docstring before touching this layer. (Backend-edit lifecycle: `recovery.md`.)
 
-**`/data/` is a git repo** — after substantial agent-owned changes (apps, shell, memory, theme), `pm-commit 'one-line what and why'` so undo is clean. Details in `recovery.md`.
+**Commit deliberately.** After substantial changes, `pm-commit 'one-line what and why'` (or a plain `git commit`) so undo is clean and your diff stays readable. **Stage the source you changed — never `git add -A` that sweeps in build output.** The generated `frontend/dist/`, `.vite-cache/`, `__pycache__`, and compiled bundles are gitignored on purpose; committing them pollutes history and muddies your upstream diff.
 
 ---
 
