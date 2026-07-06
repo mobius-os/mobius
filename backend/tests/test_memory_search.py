@@ -90,3 +90,87 @@ def test_run_usage_error_on_no_query(monkeypatch):
   ms = _load()
   monkeypatch.setattr(ms.sys, "argv", ["memory_search.py"])
   assert ms.run() == 2  # no positional request → usage error, never a crash
+
+
+# --- slug/source parsing (no graph.json needed) --------------------------
+
+
+def _identity_path_to_id(ms):
+  """A stand-in for _path_to_node_id keyed purely on a path's SHAPE, so the
+  slug/source parsers can be tested without a real graph.json. Distinct id
+  prefixes (note:/moc:/chat:) let a test assert WHICH candidate matched; only
+  the standard directory shapes resolve, everything else is None (as a missing
+  node would be)."""
+
+  def stub(file_path: str) -> str | None:
+    rel = os.path.relpath(file_path, ms.MEMORY_DIR)
+    if rel.startswith("chats/") and rel.endswith("/index.md"):
+      return "chat:" + rel[len("chats/") : -len("/index.md")]
+    if rel.startswith("notes/") and rel.endswith(".md"):
+      return "note:" + rel[len("notes/") : -len(".md")]
+    if rel.startswith("mocs/") and rel.endswith(".md"):
+      return "moc:" + rel[len("mocs/") : -len(".md")]
+    return None
+
+  return stub
+
+
+def test_slug_to_node_id_shapes(monkeypatch):
+  ms = _load()
+  monkeypatch.setattr(ms, "_path_to_node_id", _identity_path_to_id(ms))
+  # bare slug tries notes first, then mocs, then chats
+  assert ms._slug_to_node_id("foo") == "note:foo"
+  assert ms._slug_to_node_id("notes/foo") == "note:foo"
+  assert ms._slug_to_node_id("mocs/foo") == "moc:foo"
+  # the finding-2 bug: all three per-chat spellings resolve to the SAME node,
+  # where "chats/<id>/index" used to build "chats/<id>/index/index.md" and miss
+  a = ms._slug_to_node_id("chats/abc123")
+  b = ms._slug_to_node_id("chats/abc123/index")
+  c = ms._slug_to_node_id("chats/abc123/index.md")
+  assert a == b == c == "chat:abc123"
+
+
+def test_sources_to_node_ids_mixed_separators_and_dedupe(monkeypatch):
+  ms = _load()
+  monkeypatch.setattr(ms, "_path_to_node_id", _identity_path_to_id(ms))
+  # a SOURCES line mixing comma + semicolon separators, a duplicate slug, and a
+  # per-chat citation in its ".md" spelling — parsed, mapped, and deduped in order
+  text = (
+    "- Coffee twice daily (notes/coffee).\n"
+    "- Homelab named moss (notes/moss).\n"
+    "SOURCES: notes/coffee, notes/coffee; mocs/food , chats/xy/index.md\n"
+  )
+  ids = ms._sources_to_node_ids(text)
+  assert ids == ["note:coffee", "moc:food", "chat:xy"]
+
+
+# --- the constructed CLI command scopes Bash (the HIGH finding) ----------
+
+
+def test_run_cmd_scopes_bash_and_denies_write_tools(monkeypatch):
+  ms = _load()
+  captured = {}
+
+  class _FakeProc:
+    stdout = '{"type":"result","result":"No relevant memories."}\n'
+    stderr = ""
+    returncode = 0
+
+  def _fake_run(cmd, **kwargs):
+    captured["cmd"] = cmd
+    return _FakeProc()
+
+  monkeypatch.setattr(ms.subprocess, "run", _fake_run)
+  monkeypatch.setattr(ms.sys, "argv", ["memory_search.py", "the request"])
+  assert ms.run() == 0
+  cmd = captured["cmd"]
+  # Bash is scoped to read-only verbs, each rule its own argv element ...
+  assert "Bash(cat:*)" in cmd
+  assert "Bash(rg:*)" in cmd
+  assert "Bash(ls:*)" in cmd
+  # ... and the unrestricted bare "Bash" grant is gone (the write-capable hole)
+  assert "Bash" not in cmd
+  # write-shaped tools are denied explicitly, so denial doesn't rely on absence
+  assert "--disallowedTools" in cmd
+  for tool in ("Write", "Edit", "NotebookEdit"):
+    assert tool in cmd

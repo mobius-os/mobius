@@ -115,12 +115,13 @@ async def test_drain_session_injects_steering_at_both_thresholds():
     ResultMessage(is_error=True, subtype="error_max_turns")
   ]
   client = _FakeClient(msgs)
-  saw_result, result_error, auth_failure = await dr._drain_session(
+  saw_result, result_error, auth_failure, usage_limit = await dr._drain_session(
     client, None, max_turns=60, countdown=True,
   )
   assert saw_result is True
   assert result_error is True
   assert auth_failure is False
+  assert usage_limit is False
   assert len(client.queries) == 2
   assert "turn 35 of 60" in client.queries[0]
   assert "turn 45 of 60" in client.queries[1]
@@ -130,10 +131,12 @@ async def test_drain_session_injects_steering_at_both_thresholds():
 async def test_drain_session_countdown_off_never_queries():
   msgs = [AssistantMessage() for _ in range(50)] + [ResultMessage()]
   client = _FakeClient(msgs)
-  saw_result, result_error, auth_failure = await dr._drain_session(
+  saw_result, result_error, auth_failure, usage_limit = await dr._drain_session(
     client, None, max_turns=60, countdown=False,
   )
-  assert (saw_result, result_error, auth_failure) == (True, False, False)
+  assert (saw_result, result_error, auth_failure, usage_limit) == (
+    True, False, False, False,
+  )
   assert client.queries == []
 
 
@@ -147,10 +150,12 @@ async def test_drain_session_swallows_steering_injection_failure():
 
   msgs = [AssistantMessage() for _ in range(36)] + [ResultMessage()]
   client = _BrokenStdin(msgs)
-  saw_result, result_error, auth_failure = await dr._drain_session(
+  saw_result, result_error, auth_failure, usage_limit = await dr._drain_session(
     client, None, max_turns=60, countdown=True,
   )
-  assert (saw_result, result_error, auth_failure) == (True, False, False)
+  assert (saw_result, result_error, auth_failure, usage_limit) == (
+    True, False, False, False,
+  )
 
 
 # ---------------------------------------------------------------------------
@@ -383,10 +388,12 @@ async def test_drain_session_flags_auth_failure_on_401():
     )
   ]
   client = _FakeClient(msgs)
-  saw_result, result_error, auth_failure = await dr._drain_session(
+  saw_result, result_error, auth_failure, usage_limit = await dr._drain_session(
     client, None, max_turns=60, countdown=False,
   )
-  assert (saw_result, result_error, auth_failure) == (True, True, True)
+  assert (saw_result, result_error, auth_failure, usage_limit) == (
+    True, True, True, False,
+  )
 
 
 @pytest.mark.asyncio
@@ -395,10 +402,12 @@ async def test_drain_session_non_auth_error_does_not_flag_auth():
     ResultMessage(is_error=True, subtype="error_max_turns", result=None)
   ]
   client = _FakeClient(msgs)
-  saw_result, result_error, auth_failure = await dr._drain_session(
+  saw_result, result_error, auth_failure, usage_limit = await dr._drain_session(
     client, None, max_turns=60, countdown=False,
   )
-  assert (saw_result, result_error, auth_failure) == (True, True, False)
+  assert (saw_result, result_error, auth_failure, usage_limit) == (
+    True, True, False, False,
+  )
 
 
 def test_write_static_auth_failure_brief_lands_valid_html(tmp_path):
@@ -414,7 +423,7 @@ def test_write_static_auth_failure_brief_lands_valid_html(tmp_path):
 
 @pytest.mark.asyncio
 async def test_run_claude_session_returns_auth_rc_on_401(monkeypatch):
-  """A 401 result must surface as AUTH_FAILURE_RC, not the generic 2.
+  """A 401 result must surface as AUTH_FAILURE_RC, not the generic rc.
 
   This is the core of the fix: the rc carries the auth distinction out
   to the guaranteed-brief layer so it can skip the doomed CLI rescue.
@@ -556,6 +565,129 @@ async def test_fallback_auth_rc_unstaged_app_id_falls_back_to_cli(
     model=None, effort=None, log_fh=None,
   )
   assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Exit-code taxonomy — the runner's error band must never collide with the
+# wrapper's config codes (2 = no app id, 3 = no service token, 5 = lock skip)
+# ---------------------------------------------------------------------------
+
+def test_runner_error_codes_are_out_of_the_config_band():
+  # The collision this fixes: the runner used to return 2/3 for model/auth
+  # failures, colliding with fetch.sh's config errors so a usage cap read as
+  # "config error (exit 2)". Every runner error code must sit at >=64.
+  codes = {dr.GENERIC_MODEL_RC, dr.USAGE_LIMIT_RC, dr.AUTH_FAILURE_RC}
+  assert codes == {64, 65, 66}
+  assert codes.isdisjoint({2, 3, 5, 124})
+
+
+# ---------------------------------------------------------------------------
+# Usage/rate-limit handling — a cap must not burn a doomed CLI rescue either
+# ---------------------------------------------------------------------------
+
+def test_is_usage_limit_matches_known_phrasings():
+  assert dr._is_usage_limit("You have hit your weekly usage limit")
+  assert dr._is_usage_limit("API Error: 429 Too Many Requests")
+  assert dr._is_usage_limit("rate_limit_exceeded")
+  assert dr._is_usage_limit("insufficient quota")
+  # Case-insensitive.
+  assert dr._is_usage_limit("USAGE LIMIT reached")
+  # A 401 is NOT a usage limit, and the empty cases do not match.
+  assert not dr._is_usage_limit("Invalid authentication credentials")
+  assert not dr._is_usage_limit("error_max_turns")
+  assert not dr._is_usage_limit("")
+  assert not dr._is_usage_limit(None)
+
+
+@pytest.mark.asyncio
+async def test_drain_session_flags_usage_limit_but_not_auth():
+  msgs = [AssistantMessage()] + [
+    ResultMessage(
+      is_error=True,
+      subtype="error",
+      result="API Error: 429 usage limit reached",
+    )
+  ]
+  client = _FakeClient(msgs)
+  saw_result, result_error, auth_failure, usage_limit = await dr._drain_session(
+    client, None, max_turns=60, countdown=False,
+  )
+  assert (saw_result, result_error, auth_failure, usage_limit) == (
+    True, True, False, True,
+  )
+
+
+@pytest.mark.asyncio
+async def test_run_claude_session_returns_usage_rc_on_rate_limit(monkeypatch):
+  class _FakeUsageClient:
+    def __init__(self, options):
+      self.queries = []
+
+    async def connect(self):
+      pass
+
+    async def query(self, text):
+      self.queries.append(text)
+
+    async def receive_response(self):
+      yield AssistantMessage()
+      yield ResultMessage(
+        is_error=True, subtype="error", result="429 rate limit exceeded",
+      )
+
+    async def disconnect(self):
+      pass
+
+  import sys
+  import types
+
+  fake_sdk = types.ModuleType("claude_agent_sdk")
+  fake_sdk.ClaudeAgentOptions = lambda **kw: kw
+  fake_sdk.ClaudeSDKClient = _FakeUsageClient
+  monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+
+  rc = await dr._run_claude_session(
+    goal="g", skill_text="s", env={}, model=None, effort=None,
+    max_turns=60, log_fh=None, countdown=False,
+  )
+  assert rc == dr.USAGE_LIMIT_RC
+
+
+def test_write_static_usage_limit_brief_lands_valid_html(tmp_path):
+  brief = tmp_path / "apps" / "46" / "reports" / "2026-06-22.html"
+  assert dr.write_static_usage_limit_brief(brief) is True
+  html = brief.read_text(encoding="utf-8")
+  assert html.startswith("<!DOCTYPE html>")
+  assert "usage limit" in html
+  assert html.strip().endswith("</html>")
+
+
+@pytest.mark.asyncio
+async def test_fallback_writes_static_brief_without_cli_on_usage_rc(
+  tmp_path, monkeypatch,
+):
+  """On a usage-cap night, the runner writes the static brief ITSELF —
+  a second CLI session would just hit the same cap."""
+  monkeypatch.setattr(dr, "DATA_DIR", tmp_path)
+  _stage_app_id(tmp_path)
+
+  async def explode(**kwargs):
+    raise AssertionError("usage-cap rescue must NOT spawn a CLI session")
+
+  monkeypatch.setattr(dr, "_run_claude_session", explode)
+  monkeypatch.setattr(dr, "_run_codex_session", explode)
+
+  await dr._maybe_write_fallback_brief(
+    dr.USAGE_LIMIT_RC, provider="claude", skill_text="s", env={},
+    model=None, effort=None, log_fh=None,
+  )
+
+  brief = (
+    tmp_path / "apps" / "46" / "reports"
+    / f"{date.today().isoformat()}.html"
+  )
+  assert brief.is_file()
+  assert "usage limit" in brief.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
