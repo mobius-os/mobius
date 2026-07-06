@@ -328,6 +328,194 @@ test.describe('Stream reconnection', () => {
     await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(0)
   })
 
+  test('11. Quick visibility flip keeps a fresh live socket quiet', async ({ page }) => {
+    await page.addInitScript(() => {
+      const realFetch = window.fetch.bind(window)
+      let streamCount = 0
+      window.__streamFetchCount = 0
+
+      window.fetch = (input, init) => {
+        const url = typeof input === 'string' ? input : (input && input.url) || ''
+        if (!/\/api\/chats\/[0-9a-f-]+\/stream$/.test(url)) {
+          return realFetch(input, init)
+        }
+
+        streamCount++
+        window.__streamFetchCount = streamCount
+
+        if (streamCount === 1) {
+          const encoder = new TextEncoder()
+          const body = new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode(': keepalive\n\n'))
+            },
+            cancel() {},
+          })
+          return Promise.resolve(new Response(body, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          }))
+        }
+
+        return new Promise(() => {})
+      }
+    })
+
+    await setupChat(page)
+    await send(page, 'quick flip with healthy socket')
+    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(1)
+    await page.waitForFunction(() => window.__streamFetchCount === 1)
+
+    await setVisibility(page, 'hidden')
+    await page.waitForTimeout(250)
+    await setVisibility(page, 'visible')
+    await page.waitForTimeout(1800)
+
+    expect(await page.evaluate(() => window.__streamFetchCount)).toBe(1)
+    await expect(page.locator('.connection-status--reattach')).toHaveCount(0)
+  })
+
+  test('12. Long-hidden wake with stale reads still reattaches and replays', async ({ page }) => {
+    await page.addInitScript(() => {
+      const realFetch = window.fetch.bind(window)
+      let streamCount = 0
+      let finishReattached
+      window.__streamFetchCount = 0
+      window.__finishReattachedStream = () => finishReattached?.()
+
+      window.fetch = (input, init) => {
+        const url = typeof input === 'string' ? input : (input && input.url) || ''
+        if (!/\/api\/chats\/[0-9a-f-]+\/stream$/.test(url)) {
+          return realFetch(input, init)
+        }
+
+        streamCount++
+        window.__streamFetchCount = streamCount
+
+        if (streamCount === 1) {
+          const body = new ReadableStream({ start() {}, cancel() {} })
+          return Promise.resolve(new Response(body, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          }))
+        }
+
+        if (streamCount === 2) {
+          const encoder = new TextEncoder()
+          let controllerRef
+          const body = new ReadableStream({
+            start(controller) {
+              controllerRef = controller
+              controller.enqueue(encoder.encode(
+                'data: {"type":"text","content":"long-hidden replay"}\n\n',
+              ))
+              controller.enqueue(encoder.encode(
+                'data: {"type":"catch_up_done"}\n\n',
+              ))
+              finishReattached = () => {
+                controllerRef.enqueue(encoder.encode('data: {"type":"done"}\n\n'))
+                controllerRef.close()
+              }
+            },
+            cancel() {},
+          })
+          return Promise.resolve(new Response(body, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          }))
+        }
+
+        return new Promise(() => {})
+      }
+    })
+
+    await setupChat(page)
+    await send(page, 'long hidden with stale socket')
+    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(1)
+    await page.waitForFunction(() => window.__streamFetchCount === 1)
+
+    await setVisibility(page, 'hidden')
+    await page.waitForTimeout(5200)
+    await setVisibility(page, 'visible')
+
+    await page.waitForFunction(() => window.__streamFetchCount === 2)
+    await expect(page.locator('.chat__scroll')).toContainText(
+      'long-hidden replay', { timeout: 5000 },
+    )
+    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(1)
+
+    await page.evaluate(() => window.__finishReattachedStream())
+    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(0)
+  })
+
+  test('13. Slow long-hidden reattach shows the reconnecting note', async ({ page }) => {
+    await page.addInitScript(() => {
+      const realFetch = window.fetch.bind(window)
+      let streamCount = 0
+      let releaseReattach
+      window.__streamFetchCount = 0
+      window.__releaseSlowReattach = () => releaseReattach?.()
+
+      window.fetch = (input, init) => {
+        const url = typeof input === 'string' ? input : (input && input.url) || ''
+        if (!/\/api\/chats\/[0-9a-f-]+\/stream$/.test(url)) {
+          return realFetch(input, init)
+        }
+
+        streamCount++
+        window.__streamFetchCount = streamCount
+
+        if (streamCount === 1) {
+          const body = new ReadableStream({ start() {}, cancel() {} })
+          return Promise.resolve(new Response(body, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          }))
+        }
+
+        if (streamCount === 2) {
+          return new Promise(resolve => {
+            releaseReattach = () => {
+              const encoder = new TextEncoder()
+              const body = new ReadableStream({
+                start(controller) {
+                  controller.enqueue(encoder.encode(
+                    'data: {"type":"catch_up_done"}\n\n',
+                  ))
+                  controller.enqueue(encoder.encode('data: {"type":"done"}\n\n'))
+                  controller.close()
+                },
+              })
+              resolve(new Response(body, {
+                status: 200,
+                headers: { 'Content-Type': 'text/event-stream' },
+              }))
+            }
+          })
+        }
+
+        return new Promise(() => {})
+      }
+    })
+
+    await setupChat(page)
+    await send(page, 'slow reattach')
+    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(1)
+    await page.waitForFunction(() => window.__streamFetchCount === 1)
+
+    await setVisibility(page, 'hidden')
+    await page.waitForTimeout(5200)
+    await setVisibility(page, 'visible')
+
+    await page.waitForFunction(() => window.__streamFetchCount === 2)
+    await expect(page.locator('.connection-status--reattach')).toBeVisible({
+      timeout: 3000,
+    })
+
+    await page.evaluate(() => window.__releaseSlowReattach())
+    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(0)
+  })
+
   test('9. ConnectionStatus retry button stays above the composer pill on wake failure', async ({ page }) => {
     await page.addInitScript(() => {
       const realFetch = window.fetch.bind(window)
