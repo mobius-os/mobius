@@ -18,6 +18,11 @@ import { test, expect } from '@playwright/test'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
+// Recovery now runs in its OWN recoveryd container and serves /recover* there,
+// not from the app. /api/* still lives on the app (BASE); /recover* must target
+// recoveryd. In the e2e compose recoveryd is exposed on 8011 (RECOVERY_TEST_PORT).
+const RECOVER = process.env.MOBIUS_RECOVER_URL || 'http://localhost:8011'
+
 
 async function ensureOwner(page) {
   // Idempotent setup — first run creates admin/admin, later runs
@@ -39,31 +44,33 @@ let _cachedRecoverCookie = null
 
 async function loginToRecover(page) {
   await ensureOwner(page)
-  if (_cachedRecoverCookie) {
-    // Reuse the previously-issued cookie. The PWA cookie has a
-    // long enough TTL to span an entire test suite run; we only
-    // pay the auth round-trip once.
-    await page.context().addCookies([{
-      name: 'moebius_recover',
-      value: _cachedRecoverCookie,
-      domain: new URL(BASE).hostname,
-      path: '/',
-      httpOnly: true,
-      secure: BASE.startsWith('https://'),
-      sameSite: 'Lax',
-    }])
-    return
+  if (!_cachedRecoverCookie) {
+    const r = await page.request.post(`${RECOVER}/recover/auth`, {
+      form: { username: 'admin', password: 'admin' },
+      failOnStatusCode: false,
+    })
+    expect(r.status()).toBe(200)
+    // recoveryd sets its session cookie `Secure` UNCONDITIONALLY (it expects
+    // TLS behind the reverse proxy in prod), so a browser context talking to
+    // the plain-http e2e endpoint never stores it. Read the token straight out
+    // of the Set-Cookie header and inject it below with secure:false —
+    // recoveryd only reads the cookie VALUE on the way in, so this still
+    // exercises the real auth + gated-route path over http.
+    const setCookie = r.headers()['set-cookie'] || ''
+    const m = setCookie.match(/moebius_recover=([^;]+)/)
+    expect(m, 'recoveryd issued a moebius_recover cookie').toBeTruthy()
+    _cachedRecoverCookie = m[1]
+    expect(_cachedRecoverCookie.length).toBeGreaterThan(20)
   }
-  const r = await page.request.post(`${BASE}/recover/auth`, {
-    form: { username: 'admin', password: 'admin' },
-    failOnStatusCode: false,
-  })
-  expect(r.status()).toBe(200)
-  const cookies = await page.context().cookies()
-  const ck = cookies.find(c => c.name === 'moebius_recover')
-  expect(ck, 'moebius_recover cookie set').toBeTruthy()
-  expect(ck.value.length).toBeGreaterThan(20)
-  _cachedRecoverCookie = ck.value
+  await page.context().addCookies([{
+    name: 'moebius_recover',
+    value: _cachedRecoverCookie,
+    domain: new URL(RECOVER).hostname,
+    path: '/',
+    httpOnly: true,
+    secure: false,
+    sameSite: 'Lax',
+  }])
 }
 
 
@@ -72,7 +79,7 @@ async function createChat(page, provider = 'claude') {
   // chat_id. Idempotent w.r.t. provider configuration — the route
   // creates a chat regardless of whether credentials are present
   // (the underlying runner writes a _meta line and an empty log).
-  const r = await page.request.post(`${BASE}/recover/chat/new`, {
+  const r = await page.request.post(`${RECOVER}/recover/chat/new`, {
     data: { provider },
     failOnStatusCode: false,
   })
@@ -85,19 +92,25 @@ async function createChat(page, provider = 'claude') {
 
 test.describe('Recovery chat — minimum-frozen UI', () => {
 
-  test('1. /recover/chat without cookie 302s to /recover', async ({ page }) => {
+  test('1. /recover/chat without a session shows the login gate, not the chat', async ({ page }) => {
     // Clear any leftover cookies from prior tests in the same session.
     await page.context().clearCookies()
-    const r = await page.request.get(`${BASE}/recover/chat`, {
+    const r = await page.request.get(`${RECOVER}/recover/chat`, {
       maxRedirects: 0,
       failOnStatusCode: false,
     })
-    expect(r.status()).toBe(302)
+    // recoveryd renders the login page inline for an unauthenticated request
+    // (it used to 302 to /recover). The gate still holds — the chat surface
+    // must NOT be exposed without a session.
+    expect(r.status()).toBe(200)
+    const html = await r.text()
+    expect(html).toMatch(/password/i)
+    expect(html).not.toContain('rc-newchat')
   })
 
   test('2. /recover/chat with cookie renders the picker page', async ({ page }) => {
     await loginToRecover(page)
-    await page.goto(`${BASE}/recover/chat`)
+    await page.goto(`${RECOVER}/recover/chat`)
     await expect(page).toHaveTitle('Mobius recovery chat')
     // Banner is shared across picker + chat views — must be visible
     // on either entry point.
@@ -116,16 +129,16 @@ test.describe('Recovery chat — minimum-frozen UI', () => {
     await loginToRecover(page)
     const chatId = await createChat(page)
     // POST /recover/chat/send with the multi-chat schema.
-    const r = await page.request.post(`${BASE}/recover/chat/send`, {
-      data: { chat_id: chatId, message: 'lock-in test message' },
+    const r = await page.request.post(`${RECOVER}/recover/chat/send`, {
+      data: { chat_id: chatId, text: 'lock-in test message' },
     })
     expect(r.status()).toBe(200)
     const body = await r.json()
-    expect(body.status).toBe('queued')
+    expect(typeof body.turn_id).toBe('number')
 
     // Reload the chat view — server-rendered history must include
     // our message.
-    await page.goto(`${BASE}/recover/chat?id=${chatId}`)
+    await page.goto(`${RECOVER}/recover/chat?chat=${chatId}`)
     await expect(
       page.locator('.rc-log .rc-msg.rc-user').last(),
     ).toContainText('lock-in test message')
@@ -135,25 +148,25 @@ test.describe('Recovery chat — minimum-frozen UI', () => {
     await loginToRecover(page)
     const chatId = await createChat(page)
     // Seed: send a message first.
-    const sendR = await page.request.post(`${BASE}/recover/chat/send`, {
-      data: { chat_id: chatId, message: 'will be wiped' },
+    const sendR = await page.request.post(`${RECOVER}/recover/chat/send`, {
+      data: { chat_id: chatId, text: 'will be wiped' },
     })
     expect(sendR.status()).toBe(200)
     // POST reset.
-    const r = await page.request.post(`${BASE}/recover/chat/reset`, {
+    const r = await page.request.post(`${RECOVER}/recover/chat/reset`, {
       data: { chat_id: chatId },
     })
     expect(r.status()).toBe(200)
     // Reload — chat log should be empty.
-    await page.goto(`${BASE}/recover/chat?id=${chatId}`)
+    await page.goto(`${RECOVER}/recover/chat?chat=${chatId}`)
     await expect(page.locator('.rc-log .rc-msg')).toHaveCount(0)
   })
 
   test('5. Send rejects empty message', async ({ page }) => {
     await loginToRecover(page)
     const chatId = await createChat(page)
-    const r = await page.request.post(`${BASE}/recover/chat/send`, {
-      data: { chat_id: chatId, message: '   ' },
+    const r = await page.request.post(`${RECOVER}/recover/chat/send`, {
+      data: { chat_id: chatId, text: '   ' },
       failOnStatusCode: false,
     })
     expect(r.status()).toBe(400)
@@ -161,15 +174,15 @@ test.describe('Recovery chat — minimum-frozen UI', () => {
 
   test('6. /recover dashboard links to /recover/chat', async ({ page }) => {
     await loginToRecover(page)
-    await page.goto(`${BASE}/recover`)
+    await page.goto(`${RECOVER}/recover`)
     const link = page.locator('a[href="/recover/chat"]')
     await expect(link).toBeVisible()
-    await expect(link).toContainText('Open recovery chat')
+    await expect(link).toContainText('Run Recovery Agent')
   })
 
   test('7. /recover/chat/send requires cookie', async ({ page }) => {
     await page.context().clearCookies()
-    const r = await page.request.post(`${BASE}/recover/chat/send`, {
+    const r = await page.request.post(`${RECOVER}/recover/chat/send`, {
       data: { chat_id: 'any', message: 'hi' },
       failOnStatusCode: false,
     })
@@ -178,7 +191,7 @@ test.describe('Recovery chat — minimum-frozen UI', () => {
 
   test('8. /recover/chat/send rejects missing chat_id', async ({ page }) => {
     await loginToRecover(page)
-    const r = await page.request.post(`${BASE}/recover/chat/send`, {
+    const r = await page.request.post(`${RECOVER}/recover/chat/send`, {
       data: { message: 'no chat_id here' },
       failOnStatusCode: false,
     })
