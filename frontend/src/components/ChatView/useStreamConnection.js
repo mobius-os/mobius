@@ -28,12 +28,21 @@ const CHARS_PER_FRAME = 3
 const SEND_POST_TIMEOUT_MS = 20000
 
 // Delay before the wake/online reattach surfaces as a visible
-// "Reconnecting…" note. A healthy reattach (tab briefly hidden, socket
-// still warm) completes well inside this window — showing the note for
-// those would flash it on every tab switch. This is debounce on a real
-// state, not a bandaid: the reattach genuinely starts at arm time; we
-// only skip *rendering* it when it resolves faster than a human can read.
-const RECONNECT_NOTE_DELAY_MS = 300
+// "Reconnecting…" note. Real mobile reattach can spend time waking the
+// radio, negotiating TLS, and replaying a long event log; quick
+// app-switches should not flash a note at all.
+const RECONNECT_NOTE_DELAY_MS = 1500
+
+// A hidden tab that comes back inside this window is usually a glance at
+// the notification shade or an app switch. If the SSE socket has also read
+// recently, keep it: tearing down a healthy stream is what makes quiet tool
+// turns flash "Reconnecting…" on every foreground.
+const QUICK_WAKE_HIDDEN_MS = 5000
+
+// chats_stream.py sends keepalive SSE comments every 30s. Two missed
+// keepalives plus grace means a socket is no longer demonstrably healthy
+// and the long-standing frozen-tab reconnect defense should take over.
+const FRESH_SSE_READ_MS = 70000
 
 // Window during which a 204 from /stream after a send is a race
 // (the SSE GET landed before chats_stream.py:POST /messages finished
@@ -288,6 +297,19 @@ export default function useStreamConnection(chatId, {
   // prevents an onNeedsRefresh → fetchMessages race that wipes the
   // optimistic user message before the DB persists it.
   const justSentAtRef = useRef(0)
+  // Last successful body chunk from /stream. Comment-only keepalives count:
+  // the invariant is transport liveness, not whether the chunk carried a
+  // chat event.
+  const lastReadAtRef = useRef(0)
+  // Hidden duration is sampled on visibilitychange so a quick hide/show can
+  // keep a fresh active socket instead of forcing a catch-up replay.
+  const hiddenAtRef = useRef(
+    typeof document !== 'undefined' && document.visibilityState === 'hidden'
+      ? Date.now()
+      : 0
+  )
+  const lastHiddenDurationRef = useRef(null)
+  const lastWakeAtRef = useRef(0)
 
   // Max innerHeight ever observed for this session. Used as the viewport
   // height sent to the backend (which forwards it to the agent so its
@@ -511,6 +533,7 @@ export default function useStreamConnection(chatId, {
 
     const controller = new AbortController()
     abortRef.current = controller
+    lastReadAtRef.current = 0
 
     try {
       const res = await fetch(`${BASE}/api/chats/${chatIdRef.current}/stream`, {
@@ -642,6 +665,7 @@ export default function useStreamConnection(chatId, {
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
+        lastReadAtRef.current = Date.now()
 
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
@@ -1185,19 +1209,51 @@ export default function useStreamConnection(chatId, {
   // (a) Connection cleanly closed while backgrounded (abortRef is
   //     null, isStreaming still true) → reconnect with reset.
   // (b) Connection died silently — TCP dropped during sleep, no
-  //     error event fired, abortRef still non-null. We abort the
-  //     stale controller and reconnect; the catch-up burst replays
-  //     everything the client missed.
+  //     error event fired, abortRef still non-null. We abort stale
+  //     controllers and reconnect; the catch-up burst replays
+  //     everything the client missed. A controller is stale only when
+  //     it is no longer demonstrably healthy: server keepalive comments
+  //     arrive every 30s, so a read inside 70s after a short hide means
+  //     the existing socket is still alive and should not be replaced.
   //
   // Without this, the UI shows frozen "thinking" dots forever
   // after screen-lock during streaming.
   useEffect(() => {
+    function shouldKeepActiveConnection(now, hiddenDuration) {
+      return abortRef.current
+        && hiddenDuration !== null
+        && hiddenDuration < QUICK_WAKE_HIDDEN_MS
+        && lastReadAtRef.current > 0
+        && now - lastReadAtRef.current < FRESH_SSE_READ_MS
+    }
+
+    function armNoteForWake(hiddenDuration) {
+      if (hiddenDuration !== null && hiddenDuration >= QUICK_WAKE_HIDDEN_MS) {
+        armReconnectingNote()
+      }
+    }
+
     function onVisible() {
+      const now = Date.now()
+      if (document.visibilityState === 'hidden') {
+        hiddenAtRef.current = now
+        lastHiddenDurationRef.current = null
+        lastWakeAtRef.current = 0
+        return
+      }
       if (document.visibilityState !== 'visible') return
       if (!wantsReconnectRef.current && !isStreamingRef.current) return
-      // Past the idle gate: a reattach genuinely starts here. Surface it
-      // if it outlives the show-delay (see armReconnectingNote).
-      armReconnectingNote()
+      const hiddenDuration = hiddenAtRef.current
+        ? Math.max(0, now - hiddenAtRef.current)
+        : null
+      hiddenAtRef.current = 0
+      lastHiddenDurationRef.current = hiddenDuration
+      lastWakeAtRef.current = now
+      if (shouldKeepActiveConnection(now, hiddenDuration)) return
+      // Past the idle gate: a reattach genuinely starts here. On the wake
+      // path, show the note only for real backgrounding; quick flips either
+      // keep the socket above or reconnect silently if the socket is stale.
+      armNoteForWake(hiddenDuration)
       if (abortRef.current) {
         abortRef.current.abort()
         abortRef.current = null
@@ -1207,7 +1263,18 @@ export default function useStreamConnection(chatId, {
 
     function onOnline() {
       if (!wantsReconnectRef.current && !isStreamingRef.current && !connectionErrorRef.current) return
-      armReconnectingNote()
+      const now = Date.now()
+      const hiddenDuration = document.visibilityState === 'hidden'
+        ? (hiddenAtRef.current ? Math.max(0, now - hiddenAtRef.current) : null)
+        : (lastWakeAtRef.current && now - lastWakeAtRef.current < QUICK_WAKE_HIDDEN_MS
+            ? lastHiddenDurationRef.current
+            : null)
+      if (shouldKeepActiveConnection(now, hiddenDuration)) return
+      if (hiddenDuration === null) {
+        armReconnectingNote()
+      } else {
+        armNoteForWake(hiddenDuration)
+      }
       if (abortRef.current) {
         abortRef.current.abort()
         abortRef.current = null
