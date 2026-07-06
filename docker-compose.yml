@@ -34,6 +34,12 @@ services:
       - SECRET_KEY=${SECRET_KEY}
       - DOMAIN=${DOMAIN}
       - FRONTEND_ORIGIN=https://${DOMAIN}
+      # GitHub device-flow sign-in. Defaults to the Möbius OAuth app's
+      # public client id (keep in sync with config.py's baked default —
+      # an empty env var here would override it and disable device flow).
+      # Self-hosters: set GITHUB_OAUTH_CLIENT_ID in .env to use your own
+      # OAuth app, or to "" to disable the device flow (PAT still works).
+      - GITHUB_OAUTH_CLIENT_ID=${GITHUB_OAUTH_CLIENT_ID:-Ov23liMpOLS6qp5YV8Vk}
       - DATABASE_URL=sqlite:////data/db/ultimate.db
       - DATA_DIR=/data
     volumes:

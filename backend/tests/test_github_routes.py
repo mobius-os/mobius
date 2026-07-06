@@ -49,12 +49,11 @@ def _github_state():
 
 
 def _set_client_id(monkeypatch, value):
-  """Sets (or clears, when value is None) GITHUB_OAUTH_CLIENT_ID and drops
-  the lru_cache so the next get_settings() reflects it."""
-  if value is None:
-    monkeypatch.delenv("GITHUB_OAUTH_CLIENT_ID", raising=False)
-  else:
-    monkeypatch.setenv("GITHUB_OAUTH_CLIENT_ID", value)
+  """Sets GITHUB_OAUTH_CLIENT_ID and drops the lru_cache so the next
+  get_settings() reflects it. None means "device flow disabled", which is
+  an EXPLICIT empty env var — config.py ships a public default client id,
+  so merely unsetting the var would leave device flow available."""
+  monkeypatch.setenv("GITHUB_OAUTH_CLIENT_ID", value if value is not None else "")
   get_settings.cache_clear()
 
 
