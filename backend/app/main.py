@@ -36,7 +36,7 @@ from app.routes import (
   chat_logs_router, chat_router, chats_router, chats_stream_router,
   debug_router, fs_router, generate_router,
   notifications_router, notify_router, proxy_router, push_router,
-  recover_router, self_reminders_router, settings_router,
+  self_reminders_router, settings_router,
   client_error_router, standalone_router, storage_router,
   theme_router, uploads_router, platform_router,
   shell_router, published_router,
@@ -256,9 +256,40 @@ async def lifespan(app):
       )
   except Exception as exc:
     _log.error("start_frontend_watcher failed: %s", exc, exc_info=True)
+  # Runtime liveness watchdog. reconcile_interrupted_chats only runs at boot,
+  # so a turn that leaves its run marker set without a process restart (a
+  # FAILED_LEAVE_MARKER terminal, or the late-promote gap) would hold the chat
+  # "running" forever and make the app look permanently busy. This periodic
+  # sweep clears such orphaned markers between boots. Wrapped so a sweep failure
+  # can't kill the loop; the loop is cancelled on shutdown.
+  _wedged_sweep_task = None
+  try:
+    from app.chat import sweep_wedged_run_markers
+    from app.database import SessionLocal as _SweepSession
+
+    async def _wedged_marker_loop():
+      while True:
+        await _asyncio.sleep(60)
+        try:
+          _sw_db = _SweepSession()
+          try:
+            await sweep_wedged_run_markers(_sw_db)
+          finally:
+            _sw_db.close()
+        except _asyncio.CancelledError:
+          raise
+        except Exception as _exc:
+          _log.error("wedged-marker sweep failed: %s", _exc, exc_info=True)
+
+    _wedged_sweep_task = _asyncio.create_task(_wedged_marker_loop())
+  except Exception as exc:
+    _log.error("wedged-marker sweep wiring failed: %s", exc, exc_info=True)
   try:
     yield
   finally:
+    # Stop the liveness watchdog before the writer drains.
+    if _wedged_sweep_task is not None:
+      _wedged_sweep_task.cancel()
     # Drain + join the chat-writer actor so any in-flight persistence
     # completes before the process exits. Wrapped: a stop failure must
     # not mask the rest of shutdown.
@@ -491,20 +522,6 @@ except Exception as _exc:  # pragma: no cover - defensive boot guard
 app.include_router(notify_router)
 app.include_router(proxy_router)
 app.include_router(client_error_router)
-app.include_router(recover_router)
-
-# Recovery chat — frozen, isolated from production chat code so it
-# stays reachable when the agent breaks chat.py / providers.py /
-# auth.py. See app/recover_chat.py for the design.
-from app.recover_chat import router as recover_chat_router  # noqa: E402
-app.include_router(recover_chat_router)
-
-# Recovery OAuth — frozen, isolated from routes/auth.py so the
-# recovery surface can connect/reconnect a provider even when the
-# main-app auth routes are broken by an agent edit. See
-# app/recover_oauth.py for the design.
-from app.recover_oauth import router as recover_oauth_router  # noqa: E402
-app.include_router(recover_oauth_router)
 app.include_router(settings_router)
 app.include_router(platform_router)
 app.include_router(shell_router)

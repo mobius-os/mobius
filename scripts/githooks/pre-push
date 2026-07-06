@@ -157,6 +157,20 @@ if changed_match '^backend/'; then
   VENV="$MAIN/backend/.venv/bin/python"
   if [ -x "$VENV" ]; then
     warn "running backend pytest (full suite ~2m; bypass with --no-verify)…"
+    # Sibling sessions all share this ONE venv (+ its SQLite fixtures + esbuild),
+    # so two full suites at once thrash CPU/IO and BOTH crawl — a push can look
+    # like it "hangs" for many minutes when it is really contending with another
+    # session's suite. Serialize on an advisory lock at the shared venv so the
+    # suites run back-to-back at full speed instead. Best-effort by design: if
+    # flock is missing or the wait times out we run anyway — the lock is a
+    # courtesy to avoid thrash, never a correctness requirement (--no-verify
+    # still bypasses everything).
+    if command -v flock >/dev/null 2>&1 && exec 9>"$MAIN/backend/.venv/.suite.lock" 2>/dev/null; then
+      if ! flock -n 9; then
+        warn "  shared venv busy (a sibling suite is running) — waiting up to 15m…"
+        flock -w 900 9 || warn "  lock wait timed out — running anyway (may contend)"
+      fi
+    fi
     # esbuild on PATH (compile tests shell out to it) + a throwaway
     # SECRET_KEY so Settings validates. The shared venv supplies deps; cwd
     # ($ROOT/backend) supplies the code under test.
@@ -174,6 +188,8 @@ if changed_match '^backend/'; then
     else
       err "backend pytest FAILED:"; tail -n 30 "$PP_TMP/be" | sed 's/^/    /' >&2; FAIL=1
     fi
+    # Release the shared-venv lock (fd 9 also closes on hook exit; explicit is tidier).
+    exec 9>&- 2>/dev/null || true
   else
     warn "backend changed, no shared venv ($MAIN/backend/.venv) — skipping pytest (CI runs it)."
     warn "  enable: python3 -m venv \"$MAIN/backend/.venv\" \\"

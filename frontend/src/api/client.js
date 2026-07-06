@@ -115,7 +115,25 @@ export async function apiFetch(path, options = {}) {
     ...options.headers,
   }
 
-  const res = await fetch(`${BASE}/api${path}`, { ...options, headers })
+  // Opt-in timeout: callers that must not hang forever (e.g. the background
+  // reconcile poll and the message fetch — see ChatView) pass `timeoutMs`.
+  // Existing callers omit it and keep the un-timed behaviour, so this can't
+  // regress a legitimately-slow endpoint. A caller-supplied `signal` wins.
+  const { timeoutMs, ...fetchOptions } = options
+  let signal = fetchOptions.signal
+  let timeoutTimer
+  if (timeoutMs && !signal) {
+    const ctrl = new AbortController()
+    timeoutTimer = setTimeout(() => ctrl.abort(), timeoutMs)
+    signal = ctrl.signal
+  }
+
+  let res
+  try {
+    res = await fetch(`${BASE}/api${path}`, { ...fetchOptions, headers, signal })
+  } finally {
+    if (timeoutTimer) clearTimeout(timeoutTimer)
+  }
 
   if (res.status === 401 && !setupSession.isInProgress()) {
     clearToken()

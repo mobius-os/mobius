@@ -776,7 +776,18 @@ def dispatch_sdk_message(
         # Streamed via thinking_delta already — snapshot duplicate.
         continue
       if isinstance(block, TextBlock):
-        # Streamed via text_delta already — snapshot duplicate.
+        # The text already streamed live via text_delta events; this is the
+        # AUTHORITATIVE full text of the just-completed assistant item. Do NOT
+        # discard it — durable prose otherwise rides ONLY on the delta stream,
+        # so a single dropped/coalesced delta persists a permanently truncated
+        # message (the "I " bug). Emit it as a replace-semantics event; events.py
+        # overwrites the streamed text block with this complete text (a no-op
+        # when no delta was lost). Tool blocks are already sourced from this
+        # same message object and so were always durable — this closes the gap
+        # for text. Replace, never append: the reducer concatenates plain
+        # "text" events, so re-emitting as "text" would double the prose.
+        if block.text:
+          bc.publish({"type": "text_final", "content": block.text})
         continue
       _emit_unknown(
         bc, f"assistant_block:{type(block).__name__}", block,
@@ -1236,11 +1247,24 @@ async def run_claude_sdk_turn(
             continue
           break
 
+      # Reaching here means the outer while broke out of the resultless-end
+      # path above (line ~1237): the SDK stream ended WITHOUT a terminal
+      # ResultMessage and with no pending steer to requery. A successful turn
+      # returns its terminal at `return terminal` above and never falls
+      # through here. So this is an error exit, not a clean turn — the CLI
+      # died mid-stream (early resume failure, auth, OOM/SIGTERM kill) before
+      # emitting a result. Return it error-shaped so chat.py publishes the
+      # error and finalize() persists a durable error block, instead of the
+      # old silent `error=None` that logged a clean $0 "done" and let the
+      # just-consumed user message go unanswered with nothing to reconcile.
       return {
         "session_id": current_session_id,
         "cost_usd": cost_usd,
         "usage": None,
-        "error": None,
+        "error": (
+          "The response ended unexpectedly before it finished "
+          "(the agent stopped without returning a result). Please try again."
+        ),
       }
     except Exception as exc:
       msg = str(exc)

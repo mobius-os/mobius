@@ -9,10 +9,42 @@ validator, get a 304, and run the stale frame forever. That is the exact
 failure that pinned a client to a dropped `/vendor/three/` path.
 """
 
+import asyncio
 import datetime
+from pathlib import Path
 from types import SimpleNamespace
 
+from app import compiler
 from app.routes.apps import _frame_etag
+
+
+def test_recompile_bumps_updated_at_so_etag_changes(monkeypatch, tmp_path):
+  """A watcher/PATCH recompile must advance app.updated_at, or the /module +
+  /frame ETags (derived from it) never change and a warm browser 304s to the
+  stale bundle even though the compiled file was rewritten."""
+  monkeypatch.setattr(compiler, "_compiled_dir", lambda: tmp_path)
+  monkeypatch.setattr(compiler, "_entry_source_path", lambda app: None)
+
+  async def fake_compile(app_id, jsx, *, out_path=None, source_path=None):
+    Path(out_path).write_text("// compiled")
+
+  monkeypatch.setattr(compiler, "compile_jsx", fake_compile)
+
+  commits = {"n": 0}
+
+  class FakeDB:
+    def commit(self):
+      commits["n"] += 1
+
+    def rollback(self):  # pragma: no cover - not exercised on the happy path
+      pass
+
+  before = datetime.datetime(2020, 1, 1, 0, 0, 0)
+  app = SimpleNamespace(id=999, jsx_source="old", compiled_path=None, updated_at=before)
+  asyncio.run(compiler.recompile_app_bundle(FakeDB(), app, "export default function A(){}"))
+
+  assert app.updated_at > before, "recompile must advance updated_at for ETag freshness"
+  assert commits["n"] == 1
 
 
 def test_frame_etag_busts_when_frame_content_changes(tmp_path):

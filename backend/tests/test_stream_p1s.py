@@ -181,59 +181,62 @@ def test_event_log_drops_oldest_when_capped():
   assert _EVENT_LOG_MAX in seqs, "newest entry must be present"
 
 
-def test_text_delta_events_coalesced_in_log():
-  """Adjacent text-delta events for the same block index are merged into
-  one log entry. Subscribers still receive each delta individually."""
+def test_text_events_coalesced_in_log():
+  """Adjacent streaming-text events are merged into one log entry. The runners
+  publish streaming text as {"type": "text", "content": ...} (there is no
+  "text_delta"/"index" event on the wire), so the coalescer keys on that shape.
+  Subscribers still receive each chunk individually."""
   bc = ChatBroadcast("coalesce-test")
   received: list = []
   catch_up, q = bc.subscribe()
 
-  bc.publish({"type": "text_delta", "index": 0, "text": "foo"})
-  bc.publish({"type": "text_delta", "index": 0, "text": "bar"})
-  bc.publish({"type": "text_delta", "index": 0, "text": "baz"})
+  bc.publish({"type": "text", "content": "foo"})
+  bc.publish({"type": "text", "content": "bar"})
+  bc.publish({"type": "text", "content": "baz"})
 
   # Log has one coalesced entry.
   assert len(bc.event_log) == 1
-  assert bc.event_log[0]["text"] == "foobarbaz"
+  assert bc.event_log[0]["content"] == "foobarbaz"
 
-  # But subscribers received all three deltas individually.
+  # But subscribers received all three chunks individually.
   while not q.empty():
     received.append(q.get_nowait())
   assert len(received) == 3
-  assert received[0]["text"] == "foo"
-  assert received[1]["text"] == "bar"
-  assert received[2]["text"] == "baz"
+  assert received[0]["content"] == "foo"
+  assert received[1]["content"] == "bar"
+  assert received[2]["content"] == "baz"
 
 
-def test_text_delta_coalesce_boundary_resets_on_different_index():
-  """Coalescing does not merge text-deltas for different block indexes."""
+def test_text_coalesce_broken_by_boundary():
+  """A text_boundary between text runs keeps them as distinct log entries, so
+  separate assistant text blocks don't merge into one on reconnect replay."""
   bc = ChatBroadcast("boundary-test")
-  bc.publish({"type": "text_delta", "index": 0, "text": "A"})
-  bc.publish({"type": "text_delta", "index": 1, "text": "B"})
-  bc.publish({"type": "text_delta", "index": 0, "text": "C"})
+  bc.publish({"type": "text", "content": "A"})
+  bc.publish({"type": "text_boundary"})
+  bc.publish({"type": "text", "content": "B"})
 
-  # Second delta is for a different index — new log entry; third is for
-  # index 0 again but the run was broken by index 1 — another new entry.
-  assert len(bc.event_log) == 3
+  assert [e.get("type") for e in bc.event_log] == ["text", "text_boundary", "text"]
+  assert bc.event_log[0]["content"] == "A"
+  assert bc.event_log[2]["content"] == "B"
 
 
-def test_text_delta_coalesce_boundary_resets_on_non_delta():
-  """A non-text-delta event breaks the coalesce run."""
-  bc = ChatBroadcast("non-delta-break")
-  bc.publish({"type": "text_delta", "index": 0, "text": "X"})
-  bc.publish({"type": "tool_start", "index": 1})
-  bc.publish({"type": "text_delta", "index": 0, "text": "Y"})
+def test_text_coalesce_broken_by_non_text():
+  """A non-text event (e.g. a tool block) breaks the coalesce run."""
+  bc = ChatBroadcast("non-text-break")
+  bc.publish({"type": "text", "content": "X"})
+  bc.publish({"type": "tool_start", "tool": "Bash", "input": ""})
+  bc.publish({"type": "text", "content": "Y"})
 
   assert len(bc.event_log) == 3
 
 
 def test_subscribe_catch_up_after_coalesce():
   """A late subscriber's catch-up includes the coalesced log entry with
-  the merged text — semantically equivalent to all the raw deltas."""
+  the merged text — semantically equivalent to all the raw chunks."""
   bc = ChatBroadcast("catch-up-coalesce")
   for chunk in ("hello ", "world"):
-    bc.publish({"type": "text_delta", "index": 0, "text": chunk})
-  # Subscribe AFTER the deltas.
+    bc.publish({"type": "text", "content": chunk})
+  # Subscribe AFTER the chunks.
   catch_up, _ = bc.subscribe()
   assert len(catch_up) == 1
-  assert catch_up[0]["text"] == "hello world"
+  assert catch_up[0]["content"] == "hello world"

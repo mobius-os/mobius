@@ -90,7 +90,7 @@ def test_broken_route_module_yields_stub_real_routers_unaffected(
   monkeypatch,
 ):
   """If `app.routes.apps` raises on import, `apps_router` becomes a
-  stub but `recover_router` (and other healthy modules) still load
+  stub but `auth_router` (and other healthy modules) still load
   as real routers."""
   # Drop any cached `app.routes` so `_load` re-executes against the
   # monkeypatched importer state.
@@ -121,16 +121,16 @@ def test_broken_route_module_yields_stub_real_routers_unaffected(
   assert resp.status_code == 503
   assert "apps" in resp.json()["detail"]
 
-  # recover_router is a real router (not a stub): it has at least
+  # auth_router is a real router (not a stub): it has at least
   # one route registered, and that route is NOT the catch-all
   # `{rest_of_path:path}` the stub registers.
-  recover_paths = [
-    getattr(r, "path", "") for r in routes_pkg.recover_router.routes
+  auth_paths = [
+    getattr(r, "path", "") for r in routes_pkg.auth_router.routes
   ]
-  assert recover_paths, "recover_router should have real routes"
+  assert auth_paths, "auth_router should have real routes"
   assert not any(
-    "{rest_of_path:path}" in p for p in recover_paths
-  ), f"recover_router looks like a stub: {recover_paths}"
+    "{rest_of_path:path}" in p for p in auth_paths
+  ), f"auth_router looks like a stub: {auth_paths}"
 
 
 def test_main_boots_when_app_watcher_start_raises(monkeypatch):

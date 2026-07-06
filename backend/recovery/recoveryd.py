@@ -223,6 +223,12 @@ _MAX_LIVE_ATTEMPTS = 3
 # `.recover-pending` handler (entrypoint.sh ~909) and recovery_restore.sh.
 _RESTORE_MODES = {"platform", "platform-baked"}
 
+# Max JSON body recoveryd will read on an agent POST. The agent bodies are
+# tiny (a chat_id plus a text field), so anything larger is rejected with 413
+# BEFORE the body is read — an unauthenticated or cross-site client cannot tie
+# up a request thread streaming a huge payload past the auth gate.
+_MAX_JSON_BODY = 1 * 1024 * 1024
+
 
 # ---------------------------------------------------------------------------
 # Bundle trust — the root-ownership integrity rule, reused by both the
@@ -1022,7 +1028,7 @@ class _Handler(BaseHTTPRequestHandler):
     # branch BEFORE the form drain below so the body is consumed exactly once.
     if path in (
       "/recover/chat/new", "/recover/chat/send", "/recover/chat/stream",
-      "/recover/chat/delete", "/recover/chat/reset",
+      "/recover/chat/delete", "/recover/chat/reset", "/recover/restart",
       "/recover/provider/claude/start", "/recover/provider/claude/code",
       "/recover/provider/codex/start",
     ):
@@ -1221,7 +1227,10 @@ class _Handler(BaseHTTPRequestHandler):
     query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
     active = (query.get("chat") or [None])[0]
     chats = recovery_chat_runner.list_chats()
-    if active and not any(c.get("id") == active for c in chats):
+    # list_chats() keys each dict by "chat_id" (never "id"); an "id" lookup
+    # is always None and would null every valid ?chat=, bouncing the user
+    # back to the picker and breaking chat-open entirely.
+    if active and not any(c.get("chat_id") == active for c in chats):
       active = None
     history = recovery_chat_runner.load_log(active) if active else []
     provider = (
@@ -1231,12 +1240,39 @@ class _Handler(BaseHTTPRequestHandler):
       chats, active, history, provider))
 
   def _handle_agent_post(self, path: str) -> None:
-    """Dispatches the gated JSON chat + provider-reconnect POST routes."""
-    payload = self._read_json()  # drain body first (keep-alive safe).
+    """Dispatches the gated JSON chat + provider-reconnect POST routes.
+
+    The size cap, cross-site guard, and auth gate all run on HEADERS
+    (Content-Length, Sec-Fetch-Site/Origin, the session cookie) BEFORE the
+    body is read, so an oversized, cross-site, or unauthenticated request is
+    rejected without recoveryd consuming a large payload. A rejected request
+    closes the connection: the unread body is discarded rather than
+    mis-parsed as the next keep-alive request.
+    """
+    try:
+      declared = int(self.headers.get("Content-Length", 0) or 0)
+    except (TypeError, ValueError):
+      declared = 0
+    if declared > _MAX_JSON_BODY:
+      self.close_connection = True
+      self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                 {"error": "request body too large"})
+      return
     if self._reject_cross_site():
+      self.close_connection = True
       self._json(HTTPStatus.FORBIDDEN, {"error": "cross-site request blocked"})
       return
     if not self._agent_gate():
+      self.close_connection = True
+      return
+    # Gates passed on headers alone — now it is safe to read the small body.
+    payload = self._read_json()
+    if path == "/recover/restart":
+      ok, detail = schedule_restart()
+      if not ok:
+        self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": detail})
+        return
+      self._json(HTTPStatus.OK, {"ok": True})
       return
     if path == "/recover/chat/stream":
       self._stream_agent_turn(payload)
@@ -1312,6 +1348,7 @@ class _Handler(BaseHTTPRequestHandler):
     self.send_header("X-Accel-Buffering", "no")
     self.end_headers()
     loop = asyncio.new_event_loop()
+    agen = None
     try:
       agen = recovery_chat_runner.stream_turn(
         message, provider, chat_id=chat_id, model=model)
@@ -1324,8 +1361,25 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
         self.wfile.flush()
     except (BrokenPipeError, ConnectionResetError):
+      # Client disconnected mid-stream. Fall through to the finally, which
+      # closes the generator so the runner's own `finally` (which terminates
+      # the root CLI) runs — otherwise a disconnect would orphan the agent.
       pass
     finally:
+      # Close the async generator BEFORE the loop so stream_turn's `finally`
+      # executes and the root CLI process group is torn down. aclose() may
+      # raise if the generator is already exhausted; shutdown_asyncgens
+      # finalizes any that aclose() did not. Both are best-effort — a cleanup
+      # error must never mask the original disconnect.
+      if agen is not None:
+        try:
+          loop.run_until_complete(agen.aclose())
+        except Exception:
+          pass
+      try:
+        loop.run_until_complete(loop.shutdown_asyncgens())
+      except Exception:
+        pass
       loop.close()
 
   # -- logging ------------------------------------------------------------
@@ -1368,6 +1422,26 @@ def schedule_restore(mode: str) -> tuple[bool, str]:
       pass
     return False, f"could not write restart sentinel: {exc}"
   log.info("restore scheduled: mode=%s (sentinel written)", mode)
+  return True, "ok"
+
+
+def schedule_restart() -> tuple[bool, str]:
+  """Requests a PLAIN platform restart by writing only the restart sentinel.
+
+  Unlike schedule_restore, this writes NO `.recover-pending` mode — so the
+  platform container's poller cycles pid1 and the platform comes back up on
+  the SAME code (a restart, not a git-reset restore). This is the path the
+  recovery chat's "Restart server" button uses after the agent has edited
+  files in place: reload the edited code without discarding it.
+
+  Returns (ok, detail). Never raises — a recovery action that 500s is the
+  worst failure mode.
+  """
+  try:
+    _atomic_write(RESTART_SENTINEL, "1")
+  except OSError as exc:
+    return False, f"could not write restart sentinel: {exc}"
+  log.info("platform restart requested (sentinel written)")
   return True, "ok"
 
 

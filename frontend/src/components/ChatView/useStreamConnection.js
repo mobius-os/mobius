@@ -21,6 +21,12 @@ import {
 // DO NOT decrease below 2 — it makes streaming feel sluggish.
 const CHARS_PER_FRAME = 3
 
+// Hard cap on the send POST. It returns 202 as soon as the backend registers
+// the broadcast (fast), so this only fires when the request is genuinely
+// stuck (dead socket after mobile sleep, lost network). On abort the send's
+// catch resets the optimistic composer lock instead of hanging in Stop mode.
+const SEND_POST_TIMEOUT_MS = 20000
+
 // Window during which a 204 from /stream after a send is a race
 // (the SSE GET landed before chats_stream.py:POST /messages finished
 // registering the broadcast) rather than "agent finished." The POST
@@ -274,6 +280,28 @@ export default function useStreamConnection(chatId, {
       }
     } else {
       updated.push({ type: 'text', content: chunk })
+    }
+    forceNewTextBlockRef.current = false
+    return updated
+  }
+
+  // Overwrite the trailing text block with the authoritative full text carried
+  // by a `text_final` event (the SDK's AssistantMessage TextBlock). Used only
+  // on the reconnect catch-up rebuild: if a streamed delta was dropped from the
+  // broadcast log, replaying the raw chunks would rebuild a truncated block, so
+  // the authoritative replace repairs it (idempotent when nothing was lost).
+  // Respects forceNewTextBlockRef exactly like appendTextChunk: a preceding
+  // text_boundary (a new assistant item started) means text_final materialises
+  // a NEW block rather than clobbering the previous item's text — the
+  // all-deltas-lost recovery case where the item has a boundary + a final but
+  // no streamed chunks in between.
+  function replaceLastText(prev, content) {
+    const updated = [...prev]
+    const last = updated[updated.length - 1]
+    if (last?.type === 'text' && !forceNewTextBlockRef.current) {
+      updated[updated.length - 1] = { ...last, content }
+    } else {
+      updated.push({ type: 'text', content })
     }
     forceNewTextBlockRef.current = false
     return updated
@@ -609,6 +637,16 @@ export default function useStreamConnection(chatId, {
               // Live streaming: buffer for typewriter reveal.
               textBufferRef.current += content
               startDraining()
+            }
+          } else if (event.type === 'text_final') {
+            // Authoritative full text of a completed assistant item. Only act on
+            // the catch-up rebuild — replace the truncated replayed block with
+            // the complete text. Live streaming already rendered the deltas and
+            // the persisted DB (repaired server-side by the same text_final) is
+            // authoritative on any reload, so the live typewriter is left alone.
+            if (isCatchUp) {
+              const content = event.content || ''
+              if (content) applyStreamItems(prev => replaceLastText(prev, content))
             }
           } else if (event.type === 'thinking') {
             // The agent's extended reasoning (Claude thinking_delta /
@@ -994,14 +1032,28 @@ export default function useStreamConnection(chatId, {
         width: window.innerWidth,
         height: keyboardLikely ? maxH : cur,
       }
-      const res = await fetch(`${BASE}/api/chats/${chatIdRef.current}/messages`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${getToken()}`,
-        },
-        body: JSON.stringify(body),
-      })
+      // Time-box the send POST. It normally returns 202 immediately (the turn
+      // runs as a background task), so a hang means a dead socket (mobile
+      // sleep, lost network) or a wedged backend — without this the await
+      // never settles, leaving the composer optimistically locked in Stop mode
+      // forever (its catch below resets streaming state on the abort). No
+      // in-flight guard needed here: doSend already gates re-entry.
+      const sendCtrl = new AbortController()
+      const sendTimer = setTimeout(() => sendCtrl.abort(), SEND_POST_TIMEOUT_MS)
+      let res
+      try {
+        res = await fetch(`${BASE}/api/chats/${chatIdRef.current}/messages`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${getToken()}`,
+          },
+          body: JSON.stringify(body),
+          signal: sendCtrl.signal,
+        })
+      } finally {
+        clearTimeout(sendTimer)
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
       responseData = data
