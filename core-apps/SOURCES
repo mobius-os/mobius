@@ -16,4 +16,4 @@
 #
 # Format (catalog-synced apps only): <slug>  <owner/repo>  <commit-sha>
 memory      mobius-os/app-memory      44ff275d01ae8f53e94de9906b4a7d3371a9f701
-reflection  mobius-os/app-reflection  66a6766cb7d76e59a6ed124bfad53a2b4ff27b31
+reflection  mobius-os/app-reflection  e566ce8a8139f49611b45655cc5520139a50c3a1

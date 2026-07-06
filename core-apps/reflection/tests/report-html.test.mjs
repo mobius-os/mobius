@@ -198,6 +198,23 @@ test('a malformed carrier yields no cards and leaves the brief intact', async ()
   assert.match(html, /Morning/)
 })
 
+test('strips a carrier on a non-section/div tag (aside/article)', async () => {
+  const { extractReportQuestions } = await bundle()
+  const html0 = '<!doctype html><body><main><h1>Morning</h1></main>'
+    + '<aside class="report-questions" data-report-questions>'
+    + '<h2>One more thing</h2>'
+    + '<script type="application/mobius-questions+json">'
+    + '{"questions":[{"question":"Q?","options":[{"label":"A"}]}]}</script>'
+    + '</aside></body>'
+  const { html, questions } = extractReportQuestions(html0)
+
+  assert.equal(questions.length, 1)
+  // The aside carrier and its visible heading are gone; the brief survives.
+  assert.doesNotMatch(html, /data-report-questions/i)
+  assert.doesNotMatch(html, /One more thing/)
+  assert.match(html, /Morning/)
+})
+
 test('an absent carrier returns no questions and the HTML unchanged', async () => {
   const { extractReportQuestions } = await bundle()
   const plain = '<!doctype html><body><main><h1>Just a brief</h1></main></body>'
@@ -326,4 +343,34 @@ test('sanitizeQuestions dedupes questions with identical text', async () => {
   assert.equal(out.length, 1)
   assert.equal(out[0].question, 'Same text')
   assert.deepEqual(out[0].options, [{ label: 'A' }])
+})
+
+test('reportThemeStyle re-declares resolved theme tokens for the null-origin iframe', async () => {
+  const { reportThemeStyle } = await bundle()
+  const map = { '--bg': '#0c0c0c', '--text': '#f0f0f0', '--surface': '#1a1a1a', '--accent': '#7c6cf0' }
+  const style = reportThemeStyle({ getPropertyValue: (t) => map[t] || '' })
+  assert.match(style, /--bg: #0c0c0c;/)
+  assert.match(style, /--text: #f0f0f0;/)
+  assert.match(style, /color-scheme: dark;/) // #0c0c0c is dark
+  assert.match(style, /html, body \{ background: var\(--bg\); color: var\(--text\); \}/)
+})
+
+test('reportThemeStyle picks a light color-scheme for a light --bg', async () => {
+  const { reportThemeStyle } = await bundle()
+  const root = { getPropertyValue: (t) => (t === '--bg' ? '#ffffff' : t === '--text' ? '#111' : '') }
+  assert.match(reportThemeStyle(root), /color-scheme: light;/)
+})
+
+test('reportThemeStyle returns empty when no tokens resolve', async () => {
+  const { reportThemeStyle } = await bundle()
+  assert.equal(reportThemeStyle({ getPropertyValue: () => '' }), '')
+})
+
+test('hardenReportHtml places the theme style before the base style so var() lookups resolve', async () => {
+  const { hardenReportHtml } = await bundle()
+  const themed = hardenReportHtml('<article>hi</article>', '<style>:root{--bg:#0c0c0c;}</style>')
+  assert.ok(themed.indexOf('--bg:#0c0c0c') < themed.indexOf('var(--surface'),
+    'theme block must precede REPORT_BASE_STYLE so its var() lookups resolve')
+  // theme-less call still works via the default param (backward compatible)
+  assert.doesNotMatch(hardenReportHtml('<article>hi</article>'), /color-scheme:/)
 })
