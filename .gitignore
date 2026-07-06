@@ -60,3 +60,7 @@ CLAUDE.md
 
 # Baked Vite build output (created by the image build / test conftest stub)
 backend/static/
+
+# platform runtime markers (created by the entrypoint in the clone)
+.baked-sha
+frontend/node_modules
