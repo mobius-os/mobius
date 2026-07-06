@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ToolBlock from './ToolBlock.jsx'
+import ToolActivityGroup from './ToolActivityGroup.jsx'
+import { groupToolRuns } from './groupBlocks.js'
 import QuestionCard from './QuestionCard.jsx'
 
 
@@ -77,82 +79,107 @@ function ThinkingDisclosure({ item, isActive }) {
  *   runner is paused on the AskUserQuestion future.
  */
 export default function StreamingMessage({ streamItems, dataKey, onAnswer }) {
+  // Render a single stream item by type. `i` is the ORIGINAL index in
+  // streamItems, so the isLast/isActive checks below (which key off
+  // `streamItems.length - 1`) stay correct even after adjacent tool items are
+  // folded into a group — grouping never touches a trailing text/thinking item.
+  const renderItem = (item, i) => {
+    if (item.type === 'tool') {
+      return (
+        <div key={`s-${i}`} className="chat__tools">
+          <ToolBlock t={item} />
+        </div>
+      )
+    }
+    if (item.type === 'question') {
+      // QuestionCard tracks its own `submitted` state and
+      // disables itself after the user answers. The agent
+      // is paused on the AskUserQuestion future, so the
+      // user MUST be able to click these chips even while
+      // the turn is otherwise "streaming". No external
+      // disabled gate.
+      //
+      // Pass item.answers as answeredMap so patchQuestionAnswers's
+      // optimistic update is visible immediately when the question
+      // is still in streamItems — without this, the card stays
+      // in the interactive state even after the user submitted.
+      return (
+        <div key={`s-${i}`}>
+          <QuestionCard
+            questions={item.questions}
+            questionId={item.question_id}
+            answeredMap={item.answers}
+            onAnswer={item.answers ? undefined : onAnswer}
+          />
+        </div>
+      )
+    }
+    if (item.type === 'thinking') {
+      // The agent's live reasoning, shown as a COLLAPSED, secondary
+      // disclosure so a long "thinking" stretch reads as a quiet
+      // timer (filling the silence) rather than a
+      // wall of raw chain-of-thought. The partner can expand it to
+      // peek; by default the answer stays the focus. While this is
+      // the last item the agent is still mid-thought, so the summary
+      // animates with dots; an earlier thinking block the agent has
+      // already moved past reads as a frozen "Thought for Ns" toggle.
+      const isActive = i === streamItems.length - 1
+      return (
+        <ThinkingDisclosure key={`s-${i}`} item={item} isActive={isActive} />
+      )
+    }
+    if (item.type === 'text') {
+      const isLast = i === streamItems.length - 1
+      return (
+        <div key={`s-${i}`} className="chat__text chat__text--assistant">
+          <ProgressiveMarkdown text={item.content} />
+          {isLast && <span className="chat__cursor" />}
+        </div>
+      )
+    }
+    if (item.type === 'error') {
+      // StandardMarkdown so URLs in provider errors
+      // (quota links, billing pages) become clickable.
+      // Same shape as the post-promote render in
+      // MsgContent so the user gets the same affordance
+      // before and after the streaming `<li>` is
+      // replaced by the persisted message.
+      return (
+        <div key={`s-${i}`} className="chat__text--error" role="alert">
+          <span className="chat__error-label">Error</span>
+          <StandardMarkdown
+            text={item.message || 'The agent ran into an issue.'}
+          />
+        </div>
+      )
+    }
+    return null
+  }
+
+  // Fold adjacent tool items into one Activity card — the SAME grouping
+  // MsgContent applies to the persisted blocks, so the live view and the
+  // promoted message look identical.
+  const nodes = groupToolRuns(streamItems.map((item, i) => ({ item, idx: i })))
+
   return (
     <li
       className="chat__msg chat__msg--assistant"
       data-key={dataKey}
     >
-      {streamItems.map((item, i) => {
-        if (item.type === 'tool') {
+      {nodes.map(node => {
+        if (node.group) {
+          const tools = node.group.map(e => e.item)
           return (
-            <div key={`s-${i}`} className="chat__tools">
-              <ToolBlock t={item} />
+            <div key={`s-g-${node.group[0].idx}`} className="chat__tools">
+              <ToolActivityGroup tools={tools}>
+                {node.group.map(e => (
+                  <ToolBlock key={`s-${e.idx}`} t={e.item} />
+                ))}
+              </ToolActivityGroup>
             </div>
           )
         }
-        if (item.type === 'question') {
-          // QuestionCard tracks its own `submitted` state and
-          // disables itself after the user answers. The agent
-          // is paused on the AskUserQuestion future, so the
-          // user MUST be able to click these chips even while
-          // the turn is otherwise "streaming". No external
-          // disabled gate.
-          //
-          // Pass item.answers as answeredMap so patchQuestionAnswers's
-          // optimistic update is visible immediately when the question
-          // is still in streamItems — without this, the card stays
-          // in the interactive state even after the user submitted.
-          return (
-            <div key={`s-${i}`}>
-              <QuestionCard
-                questions={item.questions}
-                questionId={item.question_id}
-                answeredMap={item.answers}
-                onAnswer={item.answers ? undefined : onAnswer}
-              />
-            </div>
-          )
-        }
-        if (item.type === 'thinking') {
-          // The agent's live reasoning, shown as a COLLAPSED, secondary
-          // disclosure so a long "thinking" stretch reads as a quiet
-          // timer (filling the silence) rather than a
-          // wall of raw chain-of-thought. The partner can expand it to
-          // peek; by default the answer stays the focus. While this is
-          // the last item the agent is still mid-thought, so the summary
-          // animates with dots; an earlier thinking block the agent has
-          // already moved past reads as a frozen "Thought for Ns" toggle.
-          const isActive = i === streamItems.length - 1
-          return (
-            <ThinkingDisclosure key={`s-${i}`} item={item} isActive={isActive} />
-          )
-        }
-        if (item.type === 'text') {
-          const isLast = i === streamItems.length - 1
-          return (
-            <div key={`s-${i}`} className="chat__text chat__text--assistant">
-              <ProgressiveMarkdown text={item.content} />
-              {isLast && <span className="chat__cursor" />}
-            </div>
-          )
-        }
-        if (item.type === 'error') {
-          // StandardMarkdown so URLs in provider errors
-          // (quota links, billing pages) become clickable.
-          // Same shape as the post-promote render in
-          // MsgContent so the user gets the same affordance
-          // before and after the streaming `<li>` is
-          // replaced by the persisted message.
-          return (
-            <div key={`s-${i}`} className="chat__text--error" role="alert">
-              <span className="chat__error-label">Error</span>
-              <StandardMarkdown
-                text={item.message || 'The agent ran into an issue.'}
-              />
-            </div>
-          )
-        }
-        return null
+        return renderItem(node.single.item, node.single.idx)
       })}
     </li>
   )

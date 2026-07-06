@@ -1,6 +1,8 @@
 import { memo } from 'react'
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ToolBlock from './ToolBlock.jsx'
+import ToolActivityGroup from './ToolActivityGroup.jsx'
+import { groupToolRuns } from './groupBlocks.js'
 import QuestionCard from './QuestionCard.jsx'
 import Attachments from './Attachments.jsx'
 import CompactionCard from './CompactionCard.jsx'
@@ -71,101 +73,134 @@ function MsgContentInner({
     // here so a reopened chat matches the live view — render-time, so it
     // also cleans up already-persisted old chats with no backend migration.
     const skipToolIdx = suppressedQuestionToolIndices(msg.blocks)
+
+    // Render a single block by type. Pulled out of the map so both the plain
+    // path and grouped tool runs (below) share one renderer.
+    const renderBlock = (block, i) => {
+      if (block.type === 'text') {
+        const text = msg.role === 'user'
+          ? stripAugmentation(block.content) : block.content
+        if (!text) return null
+        return (
+          <div key={i} className={`chat__text chat__text--${msg.role}`}>
+            {msg.role === 'assistant'
+              ? <StandardMarkdown text={text} />
+              : text}
+          </div>
+        )
+      }
+      if (block.type === 'tool') {
+        return (
+          <div key={i} className="chat__tools">
+            {/* chatId + msg.ts + block index let ToolBlock lazily fetch a
+                truncated large output on expand (see chats.py
+                _truncate_large_tool_outputs + GET /tool-output). */}
+            <ToolBlock t={block} chatId={chatId} msgTs={msg.ts} blockIdx={i} />
+          </div>
+        )
+      }
+      if (block.type === 'thinking') {
+        return (
+          <details key={i} className="chat__reasoning">
+            <summary className="chat__reasoning-summary">
+              <span className="chat__reasoning-label">
+                {thoughtLabel(block.duration_ms)}
+              </span>
+            </summary>
+            <div className="chat__reasoning-body">
+              <StandardMarkdown text={block.content || ''} />
+            </div>
+          </details>
+        )
+      }
+      if (block.type === 'question') {
+        // Suppress if this exact question is currently live in
+        // streamItems — the streaming <li> is already rendering it.
+        // This prevents the duplicate card that appears when the
+        // bridge gate retires and the SSE catch-up burst fires a
+        // `question` event into both the persisted message and
+        // streamItems simultaneously.
+        if (suppressedQuestionKeys?.has(questionKey(block))) return null
+        const answers = block.answers
+        // Only the LAST block's question is the one the runner is parked
+        // on (see isQuestionAnswerable in ChatView). A question with any
+        // block after it — the turn continued, or `reconcile` appended an
+        // interrupted-turn note — is history, not the live prompt.
+        const isTailBlock = i === msg.blocks.length - 1
+        const answerable = !!(
+          onQuestionAnswer && isTailBlock && isQuestionAnswerable?.(block)
+        )
+        return (
+          <div key={i}>
+            <QuestionCard
+              questions={block.questions || []}
+              questionId={block.question_id}
+              answeredMap={answers}
+              onAnswer={answerable ? onQuestionAnswer : undefined}
+              disabled={!answerable && !answers}
+            />
+          </div>
+        )
+      }
+      if (block.type === 'error') {
+        // Errors persist as their own block (backend's
+        // process_event for 'error' events). Read as a system
+        // notice rather than an agent reply — distinct
+        // styling, no agent bubble — so the user can tell at
+        // a glance the agent didn't author it. Without this
+        // branch the block rendered to null and the error
+        // vanished on chat return; that was the bug.
+        //
+        // Run the message through StandardMarkdown so URLs in
+        // provider error responses (quota links, billing
+        // pages) become clickable — agents' error payloads
+        // typically include "Upgrade to Pro (https://...)" and
+        // "purchase more credits at https://..." that the user
+        // wants to tap straight from the chat.
+        return (
+          <div key={i} className="chat__text--error" role="alert">
+            <span className="chat__error-label">Error</span>
+            <StandardMarkdown
+              text={block.message || 'The agent ran into an issue.'}
+            />
+          </div>
+        )
+      }
+      return null
+    }
+
+    // Skip the AskUserQuestion tool twin, then fold runs of adjacent tool
+    // blocks into one Activity card. groupToolRuns runs on the SAME entries on
+    // the live path (StreamingMessage), so the transcript doesn't reshuffle
+    // when a streaming turn is promoted.
+    const entries = msg.blocks
+      .map((block, i) => ({ item: block, idx: i }))
+      .filter(({ idx }) => !skipToolIdx.has(idx))
+    const nodes = groupToolRuns(entries)
+
     return (
       <>
         {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
-        {msg.blocks.map((block, i) => {
-          if (skipToolIdx.has(i)) return null
-          if (block.type === 'text') {
-            const text = msg.role === 'user'
-              ? stripAugmentation(block.content) : block.content
-            if (!text) return null
+        {nodes.map(node => {
+          if (node.group) {
+            const tools = node.group.map(e => e.item)
             return (
-              <div key={i} className={`chat__text chat__text--${msg.role}`}>
-                {msg.role === 'assistant'
-                  ? <StandardMarkdown text={text} />
-                  : text}
+              <div key={`g-${node.group[0].idx}`} className="chat__tools">
+                <ToolActivityGroup tools={tools}>
+                  {node.group.map(e => (
+                    <ToolBlock
+                      key={e.idx}
+                      t={e.item}
+                      chatId={chatId}
+                      msgTs={msg.ts}
+                      blockIdx={e.idx}
+                    />
+                  ))}
+                </ToolActivityGroup>
               </div>
             )
           }
-          if (block.type === 'tool') {
-            return (
-              <div key={i} className="chat__tools">
-                {/* chatId + msg.ts + block index let ToolBlock lazily fetch a
-                    truncated large output on expand (see chats.py
-                    _truncate_large_tool_outputs + GET /tool-output). */}
-                <ToolBlock t={block} chatId={chatId} msgTs={msg.ts} blockIdx={i} />
-              </div>
-            )
-          }
-          if (block.type === 'thinking') {
-            return (
-              <details key={i} className="chat__reasoning">
-                <summary className="chat__reasoning-summary">
-                  <span className="chat__reasoning-label">
-                    {thoughtLabel(block.duration_ms)}
-                  </span>
-                </summary>
-                <div className="chat__reasoning-body">
-                  <StandardMarkdown text={block.content || ''} />
-                </div>
-              </details>
-            )
-          }
-          if (block.type === 'question') {
-            // Suppress if this exact question is currently live in
-            // streamItems — the streaming <li> is already rendering it.
-            // This prevents the duplicate card that appears when the
-            // bridge gate retires and the SSE catch-up burst fires a
-            // `question` event into both the persisted message and
-            // streamItems simultaneously.
-            if (suppressedQuestionKeys?.has(questionKey(block))) return null
-            const answers = block.answers
-            // Only the LAST block's question is the one the runner is parked
-            // on (see isQuestionAnswerable in ChatView). A question with any
-            // block after it — the turn continued, or `reconcile` appended an
-            // interrupted-turn note — is history, not the live prompt.
-            const isTailBlock = i === msg.blocks.length - 1
-            const answerable = !!(
-              onQuestionAnswer && isTailBlock && isQuestionAnswerable?.(block)
-            )
-            return (
-              <div key={i}>
-                <QuestionCard
-                  questions={block.questions || []}
-                  questionId={block.question_id}
-                  answeredMap={answers}
-                  onAnswer={answerable ? onQuestionAnswer : undefined}
-                  disabled={!answerable && !answers}
-                />
-              </div>
-            )
-          }
-          if (block.type === 'error') {
-            // Errors persist as their own block (backend's
-            // process_event for 'error' events). Read as a system
-            // notice rather than an agent reply — distinct
-            // styling, no agent bubble — so the user can tell at
-            // a glance the agent didn't author it. Without this
-            // branch the block rendered to null and the error
-            // vanished on chat return; that was the bug.
-            //
-            // Run the message through StandardMarkdown so URLs in
-            // provider error responses (quota links, billing
-            // pages) become clickable — agents' error payloads
-            // typically include "Upgrade to Pro (https://...)" and
-            // "purchase more credits at https://..." that the user
-            // wants to tap straight from the chat.
-            return (
-              <div key={i} className="chat__text--error" role="alert">
-                <span className="chat__error-label">Error</span>
-                <StandardMarkdown
-                  text={block.message || 'The agent ran into an issue.'}
-                />
-              </div>
-            )
-          }
-          return null
+          return renderBlock(node.single.item, node.single.idx)
         })}
       </>
     )

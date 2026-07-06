@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { apiFetch } from '../../api/client.js'
+import { formatToolResult } from './toolResultFormat.js'
 
 function sourceHost(url) {
   try {
@@ -8,6 +9,64 @@ function sourceHost(url) {
     // Unparseable URLs have no meaningful host chip; the title keeps the label.
     return ''
   }
+}
+
+// Render an already-formatted tool result (see toolResultFormat.js) so shell
+// output reads as a terminal (stdout / stderr / exit code) and a structured
+// result reads as key/values, instead of a raw JSON blob. The formatter is pure
+// and never throws; a `text` result reproduces the old plain <pre> look, so any
+// unrecognized shape degrades to exactly today's rendering. `r` is passed in
+// (not the raw string) so ToolBlock parses once and shares it with the header.
+function ToolResult({ r }) {
+  if (r.kind === 'terminal') {
+    const empty = !r.stdout && !r.stderr
+    return (
+      <div className="chat__tool-term">
+        {r.stdout && (
+          <pre className="chat__tool-text chat__tool-output">{r.stdout}</pre>
+        )}
+        {r.stderr && (
+          <pre className="chat__tool-text chat__tool-stderr">{r.stderr}</pre>
+        )}
+        {r.exitCode != null && r.exitCode !== 0 && (
+          <span className="chat__tool-exit">exit {r.exitCode}</span>
+        )}
+        {/* A silent success (no stdout/stderr, exit 0) would otherwise expand to
+            an empty box that reads as a bug — label it instead. */}
+        {empty && (r.exitCode == null || r.exitCode === 0) && (
+          <span className="chat__tool-output-more">(no output)</span>
+        )}
+        {r.truncated && (
+          <span className="chat__tool-output-more">… output truncated</span>
+        )}
+      </div>
+    )
+  }
+
+  if (r.kind === 'structured') {
+    return (
+      <div className="chat__tool-kv">
+        {r.entries.map(({ key, value }) => (
+          <div className="chat__tool-kv-row" key={key}>
+            <span className="chat__tool-kv-key">{key}</span>
+            <pre className="chat__tool-kv-val">{value}</pre>
+          </div>
+        ))}
+        {r.truncated && (
+          <span className="chat__tool-output-more">… output truncated</span>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <>
+      <pre className="chat__tool-text chat__tool-output">{r.text}</pre>
+      {r.truncated && (
+        <span className="chat__tool-output-more">… output truncated</span>
+      )}
+    </>
+  )
 }
 
 export default function ToolBlock({ t, chatId, msgTs, blockIdx }) {
@@ -49,8 +108,24 @@ export default function ToolBlock({ t, chatId, msgTs, blockIdx }) {
   // Show the fetched full output once it lands; until then the inline preview.
   const shownOutput = t.output_truncated && fullOutput !== null ? fullOutput : t.output
 
+  // Parse the shown output once — shared by the header failure chip and the
+  // body renderer. A tool never carries an 'error' status (the stream only
+  // moves running→done), so a nonzero exit code is the sole failure signal;
+  // surface it on the header so a failed step shows without expanding.
+  // Memoized on the string so a co-rendering streaming answer (which re-renders
+  // this block every typewriter frame) doesn't re-JSON-parse a large output.
+  const r = useMemo(
+    () => (shownOutput ? formatToolResult(shownOutput) : null),
+    [shownOutput],
+  )
+  const failed = !!(
+    r && r.kind === 'terminal' && r.exitCode != null && r.exitCode !== 0
+  )
+
   return (
-    <div className={`chat__tool chat__tool--${t.status || 'done'}`}>
+    <div className={
+      `chat__tool chat__tool--${t.status || 'done'}${failed ? ' chat__tool--failed' : ''}`
+    }>
       <div className="chat__tool-header" onClick={() => hasDetail && setOpen(!open)}>
         {t.status === 'running' && <span className="chat__tool-spin" />}
         {/* Skill observability: when the Skill tool loaded a named
@@ -60,6 +135,9 @@ export default function ToolBlock({ t, chatId, msgTs, blockIdx }) {
         <span className="chat__tool-name">
           {t.status === 'running' ? `Running ${toolName}...` : label}
         </span>
+        {failed && (
+          <span className="chat__tool-exit chat__tool-exit--head">exit {r.exitCode}</span>
+        )}
         {hasDetail && <span className="chat__tool-toggle">{open ? '▾' : '▸'}</span>}
       </div>
       {open && hasDetail && (
@@ -86,11 +164,7 @@ export default function ToolBlock({ t, chatId, msgTs, blockIdx }) {
               ))}
             </div>
           )}
-          {shownOutput && (
-            <pre className="chat__tool-text chat__tool-output">
-              {shownOutput}
-            </pre>
-          )}
+          {r && <ToolResult r={r} />}
           {t.output_truncated && fullOutput === null && (
             <span className="chat__tool-output-more">
               {loadingFull
