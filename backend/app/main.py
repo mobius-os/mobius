@@ -8,6 +8,7 @@ mounted last as a catch-all so that client-side routing works.
 import asyncio
 import logging
 import mimetypes
+import os
 import re
 import time
 from contextlib import asynccontextmanager
@@ -709,7 +710,13 @@ def root_redirect():
 # if it exists and is complete (both assets/ and index.html must be present).
 # Fall back to the baked-in build at /app/static/ on any error.
 _live_dir = Path(settings.data_dir) / "platform" / "frontend" / "dist"
-_baked_dir = Path(__file__).parent.parent / "static"
+# The baked SPA is at the IMAGE path /app/static, NOT relative to __file__.
+# Under the clone serve model __file__ is /data/platform/backend/app/main.py, so
+# `__file__.parent.parent / "static"` would resolve to /data/platform/backend/
+# static (nonexistent) and the baked-frontend recovery fallback would be dead
+# whenever /data/platform/frontend/dist is incomplete. Resolve it absolutely
+# (overridable via MOBIUS_BAKED_STATIC_DIR for non-standard image layouts).
+_baked_dir = Path(os.environ.get("MOBIUS_BAKED_STATIC_DIR", "/app/static"))
 
 
 def _is_complete_build(d: Path) -> bool:

@@ -112,6 +112,18 @@ def debug_status(
     except OSError:
       result["platform_upgrade_available"] = True
 
+  # F1 non-destructive migration notice: set when first clone-model boot found
+  # an existing /data/platform (old overlay shape) and moved it aside to a
+  # timestamped .pre-clone quarantine instead of deleting it. Surfaces the
+  # quarantine path so the owner can migrate the preserved edits. Absent-when-
+  # false, like the flags above, so the golden_debug_status test is unaffected.
+  _pre_clone_flag = Path(settings.data_dir) / ".platform-pre-clone-active"
+  if _pre_clone_flag.exists():
+    try:
+      result["platform_pre_clone_active"] = _pre_clone_flag.read_text().strip()
+    except OSError:
+      result["platform_pre_clone_active"] = True
+
 
   return result
 

@@ -1210,3 +1210,46 @@ def test_init_cron_is_never_tracked_so_a_reset_cannot_resurrect_it(tmp_path):
   v1_sha = app_git._run(repo, "rev-list", "--max-parents=1", "HEAD").stdout.split()[-1]
   app_git._run(repo, "reset", "--hard", v1_sha)
   assert not (repo / "init-cron.sh").exists()
+
+
+def test_commit_local_refuses_during_in_progress_cherry_pick(tmp_path):
+  """commit_local must REFUSE (before staging) while a rebase/cherry-pick is
+  mid-flight — no MERGE_HEAD, but CHERRY_PICK_HEAD + unmerged index entries.
+
+  A watcher's commit-on-save calling `git add` there would mark the conflicted
+  paths resolved in the index, and a later commit could bake conflict markers
+  into tracked source. The refusal must leave the operation entirely intact:
+  HEAD unmoved, CHERRY_PICK_HEAD still present, the paths still unmerged, and
+  the marker-bearing working tree untouched.
+  """
+  repo = tmp_path / "app"
+  _install(repo, b"line1\nORIG\nline3\n")
+  # main advances with one edit to the shared line.
+  _write(repo, "line1\nMAIN\nline3\n")
+  base = app_git.commit_local(repo, "main edit")
+  assert base is not None
+  # A sibling commit off the install point edits the SAME line a different way,
+  # so cherry-picking it onto main conflicts.
+  install_point = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  app_git._run(repo, "checkout", "-q", "-b", "side", install_point)
+  _write(repo, "line1\nSIDE\nline3\n")
+  app_git._run(repo, "add", "-A")
+  app_git._run(repo, "commit", "-q", "-m", "side edit")
+  side = app_git.head_sha(repo, "side")
+  app_git._run(repo, "checkout", "-q", app_git.LOCAL_BRANCH)
+  cp = app_git._run(repo, "cherry-pick", side, check=False)
+  assert cp.returncode != 0
+  assert (repo / ".git" / "CHERRY_PICK_HEAD").exists()
+  assert app_git._run(repo, "ls-files", "-u").stdout.strip()
+  body_before = (repo / "index.jsx").read_text()
+  assert "<<<<<<<" in body_before
+
+  result = app_git.commit_local(repo, "watcher save mid-cherry-pick")
+
+  # Refused before staging: no commit, HEAD unmoved, cherry-pick still in
+  # progress, conflicted paths NOT staged/resolved, working tree untouched.
+  assert result is None
+  assert app_git.head_sha(repo, app_git.LOCAL_BRANCH) == base
+  assert (repo / ".git" / "CHERRY_PICK_HEAD").exists()
+  assert app_git._run(repo, "ls-files", "-u").stdout.strip()
+  assert (repo / "index.jsx").read_text() == body_before

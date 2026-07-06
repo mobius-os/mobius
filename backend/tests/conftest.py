@@ -23,6 +23,10 @@ os.environ["FRONTEND_ORIGIN"] = "http://localhost:5173"
 from pathlib import Path as _Path
 
 _static = _Path(__file__).resolve().parents[1] / "static"
+# main.py resolves its baked static dir to /app/static (the image path) unless
+# MOBIUS_BAKED_STATIC_DIR overrides it — off the host that path is absent, so
+# point the override at the stub below (created before app.main imports).
+os.environ["MOBIUS_BAKED_STATIC_DIR"] = str(_static)
 if not (_static / "index.html").is_file():
   (_static / "assets").mkdir(parents=True, exist_ok=True)
   (_static / "index.html").write_text(
