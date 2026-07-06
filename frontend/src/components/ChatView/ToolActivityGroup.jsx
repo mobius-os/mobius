@@ -3,15 +3,28 @@ import { toolGroupState, toolGroupSummary } from './groupBlocks.js'
 
 // One collapsible "Activity" card standing in for a run of adjacent tool calls,
 // so a build turn's 20-tool wall doesn't bury the agent's prose. The header
-// summarizes the run ("Read, Edit, Bash +2") and carries a status chip so a
-// FAILED step is visible without expanding. Children are the individual
-// ToolBlocks, rendered by the caller (which owns their lazy-fetch props) and
-// shown only when expanded.
+// summarizes the run ("Reading files · Editing code +2") and carries a status
+// chip so a FAILED step is visible without expanding. Children are the
+// individual ToolBlocks, rendered by the caller (which owns their lazy-fetch
+// props) and shown only when expanded.
 //
-// Collapsed by default (owner's call), but auto-expands while any child is
-// running so the live tool stays visible mid-stream — matching the existing
-// defaultOpen-on-running behavior for standalone tool blocks. Once the run
-// finishes it does NOT auto-collapse (the user may be reading it).
+// COLLAPSED BY DEFAULT, ALWAYS — the card never auto-opens; the user's tap is
+// the only thing that opens or closes it, mid-run included. An earlier version
+// force-opened while any child was running (`open = running || userOpen`), on
+// the theory that the live tool should stay visible mid-stream. That was wrong
+// on two counts:
+//   1. There is no running child in the gap between one tool ending and the
+//      next starting, so the card flapped open→closed→open at EVERY tool
+//      boundary and snapped shut the instant the run finished.
+//   2. Each flap changed the card's height, and `.chat__scroll` runs with
+//      overflow-anchor:none plus manual scroll anchoring (see the "Chat UX —
+//      non-negotiable constraints" reference), so the height churn displaced
+//      whatever the reader was looking at.
+// The premise was also false: standalone stream tool blocks never carry
+// defaultOpen, so a lone running ToolBlock already renders collapsed with just
+// a header spinner. Liveness does NOT need the body open — the header spinner
+// plus the running-tool-first summary (toolGroupSummary) already say what is
+// executing. So the sole open/close signal is `userOpen`.
 export default function ToolActivityGroup({ tools, children }) {
   // Deriving the state parses each child's output (for the exit-code failure
   // check), so memoize on a cheap status+output-length signature: it only
@@ -21,12 +34,10 @@ export default function ToolActivityGroup({ tools, children }) {
   const state = useMemo(() => toolGroupState(tools), [sig]) // eslint-disable-line react-hooks/exhaustive-deps
   const running = state === 'running'
   const [userOpen, setUserOpen] = useState(false)
-  // While running, force open so the live tool stays visible; otherwise honor
-  // the user's toggle (default collapsed). A run that finishes untouched
-  // collapses on its own, since `running` drops to false and `userOpen` is
-  // still false — matching "collapsed by default" without persisting the
-  // forced-open state.
-  const open = running || userOpen
+  // The user's toggle is the ONLY open/close signal — no force-open (see the
+  // header comment for why removing it fixed the boundary flap + scroll
+  // displacement). While collapsed, the header spinner carries live status.
+  const open = userOpen
 
   const summary = toolGroupSummary(tools)
 
@@ -35,10 +46,10 @@ export default function ToolActivityGroup({ tools, children }) {
       <button
         type="button"
         className="chat__toolgroup-header"
-        // While running the group is force-open to keep the live tool visible,
-        // so a tap must not silently flip the hidden userOpen state (which would
-        // otherwise decide the collapsed state the instant the run finishes).
-        onClick={() => { if (!running) setUserOpen(o => !o) }}
+        // Togglable at any time, running or not: with default-collapse there is
+        // no forced-open state for a tap to fight, so the user can peek into a
+        // live run and close it again.
+        onClick={() => setUserOpen(o => !o)}
         aria-expanded={open}
       >
         {running

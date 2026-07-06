@@ -90,8 +90,13 @@ function MsgContentInner({
         )
       }
       if (block.type === 'tool') {
+        // Key a lone tool by `t-<firstIdx>` — the SAME scheme the group wrapper
+        // below uses — so a message that renders one tool and then (on a later
+        // render carrying a second adjacent tool) folds it into a group updates
+        // the slot in place instead of delete+insert. `i` is the block's index
+        // = the group's first index, so the keys coincide.
         return (
-          <div key={i} className="chat__tools">
+          <div key={`t-${i}`} className="chat__tools">
             {/* chatId + msg.ts + block index let ToolBlock lazily fetch a
                 truncated large output on expand (see chats.py
                 _truncate_large_tool_outputs + GET /tool-output). */}
@@ -184,8 +189,11 @@ function MsgContentInner({
         {nodes.map(node => {
           if (node.group) {
             const tools = node.group.map(e => e.item)
+            // `t-<firstIdx>` — the SAME key a lone tool at that index uses (see
+            // renderBlock), so a single→group transition updates this slot in
+            // place rather than swapping keys and forcing a delete+insert.
             return (
-              <div key={`g-${node.group[0].idx}`} className="chat__tools">
+              <div key={`t-${node.group[0].idx}`} className="chat__tools">
                 <ToolActivityGroup tools={tools}>
                   {node.group.map(e => (
                     <ToolBlock

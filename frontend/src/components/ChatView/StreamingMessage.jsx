@@ -85,8 +85,14 @@ export default function StreamingMessage({ streamItems, dataKey, onAnswer }) {
   // folded into a group — grouping never touches a trailing text/thinking item.
   const renderItem = (item, i) => {
     if (item.type === 'tool') {
+      // Key a lone tool by `s-t-<firstIdx>` — the SAME scheme the group wrapper
+      // below uses. When a second adjacent tool arrives and this slot becomes a
+      // group, the wrapper key is unchanged, so React updates the slot in place
+      // instead of delete+insert (which would churn height and displace the
+      // reader). `i` here is the item's original index = the group's first
+      // index, so the two keys coincide.
       return (
-        <div key={`s-${i}`} className="chat__tools">
+        <div key={`s-t-${i}`} className="chat__tools">
           <ToolBlock t={item} />
         </div>
       )
@@ -169,8 +175,11 @@ export default function StreamingMessage({ streamItems, dataKey, onAnswer }) {
       {nodes.map(node => {
         if (node.group) {
           const tools = node.group.map(e => e.item)
+          // `s-t-<firstIdx>` — the SAME key a lone tool at that index uses
+          // (see renderItem), so the 1→2-tool transition updates this slot in
+          // place rather than swapping keys and forcing a delete+insert.
           return (
-            <div key={`s-g-${node.group[0].idx}`} className="chat__tools">
+            <div key={`s-t-${node.group[0].idx}`} className="chat__tools">
               <ToolActivityGroup tools={tools}>
                 {node.group.map(e => (
                   <ToolBlock key={`s-${e.idx}`} t={e.item} />
