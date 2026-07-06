@@ -458,6 +458,51 @@ async def test_run_claude_session_returns_auth_rc_on_401(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_claude_session_hard_blocks_leaked_harness_tools(monkeypatch):
+  """The nightly agent must never reach the Claude Code harness / deferred
+  tools. A leaked `PushNotification` tool (loaded via `ToolSearch`) got
+  picked over the documented notifications curl and silently swallowed a
+  week of morning briefs (2026-06-30..07-05). The push is now owned by the
+  wrapper, and the runner denies the harness tools so the agent can't pick
+  them again — this is the regression guard for that fix.
+  """
+  captured: dict = {}
+
+  class _FakeClient:
+    def __init__(self, options):
+      captured["options"] = options
+
+    async def connect(self):
+      pass
+
+    async def query(self, text):
+      pass
+
+    async def receive_response(self):
+      yield AssistantMessage()
+      yield ResultMessage(is_error=False, subtype="success", result="ok")
+
+    async def disconnect(self):
+      pass
+
+  import sys
+  import types
+
+  fake_sdk = types.ModuleType("claude_agent_sdk")
+  fake_sdk.ClaudeAgentOptions = lambda **kw: kw
+  fake_sdk.ClaudeSDKClient = _FakeClient
+  monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+
+  await dr._run_claude_session(
+    goal="g", skill_text="s", env={}, model=None, effort=None,
+    max_turns=60, log_fh=None, countdown=False,
+  )
+  disallowed = captured["options"].get("disallowed_tools", [])
+  for tool in ("PushNotification", "ToolSearch", "Workflow", "ScheduleWakeup"):
+    assert tool in disallowed, f"{tool} must be hard-blocked in the nightly run"
+
+
+@pytest.mark.asyncio
 async def test_fallback_writes_static_brief_without_cli_on_auth_rc(
   tmp_path, monkeypatch,
 ):

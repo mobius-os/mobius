@@ -524,6 +524,67 @@ if command -v pm-commit >/dev/null 2>&1; then
       >>"$LOG" 2>&1 ) || true
 fi
 
+# --- deterministic morning-brief push ---------------------------------
+# Delivery of the morning push is owned HERE, by the wrapper — NOT by the
+# agent. The agent composes the brief and writes state.json (streak +
+# one-line `last_summary` headline for the app header); the wrapper reads
+# that headline and fires the push via the notifications API with the
+# service token.
+#
+# Why the wrapper and not the agent: an agent-chosen notification tool
+# proved unreliable. From 2026-06-30 the nightly agent began reaching for
+# a leaked Claude Code harness `PushNotification` tool (found via
+# `ToolSearch: select:PushNotification`) instead of the documented
+# `curl /api/notifications/send`. That harness tool is a no-op inside
+# Möbius, so no morning brief reached the partner for a week even though
+# every run succeeded and every brief was written. Making the wrapper the
+# sole sender — exactly as news/fetch.sh already does — removes the
+# dependency on the agent picking the right tool. Best-effort: a failed
+# push is logged, never fatal.
+send_morning_push() {
+  [[ "$RC" == "0" ]] || { log "morning push: skip (rc=$RC)"; return 0; }
+  local brief="$DATA_DIR/apps/$APP_ID/reports/$DATE.html"
+  [[ -f "$brief" ]] || { log "morning push: skip (no brief for $DATE)"; return 0; }
+  # Trust the headline only if state.json was written by TODAY's run;
+  # fall back to a generic line otherwise so the partner is still pinged.
+  local headline
+  headline="$(APP_ID="$APP_ID" DATE="$DATE" DATA_DIR="$DATA_DIR" python3 - <<'PY' 2>>"$LOG"
+import json, os
+try:
+    s = json.load(open(f"{os.environ['DATA_DIR']}/apps/{os.environ['APP_ID']}/state.json"))
+except Exception:
+    s = {}
+head = (s.get("last_summary") or "").strip()
+print(head if str(s.get("last_run", "")).startswith(os.environ["DATE"]) else "")
+PY
+)"
+  [[ -n "$headline" ]] || headline="Your nightly reflection is ready to read."
+  local payload
+  payload="$(APP_ID="$APP_ID" HEADLINE="$headline" python3 - <<'PY' 2>>"$LOG"
+import json, os
+app_id = os.environ["APP_ID"]
+target = f"/shell/?app={app_id}"
+print(json.dumps({
+    "title": "Your morning brief is ready",
+    "body": os.environ["HEADLINE"][:200],
+    "source_type": "app",
+    "source_id": app_id,
+    "target": target,
+    "actions": [{"action": "open_app", "title": "Read", "target": target}],
+}))
+PY
+)"
+  local code
+  code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "${auth[@]}" \
+    -H "Content-Type: application/json" -d "$payload" \
+    "$API_BASE_URL/api/notifications/send" 2>>"$LOG")"
+  case "$code" in
+    200|201|204) log "morning push sent (http=$code)";;
+    *)           log "WARN morning push failed (http=$code)";;
+  esac
+}
+send_morning_push
+
 # --- emit cron_outcome ------------------------------------------------
 emit_outcome "$RC"
 
