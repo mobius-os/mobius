@@ -35,7 +35,7 @@ from app import models
 from app.routes import (
   admin_router, apps_router, auth_router,
   chat_logs_router, chat_router, chats_router, chats_stream_router,
-  debug_router, fs_router, generate_router,
+  debug_router, fs_router, generate_router, github_router,
   notifications_router, notify_router, proxy_router, push_router,
   self_reminders_router, settings_router,
   client_error_router, standalone_router, storage_router,
@@ -528,6 +528,7 @@ app.include_router(platform_router)
 app.include_router(shell_router)
 app.include_router(uploads_router)
 app.include_router(generate_router)
+app.include_router(github_router)
 app.include_router(push_router)
 app.include_router(notifications_router)
 app.include_router(debug_router)

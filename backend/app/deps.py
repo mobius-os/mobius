@@ -374,3 +374,50 @@ def get_owner_or_app_with_manage_apps(
       "to install or uninstall apps on your behalf."
     ),
   )
+
+
+def get_owner_or_app_with_github_access(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """Owner JWT, OR an app-scoped JWT whose App row has github_access=true.
+
+  Gates the WHOLE GitHub surface in routes/github.py: the connect flow
+  (device-code start/poll, PAT submit) AND disconnect AND the read-only
+  REST/GraphQL passthrough. So this is NOT a read-only grant — read it
+  as "let this app manage and read the owner's GitHub connection". A
+  github_access app can drive the connect UI (a normal connect still
+  needs the owner to authorize on github.com or paste their own PAT),
+  can disconnect, and can read PR/issue state under the stored token.
+  What it CANNOT do is exfiltrate the token (it never leaves the server,
+  INV1) or write to GitHub over HTTP (the read surface is GET-only /
+  mutation-rejecting; all writes go through the agent's gh CLI with
+  per-action owner approval). The Contribute mini-app is the canonical
+  and, today, only holder — it ships `permissions.github_access: true`
+  so its own UI can connect + read without holding the owner JWT. A
+  boolean gate like manage_apps above, not a ladder.
+
+  Because the grant covers connect + disconnect, treat it as a
+  connection-management capability, not a read scope, when deciding
+  which apps get it. If a read-only GitHub consumer ever appears, split
+  this into github_access (read) + github_connect (manage) rather than
+  handing the read app connect power.
+
+  Permission is read from the App row at request time, so revoking
+  github_access (PATCH /api/apps/{id}) cuts off access on the next
+  request without rotating the JWT.
+  """
+  if principal.app_id is None:
+    return principal.owner
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  if bool(app.github_access):
+    return principal.owner
+  raise HTTPException(
+    status_code=403,
+    detail=(
+      "This app needs permissions.github_access=true in its manifest "
+      "to manage and read the GitHub connection on your behalf."
+    ),
+  )

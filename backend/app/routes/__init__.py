@@ -64,6 +64,7 @@ storage_router = _load("storage")
 fs_router = _load("fs")
 uploads_router = _load("uploads")
 generate_router = _load("generate")
+github_router = _load("github")
 push_router = _load("push")
 notifications_router = _load("notifications")
 debug_router = _load("debug")
@@ -90,6 +91,7 @@ __all__ = [
   "settings_router",
   "uploads_router",
   "generate_router",
+  "github_router",
   "push_router",
   "notifications_router",
   "debug_router",

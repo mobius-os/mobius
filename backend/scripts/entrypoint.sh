@@ -107,8 +107,9 @@ fi
 if ! chown -R mobius:mobius /data 2>/dev/null; then
   echo "WARNING: chown -R mobius:mobius /data failed (likely a managed-volume platform like Railway)." >&2
   echo "WARNING: Falling back to chmod 1777 /data + 777 on subdirs so the mobius user can traverse" >&2
-  echo "WARNING: AND create files at the /data top level. Per-file chmods later in this script set" >&2
-  echo "WARNING: explicit 600 on sensitive paths (.secret-key, service-token.txt, cli-auth/) so the" >&2
+  echo "WARNING: AND create files at the /data top level. .secret-key and service-token.txt get an" >&2
+  echo "WARNING: explicit 600 later in this script; cli-auth/ credential files (Claude + GitHub) are" >&2
+  echo "WARNING: written 0600 at write time by the backend (auth.py / github_auth.py os.open), so the" >&2
   echo "WARNING: wide perms don't expose secrets. chmod 700 here would lock the mobius user out of" >&2
   echo "WARNING: /data entirely (root-owned dir, mode 700, no read/exec for non-owner) and break" >&2
   echo "WARNING: boot. chmod 755 was the previous fallback but broke runtime writes to top-level" >&2
@@ -903,17 +904,40 @@ else
   '
 fi
 
-# Ensure the mobius user has a GLOBAL git identity available. The
-# local-repo config above only covers /data/.git; when the agent later
-# runs `git commit` inside /data/apps/<slug>/ (which may have its own
-# .git with no config, or no .git and no fallback because it's not
-# nested under /data/.git's worktree), commits fail with "Please tell
-# me who you are." Set the global config as mobius so any future
-# repository — per-app, shell, or scratch — picks up an identity.
-su -s /bin/sh mobius -c "
-  git config --global user.name 'Mobius Agent'
-  git config --global user.email 'agent@mobius'
-" 2>/dev/null || true
+# Ensure the mobius user has a GLOBAL git identity, a gh config symlink,
+# and a git credential helper — all as mobius, all re-asserted every boot
+# because mobius's home (/home/mobius) is image-layer and ephemeral across
+# container recreation. The local-repo config above only covers /data/.git;
+# a global identity means `git commit` inside /data/apps/<slug>/ (own .git,
+# or none) never fails with "Please tell me who you are."
+#
+# When GitHub is connected the identity attributes commits to the connected
+# user, read from mobius-github.json (the backend writes it on connect; no
+# jq in the image, so parse with python3). Deriving it from on-disk state
+# each boot — not once at connect time — is what makes attribution survive
+# recreation. When not connected, fall back to the Mobius Agent defaults.
+# The ~/.config/gh symlink lets `gh` resolve the volume-backed token, and
+# the credential helper lets a plain `git push` to github.com authenticate
+# through it; with no token gh serves nothing and the push fails loudly.
+su -s /bin/sh mobius -c '
+  mkdir -p ~/.config
+  ln -sfn /data/cli-auth/gh ~/.config/gh
+  _gh_state=/data/cli-auth/gh/mobius-github.json
+  gh_login=""
+  gh_uid=""
+  if [ -f "$_gh_state" ]; then
+    gh_login=$(python3 -c "import json;print(json.load(open(\"$_gh_state\")).get(\"login\") or \"\")" 2>/dev/null)
+    gh_uid=$(python3 -c "import json;v=json.load(open(\"$_gh_state\")).get(\"user_id\");print(\"\" if v is None else v)" 2>/dev/null)
+  fi
+  if [ -n "$gh_login" ]; then
+    git config --global user.name "$gh_login"
+    git config --global user.email "${gh_uid}+${gh_login}@users.noreply.github.com"
+  else
+    git config --global user.name "Mobius Agent"
+    git config --global user.email "agent@mobius"
+  fi
+  git config --global credential.helper "!gh auth git-credential"
+' 2>/dev/null || true
 
 # Only copy the pm-commit helper if missing or if the image version
 # differs from the on-disk copy. Blindly overwriting on every boot wipes

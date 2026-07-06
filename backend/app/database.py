@@ -127,6 +127,16 @@ def run_migrations(eng) -> None:
         "NOT NULL DEFAULT 0"
       ))
       conn.commit()
+  if "github_access" not in apps_cols:
+    # GitHub read authority — gates the read-only /api/github surface.
+    # Defaults to 0; apps gain it by declaring
+    # permissions.github_access=true in their manifest and reinstalling.
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN github_access BOOLEAN "
+        "NOT NULL DEFAULT 0"
+      ))
+      conn.commit()
   if "manifest_url" not in apps_cols:
     # Install identity — see models.App.manifest_url. Nullable for
     # user-built apps; installed apps stamp it on install/update.
