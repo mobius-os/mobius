@@ -320,6 +320,38 @@ def test_status_up_to_date_on_fresh_clone(clone_env):
   assert status["state"] == pu.PlatformUpdateState.UP_TO_DATE.value
 
 
+# --- check_for_updates: the on-demand fetch behind "Check for updates" -------
+
+def test_check_for_updates_fetches_then_reports_available(clone_env):
+  origin, platform = clone_env
+  before = _served_sha(platform)
+  # A deploy advances origin AFTER the clone's last fetch. platform_status is
+  # fetch-free, so it still reads the stale remote-tracking ref: "up to date".
+  _advance_origin(origin, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_C = 3", "LINE_C = 77")})
+  assert pu.platform_status(platform)["state"] == \
+    pu.PlatformUpdateState.UP_TO_DATE.value  # stale — no fetch happened yet
+
+  # check_for_updates runs the fetch the cheap status read skips -> now visible.
+  status = pu.check_for_updates(platform)
+  assert status["available"] is True
+  assert status["state"] == pu.PlatformUpdateState.AVAILABLE.value
+  # A check only advances remote-tracking refs — the served tree is NOT mutated.
+  assert _served_sha(platform) == before
+
+
+def test_check_for_updates_offline_is_safe_noop(clone_env):
+  origin, platform = clone_env
+  before = _served_sha(platform)
+  _git(platform, "remote", "set-url", "origin",
+       str(platform.parent / "does-not-exist.git"))
+  # An offline check must not raise and must leave the served tree + status intact.
+  status = pu.check_for_updates(platform)
+  assert status["available"] is False
+  assert status["state"] == pu.PlatformUpdateState.UP_TO_DATE.value
+  assert _served_sha(platform) == before
+
+
 # --- restart flag lifecycle -------------------------------------------------
 
 def test_boot_reconcile_clears_restart_flag(clone_env):

@@ -292,6 +292,7 @@ export const api = {
   },
   platform: {
     status: () => apiFetch('/platform/status'),
+    check: () => apiFetch('/platform/check', { method: 'POST' }),
     apply: () => apiFetch('/platform/apply', { method: 'POST' }),
     restart: () => apiFetch('/platform/restart', { method: 'POST' }),
   },
