@@ -33,7 +33,14 @@ HEARTBEAT="$DATA_DIR/cron-logs/reflection.heartbeat"
 TOKEN_FILE="$DATA_DIR/service-token.txt"
 DATE="$(date +%F)"
 INPUTS="$DATA_DIR/apps/reflection/inputs"
-RUNNER="${REFLECTION_RUNNER:-/app/scripts/reflection_runner.py}"
+# Platform-first runner resolution: post-defrost the platform clone is the
+# SERVED source of truth (the entrypoint serves its backend), so a platform
+# deploy of the runner must reach the nightly run without an image rebuild;
+# the baked /app copy is the recovery-floor fallback.
+_default_runner="/app/scripts/reflection_runner.py"
+[[ -f "$DATA_DIR/platform/backend/scripts/reflection_runner.py" ]] \
+  && _default_runner="$DATA_DIR/platform/backend/scripts/reflection_runner.py"
+RUNNER="${REFLECTION_RUNNER:-$_default_runner}"
 # Wall-clock cap for the whole night. Generous (the agent does real,
 # multi-phase work) but bounded so a wedged run can't hold the lock past
 # the next night's schedule. Overridable for tests.
