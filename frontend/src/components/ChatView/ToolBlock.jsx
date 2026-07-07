@@ -71,7 +71,11 @@ function ToolResult({ r }) {
 }
 
 export default function ToolBlock({ t, chatId, msgTs, blockIdx }) {
-  const [open, setOpen] = useState(() => !!t.defaultOpen)
+  // Collapsed until tapped — nothing produces a pre-opened tool block anymore
+  // (the last producer, the legacy compaction path, renders as CompactionCard;
+  // a legacy persisted `defaultOpen` field is ignored and renders collapsed
+  // like everything else).
+  const [open, setOpen] = useState(false)
   // The full output of a large tool block is fetched lazily on first expand —
   // a chat load ships only the top-line summary (the tool + its input) and an
   // output_truncated marker, no output preview (see chats.py
@@ -88,10 +92,6 @@ export default function ToolBlock({ t, chatId, msgTs, blockIdx }) {
   const hasDetail = !!(
     t.input || t.output || t.output_truncated || hasSources
   )
-
-  useEffect(() => {
-    if (t.defaultOpen) setOpen(true)
-  }, [t.defaultOpen])
 
   useEffect(() => {
     if (!open || !t.output_truncated || fullOutput !== null || loadingFull) return
