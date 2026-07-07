@@ -34,6 +34,7 @@ import re
 import shutil
 import subprocess
 import warnings as _warnings_mod
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 from urllib.parse import unquote, urljoin, urlparse
@@ -142,6 +143,17 @@ _SOURCE_FILES_MANAGED_PREFIXES = (
 _SOURCE_FILES_MANAGED_EXACT = frozenset((
   "index.jsx", ".gitignore", "init-cron.sh", _STATIC_ASSETS_MANIFEST,
 ))
+
+# Shared skill files an app declares via manifest `skills`: each entry is a
+# root-level `source_files` basename the post-commit sync phase copies into
+# /data/shared/skills/. Small caps — skills are instruction prose, not data.
+_SKILLS_COUNT_MAX = 5
+_SKILL_MAX_BYTES = 256 * 1024
+
+# Installer-owned ownership/provenance sidecar inside the skills dir. A
+# dotfile that is not `*.md`, so the skill loaders (the app-skills catalog
+# app, the SDK skill-load observers) never list or read it.
+_APP_SKILLS_SIDECAR = ".app-skills.json"
 
 # Tracked files in a merged tree that are NOT hand-written app source: the
 # managed .gitignore, the install-managed static-asset manifest, and the cron
@@ -340,6 +352,43 @@ def _validate_manifest(m: dict) -> None:
           "install-managed path (entry, .gitignore, static/, dist/, .build/, "
           "node_modules/, the cron/job scripts, .bak snapshots, or the "
           "numeric-id storage tree).",
+        )
+  # Shared skill files the app ships (`skills`). Shape only here; the
+  # subset-of-source_files rule is the existence guarantee — skill bytes ride
+  # the source tree on every install path (synthetic fetch, clone, clone
+  # fallback), so the sync phase can read them from the final on-disk tree.
+  # The size cap is enforced there too, where the final bytes are known.
+  skills = m.get("skills")
+  if skills is not None:
+    if not isinstance(skills, list):
+      raise HTTPException(400, "Manifest `skills` must be an array.")
+    if len(skills) > _SKILLS_COUNT_MAX:
+      raise HTTPException(
+        400, f"Manifest has too many skills (max {_SKILLS_COUNT_MAX}).",
+      )
+    root_sources = {
+      rel for rel in (source_files or [])
+      if isinstance(rel, str) and "/" not in rel
+    }
+    for i, rel in enumerate(skills):
+      if not isinstance(rel, str) or not rel.endswith(".md") or rel == ".md":
+        raise HTTPException(
+          400, f"Manifest `skills[{i}]` must be a `<name>.md` filename.",
+        )
+      if "/" in rel or "\\" in rel or ".." in rel or rel.startswith("."):
+        raise HTTPException(
+          400,
+          f"Manifest `skills[{i}]` {rel!r} must be a bare .md basename — "
+          "no directories, no traversal, no dotfiles (dotfiles in the "
+          "skills dir are installer-owned).",
+        )
+      if rel not in root_sources:
+        raise HTTPException(
+          400,
+          f"Manifest `skills[{i}]` {rel!r} must also be listed in "
+          "`source_files` as a root-level file — the installer reads skill "
+          "bytes from the installed source tree, so a skill that is not a "
+          "source file has nothing to install.",
         )
   sched = m.get("schedule")
   if sched is not None:
@@ -1140,6 +1189,193 @@ def _storage_path(app_id: int, sub: str) -> Path:
   return data_dir / "apps" / str(app_id) / sub
 
 
+# Env vars that would redirect the skill-snapshot git commands away from the
+# /data repo (git exports them into hook environments, where they OVERRIDE
+# `-C`). app_git._git_env is deliberately NOT reused for the snapshot: its
+# GIT_CEILING_DIRECTORIES is designed to STOP repo discovery at /data, which
+# is exactly the repo the snapshot targets.
+_SNAPSHOT_GIT_ENV_DROP = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
+
+
+def _snapshot_shared_skill(
+  data_dir: Path, rel: str, slug: str, version: str,
+) -> tuple[bool, str]:
+  """Commits shared/skills/<rel>'s current bytes into the /data repo.
+
+  Returns (ok, detail). ok=True means the current content is durable in git
+  history — either a fresh pre-install snapshot commit, or the file was
+  already committed clean (the nightly /data safety-net commit got there
+  first, which IS the snapshot). ok=False means durability could not be
+  guaranteed (index.lock, dubious ownership, unborn HEAD, ...) and the
+  caller must NOT overwrite the file.
+
+  `--only` + the pathspec keeps the commit to this one file, so a racing
+  `git add -A` (the nightly pm-commit) can't be swept into it and unrelated
+  staged files stay staged.
+  """
+  env = {
+    k: v for k, v in os.environ.items() if k not in _SNAPSHOT_GIT_ENV_DROP
+  }
+  # Explicit identity: the /data repo normally carries user.name from
+  # entrypoint.sh, but a snapshot must not fail (and thereby block a skill
+  # update) just because that config is missing.
+  base = [
+    "git", "-C", str(data_dir),
+    "-c", "user.name=Mobius", "-c", "user.email=mobius@localhost",
+  ]
+
+  def _run(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+      [*base, *args], capture_output=True, text=True, timeout=30, env=env,
+    )
+
+  def _reason(proc: subprocess.CompletedProcess) -> str:
+    lines = (proc.stderr or proc.stdout or "").strip().splitlines()
+    return lines[0] if lines else f"git exited {proc.returncode}"
+
+  path = f"shared/skills/{rel}"
+  status = _run("status", "--porcelain", "--", path)
+  if status.returncode != 0:
+    return False, _reason(status)
+  if not status.stdout.strip():
+    return True, "already committed"
+  add = _run("add", "--", path)
+  if add.returncode != 0:
+    return False, _reason(add)
+  commit = _run(
+    "commit", "--only",
+    "-m", f"pre-install snapshot of {rel} (app {slug} v{version})",
+    "--", path,
+  )
+  if commit.returncode != 0:
+    return False, _reason(commit)
+  return True, "committed"
+
+
+async def _sync_app_skills(
+  db: Session,
+  app: "models.App",
+  manifest: dict,
+  warnings: list[str],
+) -> None:
+  """Materializes manifest-declared skill files into /data/shared/skills.
+
+  Post-commit best-effort phase (same contract as cron): the app row is
+  already durable, so every failure appends a warning instead of raising.
+  Bytes come from the app's FINAL on-disk source tree, which is uniform
+  across the synthetic, clone, and post-merge update paths (validation
+  guarantees skills ⊆ root source_files, so the tree carries them).
+
+  The never-lose-work contract: a present skill file whose bytes differ
+  from what this installer last recorded (agent edits, or a pre-manifest
+  seed copy) is git-snapshotted into the /data repo BEFORE being
+  overwritten, and left untouched when the snapshot cannot be guaranteed.
+  Ownership rides the installer-owned sidecar so one app can never
+  silently take over another live app's skill file.
+  """
+  skills = list(dict.fromkeys(manifest.get("skills") or []))
+  if not skills:
+    return
+  if not app.source_dir:
+    # A legacy no-source_dir app has no on-disk tree to read skill bytes
+    # from — Path("") / rel would resolve against the server's CWD.
+    warnings.append("skills: app has no source_dir — skipped")
+    return
+  data_dir = Path(get_settings().data_dir)
+  skills_dir = data_dir / "shared" / "skills"
+  source_dir = Path(app.source_dir)
+  version = str(manifest.get("version", "unknown"))
+  async with fs_locks.shared_skills_lock():
+    sidecar_path = skills_dir / _APP_SKILLS_SIDECAR
+    records: dict = {}
+    if sidecar_path.exists():
+      try:
+        loaded = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+          records = loaded
+      except (OSError, ValueError):
+        # A corrupt sidecar downgrades every present file to the
+        # modified-or-unrecorded case — snapshot-then-overwrite — which is
+        # the safe direction: work is preserved, ownership is re-earned.
+        warnings.append("skills: ownership sidecar unreadable — rebuilding")
+    for rel in skills:
+      try:
+        content = (source_dir / rel).read_bytes()
+      except OSError:
+        # Validation checked the manifest's declaration, not the repo's
+        # contents — a clone whose tree lacks the file lands here.
+        warnings.append(f"skill {rel}: missing from installed source tree")
+        continue
+      if len(content) > _SKILL_MAX_BYTES:
+        warnings.append(
+          f"skill {rel}: exceeds {_SKILL_MAX_BYTES} bytes — skipped"
+        )
+        continue
+      rec = records.get(rel)
+      owner_id = rec.get("app_id") if isinstance(rec, dict) else None
+      if owner_id is not None and owner_id != app.id:
+        owner = (
+          db.query(models.App)
+          .filter(
+            models.App.id == owner_id, models.App.deleted_at.is_(None),
+          )
+          .first()
+        )
+        if owner is not None:
+          warnings.append(
+            f"skill {rel}: owned by app {owner.slug} — skipped"
+          )
+          continue
+        # Recorded owner is gone (uninstalled past TTL or tombstoned) —
+        # this app takes the file over through the normal cases below.
+      target = skills_dir / rel
+      recorded_sha = rec.get("sha256") if isinstance(rec, dict) else None
+      if target.exists():
+        current_sha = hashlib.sha256(target.read_bytes()).hexdigest()
+        if current_sha != recorded_sha:
+          # Modified since last recorded, or never recorded (an agent
+          # edit, or the old platform seed's copy): snapshot the current
+          # bytes before replacing them — never trade edits for an update.
+          if (data_dir / ".git").is_dir():
+            try:
+              ok, detail = await asyncio.to_thread(
+                _snapshot_shared_skill, data_dir, rel, app.slug, version,
+              )
+            except Exception as exc:
+              ok, detail = False, repr(exc)
+            if not ok:
+              warnings.append(
+                f"skill {rel}: left unchanged (snapshot failed: {detail}); "
+                "will retry next update"
+              )
+              continue
+            warnings.append(f"skill {rel}: snapshotted then updated")
+          else:
+            warnings.append(
+              f"skill {rel}: updated, no /data repo for snapshot"
+            )
+      atomic_write(target, content)
+      # 0o664 mirrors init_skills' boot convention — group-writable so the
+      # agent can edit the skill no matter which uid materialized it.
+      os.chmod(target, 0o664)
+      records[rel] = {
+        "app_id": app.id,
+        "slug": app.slug,
+        "manifest_url": app.manifest_url,
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "installed_at": datetime.now(UTC).isoformat(),
+      }
+      # Persist provenance immediately after each file lands: a crash
+      # between files must never leave an installed skill without its
+      # ownership record (the next install would treat it as agent-modified
+      # and snapshot-then-overwrite — safe, but noisy). Installs are rare
+      # and the JSON is tiny, so a per-file write costs nothing.
+      atomic_write(
+        sidecar_path,
+        json.dumps(records, indent=2, sort_keys=True) + "\n",
+      )
+
+
 async def install_from_manifest(
   db: Session,
   manifest_url: str | None,
@@ -1473,6 +1709,14 @@ async def install_from_manifest(
     _derive_repo_ref(manifest_url) if manifest_url is not None else None
   )
   cloned_install = False
+  cloned_update = False
+  # The `source_tree` key that carries the entry's bytes — and, on every path
+  # that writes or compiles from disk, the entry's on-disk name. Fetched/
+  # synthetic trees always key the entry as the root "index.jsx" they
+  # materialize (whatever the manifest calls it); a real origin-backed tree
+  # (cloned install or update) keys files by their repo names, so there the
+  # entry sits under manifest["entry"]. The clone branches below reassign it.
+  entry_key = "index.jsx"
   # True once `source_tree` is the MERGED tree (a clean merge or forced
   # take-upstream): the post-write commit then replays the result on the
   # upstream tip as its sole parent so the merge base advances — otherwise
@@ -1704,7 +1948,6 @@ async def install_from_manifest(
             app_git.local_diverged_from,
             git_source_dir, prev_upstream_commit,
           )
-          cloned_update = False
           if repo_ref is not None and await asyncio.to_thread(
             app_git.has_origin, git_source_dir,
           ):
@@ -1714,6 +1957,10 @@ async def install_from_manifest(
                 app_git.fetch_upstream, git_source_dir, ref,
               )
               cloned_update = True
+              # Real origin trees key files by their repo names — the entry
+              # lives under the manifest's own name, not a synthetic root
+              # index.jsx.
+              entry_key = manifest["entry"]
             except Exception as exc:
               log.warning(
                 "install: fetch from origin at %s failed; falling back to "
@@ -1739,13 +1986,13 @@ async def install_from_manifest(
                 rel: data for rel, data in upstream_tree.items()
                 if rel not in _MERGED_NON_SOURCE
               }
-            # A new upstream that dropped the root index.jsx (e.g. the manifest
-            # moved `entry`) can't fast-forward the served bundle — treat it as
-            # a conflict for the agent to resolve, mirroring the clean-merge
-            # branch below, rather than half-applying a tree with no entry.
-            if "index.jsx" not in source_tree:
+            # A new upstream whose tree lacks the manifest's entry can't
+            # fast-forward the served bundle — treat it as a conflict for the
+            # agent to resolve, mirroring the clean-merge branch below, rather
+            # than half-applying a tree with no entry.
+            if entry_key not in source_tree:
               mode = "conflict"
-              conflict_paths = ["index.jsx"]
+              conflict_paths = [entry_key]
             else:
               divergence = "fast_forward"
               merge_applied = True
@@ -1767,12 +2014,16 @@ async def install_from_manifest(
             if merge.status == "conflict":
               if force_core_store_update:
                 # Core App Store self-update: published upstream wins, keep the
-                # fetched `source_tree` and apply it like a fast-forward.
+                # fetched `source_tree` and apply it like a fast-forward. The
+                # fetched tree keys its entry as the root index.jsx, so the
+                # entry key reverts with it (a cloned fetch above may have
+                # pointed it at the repo's own entry name).
                 warnings.append(
                   "core App Store self-update replaced local edits with upstream"
                 )
                 divergence = "fast_forward"
                 merge_applied = True
+                entry_key = "index.jsx"
               else:
                 # Never rebase local. The app stays served with its current
                 # bundle + source; the new upstream is recorded for a later
@@ -1784,7 +2035,7 @@ async def install_from_manifest(
               # Read it in full (one path for one and many files) and drop the
               # managed/non-source files so `source_tree` is the source set the
               # writer reconciles the worktree to. A clean verdict that yields
-              # no index.jsx (e.g. an unreadable tree) is treated as a conflict
+              # no entry (e.g. an unreadable tree) is treated as a conflict
               # rather than half-applying a merge we can't materialise.
               merged_tree = app_git.read_merged_tree(
                 git_source_dir, merge.merged_tree_oid,
@@ -1793,9 +2044,9 @@ async def install_from_manifest(
                 rel: data for rel, data in merged_tree.items()
                 if rel not in _MERGED_NON_SOURCE
               }
-              if "index.jsx" not in merged_source:
+              if entry_key not in merged_source:
                 mode = "conflict"
-                conflict_paths = merge.conflict_paths or ["index.jsx"]
+                conflict_paths = merge.conflict_paths or [entry_key]
               else:
                 source_tree = merged_source
                 divergence = "clean_merge"
@@ -1812,25 +2063,25 @@ async def install_from_manifest(
           # for a new raw-GitHub catalog install, prefer a REAL clone so the
           # source tree carries origin/<ref> and the app's own .gitignore. If
           # cloning fails (private repo, renamed repo, offline git access), fall
-          # back to the existing synthetic-upstream path unchanged. This slice
-          # only clones apps whose entry is the conventional root `index.jsx`
-          # (which the clone reads back below); a non-root/renamed entry falls
-          # back rather than read the wrong file — generalizing the entry is a
-          # follow-up.
-          if (
-            not existing
-            and repo_ref is not None
-            and manifest.get("entry") == "index.jsx"
-          ):
+          # back to the existing synthetic-upstream path unchanged. The entry
+          # is read back from the clone under whatever name the manifest
+          # declares — the repo's bytes, not the HTTP fetch, are canonical on
+          # this path. `source_tree` keys it by that same repo name and
+          # `entry_key` tracks it, so every downstream consumer (entry_source,
+          # the compile) reads the right file and no synthetic root index.jsx
+          # is ever materialized for a cloned tree (the write loop is skipped;
+          # the on-disk file keeps the repo's name).
+          if not existing and repo_ref is not None:
             repo_url, ref = repo_ref
             try:
               app.upstream_commit = await asyncio.to_thread(
                 app_git.clone_upstream, git_source_dir, repo_url, ref,
               )
-              entry_bytes = (git_source_dir / "index.jsx").read_bytes()
+              entry_bytes = (git_source_dir / manifest["entry"]).read_bytes()
               jsx_source = entry_bytes.decode("utf-8")
               upstream_jsx_sha = hashlib.sha256(entry_bytes).hexdigest()
-              source_tree = {"index.jsx": entry_bytes}
+              source_tree = {manifest["entry"]: entry_bytes}
+              entry_key = manifest["entry"]
               cloned_install = True
             except Exception as exc:
               log.warning(
@@ -1888,8 +2139,8 @@ async def install_from_manifest(
         app.display = _manifest_display(manifest.get("display"))
 
         # `app.jsx_source` mirrors the entry the tree carries (the merged
-        # index.jsx on a clean update, the upstream bytes otherwise).
-        entry_source = source_tree["index.jsx"].decode("utf-8")
+        # entry on a clean update, the upstream bytes otherwise).
+        entry_source = source_tree[entry_key].decode("utf-8")
         if existing:
           # Apply the (possibly merged) source AND the new manifest's capability /
           # offline fields now that the merge decision is made and the conflict
@@ -1993,10 +2244,13 @@ async def install_from_manifest(
           # from the files just written; promotion of the staged bundle into the
           # live path is a post-commit commit_action, and a compile failure here
           # raises into the outer except which runs the source rollback actions
-          # appended above (restoring every .bak).
+          # appended above (restoring every .bak). `entry_key` is the entry's
+          # on-disk name on every path that reaches here: synthetic trees
+          # write it as the root index.jsx, cloned trees keep the repo's own
+          # filename (a cloned install skipped the write loop entirely).
           await compile_jsx(
             app.id, entry_source,
-            out_path=staged_bundle, source_path=jsx_file,
+            out_path=staged_bundle, source_path=source_dir_path / entry_key,
           )
           rollback_actions.append(
             lambda s=staged_bundle: s.unlink() if s.exists() else None
@@ -2177,6 +2431,22 @@ async def install_from_manifest(
         if drop_prior_cron:
           await asyncio.to_thread(_drop_app_cron, app_data_dir)
         job_path = app_data_dir / cron_job_name
+        # A cloned install/update materializes the job script with the repo's
+        # own mode — the installer never chmods tracked clone files (a mode
+        # change would read as permanent local divergence vs origin). A repo
+        # carrying the job as 100644 therefore lands non-executable, and the
+        # crontab/run-job exec fails silently at fire time; surface it now.
+        # The durable fix is repo-side (commit the +x bit). The synthetic
+        # write loop chmods declared jobs 0o755, so this never fires there.
+        if (
+          job_name
+          and job_path.exists()
+          and not os.access(job_path, os.X_OK)
+        ):
+          warnings.append(
+            f"schedule.job {cron_job_name} is not executable — cron/run-job "
+            "will fail until the app repo commits the executable bit"
+          )
         if has_cron and CRON_SCAFFOLD.exists():
           # The job script is already on disk; the scaffold preserves it and
           # installs the crontab entry pointing at it.
@@ -2208,6 +2478,17 @@ async def install_from_manifest(
     except Exception as exc:
       log.exception("install: job-script/cron step failed post-commit")
       warnings.append(f"cron: registration failed — {exc!r}")
+
+  # --- Phase 6: post-commit shared-skill materialization ---------------
+  # Same best-effort contract as cron: the app is durably installed, so a
+  # skill failure is a warning, never a 500. A conflicting update returned
+  # earlier, so new-version skills are never installed while old code is
+  # still being served.
+  try:
+    await _sync_app_skills(db, app, manifest, warnings)
+  except Exception as exc:
+    log.exception("install: skill sync failed post-commit")
+    warnings.append(f"skills: sync failed — {exc!r}")
 
   return app, mode, warnings, manifest, conflict_paths, divergence
 

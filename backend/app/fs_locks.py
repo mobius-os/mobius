@@ -35,6 +35,10 @@ acquires in reverse, so there is no cycle:
 
     install_uninstall_lock  ->  app_storage_lock(id)  ->  source_dir_lock(dir)
 
+``shared_skills_lock`` sits outside that chain: the installer's post-commit
+skill-sync phase takes it while (at most) the lifecycle lock is held, and no
+holder ever nests it with the keyed locks, so it cannot form a cycle.
+
 Multi-lock holders, all acquiring left-to-right:
 
   - ``delete_app`` holds all three.
@@ -56,6 +60,7 @@ from weakref import WeakValueDictionary
 _app_locks: "WeakValueDictionary[int, asyncio.Lock]" = WeakValueDictionary()
 _source_locks: "WeakValueDictionary[str, asyncio.Lock]" = WeakValueDictionary()
 _lifecycle_lock = asyncio.Lock()
+_shared_skills_lock = asyncio.Lock()
 
 
 def install_uninstall_lock() -> asyncio.Lock:
@@ -71,6 +76,22 @@ def install_uninstall_lock() -> asyncio.Lock:
   no uninstall can run concurrently.
   """
   return _lifecycle_lock
+
+
+def shared_skills_lock() -> asyncio.Lock:
+  """The singleton lock serializing /data/shared/skills materialization.
+
+  Held by the installer's post-commit skill-sync phase around the whole
+  read-sidecar -> hash -> git-snapshot -> write -> record sequence, so two
+  concurrent installs can't interleave between reading a skill file's hash
+  and overwriting it (one would clobber the other's snapshot decision, or
+  lose a sidecar record to a stale read-modify-write). One lock for the
+  whole skills dir rather than per-file: every sync rewrites the single
+  ownership sidecar anyway, and installs are infrequent owner actions, so
+  the coarse lock costs nothing. Uninstall never touches the skills dir or
+  the sidecar, so it does not participate.
+  """
+  return _shared_skills_lock
 
 
 def app_storage_lock(app_id: int) -> asyncio.Lock:
