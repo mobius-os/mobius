@@ -51,6 +51,18 @@ if [[ -f .env && ! -f "$worktree/.env" ]]; then
   echo "copied .env into $worktree/"
 fi
 
+# Node deps: share the main checkout's installed node_modules via symlinks
+# (the same trick wt-pytest.sh uses for the backend venv), so `npm test`,
+# esbuild smoke-checks, and playwright work in the worktree immediately —
+# no per-worktree npm ci. The symlinks are untracked; remove them before
+# `git worktree remove`.
+for dir in . frontend; do
+  if [[ -d "$dir/node_modules" && ! -e "$worktree/$dir/node_modules" ]]; then
+    ln -s "$(pwd)/$dir/node_modules" "$worktree/$dir/node_modules"
+    echo "linked $dir/node_modules into $worktree/$dir/"
+  fi
+done
+
 port=$((8001 + $(echo "$slug" | cksum | cut -d' ' -f1) % 90))
 project="mobius-test-${slug}"
 
