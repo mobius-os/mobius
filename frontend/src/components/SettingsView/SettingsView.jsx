@@ -249,25 +249,33 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
     }
   }
 
-  // Ask the service worker to re-check for a newer shell build and re-read the
-  // live build identity. `registration.update()` forces a fresh fetch of
-  // /sw.js (which is served `no-cache`); if a new bundle is live the SW
-  // installs it in the background and our update flow (skipWaiting +
-  // clientsClaim) activates it. We also re-fetch /api/version so the
-  // shell_sha !== sha notice reflects the current server state.
+  // Refresh BOTH Möbius update signals on demand — the shell bundle AND the
+  // platform git availability — so one "Check for updates" covers the whole row.
+  // Shell: `registration.update()` forces a fresh fetch of /sw.js (served
+  // `no-cache`); a live new bundle installs in the background (skipWaiting +
+  // clientsClaim) and we re-read /api/version so the shell_sha !== sha notice is
+  // current. Platform: POST /platform/check runs the `git fetch` that the cheap
+  // /status read deliberately skips, so a deploy that landed since boot becomes
+  // visible without waiting for a reboot. Both run in parallel and neither
+  // failing blocks the other (allSettled) — a hiccup just leaves the last-known
+  // state on the row.
   async function checkForUpdates() {
     if (updatePhase === 'checking') return
     setUpdatePhase('checking')
     try {
-      if ('serviceWorker' in navigator) {
-        const reg = await navigator.serviceWorker.getRegistration()
-        if (reg) await reg.update()
-      }
-      await versionQueries.current.invalidate(queryClient)
-      await versionQuery.refetch()
-    } catch {
-      // A failed SW update check or refetch is non-fatal — fall through to
-      // 'checked' so the row still shows the latest known state.
+      const shellP = (async () => {
+        if ('serviceWorker' in navigator) {
+          const reg = await navigator.serviceWorker.getRegistration()
+          if (reg) await reg.update()
+        }
+        await versionQueries.current.invalidate(queryClient)
+        await versionQuery.refetch()
+      })()
+      const platformP = (async () => {
+        const res = await api.platform.check()
+        if (res.ok) setPlatform(await res.json())
+      })()
+      await Promise.allSettled([shellP, platformP])
     } finally {
       setUpdatePhase('checked')
     }
@@ -319,10 +327,12 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
   }, [])
   useEffect(() => { refreshPlatform() }, [refreshPlatform])
 
-  // Replaces the old "Check for updates" button: on opening Settings, silently
-  // ask the SW for a newer bundle and re-read /api/version so the Möbius row's
-  // status is current without a label-mutating button. Once per open; never
-  // touches updatePhase, so it can't make the Update button look busy.
+  // Silent freshen on opening Settings: ask the SW for a newer bundle and
+  // re-read /api/version so the Möbius row's shell signal is current the moment
+  // it renders. This is the cheap on-open pass (no git fetch) — it complements
+  // the explicit "Check for updates" button, which additionally fetches platform
+  // availability. Once per open; never touches updatePhase, so it can't make the
+  // Update/Check button look busy.
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -610,8 +620,12 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
             updates the shell + non-protected backend only; the rest rides the
             image (134 SP3/SP5) — so the copy stays "Möbius is up to date / has
             an update", never a backend-vs-frontend split. Always renders (it
-            carries the Möbius build identity), so there is no second surface and
-            no label-mutating "Check" button. */}
+            carries the Möbius build identity), so there is no second surface. The
+            action slot holds exactly one contextual button; when up to date that
+            button is an explicit "Check for updates" (git fetch + SW re-check)
+            with its own "Checking…" text — it never mutates the status label
+            beside it, which is why the old label-mutating Check button was wrong
+            and this one is not. */}
         <section className="settings__section settings__section--compact">
           <h2 className="settings__section-title">Möbius</h2>
           <div className="settings__row settings__row--top">
@@ -671,7 +685,21 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
               >
                 {mobiusUpdating ? 'Updating…' : 'Update'}
               </button>
-            ) : null}
+            ) : (
+              // Nothing to apply — offer an explicit refresh. Subtle outline (a
+              // secondary action, not a call-to-action) and its own "Checking…"
+              // text, so it never mutates the status label beside it. If the
+              // check surfaces an update, this slot re-renders to the Update
+              // button on the next paint.
+              <button
+                className="settings__btn settings__btn--outline settings__btn--sm settings__btn--nowrap"
+                type="button"
+                onClick={checkForUpdates}
+                disabled={updatePhase === 'checking'}
+              >
+                {updatePhase === 'checking' ? 'Checking…' : 'Check for updates'}
+              </button>
+            )}
           </div>
           {platformPhase === 'restarting' && (
             <div className="settings__notice" role="status">
