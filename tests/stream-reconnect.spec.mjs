@@ -375,6 +375,91 @@ test.describe('Stream reconnection', () => {
     await expect(page.locator('.connection-status--reattach')).toHaveCount(0)
   })
 
+  test('14. Kept quick-wake socket self-heals when reads stop', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__MOBIUS_KEPT_SOCKET_DEADMAN_MS = 250
+
+      const realFetch = window.fetch.bind(window)
+      const encoder = new TextEncoder()
+      let streamCount = 0
+      let recoveredController
+
+      window.__streamFetchCount = 0
+      window.__sendRecoveredKeepalive = () => {
+        recoveredController?.enqueue(encoder.encode(': keepalive\n\n'))
+      }
+
+      window.fetch = (input, init) => {
+        const url = typeof input === 'string' ? input : (input && input.url) || ''
+        if (!/\/api\/chats\/[0-9a-f-]+\/stream$/.test(url)) {
+          return realFetch(input, init)
+        }
+
+        streamCount++
+        window.__streamFetchCount = streamCount
+
+        if (streamCount === 1) {
+          const body = new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode(': keepalive\n\n'))
+            },
+            cancel() {},
+          })
+          return Promise.resolve(new Response(body, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          }))
+        }
+
+        if (streamCount === 2) {
+          const body = new ReadableStream({
+            start(controller) {
+              recoveredController = controller
+              controller.enqueue(encoder.encode(
+                'data: {"type":"text","content":"deadman replay"}\n\n'
+                + 'data: {"type":"catch_up_done"}\n\n',
+              ))
+            },
+            cancel() {},
+          })
+          return Promise.resolve(new Response(body, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          }))
+        }
+
+        return new Promise(() => {})
+      }
+    })
+
+    await setupChat(page)
+    await send(page, 'quick flip with silently dead socket')
+    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(1)
+    await page.waitForFunction(() => window.__streamFetchCount === 1)
+
+    await setVisibility(page, 'hidden')
+    await page.waitForTimeout(50)
+    await setVisibility(page, 'visible')
+
+    await page.waitForFunction(() => window.__streamFetchCount === 2, {
+      timeout: 5000,
+    })
+    await expect(page.locator('.chat__scroll')).toContainText(
+      'deadman replay', { timeout: 5000 },
+    )
+    await expect(page.locator('.connection-status--reattach')).toHaveCount(0)
+
+    await setVisibility(page, 'hidden')
+    await page.waitForTimeout(50)
+    await setVisibility(page, 'visible')
+    await page.waitForTimeout(50)
+    await page.evaluate(() => window.__sendRecoveredKeepalive())
+    await page.waitForTimeout(400)
+
+    expect(await page.evaluate(() => window.__streamFetchCount)).toBe(2)
+    await expect(page.locator('.connection-status--reattach')).toHaveCount(0)
+  })
+
   test('12. Long-hidden wake with stale reads still reattaches and replays', async ({ page }) => {
     await page.addInitScript(() => {
       const realFetch = window.fetch.bind(window)
