@@ -44,6 +44,14 @@ const QUICK_WAKE_HIDDEN_MS = 5000
 // and the long-standing frozen-tab reconnect defense should take over.
 const FRESH_SSE_READ_MS = 70000
 
+// One server keepalive interval plus grace, deliberately shorter than the
+// broad freshness window above. A quick wake may keep a socket because it
+// read recently, but if that exact controller produces no later read by this
+// deadline, treat it as silently dead and replace it without showing the
+// reconnecting note: the user did not initiate anything, and a baseline
+// comparison makes still-flowing keepalives a no-op.
+const KEPT_SOCKET_DEADMAN_MS = 40000
+
 // Window during which a 204 from /stream after a send is a race
 // (the SSE GET landed before chats_stream.py:POST /messages finished
 // registering the broadcast) rather than "agent finished." The POST
@@ -264,6 +272,7 @@ export default function useStreamConnection(chatId, {
   }
 
   const abortRef = useRef(null)
+  const keptSocketDeadmanTimerRef = useRef(null)
   const retryCount = useRef(0)
   const chatIdRef = useRef(chatId)
   // The chat whose live stream is currently responsible for streamItems.
@@ -289,6 +298,34 @@ export default function useStreamConnection(chatId, {
   function cancelReconnectTimers() {
     for (const h of reconnectTimersRef.current) clearTimeout(h)
     reconnectTimersRef.current.clear()
+  }
+
+  function keptSocketDeadmanMs() {
+    const override = typeof window !== 'undefined'
+      ? window.__MOBIUS_KEPT_SOCKET_DEADMAN_MS
+      : undefined
+    return Number.isFinite(override) && override >= 0
+      ? override
+      : KEPT_SOCKET_DEADMAN_MS
+  }
+
+  function clearKeptSocketDeadman() {
+    if (!keptSocketDeadmanTimerRef.current) return
+    clearTimeout(keptSocketDeadmanTimerRef.current)
+    keptSocketDeadmanTimerRef.current = null
+  }
+
+  function armKeptSocketDeadman(controller, readBaseline) {
+    clearKeptSocketDeadman()
+    keptSocketDeadmanTimerRef.current = setTimeout(() => {
+      keptSocketDeadmanTimerRef.current = null
+      if (abortRef.current !== controller) return
+      if (lastReadAtRef.current > readBaseline) return
+      if (!wantsReconnectRef.current && !isStreamingRef.current) return
+      controller.abort()
+      if (abortRef.current === controller) abortRef.current = null
+      connectRef.current?.(true)
+    }, keptSocketDeadmanMs())
   }
 
   // Timestamp of the most recent sendMessage call. A 204 from /stream
@@ -411,6 +448,7 @@ export default function useStreamConnection(chatId, {
   }, [])
 
   const disconnect = useCallback(({ clearStreaming = false } = {}) => {
+    clearKeptSocketDeadman()
     // Salvage any text that's in the typewriter buffer but hasn't
     // been drained into streamItems yet. Without this, Stop loses
     // the most recent text chunks (up to ~1 frame of buffered
@@ -1227,6 +1265,10 @@ export default function useStreamConnection(chatId, {
         && now - lastReadAtRef.current < FRESH_SSE_READ_MS
     }
 
+    function keepActiveConnectionWithDeadman() {
+      armKeptSocketDeadman(abortRef.current, lastReadAtRef.current)
+    }
+
     function armNoteForWake(hiddenDuration) {
       if (hiddenDuration !== null && hiddenDuration >= QUICK_WAKE_HIDDEN_MS) {
         armReconnectingNote()
@@ -1249,7 +1291,10 @@ export default function useStreamConnection(chatId, {
       hiddenAtRef.current = 0
       lastHiddenDurationRef.current = hiddenDuration
       lastWakeAtRef.current = now
-      if (shouldKeepActiveConnection(now, hiddenDuration)) return
+      if (shouldKeepActiveConnection(now, hiddenDuration)) {
+        keepActiveConnectionWithDeadman()
+        return
+      }
       // Past the idle gate: a reattach genuinely starts here. On the wake
       // path, show the note only for real backgrounding; quick flips either
       // keep the socket above or reconnect silently if the socket is stale.
@@ -1269,7 +1314,10 @@ export default function useStreamConnection(chatId, {
         : (lastWakeAtRef.current && now - lastWakeAtRef.current < QUICK_WAKE_HIDDEN_MS
             ? lastHiddenDurationRef.current
             : null)
-      if (shouldKeepActiveConnection(now, hiddenDuration)) return
+      if (shouldKeepActiveConnection(now, hiddenDuration)) {
+        keepActiveConnectionWithDeadman()
+        return
+      }
       if (hiddenDuration === null) {
         armReconnectingNote()
       } else {
