@@ -76,6 +76,31 @@ def test_purge_removes_agent_browser_profile(client, db, auth, chat):
   )
 
 
+def test_purge_removes_memory_note_dir(client, db, auth, chat):
+  """Hard delete must also remove the chat's memory note dir.
+
+  The note (`shared/memory/chats/<id>/index.md`) is derived from the
+  chat, so the owner's delete intent covers it — an orphan note would
+  otherwise linger as a memory entry pointing at a chat that no
+  longer exists.
+  """
+  import os
+  chat_id = chat.id  # capture before purge
+  chat.deleted_at = datetime.utcnow() - timedelta(days=8)
+  db.commit()
+
+  data_dir = os.environ["DATA_DIR"]
+  note_dir = Path(data_dir) / "shared" / "memory" / "chats" / chat_id
+  note_dir.mkdir(parents=True, exist_ok=True)
+  (note_dir / "index.md").write_text("---\ntype: chat\n---\n## Summary\nx")
+
+  client.get("/api/chats", headers=auth)
+
+  assert not note_dir.exists(), (
+    "memory note dir must be deleted with chat"
+  )
+
+
 def test_notifications_older_than_90_days_purged(client, db, auth):
   """Notifications older than 90 days must be deleted by list_chats.
 
