@@ -590,7 +590,6 @@ def build_goal(settings: dict) -> str:
     "                          counts, app_errors_24h + recent_app_errors for",
     "                          UNCAUGHT crashes, last_5_errors for signalled",
     "                          ones) — read to orient phase 4",
-    "  - changed-since-last-run.txt  /data files changed since your last run",
     "  - gather-errors.txt     which staged inputs FAILED to fetch tonight",
     "                          (empty = all fetched OK). A non-empty file means",
     "                          some inputs are missing due to a transport error,",

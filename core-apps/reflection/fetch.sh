@@ -92,6 +92,41 @@ emit_outcome() {
   return 1
 }
 
+cleanup() {
+  # Capture the exiting status BEFORE any other command overwrites $?. On a
+  # signal-driven exit bash (5.x, verified) still runs this EXIT trap, but
+  # $? here holds the STALE last-command status — often 0 — not 128+signal.
+  # Reading the also-stale $RC instead once recorded exit_code:0 for a night
+  # that was SIGTERMed mid-runner and produced no brief.
+  local rc=$?
+  # Backstop the cron_outcome: if we're exiting before the explicit
+  # emit_outcome near the end (an unexpected failure in between, or an
+  # external kill), still record SOMETHING, since a dropped outcome makes the
+  # night invisible to the next run + the app (which then shows the PRIOR
+  # night's status). Idempotent — emit_outcome sets OUTCOME_EMITTED, so the
+  # normal path's explicit emit already ran and this is skipped. The backstop
+  # can NEVER record success: reaching it means the normal path did not
+  # complete, so a zero status is the staleness above, not a healthy run —
+  # substitute 70 ("died before completing", see the exit-code legend).
+  if [[ "${OUTCOME_EMITTED:-0}" != "1" ]]; then
+    (( rc == 0 )) && rc=70
+    emit_outcome "$rc"
+  fi
+  if [[ -n "${HEARTBEAT_PID:-}" ]]; then
+    kill "$HEARTBEAT_PID" 2>/dev/null || true
+    wait "$HEARTBEAT_PID" 2>/dev/null || true
+  fi
+}
+# EXIT-only on purpose. Verified on bash 5.2: an UNTRAPPED fatal SIGTERM (or
+# group SIGINT) during the foreground runner still fires the EXIT trap
+# promptly, while a TRAPPED signal is DEFERRED until the foreground child
+# completes — so trapping TERM/INT would postpone the backstop by up to the
+# whole RUN_TIMEOUT and lose it entirely under a kill -9 escalation.
+# Installed HERE, before the lock + input gather, so an external kill during
+# the gather still records an outcome — every early exit below emits first,
+# which makes the backstop a no-op on those paths.
+trap cleanup EXIT
+
 # --- no-overlap lock (flock) ------------------------------------------
 # fd 9 holds the lock for the life of this process; flock -n fails fast
 # if a prior night is still running (a long run that overran its window).
@@ -101,8 +136,9 @@ emit_outcome() {
 #   2    app id missing (config)  5    skipped (a prior run holds the lock)
 #   124  wall-clock timeout       127  runner missing
 #   64   model error   65  usage/rate limit   66  provider auth expired
-#   70   wrapper died before completing (backstop-only: external kill, or an
-#        unexpected failure between the trap install and the final emit)
+#   70   wrapper died before completing (backstop-only: external kill or an
+#        unexpected failure any time after startup, including during the
+#        input gather)
 # The 64-66 band is the RUNNER's own (reflection_runner.py); it can never
 # collide with the wrapper config codes above, so a model/usage/auth failure
 # is never mislabeled as a config error in cron_outcome. 70 is emitted only
@@ -171,6 +207,33 @@ if ! "${curl_timed[@]}" "${auth[@]}" \
     >"$INPUTS/activity.jsonl" 2>>"$LOG"; then
   record_gather_error "activity.jsonl: fetch failed (transport error or timeout)"
 fi
+
+# reflection-run-history.txt — the agent's own recent runs. Phase 0 of the
+# skill reads this file FIRST — a failure recurring across nights is
+# tonight's first fix. Staged by the wrapper because the agent should not
+# burn turns reconstructing its own run history. 14 days back: enough
+# nights to see a recurrence. Fetched to a dot-prefixed temp first because
+# grep exits 1 on no-match under pipefail, and a transport error must be
+# distinguishable (via gather-errors.txt) from a genuinely empty history.
+HIST_SINCE="$(date -u -d '14 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+HIST_TMP="$INPUTS/.run-history-activity.jsonl"
+if ! "${curl_timed[@]}" "${auth[@]}" \
+    "$API_BASE_URL/api/admin/activity?since=$HIST_SINCE&app_id=$APP_ID" \
+    >"$HIST_TMP" 2>>"$LOG"; then
+  record_gather_error "reflection-run-history.txt: activity fetch failed (transport error or timeout)"
+fi
+{
+  echo '# Your recent reflection runs (cron_outcome events, newest last).'
+  echo '# Exit codes: 0 ok · 2 app-id missing · 3 token missing · 5 lock-skip · 64 model error · 65 usage limit · 66 auth expired · 70 died before completing · 124 timeout · 127 runner missing'
+  grep '"ev":"cron_outcome"' "$HIST_TMP" | grep '"job":"reflection"' | tail -n 14 || true
+  echo ''
+  echo '# Your recent edits to your own skill (newest first):'
+  git -C "$DATA_DIR" log --since="14 days ago" --format="%ad %s" --date=short \
+    -- shared/skills/reflection.md 2>>"$LOG" || true
+  echo ''
+  echo "# Full wrapper log (grep WARN/ERROR for friction): $DATA_DIR/cron-logs/reflection.log"
+} >"$INPUTS/reflection-run-history.txt"
+rm -f "$HIST_TMP"
 
 # chats.md — recent chats list (titles + ids + provider), so the agent
 # knows which sessions to fork-and-interview without re-deriving the list.
@@ -524,12 +587,12 @@ PY
 # Record the app id where the runner's goal message and the agent can
 # find it (the agent writes reports to apps/<app_id>/reports/).
 printf '%s\n' "$APP_ID" >"$INPUTS/app_id"
-log "gathered inputs (activity, chats, app-feedback, prev-report, per-app-digest) into $INPUTS/"
+log "gathered inputs (activity, run-history, chats, app-feedback, prev-report, per-app-digest) into $INPUTS/"
 
 # --- heartbeat: prove liveness while the long run is in flight --------
 # A background loop touches the heartbeat file every 60s. A monitor (or a
 # morning glance) can `stat` it to tell "still reflection" from "wedged".
-# Killed in the cleanup trap below.
+# Killed in the cleanup trap above.
 #
 # fd 9 (the flock handle) is CLOSED in the child (`9>&-`) so the lock is
 # held ONLY by the main process. Without this, the backgrounded child
@@ -545,37 +608,6 @@ heartbeat_loop() {
 }
 heartbeat_loop 9>&- &
 HEARTBEAT_PID=$!
-cleanup() {
-  # Capture the exiting status BEFORE any other command overwrites $?. On a
-  # signal-driven exit bash (5.x, verified) still runs this EXIT trap, but
-  # $? here holds the STALE last-command status — often 0 — not 128+signal.
-  # Reading the also-stale $RC instead once recorded exit_code:0 for a night
-  # that was SIGTERMed mid-runner and produced no brief.
-  local rc=$?
-  # Backstop the cron_outcome: if we're exiting before the explicit
-  # emit_outcome near the end (an unexpected failure in between, or an
-  # external kill), still record SOMETHING, since a dropped outcome makes the
-  # night invisible to the next run + the app (which then shows the PRIOR
-  # night's status). Idempotent — emit_outcome sets OUTCOME_EMITTED, so the
-  # normal path's explicit emit already ran and this is skipped. The backstop
-  # can NEVER record success: reaching it means the normal path did not
-  # complete, so a zero status is the staleness above, not a healthy run —
-  # substitute 70 ("died before completing", see the exit-code legend).
-  if [[ "${OUTCOME_EMITTED:-0}" != "1" ]]; then
-    (( rc == 0 )) && rc=70
-    emit_outcome "$rc"
-  fi
-  if [[ -n "${HEARTBEAT_PID:-}" ]]; then
-    kill "$HEARTBEAT_PID" 2>/dev/null || true
-    wait "$HEARTBEAT_PID" 2>/dev/null || true
-  fi
-}
-# EXIT-only on purpose. Verified on bash 5.2: an UNTRAPPED fatal SIGTERM (or
-# group SIGINT) during the foreground runner still fires the EXIT trap
-# promptly, while a TRAPPED signal is DEFERRED until the foreground child
-# completes — so trapping TERM/INT would postpone the backstop by up to the
-# whole RUN_TIMEOUT and lose it entirely under a kill -9 escalation.
-trap cleanup EXIT
 
 # --- run the agent: full tools, real token, no sandbox ----------------
 # The runner loads the reflection skill as the system prompt, sends the

@@ -15,8 +15,11 @@ note file and the title PATCH. So a prompt-injected chat can't make the subagent
 write outside the note or exfiltrate anything.
 
 Usage: chat_note.py <chat_id>
-Exit 0 ok (or nothing-to-do) · 2 bad args. Best-effort: never raises into the
-caller — a failed note must never break or slow the turn that triggered it.
+Exit 0 ok (or nothing-to-do) · 2 bad args · 3 summarizer failed (one-line
+reason on stderr). Best-effort: never raises into the caller — a failed note
+must never break or slow the turn that triggered it, but the failure exit lets
+the caller log ONE warn line so a dead CLI (auth/credits) is visible instead
+of notes silently stopping.
 """
 
 from __future__ import annotations
@@ -144,7 +147,7 @@ def _atomic_write_text(note: Path, text: str) -> None:
   the whole old note or the whole new one, never a torn half-written file. The
   temp is dot-prefixed and non-.md so the chats/*/index.md globs never ingest it,
   and os.replace bumps mtime exactly at visibility, keeping the mtime guard
-  reliable. Raises on failure so the caller's best-effort except returns 0."""
+  reliable. Raises on failure so the caller can report it (exit 3)."""
   note.parent.mkdir(parents=True, exist_ok=True)
   fd, tmp = tempfile.mkstemp(prefix=f".{note.name}.", suffix=".tmp", dir=str(note.parent))
   try:
@@ -297,13 +300,19 @@ def run() -> int:
     proc = subprocess.run(
       cmd, env=env, capture_output=True, text=True, timeout=TIMEOUT_SECS
     )
-  except (subprocess.TimeoutExpired, OSError):
-    return 0
+  except (subprocess.TimeoutExpired, OSError) as e:
+    sys.stderr.write(f"summarizer subprocess failed: {e!r}\n")
+    return 3
   out = _clean_note_output(proc.stdout or "")
   if not _looks_like_note(out):
     # The model didn't return a well-formed note — leave any existing note
-    # untouched rather than overwriting it with garbage.
-    return 0
+    # untouched rather than overwriting it with garbage. The CLI's stderr tail
+    # is where an auth/credit error surfaces, so it goes in the reason.
+    tail = " ".join((proc.stderr or "").split())[-200:]
+    sys.stderr.write(
+      f"CLI output is not a note (rc={proc.returncode}): {tail}\n"
+    )
+    return 3
 
   # Race guard: this backstop runs at turn-end AFTER the chat lock is released
   # (chat.py), so a fresh turn — or its own backstop — can write the note while
@@ -316,8 +325,9 @@ def run() -> int:
   # concurrent reader never sees a torn note (see _atomic_write_text).
   try:
     _atomic_write_text(note, out + ("\n" if not out.endswith("\n") else ""))
-  except OSError:
-    return 0
+  except OSError as e:
+    sys.stderr.write(f"note write failed: {e!r}\n")
+    return 3
 
   m = re.search(r"^description:\s*(.+)$", out, re.MULTILINE)
   if m:
@@ -328,6 +338,8 @@ def run() -> int:
 if __name__ == "__main__":
   try:
     raise SystemExit(run())
-  except Exception:
-    # Absolute backstop: never let this surface into the caller.
-    raise SystemExit(0)
+  except Exception as e:
+    # Absolute backstop: never let this surface into the caller — but exit 3
+    # with a one-line reason so the failure is visible in the caller's log.
+    sys.stderr.write(f"unhandled: {e!r}\n")
+    raise SystemExit(3)

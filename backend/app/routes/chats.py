@@ -55,25 +55,36 @@ EMPTY_CHAT_GRACE = timedelta(hours=24)
 
 
 def _purge_chat_dir(chat_id: str) -> None:
-  """Removes per-chat scratch dirs left on disk after a chat is gone.
+  """Removes per-chat dirs left on disk after a chat is gone.
 
-  Two locations get cleaned: the chat's data dir
-  (`/data/chats/{chat_id}/` — uploads, generated images, scratch)
-  and its agent-browser Chromium profile
+  Three locations get cleaned: the chat's data dir
+  (`/data/chats/{chat_id}/` — uploads, generated images, scratch),
+  its agent-browser Chromium profile
   (`/data/agent-browser-profiles/chat-{chat_id}/` — IndexedDB,
   cache, cookies; typically 50-200 MB per profile that's seen any
-  use). Without the second rmtree, profiles accumulated across
-  every chat that ever invoked agent-browser and were never
-  reclaimed by chat-delete or the 7-day soft-delete purge — a slow
-  disk leak proportional to chat count, not time.
+  use), and its memory note dir
+  (`/data/shared/memory/chats/{chat_id}/`). Without the second
+  rmtree, profiles accumulated across every chat that ever invoked
+  agent-browser and were never reclaimed by chat-delete or the
+  7-day soft-delete purge — a slow disk leak proportional to chat
+  count, not time. The note is DERIVED from the chat, so the
+  owner's delete intent covers it; by hard-purge time the 7-day
+  soft-delete window plus nightly reflection have had time to
+  promote durable facts into topic notes, and an orphan note would
+  otherwise linger as a memory entry pointing at a chat that no
+  longer exists.
 
-  Both rmtrees use `ignore_errors=True` so chats that never wrote
+  All rmtrees use `ignore_errors=True` so chats that never wrote
   to a given location don't raise.
   """
   data_dir = Path(get_settings().data_dir)
   shutil.rmtree(data_dir / "chats" / chat_id, ignore_errors=True)
   shutil.rmtree(
     data_dir / "agent-browser-profiles" / f"chat-{chat_id}",
+    ignore_errors=True,
+  )
+  shutil.rmtree(
+    data_dir / "shared" / "memory" / "chats" / chat_id,
     ignore_errors=True,
   )
 

@@ -2427,18 +2427,16 @@ async def run_chat(
     # Turn-end chat-note guarantee: if the chat SETTLED (no pending follow-up)
     # and the agent left its note untouched this turn, write it via the
     # tool-free summarizer. Runs AFTER the reply is sent → no user-facing
-    # latency; gated to EMPTY_TERMINAL_CLEARED so a multi-turn continuation
-    # ensures once, at rest; best-effort (a failure never affects the turn).
+    # latency; gated to the settled dispositions (_NOTE_SETTLED_DISPOSITIONS)
+    # so a multi-turn continuation ensures once, at rest; best-effort (a
+    # failure never affects the turn).
     try:
       _s = get_settings()
       if _should_ensure_chat_note(
         _s, chat_id, disposition, _s.data_dir, _note_mtime_before
       ):
         await _ensure_chat_note(_s.data_dir, chat_id)
-      elif (
-        chat_id
-        and disposition == chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
-      ):
+      elif chat_id and disposition in _NOTE_SETTLED_DISPOSITIONS:
         # The agent wrote (or already had) its own note this turn, so the
         # summarizer backstop deferred — but the agent may have skipped syncing
         # the title to the note's gist (it did on the brew-timer build). Sync it
@@ -2515,6 +2513,19 @@ def _chat_note_mtime(data_dir: str, chat_id: str) -> float:
     return 0.0
 
 
+# The dispositions where a chat is truly at rest, so the note guarantee (and
+# its title-sync sibling) fires. STOP_HANDOFF_CLEARED only results when NO
+# fresh claim raced in — a stopped chat genuinely settled — and a Stop is often
+# the day's last touch on a chat; skipping it left the chat note-less for the
+# night's reflection. Deliberately NOT LIMIT_PARKED: the summarizer spawns the
+# same CLI that just hit the usage limit (a doomed call), and the parked
+# continuation's own terminal transition ensures the note once it completes.
+_NOTE_SETTLED_DISPOSITIONS = frozenset({
+  chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED,
+  chat_queue.TerminalDisposition.STOP_HANDOFF_CLEARED,
+})
+
+
 def _should_ensure_chat_note(
   settings,
   chat_id: str,
@@ -2524,12 +2535,14 @@ def _should_ensure_chat_note(
 ) -> bool:
   """Whether the turn-end note guarantee should fire. True iff the feature is
   on, this is a real chat, the chat SETTLED (no pending follow-up so it ensures
-  once, at rest — not on a continuation or a failed/stale turn), and the agent
-  left the note untouched this turn (its mtime did not advance)."""
+  once, at rest — empty-terminal or a Stop with no successor claim, per
+  _NOTE_SETTLED_DISPOSITIONS; not a continuation, a failed/stale turn, or a
+  limit-park), and the agent left the note untouched this turn (its mtime did
+  not advance)."""
   return bool(
     getattr(settings, "ensure_chat_note", False)
     and chat_id
-    and disposition == chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
+    and disposition in _NOTE_SETTLED_DISPOSITIONS
     and _chat_note_mtime(data_dir, chat_id) <= note_mtime_before
   )
 
@@ -2541,8 +2554,10 @@ async def _ensure_chat_note(data_dir: str, chat_id: str) -> None:
   transcript and writes chats/<id>/index.md (+ syncs the title); the subagent
   has no tools, this script does the privileged write. Best-effort + bounded: it
   runs AFTER the reply is sent, so it never adds user-facing latency, and any
-  failure/timeout is swallowed — a missing note must never break the turn. The
-  caller gates this on `ensure_chat_note` + the note being untouched this turn."""
+  failure/timeout is swallowed — a missing note must never break the turn — but
+  a nonzero exit leaves one WARN line (with the script's stderr reason) in
+  chat.log, so CLI credits dying no longer silently stops notes. The caller
+  gates this on `ensure_chat_note` + the note being untouched this turn."""
   log = _get_logger()
   script = Path(__file__).parent.parent / "scripts" / "chat_note.py"
   if not script.exists() or not chat_id:
@@ -2556,10 +2571,16 @@ async def _ensure_chat_note(data_dir: str, chat_id: str) -> None:
     proc = await asyncio.create_subprocess_exec(
       "python3", str(script), chat_id,
       stdout=asyncio.subprocess.DEVNULL,
-      stderr=asyncio.subprocess.DEVNULL,
+      stderr=asyncio.subprocess.PIPE,
       env=env,
     )
-    await asyncio.wait_for(proc.communicate(), timeout=150)
+    _, err = await asyncio.wait_for(proc.communicate(), timeout=150)
+    if proc.returncode:
+      tail = " ".join((err or b"").decode("utf-8", "replace").split())[-300:]
+      log.warning(
+        "chat-note summarizer failed for chat %s (rc=%s): %s",
+        chat_id, proc.returncode, tail,
+      )
   except asyncio.TimeoutError:
     log.info("ensure_chat_note timed out for chat %s", chat_id)
     if proc is not None:

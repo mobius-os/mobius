@@ -48,11 +48,25 @@ def test_skips_without_chat_id(tmp_path):
   )
 
 
+def test_fires_on_stop_handoff(tmp_path):
+  # A Stop that no fresh claim raced past is a chat truly at rest — often the
+  # day's last touch — so the guarantee fires there too.
+  assert chat._should_ensure_chat_note(
+    _settings(on=True), "c1",
+    chat_queue.TerminalDisposition.STOP_HANDOFF_CLEARED,
+    str(tmp_path), note_mtime_before=0.0,
+  )
+
+
 def test_skips_on_non_settled_dispositions(tmp_path):
+  # LIMIT_PARKED is deliberately skipped: the summarizer would spawn the same
+  # CLI that just hit the usage limit, and the parked continuation's own
+  # terminal transition ensures the note once it completes.
   for d in (
     chat_queue.TerminalDisposition.CONTINUATION_PROMOTED,
     chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER,
     chat_queue.TerminalDisposition.STALE_NO_ACTION,
+    chat_queue.TerminalDisposition.LIMIT_PARKED,
   ):
     assert not chat._should_ensure_chat_note(
       _settings(on=True), "c1", d, str(tmp_path), 0.0
@@ -176,6 +190,49 @@ def test_sync_title_only_noop_when_note_absent(tmp_path, monkeypatch):
   monkeypatch.setattr(cn.sys, "argv", ["chat_note.py", "nope", "--sync-title"])
   assert cn.run() == 0
   assert called == []
+
+
+def test_run_exits_3_with_reason_when_cli_returns_junk(tmp_path, monkeypatch, capsys):
+  # A dead CLI (auth/credit failure) produces junk stdout + an error on its
+  # stderr. run() must exit 3 with the returncode + stderr tail in the reason
+  # (the caller's WARN line) instead of silently exiting 0.
+  cn = _load_chat_note()
+  monkeypatch.setattr(cn, "MEMORY_DIR", tmp_path / "shared" / "memory")
+  monkeypatch.setattr(cn, "_read_transcript", lambda cid: "user: hi")
+  junk = types.SimpleNamespace(
+    stdout="no note here", stderr="Credit balance is too low", returncode=1
+  )
+  monkeypatch.setattr(cn.subprocess, "run", lambda *a, **k: junk)
+  monkeypatch.setattr(cn.sys, "argv", ["chat_note.py", "c1"])
+  assert cn.run() == 3
+  err = capsys.readouterr().err
+  assert "rc=1" in err
+  assert "Credit balance is too low" in err
+
+
+def test_run_returns_0_when_a_newer_writer_won_the_race(tmp_path, monkeypatch):
+  # A fresh turn's backstop writing the note while our (slower) LLM call runs
+  # is healthy concurrency, not failure — exit 0 and don't clobber the newer
+  # note with our stale output.
+  cn = _load_chat_note()
+  mem = tmp_path / "shared" / "memory"
+  monkeypatch.setattr(cn, "MEMORY_DIR", mem)
+  monkeypatch.setattr(cn, "_read_transcript", lambda cid: "user: hi")
+  monkeypatch.setattr(cn, "_patch_title", lambda *a: None)
+  note = mem / "chats" / "c1" / "index.md"
+
+  def racer_wins(*a, **k):
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("---\ntype: chat\ndescription: racer\n---\n## Summary\nnewer")
+    return types.SimpleNamespace(
+      stdout="---\ntype: chat\ndescription: ours\n---\n## Summary\nstale",
+      stderr="", returncode=0,
+    )
+
+  monkeypatch.setattr(cn.subprocess, "run", racer_wins)
+  monkeypatch.setattr(cn.sys, "argv", ["chat_note.py", "c1"])
+  assert cn.run() == 0
+  assert "newer" in note.read_text()
 
 
 def test_clean_note_output_preserves_horizontal_rule_in_body():
