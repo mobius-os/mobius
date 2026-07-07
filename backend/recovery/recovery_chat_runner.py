@@ -397,6 +397,45 @@ def _sse(event: dict) -> str:
   return f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
 
 
+# Substrings that mark a nonzero CLI exit as an AUTH failure rather than a
+# generic error, across both providers: the Anthropic API / SDK surfaces
+# ("authentication_error", "invalid_api_key") and the Codex login surfaces
+# ("unauthorized", "not logged in", "not authenticated").
+_AUTH_ERROR_SUBSTRINGS = (
+  "authentication_error", "invalid_api_key",
+  "unauthorized", "not logged in", "not authenticated",
+)
+# A standalone 401 status code — bounded so it does NOT match 401 embedded in a
+# longer number (a port like 4013, a byte offset, a duration), which would
+# false-positive the "reconnect your provider" hint on an unrelated failure.
+_AUTH_401_RE = re.compile(r"(?<!\d)401(?!\d)")
+
+
+def _is_auth_error(err: str) -> bool:
+  low = err.lower()
+  return (
+    any(p in low for p in _AUTH_ERROR_SUBSTRINGS)
+    or _AUTH_401_RE.search(low) is not None
+  )
+
+
+def _cli_error_event(rc: int, err: str) -> dict:
+  """Builds the SSE error event for a nonzero CLI exit, upgrading a
+  recognizable auth failure to an actionable reconnect message. Shared by
+  the Claude and Codex spawn paths so both give the owner the same guidance
+  (the Codex path previously surfaced only the raw error)."""
+  if _is_auth_error(err):
+    return {
+      "type": "error",
+      "message": (
+        f"CLI authentication error (exit {rc}). Use the Connect button on "
+        "the chat picker to reconnect your AI provider credentials, then "
+        "try again."
+      ),
+    }
+  return {"type": "error", "message": f"CLI exit {rc}: {err}"}
+
+
 def _system_prompt(chat_id: str | None = None) -> str:
   """Recovery agent instructions. Minimal — agent is here to fix.
 
@@ -423,7 +462,8 @@ def _system_prompt(chat_id: str | None = None) -> str:
   Updated 2026-07-03 (recoveryd migration): the agent now runs as
   ROOT in the SEPARATE recovery container, where /app is a read-only
   baked image. Point the write surface at the live editable overlay
-  (/data/platform/app/ for backend, /data/shell/ for frontend) — the
+  (/data/platform/backend/app/ for backend, /data/shell/ for
+  frontend) — the
   old map (mobius-writable /app/app + a frozen-island list of
   now-retired recover_*.py files) described the in-process recovery
   that recoveryd replaced.
@@ -471,17 +511,18 @@ def _system_prompt(chat_id: str | None = None) -> str:
     "so recovery can never break itself. Do not waste tool calls "
     "trying to edit anything under /app.\n\n"
     "Everything the live platform runs is under /data (writable):\n"
-    "  /data/platform/app/      the LIVE backend Python — a git-tracked, "
-    "editable copy that uvicorn actually imports at runtime. Fix backend "
-    "bugs HERE (NOT in /app/app, which is the read-only baked original).\n"
-    "  /data/platform/scripts/  live utility scripts.\n"
+    "  /data/platform/backend/app/  the LIVE backend Python — a "
+    "git-tracked, editable copy that uvicorn actually imports at "
+    "runtime. Fix backend bugs HERE (NOT in /app/app, which is the "
+    "read-only baked original).\n"
+    "  /data/platform/backend/scripts/  live utility scripts.\n"
     "  /data/shell/             frontend source + built bundle (dist/).\n"
     "  /data/shared/            memory, skills, shared files.\n"
     "  /data/apps/              installed mini-apps + their data.\n"
     "  /data/db/                the SQLite database.\n\n"
     "Read-only baked originals, for reference/diff only:\n"
     "  /app/app-baked/   pristine backend  -> "
-    "diff -ru /app/app-baked/ /data/platform/app/\n"
+    "diff -ru /app/app-baked/ /data/platform/backend/app/\n"
     "  /app/shell-src/   pristine frontend -> "
     "diff -ru /app/shell-src/ /data/shell/\n"
     "(use `diff -ru`, not git diff, when comparing against a baked "
@@ -490,9 +531,10 @@ def _system_prompt(chat_id: str | None = None) -> str:
     "1. Read /data/logs/chat.log for the latest error trail.\n"
     "2. diff the live tree against its baked original (above) to see "
     "what changed.\n"
-    "3. Make the smallest correct fix in /data/platform/app/ (backend), "
-    "/data/shell/ (frontend), or the relevant /data path. NOTE: if "
-    "/data/platform/app/main.py fails to compile, the platform "
+    "3. Make the smallest correct fix in /data/platform/backend/app/ "
+    "(backend), /data/shell/ (frontend), or the relevant /data path. "
+    "NOTE: if /data/platform/backend/app/main.py fails to compile, the "
+    "platform "
     "auto-boots from the baked floor instead — so a syntactically "
     "broken edit degrades safely, but always verify your fix parses.\n"
     "4. Tell the user: \"Click the **Restart server** button at the "
@@ -1169,24 +1211,9 @@ async def _spawn_claude(
         stderr_b = await proc.stderr.read() if proc.stderr else b""
         err = stderr_b.decode("utf-8", errors="replace").strip()[:500]
         if err:
-          # Detect authentication failures specifically so the user gets
-          # an actionable message rather than a raw CLI error. The patterns
-          # below cover the three surfaces that produce auth errors:
-          # "authentication_error" (Anthropic API), "invalid_api_key"
-          # (some SDK paths), "401" in the message (generic HTTP auth).
-          auth_patterns = ["authentication_error", "invalid_api_key", "401"]
-          is_auth_error = any(p in err.lower() for p in auth_patterns)
-          if is_auth_error:
-            yield _sse({
-              "type": "error",
-              "message": (
-                f"CLI authentication error (exit {rc}). "
-                "Use the Connect button on the chat picker to reconnect "
-                "your AI provider credentials, then try again."
-              ),
-            })
-          else:
-            yield _sse({"type": "error", "message": f"CLI exit {rc}: {err}"})
+          # Upgrade a recognizable auth failure to an actionable reconnect
+          # message (shared with the Codex path via _cli_error_event).
+          yield _sse(_cli_error_event(rc, err))
 
   except Exception as exc:
     yield _sse({
@@ -1363,9 +1390,7 @@ async def _spawn_codex(
         stderr_b = await proc.stderr.read() if proc.stderr else b""
         err = stderr_b.decode("utf-8", errors="replace").strip()[:500]
         if err:
-          yield _sse(
-            {"type": "error", "message": f"CLI exit {rc}: {err}"}
-          )
+          yield _sse(_cli_error_event(rc, err))
 
   except Exception as exc:
     yield _sse({

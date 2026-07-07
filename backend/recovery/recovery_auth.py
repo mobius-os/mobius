@@ -15,12 +15,18 @@ Cookie format is HMAC-SHA256-signed JSON: `<b64(payload)>.<b64(sig)>`.
 Deliberately not JWT — no library, no algorithm-negotiation surface,
 no library-CVE blast radius.
 
-The recovery HMAC key is derived from `/data/.recovery-secret`, NOT
-from `SECRET_KEY`. This is load-bearing: when SECRET_KEY drifts (the
-documented outage mode that invalidates all JWTs) the recovery surface
-is exactly when the user most needs it. Tying it to the same key means
-both break together. The recovery secret is generated once
-(secrets.token_hex(32)) and never rotated by anything else.
+The recovery HMAC key is derived from `.recovery-secret` on the
+recoveryd-ONLY volume (RECOVERY_LIVE_ROOT, /recovery-live), NOT from
+`SECRET_KEY`. Independence from SECRET_KEY is load-bearing: when
+SECRET_KEY drifts (the documented outage mode that invalidates all
+JWTs) the recovery surface is exactly when the user most needs it, so
+tying it to the same key would break both together. Keeping it off
+`/data` is equally load-bearing: the platform `chown -R mobius:mobius
+/data`s on every boot, so a secret under /data is readable by the
+mobius user and a compromised platform agent could forge a recovery
+cookie with it; the app container never mounts /recovery-live. The
+secret is generated once (secrets.token_hex(32)) and never rotated by
+anything else.
 """
 
 from __future__ import annotations
@@ -43,11 +49,13 @@ COOKIE_NAME = "moebius_recover"
 SESSION_TTL_SECONDS = 1800  # 30 min — shorter than the platform's 1h
 # recover surface (the destructive floor warrants a tighter window).
 
-# Recovery secret file lives at a fixed, volume-backed path.
-# Determined once at module scope so callers don't have to thread
-# DATA_DIR through; overridable for tests via _RECOVERY_SECRET_PATH.
+# Recovery secret file lives on the recoveryd-ONLY volume, off the
+# shared /data volume the platform can read (see the module docstring).
+# Determined once at module scope; overridable for tests via the
+# RECOVERY_LIVE_ROOT env var. Kept in step with recoveryd's own
+# RECOVERY_LIVE_ROOT default so both resolve to the same file.
 _RECOVERY_SECRET_PATH = Path(
-  os.environ.get("DATA_DIR", "/data")
+  os.environ.get("RECOVERY_LIVE_ROOT", "/recovery-live")
 ) / ".recovery-secret"
 
 
@@ -99,6 +107,10 @@ def _recovery_secret_bytes() -> bytes:
 
   new_key = secrets.token_hex(32)
   try:
+    # The recoveryd-only volume mount exists in prod, but a fresh volume
+    # (or the test sibling dir) may not yet — create it so the first cookie
+    # can mint the key.
+    os.makedirs(path.parent, exist_ok=True)
     # Write to a UNIQUE temp (crash-safe — the target is never left partial),
     # then create the target with os.link, which fails atomically if it already
     # exists. recoveryd is multi-threaded, so on a fresh volume several worker

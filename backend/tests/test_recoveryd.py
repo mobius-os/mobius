@@ -254,3 +254,55 @@ def test_render_chat_page_preserves_existing_active_chat(
   handler._render_chat_page()
   assert captured["active"] == cid, (
     "existing ?chat= must resolve to that chat, not be nulled to the picker")
+
+
+def test_system_prompt_points_at_served_backend_tree(recovery_env):
+  """The recovery agent's write-surface instructions and the restore
+  script must name the SAME served backend path. Under the whole-repo
+  /data/platform clone the served backend is /data/platform/backend/app
+  (entrypoint runs `cd /data/platform/backend && import app.main`); the
+  old subset /data/platform/app does not exist there, so an agent told
+  to edit it would silently write to a path uvicorn never imports."""
+  chat_runner = importlib.import_module("recovery_chat_runner")
+  prompt = chat_runner._system_prompt(chat_id="abc123")
+  assert "/data/platform/backend/app" in prompt, (
+    "prompt must point the agent at the served backend tree")
+  # The retired subset path must not appear (would send edits nowhere).
+  # /data/platform/backend/app/ is fine; a bare /data/platform/app/ is not.
+  assert "/data/platform/app/" not in prompt, (
+    "prompt still references the retired /data/platform/app subset")
+
+  # Pin the prompt to whatever recovery_restore.sh actually restores, so
+  # the two can never drift apart again (card 177 gap).
+  restore_sh = (
+    Path(__file__).resolve().parents[1] / "scripts" / "recovery_restore.sh"
+  ).read_text()
+  assert 'DST_APP="/data/platform/backend/app"' in restore_sh, (
+    "restore script must target the same served backend tree as the prompt")
+
+
+def test_cli_auth_error_detection(recovery_env):
+  """The shared auth-error classifier must flag real auth failures (both
+  providers) and NOT false-positive on a 401 embedded in a longer number."""
+  chat_runner = importlib.import_module("recovery_chat_runner")
+  # Real auth failures across providers.
+  for msg in (
+    "authentication_error: token expired",
+    "Error: invalid_api_key",
+    "HTTP 401 Unauthorized",
+    "codex: not logged in — run codex login",
+    "not authenticated",
+  ):
+    assert chat_runner._is_auth_error(msg), msg
+    ev = chat_runner._cli_error_event(1, msg)
+    assert "reconnect" in ev["message"].lower()
+  # Non-auth errors, including a 401 embedded in a longer number.
+  for msg in (
+    "connection refused on port 4013",
+    "read 40123 bytes then EOF",
+    "esbuild failed: syntax error",
+    "",
+  ):
+    assert not chat_runner._is_auth_error(msg), msg
+    ev = chat_runner._cli_error_event(2, msg)
+    assert "reconnect" not in ev["message"].lower()

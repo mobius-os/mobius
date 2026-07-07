@@ -48,27 +48,39 @@ from codex_login_parse import banner_has_code, parse_login_banner
 log = logging.getLogger("recoveryd.oauth")
 
 
-def _agent_ids() -> "tuple[int, int] | None":
-  """Returns (uid, gid) for the mobius agent user, or None if unknown."""
+# The platform runtime user. Provider credentials recoveryd writes land on
+# the shared /data volume and are read + refreshed by the PLATFORM chat
+# agent, which always runs as this user in the app container — so they must
+# be owned by IT, not by whoever the recovery agent happens to run as.
+# RECOVERY_AGENT_USER defaults to root; owning creds root:root 0600 would
+# leave the platform (mobius) unable to read them, so the reconnect the
+# owner just performed would not actually fix platform chat. root — the
+# recovery default — can still read a mobius-owned 0600 file, so the
+# recovery agent is unaffected either way. Overridable for tests.
+_PLATFORM_USER = os.environ.get("MOBIUS_AGENT_USER", "mobius")
+
+
+def _platform_ids() -> "tuple[int, int] | None":
+  """Returns (uid, gid) for the platform runtime user, or None if unknown."""
   try:
-    pw = pwd.getpwnam(recovery_chat_runner.RECOVERY_AGENT_USER)
+    pw = pwd.getpwnam(_PLATFORM_USER)
   except KeyError:
     return None
   return pw.pw_uid, pw.pw_gid
 
 
-def _chown_to_agent(path) -> None:
-  """Best-effort chown of a credential path to the mobius agent user.
+def _chown_to_platform_user(path) -> None:
+  """Best-effort chown of a credential path to the platform user (mobius).
 
-  Credentials are written here by recoveryd (root), but the rescue agent
-  runs AS mobius and the provider CLI must READ and REFRESH them — a
-  root-owned 0600 file would be unreadable to mobius, so the very
-  reconnect the owner just performed would leave the agent unable to
+  Credentials are written here by recoveryd (root), but the platform chat
+  agent (running as mobius in the app container) must READ and REFRESH them
+  — a root-owned 0600 file would be unreadable to mobius, so the very
+  reconnect the owner just performed would leave platform chat unable to
   authenticate. Only meaningful as root; a no-op otherwise. Never raises.
   """
   if os.geteuid() != 0:
     return
-  ids = _agent_ids()
+  ids = _platform_ids()
   if ids is None:
     return
   try:
@@ -166,7 +178,7 @@ def _write_claude_credentials(token_data: dict) -> None:
   _CLAUDE_CONFIG_PATH.mkdir(parents=True, exist_ok=True)
   # The dir may have just been created root-owned; hand it to mobius so the
   # agent (running as mobius) can read the credential file written below.
-  _chown_to_agent(_CLAUDE_CONFIG_PATH)
+  _chown_to_platform_user(_CLAUDE_CONFIG_PATH)
 
   account = token_data.get("account") or {}
   email = account.get("email_address", "")
@@ -186,7 +198,7 @@ def _write_claude_credentials(token_data: dict) -> None:
     json.dump(creds, f)
   # Written root-owned by recoveryd; the mobius agent must be able to read
   # and refresh it, so transfer ownership to mobius.
-  _chown_to_agent(path)
+  _chown_to_platform_user(path)
   log.info("Recovery: Claude credentials written for %s", email or "(unknown)")
 
 
@@ -336,7 +348,7 @@ def codex_start() -> dict:
   # agent), so CODEX_HOME must be mobius-writable — hand the (possibly
   # just-created root-owned) dir over before spawning, and the auth.json it
   # writes then lands mobius-owned and readable by the agent.
-  _chown_to_agent(_CODEX_CONFIG_PATH)
+  _chown_to_platform_user(_CODEX_CONFIG_PATH)
   env = dict(os.environ)
   env["CODEX_HOME"] = str(_CODEX_CONFIG_PATH)
 

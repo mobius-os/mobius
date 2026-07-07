@@ -387,8 +387,9 @@ def render_chat_page(
 </head>
 <body>
 <div class="rc-banner">
-  Recovery mode &mdash; minimal interface. The agent has elevated write access here
-  (<code>/app/app/</code>, <code>/app/scripts/</code>, <code>/data/shell/</code>).
+  Recovery mode &mdash; minimal interface. The agent has full root write access
+  to the live platform (<code>/data/platform/backend/app/</code>,
+  <code>/data/shell/</code>); <code>/app</code> is a read-only baked image.
   After backend edits, click <strong>Restart</strong> to reload the platform.
   <a href="/recover">&larr; Main recovery page</a>
 </div>
