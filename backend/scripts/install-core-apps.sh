@@ -23,6 +23,12 @@ set -uo pipefail
 API_BASE_URL="${API_BASE_URL:-http://localhost:8000}"
 DATA_DIR="${DATA_DIR:-/data}"
 CORE_SRC="/app/core-apps"
+# Post-defrost the platform clone is the SERVED source of truth and the baked
+# /app tree is the recovery floor — prefer the platform copy so a platform
+# deploy of core-app machinery isn't silently reverted by the next boot's
+# unconditional re-copy (the entrypoint applies the same preference to the
+# backend it serves).
+[[ -d "$DATA_DIR/platform/core-apps" ]] && CORE_SRC="$DATA_DIR/platform/core-apps"
 LOG="$DATA_DIR/cron-logs/install-core-apps.log"
 mkdir -p "$DATA_DIR/cron-logs"
 log() { echo "[$(date -Iseconds)] install-core-apps: $*" >>"$LOG"; }
@@ -195,15 +201,20 @@ reflection_app_id="$(sync_core_app reflection "Reflection" "Your nightly morning
 
 # Ship the reflection cron machinery + install the schedule (idempotent).
 # fetch.sh + the fork helpers are platform machinery (a thin runner wrapper
-# and the introspection utilities) — always re-copied from baked source, no
-# version gate: the agent edits the reflection SKILL, not these.
+# and the introspection utilities) — always re-copied from CORE_SRC
+# (platform-first, see above), no version gate: the agent edits the
+# reflection SKILL, not these.
 if [[ -n "$reflection_app_id" ]]; then
   mkdir -p "$DATA_DIR/apps/reflection"
   cp "$CORE_SRC/reflection/fetch.sh" "$DATA_DIR/apps/reflection/fetch.sh"
   # Introspection helpers the Reflection agent calls to fork + interview chats
-  # and app subagent runs (the heart of the nightly loop).
-  cp /app/scripts/fork-chat.sh "$DATA_DIR/apps/reflection/fork-chat.sh" 2>/dev/null || true
-  cp /app/scripts/fork-session.sh "$DATA_DIR/apps/reflection/fork-session.sh" 2>/dev/null || true
+  # and app subagent runs (the heart of the nightly loop). Same platform-first
+  # preference as CORE_SRC above.
+  HELPER_SRC="/app/scripts"
+  [[ -f "$DATA_DIR/platform/backend/scripts/fork-chat.sh" ]] \
+    && HELPER_SRC="$DATA_DIR/platform/backend/scripts"
+  cp "$HELPER_SRC/fork-chat.sh" "$DATA_DIR/apps/reflection/fork-chat.sh" 2>/dev/null || true
+  cp "$HELPER_SRC/fork-session.sh" "$DATA_DIR/apps/reflection/fork-session.sh" 2>/dev/null || true
   chmod +x "$DATA_DIR/apps/reflection/fetch.sh" \
     "$DATA_DIR/apps/reflection/fork-chat.sh" "$DATA_DIR/apps/reflection/fork-session.sh" 2>/dev/null || true
   # offline_capable: the report viewer just reads cached HTML.
