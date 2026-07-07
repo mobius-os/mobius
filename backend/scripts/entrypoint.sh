@@ -983,7 +983,7 @@ if [ -f /data/.recover-pending ]; then
   rm -f /data/.recover-pending
   restore_status=""
   case "$mode" in
-    backend|scripts|shell-dist|shell-src|platform|platform-baked)
+    shell-dist|shell-src|platform|platform-baked)
       echo "Recovery flag detected: $mode — running recovery_restore.sh as root..."
       if /app/scripts/recovery_restore.sh "$mode"; then
         restore_status="ok"

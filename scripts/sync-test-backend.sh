@@ -5,12 +5,12 @@
 #
 # Why this exists: the mobius-test `app` service serves BAKED image code — only
 # the `pytest` service bind-mounts backend/app. And a bind-mount onto /app/app
-# does NOT work anyway, because the entrypoint replaces /app/app with a symlink
-# to /data/platform/app (the served, agent-editable platform layer). So to test
-# a backend edit without a full image rebuild, copy the source into
-# /data/platform/{app,scripts} and restart so uvicorn re-imports it. This is the
-# exact manual loop (docker cp + restart) that costs a cycle every time it is
-# rediscovered.
+# does NOT work anyway, because the entrypoint serves the whole-repo clone from
+# /data/platform/backend (uvicorn runs `cd /data/platform/backend && import
+# app.main`). So to test a backend edit without a full image rebuild, copy the
+# source into the served tree /data/platform/backend/{app,scripts} and restart
+# so uvicorn re-imports it. This is the exact manual loop (docker cp + restart)
+# that costs a cycle every time it is rediscovered.
 #
 # REFUSES to touch prod (mobius / :8000) — same guardrail as sync-test-shell.sh.
 # This must NEVER overwrite the live owner's served backend.
@@ -60,16 +60,16 @@ fi
 # island files too; we chown back to mobius and the entrypoint re-applies the
 # protected-file perms on the restart below. __pycache__/.pyc are skipped so a
 # stale host cache can't shadow the new source.
-step "[1/4] syncing backend/app → ${CONTAINER}:/data/platform/app/"
-docker exec "$CONTAINER" mkdir -p /data/platform/app /data/platform/scripts
+step "[1/4] syncing backend/app → ${CONTAINER}:/data/platform/backend/app/"
+docker exec "$CONTAINER" mkdir -p /data/platform/backend/app /data/platform/backend/scripts
 tar -C "${REPO_ROOT}/backend/app" --exclude='__pycache__' --exclude='*.pyc' -cf - . \
-  | docker exec -i "$CONTAINER" tar -C /data/platform/app -xpf -
+  | docker exec -i "$CONTAINER" tar -C /data/platform/backend/app -xpf -
 
-step "[2/4] syncing backend/scripts → ${CONTAINER}:/data/platform/scripts/"
+step "[2/4] syncing backend/scripts → ${CONTAINER}:/data/platform/backend/scripts/"
 tar -C "${REPO_ROOT}/backend/scripts" --exclude='__pycache__' --exclude='*.pyc' -cf - . \
-  | docker exec -i "$CONTAINER" tar -C /data/platform/scripts -xpf -
+  | docker exec -i "$CONTAINER" tar -C /data/platform/backend/scripts -xpf -
 
-docker exec -u root "$CONTAINER" chown -R mobius:mobius /data/platform/app /data/platform/scripts
+docker exec -u root "$CONTAINER" chown -R mobius:mobius /data/platform/backend/app /data/platform/backend/scripts
 
 if [ "$NO_RESTART" = "1" ]; then
   step "[3/4] SKIPPED restart (--no-restart) — uvicorn still runs the previously imported modules"

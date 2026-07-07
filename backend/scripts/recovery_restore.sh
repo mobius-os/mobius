@@ -12,11 +12,6 @@
 #   shell-src       Restore the editable frontend source (the agent's
 #                   edits to /data/shell/src/ are wiped). Requires a
 #                   rebuild to take visual effect.
-#   backend         Restore /app/app/ from /app/app-baked/ (skipping
-#                   files listed in protected-files.txt — those are
-#                   already root-owned and chmod 444, so cp -a would
-#                   fail to overwrite them anyway).
-#   scripts         Restore /app/scripts/ from /app/scripts-baked/.
 #   platform        Git restore: `git -C /data/platform reset --hard HEAD`
 #                   (reverts uncommitted agent edits; commits are preserved).
 #                   Use when the agent made edits that broke the platform
@@ -27,9 +22,8 @@
 #                   /data/platform git history. Use when the agent broke
 #                   something and committed it, or git reset --hard is not enough.
 #
-# After 'backend', 'scripts', 'platform', or 'platform-baked', the
-# caller should trigger POST /recover/restart so uvicorn picks up the
-# restored code.
+# After 'platform' or 'platform-baked', the caller should trigger
+# POST /recover/restart so uvicorn picks up the restored code.
 #
 # Exit codes:
 #   0  success
@@ -48,8 +42,6 @@ Usage: recovery_restore.sh <mode>
 Modes:
   shell-dist      Restore /data/shell/dist/ from /app/static/
   shell-src       Restore /data/shell/src/ from /app/shell-src/
-  backend         Restore /app/app/ from /app/app-baked/
-  scripts         Restore /app/scripts/ from /app/scripts-baked/
   platform        git reset --hard HEAD in /data/platform
   platform-baked  Wipe + recopy /data/platform/backend/{app,scripts} from baked floor
 EOF
@@ -120,11 +112,14 @@ if [ "$MODE" = "platform-baked" ]; then
   # Re-open write access (baked copies are chmod a-w; cp -a preserves that).
   chmod -R u+w "$DST_APP" "$DST_SCR" 2>/dev/null || true
   chown -R mobius:mobius /data/platform 2>/dev/null || true
-  # Re-enforce protected-file perms in the new platform tree.
-  # The protected-files.txt entries use /app/app/ paths; those symlink to
-  # /data/platform/app/ so chmod on /app/app/X acts on /data/platform/app/X.
-  # We also walk with the real /data/platform/app/ prefix so the protection
-  # holds whether the symlink exists or not.
+  # Belt-and-suspenders re-lock of the protected files after the restore.
+  # protected-files.txt lists /data/shell/* login/setup components and the
+  # baked /app/scripts/* infra — NONE live under the /data/platform/backend
+  # tree this mode just restored, so this loop re-locks nothing in the
+  # restored tree; it simply re-asserts those unrelated files' root:444 perms
+  # (idempotent with the entrypoint's own boot re-lock). Kept as a harmless
+  # safety net; the served backend under /data/platform is mobius-owned and
+  # agent-editable by design, so it is deliberately NOT re-locked here.
   if [ -f /app/protected-files.txt ]; then
     while IFS= read -r line; do
       case "$line" in \#*|"") continue ;; esac
@@ -173,14 +168,6 @@ case "$MODE" in
     SRC="/app/shell-src"
     DST="/data/shell"
     ;;
-  backend)
-    SRC="/app/app-baked"
-    DST="/app/app"
-    ;;
-  scripts)
-    SRC="/app/scripts-baked"
-    DST="/app/scripts"
-    ;;
   *)
     echo "Unknown mode: $MODE" >&2
     exit 1
@@ -222,10 +209,10 @@ if [ $cp_status -ne 0 ]; then
 fi
 
 # Re-hand the writable layer to mobius (except for protected files
-# which entrypoint.sh re-locks on next boot).
-if [ "$DST" = "/app/app" ] || [ "$DST" = "/app/scripts" ]; then
-  chown -R mobius:mobius "$DST" 2>/dev/null || true
-elif [ "$DST" = "/data/shell" ] || [ "$DST" = "/data/shell/dist" ]; then
+# which entrypoint.sh re-locks on next boot). Only the shell modes
+# reach this generic path — the served backend/scripts restore lives
+# in the platform-baked branch above.
+if [ "$DST" = "/data/shell" ] || [ "$DST" = "/data/shell/dist" ]; then
   chown -R mobius:mobius "$DST" 2>/dev/null || true
 fi
 

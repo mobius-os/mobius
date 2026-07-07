@@ -229,6 +229,15 @@ _RESTORE_MODES = {"platform", "platform-baked"}
 # up a request thread streaming a huge payload past the auth gate.
 _MAX_JSON_BODY = 1 * 1024 * 1024
 
+# Socket timeout re-armed on the authenticated SSE recovery stream (see
+# _stream_agent_turn). Set comfortably above the recovery runner's own
+# per-turn cap (RECOVERY_MAX_TURN_SECONDS, default 900s — kept in step via the
+# same env var) so the runner's clean "turn exceeded" path fires first and the
+# socket timeout only reaps a genuinely dead connection.
+_SSE_SOCKET_TIMEOUT = float(
+  os.environ.get("RECOVERY_MAX_TURN_SECONDS", "900")
+) + 60
+
 
 # ---------------------------------------------------------------------------
 # Bundle trust — the root-ownership integrity rule, reused by both the
@@ -894,6 +903,18 @@ class _Handler(BaseHTTPRequestHandler):
   server_version = "recoveryd/1.0"
   protocol_version = "HTTP/1.1"
 
+  # Per-connection socket timeout. StreamRequestHandler.setup() applies this
+  # to the accepted socket, so handle_one_request()'s `socket.timeout` path
+  # closes any connection that stalls — a slowloris dribbling a request, or an
+  # idle HTTP/1.1 keep-alive after a completed request. Without it every such
+  # connection parks a worker thread forever and the ONLY recovery surface is
+  # wedgeable by connection exhaustion from the very container it must survive.
+  # This tight value governs the UNAUTHENTICATED request-read + keep-alive
+  # phase (the slowloris surface). The authenticated SSE recovery turn re-arms
+  # a much longer timeout for its stream (see _stream_agent_turn) so a client
+  # that backgrounds the tab while the root agent works is not killed at 30s.
+  timeout = 30
+
   # -- low-level helpers --------------------------------------------------
 
   def _send(self, code: int, body: str, *, content_type: str = "text/html",
@@ -906,6 +927,13 @@ class _Handler(BaseHTTPRequestHandler):
     self.send_header("Cache-Control", "no-store")
     self.send_header("X-Content-Type-Options", "nosniff")
     self.send_header("Referrer-Policy", "same-origin")
+    # The recovery pages carry destructive forms (restore, factory-reset) and
+    # the full-root agent chat. Forbid framing entirely so nothing — not even
+    # a same-origin mini-app — can clickjack them. Stricter than the bundled
+    # Caddyfile's global X-Frame-Options: SAMEORIGIN, which this overrides for
+    # /recover.
+    self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+    self.send_header("X-Frame-Options", "DENY")
     for k, v in (extra_headers or {}).items():
       self.send_header(k, v)
     self.end_headers()
@@ -948,9 +976,17 @@ class _Handler(BaseHTTPRequestHandler):
       length = int(self.headers.get("Content-Length", "0"))
     except (TypeError, ValueError):
       length = 0
+    # No body is a legitimate empty form.
+    if length <= 0:
+      return {}
     # Bound the body so a malicious client can't exhaust memory; recovery
-    # forms are tiny (username/password/mode).
-    if length <= 0 or length > 64 * 1024:
+    # forms are tiny (username/password/mode). An oversized body is left
+    # UNREAD, so mark the connection for close: draining it would mean
+    # reading the very megabytes we refused, and leaving it in the socket
+    # buffer would desync the next keep-alive request on this connection
+    # (it would be mis-parsed as a request line). Closing is the safe exit.
+    if length > 64 * 1024:
+      self.close_connection = True
       return {}
     raw = self.rfile.read(length).decode("utf-8", "replace")
     parsed = urllib.parse.parse_qs(raw, keep_blank_values=True)
@@ -1342,11 +1378,30 @@ class _Handler(BaseHTTPRequestHandler):
     if not message:
       self._json(HTTPStatus.BAD_REQUEST, {"error": "no message in log"})
       return
+    # This SSE body has neither Content-Length nor chunked framing, so the
+    # connection close IS its delimiter. Force the connection closed after the
+    # stream: under HTTP/1.1 keep-alive the handler would otherwise loop back
+    # to read a next request on the same socket and block a worker thread there
+    # forever (no next request is coming). Send the header AND set the flag so
+    # both the client and the request loop agree the connection ends here.
+    self.close_connection = True
     self.send_response(HTTPStatus.OK)
     self.send_header("Content-Type", "text/event-stream; charset=utf-8")
     self.send_header("Cache-Control", "no-cache")
     self.send_header("X-Accel-Buffering", "no")
+    self.send_header("Connection", "close")
     self.end_headers()
+    # Re-arm the socket timeout for the stream. The 30s class default is right
+    # for the slowloris-prone request-read phase, but too tight here: a client
+    # that backgrounds the recovery tab (common on mobile) stops draining, its
+    # TCP window fills, and a wfile write would raise socket.timeout at 30s —
+    # killing the root agent mid-repair. This endpoint is auth-gated (not a
+    # slowloris surface) and the turn is already bounded by the runner's own
+    # cap, so a generous socket timeout only reaps a genuinely dead connection.
+    try:
+      self.connection.settimeout(_SSE_SOCKET_TIMEOUT)
+    except OSError:
+      pass
     loop = asyncio.new_event_loop()
     agen = None
     try:
