@@ -51,12 +51,11 @@ log = logging.getLogger("recoveryd.oauth")
 # The platform runtime user. Provider credentials recoveryd writes land on
 # the shared /data volume and are read + refreshed by the PLATFORM chat
 # agent, which always runs as this user in the app container — so they must
-# be owned by IT, not by whoever the recovery agent happens to run as.
-# RECOVERY_AGENT_USER defaults to root; owning creds root:root 0600 would
-# leave the platform (mobius) unable to read them, so the reconnect the
-# owner just performed would not actually fix platform chat. root — the
-# recovery default — can still read a mobius-owned 0600 file, so the
-# recovery agent is unaffected either way. Overridable for tests.
+# be owned by IT, not by the recovery agent (which runs as root). Owning
+# creds root:root 0600 would leave the platform (mobius) unable to read
+# them, so the reconnect the owner just performed would not actually fix
+# platform chat. root can still read a mobius-owned 0600 file, so the
+# recovery agent is unaffected. Overridable for tests.
 _PLATFORM_USER = os.environ.get("MOBIUS_AGENT_USER", "mobius")
 
 
@@ -360,7 +359,6 @@ def codex_start() -> dict:
       stderr=subprocess.STDOUT,
       env=env,
       text=True,
-      preexec_fn=recovery_chat_runner.agent_preexec(),
     )
   except (OSError, ValueError) as exc:
     raise OAuthError(500, f"could not start codex login: {exc}")

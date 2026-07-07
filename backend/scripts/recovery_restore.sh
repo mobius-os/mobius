@@ -112,30 +112,10 @@ if [ "$MODE" = "platform-baked" ]; then
   # Re-open write access (baked copies are chmod a-w; cp -a preserves that).
   chmod -R u+w "$DST_APP" "$DST_SCR" 2>/dev/null || true
   chown -R mobius:mobius /data/platform 2>/dev/null || true
-  # Belt-and-suspenders re-lock of the protected files after the restore.
-  # protected-files.txt lists /data/shell/* login/setup components and the
-  # baked /app/scripts/* infra — NONE live under the /data/platform/backend
-  # tree this mode just restored, so this loop re-locks nothing in the
-  # restored tree; it simply re-asserts those unrelated files' root:444 perms
-  # (idempotent with the entrypoint's own boot re-lock). Kept as a harmless
-  # safety net; the served backend under /data/platform is mobius-owned and
-  # agent-editable by design, so it is deliberately NOT re-locked here.
-  if [ -f /app/protected-files.txt ]; then
-    while IFS= read -r line; do
-      case "$line" in \#*|"") continue ;; esac
-      case "$line" in
-        /*) target="$line" ;;
-        *)  target="/data/shell/$line" ;;
-      esac
-      if [ -f "$target" ]; then
-        chown root:root "$target" 2>/dev/null || true
-        case "$target" in
-          *.sh) chmod 555 "$target" 2>/dev/null || true ;;
-          *)    chmod 444 "$target" 2>/dev/null || true ;;
-        esac
-      fi
-    done < /app/protected-files.txt
-  fi
+  # The served backend under /data/platform is mobius-owned and agent-editable
+  # by design, so nothing here needs re-locking. protected-files.txt entries
+  # (/data/shell/* + baked /app/scripts/*) live OUTSIDE the restored tree and
+  # are re-locked by the entrypoint on the restart that follows this restore.
   # Commit the restore to /data/platform git history, and STAMP the baked floor
   # (.baked-sha + a baked-<sha> tag) in the SAME commit so /api/version + the
   # store read accurate right after a deploy instead of "update available" until
