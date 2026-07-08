@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0d0d0d">
+  <title>Gesture Bar Repros</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #0d0d0d; color: #f5f5f5; }
+    body { margin: 0; min-height: 100svh; background: #0d0d0d; }
+    main { max-width: 680px; margin: 0 auto; padding: 24px 18px calc(32px + env(safe-area-inset-bottom, 0px)); }
+    h1 { margin: 0 0 12px; font-size: 24px; }
+    p { margin: 0 0 18px; color: #b8b8b8; line-height: 1.45; }
+    a { display: block; padding: 13px 0; color: #93c5fd; text-decoration: none; border-top: 1px solid #2a2a2a; }
+    a:last-child { border-bottom: 1px solid #2a2a2a; }
+    code { color: #f0abfc; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Gesture Bar Repros</h1>
+    <p>Install these pages separately on Android. Each page paints the content background <code>#0d0d0d</code> and reports viewport/safe-area values at the bottom.</p>
+    <a href="./case-dark-scheme.html">1. color-scheme: dark + viewport-fit=cover</a>
+    <a href="./case-no-scheme.html">2. no color-scheme + viewport-fit=cover</a>
+    <a href="./case-forced-canvas.html">3. forced html/body canvas + viewport-fit=cover</a>
+    <a href="./case-element-extension.html">4. fixed element extends below bottom edge</a>
+    <a href="./case-standalone-cover.html">5. display standalone + viewport-fit=cover</a>
+    <a href="./case-standalone-no-cover.html">6. display standalone, no viewport-fit=cover</a>
+    <a href="./case-fullscreen-cover.html">7. display fullscreen + viewport-fit=cover</a>
+    <a href="./case-minimal-ui-cover.html">8. display minimal-ui + viewport-fit=cover</a>
+  </main>
+</body>
+</html>
