@@ -928,13 +928,11 @@
 }
 
 /* Bottom fade + gesture-strip fill. A STATIC gradient scrim tuned to the owner's
-   spec: text stays fully crisp down to roughly the MIDDLE of the composer pill,
-   then DISSOLVES and is completely gone right at the very bottom / gesture strip.
-   So the transparent-to-solid ramp is deliberately low — transparent through the
-   upper region (~68%), then a short ramp to solid var(--bg) near the bottom
-   (~95%) — rather than softening text high above the composer. The last stretch
-   stays solid so the home-indicator / gesture strip reads as plain var(--bg) and
-   nothing hard-cuts at the edge. Deliberately a static `pointer-events:none`
+   spec: text stays crisp around the composer, then dissolves toward the very
+   bottom / gesture strip. The ramp starts at an explicit zero-alpha bg stop so
+   it doesn't appear to jump in at the first visible tint; then it eases through
+   low-opacity bg before becoming solid near the bottom. Deliberately a static
+   `pointer-events:none`
    pseudo-element, NOT a `mask-image` on `.chat__scroll`: a mask over the scroller
    re-rasterizes every scroll frame and janks on Android (see the drawer-fade fix
    in Drawer.css + the android-scroll-jank note). This paints on a cheap static
@@ -955,9 +953,10 @@
   background: linear-gradient(
     to bottom,
     transparent 0%,
-    transparent 68%,
-    color-mix(in srgb, var(--bg) 60%, transparent) 84%,
-    var(--bg) 95%
+    color-mix(in srgb, var(--bg) 0%, transparent) 68%,
+    color-mix(in srgb, var(--bg) 12%, transparent) 76%,
+    color-mix(in srgb, var(--bg) 42%, transparent) 88%,
+    var(--bg) 98%
   );
   pointer-events: none;
   z-index: -1;
