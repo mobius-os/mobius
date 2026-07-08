@@ -22,6 +22,7 @@ import { assistantStreamCoversMessage, findTrailingAssistantPartialIndex, messag
 import {
   canFastForwardQueue,
   continuationRowsFromPromotedMessage,
+  serverSnapshotBehindLocal,
   startedMessagesFromResponse,
 } from './chatRuntimeState.js'
 import './ChatView.css'
@@ -74,15 +75,6 @@ function sameMessageList(a, b) {
     }
   }
   return true
-}
-
-function serverSnapshotBehindLocal(serverMsgs, localMsgs) {
-  if (!Array.isArray(localMsgs) || localMsgs.length === 0) return false
-  if (!Array.isArray(serverMsgs)) return false
-  if (serverMsgs.length < localMsgs.length) return true
-
-  const serverTs = new Set(serverMsgs.map(m => m?.ts).filter(v => v != null))
-  return localMsgs.some(m => m?.ts != null && !serverTs.has(m.ts))
 }
 
 function appendMessageBatch(prev, rows) {
@@ -1438,7 +1430,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       wasNearScrollBottom: wasNearScrollBottomAtSubmit,
     })
 
-    const userMsg = { role: 'user', content: text, ts: Date.now() }
+    const userMsg = { role: 'user', content: text, ts: Date.now(), optimistic: true }
     if (attachments.length > 0) userMsg.attachments = attachments
     commitMessages(prev => [...prev, userMsg])
     setInput('')
@@ -1456,10 +1448,9 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     // only first-or-at-bottom sends mutate scrollTop to PIN_USER_MSG.
     // When not pinning the user is reading (scrolled up), so convert any
     // stale PIN_USER_MSG from an earlier send into the reader's current
-    // ANCHOR_AT and leave their viewport fixed. The fresh path returns
-    // {status:'started'} with no server message, so the optimistic
-    // userMsg.ts is also the rendered data-ts — keying the pin to it is
-    // correct here.
+    // ANCHOR_AT and leave their viewport fixed. The optimistic userMsg.ts is
+    // the rendered data-ts until the backend's canonical row arrives in the
+    // fresh-start response.
     setSpacerActive(true)
     if (willPin) {
       if (spacerRef.current) spacerRef.current.style.height = '0px'
