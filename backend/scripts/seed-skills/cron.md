@@ -21,7 +21,7 @@ It writes `/data/apps/<slug>/job.sh` (stub, if absent), writes `/data/apps/<slug
 
 To list / remove: `crontab -u mobius -l` and edit the matching `init-cron.sh` (or delete it before re-running the scaffold). Never call `crontab -u mobius` directly without writing an `init-cron.sh` alongside.
 
-Wrap the job command with `cron-emit.sh` so outcomes land in the activity log.
+Optionally wrap the job command with `cron-emit.sh` (a manual edit — the scaffold writes the entry unwrapped) so outcomes land in the activity log.
 
 ---
 
@@ -51,7 +51,7 @@ claude -p "Fetch today's data, process it, and write the result to \
 - **Logs:** write stderr to `/data/cron-logs/`.
 - **Sub-agents start with no context** — the `--system-prompt-file` is all they get. Spell out the task fully there.
 - **Storage from a cron script** uses the raw API (`window.mobius.storage` only exists inside a running app). Enumerate, don't probe — see the storage section of `building-apps.md`.
-- After setting up a scheduled task, log it to the inbox (`echo '- <what, why>' >> /data/shared/memory/inbox.md`).
+- After setting up a scheduled task, record it in this chat's note (`chats/$CHAT_ID/index.md`) — grow its `## Summary`; see the `memory.md` skill. (There is no inbox.)
 
 ---
 
