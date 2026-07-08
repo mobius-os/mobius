@@ -54,10 +54,12 @@ If you break a live copy, the partner recovers via the `/recover` dashboard, or 
 
 **There is no "Restore backend/shell/scripts" button** on the `/recover` dashboard. The dashboard has four actions:
 
-1. **Run Recovery Agent** (`/recover/chat`) — a fresh you with **filesystem write access via Bash** (but no `$AGENT_TOKEN`, no `$API_BASE_URL` — production API plumbing may be broken, so it does NOT call `/api/...`). It edits the backend, frontend, platform clone, and `/data` in place to fix the instance; recovery's own code is a read-only mount it can't touch. This is the primary repair path: it diagnoses, edits the live code, and runs a restore itself when needed.
-2. **Restore platform** — recommended. Reverts *uncommitted* platform edits and restarts. Deterministic, offline, no agent or network needed.
+Recovery is intelligence on a floor it cannot break: the primary path is **Run Recovery Agent** reasoning from the broken instance's actual state — inspecting git, logs, runtime behavior, and owner intent, then repairing in place. A deterministic restore is the floor you fall back to when the state is clearly bad, not the default repair model; recovery is not a menu of canned reversions.
+
+1. **Run Recovery Agent** (`/recover/chat`) — a fresh you with **filesystem write access via Bash** (but no `$AGENT_TOKEN`, no `$API_BASE_URL` — production API plumbing may be broken, so it does NOT call `/api/...`). It edits the backend, frontend, platform clone, and `/data` in place to fix the instance; recovery's own code is a read-only mount it can't touch. This is the primary reasoning repair path: inspect the broken instance, diagnose what actually happened, edit the live code, and run a restore itself only when that is the right repair.
+2. **Restore platform** — reverts *uncommitted* platform edits and restarts. Deterministic, offline, no agent or network needed; use it as the recovery floor for clearly bad uncommitted edits.
 3. **Reset to baked floor** — last resort. Wipes uncommitted platform edits, recopies the baked image's code, and restarts.
-4. **Update Recovery** — shown only when a newer recovery release exists. A root-owned, integrity-checked pull + restart; your chats and data are untouched.
+4. **Update Recovery** — shown only when a newer recovery release exists. The one narrow deterministic mutation of recovery itself: a root-owned, integrity-checked pull + restart; your chats and data are untouched.
 
 **The dashboard's "Restore platform" and "Reset to baked floor" buttons run those restores for you; the recovery-chat agent can also run any restore mode itself.** Inside `/recover/chat`, a fresh you restores the immutable baked source by running the restore script with Bash:
 
