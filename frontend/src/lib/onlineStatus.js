@@ -71,15 +71,11 @@ export const DEMOTE_STREAK_WHEN_FLAG_ONLINE = 2
  * @param {boolean} navigatorOnLine  navigator.onLine (the unreliable hint)
  * @param {{successStreak?: number, failureStreak?: number, online?: boolean}} [state]
  *   caller-held connectivity state. `online` is the CURRENT verdict, threaded
- *   so a sub-threshold probe holds the prior value instead of guessing. A bare
- *   number is also accepted for back-compat (treated as successStreak with the
- *   other fields at their defaults).
+ *   so a sub-threshold probe holds the prior value instead of guessing.
  * @returns {{ online: boolean, successStreak: number, failureStreak: number }}
  */
 export function resolveOnline(probeOk, navigatorOnLine, state = {}) {
-  // Back-compat: an earlier signature passed the success streak as a bare
-  // number. Destructuring a number yields the defaults, so coerce explicitly.
-  const s = typeof state === 'number' ? { successStreak: state } : (state || {})
+  const s = state || {}
   const successStreak = s.successStreak ?? 0
   const failureStreak = s.failureStreak ?? 0
   const online = s.online ?? true

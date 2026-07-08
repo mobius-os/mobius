@@ -6,7 +6,6 @@ import assert from 'node:assert/strict'
 
 import {
   streamSnapshotKey,
-  legacyStreamSnapshotKey,
   readStoredStreamSnapshot,
   writeStoredStreamSnapshot,
   clearStoredStreamSnapshot,
@@ -30,7 +29,6 @@ test('stream snapshot read/write uses v2 key', () => {
 
   assert.deepEqual(readStoredStreamSnapshot('chat-a', storage), items)
   assert.equal(storage.map.has(streamSnapshotKey('chat-a')), true)
-  assert.equal(storage.map.has(legacyStreamSnapshotKey('chat-a')), false)
 })
 
 test('stream snapshot ignores empty writes so reconnect reset keeps visible cache', () => {
@@ -43,15 +41,13 @@ test('stream snapshot ignores empty writes so reconnect reset keeps visible cach
   assert.deepEqual(readStoredStreamSnapshot('chat-a', storage), items)
 })
 
-test('clear removes current and legacy keys', () => {
+test('clear removes the current key', () => {
   const storage = makeStorage()
   storage.setItem(streamSnapshotKey('chat-a'), JSON.stringify([{ type: 'text', content: 'new' }]))
-  storage.setItem(legacyStreamSnapshotKey('chat-a'), JSON.stringify([{ type: 'text', content: 'old' }]))
 
   clearStoredStreamSnapshot('chat-a', storage)
 
   assert.equal(storage.map.has(streamSnapshotKey('chat-a')), false)
-  assert.equal(storage.map.has(legacyStreamSnapshotKey('chat-a')), false)
 })
 
 test('read returns [] for corrupt or absent values', () => {

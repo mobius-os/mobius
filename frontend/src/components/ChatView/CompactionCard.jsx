@@ -12,9 +12,7 @@ import { compactionBrief } from './compactionToolBlock.js'
 // The briefing text is read from the plain-text `content` field (via
 // compactionBrief), which is the SAME field chat.py's
 // `_latest_compaction_brief` replays into the next provider's context.
-// Rendering never touches the stored shape, so the round-trip stays intact;
-// legacy messages that only carry the tool block still resolve because
-// compactionBrief falls back to the block output.
+// Rendering never touches the stored shape, so the round-trip stays intact.
 export default function CompactionCard({ msg }) {
   const brief = compactionBrief(msg)
   // `provider` isn't part of the stored compaction shape today, so this

@@ -136,23 +136,9 @@ export default function useOnlineStatus() {
       online: typeof navigator === 'undefined' ? true : navigator.onLine !== false,
     }
 
-    // Compatibility: older service workers used this verdict to decide whether
-    // offline-capable app code should go cache-first. Current SWs serve cached,
-    // versioned app code cache-first in every connectivity state, but keeping
-    // the post makes rolling updates safe for tabs still controlled by an older
-    // worker.
-    function postToSW(online) {
-      try {
-        navigator.serviceWorker?.controller?.postMessage({
-          type: 'moebius:connectivity', online,
-        })
-      } catch (e) { /* no controller yet / unsupported — best effort only. */ }
-    }
-
     function publish(next) {
       connState = { ...connState, online: next }
       setOnline(next)
-      postToSW(next)
     }
 
     async function check() {
