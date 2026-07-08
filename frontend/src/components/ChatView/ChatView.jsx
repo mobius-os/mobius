@@ -1968,7 +1968,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         .map(m => (m.content || '').trim())
         .filter(Boolean)
       const content = steerTexts.join('\n\n')
-      const legacyContent = steerTexts.join('\n')
       const consumePendingTs = confirmedSnapshot.map(m => m.ts)
       // De-dupe attachments by name, exactly like handleStop/resolveStopResend.
       const seenNames = new Set()
@@ -1985,7 +1984,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
       try {
         steerPinIntentRef.current = { inFlight: true }
-        let result = await streamSend(content, attachments, {
+        const result = await streamSend(content, attachments, {
           forceSteer: true,
           consumePendingTs,
           steeredMessages: confirmedSnapshot.map(m => ({
@@ -1994,32 +1993,6 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             ...(m.attachments ? { attachments: m.attachments } : {}),
           })),
         })
-        // Backward compatibility for a running backend process that has not
-        // restarted since the queue separator fix. New code expects "\n\n";
-        // old code expects "\n". Retry only after a clean not_steered
-        // response and only when the local queue still contains exactly the
-        // same server-confirmed ts set, so a race cannot double-send.
-        if (
-          result?.status === 'not_steered'
-          && legacyContent !== content
-          && consumePendingTs.length > 1
-        ) {
-          const currentTs = pendingQueue.pendingMessagesRef.current.map(m => m.ts)
-          const sameQueue = currentTs.length === consumePendingTs.length
-            && currentTs.every((ts, i) => ts === consumePendingTs[i])
-          if (sameQueue) {
-            steerPinIntentRef.current = { inFlight: true }
-            result = await streamSend(legacyContent, attachments, {
-              forceSteer: true,
-              consumePendingTs,
-              steeredMessages: confirmedSnapshot.map(m => ({
-                ts: m.ts,
-                content: m.content || '',
-                ...(m.attachments ? { attachments: m.attachments } : {}),
-              })),
-            })
-          }
-        }
         if (result?.status === 'steered') {
           // The steered rows now render inline (onSteeredIntoTurn promotes
           // them from the SSE event + transcript). Drop them from the local

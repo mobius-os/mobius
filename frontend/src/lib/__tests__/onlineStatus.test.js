@@ -124,16 +124,3 @@ test('flag missing/undefined (non-browser) treated as not-false → promotes on 
     { online: true, successStreak: 1, failureStreak: 0 },
   )
 })
-
-test('back-compat: a bare number 3rd arg is treated as successStreak with defaults', () => {
-  // Older callers passed the success streak as a number; defaults fill the rest
-  // (failureStreak 0, online true).
-  assert.deepEqual(
-    resolveOnline(true, true, 0),
-    { online: true, successStreak: 1, failureStreak: 0 },
-  )
-  assert.deepEqual(
-    resolveOnline(false, false, 5),
-    { online: false, successStreak: 0, failureStreak: 1 },
-  )
-})

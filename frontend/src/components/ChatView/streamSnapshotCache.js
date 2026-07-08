@@ -11,10 +11,6 @@ export function streamSnapshotKey(chatId) {
   return `chat-stream-items:v${STREAM_SNAPSHOT_VERSION}:${chatId}`
 }
 
-export function legacyStreamSnapshotKey(chatId) {
-  return `chat-stream-items:${chatId}`
-}
-
 function defaultStorage() {
   return typeof sessionStorage === 'undefined' ? null : sessionStorage
 }
@@ -46,10 +42,6 @@ export function clearStoredStreamSnapshot(chatId, storage = defaultStorage()) {
   if (!storage || !chatId) return
   try {
     storage.removeItem(streamSnapshotKey(chatId))
-    // Retire pre-v2 snapshots too. A v1 snapshot has no turn-boundary
-    // identity and can contain text that was already sealed into the
-    // transcript before a fast-forwarded user message.
-    storage.removeItem(legacyStreamSnapshotKey(chatId))
   } catch {
     // Best-effort cache; ignore storage failures.
   }

@@ -790,17 +790,15 @@ self.addEventListener('push', (e) => {
 // malicious payload (server compromise, MITM of an unencrypted push)
 // can't steer openWindow() or postMessage to an arbitrary URL.
 //
-// COLD-START SCOPE: the canonical target is now `/shell/?app=<id>` (and
+// COLD-START SCOPE: the canonical target is `/shell/?app=<id>` (and
 // `/shell/?chat=<id>`), which is INSIDE the PWA manifest scope (`/shell/`).
 // A cold tap (app closed/backgrounded) does `clients.openWindow(target)`;
 // only a target inside scope reopens the installed standalone PWA — an
-// out-of-scope `/app/<id>` opens a plain browser tab instead. The legacy
-// `/app/<id>` and `/chat/<id>` forms are still accepted (back-compat with
-// notifications already sitting in the OS tray / older senders); they keep
-// working warm but a COLD tap on them still opens a tab. New senders MUST
-// emit the `/shell/?app=<id>` form. Whichever form arrives, we preserve the
-// query string so the page-side parser (Shell onSwMessage, useNavigation
-// deepLink) can read `?app=`/`?chat=`.
+// out-of-scope form opens a plain browser tab instead. The retired
+// `/app/<id>` and `/chat/<id>` legacy forms are no longer accepted (the last
+// one on prod predates this by weeks); they now fall through to root. We
+// preserve the query string so the page-side parser (Shell onSwMessage,
+// useNavigation deepLink) can read `?app=`/`?chat=`.
 function _safeTarget(raw) {
   if (typeof raw !== 'string' || !raw) return '/'
   let path = raw
@@ -830,11 +828,10 @@ function _safeTarget(raw) {
     } catch { /* fall through */ }
     return '/shell/'
   }
-  // Legacy out-of-scope forms — still accepted for back-compat.
-  if (path === '/' || /^\/chat\/[^/]+$/.test(path)
-      || /^\/app\/[^/]+$/.test(path)) {
-    return path
-  }
+  // Root is the only remaining out-of-scope target we accept; every other
+  // form (including the retired /app/<id> and /chat/<id> notification
+  // targets) falls through to root.
+  if (path === '/') return path
   return '/'
 }
 

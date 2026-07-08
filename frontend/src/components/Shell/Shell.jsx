@@ -760,15 +760,6 @@ export default function Shell() {
         } catch { /* no query */ }
         if (app) navTo('canvas', { appId: parseInt(app, 10) })
         else if (chat) navTo('chat', { chatId: chat })
-        return
-      }
-      // Legacy out-of-scope forms, still accepted.
-      const appMatch = path.match(/^\/app\/([^/]+)$/)
-      const chatMatch = path.match(/^\/chat\/([^/]+)$/)
-      if (appMatch) {
-        navTo('canvas', { appId: parseInt(appMatch[1], 10) })
-      } else if (chatMatch) {
-        navTo('chat', { chatId: chatMatch[1] })
       }
     }
 
