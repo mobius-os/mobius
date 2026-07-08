@@ -365,6 +365,14 @@ def run_migrations(eng) -> None:
       # schema without a table rebuild. Nothing reads or writes it.
       # See models.Chat.agent_id.
       _add.append("ALTER TABLE chats ADD COLUMN agent_id VARCHAR(64) NULL")
+    if "activity_at" not in chats_cols:
+      # Drawer ordering key that advances only on owner-send. Backfill
+      # existing rows to updated_at so their current order is preserved
+      # the first time this column appears. See models.Chat.activity_at.
+      _add.append("ALTER TABLE chats ADD COLUMN activity_at DATETIME NULL")
+      _add.append(
+        "UPDATE chats SET activity_at = updated_at WHERE activity_at IS NULL"
+      )
     if _add:
       with eng.connect() as conn:
         for stmt in _add:

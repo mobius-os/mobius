@@ -46,10 +46,11 @@ export default function Drawer({
 }) {
   const streamingSet = streamingChatIds || EMPTY_SET
   const attentionSet = attentionChatIds || EMPTY_SET
-  // Pinned-first sort: pinned rows by pinned_at desc, then unpinned
-  // by updated_at desc. Server returns this order already (see
-  // routes/chats.py list_chats), but we re-sort defensively so the
-  // drawer stays correct if the cache holds an older response.
+  // Pinned-first sort: pinned rows by pinned_at desc, then unpinned by
+  // activity_at desc (owner-send), with updated_at as a fallback. Server
+  // returns this order already (see routes/chats.py list_chats), but we
+  // mirror it defensively so the drawer stays correct if the cache holds
+  // an older response.
   const allChats = (chats || [])
     .filter(c => c.has_messages)
     .sort((a, b) => {
@@ -57,7 +58,8 @@ export default function Drawer({
       if (ap && !bp) return -1
       if (!ap && bp) return 1
       if (ap && bp) return bp.localeCompare(ap)
-      return (b.updated_at || '').localeCompare(a.updated_at || '')
+      return ((b.activity_at || b.updated_at) || '')
+        .localeCompare((a.activity_at || a.updated_at) || '')
     })
   // Mirror the same sort for apps. Server delivers it, but the cache
   // may carry a stale list. Unpinned apps stay in creation order so

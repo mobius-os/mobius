@@ -1299,6 +1299,8 @@ class ChatWriterActor:
     chat.run_status = "running"
     chat.run_started_at = datetime.now(UTC)
     chat.updated_at = datetime.now(UTC)
+    # Owner-send: advance the drawer ordering key (see models.Chat.activity_at).
+    chat.activity_at = datetime.now(UTC)
     # Durable per-run record (077 Step 3), inserted in the SAME commit as the
     # run_status marker so the two can never diverge. Keyed on this turn's
     # run_token — the one identity the sink and ClearRunStatus also carry.
@@ -1345,6 +1347,7 @@ class ChatWriterActor:
     pending.append(new_msg)
     chat.pending_messages = pending
     chat.updated_at = datetime.now(UTC)
+    chat.activity_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
       raise _PersistFailed("AppendPending did not persist")
     return {"stored": new_msg, "pending": pending}
@@ -1413,6 +1416,7 @@ class ChatWriterActor:
         m for m in pending if m.get("ts") not in consumed
       ]
     chat.updated_at = datetime.now(UTC)
+    chat.activity_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
       raise _PersistFailed("AppendSteeredUserMessage did not persist")
     return {

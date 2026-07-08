@@ -18,6 +18,21 @@ _ESBUILD_TIMEOUT_SECS = 30
 _EXPORT_DEFAULT_RE = re.compile(r"^\s*export\s+default\b", re.MULTILINE)
 
 
+class CompileError(RuntimeError):
+  """A user-source compile failure with stderr for client-safe formatting."""
+
+  def __init__(
+    self,
+    message: str,
+    *,
+    stderr: str = "",
+    source_path: str | Path | None = None,
+  ) -> None:
+    super().__init__(message)
+    self.stderr = stderr
+    self.source_path = Path(source_path) if source_path is not None else None
+
+
 def _compiled_dir() -> Path:
   """Returns (and creates) the directory for compiled mini-app modules."""
   path = Path(get_settings().data_dir) / "compiled"
@@ -86,22 +101,24 @@ async def compile_jsx(
     The absolute path of the compiled JS file.
 
   Raises:
-    RuntimeError: If esbuild exits with a non-zero status.
+    CompileError: If the JSX is invalid or esbuild rejects the source.
   """
   # Fail loudly on malformed source before invoking esbuild — the
   # silent-0-byte case produces a downstream "no default export" at
   # runtime and wastes a debug round-trip.
   if not jsx_source or not jsx_source.strip():
-    raise RuntimeError(
+    message = (
       "JSX source is empty. Write your component to "
       "apps/<name>/index.jsx before registering."
     )
+    raise CompileError(message, stderr=message, source_path=source_path)
   if not _EXPORT_DEFAULT_RE.search(jsx_source):
-    raise RuntimeError(
+    message = (
       "JSX source has no `export default` — mini-apps must export a "
       "default React component. Add `export default function MyApp(...)` "
       "or `export default ComponentName`."
     )
+    raise CompileError(message, stderr=message, source_path=source_path)
 
   out = Path(out_path) if out_path is not None else _compiled_dir() / f"app-{app_id}.js"
 
@@ -156,8 +173,11 @@ async def compile_jsx(
         pass
       raise
     if proc.returncode != 0:
-      raise RuntimeError(
-        f"Compilation failed:\n{stderr.decode()}"
+      decoded_stderr = stderr.decode()
+      raise CompileError(
+        "Compilation failed.",
+        stderr=decoded_stderr,
+        source_path=entry_path,
       )
   finally:
     if tmp_path is not None:
