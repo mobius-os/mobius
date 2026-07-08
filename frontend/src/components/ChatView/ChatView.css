@@ -928,33 +928,36 @@
 }
 
 /* Bottom fade + gesture-strip fill. A STATIC gradient scrim tuned to the owner's
-   spec: text remains readable behind the composer pill, then DISSOLVES through
-   the below-pill safe-area / gesture strip and is fully gone at the screen bottom.
-   The pseudo-element extends below `.chat__foot` by the safe-area amount because
-   `.chat__foot` itself is lifted above the bottom; without that extension the
-   fade ends too high and scrolling text can reappear sharply below it. Keep the
-   ramp as percentages (not fixed px stops) so large Android gesture insets stretch
-   the dissolve instead of turning into a solid block. Deliberately a static
-   `pointer-events:none` pseudo-element, NOT a `mask-image` on `.chat__scroll`: a
-   mask over the scroller re-rasterizes every scroll frame and janks on Android
-   (see the drawer-fade fix in Drawer.css + the android-scroll-jank note). This
-   paints on a cheap static layer. z-index -1 keeps it inside the foot's stacking
-   context (z:5) so it sits ABOVE the scrolling message list (fading the text) but
-   BEHIND the composer pill (the pill's backdrop-blur stays crisp). Follows
-   var(--bg), so theme changes + deploy refreshes can't strand a wrong colour. */
+   spec: text stays fully crisp down to roughly the MIDDLE of the composer pill,
+   then DISSOLVES and is completely gone right at the very bottom / gesture strip.
+   So the transparent-to-solid ramp is deliberately low — transparent through the
+   upper region (~68%), then a short ramp to solid var(--bg) near the bottom
+   (~95%) — rather than softening text high above the composer. The last stretch
+   stays solid so the home-indicator / gesture strip reads as plain var(--bg) and
+   nothing hard-cuts at the edge. Deliberately a static `pointer-events:none`
+   pseudo-element, NOT a `mask-image` on `.chat__scroll`: a mask over the scroller
+   re-rasterizes every scroll frame and janks on Android (see the drawer-fade fix
+   in Drawer.css + the android-scroll-jank note). This paints on a cheap static
+   layer. z-index -1 keeps it inside the foot's stacking context (z:5) so it sits
+   ABOVE the scrolling message list (fading the text) but BEHIND the composer pill
+   (the pill's backdrop-blur stays crisp). `top` extends above the composer only so
+   the ramp's percentage stops map onto the pill; the ramp itself is bottom-weighted.
+   Percentage stops so the embedded (shorter) composer gets a proportional fade.
+   Follows var(--bg), so theme changes + deploy refreshes can't strand a wrong
+   colour. */
 .chat__foot::before {
   content: "";
   position: absolute;
   left: 0;
   right: 0;
   top: -100px;
-  bottom: calc(-1 * env(safe-area-inset-bottom, 0px));
+  bottom: 0;
   background: linear-gradient(
     to bottom,
     transparent 0%,
-    transparent 78%,
-    color-mix(in srgb, var(--bg) 70%, transparent) 92%,
-    var(--bg) 100%
+    transparent 68%,
+    color-mix(in srgb, var(--bg) 60%, transparent) 84%,
+    var(--bg) 95%
   );
   pointer-events: none;
   z-index: -1;
