@@ -20,6 +20,7 @@ aborted on the next pass.
 import subprocess
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -351,6 +352,39 @@ def test_check_for_updates_offline_is_safe_noop(clone_env):
   assert status["available"] is False
   assert status["state"] == pu.PlatformUpdateState.UP_TO_DATE.value
   assert _served_sha(platform) == before
+
+
+# --- owner Apply rebuilds stale frontend dist after frontend updates ----------
+
+def test_touched_frontend_detects_frontend_only_changes(clone_env):
+  origin, platform = clone_env
+  pre = _served_sha(platform)
+  new = _advance_origin(origin, edits={"frontend/src/App.jsx": "export default 1\n"})
+  _git(platform, "fetch", "-q", "origin")
+
+  assert pu._touched_frontend(platform, pre, new) is True
+  assert pu._touched_frontend(platform, pre, pre) is False
+
+
+@pytest.mark.asyncio
+async def test_apply_rebuilds_frontend_when_update_touched_frontend(monkeypatch, clone_env):
+  origin, platform = clone_env
+  new = _advance_origin(origin, edits={"frontend/src/App.jsx": "export default 2\n"})
+  calls = []
+
+  async def fake_rebuild(repo, res):
+    calls.append((repo, res.new_sha))
+
+  monkeypatch.setattr(pu, "_reconcile_under_lock", lambda repo, at_boot: (
+    pu.ReconcileResult("updated", _served_sha(platform), new, new)
+  ))
+  monkeypatch.setattr(pu, "_rebuild_frontend_after_update_if_needed", fake_rebuild)
+
+  res = await pu.apply_platform_update(SimpleNamespace(), platform)
+
+  assert res["state"] == pu.PlatformUpdateState.RESTART_NEEDED.value
+  assert res["needs_restart"] is True
+  assert calls == [(platform, new)]
 
 
 # --- restart flag lifecycle -------------------------------------------------
