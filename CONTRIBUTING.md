@@ -1,7 +1,8 @@
 # Contributing to Möbius
 
 Möbius is a single-owner, self-hosted PWA where the owner chats with an AI agent
-(the Claude Code or Codex CLI, running as a subprocess) to build mini-apps and
+(Claude Code or Codex, driven through its Agent SDK; the SDK runs the pinned CLI
+binary as a subprocess) to build mini-apps and
 edit the platform itself. The whole thing ships as one Docker container. This
 guide gets a fresh clone to a running dev/test loop.
 
@@ -63,9 +64,10 @@ You rarely restart anything to iterate on a mini-app. Edit
 tree, debounces 1s, recompiles the entry via esbuild, persists the bundle, and
 publishes an `app_updated` event so the shell reloads the iframe without a
 manual register step. Polling (not inotify) is used because the Docker volume
-drops inotify events. Note: editing the **shell** (`frontend/src`) is not
-live — the static dir is resolved once at server startup, so a shell rebuild
-needs a container restart.
+drops inotify events. Note: editing the **shell** in the served platform clone
+(`/data/platform/frontend/src`) IS live — `backend/app/frontend_watcher.py` runs
+a debounced `vite build` into the served `dist/` (git operations fire no edit
+events; `touch` a changed file to force a rebuild).
 
 ## Where to start
 

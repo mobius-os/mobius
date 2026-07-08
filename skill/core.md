@@ -24,7 +24,7 @@ This is local-instance work. Edit the partner's live `/data` apps, shell, memory
 
 **Recovery is separate and always up — there is no "frozen island" inside the platform to work around.** Recovery is its own `recoveryd` container at `/recover`, independent of your code. That separation is exactly what lets the whole platform repo be yours: break the running platform and recovery brings it back (see `recovery.md`). The only immutable pieces are the boot + recovery infrastructure baked into the *image* (the entrypoint, the recoveryd bundle) — you never need to touch them.
 
-**Your edits are contributable.** `/data/platform` is a real clone with `origin = mobius-os/mobius`, so `git diff origin/main` is exactly your changes. A generally-useful fix can become a pull request upstream that improves Möbius for everyone. GitHub credentials exist only when the owner connects GitHub from the Contribute app; with them you may prepare contributions and — ONLY with the owner's explicit per-action approval — submit them under the owner's identity, as drafts by default. Nothing goes public without a yes (`contributing.md`).
+**Your edits are contributable.** `/data/platform` is a real clone with `origin = mobius-os/mobius`, so `git diff origin/main` is exactly your changes. A generally-useful fix can become a pull request upstream that improves Möbius for everyone. GitHub credentials exist only when the owner connects GitHub from the Contribute app; with them you may prepare contributions and — ONLY with the owner's explicit per-action approval — submit them under the owner's identity, as drafts by default. Nothing goes public without a yes (`contributing.md`). Updates flow the other way too: the partner's Settings → Möbius row checks for and applies upstream updates (a git rebase of `/data/platform` onto `origin/main`, then "Restart to finish"); if an update conflicts with local edits, a "Resolve platform update conflict" chat opens with the git steps.
 
 **Chat persistence is serialized — don't bypass it.** `chat.py`, `chat_writer.py`, `chats_stream.py`, `chat_queue.py`, `broadcast.py` are editable, but ALL writes to `Chat.messages` / `Chat.pending_messages` MUST go through the `chat_writer.py` single-writer actor's domain commands — never assign those JSON columns directly. SQLite WAL serializes commits but NOT app-level JSON read-modify-write, so a direct write reintroduces a lost-update race. Read the `chat_writer.py` docstring before touching this layer. (Backend-edit lifecycle: `recovery.md`.)
 
@@ -38,9 +38,9 @@ If you break a live copy, the partner recovers via `/recover` or a fresh you in 
 
 | Situation | URL | Action |
 |---|---|---|
-| Backend edit, main shell healthy | Settings -> Server | Click "Restart server" |
+| Backend edit, main shell healthy | Settings -> Server | Click "Restart" (then "Restart now") |
 | Backend edit, main shell broken | `/recover/chat` | Click "Restart server" |
-| Agent stuck or unable to fix | `/recover` | Click "Restore backend" / "Restore shell" / "Restore scripts" |
+| Agent stuck or unable to fix | `/recover` | Click "Restore platform" (or "Reset to baked floor" as the last resort) |
 | Lost ability to log in to main shell | `/recover` | Log in (owner password), then options above |
 
 The recovery chat uses the **same owner password** as the main shell, behind a separate login form. Restart takes ~5–15s; the page auto-reloads when healthy. Full backend-fix loop is in `recovery.md`.
@@ -175,7 +175,7 @@ Loading a PNG into your vision (`Read` on Claude, `view_image` on Codex) lets YO
 
 1. `Bash`: capture with `bash "$SCRIPTS_DIR/agent-screenshot.sh" <route>` — with no output path it lands in the chat's served media dir (`/data/chats/$CHAT_ID/media/shot-*.png`) and prints the path **plus a ready-to-paste `![screenshot](/api/chats/…)` embed line** — copy that line into your reply (step 3) so the shot actually shows. (Already-open or non-Möbius page: `agent-browser screenshot /data/chats/$CHAT_ID/media/<name>.png`.) Only files under that dir embed — a bare `agent-browser screenshot /tmp/x.png` is viewable but 404s if embedded.
 2. `Read` / `view_image`: the path it printed.
-3. **Text** (same message, BEFORE interpreting): `![first render](/api/chats/$CHAT_ID/media/<name>.png)` — the embed path must match the file. Then a one-line description.
+3. **Text** (same message, BEFORE interpreting): `![first render](/api/chats/$CHAT_ID/media/<name>.png)` — the embed path must match the file and carry the resolved chat id — a literal `$CHAT_ID` only expands in Bash, never in your markdown. Then a one-line description.
 4. Continue.
 
 **If you've seen the app working, the partner should too.** Embed first renders (even broken ones — they let the partner redirect early), major visual changes, working interactions, and especially error/unexpected-state screenshots. Near-identical verification frames can be skipped (judgment call). For structural questions ("does button X exist?"), `snapshot` is enough.
@@ -230,7 +230,7 @@ Partner-facing messages describe what the app does and how it feels, not how it'
 ### Agent settings
 
 ```bash
-echo '{"model": "sonnet", "effort": "high"}' > /data/shared/agent-settings.json
+echo '{"model": "claude-sonnet-4-6", "effort": "high"}' > /data/shared/agent-settings.json
 ```
 
 Use the exact model string from the composer's `+` picker. Effort levels vary by provider; prefer leaving it unset — the per-provider default is sensible.
@@ -260,7 +260,7 @@ Detailed how-to lives in skill files under `/data/shared/skills/`. They're yours
 | `theming.md` | Changing the shell's look: `theme.css` (hot-reload, no rebuild), light/dark CSS variables, structural shell edits (JSX rebuild), lucide icons, describe-tree, protecting the shell. |
 | `cron.md` | Scheduling recurring jobs: `init-cron-scaffold.sh`, why every cron task needs an `init-cron.sh` (survives rebuild), the service token, scheduled-app UI rules, dry-run testing. |
 | `notifications.md` | Sending push notifications: when to notify, firing the push yourself on an open question, the curl forms, and never executing an outbound-channel script live. |
-| `images.md` | Generating images: Codex `$imagegen` vs Claude/Gemini, copying into the chat's generated dir, embedding. |
+| `images.md` | Generating images: Codex `$imagegen` vs Claude/Gemini, copying into the chat's media dir, embedding. |
 | `recovery.md` | Backend fixes, the restart loop, `/data`-as-git (`pm-commit`), SQLite manual ALTER, file locations, chat recovery, the recovery surface. |
 | `memory.md` | Growing and maintaining your knowledge graph (the "Memory" app): note format, the chat-note→note→map flow, anti-orphan, split/merge, and the daytime-vs-nightly-reflection contract. The "Sessions and memory" section above points here. |
 | `reflection.md` | The nightly unattended run: triage the day's chats by summary and interview the agents whose day shows difficulties or learnings, improve the skills (including this one), consolidate the Memory graph, fix + harden the apps, research the partner's interests, then write the morning brief (question cards only when something genuinely wants input; the partner opens the discuss chat on tap). Read it when running as the Reflection agent or wiring its cron. |
