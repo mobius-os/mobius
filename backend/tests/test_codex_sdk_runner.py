@@ -597,7 +597,8 @@ def test_run_codex_sdk_turn_publishes_thinking_for_reasoning_deltas(
   Both visible reasoning stream names (item/reasoning/textDelta and
   item/reasoning/summaryTextDelta) translate to the same provider-agnostic
   `thinking` event; an empty delta publishes nothing. The runner also asks
-  Codex for a concise reasoning summary so the summary stream is opted in.
+  Codex for an auto reasoning summary so the richest public summary stream is
+  opted in.
   """
   class ReasoningTextDeltaNotification:
     def __init__(self, delta: str):
@@ -673,7 +674,7 @@ def test_run_codex_sdk_turn_publishes_thinking_for_reasoning_deltas(
   )
 
   assert result["error"] is None
-  assert thread.turn_kwargs["summary"] == "concise"
+  assert thread.turn_kwargs["summary"] == "auto"
   assert bc.events == [
     {"type": "session_init", "session_id": "thread-1"},
     {"type": "thinking", "content": "plotting", "ts": 3250},

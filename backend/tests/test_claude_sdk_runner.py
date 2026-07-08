@@ -655,6 +655,80 @@ def test_dispatch_thinking_delta_emits_thinking(monkeypatch):
   }]
 
 
+def test_claude_thinking_config_requests_summarized_adaptive_thinking():
+  assert claude_sdk_runner._claude_thinking_config("claude-opus-4-8") == {
+    "type": "adaptive",
+    "display": "summarized",
+  }
+  assert claude_sdk_runner._claude_thinking_config(
+    "claude-sonnet-4-7-20251215"
+  ) == {
+    "type": "adaptive",
+    "display": "summarized",
+  }
+  assert claude_sdk_runner._claude_thinking_config(None) == {
+    "type": "adaptive",
+    "display": "summarized",
+  }
+  assert (
+    claude_sdk_runner._claude_thinking_config("claude-opus-4-5-20251001")
+    is None
+  )
+
+
+@pytest.mark.asyncio
+async def test_run_claude_sdk_turn_requests_summarized_thinking(monkeypatch):
+  captured: dict = {}
+
+  class _FakeClient:
+    def __init__(self, options):
+      captured["options"] = options
+
+    async def connect(self):
+      return None
+
+    async def query(self, message):
+      del message
+
+    async def disconnect(self):
+      return None
+
+    async def receive_response(self):
+      yield ResultMessage(
+        subtype="success",
+        duration_ms=10,
+        duration_api_ms=5,
+        is_error=False,
+        num_turns=1,
+        session_id="sess-thinking",
+        stop_reason="end_turn",
+        total_cost_usd=0.01,
+        usage={"input_tokens": 1, "output_tokens": 1},
+      )
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
+
+  await run_claude_sdk_turn(
+    "hello",
+    session_id=None,
+    base_env={},
+    cwd="/data",
+    chat_id="chat-thinking",
+    skill_text="system",
+    bc=_Bus(),
+    pending_questions={},
+    db=None,
+    agent_settings={"model": "claude-opus-4-8", "effort": "high"},
+  )
+
+  assert captured["options"].model == "claude-opus-4-8"
+  assert captured["options"].effort == "high"
+  assert captured["options"].thinking == {
+    "type": "adaptive",
+    "display": "summarized",
+  }
+
+
 def test_dispatch_input_json_delta_emits_unknown(monkeypatch):
   monkeypatch.setenv("MOBIUS_EMIT_UNKNOWN", "1")
   bus = _Bus()

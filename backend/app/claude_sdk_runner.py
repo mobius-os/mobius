@@ -108,6 +108,28 @@ def _thinking_event(content: str) -> dict:
   }
 
 
+def _claude_thinking_config(model: str | None) -> dict[str, str] | None:
+  """Request displayable thinking summaries on adaptive-thinking models."""
+  mid = (model or "").lower()
+  if not mid:
+    return {"type": "adaptive", "display": "summarized"}
+  adaptive_prefixes = (
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-sonnet-4-6",
+    "claude-sonnet-4-7",
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-haiku-5",
+    "claude-fable-5",
+    "claude-mythos",
+  )
+  if mid.startswith(adaptive_prefixes):
+    return {"type": "adaptive", "display": "summarized"}
+  return None
+
+
 async def _persist_session_id(db, chat_id: str, session_id: str | None) -> None:
   """Best-effort early persistence for provider resume continuity."""
   if db is None or not chat_id or not session_id:
@@ -1140,6 +1162,9 @@ async def run_claude_sdk_turn(
       options_kwargs["skills"] = "all"
     if model_override:
       options_kwargs["model"] = model_override
+    thinking_config = _claude_thinking_config(model_override)
+    if thinking_config is not None:
+      options_kwargs["thinking"] = thinking_config
     if _effort:
       options_kwargs["effort"] = _effort
     # Arm ultracode via its documented `ultracode` settings flag; on every other
