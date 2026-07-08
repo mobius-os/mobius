@@ -726,10 +726,10 @@
 
 /* ── Tool activity group ───────────────────────────── */
 
-/* A run of 2+ adjacent tool calls collapses into one card so a build turn's
-   wall of tool blocks doesn't bury the agent's prose (see ToolActivityGroup +
-   groupBlocks.js). Collapsed by default; auto-expands while a child runs. The
-   header carries a status chip so a FAILED step shows without expanding. */
+/* Adjacent tool calls, including a lone call, collapse into one card so a build
+   turn's wall of tool blocks doesn't bury the agent's prose (see
+   ToolActivityGroup + groupBlocks.js). Collapsed by default; the header carries
+   live running/done/failed status so a step's state shows without expanding. */
 .chat__toolgroup {
   border-radius: 10px;
   border: 1px solid var(--border-light); /* CONTRACT: neutral hairline — the group is structure, not signal */

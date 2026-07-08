@@ -293,15 +293,15 @@ def _format_json(value: Any) -> str:
 
 
 def _reasoning_summary_setting(sdk: dict[str, Any]) -> Any | None:
-  """Ask Codex for a concise reasoning summary when the SDK supports it."""
+  """Ask Codex for the richest public reasoning summary it supports."""
   summary_cls = sdk.get("ReasoningSummary")
   if summary_cls is None:
     return None
   try:
-    return summary_cls("concise")
+    return summary_cls("auto")
   except Exception:
     try:
-      return summary_cls(root="concise")
+      return summary_cls(root="auto")
     except Exception:
       log.warning("Codex: could not construct ReasoningSummary", exc_info=True)
       return None
@@ -1024,8 +1024,8 @@ async def run_codex_sdk_turn(
         # frontend renders the collapsed "Thinking…" trace either way.
         # Codex emits one of two visible reasoning delta streams depending on
         # SDK/app-server version and summary config: item/reasoning/textDelta
-        # or item/reasoning/summaryTextDelta. We request concise summaries for
-        # OpenAI's public API contract, but handle both SDK event names so a
+        # or item/reasoning/summaryTextDelta. We request `auto` summaries for
+        # the richest public API surface, but handle both SDK event names so a
         # version bump does not silently drop the trace.
         if isinstance(
           payload,
