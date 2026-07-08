@@ -12,6 +12,12 @@ function durationSeconds(durationMs) {
 }
 
 
+function formatSeconds(seconds) {
+  if (!Number.isFinite(seconds)) return null
+  return `${seconds} ${seconds === 1 ? 'second' : 'seconds'}`
+}
+
+
 function ThinkingDisclosure({ item, isActive }) {
   const [now, setNow] = useState(() => Date.now())
 
@@ -24,21 +30,18 @@ function ThinkingDisclosure({ item, isActive }) {
   const startedAt = Number.isFinite(item.startedAt) ? item.startedAt : now
   const activeSeconds = durationSeconds(Math.max(0, now - startedAt))
   const frozenSeconds = durationSeconds(item.duration_ms)
-  const label = isActive ? 'Thinking' : 'Thought'
   const seconds = isActive ? (activeSeconds || 1) : frozenSeconds
+  const secondsText = formatSeconds(seconds)
+  const label = isActive
+    ? `> Thinking for ${secondsText || 'a moment'} ...`
+    : secondsText
+      ? `> Thought for ${secondsText}`
+      : '> Thought'
 
   return (
     <details className="chat__reasoning">
       <summary className="chat__reasoning-summary">
-        <span className="chat__reasoning-label">{label}</span>
-        {seconds && (
-          <span className="chat__reasoning-counter">{seconds}s</span>
-        )}
-        {isActive && (
-          <span className="chat__reasoning-dots" aria-hidden="true">
-            <span /><span /><span />
-          </span>
-        )}
+        <span className="chat__reasoning-line">{label}</span>
       </summary>
       <div className="chat__reasoning-body">
         <StandardMarkdown text={item.content} />

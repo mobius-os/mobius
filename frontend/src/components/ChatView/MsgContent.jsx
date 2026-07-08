@@ -11,10 +11,16 @@ import { suppressedQuestionToolIndices } from './streamReducers.js'
 import { stripAugmentation } from './msgText.js'
 
 
-function thoughtLabel(durationMs) {
-  if (!Number.isFinite(durationMs)) return 'Thought'
-  const seconds = Math.max(1, Math.round(durationMs / 1000))
-  return `Thought for ${seconds}s`
+function thoughtSeconds(durationMs) {
+  if (!Number.isFinite(durationMs)) return null
+  return Math.max(1, Math.round(durationMs / 1000))
+}
+
+
+function thoughtLine(durationMs) {
+  const seconds = thoughtSeconds(durationMs)
+  if (!seconds) return '> Thought'
+  return `> Thought for ${seconds} ${seconds === 1 ? 'second' : 'seconds'}`
 }
 
 
@@ -108,8 +114,8 @@ function MsgContentInner({
         return (
           <details key={i} className="chat__reasoning">
             <summary className="chat__reasoning-summary">
-              <span className="chat__reasoning-label">
-                {thoughtLabel(block.duration_ms)}
+              <span className="chat__reasoning-line">
+                {thoughtLine(block.duration_ms)}
               </span>
             </summary>
             <div className="chat__reasoning-body">

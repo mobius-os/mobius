@@ -479,6 +479,51 @@ def mark_restart_needed(target_sha: str) -> None:
   os.replace(tmp, RESTART_NEEDED_FLAG)
 
 
+def _changed_paths(repo: Path, before: str | None, after: str | None) -> list[str]:
+  """Repo-relative paths changed between two commits, best-effort."""
+  if not before or not after or before == after:
+    return []
+  proc = _git(
+    "diff", "--name-only", before, after, repo=repo, check=False,
+  )
+  if proc.returncode != 0:
+    return []
+  return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def _touched_frontend(repo: Path, before: str | None, after: str | None) -> bool:
+  return any(
+    path == "frontend" or path.startswith("frontend/")
+    for path in _changed_paths(repo, before, after)
+  )
+
+
+async def _rebuild_frontend_after_update_if_needed(
+  repo: Path, res: ReconcileResult,
+) -> None:
+  """Rebuild served frontend assets after a clean update that changed them.
+
+  The live edit watcher sees ordinary file saves, but git checkout/rebase during
+  the Settings update flow can move frontend files without a reliable watcher
+  event. Without this explicit rebuild, ``/data/platform/frontend/src`` advances
+  while ``dist`` keeps serving the old bundle.
+  """
+  if not _touched_frontend(repo, res.pre_sha, res.new_sha):
+    return
+  try:
+    from app.frontend_watcher import rebuild_frontend_now
+  except Exception as exc:
+    log.warning("frontend rebuild unavailable after platform update: %r", exc)
+    return
+  try:
+    await asyncio.to_thread(
+      rebuild_frontend_now,
+      f"platform update {_short(res.pre_sha)}->{_short(res.new_sha)}",
+    )
+  except Exception as exc:
+    log.warning("frontend rebuild failed after platform update: %r", exc)
+
+
 def reconcile_clone(
   repo: Path = PLATFORM_REPO,
   *,
@@ -713,6 +758,7 @@ async def apply_platform_update(
 
     if res.status == "updated":
       mark_restart_needed(res.new_sha or "")
+      await _rebuild_frontend_after_update_if_needed(repo, res)
       state = PlatformUpdateState.RESTART_NEEDED
     elif res.status == "conflict":
       chat_id = await spawn_platform_conflict_chat(db, res.conflict_paths)

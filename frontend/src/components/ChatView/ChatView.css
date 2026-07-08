@@ -418,54 +418,28 @@
   line-height: 1.5;
 }
 .chat__reasoning-summary {
-  display: flex;
+  box-sizing: border-box;
+  display: inline-flex;
   align-items: center;
-  gap: 6px;
-  width: 100%;
+  max-width: 100%;
   cursor: pointer;
   list-style: none; /* hide the native disclosure triangle; we draw our own */
   user-select: none;
-  padding: 5px 10px;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--accent) 4%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 14%, var(--border-light));
+  padding: 2px 0;
+  color: var(--muted);
 }
 .chat__reasoning-summary::-webkit-details-marker { display: none; }
-/* Theme-matched chevron that rotates open. */
-.chat__reasoning-summary::before {
-  content: '';
-  width: 0;
-  height: 0;
-  border-left: 4px solid currentColor;
-  border-top: 4px solid transparent;
-  border-bottom: 4px solid transparent;
-  opacity: 0.6;
-  transition: transform 0.15s ease;
-}
-.chat__reasoning[open] > .chat__reasoning-summary::before {
-  transform: rotate(90deg);
-}
-.chat__reasoning-label {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  opacity: 0.8;
-}
-.chat__reasoning-counter {
-  flex-shrink: 0;
-  padding: 0 6px;
-  border-radius: 8px;
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--muted);
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border-light));
+.chat__reasoning-line {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .chat__reasoning-body {
-  margin: 0 0 0 10px;
-  padding: 7px 0 2px 10px;
-  border-left: 2px solid color-mix(in srgb, var(--border) 70%, transparent);
+  margin: 3px 0 0 10px;
+  padding: 4px 0 2px 10px;
+  border-left: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
 }
 /* Inherit the dim color for the markdown body — don't let StandardMarkdown's
    default text color override the muted reasoning tone. */
@@ -473,24 +447,6 @@
 .chat__reasoning-body :is(p, li, code, strong, em) {
   color: inherit;
 }
-/* Live "still thinking" dots in the summary while this is the active block
-   (reuses the typing-indicator @keyframes thinking). */
-.chat__reasoning-dots {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-}
-.chat__reasoning-dots span {
-  display: block;
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: currentColor;
-  opacity: 0.4;
-  animation: thinking 1.2s ease-in-out infinite;
-}
-.chat__reasoning-dots span:nth-child(2) { animation-delay: 0.2s; }
-.chat__reasoning-dots span:nth-child(3) { animation-delay: 0.4s; }
 
 .chat__cursor {
   display: inline-block;
@@ -558,9 +514,11 @@
 /* ── Tool activity blocks ──────────────────────────── */
 
 .chat__tools {
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  width: min(100%, 480px);
   margin: 4px 0;
   padding-left: 6px;
   max-width: min(100%, 480px);
@@ -569,6 +527,11 @@
 .chat__text + .chat__tools { margin-top: 10px; }
 .chat__tools + .chat__text { margin-top: 10px; }
 .chat__tools + .chat__tools { margin-top: 2px; }
+.chat__text + .chat__reasoning { margin-top: 10px; }
+.chat__reasoning + .chat__text { margin-top: 10px; }
+.chat__tools + .chat__reasoning,
+.chat__reasoning + .chat__tools,
+.chat__reasoning + .chat__reasoning { margin-top: 2px; }
 .chat__text--assistant + .chat__text--assistant { margin-top: 0.75rem; }
 
 .chat__tool {

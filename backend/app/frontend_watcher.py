@@ -19,6 +19,7 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 from watchdog.events import FileSystemEventHandler
@@ -35,6 +36,7 @@ _CACHE_DIR = _FRONTEND_DIR / ".vite-cache"
 _TMP_DIR = _FRONTEND_DIR / ".vite-tmp"
 _ROOT_FILES = {"index.html", "vite.config.js"}
 _WATCH_DIRS = ("src", "public")
+_BUILD_LOCK = threading.Lock()
 _IGNORED_PARTS = {
   ".dist-next",
   ".dist-old",
@@ -173,6 +175,28 @@ def _run_vite_build() -> str:
   return result.stdout
 
 
+def rebuild_frontend_now(reason: str = "manual") -> str:
+  """Run an immediate serialized frontend rebuild and publish shell events.
+
+  The filesystem watcher calls this after ordinary owner edits. The platform
+  self-updater calls the same path after a git reconcile because git checkout /
+  rebase updates can bypass watchdog polling and otherwise leave ``dist`` stale.
+  """
+  log.info("frontend rebuild requested: %s", reason)
+  with _BUILD_LOCK:
+    _publish_system_event({"type": "shell_rebuilding"})
+    try:
+      output = _run_vite_build()
+    except Exception as exc:
+      _publish_system_event({
+        "type": "shell_rebuild_failed",
+        "error": str(exc),
+      })
+      raise
+    _publish_system_event({"type": "shell_rebuilt"})
+    return output
+
+
 class _FrontendHandler(FileSystemEventHandler):
   """Watchdog event handler that schedules debounced frontend rebuilds."""
 
@@ -252,9 +276,8 @@ class _FrontendHandler(FileSystemEventHandler):
 
   async def _rebuild(self, changed_path: str) -> None:
     log.info("frontend rebuild scheduled after %s", changed_path)
-    _publish_system_event({"type": "shell_rebuilding"})
     try:
-      await asyncio.to_thread(_run_vite_build)
+      await asyncio.to_thread(rebuild_frontend_now, f"watch:{changed_path}")
     except asyncio.CancelledError:
       # Cancelled mid-build (lifespan shutdown): resolve the rebuild indicator
       # so a client doesn't hang on shell_rebuilding, then propagate — never
