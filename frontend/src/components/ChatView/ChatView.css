@@ -405,22 +405,30 @@
    useStreamConnection 'thinking' handler). Quiet + dim so it reads as a
    secondary "the agent is thinking" indication that fills a long silent
    stretch — not a wall of raw chain-of-thought competing with the
-   answer. The partner can expand to peek. Ephemeral: promoting the turn
-   to a persisted message drops it, so it only appears mid-stream. */
+   answer. The partner can expand to peek; persisted thinking blocks use
+   the same measured lane so the transcript does not shift after promote. */
 .chat__reasoning {
+  box-sizing: border-box;
+  width: min(100%, 480px);
+  max-width: min(100%, 480px);
   margin: 4px 0 8px;
+  padding-left: 6px;
   color: var(--text-muted, color-mix(in srgb, var(--text) 55%, transparent));
   font-size: 13px;
   line-height: 1.5;
 }
 .chat__reasoning-summary {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 6px;
+  width: 100%;
   cursor: pointer;
   list-style: none; /* hide the native disclosure triangle; we draw our own */
   user-select: none;
-  padding: 2px 0;
+  padding: 5px 10px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 14%, var(--border-light));
 }
 .chat__reasoning-summary::-webkit-details-marker { display: none; }
 /* Theme-matched chevron that rotates open. */
@@ -444,9 +452,19 @@
   text-transform: uppercase;
   opacity: 0.8;
 }
+.chat__reasoning-counter {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border-light));
+}
 .chat__reasoning-body {
-  margin-top: 4px;
-  padding-left: 10px;
+  margin: 0 0 0 10px;
+  padding: 7px 0 2px 10px;
   border-left: 2px solid color-mix(in srgb, var(--border) 70%, transparent);
 }
 /* Inherit the dim color for the markdown body — don't let StandardMarkdown's
