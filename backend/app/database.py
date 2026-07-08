@@ -128,9 +128,10 @@ def run_migrations(eng) -> None:
       ))
       conn.commit()
   if "github_access" not in apps_cols:
-    # GitHub read authority — gates the read-only /api/github surface.
-    # Defaults to 0; apps gain it by declaring
-    # permissions.github_access=true in their manifest and reinstalling.
+    # GitHub connection access — gates the whole /api/github surface
+    # (connection management + the read-only data proxy). Defaults to 0;
+    # apps gain it by declaring permissions.github_access=true in their
+    # manifest and reinstalling.
     with eng.connect() as conn:
       conn.execute(text(
         "ALTER TABLE apps ADD COLUMN github_access BOOLEAN "

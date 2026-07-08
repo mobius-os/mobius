@@ -10,9 +10,10 @@ paste their own token, but the grant itself is powerful — see the
 get_owner_or_app_with_github_access docstring. The read surface
 (/api/{path}, /graphql) is read-only by construction (INV2): the REST
 passthrough registers GET only, and the GraphQL endpoint rejects any
-document containing a mutation or subscription operation. All GitHub
-WRITES happen through the interactive agent path (gh CLI) with
-per-action owner approval — never through HTTP.
+document containing a mutation or subscription operation. This surface
+has no GitHub write endpoint at all; GitHub writes happen through the
+agent's gh CLI, where the contributing.md skill (not this code) is what
+holds the per-action owner-approval gate.
 
 The token itself never appears in any response or log line (INV1).
 """
@@ -149,8 +150,6 @@ async def connect_start(
     "device_code": payload["device_code"],
     "interval": interval,
     "next_poll_at": now + interval,
-    "expires_at": now + expires_in,
-    "scope": "public_repo",
   })
   return {
     "user_code": payload["user_code"],

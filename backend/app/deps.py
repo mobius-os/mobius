@@ -309,8 +309,9 @@ def require_app_permission(
   owner. For an app token, the granted level is read from the App row
   at request time (`getattr(app, key)`), so flipping the column revokes
   access on the very next call without rotating the 8h app JWT. This is
-  the single gate every app-capability route should call; don't scatter
-  inline `getattr(app, ...)` checks.
+  the common gate for ladder-style app permissions (none/summary/full);
+  the boolean grants below (manage_apps, github_access) use their own
+  small owner-or-app gates instead.
 
   Honest scope (design §0b): a same-origin app holds the owner JWT and
   could call owner routes directly. This gate is consent/attribution/
@@ -403,9 +404,11 @@ def get_owner_or_app_with_github_access(
   this into github_access (read) + github_connect (manage) rather than
   handing the read app connect power.
 
-  Permission is read from the App row at request time, so revoking
-  github_access (PATCH /api/apps/{id}) cuts off access on the next
-  request without rotating the JWT.
+  Permission is read from the App row at request time (not baked into
+  the JWT), so once the column is cleared access stops on the next
+  request. Today the only thing that clears it is a reinstall from a
+  manifest that no longer declares the grant — AppUpdate has no
+  github_access field, so a plain PATCH can't toggle it.
   """
   if principal.app_id is None:
     return principal.owner

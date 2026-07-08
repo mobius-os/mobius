@@ -2161,8 +2161,8 @@ async def install_from_manifest(
           app.cross_app_access = perms.get("cross_app_access", app.cross_app_access)
           app.share_with_apps = perms.get("share_with_apps", app.share_with_apps)
           app.chat_log_access = perms.get("chat_log_access", app.chat_log_access)
-          # manage_apps and offline_capable can change across versions; default
-          # to the existing value when the manifest omits the key.
+          # manage_apps, github_access, and offline_capable can change across
+          # versions; default to the existing value when the manifest omits the key.
           if "manage_apps" in perms:
             app.manage_apps = bool(perms["manage_apps"])
           if "github_access" in perms:
