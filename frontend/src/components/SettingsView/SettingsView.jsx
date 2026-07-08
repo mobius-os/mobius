@@ -13,6 +13,7 @@ import StatusDot from '../ui/StatusDot.jsx'
 import '../ui/StatusDot.css'
 import './SettingsView.css'
 
+const UPDATE_CHECKED_RESET_MS = 2200
 
 export default function SettingsView({ onThemeChange, onOpenChat }) {
   const queryClient = useQueryClient()
@@ -49,8 +50,15 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
   const [platformError, setPlatformError] = useState('')
   // 'idle' | 'checking' | 'checked' — the "Check for updates" button asks the
   // service worker to re-check cached frontend assets and re-reads
-  // /api/version.
+  // /api/version. 'checked' is a short-lived success label when no update is
+  // available.
   const [updatePhase, setUpdatePhase] = useState('idle')
+  useEffect(() => {
+    if (updatePhase !== 'checked') return undefined
+    const timer = window.setTimeout(() => setUpdatePhase('idle'), UPDATE_CHECKED_RESET_MS)
+    return () => window.clearTimeout(timer)
+  }, [updatePhase])
+
   useEffect(() => {
     // Mirror the full query value so a cache invalidation that
     // resolves to 'dark' actually flips the knob back. The earlier
@@ -452,6 +460,12 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
   const updateAvailable = !!platform?.available
   const mobiusUpdating =
     platformPhase === 'applying' || updatePhase === 'checking'
+  const checkUpdatesLabel =
+    updatePhase === 'checking'
+      ? 'Checking…'
+      : updatePhase === 'checked'
+        ? 'No updates found'
+        : 'Check for updates'
 
   return (
     <div className="settings">
@@ -648,17 +662,17 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
               </button>
             ) : (
               // Nothing to apply — offer an explicit refresh. Subtle outline (a
-              // secondary action, not a call-to-action) and its own "Checking…"
-              // text, so it never mutates the status label beside it. If the
-              // check surfaces an update, this slot re-renders to the Update
-              // button on the next paint.
+              // secondary action, not a call-to-action) and its own transient
+              // feedback text, so it never mutates the status label beside it.
+              // If the check surfaces an update, this slot re-renders to the
+              // Update button on the next paint.
               <button
                 className="settings__btn settings__btn--outline settings__btn--sm settings__btn--nowrap"
                 type="button"
                 onClick={checkForUpdates}
                 disabled={updatePhase === 'checking'}
               >
-                {updatePhase === 'checking' ? 'Checking…' : 'Check for updates'}
+                {checkUpdatesLabel}
               </button>
             )}
           </div>
