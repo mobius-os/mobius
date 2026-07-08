@@ -106,6 +106,14 @@ export default function Shell() {
   const online = useOnlineStatus()
   const chatsLoadedRef = useRef(false)
   const knownExistingOffListChatIdsRef = useRef(new Set())
+  // Always-current chats, for reading inside callbacks that may hold a stale
+  // closure. ChatView's onChatMissing fires from an async /chats/{id} 404 and
+  // captures `chats` from whenever its load effect was set up — which can be
+  // the empty first-render list. Reading `chats[0]` from that stale closure
+  // would demote to null instead of the newest live chat; read this ref
+  // instead so we always demote to the current most-recent chat.
+  const chatsRef = useRef(chats)
+  useEffect(() => { chatsRef.current = chats }, [chats])
   // In-flight guard for newChat. The function POSTs unconditionally now
   // (the old empty-chat-reuse path was the implicit deduper); without
   // this guard a rapid double-tap on "+ New chat" before the API
@@ -1264,7 +1272,10 @@ export default function Shell() {
               // it, and demote to a live chat if it's still the active view.
               knownExistingOffListChatIdsRef.current.delete(missingId)
               if (String(activeChatIdRef.current) === String(missingId)) {
-                setActiveChatId(chats[0]?.id || null)
+                // Read the CURRENT chats (chatsRef), not the possibly-stale
+                // `chats` captured in ChatView's load-effect closure — else a
+                // late 404 could demote to null instead of the newest chat.
+                setActiveChatId(chatsRef.current[0]?.id || null)
               }
             }}
             builtApp={builtApp}

@@ -295,6 +295,20 @@ def run_migrations(eng) -> None:
         "ALTER TABLE apps ADD COLUMN upstream_commit VARCHAR(64) NULL"
       ))
       conn.commit()
+  if "conflict_resolver_chat_id" not in apps_cols:
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN conflict_resolver_chat_id "
+        "VARCHAR(64) NULL"
+      ))
+      conn.commit()
+  if "conflict_resolver_upstream_commit" not in apps_cols:
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN conflict_resolver_upstream_commit "
+        "VARCHAR(64) NULL"
+      ))
+      conn.commit()
   if "upstream_jsx_sha" not in apps_cols:
     with eng.connect() as conn:
       conn.execute(text(

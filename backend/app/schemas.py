@@ -184,6 +184,12 @@ class UpdatePreviewOut(BaseModel):
   upstream_diff: str | None = None
 
 
+class AppConflictResolverChatOut(BaseModel):
+  chat_id: str
+  created: bool
+  started: bool
+
+
 class ProviderCodeRequest(BaseModel):
   code: str
 

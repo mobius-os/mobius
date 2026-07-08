@@ -895,10 +895,18 @@ def _prune_dropped_source_files(
       continue
     backup = target.with_name(target.name + ".mobius-drop-bak")
     if backup.exists():
-      try:
-        backup.unlink()
-      except OSError:
-        pass
+      # The backup path is already taken — by a leaked `.mobius-drop-bak` from
+      # an older install, or (worst case) a real tracked file with that name.
+      # Never clobber it: skip pruning this entry. Leaving an upstream-removed
+      # file on disk is harmless (a stale module at most) and reversible;
+      # destroying a tracked file is neither. `_tracked_source` excludes the
+      # backup suffix from staging, so a stale leaked one is cleaned up by the
+      # next clean update rather than here.
+      log.warning(
+        "prune: %s already exists; skipping prune of %s to avoid clobber",
+        backup, rel,
+      )
+      continue
     shutil.copy2(target, backup)
     rollback_actions.append(
       lambda b=backup, o=target: os.replace(b, o) if b.exists() else None
