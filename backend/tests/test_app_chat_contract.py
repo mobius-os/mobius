@@ -53,6 +53,52 @@ def test_app_token_can_create_and_send_to_own_chat(client, owner_token, db):
   assert r.status_code == 202, r.text
 
 
+def test_owner_chat_list_includes_only_owner_visible_app_chats(
+  client, owner_token, db
+):
+  app_id, app_token = _make_app(client, owner_token, "drawer-app")
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  app_auth = {"Authorization": f"Bearer {app_token}"}
+
+  owner = client.post(
+    "/api/chats",
+    json={"title": "Owner chat"},
+    headers=auth,
+  )
+  assert owner.status_code == 200, owner.text
+
+  hidden = client.post(
+    "/api/app-chats",
+    json={"title": "Embedded panel"},
+    headers=app_auth,
+  )
+  assert hidden.status_code == 201, hidden.text
+
+  visible = client.post(
+    "/api/app-chats",
+    json={"title": "Repair chat", "owner_visible": True},
+    headers=app_auth,
+  )
+  assert visible.status_code == 201, visible.text
+  visible_id = visible.json()["id"]
+
+  row = db.query(models.Chat).filter(models.Chat.id == visible_id).first()
+  assert row.created_by_app_id == app_id
+  assert row.agent_settings_json["owner_visible"] is True
+
+  drawer = client.get("/api/chats", headers=auth)
+  assert drawer.status_code == 200, drawer.text
+  drawer_ids = {c["id"] for c in drawer.json()}
+  assert owner.json()["id"] in drawer_ids
+  assert visible.json()["id"] in drawer_ids
+  assert hidden.json()["id"] not in drawer_ids
+
+  all_chats = client.get("/api/chats?include_app_chats=1", headers=auth)
+  assert all_chats.status_code == 200, all_chats.text
+  all_ids = {c["id"] for c in all_chats.json()}
+  assert {owner.json()["id"], visible.json()["id"], hidden.json()["id"]} <= all_ids
+
+
 def test_app_chat_create_and_patch_store_custom_system_prompt(
   client, owner_token, db
 ):
