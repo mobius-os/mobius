@@ -206,7 +206,7 @@ def _sdk_imports() -> dict[str, Any]:
   from openai_codex import ApprovalMode, AsyncCodex, Sandbox
   from openai_codex.client import CodexConfig
   from openai_codex.errors import CodexRpcError, InvalidParamsError
-  from openai_codex.types import ReasoningEffort
+  from openai_codex.types import ReasoningEffort, ReasoningSummary
   from openai_codex.generated.v2_all import (
     AgentMessageDeltaNotification,
     AgentMessageThreadItem,
@@ -247,6 +247,7 @@ def _sdk_imports() -> dict[str, Any]:
     "FileChangeThreadItem": FileChangeThreadItem,
     "InvalidParamsError": InvalidParamsError,
     "ReasoningEffort": ReasoningEffort,
+    "ReasoningSummary": ReasoningSummary,
     "Sandbox": Sandbox,
     "ItemCompletedNotification": ItemCompletedNotification,
     "ItemGuardianApprovalReviewCompletedNotification": (
@@ -289,6 +290,21 @@ def _format_json(value: Any) -> str:
     return json.dumps(dumped, ensure_ascii=True, indent=2)
   except (TypeError, ValueError):
     return str(dumped)
+
+
+def _reasoning_summary_setting(sdk: dict[str, Any]) -> Any | None:
+  """Ask Codex for a concise reasoning summary when the SDK supports it."""
+  summary_cls = sdk.get("ReasoningSummary")
+  if summary_cls is None:
+    return None
+  try:
+    return summary_cls("concise")
+  except Exception:
+    try:
+      return summary_cls(root="concise")
+    except Exception:
+      log.warning("Codex: could not construct ReasoningSummary", exc_info=True)
+      return None
 
 
 def _web_search_sources(item: Any) -> list[dict[str, str]]:
@@ -845,6 +861,8 @@ async def run_codex_sdk_turn(
         effort_str,
       )
 
+  reasoning_summary = _reasoning_summary_setting(sdk)
+
   base_instructions: str | None = None
   if session_id is None:
     if system_prompt is not None:
@@ -988,6 +1006,7 @@ async def run_codex_sdk_turn(
         cwd=cwd,
         model=model,
         effort=effort,
+        summary=reasoning_summary,
       )
       active_turn = ActiveCodexTurn(thread, turn, chat_id=chat_id)
       registry.register(active_turn)
@@ -1003,10 +1022,11 @@ async def run_codex_sdk_turn(
         # Reasoning deltas are Codex's analog of Claude's thinking_delta:
         # both publish the same `thinking` event so the provider-agnostic
         # frontend renders the collapsed "Thinking…" trace either way.
-        # Codex emits one of two delta streams depending on its reasoning
-        # summary config — the raw chain-of-thought (item/reasoning/textDelta)
-        # or a summarized form (item/reasoning/summaryTextDelta); handle both
-        # so the trace shows up whichever the model produces.
+        # Codex emits one of two visible reasoning delta streams depending on
+        # SDK/app-server version and summary config: item/reasoning/textDelta
+        # or item/reasoning/summaryTextDelta. We request concise summaries for
+        # OpenAI's public API contract, but handle both SDK event names so a
+        # version bump does not silently drop the trace.
         if isinstance(
           payload,
           (

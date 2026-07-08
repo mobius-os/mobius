@@ -43,6 +43,12 @@ class _FakeReasoningEffort:
     return value
 
 
+class _FakeReasoningSummary:
+  """Callable enum/model stand-in so `ReasoningSummary(str)` works in tests."""
+  def __call__(self, value):
+    return value
+
+
 class _FakeTurnCompletedNotification:
   def __init__(self, turn):
     self.turn = turn
@@ -84,8 +90,12 @@ class _FakeThread:
   def __init__(self, thread_id: str, turn_handle: _FakeTurnHandle):
     self.id = thread_id
     self._turn_handle = turn_handle
+    self.turn_args = None
+    self.turn_kwargs = None
 
-  async def turn(self, *_args, **_kwargs):
+  async def turn(self, *args, **kwargs):
+    self.turn_args = args
+    self.turn_kwargs = kwargs
     return self._turn_handle
 
 
@@ -135,6 +145,7 @@ def _fake_sdk(async_codex_cls):
     "FileChangeThreadItem": _Dummy,
     "InvalidParamsError": _FakeInvalidParamsError,
     "ReasoningEffort": _FakeReasoningEffort(),
+    "ReasoningSummary": _FakeReasoningSummary(),
     "Sandbox": _FakeSandbox,
     "ItemCompletedNotification": _Dummy,
     "ItemGuardianApprovalReviewCompletedNotification": _Dummy,
@@ -583,10 +594,10 @@ def test_run_codex_sdk_turn_publishes_thinking_for_reasoning_deltas(
 ):
   """Codex reasoning deltas surface as `thinking` events, like Claude.
 
-  Both the raw chain-of-thought stream (item/reasoning/textDelta) and the
-  summarized stream (item/reasoning/summaryTextDelta) translate to the
-  same provider-agnostic `thinking` event; an empty delta publishes
-  nothing.
+  Both visible reasoning stream names (item/reasoning/textDelta and
+  item/reasoning/summaryTextDelta) translate to the same provider-agnostic
+  `thinking` event; an empty delta publishes nothing. The runner also asks
+  Codex for a concise reasoning summary so the summary stream is opted in.
   """
   class ReasoningTextDeltaNotification:
     def __init__(self, delta: str):
@@ -662,6 +673,7 @@ def test_run_codex_sdk_turn_publishes_thinking_for_reasoning_deltas(
   )
 
   assert result["error"] is None
+  assert thread.turn_kwargs["summary"] == "concise"
   assert bc.events == [
     {"type": "session_init", "session_id": "thread-1"},
     {"type": "thinking", "content": "plotting", "ts": 3250},
