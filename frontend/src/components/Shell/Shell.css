@@ -16,6 +16,27 @@
   background: var(--bg); /* CONTRACT: opaque app-wide fill — every surface beneath this must assume nothing shows through */
 }
 
+/* Android Chrome's transparent gesture nav can expose a compositor strip just
+   beyond the layout viewport in installed edge-to-edge PWAs. The fixed shell
+   paints to `bottom: 0`, but does not contribute pixels below that edge; a real
+   fixed element extending past the bottom does. Keep this behind shell content
+   so it only supplies the unsafe/gesture backdrop instead of masking controls. */
+.shell::after {
+  content: "";
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: -32px;
+  height: calc(env(safe-area-inset-bottom, 0px) + 32px);
+  background: var(--bg);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.shell--immersive::after {
+  display: none;
+}
+
 /* ── Logo bar (always visible, toggles drawer) ────── */
 
 .shell__bar {
@@ -118,6 +139,7 @@
      siblings. Each view is full-bleed, stacked, and toggled via
      visibility — see .shell__view rationale below. */
   position: relative;
+  z-index: 1;
 }
 
 /* `.shell__view` wraps each persisted view (ChatView, AppCanvas).
