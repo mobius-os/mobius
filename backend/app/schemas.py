@@ -169,6 +169,17 @@ class AppScheduleUpdate(BaseModel):
   job: str | None = None
 
 
+class AppScheduleOut(BaseModel):
+  """Read-only metadata for an installed app's recurring cron job."""
+
+  id: int
+  name: str
+  slug: str | None = None
+  cron: str
+  job: str
+  next_run: datetime | None = None
+
+
 class ConflictFile(BaseModel):
   path: str
   merged_with_markers: str
