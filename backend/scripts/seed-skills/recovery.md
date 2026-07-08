@@ -52,14 +52,14 @@ git -C /data checkout <sha> -- shared/memory/notes/<slug>.md   # restore just th
 
 If you break a live copy, the partner recovers via the `/recover` dashboard, or a fresh you in the recovery chat at `/recover/chat`. The recovery chat runs its own minimal stack (separate auth, separate runner, separate per-chat storage at `/data/recovery/chats/<chat_id>.jsonl`, stdlib-only — no shared code with the production chat path) so it stays reachable when production chat code is broken. The partner can start multiple recovery chats with different providers (Claude or Codex).
 
-**There is no "Restore backend/shell/scripts" button** on the `/recover` dashboard. The dashboard has exactly four actions:
+**There is no "Restore backend/shell/scripts" button** on the `/recover` dashboard. The dashboard has four actions:
 
-1. **Open recovery chat** (`/recover/chat`) — a fresh you with **filesystem write access via Bash** (but no `$AGENT_TOKEN`, no `$API_BASE_URL` — production API plumbing may be broken, so it does NOT call `/api/...`). This is the primary repair path: it diagnoses, edits the live code in place, and runs the restore script itself when needed.
-2. **Download backup (.zip)** — a snapshot of chats, mini-apps, theme, CLI credentials, and identity secrets (`.secret-key`, `service-token.txt`, VAPID keys, recovery chat history). Store it securely; it holds every secret needed for a full restore.
-3. **Reinstall app store** — reinstalls the curated App Store mini-app from its pinned manifest URL. Idempotent: skips if already installed. Use it if the store was uninstalled by accident.
-4. **Factory reset** — last resort. Wipes the account, all mini-apps, all chats, and CLI credentials. Chat *history* is preserved per the backup, but the live state is gone — no undo. Use only if the recovery chat itself is broken and the backup is safe.
+1. **Run Recovery Agent** (`/recover/chat`) — a fresh you with **filesystem write access via Bash** (but no `$AGENT_TOKEN`, no `$API_BASE_URL` — production API plumbing may be broken, so it does NOT call `/api/...`). It edits the backend, frontend, platform clone, and `/data` in place to fix the instance; recovery's own code is a read-only mount it can't touch. This is the primary repair path: it diagnoses, edits the live code, and runs a restore itself when needed.
+2. **Restore platform** — recommended. Reverts *uncommitted* platform edits and restarts. Deterministic, offline, no agent or network needed.
+3. **Reset to baked floor** — last resort. Wipes uncommitted platform edits, recopies the baked image's code, and restarts.
+4. **Update Recovery** — shown only when a newer recovery release exists. A root-owned, integrity-checked pull + restart; your chats and data are untouched.
 
-**Restoring broken code is done by the recovery-chat agent, not a dashboard button.** Inside `/recover/chat`, a fresh you restores the immutable baked source by running the restore script with Bash:
+**The dashboard's "Restore platform" and "Reset to baked floor" buttons run those restores for you; the recovery-chat agent can also run any restore mode itself.** Inside `/recover/chat`, a fresh you restores the immutable baked source by running the restore script with Bash:
 
 ```sh
 sh /app/scripts/recovery_restore.sh <mode>
@@ -69,12 +69,12 @@ Modes (run with no argument to print what each does):
 
 | Mode | What it restores |
 |---|---|
-| `shell-dist` | Prebuilt frontend bundle (`/app/static/` -> `/data/shell/dist/`). Fast; serves immediately after restart, no rebuild. |
+| `shell-dist` | Prebuilt frontend bundle (`/app/static/` -> `/data/shell/dist/`). Fast, no rebuild. **Legacy:** `shell-dist`/`shell-src` repair the non-served `/data/shell` tree, NOT the served `/data/platform/frontend/dist` — use `platform`/`platform-baked` to repair the running instance. |
 | `shell-src` | Editable frontend source (`/app/shell-src/` -> `/data/shell`). Wipes your `src/` edits; needs a rebuild to take visual effect. |
 | `platform` | `git -C /data/platform reset --hard HEAD` — reverts *uncommitted* platform edits; commits are kept. Fast; no image needed. |
 | `platform-baked` | Full wipe + recopy of the SERVED clone tree `/data/platform/backend/{app,scripts}` from the baked floor, then commits the restore to `/data/platform` git history. Use when a bad change was already committed, or a git reset isn't enough. |
 
-The backend served by uvicorn is the `/data/platform` clone, so `platform` and `platform-baked` are the modes that repair the running backend. (The script still accepts the legacy `backend`/`scripts` modes, which only recopy the baked fallback floor at `/app/app` + `/app/scripts` — not the served clone — so reach for `platform`/`platform-baked` here.)
+The backend served by uvicorn is the `/data/platform` clone, so `platform` and `platform-baked` are the modes that repair the running backend. (The script does NOT accept `backend`/`scripts` modes — they exit "Unknown mode"; the only legacy modes it still accepts are `shell-dist`/`shell-src` above, for the non-served `/data/shell` tree — so reach for `platform`/`platform-baked` here.)
 
 After a `platform` or `platform-baked` restore, tell the partner to click **"Restart server"** at the top of the recovery chat page so uvicorn reloads the restored code.
 
@@ -83,9 +83,9 @@ After a `platform` or `platform-baked` restore, tell the partner to click **"Res
 | Backend edit, main shell healthy | Settings -> Server | Click "Restart server" |
 | Backend edit, main shell broken | `/recover/chat` | Click "Restart server" |
 | Agent stuck or unable to fix in place | `/recover/chat` | A fresh you runs `recovery_restore.sh <mode>`, then partner clicks "Restart server" |
-| App store mini-app gone | `/recover` | Click "Reinstall app store" |
-| Need a full snapshot before risky work | `/recover` | Click "Download backup (.zip)" |
-| Nothing else works, backup is safe | `/recover` | Click "Factory reset" (no undo) |
+| Bad uncommitted platform edit broke the server | `/recover` | Click "Restore platform" |
+| Committed a bad change, or a reset wasn't enough | `/recover` | Click "Reset to baked floor" |
+| A newer recovery release is available | `/recover` | Click "Update Recovery" |
 | Lost ability to log in to main shell | `/recover` | Log in (owner password), then the options above |
 
 ---
@@ -111,7 +111,7 @@ curl -s -X POST "$API_BASE_URL/api/apps/{app_id}/recover" -H "Authorization: Bea
 
 For a **store-installed** app you can equivalently just reinstall it (same
 `manifest_url`) — the install reattaches to the tombstoned row, so it comes back
-with the SAME id and all its data. The app id is in your memory inbox from when
+with the SAME id and all its data. The app id is in this chat's note from when
 you logged the deletion. After 7 days a tombstoned app is purged for good. So
 uninstall is reversible within the window — still confirm before deleting (see
 `building-apps.md`), but reassure the partner it's recoverable if they change

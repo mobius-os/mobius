@@ -2,7 +2,7 @@
 
 How to change Möbius's look and modify the shell UI: hot-reloaded `theme.css`, light/dark CSS variables, structural JSX edits that need a rebuild, lucide icons, and keeping the shell from breaking. `Read` this before any visual change to the shell.
 
-The shell UI is fully editable. Source lives at `/data/shell/src/`.
+The shell UI is fully editable. Source lives at `/data/platform/frontend/src/` (part of the `/data/platform` repo clone that actually runs).
 
 ---
 
@@ -11,7 +11,7 @@ The shell UI is fully editable. Source lives at `/data/shell/src/`.
 Hand-written file tables go stale the moment a file is renamed and send you on dead-end searches (this caused a real bug — a claimed file that no longer existed). To see what lives in the shell, or any directory on the platform:
 
 ```bash
-python3 /app/scripts/describe-tree.py /data/shell/src/components/ --depth 1 --quiet
+python3 /app/scripts/describe-tree.py /data/platform/frontend/src/components/ --depth 1 --quiet
 ```
 
 It prints `filename — first-sentence-of-docstring` for each file, so the listing always matches reality. Works on `/app/app/`, `/data/apps/`, mini-app folders — anything. When you write a NEW file, start it with a one-sentence docstring/top-comment — that's what describe-tree extracts (Python `"""..."""`, JSX `/* ... */`, shell leading `#`, CSS `/* ... */`).
@@ -47,17 +47,9 @@ curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/storage/share
 
 ---
 
-## Structural changes (JSX/CSS) — require a rebuild, and a restart to serve
+## Structural changes (JSX/CSS) — a watcher rebuilds, no restart
 
-Read source before editing, then rebuild once with all changes batched:
-
-```bash
-bash /app/scripts/rebuild_shell.sh
-```
-
-Each rebuild triggers a visible fade-transition reload — batch all edits first.
-
-**The rebuild does NOT live-reload.** `main.py` picks the static dir at module load, not per request. After `rebuild_shell.sh` writes a fresh `/data/shell/dist/`, the running uvicorn keeps serving the OLD bundle until the process restarts — so you'll claim "shell rebuilt" while the partner still sees the old UI. Tell the partner the shell updates after the next container restart, or have them click "Restart server" in Settings -> Server when the main shell is healthy. Use recovery restart only when the shell is broken (`recovery.md`). For CSS-only changes, prefer `theme.css` above (hot-reloaded, no rebuild, no restart).
+Read source first, then save your edits under `/data/platform/frontend/src/`. A file watcher runs `vite build` into the served `dist/` on every source change (debounced, atomic swap) — there is NO manual rebuild step and NO restart. Just reload the page to see the change. Batch all edits so the watcher rebuilds once instead of on every save. For CSS-only changes, prefer `theme.css` above (hot-reloaded, no build at all). If the shell breaks, direct the partner to `/recover` → "Restore platform" (see `recovery.md`).
 
 **If you're patching the same selector 3+ times in one chat, the component shape is probably wrong.** Extract a new component (e.g. a dedicated `ChatInputBar.jsx` for the composer) instead of stacking CSS overrides. Four failed in-place tries beats one extraction every time.
 
@@ -72,19 +64,19 @@ import { Paperclip, ArrowUp, Mic, ChevronDown, X } from 'lucide-react'
 <button><ArrowUp size={20} strokeWidth={2} /></button>
 ```
 
-Inline SVG path data is brittle, unreviewable in diffs, and hard to size consistently. The Lucide set covers the OpenAI Apps SDK glyphs the shell uses (Paperclip, ArrowUp/Send, Mic, ChevronDown, X, Trash, Settings, MessageSquare, Grid). Reach for inline SVG only when no equivalent exists. If `import 'lucide-react'` fails with "module not found", the container is on an older image — `cd /data/shell && npm install lucide-react`, then re-run `rebuild_shell.sh`.
+Inline SVG path data is brittle, unreviewable in diffs, and hard to size consistently. The Lucide set covers the OpenAI Apps SDK glyphs the shell uses (Paperclip, ArrowUp/Send, Mic, ChevronDown, X, Trash, Settings, MessageSquare, Grid). Reach for inline SVG only when no equivalent exists. If `import 'lucide-react'` fails with "module not found", the container is on an older image — `cd /data/platform/frontend && npm install lucide-react` (the watcher rebuilds on the next source save).
 
 ---
 
 ## Upstream changes
 
-When the platform is updated, shell source may change. Diff live against the baked source:
+When the platform is updated, shell source may change. Diff the served clone against upstream:
 
 ```bash
-diff -rq /data/shell/src /app/shell-src/src | head -40
-cp /app/shell-src/src/path/to/file /data/shell/src/path/to/file   # merge a specific file
-bash /app/scripts/rebuild_shell.sh
+git -C /data/platform diff origin/main -- frontend/src | head -40
 ```
+
+Pick up the changes through the platform-apply flow (rebase onto `origin/main`) rather than hand-copying files — see `contributing.md`.
 
 ---
 

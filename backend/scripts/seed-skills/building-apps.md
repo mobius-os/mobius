@@ -47,7 +47,7 @@ Check the wider ecosystem too: the catalog (`https://raw.githubusercontent.com/m
 
 ## Packaging / wrapping a pre-built or third-party web app
 
-Sometimes the app you want isn't authored fresh in JSX — it's an existing built web app (a React/Vite/CRA/WebGL game, a tool's `dist/`) that you mount whole. The durable pattern is a thin Möbius wrapper (a small `index.jsx` around an iframe) plus a `mobius.json` that declares the build's own files as `static_assets`, so Möbius serves them under the app's asset route. Do **not** copy built files into `/data/shell` or `/data/shell/dist`: deploy refreshes replace that tree, so the app disappears or, worse, `/some-app/index.html` falls through to the Möbius shell and opens Möbius inside Möbius.
+Sometimes the app you want isn't authored fresh in JSX — it's an existing built web app (a React/Vite/CRA/WebGL game, a tool's `dist/`) that you mount whole. The durable pattern is a thin Möbius wrapper (a small `index.jsx` around an iframe) plus a `mobius.json` that declares the build's own files as `static_assets`, so Möbius serves them under the app's asset route. Do **not** copy built files into `/data/platform/frontend` (the served tree): deploy refreshes replace that tree, so the app disappears or, worse, `/some-app/index.html` falls through to the Möbius shell and opens Möbius inside Möbius.
 
 Mechanics:
 
@@ -72,7 +72,6 @@ The packager writes `mobius.json` and an iframe `index.jsx`, enumerates every bu
 
 ```bash
 node /app/scripts/package-static-app.mjs --help
-npm run test:packager --prefix /home/hmzmrzx/projects/mobius
 ```
 
 Install it through the app installer (it registers the local package — no public repo or GitHub push), not by hand-copying into `/data`:
@@ -239,8 +238,9 @@ Delete is a **soft delete**: the app is tombstoned and its saved data is kept fo
 (or, for a store app, just reinstall it) — see `recovery.md`. Before deleting:
 verify the app exists, tell the partner which one (name, id, description), and
 ask for confirmation ("Delete [name]? You can recover it for 7 days."), then
-delete. Log creates and deletions to the inbox in the same turn (the id is your
-recovery handle); updates skip the log unless they revealed something non-obvious.
+delete. Record creates and deletions in this chat's note (`chats/$CHAT_ID/index.md`)
+in the same turn (the id is your recovery handle); updates skip the note unless
+they revealed something non-obvious.
 
 ---
 
