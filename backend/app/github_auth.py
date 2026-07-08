@@ -36,8 +36,8 @@ HOSTS_PATH = GH_AUTH_DIR / "hosts.yml"
 
 # Single in-flight device flow (mirrors routes/auth.py's _active_pkce —
 # single-owner app, one connect attempt at a time). Shape:
-# {device_code, interval, next_poll_at, expires_at, scope}. Expiry comes
-# from GitHub's expires_in (900s default), not the PKCE 300s.
+# {device_code, interval, next_poll_at}. Expiry comes from GitHub's
+# expires_in (900s default), not the PKCE 300s.
 _device_flow: dict | None = None
 
 
@@ -60,11 +60,6 @@ def read_state() -> dict | None:
   except (OSError, ValueError):
     return None
   return state if isinstance(state, dict) else None
-
-
-def is_connected() -> bool:
-  """True when a stored GitHub token exists."""
-  return get_token() is not None
 
 
 def get_token() -> str | None:

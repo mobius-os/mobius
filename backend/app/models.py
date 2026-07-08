@@ -299,12 +299,14 @@ class App(Base):
   # storage-write. The App Store mini-app is the canonical caller.
   # Default False — only granted by manifest declaration on install.
   manage_apps = Column(Boolean, nullable=False, default=False)
-  # GitHub read authority. When True, the app's token can call the
-  # read-only GitHub surface (GET /api/github/api/* and POST
-  # /api/github/graphql — both read-only by construction, INV2) under
-  # the owner's connected GitHub token. The Contribute mini-app is the
-  # canonical caller. A boolean gate like manage_apps, not a ladder.
-  # Default False — only granted by manifest declaration on install.
+  # GitHub connection access. When True, the app's token can call the
+  # whole /api/github surface: manage the connection (connect / poll /
+  # disconnect / status) and use the read-only data proxy (GET
+  # /api/github/api/* and POST /api/github/graphql, both read-only by
+  # construction, INV2). The connected token is never returned to the
+  # app. The Contribute mini-app is the canonical caller. A boolean gate
+  # like manage_apps, not a ladder. Default False — only granted by
+  # manifest declaration on install.
   github_access = Column(Boolean, nullable=False, default=False)
   # Offline capability. The agent opts an app in (default False) only
   # when it's built to run without the network — it uses
