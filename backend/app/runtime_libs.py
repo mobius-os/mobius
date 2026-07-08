@@ -44,11 +44,13 @@ RUNTIME_LIBS: tuple[str, ...] = (
 def frame_path_candidates() -> list[Path]:
   """Resolution order for app-frame.html — the single source of truth for the
   mini-app importmap. Matches routes/apps.py get_frame's `frame_candidates`
-  exactly: agent-editable copy under /data first, then the dev-mode repo path,
-  then the baked-in image fallback. (runtime_libs.py sits one directory shallower
-  than routes/apps.py, so the repo path uses parents[2] here.)"""
+  exactly: served platform frontend first, then the baked-in image fallback."""
   return [
-    Path(get_settings().data_dir) / "shell" / "public" / "app-frame.html",
+    Path(get_settings().data_dir)
+    / "platform" / "frontend" / "public" / "app-frame.html",
+    # Repo-relative: resolves to the served clone in the container (backend
+    # runs from /data/platform/backend) AND to the checkout in dev/test where
+    # /data/platform and /app do not exist.
     Path(__file__).resolve().parents[2] / "frontend" / "public" / "app-frame.html",
     Path("/app/app-frame.html"),
   ]

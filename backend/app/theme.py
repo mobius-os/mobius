@@ -498,10 +498,11 @@ def load_effective_theme(data_dir: str) -> EffectiveTheme:
 
 
 def _resolve_frame_path(data_dir: str) -> Path | None:
-  """First existing app-frame.html among the agent-editable, dev, and
-  baked-in locations — the same candidate list frame_content_rev uses."""
+  """First existing app-frame.html among the served platform and baked
+  locations — the same candidate list frame_content_rev uses."""
   candidates = [
-    Path(data_dir) / "shell" / "public" / "app-frame.html",
+    Path(data_dir) / "platform" / "frontend" / "public" / "app-frame.html",
+    # Repo-relative dev/test fallback (== served clone in-container).
     Path(__file__).resolve().parents[2] / "frontend" / "public" / "app-frame.html",
     Path("/app/app-frame.html"),
   ]

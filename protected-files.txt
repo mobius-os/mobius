@@ -1,8 +1,8 @@
 # Protected files — read-only for the agent.
 #
 # Entries are ABSOLUTE paths. The entrypoint enforces root ownership
-# and read-only modes after the chown sweep that hands the rest of
-# /data/platform and /data/shell/ to the mobius user.
+# and read-only modes after the chown sweep that hands /data/platform to the
+# mobius user.
 #
 # Two categories live here:
 #
@@ -12,14 +12,6 @@
 # 2. **Boot / restore infra** — the platform container always starts
 #    from baked entrypoint.sh, and recovery_restore.sh is the baked
 #    restore tool. recoveryd is the separate recovery floor for HTTP.
-
-# --- Credential surfaces (shell) ---
-/data/shell/src/components/LoginForm/LoginForm.jsx
-/data/shell/src/components/LoginForm/LoginForm.css
-/data/shell/src/components/SetupWizard/SetupWizard.jsx
-/data/shell/src/components/SetupWizard/SetupWizard.css
-/data/shell/src/components/ProviderAuth/ProviderAuth.jsx
-/data/shell/src/components/ProviderAuth/ProviderAuth.css
 
 # --- Boot / restore infra (scripts) ---
 # The whole-repo model un-freezes the backend: the SERVED code is

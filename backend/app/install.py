@@ -136,7 +136,7 @@ _SEEDS_TOTAL_MAX = 32 * 1024 * 1024
 
 # Static site assets declared by a manifest. These are for prebuilt apps that
 # need durable files below /data/apps/<slug>/static (served at /app-assets/...),
-# not one-off shell files under /data/shell.
+# not one-off files dropped into the platform frontend.
 _STATIC_ASSET_MAX_BYTES = 16 * 1024 * 1024
 _STATIC_ASSETS_COUNT_MAX = 256
 _STATIC_ASSETS_TOTAL_MAX = 64 * 1024 * 1024

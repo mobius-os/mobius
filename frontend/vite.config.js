@@ -30,8 +30,8 @@ const cacheDir = process.env.MOBIUS_VITE_CACHE || 'node_modules/.vite'
 // The rev MUST match backend `theme.frame_content_rev`: sha256 of the
 // app-frame.html bytes, first 16 hex chars. The build's source for that file is
 // `public/app-frame.html` (Vite copies it verbatim to dist/app-frame.html), the
-// same bytes that deploy to /data/shell/dist — so the build-time stamp and the
-// server's runtime hash agree. Done in transformIndexHtml so the emitted
+// same bytes served from /data/platform/frontend/dist — so the build-time stamp
+// and the server's runtime hash agree. Done in transformIndexHtml so the emitted
 // dist/index.html already carries the meta BEFORE VitePWA computes its precache
 // revision, keeping the precached copy and its revision in lockstep.
 function stampFrameRev() {

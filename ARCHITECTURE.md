@@ -28,7 +28,7 @@ docker-compose.yml    Self-hosted: Caddy (TLS) + app + recoveryd
 
 The image bundles everything the agent needs at runtime (the Claude and Codex CLIs, esbuild, Node) so the platform works out of the box. To join an existing Caddy setup instead of the bundled one, use `docker-compose.override.example.yml`.
 
-### Frontend serving priority (the #1 deploy gotcha)
+### Frontend serving priority
 
 At startup `backend/app/main.py:1000` picks one static directory **at module load time**, not per request (though a request for a file missing from the chosen `/data/platform/frontend/dist` still falls back per-request to the baked `/app/static`):
 
@@ -53,7 +53,7 @@ Two invariants follow. (1) **Möbius never patches the kernel from inside the co
 
 ## Self-update model — `upstream` / `main`, replay on update
 
-Möbius is the rare app whose own agent edits its live code: the in-product agent customizes its mini-apps (`/data/apps/<slug>`), the whole platform repo (`/data/platform`, a real clone of `mobius-os/mobius`), and its shell (`/data/shell`) while the platform runs. A deploy then ships a *new pristine version* of that same code. One small model keeps every such surface up to date without clobbering the owner's customizations and without a deploy ever silently dropping them.
+Möbius is the rare app whose own agent edits its live code: the in-product agent customizes its mini-apps (`/data/apps/<slug>`) and the whole platform repo (`/data/platform`, a real clone of `mobius-os/mobius`, including the frontend) while the platform runs. A deploy then ships a *new pristine version* of that same code. One small model keeps every such surface up to date without clobbering the owner's customizations and without a deploy ever silently dropping them.
 
 **Two branches per surface, and the update is a rebase.** Each updatable surface is a git repo with:
 
@@ -70,13 +70,13 @@ rebase the local edits onto it:                    A → B → X
 The owner's customizations end up *on top of* the current release, as if they'd just been made against it. Mechanically: commit any stray working-tree changes onto `main` first (`app_git.commit_local`, so the merge has a committed base), advance `upstream` to `B`, then compute the three-way verdict with `git merge-tree --write-tree` (`app_git.merge_upstream`) and, when clean, write the merged tree back and replay it as a single-parent commit on the new `upstream` tip — rebase-shaped linear history (`A → B → X`) without ever running `git rebase`.
 
 - **Clean merge** → the merged tree is replayed as a single-parent commit on the new `upstream` tip and the surface recompiles (apps) or restarts (backend) onto the new code.
-- **Conflict** (the release and the local edits touched the same lines) → an **agent chat** resolves it. Apps materialize standard conflict markers up front (`start_conflict_merge`, a `git merge --no-commit --no-ff upstream`) for the agent to edit; platform/shell leave the live tree untouched and the resolver chat runs the merge itself. Either way the resolution is finalized as the *same* single-parent replay — `--no-ff` points `MERGE_HEAD` at the upstream tip and the commit takes only that one parent, so even a resolved conflict stays linear (`A → B → X`), never the 2-parent commit a plain `git merge` would leave. Auto-spawn of the chat differs by surface: platform and shell spawn it automatically, but for apps the auto-spawn was retired (a0a828b) — the update returns `mode=conflict` + `conflict_paths` and the owner opts in via the store's click-gated "Resolve in chat" button. The owner never hand-merges; back out with `git merge --abort`.
+- **Conflict** (the release and the local edits touched the same lines) → an **agent chat** resolves it. Apps materialize standard conflict markers up front (`start_conflict_merge`, a `git merge --no-commit --no-ff upstream`) for the agent to edit; the platform updater leaves the live tree untouched and the resolver chat runs the merge itself. Either way the resolution is finalized as the *same* single-parent replay — `--no-ff` points `MERGE_HEAD` at the upstream tip and the commit takes only that one parent, so even a resolved conflict stays linear (`A → B → X`), never the 2-parent commit a plain `git merge` would leave. Auto-spawn of the chat differs by surface: platform spawns it automatically, but for apps the auto-spawn was retired (a0a828b) — the update returns `mode=conflict` + `conflict_paths` and the owner opts in via the store's click-gated "Resolve in chat" button. The owner never hand-merges; back out with `git merge --abort`.
 
 **"Update available" is an ancestry question, not a version-string compare:** an update is available iff `upstream`'s tip is **not yet an ancestor of `main`** (a new release hasn't been rebased in). This is the content question — "does my working tree already contain this release" — that a `image_sha != recorded_sha` proxy can't answer on a customized instance, and it's what eliminates phantom "update available" rows after a deploy that changed nothing the owner hadn't already.
 
 ### The recovery/auth files are NOT in the model — they're gitignored
 
-The one thing that makes a self-editing platform tricky is the recovery/auth island (`protected-files.txt`: the auth-handling shell components `LoginForm`/`SetupWizard`/`ProviderAuth` (jsx+css), plus the baked boot/restore scripts `entrypoint.sh`/`recovery_restore.sh`). These are root-owned read-only; the `mobius` user that runs the updater genuinely cannot write them. (The whole-repo model un-froze the backend — the served code is `/data/platform/backend/app`, mobius-owned and editable in place — so the old boot-chain freeze on `main.py`/`auth.py`/etc. is gone; the separate `recoveryd` container is the floor now.)
+The one thing that makes a self-editing platform tricky is the recovery/core island (`protected-files.txt`: currently the baked `entrypoint.sh` and `recovery_restore.sh`; recoveryd is the separate HTTP recovery floor). These are root-owned `chmod 444/555`; the `mobius` user that runs the updater genuinely cannot write them.
 
 The simple answer is that **they are not part of the git model at all** — each surface's `.gitignore` excludes them. They live on disk, managed wholly by the image (the root entrypoint re-enforces root-owned 444/555 on them every boot; their contents refresh from the baked floor only on first boot, a crash-loop restore, or a `recovery_restore.sh` run — the deploy/recovery path, not every reboot). Because they're untracked, neither `record upstream` nor the merge/replay ever touches them, so there is no special "protected-file" machinery in the update engine — the replay only ever moves agent-editable files, and the recovery island updates the one way it should: via an image deploy. (Recovery therefore stays agent-proof, and becomes current with the image once the deploy's restore/reconcile step runs.)
 
@@ -85,10 +85,9 @@ The simple answer is that **they are not part of the git model at all** — each
 | Surface | Repo | On the model | Engine |
 |---------|------|------------------|--------|
 | **Mini-apps** (`/data/apps/<slug>`) | `.git` per app (installed apps; agent-built bespoke apps have no upstream to track) | yes — whole source tree on `upstream`, single-parent replay, so **multi-file apps update cleanly** | `backend/app/app_git.py` + `install.py` |
-| **Platform backend** (`/data/platform`) | `.git`, recovery files gitignored | yes — clone-native `git fetch origin` + rebase of local `main` onto `origin/main` (commit-stray-edits-first, conflict-abort, post-rebase import probe with rollback); ancestry availability (`origin/main` not yet an ancestor of local `main`) | `backend/app/platform_update.py` |
-| **Shell** (`/data/shell`) | `.git`, auth components gitignored | yes — thin caller of `app_git`, seeded at boot so existing agent edits become the local delta | `backend/app/shell_update.py` |
+| **Platform** (`/data/platform` — backend *and* frontend) | `.git`, recovery files gitignored | yes — clone-native `git fetch origin` + rebase of local `main` onto `origin/main` (commit-stray-edits-first, conflict-abort, post-rebase import probe with rollback); ancestry availability (`origin/main` not yet an ancestor of local `main`) | `backend/app/platform_update.py` |
 
-Shell and mini-apps converge on **one** small tree-aware engine (`app_git.py`): `record_upstream` commits the *whole source tree* on `upstream`, `merge_upstream` verdicts a clean-vs-conflict via `git merge-tree`, and a clean apply replays the merged tree as a **single-parent** commit on top of `upstream` (linear `A→B→X`). The shell and mini-apps are thin callers of that primitive — they pass their own source tree, with the shell's `.gitignore` keeping auth files out of the model. The platform is clone-native instead: it uses `git fetch origin` plus a rebase of local `main` onto `origin/main`, with ancestry-based availability (`origin/main` not yet an ancestor of local `main`). Mini-app update discovery is different: the store compares the catalog manifest version against the installed `App.version` (the new release lives in the remote catalog, so a local ancestry check can't see it). There is no per-surface protected-file scaffolding.
+Mini-apps use **one** small tree-aware engine (`app_git.py`): `record_upstream` commits the *whole source tree* on `upstream`, `merge_upstream` verdicts a clean-vs-conflict via `git merge-tree`, and a clean apply replays the merged tree as a **single-parent** commit on top of `upstream` (linear `A→B→X`). Mini-apps are thin callers of that primitive — they pass their own source tree. The platform (backend + frontend, one served clone) is clone-native instead: it uses `git fetch origin` plus a rebase of local `main` onto `origin/main`, with ancestry-based availability (`origin/main` not yet an ancestor of local `main`). Mini-app update discovery is different: the store compares the catalog manifest version against the installed `App.version` (the new release lives in the remote catalog, so a local ancestry check can't see it). There is no per-surface protected-file scaffolding.
 
 ## Backend (`backend/app/`)
 
@@ -199,7 +198,6 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `standalone.py` | Top-level routes that make a mini-app installable as its own PWA (own importmap) |
 | `published.py` | Serves published site snapshots at `/sites/<token>/` — token-validated, traversal-confined static files from `/data/published/<token>/` (created by `POST /api/apps/{id}/publish` in `apps.py`; token stable per project) |
 | `platform.py` | Owner-gated platform self-update: `GET /api/platform/status`, `POST /apply`, `POST /restart` (drives Settings → Updates; thin caller of `platform_update.py`) |
-| `shell.py` | Owner-gated shell self-update: `GET /api/shell/status` + `POST /apply` (thin caller of `shell_update.py`) |
 | `notify.py` | System-event notifications to active broadcasts |
 | `notifications.py` | Push notification sending + history |
 | `push.py` | Web Push subscription management |
@@ -340,10 +338,10 @@ The in-product agent is a first-class reader of this code, and its behavior is g
 
 ## Boot, self-heal, and how each layer updates
 
-**Layers + where they live:** core platform = backend (`/data/platform`, a git
-repo) + shell (`/data/shell` src+dist); mini-apps (`/data/apps/<slug>`, each a
-git repo); recovery (the frozen island, below). Runtime trees are gitignored
-(db, compiled, cli-auth).
+**Layers + where they live:** core platform = `/data/platform`, a git repo whose
+backend is served from `backend/` and frontend from `frontend/dist`; mini-apps
+(`/data/apps/<slug>`, each a git repo); recovery (the frozen island, below).
+Runtime trees are gitignored (db, compiled, cli-auth).
 
 **Updates** flow through git. `backend/app/platform_update.py` is clone-native:
 `/data/platform` is a real `git clone` of the canonical repo, so an update
@@ -364,8 +362,9 @@ the shell: a new image's `sha` advances on every deploy even while
 (`backend/app/main.py`) therefore reports the image identity (`sha`, `shell_sha`)
 plus the SERVED-platform identity — `serving_source` (from the `/tmp/serving-source`
 stamp `entrypoint.sh` writes at boot), `platform_sha`, `platform_dirty`,
-`baked_sha` — and `scripts/deploy-prod.sh`'s verify step asserts these match its
-sync decision (it also hard-blocks deploying a checkout strictly BEHIND
+`baked_sha`, `served_frontend`, and `frontend_source` — and
+`scripts/deploy-prod.sh`'s verify step asserts these match its sync decision
+(it also hard-blocks deploying a checkout strictly BEHIND
 `origin/main`).
 
 **Built-in apps (Memory, Reflection)** come from the tracked top-level

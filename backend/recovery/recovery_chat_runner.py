@@ -403,7 +403,8 @@ def _system_prompt(chat_id: str | None = None) -> str:
   is no selectable persona.
 
   Updated 2026-05-26 per multi-reviewer findings:
-    - `diff -ru` not `git diff`: /app/app-baked/ has no .git
+    - baked backend lives at /app/platform-baked/backend/app (a real
+      clone); `git -C /data/platform diff origin/main` shows agent edits
     - cwd is /data/, set in stream_turn's subprocess call
     - read prior turns from the log file before answering
     - no AskUserQuestion (recovery UI has only a textarea)
@@ -414,7 +415,7 @@ def _system_prompt(chat_id: str | None = None) -> str:
   Updated 2026-07-03 (recoveryd migration): the agent now runs as
   ROOT in the SEPARATE recovery container, where /app is a read-only
   baked image. Point the write surface at the live editable overlay
-  (/data/platform/backend/app/ for backend, /data/shell/ for
+  (/data/platform/backend/app/ for backend, /data/platform/frontend/ for
   frontend) — the
   old map (mobius-writable /app/app + a frozen-island list of
   now-retired recover_*.py files) described the in-process recovery
@@ -468,15 +469,13 @@ def _system_prompt(chat_id: str | None = None) -> str:
     "runtime. Fix backend bugs HERE (NOT in /app/app, which is the "
     "read-only baked original).\n"
     "  /data/platform/backend/scripts/  live utility scripts.\n"
-    "  /data/shell/             frontend source + built bundle (dist/).\n"
+    "  /data/platform/frontend/  frontend source + built bundle (dist/).\n"
     "  /data/shared/            memory, skills, shared files.\n"
     "  /data/apps/              installed mini-apps + their data.\n"
     "  /data/db/                the SQLite database.\n\n"
     "Read-only baked originals, for reference/diff only:\n"
-    "  /app/app-baked/   pristine backend  -> "
-    "diff -ru /app/app-baked/ /data/platform/backend/app/\n"
-    "  /app/shell-src/   pristine frontend -> "
-    "diff -ru /app/shell-src/ /data/shell/\n"
+    "  /app/platform-baked/backend/app/   pristine backend  -> "
+    "diff -ru /app/platform-baked/backend/app/ /data/platform/backend/app/\n"
     "(use `diff -ru`, not git diff, when comparing against a baked "
     "tree.)\n\n"
     "Workflow:\n"
@@ -484,7 +483,7 @@ def _system_prompt(chat_id: str | None = None) -> str:
     "2. diff the live tree against its baked original (above) to see "
     "what changed.\n"
     "3. Make the smallest correct fix in /data/platform/backend/app/ "
-    "(backend), /data/shell/ (frontend), or the relevant /data path. "
+    "(backend), /data/platform/frontend/ (frontend), or the relevant /data path. "
     "NOTE: if /data/platform/backend/app/main.py fails to compile, the "
     "platform "
     "auto-boots from the baked floor instead — so a syntactically "

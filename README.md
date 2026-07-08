@@ -167,7 +167,7 @@ Caddy handles HTTPS automatically. Visit `https://your-domain.com` and the setup
 
 Bookmark `https://your-domain.com/recover`.
 
-To update: `git pull && docker compose up -d --build`. Everything in `/data` survives rebuilds. On boot the container detects that the rebuilt image is newer than the shell bundle it last served and refreshes `/data/shell/dist` from the new build, so the updated UI and CLI tooling come through on the next start. A shell you customized in `/data/shell/src` is left untouched — only the served build is refreshed; rebuild it (the in-product agent's rebuild step, or `npx vite build` in `/data/shell`) to fold your edits back in. `GET /api/version` reports both the image's build sha and the served shell's build sha for verifying an update landed.
+To update: `git pull && docker compose up -d --build`. Everything in `/data` survives rebuilds. On boot the container serves the editable whole-repo clone at `/data/platform`; backend code comes from `backend/`, and the frontend is served from `/data/platform/frontend/dist` with `/app/static` as the baked fallback. `GET /api/version` reports both the image build sha and the served platform/frontend identity for verifying an update landed.
 
 ---
 

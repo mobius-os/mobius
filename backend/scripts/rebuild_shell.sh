@@ -12,12 +12,24 @@ notify() {
 
 notify '{"type":"shell_rebuilding"}'
 
-cd /data/shell
-# Clean dist and vite transform cache to ensure a fully fresh build.
-# Without clearing .vite, vite may reuse cached transforms from the
-# previous source and produce a stale bundle.
-rm -rf dist node_modules/.vite 2>/dev/null || true
-if npx vite build 2>&1; then
+FRONTEND_DIR=/data/platform/frontend
+NEXT_DIST=.dist-next
+OLD_DIST=.dist-old
+CACHE_DIR=.vite-cache
+TMP_DIR=.vite-tmp
+
+cd "$FRONTEND_DIR"
+
+# The served frontend clone owns the build. Reuse the baked node_modules from
+# /app/shell-src so runtime edits do not install dependencies into /data.
+[ -e node_modules ] || [ -L node_modules ] || ln -s /app/shell-src/node_modules node_modules || true
+
+# Clean the output and Vite transform cache to ensure a fully fresh build.
+rm -rf "$NEXT_DIST" "$OLD_DIST" "$CACHE_DIR" "$TMP_DIR" node_modules/.vite 2>/dev/null || true
+mkdir -p "$CACHE_DIR" "$TMP_DIR"
+
+if MOBIUS_VITE_CACHE="$FRONTEND_DIR/$CACHE_DIR" TMPDIR="$FRONTEND_DIR/$TMP_DIR" \
+  npx vite build --outDir "$NEXT_DIST" --emptyOutDir 2>&1; then
   # Vite builds the app bundle but does NOT copy the self-hosted
   # vendor libs (three.js etc.) — those live only at /app/static/vendor
   # from the Dockerfile's npm-install step. Without this copy, mini-
@@ -26,9 +38,32 @@ if npx vite build 2>&1; then
   # load. Surfaced in chat 380581a8 where tunnel-runner-3d hung
   # on its loader; agent had to patch its own import path.
   if [ -d /app/static/vendor ]; then
-    cp -r /app/static/vendor dist/vendor 2>/dev/null || true
+    rm -rf "$NEXT_DIST/vendor" 2>/dev/null || true
+    cp -r /app/static/vendor "$NEXT_DIST/vendor" 2>/dev/null || true
   fi
-  echo "Shell rebuilt successfully."
+  if [ ! -f "$NEXT_DIST/index.html" ] || [ ! -d "$NEXT_DIST/assets" ]; then
+    rm -rf "$NEXT_DIST" 2>/dev/null || true
+    err="vite build did not produce a complete dist"
+    echo "$err" >&2
+    notify "{\"type\":\"shell_rebuild_failed\",\"error\":\"$err\"}"
+    exit 1
+  fi
+  old_moved=0
+  if [ -e dist ]; then
+    mv dist "$OLD_DIST"
+    old_moved=1
+  fi
+  if ! mv "$NEXT_DIST" dist; then
+    if [ "$old_moved" -eq 1 ] && [ ! -e dist ] && [ -e "$OLD_DIST" ]; then
+      mv "$OLD_DIST" dist 2>/dev/null || true
+    fi
+    err="could not promote rebuilt frontend dist"
+    echo "$err" >&2
+    notify "{\"type\":\"shell_rebuild_failed\",\"error\":\"$err\"}"
+    exit 1
+  fi
+  rm -rf "$OLD_DIST" 2>/dev/null || true
+  echo "Frontend rebuilt successfully."
   notify '{"type":"shell_rebuilt"}'
 else
   err="vite build failed"

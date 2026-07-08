@@ -66,16 +66,19 @@ import { Paperclip, ArrowUp, Mic, ChevronDown, X } from 'lucide-react'
 <button><ArrowUp size={20} strokeWidth={2} /></button>
 ```
 
-Inline SVG path data is brittle, unreviewable in diffs, and hard to size consistently. The Lucide set covers the OpenAI Apps SDK glyphs the shell uses (Paperclip, ArrowUp/Send, Mic, ChevronDown, X, Trash, Settings, MessageSquare, Grid). Reach for inline SVG only when no equivalent exists. If `import 'lucide-react'` fails with "module not found", the container is on an older image — `cd /data/platform/frontend && npm install lucide-react` (the watcher rebuilds on the next source save).
+Inline SVG path data is brittle, unreviewable in diffs, and hard to size consistently. The Lucide set covers the OpenAI Apps SDK glyphs the shell uses (Paperclip, ArrowUp/Send, Mic, ChevronDown, X, Trash, Settings, MessageSquare, Grid). Reach for inline SVG only when no equivalent exists. Dependency additions belong in the repo/image, not as runtime installs.
 
 ---
 
 ## Upstream changes
 
-When the platform is updated, shell source may change. Diff the served clone against upstream:
+When the platform is updated, shell source may change. Inspect the served clone:
 
 ```bash
-git -C /data/platform diff origin/main -- frontend/src | head -40
+cd /data/platform
+git status --short frontend/src frontend/public
+git diff -- frontend/src frontend/public | head -80
+bash /app/scripts/rebuild_shell.sh
 ```
 
 Pick up the changes through the platform-apply flow (rebase onto `origin/main`) rather than hand-copying files — see `contributing.md`.
@@ -84,13 +87,8 @@ Pick up the changes through the platform-apply flow (rebase onto `origin/main`) 
 
 ## Protected files (read-only)
 
-These credential-handling components cannot be modified:
-
-- `src/components/LoginForm/LoginForm.jsx` + `.css`
-- `src/components/SetupWizard/SetupWizard.jsx` + `.css`
-- `src/components/ProviderAuth/ProviderAuth.jsx` + `.css`
-
-Only files listed in `/app/protected-files.txt` are root-owned (chmod 444/555). Everything else in the shell is mobius-owned and editable.
+Only files listed in `/app/protected-files.txt` are root-owned (chmod 444/555).
+Everything else in the served platform frontend is mobius-owned and editable.
 
 ---
 
@@ -99,7 +97,9 @@ Only files listed in `/app/protected-files.txt` are root-owned (chmod 444/555). 
 The chat is the partner's only way to reach you. Be careful that shell edits don't break navigation, delete chats, or remove the input area. Before rebuilding, review changes:
 
 ```bash
-cd /data && git diff -- shell/
+cd /data/platform && git diff -- frontend/
 ```
 
-If the shell breaks, direct the partner to `/recover` → "Restore shell" (see `recovery.md`). After substantial shell work, `pm-commit 'shell: <what, why>'` so the change is in `/data`'s git history.
+If the shell breaks, direct the partner to `/recover/chat`; a fresh agent can
+fix `/data/platform/frontend` or restore the platform clone (see `recovery.md`).
+After substantial shell work, commit it in `/data/platform`.

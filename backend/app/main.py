@@ -40,7 +40,7 @@ from app.routes import (
   self_reminders_router, settings_router,
   client_error_router, standalone_router, storage_router,
   theme_router, uploads_router, platform_router,
-  shell_router, published_router,
+  published_router,
 )
 
 
@@ -245,7 +245,7 @@ async def lifespan(app):
   except Exception as exc:
     _log.error("start_watcher failed: %s", exc, exc_info=True)
   # Start the whole-repo frontend watcher when /data/platform is active.
-  # Wrapped separately from app_watcher: a broken shell build path must not
+  # Wrapped separately from app_watcher: a broken frontend build path must not
   # disable mini-app recompiles or crash lifespan.
   try:
     from pathlib import Path as _Path
@@ -525,7 +525,6 @@ app.include_router(proxy_router)
 app.include_router(client_error_router)
 app.include_router(settings_router)
 app.include_router(platform_router)
-app.include_router(shell_router)
 app.include_router(uploads_router)
 app.include_router(generate_router)
 app.include_router(github_router)
@@ -649,9 +648,7 @@ def _served_frontend_identity() -> dict:
   injects a content-hashed asset name into ``index.html``, so hashing the served
   ``index.html`` yields an identity that changes on every rebuild the watcher
   swaps in: the frontend analogue of ``served_sha``. ``frontend_source`` says
-  which tree is live. Distinct from ``shell_sha`` (the legacy baked-image stamp
-  under ``/data/shell``, a path the whole-repo model does not serve). Never
-  raises.
+  which tree is live. Never raises.
   """
   import hashlib
 
@@ -673,15 +670,7 @@ def version():
     build-arg (Dockerfile + deploy-prod.sh); "unknown" for a local
     `docker compose up` that didn't pass it. Lets a deploy verify the SERVED
     backend matches the intended commit — the backend analogue of the
-    frontend bundle-hash check (bundle-info.sh / verify-fresh.sh, which only
-    see the shell bundle, not the backend).
-  - ``shell_sha``: the LEGACY image-build-sha marker under /data/shell,
-    stamped by entrypoint.sh / deploy-prod.sh for the pre-whole-repo shell.
-    Under the whole-repo platform model the frontend is served from
-    /data/platform/frontend/dist, NOT /data/shell — so to verify the served
-    UI use ``served_frontend`` (below), not ``shell_sha``. Kept for
-    backward-compat with instances that still serve /data/shell; "unknown"
-    otherwise.
+    frontend bundle-hash check (bundle-info.sh / verify-fresh.sh).
   - ``served_frontend``: a content hash of the ``index.html`` in the frontend
     dir ACTUALLY being served (``frontend_source`` = ``platform`` or ``baked``).
     Changes whenever the watcher swaps a fresh ``vite build`` into the served
@@ -692,12 +681,7 @@ def version():
   the local build identity cleanly so the image-pull path is self-verifying.
   """
   settings = get_settings()
-  marker = Path(settings.data_dir) / "shell" / ".image-build-sha"
-  try:
-    shell_sha = marker.read_text(encoding="utf-8").strip() or "unknown"
-  except OSError:
-    shell_sha = "unknown"
-  return {"sha": settings.build_sha, "shell_sha": shell_sha,
+  return {"sha": settings.build_sha,
           "build_date": settings.build_date,
           **_served_platform_identity(settings.data_dir),
           **_served_frontend_identity()}
@@ -970,9 +954,9 @@ async def app_owned_asset_by_id(app_id: int, asset_path: str, request: Request):
   """Serve durable static assets owned by an installed app.
 
   Imported apps like CubeRun can keep a built static site under
-  /data/apps/<slug>/static instead of copying it into /data/shell, which is
-  intentionally refreshed on deploy. This route is public like standalone app
-  shells; it serves only files below the installed app's source_dir/static.
+  /data/apps/<slug>/static instead of copying it into the platform frontend.
+  This route is public like standalone app shells; it serves only files below
+  the installed app's source_dir/static.
   """
   return _serve_app_static_asset(
     await asyncio.to_thread(_app_source_dir_for_static_asset, app_id=app_id),

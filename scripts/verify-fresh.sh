@@ -3,13 +3,10 @@
 #
 # Wraps bundle-info.sh's JSON output and compares:
 #   - what the container is currently serving (parsed from <script src=> in /)
-#   - what's actually on disk at /data/shell/dist/assets/index-*.js
+#   - what's actually on disk at /data/platform/frontend/dist/assets/index-*.js
 #
-# A mismatch means the container is masking a fresh dist with a stale
-# in-memory _static_dir resolution — almost always because someone forgot
-# `docker restart <container>` after rebuild_shell.sh. CLAUDE.md flags
-# this as the #1 deploy gotcha; this script makes it impossible to leave
-# uncaught.
+# A mismatch means the served platform frontend dist is not the bundle currently
+# reaching clients.
 #
 # Usage:
 #   CONTAINER=mobius PORT=8000 scripts/verify-fresh.sh
@@ -36,19 +33,19 @@ else
 fi
 
 if [ -z "$served" ]; then
-  echo "verify-fresh: could not parse served bundle from / (container=$CONTAINER port=$PORT)" >&2
+  echo "verify-fresh: could not parse served bundle from /shell/ (container=$CONTAINER port=$PORT)" >&2
   exit 2
 fi
 
-# The dist file the container would serve from /data/shell/dist/assets/.
+# The dist file the container would serve from /data/platform/frontend/dist/assets/.
 # `ls | head -1` is fine — vite produces exactly one index-<hash>.js per build.
 dist=$(docker exec "$CONTAINER" bash -c \
-  "ls /data/shell/dist/assets/ 2>/dev/null | grep '^index-' | grep '\\.js$' | head -1" || true)
+  "ls /data/platform/frontend/dist/assets/ 2>/dev/null | grep '^index-' | grep '\\.js$' | head -1" || true)
 
 if [ -z "$dist" ]; then
-  echo "verify-fresh: no dist bundle at /data/shell/dist/assets/ — container is serving the baked /app/static/ fallback" >&2
+  echo "verify-fresh: no dist bundle at /data/platform/frontend/dist/assets/ — container is serving the baked /app/static/ fallback" >&2
   echo "  served: $served (from baked image)"
-  echo "  Run: docker exec $CONTAINER bash /app/scripts/rebuild_shell.sh && docker restart $CONTAINER"
+  echo "  Run: docker exec -u mobius $CONTAINER bash /app/scripts/rebuild_shell.sh"
   exit 3
 fi
 
@@ -63,12 +60,12 @@ verify-fresh: MISMATCH — $CONTAINER is serving stale code
   served: $served
   on disk: $dist
 
-The container's uvicorn resolved _static_dir at module load and is
-caching the old build. Fix by restarting:
+The container is serving a different bundle than the platform frontend dist.
+Rebuild the served frontend, then check again:
 
-  docker restart $CONTAINER
+  docker exec -u mobius $CONTAINER bash /app/scripts/rebuild_shell.sh
 
-(or sync + restart in one shot via scripts/sync-test-shell.sh for the
+(or sync + rebuild in one shot via scripts/sync-test-shell.sh for the
 test container).
 EOF
 exit 1

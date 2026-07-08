@@ -277,8 +277,11 @@ def test_system_prompt_points_at_served_backend_tree(recovery_env):
   restore_sh = (
     Path(__file__).resolve().parents[1] / "scripts" / "recovery_restore.sh"
   ).read_text()
-  assert 'DST_APP="/data/platform/backend/app"' in restore_sh, (
-    "restore script must target the same served backend tree as the prompt")
+  # The platform-baked restore now RE-SEEDS THE WHOLE /data/platform clone
+  # from /app/platform-baked (a superset of backend/app), so pin to that —
+  # the served backend the prompt names lives inside the restored tree.
+  assert 'DST="/data/platform"' in restore_sh, (
+    "restore script must re-seed the served /data/platform tree")
 
 
 def test_cli_auth_error_detection(recovery_env):
