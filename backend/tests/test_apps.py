@@ -104,6 +104,75 @@ def test_app_token_can_update_own_schedule_only(client, auth, monkeypatch):
   assert r.status_code == 403
 
 
+def test_app_schedules_are_readable_by_app_tokens(client, auth):
+  source_dir = Path(get_settings().data_dir) / "apps" / "news"
+  source_dir.mkdir(parents=True)
+  (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+  (source_dir / "mobius.json").write_text(
+    '{"schedule":{"default":"0 10 * * *","job":"fetch.sh"}}',
+    encoding="utf-8",
+  )
+
+  r = client.post("/api/apps/", json={
+    "name": "News",
+    "description": "test",
+    "jsx_source": "export default function App() { return <div/> }",
+    "source_dir": str(source_dir),
+  }, headers=auth)
+  assert r.status_code == 201, r.text
+
+  tasks = client.post("/api/apps/", json={
+    "name": "Tasks",
+    "description": "test",
+    "jsx_source": "export default function App() { return <div/> }",
+  }, headers=auth).json()
+  token = client.post(
+    "/api/auth/app-token", json={"app_id": tasks["id"]}, headers=auth,
+  ).json()["token"]
+
+  r = client.get(
+    "/api/apps/schedules",
+    headers={"Authorization": f"Bearer {token}"},
+  )
+  assert r.status_code == 200, r.text
+  assert r.json() == [{
+    "id": 1,
+    "name": "News",
+    "slug": "news",
+    "cron": "0 10 * * *",
+    "job": "fetch.sh",
+    "next_run": None,
+  }]
+
+
+def test_app_schedules_prefer_init_cron_over_manifest(client, auth):
+  source_dir = Path(get_settings().data_dir) / "apps" / "reflection"
+  source_dir.mkdir(parents=True)
+  (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+  (source_dir / "mobius.json").write_text(
+    '{"schedule":{"default":"0 10 * * *","job":"fetch.sh"}}',
+    encoding="utf-8",
+  )
+  (source_dir / "init-cron.sh").write_text(
+    f'ENTRY="0 6 * * * {source_dir}/fetch.sh 56"\n',
+    encoding="utf-8",
+  )
+
+  r = client.post("/api/apps/", json={
+    "name": "Reflection",
+    "description": "test",
+    "jsx_source": "export default function App() { return <div/> }",
+    "source_dir": str(source_dir),
+  }, headers=auth)
+  assert r.status_code == 201, r.text
+
+  r = client.get("/api/apps/schedules", headers=auth)
+  assert r.status_code == 200, r.text
+  assert [(job["cron"], job["job"]) for job in r.json()] == [
+    ("0 6 * * *", "fetch.sh")
+  ]
+
+
 def _make_icon_app(client, auth, db):
   """An app row whose `icon_png` is a large (512px) PNG, so a ?size= variant
   is provably smaller. Returns the app id."""

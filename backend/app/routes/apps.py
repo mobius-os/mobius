@@ -359,6 +359,99 @@ def ensure_slug(db: Session, app: models.App) -> str:
   return app.slug
 
 
+def _parse_cron_job_line(line: str) -> tuple[str, str] | None:
+  """Returns (cron expression, command path) for one runnable crontab line."""
+  s = line.strip()
+  if not s or s.startswith("#"):
+    return None
+  first = s.split(None, 1)[0]
+  if first.startswith("@"):
+    parts = s.split(None, 1)
+    if len(parts) != 2:
+      return None
+    cron, cmd = parts[0], parts[1]
+  elif "=" in first:
+    return None
+  else:
+    parts = s.split(None, 5)
+    if len(parts) != 6:
+      return None
+    cron, cmd = " ".join(parts[:5]), parts[5]
+  toks = cmd.split()
+  while toks and "=" in toks[0] and not toks[0].startswith("/"):
+    toks.pop(0)
+  if not toks:
+    return None
+  return cron, toks[0]
+
+
+def _read_live_crontab() -> str:
+  try:
+    result = subprocess.run(
+      ["crontab", "-u", "mobius", "-l"],
+      capture_output=True,
+      text=True,
+      timeout=10,
+      check=False,
+    )
+  except OSError:
+    return ""
+  return result.stdout if result.returncode == 0 else ""
+
+
+def _manifest_schedule(source_dir: Path) -> tuple[str, str] | None:
+  try:
+    manifest = json.loads((source_dir / "mobius.json").read_text())
+  except (OSError, ValueError):
+    return None
+  if not isinstance(manifest, dict):
+    return None
+  sched = manifest.get("schedule")
+  if not isinstance(sched, dict):
+    return None
+  cron = sched.get("default")
+  if not isinstance(cron, str) or not cron.strip():
+    return None
+  job = sched.get("job")
+  if not isinstance(job, str) or "/" in job or "\\" in job or not job.strip():
+    job = "job.sh"
+  return cron, job
+
+
+def _schedule_from_crontab_text(
+  source_dir: Path, text: str,
+) -> tuple[str, str] | None:
+  needle = f"{str(source_dir).rstrip('/')}/"
+  for line in text.splitlines():
+    entry_match = re.search(r"""^\s*ENTRY=(?:"([^"]+)"|'([^']+)')""", line)
+    if entry_match:
+      line = entry_match.group(1) or entry_match.group(2) or ""
+    parsed = _parse_cron_job_line(line)
+    if parsed is None:
+      continue
+    cron, command_path = parsed
+    if command_path.startswith(needle):
+      return cron, Path(command_path).name
+  return None
+
+
+def _app_schedule(app: models.App, live_crontab: str) -> tuple[str, str] | None:
+  if not app.source_dir:
+    return None
+  source_dir = Path(app.source_dir)
+  return (
+    _schedule_from_crontab_text(source_dir, live_crontab)
+    or _schedule_from_crontab_text(
+      source_dir,
+      (
+        (source_dir / "init-cron.sh").read_text()
+        if (source_dir / "init-cron.sh").is_file() else ""
+      ),
+    )
+    or _manifest_schedule(source_dir)
+  )
+
+
 @router.get("/", response_model=list[schemas.AppOut])
 async def list_apps(
   db: Session = Depends(get_db),
@@ -406,6 +499,35 @@ async def list_apps(
     )
     .all()
   )
+
+
+@router.get("/schedules", response_model=list[schemas.AppScheduleOut])
+def list_app_schedules(
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner_or_app),
+):
+  """Returns read-only recurring app schedules visible to owners and apps."""
+  live_crontab = _read_live_crontab()
+  rows = []
+  apps = (
+    db.query(models.App)
+    .filter(models.App.deleted_at.is_(None))
+    .order_by(models.App.name, models.App.id)
+    .all()
+  )
+  for app in apps:
+    schedule = _app_schedule(app, live_crontab)
+    if schedule is None:
+      continue
+    cron, job = schedule
+    rows.append(schemas.AppScheduleOut(
+      id=app.id,
+      name=app.name,
+      slug=app.slug,
+      cron=cron,
+      job=job,
+    ))
+  return rows
 
 
 @router.post(
