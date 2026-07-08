@@ -1,19 +1,12 @@
 #!/usr/bin/env bash
 # deploy-prod.sh — One-command prod deploy for the mobius container.
 #
-# Collapses the 4-step refresh recipe (build image → recreate container →
-# refresh /data/shell/{src,dist} → verify) into a single script so future
-# deploys don't have to be reconstructed from memory.
-#
-# The `/data/shell/dist/` masking gotcha is the headline reason this
-# script exists: the data volume persists across `docker compose build
-# && up -d`, so the new image's /app/static/ is shadowed by the old
-# /data/shell/dist/ until we copy fresh sources in and rerun
-# rebuild_shell.sh. See "Agent refresh" + "Frontend serving priority"
-# in mobius/CLAUDE.md for the gory details.
+# Collapses the deploy recipe (build image -> recreate container -> rebuild the
+# served platform frontend -> verify) into a single script so future deploys
+# don't have to be reconstructed from memory.
 #
 # Usage:
-#   scripts/deploy-prod.sh                  # full deploy (build, recreate, refresh shell, verify)
+#   scripts/deploy-prod.sh                  # full deploy (build, recreate, rebuild frontend, verify)
 #   scripts/deploy-prod.sh --skip-build     # skip docker compose build (useful when image is already current)
 #   scripts/deploy-prod.sh --yes            # don't prompt before `docker compose build`
 #   scripts/deploy-prod.sh --target=test    # redirect to mobius-test (port 8001) instead of prod
@@ -340,8 +333,8 @@ build_cache_gb() {
   esac
 }
 
-# Pull the served bundle filename out of the index.html the container is
-# currently serving. Empty if the container is down or has no bundle.
+# Pull the served frontend bundle filename out of the index.html the container
+# is currently serving. Empty if the container is down or has no bundle.
 #
 # Probes /shell/ explicitly because the SPA lives under /shell/ since the
 # manifest-scope migration (commit e451f01) — `/` 308-redirects there and
@@ -356,7 +349,7 @@ served_bundle() {
 # The git commit the SERVED backend reports at /api/version (baked at build
 # time via the BUILD_SHA build-arg). Empty if the route is missing; "unknown"
 # if the image predates the stamp or the arg wasn't passed. The backend
-# analogue of served_bundle (which only sees the frontend shell).
+# analogue of served_bundle (which only sees the frontend).
 served_sha() {
   docker exec "$CONTAINER" sh -c "curl -fsS '${INTERNAL_BASE}/api/version' 2>/dev/null" \
     | sed -n 's/.*"sha":"\([^"]*\)".*/\1/p' \
@@ -383,18 +376,17 @@ ready_code() {
   docker exec "$CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/ready'" 2>/dev/null || echo "000"
 }
 
-# Tell already-open PWAs to reload after a successful shell rebuild.
+# Tell already-open PWAs to reload after a successful frontend rebuild.
 #
-# deploy-prod.sh shadows /data/shell/dist and the new SW skipWaiting/
-# clientsClaim, but a PWA that was already open never learns a fresh
-# bundle exists — it keeps running the old shell until the user closes
-# and reopens it. The Shell's system-event stream already handles a
+# A PWA that was already open never learns a fresh bundle exists — it keeps
+# running the old shell until the user closes and reopens it. The Shell's
+# system-event stream already handles a
 # `shell_rebuilt` event (frontend/src/components/Shell/Shell.jsx — it
 # fades out and reloads), and POST /api/notify already broadcasts that
 # event type to every open Shell's /api/events/system subscription. The
 # only missing link is firing it; deploy never did. We fire it here,
-# AFTER the post-restart readiness gate, so open PWAs auto-reload onto
-# the new bundle.
+# AFTER the deploy verification gate, so open PWAs auto-reload onto the new
+# bundle.
 #
 # Auth: /api/notify requires an owner JWT. The entrypoint mints a full
 # owner-scoped service token at /data/service-token.txt (90-day, carries
@@ -449,7 +441,7 @@ fi
 
 # ── deploy lock: serialize concurrent deploys ───────────────────────────
 # Multiple Claude sessions run against this repo. Two deploys to the same
-# container at once race (recreate clobbers, half-built /data/shell). Take
+# container at once race (recreate clobbers, half-built frontend dist). Take
 # a non-blocking per-target flock; the fd stays open for the script's life
 # and releases on exit. (--check above skips this — it doesn't deploy.)
 # Lock in a user-private 0700 dir, not world-writable /tmp — a local
@@ -930,132 +922,15 @@ info "waiting up to ${CUTOVER_WAIT_SECONDS}s for ${INTERNAL_BASE}/api/ready"
 wait_for_cutover "ready_code" "writer ready" \
   "readiness check never returned 200 — the chat-persistence writer is not serving"
 
-# ── step 3: refresh /data/shell/{src,dist} so new bundle isn't masked ──
-# The data volume survives the container recreation. /data/shell/dist/
-# is whatever the agent last built, NOT the new image's /app/static/.
-# main.py picks _live_dir over _baked_dir at module load, so without
-# this step uvicorn keeps serving the stale dist.
-step "[3/4] refresh /data/shell/ from new image's /app/shell-src"
-# Clear /data/shell first so cp -a can land symlinks where the previous
-# deploy wrote regular files (or vice versa). Without this, npm packages
-# whose internal layout shifted between builds (e.g.
-# micromark-extension-math's hoisted katex bin: file in v3 → symlink in
-# v4) cause `cp: cannot create symbolic link ... File exists` because
-# cp -a's `-d` flag preserves the source symlink but won't overwrite an
-# existing destination of a different type. Trying to be defensive with
-# rm -rf /data/shell/dist alone (the previous behavior) missed the
-# node_modules sub-tree entirely. We're about to rebuild from scratch
-# anyway — clear everything in /data/shell. /app/static/ remains as the
-# baked fallback if anything goes wrong.
-# Snapshot live shell edits before the wholesale clear erases them. The
-# in-product agent edits /data/shell/src in place, but src is NOT tracked in
-# /data's git (only shell/dist + shell/node_modules are gitignored — src is
-# simply never `git add`ed), so without this every agent UI fix is silently
-# lost on the next deploy. This is exactly how the text_boundary / scroll /
-# app-CTA work drifted unrecoverably out of origin/main. Snapshot to a
-# timestamped tarball OUTSIDE /data/shell (so the rm can't eat it) whenever
-# src differs from the image's baked /app/shell-src. Best effort — never
-# blocks the deploy; recover later by diffing the tarball into frontend/src.
-if docker exec "$CONTAINER" sh -c 'test -d /data/shell/src' 2>/dev/null \
-   && ! docker exec "$CONTAINER" sh -c 'diff -rq /app/shell-src/src /data/shell/src >/dev/null 2>&1'; then
-  # Write under /data/backups/ (gitignored, so nightly pm-commit/reflection
-  # `git add -A` never commits a ~360KB blob into /data history) and run as
-  # `mobius` (NOT bare docker exec → root, which would poison the mobius-owned
-  # /data tree). Keep only the last 5 so they can't accumulate on the host.
-  shell_snap="/data/backups/shell-src-predeploy-$(date +%Y%m%d-%H%M%S).tar.gz"
-  warn "/data/shell/src differs from the baked shell (live agent edits and/or a"
-  warn "prior frontend deploy) — snapshotting to ${shell_snap} before refresh."
-  intent "docker exec -u mobius ${CONTAINER} sh -c \"mkdir -p /data/backups; tar czf '${shell_snap}' -C /data/shell src; ls -1t /data/backups/shell-src-predeploy-*.tar.gz | tail -n +6 | xargs -r rm -f\""
-  docker exec -u mobius "$CONTAINER" sh -c "mkdir -p /data/backups && tar czf '${shell_snap}' -C /data/shell src 2>/dev/null && ls -1t /data/backups/shell-src-predeploy-*.tar.gz | tail -n +6 | xargs -r rm -f" \
-    && info "shell snapshot saved (recover: docker cp ${CONTAINER}:${shell_snap} . then diff into frontend/src)" \
-    || warn "shell snapshot failed — proceeding; agent shell edits may be unrecoverable after this."
-fi
-intent "docker exec ${CONTAINER} sh -c 'rm -rf /data/shell/* /data/shell/.[!.]* 2>/dev/null; true'"
-docker exec "$CONTAINER" sh -c 'rm -rf /data/shell/* /data/shell/.[!.]* 2>/dev/null; true'
-intent "docker exec ${CONTAINER} cp -a /app/shell-src/. /data/shell/"
-docker exec "$CONTAINER" cp -a /app/shell-src/. /data/shell/
-intent "docker exec ${CONTAINER} rm -rf /data/shell/dist"
-docker exec "$CONTAINER" rm -rf /data/shell/dist
-intent "docker exec ${CONTAINER} bash /app/scripts/rebuild_shell.sh"
-docker exec "$CONTAINER" bash /app/scripts/rebuild_shell.sh
-
-# Stamp /data/shell/.image-build-sha with the SHA we just deployed so the
-# entrypoint's self-host image-update detector (entrypoint.sh) sees the
-# marker already matching this image's BUILD_SHA on the next boot and stays
-# a no-op — it must not overwrite the dist this deploy just rebuilt+verified
-# from /data/shell/src. Without the stamp a later recreate would see
-# BUILD_SHA != stale-marker and re-copy /app/static over the deploy's build.
-intent "docker exec ${CONTAINER} sh -c 'printf %s \"\$BUILD_SHA\" > /data/shell/.image-build-sha'"
-docker exec "$CONTAINER" sh -c 'printf %s "${BUILD_SHA:-unknown}" > /data/shell/.image-build-sha' || true
-
-# ── step 3b: sync /data/platform from the new baked floor ──────────────
-# The backend serves from /data/platform (the agent-editable, git-tracked
-# platform layer), which persists across image deploys BY DESIGN. A deploy
-# therefore does not reach the served backend until /data/platform is
-# synced from the new image's baked copy — without this step, prod keeps
-# running the previous deploy's backend while the sha-verify below reads
-# the new image and reports success (exactly how the icon-transparency
-# fix "deployed" but never served). Fast-forward automatically only when
-# the platform repo shows no agent work: tree clean (mode-only and dotfile
-# boot artifacts ignored) and every commit is a system commit
-# (init/restore/sync). Agent divergence is left for the in-product agent
-# to merge — discarding it here would violate the reversibility contract.
-step "[3b/4] sync /data/platform from the new baked floor"
-platform_state=$(docker exec -u mobius "$CONTAINER" bash -c '
-  cd /data/platform 2>/dev/null || { echo missing; exit 0; }
-  # Uncommitted agent edits (ignore boot dotfiles + mode-only) => diverged.
-  dirty=$(git -c core.fileMode=false status --porcelain | grep -vE "^\?\? \.|\.baked-sha$" || true)
-  if [ -n "$dirty" ]; then echo diverged; exit 0; fi
-  # Has the agent COMMITTED content edits since the last baked sync? Decide by
-  # TREE, not by counting commit subjects. The old subject-allowlist
-  # false-positived: a benign "auto: crash-loop restore" or a reconcile
-  # "snapshot:" commit (neither in the allowlist) flipped a baked tree to
-  # "diverged" and silently SKIPPED the backend sync, so prod kept serving the
-  # previous deploy. Instead diff HEAD against the most recent init/restore
-  # baseline restricted to app+scripts: a system commit that restored the baked
-  # floor leaves HEAD byte-identical to that baseline (=> clean), while a real
-  # agent content edit shows a diff (=> diverged). Robust to NEW system-commit
-  # subjects, and still errs toward diverged (never discards) when no baseline
-  # is found.
-  baseline=$(git rev-list --max-count=1 --extended-regexp \
-    --grep="^(init: platform layer|restore: platform|sync: platform)" HEAD 2>/dev/null || true)
-  if [ -n "$baseline" ] && git diff --quiet "$baseline" HEAD -- app scripts 2>/dev/null; then
-    echo clean
-  else
-    echo diverged
-  fi
-' 2>/dev/null || echo missing)
-case "$platform_state" in
-  clean)
-    intent "docker exec -u root ${CONTAINER} bash /app/scripts/recovery_restore.sh platform-baked"
-    docker exec -u root "$CONTAINER" bash /app/scripts/recovery_restore.sh platform-baked >/dev/null
-    info "platform layer fast-forwarded to the new baked tree"
-    ;;
-  missing)
-    info "no /data/platform yet — the entrypoint creates it on the restart below"
-    ;;
-  *)
-    warn "/data/platform has agent changes — NOT auto-synced."
-    warn "The served backend stays on the PREVIOUS version until merged:"
-    warn "ask the in-product agent to merge /app/app-baked into /data/platform,"
-    warn "or discard agent edits with: recovery_restore.sh platform-baked"
-    ;;
-esac
-
-# main.py resolves _static_dir at module load time, so the freshly
-# rebuilt /data/shell/dist isn't actually served until uvicorn
-# restarts. See "Shell rebuild + static-dir resolution" in CLAUDE.md.
-presence_gate "post-shell restart of ${CONTAINER}"
-intent "docker restart ${CONTAINER}  # so main.py re-resolves _static_dir"
-docker restart "$CONTAINER" >/dev/null
-info "waiting up to ${CUTOVER_WAIT_SECONDS}s for ${INTERNAL_BASE}/api/health after restart"
-wait_for_cutover \
-  "docker exec \"\$CONTAINER\" sh -c \"curl -s -o /dev/null -w '%{http_code}' '\${INTERNAL_BASE}/api/health'\" 2>/dev/null || echo 000" \
-  "healthy" \
-  "post-restart health check never returned 200"
-info "waiting up to ${CUTOVER_WAIT_SECONDS}s for ${INTERNAL_BASE}/api/ready after restart"
-wait_for_cutover "ready_code" "writer ready" \
-  "post-restart readiness check never returned 200 — the chat-persistence writer is not serving"
+# ── step 3: rebuild the served platform frontend ───────────────────────
+# The authoritative frontend source and dist now live in /data/platform. After
+# boot reconcile advances the clone, rebuild that tree in place; do not copy
+# from /app/shell-src, and do not touch any leftover legacy shell directory.
+# StaticFiles keeps serving the same dist path, so no extra restart is needed
+# after the swap.
+step "[3/4] rebuild /data/platform/frontend"
+intent "docker exec -u mobius ${CONTAINER} bash /app/scripts/rebuild_shell.sh"
+docker exec -u mobius "$CONTAINER" bash /app/scripts/rebuild_shell.sh
 
 # ── step 4: verify bundle rotated + endpoints respond ──────────────────
 step "[4/4] verify"
@@ -1067,7 +942,7 @@ if [ -z "$after_hash" ]; then
   exit 1
 fi
 # An unchanged hash is EXPECTED for a backend-only deploy (no frontend
-# source changed → rebuild_shell.sh legitimately produces an identical
+# source changed -> rebuild_shell.sh legitimately produces an identical
 # bundle), so it's a warning, not a failure — the real success signals are
 # the health checks below + rebuild_shell's own exit status (a hard rebuild
 # failure already aborts step 3 under `set -e`). On a deploy you EXPECTED to
@@ -1078,7 +953,7 @@ fi
 if [ -n "$before_hash" ] && [ "$before_hash" = "$after_hash" ]; then
   warn "bundle hash unchanged (${after_hash})."
   warn "expected for a backend-only deploy; if you changed the frontend, check"
-  warn "rebuild_shell.sh didn't no-op. Container is recreated + healthy regardless."
+  warn "the build output. Container is recreated + healthy regardless."
 else
   ok "bundle rotated: ${before_hash:-<none>} → ${after_hash}"
 fi
@@ -1107,109 +982,101 @@ if [ "$BUILT_THIS_RUN" = "1" ]; then
     exit 1
   fi
 else
-  # --skip-build: we didn't build, so don't compare against a possibly stale,
-  # shell-inherited BUILD_SHA — just report what's serving.
+  # --skip-build: we didn't build, so don't compare against BUILD_SHA — just
+  # report what's serving.
   info "backend sha: ${served:-<none>} (no build this run; not compared)"
 fi
 
-# ── served PLATFORM identity check ─────────────────────────────────────
-# The backend-sha block above reads the `sha` field = settings.build_sha = the
-# IMAGE build sha, which advances on EVERY recreate regardless of whether
-# /data/platform actually synced. That is the false-green this whole step-3b
-# dance exists to close: a container on the new image can still SERVE the
-# previous deploy's Python out of /data/platform. So consume the SERVED-platform
-# identity (_served_platform_identity → serving_source / platform_dirty /
-# baked_sha in /api/version) and assert it matches the step-3b sync decision.
-# Warn-only, never fail: the process is already health-+ready-checked above, and
-# (like the origin/main check below) this is a "what's live isn't what you think"
-# nudge, not a runtime fault.
-if [ "$BUILT_THIS_RUN" = "1" ]; then
+# ── served PLATFORM ancestry assertion (prod only) ─────────────────────
+# The backend-sha block above reads the IMAGE build sha. Under the clone model,
+# the deployed backend is the served /data/platform HEAD after boot reconcile.
+# Assert freshness by ancestry: origin/main must be contained in that served HEAD
+# (exact equality is fine; local agent commits replayed on top are also fine).
+# Reconcile conflict/rollback/offline states are explicit exceptions because
+# they intentionally keep the previous working tree live.
+if [ "$TARGET" = "prod" ]; then
   serving_source=$(served_version_field serving_source)
-  platform_dirty=$(served_version_field platform_dirty)
-  baked_served=$(served_version_field baked_sha)
-  # served_version_field returns EMPTY on a failed/unreachable /api/version probe
-  # and the literal "null" for a JSON null field — normalize both so neither is
-  # mistaken for a real value. An empty serving_source means we could not read the
-  # served identity AT ALL; we must not then print a green "verified" (that was a
-  # false-green: an unreachable probe falling through every guard into the ok arm).
-  case "$baked_served" in null|unknown) baked_served="" ;; esac
-  if [ -z "$serving_source" ] || [ "$serving_source" = "unknown" ]; then
-    warn "could not read the served-platform identity from ${INTERNAL_BASE}/api/version"
-    warn "(probe failed, or this image predates the serving-source stamp) — the served"
-    warn "backend was NOT provenance-verified. If this was a platform-affecting deploy,"
-    warn "confirm what's serving by hand."
-  else
-    case "$platform_state" in
-      clean|missing)
-        # We fast-forwarded /data/platform to the new baked floor (clean) or the
-        # entrypoint created it fresh from that floor (missing). Either way the
-        # served platform MUST now be the floor: source=platform, not dirty, and
-        # the stamped .baked-sha == the commit just built (recovery_restore.sh
-        # stamps it; settings.build_sha and .baked-sha are both the BUILD_SHA arg).
-        if [ "$serving_source" = "baked" ]; then
-          warn "served platform: serving_source=baked — the backend is serving the"
-          warn "image floor, NOT /data/platform. The platform symlink didn't take, so"
-          warn "the served Python may not be this build. Investigate the entrypoint."
-        elif [ -n "$baked_served" ] && [ "$baked_served" != "$BUILD_SHA" ]; then
-          warn "served platform .baked-sha ${baked_served:0:18}… != built ${BUILD_SHA:0:18}…"
-          warn "the /data/platform sync didn't reach the served process — prod is"
-          warn "serving a STALE backend floor. Re-run the platform-baked restore."
-        elif [ "$platform_dirty" = "true" ]; then
-          warn "served platform reports dirty after a clean fast-forward — unexpected"
-          warn "uncommitted edits in /data/platform (a sibling mid-write?). Investigate."
-        elif [ -z "$baked_served" ]; then
-          # source=platform + clean, but .baked-sha is unstamped (e.g. BUILD_SHA was
-          # unknown at the restore) — we know WHERE it serves from but can't compare
-          # the sha, so don't claim a match we didn't make.
-          ok "served platform: source=platform, clean (baked-sha unstamped — not compared)"
-        else
-          ok "served platform: source=platform, baked-sha matches build, clean"
-        fi
-        ;;
-      diverged)
-        if [ "$serving_source" = "baked" ]; then
-          # platform_state=diverged but the container is serving the BAKED floor:
-          # the agent's diverged tree failed the entrypoint's boot sanity check
-          # (e.g. a syntax error in app/) and was bypassed. Truthful + actionable —
-          # prod is on the floor and the agent's edits are NOT live.
-          warn "served platform: /data/platform is DIVERGED but the container fell back"
-          warn "to the baked floor (serving_source=baked) — the agent's edits failed the"
-          warn "boot sanity check and are NOT live. Fix or discard them in /data/platform."
-        else
-          # The diverged tree IS serving (source=platform). Expected — we preserved
-          # agent edits at step 3b (the reversibility contract). Report, don't fault.
-          info "served platform: diverged (agent edits preserved by design) — NOT on the"
-          info "new baked floor. Ask the in-product agent to merge /app/app-baked when ready."
-        fi
-        ;;
-    esac
-  fi
-fi
+  platform_sha=$(served_version_field platform_sha)
+  case "$platform_sha" in null|unknown) platform_sha="" ;; esac
 
-# ── served-sha == origin/main assertion (prod only) ────────────────────
-# The pre-flight guard refused to BUILD an unpushed commit, but assert the same
-# invariant on the OTHER end too: what's actually SERVING must equal origin/main's
-# tip. They can drift even past the pre-flight — e.g. a sibling pushed a newer
-# main mid-deploy, or this deploy ran with --allow-unpushed. If the served sha
-# isn't origin/main's tip, the operator must push (or pull+redeploy) or the next
-# deploy-from-main reverts what's live. Warn loudly; never FAIL an
-# already-succeeded deploy (the code IS serving and healthy — this is a
-# push-hygiene nudge, not a runtime fault). prod-only: the test container has no
-# origin/main contract.
-if [ "$TARGET" = "prod" ] && git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-  origin_main_sha=$(git -C "$REPO_ROOT" rev-parse origin/main 2>/dev/null || echo "")
-  served_clean="${served%-dirty}"  # the build stamps -dirty on an unclean tree
-  if [ -z "$origin_main_sha" ]; then
-    warn "could not resolve origin/main — skipping the served-sha==origin/main check."
-  elif [ -z "$served_clean" ] || [ "$served_clean" = "unknown" ]; then
-    info "served sha unknown — cannot compare to origin/main (provenance stamp missing)."
-  elif [ "$served_clean" = "$origin_main_sha" ]; then
-    ok "served sha == origin/main tip (${origin_main_sha:0:18}…) — prod is on pushed main"
-  else
-    warn "served sha ${served_clean:0:18}… != origin/main tip ${origin_main_sha:0:18}…"
-    warn "what's LIVE is not origin/main's tip. PUSH it (git push origin HEAD:main) or the"
-    warn "next deploy-from-main will REVERT this build. Deploy itself is healthy."
-  fi
+  platform_freshness=$(docker exec -u mobius "$CONTAINER" bash -c '
+    cd /data/platform 2>/dev/null || { echo missing; exit 0; }
+    [ -f /data/.platform-conflict ] && { echo conflict; exit 0; }
+    [ -f /data/.platform-rolled-back ] && { echo rolled_back; exit 0; }
+    [ -f /data/.platform-offline ] && { echo offline_flag; exit 0; }
+    head=$(git rev-parse --verify HEAD 2>/dev/null) || { echo invalid; exit 0; }
+    if ! git fetch --quiet origin main:refs/remotes/origin/main >/dev/null 2>&1; then
+      echo offline; exit 0
+    fi
+    target=$(git rev-parse --verify origin/main 2>/dev/null) || { echo offline; exit 0; }
+    if [ "$head" = "$target" ]; then
+      echo "exact:$head"; exit 0
+    fi
+    if git merge-base --is-ancestor "$target" "$head" 2>/dev/null; then
+      echo "ancestor:$target:$head"; exit 0
+    fi
+    echo "stale:$target:$head"
+  ' 2>/dev/null || echo probe_failed)
+
+  case "$platform_freshness" in
+    conflict)
+      warn "served platform freshness skipped: /data/.platform-conflict is set."
+      warn "The previous working platform remains live until the conflict is resolved."
+      ;;
+    rolled_back)
+      warn "served platform freshness skipped: /data/.platform-rolled-back is set."
+      warn "Boot reconcile rejected the update and kept the previous working platform live."
+      ;;
+    offline|offline_flag)
+      warn "served platform freshness skipped: origin/main could not be refreshed in the container."
+      warn "Boot reconcile will retry when origin is reachable."
+      ;;
+    exact:*)
+      head_sha=${platform_freshness#exact:}
+      if [ "$serving_source" != "platform" ]; then
+        fail "served platform source is '${serving_source:-<unknown>}' even though /data/platform is fresh."
+        fail "The backend is not serving the one served tree; investigate entrypoint fallback."
+        exit 1
+      fi
+      ok "served platform: HEAD == origin/main (${head_sha:0:18}…)"
+      ;;
+    ancestor:*)
+      pair=${platform_freshness#ancestor:}
+      origin_sha=${pair%%:*}
+      head_sha=${pair#*:}
+      if [ "$serving_source" != "platform" ]; then
+        fail "served platform source is '${serving_source:-<unknown>}' even though /data/platform is fresh."
+        fail "The backend is not serving the one served tree; investigate entrypoint fallback."
+        exit 1
+      fi
+      if [ -n "$platform_sha" ] && [ "$platform_sha" != "$head_sha" ]; then
+        fail "/api/version platform_sha ${platform_sha:0:18}… != /data/platform HEAD ${head_sha:0:18}…"
+        fail "The served-platform stamp is stale after reconcile."
+        exit 1
+      fi
+      ok "served platform: origin/main ${origin_sha:0:18}… is ancestor of served HEAD ${head_sha:0:18}…"
+      ;;
+    stale:*)
+      pair=${platform_freshness#stale:}
+      origin_sha=${pair%%:*}
+      head_sha=${pair#*:}
+      fail "served platform is stale: origin/main ${origin_sha:0:18}… is not an ancestor of /data/platform HEAD ${head_sha:0:18}…"
+      fail "No reconcile conflict/offline flag explains the drift; deploy did not advance the served tree."
+      exit 1
+      ;;
+    missing)
+      fail "/data/platform is missing after recreate; entrypoint did not seed the served tree."
+      exit 1
+      ;;
+    invalid)
+      fail "/data/platform exists but has no valid git HEAD after recreate."
+      exit 1
+      ;;
+    *)
+      fail "could not verify served platform freshness (${platform_freshness})."
+      exit 1
+      ;;
+  esac
 fi
 
 # Internal /api/health (we already checked this twice during waits, but

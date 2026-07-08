@@ -2,8 +2,7 @@
 # bundle-info.sh — "What is mobius-test serving and is it stale?"
 #
 # One-screen status: served bundle hash, theme --bg color, and a host-vs-
-# container drift check on a sentinel file the developer is likely
-# editing (frontend/src/components/ChatView/ChatInputBar.jsx).
+# container drift check on a sentinel file the developer is likely editing.
 #
 # Refuses to talk to prod.
 #
@@ -21,7 +20,7 @@ PORT="${PORT:-8001}"
 BASE="http://localhost:${PORT}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SENTINEL_REL="frontend/src/components/ChatView/ChatInputBar.jsx"
-SENTINEL_IN_CONTAINER="/data/shell/src/components/ChatView/ChatInputBar.jsx"
+SENTINEL_IN_CONTAINER="/data/platform/frontend/src/components/ChatView/ChatInputBar.jsx"
 
 if [ "$CONTAINER" = "mobius" ] || [ "$PORT" = "8000" ]; then
   echo "FATAL: bundle-info.sh refuses to target prod (mobius:8000)." >&2
@@ -56,7 +55,7 @@ if [ "$health" != "200" ]; then
 fi
 
 # 2. served bundle + theme --bg.
-index_html=$(curl -fsS "${BASE}/" 2>/dev/null || true)
+index_html=$(curl -fsSL "${BASE}/shell/" 2>/dev/null || true)
 bundle=$(printf '%s' "$index_html" | grep -oE 'index-[A-Za-z0-9_-]+\.js' | head -n1 || true)
 # The server injects --bg into the inline <style> block of index.html.
 # Grab the first `--bg: <value>;` occurrence.

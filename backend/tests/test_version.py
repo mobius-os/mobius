@@ -46,42 +46,6 @@ def test_version_exposes_build_date(client, monkeypatch):
   assert Settings(**_KW).build_date == "unknown"
 
 
-def _marker_path():
-  """The served-shell build marker entrypoint.sh / deploy-prod.sh stamp.
-
-  Derived from the live settings' data_dir (the test conftest points
-  DATA_DIR at a tempdir), so the test reads exactly what the endpoint does.
-  """
-  from pathlib import Path
-
-  from app.config import get_settings
-
-  return Path(get_settings().data_dir) / "shell" / ".image-build-sha"
-
-
-def test_version_shell_sha_unknown_without_marker(client):
-  # No /data/shell/.image-build-sha (a plain instance or one predating the
-  # marker) ⇒ shell_sha falls back to "unknown" rather than erroring.
-  marker = _marker_path()
-  marker.unlink(missing_ok=True)
-  body = client.get("/api/version").json()
-  assert body["shell_sha"] == "unknown"
-
-
-def test_version_shell_sha_reflects_marker(client):
-  # The endpoint surfaces the served-shell build identity stamped by the
-  # entrypoint's image-update refresh / deploy-prod, so a client can compare
-  # it against `sha` to detect a served UI that lags the installed image.
-  marker = _marker_path()
-  marker.parent.mkdir(parents=True, exist_ok=True)
-  marker.write_text("deadbeefcafe\n", encoding="utf-8")
-  try:
-    body = client.get("/api/version").json()
-    assert body["shell_sha"] == "deadbeefcafe"
-  finally:
-    marker.unlink(missing_ok=True)
-
-
 # ── served-platform identity ────────────────────────────────────────────
 # The `sha` field is the IMAGE build sha, which advances on every recreate
 # whether or not /data/platform synced. deploy-prod.sh's verify block now
@@ -112,12 +76,12 @@ def test_version_always_includes_served_platform_keys(client):
 
 def test_version_includes_served_frontend_identity(client):
   # served_frontend is the identity of the frontend bundle ACTUALLY served
-  # (hash of the served index.html), the frontend analogue of served_sha —
-  # distinct from the legacy shell_sha which points at the unserved
-  # /data/shell/dist under the whole-repo model. frontend_source names the live
-  # tree. Both must always be present; served_frontend is a str hash or None
-  # (None when the served dir has no index.html, e.g. a bare test env).
+  # (hash of the served index.html), the frontend analogue of served_sha.
+  # frontend_source names the live tree. Both must always be present;
+  # served_frontend is a str hash or None (None when the served dir has no
+  # index.html, e.g. a bare test env).
   body = client.get("/api/version").json()
+  assert "shell" + "_sha" not in body
   assert "served_frontend" in body and "frontend_source" in body
   assert body["frontend_source"] in ("platform", "baked")
   assert body["served_frontend"] is None or isinstance(

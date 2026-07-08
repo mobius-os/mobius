@@ -155,8 +155,8 @@ export async function apiFetch(path, options = {}) {
 }
 
 export const api = {
-  // Public build identity: { sha, shell_sha }. Used by Settings to show the
-  // running shell build and detect a stale served UI (shell_sha !== sha).
+  // Public build identity. Used by Settings to show the served platform build
+  // and frontend bundle identity.
   version: () => apiFetch('/version'),
   auth: {
     /**

@@ -67,6 +67,10 @@ RESTART_NEEDED_FLAG = Path("/data/.platform-restart-needed")
 # Persist a conflict so Settings keeps showing it across reloads (the rebase is
 # aborted, so no git state alone can signal it). Records the target sha + paths.
 CONFLICT_FLAG = Path("/data/.platform-conflict")
+# Persist that the last reconcile could not refresh origin. Deploy verification
+# treats this as an explicit exemption from the freshness assertion; the next
+# successful fetch clears it.
+OFFLINE_FLAG = Path("/data/.platform-offline")
 # A text-clean rebase whose result failed the import probe was rolled back to the
 # previous served commit. Records the target sha + the import error so Settings
 # can show "rolled back — needs repair" rather than silently staying "up to
@@ -424,6 +428,10 @@ def _read_conflict_flag() -> dict | None:
   return {"upstream": target or None, "chat_id": chat_id, "paths": paths}
 
 
+def _write_offline_flag(error: str) -> None:
+  OFFLINE_FLAG.write_text(error or "offline")
+
+
 def _write_rolled_back_flag(target: str | None, error: str | None) -> None:
   """Persist a rollback so Settings can show "needs repair". Line 0 is the target
   sha; the rest is the import error (truncated) for the log/UI."""
@@ -508,10 +516,13 @@ def reconcile_clone(
 
   if not _fetch(repo):
     # Offline is non-fatal: keep serving the current clone, retry next boot.
+    _write_offline_flag("fetch_failed")
     return ReconcileResult("offline", pre, pre, None, error="fetch_failed")
+  OFFLINE_FLAG.unlink(missing_ok=True)
 
   target = _rev(repo, target_ref)
   if not target:
+    _write_offline_flag("no_target_ref")
     return ReconcileResult("offline", pre, pre, None, error="no_target_ref")
 
   # Already integrated: local main contains origin/main. Nothing to apply. Sync

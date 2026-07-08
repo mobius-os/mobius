@@ -135,22 +135,13 @@ COPY skill/ ./skill/
 COPY core-apps/ ./core-apps/
 COPY protected-files.txt ./protected-files.txt
 
-# Baked backend floor. The entrypoint bootstraps /data/platform by CLONING the
-# canonical repo (so it shares git ancestry with origin/main and is PR-able); if
-# that clone fails (offline/unreachable) it falls back to serving this baked
-# backend floor. Stay root-owned + chmod a-w so even root restore code can't
-# modify them in place. (No whole-repo bake: the clone is the source of truth.)
-COPY backend/app ./app-baked/
-COPY backend/scripts ./scripts-baked/
-RUN chmod -R a-w /app/app-baked /app/scripts-baked
-
 # Frozen recovery floor (recoveryd) — the Tier-1 recovery system that runs
 # in its OWN container (same image, command `python3 -P /app/recovery/
 # recoveryd.py`). It imports ZERO app.* code and survives a fully-broken
 # platform. Baked root-owned + chmod a-w so even root can't modify it in
 # place and the agent (mobius) cannot touch it; recoveryd self-checks this
 # at startup and refuses to run if any file is writable. This is the floor
-# of the recovery story, distinct from the app-baked restore source above.
+# of the recovery story, distinct from the platform-baked backend floor.
 COPY backend/recovery ./recovery/
 RUN chmod -R a-w /app/recovery
 
@@ -341,11 +332,48 @@ RUN mkdir -p /tmp/dompurify-install && cd /tmp/dompurify-install \
          /app/static/vendor/dompurify@3.4.11 "$(command -v esbuild)" \
     && cd / && rm -rf /tmp/dompurify-install /tmp/build-dompurify-vendor.mjs
 
-# Full frontend source so the agent can edit and rebuild the shell.
-# /app/shell-src/ is the read-only reference (originals for recovery).
-# On first boot, entrypoint copies to /data/shell/ if it doesn't exist.
+# Full frontend source with installed node_modules. /app/shell-src is kept so
+# /data/platform/frontend/node_modules can symlink to it at runtime.
 COPY frontend/ ./shell-src/
 RUN cd ./shell-src && npm ci --ignore-scripts 2>/dev/null && rm -rf .vite
+
+# Whole-repo platform seed. /data is a runtime volume, so bake the real clone
+# under /app and let entrypoint copy it into /data/platform on first boot. The
+# checkout is pinned when BUILD_SHA is a real commit; local builds with
+# BUILD_SHA unset/unknown keep the default branch tip.
+ARG MOBIUS_PLATFORM_ORIGIN=https://github.com/mobius-os/mobius.git
+ARG BUILD_SHA=unknown
+RUN set -eux; \
+    git clone --depth 1 "$MOBIUS_PLATFORM_ORIGIN" /app/platform-baked; \
+    _build_sha="${BUILD_SHA:-unknown}"; \
+    if printf '%s' "$_build_sha" | grep -Eq '^[0-9a-fA-F]{40}$'; then \
+      if git -C /app/platform-baked fetch --depth 1 origin "$_build_sha" \
+         && git -C /app/platform-baked checkout "$_build_sha"; then \
+        :; \
+      else \
+        echo "FATAL: could not check out BUILD_SHA=$_build_sha" >&2; \
+        exit 1; \
+      fi; \
+    fi; \
+    git -C /app/platform-baked remote set-url origin "$MOBIUS_PLATFORM_ORIGIN"; \
+    git -C /app/platform-baked config user.name "Mobius Agent"; \
+    git -C /app/platform-baked config user.email "agent@mobius"; \
+    git -C /app/platform-baked checkout -B main HEAD; \
+    git -C /app/platform-baked branch -f upstream HEAD; \
+    git -C /app/platform-baked update-ref refs/remotes/origin/main HEAD; \
+    git -C /app/platform-baked symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main 2>/dev/null || true; \
+    if [ -d /app/platform-baked/frontend ]; then \
+      cd /app/platform-baked/frontend; \
+      [ -e node_modules ] || [ -L node_modules ] || ln -s /app/shell-src/node_modules node_modules || true; \
+      mkdir -p dist; \
+      cp -a /app/static/. dist/; \
+    fi; \
+    if [ "$_build_sha" != "unknown" ]; then \
+      git -C /app/platform-baked tag "baked-${_build_sha}" HEAD 2>/dev/null || true; \
+    fi; \
+    git -C /app/platform-baked rev-parse HEAD > /app/platform-baked/.baked-sha; \
+    chown -R root:root /app/platform-baked; \
+    chmod -R a+rX,go-w /app/platform-baked
 
 # Create a non-root user so the agent can use --dangerously-skip-permissions.
 RUN useradd -m -s /bin/bash mobius \
@@ -369,11 +397,10 @@ COPY backend/scripts/entrypoint.sh ./scripts/entrypoint.sh
 RUN chmod +x ./scripts/entrypoint.sh
 
 # Build identity — passed at `docker compose build` time (deploy-prod.sh
-# exports BUILD_SHA=$(git rev-parse HEAD)). Declared LATE, after the heavy
-# apt/pip/npm layers, so a per-build SHA change invalidates only these trivial
-# trailing layers — the expensive ones stay cached. Surfaced at GET
-# /api/version so a deploy can verify the served backend matches the commit.
-ARG BUILD_SHA=unknown
+# exports BUILD_SHA=$(git rev-parse HEAD)). Declared late above for the
+# platform-baked seed layer, after the heavy apt/pip/npm layers, so a per-build
+# SHA change invalidates only the trailing layers. Surfaced at GET /api/version
+# so a deploy can verify the served backend matches the commit.
 ENV BUILD_SHA=${BUILD_SHA}
 # BUILD_DATE is the commit date (YYYY-MM-DD) of BUILD_SHA, stamped by
 # deploy-prod.sh, so Settings can show a human "version · date" line.

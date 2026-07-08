@@ -1689,16 +1689,15 @@ def get_frame(
   if not compiled.exists():
     raise HTTPException(status_code=404, detail="Compiled module missing.")
 
-  # Frame priority: agent-editable copy first, then dev-mode path, then
-  # the baked-in fallback. The agent can edit
-  # /data/shell/public/app-frame.html directly. Resolve this BEFORE the
-  # ETag so the validator reflects the frame file's content (see
-  # _frame_etag) — otherwise a changed frame never reaches installed
-  # PWAs.
+  # Frame priority: served platform frontend first, then the baked-in fallback.
+  # Resolve this BEFORE the ETag so the validator reflects the frame file's
+  # content (see _frame_etag) — otherwise a changed frame never reaches
+  # installed PWAs.
   frame_candidates = [
-    Path(get_settings().data_dir) / "shell" / "public" / "app-frame.html",
-    Path(__file__).parent.parent.parent.parent
-    / "frontend" / "public" / "app-frame.html",
+    Path(get_settings().data_dir)
+    / "platform" / "frontend" / "public" / "app-frame.html",
+    # Repo-relative dev/test fallback (== served clone in-container).
+    Path(__file__).resolve().parents[3] / "frontend" / "public" / "app-frame.html",
     Path("/app/app-frame.html"),
   ]
   frame_path = next((p for p in frame_candidates if p.exists()), None)

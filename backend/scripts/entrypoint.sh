@@ -10,7 +10,7 @@ trap cleanup TERM INT
 # Ensure /data and key subdirectories exist and are writable by mobius.
 # Railway (and similar platforms) mount a fresh volume at /data owned by
 # root — the dirs from the Dockerfile are replaced by the empty mount.
-mkdir -p /data/db /data/apps /data/compiled /data/shared /data/shell /data/logs /data/cron-logs /data/cli-auth /data/agent-browser-profiles /data/platform
+mkdir -p /data/db /data/apps /data/compiled /data/shared /data/logs /data/cron-logs /data/cli-auth /data/agent-browser-profiles /data/platform
 
 # /data/agent-browser-profiles holds PER-CHAT Chrome user-data dirs
 # (chat-<chat_id>/...) for agent-browser. The path is set per-chat by
@@ -30,7 +30,7 @@ mkdir -p /data/db /data/apps /data/compiled /data/shared /data/shell /data/logs 
 #
 # Fallback invariant: if /data/platform/backend/app exists but cannot import,
 # or the repo is missing/corrupt, preserve it untouched and serve the baked
-# backend floor from /app/app-baked via a degraded /app/app -> /app/app-baked
+# backend floor from /app/platform-baked/backend/app via a degraded /app/app
 # symlink. recoveryd remains the outer recovery floor.
 # -----------------------------------------------------------------------
 
@@ -116,12 +116,12 @@ if ! chown -R mobius:mobius /data 2>/dev/null; then
   echo "WARNING: /data/service-token.txt — POST /api/auth/setup writes it as the mobius user, and" >&2
   echo "WARNING: it needs to be able to create files in /data, not just traverse." >&2
   chmod 1777 /data 2>/dev/null || true
-  chmod -R 777 /data/db /data/apps /data/compiled /data/shared /data/shell /data/logs /data/cron-logs /data/cli-auth 2>/dev/null || true
+  chmod -R 777 /data/db /data/apps /data/compiled /data/shared /data/logs /data/cron-logs /data/cli-auth 2>/dev/null || true
 fi
 
-# The /app/app-baked/ and /app/scripts-baked/ copies stay root-owned +
-# chmod a-w as the baked floor. /data/platform is handed to mobius so the
-# agent can edit it and Python can write bytecode there.
+# The /app/platform-baked/ clone stays root-owned + chmod a-w as the baked
+# floor. /data/platform is handed to mobius so the agent can edit it and Python
+# can write bytecode there.
 #
 # Why a+rX too: any baked-in Python source/script with a group-restrictive
 # mode (host umask 027 leaves files at 640) would be unreadable by mobius.
@@ -129,10 +129,11 @@ fi
 # `/app/skill` (the constitution mobius reads for the system prompt) gets
 # it too.
 chmod -R a+rX /app/skill 2>/dev/null || true
-# /app/shell-src (the stock source a shell refresh copies into /data/shell
-# as mobius) also needs a+rX, but it carries a ~30k-file node_modules — a
-# blanket `chmod -R` there blocks boot past the health window. chmod only the
-# git-sourced parts (src/public/config), pruning node_modules.
+# /app/shell-src remains the baked frontend source solely so
+# /data/platform/frontend/node_modules can symlink to its installed
+# node_modules. It carries a ~30k-file node_modules, so a blanket `chmod -R`
+# there blocks boot past the health window. chmod only the git-sourced parts
+# (src/public/config), pruning node_modules.
 find /app/shell-src -path '*/node_modules' -prune -o -exec chmod a+rX {} + 2>/dev/null || true
 
 # Auto-generate SECRET_KEY if not set (one-click deploy support).
@@ -164,13 +165,13 @@ fi
 # `import app.main` from it -> the safety net itself bricks. Re-open read+exec
 # every boot (root can override a-w). See CLAUDE.md "Entrypoint permission
 # defenses"; this replaces the old `chmod a+rX /app/app` the symlink model had.
-chmod -R a+rX /app/app-baked /app/scripts-baked 2>/dev/null || true
+chmod -R a+rX /app/platform-baked/backend/app /app/platform-baked/backend/scripts 2>/dev/null || true
 
 _platform_root=/data/platform
 _platform_backend=/data/platform/backend
 _platform_app=${_platform_backend}/app
-_baked_app=/app/app-baked
-_baked_scripts=/app/scripts-baked
+_baked_app=/app/platform-baked/backend/app
+_baked_scripts=/app/platform-baked/backend/scripts
 _use_platform=0
 _serve_workdir=/app
 _serve_source=baked
@@ -192,7 +193,8 @@ _platform_git_valid() {
      git -C /data/platform rev-parse --verify HEAD >/dev/null'
 }
 
-_platform_import_probe() {
+_platform_import_probe_dir() {
+  _probe_backend="$1"
   # Must mirror the real uvicorn exec EXACTLY (same user, cwd, env) so a probe
   # pass means the serve will import too. `import app.main` -> app.database ->
   # get_settings() REQUIRES SECRET_KEY (>=32 chars), which is exported above as
@@ -207,7 +209,21 @@ _platform_import_probe() {
   # GIT_*/PYTHONPATH (see its definition); the uvicorn exec below applies the
   # IDENTICAL scrub so probe and serve stay byte-for-byte the same environment.
   su -s /bin/sh mobius -c \
-    "cd /data/platform/backend && $_env_scrub timeout 60 python3 -c 'import app.main'"
+    "cd '$_probe_backend' && $_env_scrub timeout 60 python3 -c 'import app.main'"
+}
+
+_platform_import_probe() {
+  _platform_import_probe_dir /data/platform/backend
+}
+
+_platform_clear_empty_target() {
+  if [ -e /data/platform ]; then
+    if [ -n "$(ls -A /data/platform 2>/dev/null)" ]; then
+      echo "PLATFORM LAYER WARNING: /data/platform became non-empty before install; refusing to overwrite it." >&2
+      return 1
+    fi
+    rm -rf /data/platform 2>/dev/null || true
+  fi
 }
 
 _restore_baked_dir_if_symlink() {
@@ -222,16 +238,16 @@ _restore_baked_dir_if_symlink() {
 }
 
 _platform_bootstrap() {
-  # /data/platform is a REAL git clone of the canonical repo. Cloning (not
-  # copying a baked tree + `git init`) is load-bearing for the PR model: a fresh
-  # init has NO common ancestor with origin/main, so a pushed branch would read
-  # as unrelated histories. A clone shares ancestry, so `git diff origin/main`
-  # is exactly the agent's edits and `git push` a branch is a clean PR. The
-  # whole repo lands here and the agent edits it in place. One-time, first boot.
-  # On clone failure (offline / unreachable) return non-zero — the caller serves
-  # the baked backend floor and the clone is retried on the next boot.
+  # /data/platform is a REAL git clone of the canonical repo. A baked real clone
+  # (not a copied tree + `git init`) can seed first boot offline while preserving
+  # common ancestry with origin/main; if that seed is missing/invalid, the
+  # network clone path below remains the update fallback. A fresh init has NO
+  # common ancestor with origin/main, so a pushed branch would read as unrelated
+  # histories. A clone shares ancestry, so `git diff origin/main` is exactly the
+  # agent's edits and `git push` a branch is a clean PR. The whole repo lands
+  # here and the agent edits it in place. One-time, first boot.
   _origin="${MOBIUS_PLATFORM_ORIGIN:-https://github.com/mobius-os/mobius.git}"
-  echo "Platform layer: cloning $_origin -> /data/platform (first boot)."
+  echo "Platform layer: bootstrapping /data/platform (first boot)."
   # F1 non-destructive migration. We are here because /data/platform/backend/app
   # is absent, but a REAL prod volume may still carry the OLD overlay shape
   # (/data/platform/app + the agent's committed edits + .git, NOT backend/app),
@@ -259,6 +275,52 @@ _platform_bootstrap() {
       rm -rf /data/platform 2>/dev/null || true
     fi
   fi
+
+  # Primary first-boot path: seed the editable /data/platform clone from the
+  # baked real clone in the image. Copy into a temp dir owned by mobius, validate
+  # git + Python import there, then atomically rename into place. Any seed
+  # failure falls through to the network clone path; it never overwrites a
+  # non-empty /data/platform.
+  rm -rf /data/platform.seeding.* 2>/dev/null || true
+  _seeding="/data/platform.seeding.$(date -u +%Y%m%dT%H%M%SZ).$$"
+  if [ -d /app/platform-baked/.git ] &&
+     git -C /app/platform-baked rev-parse --is-inside-work-tree >/dev/null 2>&1 &&
+     git -C /app/platform-baked rev-parse --verify HEAD >/dev/null 2>&1; then
+    echo "Platform layer: seeding /data/platform from /app/platform-baked."
+    mkdir -p "$_seeding"
+    chown mobius:mobius "$_seeding" 2>/dev/null || true
+    if _SEEDING="$_seeding" su -s /bin/sh mobius -c \
+      'cp -a /app/platform-baked/. "$_SEEDING"'; then
+      chown -R mobius:mobius "$_seeding" 2>/dev/null || true
+      if [ ! -f "$_seeding/.baked-sha" ]; then
+        echo "${BUILD_SHA:-unknown}" > "$_seeding/.baked-sha"
+        chown mobius:mobius "$_seeding/.baked-sha" 2>/dev/null || true
+      fi
+      if _SEEDING="$_seeding" su -s /bin/sh mobius -c \
+        'git -C "$_SEEDING" rev-parse HEAD >/dev/null' &&
+        _platform_import_probe_dir "$_seeding/backend"; then
+        # /data/platform is absent here (the move-aside / empty-rm above
+        # handled it); this helper only removes an absent/empty target and
+        # refuses to touch a non-empty tree.
+        if ! _platform_clear_empty_target; then
+          rm -rf "$_seeding" 2>/dev/null || true
+          return 1
+        fi
+        if mv -T "$_seeding" /data/platform 2>/dev/null; then
+          echo "Platform layer: seed complete; serving /data/platform/backend."
+          return 0
+        fi
+        echo "PLATFORM LAYER WARNING: could not move baked seed into place; trying network clone." >&2
+      else
+        echo "PLATFORM LAYER WARNING: baked platform seed failed validation; trying network clone." >&2
+      fi
+    else
+      echo "PLATFORM LAYER WARNING: baked platform seed copy failed; trying network clone." >&2
+    fi
+    rm -rf "$_seeding" 2>/dev/null || true
+  fi
+
+  echo "Platform layer: cloning $_origin -> /data/platform (first boot fallback)."
   # --depth 1: shallow is fine — a later PR fetches origin + unshallows only if
   # it needs the merge base (same pattern as the app clone-update path).
   #
@@ -299,10 +361,14 @@ _platform_bootstrap() {
   echo "$_build_sha" > "$_cloning/.baked-sha"
   chown mobius:mobius "$_cloning/.baked-sha" 2>/dev/null || true
   # /data/platform is absent here (the move-aside / empty-rm above handled it);
-  # the rm is a belt-and-suspenders no-op so the rename can't nest temp inside a
-  # stray dir. Same-filesystem rename = atomic swap-in of a fully-ready tree.
-  rm -rf /data/platform 2>/dev/null || true
-  if ! mv "$_cloning" /data/platform 2>/dev/null; then
+  # this helper only removes an absent/empty target so the rename can't nest
+  # temp inside a stray dir. Same-filesystem rename = atomic swap-in of a
+  # fully-ready tree.
+  if ! _platform_clear_empty_target; then
+    rm -rf "$_cloning" 2>/dev/null || true
+    return 1
+  fi
+  if ! mv -T "$_cloning" /data/platform 2>/dev/null; then
     echo "PLATFORM LAYER WARNING: could not move the fresh clone into place; retrying next boot." >&2
     rm -rf "$_cloning" 2>/dev/null || true
     return 1
@@ -326,7 +392,7 @@ _platform_use_baked() {
   _serve_workdir=/app
   _served_sha="${BUILD_SHA:-unknown}"
   export PYTHONDONTWRITEBYTECODE=1
-  echo "PLATFORM LAYER WARNING: serving baked floor from /app/app-baked." >&2
+  echo "PLATFORM LAYER WARNING: serving baked floor from $_baked_app." >&2
   echo "  /data/platform is preserved untouched and is NOT served." >&2
   echo "  Fix /data/platform or run recovery_restore.sh platform-baked." >&2
   if [ -e /app/app ] && [ ! -L /app/app ]; then
@@ -528,159 +594,6 @@ fi
 # the fact — this chown costs nothing and closes the class.
 chown -R mobius:mobius /data/db /data/logs 2>/dev/null || true
 
-# Copy frontend source to /data/shell/ on first boot (or recovery).
-if [ ! -d /data/shell/src ]; then
-  echo "Initializing editable shell source in /data/shell/..."
-  cp -r /app/shell-src/. /data/shell/
-  chown -R mobius:mobius /data/shell
-  # record a hash of the origin so we can detect upstream updates
-  find /app/shell-src/src -type f | sort | xargs md5sum | md5sum | cut -d' ' -f1 > /data/shell/.origin-hash
-  # Stamp the image's build identity so a later image pull can tell the
-  # served /data/shell/dist is stale (see the image-update refresh below).
-  echo "${BUILD_SHA:-unknown}" > /data/shell/.image-build-sha
-  chown mobius:mobius /data/shell/.image-build-sha
-fi
-
-# --- deliver a pulled image's new shell bundle (self-host update path) ---
-# A self-hoster updates by `docker compose pull && up -d`. The new image
-# carries a fresh baked Vite build at /app/static, but the persisted
-# /data/shell/dist (whatever was last built) MASKS it — main.py picks the
-# live /data/shell/dist over the baked /app/static at startup. The
-# first-boot seed above runs only once, and the upstream-change detector
-# below only writes a diff; neither re-serves the new bundle. So without
-# this step a pulled image silently keeps serving the OLD UI/CLI shell.
-#
-# deploy-prod.sh already refreshes dist on the owner's prod, so this stays
-# a no-op there: it stamps .image-build-sha on every refresh, and a deploy
-# that rebuilt dist from this image leaves the marker matching BUILD_SHA.
-# We only act when the image is NEWER than what we last served.
-#
-# Detection: two signals, OR'd, so the refresh fires on every real update
-# path — not just the one that happens to carry a build-arg.
-#   1. BUILD_SHA marker (fast path): the baked BUILD_SHA differs from the
-#      stamped .image-build-sha. This is what deploy-prod.sh leverages to
-#      stay a no-op (it stamps the marker to match BUILD_SHA after it
-#      rebuilds dist itself), and it short-circuits the content compare
-#      when present.
-#   2. Bundle-content compare (fallback, the self-host path): the baked
-#      image's served entry bundle differs from the one in /data/shell/dist.
-#      Vite content-hashes the entry as `assets/index-<hash>.js` and names
-#      it in index.html, so a changed frontend ⇒ a changed filename and an
-#      unchanged image ⇒ the identical filename. This is the signal that
-#      makes the DOCUMENTED self-host update (`git pull && docker compose up
-#      -d --build`, which does NOT set BUILD_SHA → baked sha is "unknown")
-#      actually deliver the new bundle. docker-compose.yml defaults
-#      BUILD_SHA to "unknown", so gating on the marker alone left this path
-#      silently stale — the exact bug this block exists to fix.
-# Either signal is sufficient; the content compare is authoritative for
-# "is the served bundle actually the baked one", independent of BUILD_SHA.
-#
-# A plain re-`up` of the SAME image is a no-op: same baked bundle filename
-# ⇒ no content diff, and (when set) same BUILD_SHA ⇒ no marker diff. So
-# local dev instances and ordinary restarts don't churn dist on every boot.
-#
-# Preserving user edits: we refresh ONLY /data/shell/dist (the served
-# build), copied from the new image's baked /app/static (a complete build
-# incl. /vendor). We do NOT touch /data/shell/src — a user who customized
-# the shell source keeps it; their edits just are not reflected in the
-# served bundle until they rebuild (npx vite build / rebuild_shell.sh).
-# This is the minimum that makes a pull deliver the new baked UI while
-# leaving customization reversible: a user-built dist is regenerable from
-# their src, so refreshing it is safe.
-
-# Extract the content-hashed Vite entry bundle name (assets/index-<hash>.js)
-# from an index.html. Empty if the file is missing or has no such tag — the
-# same `index-[A-Za-z0-9_-]+\.js` shape scripts/bundle-info.sh keys on.
-_shell_bundle_id() {
-  [ -f "$1" ] || return 0
-  grep -oE 'index-[A-Za-z0-9_-]+\.js' "$1" 2>/dev/null | head -n1
-}
-
-_baked_sha="${BUILD_SHA:-unknown}"
-if [ -d /data/shell/src ] && [ -f /app/static/index.html ]; then
-  _stamped_sha=""
-  [ -f /data/shell/.image-build-sha ] && _stamped_sha=$(cat /data/shell/.image-build-sha)
-
-  # Signal 1: a known BUILD_SHA that differs from what we last stamped.
-  _sha_newer=""
-  if [ "$_baked_sha" != "unknown" ] && [ "$_baked_sha" != "$_stamped_sha" ]; then
-    _sha_newer="yes"
-  fi
-
-  # Signal 2: the baked entry bundle differs from the one served from dist.
-  # When dist is absent/incomplete (no index.html), the served id is empty
-  # and any non-empty baked id counts as "newer" — first real seed of dist.
-  _baked_bundle=$(_shell_bundle_id /app/static/index.html)
-  _served_bundle=$(_shell_bundle_id /data/shell/dist/index.html)
-  _bundle_newer=""
-  if [ -n "$_baked_bundle" ] && [ "$_baked_bundle" != "$_served_bundle" ]; then
-    _bundle_newer="yes"
-  fi
-
-  if [ -n "$_sha_newer" ] || [ -n "$_bundle_newer" ]; then
-    echo "New shell bundle detected (build ${_baked_sha}, baked=${_baked_bundle:-<none>} served=${_served_bundle:-<none>}); refreshing /data/shell/dist from the baked image."
-    # Lock + atomic swap. Two containers sharing /data (or a restart
-    # mid-copy) must never see a half-copied or nested dist: we copy into a
-    # sibling temp dir then rename() it over the old one (atomic on the same
-    # filesystem). The flock serializes concurrent refreshers so only one
-    # builds the temp dir + renames at a time. flock is guarded by
-    # command -v so a stripped image without util-linux still refreshes
-    # (unlocked) rather than failing to boot.
-    _refresh_dist() {
-      _new=/data/shell/.dist.new
-      _old=/data/shell/.dist.old
-      rm -rf "$_new" "$_old"
-      # cp the directory CONTENTS into a fresh dir, so the result is
-      # /data/shell/.dist.new/{index.html,assets,...} — never a nested
-      # .dist.new/static. -a preserves the complete baked build incl /vendor.
-      mkdir -p "$_new"
-      cp -a /app/static/. "$_new/"
-      chown -R mobius:mobius "$_new"
-      # Atomic-ish swap: move the live dist aside, rename the new one in,
-      # then drop the old. If dist is absent the first mv is a harmless
-      # no-op (guarded). A reader between the two renames sees either the
-      # complete old dist or the complete new one — never a partial tree.
-      [ -e /data/shell/dist ] && mv -f /data/shell/dist "$_old"
-      mv -f "$_new" /data/shell/dist
-      rm -rf "$_old"
-      echo "$_baked_sha" > /data/shell/.image-build-sha
-      chown mobius:mobius /data/shell/.image-build-sha
-      echo "Served shell bundle refreshed to ${_baked_bundle:-<none>} (build ${_baked_sha})."
-    }
-    if command -v flock >/dev/null 2>&1; then
-      _lock=/data/shell/.dist-refresh.lock
-      ( flock 9; _refresh_dist ) 9>"$_lock"
-      chown mobius:mobius "$_lock" 2>/dev/null || true
-    else
-      _refresh_dist
-    fi
-  fi
-fi
-
-# --- seed the shell git repo (two-branch self-update model) ---
-# /data/shell gets the SAME `upstream` (pristine image source) + `main` (agent
-# edits) git model the apps and platform use, so a pulled image's new shell
-# source can be merged in-product (POST /api/shell/apply) instead of only via a
-# full reset. Seed ONLY when .git is absent — idempotent on every later boot.
-#
-# CORRECTNESS: the seed records the BAKED /app/shell-src as `upstream` and
-# commits the CURRENT on-disk /data/shell working tree (whatever is there,
-# including any agent edits) onto `main` as a single-parent replay on `upstream`.
-# So both a FRESH boot (working tree == baked source) and an EXISTING instance
-# (working tree already has agent edits, no .git) seed correctly — agent edits
-# are never reset to the baked source. Runs as mobius (writes /data; as root it
-# would poison /data ownership + hit git "dubious ownership"). The auth
-# components are gitignored out of the model, so the protected-files chmod pass
-# below still root-owns them afterward (the repo never touches them). Never
-# blocks boot: wrapped in `|| true` and logged.
-if [ -d /data/shell ] && [ ! -d /data/shell/.git ]; then
-  echo "Shell git: seeding /data/shell two-branch repo..."
-  su -s /bin/sh mobius -c \
-    "cd /app && python3 -c 'from app import shell_update; shell_update.seed_shell_repo()'" \
-    2>&1 || echo "WARNING: shell git seed failed (non-fatal)" >&2
-  chown -R mobius:mobius /data/shell/.git 2>/dev/null || true
-fi
-
 # --- enforce protected file permissions ---
 # Two categories of protected files (see protected-files.txt header):
 #   1. Credential surfaces — chmod 444 root prevents agent tampering.
@@ -692,12 +605,10 @@ if [ -f /app/protected-files.txt ]; then
   while IFS= read -r line; do
     # skip comments and empty lines
     case "$line" in \#*|"") continue ;; esac
-    # Absolute paths only (new format). Legacy relative paths are
-    # treated as /data/shell/-relative for backward compat with any
-    # external protected-files.txt overrides.
+    # Absolute paths only. Relative legacy shell entries are ignored.
     case "$line" in
       /*) target="$line" ;;
-      *)  target="/data/shell/$line" ;;
+      *)  continue ;;
     esac
     if [ -f "$target" ]; then
       chown root:root "$target"
@@ -711,21 +622,6 @@ if [ -f /app/protected-files.txt ]; then
       esac
     fi
   done < /app/protected-files.txt
-fi
-
-# --- detect upstream shell changes ---
-if [ -f /data/shell/.origin-hash ]; then
-  current_hash=$(find /app/shell-src/src -type f | sort | xargs md5sum | md5sum | cut -d' ' -f1)
-  stored_hash=$(cat /data/shell/.origin-hash)
-  if [ "$current_hash" != "$stored_hash" ]; then
-    echo "Upstream shell source has changed — writing diff file."
-    diff_output=$(diff -rq /data/shell/src /app/shell-src/src 2>/dev/null || true)
-    export UPSTREAM_DIFF="$diff_output"
-    export UPSTREAM_CHANGED="true"
-    # update stored hash for next boot
-    echo "$current_hash" > /data/shell/.origin-hash
-    chown mobius:mobius /data/shell/.origin-hash
-  fi
 fi
 
 # Install the agent self-reminders cron dispatcher (feature 088). This
@@ -838,12 +734,17 @@ agent-browser-profiles/
 generated/
 logs/
 cron-logs/
-# platform/ and shell/ each have their OWN git repo (two-branch upstream/main
-# self-update); exclude them from the outer /data repo so `git add -A` from
-# /data doesn't treat them as untracked submodules. Their source is tracked by
-# their own git, not /data's.
+# platform/ has its OWN git repo; exclude it from the outer /data repo so
+# `git add -A` from /data doesn't treat it as an untracked submodule. Its source
+# is tracked by its own git, not /data's.
 platform/
-shell/
+# Transient bootstrap scratch + quarantines (siblings of platform/, not
+# matched by platform/). Never user data; never track them in the safety-net.
+platform.seeding.*
+platform.reseeding.*
+platform.reseed-prev.*
+platform.pre-clone.*
+platform.crashloop-prev.*
 # Phase 3 boot-state files — runtime counters, not content the agent manages.
 .boot-attempt
 .last-successful-boot
@@ -854,6 +755,7 @@ shell/
 # outer /data repo is initialized while one of these exists, `git add -A` must
 # not track it.
 .platform-conflict
+.platform-offline
 .platform-restart-needed
 .platform-apply-in-progress
 .platform-restart-requested
@@ -863,12 +765,11 @@ EOF
 chown mobius:mobius /data/.gitignore 2>/dev/null || true
 
 # Drop accidental nested git repos under /data, but preserve the intentional
-# per-app repos at /data/apps/<slug>/.git, the platform git at
-# /data/platform/.git, AND the shell git at /data/shell/.git. The outer /data
-# repo ignores those repos so `git add -A` does not try to treat them as
-# submodules, while the installer/update path can still keep each manifest-
-# installed app's upstream/main history across container restarts, and the
-# platform + shell gits are each their own two-branch repo.
+# per-app repos at /data/apps/<slug>/.git and the platform git at
+# /data/platform/.git. The outer /data repo ignores those repos so `git add -A`
+# does not try to treat them as submodules, while the installer/update path can
+# still keep each manifest-installed app's upstream/main history across
+# container restarts.
 #
 # The .pre-clone.<ts> / .crashloop-prev.<ts> quarantines are also preserved
 # WHOLE (including their .git): they hold the agent's migrated-aside platform
@@ -878,7 +779,6 @@ find /data -regextype posix-extended -mindepth 2 -maxdepth 4 \
   -type d -name '.git' \
   ! -regex '/data/apps/[^/]+/\.git' \
   ! -regex '/data/platform/\.git' \
-  ! -regex '/data/shell/\.git' \
   ! -regex '/data/platform\.pre-clone\..*' \
   ! -regex '/data/platform\.crashloop-prev\..*' \
   -prune -exec rm -rf {} + 2>/dev/null || true
@@ -983,7 +883,7 @@ if [ -f /data/.recover-pending ]; then
   rm -f /data/.recover-pending
   restore_status=""
   case "$mode" in
-    shell-dist|shell-src|platform|platform-baked)
+    platform|platform-baked)
       echo "Recovery flag detected: $mode — running recovery_restore.sh as root..."
       if /app/scripts/recovery_restore.sh "$mode"; then
         restore_status="ok"
@@ -1028,7 +928,7 @@ print(json.dumps(entry, separators=(',', ':')))
       case "$line" in \#*|"") continue ;; esac
       case "$line" in
         /*) target="$line" ;;
-        *)  target="/data/shell/$line" ;;
+        *)  continue ;;
       esac
       if [ -f "$target" ]; then
         chown root:root "$target" 2>/dev/null || true

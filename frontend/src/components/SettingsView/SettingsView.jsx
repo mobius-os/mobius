@@ -43,13 +43,13 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
   // the first tap arms the confirm, the second actually restarts.
   const [restartConfirm, setRestartConfirm] = useState(false)
   // Platform self-update (backend/frontend/libraries/recovery as one release).
-  // Distinct from the shell "App" row above, which only refreshes the PWA
-  // bundle. 'idle' | 'applying' | 'restarting'.
+  // 'idle' | 'applying' | 'restarting'.
   const [platform, setPlatform] = useState(null)
   const [platformPhase, setPlatformPhase] = useState('idle')
   const [platformError, setPlatformError] = useState('')
   // 'idle' | 'checking' | 'checked' — the "Check for updates" button asks the
-  // service worker to re-check for a new shell build and re-reads /api/version.
+  // service worker to re-check cached frontend assets and re-reads
+  // /api/version.
   const [updatePhase, setUpdatePhase] = useState('idle')
   useEffect(() => {
     // Mirror the full query value so a cache invalidation that
@@ -249,12 +249,10 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
     }
   }
 
-  // Refresh BOTH Möbius update signals on demand — the shell bundle AND the
-  // platform git availability — so one "Check for updates" covers the whole row.
-  // Shell: `registration.update()` forces a fresh fetch of /sw.js (served
-  // `no-cache`); a live new bundle installs in the background (skipWaiting +
-  // clientsClaim) and we re-read /api/version so the shell_sha !== sha notice is
-  // current. Platform: POST /platform/check runs the `git fetch` that the cheap
+  // Refresh both Möbius update signals on demand: the service worker cache and
+  // platform git availability. `registration.update()` forces a fresh fetch of
+  // /sw.js (served `no-cache`) and we re-read /api/version for the current
+  // served identity. Platform: POST /platform/check runs the `git fetch` that the cheap
   // /status read deliberately skips, so a deploy that landed since boot becomes
   // visible without waiting for a reboot. Both run in parallel and neither
   // failing blocks the other (allSettled) — a hiccup just leaves the last-known
@@ -263,7 +261,7 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
     if (updatePhase === 'checking') return
     setUpdatePhase('checking')
     try {
-      const shellP = (async () => {
+      const frontendP = (async () => {
         if ('serviceWorker' in navigator) {
           const reg = await navigator.serviceWorker.getRegistration()
           if (reg) await reg.update()
@@ -275,7 +273,7 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
         const res = await api.platform.check()
         if (res.ok) setPlatform(await res.json())
       })()
-      await Promise.allSettled([shellP, platformP])
+      await Promise.allSettled([frontendP, platformP])
     } finally {
       setUpdatePhase('checked')
     }
@@ -306,15 +304,6 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
     window.location.reload()
   }
 
-  // The "Update" action reuses checkForUpdates so the SW pulls the newest shell
-  // build before we reload to activate it — one source of truth for "ask the SW
-  // + re-read /api/version", rather than a bare reload that could race a
-  // not-yet-installed bundle.
-  async function applyUpdate() {
-    await checkForUpdates()
-    await reloadOntoFreshSW()
-  }
-
   // Platform self-update: read availability once on mount so Settings can show
   // "new update available" without a polling daemon.
   const refreshPlatform = useCallback(async () => {
@@ -327,12 +316,12 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
   }, [])
   useEffect(() => { refreshPlatform() }, [refreshPlatform])
 
-  // Silent freshen on opening Settings: ask the SW for a newer bundle and
-  // re-read /api/version so the Möbius row's shell signal is current the moment
-  // it renders. This is the cheap on-open pass (no git fetch) — it complements
-  // the explicit "Check for updates" button, which additionally fetches platform
-  // availability. Once per open; never touches updatePhase, so it can't make the
-  // Update/Check button look busy.
+  // Silent freshen on opening Settings: ask the SW for a newer cache manifest
+  // and re-read /api/version so the Möbius row's served identity is current the
+  // moment it renders. This is the cheap on-open pass (no git fetch) — it
+  // complements the explicit "Check for updates" button, which additionally
+  // fetches platform availability. Once per open; never touches updatePhase, so
+  // it can't make the Update/Check button look busy.
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -374,17 +363,12 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
     }
   }
 
-  // One "Update" button, fanning out behind it. A diverged/updatable backend
-  // overlay merges first (which then asks for a restart, or opens a resolver
-  // chat); otherwise a stale shell bundle reloads onto the fresh SW. A clean
-  // backend merge always marks restart-needed, so we never double-act — the row
-  // advances to "Restart to finish", and that restart reloads onto the fresh
-  // shell too. The owner sees one Möbius update, not a backend-vs-frontend split.
+  // One "Update" button for the platform updater. A clean merge marks
+  // restart-needed, so the row advances to "Restart to finish"; that restart
+  // reloads onto the fresh service worker too.
   async function applyMobiusUpdate() {
     if (platform?.available) {
       await applyPlatformUpdate()
-    } else if (newerBuildInstalled) {
-      await applyUpdate()
     }
   }
 
@@ -442,13 +426,11 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
   }
 
   const version = versionQuery.data
-  // The short SHA of the SHELL BUILD the served UI came from — shell_sha
-  // (the served bundle's image-build SHA) is the truthful one; fall back to
-  // sha (the running image) and finally 'unknown'. First 7 chars, matching
-  // how the Shell version row truncates sha.
-  const shellBuildSha = (() => {
-    const raw = version?.shell_sha && version.shell_sha !== 'unknown'
-      ? version.shell_sha
+  // The short SHA of the served platform tree. Fall back to the image build
+  // sha and finally 'unknown'. First 7 chars, matching the shell version row.
+  const mobiusBuildSha = (() => {
+    const raw = version?.served_sha && version.served_sha !== 'unknown'
+      ? version.served_sha
       : version?.sha && version.sha !== 'unknown'
         ? version.sha
         : null
@@ -459,21 +441,7 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
   const buildDate = version?.build_date && version.build_date !== 'unknown'
     ? version.build_date
     : null
-  // shell_sha is the build the SERVED UI came from; sha is the running image.
-  // A mismatch means a newer image is installed but its UI isn't being served
-  // to this client yet — reloading picks it up.
-  const newerBuildInstalled =
-    !!version &&
-    version.shell_sha &&
-    version.sha &&
-    version.shell_sha !== 'unknown' &&
-    version.sha !== 'unknown' &&
-    version.shell_sha !== version.sha
-
   // Derived state for the single "Möbius" update row (see the section below).
-  // updateAvailable folds both signals: a stale shell bundle (newerBuildInstalled)
-  // OR a backend overlay merge (platform.available). conflict/restart come only
-  // from the backend platform flow.
   const platformConflict = platform?.state === 'conflict'
   // A text-clean update that failed the post-rebase import probe was rolled back
   // to the previous served version — the update is still available, but its last
@@ -481,7 +449,7 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
   // as a plain "New update available".
   const platformRolledBack = platform?.state === 'rolled_back'
   const platformRestart = !!platform?.needs_restart
-  const updateAvailable = !!platform?.available || newerBuildInstalled
+  const updateAvailable = !!platform?.available
   const mobiusUpdating =
     platformPhase === 'applying' || updatePhase === 'checking'
 
@@ -610,22 +578,16 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
           )}
         </section>
 
-        {/* ONE honest "Möbius" update surface. Folds the shell-bundle reload (a
-            newer image's UI not yet served to this client) and the backend
-            platform merge (a newer baked floor, or a diverged overlay) into a
-            single row: one status line, one action. Priority: an in-progress
-            conflict, then a pending restart, then an available update, then up
-            to date. Per-layer mechanics stay invisible (the SW +
-            platform_update.py). We do NOT claim libraries/recovery updated — v1
-            updates the shell + non-protected backend only; the rest rides the
-            image (134 SP3/SP5) — so the copy stays "Möbius is up to date / has
-            an update", never a backend-vs-frontend split. Always renders (it
-            carries the Möbius build identity), so there is no second surface. The
-            action slot holds exactly one contextual button; when up to date that
-            button is an explicit "Check for updates" (git fetch + SW re-check)
-            with its own "Checking…" text — it never mutates the status label
-            beside it, which is why the old label-mutating Check button was wrong
-            and this one is not. */}
+        {/* ONE honest "Möbius" update surface. Folds platform availability,
+            conflict repair, and restart-to-finish into a single row: one status
+            line, one action. Priority: an in-progress conflict, then a pending
+            restart, then an available update, then up to date. Per-layer
+            mechanics stay invisible (the SW + platform_update.py). Always
+            renders (it carries the Möbius build identity), so there is no second
+            surface. The action slot holds exactly one contextual button; when
+            up to date that button is an explicit "Check for updates" (git fetch
+            + SW re-check) with its own "Checking…" text — it never mutates the
+            status label beside it. */}
         <section className="settings__section settings__section--compact">
           <h2 className="settings__section-title">Möbius</h2>
           <div className="settings__row settings__row--top">
@@ -643,13 +605,12 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
                         ? 'New update available'
                         : 'Up to date'}
               </StatusDot>
-              {/* The honest build identity is the short commit sha — the SHELL_BUILD
-                  marker is an internal cache-bust string, and its date is bumped by
-                  hand (so it can lie about when this build shipped). Hidden on a dev
-                  build where no sha is stamped. */}
-              {shellBuildSha !== 'unknown' && (
+              {/* The honest build identity is the served platform commit when
+                  available, falling back to the image build stamp. Hidden on a
+                  dev build where no sha is stamped. */}
+              {mobiusBuildSha !== 'unknown' && (
                 <p className="settings__build">
-                  {shellBuildSha}{buildDate ? ` · ${buildDate}` : ''}
+                  {mobiusBuildSha}{buildDate ? ` · ${buildDate}` : ''}
                 </p>
               )}
             </div>

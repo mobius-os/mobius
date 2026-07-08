@@ -71,12 +71,10 @@ Modes (run with no argument to print what each does):
 
 | Mode | What it restores |
 |---|---|
-| `shell-dist` | Prebuilt frontend bundle (`/app/static/` -> `/data/shell/dist/`). Fast, no rebuild. **Legacy:** `shell-dist`/`shell-src` repair the non-served `/data/shell` tree, NOT the served `/data/platform/frontend/dist` — use `platform`/`platform-baked` to repair the running instance. |
-| `shell-src` | Editable frontend source (`/app/shell-src/` -> `/data/shell`). Wipes your `src/` edits; needs a rebuild to take visual effect. |
 | `platform` | `git -C /data/platform reset --hard HEAD` — reverts *uncommitted* platform edits; commits are kept. Fast; no image needed. |
-| `platform-baked` | Full wipe + recopy of the SERVED clone tree `/data/platform/backend/{app,scripts}` from the baked floor, then commits the restore to `/data/platform` git history. Use when a bad change was already committed, or a git reset isn't enough. |
+| `platform-baked` | Quarantine + re-seed the full served clone tree `/data/platform` from `/app/platform-baked`. Use when a bad change was already committed, or a git reset isn't enough. |
 
-The backend served by uvicorn is the `/data/platform` clone, so `platform` and `platform-baked` are the modes that repair the running backend. (The script does NOT accept `backend`/`scripts` modes — they exit "Unknown mode"; the only legacy modes it still accepts are `shell-dist`/`shell-src` above, for the non-served `/data/shell` tree — so reach for `platform`/`platform-baked` here.)
+The backend and frontend served by uvicorn are both in the `/data/platform` clone, so `platform` and `platform-baked` are the modes that repair running code.
 
 After a `platform` or `platform-baked` restore, tell the partner to click **"Restart server"** at the top of the recovery chat page so uvicorn reloads the restored code.
 

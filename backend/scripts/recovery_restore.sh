@@ -7,20 +7,14 @@
 # idempotent: re-running is safe and produces the same result.
 #
 # Modes:
-#   shell-dist      Restore the prebuilt frontend bundle (fast; no
-#                   rebuild needed; serves immediately after restart).
-#   shell-src       Restore the editable frontend source (the agent's
-#                   edits to /data/shell/src/ are wiped). Requires a
-#                   rebuild to take visual effect.
 #   platform        Git restore: `git -C /data/platform reset --hard HEAD`
 #                   (reverts uncommitted agent edits; commits are preserved).
 #                   Use when the agent made edits that broke the platform
 #                   but hasn't committed them yet. Fast; no image needed.
-#   platform-baked  Full restore: wipe /data/platform/backend/app and
-#                   /data/platform/backend/scripts (the SERVED clone tree),
-#                   recopy from the baked floor, then commit the restore to
-#                   /data/platform git history. Use when the agent broke
-#                   something and committed it, or git reset --hard is not enough.
+#   platform-baked  Full restore: quarantine /data/platform and re-seed the
+#                   whole served clone tree from /app/platform-baked. Use when
+#                   the agent broke something and committed it, or git reset
+#                   --hard is not enough.
 #
 # After 'platform' or 'platform-baked', the caller should trigger
 # POST /recover/restart so uvicorn picks up the restored code.
@@ -40,10 +34,8 @@ if [ -z "$MODE" ]; then
 Usage: recovery_restore.sh <mode>
 
 Modes:
-  shell-dist      Restore /data/shell/dist/ from /app/static/
-  shell-src       Restore /data/shell/src/ from /app/shell-src/
   platform        git reset --hard HEAD in /data/platform
-  platform-baked  Wipe + recopy /data/platform/backend/{app,scripts} from baked floor
+  platform-baked  Quarantine + re-seed /data/platform from /app/platform-baked
 EOF
   exit 1
 fi
@@ -78,154 +70,98 @@ if [ "$MODE" = "platform" ]; then
   fi
 fi
 
-# --- platform-baked mode: full wipe + recopy from baked floor -----------
+# --- platform-baked mode: whole-tree re-seed from baked clone -----------
 if [ "$MODE" = "platform-baked" ]; then
-  # The clone serves /data/platform/backend, so the served backend + scripts are
-  # /data/platform/backend/{app,scripts} — NOT the repo-root /data/platform/{app,
-  # scripts} an older baked-floor layout used. Restoring the root paths would
-  # commit irrelevant dirs and leave the SERVED backend/app broken, so we target
-  # the served tree. The baked sources map straight across: /app/app-baked is
-  # backend/app and /app/scripts-baked is backend/scripts in the image.
-  SRC_APP="/app/app-baked"
-  SRC_SCR="/app/scripts-baked"
-  DST_APP="/data/platform/backend/app"
-  DST_SCR="/data/platform/backend/scripts"
-  if [ ! -d "$SRC_APP" ]; then
-    echo "Source missing: $SRC_APP (broken image?)" >&2
+  SRC="/app/platform-baked"
+  DST="/data/platform"
+  if [ ! -d "$SRC/.git" ]; then
+    echo "Source missing: $SRC/.git (broken image?)" >&2
     exit 2
   fi
-  echo "Restoring /data/platform/backend from baked floor..."
-  # Clear pycache before the overwrite to avoid stale bytecache.
-  find "$DST_APP" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
-  find "$DST_APP" -name '*.pyc' -delete 2>/dev/null || true
-  find "$DST_SCR" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
-  # Wipe first so files NOT in the baked floor (an agent-added module) do
-  # not survive the restore — cp -a alone only overwrites (Codex).
-  rm -rf "$DST_APP" "$DST_SCR"
-  mkdir -p "$DST_APP" "$DST_SCR"
-  cp_out=$(cp -a "$SRC_APP/." "$DST_APP/" 2>&1) || {
-    echo "FATAL: cp -a $SRC_APP -> $DST_APP failed: $cp_out" >&2; exit 3
+
+  _ts=$(date -u +%Y%m%dT%H%M%SZ)
+  _tmp="/data/platform.reseeding.$_ts.$$"
+  _quar=""
+  _env_scrub="env -u PYTHONPATH -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_COMMON_DIR -u GIT_NAMESPACE"
+
+  _restore_quarantine() {
+    if [ -n "$_quar" ] && [ ! -e "$DST" ]; then
+      mv "$_quar" "$DST" 2>/dev/null || true
+      chown -R mobius:mobius "$DST" 2>/dev/null || true
+    fi
   }
-  cp_out=$(cp -a "$SRC_SCR/." "$DST_SCR/" 2>&1) || {
-    echo "FATAL: cp -a $SRC_SCR -> $DST_SCR failed: $cp_out" >&2; exit 3
-  }
-  # Re-open write access (baked copies are chmod a-w; cp -a preserves that).
-  chmod -R u+w "$DST_APP" "$DST_SCR" 2>/dev/null || true
-  chown -R mobius:mobius /data/platform 2>/dev/null || true
-  # The served backend under /data/platform is mobius-owned and agent-editable
-  # by design, so nothing here needs re-locking. protected-files.txt entries
-  # (/data/shell/* + baked /app/scripts/*) live OUTSIDE the restored tree and
-  # are re-locked by the entrypoint on the restart that follows this restore.
-  # Commit the restore to /data/platform git history, and STAMP the baked floor
-  # (.baked-sha + a baked-<sha> tag) in the SAME commit so /api/version + the
-  # store read accurate right after a deploy instead of "update available" until
-  # a manual tag (138). Kept under the "restore: platform-baked" subject so the
-  # deploy's step-3b baseline diff still classifies it a system commit. Done as
-  # mobius so the .git refs stay mobius-owned; BUILD_SHA is expanded by THIS
-  # (root) shell because `su` resets the environment.
-  if [ -d /data/platform/.git ]; then
-    _bsha="${BUILD_SHA:-unknown}"
-    su -s /bin/sh mobius -c "
-      if [ '$_bsha' != 'unknown' ]; then printf '%s' '$_bsha' > /data/platform/.baked-sha; fi
-      git -C /data/platform add -A
-      git -C /data/platform commit -m 'restore: platform-baked restore from baked floor' 2>/dev/null || true
-      if [ '$_bsha' != 'unknown' ]; then git -C /data/platform tag -f 'baked-$_bsha' HEAD 2>/dev/null || true; fi
-    "
+
+  echo "Restoring /data/platform from baked clone..."
+
+  if [ -e "$DST" ]; then
+    if [ -n "$(ls -A "$DST" 2>/dev/null)" ]; then
+      _quar="/data/platform.reseed-prev.$_ts.$$"
+      if mv "$DST" "$_quar" 2>/dev/null; then
+        echo "Existing /data/platform preserved at $_quar (NOT deleted)." >&2
+      else
+        echo "FATAL: could not quarantine existing /data/platform; refusing to overwrite it." >&2
+        exit 3
+      fi
+    else
+      rm -rf "$DST" 2>/dev/null || true
+    fi
   fi
-  # Clear the stale upgrade-available marker so a post-restore status read does
-  # not fall back to its build sha (availability is the ancestry check now).
-  rm -f /data/.platform-upgrade-available
+
+  rm -rf /data/platform.reseeding.* 2>/dev/null || true
+  mkdir -p "$_tmp"
+  chown mobius:mobius "$_tmp" 2>/dev/null || true
+  if ! _RESEEDING="$_tmp" su -s /bin/sh mobius -c 'cp -a /app/platform-baked/. "$_RESEEDING"'; then
+    echo "FATAL: cp -a $SRC -> $_tmp failed" >&2
+    rm -rf "$_tmp" 2>/dev/null || true
+    _restore_quarantine
+    exit 3
+  fi
+
+  chown -R mobius:mobius "$_tmp" 2>/dev/null || true
+  if [ ! -f "$_tmp/.baked-sha" ]; then
+    echo "${BUILD_SHA:-unknown}" > "$_tmp/.baked-sha"
+    chown mobius:mobius "$_tmp/.baked-sha" 2>/dev/null || true
+  fi
+
+  if ! _RESEEDING="$_tmp" su -s /bin/sh mobius -c \
+    'git -C "$_RESEEDING" rev-parse --is-inside-work-tree >/dev/null &&
+     git -C "$_RESEEDING" rev-parse --verify HEAD >/dev/null'; then
+    echo "FATAL: reseeded platform failed git validation" >&2
+    rm -rf "$_tmp" 2>/dev/null || true
+    _restore_quarantine
+    exit 3
+  fi
+  if ! su -s /bin/sh mobius -c \
+    "cd '$_tmp/backend' && $_env_scrub timeout 60 python3 -c 'import app.main'"; then
+    echo "FATAL: reseeded platform failed import validation" >&2
+    rm -rf "$_tmp" 2>/dev/null || true
+    _restore_quarantine
+    exit 3
+  fi
+
+  if [ -e "$DST" ]; then
+    if [ -n "$(ls -A "$DST" 2>/dev/null)" ]; then
+      echo "FATAL: /data/platform became non-empty before install; refusing to overwrite it." >&2
+      rm -rf "$_tmp" 2>/dev/null || true
+      _restore_quarantine
+      exit 3
+    fi
+    rm -rf "$DST" 2>/dev/null || true
+  fi
+  if ! mv -T "$_tmp" "$DST" 2>/dev/null; then
+    echo "FATAL: could not move reseeded platform into place" >&2
+    rm -rf "$_tmp" 2>/dev/null || true
+    _restore_quarantine
+    exit 3
+  fi
+
+  chown -R mobius:mobius "$DST" 2>/dev/null || true
+  rm -f /data/.platform-upgrade-available /data/.platform-conflict \
+    /data/.platform-rolled-back /data/.platform-offline \
+    /data/.platform-restart-needed
   echo "Restore complete: /data/platform (platform-baked)"
   exit 0
 fi
 
-case "$MODE" in
-  shell-dist)
-    SRC="/app/static"
-    DST="/data/shell/dist"
-    ;;
-  shell-src)
-    SRC="/app/shell-src"
-    DST="/data/shell"
-    ;;
-  *)
-    echo "Unknown mode: $MODE" >&2
-    exit 1
-    ;;
-esac
-
-if [ ! -d "$SRC" ]; then
-  echo "Source missing: $SRC (broken image?)" >&2
-  exit 2
-fi
-
-echo "Restoring $DST from $SRC..."
-
-# mkdir -p the destination so a fresh volume / wiped directory works.
-mkdir -p "$DST"
-
-# cp -a preserves perms + ownership of the SOURCE (root:root for the
-# baked copies). When this script runs from entrypoint AS ROOT (the
-# normal post-flag-file path), root bypasses the dest chmod-444 so
-# all files restore cleanly. When run AS MOBIUS (e.g. manual debug),
-# cp -a's open-for-write on chmod-444 dest files fails with EACCES
-# on protected files — which is fine because those files are already
-# the right content (frozen + root-owned). We distinguish the two
-# cases by checking euid: if we're root, ANY cp failure is real and
-# fails the script.
-cp_output=$(cp -a "$SRC/." "$DST/" 2>&1)
-cp_status=$?
-if [ $cp_status -ne 0 ]; then
-  if [ "$(id -u)" -eq 0 ]; then
-    echo "FATAL: cp -a failed while running as root:" >&2
-    echo "$cp_output" >&2
-    exit 3
-  else
-    # Mobius run: protected-file EACCES is expected. Surface other
-    # errors but don't fail (operator can re-run as root if needed).
-    echo "cp -a partial: protected files blocked overwrite (expected when run as mobius)" >&2
-    echo "$cp_output" | grep -v "Permission denied" >&2 || true
-  fi
-fi
-
-# Re-hand the writable layer to mobius (except for protected files
-# which entrypoint.sh re-locks on next boot). Only the shell modes
-# reach this generic path — the served backend/scripts restore lives
-# in the platform-baked branch above.
-if [ "$DST" = "/data/shell" ] || [ "$DST" = "/data/shell/dist" ]; then
-  chown -R mobius:mobius "$DST" 2>/dev/null || true
-fi
-
-# Re-enforce protected-files chmod 444 + root ownership after the
-# overwrite. Walk the same protected-files.txt the entrypoint uses.
-if [ -f /app/protected-files.txt ]; then
-  while IFS= read -r line; do
-    case "$line" in \#*|"") continue ;; esac
-    case "$line" in
-      /*) target="$line" ;;
-      *)  target="/data/shell/$line" ;;
-    esac
-    # Only re-enforce protected files INSIDE the destination we just
-    # restored. A 'backend' restore shouldn't touch /data/shell/ perms.
-    case "$target" in
-      "$DST"/*|"$DST")
-        if [ -f "$target" ]; then
-          chown root:root "$target" 2>/dev/null || true
-          # .sh files need 555 (executable) so the next entrypoint
-          # boot can run them. Other files (Python, configs) → 444.
-          # Without the case-split, a direct `docker exec
-          # recovery_restore.sh scripts` strips +x from entrypoint.sh
-          # and recovery_restore.sh themselves, and the next
-          # container restart fails with `permission denied`.
-          case "$target" in
-            *.sh) chmod 555 "$target" 2>/dev/null || true ;;
-            *)    chmod 444 "$target" 2>/dev/null || true ;;
-          esac
-        fi
-        ;;
-    esac
-  done < /app/protected-files.txt
-fi
-
-echo "Restore complete: $DST"
-exit 0
+echo "Unknown mode: $MODE" >&2
+exit 1

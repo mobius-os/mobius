@@ -1,18 +1,16 @@
 """deploy-prod.sh must broadcast `shell_rebuilt` after a successful deploy.
 
-deploy-prod.sh shadows /data/shell/dist + the new SW (skipWaiting /
-clientsClaim), but an already-open PWA never learns a fresh bundle exists —
-it keeps running the old shell until reopened. The Shell already handles a
-`shell_rebuilt` system event (fade + reload), and POST /api/notify already
-broadcasts that type to every open Shell's /api/events/system stream. The
-only missing link was firing it; the deploy script now does, authenticated
-with the entrypoint's owner service token.
+An already-open PWA never learns a fresh bundle exists — it keeps running the
+old shell until reopened. The Shell already handles a `shell_rebuilt` system
+event (fade + reload), and POST /api/notify already broadcasts that type to
+every open Shell's /api/events/system stream. The deploy script fires it after
+verification, authenticated with the entrypoint's owner service token.
 
 These tests guard that wiring against a future edit silently dropping it,
 without needing Docker: they read the script text and assert the call is
-present and lands AFTER the post-restart readiness gate (so the reload
-always points at a verified-healthy bundle), plus that the script still
-parses under `bash -n`.
+present and lands AFTER the final readiness gate (so the reload always points
+at a verified-healthy bundle), plus that the script still parses under
+`bash -n`.
 """
 
 import re
@@ -54,14 +52,14 @@ def test_broadcast_call_is_present_and_invokes_helper():
     "deploy must actually call broadcast_shell_rebuilt"
 
 
-def test_broadcast_runs_after_post_restart_readiness_gate():
+def test_broadcast_runs_after_final_readiness_gate():
   """The reload must only fire on a verified-healthy deploy, so the call has
-  to come AFTER the post-restart readiness wait and the verify block."""
+  to come AFTER the final readiness wait and the verify block."""
   text = _read()
-  ready_gate = text.index("post-restart readiness check never returned 200")
+  ready_gate = text.rindex("rcode=$(ready_code)")
   call_site = text.index("if broadcast_shell_rebuilt;")
   assert call_site > ready_gate, \
-    "broadcast must run after the post-restart readiness gate"
+    "broadcast must run after the final readiness gate"
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")

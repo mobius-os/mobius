@@ -47,7 +47,7 @@ Check the wider ecosystem too: the catalog (`https://raw.githubusercontent.com/m
 
 ## Packaging / wrapping a pre-built or third-party web app
 
-Sometimes the app you want isn't authored fresh in JSX — it's an existing built web app (a React/Vite/CRA/WebGL game, a tool's `dist/`) that you mount whole. The durable pattern is a thin Möbius wrapper (a small `index.jsx` around an iframe) plus a `mobius.json` that declares the build's own files as `static_assets`, so Möbius serves them under the app's asset route. Do **not** copy built files into `/data/platform/frontend` (the served tree): deploy refreshes replace that tree, so the app disappears or, worse, `/some-app/index.html` falls through to the Möbius shell and opens Möbius inside Möbius.
+Sometimes the app you want isn't authored fresh in JSX — it's an existing built web app (a React/Vite/CRA/WebGL game, a tool's `dist/`) that you mount whole. The durable pattern is a thin Möbius wrapper (a small `index.jsx` around an iframe) plus a `mobius.json` that declares the build's own files as `static_assets`, so Möbius serves them under the app's asset route. Do **not** copy built app files into `/data/platform/frontend` or its `dist/`: that tree is the platform UI, so the app disappears on rebuild or, worse, `/some-app/index.html` falls through to the Möbius shell and opens Möbius inside Möbius.
 
 Mechanics:
 
@@ -678,7 +678,7 @@ const L = (await import('https://esm.sh/leaflet')).default            // maps
 const { motion } = await import('https://esm.sh/framer-motion')       // animations
 ```
 
-**To add a library to the import map permanently** (faster, no per-load dynamic import), edit `/data/shell/public/app-frame.html` — the backend prefers this copy over the baked fallback, so changes take effect on the next app load with no shell rebuild. Add an entry like `"@dnd-kit/core": "https://esm.sh/@dnd-kit/core@6",`.
+**To add a library to the import map permanently** (faster, no per-load dynamic import), edit `/data/platform/frontend/public/app-frame.html` — the backend prefers this copy over the baked fallback, so changes take effect on the next app load with no frontend rebuild. Add an entry like `"@dnd-kit/core": "https://esm.sh/@dnd-kit/core@6",`.
 
 ---
 
