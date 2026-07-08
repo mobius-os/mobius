@@ -1,32 +1,24 @@
 """AI provider adapters.
 
-Post-SDK-migration the two providers run on different paths and share
-only the identity + auth surface, not a polymorphic command shape:
+Both providers run through the Agent SDK and share only the identity +
+auth + env surface — there is no polymorphic command/parse shape:
 
   * `ClaudeProvider` — env-shaper for the SDK path. Chat turns run
     through `app.claude_sdk_runner`, which calls `check_auth` and
     `build_env` (for `CLAUDE_CONFIG_DIR` + `AGENT_BROWSER_SESSION`)
-    and then drives the Anthropic Agent SDK directly. There is no
-    argv to build and no stdout to parse on this path.
-  * `CodexProvider` — identity/auth/env shaper. Like Claude, live Codex
-    chat turns now run through the Agent SDK: `chat.py` dispatches to
-    `codex_sdk_runner.run_codex_sdk_turn`, never to `build` / `parse_line`.
-    The app-server subprocess methods (`build` spawns
-    `codex_appserver_runner.py`, `parse_line` decodes its lines) are
-    retained but are NOT on the live chat path. The translator module
-    `codex_appserver.py` does still have live consumers — the SDK runner
-    reuses its event-classification and bash-extraction helpers.
+    and then drives the Anthropic Agent SDK directly.
+  * `CodexProvider` — identity/auth/env shaper. Live Codex chat turns
+    run through the Agent SDK: `chat.py` dispatches to
+    `codex_sdk_runner.run_codex_sdk_turn`. The SDK runner reuses one
+    helper from `codex_appserver.py` (`_extract_bash_command`); the
+    provider itself only shapes credentials + env.
 
-`BaseProvider` carries only the common surface (`check_auth`,
-`build_env`, and the `name`/`cli_cmd`/`auth_dir` identifiers).
-`build`/`parse_line` live on `CodexProvider` because the SDK path
-has no use for them — putting them on the base class would be
-fictional polymorphism that `NotImplementedError`s on Claude.
+`BaseProvider` carries the whole surface (`check_auth`, `build_env`,
+and the `name`/`cli_cmd`/`auth_dir` identifiers); every provider
+implements just `check_auth` + `build_env`.
 
 Adding a new provider means writing a new class here and registering
-it in PROVIDERS. Both live providers are SDK-backed and implement just
-`check_auth` + `build_env`; the legacy subprocess surface (`build` +
-`parse_line`) lives on `CodexProvider` alone.
+it in PROVIDERS.
 """
 
 import asyncio
@@ -36,11 +28,8 @@ import os
 import shutil
 import stat
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
-
-from app.runtime_types import ChatEvent
 
 if TYPE_CHECKING:
   from app.schemas import AgentSettingsOverride
@@ -228,8 +217,9 @@ def effective_agent_settings(
 def get_skill_path() -> Path | None:
   """Resolves the agent skill file location. Single source of truth.
 
-  The legacy Codex `build()` and the SDK runners
-  (`claude_sdk_runner.py`, `codex_sdk_runner.py`) all call this. The path is independent of `data_dir` — the skill is part
+  `chat.py` and the SDK runners (`claude_sdk_runner.py`,
+  `codex_sdk_runner.py`) all call this. The path is independent of
+  `data_dir` — the skill is part
   of the deployment, not per-instance state, so resolution checks the
   baked container path first and falls back to the in-repo path for
   local development. Returns None if neither exists (callers handle
@@ -247,23 +237,12 @@ def get_skill_path() -> Path | None:
   return next((p for p in candidates if p.exists()), None)
 
 
-@dataclass
-class ProviderResult:
-  """Everything the chat module needs to spawn a provider subprocess."""
-  cmd: list[str]
-  env: dict[str, str]
-
-
 class BaseProvider:
   """Identity + auth surface shared by every provider.
 
-  Both runtime paths (SDK and subprocess) need a display name, an auth
-  preflight, and a base environment dict. They diverge after that:
-  Codex builds argv and parses runner stdout; Claude hands `build_env`
-  straight to the Agent SDK. Methods specific to the subprocess path
-  (`build` / `parse_line`) live on `CodexProvider` rather than here so
-  the interface reflects the real contract instead of an abstract one
-  that would only ever raise `NotImplementedError` on the SDK side.
+  Every provider needs a display name, an auth preflight, and a base
+  environment dict; both live providers (Claude and Codex) run through
+  the Agent SDK and hand `build_env` straight to their SDK runner.
   """
 
   # Display name shown in the setup wizard.
@@ -392,9 +371,8 @@ class ClaudeProvider(BaseProvider):
 class CodexProvider(BaseProvider):
   """OpenAI Codex provider.
 
-  build() launches the app-server JSON-RPC runner; live chat uses the
-  Codex Agent SDK. The `codex exec --json` path is not used because it
-  does not provide per-token deltas.
+  Live chat runs through the Codex Agent SDK (`codex_sdk_runner`); this
+  class only shapes identity, auth, and the subprocess env (`CODEX_HOME`).
   """
 
   name = "Codex"
@@ -410,82 +388,6 @@ class CodexProvider(BaseProvider):
       )
     return None
 
-  def build(
-    self, user_message, session_id, base_env, data_dir,
-    chat_id=None, agent_settings=None,
-  ):
-    merged = (
-      dict(agent_settings)
-      if agent_settings is not None
-      else _load_agent_settings(data_dir)
-    )
-    # Codex reads the picker's `model` key.
-    model = merged.get("model")
-
-    # Use the app-server runner. `codex exec --json` only emits one
-    # final agent_message event (no per-token deltas), so it can't
-    # produce the typewriter effect. The app-server JSON-RPC protocol
-    # emits `item/agentMessage/delta` notifications for streaming.
-    # The runner script handles the protocol handshake and translates
-    # notifications into clean Möbius event lines (session_init, text,
-    # tool_*, done) — so parse_line just JSON-decodes and returns.
-    #
-    # Prompt + base-instructions are passed via files (not argv) so
-    # large prompts (experience block injection, ~20KB) don't risk
-    # hitting argv limits on any OS.
-    scripts_dir = Path(__file__).parent.parent / "scripts"
-    runner = scripts_dir / "codex_appserver_runner.py"
-
-    # Sanitize chat_id for filesystem use. The route layer accepts
-    # chat ids over the wire and they end up in path components — a
-    # malicious id like "../../" or one with NUL could escape the
-    # data dir. Keep only alphanumerics, dash, underscore (matches
-    # the format we generate; longer/legitimate ids unaffected).
-    import re
-    import uuid
-    safe_chat_id = re.sub(r"[^A-Za-z0-9_-]", "_", chat_id or "default")
-    chat_dir = Path(data_dir) / "chats" / safe_chat_id
-    chat_dir.mkdir(parents=True, exist_ok=True)
-
-    # Per-run UUID-suffixed prompt file. Same-chat continuations
-    # (queued-turn drain) can launch multiple runs in quick succession;
-    # a shared `codex-prompt.txt` would race. The runner unlinks both
-    # the prompt and the per-run instructions file immediately after
-    # reading them (see codex_appserver_runner.py) so they don't
-    # accumulate on disk or retain transcript content outside the DB.
-    run_id = uuid.uuid4().hex[:12]
-    prompt_file = chat_dir / f"codex-prompt-{run_id}.txt"
-    prompt_file.write_text(user_message, encoding="utf-8")
-
-    cmd = [
-      "python3", str(runner),
-      "--prompt", str(prompt_file),
-      "--cwd", data_dir,
-    ]
-    if session_id:
-      cmd += ["--session-id", session_id]
-    if model:
-      cmd += ["--model", model]
-
-    env = self.build_env(base_env, data_dir, chat_id=chat_id)
-
-    # System prompt on first message: write the skill to a per-run
-    # file (same race rationale as the prompt) and pass it as
-    # --base-instructions so codex uses it for the thread.
-    if not session_id:
-      skill = get_skill_path()
-      if skill:
-        instructions_file = chat_dir / f"codex-instructions-{run_id}.txt"
-        try:
-          instructions_file.write_text(
-            skill.read_text(encoding="utf-8"), encoding="utf-8",
-          )
-          cmd += ["--base-instructions", str(instructions_file)]
-        except OSError:
-          pass
-
-    return ProviderResult(cmd=cmd, env=env)
-
   def build_env(
     self,
     base_env: dict[str, str],
@@ -496,27 +398,6 @@ class CodexProvider(BaseProvider):
     env = dict(base_env)
     env["CODEX_HOME"] = str(Path(data_dir) / "cli-auth" / "codex")
     return env
-
-  def parse_line(self, line: str) -> list[ChatEvent]:
-    """Returns the runner-shaped event when present, else `[]`.
-
-    `scripts/codex_appserver_runner.py` already translates app-server
-    JSON-RPC notifications into Möbius event dicts (session_init / text /
-    tool_* / done / error). Lines this runner doesn't recognize are
-    dropped at the runner; parse_line just decodes the JSON envelope.
-    The translator in `app.codex_appserver` is the source of truth for
-    notification shapes — exercised directly by the runner and by tests.
-    """
-    try:
-      event = json.loads(line)
-    except json.JSONDecodeError:
-      return []
-    if event.get("type") in (
-      "session_init", "text", "tool_start", "tool_input",
-      "tool_output", "tool_end", "done", "error",
-    ):
-      return [event]
-    return []
 
 
 # Registry of available providers, keyed by ID.

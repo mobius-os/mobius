@@ -1,6 +1,6 @@
 """Helpers for emitting "unknown" SDK events on the SSE wire.
 
-Both `claude_sdk_runner` and `codex_appserver` classify every event
+Both `claude_sdk_runner` and `codex_sdk_runner` classify every event
 they see from the underlying SDK and either translate it into a known
 Möbius event shape or emit it as `unknown_sdk_event`. The default is to
 EMIT unknowns rather than drop them — silently dropping data the SDKs
