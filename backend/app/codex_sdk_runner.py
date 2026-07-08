@@ -920,12 +920,12 @@ async def run_codex_sdk_turn(
         db=db,
       )
 
-      # The legacy subprocess path hardcoded `approvalPolicy=never` with
-      # `sandbox=danger-full-access`. The SDK's `ApprovalMode.auto_review`
-      # instead maps to `approvalPolicy=on_request` with
-      # `approvalsReviewer=auto_review`. That may still surface a human
-      # approval prompt in some cases; see `.pm/features/_003-tech-debt-and-test-gaps.md`
-      # OQ-5 for the required live equivalence check.
+      # We use the SDK's `ApprovalMode.auto_review`, which maps to
+      # `approvalPolicy=on_request` with `approvalsReviewer=auto_review`
+      # (rather than an unconditional `approvalPolicy=never`). That may
+      # still surface a human approval prompt in some cases; see
+      # `.pm/features/_003-tech-debt-and-test-gaps.md` OQ-5 for the
+      # required live equivalence check.
 
       # Sandbox.full_access maps to wire SandboxMode.danger_full_access
       # and disables bwrap. Möbius runs
@@ -937,8 +937,8 @@ async def run_codex_sdk_turn(
       # allows it). That blocked every tool that spawned a
       # sub-process — including the Read tool reading PNGs, which
       # silently broke the agent's ability to verify its own
-      # screenshots. The legacy subprocess path used danger-full-
-      # access for the same reason, and Möbius's design philosophy
+      # screenshots. Full access here follows the same reasoning, and
+      # Möbius's design philosophy
       # ("trust the agent; container is the sandbox") is consistent.
       _sandbox = sdk["Sandbox"].full_access
       if session_id is None:
