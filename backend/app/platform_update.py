@@ -441,7 +441,7 @@ def _read_rolled_back_flag() -> dict | None:
 
 def current_build_sha() -> str | None:
   """The current image's build SHA: the ``BUILD_SHA`` baked into the image,
-  falling back to the env var, then to the SHA recorded in the upgrade flag."""
+  falling back to the env var."""
   try:
     from app.config import settings
     cand = (getattr(settings, "build_sha", "") or "").strip()
@@ -452,10 +452,6 @@ def current_build_sha() -> str | None:
   env = (os.environ.get("BUILD_SHA") or "").strip()
   if env and env != "unknown":
     return env
-  if UPGRADE_FLAG.exists():
-    parts = UPGRADE_FLAG.read_text().split()
-    if len(parts) >= 2 and parts[0] == "upgrade-available":
-      return parts[1].strip() or None
   return None
 
 
@@ -742,7 +738,7 @@ async def spawn_platform_conflict_chat(
   db: Session, conflict_paths: list[str],
 ) -> str | None:
   """Open a visible agent chat to reconcile the new platform version into
-  ``main`` — the platform analogue of ``routes.apps._spawn_app_conflict_chat``.
+  ``main`` — the platform analogue of a per-app update-conflict resolver chat.
   Dedupes on a running resolver."""
   import time
   import uuid
@@ -830,7 +826,8 @@ async def spawn_platform_conflict_chat(
       notify_owner(
         db, owner.id, title="Platform update needs conflict resolution",
         body="The platform update conflicts with local edits. Opened a chat to resolve it.",
-        source_type="platform_conflict", source_id=chat_id, target=f"chat:{chat_id}",
+        source_type="platform_conflict", source_id=chat_id,
+        target=f"/shell/?chat={chat_id}",
       )
     except Exception:
       pass

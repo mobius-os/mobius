@@ -498,7 +498,7 @@ async def spawn_shell_conflict_chat(
       notify_owner(
         db, owner.id, title="Shell update needs conflict resolution",
         body="The shell update conflicts with local edits. Opened a chat to resolve it.",
-        source_type="shell_conflict", source_id=chat_id, target=f"chat:{chat_id}",
+        source_type="shell_conflict", source_id=chat_id, target=f"/shell/?chat={chat_id}",
       )
     except Exception:
       pass

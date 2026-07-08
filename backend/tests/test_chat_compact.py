@@ -50,17 +50,14 @@ def test_compact_stores_and_returns_summary(client, auth, monkeypatch):
   assert body["command"] == f"POST /api/chats/{chat_id}/compact"
   assert body["stored"]["kind"] == "compaction"
   assert body["stored"]["content"] == body["summary"]
-  block = body["stored"]["blocks"][0]
-  assert block["type"] == "tool"
-  assert block["tool"] == "CompactChat"
-  assert block["input"] == body["command"]
-  assert block["output"] == body["summary"]
-  assert block["status"] == "done"
-  assert block["defaultOpen"] is True
-  # The stored block carries a ts so it has a stable React key.
+  # No redundant CompactChat block is persisted — the frontend's
+  # CompactionCard renders from `content` (content-first), so the block was
+  # never read. Only the plain-text briefing is stored.
+  assert "blocks" not in body["stored"]
+  # The stored message carries a ts so it has a stable React key.
   assert isinstance(body["stored"].get("ts"), int)
 
-  # The block is durable in the transcript as its own assistant message.
+  # The compaction is durable in the transcript as its own assistant message.
   chat = client.get(
     f"/api/chats/{chat_id}?limit=50", headers=auth
   ).json()
@@ -69,7 +66,7 @@ def test_compact_stores_and_returns_summary(client, auth, monkeypatch):
   ]
   assert len(compaction_msgs) == 1
   assert compaction_msgs[-1]["content"] == body["summary"]
-  assert compaction_msgs[-1]["blocks"][0]["input"] == body["command"]
+  assert "blocks" not in compaction_msgs[-1]
   # The prior turns are still present — compaction APPENDS, it does not wipe.
   assert any(
     m.get("content") == "Build me an app" for m in chat["messages"]

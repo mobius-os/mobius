@@ -1424,12 +1424,13 @@ class ChatWriterActor:
   def _persist_compaction(self, db, cmd: PersistCompaction) -> dict:
     """Append the compaction briefing as a new assistant message; commit.
 
-    The block is its OWN message (appended, not a replace) so it can't
-    clobber a streaming snapshot, and it carries `kind="compaction"` plus a
-    tool block so the frontend surfaces both the command that ran and the
-    resulting portable briefing. The `content` remains plain text for
-    provider seeding/backward-compatible renderers. The `ts` is set strictly
-    past every message in the transcript and the pending queue (via
+    The briefing is its OWN message (appended, not a replace) so it can't
+    clobber a streaming snapshot, and it carries `kind="compaction"` so the
+    frontend renders it via the CompactionCard, which reads `content` first.
+    `content` is plain text — the sole field the card and the backend replay
+    (`_latest_compaction_brief`) read, and what provider seeding /
+    backward-compatible renderers consume. The `ts` is set strictly past
+    every message in the transcript and the pending queue (via
     `next_message_ts`, so even an empty transcript gets a wall-clock ts)
     so it can't collide with a sibling's React key.
     """
@@ -1443,14 +1444,6 @@ class ChatWriterActor:
       "role": "assistant",
       "kind": "compaction",
       "content": cmd.summary,
-      "blocks": [{
-        "type": "tool",
-        "tool": "CompactChat",
-        "input": f"POST /api/chats/{cmd.chat_id}/compact",
-        "output": cmd.summary,
-        "status": "done",
-        "defaultOpen": True,
-      }],
       "ts": next_message_ts(msgs + list(chat.pending_messages or [])),
     }
     msgs.append(new_msg)
