@@ -946,6 +946,44 @@
   z-index: 5;
 }
 
+/* Bottom fade + gesture-strip fill. A STATIC gradient scrim — transparent at
+   the top (chat text stays visible around the composer, the effect we want)
+   softening to solid var(--bg) at the very bottom, so:
+   (1) the device home-indicator / gesture strip below the composer reads as the
+       plain background instead of chat text hard-cutting at the edge, and
+   (2) text descending toward that strip DISSOLVES into the background instead of
+       stopping abruptly — a premium fade.
+   Deliberately a static `pointer-events:none` pseudo-element, NOT a `mask-image`
+   on `.chat__scroll`: a mask over the scroller re-rasterizes every scroll frame
+   and janks on Android (see the drawer-fade fix in Drawer.css + the
+   android-scroll-jank note). This paints on a cheap static layer.
+   z-index -1 keeps it inside the foot's stacking context (z:5) so it sits ABOVE
+   the scrolling message list (fading the text) but BEHIND the composer pill (the
+   pill's backdrop-blur stays crisp). It extends `top` above the composer for a
+   gradual fade and past the foot's lifted `bottom` (which sits at the safe-area
+   inset) down to the true screen edge, covering the gesture strip in solid --bg.
+   Follows var(--bg), so theme changes + deploy refreshes can't strand a wrong
+   color (the reason the old manifest/theme-color attempt kept reverting). */
+.chat__foot::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -32px;
+  bottom: calc(-1 * env(safe-area-inset-bottom, 0px));
+  background: linear-gradient(to bottom, transparent 0%, var(--bg) 72%);
+  pointer-events: none;
+  z-index: -1;
+}
+
+/* In the embedded composer the app sheet owns the safe area, so there is no
+   device gesture strip to fill and the shorter, flat-bottomed foot doesn't want
+   the tall fade. Keep it subtle: just enough to soften content under the pill. */
+.chat-embed .chat__foot::before {
+  top: -20px;
+  bottom: 0;
+}
+
 .chat__foot .queued,
 .chat__foot .connection-status,
 .chat__foot .chat__attach-tray,
