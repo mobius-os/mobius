@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch } from '../../api/client.js'
 import { formatToolResult } from './toolResultFormat.js'
 import { toolActivityLabel } from './toolActivityLabel.js'
+import { preserveTogglePosition } from './preserveTogglePosition.js'
 
 function sourceHost(url) {
   try {
@@ -76,6 +77,7 @@ export default function ToolBlock({ t, chatId, msgTs, blockIdx }) {
   // a legacy persisted `defaultOpen` field is ignored and renders collapsed
   // like everything else).
   const [open, setOpen] = useState(false)
+  const headerRef = useRef(null)
   // The full output of a large tool block is fetched lazily on first expand —
   // a chat load ships only the top-line summary (the tool + its input) and an
   // output_truncated marker, no output preview (see chats.py
@@ -127,7 +129,15 @@ export default function ToolBlock({ t, chatId, msgTs, blockIdx }) {
     <div className={
       `chat__tool chat__tool--${t.status || 'done'}${failed ? ' chat__tool--failed' : ''}`
     }>
-      <div className="chat__tool-header" onClick={() => hasDetail && setOpen(!open)}>
+      <div
+        ref={headerRef}
+        className="chat__tool-header"
+        onClick={() => {
+          if (!hasDetail) return
+          preserveTogglePosition(headerRef.current)
+          setOpen(o => !o)
+        }}
+      >
         {t.status === 'running' && <span className="chat__tool-spin" />}
         {/* Skill observability: when the Skill tool loaded a named
             skill, show its name as a chip so the user can see which

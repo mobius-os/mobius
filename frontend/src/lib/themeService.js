@@ -34,6 +34,26 @@ import { applyTheme, inferMode, HEX_RE } from './applyTheme.js'
 // re-validated against HEX_RE wherever it is read back so a future
 // server-side change can't slip a CSS expression into the DOM.
 const STYLE_ID = 'mobius-theme'
+let themeAppliedOnce = false
+let themeTransitionTimer = null
+
+function beginThemeTransition() {
+  if (typeof document === 'undefined') return
+  if (!themeAppliedOnce) return
+  if (typeof window !== 'undefined'
+      && window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) {
+    return
+  }
+  const root = document.documentElement
+  if (!root?.classList?.add || !root.classList.remove) return
+  const timerHost = typeof window !== 'undefined' ? window : globalThis
+  root.classList.add('theme-transitioning')
+  if (themeTransitionTimer) timerHost.clearTimeout(themeTransitionTimer)
+  themeTransitionTimer = timerHost.setTimeout(() => {
+    root.classList.remove('theme-transitioning')
+    themeTransitionTimer = null
+  }, 220)
+}
 
 /**
  * Apply a theme CSS string (and optional bg color) to the DOM.
@@ -50,7 +70,9 @@ const STYLE_ID = 'mobius-theme'
  * toggleTheme below, tests) don't have to change their call shape.
  */
 export function applyThemeToDom(css, bg, mode) {
+  beginThemeTransition()
   applyTheme({ css, bg, mode })
+  themeAppliedOnce = true
 }
 
 /**

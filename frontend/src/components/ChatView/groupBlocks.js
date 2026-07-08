@@ -1,15 +1,16 @@
 import { toolResultFailed } from './toolResultFormat.js'
 import { toolActivityLabel } from './toolActivityLabel.js'
 
-// Fold runs of 2+ adjacent tool entries into one group node, so a build turn's
-// wall of individual tool blocks collapses into a single "Activity" card. This
-// runs on BOTH render paths — MsgContent (persisted msg.blocks) and
-// StreamingMessage (live streamItems) — so the transcript looks the same before
-// and after a streaming turn is promoted. Keep them calling the same function.
+// Fold runs of adjacent tool entries into one activity node, including a lone
+// tool. This gives single-tool and multi-tool runs the same collapsed header and
+// lets a live single tool become a multi-tool run without swapping visual
+// primitives. This runs on BOTH render paths — MsgContent (persisted msg.blocks)
+// and StreamingMessage (live streamItems) — so the transcript looks the same
+// before and after a streaming turn is promoted. Keep them calling the same
+// function.
 //
 // Rules:
-//   - a run of >=2 adjacent entries whose item.type === 'tool' becomes a group
-//   - a LONE tool stays ungrouped (no card chrome for a single call)
+//   - any run of entries whose item.type === 'tool' becomes a group
 //   - any non-tool entry (text, question, error) breaks the run and passes
 //     through, so interleave order is preserved exactly
 //
@@ -24,10 +25,8 @@ export function groupToolRuns(entries) {
   let run = []
 
   const flush = () => {
-    if (run.length >= 2) {
+    if (run.length >= 1) {
       nodes.push({ group: run })
-    } else if (run.length === 1) {
-      nodes.push({ single: run[0] })
     }
     run = []
   }

@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { toolGroupState, toolGroupSummary } from './groupBlocks.js'
+import { preserveTogglePosition } from './preserveTogglePosition.js'
 
 // One collapsible "Activity" card standing in for a run of adjacent tool calls,
 // so a build turn's 20-tool wall doesn't bury the agent's prose. The header
@@ -34,22 +35,33 @@ export default function ToolActivityGroup({ tools, children }) {
   const state = useMemo(() => toolGroupState(tools), [sig]) // eslint-disable-line react-hooks/exhaustive-deps
   const running = state === 'running'
   const [userOpen, setUserOpen] = useState(false)
+  const headerRef = useRef(null)
   // The user's toggle is the ONLY open/close signal — no force-open (see the
   // header comment for why removing it fixed the boundary flap + scroll
   // displacement). While collapsed, the header spinner carries live status.
   const open = userOpen
 
   const summary = toolGroupSummary(tools)
+  const countLabel = `${tools.length} tool call${tools.length === 1 ? '' : 's'}`
+  const title = running
+    ? `Running ${countLabel}`
+    : state === 'error'
+      ? `${countLabel} failed`
+      : countLabel
 
   return (
     <div className={`chat__toolgroup chat__toolgroup--${state}`}>
       <button
+        ref={headerRef}
         type="button"
         className="chat__toolgroup-header"
         // Togglable at any time, running or not: with default-collapse there is
         // no forced-open state for a tap to fight, so the user can peek into a
         // live run and close it again.
-        onClick={() => setUserOpen(o => !o)}
+        onClick={() => {
+          preserveTogglePosition(headerRef.current)
+          setUserOpen(o => !o)
+        }}
         aria-expanded={open}
       >
         {running
@@ -75,8 +87,12 @@ export default function ToolActivityGroup({ tools, children }) {
                 )}
             </span>
           )}
-        <span className="chat__toolgroup-summary">{summary}</span>
-        <span className="chat__toolgroup-count">{tools.length} tools</span>
+        <span className="chat__toolgroup-summary">
+          <span className="chat__toolgroup-title">{title}</span>
+          {summary && (
+            <span className="chat__toolgroup-activity">{summary}</span>
+          )}
+        </span>
         {state === 'error' && (
           <span className="chat__toolgroup-chip">Failed</span>
         )}

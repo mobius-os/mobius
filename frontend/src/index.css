@@ -160,6 +160,13 @@ body,
   color-scheme: light;
 }
 
+:root.theme-transitioning,
+:root.theme-transitioning * {
+  transition-property: background, background-color, border-color, box-shadow, color, fill, stroke;
+  transition-duration: 180ms;
+  transition-timing-function: ease;
+}
+
 html, body, #root {
   height: 100%;
   overflow: hidden;

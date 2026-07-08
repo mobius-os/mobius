@@ -6,10 +6,10 @@ import { toolActivityLabel } from '../toolActivityLabel.js'
 const e = item => ({ item })
 const tool = (extra = {}) => ({ type: 'tool', ...extra })
 
-test('a lone tool stays ungrouped', () => {
+test('a lone tool renders as an activity group', () => {
   const nodes = groupToolRuns([e(tool()), e({ type: 'text' })])
   assert.equal(nodes.length, 2)
-  assert.ok(nodes[0].single)
+  assert.equal(nodes[0].group.length, 1)
   assert.ok(nodes[1].single)
 })
 
@@ -41,10 +41,12 @@ test('original entry metadata is carried through untouched', () => {
   assert.deepEqual(nodes[0].group.map(x => x.idx), [7, 8])
 })
 
-test('a single tool between two texts is not grouped', () => {
+test('a single tool between two texts keeps order as a one-tool group', () => {
   const nodes = groupToolRuns([e({ type: 'text' }), e(tool()), e({ type: 'text' })])
   assert.equal(nodes.length, 3)
-  assert.ok(nodes.every(n => n.single))
+  assert.ok(nodes[0].single)
+  assert.equal(nodes[1].group.length, 1)
+  assert.ok(nodes[2].single)
 })
 
 test('empty input yields no nodes', () => {
