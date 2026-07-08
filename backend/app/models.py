@@ -137,6 +137,15 @@ class Chat(Base):
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
   )
+  # Advances ONLY when the OWNER sends a message into this chat (initial
+  # send, a queued send, or a fast-forward/steer send). This is the drawer
+  # ordering key, deliberately decoupled from `updated_at` — which bumps on
+  # EVERY row write via onupdate (run markers, session id, streamed
+  # transcript, the agent's auto-retitle) and would otherwise re-sort the
+  # chat to the top on activity the owner did not initiate. No onupdate here.
+  activity_at = Column(
+    DateTime, nullable=True, default=lambda: datetime.now(UTC)
+  )
 
 
 class ChatRun(Base):

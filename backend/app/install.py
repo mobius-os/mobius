@@ -46,7 +46,7 @@ from sqlalchemy import case
 from sqlalchemy.orm import Session
 
 from app import activity, app_git, fs_locks, models
-from app.compiler import compile_jsx
+from app.compiler import CompileError, compile_jsx
 from app.config import get_settings
 # Keep the underscore alias: install._http_get calls _validate_url_safe, and
 # the install tests patch `app.install._validate_url_safe`. The canonical
@@ -84,6 +84,7 @@ _ENTRY_MAX_BYTES = 1024 * 1024
 _SEED_MAX_BYTES = 4 * 1024 * 1024
 
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 def _manifest_color(value) -> str | None:
@@ -108,6 +109,24 @@ def _manifest_display(value) -> str | None:
     return None
   value = value.strip().lower()
   return value if value in _VALID_DISPLAY else None
+
+
+def _compile_error_detail(app_name: str, exc: CompileError) -> str:
+  """Return a concise client-safe compile error for a manifest install."""
+  cleaned = _ANSI_RE.sub("", exc.stderr or "")
+  lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+  for line in lines:
+    resolve_idx = line.find("Could not resolve")
+    if resolve_idx >= 0:
+      line = line[resolve_idx:]
+      return (
+        f"{app_name} failed to compile: {line} — its manifest likely "
+        "omits a source file"
+      )
+  detail = lines[0] if lines else str(exc)
+  return f"{app_name} failed to compile: {detail}"
+
+
 # Aggregate caps across ALL seeds in one manifest. The per-file cap alone
 # leaves the total unbounded (a manifest can list many seeds), so a small
 # manifest could still force large memory growth holding them all (Codex
@@ -824,25 +843,42 @@ def _write_source_file(
   atomic_write(target, content)
 
 
+def _source_path_set(tree: dict[str, bytes]) -> set[str]:
+  """Return hand-written source paths from a full git tree."""
+  return {rel for rel in tree if rel not in _MERGED_NON_SOURCE}
+
+
+def _read_upstream_source_paths(source_dir: Path, ref: str | None) -> set[str]:
+  """Best-effort source path set for a prior or current upstream ref."""
+  if not ref:
+    return set()
+  try:
+    return _source_path_set(app_git.read_ref_tree(source_dir, ref))
+  except Exception as exc:
+    log.warning(
+      "install: failed to read upstream source paths in %s at %s — %r",
+      source_dir, ref, exc,
+    )
+    return set()
+
+
 def _prune_dropped_source_files(
   source_dir_path: Path,
-  keep: set[str],
+  dropped_source_paths: set[str],
   rollback_actions: list[Callable[[], None]],
+  commit_actions: list[Callable[[], None]],
 ) -> None:
-  """Delete git-tracked source files not in `keep`, making the worktree match a
-  merged tree.
+  """Delete only git-tracked source files the new upstream removed.
 
-  On a clean merge the merged tree omits a sibling the new version dropped, but
-  the source-write loop only writes files it has — the stale sibling stays on
-  disk and `git add -A` re-records it onto `main` as permanent local divergence.
-  This reconciles by unlinking every tracked file absent from `keep` (the merged
-  tree's path set). Only git-tracked files are touched, so runtime/storage dirs,
-  `.bak` snapshots, and gitignored output are never removed. Each deletion
-  snapshots to a `.bak` and registers a rollback restore so a later compile
-  failure brings the file back. Best-effort on the `ls-files` read: if git can't
-  enumerate, nothing is pruned (the worst case is a lingering stale sibling, not
-  data loss).
+  The delete set is the prior upstream source paths minus the new upstream
+  source paths. That keeps local-only tracked files and siblings omitted from
+  both upstreams on disk because they were never removed by upstream. Each
+  deletion snapshots to a `.mobius-drop-bak`, registers rollback restore for a
+  later failure, and registers success cleanup so the snapshot is never staged.
+  Best-effort on the `ls-files` read: if git can't enumerate, nothing is pruned.
   """
+  if not dropped_source_paths:
+    return
   try:
     listing = subprocess.run(
       ["git", "-C", str(source_dir_path), "ls-files", "-z"],
@@ -852,7 +888,7 @@ def _prune_dropped_source_files(
   except (OSError, subprocess.SubprocessError):
     return
   for rel in listing.stdout.decode().split("\0"):
-    if not rel or rel in keep:
+    if not rel or rel not in dropped_source_paths:
       continue
     target = source_dir_path / rel
     if not target.is_file():
@@ -866,6 +902,9 @@ def _prune_dropped_source_files(
     shutil.copy2(target, backup)
     rollback_actions.append(
       lambda b=backup, o=target: os.replace(b, o) if b.exists() else None
+    )
+    commit_actions.append(
+      lambda b=backup: b.unlink() if b.exists() else None
     )
     target.unlink()
 
@@ -1710,6 +1749,10 @@ async def install_from_manifest(
   )
   cloned_install = False
   cloned_update = False
+  # Source deletes are computed from old-upstream minus new-upstream. The prune
+  # phase consumes this explicit diff so local-only tracked siblings are not
+  # mistaken for files the manifest intentionally removed.
+  dropped_source_paths: set[str] = set()
   # The `source_tree` key that carries the entry's bytes — and, on every path
   # that writes or compiles from disk, the entry's on-disk name. Fetched/
   # synthetic trees always key the entry as the root "index.jsx" they
@@ -1916,6 +1959,9 @@ async def install_from_manifest(
         had_repo = app_git.is_repo(git_source_dir)
         if existing and had_repo:
           prev_upstream_commit = app.upstream_commit
+          previous_upstream_paths = await asyncio.to_thread(
+            _read_upstream_source_paths, git_source_dir, prev_upstream_commit,
+          )
           # If a PRIOR update left an unresolved conflict (MERGE_HEAD still
           # set, markers on disk), abort it first — otherwise the commit_local
           # below would commit the conflict markers as "local edits" (silent
@@ -1973,6 +2019,13 @@ async def install_from_manifest(
               git_source_dir, source_tree, canonical_manifest_url, version,
               exec_paths=exec_paths,
             )
+            new_upstream_paths = set(source_tree)
+          else:
+            new_upstream_paths = await asyncio.to_thread(
+              _read_upstream_source_paths, git_source_dir,
+              app_git.UPSTREAM_BRANCH,
+            )
+          dropped_source_paths = previous_upstream_paths - new_upstream_paths
           if not diverged:
             # No local edits → upstream wins outright for the whole tree; it is
             # `source_tree` as fetched for synthetic repos, or the full
@@ -2229,15 +2282,12 @@ async def install_from_manifest(
                 target.chmod(0o755)
             # Reconcile the worktree to the source tree: a file the new version
             # dropped (a sibling, an old job) must be deleted, not left on disk
-            # to be re-recorded onto `main` as permanent local divergence. Keep
-            # the tree's files plus the install-managed ones other phases own
-            # (the static-asset manifest is rewritten by _write_static_assets
-            # just below; .gitignore + init-cron.sh are managed too).
-            keep = set(source_tree) | {
-              _STATIC_ASSETS_MANIFEST, ".gitignore", "init-cron.sh",
-            }
+            # to be re-recorded onto `main` as permanent local divergence. The
+            # explicit upstream-diff delete set keeps local-only tracked source
+            # files out of prune's reach.
             _prune_dropped_source_files(
-              source_dir_path, keep, rollback_actions,
+              source_dir_path, dropped_source_paths,
+              rollback_actions, commit_actions,
             )
           # Compile now that the whole source tree is on disk. Passing the real
           # entry path makes esbuild resolve `./cards.js`-style sibling imports
@@ -2365,19 +2415,29 @@ async def install_from_manifest(
       except OSError as exc:
         log.warning("install: post-commit cleanup failed — %s", exc)
 
+  except CompileError as exc:
+    app_name = str(
+      manifest.get("name") or getattr(locals().get("app"), "slug", "app")
+    )
+    db.rollback()
+    _run_rollback_actions(rollback_actions)
+    _cleanup(created_paths)
+    raise HTTPException(422, _compile_error_detail(app_name, exc))
   except HTTPException:
     db.rollback()
     _run_rollback_actions(rollback_actions)
     _cleanup(created_paths)
     raise
-  except Exception as exc:
-    # Catch-all so a stray bug doesn't leak partial state. Re-raise
-    # as 500 with a useful detail; uvicorn already logs the traceback.
+  except Exception:
+    # Catch-all so a stray bug doesn't leak partial state or raw exception
+    # reprs. The traceback is logged server-side for operators.
     log.exception("install: unexpected failure during materialize")
     db.rollback()
     _run_rollback_actions(rollback_actions)
     _cleanup(created_paths)
-    raise HTTPException(500, f"Install failed: {exc!r}")
+    raise HTTPException(
+      500, "Install failed due to an unexpected server error.",
+    )
 
   # --- Phase 5: post-commit cron registration -------------------------
   # The app is fully installed at this point. Cron failures become

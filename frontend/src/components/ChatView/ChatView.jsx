@@ -183,7 +183,7 @@ function evictOldestDraft() {
 }
 
 
-export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystemEvent, builtApp, onOpenApp, onMessageStart, showPicker = true, embedded = false, quickActions = null, getContext = null }) {
+export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystemEvent, onChatMissing, builtApp, onOpenApp, onMessageStart, showPicker = true, embedded = false, quickActions = null, getContext = null }) {
   const queryClient = useQueryClient()
   // Chat is online-only (it spawns a server-side agent). When offline
   // the composer disables send and says so, rather than failing into a
@@ -966,7 +966,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
 
     const gen = fetchGenRef.current
     apiFetch(`/chats/${chatId}?limit=20`)
-      .then(r => r.json())
+      .then(r => {
+        if (r.status === 404) throw new Error('CHAT_NOT_FOUND')
+        if (!r.ok) throw new Error(`CHAT_LOAD_FAILED_${r.status}`)
+        return r.json()
+      })
       .then(data => {
         if (cancelled) return
         if (fetchGenRef.current !== gen) return
@@ -1047,10 +1051,15 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           sendingRef.current = false
         }
       })
-      .catch(() => {
+      .catch((err) => {
         if (cancelled) return
         setLoadError(true)
         setLoading(false)
+        // A confirmed 404 means this chat is gone (deleted out-of-band, or an
+        // off-list chat the restore probe had memoized as existing). Tell the
+        // shell so it demotes to a live chat instead of stranding the user on a
+        // dead chat's error screen. Network/other failures stay retryable.
+        if (err && err.message === 'CHAT_NOT_FOUND') onChatMissing?.(chatId)
       })
 
     return () => {

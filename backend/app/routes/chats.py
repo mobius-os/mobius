@@ -10,6 +10,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app import activity, auth, models, questions
@@ -231,10 +232,12 @@ def list_chats(
   db.commit()
 
   # Pinned chats sort first (newest pin at top of the pinned group),
-  # then unpinned by recency. `pinned_at IS NOT NULL` is the primary
-  # key on SQLite's order_by — a `desc()` on a nullable column would
-  # put NULL last under our SQLite collation, but making the boolean
-  # explicit is clearer and portable.
+  # then unpinned by owner-send recency. `activity_at` is the drawer
+  # ordering key; `updated_at` remains the generic row-modified time.
+  # `pinned_at IS NOT NULL` is the primary key on SQLite's order_by —
+  # a `desc()` on a nullable column would put NULL last under our
+  # SQLite collation, but making the boolean explicit is clearer and
+  # portable.
   q = db.query(models.Chat).filter(models.Chat.deleted_at.is_(None))
   if not include_app_chats:
     # Drawer history is the owner's browse list. App-attributed chats are
@@ -246,7 +249,7 @@ def list_chats(
     q.order_by(
       models.Chat.pinned_at.is_(None),
       models.Chat.pinned_at.desc(),
-      models.Chat.updated_at.desc(),
+      func.coalesce(models.Chat.activity_at, models.Chat.updated_at).desc(),
     )
     .all()
   )
@@ -255,6 +258,7 @@ def list_chats(
       "id": c.id,
       "title": c.title,
       "updated_at": c.updated_at.isoformat(),
+      "activity_at": c.activity_at.isoformat() if c.activity_at else None,
       "pinned_at": c.pinned_at.isoformat() if c.pinned_at else None,
       "has_messages": bool(c.messages and len(c.messages) > 0),
       "created_by_app_id": c.created_by_app_id,
@@ -350,7 +354,8 @@ async def update_chat(
   chat = get_active_chat_or_404(db, chat_id)
   if body.title is not None:
     chat.title = body.title
-  # Always touch updated_at so the chat moves to the top of history.
+  # Touch updated_at (generic modified time). Ordering is driven by
+  # activity_at (owner-send only), so a rename does not reorder the drawer.
   chat.updated_at = datetime.now(UTC)
   db.commit()
   return {"ok": True}

@@ -8,7 +8,7 @@ import ChatView from '../ChatView/ChatView.jsx'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
 import SettingsView from '../SettingsView/SettingsView.jsx'
 import WalkthroughOverlay from '../Walkthrough/WalkthroughOverlay.jsx'
-import { api, BASE } from '../../api/client.js'
+import { api, apiFetch, BASE } from '../../api/client.js'
 import usePushSubscription from '../../hooks/usePushSubscription.js'
 import useNavigation, { coldRestoredCanvasAppId } from '../../hooks/useNavigation.js'
 import { pushNavEntry, replaceNavEntry } from '../../lib/navHistory.js'
@@ -105,6 +105,7 @@ export default function Shell() {
   // never tapping in the dark about whether they're connected.
   const online = useOnlineStatus()
   const chatsLoadedRef = useRef(false)
+  const knownExistingOffListChatIdsRef = useRef(new Set())
   // In-flight guard for newChat. The function POSTs unconditionally now
   // (the old empty-chat-reuse path was the implicit deduper); without
   // this guard a rapid double-tap on "+ New chat" before the API
@@ -326,8 +327,31 @@ export default function Shell() {
     // present→absent transition. A cached id we've never seen in a fetched
     // list yet (just-opened app whose query hasn't caught up) is left alone
     // until the list confirms it; this is the open-app stale-list race guard.
+    //
+    // Never evict an app that a back-stack entry still points at. `/api/apps/`
+    // is NetworkFirst, so a drawer-open refetch can resolve to a stale
+    // cache-fallback list that transiently omits a still-installed app; if
+    // that app is a back target, evicting it here scrubs it from navStackRef
+    // and the back-gesture skips it (A→B→C then back landed on A, not B).
+    // A genuine LOCAL uninstall scrubs the nav-stack via deleteApp, so this
+    // generic list-reconciliation must not.
+    const navHeldAppIds = new Set(
+      navStackRef.current
+        .filter(e => e.view === 'canvas' && e.appId != null)
+        .map(e => e.appId)
+    )
+    // The ACTIVE canvas is never exempt: an app deleted out-of-band while it is
+    // the current view must still be evicted so the shell falls back to chat
+    // (feature 114), even when an earlier visit also left it on the back-stack
+    // (chat→A→B→A leaves A both active AND a back target). Only genuine back
+    // targets get the stale-list protection.
+    if (activeView === 'canvas' && activeAppId != null) {
+      navHeldAppIds.delete(activeAppId)
+    }
     const stale = appCache.filter(
-      id => !liveIds.has(id) && seenAppIdsRef.current.has(id)
+      id => !navHeldAppIds.has(id)
+        && !liveIds.has(id)
+        && seenAppIdsRef.current.has(id)
     )
     if (stale.length === 0) return
     // Evict exactly the confirmed-stale ids — NOT every id absent from
@@ -500,8 +524,20 @@ export default function Shell() {
       // ChatView would mount on `prev`, fetch `/api/chats/{prev}`,
       // 404, and show an error state for the full 30s staleTime
       // window. The nudge resolves the situation in one round-trip.
+      knownExistingOffListChatIdsRef.current.delete(prev)
       if (!liveFetched && !chatsQuery.isFetching) refreshChats()
-    } else if (prev && !liveFetched) {
+      chatsLoadedRef.current = true
+      return
+    }
+    if (!prev) {
+      // No restored chat target exists yet. Demote immediately to the
+      // newest listed chat, or let the bootstrap effect create one if the
+      // owner has no listed chats.
+      setActiveChatId(chats[0]?.id || null)
+      chatsLoadedRef.current = true
+      return
+    }
+    if (!liveFetched) {
       // Persisted snapshot is missing `prev` but we haven't heard
       // from the server yet. Hold `prev` as a tentative restore —
       // ChatView mounts on it, and if it's gone server-side, the
@@ -511,14 +547,45 @@ export default function Shell() {
       // the on-mount refetch — without that nudge a fresh persisted
       // snapshot pins us here indefinitely.
       if (!chatsQuery.isFetching) refreshChats()
-    } else {
-      // `prev` is null (cold cache, deep-link, etc.), or live data
-      // confirmed `prev` is gone. Demote to the most recent chat,
-      // or null when there genuinely are none (the bootstrap effect
-      // below handles that case).
-      setActiveChatId(chats[0]?.id || null)
+      chatsLoadedRef.current = true
+      return
     }
-    chatsLoadedRef.current = true
+    if (knownExistingOffListChatIdsRef.current.has(prev)) {
+      chatsLoadedRef.current = true
+      return
+    }
+
+    // Drawer-list absence is not deletion evidence because /api/chats is a
+    // filtered view that hides app-attributed chats and can lag a new chat.
+    // Only a direct /api/chats/{id} 404 proves that the restored target should
+    // be demoted.
+    let cancelled = false
+    const probedChatId = prev
+    ;(async () => {
+      try {
+        const res = await apiFetch(`/chats/${encodeURIComponent(probedChatId)}?limit=1`, { timeoutMs: 15000 })
+        // Stale-guard: the active chat can change while the probe is in
+        // flight, so a verdict for an old restore target must never navigate.
+        if (cancelled || activeChatIdRef.current !== probedChatId) return
+        if (res.status === 404) {
+          knownExistingOffListChatIdsRef.current.delete(probedChatId)
+          setActiveChatId(chats[0]?.id || null)
+        } else if (res.ok) {
+          // Exists but is unlisted because it is app-attributed or the drawer
+          // list is lagging a fresh chat. Memoize only the positive off-list
+          // result so future list refetches do not repeatedly probe it.
+          knownExistingOffListChatIdsRef.current.add(probedChatId)
+        }
+        // Any other status is not deletion evidence, so the restored target
+        // stays mounted until a later list refetch retries the probe.
+      } catch {
+        // Offline, network, timeout, and auth-expiry paths are not deletion
+        // evidence, so the restored target stays mounted.
+      } finally {
+        if (!cancelled && activeChatIdRef.current === probedChatId) chatsLoadedRef.current = true
+      }
+    })()
+    return () => { cancelled = true }
   }, [chats, chatsQuery.isFetched, chatsQuery.isSuccess,
       chatsQuery.isFetchedAfterMount, chatsQuery.isFetching,
       refreshChats, setActiveChatId, activeChatIdRef])
@@ -702,6 +769,7 @@ export default function Shell() {
           try { sessionStorage.setItem('pending-draft', String(e.data.draft)) } catch {}
         }
         navTo('chat', { chatId: e.data.chatId })
+        refreshChats()
       } else if (e.data?.type === 'moebius:open-app') {
         // Match against installed apps by numeric id OR slug, so the
         // sender can use whichever it has on hand. String() coercion
@@ -773,7 +841,7 @@ export default function Shell() {
         navigator.serviceWorker.removeEventListener('message', onSwMessage)
       }
     }
-  }, [apps, chats, navTo, refreshApps])
+  }, [apps, chats, navTo, refreshApps, refreshChats])
 
   async function newChat({ draft, forceNew, exclude } = {}) {
     // Reuse the most-recently-updated empty chat if one exists; only
@@ -1189,6 +1257,16 @@ export default function Shell() {
               refreshChats()
             }}
             onSystemEvent={handleSystemEvent}
+            onChatMissing={(missingId) => {
+              // ChatView's own load returned a real 404: this chat is gone
+              // (deleted out-of-band, or an off-list chat the restore probe had
+              // memoized as existing). Drop the stale memo so it can't re-hold
+              // it, and demote to a live chat if it's still the active view.
+              knownExistingOffListChatIdsRef.current.delete(missingId)
+              if (String(activeChatIdRef.current) === String(missingId)) {
+                setActiveChatId(chats[0]?.id || null)
+              }
+            }}
             builtApp={builtApp}
             onOpenApp={(appId) => { navTo('canvas', { appId }); setBuiltApp(null) }}
             onMessageStart={() => {
