@@ -121,6 +121,13 @@ def _coerce_agent_settings(raw) -> dict:
   return {}
 
 
+def _visible_in_owner_drawer(chat: models.Chat) -> bool:
+  if chat.created_by_app_id is None:
+    return True
+  settings = _coerce_agent_settings(chat.agent_settings_json)
+  return settings.get("owner_visible") is True
+
+
 @router.post(
   "/{chat_id}/media-token",
   dependencies=[Depends(reject_cross_site)],
@@ -239,12 +246,6 @@ def list_chats(
   # SQLite collation, but making the boolean explicit is clearer and
   # portable.
   q = db.query(models.Chat).filter(models.Chat.deleted_at.is_(None))
-  if not include_app_chats:
-    # Drawer history is the owner's browse list. App-attributed chats are
-    # still real chats the owner can open directly and the reflection agent
-    # can interview, but the drawer should not mix embedded app panels into
-    # the owner's own conversation history.
-    q = q.filter(models.Chat.created_by_app_id.is_(None))
   chats = (
     q.order_by(
       models.Chat.pinned_at.is_(None),
@@ -253,6 +254,11 @@ def list_chats(
     )
     .all()
   )
+  if not include_app_chats:
+    # Drawer history is the owner's browse list. Most app-attributed chats are
+    # embedded app panels and stay hidden; an app can opt a spawned, first-class
+    # owner conversation into the drawer by setting owner_visible at creation.
+    chats = [c for c in chats if _visible_in_owner_drawer(c)]
   return [
     {
       "id": c.id,
@@ -901,6 +907,7 @@ class AppChatCreate(BaseModel):
   report_date: str | None = None
   report_kind: str | None = Field(default=None, max_length=64)
   project_id: str | None = Field(default=None, max_length=64)
+  owner_visible: bool = False
 
   @field_validator("project_id")
   @classmethod
@@ -941,6 +948,7 @@ def _merge_app_chat_settings(
   report_date: str | None = None,
   report_kind: str | None = None,
   project_id: str | None = None,
+  owner_visible: bool | None = None,
 ) -> None:
   """Merge app-supplied runtime metadata into Chat.agent_settings_json."""
   from sqlalchemy.orm.attributes import flag_modified
@@ -982,6 +990,11 @@ def _merge_app_chat_settings(
       settings["project_id"] = value
     else:
       settings.pop("project_id", None)
+  if owner_visible is not None:
+    if owner_visible:
+      settings["owner_visible"] = True
+    else:
+      settings.pop("owner_visible", None)
   chat.agent_settings_json = settings or None
   if settings:
     flag_modified(chat, "agent_settings_json")
@@ -1048,6 +1061,7 @@ def create_app_chat(
     report_date=body.report_date,
     report_kind=body.report_kind,
     project_id=body.project_id,
+    owner_visible=body.owner_visible,
   )
   db.add(chat)
   db.commit()
