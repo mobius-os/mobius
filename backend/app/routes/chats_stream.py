@@ -817,7 +817,10 @@ async def send_message(
     discard_starting(chat_id)
     raise
 
-  return JSONResponse(status_code=202, content={"status": "started"})
+  return JSONResponse(
+    status_code=202,
+    content={"status": "started", "message": user_msg},
+  )
 
 
 @router.delete(

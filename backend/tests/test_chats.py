@@ -84,6 +84,31 @@ def test_send_message_rejects_cross_site_request(client, auth, chat):
   assert cross.status_code == 403
 
 
+def test_fresh_send_response_includes_stored_user_message(
+  client, auth, chat, db, monkeypatch,
+):
+  async def _noop_run_chat(*args, **kwargs):
+    return None
+
+  monkeypatch.setattr("app.routes.chats_stream.run_chat", _noop_run_chat)
+
+  response = client.post(
+    f"/api/chats/{chat.id}/messages",
+    json={"content": "build forge"},
+    headers=auth,
+  )
+
+  assert response.status_code == 202, response.text
+  body = response.json()
+  assert body["status"] == "started"
+  assert body["message"]["role"] == "user"
+  assert body["message"]["content"] == "build forge"
+  assert isinstance(body["message"]["ts"], int)
+
+  db.refresh(chat)
+  assert chat.messages == [body["message"]]
+
+
 def test_update_icon_rejects_cross_site_request(client, auth):
   # The cross-site dependency fires before the handler, so a non-existent
   # app id still 403s (mirrors test_update_app_rejects_cross_site_request).
