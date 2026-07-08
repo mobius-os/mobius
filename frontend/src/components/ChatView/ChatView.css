@@ -554,7 +554,8 @@
 .chat__tool-header {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
+  min-height: 32px;
   padding: 5px 10px;
   cursor: pointer;
   user-select: none;
@@ -736,6 +737,16 @@
   overflow: hidden;
 }
 
+.chat__toolgroup--running {
+  background: var(--surface); /* CONTRACT: same collapsed running surface as a lone tool row */
+  border-color: var(--accent, var(--border-light));
+}
+
+.chat__toolgroup--done {
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 18%, var(--border-light));
+}
+
 .chat__toolgroup--error {
   border-color: color-mix(in srgb, var(--danger) 34%, var(--border-light)); /* CONTRACT: danger-tinted hairline when a step failed */
 }
@@ -743,9 +754,10 @@
 .chat__toolgroup-header {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   width: 100%;
-  padding: 7px 11px;
+  min-height: 32px;
+  padding: 5px 10px;
   background: none;
   border: 0;
   text-align: left;
@@ -775,18 +787,31 @@
 .chat__toolgroup-summary {
   font-size: 12.5px;
   font-family: var(--mono); /* CONTRACT: monospace tool names, matching tool blocks */
-  color: var(--text); /* CONTRACT: high-contrast summary on opaque fill */
+  color: var(--muted); /* CONTRACT: same quiet summary tone as tool headers */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
   flex: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
-.chat__toolgroup-count {
+.chat__toolgroup-title {
   flex-shrink: 0;
-  font-size: 11px;
-  color: var(--muted); /* CONTRACT: low-contrast count on opaque fill */
+}
+
+.chat__toolgroup-activity {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat__toolgroup-activity::before {
+  content: '· ';
+  color: var(--muted);
 }
 
 .chat__toolgroup-chip {
@@ -1084,27 +1109,39 @@
    their own focus-within container. */
 .chat__input:focus-visible { outline: none; }
 
-/* Send / Stop / Mic buttons all live INSIDE `.chat__pill` at 36×36.
-   Only `.chat__send` keeps the accent fill (primary action); stop +
-   mic are borderless icons on the pill's own surface. */
-.chat__send {
+/* Send / Stop / Steer / Mic all live in one stable action slot. The modifiers
+   below change semantic color, but the circular shell never changes size or
+   box model, so Send→Stop→Steer swaps don't feel like a different control. */
+.chat__action {
   flex-shrink: 0;
   width: 40px;
   height: 40px;
   border-radius: 50%;
-  border: none;
-  background: var(--accent); /* CONTRACT: vivid opaque accent fill */
-  color: #fff;
+  border: 1px solid transparent;
   display: grid;
   place-items: center;
   cursor: pointer;
-  transition: background 0.15s, transform 0.08s;
+  transition:
+    background-color 0.16s ease,
+    border-color 0.16s ease,
+    color 0.16s ease,
+    box-shadow 0.16s ease,
+    transform 0.08s ease;
+}
+.chat__action:active:not(:disabled) { transform: scale(0.94); }
+.chat__action svg {
+  display: block;
+  transition: transform 0.16s ease;
+}
+
+.chat__send {
+  background: var(--accent); /* CONTRACT: vivid opaque accent fill */
+  color: #fff;
 }
 
 .chat__send:hover:not(:disabled) {
   background: var(--accent-hover); /* CONTRACT: vivid opaque accent on hover */
 }
-.chat__send:active:not(:disabled) { transform: scale(0.94); }
 
 .chat__send:disabled {
   background: var(--border); /* CONTRACT: used as a 1px separator stripe — border color repurposed as fill */
@@ -1114,21 +1151,14 @@
 /* Stop button — red so the "interrupt running agent" affordance
    is unmissable. Solid red on hover, slightly desaturated at rest. */
 .chat__stop {
-  flex-shrink: 0;
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  border: none;
-  background: transparent;
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
   color: var(--danger); /* CONTRACT: destructive accent on opaque fill */
-  display: grid;
-  place-items: center;
-  cursor: pointer;
-  transition: color 0.15s, background 0.15s;
+  border-color: color-mix(in srgb, var(--danger) 24%, transparent);
 }
 .chat__stop:hover {
   color: #fff;
   background: var(--danger); /* CONTRACT: destructive accent fill */
+  border-color: var(--danger);
 }
 
 /* Steer (fast-forward) button — replaces Stop while a turn is streaming
@@ -1137,20 +1167,10 @@
    advances the queue into the turn rather than interrupting it. Same 40×40
    pill geometry as Send/Stop so the slot doesn't reflow on swap. */
 .chat__steer {
-  flex-shrink: 0;
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  border: none;
   background: var(--accent); /* CONTRACT: vivid opaque accent fill */
   color: #fff;
-  display: grid;
-  place-items: center;
-  cursor: pointer;
-  transition: background 0.15s, transform 0.08s;
 }
 .chat__steer:hover { background: var(--accent-hover); /* CONTRACT: vivid opaque accent on hover */ }
-.chat__steer:active { transform: scale(0.94); }
 
 /* Pending-question nudge — shown in the foot when an unanswered
    AskUserQuestion card sits outside the viewport, so the frozen turn
@@ -1183,17 +1203,8 @@
 
 /* ── Voice input ──────────────────────────────────── */
 .chat__mic {
-  flex-shrink: 0;
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  border: none;
   background: transparent;
   color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
-  display: grid;
-  place-items: center;
-  cursor: pointer;
-  transition: color 0.15s;
 }
 .chat__mic:hover { color: var(--text); /* CONTRACT: high-contrast text on opaque fill */ }
 

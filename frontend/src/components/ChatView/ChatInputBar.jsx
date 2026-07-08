@@ -90,13 +90,9 @@ _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
  *  false and the Stop square returns, and while the composer has text the Send
  *  button (queue-another) still wins over both.
  *
- *  Each state's button carries a distinct `key`, and that is load-bearing.
- *  A state swap must REPLACE the DOM node, not patch a reused one: keyless
- *  same-type buttons let React keep one node across the swap, and
- *  `.chat__stop`'s background/color transition then cross-fades accent →
- *  transparent under the already-swapped icon, flashing a purple stop for
- *  ~150ms. Distinct keys force a fresh mount (a new node runs no CSS
- *  transition); within-state hover/active fades still run. */
+ *  Each state's button carries a distinct `key`, and that is load-bearing:
+ *  state swaps replace the semantic control, while the shared `.chat__action`
+ *  base keeps geometry and box model stable across Send / Stop / Steer / Mic. */
 function PrimaryAction({
   sending, listening, hasInput, hasUploading, offline, canSteer,
   onSubmit, onStop, onSteer, onToggleVoice,
@@ -105,7 +101,7 @@ function PrimaryAction({
     return (
       <button
         key="steer"
-        className="chat__steer"
+        className="chat__action chat__steer"
         type="button"
         onClick={onSteer}
         aria-label="Send queued message now"
@@ -116,7 +112,7 @@ function PrimaryAction({
   }
   if (sending && !hasInput) {
     return (
-      <button key="stop" className="chat__stop" type="button" onClick={onStop} aria-label="Stop">
+      <button key="stop" className="chat__action chat__stop" type="button" onClick={onStop} aria-label="Stop">
         <svg width="16" height="16" viewBox="0 0 12 12" fill="currentColor">
           <rect width="12" height="12" rx="2" />
         </svg>
@@ -127,7 +123,7 @@ function PrimaryAction({
     return (
       <button
         key="send"
-        className="chat__send"
+        className="chat__action chat__send"
         type="button"
         onTouchEnd={(e) => { e.preventDefault(); onSubmit(e) }}
         onClick={onSubmit}
@@ -141,7 +137,7 @@ function PrimaryAction({
   return (
     <button
       key="mic"
-      className={`chat__mic ${listening ? 'chat__mic--active' : ''}`}
+      className={`chat__action chat__mic ${listening ? 'chat__mic--active' : ''}`}
       type="button"
       onTouchEnd={(e) => { e.preventDefault(); onToggleVoice() }}
       onClick={onToggleVoice}
