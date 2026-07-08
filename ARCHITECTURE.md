@@ -6,7 +6,7 @@ Read this first if you just cloned the repo. It maps the system so you can find 
 
 Möbius is a self-hosted PWA where one owner chats with an in-product AI agent to build mini-apps and modify the platform itself. The "agent" is a coding-agent (Claude Code or Codex) running as a subprocess inside the container; a chat message spawns a turn, the backend streams the agent's output back over SSE, and the agent can compile JSX into mini-apps, edit the shell UI, manage files, and schedule tasks. The whole platform runs in a single Docker container and installs on Android/iOS as a PWA.
 
-The design has one line behind it: **low floor, high ceiling, no walls.** The agent is the product; everything else is substrate it operates on. Concretely: **code empowers the agent, it does not police it.** Subsystems the agent touches (themes, mini-apps, memory/skills, `/data/shared/`, `/data/apps/`) prefer well-named variables and inline contract comments over server-side rewriting; prevention lives in the agent's instruction layer and learned memory, not in code-level validators. Breaking is allowed because broken states are recoverable (the agent that broke it, or a sibling, fixes it — see `routes/recover.py`). The flip side: infrastructure the agent never sees — provider plumbing, the chat persistence actor, the streaming protocol, the navigation back-stack — gets whatever complexity makes it correct. Maximal expressive surface for the agent, ironclad substrate underneath.
+The design has one line behind it: **low floor, high ceiling, no walls.** The agent is the product; everything else is substrate it operates on. Concretely: **code empowers the agent, it does not police it.** Subsystems the agent touches (themes, mini-apps, memory/skills, `/data/shared/`, `/data/apps/`) prefer well-named variables and inline contract comments over server-side rewriting; prevention lives in the agent's instruction layer and learned memory, not in code-level validators. Breaking is allowed because broken states are recoverable (the agent that broke it, or a sibling, fixes it — see the `recoveryd` recovery floor, `backend/recovery/`). The flip side: infrastructure the agent never sees — provider plumbing, the chat persistence actor, the streaming protocol, the navigation back-stack — gets whatever complexity makes it correct. Maximal expressive surface for the agent, ironclad substrate underneath.
 
 This split is why a section can read either "this is intentionally hackable, don't add a guardrail" or "this is load-bearing, don't touch it without reading the full reference." Both are true; which one applies depends on whether the agent sees the surface.
 
@@ -17,21 +17,21 @@ Dockerfile (root)     Single-container image: frontend build + backend + CLI too
 docker-compose.yml    Self-hosted: Caddy (TLS) + app + recoveryd
 ├── caddy             HTTPS reverse proxy — forwards everything to app:8000
 ├── app               FastAPI serves the API + the frontend static files
-└── recoveryd         frozen recovery floor — same image, own container, serves :8001 (/recover* routing deliberately not wired in the bundled Caddyfile; see the self-heal section)
+└── recoveryd         frozen recovery floor — same image, own container, serves :8001 (the bundled Caddyfile routes /recover* to it ahead of the app catch-all; see the self-heal section)
 ```
 
 The image bundles everything the agent needs at runtime (the Claude and Codex CLIs, esbuild, Node) so the platform works out of the box. To join an existing Caddy setup instead of the bundled one, use `docker-compose.override.example.yml`.
 
 ### Frontend serving priority (the #1 deploy gotcha)
 
-At startup `backend/app/main.py:890` picks one static directory **at module load time**, not per request (though a request for a file missing from the chosen `/data/shell/dist` still falls back per-request to the baked `/app/static`):
+At startup `backend/app/main.py:1000` picks one static directory **at module load time**, not per request (though a request for a file missing from the chosen `/data/platform/frontend/dist` still falls back per-request to the baked `/app/static`):
 
 ```
-/data/shell/dist/  ← preferred (the agent's live rebuild; persists across image rebuilds)
-/app/static/       ← fallback (baked into the image, current with git HEAD)
+/data/platform/frontend/dist/  ← preferred (the served platform clone's live build; persists across image rebuilds)
+/app/static/                   ← fallback (baked into the image, current with git HEAD)
 ```
 
-The `/data` volume persists across `docker compose build && up -d`, so a new image's `/app/static/` is masked by an old `/data/shell/dist/`. After a frontend deploy, refresh both source and dist and verify the bundle hash changed in `/data/shell/dist/assets/index-*.js`. Because the choice is made at module load, an in-container shell rebuild does not take effect until the uvicorn process restarts. Never delete `/app/static/` — it is the only recovery fallback and is root-owned.
+The `/data` volume persists across `docker compose build && up -d`, so a new image's `/app/static/` is masked by an old `/data/platform/frontend/dist/`. After a frontend deploy, refresh both source and dist and verify the bundle hash changed in `/data/platform/frontend/dist/assets/index-*.js`. Because the choice is made at module load, an in-container shell rebuild does not take effect until the uvicorn process restarts. Never delete `/app/static/` — it is the only recovery fallback and is root-owned.
 
 ### Security updates — who patches what
 
@@ -70,7 +70,7 @@ The owner's customizations end up *on top of* the current release, as if they'd 
 
 ### The recovery/auth files are NOT in the model — they're gitignored
 
-The one thing that makes a self-editing platform tricky is the recovery/core island (`protected-files.txt`: the `recover_*` modules, `main.py`/`routes/__init__.py`/`auth.py`/`database.py`/`config.py`/`models.py`, `entrypoint.sh`/`recovery_restore.sh`, and the auth-handling shell components `LoginForm`/`SetupWizard`/`ProviderAuth`). These are root-owned `chmod 444`; the `mobius` user that runs the updater genuinely cannot write them.
+The one thing that makes a self-editing platform tricky is the recovery/auth island (`protected-files.txt`: the auth-handling shell components `LoginForm`/`SetupWizard`/`ProviderAuth` (jsx+css), plus the baked boot/restore scripts `entrypoint.sh`/`recovery_restore.sh`). These are root-owned read-only; the `mobius` user that runs the updater genuinely cannot write them. (The whole-repo model un-froze the backend — the served code is `/data/platform/backend/app`, mobius-owned and editable in place — so the old boot-chain freeze on `main.py`/`auth.py`/etc. is gone; the separate `recoveryd` container is the floor now.)
 
 The simple answer is that **they are not part of the git model at all** — each surface's `.gitignore` excludes them. They live on disk, managed wholly by the image (the root entrypoint re-enforces root-owned 444/555 on them every boot; their contents refresh from the baked floor only on first boot, a crash-loop restore, or a `recovery_restore.sh` run — the deploy/recovery path, not every reboot). Because they're untracked, neither `record upstream` nor the merge/replay ever touches them, so there is no special "protected-file" machinery in the update engine — the replay only ever moves agent-editable files, and the recovery island updates the one way it should: via an image deploy. (Recovery therefore stays agent-proof, and becomes current with the image once the deploy's restore/reconcile step runs.)
 
@@ -79,10 +79,10 @@ The simple answer is that **they are not part of the git model at all** — each
 | Surface | Repo | On the model | Engine |
 |---------|------|------------------|--------|
 | **Mini-apps** (`/data/apps/<slug>`) | `.git` per app (installed apps; agent-built bespoke apps have no upstream to track) | yes — whole source tree on `upstream`, single-parent replay, so **multi-file apps update cleanly** | `backend/app/app_git.py` + `install.py` |
-| **Platform backend** (`/data/platform`) | `.git`, recovery files gitignored | yes — thin caller of `app_git`; ancestry availability (sha compare only as the one-time pre-seed fallback); an idempotent migration untracks recovery files | `backend/app/platform_update.py` |
+| **Platform backend** (`/data/platform`) | `.git`, recovery files gitignored | yes — clone-native `git fetch origin` + rebase of local `main` onto `origin/main` (commit-stray-edits-first, conflict-abort, post-rebase import probe with rollback); ancestry availability (`origin/main` not yet an ancestor of local `main`) | `backend/app/platform_update.py` |
 | **Shell** (`/data/shell`) | `.git`, auth components gitignored | yes — thin caller of `app_git`, seeded at boot so existing agent edits become the local delta | `backend/app/shell_update.py` |
 
-All three converge on **one** small tree-aware engine (`app_git.py`): `record_upstream` commits the *whole source tree* on `upstream`, `merge_upstream` verdicts a clean-vs-conflict via `git merge-tree`, and a clean apply replays the merged tree as a **single-parent** commit on top of `upstream` (linear `A→B→X`). The platform and shell are thin callers of that primitive — they pass their own source tree and let their `.gitignore` keep recovery/auth files out of the model. Availability for the platform and shell is the ancestry check (`upstream` not an ancestor of the working branch); the one surviving sha-string compare is the platform's one-time pre-seed fallback for instances that predate the `upstream` branch (`platform_status`'s `seed_required` path). Mini-app update discovery is different: the store compares the catalog manifest version against the installed `App.version` (the new release lives in the remote catalog, so a local ancestry check can't see it). There is no per-surface protected-file scaffolding.
+Shell and mini-apps converge on **one** small tree-aware engine (`app_git.py`): `record_upstream` commits the *whole source tree* on `upstream`, `merge_upstream` verdicts a clean-vs-conflict via `git merge-tree`, and a clean apply replays the merged tree as a **single-parent** commit on top of `upstream` (linear `A→B→X`). The shell and mini-apps are thin callers of that primitive — they pass their own source tree, with the shell's `.gitignore` keeping auth files out of the model. The platform is clone-native instead: it uses `git fetch origin` plus a rebase of local `main` onto `origin/main`, with ancestry-based availability (`origin/main` not yet an ancestor of local `main`). Mini-app update discovery is different: the store compares the catalog manifest version against the installed `App.version` (the new release lives in the remote catalog, so a local ancestry check can't see it). There is no per-surface protected-file scaffolding.
 
 ## Backend (`backend/app/`)
 
@@ -92,7 +92,8 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 
 | File | Role |
 |------|------|
-| `main.py` | App factory: CORS, rate limiting, security headers (`_SecurityHeadersMiddleware` — authoritative on every response, strips-and-replaces same-named route headers; deliberately no CSP, see SECURITY.md), router mounting, static file serving; resolves `_static_dir` at load (`main.py:890`); serves `GET /api/version` (image + served-platform identity) |
+| `main.py` | App factory: CORS, rate limiting, security headers (`_SecurityHeadersMiddleware` — authoritative on every response, strips-and-replaces same-named route headers; deliberately no CSP, see SECURITY.md), router mounting, static file serving; resolves `_static_dir` at load (`main.py:1000`); serves `GET /api/version` (image + served-platform identity) |
+| `frontend_watcher.py` | Polling watcher that auto-rebuilds the served frontend clone (`/data/platform/frontend`) on edit — debounced `vite build`, atomic `.dist-next`→`dist` swap |
 | `config.py` | `Settings` via pydantic-settings; reads `.env` |
 | `database.py` | SQLAlchemy engine, `SessionLocal`, `Base`, `get_db`, and `run_migrations()` (idempotent boot-time additive `ALTER TABLE`s) |
 | `models.py` | ORM tables: `Owner`, `Chat`, `ChatRun`, `App`, `PushSubscription`, `Notification` |
@@ -100,10 +101,10 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `auth.py` | bcrypt hashing, JWT creation/decoding, Fernet encryption |
 | `deps.py` | FastAPI auth dependencies: `get_current_owner` (owner-only), `get_current_owner_or_app` (owner + app token), `get_principal`, `require_app_permission`, and `reject_cross_site` (CSRF) |
 | `compiler.py` | `compile_jsx()` — calls the esbuild CLI to compile a JSX string into an ES module |
-| `providers.py` | `BaseProvider` adapters (`ClaudeProvider`, `CodexProvider`) + the `PROVIDERS` registry; identity/auth/env shaping for the SDK runners, and `get_skill_path()`. (`CodexProvider.build`/`parse_line` — the app-server subprocess path — are retained but not on the live chat path; see `codex_appserver.py`.) |
+| `providers.py` | `BaseProvider` adapters (`ClaudeProvider`, `CodexProvider`) + the `PROVIDERS` registry; identity/auth/env shaping for the SDK runners (`build_env`), and `get_skill_path()`. |
 | `claude_sdk_runner.py` | Claude SDK turn runner; passes `cli_path="/usr/local/bin/claude"` so the SDK drives the same pinned binary recovery + cron use |
 | `codex_sdk_runner.py` | Codex SDK turn runner (Thread/TurnHandle + steer) |
-| `codex_appserver.py` | Pure-function translator for the Codex `app-server` JSON-RPC protocol. The subprocess streaming path it served is legacy (live Codex chat runs through `codex_sdk_runner.py`), but this module stays live — the SDK runner reuses one helper from it, `_extract_bash_command` (it implements its own event/tool classification locally) |
+| `codex_appserver.py` | Small helper module: `codex_sdk_runner.py` imports its one surviving function, `_extract_bash_command`, which pulls the bash command string out of a shell tool item. The SDK runner does its own event/tool classification locally. |
 | `chat.py` | `run_chat()` background task: spawns the turn, publishes events, routes persistence through the actor |
 | `chat_writer.py` | Single-writer chat-persistence actor — one thread owns the DB session + a FIFO command queue; ALL `Chat.messages` / `Chat.pending_messages` mutations route through it (do not write those columns directly) |
 | `chat_queue.py` | Per-chat queue lock + turn-end `drain_and_release` / `promote_pending_messages_locked` + the `TerminalDisposition` state machine; the awaited bridge between `chat.py` and the writer actor |
@@ -147,20 +148,21 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 
 ### Recovery (the frozen island)
 
-The `recover_*` modules bootstrap an agent into a broken instance and are deliberately isolated from the SDK/chat stack so a broken SDK install cannot take recovery down. They are chmod 444 root-owned via `protected-files.txt` (together with the boot-chain files `main.py`, `routes/__init__.py`, `auth.py`, `database.py`, `config.py`, `models.py`); the agent cannot edit them.
+Recovery is a SEPARATE always-up container, `recoveryd`, not a module inside `backend/app/`. Its code is a distinct package, `backend/recovery/` (baked root-owned to `/app/recovery/`, outside `backend/app/`), deliberately isolated from the SDK/chat stack — stdlib `http.server`, zero `app.*` imports — so a broken platform install cannot take recovery down. The only recovery-adjacent module left in `backend/app/` is `recovery_seed.py` (it mirrors the owner row into a DB-independent seed for a wiped-DB login; see the self-heal section).
 
 | File | Role |
 |------|------|
-| `recover_chat.py` | Recovery chat: vanilla HTML page + send/stream/reset endpoints |
-| `recover_chat_runner.py` | Minimal CLI runner for the recovery chat; shares no code with `chat`/`providers`/SDK (runs the standalone `claude` binary as its own subprocess) |
-| `recover_auth.py` | Recovery-page auth |
-| `recover_oauth.py` | OAuth handling for the recovery flow |
+| `recoveryd.py` | The recovery daemon: stdlib `http.server`, zero `app.*` imports; serves `/recover*` on :8001 and owns the Sec-Fetch-Site/Origin cross-site reject |
+| `recovery_pages.py` | Dependency-free HTML for the recovery pages |
+| `recovery_chat_pages.py` | HTML + page surface for the recovery chat |
+| `recovery_chat_runner.py` | Minimal CLI runner for the recovery chat; shares no code with `chat`/`providers`/SDK (runs the standalone `claude` binary as its own subprocess) and appends to its own per-chat jsonl under `/data`, never the `Chat.messages` column |
+| `recovery_restore.sh` | Baked git-reset restore tool (`backend/scripts/recovery_restore.sh` → `/app/scripts/`) — what the "Restore platform" button drives |
 
-The separate `recoveryd` container's code is a distinct package, `backend/recovery/` (baked root-owned to `/app/recovery/`, outside `backend/app/`): `recoveryd.py` (stdlib `http.server`, zero `app.*` imports; also owns the Sec-Fetch-Site/Origin cross-site reject), `recovery_auth.py` (HMAC-cookie auth — a deliberately frozen *verbatim* copy of `recover_auth.py` above, so edits to the platform copy do NOT propagate), `recovery_db.py` (raw-`sqlite3` owner-row read, no ORM, with a DB-independent `/data/.recovery-owner.json` fallback for a wiped DB — see the self-heal section), `recovery_pages.py` (dependency-free HTML). See the self-heal section below for the container itself.
+`recovery_auth.py` (HMAC-cookie auth) and `recovery_db.py` (raw-`sqlite3` owner-row read, no ORM, with a DB-independent `/data/.recovery-owner.json` fallback for a wiped DB) round out the package. See the self-heal section below for the container itself.
 
 ### Misc shared helpers
 
-Agent-editable general-purpose modules — several sit on live chat paths, so despite living near `recover_*` they are NOT part of the frozen island.
+Agent-editable general-purpose modules — several sit on live chat paths, so despite living near `recovery_seed.py` they are NOT part of the frozen island.
 
 | File | Role |
 |------|------|
@@ -197,6 +199,7 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `push.py` | Web Push subscription management |
 | `theme.py` | `GET /api/theme` — effective theme CSS + bg with default fallback |
 | `settings.py` | Owner-level configuration |
+| `github.py` | GitHub connect status + read-only REST/GraphQL passthrough for in-product upstream contributions (pairs with `github_auth.py` + the `contributing.md` skill) |
 | `self_reminders.py` | Agent self-scheduling endpoints |
 | `admin.py` | Admin / introspection endpoints (service-token gated) |
 | `debug.py` | Observability: active SDK clients/sessions, broadcasts, chat logs |
@@ -304,7 +307,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | Add a runtime vendor library | `backend/app/runtime_libs.py` + both importmaps + the Dockerfile vendor copy |
 | Change offline / SW behavior | `frontend/src/sw.js` + `frontend/src/sw-cache-policy.js` (read *Service worker + offline* below first) |
 | Change the in-product agent's instructions | `skill/core.md` (constitution) or `backend/scripts/seed-skills/*.md` (per-task skills) — see below |
-| Change a built-in core app (Memory / Reflection) | The catalog repo (`mobius-os/app-<slug>`) is the source of truth — `core-apps/` is a committed snapshot, never hand-edited. Bump the pinned commit in `core-apps/SOURCES`, run `scripts/sync-core-apps.sh`, commit the diff; CI (`scripts/check-core-apps-sync.sh`) fails on drift. The snapshot is baked to `/app/core-apps` (Dockerfile) and installed at boot by `backend/scripts/install-core-apps.sh` |
+| Change a built-in core app (Memory / Reflection) | The catalog repo (`mobius-os/app-<slug>`) is the source of truth — `core-apps/` is a committed snapshot, never hand-edited. Bump the pinned commit in `core-apps/SOURCES`, run `scripts/sync-core-apps.sh`, commit the diff; CI (`scripts/check-core-apps-sync.sh`) fails on drift. The snapshot is baked to `/app/core-apps` (Dockerfile) and installed at boot by `backend/scripts/install-core-apps.sh` (which prefers `/data/platform/core-apps` when the platform clone exists, falling back to the baked `/app/core-apps` floor) |
 | Theme CSS / tokens | `backend/app/theme.py` + `routes/theme.py` + `frontend/src/hooks/useTheme.js` |
 
 ## In-product agent context — three layers
@@ -336,17 +339,18 @@ repo) + shell (`/data/shell` src+dist); mini-apps (`/data/apps/<slug>`, each a
 git repo); recovery (the frozen island, below). Runtime trees are gitignored
 (db, compiled, cli-auth).
 
-**Updates** flow through git. `backend/app/platform_update.py` is a thin caller
-of the shared `app_git.py` engine (see "Where each surface stands" above): it
-picks the baked image floor to record as the `upstream` branch (today the
-upstream IS the baked floor; a signed-GitHub origin is the planned direction,
-tracked as card 147 on the maintainers' local backlog — `.pm/` is gitignored, so
-these card refs here and below are not present in a fresh clone), the engine
-computes the merge tree, and on conflict the platform path spawns an agent
-conflict-chat to resolve. Shell rebuilds via `rebuild_shell.sh`; the served
-bundle is `/data/shell/dist` if a complete build exists else baked `/app/static`
-(the #1 deploy gotcha — the volume masks a new baked dist; always byte-check the
-served hash). Mini-apps update through each app's git repo + the store; freshness
+**Updates** flow through git. `backend/app/platform_update.py` is clone-native:
+`/data/platform` is a real `git clone` of the canonical repo, so an update
+`git fetch origin`s and rebases the local `main` (the agent's edits) onto the new
+`origin/main` — committing any stray working-tree edits first so the rebase can
+only replay them, aborting back to the last-served commit on conflict, and
+running a post-rebase `import app.main` probe that rolls back rather than serve a
+broken tree. (It reuses `app_git`'s isolated git env + `commit_local` but drops
+the pre-slice-B baked-floor `upstream`-record model; card refs below point at the
+maintainers' local `.pm/` backlog, gitignored and absent from a fresh clone.) The
+served bundle is `/data/platform/frontend/dist` if a complete build exists else
+baked `/app/static` (the #1 deploy gotcha — the volume masks a new baked dist;
+always byte-check the served hash). Mini-apps update through each app's git repo + the store; freshness
 rides ETags (`/module` = `updated_at` µs; `/frame` = compound
 `updated_at`+content-hash). The backend has the same served-vs-baked gotcha as
 the shell: a new image's `sha` advances on every deploy even while
@@ -362,18 +366,20 @@ sync decision (it also hard-blocks deploying a checkout strictly BEHIND
 `core-apps/<slug>/` trees — committed SNAPSHOTS of their catalog repos
 (`mobius-os/app-*`), pinned by commit in `core-apps/SOURCES`, baked to
 `/app/core-apps` (Dockerfile), and registered/re-synced at boot by
-`backend/scripts/install-core-apps.sh` (backgrounded post-launch by the
-entrypoint; registration goes through the API with the service token). Never edit
+`backend/scripts/install-core-apps.sh` (which prefers `/data/platform/core-apps`
+when the platform clone exists, else the baked `/app/core-apps` floor;
+backgrounded post-launch by the entrypoint; registration goes through the API
+with the service token). Never edit
 `core-apps/` directly: update the catalog repo, bump `SOURCES`, and run
 `scripts/sync-core-apps.sh`; CI (`scripts/check-core-apps-sync.sh`) fails the
 build on drift.
 
 **Self-heal — LANDING (owner-signed-off 2026-06-30; the `recoveryd` container is
 BUILT — `backend/recovery/recoveryd.py`, its own service in `docker-compose.yml`
-with `restart: unless-stopped` on the same `/data` — though `/recover*` routing
-is NOT yet wired in the bundled `Caddyfile` (which still only proxies
-`app:8000`; recovery routing is left to the external `deploy-caddy` and marked
-"NOT wired here" in `docker-compose.yml`) — per the adversarially-reviewed plan in
+with `restart: unless-stopped` on the same `/data` — and `/recover*` IS wired in
+the bundled `Caddyfile` (`handle /recover* { reverse_proxy recoveryd:8001 }`
+ahead of the `app:8000` catch-all, so it never falls through to the platform) —
+per the adversarially-reviewed plan in
 cards 148 + its recoveryd-hardened addendum. Some hardening is still in flight
 under an active session, so treat the finer status of the bullets below —
 especially the pre-flight gate (card 154) and the listed removals — as
@@ -401,7 +407,7 @@ The removals not yet done at HEAD are noted in the last bullet:
   *Tier 1* is a deterministic "Restore platform" button (git-reset `/data/platform`
   via the existing `.recover-pending` + restart) needing **zero CLI / OAuth /
   network / agent** — this is THE floor and the ONLY tier built today; *Tier 2*
-  (the lifted `recover_chat_runner` spawning a rescue agent, best-effort when
+  (the lifted `recovery_chat_runner` spawning a rescue agent, best-effort when
   creds exist) is an explicitly DEFERRED follow-on, NOT in the built recoveryd
   (per `backend/recovery/recoveryd.py`'s docstring) — today the rescue chat still
   lives only inside the platform uvicorn at `/recover`, so it dies with the
@@ -486,7 +492,7 @@ All chat-domain mutations — transcript writes, run-markers, question rows, ans
 - **Questions commit-before-broadcast:** a question row is durable before its SSE push fires, so a reconnect's catch-up burst always finds it.
 - **Concurrency invariant:** ack `Future`s are NEVER resolved while a producer lock is held — collect `(ack, value)` under the lock, resolve after release — so even a synchronous done-callback that re-enters `submit()`/`stop()` can't deadlock. Do not move an ack resolution back inside a `with` block.
 
-**GUARDRAIL — never write `Chat.messages` / `Chat.pending_messages` directly** from a request handler or SDK runner. SQLite WAL serializes commits but NOT the app-level JSON snapshot READ: two readers both see the pre-write snapshot and one silently overwrites the other (the lost-update race the actor closes). The only justified direct writer is `reconcile_interrupted_chats` (`chat.py`, runs at boot before the actor starts); `recover_chat_runner.py` is actor-independent by design and appends to its own `/data/recovery_chat.jsonl`, not the `Chat.messages` column.
+**GUARDRAIL — never write `Chat.messages` / `Chat.pending_messages` directly** from a request handler or SDK runner. SQLite WAL serializes commits but NOT the app-level JSON snapshot READ: two readers both see the pre-write snapshot and one silently overwrites the other (the lost-update race the actor closes). The only justified direct writer is `reconcile_interrupted_chats` (`chat.py`, runs at boot before the actor starts); `recovery_chat_runner.py` is actor-independent by design and appends to its own `/data/recovery/chats/<chat_id>.jsonl`, not the `Chat.messages` column.
 
 ## Navigation back-stack + drawer model
 
@@ -498,7 +504,7 @@ Möbius uses one root-scoped service worker, `frontend/src/sw.js`, to keep shell
 
 `appCodeHandler()` normalizes the cache key by stripping `token`/`_`/`install` but KEEPING `v`; freshness rides `?v=<app.updated_at>` becoming a new key, not a connectivity probe. Once a versioned entry exists, `shouldServeCacheFirst()` serves it immediately while `event.waitUntil()` refreshes in the background. Cold paths and refreshes use `cache: 'reload'` through `boundedFetch()` so browser HTTP-cache revalidation can't hand the SW a bodyless `304` (`NET_TIMEOUT_MS` is a 3000ms hang guard, not a latency knob). `appCodeStoreAction()` is the storage policy: ungated frame/module stores every `200`, gated standalone stores only `X-Mobius-Offline: 1`, all non-`200` ignored; `applyAppCodeStore()` tolerates quota failures and deletes superseded same-route entries with a different `v`.
 
-Install-time precache includes the Vite shell plus a large same-origin vendor set (React 19.2.6, CodeMirror, Recharts, date-fns, d3-geo, marked, DOMPurify, d3, PixiJS) appended to `self.__WB_MANIFEST` — runtime `/vendor/` stays `CacheFirst`, but any lib an app can statically import before its error UI renders must be promoted into the precache list. `setCatchHandler()` returns precached `index.html` outside `/apps/` and `offline.html` for standalone/app-asset failures, avoiding native offline chrome. Two anti-patterns: do NOT reintroduce a `mobius-shell-nav` HTML cache (navigations bind to the precached `index.html` so HTML and hashed bundles advance together), and do NOT gate in-shell frame/module reads on `offline_capable` (that flag gates standalone offline opens + write semantics, while frame/module speed + warmup are universal). There is no hand-edited `VERSION` constant: `activate` deletes stale runtime caches via `isStaleRuntimeCache`, and Workbox handles content-versioned precache cleanup separately.
+Install-time precache includes the Vite shell plus a large same-origin vendor set (React 19.2.7, CodeMirror, Recharts, date-fns, d3-geo, marked, DOMPurify, d3, PixiJS) appended to `self.__WB_MANIFEST` — runtime `/vendor/` stays `CacheFirst`, but any lib an app can statically import before its error UI renders must be promoted into the precache list. `setCatchHandler()` returns precached `index.html` outside `/apps/` and `offline.html` for standalone/app-asset failures, avoiding native offline chrome. Two anti-patterns: do NOT reintroduce a `mobius-shell-nav` HTML cache (navigations bind to the precached `index.html` so HTML and hashed bundles advance together), and do NOT gate in-shell frame/module reads on `offline_capable` (that flag gates standalone offline opens + write semantics, while frame/module speed + warmup are universal). There is no hand-edited `VERSION` constant: `activate` deletes stale runtime caches via `isStaleRuntimeCache`, and Workbox handles content-versioned precache cleanup separately.
 
 ## Mini-app manifest (mobius.json)
 
@@ -524,5 +530,5 @@ cover it deterministically.
 
 ## See also
 
-- **Build / test / run commands and the dev loop:** `CONTRIBUTING.md`. (The #1 deploy gotcha — a stale `/data/shell/dist` masking a fresh image — is covered under *Frontend serving priority* above.)
+- **Build / test / run commands and the dev loop:** `CONTRIBUTING.md`. (The #1 deploy gotcha — a stale `/data/platform/frontend/dist` masking a fresh image — is covered under *Frontend serving priority* above.)
 - **Subsystem deep-dives are inlined above** as their own sections: *Stop-chat contract*, *AskUserQuestion interception*, *Chat persistence — single-writer actor*, *Navigation back-stack + drawer model*, *Service worker + offline*, and *Mini-app manifest (mobius.json)*. (The chat-persistence v2 design + staged-rollout notes remain internal/gitignored — the as-built contract is the section above.)
