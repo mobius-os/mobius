@@ -168,6 +168,19 @@ html, body, #root {
   width: 100%;
 }
 
+/* Paint the ROOT element with the theme background so it propagates to the
+   canvas — the full window backdrop, including the strip behind the transparent
+   Android gesture/navigation bar in edge-to-edge mode (viewport-fit=cover,
+   Chrome 135+). Without an explicit root background, that strip falls back to
+   the UA's `color-scheme: dark` canvas colour (~#121316), a hair lighter than
+   --bg (#0d0d0d) — which reads as a faint, uniform, every-screen tint on the
+   gesture bar. body's inline background covers the first paint; this closes the
+   gap for the root itself and any state where applyTheme's runtime write hasn't
+   landed. Uses var(--bg) (already set pre-paint) so there's no theme flash. */
+html {
+  background-color: var(--bg, #0d0d0d);
+}
+
 /* Prevent iOS Safari (which ignores user-scalable=no in the viewport
    meta) from intercepting two-finger spread as a page-level pinch-zoom.
    pan-x pan-y allows one-finger scrolling; pinch-zoom is blocked at the
