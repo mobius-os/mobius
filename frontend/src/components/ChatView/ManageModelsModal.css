@@ -57,7 +57,7 @@
 .mmm__title {
   font-size: 18px;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
   margin: 0;
 }
 
@@ -76,6 +76,13 @@
 .mmm__close:hover {
   background: var(--surface2);
   color: var(--text);
+}
+
+.mmm__close:focus-visible,
+.mmm__btn:focus-visible,
+.mmm-row:has(.mmm-row__toggle:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .mmm__subtext {
@@ -131,17 +138,17 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 6px;
+  padding: 8px;
   border-radius: 8px;
   cursor: pointer;
-  transition: background 0.12s;
+  transition: background 0.12s, opacity 0.12s;
 }
 
 .mmm-row:hover { background: var(--surface); }
 
 .mmm-row--hidden .mmm-row__title,
 .mmm-row--hidden .mmm-row__sub {
-  opacity: 0.5;
+  opacity: 0.55;
 }
 
 .mmm-row__main {
@@ -178,7 +185,7 @@
   font-size: 10px;
   font-weight: 600;
   font-family: inherit;
-  letter-spacing: 0.04em;
+  letter-spacing: 0;
   text-transform: uppercase;
   color: var(--muted);
   background: var(--surface2);
@@ -190,10 +197,39 @@
 
 .mmm-row__toggle {
   flex-shrink: 0;
-  width: 18px;
-  height: 18px;
+  width: 34px;
+  height: 20px;
+  appearance: none;
   accent-color: var(--accent);
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
   cursor: pointer;
+  position: relative;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.mmm-row__toggle::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--muted);
+  transform: translateY(-50%);
+  transition: transform 0.15s, background 0.15s;
+}
+
+.mmm-row__toggle:checked {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface));
+}
+
+.mmm-row__toggle:checked::before {
+  background: var(--accent);
+  transform: translate(13px, -50%);
 }
 
 .mmm__skeleton {
@@ -262,7 +298,7 @@
 
 .mmm__btn {
   background: var(--accent);
-  color: var(--bg);
+  color: var(--accent-fg, #fff);
   border: 1px solid var(--accent);
   border-radius: 10px;
   padding: 8px 14px;
@@ -278,7 +314,7 @@
 }
 
 .mmm__btn:not(:disabled):hover {
-  opacity: 0.9;
+  background: var(--accent-hover, var(--accent));
 }
 
 .mmm__btn--outline {

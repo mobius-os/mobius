@@ -13,12 +13,12 @@
 }
 
 .csp__label {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
   color: var(--muted);
-  padding: 4px 10px 6px;
+  padding: 4px 10px 7px;
 }
 
 .csp-row {
@@ -34,15 +34,25 @@
   font: inherit;
   color: var(--text);
   text-align: left;
-  transition: background 0.12s ease;
+  transition: background 0.12s ease, border-color 0.12s ease;
 }
 
 .csp-row:hover { background: var(--surface); }
 
 .csp-row--selected {
-  background: var(--accent-dim);
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface));
 }
-.csp-row--selected:hover { background: var(--accent-dim); }
+.csp-row--selected:hover {
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+}
+
+.csp-row:focus-visible,
+.csp__manage:focus-visible,
+.csp__confirm-btn:focus-visible,
+.csp-effort__stop:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 
 .csp-row--locked {
   opacity: 0.4;
@@ -90,8 +100,8 @@
 }
 
 .csp-row__dot {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
   border: 1.5px solid var(--border);
   flex-shrink: 0;
@@ -101,18 +111,20 @@
 
 .csp-row--selected .csp-row__dot {
   border-color: var(--accent);
+  background: var(--accent);
 }
 
 .csp-row--selected .csp-row__dot::after {
   content: '';
   position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-  transform: translate(-50%, -50%);
+  left: 4px;
+  top: 2px;
+  width: 5px;
+  height: 8px;
+  border: 1.5px solid var(--accent-fg, #fff);
+  border-top: 0;
+  border-left: 0;
+  transform: rotate(45deg);
 }
 
 /* ── Effort stepper-slider ───────────────────────────────
@@ -192,7 +204,7 @@
 
 .csp-effort__label {
   font-size: 12px;      /* --font-text-xs */
-  font-weight: 600;     /* OpenAI badge weight */
+  font-weight: 500;
   color: var(--text);
   white-space: nowrap;
   min-width: 70px;
@@ -208,7 +220,7 @@
   display: flex;
   align-items: center;
   width: 100%;
-  padding: 10px 10px;
+  padding: 9px 10px;
   border: 0;
   background: none;
   border-radius: 8px;
@@ -295,9 +307,9 @@
   flex-direction: column;
   gap: 8px;
   padding: 9px;
-  border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--border-light));
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border-light));
   border-radius: 8px;
-  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface));
 }
 
 .csp__confirm-copy {

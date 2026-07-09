@@ -1,6 +1,6 @@
 .qcard {
   margin: 8px 0;
-  padding: 12px 14px;
+  padding: 14px;
   border-radius: 12px;
   background: var(--surface, rgba(255,255,255,.06));
   border: 1px solid var(--border-light, var(--border));
@@ -16,23 +16,23 @@
 }
 
 .qcard__header {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: .5px;
-  color: var(--accent);
-  margin-bottom: 4px;
+  letter-spacing: 0;
+  color: var(--muted);
+  margin-bottom: 6px;
 }
 .qcard__text {
-  font-size: 14px;
-  margin-bottom: 6px;
+  font-size: 14.5px;
+  line-height: 1.45;
+  margin-bottom: 8px;
   color: var(--text);
 }
 
 .qcard__hint {
   font-size: 11px;
   color: var(--muted, var(--text));
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 .qcard__opts {
   display: flex;
@@ -43,7 +43,7 @@
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 6px 12px;
+  padding: 7px 12px;
   /* 36px minimum tap target — chips wrap so a taller button keeps rows
      comfortably tappable on mobile while preserving the chip-pill density. */
   min-height: 36px;
@@ -53,7 +53,7 @@
   color: var(--text);
   font-size: 13px;
   cursor: pointer;
-  transition: background .15s, border-color .15s;
+  transition: background .15s, border-color .15s, color .15s;
   /* Don't let the browser's default mouse-focus ring linger on the
      last clicked option — visually inconsistent with un-clicked
      options. Keyboard-focus uses :focus-visible below for a11y. */
@@ -91,12 +91,12 @@
   background: var(--surface2, rgba(128,128,128,.1));
 }
 .qcard__opt--on {
-  background: var(--accent);
-  color: var(--bg);
-  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
 }
 .qcard__opt--on:hover:not(:disabled) {
-  background: var(--accent-hover, var(--accent));
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface));
 }
 .qcard__opt:disabled {
   cursor: default;
@@ -108,17 +108,8 @@
 }
 
 /* Pick-one vs pick-many glyph. Box = multi (checkbox), circle = single
-   (radio).
-   Unselected: outline ring in currentColor (= --text on the transparent
-     chip) at 65% opacity.
-   Selected marks sit INSIDE the accent-filled chip, so they must be drawn
-   in the chip's on-accent foreground (currentColor = the chip's text
-   color), never in var(--accent) — accent-on-accent renders an invisible
-   glyph in every theme:
-   Selected radio: ring + center dot via radial-gradient, both currentColor.
-   Selected checkbox: currentColor-filled rounded square with the checkmark
-     stroked in var(--accent) so it contrasts against that fill (reads as a
-     cut-out of the chip background). */
+   (radio). Selected options keep the chip quiet; the mark carries the
+   accent so the state reads without flooding the whole option. */
 .qcard__mark {
   flex: none;
   width: 14px;
@@ -136,7 +127,10 @@
   border-radius: 50%;
 }
 
-/* Selected radio: ring + center dot in the chip's on-accent foreground */
+.qcard__opt--on .qcard__mark {
+  color: var(--accent);
+}
+
 .qcard__opt--on .qcard__mark--radio {
   background: radial-gradient(
     circle,
@@ -148,7 +142,6 @@
   opacity: 1;
 }
 
-/* Selected checkbox: on-accent fill + accent checkmark */
 .qcard__opt--on .qcard__mark--box {
   background: currentColor;
   border-color: currentColor;
@@ -157,15 +150,11 @@
 .qcard__opt--on .qcard__mark--box::after {
   content: '';
   position: absolute;
-  /* Checkmark drawn as a rotated L: left stroke + right stroke. Stroked in
-     var(--accent) — the box behind it is currentColor-filled (on-accent
-     foreground), so the accent stroke is the contrasting color here, and it
-     visually matches the chip's accent background showing through. */
   left: 2px;
   top: 1px;
   width: 4px;
   height: 7px;
-  border: 1.5px solid var(--accent);
+  border: 1.5px solid var(--accent-fg, #fff);
   border-top: none;
   border-left: none;
   transform: rotate(45deg);
@@ -184,9 +173,12 @@
   font-size: 13px;
   outline: none;
   box-sizing: border-box;
+  transition: border-color .15s, box-shadow .15s;
 }
-.qcard__input:focus {
+.qcard__input:focus,
+.qcard__input:focus-visible {
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
 }
 
 .qcard__submit {
@@ -197,14 +189,18 @@
   border-radius: 8px;
   border: none;
   background: var(--accent);
-  color: var(--bg);
+  color: var(--accent-fg, #fff);
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
-  transition: filter .15s;
+  transition: background .15s, opacity .15s;
 }
 .qcard__submit:hover:not(:disabled) {
   background: var(--accent-hover, var(--accent));
+}
+.qcard__submit:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .qcard__submit:disabled {
   opacity: .4;

@@ -666,7 +666,7 @@ export default function ChatSettingsPanel({
               {isPendingRow && (
                 <div className="csp__confirm" role="group" aria-label="Confirm provider switch">
                   <p className="csp__confirm-copy">
-                    Switching will compact first.
+                    Möbius will summarize this chat before switching providers.
                   </p>
                   <div className="csp__confirm-actions">
                     <button
@@ -702,7 +702,7 @@ export default function ChatSettingsPanel({
           onPointerDown={(ev) => ev.preventDefault()}
           onClick={() => setManageOpen(true)}
         >
-          + Manage models
+          Manage models
         </button>
       )}
       {(codexSwitchWarning || compacting || error) && (
