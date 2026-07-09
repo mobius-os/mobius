@@ -5,6 +5,7 @@
   align-items: center;
   justify-content: center;
   padding: 24px;
+  box-sizing: border-box;
 }
 
 .setup__card {
@@ -13,7 +14,8 @@
   background: var(--surface, #14181f);
   border: 1px solid var(--border, #252b36);
   border-radius: 12px;
-  padding: 32px;
+  padding: 30px 32px 32px;
+  box-sizing: border-box;
 }
 
 .setup__logo {
@@ -21,7 +23,39 @@
   width: 96px;
   height: 96px;
   border-radius: 20px;
-  margin: 0 auto 16px;
+  margin: 0 auto 14px;
+}
+
+.setup__progress {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 18px;
+  color: var(--muted, #52525b);
+}
+
+.setup__progress-text {
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.setup__progress-track {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.setup__progress-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--border, #252b36);
+}
+
+.setup__progress-dot--active {
+  background: var(--accent, #a78bfa);
 }
 
 .setup__title {
@@ -34,8 +68,16 @@
 
 .setup__subtitle {
   color: var(--muted, #52525b);
-  margin-bottom: 24px;
+  margin: 0 auto 24px;
   text-align: center;
+  line-height: 1.5;
+  max-width: 34ch;
+}
+
+.setup__subtitle a {
+  color: var(--accent, #a78bfa);
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .setup__form {
@@ -57,15 +99,17 @@
   box-sizing: border-box;
   background: var(--bg, #0d0d0d);
   border: 1px solid var(--border, #252b36);
-  border-radius: 6px;
+  border-radius: 10px;
   color: var(--text, #d4d4d8);
   padding: 9px 12px;
   outline: none;
-  transition: border-color 0.15s;
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
 
-.setup__input:focus {
+.setup__input:focus,
+.setup__input:focus-visible {
   border-color: var(--accent, #a78bfa);
+  box-shadow: 0 0 0 3px var(--accent-dim, rgba(167, 139, 250, 0.14));
 }
 
 .setup__error {
@@ -76,19 +120,20 @@
 .setup__hint {
   font-size: 13px;
   color: var(--muted, #52525b);
-  margin-top: 6px;
-  margin-bottom: 16px;
+  line-height: 1.45;
+  margin: -6px 0 2px;
 }
 
 .setup__btn {
   background: var(--accent, #a78bfa);
   color: #fff;
   border: none;
-  border-radius: 6px;
+  border-radius: 10px;
   padding: 10px;
   font-weight: 600;
   margin-top: 4px;
   transition: background 0.15s;
+  cursor: pointer;
 }
 
 /* "Sign in with Claude" sits directly in the card, not in a form —
@@ -107,6 +152,14 @@
 .setup__btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.setup__btn:focus-visible,
+.setup__skip:focus-visible,
+.setup__subtitle a:focus-visible,
+.setup__auth-msg a:focus-visible {
+  outline: 2px solid var(--accent, #a78bfa);
+  outline-offset: 2px;
 }
 
 .setup__auth-pending {
@@ -192,6 +245,7 @@
   font-size: 13px;
   cursor: pointer;
   text-align: center;
+  border-radius: 6px;
 }
 
 .setup__skip:hover {
@@ -225,4 +279,31 @@
   white-space: pre-wrap;
   word-break: break-all;
   margin: 0;
+}
+
+@media (max-width: 520px), (max-height: 720px) {
+  .setup {
+    align-items: flex-start;
+    padding: 16px;
+  }
+
+  .setup__card {
+    padding: 24px;
+  }
+
+  .setup__logo {
+    width: 80px;
+    height: 80px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .setup__input,
+  .setup__btn {
+    transition: none;
+  }
+
+  .setup__spinner {
+    animation: none;
+  }
 }

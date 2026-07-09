@@ -573,7 +573,7 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
           </form>
         </section>
 
-        <section className="settings__section settings__section--compact settings__section--server">
+        <section className="settings__section settings__section--compact">
           <div className="settings__row">
             <span className="settings__label">Dark mode</span>
             <Switch
@@ -686,7 +686,7 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
           )}
         </section>
 
-        <section className="settings__section settings__section--compact">
+        <section className="settings__section settings__section--compact settings__section--server">
           <h2 className="settings__section-title">Server</h2>
           <div className="settings__row">
             <span className="settings__label">Restart</span>
