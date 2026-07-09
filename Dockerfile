@@ -343,9 +343,20 @@ RUN cd ./shell-src && npm ci --ignore-scripts 2>/dev/null && rm -rf .vite
 # BUILD_SHA unset/unknown keep the default branch tip.
 ARG MOBIUS_PLATFORM_ORIGIN=https://github.com/mobius-os/mobius.git
 ARG BUILD_SHA=unknown
+ARG BUILD_DATE=unknown
+ARG RAILWAY_GIT_COMMIT_SHA=unknown
+ARG RAILWAY_DEPLOYMENT_ID=unknown
 RUN set -eux; \
     git clone --depth 1 "$MOBIUS_PLATFORM_ORIGIN" /app/platform-baked; \
     _build_sha="${BUILD_SHA:-unknown}"; \
+    _railway_sha="${RAILWAY_GIT_COMMIT_SHA:-unknown}"; \
+    if [ "$_build_sha" = "unknown" ] && [ "$_railway_sha" != "unknown" ] && [ -n "$_railway_sha" ]; then \
+      _build_sha="$_railway_sha"; \
+    fi; \
+    _build_date="${BUILD_DATE:-unknown}"; \
+    if [ "$_build_date" = "unknown" ] || [ -z "$_build_date" ]; then \
+      _build_date="$(date -u +%Y-%m-%d)"; \
+    fi; \
     if printf '%s' "$_build_sha" | grep -Eq '^[0-9a-fA-F]{40}$'; then \
       if git -C /app/platform-baked fetch --depth 1 origin "$_build_sha" \
          && git -C /app/platform-baked checkout "$_build_sha"; then \
@@ -372,6 +383,9 @@ RUN set -eux; \
       git -C /app/platform-baked tag "baked-${_build_sha}" HEAD 2>/dev/null || true; \
     fi; \
     git -C /app/platform-baked rev-parse HEAD > /app/platform-baked/.baked-sha; \
+    printf '{"sha":"%s","build_date":"%s","railway_deployment_id":"%s"}\n' \
+      "$_build_sha" "$_build_date" "${RAILWAY_DEPLOYMENT_ID:-unknown}" \
+      > /app/build-info.json; \
     chown -R root:root /app/platform-baked; \
     chmod -R a+rX,go-w /app/platform-baked
 
@@ -403,8 +417,8 @@ RUN chmod +x ./scripts/entrypoint.sh
 # so a deploy can verify the served backend matches the commit.
 ENV BUILD_SHA=${BUILD_SHA}
 # BUILD_DATE is the commit date (YYYY-MM-DD) of BUILD_SHA, stamped by
-# deploy-prod.sh, so Settings can show a human "version · date" line.
-ARG BUILD_DATE=unknown
+# deploy-prod.sh. Managed Docker builders that do not pass BUILD_DATE use
+# /app/build-info.json, written above, so Settings can still show a date.
 ENV BUILD_DATE=${BUILD_DATE}
 
 EXPOSE 8000
