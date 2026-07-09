@@ -98,6 +98,17 @@ def _format_cli_version(raw: str | None) -> str | None:
   return f"{version} ({date})" if date else version
 
 
+def _background_choice_payload(choice) -> dict | None:
+  if choice is None or choice.provider is None:
+    return None
+  out = {"provider": choice.provider, "model": None, "effort": None}
+  if isinstance(choice.model, str) and choice.model.strip():
+    out["model"] = choice.model.strip()
+  if isinstance(choice.effort, str) and choice.effort.strip():
+    out["effort"] = choice.effort.strip()
+  return out
+
+
 # Outer composer — this is what routes/__init__.py picks up. The
 # real surfaces live on the three child surfaces below.
 router = APIRouter()
@@ -149,6 +160,9 @@ def get_settings_view(
     "gemini_configured": owner.gemini_api_key_enc is not None,
     "codex_authenticated": codex_creds.exists(),
     "provider": owner.provider or "claude",
+    "background_agents": providers.background_agent_settings(
+      data_dir, owner.provider or "claude"
+    ),
     "skills_enabled": providers.skills_enabled(data_dir),
     "claude_version": _format_cli_version(_cli_version("claude")),
     "codex_version": _format_cli_version(_cli_version("codex")),
@@ -174,10 +188,24 @@ def update_settings(
   # Owner model is frozen / chmod 444), so it's persisted outside the
   # DB transaction. Merge into the existing file so we don't clobber
   # model/effort defaults the picker wrote there.
-  if body.skills_enabled is not None:
+  if body.skills_enabled is not None or body.background_agents is not None:
     data_dir = get_app_settings().data_dir
     current = providers._load_agent_settings(data_dir)
-    current["skills_enabled"] = bool(body.skills_enabled)
+    if body.skills_enabled is not None:
+      current["skills_enabled"] = bool(body.skills_enabled)
+    if body.background_agents is not None:
+      existing = providers.background_agent_settings(
+        data_dir, owner.provider or "claude"
+      )
+      primary = (
+        _background_choice_payload(body.background_agents.primary)
+        or existing.get("primary")
+      )
+      fallback = _background_choice_payload(body.background_agents.fallback)
+      current["background_agents"] = {
+        "primary": primary,
+        "fallback": fallback,
+      }
     providers.write_agent_settings(data_dir, current)
   return {"ok": True}
 

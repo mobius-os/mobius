@@ -95,7 +95,6 @@ from pathlib import Path
 # recover_chat_runner.py's module-level Path constants.
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILL_PATH = DATA_DIR / "shared" / "skills" / "reflection.md"
-SETTINGS_PATH = DATA_DIR / "apps" / "reflection" / "settings.json"
 LOG_PATH = DATA_DIR / "cron-logs" / "reflection.log"
 CLAUDE_CONFIG_DIR = DATA_DIR / "cli-auth" / "claude"
 CODEX_HOME = DATA_DIR / "cli-auth" / "codex"
@@ -124,6 +123,19 @@ DEFAULT_MAX_TURNS = 60
 # override per-instance via /data/apps/reflection/settings.json without
 # touching code.
 DEFAULT_PROVIDER = "claude"
+KNOWN_MODELS_BY_PROVIDER = {
+  "claude": (
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-opus-4-5-20251001",
+    "claude-sonnet-4-7-20251215",
+    "claude-sonnet-4-6",
+    "claude-sonnet-4-5-20251001",
+    "claude-haiku-4-5-20251001",
+  ),
+  "codex": ("gpt-5.5", "gpt-5.4"),
+}
 
 # Turn budget for the guaranteed-brief rescue session. Small on
 # purpose: read the cut-off run's leavings, write a minimal brief,
@@ -524,45 +536,138 @@ def load_settings() -> dict:
   id) — so the owner can steer which agent dreams without a code
   change. Missing or malformed → {} (the caller applies defaults).
   """
-  if not SETTINGS_PATH.is_file():
+  path = DATA_DIR / "apps" / "reflection" / "settings.json"
+  if not path.is_file():
     return {}
   try:
-    data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    data = json.loads(path.read_text(encoding="utf-8"))
   except (json.JSONDecodeError, OSError):
     return {}
   return data if isinstance(data, dict) else {}
 
 
-def _resolve_model(settings: dict) -> tuple[str, str | None, str | None]:
-  """Returns (provider, model, effort) from settings.json + defaults.
+def load_global_agent_settings() -> dict:
+  """Reads /data/shared/agent-settings.json, tolerating absence/corruption."""
+  path = DATA_DIR / "shared" / "agent-settings.json"
+  if not path.is_file():
+    return {}
+  try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+  except (json.JSONDecodeError, OSError):
+    return {}
+  return data if isinstance(data, dict) else {}
 
-  Provider defaults to Claude. Model/effort are passed through only
-  when present and self-consistent: a model that belongs to the OTHER
-  provider is dropped (a cross-provider id would surface as an obscure
-  SDK error) — same defensive normalization the chat runners do. Both
-  may be None, in which case the SDK uses its own account default.
+
+def _model_belongs_to_other_provider(model: str, provider: str) -> bool:
+  """True when a known model id clearly belongs to another provider."""
+  for known_provider, models in KNOWN_MODELS_BY_PROVIDER.items():
+    if known_provider != provider and model in models:
+      return True
+  return False
+
+
+def _clean_agent_choice(
+  raw: dict | None,
+  *,
+  fallback_provider: str | None = None,
+  label: str = "settings",
+) -> dict | None:
+  """Normalize one provider/model/effort choice.
+
+  The runner avoids importing app.providers so cron importability stays
+  stdlib-only. This mirrors the backend's defensive shape: unknown providers
+  are dropped, empty strings become None, and a known cross-provider model id
+  is ignored instead of being handed to the wrong CLI.
   """
-  provider = settings.get("provider") or DEFAULT_PROVIDER
+  if not isinstance(raw, dict):
+    return None
+  provider = raw.get("provider")
   if provider not in ("claude", "codex"):
-    provider = DEFAULT_PROVIDER
-  model = settings.get("model") or None
-  effort = settings.get("effort") or None
-  if model:
-    # Reject a model that clearly belongs to the other provider. We
-    # avoid importing app.providers (keeps this runner importable
-    # without the backend package on sys.path) and inline the short
-    # known-model check instead.
-    other = {
-      "claude": ("gpt-5.5", "gpt-5.4"),
-      "codex": (
-        "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
-        "claude-sonnet-4-6",
-      ),
-    }.get(provider, ())
-    if model in other:
-      _log(f"settings model {model!r} mismatches provider {provider!r}; dropping")
-      model = None
-  return provider, model, effort
+    provider = fallback_provider if fallback_provider in ("claude", "codex") else None
+  if provider not in ("claude", "codex"):
+    return None
+  model = raw.get("model")
+  model = model.strip() if isinstance(model, str) and model.strip() else None
+  if model and _model_belongs_to_other_provider(model, provider):
+    _log(f"{label} model {model!r} mismatches provider {provider!r}; dropping")
+    model = None
+  effort = raw.get("effort")
+  effort = effort.strip() if isinstance(effort, str) and effort.strip() else None
+  return {"provider": provider, "model": model, "effort": effort}
+
+
+def _same_agent_choice(a: dict | None, b: dict | None) -> bool:
+  if not a or not b:
+    return False
+  return (
+    a.get("provider") == b.get("provider")
+    and (a.get("model") or None) == (b.get("model") or None)
+    and (a.get("effort") or None) == (b.get("effort") or None)
+  )
+
+
+def _resolve_agents(settings: dict) -> dict:
+  """Returns primary/fallback provider choices for the nightly run.
+
+  Per-app settings.json remains authoritative when it names a provider/model.
+  Otherwise Reflection inherits the system-level background agent defaults
+  from /data/shared/agent-settings.json. That lets the owner set "Claude first,
+  Codex fallback" once in Settings while still allowing Reflection to opt into
+  its own choices later.
+  """
+  global_settings = load_global_agent_settings()
+  raw_background = global_settings.get("background_agents")
+  background = raw_background if isinstance(raw_background, dict) else {}
+  global_primary = _clean_agent_choice(
+    background.get("primary"),
+    fallback_provider=DEFAULT_PROVIDER,
+    label="global background primary",
+  )
+  if global_primary is None:
+    global_primary = _clean_agent_choice(
+      {
+        "provider": DEFAULT_PROVIDER,
+        "model": global_settings.get("model"),
+        "effort": global_settings.get("effort"),
+      },
+      fallback_provider=DEFAULT_PROVIDER,
+      label="global primary",
+    )
+  primary_provider = global_primary.get("provider") or DEFAULT_PROVIDER
+  has_app_primary = any(settings.get(k) for k in ("provider", "model", "effort"))
+  primary = None
+  if has_app_primary:
+    primary = _clean_agent_choice(
+      {
+        "provider": settings.get("provider"),
+        "model": settings.get("model"),
+        "effort": settings.get("effort"),
+      },
+      fallback_provider=primary_provider,
+      label="reflection primary",
+    )
+  if primary is None:
+    primary = global_primary
+
+  raw_fallback = None
+  if any(settings.get(k) for k in ("fallback_provider", "fallback_model", "fallback_effort")):
+    raw_fallback = {
+      "provider": settings.get("fallback_provider"),
+      "model": settings.get("fallback_model"),
+      "effort": settings.get("fallback_effort"),
+    }
+  else:
+    raw_fallback = background.get("fallback")
+  fallback = _clean_agent_choice(raw_fallback, label="reflection fallback")
+  if _same_agent_choice(primary, fallback):
+    fallback = None
+  return {"primary": primary, "fallback": fallback}
+
+
+def _resolve_model(settings: dict) -> tuple[str, str | None, str | None]:
+  """Backward-compatible helper returning the resolved primary choice."""
+  primary = _resolve_agents(settings)["primary"]
+  return primary["provider"], primary.get("model"), primary.get("effort")
 
 
 def build_goal(settings: dict) -> str:
@@ -934,14 +1039,45 @@ async def _run_codex_session(
     _log(f"ERROR codex runner failed: {exc!r}")
     return 1
   if result.get("error"):
-    _log(f"WARN codex run ended in error: {result.get('error')}")
-    return 1
+    err = str(result.get("error") or "")
+    _log(f"WARN codex run ended in error: {err}")
+    if _is_auth_failure(err):
+      return AUTH_FAILURE_RC
+    if _is_usage_limit(err):
+      return USAGE_LIMIT_RC
+    return GENERIC_MODEL_RC
   _log(
     "codex run complete "
     f"session_id={result.get('session_id') or '(none)'} "
     f"cost_usd={result.get('cost_usd')}"
   )
   return 0
+
+
+async def _run_agent_choice(
+  choice: dict,
+  *,
+  goal: str,
+  skill_text: str,
+  env: dict[str, str],
+  max_turns: int,
+  log_fh,
+  countdown: bool,
+) -> int:
+  """Runs the selected provider choice through its matching SDK path."""
+  provider = choice["provider"]
+  model = choice.get("model")
+  effort = choice.get("effort")
+  if provider == "codex":
+    return await _run_codex_session(
+      goal=goal, skill_text=skill_text, env=env,
+      model=model, effort=effort, log_fh=log_fh,
+    )
+  return await _run_claude_session(
+    goal=goal, skill_text=skill_text, env=env, model=model,
+    effort=effort, max_turns=max_turns, log_fh=log_fh,
+    countdown=countdown,
+  )
 
 
 async def _maybe_write_fallback_brief(
@@ -1053,7 +1189,12 @@ async def run() -> int:
   to a CLI-free static brief instead of another doomed CLI rescue.
   """
   settings = load_settings()
-  provider, model, effort = _resolve_model(settings)
+  agents = _resolve_agents(settings)
+  primary = agents["primary"]
+  fallback = agents.get("fallback")
+  provider = primary["provider"]
+  model = primary.get("model")
+  effort = primary.get("effort")
   skill_text = load_skill()
   seed_brief_template()
   goal = build_goal(settings)
@@ -1078,17 +1219,28 @@ async def run() -> int:
   _safety_snapshot(f"reflection: pre-run safety snapshot {date.today().isoformat()}")
 
   try:
-    if provider == "codex":
-      rc = await _run_codex_session(
-        goal=goal, skill_text=skill_text, env=env,
-        model=model, effort=effort, log_fh=log_fh,
+    rc = await _run_agent_choice(
+      primary, goal=goal, skill_text=skill_text, env=env,
+      max_turns=max_turns, log_fh=log_fh, countdown=True,
+    )
+    if (
+      rc in (AUTH_FAILURE_RC, USAGE_LIMIT_RC)
+      and fallback is not None
+      and fallback_needed(rc, todays_brief_path())
+    ):
+      _log(
+        f"primary background agent failed rc={rc}; trying fallback "
+        f"provider={fallback['provider']} "
+        f"model={fallback.get('model') or '(default)'} "
+        f"effort={fallback.get('effort') or '(default)'}"
       )
-    else:
-      rc = await _run_claude_session(
-        goal=goal, skill_text=skill_text, env=env, model=model,
-        effort=effort, max_turns=max_turns, log_fh=log_fh,
-        countdown=True,
+      rc = await _run_agent_choice(
+        fallback, goal=goal, skill_text=skill_text, env=env,
+        max_turns=max_turns, log_fh=log_fh, countdown=True,
       )
+      provider = fallback["provider"]
+      model = fallback.get("model")
+      effort = fallback.get("effort")
     if rc == 0:
       _log("done")
     else:

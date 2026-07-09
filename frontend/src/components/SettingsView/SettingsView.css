@@ -262,6 +262,88 @@
    ../ProviderAuth/ProviderAuth.css since the component is shared
    between SettingsView and SetupWizard. */
 
+.settings__agent-defaults {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings__agent-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings__agent-title {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: 0;
+  color: var(--text);
+}
+
+.settings__agent-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+
+.settings__agent-row-copy {
+  min-width: 0;
+}
+
+.settings__agent-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+
+.settings__select {
+  width: 100%;
+  min-height: 42px;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  padding: 9px 10px;
+  outline: none;
+}
+
+.settings__select:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.settings__select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.settings__field-note {
+  grid-column: 1 / -1;
+  margin: -2px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@media (min-width: 520px) {
+  .settings__agent-row {
+    grid-template-columns: minmax(0, 1fr) minmax(220px, 1.2fr);
+    align-items: start;
+  }
+
+  .settings__agent-controls {
+    grid-template-columns: minmax(120px, 0.9fr) minmax(0, 1.2fr);
+  }
+}
+
 /* Möbius update cluster: the status line stacks ABOVE the build identity, so a
    short status ("Up to date") never shares a flex row with the build string and
    wraps mid-phrase. A vertical stack reads as one calm unit; the trailing action
