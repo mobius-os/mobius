@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   _computeSpacerH,
+  _pinReapplyNeeded,
   isNearContentBottom,
   isNearScrollBottom,
   modeForForegroundReturn,
@@ -67,10 +68,11 @@ test('shouldPinSend can ignore stale follow mode for delayed queued insertion', 
   }), false)
 })
 
-test('shouldPinSend ignores dynamic pin spacer when checking bottom gap', () => {
+test('shouldPinSend treats the bottom of real content as at-bottom, ignoring dynamic pin spacer', () => {
   // Raw gap is 440px, but 400px is phantom spacer left by a previous pin.
-  // Real content gap is 40px, but the reader is in the middle of the reserved
-  // spacer, not the true scroll bottom. Sending should NOT yank them.
+  // Real content gap is 40px: visually, the reader is at the conversation
+  // tail. The next send should pin to the top even though the physical scroll
+  // bottom includes empty reserved room below the messages.
   const scrollEl = makeScrollEl({
     scrollHeight: 2000,
     scrollTop: 1000,
@@ -81,7 +83,7 @@ test('shouldPinSend ignores dynamic pin spacer when checking bottom gap', () => 
     scrollEl,
     mode: { kind: 'PIN_USER_MSG', ts: 123 },
     isFirstUserMsg: false,
-  }), false)
+  }), true)
 })
 
 test('shouldPinSend still refuses to pin when real content gap is large', () => {
@@ -108,6 +110,44 @@ test('isNearContentBottom uses the same phantom-spacer bottom contract', () => {
   assert.equal(isNearContentBottom(scrollEl), true)
   assert.equal(isNearScrollBottom(scrollEl), false,
     'middle of reserved spacer is not true scroll bottom')
+})
+
+test('pin reapply is needed when the first pin was clamped but spacer now makes the target reachable', () => {
+  const scrollEl = {
+    scrollHeight: 2000,
+    scrollTop: 500,
+    clientHeight: 700,
+    querySelector(selector) {
+      if (selector === '.chat__msg--user[data-ts="123"]') {
+        return { offsetTop: 1000 }
+      }
+      return null
+    },
+  }
+
+  assert.equal(
+    _pinReapplyNeeded(scrollEl, { kind: 'PIN_USER_MSG', ts: 123 }, 1000),
+    true,
+  )
+})
+
+test('pin reapply waits until the target is reachable to avoid stepwise pin jitter', () => {
+  const scrollEl = {
+    scrollHeight: 1500,
+    scrollTop: 500,
+    clientHeight: 700,
+    querySelector(selector) {
+      if (selector === '.chat__msg--user[data-ts="123"]') {
+        return { offsetTop: 1000 }
+      }
+      return null
+    },
+  }
+
+  assert.equal(
+    _pinReapplyNeeded(scrollEl, { kind: 'PIN_USER_MSG', ts: 123 }, 1000),
+    false,
+  )
 })
 
 test('viewport resize at physical bottom retires stale pin mode', () => {

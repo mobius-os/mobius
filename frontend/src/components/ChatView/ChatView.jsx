@@ -6,7 +6,7 @@ import useStreamConnection from './useStreamConnection.js'
 import useScrollMode, {
   shouldPinSend,
   anchorModeFromScroll,
-  isNearScrollBottom,
+  isNearContentBottom,
   modeForForegroundReturn,
 } from './useScrollMode.js'
 import useVoiceInput from './useVoiceInput.js'
@@ -23,7 +23,7 @@ import QueuedMessages from './QueuedMessages.jsx'
 import MsgContent from './MsgContent.jsx'
 import { questionKey } from './questionKey.js'
 import { resolveStopResend } from './resolveStopResend.js'
-import { assistantStreamCoversMessage, findTrailingAssistantPartialIndex, messageCoversAssistantStream, promoteAssistantStream, streamItemsHaveRenderableContent } from './streamPromotion.js'
+import { chooseActiveAssistantSurface, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent } from './streamPromotion.js'
 import {
   canFastForwardQueue,
   continuationRowsFromPromotedMessage,
@@ -145,12 +145,16 @@ function findOptimisticUserIndex(messages, ts) {
  *  user is reading above the tail. Convert that stale pin into the reader's
  *  current scroll position (ANCHOR_AT). The bottom spacer is now independent
  *  from pinning, so it can still reserve room below the newest user message
- *  without moving the reader. Any other current mode is left untouched:
- *  ANCHOR_AT is already the reader's position, and FOLLOW_BOTTOM (reachable
- *  only via pin:false, e.g. handleStop's queue-collapse) must keep following
- *  the stream. */
-function settleNonPinMode(modeRef, scrollEl) {
-  if (modeRef.current?.kind !== 'PIN_USER_MSG') return
+ *  without moving the reader. By default FOLLOW_BOTTOM is left alone because
+ *  pin:false synthetic sends (e.g. handleStop's queue-collapse) intentionally
+ *  keep following. Real user sends/steers that choose not to pin pass
+ *  retireFollow:true so a stale FOLLOW_BOTTOM cannot yank a scrolled-up reader
+ *  when the delayed message becomes visible. */
+function settleNonPinMode(modeRef, scrollEl, { retireFollow = false } = {}) {
+  const kind = modeRef.current?.kind
+  if (kind !== 'PIN_USER_MSG' && !(retireFollow && kind === 'FOLLOW_BOTTOM')) {
+    return
+  }
   const anchor = anchorModeFromScroll(scrollEl)
   if (anchor) modeRef.current = anchor
 }
@@ -317,7 +321,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // cid preservation).
   const pendingQueue = usePendingQueue(cached?.pending_messages || [])
   const queuedContinuationLocalPromotedRef = useRef(null)
+  const queuedContinuationPinIntentRef = useRef(null)
+  const queuedPinIntentByCidRef = useRef(new Map())
+  const queuedPinIntentByTsRef = useRef(new Map())
   const steerPinIntentRef = useRef(null)
+  const inlineSteerPinIntentRef = useRef(null)
   const runtimeReconnectInFlightRef = useRef(false)
   const swReloadHoldTimerRef = useRef(null)
 
@@ -501,12 +509,21 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   //                             ANCHOR_AT{...} on pagination, etc.
   //   • gestureWindowUntilRef — read by handleScroll to gate pagination
   //                             on user-driven scrolls only.
+  //   • userScrollIntentVersionRef
+  //                           — bumped only by human scroll input; delayed
+  //                             queued/steered sends honor their pin intent
+  //                             only if this has not changed since submit.
   //   • revealed              — apply to .chat__scroll style for the
   //                             hide-then-reveal scroll restore.
   //
   // See useScrollMode.js + ARCHITECTURE.md "Chat scroll + steer
   // contract" for full design.
-  const { modeRef, gestureWindowUntilRef, revealed } = useScrollMode({
+  const {
+    modeRef,
+    gestureWindowUntilRef,
+    userScrollIntentVersionRef,
+    revealed,
+  } = useScrollMode({
     chatId,
     scrollRef,
     spacerRef,
@@ -516,6 +533,65 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     pendingMessagesLength: pendingQueue.pendingMessages.length,
     loadingOlderRef: loadingOlder,
   })
+
+  function makeSendPinIntent(willPin) {
+    return {
+      willPin: !!willPin,
+      userScrollIntentVersion: userScrollIntentVersionRef.current,
+    }
+  }
+
+  function pinIntentStillCurrent(intent) {
+    return !!intent
+      && intent.userScrollIntentVersion === userScrollIntentVersionRef.current
+  }
+
+  function rememberQueuedPinIntent(cid, intent) {
+    if (!cid || !intent) return
+    queuedPinIntentByCidRef.current.set(cid, intent)
+  }
+
+  function rememberQueuedPinIntentTs(cid, ts) {
+    if (ts == null) return
+    const intent = cid ? queuedPinIntentByCidRef.current.get(cid) : null
+    if (intent) queuedPinIntentByTsRef.current.set(ts, intent)
+  }
+
+  function forgetQueuedPinIntent({ cid = null, ts = null, tsList = null } = {}) {
+    if (cid) queuedPinIntentByCidRef.current.delete(cid)
+    if (ts != null) queuedPinIntentByTsRef.current.delete(ts)
+    if (Array.isArray(tsList)) {
+      for (const value of tsList) queuedPinIntentByTsRef.current.delete(value)
+    }
+  }
+
+  function takeQueuedPinIntent({ tsList = null, ts = null, localPromoted = null } = {}) {
+    const keys = []
+    if (Array.isArray(tsList)) keys.push(...tsList.filter(v => v != null))
+    if (ts != null) keys.push(ts)
+    let intent = null
+    for (const key of keys) {
+      if (!intent && queuedPinIntentByTsRef.current.has(key)) {
+        intent = queuedPinIntentByTsRef.current.get(key)
+      }
+      queuedPinIntentByTsRef.current.delete(key)
+    }
+    const cid = localPromoted?.cid
+    if (cid) {
+      if (!intent && queuedPinIntentByCidRef.current.has(cid)) {
+        intent = queuedPinIntentByCidRef.current.get(cid)
+      }
+      queuedPinIntentByCidRef.current.delete(cid)
+    }
+    return intent
+  }
+
+  function forgetAllQueuedPinIntents() {
+    queuedPinIntentByCidRef.current.clear()
+    queuedPinIntentByTsRef.current.clear()
+    queuedContinuationPinIntentRef.current = null
+    inlineSteerPinIntentRef.current = null
+  }
 
   // Re-fetch messages from the API. Called when the SSE stream reconnects
   // and gets a 204 (no active broadcast — the chat finished while the
@@ -657,6 +733,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         // that event cannot be accidentally folded into this turn here.
         const localPromoted = queuedContinuationLocalPromotedRef.current
         queuedContinuationLocalPromotedRef.current = null
+        const continuationPinIntent = queuedContinuationPinIntentRef.current
+        queuedContinuationPinIntentRef.current = null
         const promotedRows = continuationRowsFromPromotedMessage(
           promotedMessage,
           localPromoted,
@@ -672,20 +750,28 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             m => m.role === 'user' && !m.hidden,
           )
           const pinTargetTs = promotedRows[0]?.ts
-          const contWillPin = pinTargetTs != null && shouldPinSend({
+          const fallbackWillPin = () => shouldPinSend({
             scrollEl: scrollRef.current,
             mode: modeRef.current,
             isFirstUserMsg: contIsFirstUser,
             respectFollowMode: false,
           })
+          const intentStillCurrent = continuationPinIntent
+            ? pinIntentStillCurrent(continuationPinIntent)
+            : true
+          const contWillPin = pinTargetTs != null && intentStillCurrent && (
+            continuationPinIntent
+              ? continuationPinIntent.willPin
+              : fallbackWillPin()
+          )
           commitMessages(prev => appendMessageBatch(prev, promotedRows))
           promotedRef.current = false
           setSpacerActive(true)
           if (contWillPin) {
             if (spacerRef.current) spacerRef.current.style.height = '0px'
             modeRef.current = { kind: 'PIN_USER_MSG', ts: pinTargetTs }
-          } else {
-            settleNonPinMode(modeRef, scrollRef.current)
+          } else if (intentStillCurrent) {
+            settleNonPinMode(modeRef, scrollRef.current, { retireFollow: true })
           }
         } else {
           // Server's promoted ts isn't in our local queue (cancel raced
@@ -697,6 +783,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         setServerRunningState(true)
       } else {
         queuedContinuationLocalPromotedRef.current = null
+        queuedContinuationPinIntentRef.current = null
         setSending(false)
         sendingRef.current = false
         setServerRunningState(false)
@@ -721,6 +808,11 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         : pendingQueue.promoteAll(ts)
       queuedContinuationLocalPromotedRef.current =
         serverRows?.length ? serverRows : localPromoted
+      queuedContinuationPinIntentRef.current = takeQueuedPinIntent({
+        tsList: consumedTs,
+        ts,
+        localPromoted,
+      })
     },
     onLiveQuestion: setLiveQuestionId,
     onSteeredIntoTurn: ({ ts, content, messages: steeredBatch }) => {
@@ -740,7 +832,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       // could work while the message stayed low in the viewport with no
       // reserved room below it.
       //
-      const pinIntent = steerPinIntentRef.current
+      const pinIntent = steerPinIntentRef.current || inlineSteerPinIntentRef.current
+      inlineSteerPinIntentRef.current = null
       const steeredMessages = Array.isArray(steeredBatch) && steeredBatch.length > 0
         ? steeredBatch.map((m, i) => ({
             role: 'user',
@@ -751,21 +844,19 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         : [{ role: 'user', content, ts: ts ?? Date.now() }]
       const pinTargetTs = steeredMessages[0]?.ts
       promoteStreamToMessages({ keepTurnOpen: true })
-      // Pin decision is intentionally recomputed at the moment the steered
-      // row becomes visible. The reader may have scrolled after tapping the
-      // button or while the queued POST was in flight; using an old at-bottom
-      // snapshot would yank a scrolled-up reader back to the new message.
       const steeredIsFirstUser = !messagesRef.current.some(
         m => m.role === 'user' && !m.hidden,
       )
-      const pinStillValid = !!pinIntent
-      const shouldPinSteered = pinTargetTs != null && pinStillValid
-        && shouldPinSend({
-          scrollEl: scrollRef.current,
-          mode: modeRef.current,
-          isFirstUserMsg: steeredIsFirstUser,
-          respectFollowMode: false,
-        })
+      const fallbackWillPin = () => shouldPinSend({
+        scrollEl: scrollRef.current,
+        mode: modeRef.current,
+        isFirstUserMsg: steeredIsFirstUser,
+        respectFollowMode: false,
+      })
+      const pinStillValid = pinIntent ? pinIntentStillCurrent(pinIntent) : false
+      const shouldPinSteered = pinTargetTs != null && pinStillValid && (
+        pinIntent ? pinIntent.willPin : fallbackWillPin()
+      )
       // Dedup by ts so a reconnect's catch-up replay of the same event
       // can't double-insert the steered user message. Insert by transcript ts
       // instead of blindly appending: if a fetch/replay already committed the
@@ -776,7 +867,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         if (spacerRef.current) spacerRef.current.style.height = '0px'
         modeRef.current = { kind: 'PIN_USER_MSG', ts: pinTargetTs }
       } else if (pinStillValid) {
-        settleNonPinMode(modeRef, scrollRef.current)
+        settleNonPinMode(modeRef, scrollRef.current, { retireFollow: true })
       }
       steerPinIntentRef.current = null
     },
@@ -1230,8 +1321,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     // viewport before we compute the send rule; if we measure after
     // blur, a reader who was genuinely at the bottom can be misread as
     // scrolled up and the new user message won't pin to the top.
-    const wasNearScrollBottomAtSubmit = scrollRef.current
-      ? isNearScrollBottom(scrollRef.current)
+    const wasNearContentBottomAtSubmit = scrollRef.current
+      ? isNearContentBottom(scrollRef.current)
       : null
 
     // On touch devices, blur to dismiss the soft keyboard. Desktop keeps
@@ -1294,18 +1385,20 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       // rule as a fresh send. The at-bottom / following decision and the
       // first-user check must reflect the moment of sending — reading them
       // AFTER `await streamSend(...)` lets a scroll during the POST flip the
-      // decision. `modeAtSend` lets us detect such a scroll and yield to it
-      // (a user-driven mode change during the await is the newer intent).
+      // decision. The user-scroll intent version lets us detect such a scroll
+      // and yield to it (a user-driven scroll after send is the newer intent).
       const queuedIsFirstUser = !messagesRef.current.some(
         m => m.role === 'user' && !m.hidden,
       )
-      const queuedModeAtSend = modeRef.current
-      const queuedWillPin = shouldPinSend({
+      const queuedWillPin = pin && shouldPinSend({
         scrollEl: scrollRef.current,
         mode: modeRef.current,
         isFirstUserMsg: queuedIsFirstUser,
-        wasNearScrollBottom: wasNearScrollBottomAtSubmit,
+        wasNearScrollBottom: wasNearContentBottomAtSubmit,
       })
+      const queuedPinIntent = makeSendPinIntent(queuedWillPin)
+      rememberQueuedPinIntent(cid, queuedPinIntent)
+      inlineSteerPinIntentRef.current = queuedPinIntent
       setInput('')
       clearComposerFilesForSend()
       if (inputRef.current) {
@@ -1332,6 +1425,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           const canonicalPending = result.pending_message || null
           // Replace optimistic ts with server's (cid is stable).
           const ackTs = canonicalPending?.ts ?? result.ts
+          rememberQueuedPinIntentTs(queuedMsg.cid, ackTs)
           pendingQueue.swapOptimisticTs(
             queuedMsg.cid,
             ackTs ?? queuedMsg.ts,
@@ -1364,7 +1458,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
             // (captured before the await) and yield to a user scroll that
             // changed the mode during the POST. Pin keys to the first SERVER
             // ts from the promoted batch, not the optimistic queuedMsg.ts.
-            const pinStillValid = modeRef.current === queuedModeAtSend
+            const pinStillValid = pinIntentStillCurrent(queuedPinIntent)
             const pinTargetTs = startedMessages?.[0]?.ts ?? queuedMsg.ts
             setSpacerActive(true)
             if (queuedWillPin && pinStillValid) {
@@ -1374,8 +1468,13 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                 ts: pinTargetTs,
               }
             } else if (pinStillValid) {
-              settleNonPinMode(modeRef, scrollRef.current)
+              settleNonPinMode(modeRef, scrollRef.current, { retireFollow: pin })
             }
+            forgetQueuedPinIntent({
+              cid: queuedMsg.cid,
+              ts: ackTs,
+              tsList: result.message?._consumed_ts,
+            })
             bridgeHook.markBridged()
           }
         }
@@ -1386,6 +1485,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         // optimistic queued-tray entry here — it never queued.
         if (result?.status === 'steered') {
           pendingQueue.cancelByCid(queuedMsg.cid)
+          forgetQueuedPinIntent({ cid: queuedMsg.cid })
         }
         // Race: server said "started" though we expected queued.
         if (result?.status === 'started') {
@@ -1415,7 +1515,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           // ANCHOR_AT (see settleNonPinMode) so the reader stays put with
           // reservation still available below. Pin keys to the first SERVER
           // ts when available; otherwise fall back to the optimistic ts.
-          const startedPinStillValid = modeRef.current === queuedModeAtSend
+          const startedPinStillValid = pinIntentStillCurrent(queuedPinIntent)
           const pinTargetTs = startedMessages?.[0]?.ts ?? queuedMsg.ts
           setSpacerActive(true)
           if (queuedWillPin && startedPinStillValid) {
@@ -1425,13 +1525,20 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
               ts: pinTargetTs,
             }
           } else if (startedPinStillValid) {
-            settleNonPinMode(modeRef, scrollRef.current)
+            settleNonPinMode(modeRef, scrollRef.current, { retireFollow: pin })
           }
+          forgetQueuedPinIntent({
+            cid: queuedMsg.cid,
+            tsList: result.message?._consumed_ts,
+          })
           // This is a NEW turn (not the bridge turn from mount).
           // Retire the bridge gate so the upcoming promote appends a
           // fresh assistant instead of replacing whichever message
           // is currently last.
           bridgeHook.markBridged()
+        }
+        if (result?.status !== 'steered') {
+          inlineSteerPinIntentRef.current = null
         }
         // Invariant: every observable queue-path status must resolve
         // the optimistic entry's in-flight flag. queued/steered/started
@@ -1449,6 +1556,8 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       } catch (err) {
         // Roll back optimistic + restore input.
         pendingQueue.cancelByCid(queuedMsg.cid)
+        forgetQueuedPinIntent({ cid: queuedMsg.cid })
+        inlineSteerPinIntentRef.current = null
         restoreComposerAfterFailedSend()
         commitMessages(prev => [
           ...prev,
@@ -1480,7 +1589,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       scrollEl: scrollRef.current,
       mode: modeRef.current,
       isFirstUserMsg,
-      wasNearScrollBottom: wasNearScrollBottomAtSubmit,
+      wasNearScrollBottom: wasNearContentBottomAtSubmit,
     })
 
     const userMsg = { role: 'user', content: text, ts: Date.now(), optimistic: true }
@@ -1509,7 +1618,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       if (spacerRef.current) spacerRef.current.style.height = '0px'
       modeRef.current = { kind: 'PIN_USER_MSG', ts: userMsg.ts }
     } else {
-      settleNonPinMode(modeRef, scrollRef.current)
+      settleNonPinMode(modeRef, scrollRef.current, { retireFollow: pin })
     }
     // Fresh turn — not a bridge from a mounted DB partial.
     bridgeHook.markBridged()
@@ -1764,6 +1873,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
   // by re-fetching authoritative state on success or on error.
   const handleCancelPending = useCallback(async (ts) => {
     pendingQueue.cancelByTs(ts)
+    forgetQueuedPinIntent({ ts })
     try {
       const res = await apiFetch(`/chats/${chatId}/pending/${ts}`, {
         method: 'DELETE',
@@ -1841,6 +1951,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       // pendingQueue.clear() updates pendingMessagesRef.current to
       // [] before this line returns (synchronous).
       fetchGenRef.current += 1
+      forgetAllQueuedPinIntents()
       pendingQueue.clear()
 
       let stoppedCleanly = true
@@ -2050,7 +2161,20 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       if (!content) return
 
       try {
-        steerPinIntentRef.current = { inFlight: true }
+        const wasNearContentBottomAtSteer = scrollRef.current
+          ? isNearContentBottom(scrollRef.current)
+          : null
+        const steerIsFirstUser = !messagesRef.current.some(
+          m => m.role === 'user' && !m.hidden,
+        )
+        const steerWillPin = shouldPinSend({
+          scrollEl: scrollRef.current,
+          mode: modeRef.current,
+          isFirstUserMsg: steerIsFirstUser,
+          respectFollowMode: false,
+          wasNearScrollBottom: wasNearContentBottomAtSteer,
+        })
+        steerPinIntentRef.current = makeSendPinIntent(steerWillPin)
         const result = await streamSend(content, attachments, {
           forceSteer: true,
           consumePendingTs,
@@ -2070,6 +2194,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
           } else {
             for (const ts of consumePendingTs) pendingQueue.cancelByTs(ts)
           }
+          forgetQueuedPinIntent({ tsList: consumePendingTs })
         }
         if (result?.status !== 'steered') {
           steerPinIntentRef.current = null
@@ -2238,20 +2363,19 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     : -1
   const activePartialMsgIdx = bridgeMsgIdx >= 0 ? bridgeMsgIdx : trailingAssistantPartialIdx
   const activePartialMsg = activePartialMsgIdx >= 0 ? messages[activePartialMsgIdx] : null
-  const liveStreamCoversPartial = activePartialMsg
-    ? assistantStreamCoversMessage(activePartialMsg, streamItems)
-    : false
-  const partialCoversLiveStream = activePartialMsg
-    ? messageCoversAssistantStream(activePartialMsg, streamItems)
-    : false
   // Single-surface invariant for active assistant partials:
   // - if the live stream is at least as fresh as the saved DB partial, hide the
   //   DB row and render StreamingMessage; final promotion replaces that row.
   // - if the DB partial is richer than a stale cached stream snapshot (e.g.
   //   stray "I" after returning to chat), keep the DB row and suppress the
   //   stale stream until catch-up catches up.
-  const liveMirrorMsgIdx = liveStreamCoversPartial ? activePartialMsgIdx : -1
-  const suppressStreamingSurface = !!(activePartialMsg && partialCoversLiveStream && !liveStreamCoversPartial)
+  // - if both surfaces clearly belong to the same active answer but tool /
+  //   thinking metadata is only partially replayed, still choose ONE surface.
+  //   Rendering both was the transient "duplicated agent output" bug: reopening
+  //   the chat fixed it because the durable transcript had only one copy.
+  const activeAssistantSurface = chooseActiveAssistantSurface(activePartialMsg, streamItems)
+  const liveMirrorMsgIdx = activeAssistantSurface.hideMessage ? activePartialMsgIdx : -1
+  const suppressStreamingSurface = !!(activePartialMsg && activeAssistantSurface.suppressStream)
   const showStreamingSurface = turnActive && streamItems.length > 0 && !suppressStreamingSurface
 
   // ── Sticky "needs your answer" affordance ──────────────────────────

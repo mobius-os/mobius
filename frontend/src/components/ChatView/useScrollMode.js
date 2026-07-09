@@ -15,10 +15,12 @@
  *
  * Bottom detection: the load-bearing at-bottom decision for
  * send-pinning is scrollHeight math (`shouldPinSend` →
- * `isNearScrollBottom`, read from `scrollTop` before the append). The
- * IntersectionObserver on a sentinel at the end of `.chat__scroll` is
+ * `isNearContentBottom`, read from `scrollTop` before the append). The
+ * dynamic pin spacer is reserved room, not message content: if the reader is
+ * at the bottom of the real conversation, the next send should still pin.
+ * The IntersectionObserver on a sentinel at the end of `.chat__scroll` is
  * used only for the gesture-driven mode transition (engaging
- * FOLLOW_BOTTOM when the user scrolls to the bottom), not for the
+ * FOLLOW_BOTTOM when the user scrolls to the physical bottom), not for the
  * send-pin decision.
  *
  * User-gesture detection: pointerdown/wheel/touchstart/keydown open a
@@ -126,6 +128,19 @@ export function applyMode(scrollEl, mode) {
   }
 }
 
+export function _pinReapplyNeeded(scrollEl, mode, lastPinTop) {
+  if (!scrollEl || mode?.kind !== 'PIN_USER_MSG') return false
+  const el = scrollEl.querySelector(
+    `.chat__msg--user[data-ts="${mode.ts}"]`,
+  )
+  if (!el) return false
+  const target = Math.max(0, el.offsetTop - PIN_OFFSET)
+  const maxScrollTop = scrollEl.scrollHeight - scrollEl.clientHeight
+  const clampedShort = scrollEl.scrollTop < target - 1
+    && maxScrollTop >= target - 1
+  return el.offsetTop !== lastPinTop || clampedShort
+}
+
 
 /** Validates a saved ScrollMode against current state.
  *  Degrades to FOLLOW_BOTTOM if the anchor no longer exists. */
@@ -191,14 +206,14 @@ const NEAR_BOTTOM_PX = 50
  *  the first follow-write, so a sentinel read at send time would
  *  mis-classify an at-bottom reader):
  *
- *    1. The scroll position is within NEAR_BOTTOM_PX of the true scroll
- *       bottom right now, measured from scrollTop BEFORE the new message
- *       appends. This is a position computation, not a sentinel read, and
- *       it covers a chat short enough to fit the viewport and a reader
- *       sitting at the actual tail without having made the bottom gesture.
- *       Reserved pin-spacer room is part of the scroll range for this
- *       purpose: a reader in the middle of that empty reserved room is not
- *       at the bottom and must not be yanked to the next user message.
+ *    1. The scroll position is within NEAR_BOTTOM_PX of the bottom of the
+ *       real message content right now, measured from scrollTop BEFORE the
+ *       new message appends. This is a position computation, not a sentinel
+ *       read, and it covers a chat short enough to fit the viewport and a
+ *       reader sitting at the visible tail without having made the bottom
+ *       gesture. Reserved pin-spacer room is excluded for this purpose:
+ *       empty room below the last message should not make the next send land
+ *       mid-screen when the user is visually at the bottom of the chat.
  *
  *    2. FOLLOW_BOTTOM is only a fallback when the scroll element is not
  *       available. It is deliberately NOT authoritative when scrollEl
@@ -216,7 +231,7 @@ export function shouldPinSend({
 }) {
   if (isFirstUserMsg) return true
   if (typeof wasNearScrollBottom === 'boolean') return wasNearScrollBottom
-  if (scrollEl) return isNearScrollBottom(scrollEl)
+  if (scrollEl) return isNearContentBottom(scrollEl)
   if (respectFollowMode && mode && mode.kind === 'FOLLOW_BOTTOM') return true
   return false
 }
@@ -337,6 +352,7 @@ export function modeForForegroundReturn(scrollEl) {
  *     | {kind: 'ANCHOR_AT', key: string, offset: number}
  *   >,
  *   gestureWindowUntilRef: React.MutableRefObject<number>,
+ *   userScrollIntentVersionRef: React.MutableRefObject<number>,
  *   revealed: boolean,
  * }}
  */
@@ -355,6 +371,12 @@ export default function useScrollMode({
   const modeChatIdRef = useRef(null)
   const bottomVisibleRef = useRef(false)
   const gestureWindowUntilRef = useRef(0)
+  // Monotonic counter for actual user scroll intent. Send/steer code captures
+  // this at submit time and honors a delayed pin only if the user did not
+  // scroll after submitting. Programmatic applyMode scrolls must not increment
+  // it, so it is bumped from pointer/wheel/touch/key input on the scroll pane,
+  // not from every scroll event.
+  const userScrollIntentVersionRef = useRef(0)
   const fullViewHRef = useRef(0)
   // Lives outside the layout effect so it survives StrictMode's
   // double-invoke in dev (and any future effect re-run). If this were
@@ -498,6 +520,19 @@ export default function useScrollMode({
       }
     }
 
+    function settlePinnedMode() {
+      if (!_pinReapplyNeeded(scrollEl, modeRef.current, lastPinTopRef.current)) {
+        return
+      }
+      applyMode(scrollEl, modeRef.current)
+      const el = scrollEl.querySelector(
+        `.chat__msg--user[data-ts="${modeRef.current.ts}"]`,
+      )
+      lastPinTopRef.current = el ? el.offsetTop : null
+      lastAppliedModeRef.current = modeRef.current
+      nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
+    }
+
     // Full sync — size spacer and apply-if-changed. Used at mount, RO, reveal,
     // and visualViewport keyboard changes. Each call sizes the spacer (always
     // needed — the spacer math depends on changing content). Most callers only
@@ -527,6 +562,12 @@ export default function useScrollMode({
       } else {
         maybeApplyMode()
       }
+      // A send can set PIN_USER_MSG while the dynamic spacer is still at its
+      // old height. `sizeSpacer()` above makes the target reachable; this
+      // immediate settle pass applies the same pin again if the browser had
+      // clamped the first write, instead of waiting for a later RO event that
+      // may never fire for the spacer-only height change.
+      settlePinnedMode()
       nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
     }
     syncLayout()
@@ -614,28 +655,15 @@ export default function useScrollMode({
         // tall-enough scrollHeight already keeps the pin satisfied (no
         // clamp, no offsetTop shift) — so this stays a no-op there and does
         // NOT reintroduce the May-2026 re-pin-every-RO-firing jitter.
-        const el = scrollEl.querySelector(
-          `.chat__msg--user[data-ts="${modeRef.current.ts}"]`,
-        )
-        if (el) {
-          const target = Math.max(0, el.offsetTop - PIN_OFFSET)
-          const maxScrollTop = scrollEl.scrollHeight - scrollEl.clientHeight
-          // Reachability is measured against the TARGET, not "is there any
-          // more room than now". If we gated on `maxScrollTop >= scrollTop`,
-          // a layout still growing toward the target (scrollHeight climbing
-          // as content streams in below) would re-pin stepwise on every RO
-          // firing — clamp to the current max, fire again, clamp a little
-          // higher — reintroducing the May-2026 stutter. Gating on the
-          // target means we re-pin exactly once, when the settled layout
-          // can actually hold the message at the top.
-          const clampedShort = scrollEl.scrollTop < target - 1
-            && maxScrollTop >= target - 1
-          if (el.offsetTop !== lastPinTopRef.current || clampedShort) {
-            applyMode(scrollEl, modeRef.current)
-            lastPinTopRef.current = el.offsetTop
-            nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
-          }
-        }
+        // Reachability is measured against the TARGET, not "is there any
+        // more room than now". If we gated on `maxScrollTop >= scrollTop`,
+        // a layout still growing toward the target (scrollHeight climbing
+        // as content streams in below) would re-pin stepwise on every RO
+        // firing — clamp to the current max, fire again, clamp a little
+        // higher — reintroducing the May-2026 stutter. Gating on the
+        // target means we re-pin exactly once, when the settled layout
+        // can actually hold the message at the top.
+        settlePinnedMode()
       }
       nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
       requestRevealOnQuiet()  // each RO firing pushes the reveal back
@@ -648,6 +676,7 @@ export default function useScrollMode({
     // User-gesture detection.
     const onUserInput = () => {
       gestureWindowUntilRef.current = performance.now() + GESTURE_WINDOW_MS
+      userScrollIntentVersionRef.current += 1
     }
     scrollEl.addEventListener('pointerdown', onUserInput, { passive: true })
     scrollEl.addEventListener('touchstart', onUserInput, { passive: true })
@@ -738,6 +767,7 @@ export default function useScrollMode({
   return {
     modeRef,
     gestureWindowUntilRef,
+    userScrollIntentVersionRef,
     revealed,
   }
 }
