@@ -739,6 +739,8 @@ async def _http_get(
         next_url = None
         if r.status_code == 404:
           raise HTTPException(404, f"Not found: {url}")
+        if r.status_code == 429:
+          raise HTTPException(429, _rate_limit_detail(url, r.headers))
         if r.status_code >= 400:
           raise HTTPException(
             502, f"Upstream {r.status_code} fetching {url}",
@@ -761,6 +763,43 @@ async def _http_get(
   # Recurse outside the stream context so the previous connection is
   # already released by the time we open the next one.
   return await _http_get(client, next_url, max_bytes, _hops + 1)
+
+
+def _header(headers, name: str) -> str | None:
+  for key, value in (headers or {}).items():
+    if str(key).lower() == name.lower():
+      return str(value)
+  return None
+
+
+def _wait_label(seconds: int) -> str:
+  seconds = max(1, int(seconds))
+  if seconds < 60:
+    return f"{seconds} second{'s' if seconds != 1 else ''}"
+  minutes = (seconds + 59) // 60
+  return f"about {minutes} minute{'s' if minutes != 1 else ''}"
+
+
+def _rate_limit_detail(url: str, headers) -> str:
+  host = urlparse(url).hostname or "upstream"
+  service = "GitHub" if "github" in host.lower() else host
+  detail = f"{service} rate-limited this app update."
+  retry_after = _header(headers, "retry-after")
+  if retry_after:
+    try:
+      seconds = int(float(retry_after))
+      if seconds > 0:
+        return f"{detail} Try again in {_wait_label(seconds)}."
+    except ValueError:
+      pass
+  reset = _header(headers, "x-ratelimit-reset")
+  if reset:
+    try:
+      reset_at = datetime.fromtimestamp(int(reset), UTC)
+      return f"{detail} Try again after {reset_at.isoformat(timespec='minutes')}."
+    except (ValueError, OSError):
+      pass
+  return f"{detail} Please wait a minute and try again."
 
 
 def _seed_value_is_inline(value) -> bool:

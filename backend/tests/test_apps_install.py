@@ -1614,6 +1614,27 @@ def test_install_aborts_when_stream_exceeds_cap(client, auth, bypass_url_validat
   assert "cap" in r.json()["detail"].lower() or "exceeds" in r.json()["detail"].lower()
 
 
+def test_install_surfaces_github_rate_limit_as_429(client, auth, bypass_url_validation):
+  base = "https://raw.githubusercontent.com/mobius-os/app-test/main/"
+  responses = {
+    base + "mobius.json": (
+      429,
+      b"rate limited",
+      {"retry-after": "60"},
+    ),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r.status_code == 429, r.text
+  assert "GitHub rate-limited" in r.json()["detail"]
+  assert "minute" in r.json()["detail"]
+
+
 # --- Update path rolls back compiled bundle (fix 4) -----------------
 
 
