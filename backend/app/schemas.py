@@ -386,6 +386,9 @@ class SettingsUpdate(BaseModel):
 
   gemini_api_key: str | None = None
   provider: str | None = None
+  # Global defaults for new chats. Existing chats can still override these
+  # through ChatPatch.agent_settings_json.
+  agent_settings: AgentSettingsOverride | None = None
   background_agents: BackgroundAgentsUpdate | None = None
   # Opt-in to offering SDK skills to the Claude agent. Behavior-
   # shifting and default-off (see providers.skills_enabled); persisted

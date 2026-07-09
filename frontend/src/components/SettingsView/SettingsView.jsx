@@ -11,6 +11,8 @@ import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
 import StatusDot from '../ui/StatusDot.jsx'
+import ManageModelsModal from '../ChatView/ManageModelsModal.jsx'
+import { PROVIDER_INFO, PROVIDER_ORDER } from '../ChatView/ChatSettingsPanel.jsx'
 import '../ui/StatusDot.css'
 import './SettingsView.css'
 
@@ -36,61 +38,129 @@ function normalizeBackgroundAgents(backgroundAgents) {
     primary: {
       provider: primaryProvider,
       model: backgroundAgents?.primary?.model || '',
-      effort: backgroundAgents?.primary?.effort || '',
+      effort: backgroundAgents?.primary?.effort || defaultEffort(primaryProvider),
     },
     fallback: {
       provider: fallbackProvider,
       model: backgroundAgents?.fallback?.model || '',
-      effort: backgroundAgents?.fallback?.effort || '',
+      effort: backgroundAgents?.fallback?.effort || defaultEffort(fallbackProvider),
     },
   }
 }
 
-function BackgroundAgentPicker({
-  label,
-  hint,
+function defaultEffort(provider) {
+  const efforts = PROVIDER_INFO[provider]?.efforts || []
+  return efforts.find(e => e.value === 'medium')?.value || efforts[0]?.value || ''
+}
+
+function normalizeChatAgent(settings) {
+  const provider = PROVIDER_CHOICES.some(p => p.id === settings?.provider)
+    ? settings.provider
+    : 'claude'
+  const agent = settings?.agent_settings || {}
+  const effortByProvider = (
+    agent.effort_by_provider && typeof agent.effort_by_provider === 'object'
+  ) ? agent.effort_by_provider : {}
+  const effort = agent.effort || effortByProvider[provider] || defaultEffort(provider)
+  return {
+    provider,
+    model: agent.model || '',
+    effort,
+    effort_by_provider: { ...effortByProvider, [provider]: effort },
+  }
+}
+
+function providerLabel(provider) {
+  return PROVIDER_CHOICES.find(p => p.id === provider)?.label || 'No provider'
+}
+
+function SaveState({ saving, saved, error }) {
+  if (error) return <span className="settings-agent-state settings-agent-state--error">Not saved</span>
+  if (saving) return <span className="settings-agent-state">Saving…</span>
+  if (saved) return <span className="settings-agent-state settings-agent-state--saved">Saved</span>
+  return <span className="settings-agent-state">Auto-saves</span>
+}
+
+function AgentChoiceCard({
+  title,
+  description,
   choice,
   allowNone = false,
   models,
   connected,
+  saving = false,
+  saved = false,
+  error = '',
   onProviderChange,
   onModelChange,
+  onEffortChange,
 }) {
   const provider = choice?.provider || ''
+  const info = PROVIDER_INFO[provider]
+  const Logo = info?.Logo
+  const efforts = info?.efforts || []
   return (
-    <div className="settings__agent-row">
-      <div className="settings__agent-row-copy">
-        <div className="settings__label">{label}</div>
-        <p className="settings__subtext settings__subtext--tight">{hint}</p>
+    <div className={`settings-agent-card${provider ? '' : ' settings-agent-card--empty'}`}>
+      <div className="settings-agent-card__head">
+        <span className="settings-agent-card__icon" aria-hidden="true">
+          {Logo ? <Logo /> : '-'}
+        </span>
+        <span className="settings-agent-card__copy">
+          <span className="settings-agent-card__title">{title}</span>
+          <span className="settings-agent-card__description">{description}</span>
+        </span>
+        <SaveState saving={saving} saved={saved} error={error} />
       </div>
-      <div className="settings__agent-controls">
-        <select
-          className="settings__select"
-          value={provider}
-          onChange={(e) => onProviderChange(e.target.value)}
-          aria-label={`${label} provider`}
-        >
-          {allowNone && <option value="">No fallback</option>}
-          {PROVIDER_CHOICES.map((p) => (
-            <option key={p.id} value={p.id}>{p.label}</option>
-          ))}
-        </select>
-        <select
-          className="settings__select"
-          value={choice?.model || ''}
-          onChange={(e) => onModelChange(e.target.value)}
-          aria-label={`${label} model`}
-          disabled={!provider}
-        >
-          <option value="">Provider default</option>
-          {models.map((m) => (
-            <option key={m.id} value={m.id}>{m.label || m.id}</option>
-          ))}
-        </select>
-        {provider && connected === false && (
-          <p className="settings__field-note">Not connected yet.</p>
-        )}
+      <div className="settings-agent-card__controls">
+        <label className="settings-agent-field">
+          <span>Provider</span>
+          <select
+            className="settings__select"
+            value={provider}
+            onChange={(e) => onProviderChange(e.target.value)}
+            aria-label={`${title} provider`}
+          >
+            {allowNone && <option value="">No secondary agent</option>}
+            {PROVIDER_CHOICES.map((p) => (
+              <option key={p.id} value={p.id}>{p.label}</option>
+            ))}
+          </select>
+        </label>
+        <label className="settings-agent-field">
+          <span>Model</span>
+          <select
+            className="settings__select"
+            value={choice?.model || ''}
+            onChange={(e) => onModelChange(e.target.value)}
+            aria-label={`${title} model`}
+            disabled={!provider}
+          >
+            <option value="">Provider default</option>
+            {models.map((m) => (
+              <option key={m.id} value={m.id}>{m.label || m.id}</option>
+            ))}
+          </select>
+        </label>
+        <label className="settings-agent-field">
+          <span>Effort</span>
+          <select
+            className="settings__select"
+            value={choice?.effort || ''}
+            onChange={(e) => onEffortChange(e.target.value)}
+            aria-label={`${title} effort`}
+            disabled={!provider}
+          >
+            {efforts.map((e) => (
+              <option key={e.value} value={e.value}>{e.label}</option>
+            ))}
+          </select>
+        </label>
       </div>
+      {provider && connected === false && (
+        <p className="settings__field-note">
+          {providerLabel(provider)} is not connected yet.
+        </p>
+      )}
     </div>
   )
 }
@@ -186,10 +256,22 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
     settingsQuery.refetch()
     claudeStatusQuery.refetch()
   }, [settingsQuery, claudeStatusQuery])
+  const [chatDraft, setChatDraft] = useState(null)
+  const [chatSaving, setChatSaving] = useState(false)
+  const [chatSaved, setChatSaved] = useState(false)
+  const [chatError, setChatError] = useState('')
+  const chatSaveReqRef = useRef(0)
   const [backgroundDraft, setBackgroundDraft] = useState(null)
   const [backgroundSaving, setBackgroundSaving] = useState(false)
   const [backgroundSaved, setBackgroundSaved] = useState(false)
   const [backgroundError, setBackgroundError] = useState('')
+  const backgroundSaveReqRef = useRef(0)
+  const [manageModelsOpen, setManageModelsOpen] = useState(false)
+
+  useEffect(() => {
+    if (!settingsQuery.data) return
+    setChatDraft(normalizeChatAgent(settingsQuery.data))
+  }, [settingsQuery.data])
 
   useEffect(() => {
     if (!settingsQuery.data?.background_agents) return
@@ -211,20 +293,61 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
     return FALLBACK_MODEL_ROWS[provider] || []
   }, [modelRegistryQuery.data])
 
-  const setBackgroundChoice = useCallback((slot, patch) => {
-    setBackgroundDraft((prev) => {
-      const current = prev || normalizeBackgroundAgents(settingsQuery.data?.background_agents)
-      const nextChoice = { ...current[slot], ...patch }
-      if ('provider' in patch) nextChoice.model = ''
-      return { ...current, [slot]: nextChoice }
-    })
-    setBackgroundSaved(false)
-    setBackgroundError('')
-  }, [settingsQuery.data?.background_agents])
+  const persistChatAgent = useCallback(async (next) => {
+    if (!next?.provider) return
+    const reqId = ++chatSaveReqRef.current
+    setChatSaving(true)
+    setChatSaved(false)
+    setChatError('')
+    try {
+      const res = await api.settings.save({
+        provider: next.provider,
+        agent_settings: {
+          model: next.model || null,
+          effort: next.effort || null,
+          effort_by_provider: next.effort_by_provider || null,
+        },
+      })
+      if (reqId !== chatSaveReqRef.current) return
+      if (!res.ok) {
+        let detail = ''
+        try { detail = (await res.json()).detail || '' } catch {}
+        throw new Error(detail || 'Could not save chat agents.')
+      }
+      settingsQueries.owner.invalidate(queryClient)
+      setChatSaved(true)
+      setTimeout(() => {
+        if (reqId === chatSaveReqRef.current) setChatSaved(false)
+      }, 1800)
+    } catch (err) {
+      if (reqId === chatSaveReqRef.current) {
+        setChatError(err.message || 'Could not save chat agents.')
+      }
+    } finally {
+      if (reqId === chatSaveReqRef.current) setChatSaving(false)
+    }
+  }, [queryClient])
 
-  const saveBackgroundAgents = useCallback(async () => {
-    const draft = backgroundDraft || normalizeBackgroundAgents(settingsQuery.data?.background_agents)
-    if (!draft?.primary?.provider || backgroundSaving) return
+  const setChatChoice = useCallback((patch) => {
+    const current = chatDraft || normalizeChatAgent(settingsQuery.data)
+    const next = { ...current, ...patch }
+    if ('provider' in patch) {
+      next.model = ''
+      next.effort = current.effort_by_provider?.[next.provider] || defaultEffort(next.provider)
+    }
+    if ('effort' in patch || 'provider' in patch) {
+      next.effort_by_provider = {
+        ...(current.effort_by_provider || {}),
+        [next.provider]: next.effort,
+      }
+    }
+    setChatDraft(next)
+    persistChatAgent(next)
+  }, [chatDraft, persistChatAgent, settingsQuery.data])
+
+  const persistBackgroundAgents = useCallback(async (draft) => {
+    if (!draft?.primary?.provider) return
+    const reqId = ++backgroundSaveReqRef.current
     setBackgroundSaving(true)
     setBackgroundError('')
     setBackgroundSaved(false)
@@ -244,6 +367,7 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
           : null,
       }
       const res = await api.settings.save({ background_agents: payload })
+      if (reqId !== backgroundSaveReqRef.current) return
       if (!res.ok) {
         let detail = ''
         try { detail = (await res.json()).detail || '' } catch {}
@@ -251,13 +375,30 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
       }
       settingsQueries.owner.invalidate(queryClient)
       setBackgroundSaved(true)
-      setTimeout(() => setBackgroundSaved(false), 2200)
+      setTimeout(() => {
+        if (reqId === backgroundSaveReqRef.current) setBackgroundSaved(false)
+      }, 1800)
     } catch (err) {
-      setBackgroundError(err.message || 'Could not save background agents.')
+      if (reqId === backgroundSaveReqRef.current) {
+        setBackgroundError(err.message || 'Could not save background agents.')
+      }
     } finally {
-      setBackgroundSaving(false)
+      if (reqId === backgroundSaveReqRef.current) setBackgroundSaving(false)
     }
-  }, [backgroundDraft, backgroundSaving, queryClient, settingsQuery.data?.background_agents])
+  }, [queryClient])
+
+  const setBackgroundChoice = useCallback((slot, patch) => {
+    const current = backgroundDraft ||
+      normalizeBackgroundAgents(settingsQuery.data?.background_agents)
+    const nextChoice = { ...current[slot], ...patch }
+    if ('provider' in patch) {
+      nextChoice.model = ''
+      nextChoice.effort = patch.provider ? defaultEffort(patch.provider) : ''
+    }
+    const next = { ...current, [slot]: nextChoice }
+    setBackgroundDraft(next)
+    persistBackgroundAgents(next)
+  }, [backgroundDraft, persistBackgroundAgents, settingsQuery.data?.background_agents])
 
   // Stable identity-preserving callbacks: passing fresh arrow
   // functions in JSX re-mounted ProviderRow's event handlers every
@@ -626,6 +767,7 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
         : 'Check for updates'
   const effectiveBackgroundDraft = backgroundDraft ||
     normalizeBackgroundAgents(settingsQuery.data?.background_agents)
+  const effectiveChatDraft = chatDraft || normalizeChatAgent(settingsQuery.data)
   const modelLoadNote = modelRegistryQuery.isError
     ? 'Could not refresh the live model list. Saved defaults still work.'
     : modelRegistryQuery.isLoading
@@ -672,45 +814,83 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
                 </ProviderRow>
               </div>
 
-              <div className="settings__agent-defaults">
-                <div className="settings__agent-head">
+              <div className="settings-agent-group">
+                <div className="settings-agent-group__head">
                   <div>
-                    <h3 className="settings__agent-title">Background agents</h3>
+                    <h3 className="settings__agent-title">Chat agents</h3>
                     <p className="settings__subtext settings__subtext--tight">
-                      Used by scheduled/system apps when they have not chosen
-                      their own model.
+                      Defaults for new chats. Existing chats keep their own
+                      picker in the composer.
                     </p>
                   </div>
                   <button
-                    className="settings__btn settings__btn--outline settings__btn--sm"
+                    className="settings__btn settings__btn--outline settings__btn--sm settings__btn--nowrap"
                     type="button"
-                    onClick={saveBackgroundAgents}
-                    disabled={backgroundSaving || !effectiveBackgroundDraft.primary.provider}
+                    onClick={() => setManageModelsOpen(true)}
                   >
-                    {backgroundSaving ? 'Saving…' : backgroundSaved ? 'Saved' : 'Save'}
+                    Configure models
                   </button>
                 </div>
                 {modelLoadNote && (
                   <div className="settings__notice">{modelLoadNote}</div>
                 )}
-                <BackgroundAgentPicker
-                  label="Primary"
-                  hint="First choice for nightly and scheduled agent work."
+                <AgentChoiceCard
+                  title="Default chat agent"
+                  description="Used when you start a new conversation."
+                  choice={effectiveChatDraft}
+                  models={modelsForProvider(effectiveChatDraft.provider)}
+                  connected={connectedByProvider[effectiveChatDraft.provider]}
+                  saving={chatSaving}
+                  saved={chatSaved}
+                  error={chatError}
+                  onProviderChange={(provider) => setChatChoice({ provider })}
+                  onModelChange={(model) => setChatChoice({ model })}
+                  onEffortChange={(effort) => setChatChoice({ effort })}
+                />
+                {chatError && (
+                  <Alert
+                    color="danger"
+                    variant="soft"
+                    description={chatError}
+                  />
+                )}
+              </div>
+
+              <div className="settings-agent-group">
+                <div className="settings-agent-group__head">
+                  <div>
+                    <h3 className="settings__agent-title">Background tasks</h3>
+                    <p className="settings__subtext settings__subtext--tight">
+                      Used by Memory, Reflection, and scheduled app work.
+                    </p>
+                  </div>
+                </div>
+                <AgentChoiceCard
+                  title="Primary"
+                  description="First choice for unattended work."
                   choice={effectiveBackgroundDraft.primary}
                   models={modelsForProvider(effectiveBackgroundDraft.primary.provider)}
                   connected={connectedByProvider[effectiveBackgroundDraft.primary.provider]}
+                  saving={backgroundSaving}
+                  saved={backgroundSaved}
+                  error={backgroundError}
                   onProviderChange={(provider) => setBackgroundChoice('primary', { provider })}
                   onModelChange={(model) => setBackgroundChoice('primary', { model })}
+                  onEffortChange={(effort) => setBackgroundChoice('primary', { effort })}
                 />
-                <BackgroundAgentPicker
-                  label="Fallback"
-                  hint="Used when the primary provider is out of usage or unauthenticated."
+                <AgentChoiceCard
+                  title="Secondary"
+                  description="Used if the primary is unavailable or out of usage."
                   allowNone
                   choice={effectiveBackgroundDraft.fallback}
                   models={modelsForProvider(effectiveBackgroundDraft.fallback.provider)}
                   connected={connectedByProvider[effectiveBackgroundDraft.fallback.provider]}
+                  saving={backgroundSaving}
+                  saved={backgroundSaved}
+                  error={backgroundError}
                   onProviderChange={(provider) => setBackgroundChoice('fallback', { provider })}
                   onModelChange={(model) => setBackgroundChoice('fallback', { model })}
+                  onEffortChange={(effort) => setBackgroundChoice('fallback', { effort })}
                 />
                 {backgroundError && (
                   <Alert
@@ -720,6 +900,13 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
                   />
                 )}
               </div>
+              {manageModelsOpen && (
+                <ManageModelsModal
+                  onClose={() => setManageModelsOpen(false)}
+                  providerOrder={PROVIDER_ORDER}
+                  providerInfo={PROVIDER_INFO}
+                />
+              )}
             </>
           ) : providerError ? (
             // First-ever open with no persisted cache and the fetch

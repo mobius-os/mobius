@@ -229,7 +229,7 @@ export default function ManageModelsModal({
                             className="mmm-row__toggle"
                             checked={visible}
                             onChange={() => toggle(m.id)}
-                            aria-label={`${visible ? 'Hide' : 'Show'} ${m.label} in picker`}
+                            aria-label={`${m.label} visible in chat picker`}
                           />
                         </label>
                       )

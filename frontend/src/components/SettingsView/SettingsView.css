@@ -13,7 +13,7 @@
 }
 
 .settings__content {
-  max-width: 480px;
+  max-width: 640px;
   margin: 0 auto;
 }
 
@@ -262,7 +262,7 @@
    ../ProviderAuth/ProviderAuth.css since the component is shared
    between SettingsView and SetupWizard. */
 
-.settings__agent-defaults {
+.settings-agent-group {
   margin-top: 16px;
   padding-top: 16px;
   border-top: 1px solid var(--border);
@@ -271,7 +271,7 @@
   gap: 12px;
 }
 
-.settings__agent-head {
+.settings-agent-group__head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -286,29 +286,102 @@
   color: var(--text);
 }
 
-.settings__agent-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 8px;
+.settings-agent-card {
+  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+  background: color-mix(in srgb, var(--surface) 68%, var(--bg));
+  border-radius: 8px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
-.settings__agent-row-copy {
+.settings-agent-card--empty {
+  background: color-mix(in srgb, var(--surface) 58%, var(--bg));
+}
+
+.settings-agent-card__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   min-width: 0;
 }
 
-.settings__agent-controls {
+.settings-agent-card__icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  background: color-mix(in srgb, var(--surface2) 72%, var(--surface));
+  color: var(--text);
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  place-items: center;
+  flex-shrink: 0;
+  font-size: 13px;
+}
+
+.settings-agent-card__copy {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-agent-card__title {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.settings-agent-card__description {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.settings-agent-state {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.settings-agent-state--saved {
+  color: var(--accent);
+}
+
+.settings-agent-state--error {
+  color: var(--danger);
+}
+
+.settings-agent-card__controls {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.8fr) minmax(170px, 1.3fr) minmax(120px, 0.8fr);
   gap: 8px;
+}
+
+.settings-agent-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.settings-agent-field > span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.2;
 }
 
 .settings__select {
   width: 100%;
   min-height: 42px;
   box-sizing: border-box;
-  border: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, var(--border) 86%, transparent);
   border-radius: 8px;
-  background: var(--bg);
+  background: color-mix(in srgb, var(--bg) 76%, var(--surface));
   color: var(--text);
   font: inherit;
   font-size: 14px;
@@ -327,20 +400,22 @@
 }
 
 .settings__field-note {
-  grid-column: 1 / -1;
-  margin: -2px 0 0;
+  margin: -4px 0 0 42px;
   color: var(--muted);
   font-size: 12px;
 }
 
-@media (min-width: 520px) {
-  .settings__agent-row {
-    grid-template-columns: minmax(0, 1fr) minmax(220px, 1.2fr);
-    align-items: start;
+@media (max-width: 620px) {
+  .settings-agent-card__controls {
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .settings__agent-controls {
-    grid-template-columns: minmax(120px, 0.9fr) minmax(0, 1.2fr);
+  .settings-agent-group__head {
+    flex-direction: column;
+  }
+
+  .settings__field-note {
+    margin-left: 0;
   }
 }
 

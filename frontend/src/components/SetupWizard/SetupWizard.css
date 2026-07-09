@@ -2,10 +2,18 @@
   height: 100%;
   overflow-y: auto;
   display: flex;
-  align-items: center;
+  align-items: safe center;
   justify-content: center;
   padding: 24px;
   box-sizing: border-box;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.setup::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 .setup__card {
@@ -107,7 +115,8 @@
 }
 
 .setup__input:focus,
-.setup__input:focus-visible {
+.setup__input:focus-visible,
+.setup__select:focus-visible {
   border-color: var(--accent, #a78bfa);
   box-shadow: 0 0 0 3px var(--accent-dim, rgba(167, 139, 250, 0.14));
 }
@@ -136,9 +145,13 @@
   cursor: pointer;
 }
 
+.setup__btn--full {
+  width: 100%;
+}
+
 /* "Sign in with Claude" sits directly in the card, not in a form —
    center it and let it size to its content. */
-.setup__card > .setup__btn {
+.setup__card > .setup__btn:not(.setup__btn--full) {
   display: block;
   margin: 0 auto;
   width: fit-content;
@@ -227,6 +240,76 @@
   margin-bottom: 16px;
 }
 
+.setup-agent {
+  margin-top: 18px;
+  padding: 14px;
+  border: 1px solid var(--border, #252b36);
+  border-radius: 10px;
+  background: var(--bg, #0d0d0d);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.setup-agent__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.setup-agent__head h2 {
+  margin: 0;
+  color: var(--text, #d4d4d8);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.setup-agent__head span {
+  color: var(--muted, #52525b);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.setup-agent-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.setup-agent-row__label {
+  color: var(--muted, #52525b);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.setup-agent-row__controls {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: 8px;
+}
+
+.setup__select {
+  width: 100%;
+  min-height: 38px;
+  box-sizing: border-box;
+  background: var(--surface, #14181f);
+  border: 1px solid var(--border, #252b36);
+  border-radius: 8px;
+  color: var(--text, #d4d4d8);
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.setup__select:disabled {
+  opacity: 0.62;
+  cursor: not-allowed;
+}
+
 .setup__skip-warn {
   margin-top: 16px;
   font-size: 12px;
@@ -294,6 +377,10 @@
   .setup__logo {
     width: 80px;
     height: 80px;
+  }
+
+  .setup-agent-row__controls {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

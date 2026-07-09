@@ -55,9 +55,9 @@
  * ║      (captured in ComposerPopover at + tap-time). Picking a      ║
  * ║      model or effort with the keyboard DOWN does NOT pop it      ║
  * ║      up. Every interactive row in this panel has                 ║
- * ║      `onPointerDown={(e) => e.preventDefault()}` — see           ║
- * ║      ComposerPopover.jsx's three-guard contract for the full     ║
- * ║      story.                                                      ║
+ * ║      pointerdown focus guards — see ComposerPopover.jsx's        ║
+ * ║      three-guard contract for the full story. Touch starts are   ║
+ * ║      allowed to pan so long model lists can scroll.              ║
  * ║                                                                  ║
  * ║   The EffortSlider component renders a stepper track — NOT       ║
  * ║   pills, NOT a chip group. The slider was explicitly chosen      ║
@@ -81,7 +81,6 @@ import {
   CLAUDE_MODELS,
   CODEX_MODELS,
 } from '../ProviderModelPicker/ProviderModelPicker.jsx'
-import ManageModelsModal from './ManageModelsModal.jsx'
 import './ChatSettingsPanel.css'
 
 
@@ -145,7 +144,7 @@ function OpenAILogo() {
  *  Both are rendered as a horizontal stepper-slider in
  *  ChatSettingsPanel: a single track with N stops, the selected
  *  one filled, the long-form label rendered next to the track. */
-const PROVIDER_INFO = {
+export const PROVIDER_INFO = {
   codex: {
     id: 'codex',
     label: 'OpenAI Codex',
@@ -181,7 +180,12 @@ const PROVIDER_INFO = {
     ],
   },
 }
-const PROVIDER_ORDER = ['codex', 'claude']
+export const PROVIDER_ORDER = ['codex', 'claude']
+
+
+function preserveFocusUnlessTouch(ev) {
+  if (ev.pointerType !== 'touch') ev.preventDefault()
+}
 
 
 /** Resolves the displayed model list for `providerId` from the live
@@ -238,8 +242,9 @@ function EffortSlider({ efforts, value, onChange }) {
               + (i === selectedIndex ? ' csp-effort__stop--on' : '')
               + (i < selectedIndex ? ' csp-effort__stop--filled' : '')
             }
-            // Keep textarea focused so the keyboard stays open.
-            onPointerDown={(ev) => ev.preventDefault()}
+            // Keep textarea focused for mouse/pen clicks, but let touch
+            // gestures pan the scroll container.
+            onPointerDown={preserveFocusUnlessTouch}
             onClick={() => onChange(e.value)}
             onKeyDown={(ev) => {
               let next
@@ -285,11 +290,6 @@ export default function ChatSettingsPanel({
   const [pendingSwitch, setPendingSwitch] = useState(null)
   const [error, setError] = useState('')
   const [connectedProviders, setConnectedProviders] = useState(null)
-  // True while the manage-models modal is mounted. When the modal
-  // opens we still want the popover-anchored picker to live in the
-  // background so the user can return to it; the modal is fully
-  // self-contained.
-  const [manageOpen, setManageOpen] = useState(false)
   const fallbackReqId = useRef(0)
   const latestReqId = reqIdRef || fallbackReqId
   const pendingSwitchPreviousRef = useRef(null)
@@ -643,8 +643,7 @@ export default function ChatSettingsPanel({
               <button
                 type="button"
                 className={`csp-row${isSelected ? ' csp-row--selected' : ''}`}
-                // Keep textarea focused so the keyboard stays open.
-                onPointerDown={(ev) => ev.preventDefault()}
+                onPointerDown={preserveFocusUnlessTouch}
                 onClick={() => handlePickModel(m.id, pid)}
                 disabled={saving || compacting}
                 title={isCrossProvider ? 'Compact this chat and switch providers' : undefined}
@@ -672,7 +671,7 @@ export default function ChatSettingsPanel({
                     <button
                       type="button"
                       className="csp__confirm-btn csp__confirm-btn--primary"
-                      onPointerDown={(ev) => ev.preventDefault()}
+                      onPointerDown={preserveFocusUnlessTouch}
                       onClick={handleConfirmProviderSwitch}
                       disabled={saving || compacting}
                     >
@@ -681,7 +680,7 @@ export default function ChatSettingsPanel({
                     <button
                       type="button"
                       className="csp__confirm-btn csp__confirm-btn--ghost"
-                      onPointerDown={(ev) => ev.preventDefault()}
+                      onPointerDown={preserveFocusUnlessTouch}
                       onClick={handleCancelProviderSwitch}
                       disabled={compacting}
                     >
@@ -695,16 +694,9 @@ export default function ChatSettingsPanel({
         })
       })}
       {dataReady && (
-        <button
-          type="button"
-          className="csp__manage"
-          // Keep textarea focused so the keyboard stays open.
-          onPointerDown={(ev) => ev.preventDefault()}
-          onClick={() => setManageOpen(true)}
-        >
-          <span className="csp__manage-mark" aria-hidden="true">+</span>
-          <span className="csp__manage-label">Manage models</span>
-        </button>
+        <div className="csp__settings-note">
+          Configure available models in Settings.
+        </div>
       )}
       {(codexSwitchWarning || compacting || error) && (
         <div className="csp__foot">
@@ -721,13 +713,6 @@ export default function ChatSettingsPanel({
           )}
           {error && <p className="csp__error">{error}</p>}
         </div>
-      )}
-      {manageOpen && (
-        <ManageModelsModal
-          onClose={() => setManageOpen(false)}
-          providerOrder={PROVIDER_ORDER}
-          providerInfo={PROVIDER_INFO}
-        />
       )}
     </div>
   )
