@@ -606,6 +606,33 @@ def _same_agent_choice(a: dict | None, b: dict | None) -> bool:
   )
 
 
+def _has_app_primary_override(settings: dict) -> bool:
+  """Whether settings.json intentionally overrides the system primary agent.
+
+  Reflection versions before the system background-agent picker seeded
+  `provider: "claude"` even when the owner had never chosen a per-app model.
+  Treat that exact legacy default (Claude provider only, no model/effort, no
+  explicit mode marker) as inherited so existing installs can follow the new
+  system primary/fallback settings.
+  """
+  mode = settings.get("primary_agent_mode")
+  if mode == "system":
+    return False
+  if mode == "app":
+    return True
+  provider = settings.get("provider")
+  provider = provider.strip() if isinstance(provider, str) else None
+  model = settings.get("model")
+  model = model.strip() if isinstance(model, str) else None
+  effort = settings.get("effort")
+  effort = effort.strip() if isinstance(effort, str) else None
+  if model or effort:
+    return True
+  if provider and provider != DEFAULT_PROVIDER:
+    return True
+  return False
+
+
 def _resolve_agents(settings: dict) -> dict:
   """Returns primary/fallback provider choices for the nightly run.
 
@@ -634,7 +661,7 @@ def _resolve_agents(settings: dict) -> dict:
       label="global primary",
     )
   primary_provider = global_primary.get("provider") or DEFAULT_PROVIDER
-  has_app_primary = any(settings.get(k) for k in ("provider", "model", "effort"))
+  has_app_primary = _has_app_primary_override(settings)
   primary = None
   if has_app_primary:
     primary = _clean_agent_choice(

@@ -19,8 +19,11 @@ export function SettingsTab({ appId, storage, token }) {
   const [hour, setHour] = useState(DEFAULT_HOUR)
   const [excludeApps, setExcludeApps] = useState([])
   const [settingsExtra, setSettingsExtra] = useState({})
+  const [useSystemPrimary, setUseSystemPrimary] = useState(true)
   const [provider, setProvider] = useState(DEFAULT_PROVIDER)
   const [model, setModel] = useState(DEFAULT_MODEL)
+  const [fallbackProvider, setFallbackProvider] = useState('')
+  const [fallbackModel, setFallbackModel] = useState('')
   const [verbosity, setVerbosity] = useState(DEFAULT_VERBOSITY)
   const [focus, setFocus] = useState('')
   const [avoid, setAvoid] = useState('')
@@ -59,11 +62,33 @@ export function SettingsTab({ appId, storage, token }) {
           setCronIsCustom(false)
         }
         if (Array.isArray(s.exclude_apps)) setExcludeApps(s.exclude_apps)
+        const primaryMode = s.primary_agent_mode
+        const providerValue = typeof s.provider === 'string' ? s.provider.trim() : ''
+        const modelValue = typeof s.model === 'string' ? s.model.trim() : ''
+        const effortValue = typeof s.effort === 'string' ? s.effort.trim() : ''
+        const legacyDefaultPrimary = (
+          !primaryMode &&
+          providerValue === DEFAULT_PROVIDER &&
+          !modelValue &&
+          !effortValue
+        )
+        const hasPrimaryOverride = primaryMode === 'app' || (
+          primaryMode !== 'system' &&
+          !legacyDefaultPrimary &&
+          Boolean(providerValue || modelValue || effortValue)
+        )
+        setUseSystemPrimary(!hasPrimaryOverride)
         if (typeof s.provider === 'string' && s.provider.trim()) {
           setProvider(s.provider.trim())
         }
         if (typeof s.model === 'string' && s.model.trim()) {
           setModel(s.model.trim())
+        }
+        if (typeof s.fallback_provider === 'string' && s.fallback_provider.trim()) {
+          setFallbackProvider(s.fallback_provider.trim())
+        }
+        if (typeof s.fallback_model === 'string' && s.fallback_model.trim()) {
+          setFallbackModel(s.fallback_model.trim())
         }
         const vOpt = VERBOSITY_OPTIONS.find((o) => o.id === s.verbosity)
         if (vOpt) setVerbosity(vOpt.id)
@@ -124,9 +149,13 @@ export function SettingsTab({ appId, storage, token }) {
         minute: 0,
         timezone: settingsExtra.timezone ?? null,
         exclude_apps: excludeApps,
-        provider: provider || settingsExtra.provider || DEFAULT_PROVIDER,
-        model: model || settingsExtra.model || null,
-        effort: settingsExtra.effort ?? null,
+        provider: useSystemPrimary ? null : (provider || settingsExtra.provider || DEFAULT_PROVIDER),
+        model: useSystemPrimary ? null : (model || settingsExtra.model || null),
+        effort: useSystemPrimary ? null : (settingsExtra.effort ?? null),
+        fallback_provider: fallbackProvider || null,
+        fallback_model: fallbackProvider ? (fallbackModel || null) : null,
+        fallback_effort: fallbackProvider ? (settingsExtra.fallback_effort ?? null) : null,
+        primary_agent_mode: useSystemPrimary ? 'system' : 'app',
         verbosity,
         focus: focus.trim() || null,
         avoid: avoid.trim() || null,
@@ -140,7 +169,7 @@ export function SettingsTab({ appId, storage, token }) {
     } finally {
       setSaving(false)
     }
-  }, [saving, cronIsCustom, rawCron, hour, excludeApps, provider, model, verbosity, focus, avoid, settingsExtra, storage])
+  }, [saving, cronIsCustom, rawCron, hour, excludeApps, useSystemPrimary, provider, model, fallbackProvider, fallbackModel, verbosity, focus, avoid, settingsExtra, storage])
 
   if (loading) {
     return (
@@ -221,51 +250,118 @@ export function SettingsTab({ appId, storage, token }) {
             for your account.
           </div>
         ) : (
-          <>
-            <select
-              className="rf-select"
-              value={model ? `${provider}\t${model}` : `${provider}\t`}
-              onChange={(e) => {
-                const idx = e.target.value.indexOf('\t')
-                const nextProvider = e.target.value.slice(0, idx)
-                const nextModel = e.target.value.slice(idx + 1) || null
-                if (nextProvider) {
-                  setProvider(nextProvider)
-                  setModel(nextModel)
-                }
-              }}
-              aria-label="Reflection model"
-            >
-              <option value={`${provider}\t`}>Provider default</option>
-              {modelGroups.map((group) => {
-                const isConnected = !connectedProviders || connectedProviders.has(group.key)
-                return (
-                  <optgroup
-                    key={group.key}
-                    label={`${group.label}${isConnected ? '' : ' (not connected)'}`}
-                  >
-                    {group.models.map((m) => {
-                      const on = provider === group.key && model === m.id
-                      return (
-                        <option
-                          key={`${group.key}-${m.id}`}
-                          value={`${group.key}\t${m.id}`}
-                          disabled={!isConnected && !on}
-                        >
-                          {m.name}
-                        </option>
-                      )
-                    })}
-                  </optgroup>
-                )
-              })}
-            </select>
-            <div className="rf-meta">
-              {(modelGroups.find((group) => group.key === provider)?.label || provider)}
-              {' · '}
-              {model || 'provider default'}
+          <div className="rf-agent-stack">
+            <div className="rf-agent-field">
+              <div className="rf-note-strong">Primary</div>
+              <select
+                className="rf-select"
+                value={useSystemPrimary ? '' : (model ? `${provider}\t${model}` : `${provider}\t`)}
+                onChange={(e) => {
+                  if (!e.target.value) {
+                    setUseSystemPrimary(true)
+                    return
+                  }
+                  const idx = e.target.value.indexOf('\t')
+                  const nextProvider = e.target.value.slice(0, idx)
+                  const nextModel = e.target.value.slice(idx + 1) || null
+                  if (nextProvider) {
+                    setUseSystemPrimary(false)
+                    setProvider(nextProvider)
+                    setModel(nextModel)
+                  }
+                }}
+                aria-label="Reflection model"
+              >
+                <option value="">Use system primary</option>
+                <option value={`${provider}\t`}>Provider default</option>
+                {modelGroups.map((group) => {
+                  const isConnected = !connectedProviders || connectedProviders.has(group.key)
+                  return (
+                    <optgroup
+                      key={group.key}
+                      label={`${group.label}${isConnected ? '' : ' (not connected)'}`}
+                    >
+                      {group.models.map((m) => {
+                        const on = provider === group.key && model === m.id
+                        return (
+                          <option
+                            key={`${group.key}-${m.id}`}
+                            value={`${group.key}\t${m.id}`}
+                            disabled={!isConnected && !on}
+                          >
+                            {m.name}
+                          </option>
+                        )
+                      })}
+                    </optgroup>
+                  )
+                })}
+              </select>
+              <div className="rf-meta">
+                {useSystemPrimary
+                  ? 'System primary'
+                  : `${modelGroups.find((group) => group.key === provider)?.label || provider} · ${model || 'provider default'}`}
+              </div>
             </div>
-          </>
+            <div className="rf-agent-field">
+              <div className="rf-note-strong">Fallback</div>
+              <select
+                className="rf-select"
+                value={fallbackProvider ? `${fallbackProvider}\t${fallbackModel || ''}` : ''}
+                onChange={(e) => {
+                  if (!e.target.value) {
+                    setFallbackProvider('')
+                    setFallbackModel('')
+                    return
+                  }
+                  const idx = e.target.value.indexOf('\t')
+                  const nextProvider = e.target.value.slice(0, idx)
+                  const nextModel = e.target.value.slice(idx + 1) || null
+                  if (nextProvider) {
+                    setFallbackProvider(nextProvider)
+                    setFallbackModel(nextModel)
+                  }
+                }}
+                aria-label="Reflection fallback model"
+              >
+                <option value="">Use system fallback</option>
+                {modelGroups.map((group) => {
+                  const isConnected = !connectedProviders || connectedProviders.has(group.key)
+                  const onProviderDefault = fallbackProvider === group.key && !fallbackModel
+                  return (
+                    <optgroup
+                      key={group.key}
+                      label={`${group.label}${isConnected ? '' : ' (not connected)'}`}
+                    >
+                      <option
+                        value={`${group.key}\t`}
+                        disabled={!isConnected && !onProviderDefault}
+                      >
+                        {group.label} default
+                      </option>
+                      {group.models.map((m) => {
+                        const on = fallbackProvider === group.key && fallbackModel === m.id
+                        return (
+                          <option
+                            key={`${group.key}-${m.id}`}
+                            value={`${group.key}\t${m.id}`}
+                            disabled={!isConnected && !on}
+                          >
+                            {m.name}
+                          </option>
+                        )
+                      })}
+                    </optgroup>
+                  )
+                })}
+              </select>
+              <div className="rf-meta">
+                {fallbackProvider
+                  ? `${modelGroups.find((group) => group.key === fallbackProvider)?.label || fallbackProvider} · ${fallbackModel || 'provider default'}`
+                  : 'System fallback'}
+              </div>
+            </div>
+          </div>
         )}
       </div>
 

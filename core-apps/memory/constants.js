@@ -22,8 +22,10 @@ export const PALETTE = [
 
 export const S = {
   root: {
-    height: '100%', overflow: 'hidden', background: 'var(--bg)', color: 'var(--text)',
+    height: '100%', width: '100%', maxWidth: '100%', overflow: 'hidden',
+    background: 'var(--bg)', color: 'var(--text)',
     fontFamily: 'var(--font)', display: 'flex', flexDirection: 'column', position: 'relative',
+    WebkitTapHighlightColor: 'transparent',
   },
   header: {
     display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -32,17 +34,17 @@ export const S = {
   },
   brand: { display: 'flex', alignItems: 'center', gap: 11, minWidth: 0 },
   brandDot: {
-    width: 34, height: 34, borderRadius: '50%', flexShrink: 0,
+    width: 34, height: 34, borderRadius: 8, flexShrink: 0,
     display: 'flex', alignItems: 'center', justifyContent: 'center',
-    background: 'radial-gradient(circle at 32% 28%, var(--accent-hover, #c4b5fd), var(--accent))',
-    boxShadow: '0 0 0 1px var(--accent-dim, rgba(167,139,250,0.18)), 0 4px 14px var(--accent-dim, rgba(167,139,250,0.3))',
+    background: 'color-mix(in srgb, var(--accent) 16%, transparent)',
+    boxShadow: 'none',
   },
   brandDotCore: {
-    width: 7, height: 7, borderRadius: '50%', background: 'rgba(255,255,255,0.92)',
-    boxShadow: '0 0 6px rgba(255,255,255,0.7)',
+    width: 7, height: 7, borderRadius: '50%', background: 'var(--accent)',
+    boxShadow: 'none',
   },
   brandIcon: {
-    width: 34, height: 34, borderRadius: 7, flexShrink: 0, display: 'block',
+    width: 34, height: 34, borderRadius: 8, flexShrink: 0, display: 'block',
     objectFit: 'cover',
   },
   subtitle: {
@@ -84,8 +86,8 @@ export const S = {
   },
   healthRow: { display: 'flex', alignItems: 'baseline', gap: 8, padding: '3px 0', fontSize: 12 },
   sevTag: {
-    fontSize: 9.5, fontWeight: 700, textTransform: 'uppercase', borderRadius: 4,
-    padding: '1px 5px', flexShrink: 0, letterSpacing: '0.04em',
+    fontSize: 10, fontWeight: 650, textTransform: 'none', borderRadius: 4,
+    padding: '1px 5px', flexShrink: 0, letterSpacing: 0,
   },
   sevWarn: { background: 'rgba(240,198,116,0.16)', color: 'var(--accent-hover, #f0c674)' },
   sevErr: { background: 'rgba(248,113,113,0.18)', color: 'var(--danger)' },
@@ -98,7 +100,7 @@ export const S = {
     position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
     alignItems: 'center', justifyContent: 'center', gap: 16, padding: 28, textAlign: 'center',
   },
-  centerTitle: { fontSize: 17, fontWeight: 600, color: 'var(--text)', letterSpacing: '-0.01em' },
+  centerTitle: { fontSize: 17, fontWeight: 600, color: 'var(--text)', letterSpacing: 0 },
   centerText: { fontSize: 13.5, color: 'var(--muted)', maxWidth: 320, lineHeight: 1.55 },
   errIcon: {
     width: 42, height: 42, borderRadius: '50%', display: 'flex', alignItems: 'center',
@@ -122,7 +124,7 @@ export const S = {
     boxShadow: '0 8px 28px rgba(0,0,0,0.3)', backdropFilter: 'blur(4px)',
   },
   legendTitle: {
-    fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em',
+    fontSize: 11, fontWeight: 650, textTransform: 'none', letterSpacing: 0,
     color: 'var(--muted)', marginBottom: 8,
   },
   legendRow: {
@@ -143,8 +145,8 @@ export const S = {
   table: { width: '100%', borderCollapse: 'collapse', fontSize: 13 },
   th: {
     position: 'sticky', top: 0, zIndex: 1, background: 'var(--surface)',
-    color: 'var(--muted)', fontWeight: 600, fontSize: 11, textTransform: 'uppercase',
-    letterSpacing: '0.05em', padding: '11px 12px', borderBottom: '1px solid var(--border)',
+    color: 'var(--muted)', fontWeight: 650, fontSize: 11.5, textTransform: 'none',
+    letterSpacing: 0, padding: '11px 12px', borderBottom: '1px solid var(--border)',
     whiteSpace: 'nowrap', userSelect: 'none',
   },
   // The sortable-header button fills the cell and inherits its typography so it
@@ -179,7 +181,7 @@ export const S = {
   },
   typeTag: {
     fontSize: 10.5, fontWeight: 600, padding: '2px 8px', borderRadius: 999,
-    background: 'var(--surface2)', color: 'var(--muted)', letterSpacing: '0.01em',
+    background: 'var(--surface2)', color: 'var(--muted)', letterSpacing: 0,
     border: '1px solid var(--border)',
   },
   typeMoc: {
@@ -206,7 +208,7 @@ export const S = {
     padding: '15px 16px 10px', gap: 10,
   },
   panelHeadMain: { display: 'flex', gap: 11, minWidth: 0, alignItems: 'flex-start' },
-  panelTitle: { fontSize: 18, fontWeight: 700, lineHeight: 1.18, letterSpacing: '-0.01em' },
+  panelTitle: { fontSize: 18, fontWeight: 700, lineHeight: 1.18, letterSpacing: 0 },
   panelMetaLine: {
     display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
     marginTop: 5, color: 'var(--muted)', fontSize: 11.5,
@@ -236,7 +238,7 @@ export const S = {
     overflow: 'hidden',
   },
   paneHead: {
-    fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0,
+    fontSize: 11, fontWeight: 650, textTransform: 'none', letterSpacing: 0,
     color: 'var(--muted)', whiteSpace: 'nowrap',
   },
   localCount: {

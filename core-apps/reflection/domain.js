@@ -10,6 +10,12 @@ export function cronExitLabel(code) {
   if (n === 5) return 'skipped (lock held)'
   if (n === 124) return 'timed out'
   if (n === 2 || n === 3) return 'config error (exit ' + n + ')'
+  // The runner's own error band (>=64) — distinct from the wrapper's config
+  // codes above so a model/usage/auth night is never mislabeled as config.
+  if (n === 64) return 'model error'
+  if (n === 65) return 'usage limit reached'
+  if (n === 66) return 'provider auth expired'
+  if (n === 70) return 'died before completing'
   return 'failed (exit ' + n + ')'
 }
 

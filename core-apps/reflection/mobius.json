@@ -1,7 +1,7 @@
 {
   "id": "reflection",
   "name": "Reflection",
-  "version": "2.5.4",
+  "version": "2.5.8",
   "description": "While you sleep, Möbius reviews the day's work and leaves a one-page morning brief.",
   "author": "mobius-os",
   "license": "MIT",
@@ -21,8 +21,11 @@
       "timezone": null,
       "cron": "0 6 * * *",
       "exclude_apps": [],
-      "provider": "claude",
+      "provider": null,
       "model": null,
+      "primary_agent_mode": "system",
+      "fallback_provider": null,
+      "fallback_model": null,
       "verbosity": "standard",
       "focus": null,
       "avoid": null

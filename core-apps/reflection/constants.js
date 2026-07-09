@@ -8,11 +8,18 @@ export const VERBOSITY_OPTIONS = [
 export const DEFAULT_VERBOSITY = 'standard'
 
 // Exit-code meanings for cron_outcome events (from the fetch.sh legend).
+// 2/3 are the WRAPPER's config errors only; the runner's own failures use a
+// separate >=64 band so a model/usage/auth failure is never labeled a config
+// error (the old shared codes showed a weekly usage cap as "config error").
 export const CRON_EXIT_LABELS = {
   0:   'ran ok',
   2:   'config error (no app id)',
   3:   'config error (missing service token)',
   5:   'skipped — a prior run still held the lock',
+  64:  'model error',
+  65:  'usage limit reached',
+  66:  'provider auth expired — reconnect in Settings',
+  70:  'died before completing (external interruption)',
   124: 'timed out',
   127: 'runner not found',
 }
@@ -124,8 +131,7 @@ export const REPORT_BASE_STYLE = `<style>
   .brief-questions {
     margin: 28px 0 8px;
     padding: 16px 18px;
-    border: 1px solid var(--accent, #6d5ef0);
-    border-left-width: 3px;
+    border: 1px solid color-mix(in srgb, var(--accent, #6d5ef0) 40%, var(--border, #e4e1dc));
     border-radius: 14px;
     background: var(--accent-tint, #ece9fd);
   }
@@ -182,7 +188,7 @@ export const REPORT_BASE_STYLE = `<style>
   .brief .lede {
     padding: var(--sp-5); border: 1px solid var(--border, #e4e1dc);
     border-radius: var(--radius); background: var(--surface, #fff);
-    box-shadow: 0 1px 2px rgba(0,0,0,.12), 0 8px 28px rgba(0,0,0,.16);
+    box-shadow: 0 1px 2px rgba(0,0,0,.12), 0 4px 8px rgba(0,0,0,.14);
   }
   .brief .headline { margin: 0; font-size: var(--step-1); line-height: 1.45; font-weight: 560; color: var(--text, #1c1b19); }
   .brief .keypoints { list-style: none; margin: var(--sp-4) 0 0; padding-left: 0; }
@@ -207,14 +213,14 @@ export const REPORT_BASE_STYLE = `<style>
   .brief .item p.lead, .brief p.lead { margin-top: 0; }
   .brief .meta { display: grid; gap: var(--sp-2); margin: var(--sp-3) 0 0; }
   .brief .meta > div { display: grid; grid-template-columns: minmax(4.5rem, 6rem) 1fr; gap: var(--sp-3); align-items: baseline; font-size: var(--step--1); }
-  .brief .meta dt, .brief .meta .k { margin: 0; color: var(--muted, #6b6862); text-transform: uppercase; letter-spacing: .06em; font-size: .72rem; font-weight: 650; }
+  .brief .meta dt, .brief .meta .k { margin: 0; color: var(--muted, #6b6862); letter-spacing: 0; font-size: .72rem; font-weight: 650; }
   .brief .meta .v { color: var(--text, #1c1b19); }
   .brief .meta .v.action { color: var(--accent, #6d5ef0); font-weight: 560; }
 
   /* Status badges — color-mix tint keeps them theme-agnostic. */
   .brief .badge {
     display: inline-block; vertical-align: baseline; white-space: nowrap;
-    font-size: .7rem; font-weight: 650; letter-spacing: .04em; text-transform: uppercase;
+    font-size: .7rem; font-weight: 650; letter-spacing: 0;
     padding: .18em .6em; border-radius: 999px;
     color: var(--accent, #6d5ef0); background: color-mix(in srgb, currentColor 16%, transparent);
   }
