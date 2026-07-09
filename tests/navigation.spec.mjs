@@ -69,13 +69,11 @@ async function getNavState(page) {
 /** Navigate to a chat by clicking in the drawer. */
 async function navigateToChat(page, index = 0) {
   await page.evaluate((idx) => {
-    const items = document.querySelectorAll('.drawer__item')
-    let chatItems = []
-    items.forEach(el => {
-      if (el.querySelector('.drawer__item-text') && !el.classList.contains('drawer__item--new')) {
-        chatItems.push(el)
-      }
-    })
+    const chats = document.querySelector('.drawer__group--chats')
+    const items = chats?.querySelectorAll('.drawer__item') || []
+    const chatItems = Array.from(items).filter(el =>
+      el.querySelector('.drawer__item-text') && !el.classList.contains('drawer__item--new')
+    )
     if (chatItems[idx]) chatItems[idx].click()
   }, index)
   await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
