@@ -2,6 +2,14 @@
   height: 100%;
   overflow-y: auto;
   padding: 32px 24px 24px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.settings::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 .settings__content {
@@ -19,7 +27,7 @@
 .settings__section {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 8px;
   padding: 20px;
   margin-bottom: 14px;
 }
@@ -79,7 +87,7 @@
 .settings__notice {
   margin-top: 12px;
   padding: 10px 12px;
-  border-radius: 10px;
+  border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--surface2);
   color: var(--muted);
@@ -102,7 +110,7 @@
 .settings__input {
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 8px;
   color: var(--text);
   padding: 11px 14px;
   font-size: 14px;
@@ -131,9 +139,9 @@
 .settings__btn {
   align-self: flex-start;
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-fg);
   border: none;
-  border-radius: 10px;
+  border-radius: 8px;
   padding: 10px 18px;
   font-size: 14px;
   font-weight: 500;
@@ -148,8 +156,10 @@
   outline-offset: 2px;
 }
 
-.settings__btn:hover:not(:disabled) {
-  background: var(--accent-hover);
+@media (hover: hover) and (pointer: fine) {
+  .settings__btn:hover:not(:disabled) {
+    background: var(--accent-hover);
+  }
 }
 
 .settings__btn:disabled {
@@ -179,8 +189,10 @@
   margin-top: 0;
 }
 
-.settings__btn--outline:hover {
-  background: var(--surface2);
+@media (hover: hover) and (pointer: fine) {
+  .settings__btn--outline:hover {
+    background: var(--surface2);
+  }
 }
 
 .settings__row {

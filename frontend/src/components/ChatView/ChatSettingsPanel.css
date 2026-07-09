@@ -37,13 +37,12 @@
   transition: background 0.12s ease, border-color 0.12s ease;
 }
 
-.csp-row:hover { background: var(--surface); }
+@media (hover: hover) and (pointer: fine) {
+  .csp-row:hover { background: var(--surface); }
+}
 
 .csp-row--selected {
   background: color-mix(in srgb, var(--accent) 9%, var(--surface));
-}
-.csp-row--selected:hover {
-  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
 }
 
 .csp-row:focus-visible,
@@ -53,12 +52,19 @@
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+@media (hover: hover) and (pointer: fine) {
+  .csp-row--selected:hover {
+    background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  }
+}
 
 .csp-row--locked {
   opacity: 0.4;
   cursor: not-allowed;
 }
-.csp-row--locked:hover { background: none; }
+@media (hover: hover) and (pointer: fine) {
+  .csp-row--locked:hover { background: none; }
+}
 
 .csp-row__icon {
   width: 30px;
@@ -180,8 +186,10 @@
   transition: background 0.15s, border-color 0.15s, transform 0.15s;
 }
 
-.csp-effort__stop:hover {
-  border-color: var(--accent);
+@media (hover: hover) and (pointer: fine) {
+  .csp-effort__stop:hover {
+    border-color: var(--accent);
+  }
 }
 
 /* Stops at or below the selected one read as "filled" — fill in
@@ -234,10 +242,12 @@
   box-sizing: border-box;
 }
 
-.csp__manage:hover {
-  background: color-mix(in srgb, var(--accent) 8%, var(--surface2));
-  border-color: color-mix(in srgb, var(--accent) 34%, var(--border));
-  color: var(--text);
+@media (hover: hover) and (pointer: fine) {
+  .csp__manage:hover {
+    background: color-mix(in srgb, var(--accent) 8%, var(--surface2));
+    border-color: color-mix(in srgb, var(--accent) 34%, var(--border));
+    color: var(--text);
+  }
 }
 
 .csp__manage-mark {
@@ -359,7 +369,7 @@
 }
 
 .csp__confirm-btn--primary {
-  color: var(--accent-contrast, #fff);
+  color: var(--accent-fg, #ffffff);
   border-color: var(--accent);
   background: var(--accent);
 }
