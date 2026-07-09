@@ -14,6 +14,7 @@ def test_memory_and_reflection_suppressible_store_and_ordinary_not():
   # Reflection is suppressible (owner call): uninstalling it also stops its
   # nightly run — an accepted trade-off (see the module docstring).
   assert core_app_suppress.is_suppressible_core_slug("reflection")
+  assert core_app_suppress.is_suppressible_core_slug("beat-machine")
   # The App Store is the app-manager — never durably suppressible.
   assert not core_app_suppress.is_suppressible_core_slug("store")
   assert not core_app_suppress.is_suppressible_core_slug("notes")
@@ -59,9 +60,10 @@ def test_list_suppressed(tmp_path):
   assert core_app_suppress.list_suppressed(tmp_path) == set()
   core_app_suppress.mark_suppressed(tmp_path, "memory")
   core_app_suppress.mark_suppressed(tmp_path, "reflection")
+  core_app_suppress.mark_suppressed(tmp_path, "beat-machine")
   # a non-suppressible slug is a no-op and never appears
   core_app_suppress.mark_suppressed(tmp_path, "store")
-  assert core_app_suppress.list_suppressed(tmp_path) == {"memory", "reflection"}
+  assert core_app_suppress.list_suppressed(tmp_path) == {"memory", "reflection", "beat-machine"}
 
 
 def test_marker_path_matches_shell_check(tmp_path):

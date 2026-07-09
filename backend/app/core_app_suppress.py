@@ -1,6 +1,6 @@
 """Durable owner-suppression of re-seeded core apps.
 
-A "core app" (memory, reflection) is re-installed by
+A "core app" (memory, reflection, beat-machine) is re-installed by
 ``backend/scripts/install-core-apps.sh`` on every container boot. Without a
 durable signal, an owner who deletes such an app sees it resurrected on the next
 reboot: the seeder is not tombstone-aware, and the 7-day soft-delete tombstone
@@ -8,9 +8,10 @@ eventually TTL-purges, freeing the slug for a fresh re-create. This module
 records the owner's decision as a per-slug marker file under
 ``<data_dir>/shared/suppressed-core-apps/<slug>`` that the boot seeder honors, so
 a deleted core app stays gone until the owner brings it back. Two bring-back
-paths, both of which clear the marker: ``recover_app`` within the 7-day tombstone
-window, or reinstalling from the App Store afterwards (memory IS listed in the
-store catalog, so this is a real owner-facing path — verified 2026-07-06).
+paths can clear the marker: ``recover_app`` within the 7-day tombstone window,
+or reinstalling from the App Store afterwards when that core app has a catalog
+entry (memory IS listed in the store catalog, so this is a real owner-facing
+path there — verified 2026-07-06).
 
 File-based on purpose: the marker lives in the ``/data`` volume so it survives
 reboots AND the tombstone TTL purge; the boot seeder is a shell script that can
@@ -45,7 +46,7 @@ from .timeutil import now_naive_utc
 # app-manager). ``reflection`` is included with the accepted trade-off that
 # uninstalling it stops its nightly run (brief + graph consolidation) — see the
 # module docstring.
-SUPPRESSIBLE_CORE_SLUGS = frozenset({"memory", "reflection"})
+SUPPRESSIBLE_CORE_SLUGS = frozenset({"memory", "reflection", "beat-machine"})
 
 # Relative to data_dir. Mirrored by the `[ -f ]` check at the top of
 # sync_core_app in install-core-apps.sh — keep the two paths in lockstep.
