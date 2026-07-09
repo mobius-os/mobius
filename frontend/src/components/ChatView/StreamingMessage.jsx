@@ -33,7 +33,7 @@ function ThinkingDisclosure({ item, isActive }) {
   const seconds = isActive ? (activeSeconds || 1) : frozenSeconds
   const secondsText = formatSeconds(seconds)
   const label = isActive
-    ? `> Thinking for ${secondsText || 'a moment'} ...`
+    ? `> Thinking for ${secondsText || 'a moment'}`
     : secondsText
       ? `> Thought for ${secondsText}`
       : '> Thought'
@@ -41,7 +41,16 @@ function ThinkingDisclosure({ item, isActive }) {
   return (
     <details className="chat__reasoning">
       <summary className="chat__reasoning-summary">
-        <span className="chat__reasoning-line">{label}</span>
+        <span className="chat__reasoning-line">
+          {label}
+          {isActive && (
+            <span className="chat__reasoning-ellipsis" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </span>
+          )}
+        </span>
       </summary>
       <div className="chat__reasoning-body">
         <StandardMarkdown text={item.content} />
