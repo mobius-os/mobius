@@ -7,6 +7,12 @@ import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
 import './SetupWizard.css'
 
+const SETUP_STEPS = [
+  { id: 'account', label: 'Account' },
+  { id: 'provider', label: 'AI' },
+  { id: 'gemini', label: 'Images' },
+]
+
 export default function SetupWizard({ onDone, initialStep = 'account' }) {
   const [step, setStep] = useState(initialStep)
   // Hoisted from ProviderStep so ProviderAuth (which is a
@@ -112,28 +118,31 @@ export default function SetupWizard({ onDone, initialStep = 'account' }) {
       <div className="setup">
         <div className="setup__card">
           <img src={`${BASE}/moebius.png`} alt="Möbius" className="setup__logo" />
+          <SetupProgress step="gemini" />
           <h1 className="setup__title">Image generation (optional)</h1>
           <p className="setup__subtitle">
-            Generate images in chat with Google Gemini.
-          </p>
-          <p className="setup__subtitle">
-            Get an API key at{' '}
+            Add a Gemini API key only if you want image generation in chat. Get
+            one at{' '}
             <a href="https://aistudio.google.com" target="_blank" rel="noopener noreferrer">
               aistudio.google.com
             </a>
+            .
           </p>
           <form
             className="setup__form"
             onSubmit={(e) => { e.preventDefault(); handleGeminiSave() }}
           >
-            <input
-              className="setup__input"
-              type="password"
-              placeholder="AIza..."
-              value={geminiKey}
-              onChange={(e) => { setGeminiKey(e.target.value); setGeminiError('') }}
-              autoComplete="off"
-            />
+            <label className="setup__label">
+              Gemini API key
+              <input
+                className="setup__input"
+                type="password"
+                placeholder="AIza..."
+                value={geminiKey}
+                onChange={(e) => { setGeminiKey(e.target.value); setGeminiError('') }}
+                autoComplete="off"
+              />
+            </label>
             <p className="setup__hint">
               Your key is encrypted at rest and never leaves the server.
             </p>
@@ -162,9 +171,11 @@ export default function SetupWizard({ onDone, initialStep = 'account' }) {
     <div className="setup">
       <div className="setup__card">
         <img src={`${BASE}/moebius.png`} alt="Möbius" className="setup__logo" />
+        <SetupProgress step="account" />
         <h1 className="setup__title">Welcome to Möbius</h1>
         <p className="setup__subtitle">
-          Create an account to get started.
+          Create the owner account for this install. You will connect an AI
+          provider next.
         </p>
         <form className="setup__form" onSubmit={handleAccountSubmit}>
           <label className="setup__label">
@@ -236,10 +247,11 @@ function ProviderStep({ onSkip, onConnected, claudeAuthenticated }) {
     <div className="setup">
       <div className="setup__card">
         <img src={`${BASE}/moebius.png`} alt="Möbius" className="setup__logo" />
+        <SetupProgress step="provider" />
         <h1 className="setup__title">Connect your AI</h1>
         <p className="setup__subtitle">
-          Pick a provider to connect. You can switch or connect the
-          other one later in Settings.
+          Connect Codex or Claude so chats can run. You can add the other later
+          in Settings.
         </p>
 
         <div className="settings__providers">
@@ -274,10 +286,35 @@ function ProviderStep({ onSkip, onConnected, claudeAuthenticated }) {
         <p className="setup__skip-warn">
           Without a provider, all chat messages will fail.
         </p>
-        <button className="setup__skip" onClick={onSkip}>
+        <button className="setup__skip" type="button" onClick={onSkip}>
           Skip for now
         </button>
       </div>
+    </div>
+  )
+}
+
+function SetupProgress({ step }) {
+  const currentIndex = SETUP_STEPS.findIndex(item => item.id === step)
+  const safeIndex = currentIndex >= 0 ? currentIndex : 0
+  const currentStep = SETUP_STEPS[safeIndex]
+
+  return (
+    <div
+      className="setup__progress"
+      aria-label={`Step ${safeIndex + 1} of ${SETUP_STEPS.length}: ${currentStep.label}`}
+    >
+      <span className="setup__progress-text">
+        Step {safeIndex + 1} of {SETUP_STEPS.length}
+      </span>
+      <span className="setup__progress-track" aria-hidden="true">
+        {SETUP_STEPS.map((item, index) => (
+          <span
+            key={item.id}
+            className={`setup__progress-dot${index <= safeIndex ? ' setup__progress-dot--active' : ''}`}
+          />
+        ))}
+      </span>
     </div>
   )
 }
