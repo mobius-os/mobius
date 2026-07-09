@@ -14,6 +14,11 @@ import '../ui/StatusDot.css'
 import './SettingsView.css'
 
 const UPDATE_CHECKED_RESET_MS = 2200
+const RETURN_VIEW_KEY = 'mobius:return-view'
+
+function returnToSettingsAfterReload() {
+  try { sessionStorage.setItem(RETURN_VIEW_KEY, 'settings') } catch {}
+}
 
 export default function SettingsView({ onThemeChange, onOpenChat }) {
   const queryClient = useQueryClient()
@@ -223,6 +228,7 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
         try { detail = (await res.json()).detail || '' } catch {}
         throw new Error(detail || `Restart failed (${res.status})`)
       }
+      returnToSettingsAfterReload()
       // Poll /api/health every ~1.5s instead of a fixed 10s blind reload.
       // Reload as soon as the server is back; surface a notice if it hasn't
       // returned within ~45s (30 polls × 1500ms) so the user knows to check
@@ -424,6 +430,7 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
         setPlatformPhase('idle')
         return
       }
+      returnToSettingsAfterReload()
       pollHealthThenReload(() =>
         setPlatformError("Server hasn't come back yet — check the container."))
     } catch {

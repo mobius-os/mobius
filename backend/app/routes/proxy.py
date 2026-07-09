@@ -23,6 +23,13 @@ _MAX_BYTES = 2 * 1024 * 1024  # 2 MB
 
 # 512 KB — generous for API payloads, prevents memory exhaustion from abuse.
 _MAX_BODY = 512 * 1024
+_FORWARDED_RESPONSE_HEADERS = (
+  "retry-after",
+  "x-ratelimit-limit",
+  "x-ratelimit-remaining",
+  "x-ratelimit-reset",
+  "x-ratelimit-used",
+)
 
 
 class ProxyPostRequest(BaseModel):
@@ -51,9 +58,15 @@ async def _capped_response(
       buf.extend(chunk[:room])
       if len(buf) >= _MAX_BYTES:
         break
+    headers = {
+      name: r.headers[name]
+      for name in _FORWARDED_RESPONSE_HEADERS
+      if name in r.headers
+    }
     return Response(
       content=bytes(buf),
       status_code=r.status_code,
+      headers=headers,
       media_type=r.headers.get("content-type", "application/octet-stream"),
     )
   finally:

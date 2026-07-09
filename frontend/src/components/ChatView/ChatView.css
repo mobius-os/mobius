@@ -468,7 +468,7 @@
   box-sizing: border-box;
   width: min(100%, 480px);
   max-width: min(100%, 480px);
-  margin: 4px 0 8px;
+  margin: 4px 0;
   padding-left: 6px;
   color: var(--text-muted, color-mix(in srgb, var(--text) 55%, transparent));
   font-size: 13px;
@@ -610,7 +610,7 @@
 .chat__tools + .chat__text { margin-top: 10px; }
 .chat__tools + .chat__tools { margin-top: 2px; }
 .chat__text + .chat__reasoning { margin-top: 10px; }
-.chat__reasoning + .chat__text { margin-top: 10px; }
+.chat__reasoning + .chat__text { margin-top: 4px; }
 .chat__tools + .chat__reasoning,
 .chat__reasoning + .chat__tools,
 .chat__reasoning + .chat__reasoning { margin-top: 2px; }
@@ -1230,17 +1230,17 @@
   cursor: not-allowed;
 }
 
-/* Stop button — red so the "interrupt running agent" affordance
-   is unmissable. Solid red on hover, slightly desaturated at rest. */
+/* Stop button — calm neutral shell with the destructive meaning carried by the
+   square glyph, avoiding the old red circular halo around the action slot. */
 .chat__stop {
-  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  background: var(--surface2);
   color: var(--danger); /* CONTRACT: destructive accent on opaque fill */
-  border-color: color-mix(in srgb, var(--danger) 24%, transparent);
+  border-color: var(--border-light);
 }
 .chat__stop:hover {
-  color: #fff;
-  background: var(--danger); /* CONTRACT: destructive accent fill */
-  border-color: var(--danger);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface2)); /* CONTRACT: faint destructive tint on opaque fill */
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--border-light));
 }
 
 /* Steer (fast-forward) button — replaces Stop while a turn is streaming

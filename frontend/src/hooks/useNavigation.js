@@ -8,6 +8,7 @@ import {
 const ACTIVE_CHAT_KEY = 'moebius_active_chat'
 const ACTIVE_VIEW_KEY = 'moebius_active_view'
 const ACTIVE_APP_KEY = 'moebius_active_app'
+const RETURN_VIEW_KEY = 'mobius:return-view'
 
 const MAX_APP_SENTINELS = 20
 
@@ -78,6 +79,16 @@ const restored = (() => {
   return null
 })()
 
+const returnView = (() => {
+  try {
+    const view = sessionStorage.getItem(RETURN_VIEW_KEY)
+    sessionStorage.removeItem(RETURN_VIEW_KEY)
+    return view === 'settings' ? { view: 'settings' } : null
+  } catch {
+    return null
+  }
+})()
+
 // The app id cold-restored to the canvas (null unless the storage-restore
 // — not shellReload/deepLink — drove it). The restore is OPTIMISTIC: this
 // hook can't see the apps list, so Shell validates this id against the
@@ -123,12 +134,14 @@ export const coldRestoredCanvasAppId =
  */
 export default function useNavigation() {
   const [activeView, setActiveView] = useState(
-    shellReload?.activeView || deepLink?.view || restored?.view || 'chat'
+    shellReload?.activeView || deepLink?.view || returnView?.view || restored?.view || 'chat'
   )
   const [activeAppId, setActiveAppId] = useState(
-    shellReload?.activeAppId || deepLink?.appId
-      || (restored?.view === 'canvas' ? restored.appId : null)
-      || null
+    returnView?.view === 'settings'
+      ? null
+      : shellReload?.activeAppId || deepLink?.appId
+        || (restored?.view === 'canvas' ? restored.appId : null)
+        || null
   )
   const [activeChatId, setActiveChatId] = useState(
     () => shellReload?.activeChatId || deepLink?.chatId || localStorage.getItem(ACTIVE_CHAT_KEY) || null

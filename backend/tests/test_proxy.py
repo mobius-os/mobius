@@ -5,12 +5,14 @@ The proxy now shares the canonical SSRF validator with the install fetcher
 and the integration tests drive it through the proxy endpoints.
 """
 
+import asyncio
 from unittest.mock import patch
 
 import pytest
 from fastapi import HTTPException
 
 from app.net_utils import validate_url_safe
+from app.routes.proxy import _capped_response
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +149,35 @@ def test_proxy_get_allows_same_origin_request(client, owner_token):
   )
   # 400 = URL rejected by SSRF validator, not 403 CSRF → guard passed.
   assert r.status_code == 400
+
+
+def test_proxy_forwards_rate_limit_headers():
+  class _RateLimitedResponse:
+    status_code = 429
+    headers = {
+      "content-type": "text/plain",
+      "retry-after": "60",
+      "x-ratelimit-remaining": "0",
+      "x-ratelimit-reset": "1783620000",
+      "x-not-forwarded": "secret",
+    }
+
+    async def aiter_bytes(self):
+      yield b"rate limited"
+
+    async def aclose(self):
+      pass
+
+  class _Client:
+    async def send(self, req, stream=True):
+      return _RateLimitedResponse()
+
+  response = asyncio.run(_capped_response(_Client(), object()))
+  assert response.status_code == 429
+  assert response.headers["retry-after"] == "60"
+  assert response.headers["x-ratelimit-remaining"] == "0"
+  assert response.headers["x-ratelimit-reset"] == "1783620000"
+  assert "x-not-forwarded" not in response.headers
 
 
 def test_validate_url_rejects_if_any_ip_is_private():
