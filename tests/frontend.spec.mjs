@@ -462,20 +462,50 @@ test.describe('App canvas', () => {
 
     const result = await page.evaluate(async () => {
       const token = localStorage.getItem('token')
+      const headers = {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      }
+      const created = await fetch('/api/apps/', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: `E2E List Smoke ${Date.now()}`,
+          description: 'Temporary app for the apps-list API smoke test.',
+          jsx_source: 'export default function App() { return <div>list smoke</div> }',
+        }),
+      })
+      if (!created.ok) {
+        return {
+          ok: false,
+          phase: 'create',
+          status: created.status,
+          body: await created.text(),
+        }
+      }
+      const app = await created.json()
+
       // Origin-relative — the shell now lives under `/shell/` so a
       // `./api/...` reference resolves to `/shell/api/...` and gets
       // caught by the SPA index instead of the API router.
       const res = await fetch('/api/apps/', {
         headers: { Authorization: `Bearer ${token}` },
       })
-      if (!res.ok) return { ok: false, status: res.status }
+      if (!res.ok) return { ok: false, phase: 'list', status: res.status }
       const data = await res.json()
-      return { ok: true, isArray: Array.isArray(data), count: Array.isArray(data) ? data.length : 0 }
+      await fetch(`/api/apps/${app.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      return {
+        ok: true,
+        isArray: Array.isArray(data),
+        foundCreatedApp: Array.isArray(data) && data.some(item => item.id === app.id),
+      }
     })
     expect(result.ok).toBe(true)
     expect(result.isArray).toBe(true)
-    // At minimum the Hello World seed app should exist.
-    expect(result.count).toBeGreaterThanOrEqual(1)
+    expect(result.foundCreatedApp).toBe(true)
   })
 })
 
