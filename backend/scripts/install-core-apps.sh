@@ -1,9 +1,8 @@
 #!/bin/bash
-# install-core-apps.sh — installs Möbius's two CORE apps (Memory, the
-# memory-graph viewer; and Reflection, the nightly brief) from baked source,
-# plus the nightly reflection cron. Idempotent + deploy-aware: registers a
+# install-core-apps.sh — installs Möbius's CORE apps from baked source, plus
+# the nightly reflection cron. Idempotent + deploy-aware: registers a
 # missing app, and re-syncs an existing app's UI from baked source only when
-# the baked jsx changed since the last sync (see sync_core_app).
+# the baked app source changed since the last sync (see sync_core_app).
 #
 # Runs AFTER the server is up (the entrypoint backgrounds it post-launch and
 # it polls /api/health first) because registration goes through the API — the
@@ -89,19 +88,46 @@ except Exception:
 ' "$1" 2>/dev/null
 }
 
-# sync_core_app <slug> <Name> <description> ; echoes the app id.
+core_source_hash() {
+  local dir="$1"
+  (
+    cd "$dir" 2>/dev/null || exit 0
+    find . -type f \
+      ! -path './.git/*' \
+      ! -path './node_modules/*' \
+      ! -path './tests/*' \
+      -print0 \
+      | sort -z \
+      | xargs -0 sha256sum
+  ) 2>/dev/null | sha256sum | cut -d' ' -f1
+}
+
+copy_core_source_tree() {
+  local src_dir="$1" dst_dir="$2"
+  mkdir -p "$dst_dir"
+  (
+    cd "$src_dir" || exit 1
+    tar --exclude='./.git' --exclude='./node_modules' --exclude='./tests' -cf - .
+  ) | (
+    cd "$dst_dir" || exit 1
+    tar -xf -
+  )
+}
+
+# sync_core_app <slug> <Name> <description> [src_slug] [dst_slug] ; echoes the app id.
 #
 # register_app.py is create-OR-update (it PATCHes jsx_source when an app of
 # the same name exists), so calling it always re-syncs the baked UI. But we
 # gate that on the baked source actually having CHANGED since the last sync:
 # core apps are platform-owned, yet the agent may still improve a core app's
 # UI (e.g. the Reflection brief renderer), and Möbius treats agent edits as
-# first-class. The hash sentinel means a platform DEPLOY (new baked jsx)
+# first-class. The hash sentinel means a platform DEPLOY (new baked source)
 # propagates on the next boot, while an ordinary restart leaves any
 # post-deploy agent edits untouched. First boot after this mechanism ships
 # has no sentinel → treated as changed → installs/updates once.
 sync_core_app() {
   local slug="$1" name="$2" desc="$3"
+  local src_slug="${4:-$slug}" dst_slug="${5:-$slug}"
   # Durable owner-suppression: if the owner uninstalled this core app, a marker
   # file persists under /data (it survives reboots AND the 7-day tombstone TTL
   # purge). Honor it and do NOT re-create the app — the deletion stays deleted
@@ -118,19 +144,24 @@ sync_core_app() {
     log "$slug is owner-suppressed (uninstalled) — skipping core-app seed"
     return
   fi
-  local src="$CORE_SRC/$slug/index.jsx"
-  local dst_dir="$DATA_DIR/apps/$slug"
-  local hashfile="$dst_dir/.baked-jsx.sha256"
+  local src_dir="$CORE_SRC/$src_slug"
+  local src="$src_dir/index.jsx"
+  local dst_dir="$DATA_DIR/apps/$dst_slug"
+  local hashfile="$dst_dir/.baked-source.sha256"
+  if [[ ! -f "$src" ]]; then
+    log "WARN $slug missing baked source ($src); skipping core-app seed"
+    return
+  fi
   mkdir -p "$dst_dir"
   local baked_hash live_hash existing_id
-  baked_hash="$(sha256sum "$src" 2>/dev/null | cut -d' ' -f1)"
+  baked_hash="$(core_source_hash "$src_dir")"
   live_hash="$(cat "$hashfile" 2>/dev/null || echo none)"
   existing_id="$(has_app "$slug")"
   # Store-managed apps (installed from the catalog, carrying a manifest_url)
   # own their update lifecycle via the store — the owner re-installs from the
   # manifest. Baked-sync must NOT cp baked source over a store-installed
   # working tree (that regressed prod Memory: served a stale baked vX over the
-  # store-installed vY). Skip the JSX sync for them entirely, keeping baked-
+  # store-installed vY). Skip the source sync for them entirely, keeping baked-
   # sync a FIRST-INSTALL-ONLY fallback for instances that never reached the
   # catalog. Platform machinery copied OUTSIDE this function (e.g. the reflection
   # cron scripts) is separate and still runs.
@@ -149,7 +180,7 @@ sync_core_app() {
     echo "$existing_id"
     return
   fi
-  cp "$src" "$dst_dir/index.jsx"
+  copy_core_source_tree "$src_dir" "$dst_dir"
   local id
   id="$(python3 /app/scripts/register_app.py "$name" "$desc" "$dst_dir/index.jsx" 2>>"$LOG" \
     | python3 -c 'import json,sys
@@ -226,4 +257,19 @@ if [[ -n "$reflection_app_id" ]]; then
     || log "WARN reflection cron install failed (see log)"
 fi
 
-log "done (memory=$memory_app_id reflection=$reflection_app_id)"
+# --- Beat Machine -------------------------------------------------------
+# Canonical app slug is `beat-machine`; the original prod source directory was
+# `/data/apps/beatmachine`, so keep that runtime path to let register_app.py
+# match and upgrade the existing row by source_dir instead of creating a
+# duplicate app on first native sync.
+beat_machine_app_id="$(sync_core_app beat-machine "Beat Machine" "A native sampler pad for synthesized drums, custom recordings, and simple effects." beat-machine beatmachine)"
+if [[ -n "$beat_machine_app_id" ]]; then
+  if [[ -f "$CORE_SRC/beat-machine/icon.png" ]]; then
+    curl -s -X PUT -H "Authorization: Bearer $TOKEN" --data-binary @"$CORE_SRC/beat-machine/icon.png" \
+      "$API_BASE_URL/api/apps/$beat_machine_app_id/icon" -o /dev/null -w 'beat-machine icon: HTTP %{http_code}\n' >>"$LOG" 2>&1 || true
+  fi
+  curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -d '{"offline_capable": true}' "$API_BASE_URL/api/apps/$beat_machine_app_id" >>"$LOG" 2>&1 || true
+fi
+
+log "done (memory=$memory_app_id reflection=$reflection_app_id beat-machine=$beat_machine_app_id)"

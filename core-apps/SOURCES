@@ -15,5 +15,6 @@
 # EVERY core-apps/<slug>/ ships a valid mobius.json, native or not.
 #
 # Format (catalog-synced apps only): <slug>  <owner/repo>  <commit-sha>
-memory      mobius-os/app-memory      44ff275d01ae8f53e94de9906b4a7d3371a9f701
-reflection  mobius-os/app-reflection  e566ce8a8139f49611b45655cc5520139a50c3a1
+memory      mobius-os/app-memory      2d64d3c7d5baeb0443ad527632e142ab164cff78
+reflection  mobius-os/app-reflection  da0557ba257058c1bd01f73983519c52c0d2f21b
+beat-machine  mobius-os/app-beat-machine  b23ee738d557389c6eeab408117574859926ff1c
