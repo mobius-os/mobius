@@ -211,32 +211,50 @@
   text-align: right;
 }
 
-/* "+ Manage models" affordance at the bottom of the picker. Reads as
-   a row, not a button — same padding + border-radius as csp-row but
-   no icon column and the label sits flush with where row titles sit.
-   This is the entry point to the manage-models modal where the
-   owner can hide registry entries they don't want in the picker. */
+/* Manage-models affordance at the bottom of the picker. It is deliberately
+   more button-like than a provider row so it doesn't read as a section label. */
 .csp__manage {
   display: flex;
   align-items: center;
+  justify-content: center;
+  gap: 7px;
   width: 100%;
   padding: 9px 10px;
-  border: 0;
-  background: none;
+  border: 1px solid var(--border-light, var(--border));
+  background: var(--surface2);
   border-radius: 8px;
   cursor: pointer;
   font: inherit;
   font-size: 13px;
   font-weight: 500;
-  color: var(--muted);
-  text-align: left;
-  transition: background 0.12s ease, color 0.12s ease;
-  margin-top: 2px;
+  color: var(--text);
+  text-align: center;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  margin-top: 6px;
+  box-sizing: border-box;
 }
 
 .csp__manage:hover {
-  background: var(--surface);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface2));
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--border));
   color: var(--text);
+}
+
+.csp__manage-mark {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  display: inline-grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface2));
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.csp__manage-label {
+  min-width: 0;
 }
 
 .csp__loading {

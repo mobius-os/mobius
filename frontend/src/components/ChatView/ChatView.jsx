@@ -782,6 +782,9 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
         try { el.focus({ preventScroll: true }) }
         catch { el.focus() }
       }
+      const end = String(text).length
+      try { el.setSelectionRange(end, end) } catch {}
+      el.scrollTop = el.scrollHeight
     })
   }
 
@@ -2315,7 +2318,7 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
                       type="button"
                       className="chat__quick-action-chip"
                       role="listitem"
-                      onClick={() => setInput(action.prompt)}
+                      onClick={() => restoreComposerText(action.prompt)}
                     >
                       {action.label}
                     </button>

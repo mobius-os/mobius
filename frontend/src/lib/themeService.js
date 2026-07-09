@@ -5,13 +5,13 @@ import { applyTheme, inferMode, HEX_RE } from './applyTheme.js'
 /**
  * Owns the theme lifecycle: read, transform, apply (DOM + body bg
  * + meta theme-color), persist (storage API), notify (server SSE),
- * invalidate (React Query). Single source of truth for theme
+ * seed/invalidate (React Query). Single source of truth for theme
  * mutations triggered by the Settings UI.
  *
  * Why module-not-hook: applyThemeToDom + persistTheme are pure
  * side-effect helpers callable from anywhere — `useTheme` invokes
  * applyThemeToDom from an effect; SettingsView's toggleTheme will
- * orchestrate persist + apply + invalidate. A hook would add
+ * orchestrate cache seed + apply + persist. A hook would add
  * render-cycle coupling the helpers don't need.
  *
  * The AGENT-DRIVEN path (agent writes /data/shared/theme.css
@@ -19,14 +19,15 @@ import { applyTheme, inferMode, HEX_RE } from './applyTheme.js'
  * `theme_updated` event → Shell's loadTheme → themeQueries
  * invalidate → useTheme refetches → applyThemeToDom. That path
  * still works because Shell's loadTheme also invalidates the
- * query.
+ * query. The local settings-toggle path is faster: it seeds the
+ * React Query cache before paint, so Shell/AppCanvas/Settings agree
+ * before a refetch can serve stale SWR data.
  *
- * IFRAME PROPAGATION CONTRACT: invalidating the React Query cache
+ * IFRAME PROPAGATION CONTRACT: seeding the React Query theme cache
  * is what triggers AppCanvas's useEffect to postMessage
- * `moebius:frame-theme` to live iframes. If you forget to
- * invalidate after a theme mutation, iframes silently stay on the
- * old theme until next mount. Commit 3a wires this in for
- * toggleTheme.
+ * `moebius:frame-theme` to live iframes. If you forget to seed
+ * after a local theme mutation, iframes silently stay on the old
+ * theme until next mount.
  */
 
 // HEX_RE + the applier live in ./applyTheme.js now (the single source
@@ -36,6 +37,17 @@ import { applyTheme, inferMode, HEX_RE } from './applyTheme.js'
 const STYLE_ID = 'mobius-theme'
 let themeAppliedOnce = false
 let themeTransitionTimer = null
+let lastThemeSignature = null
+
+function signatureForTheme(css, bg, mode) {
+  const cssText = css || ''
+  const cssBg = bg || cssText.match(/--bg:\s*(#[0-9a-fA-F]{3,8})/)?.[1]
+  return JSON.stringify([
+    cssText,
+    bg || '',
+    mode || inferMode(cssBg) || '',
+  ])
+}
 
 function beginThemeTransition() {
   if (typeof document === 'undefined') return
@@ -70,8 +82,10 @@ function beginThemeTransition() {
  * toggleTheme below, tests) don't have to change their call shape.
  */
 export function applyThemeToDom(css, bg, mode) {
-  beginThemeTransition()
+  const signature = signatureForTheme(css, bg, mode)
+  if (signature !== lastThemeSignature) beginThemeTransition()
   applyTheme({ css, bg, mode })
+  lastThemeSignature = signature
   themeAppliedOnce = true
 }
 
@@ -124,11 +138,10 @@ export function getEffectiveTheme() {
  * the optimistic-state rollback. The `api` parameter defaults to
  * the real client; tests pass a mock to verify call sequence.
  *
- * Note: /notify only reaches active chat broadcasts; iframe cache
- * invalidation is the caller's responsibility (see commit 3a's
- * toggleTheme, which invalidates the React Query cache so
- * AppCanvas can postMessage `moebius:frame-theme` to live
- * iframes).
+ * Note: /notify only reaches active chat broadcasts; iframe theme
+ * propagation is the caller's responsibility. toggleTheme seeds the
+ * React Query cache so AppCanvas can postMessage
+ * `moebius:frame-theme` to live iframes.
  */
 export async function persistTheme(css, mode, api) {
   await Promise.all([
@@ -181,11 +194,24 @@ async function _refreshThemeSwCache(css, bg, mode) {
   }
 }
 
+async function _cancelThemeQueries(queryClient) {
+  await Promise.all([
+    queryClient.cancelQueries?.({ queryKey: themeQueries.keys.all }),
+    queryClient.cancelQueries?.({ queryKey: themeQueries.keys.mode }),
+  ])
+}
+
+function _seedThemeQueries(queryClient, css, bg, mode) {
+  queryClient.setQueryData?.(themeQueries.keys.all, { css, bg, mode })
+  queryClient.setQueryData?.(themeQueries.keys.mode, mode)
+}
+
 /**
  * Toggle between dark and light: fetch the current CSS, swap
- * structural color vars for the opposite mode, apply to the DOM,
- * persist to storage, then invalidate the React Query cache so
- * AppCanvas can postMessage the new theme to live iframes.
+ * structural color vars for the opposite mode, seed the React Query
+ * cache, apply to the DOM, persist to storage, then mark theme
+ * queries stale without an immediate refetch. AppCanvas observes the
+ * seeded cache and postMessages the new theme to live iframes.
  *
  * Returns `{ newMode, newCss, newBg }` so the caller (SettingsView)
  * can update its optimistic UI state without re-deriving them.
@@ -193,16 +219,16 @@ async function _refreshThemeSwCache(css, bg, mode) {
  * Throws on persist failure so the caller can run its rollback
  * (flip lightMode back, surface an error).
  *
- * CRITICAL — cache invalidation contract:
- *   Both `themeQueries.invalidate` AND `themeQueries.mode.invalidate`
- *   MUST fire after persistTheme. The first is what AppCanvas.jsx
- *   subscribes to (useQuery({ queryKey: themeQueryKey, ... })) and
- *   its useEffect on [theme?.css, theme?.bg] is what fires the
- *   `moebius:frame-theme` postMessage to live iframes. The second
- *   is what SettingsView reads to seed `lightMode` after navigation
- *   away and back. Forgetting either silently breaks one consumer:
- *   iframes stale-theme until next mount, OR the dark-mode toggle
- *   flips back to the persisted value after a settings re-open.
+ * CRITICAL — cache handoff contract:
+ *   `_seedThemeQueries` MUST write BOTH theme query keys. The first is
+ *   what AppCanvas.jsx subscribes to (useQuery({ queryKey:
+ *   themeQueryKey, ... })) and its useEffect on [theme?.css,
+ *   theme?.bg] fires the `moebius:frame-theme` postMessage to live
+ *   iframes. The second is what SettingsView reads to seed
+ *   `lightMode` after navigation away and back. The follow-up
+ *   invalidate calls intentionally use `refetchType: 'none'`: they
+ *   mark the data refreshable later without letting same-tick SWR
+ *   refetches repaint an older theme over the optimistic paint.
  *
  * CRITICAL — bg extraction:
  *   `newBg` is extracted from the BUILT CSS via regex, not from
@@ -261,25 +287,31 @@ export async function toggleTheme(queryClient, currentMode, api) {
   const bgMatch = newCss.match(/--bg:\s*(#[0-9a-fA-F]{3,8})/)
   const newBg = bgMatch ? bgMatch[1] : meta.colors['--bg']
 
-  // Apply optimistically, then persist. On persist failure the
-  // catch rolls the DOM back to `currentCss` so the <style> block
-  // and server storage stay consistent — otherwise the user sees
-  // the new theme until the next refetch resolves the divergence.
-  applyThemeToDom(newCss, newBg)
+  // Stop any in-flight /api/theme or theme-mode fetch from writing an older
+  // value after the optimistic paint. Then seed both query caches BEFORE the
+  // DOM apply so useTheme/AppCanvas/Settings all see the same target mode on
+  // the same tick as the visual change.
+  await _cancelThemeQueries(queryClient)
+  _seedThemeQueries(queryClient, newCss, newBg, newMode)
+  applyThemeToDom(newCss, newBg, newMode)
+
   try {
-    await persistTheme(newCss, newMode, api)
-    // Make the post-toggle refetch resolve to the NEW theme, not the stale
-    // SWR-cached one — otherwise useTheme's apply effect would repaint the
-    // old theme over this toggle's correct paint (the revert/stuck bug).
-    // setQueryData updates the in-memory cache immediately; the SW cache
-    // refresh keeps the SWR network revalidation from re-introducing stale
-    // data on the next read.
-    queryClient.setQueryData(themeQueries.keys.all, { css: newCss, bg: newBg, mode: newMode })
+    // Refresh SWR's local /api/theme body before notify.send can provoke a
+    // sibling loadTheme() refetch. A stale SWR body was the visible snap-back:
+    // the UI painted light, then the service worker served the old dark body.
     await _refreshThemeSwCache(newCss, newBg, newMode)
-    themeQueries.invalidate(queryClient)
-    themeQueries.mode.invalidate(queryClient)
+    await persistTheme(newCss, newMode, api)
+    _seedThemeQueries(queryClient, newCss, newBg, newMode)
+    await _refreshThemeSwCache(newCss, newBg, newMode)
+    // Mark stale so future explicit reloads know the query can refresh, but do
+    // not immediately refetch: we already have the authoritative value we just
+    // persisted, and another same-tick SWR refetch only adds flicker risk.
+    themeQueries.invalidate(queryClient, { refetchType: 'none' })
+    themeQueries.mode.invalidate(queryClient, { refetchType: 'none' })
   } catch (err) {
-    applyThemeToDom(currentCss, oldBg)
+    _seedThemeQueries(queryClient, currentCss, oldBg, currentMode)
+    await _refreshThemeSwCache(currentCss, oldBg, currentMode)
+    applyThemeToDom(currentCss, oldBg, currentMode)
     throw err
   }
 

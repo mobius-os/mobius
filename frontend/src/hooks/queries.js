@@ -275,12 +275,12 @@ export const themeQueries = {
   },
   fetch: fetchTheme,
   useQuery: useThemeQuery,
-  invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: themeKey }),
+  invalidate: (queryClient, options = {}) => queryClient.invalidateQueries({ queryKey: themeKey, ...options }),
   mode: {
     key: themeModeKey,
     fetch: fetchThemeMode,
     useQuery: useThemeModeQuery,
-    invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: themeModeKey }),
+    invalidate: (queryClient, options = {}) => queryClient.invalidateQueries({ queryKey: themeModeKey, ...options }),
   },
 }
 

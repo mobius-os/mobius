@@ -159,7 +159,6 @@ export default function SettingsView({ onThemeChange, onOpenChat }) {
     // postMessages `moebius:frame-theme` to live iframes.
     try {
       await themeService.toggleTheme(queryClient, currentMode, api)
-      onThemeChange?.()
     } catch {
       setLightMode(currentMode === 'light')
       setThemeError(

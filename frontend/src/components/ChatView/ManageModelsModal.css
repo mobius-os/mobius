@@ -32,7 +32,7 @@
      the fallback for browsers without dvh. */
   max-height: calc(100vh - 48px);
   max-height: calc(100dvh - 48px);
-  overflow-y: auto;
+  overflow: hidden;
   padding: 20px;
   box-sizing: border-box;
   display: flex;
@@ -90,6 +90,17 @@
   color: var(--muted);
   line-height: 1.5;
   margin: 0;
+  flex-shrink: 0;
+}
+
+.mmm__body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 2px;
 }
 
 .mmm__section {
@@ -255,6 +266,7 @@
   margin: 0;
   font-size: 13px;
   color: var(--danger);
+  flex-shrink: 0;
 }
 
 /* Inline discard-confirm — replaces window.confirm which iOS PWA suppresses.
@@ -267,6 +279,7 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .mmm__confirm-copy {
@@ -286,10 +299,11 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding-top: 4px;
+  flex-wrap: wrap;
   border-top: 1px solid var(--border);
   margin-top: 4px;
   padding-top: 14px;
+  flex-shrink: 0;
 }
 
 .mmm__foot-spacer {
@@ -336,4 +350,21 @@
 .mmm__btn--ghost:not(:disabled):hover {
   background: var(--surface2);
   color: var(--text);
+}
+
+@media (max-width: 520px) {
+  .mmm__overlay {
+    padding: 12px;
+    align-items: center;
+  }
+
+  .mmm {
+    max-height: calc(100vh - 24px);
+    max-height: calc(100dvh - 24px);
+    padding: 16px;
+  }
+
+  .mmm__btn {
+    min-height: 36px;
+  }
 }
