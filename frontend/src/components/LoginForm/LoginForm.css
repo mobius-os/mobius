@@ -29,7 +29,7 @@
   font-weight: 700;
   margin-bottom: 4px;
   text-align: center;
-  letter-spacing: -0.5px;
+  letter-spacing: 0;
 }
 
 .login__tagline {
