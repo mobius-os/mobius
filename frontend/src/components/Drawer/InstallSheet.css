@@ -23,10 +23,15 @@
   background: var(--surface, #14181f);
   color: var(--text, #d4d4d8);
   border: 1px solid var(--border, #252b36);
-  border-radius: 18px;
+  border-radius: 14px;
   padding: 20px;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
   animation: is-pop 0.18s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+[data-theme="light"] .is__card {
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.08),
+    0 1px 3px rgba(0, 0, 0, 0.06);
 }
 
 @keyframes is-pop {
@@ -113,11 +118,14 @@
   color: var(--text, #d4d4d8);
   font: inherit;
   font-size: 15px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-.is__name-input:focus {
+.is__name-input:focus,
+.is__name-input:focus-visible {
   outline: none;
   border-color: var(--accent, #a78bfa);
+  box-shadow: 0 0 0 3px var(--accent-dim, rgba(167, 139, 250, 0.14));
 }
 
 .is__preview {
@@ -157,13 +165,18 @@
 .is__btn {
   flex: 1;
   padding: 12px 16px;
-  border-radius: 12px;
+  border-radius: 10px;
   border: none;
   font: inherit;
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
   transition: opacity 0.15s;
+}
+
+.is__btn:focus-visible {
+  outline: 2px solid var(--accent, #a78bfa);
+  outline-offset: 2px;
 }
 
 .is__btn:disabled {
@@ -198,15 +211,15 @@
 }
 
 .is__arrow {
-  display: block;
-  margin-top: 10px;
-  font-size: 22px;
-  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  margin: 12px auto 0;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent, #a78bfa) 34%, var(--border, #252b36));
+  background: color-mix(in srgb, var(--accent, #a78bfa) 10%, transparent);
+  font-size: 18px;
   color: var(--accent, #a78bfa);
-  animation: is-arrow-bounce 1.6s ease-in-out infinite;
-}
-
-@keyframes is-arrow-bounce {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-4px); }
 }

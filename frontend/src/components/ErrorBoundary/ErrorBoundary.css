@@ -75,7 +75,7 @@
   background: transparent;
   color: var(--text, #ececec);
   cursor: pointer;
-  transition: opacity 0.15s var(--spring, ease);
+  transition: opacity 0.15s var(--ease-out-soft, ease);
 }
 
 .errbound__btn:hover {

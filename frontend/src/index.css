@@ -289,12 +289,12 @@ textarea:focus-visible {
 }
 
 /* ── Visual refinements ──
-   Motion, gradients, selection, and drawer scrollbar rules. Kept in
+   Motion, selection, and drawer scrollbar rules. Kept in
    index.css rather than theme.css so the theme toggle (which rewrites
    theme.css with regenerated colors) doesn't strip them. */
 
 :root {
-  --spring: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-out-soft: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 /* Message entry animation */
@@ -302,7 +302,7 @@ textarea:focus-visible {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
 }
-.chat__msg { animation: msg-enter 280ms var(--spring); }
+.chat__msg { animation: msg-enter 240ms var(--ease-out-soft); }
 
 /* Tool block entry — opacity only so height stays stable for spacer
    math (see CLAUDE.md "Chat UX — non-negotiable constraints"). */
@@ -355,12 +355,8 @@ textarea:focus-visible {
   height: 0;
 }
 
-/* Gradient wordmark in the shell bar */
 .shell__wordmark {
-  background: linear-gradient(135deg, var(--text) 30%, var(--accent) 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: var(--text);
 }
 
 /* Gradient user message bubbles, white text */
@@ -370,16 +366,12 @@ textarea:focus-visible {
   box-shadow: 0 2px 14px -4px var(--accent-dim);
 }
 
-/* Gradient empty-state title */
 .chat__empty-title {
   font-size: 30px;
   font-weight: 700;
   letter-spacing: -0.04em;
   line-height: 1.05;
-  background: linear-gradient(135deg, var(--text) 30%, var(--accent) 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: var(--text);
 }
 
 /* High-contrast text selection so the highlight is visible on every

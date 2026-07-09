@@ -19,7 +19,7 @@
   text-align: center;
   /* Subtle entrance — short fade+slide from below. Reduced-motion
      rule in index.css collapses this to 1ms without removing it. */
-  animation: toast-in 0.18s var(--spring, cubic-bezier(0.16, 1, 0.3, 1));
+  animation: toast-in 0.18s var(--ease-out-soft, cubic-bezier(0.16, 1, 0.3, 1));
   /* Prevent user selecting toast text accidentally on long-press. */
   user-select: none;
   -webkit-user-select: none;
