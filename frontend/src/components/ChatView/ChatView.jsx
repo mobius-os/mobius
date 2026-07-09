@@ -185,6 +185,27 @@ function evictOldestDraft() {
   } catch { /* ignore */ }
 }
 
+const PENDING_DRAFT_KEY = 'pending-draft'
+const PENDING_DRAFT_AUTOSEND_KEY = 'pending-draft-autosend'
+const DRAFT_AUTOSEND_PREFIX = 'draft-autosend:'
+
+function readInitialComposer(chatId) {
+  try {
+    const pending = sessionStorage.getItem(PENDING_DRAFT_KEY)
+    const saved = sessionStorage.getItem(`draft:${chatId}`) || ''
+    const input = pending || saved
+    const autoSendDraft =
+      sessionStorage.getItem(PENDING_DRAFT_AUTOSEND_KEY) ||
+      sessionStorage.getItem(`${DRAFT_AUTOSEND_PREFIX}${chatId}`)
+    return {
+      input,
+      autoSend: !!input && autoSendDraft === input,
+    }
+  } catch {
+    return { input: '', autoSend: false }
+  }
+}
+
 
 export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystemEvent, onChatMissing, builtApp, onOpenApp, onMessageStart, showPicker = true, embedded = false, quickActions = null, getContext = null }) {
   const queryClient = useQueryClient()
@@ -236,13 +257,27 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
       : existing
     )
   }
-  const [input, setInput] = useState(() => {
+  const initialComposerRef = useRef(null)
+  if (!initialComposerRef.current) {
+    initialComposerRef.current = readInitialComposer(chatId)
+  }
+  const [input, setInput] = useState(() => initialComposerRef.current.input)
+  const [autoSendPendingDraft, setAutoSendPendingDraft] = useState(
+    () => initialComposerRef.current.autoSend,
+  )
+  const autoSendAttemptedRef = useRef(false)
+
+  useEffect(() => {
+    const initial = initialComposerRef.current.input
     try {
-      const pending = sessionStorage.getItem('pending-draft')
-      if (pending) { sessionStorage.removeItem('pending-draft'); return pending }
-      return sessionStorage.getItem(`draft:${chatId}`) || ''
-    } catch { return '' }
-  })
+      if (sessionStorage.getItem(PENDING_DRAFT_KEY) === initial) {
+        sessionStorage.removeItem(PENDING_DRAFT_KEY)
+      }
+      if (sessionStorage.getItem(PENDING_DRAFT_AUTOSEND_KEY) === initial) {
+        sessionStorage.removeItem(PENDING_DRAFT_AUTOSEND_KEY)
+      }
+    } catch { /* private browsing */ }
+  }, [])
 
   // Per-chat agent runtime config (provider, agent_settings_json,
   // effective_agent_settings, has_assistant_turns). Resolved by the
@@ -1594,6 +1629,20 @@ export default function ChatView({ chatId, onStreamEnd, onFirstMessage, onSystem
     restoreFiles,
     releaseFiles,
   ])
+
+  useEffect(() => {
+    if (!autoSendPendingDraft || autoSendAttemptedRef.current) return
+    if (loading || loadError) return
+    const text = input.trim()
+    if (!text) {
+      setAutoSendPendingDraft(false)
+      return
+    }
+    autoSendAttemptedRef.current = true
+    setAutoSendPendingDraft(false)
+    try { sessionStorage.removeItem(`${DRAFT_AUTOSEND_PREFIX}${chatId}`) } catch {}
+    doSend(text)
+  }, [autoSendPendingDraft, loading, loadError, input, chatId, doSend])
 
   // Sends the answer without a visible user message bubble.
   // Sends the answer to an AskUserQuestion as a hidden user message.
